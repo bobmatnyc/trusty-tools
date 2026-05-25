@@ -2715,6 +2715,21 @@ async fn run_daemon(addr: SocketAddr, tailscale: bool, mcp: bool) -> anyhow::Res
         return trusty_mpm_daemon::run_mcp(state).await;
     }
 
+    // Refuse to start a second instance: read the lock-file address, probe
+    // `/health`, and bail out cleanly when an existing daemon answers. Without
+    // this guard, the `AddrInUse` fallback below would auto-pick an ephemeral
+    // port and silently spawn a duplicate daemon that splits traffic with the
+    // original. `resolve_daemon_url` already validates the recorded PID is
+    // alive (and clears stale lock files), so a `None`-ish result here means
+    // either no lock exists or the recorded daemon is dead — proceed normally.
+    let recorded_url = trusty_mpm_core::resolve_daemon_url(None);
+    if recorded_url != trusty_mpm_core::DEFAULT_DAEMON_URL
+        && trusty_common::probe_health(&recorded_url, "/health").await
+    {
+        eprintln!("trusty-mpm daemon is already running at {recorded_url}");
+        return Ok(());
+    }
+
     // Auto port selection: try configured address; fall back to ephemeral.
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
