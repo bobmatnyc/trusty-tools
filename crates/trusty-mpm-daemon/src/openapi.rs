@@ -30,6 +30,7 @@ use utoipa::OpenApi;
     paths(
         crate::api::health,
         crate::api::list_sessions,
+        crate::api::get_session,
         crate::api::register_session,
         crate::api::connect_session,
         crate::api::remove_session,

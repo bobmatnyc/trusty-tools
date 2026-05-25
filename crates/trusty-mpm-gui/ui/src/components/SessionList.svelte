@@ -9,7 +9,7 @@
   // Test: Seed `sessions` with one running session, click the row → it becomes
   // active; click the Files tab → `<FileTracking />` renders; click [×] →
   // `sidebarVisible` becomes false.
-  import { Pause, Play, Square, X } from 'lucide-svelte';
+  import { ChevronDown, ChevronRight, Pause, Play, Square, X } from 'lucide-svelte';
   import { invoke } from '../lib/transport';
   import {
     sessions,
@@ -17,6 +17,9 @@
     refreshSessions,
     sidebarVisible,
     sidebarTab,
+    groupedSessions,
+    collapsedProjects,
+    UNGROUPED_PROJECT_KEY,
     type Session,
   } from '../stores/app';
   import MemoryGauge from './MemoryGauge.svelte';
@@ -99,6 +102,49 @@
       await refreshSessions();
     }
   }
+
+  /**
+   * Why: Project group headers show a friendly basename rather than the raw
+   * absolute path so the sidebar stays scannable.
+   * What: Returns `Ungrouped` for the sentinel key, otherwise the last path
+   * segment of `key` (or the full key when basename extraction is empty).
+   * Test: `projectLabel('_ungrouped_')` is `Ungrouped`; `projectLabel('/a/b')`
+   * is `b`; `projectLabel('/')` is `/`.
+   */
+  function projectLabel(key: string): string {
+    if (key === UNGROUPED_PROJECT_KEY) return 'Ungrouped';
+    return basename(key);
+  }
+
+  /**
+   * Why: Clicking a project header should toggle its open/closed state in
+   * `collapsedProjects`; the store is the single source of truth so multiple
+   * components can observe the same fold state.
+   * What: Mutates the writable set, adding `key` when absent and removing it
+   * when present, then publishes a fresh set so Svelte reactivity fires.
+   * Test: Toggle twice → the key is added then removed; assert the store's
+   * `has(key)` flips between calls.
+   */
+  function toggleProject(key: string): void {
+    collapsedProjects.update((set) => {
+      const next = new Set(set);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  /**
+   * Why: A project header dot mirrors the per-row status: green when any
+   * session in the group is running, so a collapsed group still hints at
+   * activity without the operator expanding it.
+   * What: Returns true when at least one session in `group` has status
+   * `running`.
+   * Test: Pass a group with one running session → true; all stopped → false.
+   */
+  function groupHasRunning(group: Session[]): boolean {
+    return group.some((s) => s.status === 'running');
+  }
 </script>
 
 <aside
@@ -143,58 +189,101 @@
   {#if $sidebarTab === 'files'}
     <FileTracking />
   {:else}
-    {#if $sessions.length === 0}
-      <p class="px-3 py-4 text-xs opacity-60">No sessions registered.</p>
-    {/if}
-
-    {#each $sessions as session (session.id)}
+    <!-- Coordinator entry stays pinned above every project group. -->
     <button
       type="button"
-      on:click={() => select(session.id)}
-      class={`flex flex-col gap-1 border-b border-trusty-border-light px-3 py-2 text-left dark:border-trusty-border ${
-        $activeSessionId === session.id
+      on:click={() => activeSessionId.set(null)}
+      class={`flex items-center gap-2 border-b border-trusty-border-light px-3 py-2 text-left dark:border-trusty-border ${
+        $activeSessionId === null
           ? 'bg-trusty-primary/10'
           : 'hover:bg-trusty-border-light/60 dark:hover:bg-trusty-border/60'
       }`}
     >
-      <div class="flex items-center gap-2">
-        <span class={`h-2 w-2 shrink-0 rounded-full ${statusTone(session.status)}`}
-        ></span>
-        <span class="truncate font-mono text-xs">{session.id}</span>
-        <span class="ml-auto shrink-0 text-[10px] opacity-60">
-          {fmtUptime(session.uptime_secs)}
-        </span>
-      </div>
+      <span class="h-2 w-2 shrink-0 rounded-full bg-trusty-primary"></span>
+      <span class="font-mono text-xs">[coord]</span>
+      <span class="ml-auto shrink-0 text-[10px] opacity-60">global</span>
+    </button>
 
-      <span class="truncate text-[11px] opacity-70">
-        {basename(session.workdir)}
-      </span>
+    {#if $sessions.length === 0}
+      <p class="px-3 py-4 text-xs opacity-60">No sessions registered.</p>
+    {/if}
 
-      <MemoryGauge pct={session.memory_pct ?? 0} />
-
-      <div class="mt-1 flex items-center gap-2">
+    {#each [...$groupedSessions] as [projectKey, group] (projectKey)}
+      {@const collapsed = $collapsedProjects.has(projectKey)}
+      <div class="border-b border-trusty-border-light dark:border-trusty-border">
         <button
           type="button"
-          on:click={(e) => toggle(session, e)}
-          aria-label={session.status === 'paused' ? 'Resume' : 'Pause'}
-          class="rounded p-0.5 hover:bg-trusty-border-light dark:hover:bg-trusty-border"
+          on:click={() => toggleProject(projectKey)}
+          class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] font-medium uppercase tracking-wide opacity-80 hover:bg-trusty-border-light/60 dark:hover:bg-trusty-border/60"
         >
-          {#if session.status === 'paused'}
-            <Play size={13} />
+          {#if collapsed}
+            <ChevronRight size={12} />
           {:else}
-            <Pause size={13} />
+            <ChevronDown size={12} />
+          {/if}
+          <span class="truncate">{projectLabel(projectKey)}</span>
+          {#if groupHasRunning(group)}
+            <span
+              class="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-status-running status-pulse"
+              aria-label="Has running sessions"
+            ></span>
+          {:else}
+            <span class="ml-auto shrink-0 text-[10px] opacity-50">{group.length}</span>
           {/if}
         </button>
-        <button
-          type="button"
-          on:click={(e) => stop(session, e)}
-          aria-label="Stop"
-          class="rounded p-0.5 hover:bg-trusty-border-light dark:hover:bg-trusty-border"
-        >
-          <Square size={13} />
-        </button>
+
+        {#if !collapsed}
+          {#each group as session (session.id)}
+          <button
+            type="button"
+            on:click={() => select(session.id)}
+            class={`flex flex-col gap-1 border-t border-trusty-border-light pl-6 pr-3 py-2 text-left dark:border-trusty-border ${
+              $activeSessionId === session.id
+                ? 'bg-trusty-primary/10'
+                : 'hover:bg-trusty-border-light/60 dark:hover:bg-trusty-border/60'
+            }`}
+          >
+            <div class="flex items-center gap-2">
+              <span class={`h-2 w-2 shrink-0 rounded-full ${statusTone(session.status)}`}
+              ></span>
+              <span class="truncate font-mono text-xs">{session.id}</span>
+              <span class="ml-auto shrink-0 text-[10px] opacity-60">
+                {fmtUptime(session.uptime_secs)}
+              </span>
+            </div>
+
+            <span class="truncate text-[11px] opacity-70">
+              {basename(session.workdir)}
+            </span>
+
+            <MemoryGauge pct={session.memory_pct ?? 0} />
+
+            <div class="mt-1 flex items-center gap-2">
+              <button
+                type="button"
+                on:click={(e) => toggle(session, e)}
+                aria-label={session.status === 'paused' ? 'Resume' : 'Pause'}
+                class="rounded p-0.5 hover:bg-trusty-border-light dark:hover:bg-trusty-border"
+              >
+                {#if session.status === 'paused'}
+                  <Play size={13} />
+                {:else}
+                  <Pause size={13} />
+                {/if}
+              </button>
+              <button
+                type="button"
+                on:click={(e) => stop(session, e)}
+                aria-label="Stop"
+                class="rounded p-0.5 hover:bg-trusty-border-light dark:hover:bg-trusty-border"
+              >
+                <Square size={13} />
+              </button>
+            </div>
+          </button>
+          {/each}
+        {/if}
       </div>
-    </button>
     {/each}
   {/if}
 </aside>

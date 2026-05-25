@@ -8,7 +8,7 @@
 // populated and `daemonHealth` becomes `'ok'`; with the daemon down assert it
 // becomes `'error'`.
 
-import { writable } from 'svelte/store';
+import { derived, writable } from 'svelte/store';
 import { invoke } from '../lib/transport';
 
 /** A single managed session as reported by `GET /sessions`. */
@@ -19,6 +19,7 @@ export interface Session {
   uptime_secs: number;
   agent?: string;
   memory_pct?: number;
+  project_path?: string | null;
 }
 
 /** A hook/telemetry event from the daemon ring buffer or SSE stream. */
@@ -73,6 +74,40 @@ export const sidebarVisible = writable<boolean>(true);
 
 /** Which sidebar pane is active. */
 export const sidebarTab = writable<'sessions' | 'files'>('sessions');
+
+/** Sentinel key used in `groupedSessions` for sessions without `project_path`. */
+export const UNGROUPED_PROJECT_KEY = '_ungrouped_';
+
+/**
+ * Why: The sidebar groups session rows by their owning project so operators
+ * can fold away projects they aren't actively driving; deriving the grouping
+ * once in the store keeps `SessionList` purely presentational.
+ * What: A `Map<string, Session[]>` keyed by `project_path` with sessions that
+ * lack a path bucketed under `UNGROUPED_PROJECT_KEY`. Insertion order matches
+ * the order sessions are first seen in `$sessions`.
+ * Test: Set `sessions` to a mix of sessions with and without `project_path` →
+ * assert the map has one bucket per distinct path plus `_ungrouped_` for the
+ * orphans, and bucket lengths match the input.
+ */
+export const groupedSessions = derived(sessions, ($sessions) => {
+  const map = new Map<string, typeof $sessions>();
+  for (const s of $sessions) {
+    const key = s.project_path ?? UNGROUPED_PROJECT_KEY;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key)!.push(s);
+  }
+  return map;
+});
+
+/**
+ * Why: The session list lets the user fold project groups individually; the
+ * set of collapsed project keys lives in a shared store so the state survives
+ * sidebar re-renders and is reachable from any component that needs it.
+ * What: A `Set<string>` of project keys (paths or `UNGROUPED_PROJECT_KEY`)
+ * that are currently collapsed. Empty by default — every project starts open.
+ * Test: Add a key, assert the store reflects it; remove it, assert it is gone.
+ */
+export const collapsedProjects = writable<Set<string>>(new Set());
 
 /**
  * Why: The sidebar must reflect daemon state without each row polling on its

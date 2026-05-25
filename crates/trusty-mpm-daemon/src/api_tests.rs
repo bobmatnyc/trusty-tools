@@ -158,6 +158,38 @@ async fn register_and_remove_session() {
 }
 
 #[tokio::test]
+async fn get_session_returns_session() {
+    // `GET /sessions/{id}` resolves a single session by id and returns its
+    // current snapshot so callers don't have to page through `GET /sessions`.
+    let (state, id) = state_with_session();
+    let Json(session) = get_session(State(state), Path(id.0.to_string()))
+        .await
+        .expect("known id resolves");
+    assert_eq!(session.id, id);
+    assert_eq!(session.workdir, "/tmp/p");
+}
+
+#[tokio::test]
+async fn get_session_unknown_is_404() {
+    // An unknown UUID is a 404, matching the rest of the sessions surface.
+    let state = DaemonState::shared();
+    let err = get_session(State(state), Path(SessionId::new().0.to_string()))
+        .await
+        .unwrap_err();
+    assert_eq!(err.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn get_session_malformed_id_is_400() {
+    // A non-UUID id is a 400 before the lookup runs, mirroring `parse_id`.
+    let state = DaemonState::shared();
+    let err = get_session(State(state), Path("not-a-uuid".to_string()))
+        .await
+        .unwrap_err();
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn connect_session_registers_without_deploy() {
     // `POST /api/v1/sessions/connect` performs the same daemon-side
     // bookkeeping as `POST /sessions` — it registers the session and returns

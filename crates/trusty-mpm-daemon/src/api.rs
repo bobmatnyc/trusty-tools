@@ -70,12 +70,13 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .route("/api/v1/sessions/connect", post(connect_session))
         .route("/sessions/dead", axum::routing::delete(reap_sessions))
         .route("/sessions/discover", post(discover_sessions))
-        .route("/sessions/{id}", axum::routing::delete(remove_session))
+        .route("/sessions/{id}", get(get_session).delete(remove_session))
         .route("/sessions/{id}/events", get(session_events))
         .route("/sessions/{id}/pause", post(pause_session))
         .route("/sessions/{id}/resume", post(resume_session))
         .route("/sessions/{id}/command", post(send_command))
         .route("/sessions/{id}/output", get(get_output))
+        .route("/sessions/{id}/pane", get(get_output))
         .route("/sessions/{id}/pid", axum::routing::patch(set_session_pid))
         .route("/projects", get(list_projects).post(register_project))
         .route("/projects/current", get(current_project))
@@ -277,6 +278,36 @@ pub async fn connect_session(
     body: Json<RegisterSession>,
 ) -> Json<RegisterSessionResponse> {
     register_session(state, body).await
+}
+
+/// `GET /sessions/:id` — fetch a single session's detail.
+///
+/// Why: clients need to fetch one session without paging through the full
+/// `GET /sessions` list — avoids over-fetching and simplifies client state
+/// management when the caller already knows the session id.
+/// What: parses `id` as a UUID, looks the session up in [`DaemonState`], and
+/// returns it as JSON. A malformed id is a `400`; an unknown id is a `404`.
+/// Test: `get_session_returns_session`, `get_session_unknown_is_404`.
+#[utoipa::path(
+    get,
+    path = "/sessions/{id}",
+    tag = "sessions",
+    params(("id" = String, Path, description = "Session UUID")),
+    responses(
+        (status = 200, description = "Session detail", body = Session),
+        (status = 400, description = "Malformed session id"),
+        (status = 404, description = "No session with that id"),
+    )
+)]
+pub async fn get_session(
+    State(state): State<Arc<DaemonState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Session>, DaemonError> {
+    let session_id = parse_id(&id)?;
+    state
+        .session(session_id)
+        .map(Json)
+        .ok_or(DaemonError::SessionNotFound { id })
 }
 
 /// `DELETE /sessions/:id` — deregister a session.
