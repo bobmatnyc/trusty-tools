@@ -10,14 +10,20 @@
 //! Test: `cargo test -p trusty-mpm-daemon` drives the handlers directly with an
 //! in-memory state (no socket bind needed).
 
+use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
+    response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
 };
+use futures::Stream;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -71,7 +77,8 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .route("/sessions/dead", axum::routing::delete(reap_sessions))
         .route("/sessions/discover", post(discover_sessions))
         .route("/sessions/{id}", get(get_session).delete(remove_session))
-        .route("/sessions/{id}/events", get(session_events))
+        .route("/sessions/{id}/events", get(stream_session_events))
+        .route("/sessions/{id}/events/poll", get(session_events))
         .route("/sessions/{id}/pause", post(pause_session))
         .route("/sessions/{id}/resume", post(resume_session))
         .route("/sessions/{id}/command", post(send_command))
@@ -81,7 +88,8 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .route("/projects", get(list_projects).post(register_project))
         .route("/projects/current", get(current_project))
         .route("/projects/discover", get(discover_projects))
-        .route("/events", get(recent_events))
+        .route("/events", get(stream_events))
+        .route("/events/poll", get(recent_events))
         .route("/hooks", post(ingest_hook))
         .route("/breakers", get(breakers))
         .route("/optimizer", get(get_optimizer))
@@ -160,10 +168,18 @@ pub async fn list_sessions(
     Json(SessionsResponse { sessions })
 }
 
-/// `GET /events` — recent hook events across all sessions (dashboard feed).
+/// `GET /events/poll` — JSON snapshot of recent hook events (legacy / fallback).
+///
+/// Why: SSE-incapable clients (curl in a one-shot script, legacy CLI tooling)
+/// still need a way to read the ring buffer. The push-based feed lives at
+/// `GET /events`; this endpoint preserves the original synchronous-snapshot
+/// contract under a `/poll` suffix for backward compatibility.
+/// What: returns the bounded ring buffer of recent [`HookEventRecord`]s as
+/// `{ "events": [...] }`.
+/// Test: covered transitively by `hook_relay_ingests_known_event`.
 #[utoipa::path(
     get,
-    path = "/events",
+    path = "/events/poll",
     tag = "events",
     responses((status = 200, description = "Recent hook events across all sessions"))
 )]
@@ -171,6 +187,34 @@ pub async fn recent_events(State(state): State<Arc<DaemonState>>) -> Json<Events
     Json(EventsResponse {
         events: state.recent_hook_events(),
     })
+}
+
+/// `GET /events` — live SSE stream of every hook event.
+///
+/// Why: the GUI and other real-time consumers need push notifications when
+/// hook events arrive rather than polling `GET /events/poll`. SSE is the
+/// lowest-friction streaming protocol for browser and `reqwest` clients —
+/// plain HTTP, no upgrade dance, automatic reconnection in the browser.
+/// What: subscribes to the daemon's broadcast channel and streams each event
+/// as one SSE `data:` line (JSON-encoded). A `KeepAlive` comment ping every
+/// 15 seconds prevents idle proxies from closing the connection.
+/// Test: `events_sse_streams_one_frame` posts a hook and reads one SSE frame
+/// from this handler.
+pub async fn stream_events(
+    State(state): State<Arc<DaemonState>>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.event_subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|result| match result {
+        Ok(val) => Some(Ok(Event::default().data(val.to_string()))),
+        // Lagged / dropped frames are skipped — the channel intentionally
+        // sheds load when a subscriber falls behind.
+        Err(_) => None,
+    });
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    )
 }
 
 /// JSON body for registering a session via `POST /sessions`.
@@ -427,10 +471,18 @@ pub async fn discover_sessions(State(state): State<Arc<DaemonState>>) -> Json<Di
     })
 }
 
-/// `GET /sessions/:id/events` — recent hook events for one session.
+/// `GET /sessions/:id/events/poll` — JSON snapshot of one session's hook events.
+///
+/// Why: the push-based per-session feed lives at `GET /sessions/{id}/events`;
+/// this endpoint preserves the original synchronous-snapshot contract under
+/// a `/poll` suffix for clients that cannot or do not need to stream.
+/// What: parses the session id and returns the bounded ring buffer filtered
+/// to that session.
+/// Test: covered transitively by the `state::tests::hook_history_is_bounded`
+/// test, which exercises the underlying `hook_events_for` query.
 #[utoipa::path(
     get,
-    path = "/sessions/{id}/events",
+    path = "/sessions/{id}/events/poll",
     tag = "events",
     params(("id" = String, Path, description = "Session UUID")),
     responses(
@@ -446,6 +498,42 @@ pub async fn session_events(
     Ok(Json(EventsResponse {
         events: state.hook_events_for(session),
     }))
+}
+
+/// `GET /sessions/{id}/events` — live SSE stream of one session's hook events.
+///
+/// Why: per-session event filtering lets the GUI subscribe to one session's
+/// activity without receiving noise from every other concurrent session.
+/// What: subscribes to the broadcast channel and forwards only events whose
+/// serialized JSON contains the session id (matching the
+/// `"session": "<uuid>"` field every [`HookEventRecord`] carries). A 15-second
+/// `KeepAlive` ping keeps idle proxies from closing the connection.
+/// Test: `session_events_sse_filters_by_session` posts a hook for one
+/// session and confirms only that session's stream sees it.
+pub async fn stream_session_events(
+    Path(id): Path<String>,
+    State(state): State<Arc<DaemonState>>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.event_subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(move |result| match result {
+        Ok(val) => {
+            // Include the event only if it mentions this session id. The
+            // record serializes its `SessionId` as the UUID string, so a
+            // simple substring match is sufficient and avoids a typed parse
+            // per frame.
+            if val.to_string().contains(&id) {
+                Some(Ok(Event::default().data(val.to_string())))
+            } else {
+                None
+            }
+        }
+        Err(_) => None,
+    });
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    )
 }
 
 /// Result of applying an optional compression level to captured output.

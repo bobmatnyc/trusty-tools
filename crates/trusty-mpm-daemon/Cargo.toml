@@ -50,6 +50,7 @@ utoipa-swagger-ui.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 reqwest.workspace = true
+http-body-util.workspace = true
 
 # End-to-end regression suite: spawns a real daemon on a loopback port and
 # drives it over HTTP. Lives in its own test binary so the module tree compiles

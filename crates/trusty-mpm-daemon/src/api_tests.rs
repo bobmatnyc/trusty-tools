@@ -817,3 +817,168 @@ async fn apply_claude_config_unknown_rec_is_404() {
     .await;
     assert_eq!(result.unwrap_err(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn ingest_hook_broadcasts_to_subscribers() {
+    // `POST /hooks` must publish the event onto the broadcast channel so the
+    // SSE handlers can stream it to live subscribers. Subscribing first
+    // guarantees the receiver sees the publish.
+    let (state, id) = state_with_session();
+    let mut rx = state.event_subscribe();
+
+    let post = HookPost {
+        session_id: id.0.to_string(),
+        event: HookEvent::PostToolUse,
+        payload: serde_json::json!({"tool": "Edit"}),
+    };
+    let result = ingest_hook(State(state.clone()), Json(post)).await;
+    assert!(result.is_ok());
+
+    let received = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("broadcast arrived within 1s")
+        .expect("broadcast value is Ok");
+    assert_eq!(received["event"], serde_json::json!("PostToolUse"));
+    assert_eq!(received["session"], serde_json::json!(id.0.to_string()));
+}
+
+#[tokio::test]
+async fn events_sse_streams_one_frame() {
+    // The new `GET /events` SSE handler subscribes to the broadcast channel
+    // and writes each event as one `data:` line. Driving the live router via
+    // `tower::oneshot` and reading the response body confirms the wire
+    // contract.
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    let (state, id) = state_with_session();
+    let app = router(Arc::clone(&state));
+
+    // Kick off the SSE request first so the handler subscribes *before* we
+    // publish; otherwise the broadcast value is dropped on the floor.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/events")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        content_type.starts_with("text/event-stream"),
+        "expected SSE content-type, got {content_type:?}"
+    );
+
+    // Now publish a hook event after the handler is connected.
+    state
+        .clone()
+        .push_hook_event(trusty_mpm_core::hook::HookEventRecord::now(
+            id,
+            HookEvent::PostToolUse,
+            serde_json::json!({"tool": "Edit"}),
+        ));
+
+    // Read one frame of body bytes. The frame must contain the JSON-encoded
+    // event on a `data:` line. A 2-second timeout keeps a regression from
+    // hanging the test runner.
+    let mut body = response.into_body();
+    let bytes = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let frame = body.frame().await.expect("body has a frame")?;
+            if let Ok(data) = frame.into_data()
+                && !data.is_empty()
+            {
+                return Ok::<_, axum::Error>(data);
+            }
+        }
+    })
+    .await
+    .expect("SSE frame arrived within 2s")
+    .expect("frame read ok");
+
+    let text = std::str::from_utf8(&bytes).expect("utf8");
+    assert!(
+        text.contains("data:"),
+        "expected an SSE `data:` line, got {text:?}"
+    );
+    assert!(
+        text.contains("PostToolUse"),
+        "expected event payload in frame, got {text:?}"
+    );
+    assert!(
+        text.contains(&id.0.to_string()),
+        "expected session id in frame, got {text:?}"
+    );
+}
+
+#[tokio::test]
+async fn session_events_sse_filters_by_session() {
+    // `GET /sessions/{id}/events` must only forward events for that session,
+    // dropping events for unrelated sessions. Publishing one event for the
+    // subscribed session and one for an unrelated session and confirming only
+    // the first arrives proves the filter is in effect.
+    let (state, id) = state_with_session();
+    let other = SessionId::new();
+    let mut other_session =
+        trusty_mpm_core::session::Session::new(other, "/tmp/other", ControlModel::Tmux, None);
+    other_session.status = SessionStatus::Active;
+    state.register_session(other_session);
+
+    let stream_response =
+        stream_session_events(Path(id.0.to_string()), State(Arc::clone(&state))).await;
+    // Consume the `Sse<...>` to a real HTTP response so we can read frames.
+    use axum::response::IntoResponse;
+    let response = stream_response.into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Publish: one for the other session (must be filtered out), then one for
+    // the subscribed session.
+    state.push_hook_event(trusty_mpm_core::hook::HookEventRecord::now(
+        other,
+        HookEvent::PostToolUse,
+        serde_json::json!({"tool": "Read"}),
+    ));
+    state.push_hook_event(trusty_mpm_core::hook::HookEventRecord::now(
+        id,
+        HookEvent::PostToolUse,
+        serde_json::json!({"tool": "Edit"}),
+    ));
+
+    use http_body_util::BodyExt;
+    let mut body = response.into_body();
+    let bytes = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let frame = body.frame().await.expect("body has a frame")?;
+            if let Ok(data) = frame.into_data()
+                && !data.is_empty()
+            {
+                return Ok::<_, axum::Error>(data);
+            }
+        }
+    })
+    .await
+    .expect("SSE frame arrived within 2s")
+    .expect("frame read ok");
+
+    let text = std::str::from_utf8(&bytes).expect("utf8");
+    // The first non-empty data frame must be the *subscribed* session's event,
+    // not the unrelated one.
+    assert!(
+        text.contains(&id.0.to_string()),
+        "expected subscribed session id in frame, got {text:?}"
+    );
+    assert!(
+        !text.contains(&other.0.to_string()),
+        "unrelated session id leaked into stream: {text:?}"
+    );
+}

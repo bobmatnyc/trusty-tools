@@ -16,7 +16,7 @@ async fn events_empty_initially() {
     let daemon = TestDaemon::spawn().await;
     let resp = daemon
         .client()
-        .get(daemon.url("/events"))
+        .get(daemon.url("/events/poll"))
         .send()
         .await
         .expect("events request");
@@ -25,7 +25,7 @@ async fn events_empty_initially() {
     assert!(body["events"].as_array().expect("events array").is_empty());
 }
 
-/// A valid hook event posted for a registered session appears in `/events`.
+/// A valid hook event posted for a registered session appears in `/events/poll`.
 #[tokio::test]
 async fn hook_event_appears_in_feed() {
     let daemon = TestDaemon::spawn().await;
@@ -55,7 +55,7 @@ async fn hook_event_appears_in_feed() {
     assert_eq!(post.status(), 200);
 
     let feed: Value = client
-        .get(daemon.url("/events"))
+        .get(daemon.url("/events/poll"))
         .send()
         .await
         .expect("events request")

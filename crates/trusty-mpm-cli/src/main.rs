@@ -1199,7 +1199,7 @@ async fn session(client: &reqwest::Client, url: &str, action: SessionAction) -> 
                 events: Vec<EventRow>,
             }
             let body: Body = client
-                .get(format!("{url}/sessions/{id}/events"))
+                .get(format!("{url}/sessions/{id}/events/poll"))
                 .send()
                 .await?
                 .error_for_status()?
@@ -2616,8 +2616,10 @@ async fn print_status(client: &reqwest::Client, url: &str) -> anyhow::Result<()>
 
 /// `events` subcommand — print the recent hook-event feed.
 ///
-/// Why: gives operators a quick tail of daemon activity without the TUI.
-/// What: `GET /events`, printing `{timestamp} {session_short} {event}`.
+/// Why: gives operators a quick tail of daemon activity without the TUI. The
+/// daemon serves a live SSE stream at `/events`; this CLI command polls the
+/// legacy snapshot at `/events/poll`, which mirrors the historical behaviour.
+/// What: `GET /events/poll`, printing `{timestamp} {session_short} {event}`.
 /// Test: run against a daemon that has ingested hook events.
 async fn events(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
     #[derive(Deserialize)]
@@ -2625,7 +2627,7 @@ async fn events(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
         events: Vec<EventRow>,
     }
     let body: Body = client
-        .get(format!("{url}/events"))
+        .get(format!("{url}/events/poll"))
         .send()
         .await?
         .error_for_status()?

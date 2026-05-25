@@ -414,7 +414,7 @@ async fn on_callback(
 /// permission prompt, an agent fails, or the overseer blocks something —
 /// without having to poll the bot themselves.
 /// What: every [`SESSION_POLL_INTERVAL`] it fetches `GET /sessions` and each
-/// session's `GET /sessions/{id}/events`, runs [`alerts::check_and_alert`] to
+/// session's `GET /sessions/{id}/events/poll`, runs [`alerts::check_and_alert`] to
 /// find new subscribed events, and sends each as a message to `chat_id`. Every
 /// [`OVERSEER_POLL_INTERVAL`] it also checks `GET /overseer` for a block
 /// decision. Cancelled cleanly via `shutdown`.
@@ -481,7 +481,7 @@ async fn poll_session_alerts(
     let mut events_by_session = std::collections::HashMap::new();
     for s in &sessions {
         let Some(id) = s["id"].as_str() else { continue };
-        let url = format!("{daemon_url}/sessions/{id}/events");
+        let url = format!("{daemon_url}/sessions/{id}/events/poll");
         if let Ok(r) = client.get(&url).send().await
             && let Ok(body) = r.json::<serde_json::Value>().await
         {

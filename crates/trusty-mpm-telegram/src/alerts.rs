@@ -117,7 +117,7 @@ pub type LastSeen = std::collections::HashMap<String, String>;
 
 /// Pure core of the push-alert loop: decide which events warrant an alert.
 ///
-/// Why: the I/O (polling `/sessions`, `/sessions/{id}/events`, sending
+/// Why: the I/O (polling `/sessions`, `/sessions/{id}/events/poll`, sending
 /// messages) is thin and untestable; the *decision* of which events are new
 /// and subscribed is the part worth testing, so it is extracted here.
 /// What: walks each session's events, and for every event newer than the

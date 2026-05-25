@@ -56,6 +56,13 @@ pub struct ReapResult {
 /// memory in a long-lived daemon; a ring buffer caps it.
 pub const HOOK_HISTORY_LIMIT: usize = 1024;
 
+/// Capacity of the SSE event broadcast channel.
+///
+/// Why: `tokio::sync::broadcast` is a fixed-size ring buffer; late subscribers
+/// that fall behind drop the oldest events. 1024 frames is generous for a UI
+/// feed but still cheap memory-wise (each frame is a `serde_json::Value` Arc).
+pub const EVENT_CHANNEL_CAPACITY: usize = 1024;
+
 /// How long a one-time bot pairing code stays valid after it is issued.
 ///
 /// Why: a pairing code is a low-entropy secret; a short five-minute window
@@ -140,6 +147,18 @@ pub struct DaemonState {
     /// What: the framework root, the directory `pairing.json` lives in.
     /// Test: `pairing_persists_to_disk`.
     framework_root: PathBuf,
+    /// Broadcast channel for live hook events.
+    ///
+    /// Why: the GUI and other real-time consumers subscribe to a Server-Sent
+    /// Events stream rather than polling `GET /events/poll`. A
+    /// `tokio::sync::broadcast` channel fans one publish out to every active
+    /// SSE subscriber. The payload is `serde_json::Value` so the broadcast is
+    /// generic across event shapes and avoids tying every consumer to a
+    /// specific Rust type.
+    /// What: the sender side of the channel; SSE handlers call
+    /// [`Self::event_subscribe`] to obtain a `Receiver`.
+    /// Test: `ingest_hook_broadcasts_to_subscribers` exercises subscribe + publish.
+    pub event_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
 }
 
 impl Default for DaemonState {
@@ -287,6 +306,7 @@ impl DaemonState {
         if let Some(chat_id) = paired {
             tracing::info!("restored persisted Telegram pairing (chat {chat_id})");
         }
+        let (event_tx, _) = tokio::sync::broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
             sessions: DashMap::new(),
             delegations: DashMap::new(),
@@ -305,6 +325,7 @@ impl DaemonState {
             paired_chat_id: Mutex::new(paired),
             pair_code: Mutex::new(None),
             framework_root,
+            event_tx,
         }
     }
 
@@ -354,6 +375,7 @@ impl DaemonState {
         let build = build_overseer(overseer_cfg);
         let framework_root = paths.root.clone();
         let paired = crate::pairing_store::load(&framework_root).map(|r| r.chat_id);
+        let (event_tx, _) = tokio::sync::broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
             sessions: DashMap::new(),
             delegations: DashMap::new(),
@@ -372,6 +394,7 @@ impl DaemonState {
             paired_chat_id: Mutex::new(paired),
             pair_code: Mutex::new(None),
             framework_root,
+            event_tx,
         }
     }
 
@@ -828,19 +851,42 @@ impl DaemonState {
 
     // ---- hook events ----------------------------------------------------
 
-    /// Append a hook event to the bounded history ring buffer.
+    /// Append a hook event to the bounded history ring buffer and broadcast it.
     ///
     /// Why: the dashboard's live feed reads recent events; the buffer must not
-    /// grow without bound in a long-running daemon.
+    /// grow without bound in a long-running daemon. The same call also fans
+    /// the event out to every active SSE subscriber so push consumers (the
+    /// GUI) see the event in real time without polling.
     /// What: pushes to the back, evicting the oldest once `HOOK_HISTORY_LIMIT`
-    /// is exceeded.
-    /// Test: `hook_history_is_bounded`.
+    /// is exceeded, then best-effort broadcasts a JSON copy of the record to
+    /// `event_tx`. Send errors (no active subscribers) are intentionally
+    /// ignored.
+    /// Test: `hook_history_is_bounded`, `ingest_hook_broadcasts_to_subscribers`.
     pub fn push_hook_event(&self, record: HookEventRecord) {
-        let mut buf = self.hook_history.lock();
-        if buf.len() >= HOOK_HISTORY_LIMIT {
-            buf.pop_front();
+        let value = serde_json::to_value(&record).unwrap_or_default();
+        {
+            let mut buf = self.hook_history.lock();
+            if buf.len() >= HOOK_HISTORY_LIMIT {
+                buf.pop_front();
+            }
+            buf.push_back(record);
         }
-        buf.push_back(record);
+        // Best-effort broadcast: a send error means no active subscribers,
+        // which is the common case and not a fault.
+        let _ = self.event_tx.send(value);
+    }
+
+    /// Subscribe to the live hook-event broadcast stream.
+    ///
+    /// Why: SSE handlers need a fresh receiver per connection. Wrapping the
+    /// raw `Sender::subscribe` call in a method keeps the channel field's
+    /// access pattern uniform and documents the intended consumer.
+    /// What: returns a new `broadcast::Receiver` that will see every event
+    /// published after `subscribe` was called, up to `EVENT_CHANNEL_CAPACITY`
+    /// of backlog before lagging.
+    /// Test: `ingest_hook_broadcasts_to_subscribers`.
+    pub fn event_subscribe(&self) -> tokio::sync::broadcast::Receiver<serde_json::Value> {
+        self.event_tx.subscribe()
     }
 
     /// Snapshot recent hook events, newest last.

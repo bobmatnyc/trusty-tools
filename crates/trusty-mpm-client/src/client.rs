@@ -389,30 +389,34 @@ impl DaemonClient {
 
     /// Fetch the recent hook-event feed from the daemon.
     ///
-    /// Why: the dashboard's event panel refreshes from this.
-    /// What: `GET /events`, returns the `events` array deserialized.
+    /// Why: the dashboard's event panel refreshes from this. The push-based
+    /// SSE feed lives at `GET /events`; this method polls the legacy snapshot
+    /// at `GET /events/poll` for callers that don't stream.
+    /// What: `GET /events/poll`, returns the `events` array deserialized.
     /// Test: `events_deserialize_from_record_shape` covers the wire shape.
     pub async fn events(&self) -> anyhow::Result<Vec<EventRow>> {
         #[derive(Deserialize)]
         struct Body {
             events: Vec<EventRow>,
         }
-        let url = format!("{}/events", self.base);
+        let url = format!("{}/events/poll", self.base);
         let body: Body = self.http.get(&url).send().await?.json().await?;
         Ok(body.events)
     }
 
     /// Fetch one session's recent hook events.
     ///
-    /// Why: the `/status` command shows a session's last events.
-    /// What: `GET /sessions/{id}/events`, returns the `events` array.
+    /// Why: the `/status` command shows a session's last events. The
+    /// push-based SSE feed lives at `GET /sessions/{id}/events`; this method
+    /// polls the legacy snapshot at `GET /sessions/{id}/events/poll`.
+    /// What: `GET /sessions/{id}/events/poll`, returns the `events` array.
     /// Test: covered by the executor's status test.
     pub async fn session_events(&self, id: &str) -> anyhow::Result<Vec<EventRow>> {
         #[derive(Deserialize)]
         struct Body {
             events: Vec<EventRow>,
         }
-        let url = format!("{}/sessions/{id}/events", self.base);
+        let url = format!("{}/sessions/{id}/events/poll", self.base);
         let body: Body = self.http.get(&url).send().await?.json().await?;
         Ok(body.events)
     }

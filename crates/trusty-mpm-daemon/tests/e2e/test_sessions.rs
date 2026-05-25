@@ -161,7 +161,7 @@ async fn session_events_empty() {
     let id = created["id"].as_str().expect("id present").to_string();
 
     let resp = client
-        .get(daemon.url(&format!("/sessions/{id}/events")))
+        .get(daemon.url(&format!("/sessions/{id}/events/poll")))
         .send()
         .await
         .expect("session events");
