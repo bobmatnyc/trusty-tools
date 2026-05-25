@@ -553,19 +553,82 @@ fn scan_claude_md(root: &Path, subject: Option<&str>, out: &mut Vec<BootstrapTri
     }
 }
 
-/// Scan `.git/config` for the `remote.origin.url`.
+/// Scan the git origin URL for the project rooted at `root`.
 ///
 /// Why: Tying a project to its source repo URL is the single highest-signal
-/// fact for downstream tooling (link to issues, find upstream, etc.).
-/// What: Reuses the same INI-ish scan as `discovery::extract_origin_url` but
-/// kept inline here so `bootstrap` is self-contained. Emits a
-/// `(subject, source_repo, url)` triple.
-/// Test: `scan_project_extracts_git_origin`.
+/// fact for downstream tooling (link to issues, find upstream, etc.). The
+/// canonical source is `[remote "origin"] url = …`, but its physical location
+/// depends on whether `root` is a normal checkout or a git worktree:
+///
+/// - Normal checkout: `.git/` is a directory; the config lives in
+///   `<root>/.git/config`.
+/// - Worktree: `.git` is a *file* containing `gitdir: <pointer>` to the
+///   parent repo's `.git/worktrees/<name>/` dir; the `[remote]` section lives
+///   in the parent's `.git/config`, not anywhere reachable by joining
+///   `<root>/.git/config`.
+///
+/// Issue #113: the previous implementation only handled the first case and
+/// silently dropped the `source_repo` triple in any worktree-based checkout.
+///
+/// What: First shells out to `git -C <root> config --get remote.origin.url`,
+/// which natively resolves the `.git`-file pointer for us. Falls back to a
+/// direct file scan of `<root>/.git/config` when `git` is unavailable on PATH
+/// (matters for the fixture-based unit tests, which fabricate a `.git/config`
+/// file in a tempdir without a real repo). Emits a
+/// `(subject, source_repo, url)` triple when a URL is found.
+/// Test: `scan_project_extracts_git_origin` (file fallback path),
+/// `tools::tests::kg_bootstrap_seeds_workspace_facts` (git-CLI path,
+/// exercised inside worktrees).
 fn scan_git_config(root: &Path, subject: Option<&str>, out: &mut Vec<BootstrapTriple>) {
     let Some(subject) = subject else { return };
-    let Ok(raw) = std::fs::read_to_string(root.join(".git").join("config")) else {
+    let Some(url) = read_origin_url(root) else {
         return;
     };
+    out.push(BootstrapTriple {
+        subject: subject.to_string(),
+        predicate: "source_repo".to_string(),
+        object: url,
+        provenance: "bootstrap:git.config".to_string(),
+    });
+}
+
+/// Resolve `remote.origin.url` for the repo rooted at `root`, transparent to
+/// worktree vs. normal-checkout layout.
+///
+/// Why: Centralises the worktree-vs-checkout indirection in one place so the
+/// bootstrap scanner stays readable. See `scan_git_config` for the full
+/// reasoning behind the two-strategy approach.
+/// What: (1) tries `git -C <root> config --get remote.origin.url`, which
+/// works equally well in worktrees, normal checkouts, and submodules; (2)
+/// falls back to a manual INI scan of `<root>/.git/config` for environments
+/// without a `git` binary (notably the fixture-based unit tests in this
+/// module). Returns `None` if neither path yields a non-empty URL.
+/// Test: `read_origin_url_returns_none_for_non_git_dir`,
+/// `scan_project_extracts_git_origin` (file fallback).
+fn read_origin_url(root: &Path) -> Option<String> {
+    // Strategy 1: ask git directly. This is the only path that handles
+    // worktrees correctly without us re-implementing `gitdir:` resolution.
+    if let Ok(output) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("config")
+        .arg("--get")
+        .arg("remote.origin.url")
+        .output()
+    {
+        if output.status.success() {
+            let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !url.is_empty() {
+                return Some(url);
+            }
+        }
+    }
+
+    // Strategy 2: direct INI scan of `<root>/.git/config`. Only useful for
+    // fixture tests that fabricate a `.git/config` in a tempdir; real-world
+    // worktrees will never reach this branch because the file read fails
+    // (the worktree `.git` is a file, not a directory).
+    let raw = std::fs::read_to_string(root.join(".git").join("config")).ok()?;
     let mut in_origin = false;
     for line in raw.lines() {
         let trimmed = line.trim();
@@ -579,18 +642,13 @@ fn scan_git_config(root: &Path, subject: Option<&str>, out: &mut Vec<BootstrapTr
                 if let Some(rest) = rest.strip_prefix('=') {
                     let url = rest.trim().to_string();
                     if !url.is_empty() {
-                        out.push(BootstrapTriple {
-                            subject: subject.to_string(),
-                            predicate: "source_repo".to_string(),
-                            object: url,
-                            provenance: "bootstrap:git.config".to_string(),
-                        });
-                        return;
+                        return Some(url);
                     }
                 }
             }
         }
     }
+    None
 }
 
 /// Hint string returned by `kg_query` when the palace KG is empty.
