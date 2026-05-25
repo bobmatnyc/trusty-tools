@@ -133,5 +133,13 @@ export const api = {
     if (until) params.set('until', until);
     const qs = params.toString();
     return request(`/api/v1/activity${qs ? `?${qs}` : ''}`);
-  }
+  },
+
+  /**
+   * Full graph payload for a palace: triples + node/edge/community counts.
+   * Why: Issue #97 — the visual graph view fetches every active triple in
+   * one call so d3-force can lay out the graph without paging.
+   */
+  kgGraph: (id) =>
+    request(`/api/v1/palaces/${encodeURIComponent(id)}/kg/graph`)
 };

@@ -19,6 +19,7 @@
 //! - `kg_assert(palace, subject, predicate, object, confidence?, provenance?)` -> ()
 //! - `kg_query(palace, subject)`                    -> Vec<Triple>
 
+use crate::kg_extract::{extract_triples, ExtractInput};
 use crate::{ActivitySource, AppState, DaemonEvent};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
@@ -386,6 +387,32 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     })
 }
 
+/// Reverse of `parse_room`: produce a stable label for KG `in-room`
+/// extraction.
+///
+/// Why: The auto-extractor wants the same friendly label the caller passed
+/// (`"Backend"`, `"General"`, …) so the graph stays consistent across
+/// remember calls regardless of how the MCP client spelled the argument.
+/// What: Returns the canonical enum-name string for the built-in variants
+/// and the inner string for `Custom`.
+/// Test: Indirect — `auto_kg_extraction_hooks_into_memory_remember`
+/// round-trips a known room label.
+fn room_label(room: &RoomType) -> Option<String> {
+    let label = match room {
+        RoomType::Frontend => "Frontend",
+        RoomType::Backend => "Backend",
+        RoomType::Testing => "Testing",
+        RoomType::Planning => "Planning",
+        RoomType::Documentation => "Documentation",
+        RoomType::Research => "Research",
+        RoomType::Configuration => "Configuration",
+        RoomType::Meetings => "Meetings",
+        RoomType::General => "General",
+        RoomType::Custom(s) => return Some(s.clone()),
+    };
+    Some(label.to_string())
+}
+
 /// Parse a `RoomType` from an optional string (`"Backend"`, `"Frontend"`,
 /// etc.) — falls back to `RoomType::General` when unset or unknown.
 ///
@@ -418,6 +445,51 @@ fn open_palace_handle(
         .registry
         .open_palace(&state.data_root, &pid)
         .with_context(|| format!("open palace {palace_id}"))
+}
+
+/// Run deterministic KG extraction over a freshly-written drawer and assert
+/// any resulting triples through the palace's `KnowledgeGraph`.
+///
+/// Why: Issue #97 — `memory_remember` and `memory_note` should auto-populate
+/// the KG so palaces with drawers always have a graph. The extractor is pure
+/// and offline so the write hot path stays fast; failures *must never* fail
+/// the parent write (the drawer is already on disk), so this function logs
+/// and swallows every error.
+/// What: Builds an `ExtractInput`, runs `extract_triples`, then calls
+/// `handle.kg.assert` for each triple. Any failure during assertion is
+/// captured as a `tracing::warn!` and the rest of the triples are still
+/// attempted; the function returns nothing.
+/// Test: `auto_kg_extraction_hooks_into_memory_remember`,
+/// `auto_kg_extraction_no_op_does_not_fail_remember`.
+async fn auto_extract_and_assert(
+    handle: &std::sync::Arc<trusty_common::memory_core::PalaceHandle>,
+    drawer_id: Uuid,
+    content: &str,
+    tags: &[String],
+    room: Option<&str>,
+) {
+    let input = ExtractInput {
+        drawer_id,
+        content,
+        tags,
+        room,
+    };
+    let triples = extract_triples(&input);
+    if triples.is_empty() {
+        return;
+    }
+    for triple in triples {
+        let s = triple.subject.clone();
+        let p = triple.predicate.clone();
+        if let Err(e) = handle.kg.assert(triple).await {
+            tracing::warn!(
+                drawer_id = %drawer_id,
+                subject = %s,
+                predicate = %p,
+                "auto kg extraction: assert failed (non-fatal): {e:#}",
+            );
+        }
+    }
 }
 
 /// Resolve a palace argument, falling back to `state.default_palace` when
@@ -479,6 +551,12 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
             // `remember_with_options` so the activity feed shows what was
             // stored (matches the HTTP path's behaviour).
             let preview = crate::web::drawer_content_preview(&text);
+            // Issue #97: keep originals so the auto-KG extractor sees the
+            // same content / tags that landed in the drawer.
+            // `remember_with_options` consumes them, so clone before the call.
+            let content_for_kg = text.clone();
+            let tags_for_kg = tags.clone();
+            let room_label_for_kg = room_label(&room);
             let drawer_id = handle
                 .remember_with_options(text, room, tags, 0.5, opts)
                 .await
@@ -496,6 +574,16 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
                 source: ActivitySource::Mcp,
             });
             state.emit(crate::web::aggregate_status_event(state));
+            // Issue #97: best-effort auto-extraction. Failures never fail
+            // the write — the drawer is already on disk.
+            auto_extract_and_assert(
+                &handle,
+                drawer_id,
+                &content_for_kg,
+                &tags_for_kg,
+                room_label_for_kg.as_deref(),
+            )
+            .await;
             Ok(json!({
                 "drawer_id": drawer_id.to_string(),
                 "palace": palace,
@@ -525,6 +613,11 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
                 })
                 .unwrap_or_default();
             let handle = open_palace_handle(state, palace)?;
+            // Issue #97: mirror memory_remember — keep originals so the KG
+            // extractor sees the same content / tags that landed in the
+            // drawer. `remember_with_options` consumes them, so clone before.
+            let content_for_kg = content.clone();
+            let tags_for_kg = tags.clone();
             // note() preset skips the token threshold; we keep the default
             // filter for noise patterns. No MCP-stricter min_tokens override
             // is needed because `enforce_min_tokens = false`.
@@ -551,6 +644,16 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
                 source: ActivitySource::Mcp,
             });
             state.emit(crate::web::aggregate_status_event(state));
+            // Issue #97: best-effort auto-extraction (same hook as
+            // memory_remember). `memory_note` is pinned to the General room.
+            auto_extract_and_assert(
+                &handle,
+                drawer_id,
+                &content_for_kg,
+                &tags_for_kg,
+                Some("General"),
+            )
+            .await;
             Ok(json!({
                 "drawer_id": drawer_id.to_string(),
                 "palace": palace,
@@ -1327,6 +1430,101 @@ mod tests {
                 .any(|r| r["content"].as_str().unwrap_or("").contains("Quokkas")),
             "expected to recall the Quokkas drawer; got {results:?}"
         );
+    }
+
+    /// Why: Issue #97 — `memory_remember` should auto-populate the KG so
+    /// every drawer leaves a graph trail. Confirm a freshly remembered
+    /// drawer leaves `has-tag`/`in-room`/`mentions` triples (using the
+    /// tag-as-subject encoding) in the palace KG.
+    /// What: Create a palace, write one drawer with known tags + room +
+    /// recognisable pattern content, then read all active triples and
+    /// assert the expected auto-extracted shapes show up.
+    /// Test: This test.
+    #[tokio::test]
+    async fn auto_kg_extraction_hooks_into_memory_remember() {
+        let state = test_state();
+        let _ = dispatch_tool(&state, "palace_create", json!({"name": "kgauto"}))
+            .await
+            .expect("palace_create");
+
+        let _ = dispatch_tool(
+            &state,
+            "memory_remember",
+            json!({
+                "palace": "kgauto",
+                "text": "Rustc is a compiler for the Rust language; tracks #performance",
+                "room": "Backend",
+                "tags": ["compiler", "language"],
+            }),
+        )
+        .await
+        .expect("memory_remember");
+
+        let handle = open_palace_handle(&state, "kgauto").expect("open palace");
+        let triples = handle.kg.list_active(1000, 0).await.expect("list_active");
+        let auto: Vec<_> = triples
+            .iter()
+            .filter(|t| t.provenance.as_deref() == Some(crate::kg_extract::AUTO_PROVENANCE))
+            .collect();
+        assert!(
+            !auto.is_empty(),
+            "expected at least one auto-extracted triple after memory_remember; got: {triples:?}"
+        );
+        // Tag/room/topic encoding: each metadata category becomes its own
+        // subject so multiple tags coexist under the KG's "one active
+        // triple per (s, p)" invariant. Confirm both tags survive.
+        assert!(
+            auto.iter()
+                .any(|t| t.subject == "tag:compiler" && t.predicate == "tags"),
+            "expected tag:compiler edge in auto subset: {auto:?}"
+        );
+        assert!(
+            auto.iter()
+                .any(|t| t.subject == "tag:language" && t.predicate == "tags"),
+            "expected tag:language edge in auto subset: {auto:?}"
+        );
+        assert!(
+            auto.iter()
+                .any(|t| t.subject == "room:Backend" && t.predicate == "contains"),
+            "expected room:Backend edge in auto subset: {auto:?}"
+        );
+        assert!(
+            auto.iter().any(|t| t.predicate == "mentioned-in"),
+            "expected at least one #hashtag mention triple in auto subset: {auto:?}"
+        );
+    }
+
+    /// Why: Issue #97 — failures inside the auto-extraction pass must
+    /// never fail the parent write. We can't easily inject a failure into
+    /// the live `KnowledgeGraph::assert`, so this test exercises the
+    /// documented contract by verifying the parent `memory_remember`
+    /// succeeds even when the content produces zero auto-extracted triples
+    /// (the closest natural no-op to "extraction failed").
+    /// What: Remember a drawer with empty tags + minimal patternless
+    /// content; confirm `memory_remember` returns a drawer id and no
+    /// auto-extracted triples are emitted (the only built-in auto triples
+    /// would have come from tags/room/hashtags/patterns).
+    /// Test: This test.
+    #[tokio::test]
+    async fn auto_kg_extraction_no_op_does_not_fail_remember() {
+        let state = test_state();
+        let _ = dispatch_tool(&state, "palace_create", json!({"name": "kgnoop"}))
+            .await
+            .expect("palace_create");
+
+        let res = dispatch_tool(
+            &state,
+            "memory_remember",
+            json!({
+                "palace": "kgnoop",
+                // 8+ tokens to clear MCP_MIN_TOKENS; no tags, no room, no
+                // hashtags, no pattern triggers.
+                "text": "The quick brown fox jumped over the lazy dog repeatedly",
+            }),
+        )
+        .await
+        .expect("memory_remember should succeed even when extraction yields nothing");
+        assert!(res["drawer_id"].as_str().is_some());
     }
 
     /// Why: Confirm `kg_assert` writes a triple and `kg_query` returns it

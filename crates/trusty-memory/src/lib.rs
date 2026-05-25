@@ -25,6 +25,7 @@ pub mod activity;
 pub mod bootstrap;
 pub mod commands;
 pub mod discovery;
+pub mod kg_extract;
 pub mod openrpc;
 pub mod prompt_facts;
 pub mod service;

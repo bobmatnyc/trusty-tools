@@ -95,6 +95,7 @@ pub fn router() -> Router<AppState> {
             get(kg_list_subjects_with_counts),
         )
         .route("/api/v1/palaces/{id}/kg/all", get(kg_list_all))
+        .route("/api/v1/palaces/{id}/kg/graph", get(kg_graph))
         .route("/api/v1/palaces/{id}/kg/count", get(kg_count))
         .route(
             "/api/v1/palaces/{id}/dream/status",
@@ -1336,6 +1337,68 @@ async fn kg_count(
     let handle = open_handle(&state, &id)?;
     let active = handle.kg.count_active_triples();
     Ok(Json(json!({ "active": active })))
+}
+
+/// Wire shape returned by `/api/v1/palaces/{id}/kg/graph`.
+///
+/// Why: Issue #97 — the per-palace visual graph view needs a single payload
+/// containing every active triple plus a node-level community count so the
+/// UI can color-code clusters. Splitting into nodes/edges client-side lets
+/// d3-force own the layout while keeping the wire shape compact.
+/// What: `triples` carries the raw `(s, p, o)` list; `community_count` lets
+/// the SPA decide whether to color-code clusters (zero ⇒ no Louvain pass
+/// has run).
+/// Test: `kg_graph_returns_active_triples`.
+#[derive(Serialize)]
+struct KgGraphPayload {
+    triples: Vec<Triple>,
+    node_count: u64,
+    edge_count: u64,
+    community_count: u64,
+}
+
+/// Hard cap on triples returned by the per-palace graph endpoint.
+///
+/// Why: The visual graph is unusable past a few thousand triples regardless
+/// of how fast the daemon serves the payload. The spec target is "<1s for
+/// palaces with <500 triples"; this cap protects the daemon from a runaway
+/// fetch on a pathologically large palace.
+/// What: `5_000` — well above the issue's 500-triple sanity benchmark while
+/// staying inside an acceptable single JSON response budget.
+/// Test: `kg_graph_returns_active_triples`.
+const KG_GRAPH_MAX_TRIPLES: usize = 5_000;
+
+/// `GET /api/v1/palaces/{id}/kg/graph` — full graph payload for the SPA.
+///
+/// Why: Issue #97's visual graph view needs every active triple in one call
+/// so the d3-force layout can run without paging. The existing `/kg/all`
+/// endpoint caps page size at 200 — fine for the explorer table but too
+/// small for the visual graph. This handler does a single `list_active`
+/// pass capped at [`KG_GRAPH_MAX_TRIPLES`] and bundles the graph counts in
+/// the same payload.
+/// What: opens the palace handle, calls `KnowledgeGraph::list_active(cap,
+/// 0)`, and returns `{ triples, node_count, edge_count, community_count }`.
+/// Failures surface as `ApiError::internal`.
+/// Test: `kg_graph_returns_active_triples` (web tests).
+async fn kg_graph(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<KgGraphPayload>, ApiError> {
+    let handle = open_handle(&state, &id)?;
+    let triples = handle
+        .kg
+        .list_active(KG_GRAPH_MAX_TRIPLES, 0)
+        .await
+        .map_err(|e| ApiError::internal(format!("kg list_active: {e:#}")))?;
+    let node_count = handle.kg.node_count() as u64;
+    let edge_count = handle.kg.edge_count() as u64;
+    let community_count = handle.kg.community_count() as u64;
+    Ok(Json(KgGraphPayload {
+        triples,
+        node_count,
+        edge_count,
+        community_count,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -4170,6 +4233,154 @@ mod tests {
         assert_eq!(arr[0]["subject"], "alpha");
         assert_eq!(arr[0]["predicate"], "is");
         assert_eq!(arr[0]["object"], "thing");
+    }
+
+    /// Why (issue #97): The visual graph view fetches the entire active
+    /// triple set in one call so d3-force can lay it out without paging.
+    /// The endpoint must return the triple list plus the node/edge/
+    /// community counts that drive the legend.
+    /// What: Creates a palace, asserts a single triple, and confirms `GET
+    /// /api/v1/palaces/{id}/kg/graph` returns `{ triples, node_count,
+    /// edge_count, community_count }` with the right shape.
+    /// Test: This test.
+    #[tokio::test]
+    async fn kg_graph_returns_active_triples() {
+        let state = test_state();
+        let app = router().with_state(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/palaces")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"name": "kg-graph"}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = json!({
+            "subject": "alpha",
+            "predicate": "is",
+            "object": "thing",
+        })
+        .to_string();
+        let r = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/palaces/kg-graph/kg")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/palaces/kg-graph/kg/graph")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 16_384).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let triples = v["triples"].as_array().expect("triples array");
+        assert!(triples
+            .iter()
+            .any(|t| t["subject"] == "alpha" && t["predicate"] == "is" && t["object"] == "thing"));
+        assert!(v["node_count"].as_u64().is_some());
+        assert!(v["edge_count"].as_u64().is_some());
+        assert!(v["community_count"].as_u64().is_some());
+    }
+
+    /// Why (issue #97): The visual graph view's stated perf budget is
+    /// "<1s for palaces with <500 triples". Seed 500 triples, time one
+    /// `/kg/graph` round-trip, and assert the result stays well under that
+    /// budget. The assertion uses a generous 10x ceiling so flaky CI
+    /// hardware doesn't false-positive while still catching catastrophic
+    /// regressions.
+    /// What: Creates a palace, asserts 500 triples directly through the
+    /// `KnowledgeGraph` handle (skipping the HTTP overhead of 500 separate
+    /// `POST /kg` calls), then runs one `GET /kg/graph` and prints the
+    /// elapsed time to stderr.
+    /// Test: This test.
+    #[tokio::test]
+    async fn kg_graph_meets_perf_budget_for_500_triples() {
+        let state = test_state();
+        let app = router().with_state(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/palaces")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"name": "kg-perf"}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let pid = trusty_common::memory_core::palace::PalaceId::new("kg-perf");
+        let handle = state
+            .registry
+            .open_palace(&state.data_root, &pid)
+            .expect("open palace");
+        let now = chrono::Utc::now();
+        for s in 0..10 {
+            for o in 0..50 {
+                handle
+                    .kg
+                    .assert(Triple {
+                        subject: format!("s{s}"),
+                        predicate: format!("p{o}"),
+                        object: format!("o{o}"),
+                        valid_from: now,
+                        valid_to: None,
+                        confidence: 1.0,
+                        provenance: Some("perf-test".to_string()),
+                    })
+                    .await
+                    .expect("kg.assert");
+            }
+        }
+
+        let started = std::time::Instant::now();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/palaces/kg-perf/kg/graph")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 1_000_000).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let n = v["triples"].as_array().map(|a| a.len()).unwrap_or(0);
+        assert_eq!(n, 500, "expected 500 triples in payload");
+        assert!(
+            elapsed.as_secs_f64() < 10.0,
+            "graph endpoint should serve 500 triples in well under 10s; took {elapsed:?}"
+        );
+        eprintln!(
+            "[perf] kg_graph endpoint served 500 triples in {:.3}ms",
+            elapsed.as_secs_f64() * 1000.0
+        );
     }
 
     /// Why (issue #42): `GET /api/v1/kg/prompt-context` must serve the

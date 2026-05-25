@@ -15,6 +15,19 @@
    */
   import { onMount } from 'svelte';
   import { api } from '../api.js';
+  import { navigate } from '../router.svelte.js';
+
+  /*
+   * Why: Issue #97 — clicking the "graph →" badge on a palace row should
+   * jump to the per-palace visual graph view. The router uses hash-based
+   * URLs so we just navigate to `#/palace/<id>/graph`.
+   * What: Navigates the SPA without bubbling the click into the row toggle.
+   * Test: click the badge in the dashboard, confirm `#/palace/<id>/graph`
+   * is the new hash.
+   */
+  function navigateToGraph(id) {
+    navigate(`/palace/${encodeURIComponent(id)}/graph`);
+  }
 
   let palaces = $state([]);
   let error = $state(null);
@@ -322,24 +335,52 @@
 
 {#snippet palaceRow(p)}
   <div class="palace">
-    <button
-      class="tree-row palace-row"
-      onclick={() => togglePalace(p.id)}
-      aria-expanded={!!expanded[p.id]}
-    >
-      <span class="caret" class:open={expanded[p.id]}>▸</span>
-      <span class="tree-icon">▤</span>
-      <span class="tree-name">{p.name || p.id}</span>
-      <span class="counts">
-        <span class="badge badge-muted" title="Last write">
-          {relTime(p.last_write_at)}
+    <div class="palace-row-wrap">
+      <button
+        class="tree-row palace-row"
+        onclick={() => togglePalace(p.id)}
+        aria-expanded={!!expanded[p.id]}
+      >
+        <span class="caret" class:open={expanded[p.id]}>▸</span>
+        <span class="tree-icon">▤</span>
+        <span class="tree-name">{p.name || p.id}</span>
+        <span class="counts">
+          <span class="badge badge-muted" title="Last write">
+            {relTime(p.last_write_at)}
+          </span>
+          <span class="badge badge-muted">{p.wing_count ?? 0} wings</span>
+          <span class="badge badge-muted">{p.drawer_count ?? 0} drawers</span>
+          <span class="badge badge-info">{p.vector_count ?? 0} vectors</span>
+          <span class="badge badge-info">{p.kg_triple_count ?? 0} triples</span>
+          <!-- Issue #97: surface KG graph density inline so users can spot
+               palaces with content without opening the graph view. -->
+          <span class="badge badge-graph" title="KG nodes">
+            {p.node_count ?? 0} nodes
+          </span>
+          <span class="badge badge-graph" title="KG edges">
+            {p.edge_count ?? 0} edges
+          </span>
+          {#if (p.community_count ?? 0) > 0}
+            <span class="badge badge-graph" title="Louvain communities">
+              {p.community_count} communities
+            </span>
+          {/if}
         </span>
-        <span class="badge badge-muted">{p.wing_count ?? 0} wings</span>
-        <span class="badge badge-muted">{p.drawer_count ?? 0} drawers</span>
-        <span class="badge badge-info">{p.vector_count ?? 0} vectors</span>
-        <span class="badge badge-info">{p.kg_triple_count ?? 0} triples</span>
-      </span>
-    </button>
+      </button>
+      <!-- Sibling of the row button so we don't nest <button> inside
+           <button>, which the browser would "repair" by hoisting and
+           detaching click handlers. -->
+      <button
+        type="button"
+        class="badge badge-link palace-graph-link"
+        title="Open per-palace graph view"
+        onclick={(e) => {
+          e.stopPropagation();
+          navigateToGraph(p.id);
+        }}>
+        graph →
+      </button>
+    </div>
     {#if p.description}
       <div class="palace-desc">{p.description}</div>
     {/if}
@@ -449,6 +490,23 @@
   }
   .palace {
     border-bottom: 1px solid var(--trusty-border);
+  }
+  /*
+   * Issue #97 — wraps the palace row button and the sibling "graph →" link
+   * so they can't end up nested. Flexbox places the link at the end of the
+   * row; the button itself still fills the available width.
+   */
+  .palace-row-wrap {
+    display: flex;
+    align-items: center;
+    gap: var(--trusty-space-2);
+  }
+  .palace-row-wrap > .palace-row {
+    flex: 1;
+  }
+  .palace-graph-link {
+    margin-right: var(--trusty-space-5);
+    flex-shrink: 0;
   }
   .tree-row {
     display: flex;

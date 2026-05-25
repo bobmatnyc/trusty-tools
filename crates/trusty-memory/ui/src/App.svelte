@@ -17,6 +17,7 @@
   import Logs from './lib/views/Logs.svelte';
   import Dream from './lib/views/Dream.svelte';
   import KG from './lib/views/KG.svelte';
+  import PalaceGraph from './lib/views/PalaceGraph.svelte';
   import { getRoute } from './lib/router.svelte.js';
   import { refreshHealth, refreshStatus } from './lib/state.svelte.js';
   import { onMount } from 'svelte';
@@ -40,6 +41,11 @@
   let view = $derived.by(() => {
     const segs = route.segments;
     if (segs.length === 0) return { kind: 'health' };
+    // Issue #97: `/palace/<id>/graph` opens the per-palace graph view.
+    // `/palaces` (plural) stays on the existing list view.
+    if (segs[0] === 'palace' && segs.length >= 2 && segs[2] === 'graph') {
+      return { kind: 'palace-graph' };
+    }
     if (segs[0] === 'palaces' || segs[0] === 'palace') return { kind: 'palaces' };
     if (segs[0] === 'kg') return { kind: 'kg' };
     if (segs[0] === 'logs') return { kind: 'logs' };
@@ -69,6 +75,8 @@
         </div>
       {:else if view.kind === 'health'}
         <Health />
+      {:else if view.kind === 'palace-graph'}
+        <PalaceGraph />
       {:else if view.kind === 'palaces'}
         <Palaces />
       {:else if view.kind === 'logs'}

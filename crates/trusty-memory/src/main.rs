@@ -167,6 +167,25 @@ enum Command {
         #[command(subcommand)]
         target: MonitorTarget,
     },
+
+    /// Re-run auto-KG extraction across every drawer in a palace.
+    ///
+    /// Why: Issue #97 — `memory_remember` now extracts triples on write,
+    /// but existing palaces sit at zero auto-extracted triples until
+    /// back-filled. `kg-rebuild` walks every drawer and re-asserts the
+    /// heuristic triples so the visual graph view is immediately useful.
+    /// What: Loads palaces from disk, processes each palace (or just one
+    /// when `--palace` is supplied), and prints a per-palace summary plus
+    /// an aggregate total. Failures on individual asserts are logged but
+    /// never abort the run.
+    /// Test: `commands::kg_rebuild::tests::kg_rebuild_processes_all_drawers`.
+    #[command(name = "kg-rebuild")]
+    KgRebuild {
+        /// Restrict the rebuild to a single palace id. When omitted, every
+        /// palace under the data root is processed.
+        #[arg(long, value_name = "ID")]
+        palace: Option<String>,
+    },
 }
 
 /// Target surface for the `monitor` subcommand.
@@ -242,6 +261,9 @@ async fn main() -> Result<()> {
         Command::Service { action } => handle_service(&action),
         Command::Doctor => trusty_memory::commands::doctor::handle_doctor().await,
         Command::Monitor { target } => run_monitor(target).await,
+        Command::KgRebuild { palace } => {
+            trusty_memory::commands::kg_rebuild::handle_kg_rebuild(palace).await
+        }
     }
 }
 

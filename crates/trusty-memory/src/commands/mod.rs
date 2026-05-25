@@ -10,6 +10,7 @@
 //! Test: Each submodule carries its own unit tests.
 
 pub mod doctor;
+pub mod kg_rebuild;
 pub mod migrate;
 pub mod migrations;
 pub mod monitor;
