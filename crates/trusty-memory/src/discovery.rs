@@ -37,7 +37,9 @@ pub enum DiscoverySource {
     /// First-letter abbreviation of a hyphenated package name is globally
     /// unique within the workspace.
     FirstLetterAbbrev,
-    /// Short name extracted from the `origin` remote URL in `.git/config`.
+    /// Short name extracted from the `origin` remote URL of the repo
+    /// containing the project root (resolved via `git -C <root> config`, so
+    /// it works inside worktrees as well as normal checkouts).
     GitRemote,
 }
 
@@ -352,7 +354,7 @@ fn add_first_letter_abbreviations(
     }
 }
 
-/// Read `.git/config` and extract the short repo name from `origin`.
+/// Read the git origin URL for `project_root` and extract a short repo name.
 ///
 /// Why: Most repos refer to themselves by the trailing path component of the
 /// origin URL ("trusty-tools"), which is rarely the same as the working tree
@@ -360,16 +362,28 @@ fn add_first_letter_abbreviations(
 /// an alias for itself isn't useful, but surfacing the workspace dir name as
 /// the canonical full name for the short repo name is — e.g. when working
 /// inside a worktree directory the model still knows "trusty-tools" refers
-/// to the project.
-/// What: Greps `.git/config` for the `[remote "origin"] url = ...` line,
-/// strips `.git`, takes the last `/`-separated component. Emits a
-/// `GitRemote` discovery only when the short name differs from the directory
-/// name and the directory name is non-empty.
-/// Test: `git_remote_extracts_short_name_from_origin_url`.
+/// to the project. The canonical source for `[remote "origin"] url = …` lives
+/// in `<root>/.git/config` for a normal checkout, but in a *worktree* `.git`
+/// is a file containing `gitdir: <parent>/.git/worktrees/<name>/` and the
+/// `[remote]` section is reachable only through the parent repo's
+/// `.git/config`. Direct filesystem reads silently drop the discovery in
+/// worktree-based checkouts.
+///
+/// Issue #116: the previous implementation only handled the normal-checkout
+/// case and returned `None` from inside any git worktree, mirroring the bug
+/// fixed for `kg_bootstrap` in #113 / PR #115.
+///
+/// What: Resolves the origin URL via [`read_origin_url`] (which prefers
+/// `git -C <root> config --get remote.origin.url` and falls back to a manual
+/// INI scan of `<root>/.git/config` when no `git` binary is on PATH — useful
+/// only for fixture-based tests that fabricate a `.git/config` directly).
+/// Extracts the short name, strips a trailing `.git`, and emits a
+/// `GitRemote` discovery iff the short name differs from the directory name.
+/// Test: `extract_origin_url_handles_typical_config`,
+/// `short_repo_name_strips_git_suffix_and_path`,
+/// `git_remote_works_inside_worktree`.
 fn discover_git_remote(project_root: &Path) -> Option<AliasDiscovery> {
-    let config_path = project_root.join(".git").join("config");
-    let raw = std::fs::read_to_string(&config_path).ok()?;
-    let url = extract_origin_url(&raw)?;
+    let url = read_origin_url(project_root)?;
     let short = short_repo_name(&url)?;
     let dir_name = project_root
         .file_name()
@@ -384,6 +398,52 @@ fn discover_git_remote(project_root: &Path) -> Option<AliasDiscovery> {
         full: dir_name,
         source: DiscoverySource::GitRemote,
     })
+}
+
+/// Resolve `remote.origin.url` for the repo rooted at `project_root`,
+/// transparent to worktree vs. normal-checkout layout.
+///
+/// Why: Centralises the worktree-vs-checkout indirection in one place so
+/// `discover_git_remote` stays readable. In a worktree `.git` is a file
+/// (not a directory) containing `gitdir: <parent>/.git/worktrees/<name>/`,
+/// so a naive `std::fs::read_to_string(".git/config")` fails — but the
+/// `[remote "origin"]` section is still reachable via the parent's
+/// `.git/config`. Shelling out to `git` lets us delegate that pointer
+/// resolution instead of re-implementing it.
+/// What: (1) tries `git -C <root> config --get remote.origin.url`, which
+/// works equally well in worktrees, normal checkouts, and submodules; (2)
+/// falls back to a manual INI scan of `<root>/.git/config` for environments
+/// without a `git` binary on PATH (notably fixture tests that fabricate a
+/// `.git/config` in a tempdir without ever initialising a real repo).
+/// Returns `None` if neither path yields a non-empty URL.
+/// Test: `git_remote_works_inside_worktree` (CLI path),
+/// `extract_origin_url_handles_typical_config` (file fallback path, via
+/// `extract_origin_url`).
+fn read_origin_url(project_root: &Path) -> Option<String> {
+    // Strategy 1: ask git directly. This is the only path that handles
+    // worktrees correctly without us re-implementing `gitdir:` resolution.
+    if let Ok(output) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .arg("config")
+        .arg("--get")
+        .arg("remote.origin.url")
+        .output()
+    {
+        if output.status.success() {
+            let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !url.is_empty() {
+                return Some(url);
+            }
+        }
+    }
+
+    // Strategy 2: direct INI scan of `<root>/.git/config`. Only useful for
+    // fixture tests that fabricate a `.git/config` in a tempdir; real-world
+    // worktrees will never reach this branch because the file read fails
+    // (the worktree `.git` is a file, not a directory).
+    let raw = std::fs::read_to_string(project_root.join(".git").join("config")).ok()?;
+    extract_origin_url(&raw)
 }
 
 /// Extract the `url = ...` value from the `[remote "origin"]` section of a
@@ -678,6 +738,111 @@ path = "src/main.rs"
                 .count(),
             1
         );
+    }
+
+    /// Why (issue #116): `discover_git_remote` must return the same remote
+    /// URL inside a git worktree as it does in the parent checkout. Before
+    /// the fix it read `<root>/.git/config` directly, which fails inside a
+    /// worktree because `.git` is a *file* (containing
+    /// `gitdir: <parent>/.git/worktrees/<name>/`), not a directory — and
+    /// the `[remote "origin"]` section lives only in the parent's
+    /// `.git/config`. This test pins the post-fix behaviour: initialise a
+    /// real repo, add a remote, create a worktree off it, and assert
+    /// `discover_git_remote` recovers the URL from inside the worktree.
+    /// What: Builds a tempdir-backed parent repo + worktree pair using the
+    /// real `git` CLI (the same tool the production code delegates to),
+    /// then calls the discovery helper against the worktree path.
+    /// Test: this test itself; serves as the worktree regression guard for #116.
+    #[test]
+    fn git_remote_works_inside_worktree() {
+        // Skip when `git` is unavailable on PATH — the fixture relies on
+        // real worktree semantics that we can't fabricate from pure FS ops.
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .ok()
+            .map(|o| !o.status.success())
+            .unwrap_or(true)
+        {
+            eprintln!("skipping git_remote_works_inside_worktree: `git` not on PATH");
+            return;
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // The repo dir name must differ from the short repo name in the
+        // remote URL so that `discover_git_remote` actually emits a
+        // discovery (it skips when `short == dir_name`).
+        let parent = tmp.path().join("local-checkout");
+        std::fs::create_dir_all(&parent).expect("mkdir parent");
+
+        // Initialise a real repo so `.git` is a directory in the parent
+        // and a file (with `gitdir:`) inside the worktree.
+        let run = |args: &[&str], cwd: &Path| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .status()
+                .expect("git status");
+            assert!(status.success(), "git {args:?} failed in {cwd:?}");
+        };
+        run(&["init", "--initial-branch=main", "."], &parent);
+        run(&["config", "user.email", "test@example.invalid"], &parent);
+        run(&["config", "user.name", "test"], &parent);
+        run(
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:bobmatnyc/trusty-tools.git",
+            ],
+            &parent,
+        );
+        // A real commit + branch is required before `git worktree add` will
+        // accept the source as a base.
+        std::fs::write(parent.join("README.md"), "hi").expect("write README");
+        run(&["add", "README.md"], &parent);
+        run(&["commit", "-m", "init"], &parent);
+
+        // Create the worktree as a sibling directory (outside the parent
+        // checkout, the standard layout). Re-use the same short repo name
+        // as the URL's tail so this also confirms the "short == dir_name"
+        // skip rule works against the worktree dir name (not the parent's).
+        let worktree = tmp.path().join("trusty-tools-feature");
+        run(
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                worktree.to_str().expect("worktree path"),
+            ],
+            &parent,
+        );
+
+        // Sanity: `.git` inside the worktree must be a file, not a dir —
+        // otherwise the fixture isn't actually exercising the bug.
+        let dot_git = worktree.join(".git");
+        assert!(
+            dot_git.is_file(),
+            "expected `.git` to be a file inside the worktree; got {dot_git:?}"
+        );
+
+        // Run discovery against the worktree path. Pre-fix this returned
+        // `None`; post-fix it must return the GitRemote discovery with the
+        // short name extracted from origin.
+        let d = discover_git_remote(&worktree).expect("expected GitRemote discovery from worktree");
+        assert_eq!(d.source, DiscoverySource::GitRemote);
+        assert_eq!(d.short, "trusty-tools");
+        assert_eq!(d.full, "trusty-tools-feature");
+
+        // Also confirm the normal-checkout path still works inside the same
+        // fixture (regression guard: the shell-out must not break the
+        // happy path either).
+        let d_parent = discover_git_remote(&parent)
+            .expect("expected GitRemote discovery from normal checkout");
+        assert_eq!(d_parent.source, DiscoverySource::GitRemote);
+        assert_eq!(d_parent.short, "trusty-tools");
+        assert_eq!(d_parent.full, "local-checkout");
     }
 
     /// Resolve the workspace root (parent of `crates/trusty-memory`).
