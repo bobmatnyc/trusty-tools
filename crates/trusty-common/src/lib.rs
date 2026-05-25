@@ -314,6 +314,81 @@ pub fn read_daemon_addr(app_name: &str) -> Result<Option<String>> {
     }
 }
 
+// ─── Already-running guard ────────────────────────────────────────────────
+
+/// Issue a short-timeout `GET {base_url}{health_path}` and report whether it
+/// returns a 2xx response.
+///
+/// Why: every trusty-* daemon's "is one already running?" check follows the
+/// same shape — probe the recorded address for `/health` with a tight timeout
+/// so a dead daemon does not block the start command for the discovery
+/// timeout. Lifting the probe into one helper keeps the request/timeout
+/// configuration identical across `check_already_running` (file-based) and the
+/// trusty-mpm lock-file path (where the URL is derived from a TOML file).
+/// What: builds a `reqwest::Client` with a 1 s request timeout, issues the GET,
+/// returns `true` only when the response is HTTP 2xx. Any client-builder error
+/// or transport failure returns `false`.
+/// Test: covered indirectly via `check_already_running_*` and the three daemon
+/// integration paths.
+pub async fn probe_health(base_url: &str, health_path: &str) -> bool {
+    let probe = format!("{base_url}{health_path}");
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(1))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    matches!(client.get(&probe).send().await, Ok(resp) if resp.status().is_success())
+}
+
+/// Probe whether an existing daemon recorded at `addr_file` is healthy and,
+/// if so, return its base URL so the caller can refuse to start a duplicate.
+///
+/// Why: every trusty-* daemon (search, memory, mpm) historically port-walked on
+/// boot. Invoking the `start` / `serve` command a second time silently spawned
+/// a second instance on the next free port — splitting traffic between two
+/// stores, doubling RSS, and confusing every client that resolves the address
+/// from disk. The CLI must read the recorded address, ask the live process for
+/// `/health`, and if both succeed report "already running" and exit 0 rather
+/// than racing a duplicate process against the port walker. A shared helper
+/// keeps the three daemons honest — drift here is the bug we are fixing.
+/// What: returns `Some("http://<addr>")` only when (a) `addr_file` exists and
+/// is readable, (b) its trimmed contents parse as a non-empty `host:port`, and
+/// (c) an HTTP `GET http://<addr><health_path>` returns a 2xx within ~1.5 s
+/// (1 s request timeout plus tokio scheduling slack). Returns `None` on every
+/// other outcome — missing file, unreadable contents, dead address, non-2xx
+/// response — so the caller treats that as "no live daemon, proceed".
+/// Side-effect (stale-file cleanup): when the file exists but the health probe
+/// fails (or the file is empty / malformed), the function best-effort deletes
+/// it via `std::fs::remove_file` so the next caller does not chase the same
+/// dead address. A delete failure is intentionally ignored.
+/// Test: `check_already_running_returns_none_when_file_missing`,
+/// `check_already_running_returns_none_when_file_empty`,
+/// `check_already_running_returns_none_when_address_dead`,
+/// `check_already_running_returns_url_when_health_ok`.
+pub async fn check_already_running(addr_file: &Path, health_path: &str) -> Option<String> {
+    let raw = match std::fs::read_to_string(addr_file) {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+    let addr = raw.trim();
+    if addr.is_empty() {
+        // Empty / whitespace-only file is treated as stale — best-effort delete.
+        let _ = std::fs::remove_file(addr_file);
+        return None;
+    }
+    let url = format!("http://{addr}");
+    if probe_health(&url, health_path).await {
+        Some(url)
+    } else {
+        // Stale file pointing at a dead address. Clear it so the next start
+        // attempt is not blocked by a probe against the dead URL.
+        let _ = std::fs::remove_file(addr_file);
+        None
+    }
+}
+
 // ─── CLI initialisation ───────────────────────────────────────────────────
 
 /// Initialise the global tracing subscriber.
@@ -765,6 +840,84 @@ mod tests {
     async fn openrouter_chat_rejects_empty_key() {
         let err = openrouter_chat("", "x", vec![]).await.unwrap_err();
         assert!(err.to_string().contains("api key"));
+    }
+
+    #[tokio::test]
+    async fn check_already_running_returns_none_when_file_missing() {
+        // Why: a fresh machine (no prior daemon) must skip the probe entirely
+        // and let the caller proceed with normal startup.
+        let tmp = tempfile_like_dir();
+        let missing = tmp.join("does-not-exist");
+        let got = check_already_running(&missing, "/health").await;
+        assert!(got.is_none());
+    }
+
+    #[tokio::test]
+    async fn check_already_running_returns_none_when_file_empty() {
+        // Why: a half-written / truncated address file should be treated as
+        // "no daemon" and the stale file cleared so the next start does not
+        // see it again.
+        let tmp = tempfile_like_dir();
+        let path = tmp.join("http_addr");
+        std::fs::write(&path, "   \n  ").unwrap();
+        let got = check_already_running(&path, "/health").await;
+        assert!(got.is_none());
+        assert!(
+            !path.exists(),
+            "empty address file should be cleaned up by check_already_running"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_already_running_returns_none_when_address_dead() {
+        // Why: a stale address (daemon previously crashed) must NOT block a
+        // fresh start; the helper must probe, see no listener, clear the file,
+        // and report "no daemon".
+        let tmp = tempfile_like_dir();
+        let path = tmp.join("http_addr");
+        // Reserved unbound port — TCP connect will fail fast.
+        std::fs::write(&path, "127.0.0.1:1\n").unwrap();
+        let got = check_already_running(&path, "/health").await;
+        assert!(got.is_none(), "dead address should map to None");
+        assert!(
+            !path.exists(),
+            "stale address file should be cleaned up by check_already_running"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_already_running_returns_url_when_health_ok() {
+        // Why: positive control — when a daemon really is listening and
+        // returns 2xx on the health path, the helper must report its URL so
+        // the caller can refuse to spawn a duplicate.
+        // What: spin up a one-shot mini HTTP server on an ephemeral port that
+        // answers `GET /health → 200`, write the address to the file, and
+        // confirm the helper returns the expected URL.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let tmp = tempfile_like_dir();
+        let path = tmp.join("http_addr");
+        std::fs::write(&path, format!("{local}\n")).unwrap();
+
+        let got = check_already_running(&path, "/health").await;
+        assert_eq!(got.as_deref(), Some(format!("http://{local}").as_str()));
+        assert!(
+            path.exists(),
+            "address file must be preserved when the daemon is healthy"
+        );
+        let _ = server.await;
     }
 
     // Test-only helper: makes a unique scratch dir without pulling in tempfile

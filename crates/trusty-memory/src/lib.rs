@@ -665,17 +665,23 @@ pub const DEFAULT_HTTP_PORT: u16 = 7070;
 /// to the OS-assigned port. Matches the trusty-search convention.
 const DYNAMIC_PORT_RANGE: u16 = 10;
 
-/// Path to `~/.trusty-memory/http_addr` — the canonical address-discovery file.
+/// Path to the canonical address-discovery file for the trusty-memory daemon.
 ///
 /// Why: clients (CLI, MCP tools, dashboards) need to find the running daemon
-/// without configuration when the port was selected dynamically. Mirrors
-/// `trusty-search`'s `~/.trusty-search/http_addr` contract so the two tools
-/// share a single discovery convention.
-/// What: returns `$HOME/.trusty-memory/http_addr`, or `None` if `$HOME` is
-/// unresolvable (locked-down container, no passwd entry).
-/// Test: `http_addr_path_uses_dot_trusty_memory`.
+/// without configuration when the port was selected dynamically. Using
+/// `trusty_common::resolve_data_dir` aligns this path with the location
+/// that `trusty_common::read_daemon_addr("trusty-memory")` reads from, so
+/// `prompt-context`, `doctor`, and `start`'s probe all find the running daemon.
+/// The old `~/.trusty-memory/http_addr` path and the new
+/// `~/Library/Application Support/trusty-memory/http_addr` (macOS) path were
+/// divergent — the daemon wrote one; readers expected the other.
+/// What: returns `{resolve_data_dir("trusty-memory")}/http_addr`, or `None` if
+/// the data dir cannot be resolved (locked-down container, no passwd entry).
+/// Test: `http_addr_path_uses_resolve_data_dir`.
 pub fn http_addr_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".trusty-memory").join("http_addr"))
+    trusty_common::resolve_data_dir("trusty-memory")
+        .ok()
+        .map(|d| d.join("http_addr"))
 }
 
 /// Bind a `TcpListener` to `127.0.0.1`, dynamically selecting a port.
@@ -1257,20 +1263,29 @@ mod tests {
 
     /// Why: every `~/.trusty-memory/http_addr` consumer (CLI, dashboard,
     /// future trusty-mpm wiring) must agree on the path. A regression that
-    /// moves this file to e.g. `$XDG_DATA_HOME/trusty-memory/http_addr` would
-    /// silently break every client.
-    /// What: under a real `$HOME`, the path ends in `.trusty-memory/http_addr`.
+    /// moves this file breaks every client relying on `read_daemon_addr`.
+    /// What: under a stubbed data dir, the path ends in
+    /// `trusty-memory/http_addr` — matching `trusty_common::read_daemon_addr`'s
+    /// expected location.
     #[test]
-    fn http_addr_path_uses_dot_trusty_memory() {
-        if let Some(p) = http_addr_path() {
-            assert!(
-                p.ends_with(".trusty-memory/http_addr"),
-                "unexpected http_addr path: {}",
-                p.display()
-            );
+    fn http_addr_path_uses_resolve_data_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Pin the data directory so we don't depend on the real HOME / XDG.
+        // SAFETY: single-threaded test; TRUSTY_DATA_DIR_OVERRIDE is a
+        // test-only convention documented in trusty-common.
+        unsafe {
+            std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, tmp.path());
         }
-        // CI containers with no $HOME return None — that's fine; the writer
-        // logs and falls back gracefully.
+        let result = http_addr_path();
+        unsafe {
+            std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV);
+        }
+        let p = result.expect("http_addr_path must return Some when data dir is resolvable");
+        assert!(
+            p.ends_with("trusty-memory/http_addr"),
+            "unexpected http_addr path: {}",
+            p.display()
+        );
     }
 
     /// Why: write+read round-trip pins the disk format: a single line of

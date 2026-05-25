@@ -375,6 +375,14 @@ pub fn walk_source_files(root: &Path) -> WalkResult {
 /// issue #77 default doc exclusion without losing the rest of the walker's
 /// hygiene (binary skip, minified detection, SKIP_DIRS pruning).
 /// What:
+/// - Canonicalises `root` up front (resolves symlink components) so emitted
+///   file paths are stable regardless of which alias the caller passed in.
+///   When canonicalization fails (e.g. the root vanished mid-call), falls back
+///   to the input path so the walker still tries — the daemon's
+///   `validate_root_path` is the canonical guard, this is defence in depth.
+/// - Follows symlinks during traversal so symlinked subdirectories inside the
+///   tree (vendored crates, monorepo aliases) are indexed instead of silently
+///   skipped.
 /// - Filtered by [`SOURCE_EXTS`].
 /// - Skips any directory whose basename is in [`SKIP_DIRS`].
 /// - Skips files matching [`should_skip_path`] (minified/binary/large).
@@ -383,12 +391,21 @@ pub fn walk_source_files(root: &Path) -> WalkResult {
 /// - Skips entries that fail to stat (does not error out the whole walk).
 ///
 /// Test: `test_default_excludes_markdown_and_changelog`,
-/// `test_include_docs_keeps_markdown`.
+/// `test_include_docs_keeps_markdown`,
+/// `test_canonicalizes_symlinked_root`,
+/// `test_follows_symlinked_subdirectory`.
 pub fn walk_source_files_with_options(root: &Path, opts: WalkOptions) -> WalkResult {
     let mut files = Vec::new();
     let mut skipped_dirs = 0usize;
 
-    let walker = WalkDir::new(root).follow_links(false).into_iter();
+    // Resolve any symlink components so emitted file paths never carry a
+    // symlink alias the caller didn't intend. Falls back to the input on
+    // canonicalize failure (TOCTOU race, permission error) — the daemon-side
+    // `validate_root_path` already canonicalises before storing, so this is
+    // belt-and-braces for callers that bypass the HTTP entry point.
+    let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+
+    let walker = WalkDir::new(&canonical_root).follow_links(true).into_iter();
     let walker = walker.filter_entry(|e| {
         if e.depth() == 0 {
             return true;
@@ -942,5 +959,92 @@ mod tests {
         // 5+ lines, even if one line is long.
         let content = format!("line1\nline2\nline3\nline4\nline5\n{}\n", "x".repeat(600));
         assert!(!should_skip_content(Path::new("ok.js"), &content));
+    }
+
+    // --- Symlink resolution tests (issue: indexed-paths-mismatch) ---
+
+    /// When the walk root is itself a symlink to the real directory, every
+    /// emitted file path must start with the canonical (real) directory, not
+    /// the symlink alias. This is the daemon-side guard against the bug where
+    /// indexing `/Users/me/Projects/foo` (a symlink to `/Volumes/Disk/...`)
+    /// stored paths under the symlink alias and search from the canonical
+    /// mount returned zero hits.
+    #[cfg(unix)]
+    #[test]
+    fn test_canonicalizes_symlinked_root() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // `tempfile::tempdir()` on macOS already returns a `/var/folders/...`
+        // path whose `/var` is a symlink to `/private/var`. Canonicalise once
+        // up front so the expected-prefix check below doesn't trip on the OS's
+        // own symlink rather than ours.
+        let real_root = std::fs::canonicalize(tmp.path()).expect("canonicalize real root");
+        fs::write(real_root.join("main.rs"), "fn main() {}").unwrap();
+
+        // Create a sibling symlink that points at `real_root`, then walk via
+        // the symlink path. Every emitted file must live under `real_root`.
+        let parent = real_root.parent().expect("tempdir has parent");
+        let link_path = parent.join(format!(
+            "trusty-search-symlink-{}",
+            std::process::id() // unique per test run
+        ));
+        // Best-effort cleanup of any stale link from a previous run.
+        let _ = std::fs::remove_file(&link_path);
+        symlink(&real_root, &link_path).expect("create symlink");
+
+        let result = walk_source_files(&link_path);
+        // Always clean up the symlink, even on test failure.
+        let _ = std::fs::remove_file(&link_path);
+
+        assert!(!result.files.is_empty(), "walker emitted no files");
+        for f in &result.files {
+            assert!(
+                f.starts_with(&real_root),
+                "emitted file {f:?} does not start with canonical root {real_root:?}",
+            );
+            assert!(
+                !f.starts_with(&link_path),
+                "emitted file {f:?} carries the symlink alias instead of canonical path",
+            );
+        }
+    }
+
+    /// When a symlinked subdirectory inside the tree points at a directory of
+    /// source files, those files must be indexed. Historically `follow_links`
+    /// was disabled so vendored / monorepo-aliased subtrees were silently
+    /// skipped.
+    #[cfg(unix)]
+    #[test]
+    fn test_follows_symlinked_subdirectory() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(tmp.path()).expect("canonicalize root");
+
+        // Real source dir lives outside the walked root; we link it in.
+        let extern_dir = tempfile::tempdir().expect("extern tempdir");
+        let extern_root = std::fs::canonicalize(extern_dir.path()).expect("canonicalize extern");
+        fs::write(extern_root.join("linked.rs"), "fn linked() {}").unwrap();
+
+        // Plain file inside the root so we have a baseline.
+        fs::write(root.join("local.rs"), "fn local() {}").unwrap();
+        // Symlinked subdirectory: walking should descend into it.
+        symlink(&extern_root, root.join("vendored")).expect("symlink subdir");
+
+        let result = walk_source_files(&root);
+        let names: Vec<String> = result
+            .files
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+        assert!(
+            names.contains(&"local.rs".to_string()),
+            "baseline local file missing: {names:?}",
+        );
+        assert!(
+            names.contains(&"linked.rs".to_string()),
+            "file inside symlinked subdir was not indexed: {names:?}",
+        );
     }
 }

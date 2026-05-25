@@ -15,35 +15,20 @@
 
 use anyhow::Result;
 use colored::Colorize;
-use std::time::Duration;
 
-/// Probe whether a trusty-memory daemon is already bound and answering
-/// `/health` on the address recorded in `~/.trusty-memory/http_addr`.
+/// Path to the trusty-memory daemon's address-discovery file.
 ///
-/// Why: a second `start` invocation must NOT spawn a second daemon — the port
-/// walker in `bind_dynamic_port` would happily pick the next free slot,
-/// leaving the operator with two competing instances. The address file is the
-/// canonical "where am I?" record; a successful `/health` probe against it
-/// confirms the recorded address still points at a live process.
-/// What: reads the address file via `trusty_common::read_daemon_addr` (which
-/// returns `Ok(None)` when no file exists), then issues a 1-second-timeout
-/// `GET /health` against the recorded `host:port`. Returns `Some(url)` only
-/// when both reads succeed.
-/// Test: covered indirectly by the `start` integration path — the second
-/// invocation prints "already running" rather than spawning a duplicate.
-async fn probe_running_daemon() -> Option<String> {
-    let addr = trusty_common::read_daemon_addr("trusty-memory")
+/// Why: both `handle_start` and the background-mode branch of `serve` need to
+/// probe the same file before binding a port, so the path is centralized here
+/// rather than re-derived at each call site. Returns `None` when the data dir
+/// cannot be resolved (e.g. no $HOME / TRUSTY_DATA_DIR_OVERRIDE) so the
+/// fallback path lets normal startup proceed.
+/// What: returns `{resolve_data_dir("trusty-memory")}/http_addr`.
+/// Test: covered indirectly by the start integration path.
+pub(crate) fn addr_file_path() -> Option<std::path::PathBuf> {
+    trusty_common::resolve_data_dir("trusty-memory")
         .ok()
-        .flatten()?;
-    let url = format!("http://{addr}/health");
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(1))
-        .build()
-        .ok()?;
-    match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => Some(format!("http://{addr}")),
-        _ => None,
-    }
+        .map(|d| d.join("http_addr"))
 }
 
 /// Boot the trusty-memory HTTP daemon in the background.
@@ -53,20 +38,26 @@ async fn probe_running_daemon() -> Option<String> {
 /// did) tied the daemon's lifetime to the controlling terminal, which broke
 /// shell profiles, tmux panes, and any `make`-driven dev loop. Detaching via
 /// self-spawn fixes the lifetime AND keeps the surface identical to
-/// `trusty-search start`.
-/// What: if `probe_running_daemon` finds a healthy daemon, prints its URL and
-/// returns. Otherwise spawns `<this exe> serve --foreground` with stdio
-/// redirected to `/dev/null` so the child inherits no terminal, and prints
-/// the spawned PID. Does NOT wait for the child to finish binding — callers
-/// that need health confirmation should run `trusty-memory doctor` next.
-/// Test: `cargo run -p trusty-memory -- start` returns within a second.
+/// `trusty-search start`. The duplicate-instance guard
+/// (`check_already_running`) is the load-bearing piece: without it a second
+/// invocation would silently spawn a second daemon on the next free port.
+/// What: if `trusty_common::check_already_running` reports a healthy daemon,
+/// prints its URL and returns. Otherwise spawns `<this exe> serve
+/// --foreground` with stdio redirected to `/dev/null` so the child inherits no
+/// terminal, and prints the spawned PID. Does NOT wait for the child to finish
+/// binding — callers that need health confirmation should run `trusty-memory
+/// doctor` next.
+/// Test: `cargo run -p trusty-memory -- start` returns within a second; running
+/// it twice in a row reports "already running" on the second invocation.
 pub async fn handle_start() -> Result<()> {
-    if let Some(url) = probe_running_daemon().await {
-        eprintln!(
-            "{} trusty-memory daemon already running at {url}",
-            "◉".green()
-        );
-        return Ok(());
+    if let Some(path) = addr_file_path() {
+        if let Some(url) = trusty_common::check_already_running(&path, "/health").await {
+            eprintln!(
+                "{} trusty-memory is already running at {url}",
+                "◉".green()
+            );
+            return Ok(());
+        }
     }
 
     let exe = std::env::current_exe()

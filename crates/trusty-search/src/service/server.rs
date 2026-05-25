@@ -1275,7 +1275,7 @@ async fn list_indexes_handler(State(state): State<Arc<SearchAppState>>) -> Json<
 
 async fn create_index_handler(
     State(state): State<Arc<SearchAppState>>,
-    Json(req): Json<CreateIndexRequest>,
+    Json(mut req): Json<CreateIndexRequest>,
 ) -> Response {
     let id = IndexId::new(req.id.clone());
     // Issue #63: validate root_path is absolute and points at an existing
@@ -1286,9 +1286,20 @@ async fn create_index_handler(
     // pointed at the wrong project on disk. Rejecting non-absolute or
     // non-directory paths up front gives the caller a clear error and
     // prevents the bleed described in #64.
-    if let Err(resp) = validate_root_path(&req.root_path) {
-        return resp;
-    }
+    //
+    // Issue (indexed-paths-mismatch): the validator also returns the
+    // *canonical* (symlink-resolved) form. We replace `req.root_path` with
+    // it so every downstream consumer — the persistence layer, the indexer's
+    // root reference, `include_paths` joins, git-head probing, and the
+    // registry handle — stores a single canonical identity for the project.
+    // Without this, registering via `/Users/foo` when that's a symlink to
+    // `/Volumes/Kemono/...` stored the symlink path and search queries from
+    // the canonical mount returned zero hits.
+    let canonical_root = match validate_root_path(&req.root_path) {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    req.root_path = canonical_root;
     if state.registry.get(&id).is_some() {
         return Json(serde_json::json!({
             "id": req.id,
@@ -1407,7 +1418,7 @@ async fn create_index_handler(
 }
 
 /// Validate that a client-supplied `root_path` is absolute and points at an
-/// existing directory.
+/// existing directory, and return its canonical (symlink-resolved) form.
 ///
 /// Why: issue #63 — `POST /indexes` and `POST /indexes/:id/reindex` used to
 /// accept arbitrary `PathBuf` values, including relative paths and
@@ -1415,12 +1426,22 @@ async fn create_index_handler(
 /// the daemon's startup CWD by every downstream walker / file reader, which
 /// caused the wrong files to be indexed under the named id (e.g. a
 /// `claude-mpm` index pointing at `/Users/masa/Projects/trusty-tools`).
-/// Centralising the check here keeps both handlers honest.
-/// What: returns `Ok(())` when `path` is absolute and `is_dir()`; otherwise
-/// `Err(Response)` carrying `400 Bad Request` + a JSON `{ "error": "..." }`
-/// body explaining the failure mode.
+/// Symlink resolution (issue: indexed-paths-mismatch) is the same problem
+/// in different clothing: registering `/Users/masa/Projects/foo` when that
+/// path is a symlink to `/Volumes/Kemono/...` stored the symlink path in
+/// the registry, the walker emitted file paths under the symlink, and a
+/// caller searching from the canonical mount point got zero hits. Resolving
+/// the symlink up front makes the registry hold a single canonical identity
+/// for the project, regardless of which alias the caller used.
+/// What: returns `Ok(canonical_path)` when `path` is absolute, exists, and
+/// is a directory — the returned path has all symlink components resolved
+/// via `std::fs::canonicalize`. Otherwise returns `Err(Response)` carrying
+/// `400 Bad Request` + a JSON `{ "error": "..." }` body explaining the
+/// failure mode. Callers MUST use the returned canonical path for storage,
+/// not the original request value.
 /// Test: `create_index_rejects_relative_root_path`,
 /// `create_index_rejects_nonexistent_root_path`,
+/// `create_index_canonicalizes_symlinked_root_path`,
 /// `reindex_rejects_relative_root_path`.
 // `clippy::result_large_err` (added/tightened in clippy 1.94, newer than the
 // repo's MSRV 1.88 CI baseline) flags the large axum `Response` Err variant.
@@ -1428,7 +1449,7 @@ async fn create_index_handler(
 // no runtime benefit on a cold validation path; suppress locally rather than
 // churn unrelated code.
 #[allow(clippy::result_large_err)]
-fn validate_root_path(path: &std::path::Path) -> Result<(), Response> {
+fn validate_root_path(path: &std::path::Path) -> Result<std::path::PathBuf, Response> {
     if path.as_os_str().is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -1464,7 +1485,27 @@ fn validate_root_path(path: &std::path::Path) -> Result<(), Response> {
         )
             .into_response());
     }
-    Ok(())
+    // Resolve any symlink components so the registry, walker, and persistence
+    // layer all agree on the project's canonical identity. `is_dir()` returned
+    // true above, so `canonicalize` should succeed; on the off chance it fails
+    // (e.g. a TOCTOU unlink between the `is_dir` check and this call) we surface
+    // a 400 with the underlying I/O error rather than fall back to the
+    // un-canonicalized path — half-resolved paths are exactly what produced the
+    // mismatch in the first place.
+    match std::fs::canonicalize(path) {
+        Ok(canonical) => Ok(canonical),
+        Err(e) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "root_path {:?} could not be canonicalized: {}",
+                    path.display().to_string(),
+                    e
+                ),
+            })),
+        )
+            .into_response()),
+    }
 }
 
 /// Determine whether a chunk's stored `file` field falls within an index's
@@ -3002,14 +3043,21 @@ async fn reindex_handler(
             // absolute-existing-directory check as `POST /indexes`. Without
             // this, `POST /indexes/:id/reindex { root_path: "." }` would
             // silently re-point an existing index at the daemon's CWD.
-            if let Err(resp) = validate_root_path(&new_root) {
-                let (parts, body) = resp.into_parts();
-                let status = parts.status;
-                let body_bytes = axum::body::to_bytes(body, 4096).await.unwrap_or_default();
-                let json: serde_json::Value =
-                    serde_json::from_slice(&body_bytes).unwrap_or_else(|_| serde_json::json!({}));
-                return Err((status, Json(json)));
-            }
+            //
+            // Issue (indexed-paths-mismatch): use the canonical form so a
+            // re-register via a symlink alias normalises to the same identity
+            // the original `POST /indexes` stored.
+            let new_root = match validate_root_path(&new_root) {
+                Ok(canonical) => canonical,
+                Err(resp) => {
+                    let (parts, body) = resp.into_parts();
+                    let status = parts.status;
+                    let body_bytes = axum::body::to_bytes(body, 4096).await.unwrap_or_default();
+                    let json: serde_json::Value = serde_json::from_slice(&body_bytes)
+                        .unwrap_or_else(|_| serde_json::json!({}));
+                    return Err((status, Json(json)));
+                }
+            };
             if handle.root_path.as_os_str().is_empty() || handle.root_path != new_root {
                 let indexer = Arc::clone(&handle.indexer);
                 // Preserve the filter set / domain vocabulary recorded on the
@@ -4113,6 +4161,68 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&body).expect("json");
         let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("");
         assert!(err.contains("does not exist"), "got: {err}");
+    }
+
+    /// Issue (indexed-paths-mismatch): when the caller supplies a `root_path`
+    /// that is a symlink to a real directory, the handler must canonicalise
+    /// it before storing on the `IndexHandle`. Otherwise the registry holds
+    /// the symlink alias, the walker emits file paths under the alias, and
+    /// search queries from the canonical mount point return zero hits because
+    /// `file_is_within_root` won't match.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_index_canonicalizes_symlinked_root_path() {
+        use crate::core::registry::IndexId;
+        use crate::core::registry::IndexRegistry;
+        use std::os::unix::fs::symlink;
+
+        let state = SearchAppState::new(IndexRegistry::new());
+        let embedder: Arc<dyn Embedder> = Arc::new(crate::core::embed::MockEmbedder::new(8));
+        state.install_embedder(embedder).await;
+        let state_arc = Arc::new(state);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real_root = std::fs::canonicalize(tmp.path()).expect("canonicalize real root");
+        let parent = real_root.parent().expect("tempdir has parent");
+        let link_path = parent.join(format!(
+            "trusty-search-server-symlink-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&link_path);
+        symlink(&real_root, &link_path).expect("create symlink");
+
+        let resp = create_index_handler(
+            State(Arc::clone(&state_arc)),
+            Json(CreateIndexRequest {
+                id: "symlinked".into(),
+                // Register via the SYMLINK path — the registry should still
+                // store the CANONICAL path so search queries from either
+                // alias resolve identically.
+                root_path: link_path.clone(),
+                include_paths: None,
+                exclude_globs: None,
+                extensions: None,
+                domain_terms: None,
+                path_filter: None,
+                include_docs: None,
+            }),
+        )
+        .await;
+        let _ = std::fs::remove_file(&link_path); // best-effort cleanup
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let handle = state_arc
+            .registry
+            .get(&IndexId::new("symlinked"))
+            .expect("registered handle");
+        assert_eq!(
+            handle.root_path, real_root,
+            "registry stored the symlink alias instead of the canonical path",
+        );
+        assert_ne!(
+            handle.root_path, link_path,
+            "registry retained the symlink alias — downstream walkers will mismatch",
+        );
     }
 
     /// Issue #63: an absolute, existing directory must be accepted.

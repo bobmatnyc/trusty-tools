@@ -10790,7 +10790,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.4.21"
+version = "0.4.22"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10908,7 +10908,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.4.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10947,7 +10947,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -10972,7 +10972,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm-client"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -10989,7 +10989,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11012,7 +11012,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm-daemon"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11022,6 +11022,7 @@ dependencies = [
  "dashmap 6.2.1",
  "dirs 5.0.1",
  "futures",
+ "http-body-util",
  "notify 6.1.1",
  "parking_lot",
  "reqwest 0.12.28",
@@ -11061,7 +11062,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm-mcp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11079,7 +11080,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm-telegram"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -11099,7 +11100,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm-tui"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11132,7 +11133,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",

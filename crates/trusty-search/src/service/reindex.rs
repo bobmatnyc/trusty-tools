@@ -316,15 +316,23 @@ fn collect_files_to_index(handle: &IndexHandle) -> crate::service::walker::WalkR
     // operates on the *basename* of the first component under `root_path`,
     // so callers can write `["common-*", "duetto-common*"]` without enumerating
     // every repo path manually.
+    //
+    // Walker output is canonicalised (issue: indexed-paths-mismatch) so the
+    // `strip_prefix` inside `path_matches_filter` needs the canonical root
+    // too — otherwise a non-validated handle (e.g. the test harness) whose
+    // `root_path` still carries a symlink alias would mismatch every walked
+    // file. Best-effort canonicalisation with a fallback to the stored value.
     if !handle.path_filter.is_empty() {
         let patterns = handle.path_filter.clone();
-        let root = handle.root_path.clone();
+        let root =
+            std::fs::canonicalize(&handle.root_path).unwrap_or_else(|_| handle.root_path.clone());
         walked_files.retain(|p| crate::core::registry::path_matches_filter(p, &root, &patterns));
     }
 
     // De-duplicate when multiple `include_paths` overlap (e.g. `["."]` plus
     // `["src"]`). `walk_source_files` returns canonicalised paths inside each
-    // subtree but doesn't dedupe across subtrees.
+    // subtree (issue: indexed-paths-mismatch) but doesn't dedupe across
+    // subtrees.
     walked_files.sort();
     walked_files.dedup();
 
