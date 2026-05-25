@@ -314,6 +314,16 @@ async fn run_serve(
     let data_dir = trusty_common::resolve_data_dir("trusty-memory")?;
     let data_root = resolve_palace_registry_dir(data_dir);
 
+    // Apply one-shot, idempotent on-disk migrations before any in-memory
+    // registry hydration so subsequent `load_palaces_from_disk` calls see the
+    // updated metadata. Currently this rewrites the default `localLLM`
+    // palace's display name to "User Memories" when the legacy literal is
+    // still present (issue #98). Failures here are logged but do not abort
+    // startup — a single bad migration must not take the daemon down.
+    if let Err(e) = trusty_memory::commands::migrations::migrate_default_palace_name(&data_root) {
+        tracing::warn!("default-palace name migration skipped: {e:#}");
+    }
+
     // Determine mode: `--stdio` wins (explicit MCP stdio), `--http <addr>`
     // binds that exact address, otherwise we bind dynamically (the launchd
     // plist path).
