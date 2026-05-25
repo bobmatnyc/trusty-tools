@@ -1006,6 +1006,12 @@ async fn create_drawer(
     // Compute the preview *before* moving `body.content` into `remember` so
     // the SSE activity feed can show what was actually stored.
     let content_preview = drawer_content_preview(&body.content);
+    // Issue #133: mirror the MCP `memory_remember` path — keep originals so
+    // the auto-KG extractor sees the same content / tags / room that landed
+    // in the drawer. `remember` consumes them, so clone before the call.
+    let content_for_kg = body.content.clone();
+    let tags_for_kg = body.tags.clone();
+    let room_label_for_kg = crate::tools::room_label(&room);
     let drawer_id = handle
         .remember(body.content, room, body.tags, importance)
         .await
@@ -1024,6 +1030,18 @@ async fn create_drawer(
         source: ActivitySource::Http,
     });
     state.emit(aggregate_status_event(&state));
+    // Issue #133: best-effort auto-KG extraction. Mirrors the MCP path
+    // (`tools.rs::memory_remember`). Failures during extraction MUST NOT
+    // fail the HTTP write — the drawer is already on disk; the extractor
+    // logs warnings and swallows errors internally.
+    crate::tools::auto_extract_and_assert(
+        &handle,
+        drawer_id,
+        &content_for_kg,
+        &tags_for_kg,
+        room_label_for_kg.as_deref(),
+    )
+    .await;
     Ok(Json(json!({ "id": drawer_id })))
 }
 
@@ -3582,6 +3600,105 @@ mod tests {
         assert!(
             v.is_array(),
             "the alias must return the list-drawers array shape, got {v:?}"
+        );
+    }
+
+    /// Issue #133 — `POST /api/v1/palaces/{id}/drawers` must trigger the
+    /// same auto-KG extraction as the MCP `memory_remember` tool.
+    ///
+    /// Why: PR #106 wired auto-extract only into the MCP path; HTTP-origin
+    /// writes silently skipped it, leaving every palace populated via the
+    /// HTTP API with an empty KG. This regression test posts a drawer over
+    /// HTTP and then queries the KG to confirm the expected `tag:`,
+    /// `room:`, and `topic:` (`#hashtag`) auto-extracted triples landed.
+    /// What: creates a palace via the registry, posts a drawer with tags +
+    /// room + a `#hashtag` over the HTTP endpoint, reads
+    /// `/api/v1/palaces/{id}/kg/graph`, and asserts the auto-extracted
+    /// triples (provenance = `auto:remember`) appear.
+    /// Test: this test.
+    #[tokio::test]
+    async fn http_create_drawer_runs_auto_kg_extraction() {
+        let state = test_state();
+        let palace = Palace {
+            id: PalaceId::new("kgauto-http"),
+            name: "kgauto-http".to_string(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: state.data_root.join("kgauto-http"),
+        };
+        state
+            .registry
+            .create_palace(&state.data_root, palace)
+            .expect("create_palace");
+
+        let app = router().with_state(state.clone());
+        let body = json!({
+            "content": "trusty-memory is a Rust crate that ships an MCP server. \
+                        It tracks #mcp and #rust topics with care.",
+            "room": "Backend",
+            "tags": ["test", "kg"],
+            "importance": 0.5,
+        })
+        .to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/palaces/kgauto-http/drawers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "create_drawer must return 200 OK"
+        );
+
+        // Read the KG graph for the same palace and assert auto-extracted
+        // triples landed. The exact set is exercised in
+        // `tools::tests::auto_kg_extraction_hooks_into_memory_remember`; here
+        // we only need to confirm the HTTP path now mirrors the MCP path.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/palaces/kgauto-http/kg/graph")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let triples = v["triples"].as_array().expect("triples array");
+        assert!(
+            !triples.is_empty(),
+            "HTTP-origin drawer must populate the KG; got empty graph"
+        );
+        let auto: Vec<&Value> = triples
+            .iter()
+            .filter(|t| t["provenance"].as_str() == Some(crate::kg_extract::AUTO_PROVENANCE))
+            .collect();
+        assert!(
+            !auto.is_empty(),
+            "expected at least one auto-extracted triple in HTTP-populated KG; got: {triples:?}"
+        );
+        // Spot-check the tag-as-subject encoding survived (matches the MCP
+        // path's behaviour and proves the extractor saw the body's tags).
+        assert!(
+            auto.iter()
+                .any(|t| t["subject"].as_str() == Some("tag:test")),
+            "expected `tag:test` auto-extracted edge, got: {auto:?}"
+        );
+        // Hashtag mention triples (room-aware extractor).
+        assert!(
+            auto.iter()
+                .any(|t| t["predicate"].as_str() == Some("mentioned-in")),
+            "expected at least one #hashtag mention triple, got: {auto:?}"
         );
     }
 

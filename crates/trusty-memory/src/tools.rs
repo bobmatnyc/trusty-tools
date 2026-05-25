@@ -411,7 +411,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
 /// and the inner string for `Custom`.
 /// Test: Indirect — `auto_kg_extraction_hooks_into_memory_remember`
 /// round-trips a known room label.
-fn room_label(room: &RoomType) -> Option<String> {
+pub(crate) fn room_label(room: &RoomType) -> Option<String> {
     let label = match room {
         RoomType::Frontend => "Frontend",
         RoomType::Backend => "Backend",
@@ -474,8 +474,9 @@ fn open_palace_handle(
 /// captured as a `tracing::warn!` and the rest of the triples are still
 /// attempted; the function returns nothing.
 /// Test: `auto_kg_extraction_hooks_into_memory_remember`,
-/// `auto_kg_extraction_no_op_does_not_fail_remember`.
-async fn auto_extract_and_assert(
+/// `auto_kg_extraction_no_op_does_not_fail_remember`,
+/// `web::tests::http_create_drawer_runs_auto_kg_extraction`.
+pub(crate) async fn auto_extract_and_assert(
     handle: &std::sync::Arc<trusty_common::memory_core::PalaceHandle>,
     drawer_id: Uuid,
     content: &str,
