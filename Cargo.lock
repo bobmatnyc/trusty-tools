@@ -11022,6 +11022,7 @@ dependencies = [
  "dashmap 6.2.1",
  "dirs 5.0.1",
  "futures",
+ "http-body-util",
  "notify 6.1.1",
  "parking_lot",
  "reqwest 0.12.28",

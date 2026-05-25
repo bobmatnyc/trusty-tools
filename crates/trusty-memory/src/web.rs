@@ -3062,6 +3062,9 @@ async fn send_message_handler(
         drawer_count,
         timestamp: chrono::Utc::now(),
         content_preview: format!("[msg from {from_palace}] {}", body.purpose),
+        // Issue #96 — record the originating subsystem so the activity feed
+        // can badge this row as an HTTP-initiated message.
+        source: ActivitySource::Http,
     });
     Ok(Json(json!({
         "drawer_id": drawer_id.to_string(),
