@@ -217,6 +217,25 @@ enum Command {
         #[arg(long, value_name = "PALACE")]
         palace: Option<String>,
     },
+
+    /// Re-run auto-KG extraction across every drawer in a palace.
+    ///
+    /// Why: Issue #97 — `memory_remember` now extracts triples on write,
+    /// but existing palaces sit at zero auto-extracted triples until
+    /// back-filled. `kg-rebuild` walks every drawer and re-asserts the
+    /// heuristic triples so the visual graph view is immediately useful.
+    /// What: Loads palaces from disk, processes each palace (or just one
+    /// when `--palace` is supplied), and prints a per-palace summary plus
+    /// an aggregate total. Failures on individual asserts are logged but
+    /// never abort the run.
+    /// Test: `commands::kg_rebuild::tests::kg_rebuild_processes_all_drawers`.
+    #[command(name = "kg-rebuild")]
+    KgRebuild {
+        /// Restrict the rebuild to a single palace id. When omitted, every
+        /// palace under the data root is processed.
+        #[arg(long, value_name = "ID")]
+        palace: Option<String>,
+    },
 }
 
 /// Target surface for the `monitor` subcommand.
@@ -299,6 +318,9 @@ async fn main() -> Result<()> {
             from,
         } => handle_send_message(to, purpose, content, from).await,
         Command::InboxCheck { palace } => handle_inbox_check(palace).await,
+        Command::KgRebuild { palace } => {
+            trusty_memory::commands::kg_rebuild::handle_kg_rebuild(palace).await
+        }
     }
 }
 
@@ -370,6 +392,16 @@ async fn run_serve(
     // palace_create, load_palaces_from_disk) pointed at the same place.
     let data_dir = trusty_common::resolve_data_dir("trusty-memory")?;
     let data_root = resolve_palace_registry_dir(data_dir);
+
+    // Apply one-shot, idempotent on-disk migrations before any in-memory
+    // registry hydration so subsequent `load_palaces_from_disk` calls see the
+    // updated metadata. Currently this rewrites the default `localLLM`
+    // palace's display name to "User Memories" when the legacy literal is
+    // still present (issue #98). Failures here are logged but do not abort
+    // startup — a single bad migration must not take the daemon down.
+    if let Err(e) = trusty_memory::commands::migrations::migrate_default_palace_name(&data_root) {
+        tracing::warn!("default-palace name migration skipped: {e:#}");
+    }
 
     // Determine mode: `--stdio` wins (explicit MCP stdio), `--http <addr>`
     // binds that exact address, otherwise we bind dynamically (the launchd

@@ -8,8 +8,9 @@
 //! delivery.
 //!
 //! What: a side-effect-only command that:
-//!   1. Resolves the calling project's palace slug via
-//!      [`crate::messaging::cwd_palace_slug`] (or `--palace` override).
+//!   1. Resolves the calling project's palace slug. Precedence (issue #125):
+//!      `--palace` override > stdin JSON `cwd` field > process cwd via
+//!      [`crate::messaging::cwd_palace_slug`].
 //!   2. Queries the daemon's `GET /api/v1/messages?palace=<slug>&unread_only=true`
 //!      endpoint for unread messages.
 //!   3. Renders each message into a Markdown injection block and writes
@@ -91,10 +92,13 @@ pub async fn handle_inbox_check(palace: Option<String>) -> Result<()> {
 
     // Resolve recipient palace eagerly so the log entry can carry it on
     // every failure path. `palace` (the explicit override) takes precedence;
-    // fall back to the cwd-derived slug; finally `"<unknown>"` if even cwd
-    // resolution fails.
+    // then a stdin-provided `cwd` (issue #125 — the JSON Claude Code pipes
+    // into the SessionStart hook reflects the user's actual cwd, which
+    // differs from the hook process cwd when the hook was registered from a
+    // different directory); then the process cwd; finally `"<unknown>"`.
     let recipient = palace
         .clone()
+        .or_else(|| palace_slug_from_stdin_cwd(&trigger_prompt))
         .or_else(|| crate::messaging::cwd_palace_slug().ok())
         .unwrap_or_else(|| "<unknown>".to_string());
 
@@ -212,6 +216,30 @@ fn read_stdin_best_effort() -> String {
     buf
 }
 
+/// Parse a SessionStart hook stdin payload and derive the palace slug from
+/// the JSON's `cwd` field (issue #125).
+///
+/// Why: Claude Code pipes the session metadata as JSON; the `cwd` field
+/// reflects the user's actual working directory at session start. The hook
+/// process inherits its cwd from wherever it was registered (often a fixed
+/// install root), so the stdin-provided `cwd` is the authoritative source
+/// for the recipient palace slug.
+/// What: best-effort JSON parse; returns `Some(slug)` only when the payload
+/// is a JSON object carrying a non-empty `cwd` string AND
+/// `cwd_palace_slug_at` succeeds for that path.
+/// Test: `palace_slug_from_stdin_cwd_uses_stdin_path`.
+fn palace_slug_from_stdin_cwd(stdin_payload: &str) -> Option<String> {
+    if stdin_payload.trim().is_empty() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(stdin_payload).ok()?;
+    let cwd = value.get("cwd")?.as_str()?;
+    if cwd.is_empty() {
+        return None;
+    }
+    crate::messaging::cwd_palace_slug_at(std::path::Path::new(cwd)).ok()
+}
+
 /// Append one log entry to the enriched-prompt log, swallowing failures.
 fn log_entry(
     trigger_prompt: &str,
@@ -260,6 +288,48 @@ fn render_fallback(m: &ServerMessage) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why (issue #125): when Claude Code invokes the SessionStart hook, the
+    /// stdin JSON carries a `cwd` field reflecting the user's actual cwd.
+    /// The hook process cwd may not match (it inherits from wherever the
+    /// hook was registered). `palace_slug_from_stdin_cwd` must derive the
+    /// slug from the stdin payload, not the process cwd.
+    /// What: build a JSON payload with a tempdir `cwd`; assert the derived
+    /// slug matches `cwd_palace_slug_at(tempdir)` and reflects the tempdir
+    /// basename rather than the process cwd basename.
+    /// Test: itself.
+    #[test]
+    fn palace_slug_from_stdin_cwd_uses_stdin_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project = tmp.path().join("inbox-stdin-project");
+        std::fs::create_dir_all(&project).expect("create project dir");
+        let payload = serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "cwd": project.to_string_lossy(),
+        })
+        .to_string();
+
+        let expected =
+            crate::messaging::cwd_palace_slug_at(&project).expect("derive slug from stdin cwd");
+        let got = palace_slug_from_stdin_cwd(&payload).expect("slug from stdin");
+        assert_eq!(got, expected);
+        assert!(
+            got.contains("inbox-stdin-project"),
+            "expected slug derived from stdin path, got {got:?}"
+        );
+    }
+
+    /// Why: empty stdin, non-JSON stdin, or JSON without a `cwd` field must
+    /// return `None` so the caller falls back to the next resolution layer.
+    /// What: exercise each negative path.
+    /// Test: itself.
+    #[test]
+    fn palace_slug_from_stdin_cwd_returns_none_on_bad_input() {
+        assert_eq!(palace_slug_from_stdin_cwd(""), None);
+        assert_eq!(palace_slug_from_stdin_cwd("not json"), None);
+        assert_eq!(palace_slug_from_stdin_cwd("{\"foo\":\"bar\"}"), None);
+        assert_eq!(palace_slug_from_stdin_cwd("{\"cwd\":\"\"}"), None);
+    }
 
     /// Why: the hook is wired into every Claude Code session start; failing
     /// it would block the session opening. Without a running daemon

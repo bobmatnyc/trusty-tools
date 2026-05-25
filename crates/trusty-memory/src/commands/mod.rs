@@ -11,7 +11,9 @@
 
 pub mod doctor;
 pub mod inbox_check;
+pub mod kg_rebuild;
 pub mod migrate;
+pub mod migrations;
 pub mod monitor;
 pub mod prompt_context;
 pub mod send_message;

@@ -181,19 +181,54 @@ fn count_facts(body: &str) -> usize {
 
 /// Resolve the palace identifier for the log entry.
 ///
-/// Why: the daemon's `/api/v1/kg/prompt-context` endpoint serves whichever
-/// palace it considers default; the CLI does not pass one explicitly. For
-/// log fidelity we still want a palace identifier — use the cwd-derived
-/// slug, the same identifier `inbox-check` uses, falling back to
-/// `"<unknown>"` if cwd resolution fails (e.g. deleted directory).
-fn resolve_palace_for_log() -> String {
+/// Why (issue #125): Claude Code's `UserPromptSubmit` hook payload is a JSON
+/// object carrying (among other fields) `"cwd": "<absolute-path>"` that
+/// reflects the user's *actual* working directory at the moment the prompt
+/// was submitted. The hook process inherits its own cwd from wherever it
+/// was registered (often the parent project root), so deriving the palace
+/// slug from the process cwd would tag every log entry with the wrong
+/// project. We prefer the stdin-provided `cwd` and fall back to the process
+/// cwd only when stdin doesn't carry one (e.g. manual `trusty-memory
+/// prompt-context` invocations from a TTY).
+/// What: best-effort `serde_json` parse of `stdin_payload`; on success and
+/// when the JSON has a string `cwd` field, derive the slug via
+/// [`crate::messaging::cwd_palace_slug_at`] from THAT path. Any failure
+/// (non-JSON stdin, missing field, slug-derivation error) falls through to
+/// the existing `cwd_palace_slug()` (process cwd) path and finally to the
+/// `"<unknown>"` sentinel.
+/// Test: `resolve_palace_for_log_prefers_stdin_cwd`.
+fn resolve_palace_for_log(stdin_payload: &str) -> String {
+    if let Some(slug) = palace_slug_from_stdin_cwd(stdin_payload) {
+        return slug;
+    }
     crate::messaging::cwd_palace_slug().unwrap_or_else(|_| "<unknown>".to_string())
+}
+
+/// Parse `stdin_payload` as JSON and, when it carries a `cwd` string, derive
+/// the palace slug from that path.
+///
+/// Why: factored out so the unit test can exercise the stdin-override path
+/// without manipulating the process cwd.
+/// What: returns `Some(slug)` only when the payload parses as a JSON object,
+/// contains a non-empty string `cwd`, and slug derivation succeeds for that
+/// path. Returns `None` on every failure mode so the caller can fall back.
+/// Test: `resolve_palace_for_log_prefers_stdin_cwd`.
+fn palace_slug_from_stdin_cwd(stdin_payload: &str) -> Option<String> {
+    if stdin_payload.trim().is_empty() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(stdin_payload).ok()?;
+    let cwd = value.get("cwd")?.as_str()?;
+    if cwd.is_empty() {
+        return None;
+    }
+    crate::messaging::cwd_palace_slug_at(std::path::Path::new(cwd)).ok()
 }
 
 /// Append one log entry to the enriched-prompt log, swallowing failures.
 fn log_entry(trigger_prompt: &str, injection: &str, facts_count: usize, start: Instant) {
     let logger = PromptLogger::from_env();
-    let palace = resolve_palace_for_log();
+    let palace = resolve_palace_for_log(trigger_prompt);
     let entry = PromptLogEntry::new(
         "UserPromptSubmit",
         "prompt-context-facts",
@@ -209,6 +244,64 @@ fn log_entry(trigger_prompt: &str, injection: &str, facts_count: usize, start: I
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why (issue #125): when Claude Code invokes the UserPromptSubmit hook,
+    /// the stdin JSON carries a `cwd` field that reflects the user's actual
+    /// working directory at prompt time. The hook process cwd may be where
+    /// the hook was registered (typically a fixed install root), not where
+    /// the user actually is. The log palace must follow the stdin `cwd`.
+    /// What: build a stdin JSON payload pointing at a tempdir, derive the
+    /// expected slug for that tempdir via the *_at variant, and assert
+    /// `resolve_palace_for_log` returns the same slug — even though the
+    /// process cwd is unchanged and would resolve to a different slug.
+    /// Test: itself.
+    #[test]
+    fn resolve_palace_for_log_prefers_stdin_cwd() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Pick a basename that won't slugify to the same thing as the
+        // process cwd's basename (the worktree dir is `fix-124-rebase-damage`).
+        let project = tmp.path().join("stdin-driven-project");
+        std::fs::create_dir_all(&project).expect("create project dir");
+        let payload = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": project.to_string_lossy(),
+            "prompt": "hello"
+        })
+        .to_string();
+
+        let expected =
+            crate::messaging::cwd_palace_slug_at(&project).expect("derive slug from stdin cwd");
+        let got = resolve_palace_for_log(&payload);
+        assert_eq!(
+            got, expected,
+            "stdin `cwd` must override the process cwd for the log palace slug"
+        );
+        // Sanity: the slug should reflect the stdin-provided path's basename,
+        // not the process cwd's basename. (The process cwd here is the
+        // worktree, which slugifies to `fix-124-rebase-damage` or similar.)
+        assert!(
+            got.contains("stdin-driven-project"),
+            "expected slug derived from stdin path, got {got:?}"
+        );
+    }
+
+    /// Why (issue #125): when stdin is empty or non-JSON, the helper must
+    /// fall through to the process-cwd resolution path so manual `trusty-
+    /// memory prompt-context` invocations from a TTY still get a useful
+    /// palace identifier.
+    /// What: pass an empty string and a non-JSON string; assert the result
+    /// is *not* the legacy `"<unknown>"` sentinel (the process cwd here is a
+    /// real git repo, so cwd_palace_slug succeeds).
+    /// Test: itself.
+    #[test]
+    fn resolve_palace_for_log_falls_back_to_process_cwd() {
+        let from_empty = resolve_palace_for_log("");
+        let from_garbage = resolve_palace_for_log("not json at all");
+        // Process cwd is a real git worktree, so both should resolve to the
+        // same non-sentinel slug.
+        assert_eq!(from_empty, from_garbage);
+        assert_ne!(from_empty, "<unknown>");
+    }
 
     /// Why: the hook is wired into every Claude Code prompt the user types;
     /// failing it would block the prompt. The contract is that a missing
