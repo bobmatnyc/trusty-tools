@@ -29,6 +29,7 @@ pub mod kg_extract;
 pub mod messaging;
 pub mod openrpc;
 pub mod prompt_facts;
+pub mod prompt_log;
 pub mod service;
 pub mod tools;
 pub mod web;

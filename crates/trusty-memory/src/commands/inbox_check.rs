@@ -29,7 +29,9 @@
 
 use anyhow::Result;
 use serde::Deserialize;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use crate::prompt_log::{PromptLogEntry, PromptLogger};
 
 /// Connect + total request timeout. Kept short so a slow/dead daemon can
 /// never block a Claude Code session for more than a few seconds.
@@ -82,24 +84,32 @@ struct ServerMessage {
 /// projects whose repo basename does not match their preferred palace.
 /// Test: `inbox_check_returns_ok_without_daemon`.
 pub async fn handle_inbox_check(palace: Option<String>) -> Result<()> {
-    // Resolve daemon address — missing = exit silently.
+    let start = Instant::now();
+    // SessionStart hooks deliver session metadata (JSON) on stdin. Capture
+    // it best-effort for the log; never block on stdin reads.
+    let trigger_prompt = read_stdin_best_effort();
+
+    // Resolve recipient palace eagerly so the log entry can carry it on
+    // every failure path. `palace` (the explicit override) takes precedence;
+    // fall back to the cwd-derived slug; finally `"<unknown>"` if even cwd
+    // resolution fails.
+    let recipient = palace
+        .clone()
+        .or_else(|| crate::messaging::cwd_palace_slug().ok())
+        .unwrap_or_else(|| "<unknown>".to_string());
+
+    // Resolve daemon address — missing = exit silently (but still log).
     let addr = match trusty_common::read_daemon_addr("trusty-memory") {
         Ok(Some(addr)) => addr,
-        _ => return Ok(()),
+        _ => {
+            log_entry(&trigger_prompt, "", 0, &recipient, start);
+            return Ok(());
+        }
     };
     let base = if addr.starts_with("http://") || addr.starts_with("https://") {
         addr
     } else {
         format!("http://{addr}")
-    };
-
-    // Resolve recipient palace.
-    let recipient = match palace {
-        Some(s) => s,
-        None => match crate::messaging::cwd_palace_slug() {
-            Ok(s) => s,
-            Err(_) => return Ok(()),
-        },
     };
 
     let client = match reqwest::Client::builder()
@@ -108,37 +118,56 @@ pub async fn handle_inbox_check(palace: Option<String>) -> Result<()> {
         .build()
     {
         Ok(c) => c,
-        Err(_) => return Ok(()),
+        Err(_) => {
+            log_entry(&trigger_prompt, "", 0, &recipient, start);
+            return Ok(());
+        }
     };
 
     // Fetch unread messages.
     let list_url = format!("{base}/api/v1/messages?palace={recipient}&unread_only=true");
     let resp = match client.get(&list_url).send().await {
         Ok(r) => r,
-        Err(_) => return Ok(()),
+        Err(_) => {
+            log_entry(&trigger_prompt, "", 0, &recipient, start);
+            return Ok(());
+        }
     };
     if !resp.status().is_success() {
+        log_entry(&trigger_prompt, "", 0, &recipient, start);
         return Ok(());
     }
     let messages: Vec<ServerMessage> = match resp.json().await {
         Ok(v) => v,
-        Err(_) => return Ok(()),
+        Err(_) => {
+            log_entry(&trigger_prompt, "", 0, &recipient, start);
+            return Ok(());
+        }
     };
     if messages.is_empty() {
+        log_entry(&trigger_prompt, "", 0, &recipient, start);
         return Ok(());
     }
 
-    // Render and acknowledge.
-    println!("# Inter-project inbox (trusty-memory, palace `{recipient}`)\n");
+    // Render. We buffer the injection into a string so the same content the
+    // user sees lands on stdout AND in the log file (issue #105). Writing
+    // to stdout still uses `println!` (single syscall per block) so the
+    // ordering relative to the hook caller is preserved.
+    let mut injection = String::new();
+    injection.push_str(&format!(
+        "# Inter-project inbox (trusty-memory, palace `{recipient}`)\n\n"
+    ));
     for m in &messages {
         let block = match &m.formatted {
             Some(s) => s.clone(),
             None => render_fallback(m),
         };
-        // One blank line between messages for readability.
-        println!("{block}");
-        println!();
+        injection.push_str(&block);
+        injection.push('\n');
+        injection.push('\n');
     }
+    // One write to stdout — the hook reads the entire stream.
+    print!("{injection}");
 
     // Mark each delivered message read. Best-effort: a failed ack means the
     // next SessionStart will redeliver, which is safer than silently
@@ -149,7 +178,59 @@ pub async fn handle_inbox_check(palace: Option<String>) -> Result<()> {
         let _ = client.post(&mark_url).json(&body).send().await;
     }
 
+    log_entry(
+        &trigger_prompt,
+        &injection,
+        messages.len(),
+        &recipient,
+        start,
+    );
     Ok(())
+}
+
+/// Read the hook's stdin into a string, capped at 64 KiB.
+///
+/// Why (issue #105): SessionStart hooks may forward session metadata JSON via
+/// stdin; capturing it lets the log entry record what triggered the
+/// invocation. Failures or absent stdin (e.g. running the command in a TTY
+/// for manual testing) degrade to an empty string.
+/// What: reads up to 64 KiB synchronously; checks `is_terminal` first to
+/// avoid blocking on an interactive stdin.
+/// Test: not unit-tested (process stdin is hard to mock); covered indirectly.
+fn read_stdin_best_effort() -> String {
+    use std::io::Read;
+    const STDIN_CAP_BYTES: usize = 64 * 1024;
+    let stdin = std::io::stdin();
+    if std::io::IsTerminal::is_terminal(&stdin) {
+        return String::new();
+    }
+    let mut buf = String::new();
+    let _ = stdin
+        .lock()
+        .take(STDIN_CAP_BYTES as u64)
+        .read_to_string(&mut buf);
+    buf
+}
+
+/// Append one log entry to the enriched-prompt log, swallowing failures.
+fn log_entry(
+    trigger_prompt: &str,
+    injection: &str,
+    unread_count: usize,
+    palace: &str,
+    start: Instant,
+) {
+    let logger = PromptLogger::from_env();
+    let entry = PromptLogEntry::new(
+        "SessionStart",
+        "inbox-check-messages",
+        palace,
+        trigger_prompt,
+        injection,
+    )
+    .with_unread_messages_count(unread_count)
+    .with_duration_ms(start.elapsed().as_millis() as u64);
+    logger.log(entry);
 }
 
 /// Fallback renderer used when the daemon does not pre-format messages.
@@ -187,6 +268,7 @@ mod tests {
     /// with an unreachable daemon and assert it returns `Ok(())`.
     #[tokio::test]
     async fn inbox_check_returns_ok_without_daemon() {
+        let _guard = crate::commands::env_test_lock().lock().await;
         let tmp = tempfile::tempdir().expect("tempdir");
         // SAFETY: tests serialise on `TRUSTY_DATA_DIR_OVERRIDE` by
         // convention; we only mutate inside this test's scope.
@@ -201,5 +283,58 @@ mod tests {
             res.is_ok(),
             "missing daemon lockfile must degrade to Ok(()), got {res:?}"
         );
+    }
+
+    /// Why (issue #105): the SessionStart hook must record its invocation
+    /// even when no daemon is running, so we can see "session opened, no
+    /// inbox to check" in the JSONL stream.
+    /// What: pin a tempdir as the data dir; call the handler with an
+    /// explicit palace so `cwd_palace_slug` is not consulted; assert a
+    /// single log entry tagged `inbox-check-messages` lands under the logs
+    /// directory.
+    /// Test: itself.
+    #[tokio::test]
+    async fn inbox_check_logs_attempt_without_daemon() {
+        let _guard = crate::commands::env_test_lock().lock().await;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // SAFETY: env mutation is scoped to this test.
+        unsafe {
+            std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, tmp.path());
+            std::env::remove_var(crate::prompt_log::ENV_ENABLED);
+            std::env::remove_var(crate::prompt_log::ENV_DIR);
+            std::env::remove_var(crate::prompt_log::ENV_HASH_PROMPTS);
+        }
+        let res = handle_inbox_check(Some("explicit-palace".to_string())).await;
+        let logs_dir = trusty_common::resolve_data_dir("trusty-memory")
+            .expect("resolve data dir")
+            .join("logs");
+        unsafe {
+            std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV);
+        }
+        assert!(res.is_ok());
+        // Filter by FILE_PREFIX so unrelated daemon log files (stdout.log,
+        // stderr.log) under the same data root don't trip the count.
+        let files: Vec<_> = std::fs::read_dir(&logs_dir)
+            .expect("logs dir should exist")
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("enriched-prompts."))
+            })
+            .collect();
+        assert_eq!(
+            files.len(),
+            1,
+            "expected one enriched-prompts log file, got {files:?}"
+        );
+        let content = std::fs::read_to_string(&files[0]).expect("read log");
+        let line = content.lines().next().expect("at least one line");
+        let parsed: crate::prompt_log::PromptLogEntry =
+            serde_json::from_str(line).expect("parse JSONL");
+        assert_eq!(parsed.hook_type, "SessionStart");
+        assert_eq!(parsed.injection_kind, "inbox-check-messages");
+        assert_eq!(parsed.palace, "explicit-palace");
     }
 }

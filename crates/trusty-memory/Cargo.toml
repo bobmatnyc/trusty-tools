@@ -60,6 +60,12 @@ sysinfo = { workspace = true }
 # already a transitive dev-dependency for the MCP stdio peer-lock test; this
 # moves it to a runtime dependency.
 redb = { workspace = true }
+# Issue #105: optional SHA-256 hashing of `trigger_prompt` field in enriched
+# prompt logs when `TRUSTY_MEMORY_PROMPT_LOG_HASH_PROMPTS=1`. `sha2` already
+# lives in the workspace dependency table (used by trusty-common,
+# trusty-analyze, trusty-mpm-core, trusty-gworkspace) so this adds no new
+# lockfile churn.
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
