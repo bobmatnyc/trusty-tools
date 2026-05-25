@@ -110,5 +110,28 @@ export const api = {
     ),
 
   /** Count of currently-active triples for a palace. */
-  kgCount: (id) => request(`/api/v1/palaces/${encodeURIComponent(id)}/kg/count`)
+  kgCount: (id) => request(`/api/v1/palaces/${encodeURIComponent(id)}/kg/count`),
+
+  /**
+   * List entries from the persistent activity log (issue #96), newest
+   * first. Used by `ActivityFeed.svelte` to hydrate on mount and to page
+   * on scroll.
+   * Params:
+   *   - limit: page size (1..=500, default 50)
+   *   - offset: number of rows to skip
+   *   - palace: filter to one palace id
+   *   - source: filter to 'http' | 'mcp' | 'hook'
+   *   - since / until: ISO-8601 timestamps for time-range filters
+   */
+  listActivity: ({ limit, offset, palace, source, since, until } = {}) => {
+    const params = new URLSearchParams();
+    if (limit != null) params.set('limit', String(limit));
+    if (offset != null) params.set('offset', String(offset));
+    if (palace) params.set('palace', palace);
+    if (source) params.set('source', source);
+    if (since) params.set('since', since);
+    if (until) params.set('until', until);
+    const qs = params.toString();
+    return request(`/api/v1/activity${qs ? `?${qs}` : ''}`);
+  }
 };

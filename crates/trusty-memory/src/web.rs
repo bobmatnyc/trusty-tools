@@ -10,7 +10,7 @@
 //! fallback and JSON shape of every read endpoint against an in-memory
 //! palace built on a `tempdir`.
 
-use crate::{AppState, DaemonEvent};
+use crate::{ActivityFilter, ActivitySource, AppState, DaemonEvent};
 use axum::{
     body::Body,
     extract::{Path as AxumPath, Query, State},
@@ -121,6 +121,7 @@ pub fn router() -> Router<AppState> {
         )
         .route("/health", get(health))
         .route("/api/v1/logs/tail", get(logs_tail))
+        .route("/api/v1/activity", get(activity_handler))
         .route("/api/v1/admin/stop", post(admin_stop))
         .fallback(static_handler);
 
@@ -389,6 +390,168 @@ async fn admin_stop(State(_state): State<AppState>) -> Json<Value> {
         std::process::exit(0);
     });
     Json(serde_json::json!({ "ok": true, "message": "shutting down" }))
+}
+
+// ---------------------------------------------------------------------------
+// Activity log (issue #96)
+// ---------------------------------------------------------------------------
+
+/// Default page size returned by `GET /api/v1/activity` when the client
+/// omits `limit`. Matches the existing 50-row dashboard window.
+const ACTIVITY_DEFAULT_LIMIT: usize = 50;
+
+/// Hard cap on a single activity-page response.
+///
+/// Why: bounds the per-request work the handler performs and the response
+/// size on the wire. The UI never asks for more than a screen's worth at a
+/// time; this leaves headroom for power users running curl.
+/// What: 500 entries — large enough for ad-hoc inspection without becoming
+/// a DoS lever.
+/// Test: `activity_endpoint_clamps_limit`.
+const ACTIVITY_MAX_LIMIT: usize = 500;
+
+/// Query parameters accepted by `GET /api/v1/activity`.
+///
+/// Why: serde-driven extraction keeps the handler signature small while
+/// validating shape (numeric/ISO timestamps, optional fields). All filter
+/// fields are optional and combine with AND.
+/// What: see [`ActivityFilter`] for the underlying filter semantics.
+/// Test: `activity_endpoint_lists_recent_emits`,
+/// `activity_endpoint_filters_by_source_and_palace`.
+#[derive(Deserialize, Debug, Default)]
+struct ActivityQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    offset: Option<usize>,
+    #[serde(default)]
+    palace: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    since: Option<String>,
+    #[serde(default)]
+    until: Option<String>,
+}
+
+/// Wire shape for one row in the `GET /api/v1/activity` response.
+///
+/// Why: the persisted `ActivityEntry` carries a JSON-encoded `payload`
+/// string so the schema is decoupled from `DaemonEvent` evolution; we
+/// re-decode the payload to a `Value` here so the UI receives a structured
+/// JSON object instead of a nested escaped string.
+/// What: same fields as `ActivityEntry` except `payload` is the parsed
+/// JSON `Value` (falls back to a string when parse fails).
+/// Test: `activity_endpoint_lists_recent_emits`.
+#[derive(Serialize, Debug)]
+struct ActivityRow {
+    id: u64,
+    timestamp: chrono::DateTime<chrono::Utc>,
+    source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    palace_id: Option<String>,
+    event_type: String,
+    payload: Value,
+}
+
+/// `GET /api/v1/activity` — paginated activity history (issue #96).
+///
+/// Why: the dashboard activity feed (`ActivityFeed.svelte`) used to be a
+/// pure live-stream — opening the UI rendered an empty pane. Returning a
+/// paginated history lets the UI seed the feed on mount and load more on
+/// scroll, then layer the SSE live-tail on top.
+/// What: clamps `limit` to [1, [`ACTIVITY_MAX_LIMIT`]], parses optional
+/// filters, and queries the persistent log. The response shape is
+/// `{ entries: [...], total, limit, offset }` so the UI can decide
+/// whether more rows exist.
+/// Test: `activity_endpoint_lists_recent_emits`,
+/// `activity_endpoint_clamps_limit`,
+/// `activity_endpoint_filters_by_source_and_palace`.
+async fn activity_handler(
+    State(state): State<AppState>,
+    Query(q): Query<ActivityQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let limit = q
+        .limit
+        .unwrap_or(ACTIVITY_DEFAULT_LIMIT)
+        .clamp(1, ACTIVITY_MAX_LIMIT);
+    let offset = q.offset.unwrap_or(0);
+
+    let source = match q.source.as_deref() {
+        Some(s) => match ActivitySource::parse(s) {
+            Some(parsed) => Some(parsed),
+            None => {
+                return Err(ApiError::bad_request(format!(
+                    "unknown source '{s}'; expected one of http, mcp, hook",
+                )))
+            }
+        },
+        None => None,
+    };
+
+    let since = parse_iso_or_bad_request(q.since.as_deref(), "since")?;
+    let until = parse_iso_or_bad_request(q.until.as_deref(), "until")?;
+
+    let filter = ActivityFilter {
+        palace_id: q.palace.filter(|s| !s.is_empty()),
+        source,
+        since,
+        until,
+    };
+
+    let entries = state
+        .activity_log
+        .list(&filter, limit, offset)
+        .map_err(|e| ApiError::internal(format!("activity list: {e:#}")))?;
+    let total = state
+        .activity_log
+        .count()
+        .map_err(|e| ApiError::internal(format!("activity count: {e:#}")))?;
+
+    let rows: Vec<ActivityRow> = entries
+        .into_iter()
+        .map(|e| {
+            let payload = serde_json::from_str::<Value>(&e.payload)
+                .unwrap_or_else(|_| Value::String(e.payload.clone()));
+            ActivityRow {
+                id: e.id,
+                timestamp: e.timestamp,
+                source: e.source.as_str(),
+                palace_id: e.palace_id,
+                event_type: e.event_type,
+                payload,
+            }
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "entries": rows,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    })))
+}
+
+/// Parse an optional ISO-8601 timestamp string for the activity filter.
+///
+/// Why: the `since` / `until` query params are user-supplied; a bad value
+/// should reject the request with a clear 400 rather than be silently
+/// dropped (which would return seemingly-correct but mis-filtered data).
+/// What: returns `Ok(None)` when the input is `None` or empty;
+/// `Ok(Some(_))` on a parseable RFC 3339 timestamp; `Err(ApiError::bad_request)`
+/// otherwise.
+/// Test: `activity_endpoint_lists_recent_emits` exercises the happy path
+/// (no timestamps); a bad timestamp returns 400 — see manual curl.
+fn parse_iso_or_bad_request(
+    s: Option<&str>,
+    field: &str,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, ApiError> {
+    match s {
+        None | Some("") => Ok(None),
+        Some(raw) => chrono::DateTime::parse_from_rfc3339(raw)
+            .map(|dt| Some(dt.with_timezone(&chrono::Utc)))
+            .map_err(|e| ApiError::bad_request(format!("invalid {field} (RFC 3339): {e}"))),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -730,6 +893,7 @@ async fn create_palace(
     state.emit(DaemonEvent::PalaceCreated {
         id: name.clone(),
         name: name.clone(),
+        source: ActivitySource::Http,
     });
     Ok(Json(json!({ "id": name })))
 }
@@ -804,7 +968,7 @@ const DRAWER_PREVIEW_MAX_CHARS: usize = 80;
 /// trims leading/trailing whitespace, and truncates to
 /// [`DRAWER_PREVIEW_MAX_CHARS`] characters with a trailing `…` when cut.
 /// Test: `drawer_preview_collapses_whitespace_and_truncates`.
-fn drawer_content_preview(content: &str) -> String {
+pub(crate) fn drawer_content_preview(content: &str) -> String {
     let normalised: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
     if normalised.chars().count() <= DRAWER_PREVIEW_MAX_CHARS {
         normalised
@@ -847,6 +1011,7 @@ async fn create_drawer(
         drawer_count,
         timestamp: chrono::Utc::now(),
         content_preview,
+        source: ActivitySource::Http,
     });
     state.emit(aggregate_status_event(&state));
     Ok(Json(json!({ "id": drawer_id })))
@@ -867,6 +1032,7 @@ async fn delete_drawer(
     state.emit(DaemonEvent::DrawerDeleted {
         palace_id: id.clone(),
         drawer_count,
+        source: ActivitySource::Http,
     });
     state.emit(aggregate_status_event(&state));
     Ok(StatusCode::NO_CONTENT)
@@ -880,7 +1046,7 @@ async fn delete_drawer(
 /// What: Mirrors the math in the `status` handler — sums drawer count,
 /// vector index size, and active KG triples across every persisted palace.
 /// Test: Indirectly via the SSE integration tests that observe the event.
-fn aggregate_status_event(state: &AppState) -> DaemonEvent {
+pub(crate) fn aggregate_status_event(state: &AppState) -> DaemonEvent {
     let palaces = PalaceRegistry::list_palaces(&state.data_root).unwrap_or_default();
     let (mut total_drawers, mut total_vectors, mut total_kg_triples) = (0usize, 0usize, 0usize);
     for p in &palaces {
@@ -1298,6 +1464,7 @@ async fn dream_run(State(state): State<AppState>) -> Result<Json<DreamStatusPayl
         compacted: out.compacted,
         closets_updated: out.closets_updated,
         duration_ms: out.duration_ms,
+        source: ActivitySource::Http,
     });
     state.emit(aggregate_status_event(&state));
     Ok(Json(out))
@@ -3563,9 +3730,10 @@ mod tests {
             .expect("event received within timeout")
             .expect("event channel still open");
         match event {
-            DaemonEvent::PalaceCreated { id, name } => {
+            DaemonEvent::PalaceCreated { id, name, source } => {
                 assert_eq!(id, "sse-test");
                 assert_eq!(name, "sse-test");
+                assert_eq!(source, ActivitySource::Http);
             }
             other => panic!("expected PalaceCreated, got {other:?}"),
         }
@@ -4277,5 +4445,250 @@ mod tests {
             "got {}",
             resp.status()
         );
+    }
+
+    /// Why (issue #96): `GET /api/v1/activity` must return the entries
+    /// captured by the persistent log so the dashboard feed has history on
+    /// page load. This drives the endpoint with a sequence of emits that
+    /// model both HTTP- and MCP-origin writes, then asserts the response
+    /// shape, ordering, total count, and that the source labels make it
+    /// onto the wire.
+    /// What: emits four `DaemonEvent`s with mixed sources, fetches
+    /// `/api/v1/activity?limit=10`, and checks the structure of the
+    /// returned JSON.
+    /// Test: this test.
+    #[tokio::test]
+    async fn activity_endpoint_lists_recent_emits() {
+        let state = test_state();
+        // Three drawer_added (one MCP, two HTTP) and one palace_created.
+        state.emit(DaemonEvent::PalaceCreated {
+            id: "alpha".into(),
+            name: "alpha".into(),
+            source: ActivitySource::Http,
+        });
+        state.emit(DaemonEvent::DrawerAdded {
+            palace_id: "alpha".into(),
+            palace_name: "alpha".into(),
+            drawer_count: 1,
+            timestamp: chrono::Utc::now(),
+            content_preview: "hello".into(),
+            source: ActivitySource::Mcp,
+        });
+        state.emit(DaemonEvent::DrawerAdded {
+            palace_id: "beta".into(),
+            palace_name: "beta".into(),
+            drawer_count: 1,
+            timestamp: chrono::Utc::now(),
+            content_preview: "hi there".into(),
+            source: ActivitySource::Http,
+        });
+        state.emit(DaemonEvent::DrawerDeleted {
+            palace_id: "alpha".into(),
+            drawer_count: 0,
+            source: ActivitySource::Http,
+        });
+
+        let app = router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/activity?limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["limit"], 10);
+        assert_eq!(v["offset"], 0);
+        assert_eq!(v["total"], 4);
+        let entries = v["entries"].as_array().expect("entries array");
+        assert_eq!(entries.len(), 4);
+        // Newest-first: drawer_deleted is the last event we pushed.
+        assert_eq!(entries[0]["event_type"], "drawer_deleted");
+        assert_eq!(entries[3]["event_type"], "palace_created");
+        // Sources made it onto the wire as lowercase strings.
+        let sources: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| e["source"].as_str())
+            .collect();
+        assert!(sources.contains(&"http"));
+        assert!(sources.contains(&"mcp"));
+        // Payload is structured JSON, not an escaped string.
+        assert!(entries[0]["payload"].is_object());
+    }
+
+    /// Why: the handler must enforce a sane upper bound on `limit` so a
+    /// curl with `?limit=1000000` cannot force a huge scan + response.
+    /// What: asks for `limit=10000`, asserts the response advertises the
+    /// clamped value.
+    /// Test: this test.
+    #[tokio::test]
+    async fn activity_endpoint_clamps_limit() {
+        let state = test_state();
+        let app = router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/activity?limit=10000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["limit"], ACTIVITY_MAX_LIMIT);
+    }
+
+    /// Why: filters are how the dashboard scopes the feed to a single
+    /// palace or to one origin (MCP vs HTTP). Confirm AND-semantics on
+    /// `?palace=` and `?source=`.
+    /// What: emits 3 events, queries with `?palace=alpha&source=mcp`, and
+    /// asserts only the matching row is returned.
+    /// Test: this test.
+    #[tokio::test]
+    async fn activity_endpoint_filters_by_source_and_palace() {
+        let state = test_state();
+        state.emit(DaemonEvent::DrawerAdded {
+            palace_id: "alpha".into(),
+            palace_name: "alpha".into(),
+            drawer_count: 1,
+            timestamp: chrono::Utc::now(),
+            content_preview: "".into(),
+            source: ActivitySource::Mcp,
+        });
+        state.emit(DaemonEvent::DrawerAdded {
+            palace_id: "alpha".into(),
+            palace_name: "alpha".into(),
+            drawer_count: 2,
+            timestamp: chrono::Utc::now(),
+            content_preview: "".into(),
+            source: ActivitySource::Http,
+        });
+        state.emit(DaemonEvent::DrawerAdded {
+            palace_id: "beta".into(),
+            palace_name: "beta".into(),
+            drawer_count: 1,
+            timestamp: chrono::Utc::now(),
+            content_preview: "".into(),
+            source: ActivitySource::Mcp,
+        });
+
+        let app = router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/activity?palace=alpha&source=mcp&limit=50")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let entries = v["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "filter should leave one row, got {v}");
+        assert_eq!(entries[0]["palace_id"], "alpha");
+        assert_eq!(entries[0]["source"], "mcp");
+    }
+
+    /// Why: unknown source values must produce a 400 so the caller sees the
+    /// typo instead of silently getting "no rows".
+    #[tokio::test]
+    async fn activity_endpoint_rejects_unknown_source() {
+        let state = test_state();
+        let app = router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/activity?source=nope")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Why (issue #96): MCP-side `memory_remember` must now emit a
+    /// `DrawerAdded` event with `source = Mcp`. Confirm by driving the MCP
+    /// dispatcher directly and reading the broadcast channel.
+    /// What: pre-creates a palace, calls `dispatch_tool("memory_remember",
+    /// ...)`, subscribes to the events channel before the call, and
+    /// asserts the next event tag is `drawer_added` with the MCP source.
+    /// Test: this test.
+    #[tokio::test]
+    async fn mcp_memory_remember_emits_drawer_added_with_mcp_source() {
+        use crate::tools::dispatch_tool;
+        let state = test_state();
+        let mut rx = state.events.subscribe();
+        // Create palace via the MCP tool so the activity log captures both
+        // the palace_created and drawer_added events.
+        let _ = dispatch_tool(&state, "palace_create", json!({"name": "p1"}))
+            .await
+            .expect("palace_create");
+        // Drain the palace_created event.
+        let first = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .expect("first event")
+            .expect("channel open");
+        assert!(
+            matches!(first, DaemonEvent::PalaceCreated { ref source, .. } if *source == ActivitySource::Mcp)
+        );
+
+        let _ = dispatch_tool(
+            &state,
+            "memory_remember",
+            json!({
+                "palace": "p1",
+                "text": "the quick brown fox jumps over the lazy dog and more"
+            }),
+        )
+        .await
+        .expect("memory_remember");
+
+        // The next event from the channel should be DrawerAdded(Mcp).
+        let next = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .expect("drawer_added event")
+            .expect("channel open");
+        match next {
+            DaemonEvent::DrawerAdded {
+                source, palace_id, ..
+            } => {
+                assert_eq!(source, ActivitySource::Mcp);
+                assert_eq!(palace_id, "p1");
+            }
+            other => panic!("expected DrawerAdded, got {other:?}"),
+        }
+
+        // The activity log should now hold ≥ 2 entries (palace_created +
+        // drawer_added). Also confirm the HTTP endpoint surfaces them with
+        // `mcp` sources.
+        let app = router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/activity?source=mcp&limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let entries = v["entries"].as_array().unwrap();
+        let event_types: std::collections::HashSet<&str> = entries
+            .iter()
+            .filter_map(|e| e["event_type"].as_str())
+            .collect();
+        assert!(event_types.contains("drawer_added"));
+        assert!(event_types.contains("palace_created"));
     }
 }

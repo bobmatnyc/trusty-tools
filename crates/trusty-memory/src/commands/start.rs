@@ -52,10 +52,7 @@ pub(crate) fn addr_file_path() -> Option<std::path::PathBuf> {
 pub async fn handle_start() -> Result<()> {
     if let Some(path) = addr_file_path() {
         if let Some(url) = trusty_common::check_already_running(&path, "/health").await {
-            eprintln!(
-                "{} trusty-memory is already running at {url}",
-                "◉".green()
-            );
+            eprintln!("{} trusty-memory is already running at {url}", "◉".green());
             return Ok(());
         }
     }

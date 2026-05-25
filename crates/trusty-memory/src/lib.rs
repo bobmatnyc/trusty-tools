@@ -21,6 +21,7 @@ use trusty_common::memory_core::store::ChatSessionStore;
 use trusty_common::memory_core::PalaceRegistry;
 use trusty_common::ChatProvider;
 
+pub mod activity;
 pub mod bootstrap;
 pub mod commands;
 pub mod discovery;
@@ -29,6 +30,8 @@ pub mod prompt_facts;
 pub mod service;
 pub mod tools;
 pub mod web;
+
+pub use activity::{ActivityEntry, ActivityFilter, ActivityLog, ActivitySource};
 
 pub use service::MemoryMcpService;
 pub use tools::MemoryMcpServer;
@@ -75,6 +78,13 @@ pub enum DaemonEvent {
     PalaceCreated {
         id: String,
         name: String,
+        /// Originating subsystem (HTTP, MCP, Hook). Why (issue #96): the
+        /// UI badges each row with its source so operators can tell at a
+        /// glance whether a write came from the dashboard form, an MCP
+        /// tool call, or a hook-driven path. The wire-format key is
+        /// `source` (lower-case strings via serde rename_all on
+        /// `ActivitySource`).
+        source: ActivitySource,
     },
     DrawerAdded {
         palace_id: String,
@@ -97,10 +107,14 @@ pub enum DaemonEvent {
         /// the missing field via `#[serde(default)]`).
         #[serde(default)]
         content_preview: String,
+        /// Originating subsystem (issue #96).
+        source: ActivitySource,
     },
     DrawerDeleted {
         palace_id: String,
         drawer_count: usize,
+        /// Originating subsystem (issue #96).
+        source: ActivitySource,
     },
     DreamCompleted {
         palace_id: Option<String>,
@@ -109,12 +123,104 @@ pub enum DaemonEvent {
         compacted: usize,
         closets_updated: usize,
         duration_ms: u64,
+        /// Originating subsystem (issue #96).
+        source: ActivitySource,
     },
     StatusChanged {
         total_drawers: usize,
         total_vectors: usize,
         total_kg_triples: usize,
     },
+}
+
+/// Open the activity log under `data_root`, falling back to a per-process
+/// tempdir when the primary location is unwritable.
+///
+/// Why (issue #96): the activity log is a best-effort feature — if the data
+/// root is on a read-only mount, missing, or locked by another process, the
+/// daemon should still come up and serve every other endpoint. Falling back
+/// to a `std::env::temp_dir()`-anchored subdirectory keyed by the daemon's
+/// process id keeps the log available for the lifetime of the daemon while
+/// guaranteeing a unique writable directory.
+/// What: tries `ActivityLog::open(data_root)`; on error logs a warning and
+/// retries against `<temp>/trusty-memory-activity-<pid>/`. The final
+/// fallback `expect` is only reachable when even `temp_dir()` is broken,
+/// which is a programmer-error class invariant.
+/// Test: covered indirectly by `app_state_default_constructs` and every
+/// test that builds an `AppState` against a tempdir.
+fn open_activity_log_with_fallback(data_root: &Path) -> Arc<ActivityLog> {
+    match ActivityLog::open(data_root) {
+        Ok(log) => Arc::new(log),
+        Err(e) => {
+            tracing::warn!(
+                "could not open activity log at {}: {e:#}; falling back to per-process tempdir",
+                data_root.display()
+            );
+            let fallback =
+                std::env::temp_dir().join(format!("trusty-memory-activity-{}", std::process::id()));
+            Arc::new(
+                ActivityLog::open(&fallback)
+                    .expect("activity fallback log must open in a fresh tempdir"),
+            )
+        }
+    }
+}
+
+impl DaemonEvent {
+    /// Short discriminant label matching the SSE `type` field.
+    ///
+    /// Why: the persisted activity log stores `event_type` as a string so
+    /// the UI can render the row without re-parsing the payload. Sharing
+    /// the same labels the SSE serializer uses keeps the wire and the
+    /// stored history consistent.
+    /// What: returns one of `palace_created`, `drawer_added`,
+    /// `drawer_deleted`, `dream_completed`, `status_changed`.
+    /// Test: `daemon_event_type_str_matches_sse_tag` in the lib tests.
+    pub fn type_str(&self) -> &'static str {
+        match self {
+            Self::PalaceCreated { .. } => "palace_created",
+            Self::DrawerAdded { .. } => "drawer_added",
+            Self::DrawerDeleted { .. } => "drawer_deleted",
+            Self::DreamCompleted { .. } => "dream_completed",
+            Self::StatusChanged { .. } => "status_changed",
+        }
+    }
+
+    /// `palace_id` if the event is scoped to a single palace.
+    ///
+    /// Why: the activity log indexes entries by palace id so the UI can
+    /// filter by palace; daemon-wide events (`status_changed`,
+    /// dream-across-all-palaces) return `None`.
+    /// What: returns a borrowed string when the variant carries a palace
+    /// id, otherwise `None`.
+    /// Test: `daemon_event_palace_id_extraction`.
+    pub fn palace_id(&self) -> Option<&str> {
+        match self {
+            Self::PalaceCreated { id, .. } => Some(id),
+            Self::DrawerAdded { palace_id, .. } | Self::DrawerDeleted { palace_id, .. } => {
+                Some(palace_id)
+            }
+            Self::DreamCompleted { palace_id, .. } => palace_id.as_deref(),
+            Self::StatusChanged { .. } => None,
+        }
+    }
+
+    /// Originating subsystem if the event carries one.
+    ///
+    /// Why: only mutation events carry a `source`; the aggregate
+    /// `StatusChanged` is recomputed by the daemon and has no caller, so
+    /// it returns `None`.
+    /// What: returns the variant's `source` field where present.
+    /// Test: `daemon_event_source_extraction`.
+    pub fn source(&self) -> Option<ActivitySource> {
+        match self {
+            Self::PalaceCreated { source, .. }
+            | Self::DrawerAdded { source, .. }
+            | Self::DrawerDeleted { source, .. }
+            | Self::DreamCompleted { source, .. } => Some(*source),
+            Self::StatusChanged { .. } => None,
+        }
+    }
 }
 
 /// Shared application state passed to every request handler.
@@ -217,6 +323,20 @@ pub struct AppState {
     /// Test: `get_prompt_context_returns_cached_or_hint`,
     /// `get_prompt_context_filters_by_query`.
     pub prompt_context_cache: Arc<RwLock<prompt_facts::PromptFactsCache>>,
+    /// Persistent activity log (issue #96).
+    ///
+    /// Why: the dashboard activity feed used to be a pure live-stream over
+    /// `/sse` — opening the UI showed an empty feed and any mutation from
+    /// the MCP path was invisible. Holding an `ActivityLog` on `AppState`
+    /// lets `emit` record an entry on every push so the
+    /// `GET /api/v1/activity` handler can return historical rows on mount
+    /// and the live SSE stream can continue prepending events on top of
+    /// the loaded history. `None` on builds that opt out (tests that use
+    /// `AppState::new` get a real log under their tempdir so behaviour
+    /// matches production).
+    /// What: an `Arc<ActivityLog>` shared with every emitter.
+    /// Test: `web::tests::activity_endpoint_lists_recent_emits`.
+    pub activity_log: Arc<ActivityLog>,
 }
 
 impl AppState {
@@ -232,6 +352,11 @@ impl AppState {
     /// AppState pointed at a tempdir and round-trips a palace through it.
     pub fn new(data_root: PathBuf) -> Self {
         let (events_tx, _) = broadcast::channel::<DaemonEvent>(128);
+        // Issue #96: open (or create) the persistent activity log under the
+        // daemon data root. Open failure is logged but never crashes the
+        // daemon — we fall back to a per-process tempdir so emits remain
+        // best-effort and the rest of the daemon keeps working.
+        let activity_log = open_activity_log_with_fallback(&data_root);
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
             registry: Arc::new(PalaceRegistry::new()),
@@ -253,6 +378,7 @@ impl AppState {
             )),
             bound_addr: Arc::new(OnceLock::new()),
             prompt_context_cache: Arc::new(RwLock::new(prompt_facts::PromptFactsCache::default())),
+            activity_log,
         }
     }
 
@@ -341,17 +467,35 @@ impl AppState {
         self
     }
 
-    /// Send a `DaemonEvent` to all connected SSE subscribers.
+    /// Send a `DaemonEvent` to all connected SSE subscribers and persist
+    /// it to the activity log when the variant carries a source.
     ///
     /// Why: Mutating handlers call this after a successful write so the
     /// dashboard can update without polling. The send is best-effort —
     /// `broadcast::Sender::send` returns `Err` only when there are no live
-    /// receivers, which is fine (no listeners == no work to do).
-    /// What: Drops the result, so callers don't need to care whether anyone
-    /// is listening.
+    /// receivers, which is fine (no listeners == no work to do). Issue
+    /// #96 additionally writes the entry to the persistent activity log
+    /// so the feed can serve historical rows on page load and so MCP /
+    /// HTTP / Hook origins are visible to the operator. Persistence is
+    /// also best-effort — a write failure is logged but never blocks the
+    /// SSE broadcast.
+    /// What: serialises the event for the log (skipping `StatusChanged`
+    /// which is a recomputed aggregate, not a mutation), then sends it
+    /// over the broadcast channel.
     /// Test: `web::tests::sse_stream_receives_palace_created` confirms a
-    /// subscriber observes the emitted event.
+    /// subscriber observes the emitted event;
+    /// `activity_endpoint_lists_recent_emits` confirms persistence.
     pub fn emit(&self, event: DaemonEvent) {
+        if let Some(source) = event.source() {
+            let event_type = event.type_str();
+            let palace_id = event.palace_id().map(|s| s.to_string());
+            if let Err(e) = self
+                .activity_log
+                .append(source, palace_id, event_type, &event)
+            {
+                tracing::warn!("activity_log.append failed for {event_type}: {e:#}");
+            }
+        }
         let _ = self.events.send(event);
     }
 
@@ -1355,5 +1499,127 @@ mod tests {
     fn app_state_starts_with_empty_bound_addr() {
         let state = test_state();
         assert!(state.bound_addr.get().is_none());
+    }
+
+    /// Why (issue #96): `DaemonEvent::type_str` underpins the persisted
+    /// activity log's `event_type` column — every variant must map to the
+    /// exact SSE `type` tag the UI already handles. A drift between the
+    /// SSE wire format and the stored type would break the feed's icon /
+    /// label rendering for historical rows.
+    /// What: constructs one of each variant, serialises via serde, and
+    /// confirms `type_str()` matches the JSON `type` field.
+    /// Test: this test.
+    #[test]
+    fn daemon_event_type_str_matches_sse_tag() {
+        let cases = [
+            DaemonEvent::PalaceCreated {
+                id: "p".into(),
+                name: "p".into(),
+                source: ActivitySource::Http,
+            },
+            DaemonEvent::DrawerAdded {
+                palace_id: "p".into(),
+                palace_name: "p".into(),
+                drawer_count: 1,
+                timestamp: chrono::Utc::now(),
+                content_preview: String::new(),
+                source: ActivitySource::Mcp,
+            },
+            DaemonEvent::DrawerDeleted {
+                palace_id: "p".into(),
+                drawer_count: 0,
+                source: ActivitySource::Http,
+            },
+            DaemonEvent::DreamCompleted {
+                palace_id: None,
+                merged: 0,
+                pruned: 0,
+                compacted: 0,
+                closets_updated: 0,
+                duration_ms: 0,
+                source: ActivitySource::Http,
+            },
+            DaemonEvent::StatusChanged {
+                total_drawers: 0,
+                total_vectors: 0,
+                total_kg_triples: 0,
+            },
+        ];
+        for ev in &cases {
+            let json = serde_json::to_value(ev).unwrap();
+            assert_eq!(json["type"].as_str(), Some(ev.type_str()));
+        }
+    }
+
+    /// Why (issue #96): `palace_id()` and `source()` feed the persisted
+    /// activity log's columns; they must extract the right field per
+    /// variant. Sloppy refactors could swap two fields and the log would
+    /// silently mis-attribute writes.
+    /// What: builds each variant with known field values and asserts the
+    /// extractor returns them.
+    /// Test: this test.
+    #[test]
+    fn daemon_event_palace_id_and_source_extraction() {
+        let ev = DaemonEvent::DrawerAdded {
+            palace_id: "alpha".into(),
+            palace_name: "alpha".into(),
+            drawer_count: 1,
+            timestamp: chrono::Utc::now(),
+            content_preview: String::new(),
+            source: ActivitySource::Mcp,
+        };
+        assert_eq!(ev.palace_id(), Some("alpha"));
+        assert_eq!(ev.source(), Some(ActivitySource::Mcp));
+
+        let status = DaemonEvent::StatusChanged {
+            total_drawers: 1,
+            total_vectors: 2,
+            total_kg_triples: 3,
+        };
+        assert_eq!(status.palace_id(), None);
+        assert_eq!(status.source(), None);
+
+        let dream = DaemonEvent::DreamCompleted {
+            palace_id: Some("p1".into()),
+            merged: 0,
+            pruned: 0,
+            compacted: 0,
+            closets_updated: 0,
+            duration_ms: 10,
+            source: ActivitySource::Http,
+        };
+        assert_eq!(dream.palace_id(), Some("p1"));
+        assert_eq!(dream.source(), Some(ActivitySource::Http));
+    }
+
+    /// Why (issue #96): `AppState::emit` must persist mutation events to
+    /// the activity log while keeping `StatusChanged` (a recomputed
+    /// aggregate, not a mutation) out of the persisted history.
+    /// What: emits one of each variant under a fresh state and asserts
+    /// the persisted count matches the number of mutation events.
+    /// Test: this test.
+    #[tokio::test]
+    async fn emit_persists_mutations_but_skips_status_changed() {
+        let state = test_state();
+        state.emit(DaemonEvent::PalaceCreated {
+            id: "p".into(),
+            name: "p".into(),
+            source: ActivitySource::Http,
+        });
+        state.emit(DaemonEvent::StatusChanged {
+            total_drawers: 1,
+            total_vectors: 0,
+            total_kg_triples: 0,
+        });
+        state.emit(DaemonEvent::DrawerAdded {
+            palace_id: "p".into(),
+            palace_name: "p".into(),
+            drawer_count: 1,
+            timestamp: chrono::Utc::now(),
+            content_preview: "x".into(),
+            source: ActivitySource::Mcp,
+        });
+        let count = state.activity_log.count().unwrap();
+        assert_eq!(count, 2, "only PalaceCreated + DrawerAdded must persist");
     }
 }

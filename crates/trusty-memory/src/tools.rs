@@ -19,7 +19,7 @@
 //! - `kg_assert(palace, subject, predicate, object, confidence?, provenance?)` -> ()
 //! - `kg_query(palace, subject)`                    -> Vec<Triple>
 
-use crate::AppState;
+use crate::{ActivitySource, AppState, DaemonEvent};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use trusty_common::memory_core::filter::{FilterConfig, MCP_MIN_TOKENS};
@@ -29,6 +29,24 @@ use trusty_common::memory_core::retrieval::{
 };
 use trusty_common::memory_core::store::kg::Triple;
 use uuid::Uuid;
+
+/// Look up the friendly palace name (Palace.name) from disk, falling back to
+/// the id when the metadata can't be read.
+///
+/// Why (issue #96): MCP-side emit calls need the same `palace_name` field
+/// the HTTP path emits so the activity feed renders identical labels
+/// regardless of origin. Re-reading the on-disk metadata is the simplest
+/// way to avoid drift — name changes propagate immediately.
+/// What: walks the registry's on-disk listing and returns the matching
+/// `name`. On any error, returns the id verbatim so emit calls never fail.
+/// Test: implicit — the MCP emit tests assert the `palace_id` matches; the
+/// fallback is the same id-as-name behaviour the HTTP path uses.
+fn lookup_palace_name(state: &AppState, palace_id: &str) -> String {
+    trusty_common::memory_core::PalaceRegistry::list_palaces(&state.data_root)
+        .ok()
+        .and_then(|ps| ps.into_iter().find(|p| p.id.0 == palace_id).map(|p| p.name))
+        .unwrap_or_else(|| palace_id.to_string())
+}
 
 /// Build the strict MCP-level `RememberOptions`.
 ///
@@ -457,10 +475,27 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
 
             let handle = open_palace_handle(state, palace)?;
             let opts = mcp_remember_opts(force);
+            // Snapshot the content preview *before* moving `text` into
+            // `remember_with_options` so the activity feed shows what was
+            // stored (matches the HTTP path's behaviour).
+            let preview = crate::web::drawer_content_preview(&text);
             let drawer_id = handle
                 .remember_with_options(text, room, tags, 0.5, opts)
                 .await
                 .context("PalaceHandle::remember_with_options")?;
+            // Issue #96: emit a DrawerAdded so the activity feed shows
+            // MCP-origin writes with `source = Mcp`.
+            let palace_name = lookup_palace_name(state, palace);
+            let drawer_count = handle.drawers.read().len();
+            state.emit(DaemonEvent::DrawerAdded {
+                palace_id: palace.to_string(),
+                palace_name,
+                drawer_count,
+                timestamp: chrono::Utc::now(),
+                content_preview: preview,
+                source: ActivitySource::Mcp,
+            });
+            state.emit(crate::web::aggregate_status_event(state));
             Ok(json!({
                 "drawer_id": drawer_id.to_string(),
                 "palace": palace,
@@ -493,6 +528,7 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
             // note() preset skips the token threshold; we keep the default
             // filter for noise patterns. No MCP-stricter min_tokens override
             // is needed because `enforce_min_tokens = false`.
+            let preview = crate::web::drawer_content_preview(&content);
             let drawer_id = handle
                 .remember_with_options(
                     content,
@@ -503,6 +539,18 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
                 )
                 .await
                 .context("PalaceHandle::remember_with_options (note)")?;
+            // Issue #96: emit a DrawerAdded so the activity feed sees notes.
+            let palace_name = lookup_palace_name(state, palace);
+            let drawer_count = handle.drawers.read().len();
+            state.emit(DaemonEvent::DrawerAdded {
+                palace_id: palace.to_string(),
+                palace_name,
+                drawer_count,
+                timestamp: chrono::Utc::now(),
+                content_preview: preview,
+                source: ActivitySource::Mcp,
+            });
+            state.emit(crate::web::aggregate_status_event(state));
             Ok(json!({
                 "drawer_id": drawer_id.to_string(),
                 "palace": palace,
@@ -560,6 +608,13 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
                 .registry
                 .create_palace(&state.data_root, palace)
                 .context("create_palace")?;
+            // Issue #96: emit so MCP-driven palace creation lands in the
+            // dashboard activity feed alongside HTTP-origin creates.
+            state.emit(DaemonEvent::PalaceCreated {
+                id: palace_name.to_string(),
+                name: palace_name.to_string(),
+                source: ActivitySource::Mcp,
+            });
             // Issue #60: auto-seed the KG with temporal metadata so every
             // new palace has at least `created_at` + `bootstrapped_at`
             // triples anchored to the palace name. We deliberately do NOT
@@ -818,6 +873,14 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
                 .map_err(|e| anyhow!("memory_forget: invalid drawer_id UUID: {e}"))?;
             let handle = open_palace_handle(state, &palace)?;
             handle.forget(drawer_id).await.context("forget")?;
+            // Issue #96: emit so MCP-driven deletes are visible in the feed.
+            let drawer_count = handle.drawers.read().len();
+            state.emit(DaemonEvent::DrawerDeleted {
+                palace_id: palace.clone(),
+                drawer_count,
+                source: ActivitySource::Mcp,
+            });
+            state.emit(crate::web::aggregate_status_event(state));
             Ok(json!({"status": "deleted", "drawer_id": drawer_id_str, "palace": palace}))
         }
         "palace_info" => {

@@ -55,12 +55,12 @@ colored = { workspace = true }
 #      Linux; the same crate is already a workspace dependency used by
 #      trusty-search and trusty-mpm-daemon, so this is zero new lockfile churn.
 sysinfo = { workspace = true }
+# Issue #96: persistent activity log lives in a dedicated redb file under the
+# daemon data dir so the dashboard activity feed survives restarts. redb was
+# already a transitive dev-dependency for the MCP stdio peer-lock test; this
+# moves it to a runtime dependency.
+redb = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 tower = { workspace = true }
-# Used by `tests/mcp_stdio_tools.rs` to simulate a peer-process redb
-# lock (issue #59) by holding `Database::create` against a palace's
-# `kg.redb` / `index.usearch.redb` files while a fresh `AppState`
-# falls back to the snapshot path.
-redb = { workspace = true }

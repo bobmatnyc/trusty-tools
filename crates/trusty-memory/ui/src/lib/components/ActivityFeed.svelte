@@ -1,32 +1,52 @@
 <script>
   /*
    * Why: The daemon broadcasts DrawerAdded / PalaceCreated / DreamCompleted
-   * / StatusChanged over `/sse`. With many palaces active simultaneously,
-   * operators need a filter input so they can focus on a single palace's
-   * activity, plus an "Active only" toggle that hides palaces that haven't
-   * written during the current session.
-   * What: Connects to `/sse` via EventSource, parses each JSON frame, and
-   * prepends it to a ring buffer capped at MAX_EVENTS. Filters by palace
-   * name substring; "Active only" hides events from palaces not seen since
-   * the page loaded. Auto-reconnects with exponential backoff on error.
-   * Test: open the SPA, post a drawer or palace, confirm the feed prepends
-   * a new row within ~1s. Type a substring and confirm filtering. Toggle
-   * "Active only" and confirm only session-active palaces appear.
+   * / StatusChanged over `/sse`. Issue #96 adds a persistent activity log
+   * (redb) plus `GET /api/v1/activity?limit=&offset=&palace=&source=` so
+   * the feed can hydrate with history on page load instead of waiting for
+   * the next live event. The same endpoint tags every row with its origin
+   * (Http/Mcp/Hook) so the UI can render a source badge per row — MCP
+   * writes used to be invisible because only the HTTP path emitted.
+   * What: On mount we fetch the first page, render it, and connect to
+   * `/sse` for live-tail updates. Scrolling near the bottom of the feed
+   * fetches the next page. Filters by palace name substring; "Active only"
+   * hides palaces with no activity this session. Auto-reconnects SSE with
+   * exponential backoff on error.
+   * Test: open the SPA, see historical entries on first paint; create a
+   * drawer via MCP (`mcp__trusty-memory__memory_remember`) and confirm a
+   * new row appears with the `mcp` badge. Scroll near the bottom and watch
+   * the network tab for `/api/v1/activity?offset=…` requests.
    */
   import { onMount, onDestroy } from 'svelte';
   import { api } from '../api.js';
 
-  const MAX_EVENTS = 100;
+  // Live in-memory buffer for SSE-pushed events. Caps prevent unbounded
+  // growth in long-running sessions; the persistent history endpoint
+  // owns the real archive.
+  const MAX_EVENTS = 500;
+  const PAGE_SIZE = 50;
   // Exponential backoff: 1s, 2s, 4s, 8s, ..., capped at 30s.
   const BACKOFF_MIN_MS = 1000;
   const BACKOFF_MAX_MS = 30_000;
+  // Pixel buffer from the bottom of the feed that triggers a page fetch.
+  const SCROLL_BUFFER_PX = 100;
 
+  // `events` holds the merged history + live tail, newest-first.
   let events = $state([]);
+  // Smallest entry id seen so far — used to dedupe live SSE pushes against
+  // already-loaded history and to compute the next paging offset.
+  let smallestSeenId = $state(null);
   let connected = $state(false);
   let backoffMs = BACKOFF_MIN_MS;
   let collapsed = $state(false);
   let source = null;
   let reconnectTimer = null;
+
+  // Paging state for the persistent history.
+  let historyOffset = $state(0);
+  let historyTotal = $state(0);
+  let loadingPage = $state(false);
+  let endReached = $state(false);
 
   // Filter UI state.
   let filterText = $state('');
@@ -40,21 +60,116 @@
   // Used by the "Active only" toggle.
   let activeIds = $state(new Set());
 
+  // Ref to the scrolling container so we can attach a scroll handler.
+  let feedBodyEl = $state(null);
+
+  /**
+   * Why: history rows from `/api/v1/activity` carry a real id; live SSE
+   * frames do not. We synthesise a stable id for live frames so Svelte's
+   * keyed `{#each}` loop dedupes correctly when the same write produces
+   * both a live frame and a later history hit (small race window).
+   * What: returns the row's persisted id if present; otherwise a
+   * synthetic string keyed on the event timestamp + random suffix.
+   */
+  function rowKey(evt) {
+    if (typeof evt.id === 'number') return `db-${evt.id}`;
+    return evt._id;
+  }
+
+  /**
+   * Why: Normalise an activity row (from either the history endpoint or
+   * the live SSE stream) to a common shape the renderer expects. The
+   * history row nests the SSE payload under `payload`; we flatten it so
+   * the existing `describe()` logic — written for the SSE shape — still
+   * works without per-source branches.
+   * What: returns `{ ...payload, type, source, palace_id, _ts, _id, id }`
+   * with sensible defaults. The `source` field is preserved verbatim
+   * (lower-case 'http' | 'mcp' | 'hook').
+   */
+  function normaliseHistoryRow(row) {
+    const payload = row.payload || {};
+    return {
+      ...payload,
+      type: row.event_type,
+      source: row.source,
+      palace_id: row.palace_id ?? payload.palace_id ?? null,
+      timestamp: row.timestamp ?? payload.timestamp,
+      _ts: new Date(row.timestamp).getTime(),
+      _id: `db-${row.id}`,
+      id: row.id
+    };
+  }
+
   /**
    * Why: New events should appear at the top; old events fall off when we
-   * exceed the cap.
-   * What: Prepend `evt` and slice to MAX_EVENTS. Records palace id as
-   * "session-active" so the Active toggle has data to filter on.
-   * Test: push MAX_EVENTS+5 entries, assert length === MAX_EVENTS.
+   * exceed the cap. Records palace id as "session-active" so the Active
+   * toggle has data to filter on.
    */
-  function pushEvent(evt) {
-    const stamped = { ...evt, _ts: Date.now(), _id: `${Date.now()}-${Math.random()}` };
+  function prependLive(evt) {
+    const stamped = { ...evt, _ts: Date.now(), _id: `live-${Date.now()}-${Math.random()}` };
     events = [stamped, ...events].slice(0, MAX_EVENTS);
     const pid = evt?.palace_id;
     if (pid && !activeIds.has(pid)) {
       const next = new Set(activeIds);
       next.add(pid);
       activeIds = next;
+    }
+  }
+
+  /**
+   * Why: Replace or append a batch of history rows. Used at mount for
+   * page 1 and on scroll for later pages. Tracks the smallest-id seen so
+   * paging can compute the right offset.
+   */
+  function appendHistory(rows) {
+    if (!rows || rows.length === 0) {
+      endReached = true;
+      return;
+    }
+    const normalised = rows.map(normaliseHistoryRow);
+    events = [...events, ...normalised];
+    for (const r of normalised) {
+      if (r.palace_id && !activeIds.has(r.palace_id)) {
+        const next = new Set(activeIds);
+        next.add(r.palace_id);
+        activeIds = next;
+      }
+      if (smallestSeenId === null || (typeof r.id === 'number' && r.id < smallestSeenId)) {
+        smallestSeenId = r.id;
+      }
+    }
+  }
+
+  async function loadHistoryPage(offset = 0) {
+    if (loadingPage || endReached) return;
+    loadingPage = true;
+    try {
+      const data = await api.listActivity({ limit: PAGE_SIZE, offset });
+      historyTotal = data?.total ?? 0;
+      appendHistory(data?.entries || []);
+      historyOffset = offset + (data?.entries?.length || 0);
+      // If the server returned fewer than requested, we are at the end.
+      if (!data?.entries || data.entries.length < PAGE_SIZE) {
+        endReached = true;
+      }
+      // If we've loaded everything reported, mark done.
+      if (historyOffset >= historyTotal) {
+        endReached = true;
+      }
+    } catch (e) {
+      // Surface in the console; the feed still works in live-tail mode.
+      console.warn('activity history fetch failed', e);
+    } finally {
+      loadingPage = false;
+    }
+  }
+
+  function onFeedScroll() {
+    if (!feedBodyEl) return;
+    const remaining =
+      feedBodyEl.scrollHeight - feedBodyEl.scrollTop - feedBodyEl.clientHeight;
+    if (remaining < SCROLL_BUFFER_PX) {
+      loadHistoryPage(historyOffset);
     }
   }
 
@@ -89,7 +204,7 @@
       }
       // Initial connect frame from the daemon — informational only.
       if (parsed?.type === 'connected') return;
-      pushEvent(parsed);
+      prependLive(parsed);
     };
 
     source.onerror = () => {
@@ -118,7 +233,6 @@
    * the feed needs a fallback id→name table so the description stays
    * readable.
    * What: Fetches `/api/v1/palaces` once at mount, builds a id→name map.
-   * Test: open the SPA, watch network tab — listPalaces fires once.
    */
   async function loadPalaceNames() {
     try {
@@ -135,6 +249,10 @@
 
   onMount(() => {
     loadPalaceNames();
+    // Kick off history hydration before connecting to SSE so the first
+    // paint of the feed has rows. Live frames that arrive while the
+    // history is loading will simply prepend on top.
+    loadHistoryPage(0);
     connect();
   });
 
@@ -157,7 +275,6 @@
    * Why: Raw epoch ms is unreadable; operators want "2s ago" / "3m ago".
    * What: Returns a short relative-time string. Accepts either a numeric
    * epoch ms or an ISO-8601 string (for `timestamp` field on DrawerAdded).
-   * Test: relTime(now - 1500) starts with "1s".
    */
   function relTime(ts) {
     let t;
@@ -177,14 +294,6 @@
     return `${Math.floor(h / 24)}d ago`;
   }
 
-  /**
-   * Why: Each event has a `palace_id` (sometimes) and we want to render
-   * the friendly name (Palace.name) in the feed. The daemon now includes
-   * `palace_name` on DrawerAdded; older frames fall back to the cached
-   * id→name map.
-   * What: returns the best-known label for a palace id.
-   * Test: labelFor({palace_id:"x", palace_name:"X"}) === "X".
-   */
   function labelFor(evt) {
     return evt?.palace_name || palaceNames[evt?.palace_id] || evt?.palace_id || '';
   }
@@ -192,8 +301,6 @@
   /**
    * Why: Per-event-type rendering keeps the feed scannable; emoji + short
    * description matches the spec.
-   * What: Returns { icon, label, description } for a given event.
-   * Test: describe({type:"palace_created", name:"foo"}).description includes "foo".
    */
   function describe(evt) {
     switch (evt.type) {
@@ -271,8 +378,6 @@
     return events.filter((evt) => {
       if (activeOnly) {
         const pid = evt?.palace_id;
-        // Always keep events without a palace_id (palace_created, dream, etc.)
-        // when activeOnly is on, since they carry useful daemon-level signals.
         if (pid && !activeIds.has(pid)) return false;
       }
       if (!f) return true;
@@ -281,15 +386,21 @@
     });
   });
 
-  /**
-   * Why: For DrawerAdded the daemon now sends a `timestamp` ISO string; we
-   * prefer it over the SSE-arrival time because it's the wall-clock time of
-   * the write (more accurate when the SSE channel has lag).
-   * What: returns ISO `timestamp` if present, otherwise the local arrival ms.
-   * Test: bestTime({timestamp:'2026-01-01T00:00:00Z', _ts: 0}) === iso.
-   */
   function bestTime(evt) {
     return evt?.timestamp || evt?._ts;
+  }
+
+  /**
+   * Why (issue #96): the source badge needs a deterministic CSS class so
+   * each origin renders in a distinct color (HTTP=blue, MCP=purple,
+   * HOOK=amber). Defaulting to 'http' matches the previous behaviour where
+   * every event was implicitly from the HTTP path.
+   * What: returns the canonical lower-case origin string.
+   */
+  function sourceLabel(evt) {
+    const s = (evt?.source || '').toLowerCase();
+    if (s === 'http' || s === 'mcp' || s === 'hook') return s;
+    return null;
   }
 </script>
 
@@ -328,11 +439,13 @@
       </label>
     </div>
 
-    <div class="feed-body">
+    <div class="feed-body" bind:this={feedBodyEl} onscroll={onFeedScroll}>
       {#if visibleEvents.length === 0}
         <div class="empty">
           {#if events.length === 0}
-            {#if connected}
+            {#if loadingPage}
+              Loading history…
+            {:else if connected}
               Waiting for events…
             {:else}
               Disconnected — retrying.
@@ -343,13 +456,19 @@
         </div>
       {:else}
         <ul class="event-list">
-          {#each visibleEvents as evt (evt._id)}
+          {#each visibleEvents as evt (rowKey(evt))}
             {@const d = describe(evt)}
+            {@const src = sourceLabel(evt)}
             <li class="event-row">
               <span class="icon" aria-hidden="true">{d.icon}</span>
               <div class="event-main">
                 <div class="event-line">
                   <span class="badge">{d.label}</span>
+                  {#if src}
+                    <span class="src-badge src-{src}" title="Origin: {src}">
+                      {src}
+                    </span>
+                  {/if}
                   {#if d.link}
                     <a class="desc link" href={d.link}>{d.description}</a>
                   {:else}
@@ -361,6 +480,11 @@
               </div>
             </li>
           {/each}
+          {#if loadingPage}
+            <li class="loading-row">Loading more…</li>
+          {:else if endReached && historyTotal > 0}
+            <li class="loading-row dim">{historyTotal} total events</li>
+          {/if}
         </ul>
       {/if}
     </div>
@@ -504,6 +628,33 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
+  /* Origin badges — small coloured pills next to the event-type badge.
+     Why: lets operators tell at a glance whether a write came from
+     the HTTP API, an MCP tool call, or a future hook integration. */
+  .src-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border: 1px solid transparent;
+  }
+  .src-http {
+    color: #1d4ed8;
+    background: #dbeafe;
+    border-color: #bfdbfe;
+  }
+  .src-mcp {
+    color: #6d28d9;
+    background: #ede9fe;
+    border-color: #ddd6fe;
+  }
+  .src-hook {
+    color: #92400e;
+    background: #fef3c7;
+    border-color: #fde68a;
+  }
   .desc {
     color: var(--trusty-text, #111827);
     overflow: hidden;
@@ -521,5 +672,16 @@
     color: var(--trusty-text-muted, #9ca3af);
     font-size: 10px;
     margin-top: 2px;
+  }
+  .loading-row {
+    list-style: none;
+    padding: 12px 16px;
+    text-align: center;
+    color: var(--trusty-text-muted, #9ca3af);
+    font-size: 11px;
+  }
+  .loading-row.dim {
+    color: var(--trusty-text-muted, #9ca3af);
+    font-style: italic;
   }
 </style>
