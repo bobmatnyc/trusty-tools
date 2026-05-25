@@ -266,6 +266,80 @@ When publishing a crate to crates.io:
 - The `[patch.crates-io]` block in the root `Cargo.toml` ensures the in-tree
   crates are preferred during local builds even if a published version exists.
 
+## Parallel Worktree Discipline
+
+Multiple Claude Code sessions and subagents may share this repo concurrently.
+The main checkout often holds another session's uncommitted work. To prevent
+one session from stomping on another's edits, the following rules apply to
+every session and every dispatched subagent.
+
+🔴 **The main checkout is inspection-only.** From the repo root
+(`/path/to/trusty-tools/` — wherever the repo lives on disk), the only
+allowed operations are read-only: `git status`, `git log`, `git diff`,
+`git show`, file reads. **Forbidden in the main checkout's working tree**:
+edits, `git reset --hard`, `git checkout .`, `git stash`, `git restore .`,
+`cargo build`/`cargo test` (write to `target/`), `sed`/`awk`/`patch`, or
+any command that mutates the working tree, the index, or `target/`.
+
+🔴 **All write-side work happens in a dedicated git worktree branched off
+`origin/main`.** Provision one before starting any edit, build, or test:
+
+```bash
+git fetch origin main
+git worktree add -b <feature-or-fix-branch> \
+                  .claude/worktrees/<dirname> origin/main
+cd .claude/worktrees/<dirname>
+# … edit, build, test, commit, push from here …
+```
+
+Each ticket, refactor, or experiment gets its own worktree. Worktrees are
+disposable — delete them with `git worktree remove --force <path>` once the
+PR has merged.
+
+🟡 **If you absolutely must run a command from the main checkout** — for
+example `cargo install --path crates/<name> --locked` after a merge —
+stash first, operate, then restore:
+
+```bash
+git -C /path/to/main-checkout stash push -u \
+    -m "claude: pre-op-safety $(date +%s)"
+# … do the op …
+git -C /path/to/main-checkout stash pop
+```
+
+Surface the stash name in your report if popping fails so the human can
+restore manually.
+
+🟡 **`cargo install` from a worktree, not the main checkout.** The preferred
+pattern for installing a freshly-built binary onto your PATH is:
+
+```bash
+cargo install --path .claude/worktrees/<dirname>/crates/<name> --locked
+```
+
+Cargo writes atomically to a temp file and renames into `~/.cargo/bin/`,
+which keeps the macOS kernel's cdhash cache consistent (see the
+release-workflow note above). The main checkout never needs to be involved.
+
+🟢 **Subagents inherit these rules.** Every `Agent`/`Task` dispatch prompt
+**must**:
+- name the exact worktree path the agent should operate from
+- explicitly forbid leaving that worktree into the main checkout
+- forbid `git reset --hard`, `git checkout .`, and `git stash` against the
+  main checkout
+- forbid touching files outside the assigned worktree
+
+The pattern of instructing an agent to "operate from the main checkout" is
+banned. QA agents get their own worktree
+(`.claude/worktrees/qa-<ticket-or-pass>`) just like engineering agents.
+
+🟢 **Worktree cleanup is safe.** `git worktree remove --force <path>` deletes
+the worktree directory but never the main checkout. After a squash-merge the
+local feature branch will appear "unmerged" to git because the squashed
+commit on `main` has a different hash — use `git branch -D <branch>` and
+`git push origin --delete <branch>` to clean up. These operations touch only
+refs, never working trees.
+
 ## Crate-Specific Notes
 
 ### trusty-common
