@@ -130,6 +130,85 @@ with `--palace <name>`.
 | `memory_dream` | `palace?` | Run a consolidation cycle (merge near-duplicates, prune, compact). |
 | `memory_status` | — | Global statistics (total drawers, vectors, KG triples). |
 
+### Inter-project messaging (issue #99)
+
+| Tool | Arguments | Description |
+|---|---|---|
+| `memory_send_message` | `to_palace, purpose, content, from_palace?` | Deliver a message to another palace's inbox. |
+
+Plus two CLI subcommands:
+
+- `trusty-memory send-message --to <palace> --purpose <p> --content <text> [--from <palace>]`
+  — non-MCP entry point. Posts to the daemon's `POST /api/v1/messages`.
+- `trusty-memory inbox-check [--palace <id>]` — installed as a Claude Code
+  `SessionStart` hook by `setup`. Reads unread messages from the cwd-derived
+  palace, prints them to stdout (Claude Code injects stdout as session
+  context), and atomically marks them read.
+
+#### Design
+
+A message is a **drawer in the recipient's palace** carrying a namespaced
+tag envelope. No new schema, no new database — just convention:
+
+| Tag | Example | Meaning |
+|---|---|---|
+| `msg:v1` | (literal) | Marker tag for the v1 envelope. |
+| `msg:from=<palace>` | `msg:from=trusty-tools` | Sender palace id. |
+| `msg:to=<palace>` | `msg:to=claude-mpm` | Recipient palace id (audit). |
+| `msg:purpose=<text>` | `msg:purpose=task` | Free-text purpose / category. |
+| `msg:sent_at=<rfc3339>` | `msg:sent_at=2026-05-25T12:34:56+00:00` | UTC send timestamp. |
+| `msg:read=<bool>` | `msg:read=false` | Receiver-flipped read flag. |
+
+#### Addressing
+
+Sender and recipient palaces are addressed by **repo slug**. The slug is
+derived from the working directory by:
+
+1. Take the basename of `git rev-parse --show-toplevel` (or cwd, when not in
+   a git checkout).
+2. Strip a trailing `.git` suffix if present.
+3. Lowercase.
+4. Replace every run of whitespace or `_` with a single `-`.
+5. Strip every character outside `[a-z0-9-]`.
+6. Collapse consecutive `-` and trim leading/trailing `-`.
+
+Examples (all resolve to `trusty-tools`):
+`/Users/bob/Projects/trusty-tools`,
+`/Users/bob/Projects/Trusty_Tools`,
+`/Users/bob/Projects/trusty tools`,
+`/Users/bob/Projects/.trusty-tools.git`.
+
+No central registry; sender and receiver agree on the slug out of band.
+
+#### Delivery
+
+The receiver's `trusty-memory setup` installs `trusty-memory inbox-check` as
+a `SessionStart` hook in every Claude Code settings file it finds (alongside
+the existing `UserPromptSubmit` `prompt-context` hook). On every new Claude
+Code session, the hook:
+
+1. Resolves the receiver palace slug from cwd.
+2. Fetches unread messages from `GET /api/v1/messages?palace=<slug>&unread_only=true`.
+3. Prints each as a Markdown block to stdout — Claude Code injects stdout as
+   session context.
+4. Atomically marks each delivered message read via
+   `POST /api/v1/messages/mark_read`.
+
+The mark-read step uses an in-memory compare-and-swap on the palace's
+drawer table so two concurrent sessions opening at once cannot
+double-deliver: exactly one observes `read=false` and flips the flag, the
+other returns `false` and emits nothing.
+
+Every failure path in `inbox-check` degrades to exit 0 with empty stdout
+so a missing or slow daemon never blocks Claude Code session start.
+
+#### Migration from `claude-mpm` `/mpm-message`
+
+This primitive replaces the Python `/mpm-message` skill in `claude-mpm`
+(which wrote to `~/.claude-mpm/messaging.db` via a process-local SQLite
+file). The companion ticket in `claude-mpm` is `#557`; data migration is
+out of scope here.
+
 ## Web UI
 
 When running in HTTP mode, the embedded Svelte admin dashboard is available at:

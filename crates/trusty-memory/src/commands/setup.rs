@@ -52,6 +52,18 @@ const MCP_SERVER_KEY: &str = "trusty-memory";
 /// settings JSON.
 const HOOK_EVENT: &str = "UserPromptSubmit";
 
+/// The Claude Code hook event the inbox-check hook is registered under
+/// (issue #99).
+///
+/// Why: `SessionStart` fires exactly once at the beginning of a new Claude
+/// Code session and Claude Code injects the hook's stdout as context for
+/// that session. That makes it the right place to deliver inter-project
+/// messages that arrived since the previous session — they appear in the
+/// model's working context immediately, without polling.
+/// What: the literal `"SessionStart"` string Claude Code expects in the
+/// settings JSON.
+const SESSION_START_HOOK_EVENT: &str = "SessionStart";
+
 /// Shell command Claude Code invokes for the UserPromptSubmit hook.
 ///
 /// Why: routing through the installed `trusty-memory` binary (rather than a
@@ -62,6 +74,15 @@ const HOOK_EVENT: &str = "UserPromptSubmit";
 /// What: the bare command. Claude Code resolves it via PATH; if the user has
 /// installed trusty-memory via `cargo install`, it will be on PATH.
 const HOOK_COMMAND: &str = "trusty-memory prompt-context";
+
+/// Shell command Claude Code invokes for the SessionStart hook (issue #99).
+///
+/// Why: the receiver's inter-project inbox is delivered exactly once per
+/// session; `inbox-check` does the daemon round-trip, prints the messages
+/// to stdout (where Claude Code injects them), and atomically marks them
+/// read so the next session does not redeliver.
+/// What: the bare command, found by Claude Code via PATH.
+const INBOX_CHECK_HOOK_COMMAND: &str = "trusty-memory inbox-check";
 
 /// Hook command timeout in milliseconds.
 ///
@@ -429,15 +450,20 @@ fn patch_one(path: &Path, entry: &serde_json::Value) -> Result<PatchOutcome> {
     })
 }
 
-/// Build the trusty-memory `UserPromptSubmit` hook block as Claude Code
-/// expects it.
+/// Build the trusty-memory `UserPromptSubmit` + `SessionStart` hook block
+/// as Claude Code expects it.
 ///
 /// Why: the live `settings.json` shape is `{"hooks": {"<Event>": [{ "matcher":
 /// "*", "hooks": [{ "type": "command", "command": "...", "timeout": ... }]
 /// }]}}`. A centralised constructor keeps every call site producing the
 /// exact same shape so [`merge_hook_entries`] can dedup by deep equality.
-/// What: returns a JSON object with the single `UserPromptSubmit` event.
-/// Test: covered indirectly by `patch_one_installs_hook`.
+/// Issue #99 added the `SessionStart` block for inter-project inbox
+/// delivery; it shares the same shape and timeout as the prompt-context
+/// hook so existing operators don't have to reason about two policies.
+/// What: returns a JSON object with both the `UserPromptSubmit` event
+/// (running `prompt-context`) and the `SessionStart` event (running
+/// `inbox-check`).
+/// Test: `patch_one_installs_hook`, `patch_one_installs_session_start_hook`.
 fn prompt_context_hook_additions() -> Value {
     json!({
         "hooks": {
@@ -448,6 +474,18 @@ fn prompt_context_hook_additions() -> Value {
                         {
                             "type": "command",
                             "command": HOOK_COMMAND,
+                            "timeout": HOOK_TIMEOUT_MS,
+                        }
+                    ],
+                }
+            ],
+            SESSION_START_HOOK_EVENT: [
+                {
+                    "matcher": "*",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": INBOX_CHECK_HOOK_COMMAND,
                             "timeout": HOOK_TIMEOUT_MS,
                         }
                     ],
@@ -523,6 +561,64 @@ mod tests {
         assert_eq!(inner[0]["command"], HOOK_COMMAND);
         assert_eq!(inner[0]["type"], "command");
         assert_eq!(inner[0]["timeout"], HOOK_TIMEOUT_MS);
+
+        // Issue #99: SessionStart hook must also land.
+        let ss_entries = value["hooks"][SESSION_START_HOOK_EVENT]
+            .as_array()
+            .expect("SessionStart hooks installed");
+        assert_eq!(
+            ss_entries.len(),
+            1,
+            "exactly one SessionStart matcher block"
+        );
+        let ss_inner = ss_entries[0]["hooks"].as_array().unwrap();
+        assert_eq!(ss_inner[0]["command"], INBOX_CHECK_HOOK_COMMAND);
+        assert_eq!(ss_inner[0]["type"], "command");
+        assert_eq!(ss_inner[0]["timeout"], HOOK_TIMEOUT_MS);
+    }
+
+    /// Why: regression for issue #99 — when a user has the UserPromptSubmit
+    /// hook from an earlier release but no SessionStart hook, re-running
+    /// setup must add the SessionStart block (and not touch any existing
+    /// UserPromptSubmit hook).
+    /// What: seeds a settings file with the MCP entry + UserPromptSubmit
+    /// hook only, patches, and asserts both events are present afterwards.
+    #[test]
+    fn patch_one_installs_session_start_hook_when_upgrading() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("settings.json");
+        let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve"]);
+        let seed = json!({
+            "mcpServers": {
+                MCP_SERVER_KEY: { "command": "trusty-memory", "args": ["serve"] }
+            },
+            "hooks": {
+                HOOK_EVENT: [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": HOOK_COMMAND,
+                        "timeout": HOOK_TIMEOUT_MS,
+                    }]
+                }]
+            }
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+
+        let outcome = patch_one(&path, &entry).expect("patch ok");
+        assert!(!outcome.mcp_wrote);
+        assert!(outcome.hook_wrote, "SessionStart hook must be added");
+
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // Existing UserPromptSubmit is preserved exactly.
+        let ups = value["hooks"][HOOK_EVENT].as_array().unwrap();
+        assert_eq!(ups.len(), 1);
+        assert_eq!(ups[0]["hooks"][0]["command"], HOOK_COMMAND);
+        // New SessionStart is present.
+        let ss = value["hooks"][SESSION_START_HOOK_EVENT].as_array().unwrap();
+        assert_eq!(ss.len(), 1);
+        assert_eq!(ss[0]["hooks"][0]["command"], INBOX_CHECK_HOOK_COMMAND);
     }
 
     /// Why: re-running `setup` must be safe — calling `patch_one` against

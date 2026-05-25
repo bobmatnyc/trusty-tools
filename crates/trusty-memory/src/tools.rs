@@ -382,6 +382,20 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                     },
                     "required": ["q"],
                 }
+            },
+            {
+                "name": "memory_send_message",
+                "description": "Send an inter-project message (issue #99). Writes a tagged drawer into the recipient palace; the recipient's SessionStart hook picks it up via `trusty-memory inbox-check`. `to_palace` is the recipient repo slug (e.g. `trusty-tools`, `claude-mpm`). `from_palace` defaults to the calling project's cwd-derived slug when omitted.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "to_palace":   {"type": "string", "description": "Recipient palace id (repo slug)."},
+                        "purpose":     {"type": "string", "description": "Free-text purpose / category (e.g. `task`, `notify`, `reply`)."},
+                        "content":     {"type": "string", "description": "Message body — plain text, no length limit. Rendered into the recipient session as a Markdown block."},
+                        "from_palace": {"type": "string", "description": "Sender palace id (optional, defaults to cwd-derived slug)."}
+                    },
+                    "required": ["to_palace", "purpose", "content"],
+                }
             }
         ]
     })
@@ -1257,6 +1271,51 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
             }
             crate::bootstrap::result_to_json(&result)
         }
+        "memory_send_message" => {
+            // Issue #99: inter-project messaging via palace memories.
+            let to_palace = args
+                .get("to_palace")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("memory_send_message: missing 'to_palace'"))?
+                .to_string();
+            let purpose = args
+                .get("purpose")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("memory_send_message: missing 'purpose'"))?
+                .to_string();
+            let content = args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("memory_send_message: missing 'content'"))?
+                .to_string();
+            // from_palace defaults to the explicit `from_palace` arg, then
+            // the server's --palace default, then the cwd-derived slug.
+            let from_palace = if let Some(s) = args.get("from_palace").and_then(|v| v.as_str()) {
+                s.to_string()
+            } else if let Some(d) = state.default_palace.clone() {
+                d
+            } else {
+                crate::messaging::cwd_palace_slug()
+                    .context("memory_send_message: derive from_palace from cwd")?
+            };
+            let drawer_id = crate::messaging::send_message_to_palace(
+                &state.registry,
+                &state.data_root,
+                &from_palace,
+                &to_palace,
+                &purpose,
+                content,
+            )
+            .await
+            .context("memory_send_message")?;
+            Ok(json!({
+                "drawer_id": drawer_id.to_string(),
+                "from_palace": from_palace,
+                "to_palace": to_palace,
+                "purpose": purpose,
+                "status": "sent",
+            }))
+        }
         other => anyhow::bail!("unknown tool: {other}"),
     }
 }
@@ -1345,7 +1404,7 @@ mod tests {
             .get("tools")
             .and_then(|t| t.as_array())
             .expect("tools array");
-        assert_eq!(tools.len(), 20);
+        assert_eq!(tools.len(), 21);
         let names: Vec<&str> = tools
             .iter()
             .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
@@ -1371,6 +1430,7 @@ mod tests {
             "get_prompt_context",
             "discover_aliases",
             "kg_bootstrap",
+            "memory_send_message",
         ] {
             assert!(names.contains(&expected), "missing tool: {expected}");
         }

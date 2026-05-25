@@ -120,6 +120,15 @@ pub fn router() -> Router<AppState> {
             "/api/v1/palaces/{id}/chat/sessions/{session_id}",
             get(get_chat_session).delete(delete_chat_session),
         )
+        // Issue #99: inter-project messaging.
+        .route(
+            "/api/v1/messages",
+            get(list_messages_handler).post(send_message_handler),
+        )
+        .route(
+            "/api/v1/messages/mark_read",
+            post(mark_message_read_handler),
+        )
         .route("/health", get(health))
         .route("/api/v1/logs/tail", get(logs_tail))
         .route("/api/v1/activity", get(activity_handler))
@@ -2943,6 +2952,163 @@ async fn delete_chat_session(
 }
 
 // ---------------------------------------------------------------------------
+// Inter-project messaging (issue #99)
+// ---------------------------------------------------------------------------
+
+/// Query parameters for `GET /api/v1/messages`.
+///
+/// Why: the receiver's SessionStart hook calls `unread_only=true` to fetch
+/// pending mail; the UI's audit view calls `unread_only=false` to render
+/// the full history.
+/// What: `palace` is the recipient slug; `unread_only` defaults to `false`.
+/// Test: `messages_endpoint_round_trip`.
+#[derive(Deserialize)]
+struct ListMessagesQuery {
+    palace: String,
+    #[serde(default)]
+    unread_only: Option<bool>,
+}
+
+/// `GET /api/v1/messages?palace=<id>&unread_only=<bool>` — list messages in
+/// a palace, optionally filtering to unread.
+///
+/// Why: serves the same data the MCP `inbox-check` CLI consumes, plus the UI
+/// audit log. Returns a JSON array of `{id, from_palace, to_palace, purpose,
+/// sent_at, read, content, formatted}` objects; `formatted` is the
+/// pre-rendered Markdown block the SessionStart hook emits to stdout.
+/// What: opens the palace, calls
+/// [`crate::messaging::list_messages`], and renders each message envelope
+/// plus its formatted block to JSON.
+/// Test: `messages_endpoint_round_trip`.
+async fn list_messages_handler(
+    State(state): State<AppState>,
+    Query(q): Query<ListMessagesQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let handle = open_handle(&state, &q.palace)?;
+    let unread_only = q.unread_only.unwrap_or(false);
+    let messages = crate::messaging::list_messages(&handle, unread_only);
+    let payload: Vec<Value> = messages
+        .into_iter()
+        .map(|m| {
+            let formatted = m.to_injection_block();
+            json!({
+                "id":          m.id.to_string(),
+                "from_palace": m.from_palace,
+                "to_palace":   m.to_palace,
+                "purpose":     m.purpose,
+                "sent_at":     m.sent_at.to_rfc3339(),
+                "read":        m.read,
+                "content":     m.content,
+                "formatted":   formatted,
+            })
+        })
+        .collect();
+    Ok(Json(json!(payload)))
+}
+
+/// Request body for `POST /api/v1/messages`.
+///
+/// Why: the send path takes the same four fields whether invoked from MCP,
+/// CLI, or HTTP; sharing the JSON shape keeps callers interchangeable.
+/// What: `to_palace`, `purpose`, `content` are required; `from_palace`
+/// defaults to the server's `--palace` default if set, otherwise to
+/// `<unknown>` (sender SHOULD set it explicitly; the CLI does cwd
+/// derivation client-side so the daemon stays project-agnostic).
+/// Test: `messages_endpoint_round_trip`.
+#[derive(Deserialize)]
+struct SendMessageBody {
+    to_palace: String,
+    purpose: String,
+    content: String,
+    #[serde(default)]
+    from_palace: Option<String>,
+}
+
+/// `POST /api/v1/messages` — deliver an inter-project message.
+///
+/// Why: lets non-MCP callers (the `trusty-memory send-message` CLI, future
+/// remote callers) put messages on a recipient palace's queue. Mirrors the
+/// MCP `memory_send_message` tool exactly so they stay in lockstep.
+/// What: writes a tagged drawer into the recipient palace via
+/// [`crate::messaging::send_message_to_palace`]. Returns
+/// `{drawer_id, from_palace, to_palace, purpose, status: "sent"}` on success.
+/// Test: `messages_endpoint_round_trip`.
+async fn send_message_handler(
+    State(state): State<AppState>,
+    Json(body): Json<SendMessageBody>,
+) -> Result<Json<Value>, ApiError> {
+    let from_palace = body
+        .from_palace
+        .or_else(|| state.default_palace.clone())
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let drawer_id = crate::messaging::send_message_to_palace(
+        &state.registry,
+        &state.data_root,
+        &from_palace,
+        &body.to_palace,
+        &body.purpose,
+        body.content,
+    )
+    .await
+    .map_err(|e| ApiError::internal(format!("send_message: {e:#}")))?;
+    // Emit a drawer-added SSE event so the dashboard activity feed shows
+    // the new message immediately.
+    let drawer_count = open_handle(&state, &body.to_palace)
+        .map(|h| h.drawers.read().len())
+        .unwrap_or(0);
+    state.emit(DaemonEvent::DrawerAdded {
+        palace_id: body.to_palace.clone(),
+        palace_name: body.to_palace.clone(),
+        drawer_count,
+        timestamp: chrono::Utc::now(),
+        content_preview: format!("[msg from {from_palace}] {}", body.purpose),
+    });
+    Ok(Json(json!({
+        "drawer_id": drawer_id.to_string(),
+        "from_palace": from_palace,
+        "to_palace": body.to_palace,
+        "purpose": body.purpose,
+        "status": "sent",
+    })))
+}
+
+/// Request body for `POST /api/v1/messages/mark_read`.
+///
+/// Why: the SessionStart hook needs an explicit, idempotent ack so two
+/// concurrent sessions starting on the same palace don't double-deliver.
+/// What: identifies a single message by `(palace, drawer_id)`.
+/// Test: `messages_endpoint_round_trip`.
+#[derive(Deserialize)]
+struct MarkReadBody {
+    palace: String,
+    drawer_id: String,
+}
+
+/// `POST /api/v1/messages/mark_read` — atomically flip a message's read flag.
+///
+/// Why: separating ack from list lets the receiver atomically retire
+/// exactly the messages it printed, even when other writers are landing
+/// new messages in the same palace.
+/// What: parses the drawer id, calls
+/// [`crate::messaging::mark_message_read`], and returns `{flipped: bool}`
+/// where `flipped == true` iff this call was the one that flipped the flag
+/// (returning `false` is fine — it means the drawer was already read or
+/// has been concurrently removed; either way no further work is needed).
+/// Test: `messages_endpoint_round_trip`.
+async fn mark_message_read_handler(
+    State(state): State<AppState>,
+    Json(body): Json<MarkReadBody>,
+) -> Result<Json<Value>, ApiError> {
+    let uuid = Uuid::parse_str(&body.drawer_id)
+        .map_err(|_| ApiError::bad_request("drawer_id must be a UUID"))?;
+    let handle = open_handle(&state, &body.palace)?;
+    let flipped = crate::messaging::mark_message_read(&handle, uuid)
+        .await
+        .map_err(|e| ApiError::internal(format!("mark_read: {e:#}")))?;
+    Ok(Json(json!({"flipped": flipped})))
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -3681,6 +3847,142 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Why: issue #99 — the HTTP surface for inter-project messaging is what
+    /// `trusty-memory send-message` and `trusty-memory inbox-check` both
+    /// drive. We pin the round-trip (send → list-unread → mark-read →
+    /// list-empty) so a future refactor cannot accidentally break either
+    /// CLI without a failing test.
+    /// What: pre-creates the recipient palace, POSTs a message, asserts
+    /// `unread_only=true` returns exactly one entry with the right
+    /// envelope fields, POSTs to mark_read, asserts the unread inbox is
+    /// now empty, and confirms the audit view (`unread_only=false`) still
+    /// surfaces the read message.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn messages_endpoint_round_trip() {
+        let state = test_state();
+        let palace = trusty_common::memory_core::Palace {
+            id: PalaceId::new("msg-test"),
+            name: "msg-test".to_string(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: state.data_root.join("msg-test"),
+        };
+        state
+            .registry
+            .create_palace(&state.data_root, palace)
+            .expect("create_palace");
+        let app = router().with_state(state);
+
+        // POST /api/v1/messages — send.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/messages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "to_palace":   "msg-test",
+                            "from_palace": "sender-palace",
+                            "purpose":     "task",
+                            "content":     "please refresh schema"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let send_resp: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(send_resp["status"], "sent");
+        let drawer_id = send_resp["drawer_id"]
+            .as_str()
+            .expect("drawer_id")
+            .to_string();
+
+        // GET unread inbox.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/messages?palace=msg-test&unread_only=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let list: Vec<Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["id"], drawer_id);
+        assert_eq!(list[0]["from_palace"], "sender-palace");
+        assert_eq!(list[0]["to_palace"], "msg-test");
+        assert_eq!(list[0]["purpose"], "task");
+        assert_eq!(list[0]["content"], "please refresh schema");
+        assert_eq!(list[0]["read"], false);
+        assert!(list[0]["formatted"]
+            .as_str()
+            .unwrap()
+            .contains("sender-palace"));
+
+        // POST mark_read.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/messages/mark_read")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"palace": "msg-test", "drawer_id": drawer_id}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 1024).await.unwrap();
+        let mark: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(mark["flipped"], true);
+
+        // GET unread again — empty.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/messages?palace=msg-test&unread_only=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let list: Vec<Value> = serde_json::from_slice(&bytes).unwrap();
+        assert!(list.is_empty(), "inbox cleared after mark_read");
+
+        // GET history (unread_only=false) — still has the message, now read.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/messages?palace=msg-test&unread_only=false")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let history: Vec<Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["read"], true);
     }
 
     /// Why: The chat assistant's tool surface is part of the public API — any

@@ -16,8 +16,10 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
+use trusty_memory::commands::inbox_check::handle_inbox_check;
 use trusty_memory::commands::migrate::{handle_migrate, MigrateTarget};
 use trusty_memory::commands::prompt_context::handle_prompt_context;
+use trusty_memory::commands::send_message::handle_send_message;
 use trusty_memory::commands::service::{handle_service, ServiceAction};
 use trusty_memory::commands::setup::handle_setup;
 use trusty_memory::commands::start::handle_start;
@@ -168,22 +170,51 @@ enum Command {
         target: MonitorTarget,
     },
 
-    /// Re-run auto-KG extraction across every drawer in a palace.
+    /// Send an inter-project message to another palace (issue #99).
     ///
-    /// Why: Issue #97 — `memory_remember` now extracts triples on write,
-    /// but existing palaces sit at zero auto-extracted triples until
-    /// back-filled. `kg-rebuild` walks every drawer and re-asserts the
-    /// heuristic triples so the visual graph view is immediately useful.
-    /// What: Loads palaces from disk, processes each palace (or just one
-    /// when `--palace` is supplied), and prints a per-palace summary plus
-    /// an aggregate total. Failures on individual asserts are logged but
-    /// never abort the run.
-    /// Test: `commands::kg_rebuild::tests::kg_rebuild_processes_all_drawers`.
-    #[command(name = "kg-rebuild")]
-    KgRebuild {
-        /// Restrict the rebuild to a single palace id. When omitted, every
-        /// palace under the data root is processed.
-        #[arg(long, value_name = "ID")]
+    /// Why: replaces the Python `/mpm-message` skill with a trusty-memory
+    /// native primitive. Writes a tagged drawer into the recipient palace;
+    /// the recipient's SessionStart hook picks it up via `inbox-check`.
+    ///
+    /// Example: `trusty-memory send-message --to claude-mpm --purpose task \
+    ///           --content "Please refresh the messaging.db schema"`.
+    #[command(name = "send-message")]
+    SendMessage {
+        /// Recipient palace id (repo slug). Required.
+        #[arg(long, value_name = "PALACE")]
+        to: String,
+
+        /// Free-text purpose / category (e.g. `task`, `notify`, `reply`).
+        #[arg(long, value_name = "PURPOSE")]
+        purpose: String,
+
+        /// Message body. Plain text; rendered into the recipient session as
+        /// a Markdown block.
+        #[arg(long, value_name = "TEXT")]
+        content: String,
+
+        /// Sender palace id (defaults to the cwd-derived slug).
+        #[arg(long, value_name = "PALACE")]
+        from: Option<String>,
+    },
+
+    /// Pick up unread inter-project messages for the calling project
+    /// (issue #99).
+    ///
+    /// Why: installed as a Claude Code `SessionStart` hook by
+    /// `trusty-memory setup`. Reads the receiver palace's unread messages,
+    /// prints them as Markdown to stdout (Claude Code injects stdout as
+    /// session context), and marks them read via the daemon's HTTP API.
+    /// Every failure path degrades to silence so a slow daemon never blocks
+    /// session start.
+    ///
+    /// `--palace` overrides the cwd-derived slug; useful for test rigs and
+    /// for projects whose repo basename does not match their preferred
+    /// palace name.
+    #[command(name = "inbox-check")]
+    InboxCheck {
+        /// Receiver palace id (defaults to cwd-derived repo slug).
+        #[arg(long, value_name = "PALACE")]
         palace: Option<String>,
     },
 }
@@ -261,9 +292,13 @@ async fn main() -> Result<()> {
         Command::Service { action } => handle_service(&action),
         Command::Doctor => trusty_memory::commands::doctor::handle_doctor().await,
         Command::Monitor { target } => run_monitor(target).await,
-        Command::KgRebuild { palace } => {
-            trusty_memory::commands::kg_rebuild::handle_kg_rebuild(palace).await
-        }
+        Command::SendMessage {
+            to,
+            purpose,
+            content,
+            from,
+        } => handle_send_message(to, purpose, content, from).await,
+        Command::InboxCheck { palace } => handle_inbox_check(palace).await,
     }
 }
 
@@ -335,16 +370,6 @@ async fn run_serve(
     // palace_create, load_palaces_from_disk) pointed at the same place.
     let data_dir = trusty_common::resolve_data_dir("trusty-memory")?;
     let data_root = resolve_palace_registry_dir(data_dir);
-
-    // Apply one-shot, idempotent on-disk migrations before any in-memory
-    // registry hydration so subsequent `load_palaces_from_disk` calls see the
-    // updated metadata. Currently this rewrites the default `localLLM`
-    // palace's display name to "User Memories" when the legacy literal is
-    // still present (issue #98). Failures here are logged but do not abort
-    // startup — a single bad migration must not take the daemon down.
-    if let Err(e) = trusty_memory::commands::migrations::migrate_default_palace_name(&data_root) {
-        tracing::warn!("default-palace name migration skipped: {e:#}");
-    }
 
     // Determine mode: `--stdio` wins (explicit MCP stdio), `--http <addr>`
     // binds that exact address, otherwise we bind dynamically (the launchd

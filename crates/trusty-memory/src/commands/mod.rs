@@ -10,11 +10,11 @@
 //! Test: Each submodule carries its own unit tests.
 
 pub mod doctor;
-pub mod kg_rebuild;
+pub mod inbox_check;
 pub mod migrate;
-pub mod migrations;
 pub mod monitor;
 pub mod prompt_context;
+pub mod send_message;
 pub mod service;
 pub mod setup;
 pub mod start;

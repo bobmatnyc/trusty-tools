@@ -95,6 +95,43 @@
   }
 
   /**
+   * Why (issue #99): inter-project messages are stored as drawers carrying
+   * a `msg:v1` marker tag plus `msg:purpose=…` and `msg:read=…` namespaced
+   * tags. Rendering each of those as a raw tag bubble is noisy; we surface
+   * a single coloured "Message" badge instead and hide the namespaced
+   * tags from the regular tag list.
+   * What: returns `{isMessage, purpose, read}` for a drawer; defaults to
+   * `{isMessage: false}` when the marker tag is absent.
+   * Test: badgeOf({tags:["msg:v1","msg:purpose=task","msg:read=false"]}) ===
+   *       {isMessage:true, purpose:"task", read:false}.
+   */
+  function messageBadge(d) {
+    const tags = d?.tags || [];
+    if (!tags.some((t) => t === 'msg:v1')) return { isMessage: false };
+    const get = (prefix) => {
+      const m = tags.find((t) => t.startsWith(prefix));
+      return m ? m.slice(prefix.length) : null;
+    };
+    return {
+      isMessage: true,
+      purpose: get('msg:purpose=') || 'message',
+      from: get('msg:from=') || '',
+      read: (get('msg:read=') || 'false').toLowerCase() === 'true',
+    };
+  }
+
+  /**
+   * Why: filter the namespaced `msg:*` tags out of the regular tag list so
+   * the message badge is the single source of truth for message metadata.
+   * What: returns the original tags minus anything matching the `msg:*`
+   * convention from issue #99.
+   * Test: visibleTags(["foo","msg:v1","msg:read=true"]) === ["foo"].
+   */
+  function visibleTags(tags) {
+    return (tags || []).filter((t) => !t.startsWith('msg:'));
+  }
+
+  /**
    * Why: Auto-registered palaces store their source path in `description`
    * as "Auto-registered from <path>"; the basename of that path is the
    * project name, which is the natural grouping key for operators.
@@ -400,6 +437,7 @@
             </span>
           </div>
           {#each drawers[p.id].items as d (d.id)}
+            {@const badge = messageBadge(d)}
             <div class="drawer-row">
               <span class="tree-icon">·</span>
               <div class="drawer-body">
@@ -411,7 +449,15 @@
                       style="width: {Math.round((d.importance ?? 0) * 100)}%"
                     ></span>
                   </span>
-                  {#each d.tags || [] as tag}
+                  {#if badge.isMessage}
+                    <span
+                      class="msg-badge {badge.read ? 'msg-read' : 'msg-unread'}"
+                      title={badge.from ? `From ${badge.from} • ${badge.read ? 'read' : 'unread'}` : ''}
+                    >
+                      {badge.read ? '✓ msg' : '✉ msg'} · {badge.purpose}
+                    </span>
+                  {/if}
+                  {#each visibleTags(d.tags) as tag}
                     <span class="tag">{tag}</span>
                   {/each}
                 </div>
@@ -582,6 +628,28 @@
     gap: var(--trusty-space-2);
     margin-top: 4px;
     flex-wrap: wrap;
+  }
+  /* Issue #99: inter-project messaging badge. Two colour variants signal
+     unread vs read at a glance; the title attribute carries the full
+     sender / read context. */
+  .msg-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  .msg-unread {
+    background: rgba(255, 196, 0, 0.18);
+    color: #b56a00;
+    border: 1px solid rgba(255, 196, 0, 0.35);
+  }
+  .msg-read {
+    background: rgba(120, 120, 120, 0.18);
+    color: var(--trusty-text-muted, #6b7280);
+    border: 1px solid rgba(120, 120, 120, 0.25);
   }
   .tree-note {
     padding: var(--trusty-space-2) var(--trusty-space-5) var(--trusty-space-2) 44px;
