@@ -241,6 +241,21 @@ pub fn corpus_redb_path(index_id: &str) -> Result<PathBuf> {
     Ok(index_data_dir(index_id)?.join("index.redb"))
 }
 
+/// Path to the per-index schema-version stamp file (issue #179).
+///
+/// Why: the `trusty-common::migrations` runner persists the applied
+/// `SchemaVersion` next to the index data so warm-boot can decide whether
+/// the JSON → redb migration has already run. Centralising the layout here
+/// keeps the stamp adjacent to `index.redb` / `chunks.json` and ensures the
+/// persistence loader and the migration registry agree on one path.
+/// What: returns `<data_dir>/indexes/<id>/schema_version.json`.
+/// Test: covered indirectly by `persistence_loader` integration tests; the
+/// file-stamp round-trip itself is unit-tested in
+/// `trusty_common::migrations::file_stamp`.
+pub fn schema_version_path(index_id: &str) -> Result<PathBuf> {
+    Ok(index_data_dir(index_id)?.join("schema_version.json"))
+}
+
 /// Path to the staging redb corpus written during a `--force` reindex
 /// (issue #28, Phase 4).
 ///

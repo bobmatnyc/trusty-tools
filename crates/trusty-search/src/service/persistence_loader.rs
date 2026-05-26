@@ -17,10 +17,15 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use trusty_common::migrations::{
+    file_stamp::{read_version_from_file, write_version_to_file},
+    MigrationRunner, SchemaVersion,
+};
+
 use crate::core::{
     corpus::CorpusStore,
     embed::Embedder,
-    indexer::CodeIndexer,
+    indexer::{migrations::JsonCorpusToRedbMigration, CodeIndexer},
     store::{UsearchStore, VectorStore},
 };
 
@@ -66,48 +71,116 @@ pub async fn build_indexer_with_persisted_state(
 }
 
 /// Restore the chunk corpus for `indexer`, preferring the redb store and
-/// falling back to the legacy `chunks.json` snapshot (issue #28).
+/// falling back to the legacy `chunks.json` snapshot via the shared
+/// `trusty-common::migrations` runner (issues #28, #179).
 ///
 /// Why: redb is the new source of truth, but daemons upgraded in place have a
-/// populated `chunks.json` and an empty `index.redb`. This function tries redb
-/// first; on an empty redb corpus it reads the JSON snapshot and then seeds
-/// redb from it so every subsequent restart uses the fast path.
-/// What: `load_chunks_from_redb` → (if 0 chunks) `load_chunks_from_disk` +
-/// `migrate_corpus_to_redb`. Either restore path rebuilds BM25 + the symbol
-/// graph as a side effect.
-/// Test: covered by the corpus roundtrip + migration integration tests.
+/// populated `chunks.json` and an empty `index.redb`. The migration kernel
+/// owns the ordering — we always try redb first (the fast path) and only run
+/// the legacy-JSON step when redb is empty *and* the on-disk schema stamp
+/// hasn't already recorded that the migration ran. The stamp is written
+/// after every successful migration step so subsequent boots skip the JSON
+/// probe entirely.
+/// What: tries `load_chunks_from_redb` first; on a populated redb corpus
+/// stamps the schema (so legacy `chunks.json` becomes inert) and returns.
+/// On an empty redb the [`MigrationRunner`] dispatches
+/// [`JsonCorpusToRedbMigration`], which reads the JSON snapshot and seeds
+/// redb. The runner writes the schema stamp after each successful step.
+/// Test: covered by the corpus roundtrip + migration integration tests; the
+/// runner itself is unit-tested in `trusty-common::migrations`.
 async fn restore_corpus(indexer: &mut CodeIndexer, index_id: &str) {
     // Primary path: redb durable corpus.
     match indexer.load_chunks_from_redb().await {
         Ok(n) if n > 0 => {
             tracing::info!("warm-boot: restored {n} chunks for index '{index_id}' from redb");
+            // Ensure the schema stamp is bumped past the JSON → redb step so
+            // a stray `chunks.json` left over from the legacy build is never
+            // re-read on the next boot.
+            stamp_if_unversioned(index_id);
             return;
         }
-        Ok(_) => {} // empty redb — fall through to the JSON migration branch
+        Ok(_) => {} // empty redb — fall through to the migration runner.
         Err(e) => tracing::warn!(
             "warm-boot: redb corpus load failed for '{index_id}' ({e}) — \
-             trying legacy chunks.json"
+             trying registered migrations"
         ),
     }
 
-    // Fallback / migration path: legacy chunks.json snapshot.
-    match persistence::chunks_path(index_id) {
-        Ok(path) => match indexer.load_chunks_from_disk(&path).await {
-            Ok(n) if n > 0 => {
-                tracing::info!(
-                    "warm-boot: restored {n} chunks for index '{index_id}' from legacy {} — \
-                     migrating to redb",
-                    path.display()
-                );
-                // Seed redb so the next restart uses the fast path.
-                indexer.migrate_corpus_to_redb().await;
-            }
-            Ok(_) => {} // empty / missing — genuine first-run case
-            Err(e) => tracing::warn!(
-                "warm-boot: could not load chunks for '{index_id}' ({e}) — starting empty"
-            ),
-        },
-        Err(e) => tracing::warn!("cannot resolve chunks path for '{index_id}': {e}"),
+    // Migration runner path (issue #179): dispatches the legacy JSON →
+    // redb migration when the on-disk schema stamp says it hasn't yet run.
+    run_migrations(indexer, index_id);
+}
+
+/// Dispatch the trusty-search migration runner for one index.
+///
+/// Why: lifted into its own function so the redb-empty branch in
+/// [`restore_corpus`] and any future "force re-migrate" admin command can
+/// share one entry point. Keeps the runner's stamp file path resolution
+/// and error logging in one place.
+/// What: reads the current stamp via `read_version_from_file`, instantiates
+/// the runner with [`JsonCorpusToRedbMigration`], and runs it against the
+/// indexer. Failures are logged but never propagated — a missing
+/// `chunks.json` is the genuine first-boot case and yields an empty corpus.
+/// Test: covered by the existing migration integration tests.
+fn run_migrations(indexer: &mut CodeIndexer, index_id: &str) {
+    let stamp_path = match persistence::schema_version_path(index_id) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("cannot resolve schema version path for '{index_id}': {e}");
+            return;
+        }
+    };
+    let current = match read_version_from_file(&stamp_path) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                "warm-boot: failed to read schema stamp at {} ({e}) — \
+                 treating as UNVERSIONED",
+                stamp_path.display()
+            );
+            SchemaVersion::UNVERSIONED
+        }
+    };
+    let runner = MigrationRunner::new(vec![Box::new(JsonCorpusToRedbMigration)]);
+    if let Err(e) = runner.run(indexer, current, |v| write_version_to_file(&stamp_path, v)) {
+        tracing::warn!(
+            "warm-boot: migration runner failed for '{index_id}' ({e}) — \
+             starting with whatever state was restored"
+        );
+    }
+}
+
+/// Stamp the schema as fully migrated if the on-disk stamp is currently
+/// UNVERSIONED.
+///
+/// Why: the redb-populated branch in [`restore_corpus`] short-circuits
+/// without invoking the runner. We still want the stamp to advance so a
+/// future migration with a higher `from_version` runs cleanly, and so a
+/// stray legacy `chunks.json` is never reprocessed. Writing only when the
+/// stamp is missing/UNVERSIONED preserves any version that a previous
+/// runner write recorded.
+/// What: best-effort — read the stamp, and if it is UNVERSIONED, write the
+/// current `TRUSTY_SEARCH_SCHEMA_TARGET`. A failure is logged at WARN.
+/// Test: covered indirectly via the corpus roundtrip integration tests.
+fn stamp_if_unversioned(index_id: &str) {
+    use crate::core::indexer::migrations::TRUSTY_SEARCH_SCHEMA_TARGET;
+
+    let stamp_path = match persistence::schema_version_path(index_id) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("cannot resolve schema version path for '{index_id}': {e}");
+            return;
+        }
+    };
+    let current = read_version_from_file(&stamp_path).unwrap_or(SchemaVersion::UNVERSIONED);
+    if current >= TRUSTY_SEARCH_SCHEMA_TARGET {
+        return;
+    }
+    if let Err(e) = write_version_to_file(&stamp_path, TRUSTY_SEARCH_SCHEMA_TARGET) {
+        tracing::warn!(
+            "warm-boot: failed to bump schema stamp for '{index_id}' at {} ({e})",
+            stamp_path.display()
+        );
     }
 }
 

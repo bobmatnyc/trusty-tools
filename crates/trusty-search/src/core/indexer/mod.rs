@@ -39,6 +39,7 @@ pub(crate) mod archive;
 pub(crate) mod docs_penalty;
 mod files;
 mod ingest;
+pub(crate) mod migrations;
 mod persist;
 mod search;
 
