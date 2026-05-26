@@ -1,14 +1,17 @@
 //! CLI entry point for the `trusty-memory` binary.
 //!
 //! Why: ship a thin clap-to-handler shim so users can `cargo install
-//! trusty-memory` and invoke either `trusty-memory serve` (the MCP stdio
-//! server consumed by Claude Code) or `trusty-memory migrate kuzu-memory`
-//! (which rewrites Claude settings files that still reference the legacy
-//! kuzu-memory MCP server). All real logic lives in the library and the
-//! `commands::migrate` module — this file does CLI parsing and dispatch only.
+//! trusty-memory` and invoke `trusty-memory serve` (the HTTP/SSE daemon
+//! consumed by Claude Code via the `trusty-memory-mcp-bridge` companion
+//! binary) or `trusty-memory migrate kuzu-memory` (which rewrites Claude
+//! settings files that still reference the legacy kuzu-memory MCP server).
+//! All real logic lives in the library and the `commands::migrate` module —
+//! this file does CLI parsing and dispatch only.
 //! What: defines a `clap::Parser` with `serve` and `migrate` subcommands.
-//! `serve` defers to `trusty_memory::run_stdio` (or `run_http` when `--http`
-//! is supplied); `migrate` defers to `commands::migrate::handle_migrate`.
+//! `serve` defers to `trusty_memory::run_http` / `run_http_dynamic`;
+//! Claude Code talks to the daemon through the `trusty-memory-mcp-bridge`
+//! stdio-to-UDS pipe (PR #149). `migrate` defers to
+//! `commands::migrate::handle_migrate`.
 //! Test: `cargo run -p trusty-memory -- --help` lists both subcommands.
 //! `cargo run -p trusty-memory -- migrate kuzu-memory --dry-run` exercises
 //! the migrate path end-to-end without modifying any files.
@@ -24,7 +27,7 @@ use trusty_memory::commands::service::{handle_service, ServiceAction};
 use trusty_memory::commands::setup::handle_setup;
 use trusty_memory::commands::start::handle_start;
 use trusty_memory::commands::stop::handle_stop;
-use trusty_memory::{resolve_palace_registry_dir, run_http, run_http_dynamic, run_stdio, AppState};
+use trusty_memory::{resolve_palace_registry_dir, run_http, run_http_dynamic, AppState};
 
 /// Top-level CLI for `trusty-memory`.
 #[derive(Debug, Parser)]
@@ -69,34 +72,32 @@ enum Command {
     /// Run the daemon.
     ///
     /// Default mode is HTTP/SSE with dynamic port selection (7070..=7079, OS
-    /// fallback). Without `--stdio` or `--foreground`, `serve` self-spawns a
-    /// detached background daemon (alias for `start`) and returns immediately
-    /// so the parent shell gets its prompt back. Pass `--foreground` to keep
-    /// the daemon in the foreground (used internally by `start` to host the
-    /// actual HTTP server, and by launchd / systemd). Pass `--http <ADDR>` to
-    /// bind a specific address, or `--stdio` to speak MCP over stdin/stdout
-    /// for direct Claude Code integration.
+    /// fallback). Without `--foreground`, `serve` self-spawns a detached
+    /// background daemon (alias for `start`) and returns immediately so the
+    /// parent shell gets its prompt back. Pass `--foreground` to keep the
+    /// daemon in the foreground (used internally by `start` to host the
+    /// actual HTTP server, and by launchd / systemd). Pass `--http <ADDR>`
+    /// to bind a specific address.
+    ///
+    /// Claude Code integration: install the `trusty-memory-mcp-bridge`
+    /// binary into your `.mcp.json` — it pipes stdio between Claude Code
+    /// and the daemon over a Unix domain socket (PR #149). The legacy
+    /// `serve --stdio` flag was removed in PR for #150 because it
+    /// deadlocked on the redb exclusive write lock whenever a daemon was
+    /// already running.
     Serve {
-        /// Bind the HTTP/SSE server to a specific address. When omitted (and
-        /// `--stdio` is not set), the daemon binds dynamically.
+        /// Bind the HTTP/SSE server to a specific address. When omitted,
+        /// the daemon binds dynamically.
         #[arg(long, value_name = "ADDR")]
         http: Option<SocketAddr>,
 
-        /// Speak MCP over stdin/stdout instead of binding an HTTP server.
-        ///
-        /// Why: Claude Code launches MCP servers as child processes and
-        /// expects JSON-RPC on stdio. This flag preserves that mode while
-        /// letting the default `serve` invocation run the HTTP daemon.
-        #[arg(long, conflicts_with = "http")]
-        stdio: bool,
-
         /// Run the HTTP daemon in the foreground (do not self-spawn).
         ///
-        /// Why: `serve` without `--stdio` defaults to background mode so the
-        /// trusty-* daemons share a `start` / `serve` UX. Long-running
-        /// supervisors (launchd, systemd, Docker) need a foreground process
-        /// to manage, so they pass `--foreground` to opt out of the spawn.
-        #[arg(long, conflicts_with = "stdio")]
+        /// Why: `serve` defaults to background mode so the trusty-* daemons
+        /// share a `start` / `serve` UX. Long-running supervisors (launchd,
+        /// systemd, Docker) need a foreground process to manage, so they
+        /// pass `--foreground` to opt out of the spawn.
+        #[arg(long)]
         foreground: bool,
 
         /// Bind every MCP tool call to this palace when the caller omits the
@@ -297,10 +298,9 @@ async fn main() -> Result<()> {
         Command::Stop => handle_stop().await,
         Command::Serve {
             http,
-            stdio,
             foreground,
             palace,
-        } => run_serve(http, stdio, foreground, palace, log_buffer).await,
+        } => run_serve(http, foreground, palace, log_buffer).await,
         Command::Migrate {
             target,
             dry_run,
@@ -354,27 +354,28 @@ async fn run_monitor(target: MonitorTarget) -> Result<()> {
     }
 }
 
-/// Dispatch `serve` to either the stdio loop or the HTTP server.
+/// Dispatch `serve` to the HTTP server (background spawn or inline foreground).
 ///
 /// Why: keeps `main` focused on parsing while putting the `AppState`
-/// construction in one place.
+/// construction in one place. Issue #150 removed the legacy `--stdio` flag
+/// — Claude Code now talks to the daemon through the
+/// `trusty-memory-mcp-bridge` binary (PR #149) over a Unix domain socket,
+/// which sidesteps the redb exclusive-lock deadlock that made the in-process
+/// stdio path unusable whenever a long-lived daemon was already running.
 /// What: resolves the palace registry directory (descending into the legacy
 /// `palaces/` subdirectory when present — see `resolve_palace_registry_dir`),
 /// builds an `AppState` rooted there, applies the `--palace` default if any,
-/// re-hydrates every persisted palace, and — on the HTTP path — wires the
-/// issue-#35 `LogBuffer` so `GET /api/v1/logs/tail` serves captured logs. The
-/// stdio path does not need the buffer (no HTTP surface), so it is dropped
-/// there.
+/// re-hydrates every persisted palace, and wires the issue-#35 `LogBuffer`
+/// so `GET /api/v1/logs/tail` serves captured logs.
 /// Test: not unit-tested (process-level entry point); exercised manually via
 /// `cargo run -p trusty-memory -- serve` and the parent integration tests.
 async fn run_serve(
     http: Option<SocketAddr>,
-    stdio: bool,
     foreground: bool,
     palace: Option<String>,
     log_buffer: trusty_common::log_buffer::LogBuffer,
 ) -> Result<()> {
-    // Background self-spawn path: when invoked without `--stdio`, `--http`, or
+    // Background self-spawn path: when invoked without `--http` or
     // `--foreground`, fork a detached copy of ourselves with `serve
     // --foreground` and return immediately. Mirrors `trusty-search start` so
     // the parent shell keeps its prompt and tmux pane closures do not
@@ -382,7 +383,7 @@ async fn run_serve(
     //
     // Supervisors (launchd, systemd, Docker) always pass `--foreground` and
     // stay on the inline path so they can manage the process lifecycle.
-    if !stdio && !foreground && http.is_none() {
+    if !foreground && http.is_none() {
         return trusty_memory::commands::start::handle_start().await;
     }
 
@@ -401,16 +402,6 @@ async fn run_serve(
     // startup — a single bad migration must not take the daemon down.
     if let Err(e) = trusty_memory::commands::migrations::migrate_default_palace_name(&data_root) {
         tracing::warn!("default-palace name migration skipped: {e:#}");
-    }
-
-    // Determine mode: `--stdio` wins (explicit MCP stdio), `--http <addr>`
-    // binds that exact address, otherwise we bind dynamically (the launchd
-    // plist path).
-    if stdio {
-        let state = AppState::new(data_root).with_default_palace(palace);
-        let count = state.load_palaces_from_disk().await?;
-        tracing::info!("Loaded {count} palaces from disk");
-        return run_stdio(state).await;
     }
 
     if let Some(addr) = http {

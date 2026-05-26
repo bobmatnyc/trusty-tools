@@ -3,10 +3,16 @@
 [![crates.io](https://img.shields.io/crates/v/trusty-memory.svg)](https://crates.io/crates/trusty-memory)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Memory palace MCP server (stdio + HTTP/SSE) backed by `usearch` vector store,
-SQLite metadata, and `fastembed` embeddings. Stores and retrieves natural-language
-memories organized into named "palaces" (namespaces), with an optional
-knowledge-graph layer for structured triples.
+Memory palace MCP server (HTTP/SSE + Unix domain socket) backed by `usearch`
+vector store, SQLite metadata, and `fastembed` embeddings. Stores and retrieves
+natural-language memories organized into named "palaces" (namespaces), with an
+optional knowledge-graph layer for structured triples.
+
+Claude Code integration uses the companion `trusty-memory-mcp-bridge` binary
+which speaks stdio MCP and pipes it over the daemon's Unix domain socket.
+The legacy in-process `serve --stdio` flag was removed in issue #150 because
+it deadlocked on redb's exclusive write lock whenever a long-lived daemon
+was already running.
 
 Integrates with Claude Code and any other MCP-aware client as a first-class
 long-term memory backend.
@@ -30,23 +36,24 @@ The installed binary is named `trusty-memory`.
 
 ## Quick Start
 
-### stdio mode (Claude Code integration)
+### Start the daemon
 
 ```bash
 trusty-memory serve
 ```
 
-Reads JSON-RPC 2.0 from stdin, writes responses to stdout. This is the mode
-Claude Code uses.
+By default, `serve` self-spawns a detached background daemon (alias for
+`trusty-memory start`) and returns control to the shell so you keep your
+prompt. The daemon binds HTTP/SSE on a dynamic port in the `7070..=7079`
+range (with OS fallback) and writes the resolved address to its
+discovery file. Pass `--foreground` to keep the daemon inline (used by
+launchd / systemd / Docker), or `--http <ADDR>` to pin a specific address.
 
-### HTTP mode (browser dashboard + REST API)
+### Browser dashboard + REST API
 
-```bash
-trusty-memory serve --port 7880
-```
-
-Binds an HTTP server with the embedded Svelte admin UI at `http://127.0.0.1:7880`
-and a REST API under `/api/v1/`.
+The same `trusty-memory serve` daemon serves the embedded Svelte admin UI
+at the bound address (printed by `trusty-memory monitor web` once the
+daemon is running) and a REST API under `/api/v1/`.
 
 ### Bind to a named palace
 
@@ -61,42 +68,38 @@ call.
 
 ## Claude Code Integration
 
-Add to your project's `.mcp.json` (or `~/.claude/mcp.json` for machine-wide):
+Run `trusty-memory setup` once — it installs the launchd LaunchAgent
+(macOS), pre-warms the embedder cache, and patches every Claude settings
+file it finds with the canonical MCP server entry. The MCP entry points
+at `trusty-memory-mcp-bridge`, a thin stdio-to-UDS pipe (PR #149) that
+Claude Code spawns as a child process. The bridge then connects to the
+long-lived daemon over the Unix domain socket the daemon owns.
+
+If you prefer to edit `.mcp.json` (or `~/.claude/mcp.json`) by hand:
 
 ```json
 {
   "mcpServers": {
     "trusty-memory": {
-      "command": "trusty-memory",
-      "args": ["serve"],
+      "command": "trusty-memory-mcp-bridge",
+      "args": [],
       "env": {}
     }
   }
 }
 ```
 
-To pre-bind a palace so Claude Code never needs to pass `palace` explicitly:
-
-```json
-{
-  "mcpServers": {
-    "trusty-memory": {
-      "command": "trusty-memory",
-      "args": ["serve", "--palace", "my-project"],
-      "env": {}
-    }
-  }
-}
-```
-
-Claude Code auto-discovers `.mcp.json` on project open. The `trusty-memory`
-binary must be on `PATH`.
+Claude Code auto-discovers `.mcp.json` on project open. The
+`trusty-memory-mcp-bridge` binary must be on `PATH` and the daemon must be
+running (started either by `trusty-memory setup`'s LaunchAgent or by
+`trusty-memory start` / `trusty-memory serve`).
 
 ## Available MCP Tools
 
-All 12 tools are exposed via both the stdio MCP server and the HTTP API
-(`/api/v1/`). The `palace` argument is required unless the server was started
-with `--palace <name>`.
+All 12 tools are exposed via both the MCP protocol (over the
+`trusty-memory-mcp-bridge` → UDS path) and the HTTP API (`/api/v1/`). The
+`palace` argument is required unless the server was started with
+`--palace <name>`.
 
 ### Memory tools
 
@@ -265,10 +268,13 @@ Each palace directory contains:
 
 ```
 trusty-memory (this crate)          trusty-memory-core
-  stdio JSON-RPC 2.0 loop  ──────►  PalaceRegistry
-  axum HTTP/SSE server     ──────►  usearch vector index
+  axum HTTP/SSE server     ──────►  PalaceRegistry
+  Unix domain socket       ──────►  usearch vector index
   embedded Svelte UI               SQLite metadata + KG
   12 MCP tools                     fastembed (AllMiniLML6V2Q)
+
+trusty-memory-mcp-bridge (separate binary, PR #149)
+  Claude Code stdio  ◄──pipe──►  trusty-memory UDS
 ```
 
 `trusty-memory-core` owns the storage engine: `usearch` for approximate
@@ -282,11 +288,11 @@ no separate web server or Node.js installation is needed at runtime.
 ## Development
 
 ```bash
-# Build and run
+# Build and run (background daemon, dynamic port)
 cargo run -p trusty-memory -- serve
 
-# Run in HTTP mode
-cargo run -p trusty-memory -- serve --port 7880
+# Run inline on a specific address (foreground, useful for debuggers)
+cargo run -p trusty-memory -- serve --foreground --http 127.0.0.1:7880
 
 # Tests
 cargo test -p trusty-memory

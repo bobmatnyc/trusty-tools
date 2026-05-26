@@ -102,15 +102,26 @@ pub(crate) fn launchd_log_dir() -> Result<std::path::PathBuf> {
 /// and arg vector. Building it in one place keeps them in sync and lets the
 /// shared [`trusty_common::launchd`] module own the XML rendering and the
 /// `launchctl` glue.
+///
+/// 🔴 The args MUST invoke `serve --foreground` rather than bare `serve`.
+/// Plain `serve` self-spawns a detached child and exits 0 (matching
+/// `trusty-search start`'s background-mode behaviour), which launchd
+/// interprets as "service stopped" — it then re-launches the agent in a
+/// tight loop, creating orphan daemon processes and breaking auto-restart
+/// on reboot (issue #132). `--foreground` keeps the HTTP daemon in this
+/// process so launchd supervises the actual daemon PID and `KeepAlive`
+/// works correctly.
+///
 /// What: assembles a [`trusty_common::launchd::LaunchdConfig`] pointing at
-/// the current binary with `serve` as the single argument; uses
-/// `KeepAlive::OnSuccess` so a clean shutdown does not crash-loop. Also
-/// injects `FASTEMBED_CACHE_DIR=$HOME/.cache/fastembed` so the embedder
-/// model download does not try to write into launchd's read-only sandbox
-/// `TMPDIR` (GH #58).
-/// Test: `build_launchd_config_sets_fastembed_cache_dir` asserts the env
-/// var is wired in. End-to-end exercised via `service install` /
-/// `service start`.
+/// the current binary with `serve --foreground` so launchd supervises the
+/// daemon process directly; uses `KeepAlive::OnSuccess` so a clean shutdown
+/// does not crash-loop. Also injects `FASTEMBED_CACHE_DIR=$HOME/.cache/fastembed`
+/// so the embedder model download does not try to write into launchd's
+/// read-only sandbox `TMPDIR` (GH #58).
+/// Test: `build_launchd_config_uses_canonical_shape` asserts the
+/// `--foreground` flag is present (issue #132 regression guard);
+/// `build_launchd_config_sets_fastembed_cache_dir` asserts the env var is
+/// wired in. End-to-end exercised via `service install` / `service start`.
 #[cfg(target_os = "macos")]
 pub(crate) fn build_launchd_config(
     exe: std::path::PathBuf,
@@ -120,7 +131,7 @@ pub(crate) fn build_launchd_config(
     LaunchdConfig {
         label: LAUNCHD_LABEL.to_string(),
         exe_path: exe,
-        args: vec!["serve".to_string()],
+        args: vec!["serve".to_string(), "--foreground".to_string()],
         log_dir,
         keep_alive: KeepAlive::OnSuccess,
         throttle_interval: 10,
@@ -354,8 +365,12 @@ mod tests {
     /// Why: the LaunchdConfig we hand to `trusty_common::launchd` must always
     /// describe the canonical trusty-memory agent (label, args, restart
     /// policy). Drift here corrupts every plist that the binary writes.
+    /// Issue #132 specifically required that the args invoke
+    /// `serve --foreground` — plain `serve` self-spawns and exits 0, which
+    /// launchd interprets as "service stopped" and re-launches in a tight
+    /// loop. This assertion is the regression guard.
     /// What: builds the config with dummy paths and asserts the
-    /// load-bearing fields.
+    /// load-bearing fields, including the `--foreground` flag.
     /// Test: pure construction, no fs side effects.
     #[cfg(target_os = "macos")]
     #[test]
@@ -368,7 +383,13 @@ mod tests {
             PathBuf::from("/tmp/trusty-memory/logs"),
         );
         assert_eq!(cfg.label, LAUNCHD_LABEL);
-        assert_eq!(cfg.args, vec!["serve".to_string()]);
+        assert_eq!(
+            cfg.args,
+            vec!["serve".to_string(), "--foreground".to_string()],
+            "launchd plist must invoke `serve --foreground` (issue #132) so \
+             launchd supervises the daemon PID directly instead of \
+             re-launching the self-spawning parent on every exit"
+        );
         assert_eq!(cfg.keep_alive, KeepAlive::OnSuccess);
         assert_eq!(cfg.throttle_interval, 10);
         // env_vars is allowed to be empty only on hosts without a HOME

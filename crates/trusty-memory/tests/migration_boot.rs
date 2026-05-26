@@ -11,13 +11,18 @@
 //! real binary, lets it boot, and asserts the on-disk `palace.json` was
 //! migrated.
 //!
-//! What: spawn `trusty-memory serve --stdio` against a tempdir-rooted data
-//! directory that already contains a legacy `localLLM` palace
-//! (`name = "localLLM"`). Give the process enough time to run the migration
-//! and complete the initial `load_palaces_from_disk` step, then kill it and
-//! assert `palace.json` now reads `name = "User Memories"`. Re-running the
-//! test path is the idempotency guarantee — re-invoking the binary against
-//! an already-migrated palace must not corrupt or rewrite it.
+//! What: spawn `trusty-memory serve --foreground --http 127.0.0.1:0` against
+//! a tempdir-rooted data directory that already contains a legacy `localLLM`
+//! palace (`name = "localLLM"`). Give the process enough time to run the
+//! migration and complete the initial `load_palaces_from_disk` step, then
+//! kill it and assert `palace.json` now reads `name = "User Memories"`.
+//! Re-running the test path is the idempotency guarantee — re-invoking the
+//! binary against an already-migrated palace must not corrupt or rewrite
+//! it. `--foreground` is required because plain `serve` self-spawns and
+//! exits 0 (see `commands::start`), which would race the kill below.
+//! `--http 127.0.0.1:0` picks an OS-assigned port so concurrent test runs
+//! cannot collide on the historic default 7070. Issue #150 removed the
+//! cheaper `serve --stdio` boot path that this test originally used.
 //!
 //! Test: `cargo test -p trusty-memory --test migration_boot`. Requires Cargo
 //! to have built the binary via `CARGO_BIN_EXE_trusty-memory`.
@@ -75,20 +80,27 @@ fn locate_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_trusty-memory"))
 }
 
-/// Spawn `trusty-memory serve --stdio` against `data_dir`, sleep just long
-/// enough for the migration to run, then kill the child. Returns once the
-/// child is reaped.
+/// Spawn `trusty-memory serve --foreground` against `data_dir`, sleep just
+/// long enough for the migration to run, then kill the child. Returns once
+/// the child is reaped.
 ///
-/// Why: stdio mode is the cheapest boot path — it does no HTTP binding and
-/// no background hydration spawn — so the migration runs and we can tear
-/// down quickly.
-/// What: pipes stdin/stdout/stderr to dev-null equivalents, waits BOOT_WAIT,
-/// then sends SIGKILL via `Child::kill`. Reaps via `wait`.
+/// Why: issue #150 removed the `serve --stdio` flag (the previous cheapest
+/// boot path) because it deadlocked on redb's exclusive write lock whenever
+/// a long-lived daemon was already running. `serve --foreground` is now the
+/// canonical "supervisor-friendly" mode — it does not self-spawn, so the
+/// child PID we kill is the actual daemon. We bind `--http 127.0.0.1:0`
+/// so the OS assigns a free port: concurrent test runs (and any locally
+/// running daemon on the historic 7070) never collide.
+/// What: spawns the binary with `--foreground --http 127.0.0.1:0`, pipes
+/// every stdio to dev-null equivalents, waits BOOT_WAIT, then sends SIGKILL
+/// via `Child::kill`. Reaps via `wait`.
 fn boot_briefly(data_dir: &Path) {
     let bin = locate_binary();
     let mut child = Command::new(&bin)
         .arg("serve")
-        .arg("--stdio")
+        .arg("--foreground")
+        .arg("--http")
+        .arg("127.0.0.1:0")
         .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir)
         // Quiet the daemon — we don't read its output here.
         .env("RUST_LOG", "warn")

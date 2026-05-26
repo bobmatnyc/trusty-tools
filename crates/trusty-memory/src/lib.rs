@@ -1,12 +1,21 @@
-//! MCP server (stdio + HTTP/SSE) for trusty-memory.
+//! MCP server (HTTP/SSE + UDS) for trusty-memory.
 //!
 //! Why: Claude Code and other MCP-aware clients integrate with trusty-memory
 //! through the standardized Model Context Protocol; we expose memory + KG
-//! tools so they can be called by name.
-//! What: Provides `run_stdio` (JSON-RPC 2.0 over stdin/stdout) and `run_http`
-//! (axum HTTP/SSE stub), plus an `AppState` that carries the shared
-//! `PalaceRegistry`, on-disk data root, and a lazily-initialized embedder.
-//! Test: `cargo test -p trusty-memory-mcp` validates handshake + dispatch.
+//! tools so they can be called by name. Claude Code itself speaks stdio,
+//! but the in-process `serve --stdio` path was removed in issue #150
+//! because it deadlocked on the redb exclusive write lock whenever a
+//! long-lived daemon was already running — the canonical stdio integration
+//! is now the `trusty-memory-mcp-bridge` binary (PR #149), which pipes
+//! Claude Code's stdio over a Unix domain socket to the daemon.
+//! What: Provides `run_http` / `run_http_dynamic` / `run_http_on` (axum
+//! HTTP/SSE + REST + UI) and the `transport::uds` module (Unix-domain
+//! socket transport for the MCP bridge), plus an `AppState` that carries
+//! the shared `PalaceRegistry`, on-disk data root, and a lazily-initialized
+//! embedder.
+//! Test: `cargo test -p trusty-memory` validates handshake + dispatch via
+//! the in-process `handle_message` unit tests and the `tests/uds_roundtrip.rs`
+//! end-to-end harness.
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -15,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 use tokio::sync::{broadcast, OnceCell};
 use tracing::info;
-use trusty_common::mcp::{error_codes, initialize_response, Request, Response};
+use trusty_common::mcp::initialize_response;
 use trusty_common::memory_core::embed::FastEmbedder;
 use trusty_common::memory_core::store::ChatSessionStore;
 use trusty_common::memory_core::PalaceRegistry;
@@ -883,63 +892,6 @@ pub async fn handle_message(state: &AppState, msg: Value) -> Value {
             }
         }),
     }
-}
-
-/// Run the MCP stdio JSON-RPC 2.0 server loop.
-///
-/// Why: Claude Code launches MCP servers as child processes and speaks
-/// JSON-RPC over stdin/stdout — this is the primary integration path.
-/// What: Delegates to `trusty_mcp_core::run_stdio_loop`, adapting each
-/// shared `Request` back into the JSON `Value` shape `handle_message`
-/// expects, and translating the returned `Value` into a `Response`.
-/// Notifications (where `handle_message` returns `Value::Null`) become
-/// suppressed responses so the loop emits nothing on the wire.
-/// Test: `handle_message` covers protocol behaviour in unit tests.
-pub async fn run_stdio(state: AppState) -> Result<()> {
-    info!("trusty-memory MCP stdio server starting");
-    let state = Arc::new(state);
-    trusty_common::mcp::run_stdio_loop(move |req: Request| {
-        let state = state.clone();
-        async move {
-            // Re-serialise the Request into the JSON shape handle_message expects.
-            // (handle_message predates the shared types and reads loose Values.)
-            let msg = json!({
-                "jsonrpc": req.jsonrpc.unwrap_or_else(|| "2.0".to_string()),
-                "id": req.id.clone().unwrap_or(Value::Null),
-                "method": req.method,
-                "params": req.params.unwrap_or(Value::Null),
-            });
-            let resp_value = handle_message(&state, msg).await;
-            // handle_message returns Value::Null for notifications.
-            if resp_value.is_null() {
-                return Response::suppressed();
-            }
-            // Otherwise it returns the full JSON-RPC envelope as a Value;
-            // re-encode into the shared Response struct so the loop can serialise.
-            let id = resp_value.get("id").cloned();
-            if let Some(result) = resp_value.get("result").cloned() {
-                Response::ok(id, result)
-            } else if let Some(err) = resp_value.get("error") {
-                let code =
-                    err.get("code")
-                        .and_then(|c| c.as_i64())
-                        .unwrap_or(error_codes::INTERNAL_ERROR as i64) as i32;
-                let message = err
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("internal error")
-                    .to_string();
-                Response::err(id, code, message)
-            } else {
-                Response::err(
-                    id,
-                    error_codes::INTERNAL_ERROR,
-                    "malformed handler response",
-                )
-            }
-        }
-    })
-    .await
 }
 
 /// Preferred starting port for the trusty-memory HTTP daemon.
