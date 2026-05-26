@@ -211,6 +211,24 @@ pub struct ClassifyArgs {
     /// are updated; category, confidence, and method are left untouched.
     #[arg(long)]
     pub backfill_complexity: bool,
+    /// Re-classify commits that already have a `classification_id`.
+    ///
+    /// Without this flag, `tga classify` skips any commit that already
+    /// carries a verdict — useful for incremental runs but a footgun when
+    /// the rule set is updated. With `--force`, every matching commit is
+    /// re-classified and its existing `classifications` row is replaced
+    /// (no orphan rows). Combine with `--since` to bound the rewrite to a
+    /// recent window.
+    #[arg(long, short = 'f', default_value_t = false)]
+    pub force: bool,
+    /// Limit `--force` re-classification to commits whose author
+    /// timestamp is on or after this date (ISO8601: YYYY-MM-DD).
+    ///
+    /// Without `--force`, this flag is ignored — the default flow already
+    /// skips classified rows. When supplied with `--force`, only the
+    /// subset of already-classified commits in the window is rewritten.
+    #[arg(long, value_name = "DATE")]
+    pub since: Option<String>,
 }
 
 /// Arguments for `tga report`.

@@ -53,12 +53,53 @@ pub struct RepoCoverage {
 /// Stage-2 pipeline: classify every unclassified commit currently in the DB.
 pub struct ClassificationPipeline {
     config: Config,
+    /// When `true`, re-classify commits that already carry a verdict.
+    ///
+    /// Defaults to `false` (skip-if-classified). See [`Self::with_force`].
+    force: bool,
+    /// Optional lower bound on `commits.timestamp` (ISO8601: `YYYY-MM-DD`).
+    ///
+    /// Only consulted when `force == true`; without force the default
+    /// "missing-verdict" filter is the only selector. See [`Self::with_since`].
+    since: Option<String>,
 }
 
 impl ClassificationPipeline {
     /// Construct a new pipeline bound to the given config.
     pub fn new(config: Config) -> Self {
-        Self { config }
+        Self {
+            config,
+            force: false,
+            since: None,
+        }
+    }
+
+    /// Re-classify commits even if they already have a `classification_id`.
+    ///
+    /// Why: when the rule set is updated (or a JIRA project mapping is
+    /// added), operators need to retroactively apply the new rules to
+    /// historical data. Without this, the pipeline skips classified rows
+    /// and the new rules never fire on them. Issue #205.
+    /// What: flips the read query from "WHERE classification_id IS NULL" to
+    /// "any commit", and the write-back replaces the existing
+    /// `classifications` row in place (no orphan rows).
+    /// Test: see `pipeline_force_reclassifies_rows` in this module.
+    pub fn with_force(mut self, force: bool) -> Self {
+        self.force = force;
+        self
+    }
+
+    /// Bound `--force` rewrites to commits whose `timestamp` is on or after
+    /// the given ISO8601 date.
+    ///
+    /// Why: full-corpus rewrites are expensive; the common case for the
+    /// retroactive flow is "apply the new rules to the last quarter".
+    /// What: stores the string verbatim; the read query appends a
+    /// `timestamp >= ?` predicate when set. No-op when `force` is `false`.
+    /// Test: covered by the same integration test as `with_force`.
+    pub fn with_since(mut self, since: Option<String>) -> Self {
+        self.since = since;
+        self
     }
 
     /// Execute the pipeline against `db`.
@@ -188,10 +229,17 @@ impl ClassificationPipeline {
         db: &mut Database,
         engine: ClassificationEngine,
     ) -> Result<ClassificationStats> {
-        // 2. Read unclassified commits.
-        let commits = read_unclassified_commits(db)?;
+        // 2. Read candidate commits. The default flow returns only the
+        //    rows that lack a verdict; `--force` widens this to every row
+        //    (optionally bounded by `--since`).
+        let commits = read_candidate_commits(db, self.force, self.since.as_deref())?;
         let total = commits.len();
-        info!(total, "starting classification");
+        info!(
+            total,
+            force = self.force,
+            since = ?self.since,
+            "starting classification"
+        );
 
         if commits.is_empty() {
             return Ok(ClassificationStats::default());
@@ -599,6 +647,13 @@ struct CommitRow {
     message: String,
     is_merge: bool,
     repository: String,
+    /// Pre-existing classification row id, if any.
+    ///
+    /// Populated by [`read_candidate_commits`] for `--force` re-runs so
+    /// the write-back path can UPDATE the existing `classifications` row
+    /// in place instead of inserting an orphan. `None` for first-time
+    /// classification (the default flow).
+    existing_classification_id: Option<i64>,
 }
 
 /// Decide whether a `(category, subcategory)` verdict represents a revert.
@@ -625,22 +680,59 @@ fn is_revert_verdict(category: &str, subcategory: Option<&str>) -> bool {
     false
 }
 
-fn read_unclassified_commits(db: &Database) -> Result<Vec<CommitRow>> {
+/// Read candidates for the classification cascade.
+///
+/// Why: `--force` (issue #205) re-classifies commits that already have a
+/// verdict, optionally bounded by `--since DATE`. The default flow keeps
+/// the historical "skip-if-classified" semantics so incremental runs stay
+/// cheap.
+/// What: builds a SELECT whose WHERE clause toggles based on `force`:
+///
+///   * `!force`               → `WHERE classification_id IS NULL` (legacy)
+///   * `force, since = None`  → no WHERE (every commit)
+///   * `force, since = Some`  → `WHERE timestamp >= ?`
+///
+/// Test: covered by `read_candidate_commits_*` unit tests and the
+/// `pipeline_force_*` integration tests in this module.
+fn read_candidate_commits(
+    db: &Database,
+    force: bool,
+    since: Option<&str>,
+) -> Result<Vec<CommitRow>> {
+    use rusqlite::params_from_iter;
+    use rusqlite::types::Value;
+
+    let (sql, params): (&str, Vec<Value>) = match (force, since) {
+        (false, _) => (
+            "SELECT id, sha, message, is_merge, repository, classification_id \
+             FROM commits WHERE classification_id IS NULL",
+            Vec::new(),
+        ),
+        (true, None) => (
+            "SELECT id, sha, message, is_merge, repository, classification_id \
+             FROM commits",
+            Vec::new(),
+        ),
+        (true, Some(date)) => (
+            "SELECT id, sha, message, is_merge, repository, classification_id \
+             FROM commits WHERE timestamp >= ?1",
+            vec![Value::Text(date.to_string())],
+        ),
+    };
+
     let mut stmt = db
         .connection()
-        .prepare(
-            "SELECT id, sha, message, is_merge, repository \
-             FROM commits WHERE classification_id IS NULL",
-        )
+        .prepare(sql)
         .map_err(crate::core::TgaError::from)?;
     let rows = stmt
-        .query_map([], |row| {
+        .query_map(params_from_iter(params.iter()), |row| {
             Ok(CommitRow {
                 id: row.get(0)?,
                 sha: row.get(1)?,
                 message: row.get(2)?,
                 is_merge: row.get::<_, i64>(3)? != 0,
                 repository: row.get(4)?,
+                existing_classification_id: row.get(5)?,
             })
         })
         .map_err(crate::core::TgaError::from)?;
@@ -672,6 +764,18 @@ fn write_results(
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )
             .map_err(crate::core::TgaError::from)?;
+        // Issue #205: when `--force` reclassifies a commit that already
+        // has a `classifications` row, UPDATE it in place rather than
+        // inserting a fresh row and orphaning the old one. This keeps
+        // the table free of dangling rows that no commit points at.
+        let mut update_existing_classification = tx
+            .prepare(
+                "UPDATE classifications \
+                 SET category = ?1, subcategory = ?2, ticket_id = ?3, \
+                     confidence = ?4, method = ?5, complexity = ?6 \
+                 WHERE id = ?7",
+            )
+            .map_err(crate::core::TgaError::from)?;
         // The UPDATE also sets `is_revert` so the column stays in sync with
         // the verdict category. Without this branch, the column remains 0
         // forever even when classification correctly identified a revert
@@ -686,17 +790,32 @@ fn write_results(
             .map_err(crate::core::TgaError::from)?;
 
         for (commit, result) in commits.iter().zip(results.iter()) {
-            insert_classification
-                .execute(params![
-                    result.category,
-                    result.subcategory,
-                    result.ticket_id,
-                    result.confidence,
-                    result.method.as_str(),
-                    result.complexity.map(|v| v as i64),
-                ])
-                .map_err(crate::core::TgaError::from)?;
-            let classification_id = tx.last_insert_rowid();
+            let classification_id = if let Some(existing) = commit.existing_classification_id {
+                update_existing_classification
+                    .execute(params![
+                        result.category,
+                        result.subcategory,
+                        result.ticket_id,
+                        result.confidence,
+                        result.method.as_str(),
+                        result.complexity.map(|v| v as i64),
+                        existing,
+                    ])
+                    .map_err(crate::core::TgaError::from)?;
+                existing
+            } else {
+                insert_classification
+                    .execute(params![
+                        result.category,
+                        result.subcategory,
+                        result.ticket_id,
+                        result.confidence,
+                        result.method.as_str(),
+                        result.complexity.map(|v| v as i64),
+                    ])
+                    .map_err(crate::core::TgaError::from)?;
+                tx.last_insert_rowid()
+            };
             // Treat `revert` and `rollback` as the canonical revert
             // categories. Match `subcategory` too because some rules attach
             // the revert signal at the subcategory level (e.g. a merge
@@ -814,6 +933,228 @@ mod tests {
             )
             .expect("insert commit");
         db.connection().last_insert_rowid()
+    }
+
+    /// Why: regression guard for the `--force` retroactive flow (issue
+    /// #205). Without `--force`, classified commits are skipped; with
+    /// `--force`, they must be re-classified and the existing
+    /// `classifications` row updated in place (no orphans). The fixture
+    /// pre-seeds a "wrong" verdict that the default ruleset's
+    /// conventional-commit tier will overwrite with the correct one.
+    /// What: seed one commit with a manually-attached classification
+    /// that disagrees with the default rules, run `tga classify --force`,
+    /// assert the row's `classifications` was updated (same id, new
+    /// category) and that no orphan rows were inserted.
+    /// Test: in-memory DB; no LLM.
+    #[tokio::test]
+    async fn pipeline_force_reclassifies_existing_rows_in_place() {
+        let mut db = Database::open_in_memory().expect("db");
+
+        // Pre-seed a (wrong) classification: category "feature" for a
+        // message that the cc-fix rule will correctly classify as
+        // "bugfix" on a force re-run.
+        db.connection()
+            .execute(
+                "INSERT INTO classifications (category, subcategory, confidence, method) \
+                 VALUES ('feature', NULL, 0.5, 'regex_rule')",
+                [],
+            )
+            .expect("insert classification");
+        let pre_cls_id = db.connection().last_insert_rowid();
+        let commit_id = insert_commit(&db, "sha-fix-1", "fix: handle null user");
+        db.connection()
+            .execute(
+                "UPDATE commits SET classification_id = ?1 WHERE id = ?2",
+                params![pre_cls_id, commit_id],
+            )
+            .expect("link cls");
+
+        // Default flow (no force) should skip — verdict stays as 'feature'.
+        let pipeline_no_force = ClassificationPipeline::new(Config::default());
+        let engine =
+            ClassificationEngine::new(default_rules(), ClassificationEngineConfig::default())
+                .expect("engine");
+        pipeline_no_force
+            .run_with_engine(&mut db, engine)
+            .await
+            .expect("default run");
+        let still_feature: String = db
+            .connection()
+            .query_row(
+                "SELECT cl.category FROM classifications cl \
+                 JOIN commits c ON c.classification_id = cl.id WHERE c.sha = 'sha-fix-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query 1");
+        assert_eq!(
+            still_feature, "feature",
+            "default flow must NOT re-classify already-classified commits"
+        );
+
+        // --force flips the verdict to 'bugfix' via the cc-fix rule.
+        let pipeline_forced = ClassificationPipeline::new(Config::default()).with_force(true);
+        let engine =
+            ClassificationEngine::new(default_rules(), ClassificationEngineConfig::default())
+                .expect("engine");
+        pipeline_forced
+            .run_with_engine(&mut db, engine)
+            .await
+            .expect("force run");
+
+        // Verdict updated (and joined via the same row id — no orphan).
+        let (new_cat, new_cls_id): (String, i64) = db
+            .connection()
+            .query_row(
+                "SELECT cl.category, cl.id FROM classifications cl \
+                 JOIN commits c ON c.classification_id = cl.id WHERE c.sha = 'sha-fix-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query 2");
+        assert_eq!(new_cat, "bugfix");
+        assert_eq!(
+            new_cls_id, pre_cls_id,
+            "force must update in place, not orphan"
+        );
+
+        let total_rows: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM classifications", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(
+            total_rows, 1,
+            "force must not duplicate the classifications row"
+        );
+    }
+
+    /// Why: `--since` bounds the scope of `--force` to a recent window
+    /// so operators can rewrite only the last quarter (or any window)
+    /// without re-classifying years of history.
+    /// What: seed two commits — one in 2023, one in 2025 — pre-classify
+    /// both as "feature", then run `tga classify --force --since 2025-01-01`
+    /// and assert only the 2025 commit was rewritten.
+    /// Test: in-memory DB; commits.timestamp is ISO8601 string.
+    #[tokio::test]
+    async fn pipeline_force_since_bounds_rewrite_window() {
+        let mut db = Database::open_in_memory().expect("db");
+
+        // Seed two pre-classified rows, then re-date their commits.
+        for (sha, ts) in [
+            ("sha-old", "2023-06-01T00:00:00Z"),
+            ("sha-new", "2025-06-01T00:00:00Z"),
+        ] {
+            db.connection()
+                .execute(
+                    "INSERT INTO classifications (category, confidence, method) \
+                     VALUES ('feature', 0.5, 'regex_rule')",
+                    [],
+                )
+                .expect("insert cls");
+            let cls_id = db.connection().last_insert_rowid();
+            db.connection()
+                .execute(
+                    "INSERT INTO commits (sha, author_name, author_email, timestamp, message, repository, classification_id) \
+                     VALUES (?1, 'a', 'a@x', ?2, 'fix: handle null user', 'r', ?3)",
+                    params![sha, ts, cls_id],
+                )
+                .expect("insert commit");
+        }
+
+        // --force --since 2025-01-01 — only sha-new is in scope.
+        let pipeline = ClassificationPipeline::new(Config::default())
+            .with_force(true)
+            .with_since(Some("2025-01-01".to_string()));
+        let engine =
+            ClassificationEngine::new(default_rules(), ClassificationEngineConfig::default())
+                .expect("engine");
+        pipeline
+            .run_with_engine(&mut db, engine)
+            .await
+            .expect("force+since");
+
+        // sha-new now classified as bugfix; sha-old still feature.
+        let new_cat: String = db
+            .connection()
+            .query_row(
+                "SELECT cl.category FROM classifications cl \
+                 JOIN commits c ON c.classification_id = cl.id WHERE c.sha = 'sha-new'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query new");
+        assert_eq!(new_cat, "bugfix");
+
+        let old_cat: String = db
+            .connection()
+            .query_row(
+                "SELECT cl.category FROM classifications cl \
+                 JOIN commits c ON c.classification_id = cl.id WHERE c.sha = 'sha-old'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query old");
+        assert_eq!(
+            old_cat, "feature",
+            "--since must exclude commits older than the bound"
+        );
+    }
+
+    /// Why: `read_candidate_commits` is the single SQL-builder for the
+    /// pipeline's candidate set; regressions here would silently change
+    /// which commits get re-classified.
+    /// What: probes each of the three branches: default (NULL only),
+    /// force (all), force+since (windowed).
+    /// Test: pure SQL exercise against an in-memory DB.
+    #[test]
+    fn read_candidate_commits_branches_select_correctly() {
+        let db = Database::open_in_memory().expect("db");
+        // Two classified commits + one unclassified.
+        db.connection()
+            .execute(
+                "INSERT INTO classifications (category, confidence, method) \
+                 VALUES ('feature', 0.5, 'regex_rule')",
+                [],
+            )
+            .expect("cls");
+        let cls_id = db.connection().last_insert_rowid();
+        db.connection()
+            .execute(
+                "INSERT INTO commits (sha, author_name, author_email, timestamp, message, repository, classification_id) \
+                 VALUES ('old', 'a', 'a@x', '2023-01-01T00:00:00Z', 'm', 'r', ?1)",
+                params![cls_id],
+            )
+            .expect("insert old");
+        db.connection()
+            .execute(
+                "INSERT INTO commits (sha, author_name, author_email, timestamp, message, repository, classification_id) \
+                 VALUES ('new', 'a', 'a@x', '2025-06-01T00:00:00Z', 'm', 'r', ?1)",
+                params![cls_id],
+            )
+            .expect("insert new");
+        db.connection()
+            .execute(
+                "INSERT INTO commits (sha, author_name, author_email, timestamp, message, repository) \
+                 VALUES ('null', 'a', 'a@x', '2024-01-01T00:00:00Z', 'm', 'r')",
+                [],
+            )
+            .expect("insert unclassified");
+
+        // Default flow: only the unclassified row.
+        let v = super::read_candidate_commits(&db, false, None).expect("default");
+        let shas: Vec<&str> = v.iter().map(|c| c.sha.as_str()).collect();
+        assert_eq!(shas, vec!["null"]);
+
+        // --force: every row.
+        let v = super::read_candidate_commits(&db, true, None).expect("force");
+        let mut shas: Vec<&str> = v.iter().map(|c| c.sha.as_str()).collect();
+        shas.sort();
+        assert_eq!(shas, vec!["new", "null", "old"]);
+
+        // --force --since 2025-01-01: only "new" (timestamp >= bound).
+        let v = super::read_candidate_commits(&db, true, Some("2025-01-01")).expect("force+since");
+        let shas: Vec<&str> = v.iter().map(|c| c.sha.as_str()).collect();
+        assert_eq!(shas, vec!["new"]);
     }
 
     /// Why: regression guard for issue #210. `commits.is_revert` was always

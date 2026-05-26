@@ -8,8 +8,9 @@ use crate::ClassifyArgs;
 
 /// Run the classification stage over previously-collected commits.
 ///
-/// Honors `--rules` and `--use-llm` overrides by mutating the
-/// [`ClassificationConfig`] section of the loaded YAML config.
+/// Honors `--rules`, `--use-llm`, and `--force` / `--since` overrides by
+/// mutating the [`ClassificationConfig`] section of the loaded YAML config
+/// and configuring the pipeline accordingly.
 pub async fn run(config: Config, db: &mut Database, args: ClassifyArgs) -> anyhow::Result<()> {
     let mut cfg = config;
 
@@ -26,7 +27,19 @@ pub async fn run(config: Config, db: &mut Database, args: ClassifyArgs) -> anyho
         }
     }
 
-    let pipeline = ClassificationPipeline::new(cfg);
+    // --since without --force is a no-op (default flow already skips
+    // classified rows). Flag this rather than silently ignoring it so the
+    // operator notices the missing `--force`.
+    if args.since.is_some() && !args.force {
+        tracing::warn!(
+            "--since was supplied without --force; ignoring it. \
+             Pass --force to re-classify commits already in the DB."
+        );
+    }
+
+    let pipeline = ClassificationPipeline::new(cfg)
+        .with_force(args.force)
+        .with_since(args.since.clone());
 
     // Backfill mode: fill in only the missing complexity scores and return,
     // leaving existing category/confidence/method verdicts untouched.
