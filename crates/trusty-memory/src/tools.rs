@@ -705,984 +705,1116 @@ fn resolve_palace<'a>(state: &'a AppState, args: &'a Value, tool: &str) -> Resul
         .ok_or_else(|| anyhow!("{tool}: missing 'palace' (no --palace default configured)"))
 }
 
+/// Inputs to the shared write-drawer pipeline.
+///
+/// Why (issue #227): `memory_remember` and `memory_note` share the same
+/// "open palace → write drawer → fan-out side effects" tail. Capturing those
+/// inputs in one struct keeps the handler call sites flat and makes the
+/// shared pipeline a single function — every behavioural divergence between
+/// the two tools is now visible in their handlers, not buried in a
+/// 60-line block of duplicated post-write fan-out.
+/// What: bundles every value the post-gate pipeline needs. `room_label_for_kg`
+/// is pre-computed by the handler (memory_note pins it to `"General"`;
+/// memory_remember derives it from `RoomType` via [`room_label`]).
+/// Test: exercised end-to-end by `dispatch_remember_then_recall`,
+/// `dispatch_remember_with_context_writes_combined`, and the note tests.
+struct WriteDrawerParams<'a> {
+    palace_id: &'a str,
+    content: String,
+    tags: Vec<String>,
+    room: RoomType,
+    importance: f32,
+    opts: RememberOptions,
+    room_label_for_kg: Option<String>,
+}
+
+/// Run the shared write pipeline after content has been gated and attribution
+/// applied.
+///
+/// Why (issue #227): centralises the open-palace → remember → BM25 → emit →
+/// auto-KG-extract tail that `memory_remember` and `memory_note` both run.
+/// Hosting it in one place keeps the side-effect ordering identical across
+/// the two tools and makes future write-side hooks land in one location.
+/// What: opens the palace handle, calls `remember_with_options`, fires the
+/// BM25 index task, emits `DrawerAdded` + the aggregate status event, and
+/// runs the auto-KG-extraction pass (best-effort). Returns the new drawer
+/// id on success; any underlying error propagates via `anyhow::Result`.
+/// Test: covered through `dispatch_remember_then_recall`,
+/// `dispatch_remember_with_context_writes_combined`,
+/// `dispatch_note_skips_short_no_context` (negative path before this runs),
+/// and `auto_kg_extraction_hooks_into_memory_remember`.
+async fn write_drawer(state: &AppState, params: WriteDrawerParams<'_>) -> Result<Uuid> {
+    let WriteDrawerParams {
+        palace_id,
+        content,
+        tags,
+        room,
+        importance,
+        opts,
+        room_label_for_kg,
+    } = params;
+
+    let handle = open_palace_handle(state, palace_id)?;
+    // Snapshot the preview before `content` is moved into the write so the
+    // activity feed shows what landed on disk (matches the HTTP path).
+    let preview = crate::service::drawer_content_preview(&content);
+    // Issue #97: keep originals so the auto-KG extractor sees the same
+    // content / tags that landed in the drawer. `remember_with_options`
+    // consumes them, so clone before the call.
+    let content_for_kg = content.clone();
+    let tags_for_kg = tags.clone();
+    let drawer_id = handle
+        .remember_with_options(content, room, tags, importance, opts)
+        .await
+        .context("PalaceHandle::remember_with_options")?;
+    // Issue #156: opt-in BM25 lexical lane. Fire-and-forget so the
+    // redb write returns immediately; daemon errors are logged but
+    // never block the MCP response.
+    bm25_index_fire_and_forget(state, palace_id, drawer_id, &content_for_kg);
+    // Issue #96: emit a DrawerAdded so the activity feed shows
+    // MCP-origin writes with `source = Mcp`.
+    let palace_name = lookup_palace_name(state, palace_id);
+    let drawer_count = handle.drawers.read().len();
+    state.emit(DaemonEvent::DrawerAdded {
+        palace_id: palace_id.to_string(),
+        palace_name,
+        drawer_count,
+        timestamp: chrono::Utc::now(),
+        content_preview: preview,
+        source: ActivitySource::Mcp,
+    });
+    state.emit(crate::service::MemoryService::new(state.clone()).aggregate_status_event());
+    // Issue #97: best-effort auto-extraction. Failures never fail the
+    // write — the drawer is already on disk.
+    auto_extract_and_assert(
+        &handle,
+        drawer_id,
+        &content_for_kg,
+        &tags_for_kg,
+        room_label_for_kg.as_deref(),
+    )
+    .await;
+    Ok(drawer_id)
+}
+
+/// Build a JSON "skipped" envelope used by both write handlers when a gate
+/// rejects the input.
+///
+/// Why (issue #227): keeps the three skip reasons (`blocked pattern`,
+/// `short prompt, no context`, `duplicate within window`) emitted as a
+/// uniform shape so callers can parse the envelope without per-tool
+/// branching.
+/// What: returns `{"palace": <id>, "status": "skipped", "reason": <reason>}`.
+/// Test: exercised by `dispatch_remember_skips_short_no_context`,
+/// `dispatch_note_skips_short_no_context`,
+/// `dispatch_remember_blocks_blocklist_pattern`.
+fn skipped_envelope(palace_id: &str, reason: &str) -> Value {
+    json!({
+        "palace": palace_id,
+        "status": "skipped",
+        "reason": reason,
+    })
+}
+
+/// Extract a `tags` argument (JSON array of strings) into a `Vec<String>`.
+///
+/// Why: every write-side handler accepts an optional `tags` argument with
+/// identical shape; centralising the parse keeps the handlers focused on
+/// their tool-specific logic.
+/// What: returns the strings in order; non-string entries are silently
+/// dropped (matches pre-refactor behaviour).
+/// Test: covered indirectly by `dispatch_remember_then_recall` and
+/// `auto_kg_extraction_hooks_into_memory_remember`.
+fn parse_tags(args: &Value) -> Vec<String> {
+    args.get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Attach the MCP attribution tags (`creator:*` and the bare-UUID session
+/// projection) to the caller-supplied tag list.
+///
+/// Why (Submission-logging Part B + issue #202): every MCP-origin drawer must
+/// carry the writer identity so the activity panel and audit logs can attribute
+/// the write. Issue #202 also projects a bare-UUID session tag into the
+/// reserved `creator:session=<first-8>` slot when present.
+/// What: appends the session-tag projection (when one is found in the input
+/// tags) then merges the canonical `CreatorInfo::new_self(MCP, Mcp)` into the
+/// vec. Mutates in place to match the original code path.
+/// Test: covered indirectly by `dispatch_remember_then_recall`.
+fn attach_mcp_attribution(tags: &mut Vec<String>) {
+    if let Some(session_tag) = session_tag_from_tags(tags) {
+        tags.push(session_tag);
+    }
+    CreatorInfo::new_self(MCP_CLIENT_NAME, CreatorSource::Mcp).merge_into(tags);
+}
+
+// ----------------------------------------------------------------------
+// Per-tool handlers (issue #227)
+//
+// Each `handle_*` function owns one MCP tool. Handlers parse their
+// arguments, apply tool-specific gates, then either return a `skipped`
+// envelope or delegate to `write_drawer` / the underlying registry call.
+// `dispatch_tool` is now a thin router.
+// ----------------------------------------------------------------------
+
+async fn handle_memory_remember(state: &AppState, args: Value) -> Result<Value> {
+    let palace = resolve_palace(state, &args, "memory_remember")?;
+    let palace = palace.as_str();
+    let raw_text = args
+        .get("text")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("memory_remember: missing 'text'"))?
+        .to_string();
+    // Issue #220: blocklist gate — silently drop content matching
+    // known low-value auto-capture patterns (e.g. `Tool use: Bash`,
+    // `Claude Code session ended: …`). Logged at debug so operators
+    // can audit when investigating missing writes.
+    if blocklist_gate(&raw_text) {
+        tracing::debug!(
+            palace = %palace,
+            "content gate: skipped (blocked pattern)",
+        );
+        return Ok(skipped_envelope(
+            palace,
+            "content gate: skipped (blocked pattern)",
+        ));
+    }
+    // Issue #215: content gate — drop very short standalone content
+    // unless the caller supplied a `context` wrapper. When skipped,
+    // return a success envelope with an explanatory status so the
+    // caller can see the write was a no-op without having to parse
+    // a custom error shape.
+    let ctx = args.get("context").and_then(|v| v.as_str());
+    let text = match content_gate(&raw_text, ctx) {
+        Some(t) => t,
+        None => {
+            return Ok(skipped_envelope(
+                palace,
+                "content gate: skipped (short prompt, no context)",
+            ));
+        }
+    };
+    let room = parse_room(args.get("room").and_then(|v| v.as_str()));
+    let mut tags = parse_tags(&args);
+    // Submission-logging Part B: attach `creator:*` attribution so
+    // every MCP-origin drawer carries the writer identity (client
+    // = `trusty-memory-mcp`, source = `mcp`, version + cwd of the
+    // MCP server process). Issue #202: also project a bare-UUID
+    // session tag (when present in the caller's tags) into the
+    // reserved `creator:session=<first-8>` slot so the activity
+    // panel can surface it without inspecting every tag.
+    attach_mcp_attribution(&mut tags);
+
+    let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // Issue #230: serialise the dedup-check + write sequence per-palace
+    // so two concurrent identical writes can't both pass the gate. The
+    // lock is scoped to the palace id — writes to different palaces
+    // still run in parallel. The guard is held across the gate check
+    // and the `write_drawer` call so the redb write inside
+    // `remember_with_options` happens with the gate snapshot still
+    // visible to subsequent waiters.
+    let write_lock = state.palace_write_lock(palace);
+    let _write_guard = write_lock.lock().await;
+
+    // Issue #220: rolling dedup window — skip when a near-duplicate
+    // landed in the same palace within the last 5 minutes. The
+    // `force=true` operator override bypasses the gate so
+    // intentional re-writes are not silently dropped.
+    if !force {
+        let handle = open_palace_handle(state, palace)?;
+        if dedup_gate(&handle, &text) {
+            tracing::debug!(
+                palace = %palace,
+                "content gate: skipped (duplicate within window)",
+            );
+            return Ok(skipped_envelope(
+                palace,
+                "content gate: skipped (duplicate within window)",
+            ));
+        }
+    }
+    let room_label_for_kg = room_label(&room);
+    let drawer_id = write_drawer(
+        state,
+        WriteDrawerParams {
+            palace_id: palace,
+            content: text,
+            tags,
+            room,
+            importance: 0.5,
+            opts: mcp_remember_opts(force),
+            room_label_for_kg,
+        },
+    )
+    .await?;
+    Ok(json!({
+        "drawer_id": drawer_id.to_string(),
+        "palace": palace,
+        "status": "stored",
+    }))
+}
+
+async fn handle_memory_note(state: &AppState, args: Value) -> Result<Value> {
+    // Issue #61: curated short-fact shortcut. Bypasses the token
+    // threshold (so "User prefers snake_case" is accepted) but still
+    // applies noise-pattern rejects so the tool can't be used to
+    // smuggle in auto-capture garbage. Pinned `DrawerType::UserFact`
+    // and `importance = 1.0` so the entry surfaces in L1 essentials.
+    let palace = resolve_palace(state, &args, "memory_note")?;
+    let palace = palace.as_str();
+    let raw_content = args
+        .get("content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("memory_note: missing 'content'"))?
+        .to_string();
+    // Issue #220: blocklist gate — silently drop content matching
+    // known low-value auto-capture patterns. Same filter as
+    // `memory_remember` so the gate is uniform across the write
+    // surface.
+    if blocklist_gate(&raw_content) {
+        tracing::debug!(
+            palace = %palace,
+            "content gate: skipped (blocked pattern)",
+        );
+        return Ok(skipped_envelope(
+            palace,
+            "content gate: skipped (blocked pattern)",
+        ));
+    }
+    // Issue #215: same content gate as `memory_remember`. A `context`
+    // arg can be passed to wrap a one-word answer; otherwise short
+    // standalone content is silently dropped with an explanatory
+    // status envelope.
+    let ctx = args.get("context").and_then(|v| v.as_str());
+    let content = match content_gate(&raw_content, ctx) {
+        Some(c) => c,
+        None => {
+            return Ok(skipped_envelope(
+                palace,
+                "content gate: skipped (short prompt, no context)",
+            ));
+        }
+    };
+    let mut tags = parse_tags(&args);
+    // Submission-logging Part B: same attribution as memory_remember.
+    // Issue #202: project a bare-UUID session tag (when present)
+    // into the reserved `creator:session=<first-8>` slot.
+    attach_mcp_attribution(&mut tags);
+    // Issue #230: serialise the dedup-check + write sequence per-palace
+    // so two concurrent identical writes can't both pass the gate. The
+    // lock is scoped to the palace id — writes to different palaces
+    // still run in parallel. Held across the gate check and the
+    // `write_drawer` call so the redb write inside
+    // `remember_with_options` is visible to subsequent waiters before
+    // they snapshot.
+    let write_lock = state.palace_write_lock(palace);
+    let _write_guard = write_lock.lock().await;
+    // Issue #220: rolling dedup window — same gate as
+    // `memory_remember`. `memory_note` has no `force` arg, so the
+    // gate is unconditional: curated short-fact writes that happen
+    // to duplicate an existing recent note are still skipped.
+    {
+        let handle = open_palace_handle(state, palace)?;
+        if dedup_gate(&handle, &content) {
+            tracing::debug!(
+                palace = %palace,
+                "content gate: skipped (duplicate within window)",
+            );
+            return Ok(skipped_envelope(
+                palace,
+                "content gate: skipped (duplicate within window)",
+            ));
+        }
+    }
+    // note() preset skips the token threshold; we keep the default
+    // filter for noise patterns. No MCP-stricter min_tokens override
+    // is needed because `enforce_min_tokens = false`.
+    let drawer_id = write_drawer(
+        state,
+        WriteDrawerParams {
+            palace_id: palace,
+            content,
+            tags,
+            room: RoomType::General,
+            importance: 1.0,
+            opts: RememberOptions::note(),
+            // memory_note is pinned to the General room; mirror that for
+            // the KG extractor so the auto-extracted triples carry the
+            // same room label as the drawer.
+            room_label_for_kg: Some("General".to_string()),
+        },
+    )
+    .await
+    .context("PalaceHandle::remember_with_options (note)")?;
+    Ok(json!({
+        "drawer_id": drawer_id.to_string(),
+        "palace": palace,
+        "status": "stored",
+        "drawer_type": "UserFact",
+    }))
+}
+
+async fn handle_memory_recall(state: &AppState, args: Value) -> Result<Value> {
+    let palace = resolve_palace(state, &args, "memory_recall")?;
+    let query = args
+        .get("query")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("memory_recall: missing 'query'"))?;
+    let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+
+    let handle = open_palace_handle(state, &palace)?;
+    let embedder = state.embedder().await?;
+    // Issue #156: when the BM25 lane is enabled, run it in parallel
+    // with the vector recall and RRF-fuse the two ranked lists.
+    // When the daemon is unavailable or the env var is unset, the
+    // helper returns `None` and we return the vector-only results
+    // verbatim — zero behavioural change for existing deployments.
+    let vector_fut = recall(&handle, embedder.as_ref(), query, top_k);
+    let bm25_fut = bm25_search_optional(state, &palace, query, top_k);
+    let (vector_res, bm25_res) = tokio::join!(vector_fut, bm25_fut);
+    let mut results = vector_res.context("recall")?;
+    if let Some(bm25_hits) = bm25_res {
+        fuse_bm25_into_recall(&mut results, &bm25_hits, top_k);
+    }
+    Ok(serialize_recall(&palace, query, results))
+}
+
+async fn handle_memory_recall_deep(state: &AppState, args: Value) -> Result<Value> {
+    let palace = resolve_palace(state, &args, "memory_recall_deep")?;
+    let query = args
+        .get("query")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("memory_recall_deep: missing 'query'"))?;
+    let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+
+    let handle = open_palace_handle(state, &palace)?;
+    let embedder = state.embedder().await?;
+    let results = recall_deep(&handle, embedder.as_ref(), query, top_k)
+        .await
+        .context("recall_deep")?;
+    Ok(serialize_recall(&palace, query, results))
+}
+
+async fn handle_palace_create(state: &AppState, args: Value) -> Result<Value> {
+    let palace_name = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("palace_create: missing 'name'"))?;
+    let description = args
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let palace = Palace {
+        id: PalaceId::new(palace_name),
+        name: palace_name.to_string(),
+        description,
+        created_at: chrono::Utc::now(),
+        data_dir: state.data_root.join(palace_name),
+    };
+    let _handle = state
+        .registry
+        .create_palace(&state.data_root, palace)
+        .context("create_palace")?;
+    // Issue #96: emit so MCP-driven palace creation lands in the
+    // dashboard activity feed alongside HTTP-origin creates.
+    state.emit(DaemonEvent::PalaceCreated {
+        id: palace_name.to_string(),
+        name: palace_name.to_string(),
+        source: ActivitySource::Mcp,
+    });
+    // Issue #60: auto-seed the KG with temporal metadata so every
+    // new palace has at least `created_at` + `bootstrapped_at`
+    // triples anchored to the palace name. We deliberately do NOT
+    // pass a project_path here — that requires an explicit user
+    // decision (which directory belongs to this palace?). Failures
+    // are non-fatal: the palace was already created, and the user
+    // can re-run `kg_bootstrap` manually if needed.
+    let bootstrap_summary = match crate::bootstrap::bootstrap_palace(state, palace_name, None).await
+    {
+        Ok(r) => Some(serde_json::json!({
+            "triples_asserted": r.triples_asserted,
+            "project_subject": r.project_subject,
+        })),
+        Err(e) => {
+            tracing::warn!(
+                palace = %palace_name,
+                "auto-bootstrap on palace_create failed: {e:#}",
+            );
+            None
+        }
+    };
+    Ok(json!({
+        "palace_id": palace_name,
+        "status": "created",
+        "bootstrap": bootstrap_summary,
+    }))
+}
+
+async fn handle_palace_list(state: &AppState, _args: Value) -> Result<Value> {
+    let root = state.data_root.clone();
+    let palaces = tokio::task::spawn_blocking(move || {
+        trusty_common::memory_core::PalaceRegistry::list_palaces(&root)
+    })
+    .await
+    .context("join list_palaces")??;
+    let ids: Vec<String> = palaces.iter().map(|p| p.id.as_str().to_string()).collect();
+    Ok(json!({ "palaces": ids }))
+}
+
+async fn handle_palace_delete(state: &AppState, args: Value) -> Result<Value> {
+    // Issue #180: full palace teardown. The HTTP layer is the
+    // canonical implementation; we just delegate to the same
+    // `MemoryService::delete_palace` method to keep behaviour
+    // (and the conflict / not-found / 204 split) identical
+    // across surfaces. ServiceError variants are folded into
+    // anyhow here so the MCP wire shape matches every other
+    // tool's error contract.
+    let palace_id = args
+        .get("palace_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("palace_delete: missing 'palace_id'"))?
+        .to_string();
+    let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    use crate::service::{MemoryService, ServiceError};
+    let svc = MemoryService::new(state.clone());
+    match svc.delete_palace(&palace_id, force).await {
+        Ok(()) => Ok(json!({ "deleted": palace_id })),
+        Err(ServiceError::NotFound(_)) => Err(anyhow!("Palace not found: {palace_id}")),
+        Err(ServiceError::Conflict(msg)) => Err(anyhow!(msg)),
+        Err(e) => Err(anyhow!("palace_delete: {e}")),
+    }
+}
+
+async fn handle_palace_update(state: &AppState, args: Value) -> Result<Value> {
+    // Issue #180 follow-up: rename a palace's display name. The HTTP
+    // layer is the canonical implementation; we delegate to the
+    // same `MemoryService::update_palace_name` so the
+    // load-mutate-save-emit chain stays consistent across surfaces.
+    // The MCP wire shape is the minimal acknowledgement payload —
+    // callers needing the enriched palace info should use
+    // `palace_info` (or the HTTP endpoint, which returns the full
+    // shape).
+    let palace_id = args
+        .get("palace_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("palace_update: missing 'palace_id'"))?
+        .to_string();
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("palace_update: missing 'name'"))?
+        .to_string();
+    use crate::service::MemoryService;
+    let svc = MemoryService::new(state.clone());
+    match svc.update_palace_name(&palace_id, &name).await {
+        Ok(_info) => Ok(json!({ "updated": palace_id, "name": name.trim() })),
+        Err(e) => Err(anyhow!("palace_update: {e}")),
+    }
+}
+
+async fn handle_kg_assert(state: &AppState, args: Value) -> Result<Value> {
+    let palace = resolve_palace(state, &args, "kg_assert")?;
+    let palace = palace.as_str();
+    let subject = args
+        .get("subject")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("kg_assert: missing 'subject'"))?
+        .to_string();
+    let predicate = args
+        .get("predicate")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("kg_assert: missing 'predicate'"))?
+        .to_string();
+    let object = args
+        .get("object")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("kg_assert: missing 'object'"))?
+        .to_string();
+    let confidence = args
+        .get("confidence")
+        .and_then(|v| v.as_f64())
+        .map(|c| (c as f32).clamp(0.0, 1.0))
+        .unwrap_or(1.0);
+    let provenance = args
+        .get("provenance")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let handle = open_palace_handle(state, palace)?;
+    let triple = Triple {
+        subject,
+        predicate,
+        object,
+        valid_from: chrono::Utc::now(),
+        valid_to: None,
+        confidence,
+        provenance,
+    };
+    let is_hot = crate::prompt_facts::is_hot_predicate(&triple.predicate);
+    handle.kg.assert(triple).await.context("kg.assert")?;
+    // Rebuild the prompt cache if this assertion touched a hot
+    // predicate; otherwise the cache stays valid and we skip the
+    // gather/format pass. Failures are logged but non-fatal — the
+    // write succeeded, the cache is only a denormalisation.
+    if is_hot {
+        if let Err(e) = crate::prompt_facts::rebuild_prompt_cache(state).await {
+            tracing::warn!("rebuild_prompt_cache after kg_assert failed: {e:#}");
+        }
+    }
+    Ok(json!({ "status": "asserted" }))
+}
+
+async fn handle_add_alias(state: &AppState, args: Value) -> Result<Value> {
+    let short = args
+        .get("short")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("add_alias: missing 'short'"))?
+        .to_string();
+    let full = args
+        .get("full")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("add_alias: missing 'full'"))?
+        .to_string();
+    let extra = args
+        .get("extra")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // `add_alias` is bound to the default palace when configured;
+    // otherwise it lands in whatever palace the caller names. This
+    // mirrors `resolve_palace`'s rule but without the helpful error
+    // — aliases are typically project-scoped via `--palace`.
+    let palace = resolve_palace(state, &args, "add_alias")?;
+    let handle = open_palace_handle(state, &palace)?;
+    // Compose the object: "<full>" or "<full> (<extra>)".
+    let object = match extra.as_deref() {
+        Some(e) if !e.is_empty() => format!("{full} ({e})"),
+        _ => full.clone(),
+    };
+    let triple = Triple {
+        subject: short.clone(),
+        predicate: "is_alias_for".to_string(),
+        object,
+        valid_from: chrono::Utc::now(),
+        valid_to: None,
+        confidence: 1.0,
+        provenance: Some("add_alias".to_string()),
+    };
+    handle
+        .kg
+        .assert(triple)
+        .await
+        .context("kg.assert (alias)")?;
+    if let Err(e) = crate::prompt_facts::rebuild_prompt_cache(state).await {
+        tracing::warn!("rebuild_prompt_cache after add_alias failed: {e:#}");
+    }
+    Ok(json!({ "asserted": true, "short": short, "full": full }))
+}
+
+async fn handle_list_prompt_facts(state: &AppState, _args: Value) -> Result<Value> {
+    let triples = crate::prompt_facts::gather_hot_triples(state).await?;
+    let payload: Vec<Value> = triples
+        .into_iter()
+        .map(|(subject, predicate, object)| {
+            json!({ "subject": subject, "predicate": predicate, "object": object })
+        })
+        .collect();
+    Ok(json!({ "facts": payload }))
+}
+
+async fn handle_remove_prompt_fact(state: &AppState, args: Value) -> Result<Value> {
+    let subject = args
+        .get("subject")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("remove_prompt_fact: missing 'subject'"))?
+        .to_string();
+    let predicate = args
+        .get("predicate")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("remove_prompt_fact: missing 'predicate'"))?
+        .to_string();
+
+    // The prompt-fact surface spans every palace, so try retracting
+    // across all of them and report `true` if any palace closed an
+    // active interval. This matches `list_prompt_facts`' scope so
+    // round-tripping list→remove never silently no-ops because the
+    // caller didn't name the right palace.
+    let mut closed_total: usize = 0;
+    for palace_id in state.registry.list() {
+        if let Some(handle) = state.registry.get(&palace_id) {
+            match handle.kg.retract(&subject, &predicate).await {
+                Ok(n) => closed_total += n,
+                Err(e) => tracing::warn!(
+                    palace = %palace_id.as_str(),
+                    "retract failed: {e:#}",
+                ),
+            }
+        }
+    }
+    if closed_total > 0 {
+        if let Err(e) = crate::prompt_facts::rebuild_prompt_cache(state).await {
+            tracing::warn!("rebuild_prompt_cache after remove_prompt_fact failed: {e:#}");
+        }
+        Ok(json!({ "removed": true, "closed": closed_total }))
+    } else {
+        Ok(json!({ "removed": false, "reason": "not found" }))
+    }
+}
+
+async fn handle_kg_query(state: &AppState, args: Value) -> Result<Value> {
+    let palace = resolve_palace(state, &args, "kg_query")?;
+    let subject = args
+        .get("subject")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("kg_query: missing 'subject'"))?;
+    let handle = open_palace_handle(state, &palace)?;
+    let triples = handle
+        .kg
+        .query_active(subject)
+        .await
+        .context("kg.query_active")?;
+    let payload: Vec<Value> = triples
+        .iter()
+        .map(|t| {
+            json!({
+                "subject": t.subject,
+                "predicate": t.predicate,
+                "object": t.object,
+                "valid_from": t.valid_from.to_rfc3339(),
+                "valid_to": t.valid_to.as_ref().map(|d| d.to_rfc3339()),
+                "confidence": t.confidence,
+                "provenance": t.provenance,
+            })
+        })
+        .collect();
+    // Issue #60: surface a hint when the requested subject has no
+    // active triples so the model knows `kg_bootstrap` and
+    // `kg_assert` exist. Empty payload is the only signal we have
+    // at the per-subject query layer; that's the user-visible
+    // "nothing here" case the hint is for.
+    let mut response = json!({ "subject": subject, "triples": payload });
+    if crate::bootstrap::is_kg_empty_for_subject(&triples) {
+        response["hint"] = Value::String(crate::bootstrap::KG_EMPTY_HINT.to_string());
+    }
+    Ok(response)
+}
+
+async fn handle_memory_list(state: &AppState, args: Value) -> Result<Value> {
+    let palace = resolve_palace(state, &args, "memory_list")?;
+    let handle = open_palace_handle(state, &palace)?;
+    let room = args
+        .get("room")
+        .and_then(|v| v.as_str())
+        .map(|s| parse_room(Some(s)));
+    let tag = args
+        .get("tag")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+    let drawers = handle.list_drawers(room, tag, limit);
+    let payload: Vec<Value> = drawers
+        .iter()
+        .map(|d| {
+            json!({
+                "drawer_id": d.id.to_string(),
+                "content": d.content,
+                "importance": d.importance,
+                "tags": d.tags,
+                "created_at": d.created_at.to_rfc3339(),
+                "drawer_type": d.drawer_type.as_str(),
+                "expires_at": d.expires_at.map(|t| t.to_rfc3339()),
+            })
+        })
+        .collect();
+    Ok(json!({ "palace": palace, "drawers": payload }))
+}
+
+async fn handle_memory_forget(state: &AppState, args: Value) -> Result<Value> {
+    let palace = resolve_palace(state, &args, "memory_forget")?;
+    let drawer_id_str = args
+        .get("drawer_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("memory_forget: missing 'drawer_id'"))?;
+    let drawer_id = Uuid::parse_str(drawer_id_str)
+        .map_err(|e| anyhow!("memory_forget: invalid drawer_id UUID: {e}"))?;
+    let handle = open_palace_handle(state, &palace)?;
+    handle.forget(drawer_id).await.context("forget")?;
+    // Issue #96: emit so MCP-driven deletes are visible in the feed.
+    let drawer_count = handle.drawers.read().len();
+    state.emit(DaemonEvent::DrawerDeleted {
+        palace_id: palace.clone(),
+        drawer_count,
+        source: ActivitySource::Mcp,
+    });
+    state.emit(crate::service::MemoryService::new(state.clone()).aggregate_status_event());
+    Ok(json!({ "status": "deleted", "drawer_id": drawer_id_str, "palace": palace }))
+}
+
+async fn handle_palace_info(state: &AppState, args: Value) -> Result<Value> {
+    let palace = resolve_palace(state, &args, "palace_info")?;
+    let handle = open_palace_handle(state, &palace)?;
+    let drawer_count = handle.list_drawers(None, None, usize::MAX).len();
+    let data_dir = handle
+        .data_dir
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string());
+    Ok(json!({
+        "id": handle.id.as_str(),
+        "name": handle.id.as_str(),
+        "drawer_count": drawer_count,
+        "data_dir": data_dir,
+    }))
+}
+
+async fn handle_palace_compact(state: &AppState, args: Value) -> Result<Value> {
+    let palace = resolve_palace(state, &args, "palace_compact")?;
+    let handle = open_palace_handle(state, &palace)?;
+    // Use the live drawer table (sourced from SQLite at palace open) as
+    // the authoritative valid-id set, then run the vector store's
+    // synchronous compaction on a blocking thread.
+    let valid_ids: std::collections::HashSet<Uuid> =
+        handle.drawers.read().iter().map(|d| d.id).collect();
+    let vector_store = handle.vector_store.clone();
+    let res = tokio::task::spawn_blocking(move || vector_store.compact_orphans(&valid_ids))
+        .await
+        .context("join palace_compact")??;
+    Ok(json!({
+        "palace": palace,
+        "total_checked": res.total_checked,
+        "orphans_removed": res.orphans_removed,
+        "index_size_before": res.index_size_before,
+        "index_size_after": res.index_size_after,
+    }))
+}
+
+async fn handle_kg_gaps(state: &AppState, args: Value) -> Result<Value> {
+    // Why (issue #53): Surface the cached community-detection output
+    // so the model can plan exploration without re-running Louvain.
+    // We deliberately do NOT recompute on the read path; the cache is
+    // refreshed by the dream cycle.
+    // What: Resolves the palace (explicit arg or daemon default),
+    // validates it exists by opening the handle, and returns the
+    // cached vec (an empty array when the dream cycle has not yet
+    // populated it).
+    // Test: `dispatch_kg_gaps_returns_cached`.
+    let palace = resolve_palace(state, &args, "kg_gaps")?;
+    // Ensure the palace exists; this also surfaces a useful error for
+    // typos in the palace argument.
+    let _handle = open_palace_handle(state, &palace)?;
+    let pid = PalaceId::new(&palace);
+    let cached = state.registry.get_gaps(&pid).unwrap_or_default();
+    let payload: Vec<Value> = cached
+        .into_iter()
+        .map(|g| {
+            json!({
+                "entities": g.entities,
+                "internal_density": g.internal_density,
+                "external_bridges": g.external_bridges,
+                "suggested_exploration": g.suggested_exploration,
+            })
+        })
+        .collect();
+    Ok(json!({ "palace": palace, "gaps": payload }))
+}
+
+async fn handle_memory_recall_all(state: &AppState, args: Value) -> Result<Value> {
+    let query = args
+        .get("q")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("memory_recall_all: missing 'q'"))?;
+    let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let deep = args.get("deep").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // List every palace on disk and open a handle for each. Palaces
+    // that fail to open are skipped with a warning so a single bad
+    // namespace cannot fail the whole fan-out.
+    let root = state.data_root.clone();
+    let palaces = tokio::task::spawn_blocking(move || {
+        trusty_common::memory_core::PalaceRegistry::list_palaces(&root)
+    })
+    .await
+    .context("join list_palaces")??;
+
+    let mut handles = Vec::with_capacity(palaces.len());
+    for p in &palaces {
+        match state.registry.open_palace(&state.data_root, &p.id) {
+            Ok(h) => handles.push(h),
+            Err(e) => {
+                tracing::warn!(palace = %p.id, "memory_recall_all: open failed: {e:#}")
+            }
+        }
+    }
+
+    let embedder = state.embedder().await?;
+    let erased: std::sync::Arc<dyn trusty_common::memory_core::embed::Embedder + Send + Sync> =
+        embedder;
+    let results = recall_across_palaces(&handles, &erased, query, top_k, deep)
+        .await
+        .context("recall_across_palaces")?;
+
+    let payload: Vec<Value> = results
+        .iter()
+        .map(|r| {
+            json!({
+                "palace_id":  r.palace_id,
+                "drawer_id":  r.result.drawer.id.to_string(),
+                "content":    r.result.drawer.content,
+                "importance": r.result.drawer.importance,
+                "tags":       r.result.drawer.tags,
+                "score":      r.result.score,
+                "layer":      r.result.layer,
+                "drawer_type": r.result.drawer.drawer_type.as_str(),
+            })
+        })
+        .collect();
+    Ok(json!({ "query": query, "results": payload }))
+}
+
+async fn handle_get_prompt_context(state: &AppState, args: Value) -> Result<Value> {
+    // Why (issue #42): the model calls this at the start of each
+    // turn to pull aliases/conventions/facts into its working
+    // context. A `query` filter lets it scope the result to just
+    // the facts that matter for the current task — cheap on the
+    // wire and keeps the prompt focused.
+    // What: read-locks the cache once, clones the snapshot, then
+    // releases the lock so the formatter runs without blocking
+    // concurrent readers. When `query` is set we re-format a
+    // filtered subset of the raw triples; otherwise we serve the
+    // pre-formatted string directly.
+    let query = args
+        .get("query")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    // Issue #229: tokio::sync::RwLock is async-aware — `.read()` returns a
+    // future that resolves to the guard, so no poison handling is needed
+    // (tokio locks are not poisoned by panics).
+    let cache_snapshot = {
+        let guard = state.prompt_context_cache.read().await;
+        guard.clone()
+    };
+
+    let body = if let Some(q) = query.as_deref() {
+        let needle = q.to_lowercase();
+        let filtered: Vec<(String, String, String)> = cache_snapshot
+            .triples
+            .into_iter()
+            .filter(|(subject, _predicate, object)| {
+                subject.to_lowercase().contains(&needle) || object.to_lowercase().contains(&needle)
+            })
+            .collect();
+        let formatted = crate::prompt_facts::build_prompt_context(&filtered);
+        if formatted.is_empty() {
+            "No project context found matching your query.".to_string()
+        } else {
+            formatted
+        }
+    } else if cache_snapshot.formatted.is_empty() {
+        "No prompt facts stored yet.".to_string()
+    } else {
+        cache_snapshot.formatted
+    };
+
+    // Return the body as a bare JSON string so the MCP envelope's
+    // `content[0].text` carries the formatted Markdown verbatim
+    // (ready to paste into the model's working context) without an
+    // extra `{"context": "..."}` wrapper that callers would have
+    // to strip.
+    Ok(Value::String(body))
+}
+
+async fn handle_discover_aliases(state: &AppState, args: Value) -> Result<Value> {
+    // Why (issue #42): Surface project shorthand automatically so the
+    // model never has to be told `tga == trusty-git-analytics`. The
+    // tool resolves a palace (default or argument), runs the
+    // pure-discovery scanner against the requested root (or cwd),
+    // checks each candidate against the palace's active KG, and
+    // asserts only the new ones. The prompt cache is rebuilt once
+    // at the end iff anything was actually asserted.
+    // What: returns `{ discovered: [...], already_known: N, new: M }`
+    // so callers can audit the delta.
+    // Test: `dispatch_discover_aliases_inserts_new_and_dedupes`.
+    let palace = resolve_palace(state, &args, "discover_aliases")?;
+    let project_root = args
+        .get("project_root")
+        .and_then(|v| v.as_str())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .ok_or_else(|| anyhow!("discover_aliases: no project_root and cwd unavailable"))?;
+
+    let discoveries = crate::discovery::discover_project_aliases(&project_root).await?;
+
+    let handle = open_palace_handle(state, &palace)?;
+
+    let mut already_known = 0usize;
+    let mut newly_asserted = 0usize;
+    let mut reported: Vec<Value> = Vec::with_capacity(discoveries.len());
+
+    for d in &discoveries {
+        // Check active triples for the subject; if any matches the
+        // same predicate + object, skip the assertion.
+        let active = handle
+            .kg
+            .query_active(&d.short)
+            .await
+            .context("kg.query_active")?;
+        let exists = active
+            .iter()
+            .any(|t| t.predicate == "is_alias_for" && t.object == d.full);
+        if exists {
+            already_known += 1;
+            continue;
+        }
+
+        let triple = Triple {
+            subject: d.short.clone(),
+            predicate: "is_alias_for".to_string(),
+            object: d.full.clone(),
+            valid_from: chrono::Utc::now(),
+            valid_to: None,
+            confidence: 1.0,
+            provenance: Some(format!("discover_aliases:{}", d.source.as_str())),
+        };
+        handle
+            .kg
+            .assert(triple)
+            .await
+            .context("kg.assert (discover)")?;
+        newly_asserted += 1;
+        reported.push(json!({
+            "short": d.short,
+            "full": d.full,
+            "source": d.source.as_str(),
+        }));
+    }
+
+    if newly_asserted > 0 {
+        if let Err(e) = crate::prompt_facts::rebuild_prompt_cache(state).await {
+            tracing::warn!("rebuild_prompt_cache after discover_aliases failed: {e:#}");
+        }
+    }
+
+    Ok(json!({
+        "discovered": reported,
+        "already_known": already_known,
+        "new": newly_asserted,
+        "palace": palace,
+    }))
+}
+
+async fn handle_kg_bootstrap(state: &AppState, args: Value) -> Result<Value> {
+    // Issue #60: scan well-known project files and seed the KG with
+    // structured triples + temporal metadata. The handler resolves
+    // the palace (explicit arg or daemon default) and forwards the
+    // optional `project_path` to the bootstrap helper.
+    let palace = resolve_palace(state, &args, "kg_bootstrap")?;
+    let project_path = args
+        .get("project_path")
+        .and_then(|v| v.as_str())
+        .map(std::path::PathBuf::from);
+    let result = crate::bootstrap::bootstrap_palace(state, &palace, project_path.as_deref())
+        .await
+        .context("bootstrap_palace")?;
+    // Rebuild the prompt cache: bootstrap can land hot predicates
+    // (descriptions, language tags) that affect the prompt-facts
+    // surface. Cache failures are non-fatal.
+    if let Err(e) = crate::prompt_facts::rebuild_prompt_cache(state).await {
+        tracing::warn!("rebuild_prompt_cache after kg_bootstrap failed: {e:#}");
+    }
+    crate::bootstrap::result_to_json(&result)
+}
+
+async fn handle_memory_send_message(state: &AppState, args: Value) -> Result<Value> {
+    // Issue #99: inter-project messaging via palace memories.
+    let to_palace = args
+        .get("to_palace")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("memory_send_message: missing 'to_palace'"))?
+        .to_string();
+    let purpose = args
+        .get("purpose")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("memory_send_message: missing 'purpose'"))?
+        .to_string();
+    let content = args
+        .get("content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("memory_send_message: missing 'content'"))?
+        .to_string();
+    // from_palace defaults to the explicit `from_palace` arg, then
+    // the server's --palace default, then the cwd-derived slug.
+    let from_palace = if let Some(s) = args.get("from_palace").and_then(|v| v.as_str()) {
+        s.to_string()
+    } else if let Some(d) = state.default_palace.clone() {
+        d
+    } else {
+        crate::messaging::cwd_palace_slug()
+            .context("memory_send_message: derive from_palace from cwd")?
+    };
+    let drawer_id = crate::messaging::send_message_to_palace(
+        &state.registry,
+        &state.data_root,
+        &from_palace,
+        &to_palace,
+        &purpose,
+        content,
+        CreatorInfo::new_self(MCP_CLIENT_NAME, CreatorSource::Mcp),
+    )
+    .await
+    .context("memory_send_message")?;
+    Ok(json!({
+        "drawer_id": drawer_id.to_string(),
+        "from_palace": from_palace,
+        "to_palace": to_palace,
+        "purpose": purpose,
+        "status": "sent",
+    }))
+}
+
 /// Dispatch a tool call by name to its real handler.
 ///
 /// Why: Centralises the name → handler mapping; every handler now performs a
 /// real read/write against the live `PalaceRegistry` instead of returning a
-/// stub.
+/// stub. After issue #227 the body is a thin router — every tool's logic
+/// lives in its own `handle_*` function above so the dispatcher itself is
+/// auditable at a glance.
 /// What: Returns `Ok(Value)` on success, `Err` on unknown tool / bad args /
 /// underlying failure.
 /// Test: `dispatch_palace_create_persists`, `dispatch_remember_then_recall`,
 /// `dispatch_kg_assert_then_query`, `dispatch_unknown_tool_errors`.
 pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<Value> {
     match name {
-        "memory_remember" => {
-            let palace = resolve_palace(state, &args, "memory_remember")?;
-            let palace = palace.as_str();
-            let raw_text = args
-                .get("text")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("memory_remember: missing 'text'"))?
-                .to_string();
-            // Issue #220: blocklist gate — silently drop content matching
-            // known low-value auto-capture patterns (e.g. `Tool use: Bash`,
-            // `Claude Code session ended: …`). Logged at debug so operators
-            // can audit when investigating missing writes.
-            if blocklist_gate(&raw_text) {
-                tracing::debug!(
-                    palace = %palace,
-                    "content gate: skipped (blocked pattern)",
-                );
-                return Ok(json!({
-                    "palace": palace,
-                    "status": "skipped",
-                    "reason": "content gate: skipped (blocked pattern)",
-                }));
-            }
-            // Issue #215: content gate — drop very short standalone content
-            // unless the caller supplied a `context` wrapper. When skipped,
-            // return a success envelope with an explanatory status so the
-            // caller can see the write was a no-op without having to parse
-            // a custom error shape.
-            let ctx = args.get("context").and_then(|v| v.as_str());
-            let text = match content_gate(&raw_text, ctx) {
-                Some(t) => t,
-                None => {
-                    return Ok(json!({
-                        "palace": palace,
-                        "status": "skipped",
-                        "reason": "content gate: skipped (short prompt, no context)",
-                    }));
-                }
-            };
-            let room = parse_room(args.get("room").and_then(|v| v.as_str()));
-            let mut tags: Vec<String> = args
-                .get("tags")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|t| t.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            // Submission-logging Part B: attach `creator:*` attribution so
-            // every MCP-origin drawer carries the writer identity (client
-            // = `trusty-memory-mcp`, source = `mcp`, version + cwd of the
-            // MCP server process). Issue #202: also project a bare-UUID
-            // session tag (when present in the caller's tags) into the
-            // reserved `creator:session=<first-8>` slot so the activity
-            // panel can surface it without inspecting every tag.
-            if let Some(session_tag) = session_tag_from_tags(&tags) {
-                tags.push(session_tag);
-            }
-            CreatorInfo::new_self(MCP_CLIENT_NAME, CreatorSource::Mcp).merge_into(&mut tags);
-
-            let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
-
-            let handle = open_palace_handle(state, palace)?;
-            // Issue #230: serialise the dedup-check + write sequence
-            // per-palace so two concurrent identical writes can't both
-            // pass the gate. The lock is scoped to the palace id — writes
-            // to different palaces still run in parallel. The guard is
-            // held until the end of this match arm so the post-write
-            // emits / KG extraction also see a consistent view; the redb
-            // write inside `remember_with_options` is the only operation
-            // that strictly needs the lock, but holding it longer is
-            // cheap and keeps the activity-log ordering coherent.
-            let write_lock = state.palace_write_lock(palace);
-            let _write_guard = write_lock.lock().await;
-            // Issue #220: rolling dedup window — skip when a near-duplicate
-            // landed in the same palace within the last 5 minutes. The
-            // `force=true` operator override bypasses the gate so
-            // intentional re-writes are not silently dropped.
-            if !force && dedup_gate(&handle, &text) {
-                tracing::debug!(
-                    palace = %palace,
-                    "content gate: skipped (duplicate within window)",
-                );
-                return Ok(json!({
-                    "palace": palace,
-                    "status": "skipped",
-                    "reason": "content gate: skipped (duplicate within window)",
-                }));
-            }
-            let opts = mcp_remember_opts(force);
-            // Snapshot the content preview *before* moving `text` into
-            // `remember_with_options` so the activity feed shows what was
-            // stored (matches the HTTP path's behaviour).
-            let preview = crate::service::drawer_content_preview(&text);
-            // Issue #97: keep originals so the auto-KG extractor sees the
-            // same content / tags that landed in the drawer.
-            // `remember_with_options` consumes them, so clone before the call.
-            let content_for_kg = text.clone();
-            let tags_for_kg = tags.clone();
-            let room_label_for_kg = room_label(&room);
-            let drawer_id = handle
-                .remember_with_options(text, room, tags, 0.5, opts)
-                .await
-                .context("PalaceHandle::remember_with_options")?;
-            // Issue #156: opt-in BM25 lexical lane. Fire-and-forget so the
-            // redb write returns immediately; daemon errors are logged but
-            // never block the MCP response.
-            bm25_index_fire_and_forget(state, palace, drawer_id, &content_for_kg);
-            // Issue #96: emit a DrawerAdded so the activity feed shows
-            // MCP-origin writes with `source = Mcp`.
-            let palace_name = lookup_palace_name(state, palace);
-            let drawer_count = handle.drawers.read().len();
-            state.emit(DaemonEvent::DrawerAdded {
-                palace_id: palace.to_string(),
-                palace_name,
-                drawer_count,
-                timestamp: chrono::Utc::now(),
-                content_preview: preview,
-                source: ActivitySource::Mcp,
-            });
-            state.emit(crate::service::MemoryService::new(state.clone()).aggregate_status_event());
-            // Issue #97: best-effort auto-extraction. Failures never fail
-            // the write — the drawer is already on disk.
-            auto_extract_and_assert(
-                &handle,
-                drawer_id,
-                &content_for_kg,
-                &tags_for_kg,
-                room_label_for_kg.as_deref(),
-            )
-            .await;
-            Ok(json!({
-                "drawer_id": drawer_id.to_string(),
-                "palace": palace,
-                "status": "stored",
-            }))
-        }
-        "memory_note" => {
-            // Issue #61: curated short-fact shortcut. Bypasses the token
-            // threshold (so "User prefers snake_case" is accepted) but still
-            // applies noise-pattern rejects so the tool can't be used to
-            // smuggle in auto-capture garbage. Pinned `DrawerType::UserFact`
-            // and `importance = 1.0` so the entry surfaces in L1 essentials.
-            let palace = resolve_palace(state, &args, "memory_note")?;
-            let palace = palace.as_str();
-            let raw_content = args
-                .get("content")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("memory_note: missing 'content'"))?
-                .to_string();
-            // Issue #220: blocklist gate — silently drop content matching
-            // known low-value auto-capture patterns. Same filter as
-            // `memory_remember` so the gate is uniform across the write
-            // surface.
-            if blocklist_gate(&raw_content) {
-                tracing::debug!(
-                    palace = %palace,
-                    "content gate: skipped (blocked pattern)",
-                );
-                return Ok(json!({
-                    "palace": palace,
-                    "status": "skipped",
-                    "reason": "content gate: skipped (blocked pattern)",
-                }));
-            }
-            // Issue #215: same content gate as `memory_remember`. A `context`
-            // arg can be passed to wrap a one-word answer; otherwise short
-            // standalone content is silently dropped with an explanatory
-            // status envelope.
-            let ctx = args.get("context").and_then(|v| v.as_str());
-            let content = match content_gate(&raw_content, ctx) {
-                Some(c) => c,
-                None => {
-                    return Ok(json!({
-                        "palace": palace,
-                        "status": "skipped",
-                        "reason": "content gate: skipped (short prompt, no context)",
-                    }));
-                }
-            };
-            let mut tags: Vec<String> = args
-                .get("tags")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|t| t.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            // Submission-logging Part B: same attribution as memory_remember.
-            // Issue #202: project a bare-UUID session tag (when present)
-            // into the reserved `creator:session=<first-8>` slot.
-            if let Some(session_tag) = session_tag_from_tags(&tags) {
-                tags.push(session_tag);
-            }
-            CreatorInfo::new_self(MCP_CLIENT_NAME, CreatorSource::Mcp).merge_into(&mut tags);
-            let handle = open_palace_handle(state, palace)?;
-            // Issue #230: per-palace write lock — same rationale as
-            // `memory_remember`. Held across the dedup gate and the
-            // `remember_with_options` write so two concurrent identical
-            // notes can't both pass the gate.
-            let write_lock = state.palace_write_lock(palace);
-            let _write_guard = write_lock.lock().await;
-            // Issue #220: rolling dedup window — same gate as
-            // `memory_remember`. `memory_note` has no `force` arg, so the
-            // gate is unconditional: curated short-fact writes that happen
-            // to duplicate an existing recent note are still skipped.
-            if dedup_gate(&handle, &content) {
-                tracing::debug!(
-                    palace = %palace,
-                    "content gate: skipped (duplicate within window)",
-                );
-                return Ok(json!({
-                    "palace": palace,
-                    "status": "skipped",
-                    "reason": "content gate: skipped (duplicate within window)",
-                }));
-            }
-            // Issue #97: mirror memory_remember — keep originals so the KG
-            // extractor sees the same content / tags that landed in the
-            // drawer. `remember_with_options` consumes them, so clone before.
-            let content_for_kg = content.clone();
-            let tags_for_kg = tags.clone();
-            // note() preset skips the token threshold; we keep the default
-            // filter for noise patterns. No MCP-stricter min_tokens override
-            // is needed because `enforce_min_tokens = false`.
-            let preview = crate::service::drawer_content_preview(&content);
-            let drawer_id = handle
-                .remember_with_options(
-                    content,
-                    RoomType::General,
-                    tags,
-                    1.0,
-                    RememberOptions::note(),
-                )
-                .await
-                .context("PalaceHandle::remember_with_options (note)")?;
-            // Issue #156: opt-in BM25 lexical lane. Fire-and-forget — note
-            // writes never block on the daemon round-trip.
-            bm25_index_fire_and_forget(state, palace, drawer_id, &content_for_kg);
-            // Issue #96: emit a DrawerAdded so the activity feed sees notes.
-            let palace_name = lookup_palace_name(state, palace);
-            let drawer_count = handle.drawers.read().len();
-            state.emit(DaemonEvent::DrawerAdded {
-                palace_id: palace.to_string(),
-                palace_name,
-                drawer_count,
-                timestamp: chrono::Utc::now(),
-                content_preview: preview,
-                source: ActivitySource::Mcp,
-            });
-            state.emit(crate::service::MemoryService::new(state.clone()).aggregate_status_event());
-            // Issue #97: best-effort auto-extraction (same hook as
-            // memory_remember). `memory_note` is pinned to the General room.
-            auto_extract_and_assert(
-                &handle,
-                drawer_id,
-                &content_for_kg,
-                &tags_for_kg,
-                Some("General"),
-            )
-            .await;
-            Ok(json!({
-                "drawer_id": drawer_id.to_string(),
-                "palace": palace,
-                "status": "stored",
-                "drawer_type": "UserFact",
-            }))
-        }
-        "memory_recall" => {
-            let palace = resolve_palace(state, &args, "memory_recall")?;
-            let query = args
-                .get("query")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("memory_recall: missing 'query'"))?;
-            let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-
-            let handle = open_palace_handle(state, &palace)?;
-            let embedder = state.embedder().await?;
-            // Issue #156: when the BM25 lane is enabled, run it in parallel
-            // with the vector recall and RRF-fuse the two ranked lists.
-            // When the daemon is unavailable or the env var is unset, the
-            // helper returns `None` and we return the vector-only results
-            // verbatim — zero behavioural change for existing deployments.
-            let vector_fut = recall(&handle, embedder.as_ref(), query, top_k);
-            let bm25_fut = bm25_search_optional(state, &palace, query, top_k);
-            let (vector_res, bm25_res) = tokio::join!(vector_fut, bm25_fut);
-            let mut results = vector_res.context("recall")?;
-            if let Some(bm25_hits) = bm25_res {
-                fuse_bm25_into_recall(&mut results, &bm25_hits, top_k);
-            }
-            Ok(serialize_recall(&palace, query, results))
-        }
-        "memory_recall_deep" => {
-            let palace = resolve_palace(state, &args, "memory_recall_deep")?;
-            let query = args
-                .get("query")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("memory_recall_deep: missing 'query'"))?;
-            let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-
-            let handle = open_palace_handle(state, &palace)?;
-            let embedder = state.embedder().await?;
-            let results = recall_deep(&handle, embedder.as_ref(), query, top_k)
-                .await
-                .context("recall_deep")?;
-            Ok(serialize_recall(&palace, query, results))
-        }
-        "palace_create" => {
-            let palace_name = args
-                .get("name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("palace_create: missing 'name'"))?;
-            let description = args
-                .get("description")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            let palace = Palace {
-                id: PalaceId::new(palace_name),
-                name: palace_name.to_string(),
-                description,
-                created_at: chrono::Utc::now(),
-                data_dir: state.data_root.join(palace_name),
-            };
-            let _handle = state
-                .registry
-                .create_palace(&state.data_root, palace)
-                .context("create_palace")?;
-            // Issue #96: emit so MCP-driven palace creation lands in the
-            // dashboard activity feed alongside HTTP-origin creates.
-            state.emit(DaemonEvent::PalaceCreated {
-                id: palace_name.to_string(),
-                name: palace_name.to_string(),
-                source: ActivitySource::Mcp,
-            });
-            // Issue #60: auto-seed the KG with temporal metadata so every
-            // new palace has at least `created_at` + `bootstrapped_at`
-            // triples anchored to the palace name. We deliberately do NOT
-            // pass a project_path here — that requires an explicit user
-            // decision (which directory belongs to this palace?). Failures
-            // are non-fatal: the palace was already created, and the user
-            // can re-run `kg_bootstrap` manually if needed.
-            let bootstrap_summary =
-                match crate::bootstrap::bootstrap_palace(state, palace_name, None).await {
-                    Ok(r) => Some(serde_json::json!({
-                        "triples_asserted": r.triples_asserted,
-                        "project_subject": r.project_subject,
-                    })),
-                    Err(e) => {
-                        tracing::warn!(
-                            palace = %palace_name,
-                            "auto-bootstrap on palace_create failed: {e:#}",
-                        );
-                        None
-                    }
-                };
-            Ok(json!({
-                "palace_id": palace_name,
-                "status": "created",
-                "bootstrap": bootstrap_summary,
-            }))
-        }
-        "palace_list" => {
-            let root = state.data_root.clone();
-            let palaces = tokio::task::spawn_blocking(move || {
-                trusty_common::memory_core::PalaceRegistry::list_palaces(&root)
-            })
-            .await
-            .context("join list_palaces")??;
-            let ids: Vec<String> = palaces.iter().map(|p| p.id.as_str().to_string()).collect();
-            Ok(json!({"palaces": ids}))
-        }
-        "palace_delete" => {
-            // Issue #180: full palace teardown. The HTTP layer is the
-            // canonical implementation; we just delegate to the same
-            // `MemoryService::delete_palace` method to keep behaviour
-            // (and the conflict / not-found / 204 split) identical
-            // across surfaces. ServiceError variants are folded into
-            // anyhow here so the MCP wire shape matches every other
-            // tool's error contract.
-            let palace_id = args
-                .get("palace_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("palace_delete: missing 'palace_id'"))?
-                .to_string();
-            let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
-            use crate::service::{MemoryService, ServiceError};
-            let svc = MemoryService::new(state.clone());
-            match svc.delete_palace(&palace_id, force).await {
-                Ok(()) => Ok(json!({"deleted": palace_id})),
-                Err(ServiceError::NotFound(_)) => Err(anyhow!("Palace not found: {palace_id}")),
-                Err(ServiceError::Conflict(msg)) => Err(anyhow!(msg)),
-                Err(e) => Err(anyhow!("palace_delete: {e}")),
-            }
-        }
-        "palace_update" => {
-            // Issue #180 follow-up: rename a palace's display name. The HTTP
-            // layer is the canonical implementation; we delegate to the
-            // same `MemoryService::update_palace_name` so the
-            // load-mutate-save-emit chain stays consistent across surfaces.
-            // The MCP wire shape is the minimal acknowledgement payload —
-            // callers needing the enriched palace info should use
-            // `palace_info` (or the HTTP endpoint, which returns the full
-            // shape).
-            let palace_id = args
-                .get("palace_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("palace_update: missing 'palace_id'"))?
-                .to_string();
-            let name = args
-                .get("name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("palace_update: missing 'name'"))?
-                .to_string();
-            use crate::service::MemoryService;
-            let svc = MemoryService::new(state.clone());
-            match svc.update_palace_name(&palace_id, &name).await {
-                Ok(_info) => Ok(json!({"updated": palace_id, "name": name.trim()})),
-                Err(e) => Err(anyhow!("palace_update: {e}")),
-            }
-        }
-        "kg_assert" => {
-            let palace = resolve_palace(state, &args, "kg_assert")?;
-            let palace = palace.as_str();
-            let subject = args
-                .get("subject")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("kg_assert: missing 'subject'"))?
-                .to_string();
-            let predicate = args
-                .get("predicate")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("kg_assert: missing 'predicate'"))?
-                .to_string();
-            let object = args
-                .get("object")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("kg_assert: missing 'object'"))?
-                .to_string();
-            let confidence = args
-                .get("confidence")
-                .and_then(|v| v.as_f64())
-                .map(|c| (c as f32).clamp(0.0, 1.0))
-                .unwrap_or(1.0);
-            let provenance = args
-                .get("provenance")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            let handle = open_palace_handle(state, palace)?;
-            let triple = Triple {
-                subject,
-                predicate,
-                object,
-                valid_from: chrono::Utc::now(),
-                valid_to: None,
-                confidence,
-                provenance,
-            };
-            let is_hot = crate::prompt_facts::is_hot_predicate(&triple.predicate);
-            handle.kg.assert(triple).await.context("kg.assert")?;
-            // Rebuild the prompt cache if this assertion touched a hot
-            // predicate; otherwise the cache stays valid and we skip the
-            // gather/format pass. Failures are logged but non-fatal — the
-            // write succeeded, the cache is only a denormalisation.
-            if is_hot {
-                if let Err(e) = crate::prompt_facts::rebuild_prompt_cache(state).await {
-                    tracing::warn!("rebuild_prompt_cache after kg_assert failed: {e:#}");
-                }
-            }
-            Ok(json!({"status": "asserted"}))
-        }
-        "add_alias" => {
-            let short = args
-                .get("short")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("add_alias: missing 'short'"))?
-                .to_string();
-            let full = args
-                .get("full")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("add_alias: missing 'full'"))?
-                .to_string();
-            let extra = args
-                .get("extra")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            // `add_alias` is bound to the default palace when configured;
-            // otherwise it lands in whatever palace the caller names. This
-            // mirrors `resolve_palace`'s rule but without the helpful error
-            // — aliases are typically project-scoped via `--palace`.
-            let palace = resolve_palace(state, &args, "add_alias")?;
-            let handle = open_palace_handle(state, &palace)?;
-            // Compose the object: "<full>" or "<full> (<extra>)".
-            let object = match extra.as_deref() {
-                Some(e) if !e.is_empty() => format!("{full} ({e})"),
-                _ => full.clone(),
-            };
-            let triple = Triple {
-                subject: short.clone(),
-                predicate: "is_alias_for".to_string(),
-                object,
-                valid_from: chrono::Utc::now(),
-                valid_to: None,
-                confidence: 1.0,
-                provenance: Some("add_alias".to_string()),
-            };
-            handle
-                .kg
-                .assert(triple)
-                .await
-                .context("kg.assert (alias)")?;
-            if let Err(e) = crate::prompt_facts::rebuild_prompt_cache(state).await {
-                tracing::warn!("rebuild_prompt_cache after add_alias failed: {e:#}");
-            }
-            Ok(json!({"asserted": true, "short": short, "full": full}))
-        }
-        "list_prompt_facts" => {
-            let triples = crate::prompt_facts::gather_hot_triples(state).await?;
-            let payload: Vec<Value> = triples
-                .into_iter()
-                .map(|(subject, predicate, object)| {
-                    json!({"subject": subject, "predicate": predicate, "object": object})
-                })
-                .collect();
-            Ok(json!({"facts": payload}))
-        }
-        "remove_prompt_fact" => {
-            let subject = args
-                .get("subject")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("remove_prompt_fact: missing 'subject'"))?
-                .to_string();
-            let predicate = args
-                .get("predicate")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("remove_prompt_fact: missing 'predicate'"))?
-                .to_string();
-
-            // The prompt-fact surface spans every palace, so try retracting
-            // across all of them and report `true` if any palace closed an
-            // active interval. This matches `list_prompt_facts`' scope so
-            // round-tripping list→remove never silently no-ops because the
-            // caller didn't name the right palace.
-            let mut closed_total: usize = 0;
-            for palace_id in state.registry.list() {
-                if let Some(handle) = state.registry.get(&palace_id) {
-                    match handle.kg.retract(&subject, &predicate).await {
-                        Ok(n) => closed_total += n,
-                        Err(e) => tracing::warn!(
-                            palace = %palace_id.as_str(),
-                            "retract failed: {e:#}",
-                        ),
-                    }
-                }
-            }
-            if closed_total > 0 {
-                if let Err(e) = crate::prompt_facts::rebuild_prompt_cache(state).await {
-                    tracing::warn!("rebuild_prompt_cache after remove_prompt_fact failed: {e:#}");
-                }
-                Ok(json!({"removed": true, "closed": closed_total}))
-            } else {
-                Ok(json!({"removed": false, "reason": "not found"}))
-            }
-        }
-        "kg_query" => {
-            let palace = resolve_palace(state, &args, "kg_query")?;
-            let subject = args
-                .get("subject")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("kg_query: missing 'subject'"))?;
-            let handle = open_palace_handle(state, &palace)?;
-            let triples = handle
-                .kg
-                .query_active(subject)
-                .await
-                .context("kg.query_active")?;
-            let payload: Vec<Value> = triples
-                .iter()
-                .map(|t| {
-                    json!({
-                        "subject": t.subject,
-                        "predicate": t.predicate,
-                        "object": t.object,
-                        "valid_from": t.valid_from.to_rfc3339(),
-                        "valid_to": t.valid_to.as_ref().map(|d| d.to_rfc3339()),
-                        "confidence": t.confidence,
-                        "provenance": t.provenance,
-                    })
-                })
-                .collect();
-            // Issue #60: surface a hint when the requested subject has no
-            // active triples so the model knows `kg_bootstrap` and
-            // `kg_assert` exist. Empty payload is the only signal we have
-            // at the per-subject query layer; that's the user-visible
-            // "nothing here" case the hint is for.
-            let mut response = json!({"subject": subject, "triples": payload});
-            if crate::bootstrap::is_kg_empty_for_subject(&triples) {
-                response["hint"] = Value::String(crate::bootstrap::KG_EMPTY_HINT.to_string());
-            }
-            Ok(response)
-        }
-        "memory_list" => {
-            let palace = resolve_palace(state, &args, "memory_list")?;
-            let handle = open_palace_handle(state, &palace)?;
-            let room = args
-                .get("room")
-                .and_then(|v| v.as_str())
-                .map(|s| parse_room(Some(s)));
-            let tag = args
-                .get("tag")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
-            let drawers = handle.list_drawers(room, tag, limit);
-            let payload: Vec<Value> = drawers
-                .iter()
-                .map(|d| {
-                    json!({
-                        "drawer_id": d.id.to_string(),
-                        "content": d.content,
-                        "importance": d.importance,
-                        "tags": d.tags,
-                        "created_at": d.created_at.to_rfc3339(),
-                        "drawer_type": d.drawer_type.as_str(),
-                        "expires_at": d.expires_at.map(|t| t.to_rfc3339()),
-                    })
-                })
-                .collect();
-            Ok(json!({"palace": palace, "drawers": payload}))
-        }
-        "memory_forget" => {
-            let palace = resolve_palace(state, &args, "memory_forget")?;
-            let drawer_id_str = args
-                .get("drawer_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("memory_forget: missing 'drawer_id'"))?;
-            let drawer_id = Uuid::parse_str(drawer_id_str)
-                .map_err(|e| anyhow!("memory_forget: invalid drawer_id UUID: {e}"))?;
-            let handle = open_palace_handle(state, &palace)?;
-            handle.forget(drawer_id).await.context("forget")?;
-            // Issue #96: emit so MCP-driven deletes are visible in the feed.
-            let drawer_count = handle.drawers.read().len();
-            state.emit(DaemonEvent::DrawerDeleted {
-                palace_id: palace.clone(),
-                drawer_count,
-                source: ActivitySource::Mcp,
-            });
-            state.emit(crate::service::MemoryService::new(state.clone()).aggregate_status_event());
-            Ok(json!({"status": "deleted", "drawer_id": drawer_id_str, "palace": palace}))
-        }
-        "palace_info" => {
-            let palace = resolve_palace(state, &args, "palace_info")?;
-            let handle = open_palace_handle(state, &palace)?;
-            let drawer_count = handle.list_drawers(None, None, usize::MAX).len();
-            let data_dir = handle
-                .data_dir
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string());
-            Ok(json!({
-                "id": handle.id.as_str(),
-                "name": handle.id.as_str(),
-                "drawer_count": drawer_count,
-                "data_dir": data_dir,
-            }))
-        }
-        "palace_compact" => {
-            let palace = resolve_palace(state, &args, "palace_compact")?;
-            let handle = open_palace_handle(state, &palace)?;
-            // Use the live drawer table (sourced from SQLite at palace open) as
-            // the authoritative valid-id set, then run the vector store's
-            // synchronous compaction on a blocking thread.
-            let valid_ids: std::collections::HashSet<Uuid> =
-                handle.drawers.read().iter().map(|d| d.id).collect();
-            let vector_store = handle.vector_store.clone();
-            let res = tokio::task::spawn_blocking(move || vector_store.compact_orphans(&valid_ids))
-                .await
-                .context("join palace_compact")??;
-            Ok(json!({
-                "palace": palace,
-                "total_checked": res.total_checked,
-                "orphans_removed": res.orphans_removed,
-                "index_size_before": res.index_size_before,
-                "index_size_after": res.index_size_after,
-            }))
-        }
-        "kg_gaps" => {
-            // Why (issue #53): Surface the cached community-detection output
-            // so the model can plan exploration without re-running Louvain.
-            // We deliberately do NOT recompute on the read path; the cache is
-            // refreshed by the dream cycle.
-            // What: Resolves the palace (explicit arg or daemon default),
-            // validates it exists by opening the handle, and returns the
-            // cached vec (an empty array when the dream cycle has not yet
-            // populated it).
-            // Test: `dispatch_kg_gaps_returns_cached`.
-            let palace = resolve_palace(state, &args, "kg_gaps")?;
-            // Ensure the palace exists; this also surfaces a useful error for
-            // typos in the palace argument.
-            let _handle = open_palace_handle(state, &palace)?;
-            let pid = PalaceId::new(&palace);
-            let cached = state.registry.get_gaps(&pid).unwrap_or_default();
-            let payload: Vec<Value> = cached
-                .into_iter()
-                .map(|g| {
-                    json!({
-                        "entities": g.entities,
-                        "internal_density": g.internal_density,
-                        "external_bridges": g.external_bridges,
-                        "suggested_exploration": g.suggested_exploration,
-                    })
-                })
-                .collect();
-            Ok(json!({ "palace": palace, "gaps": payload }))
-        }
-        "memory_recall_all" => {
-            let query = args
-                .get("q")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("memory_recall_all: missing 'q'"))?;
-            let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-            let deep = args.get("deep").and_then(|v| v.as_bool()).unwrap_or(false);
-
-            // List every palace on disk and open a handle for each. Palaces
-            // that fail to open are skipped with a warning so a single bad
-            // namespace cannot fail the whole fan-out.
-            let root = state.data_root.clone();
-            let palaces = tokio::task::spawn_blocking(move || {
-                trusty_common::memory_core::PalaceRegistry::list_palaces(&root)
-            })
-            .await
-            .context("join list_palaces")??;
-
-            let mut handles = Vec::with_capacity(palaces.len());
-            for p in &palaces {
-                match state.registry.open_palace(&state.data_root, &p.id) {
-                    Ok(h) => handles.push(h),
-                    Err(e) => {
-                        tracing::warn!(palace = %p.id, "memory_recall_all: open failed: {e:#}")
-                    }
-                }
-            }
-
-            let embedder = state.embedder().await?;
-            let erased: std::sync::Arc<
-                dyn trusty_common::memory_core::embed::Embedder + Send + Sync,
-            > = embedder;
-            let results = recall_across_palaces(&handles, &erased, query, top_k, deep)
-                .await
-                .context("recall_across_palaces")?;
-
-            let payload: Vec<Value> = results
-                .iter()
-                .map(|r| {
-                    json!({
-                        "palace_id":  r.palace_id,
-                        "drawer_id":  r.result.drawer.id.to_string(),
-                        "content":    r.result.drawer.content,
-                        "importance": r.result.drawer.importance,
-                        "tags":       r.result.drawer.tags,
-                        "score":      r.result.score,
-                        "layer":      r.result.layer,
-                        "drawer_type": r.result.drawer.drawer_type.as_str(),
-                    })
-                })
-                .collect();
-            Ok(json!({ "query": query, "results": payload }))
-        }
-        "get_prompt_context" => {
-            // Why (issue #42): the model calls this at the start of each
-            // turn to pull aliases/conventions/facts into its working
-            // context. A `query` filter lets it scope the result to just
-            // the facts that matter for the current task — cheap on the
-            // wire and keeps the prompt focused.
-            // What: read-locks the cache once, clones the snapshot, then
-            // releases the lock so the formatter runs without blocking
-            // concurrent readers. When `query` is set we re-format a
-            // filtered subset of the raw triples; otherwise we serve the
-            // pre-formatted string directly.
-            let query = args
-                .get("query")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-
-            let cache_snapshot = {
-                let guard = state.prompt_context_cache.read().await;
-                guard.clone()
-            };
-
-            let body = if let Some(q) = query.as_deref() {
-                let needle = q.to_lowercase();
-                let filtered: Vec<(String, String, String)> = cache_snapshot
-                    .triples
-                    .into_iter()
-                    .filter(|(subject, _predicate, object)| {
-                        subject.to_lowercase().contains(&needle)
-                            || object.to_lowercase().contains(&needle)
-                    })
-                    .collect();
-                let formatted = crate::prompt_facts::build_prompt_context(&filtered);
-                if formatted.is_empty() {
-                    "No project context found matching your query.".to_string()
-                } else {
-                    formatted
-                }
-            } else if cache_snapshot.formatted.is_empty() {
-                "No prompt facts stored yet.".to_string()
-            } else {
-                cache_snapshot.formatted
-            };
-
-            // Return the body as a bare JSON string so the MCP envelope's
-            // `content[0].text` carries the formatted Markdown verbatim
-            // (ready to paste into the model's working context) without an
-            // extra `{"context": "..."}` wrapper that callers would have
-            // to strip.
-            Ok(Value::String(body))
-        }
-        "discover_aliases" => {
-            // Why (issue #42): Surface project shorthand automatically so the
-            // model never has to be told `tga == trusty-git-analytics`. The
-            // tool resolves a palace (default or argument), runs the
-            // pure-discovery scanner against the requested root (or cwd),
-            // checks each candidate against the palace's active KG, and
-            // asserts only the new ones. The prompt cache is rebuilt once
-            // at the end iff anything was actually asserted.
-            // What: returns `{ discovered: [...], already_known: N, new: M }`
-            // so callers can audit the delta.
-            // Test: `dispatch_discover_aliases_inserts_new_and_dedupes`.
-            let palace = resolve_palace(state, &args, "discover_aliases")?;
-            let project_root = args
-                .get("project_root")
-                .and_then(|v| v.as_str())
-                .map(std::path::PathBuf::from)
-                .or_else(|| std::env::current_dir().ok())
-                .ok_or_else(|| anyhow!("discover_aliases: no project_root and cwd unavailable"))?;
-
-            let discoveries = crate::discovery::discover_project_aliases(&project_root).await?;
-
-            let handle = open_palace_handle(state, &palace)?;
-
-            let mut already_known = 0usize;
-            let mut newly_asserted = 0usize;
-            let mut reported: Vec<Value> = Vec::with_capacity(discoveries.len());
-
-            for d in &discoveries {
-                // Check active triples for the subject; if any matches the
-                // same predicate + object, skip the assertion.
-                let active = handle
-                    .kg
-                    .query_active(&d.short)
-                    .await
-                    .context("kg.query_active")?;
-                let exists = active
-                    .iter()
-                    .any(|t| t.predicate == "is_alias_for" && t.object == d.full);
-                if exists {
-                    already_known += 1;
-                    continue;
-                }
-
-                let triple = Triple {
-                    subject: d.short.clone(),
-                    predicate: "is_alias_for".to_string(),
-                    object: d.full.clone(),
-                    valid_from: chrono::Utc::now(),
-                    valid_to: None,
-                    confidence: 1.0,
-                    provenance: Some(format!("discover_aliases:{}", d.source.as_str())),
-                };
-                handle
-                    .kg
-                    .assert(triple)
-                    .await
-                    .context("kg.assert (discover)")?;
-                newly_asserted += 1;
-                reported.push(json!({
-                    "short": d.short,
-                    "full": d.full,
-                    "source": d.source.as_str(),
-                }));
-            }
-
-            if newly_asserted > 0 {
-                if let Err(e) = crate::prompt_facts::rebuild_prompt_cache(state).await {
-                    tracing::warn!("rebuild_prompt_cache after discover_aliases failed: {e:#}");
-                }
-            }
-
-            Ok(json!({
-                "discovered": reported,
-                "already_known": already_known,
-                "new": newly_asserted,
-                "palace": palace,
-            }))
-        }
-        "kg_bootstrap" => {
-            // Issue #60: scan well-known project files and seed the KG with
-            // structured triples + temporal metadata. The handler resolves
-            // the palace (explicit arg or daemon default) and forwards the
-            // optional `project_path` to the bootstrap helper.
-            let palace = resolve_palace(state, &args, "kg_bootstrap")?;
-            let project_path = args
-                .get("project_path")
-                .and_then(|v| v.as_str())
-                .map(std::path::PathBuf::from);
-            let result =
-                crate::bootstrap::bootstrap_palace(state, &palace, project_path.as_deref())
-                    .await
-                    .context("bootstrap_palace")?;
-            // Rebuild the prompt cache: bootstrap can land hot predicates
-            // (descriptions, language tags) that affect the prompt-facts
-            // surface. Cache failures are non-fatal.
-            if let Err(e) = crate::prompt_facts::rebuild_prompt_cache(state).await {
-                tracing::warn!("rebuild_prompt_cache after kg_bootstrap failed: {e:#}");
-            }
-            crate::bootstrap::result_to_json(&result)
-        }
-        "memory_send_message" => {
-            // Issue #99: inter-project messaging via palace memories.
-            let to_palace = args
-                .get("to_palace")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("memory_send_message: missing 'to_palace'"))?
-                .to_string();
-            let purpose = args
-                .get("purpose")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("memory_send_message: missing 'purpose'"))?
-                .to_string();
-            let content = args
-                .get("content")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("memory_send_message: missing 'content'"))?
-                .to_string();
-            // from_palace defaults to the explicit `from_palace` arg, then
-            // the server's --palace default, then the cwd-derived slug.
-            let from_palace = if let Some(s) = args.get("from_palace").and_then(|v| v.as_str()) {
-                s.to_string()
-            } else if let Some(d) = state.default_palace.clone() {
-                d
-            } else {
-                crate::messaging::cwd_palace_slug()
-                    .context("memory_send_message: derive from_palace from cwd")?
-            };
-            let drawer_id = crate::messaging::send_message_to_palace(
-                &state.registry,
-                &state.data_root,
-                &from_palace,
-                &to_palace,
-                &purpose,
-                content,
-                CreatorInfo::new_self(MCP_CLIENT_NAME, CreatorSource::Mcp),
-            )
-            .await
-            .context("memory_send_message")?;
-            Ok(json!({
-                "drawer_id": drawer_id.to_string(),
-                "from_palace": from_palace,
-                "to_palace": to_palace,
-                "purpose": purpose,
-                "status": "sent",
-            }))
-        }
+        "memory_remember" => handle_memory_remember(state, args).await,
+        "memory_note" => handle_memory_note(state, args).await,
+        "memory_recall" => handle_memory_recall(state, args).await,
+        "memory_recall_deep" => handle_memory_recall_deep(state, args).await,
+        "palace_create" => handle_palace_create(state, args).await,
+        "palace_list" => handle_palace_list(state, args).await,
+        "palace_delete" => handle_palace_delete(state, args).await,
+        "palace_update" => handle_palace_update(state, args).await,
+        "kg_assert" => handle_kg_assert(state, args).await,
+        "add_alias" => handle_add_alias(state, args).await,
+        "list_prompt_facts" => handle_list_prompt_facts(state, args).await,
+        "remove_prompt_fact" => handle_remove_prompt_fact(state, args).await,
+        "kg_query" => handle_kg_query(state, args).await,
+        "memory_list" => handle_memory_list(state, args).await,
+        "memory_forget" => handle_memory_forget(state, args).await,
+        "palace_info" => handle_palace_info(state, args).await,
+        "palace_compact" => handle_palace_compact(state, args).await,
+        "kg_gaps" => handle_kg_gaps(state, args).await,
+        "memory_recall_all" => handle_memory_recall_all(state, args).await,
+        "get_prompt_context" => handle_get_prompt_context(state, args).await,
+        "discover_aliases" => handle_discover_aliases(state, args).await,
+        "kg_bootstrap" => handle_kg_bootstrap(state, args).await,
+        "memory_send_message" => handle_memory_send_message(state, args).await,
         other => anyhow::bail!("unknown tool: {other}"),
     }
 }
