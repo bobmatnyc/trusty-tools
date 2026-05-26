@@ -18,12 +18,13 @@
 //!     (`{"jsonrpc": "2.0", "id": ..., "method": ..., "params": ...}` →
 //!     `{"jsonrpc": "2.0", "id": ..., "result": ...}` or `error`).
 //!   - [`dispatch`]: async function that consumes a request and an
-//!     `AppState` and returns the response. It routes `palace_*`,
-//!     `memory_*`, `kg_*`, `add_alias`, `discover_aliases`,
-//!     `get_prompt_context`, `list_prompt_facts`, `remove_prompt_fact`,
-//!     `memory_send_message`, and `hook_fired` to the existing handlers
-//!     in [`crate::tools`] / [`crate::lib`]. Unknown methods return
-//!     `-32601 Method not found`.
+//!     `AppState` and returns the response. It routes `initialize`,
+//!     `notifications/initialized`, `ping`, `rpc.discover`, `tools/list`,
+//!     `tools/call`, `palace_*`, `memory_*`, `kg_*`, `add_alias`,
+//!     `discover_aliases`, `get_prompt_context`, `list_prompt_facts`,
+//!     `remove_prompt_fact`, `memory_send_message`, and `hook_fired` to the
+//!     existing handlers in [`crate::tools`] / [`crate::lib`]. Unknown
+//!     methods return `-32601 Method not found`.
 //!
 //! Test: see `dispatch_palace_list_returns_empty_array_initially`,
 //!     `dispatch_unknown_method_returns_method_not_found`,
@@ -33,6 +34,7 @@
 use crate::{ActivitySource, AppState, DaemonEvent, HookType, InjectionKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use trusty_common::mcp::initialize_response;
 
 /// JSON-RPC 2.0 standard error codes used by [`dispatch`].
 ///
@@ -235,22 +237,46 @@ struct HookFiredParams {
 /// future transport (gRPC, named pipes on Windows) all funnel through
 /// this function. Concentrating the routing here means new tools
 /// automatically light up on every transport.
-/// What: routes by `req.method`. `ping` returns `{}`. `rpc.discover`
-/// returns the OpenRPC document. `tools/list` returns the MCP tool
-/// definitions. `tools/call` extracts `name` + `arguments` from
-/// `params` (matching the MCP convention). Any method listed in
-/// [`TOOL_METHODS`] is forwarded directly to
-/// [`crate::tools::dispatch_tool`] with `params` as the argument
-/// object. `hook_fired` emits a [`DaemonEvent::HookFired`] (the
-/// JSON-RPC equivalent of `POST /api/v1/activity/hook`). Unknown
-/// methods return [`error_codes::METHOD_NOT_FOUND`].
-/// Test: see `dispatch_*` tests in this module.
+/// What: routes by `req.method`. `initialize` returns the MCP capability
+/// handshake required by Claude Code before it will mark the server as
+/// connected. `notifications/initialized` and `notifications/cancelled`
+/// are client-to-server notifications (no response per MCP spec). `ping`
+/// returns `{}`. `rpc.discover` returns the OpenRPC document. `tools/list`
+/// returns the MCP tool definitions. `tools/call` extracts `name` +
+/// `arguments` from `params` (matching the MCP convention). Any method
+/// listed in [`TOOL_METHODS`] is forwarded directly to
+/// [`crate::tools::dispatch_tool`] with `params` as the argument object.
+/// `hook_fired` emits a [`DaemonEvent::HookFired`] (the JSON-RPC equivalent
+/// of `POST /api/v1/activity/hook`). Unknown methods return
+/// [`error_codes::METHOD_NOT_FOUND`].
+/// Test: see `dispatch_*` tests in this module, especially
+/// `dispatch_initialize_returns_capabilities`.
 pub async fn dispatch(state: &AppState, req: JsonRpcRequest) -> JsonRpcResponse {
     let id = req.id.clone().unwrap_or(Value::Null);
     let params = req.params.clone().unwrap_or(Value::Null);
 
     // Built-in protocol methods first — these never touch tool surface.
     match req.method.as_str() {
+        // MCP lifecycle: Claude Code sends `initialize` first; without a
+        // valid response the client marks the server as failed and refuses
+        // to call any tools. `notifications/initialized` is a client
+        // notification confirming it finished setup — per spec we MUST NOT
+        // send a response (handled by the `is_notification` guard in the
+        // UDS handler, but we also explicitly return Null here for safety).
+        "initialize" => {
+            let extra = state
+                .default_palace
+                .as_deref()
+                .map(|p| json!({"default_palace": p}));
+            let result = initialize_response("trusty-memory", &state.version, extra);
+            return JsonRpcResponse::ok(id, result);
+        }
+        "notifications/initialized" | "notifications/cancelled" => {
+            // Notifications must not receive a response (MCP spec §4.1).
+            // Returning Null here is safe: the UDS handler suppresses the
+            // response for any request whose id is absent or Null.
+            return JsonRpcResponse::ok(Value::Null, Value::Null);
+        }
         "ping" => return JsonRpcResponse::ok(id, json!({})),
         "rpc.discover" => {
             let result = crate::openrpc::build_discover_response(
@@ -417,6 +443,44 @@ mod tests {
         let err = resp.error.expect("error");
         assert_eq!(err.code, error_codes::METHOD_NOT_FOUND);
         assert!(err.message.contains("definitely_not_a_real_method"));
+    }
+
+    /// Why: `initialize` is the first method Claude Code sends over the UDS/
+    /// bridge path. Without a valid response the MCP client marks the server
+    /// as failed. This confirms the dispatcher routes `initialize` to
+    /// `trusty_common::mcp::initialize_response` and returns the MCP
+    /// capability shape Claude Code expects.
+    /// What: dispatch an `initialize` request, assert the result carries
+    /// `protocolVersion`, `capabilities.tools`, and `serverInfo.name`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn dispatch_initialize_returns_capabilities() {
+        let state = test_state();
+        let req = JsonRpcRequest {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(1)),
+            method: "initialize".to_string(),
+            params: Some(json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1.0"}
+            })),
+        };
+        let resp = dispatch(&state, req).await;
+        assert!(resp.error.is_none(), "initialize must not error: {:?}", resp.error);
+        let result = resp.result.expect("result");
+        assert_eq!(
+            result["protocolVersion"], "2024-11-05",
+            "must echo the negotiated protocol version"
+        );
+        assert!(
+            result["capabilities"]["tools"].is_object(),
+            "must advertise tools capability"
+        );
+        assert_eq!(
+            result["serverInfo"]["name"], "trusty-memory",
+            "serverInfo.name must be trusty-memory"
+        );
     }
 
     /// Why: ping is a protocol-level keepalive; must return `{}` and
