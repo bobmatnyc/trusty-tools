@@ -437,6 +437,90 @@ impl MemoryService {
         Ok(())
     }
 
+    /// Rename a palace's display name without touching its data.
+    ///
+    /// Why: Operators need to fix typos and rebrand palaces without dropping
+    /// the underlying drawers / vectors / KG. The palace id (the directory
+    /// name on disk) is immutable — only the human-readable `name` field in
+    /// `palace.json` changes — so cached `PalaceHandle`s stay valid and no
+    /// registry invalidation is required.
+    /// What: 1) loads the palace via `PalaceStore::load_palace` (404 when the
+    /// directory or `palace.json` is missing), 2) trims the new name and
+    /// returns `BadRequest` when empty, 3) mutates `palace.name` and writes
+    /// the metadata back through the atomic `PalaceStore::save_palace`
+    /// (tmp file + rename), 4) emits an aggregate `StatusChanged` so
+    /// dashboards re-render the relabelled palace, 5) returns the updated
+    /// palace as JSON (enriched with the live handle stats, so callers see
+    /// drawer/vector/KG counts in the same shape as `GET /palaces/{id}`).
+    /// Test: `update_palace_name_renames_palace`,
+    /// `update_palace_name_rejects_empty_name`,
+    /// `update_palace_name_returns_not_found_for_missing_id` in `web::tests`.
+    pub async fn update_palace_name(&self, palace_id: &str, name: &str) -> Result<Value> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(anyhow!("name must be non-empty after trimming"));
+        }
+        let palace_dir = self.state.data_root.join(palace_id);
+        let mut palace = trusty_common::memory_core::store::PalaceStore::load_palace(&palace_dir)
+            .map_err(|e| anyhow!("palace not found: {palace_id} ({e})"))?;
+        palace.name = trimmed.to_string();
+        trusty_common::memory_core::store::PalaceStore::save_palace(&palace)
+            .with_context(|| format!("save palace metadata for {palace_id}"))?;
+        let handle = self
+            .state
+            .registry
+            .open_palace(&self.state.data_root, &palace.id)
+            .ok();
+        let info = palace_info_from(&palace, handle.as_ref());
+        self.state.emit(self.aggregate_status_event());
+        serde_json::to_value(info).context("serialize palace info")
+    }
+
+    /// Typed variant of [`Self::update_palace_name`] used by the HTTP handler.
+    ///
+    /// Why: HTTP needs to distinguish 400 (empty name) from 404 (missing
+    /// palace) so the right status code is emitted; the chat / MCP tool
+    /// only cares about a `Result<Value>` because both errors are surfaced
+    /// as opaque MCP error strings. Keeping a typed variant alongside the
+    /// untyped one keeps the wire shape correct on both surfaces without
+    /// asking either caller to parse error strings.
+    /// What: same as [`Self::update_palace_name`] but returns
+    /// `ServiceError::BadRequest` for empty names and
+    /// `ServiceError::NotFound` for missing palace metadata.
+    /// Test: `update_palace_name_renames_palace`,
+    /// `update_palace_name_rejects_empty_name`,
+    /// `update_palace_name_returns_not_found_for_missing_id`.
+    pub async fn update_palace_name_typed(
+        &self,
+        palace_id: &str,
+        name: &str,
+    ) -> ServiceResult<Value> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(ServiceError::bad_request(
+                "name must be non-empty after trimming",
+            ));
+        }
+        let palace_dir = self.state.data_root.join(palace_id);
+        let mut palace = trusty_common::memory_core::store::PalaceStore::load_palace(&palace_dir)
+            .map_err(|e| {
+            ServiceError::not_found(format!("palace not found: {palace_id} ({e})"))
+        })?;
+        palace.name = trimmed.to_string();
+        trusty_common::memory_core::store::PalaceStore::save_palace(&palace).map_err(|e| {
+            ServiceError::internal(format!("save palace metadata for {palace_id}: {e}"))
+        })?;
+        let handle = self
+            .state
+            .registry
+            .open_palace(&self.state.data_root, &palace.id)
+            .ok();
+        let info = palace_info_from(&palace, handle.as_ref());
+        self.state.emit(self.aggregate_status_event());
+        serde_json::to_value(info)
+            .map_err(|e| ServiceError::internal(format!("serialize palace info: {e}")))
+    }
+
     /// Look up a single palace by id and enrich with live handle stats.
     ///
     /// Why: distinct 404 vs. 500 path is needed by both HTTP and chat callers.

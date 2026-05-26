@@ -234,6 +234,18 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                 }
             },
             {
+                "name": "palace_update",
+                "description": "Update the display name of an existing palace. The palace's drawers, vectors, and knowledge graph are preserved; only the human-readable name changes.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "palace_id": {"type": "string", "description": "Id of the palace to rename."},
+                        "name":      {"type": "string", "description": "New display name. Trimmed; must be non-empty."}
+                    },
+                    "required": ["palace_id", "name"]
+                }
+            },
+            {
                 "name": "kg_assert",
                 "description": "Assert a fact in the temporal knowledge graph.",
                 "inputSchema": {
@@ -827,6 +839,32 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
                 Err(ServiceError::NotFound(_)) => Err(anyhow!("Palace not found: {palace_id}")),
                 Err(ServiceError::Conflict(msg)) => Err(anyhow!(msg)),
                 Err(e) => Err(anyhow!("palace_delete: {e}")),
+            }
+        }
+        "palace_update" => {
+            // Issue #180 follow-up: rename a palace's display name. The HTTP
+            // layer is the canonical implementation; we delegate to the
+            // same `MemoryService::update_palace_name` so the
+            // load-mutate-save-emit chain stays consistent across surfaces.
+            // The MCP wire shape is the minimal acknowledgement payload —
+            // callers needing the enriched palace info should use
+            // `palace_info` (or the HTTP endpoint, which returns the full
+            // shape).
+            let palace_id = args
+                .get("palace_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("palace_update: missing 'palace_id'"))?
+                .to_string();
+            let name = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("palace_update: missing 'name'"))?
+                .to_string();
+            use crate::service::MemoryService;
+            let svc = MemoryService::new(state.clone());
+            match svc.update_palace_name(&palace_id, &name).await {
+                Ok(_info) => Ok(json!({"updated": palace_id, "name": name.trim()})),
+                Err(e) => Err(anyhow!("palace_update: {e}")),
             }
         }
         "kg_assert" => {
@@ -1579,7 +1617,7 @@ mod tests {
             .get("tools")
             .and_then(|t| t.as_array())
             .expect("tools array");
-        assert_eq!(tools.len(), 22);
+        assert_eq!(tools.len(), 23);
         let names: Vec<&str> = tools
             .iter()
             .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
@@ -1593,6 +1631,7 @@ mod tests {
             "memory_forget",
             "palace_create",
             "palace_delete",
+            "palace_update",
             "palace_list",
             "palace_info",
             "palace_compact",

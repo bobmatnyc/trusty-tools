@@ -63,7 +63,9 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/palaces", get(list_palaces).post(create_palace))
         .route(
             "/api/v1/palaces/{id}",
-            get(get_palace_handler).delete(delete_palace_handler),
+            get(get_palace_handler)
+                .delete(delete_palace_handler)
+                .patch(update_palace_handler),
         )
         .route(
             "/api/v1/palaces/{id}/drawers",
@@ -801,6 +803,45 @@ async fn delete_palace_handler(
         .delete_palace(&id, q.force.unwrap_or(false))
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Request body for `PATCH /api/v1/palaces/{id}`.
+///
+/// Why: The only mutable palace metadata exposed today is the display name;
+/// keeping the body to a single field keeps the wire contract obvious and
+/// lets us extend later without breaking older clients (additive fields
+/// only). Issue #180 follow-up.
+/// What: a single required `name` string. Empty / whitespace-only values
+/// are rejected with 400 by the handler.
+/// Test: `update_palace_name_renames_palace`,
+/// `update_palace_name_rejects_empty_name`.
+#[derive(Deserialize)]
+struct UpdatePalaceBody {
+    name: String,
+}
+
+/// `PATCH /api/v1/palaces/{id}` — rename a palace's display name.
+///
+/// Why: Issue #180 follow-up — operators need to relabel palaces without
+/// re-creating them (which would lose all stored drawers / KG / vectors).
+/// Only the human-readable `name` changes; the directory name (which is the
+/// palace id) is immutable.
+/// What: delegates to `MemoryService::update_palace_name_typed`. Returns
+/// `200 OK` with the updated palace info on success, `404 Not Found` when
+/// the id is unknown, and `400 Bad Request` when the supplied name is
+/// empty after trimming.
+/// Test: `update_palace_name_renames_palace`,
+/// `update_palace_name_rejects_empty_name`,
+/// `update_palace_name_returns_not_found_for_missing_id`.
+async fn update_palace_handler(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<UpdatePalaceBody>,
+) -> Result<Json<Value>, ApiError> {
+    let value = crate::service::MemoryService::new(state)
+        .update_palace_name_typed(&id, &body.name)
+        .await?;
+    Ok(Json(value))
 }
 
 // ---------------------------------------------------------------------------
@@ -2263,6 +2304,126 @@ mod tests {
                     .method("DELETE")
                     .uri("/api/v1/palaces/never-existed")
                     .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Why: Issue #180 follow-up — verify the happy path of `PATCH
+    /// /api/v1/palaces/{id}`: create a palace, rename it, and confirm
+    /// `GET /api/v1/palaces/{id}` returns the new display name. The id
+    /// (which is the on-disk directory) must stay stable.
+    /// What: POST a palace named "rename-me", PATCH with a new display
+    /// name, expect 200 + payload showing the rename, then GET to confirm
+    /// persistence to disk.
+    /// Test: This test itself.
+    #[tokio::test]
+    async fn update_palace_name_renames_palace() {
+        let state = test_state();
+        let app = router().with_state(state);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/palaces")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"name": "rename-me"}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/palaces/rename-me")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"name": "New Display Name"}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["id"].as_str(), Some("rename-me"));
+        assert_eq!(v["name"].as_str(), Some("New Display Name"));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/palaces/rename-me")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["id"].as_str(), Some("rename-me"));
+        assert_eq!(v["name"].as_str(), Some("New Display Name"));
+    }
+
+    /// Why: Issue #180 follow-up — empty / whitespace-only names would
+    /// break the dashboard label. Reject with 400 so the caller knows the
+    /// request was well-formed but the value is invalid.
+    /// What: Create a palace, PATCH with `{"name": "   "}`, expect 400.
+    /// Test: This test itself.
+    #[tokio::test]
+    async fn update_palace_name_rejects_empty_name() {
+        let state = test_state();
+        let app = router().with_state(state);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/palaces")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"name": "keep-name"}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/palaces/keep-name")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"name": "   "}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Why: Issue #180 follow-up — patching a non-existent palace must
+    /// yield 404 so retries against the wrong id surface the real problem
+    /// rather than silently no-op'ing.
+    /// What: PATCH against a never-created id and assert 404.
+    /// Test: This test itself.
+    #[tokio::test]
+    async fn update_palace_name_returns_not_found_for_missing_id() {
+        let state = test_state();
+        let app = router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/palaces/no-such-palace")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"name": "irrelevant"}).to_string()))
                     .unwrap(),
             )
             .await

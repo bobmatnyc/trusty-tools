@@ -1314,8 +1314,9 @@ mod tests {
         let resp = handle_message(&state, req).await;
         let tools = resp["result"]["tools"].as_array().expect("tools array");
         // Issue #99 added `memory_send_message`; issue #180 added
-        // `palace_delete` on top of the 21-tool baseline.
-        assert_eq!(tools.len(), 22);
+        // `palace_delete`; the #180 follow-up adds `palace_update` on top
+        // of the 22-tool baseline.
+        assert_eq!(tools.len(), 23);
     }
 
     #[tokio::test]
