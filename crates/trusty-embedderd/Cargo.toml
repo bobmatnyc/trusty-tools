@@ -1,6 +1,7 @@
 [package]
 name = "trusty-embedderd"
 version = "0.3.0"
+publish = false
 edition = "2021"
 license-file = "LICENSE"
 repository = "https://github.com/bobmatnyc/trusty-tools"
