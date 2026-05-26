@@ -30,10 +30,10 @@ trusty-common = { path = "crates/trusty-common", version = "0.4.23" }
 trusty-mcp-core = { path = "crates/trusty-mcp-core", version = "0.1" }
 trusty-embedder = { path = "crates/trusty-embedder", version = "0.1" }
 trusty-symgraph = { path = "crates/trusty-symgraph", version = "0.2.6" }
-# trusty-mpm internal crates (consumed by trusty-mpm-* sub-crates).
-trusty-mpm-core = { path = "crates/trusty-mpm-core", version = "0.4.0" }
-trusty-mpm-mcp = { path = "crates/trusty-mpm-mcp", version = "0.4.0" }
-trusty-mpm-client = { path = "crates/trusty-mpm-client", version = "0.4.0" }
+# trusty-mpm: unified crate (replaces the former trusty-mpm-{core,mcp,client,
+# daemon,cli,tui,telegram} sub-crates). The gui sub-crate is kept separate
+# because it owns Tauri's build.rs and tauri.conf.json.
+trusty-mpm = { path = "crates/trusty-mpm", version = "0.4.0" }
 
 # ── Async runtime / HTTP ────────────────────────────────────────────────────
 anyhow = "1"

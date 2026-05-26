@@ -1,0 +1,158 @@
+[package]
+name = "trusty-mpm"
+version.workspace = true
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "trusty-mpm: unified multi-agent orchestration platform (core, daemon, CLI, TUI, Telegram)"
+
+# ── Feature flags ─────────────────────────────────────────────────────────────
+#
+# Default features build the two most common user-facing tools: the CLI (`tm`)
+# and the background daemon (`trusty-mpmd`). Users who only want the libraries
+# can opt out with `--no-default-features`.
+#
+# Each optional binary is gated behind a matching feature flag so users only
+# pay the compile cost for the components they actually install.
+[features]
+default = ["cli", "daemon"]
+
+# `cli` gates the `tm` / `trusty-mpm` binary (embeds daemon + tui + telegram).
+cli = ["daemon", "tui", "telegram"]
+
+# `daemon` gates the `trusty-mpmd` shim binary and the daemon library module.
+# Activating `daemon` also pulls in `mcp` (the daemon implements OrchestratorBackend).
+daemon = ["mcp",
+          "dep:axum", "dep:tower", "dep:tower-http",
+          "dep:tokio-stream", "dep:futures",
+          "dep:dashmap", "dep:parking_lot",
+          "dep:notify", "dep:tracing-appender",
+          "dep:utoipa-swagger-ui"]
+
+# `mcp` gates the MCP server library module.
+# `async-trait` is needed by the OrchestratorBackend trait definition.
+mcp = ["dep:async-trait"]
+
+# `tui` gates the `trusty-mpm-tui` shim binary and the TUI library module.
+tui = ["dep:ratatui", "dep:crossterm"]
+
+# `telegram` gates the `trusty-mpm-telegram` shim binary and the Telegram library module.
+telegram = ["dep:teloxide", "dep:tokio-util"]
+
+# `gui` gates the `trusty-mpm-gui` shim binary.
+# The Tauri GUI lives in the separate `trusty-mpm-gui` crate (it owns
+# `build.rs` + `tauri.conf.json` which cannot be merged into a generic crate).
+gui = ["dep:trusty-mpm-gui"]
+
+# ── Library ────────────────────────────────────────────────────────────────────
+[lib]
+name = "trusty_mpm"
+path = "src/lib.rs"
+
+# ── Binaries ───────────────────────────────────────────────────────────────────
+
+[[bin]]
+name = "tm"
+path = "src/bin/tm.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "trusty-mpm"
+path = "src/bin/tm.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "trusty-mpmd"
+path = "src/bin/trusty-mpmd.rs"
+required-features = ["daemon"]
+
+[[bin]]
+name = "trusty-mpm-tui"
+path = "src/bin/trusty-mpm-tui.rs"
+required-features = ["tui"]
+
+[[bin]]
+name = "trusty-mpm-telegram"
+path = "src/bin/trusty-mpm-telegram.rs"
+required-features = ["telegram"]
+
+[[bin]]
+name = "trusty-mpm-gui"
+path = "src/bin/trusty-mpm-gui.rs"
+required-features = ["gui"]
+
+# ── Integration test ───────────────────────────────────────────────────────────
+[[test]]
+name = "e2e"
+path = "tests/e2e/main.rs"
+required-features = ["daemon"]
+
+# ── Always-on dependencies ─────────────────────────────────────────────────────
+# Required by the `core` and `client` library modules (compiled unconditionally).
+[dependencies]
+trusty-common = { workspace = true, features = ["mcp"] }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+toml.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+gray_matter.workspace = true
+walkdir.workspace = true
+dirs.workspace = true
+sha2.workspace = true
+utoipa.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
+tokio.workspace = true
+
+# Always-on CLI/binary support deps.
+# These are pulled in by the bin targets; having them always-on is acceptable
+# because the library itself does not depend on them directly.
+clap.workspace = true
+tracing-subscriber.workspace = true
+colored.workspace = true
+sysinfo.workspace = true
+libc.workspace = true
+
+# ── Optional dependencies (feature-gated) ────────────────────────────────────
+
+# mcp feature
+async-trait = { workspace = true, optional = true }
+
+# daemon feature
+axum = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
+tokio-stream = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+dashmap = { workspace = true, optional = true }
+parking_lot = { workspace = true, optional = true }
+notify = { workspace = true, optional = true }
+tracing-appender = { workspace = true, optional = true }
+utoipa-swagger-ui = { workspace = true, optional = true }
+
+# tui feature
+ratatui = { workspace = true, optional = true }
+crossterm = { workspace = true, optional = true }
+
+# telegram feature
+teloxide = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
+
+# gui feature — separate crate due to Tauri build system
+trusty-mpm-gui = { path = "../trusty-mpm-gui", version = "0.2.12", optional = true }
+
+# ── Platform-specific always-on deps ─────────────────────────────────────────
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal"] }
+
+# ── Dev dependencies ───────────────────────────────────────────────────────────
+[dev-dependencies]
+tempfile.workspace = true
+axum.workspace = true
+http-body-util.workspace = true
