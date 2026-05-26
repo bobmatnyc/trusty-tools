@@ -14,10 +14,10 @@
 /// Why: distinct variants allow callers to decide whether to retry (transport
 /// errors), report a bug (dimension mismatch), or surface a model issue.
 ///
-/// What: covers the main failure modes across the in-process, HTTP-remote,
-/// and UDS-remote paths.
+/// What: covers the main failure modes across both the in-process and remote
+/// paths.
 ///
-/// Test: `error_display_*` below and the bit_identical integration test.
+/// Test: `error_display` below and the bit_identical integration test.
 #[derive(Debug, thiserror::Error)]
 pub enum EmbedderError {
     /// The ONNX model raised an error during embedding.
@@ -35,16 +35,9 @@ pub enum EmbedderError {
     #[error("embedder dimension mismatch: sent {sent} texts, got {got} vectors")]
     DimensionMismatch { sent: usize, got: usize },
 
-    /// The remote server returned an error response body (HTTP path).
+    /// The remote server returned an error response body.
     #[error("embedder remote error (HTTP {status}): {body}")]
     RemoteError { status: u16, body: String },
-
-    /// A UDS transport or protocol error occurred.
-    ///
-    /// Why: UDS failures need to be distinguishable from model errors so
-    /// callers can decide whether to retry on a different transport.
-    #[error("embedder UDS error: {0}")]
-    UdsError(String),
 }
 
 #[cfg(test)]
