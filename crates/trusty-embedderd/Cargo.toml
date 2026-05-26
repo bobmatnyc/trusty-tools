@@ -41,10 +41,13 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-# Used in the bit_identical integration test.
+# Used in the bit_identical integration test and in-crate unit tests.
 tokio = { workspace = true }
 anyhow = { workspace = true }
 trusty-embedder-client = { workspace = true }
+# `embedder-test-support` exposes MockEmbedder outside cfg(test) for unit tests
+# in batch_queue and uds_server that need a fast in-process fake embedder.
+trusty-common = { workspace = true, features = ["embedder", "embedder-bundled-ort", "embedder-test-support"] }
 
 [features]
 # Forward ORT feature flags so the binary can be compiled with cuda/coreml.
