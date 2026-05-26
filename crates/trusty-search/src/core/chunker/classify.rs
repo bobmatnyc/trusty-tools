@@ -52,6 +52,18 @@ pub(super) fn classify_node(lang: &str, node: Node<'_>) -> Option<ChunkType> {
         ("rust", "trait_item") => ChunkType::Trait,
         ("rust", "enum_item") => ChunkType::Enum,
         ("rust", "mod_item") => ChunkType::Module,
+        // `pub const NAME: TYPE = VALUE;` and `pub static NAME: TYPE = VALUE;`
+        // (Phase 1: Rust only — see TODO below for other languages).
+        // Only public declarations get their own Constant chunk; private consts
+        // stay in the surrounding scope chunk so the chunk count doesn't
+        // explode for internal implementation details.
+        //
+        // TODO: extend per-const chunking to Python (UPPERCASE module-level
+        // assignments), TypeScript (`export const X = …`), Go (`const` /
+        // `const ( … )` blocks), and Java (`public static final` fields) in
+        // follow-up tickets once the Rust phase is validated.
+        ("rust", "const_item") if rust_item_is_pub(node) => ChunkType::Constant,
+        ("rust", "static_item") if rust_item_is_pub(node) => ChunkType::Constant,
 
         ("python", "function_definition") => {
             if ancestor_kind(node, "class_definition").is_some() {
@@ -237,6 +249,26 @@ pub(super) fn scala_enclosing_class_name(node: Node<'_>, src: &[u8]) -> Option<S
             .unwrap_or("")
             .to_string(),
     )
+}
+
+/// Return `true` when a Rust `const_item` or `static_item` node has a
+/// `visibility_modifier` child (i.e. is `pub`, `pub(crate)`, etc.).
+///
+/// Why: Phase 1 per-const chunking is scoped to public declarations only.
+/// Private constants stay in whatever surrounding scope chunk would otherwise
+/// claim them, avoiding an explosion of trivial implementation-detail chunks.
+/// What: walks the direct children of `node` looking for a
+/// `visibility_modifier` node; returns `true` on first hit, `false` otherwise.
+/// Test: `test_rust_pub_const_chunking` verifies that `pub const` items get
+/// Constant chunks and private `const` items do not.
+pub(super) fn rust_item_is_pub(node: Node<'_>) -> bool {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "visibility_modifier" {
+            return true;
+        }
+    }
+    false
 }
 
 /// For PHP methods (issue #49): walk up to the enclosing

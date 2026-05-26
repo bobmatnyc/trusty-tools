@@ -1641,6 +1641,199 @@ class Foo {
         );
     }
 
+    // ----- Per-pub-const Rust chunking (issue #143) -------------------------
+
+    /// Why: a file containing only `pub const` declarations used to produce a
+    /// single whole-file `Code` chunk with null `function_name`, making every
+    /// constant invisible to symbol-name queries and the Definition-intent boost.
+    /// What: each `pub const` / `pub static` in a `.rs` file must produce its own
+    /// `Constant` chunk with a non-null `function_name`.
+    /// Test: this is the test.
+    #[test]
+    fn test_rust_pub_const_chunking_produces_n_constant_chunks() {
+        let src = r#"
+pub const ALPHA: u32 = 1;
+pub const BRUSILOV_EPOCH: u64 = 1_000_000;
+pub const MAX_BATCH_SIZE: usize = 256;
+pub const KIKUCHI_MAX_DEPTH: usize = 8;
+pub const HNSW_EF_CONSTRUCTION: usize = 200;
+pub const DEFAULT_TOP_K: usize = 10;
+pub const BM25_K1: f32 = 1.5;
+pub const BM25_B: f32 = 0.75;
+"#;
+        let (chunks, _) = chunk_ast("constants.rs", src);
+        let const_chunks: Vec<&RawChunk> = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Constant)
+            .collect();
+        assert_eq!(
+            const_chunks.len(),
+            8,
+            "expected 8 Constant chunks (one per pub const), got {}: {:#?}",
+            const_chunks.len(),
+            chunks
+        );
+        // Every constant chunk must have a non-null function_name.
+        for c in &const_chunks {
+            assert!(
+                c.function_name.is_some(),
+                "expected non-null function_name for constant chunk {c:#?}"
+            );
+        }
+        // Spot-check a few names.
+        let names: Vec<_> = const_chunks
+            .iter()
+            .filter_map(|c| c.function_name.as_deref())
+            .collect();
+        assert!(
+            names.contains(&"BRUSILOV_EPOCH"),
+            "expected BRUSILOV_EPOCH in names: {names:?}"
+        );
+        assert!(
+            names.contains(&"MAX_BATCH_SIZE"),
+            "expected MAX_BATCH_SIZE in names: {names:?}"
+        );
+    }
+
+    /// Why: validates that a mixed Rust file — constants + functions — emits
+    /// the correct chunk type for each item and does not absorb function chunks
+    /// into constant chunks or vice-versa.
+    /// What: a file with one `pub const`, one `pub fn`, and one more `pub const`
+    /// must produce 3 chunks in the expected types.
+    /// Test: this is the test.
+    #[test]
+    fn test_rust_mixed_const_and_fn_chunking() {
+        let src = r#"
+pub const FOO: u32 = 42;
+
+pub fn do_something() -> u32 {
+    FOO + 1
+}
+
+pub const BAR: &str = "hello";
+"#;
+        let (chunks, _) = chunk_ast("mixed.rs", src);
+
+        let const_chunks: Vec<&RawChunk> = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Constant)
+            .collect();
+        assert_eq!(
+            const_chunks.len(),
+            2,
+            "expected 2 Constant chunks, got {const_chunks:#?}"
+        );
+        let const_names: Vec<_> = const_chunks
+            .iter()
+            .filter_map(|c| c.function_name.as_deref())
+            .collect();
+        assert!(
+            const_names.contains(&"FOO"),
+            "expected FOO: {const_names:?}"
+        );
+        assert!(
+            const_names.contains(&"BAR"),
+            "expected BAR: {const_names:?}"
+        );
+
+        let fn_chunks: Vec<&RawChunk> = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Function)
+            .collect();
+        assert_eq!(
+            fn_chunks.len(),
+            1,
+            "expected 1 Function chunk, got {fn_chunks:#?}"
+        );
+        assert_eq!(
+            fn_chunks[0].function_name.as_deref(),
+            Some("do_something"),
+            "fn chunk name mismatch"
+        );
+    }
+
+    /// Why: `pub static` is semantically equivalent to `pub const` for the
+    /// purpose of symbol lookup; both must emit Constant chunks.
+    /// What: `pub static X: &str = "…"` produces a Constant chunk with the
+    /// identifier as `function_name`.
+    /// Test: this is the test.
+    #[test]
+    fn test_rust_pub_static_treated_as_constant() {
+        let src = r#"
+pub static GREETING: &str = "hello";
+pub static MAX_RETRIES: u32 = 3;
+"#;
+        let (chunks, _) = chunk_ast("statics.rs", src);
+        let const_chunks: Vec<&RawChunk> = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Constant)
+            .collect();
+        assert_eq!(
+            const_chunks.len(),
+            2,
+            "expected 2 Constant chunks for pub static, got {const_chunks:#?}"
+        );
+        let names: Vec<_> = const_chunks
+            .iter()
+            .filter_map(|c| c.function_name.as_deref())
+            .collect();
+        assert!(names.contains(&"GREETING"), "expected GREETING: {names:?}");
+        assert!(
+            names.contains(&"MAX_RETRIES"),
+            "expected MAX_RETRIES: {names:?}"
+        );
+    }
+
+    /// Why: Phase 1 scopes per-const chunking to public declarations only;
+    /// private constants stay in whatever surrounding chunk applies.
+    /// What: a file with private `const` (no `pub`) must NOT produce any
+    /// `Constant` chunks — the private const stays unclaimed / falls through
+    /// to the whole-file fallback.
+    /// Test: this is the test.
+    #[test]
+    fn test_rust_private_const_does_not_get_constant_chunk() {
+        let src = r#"
+const INTERNAL_LIMIT: usize = 100;
+const PRIVATE_KEY: &str = "secret";
+"#;
+        let (chunks, _) = chunk_ast("private.rs", src);
+        let const_chunks: Vec<&RawChunk> = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Constant)
+            .collect();
+        assert!(
+            const_chunks.is_empty(),
+            "expected no Constant chunks for private consts, got {const_chunks:#?}"
+        );
+    }
+
+    /// Why: regression guard — existing function/struct/impl/trait/enum
+    /// chunking must not be disturbed by the new const/static rules.
+    /// What: a Rust file without any `pub const` / `pub static` still produces
+    /// correct Function, Struct, Impl chunks as before.
+    /// Test: this is the test.
+    #[test]
+    fn test_rust_no_const_regression_on_function_chunks() {
+        // Uses the same content as test_rust_function_chunking to ensure parity.
+        let src = r#"
+fn alpha() {}
+
+fn beta() -> i32 { 1 }
+
+fn gamma(x: i32) -> i32 { x + 1 }
+"#;
+        let (chunks, _) = chunk_ast("no_const.rs", src);
+        let fns: Vec<&RawChunk> = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Function)
+            .collect();
+        assert_eq!(fns.len(), 3, "expected 3 Function chunks, got {fns:#?}");
+        assert!(
+            chunks.iter().all(|c| c.chunk_type != ChunkType::Constant),
+            "unexpected Constant chunk in function-only file: {chunks:#?}"
+        );
+    }
+
     /// Issue #90: end-to-end check that a small Rust snippet — parsed by
     /// `chunk_ast`, fed into `SymbolGraph::build_from_chunks` — produces
     /// non-zero symbols and a usable caller→callee edge. This is the

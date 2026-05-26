@@ -9,7 +9,28 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ## [Unreleased]
 
-_(no unreleased changes)_
+### Added
+
+- **#143** `ChunkType::Constant` chunks per `pub const` / `pub static` Rust declaration.
+  The Rust tree-sitter chunker now emits one `Constant` chunk per top-level public
+  constant/static, with `function_name = Some(<identifier>)` (e.g. `BRUSILOV_EPOCH`).
+  Previously a file containing only `pub const` declarations produced a single whole-file
+  `Code` chunk with null `function_name`, making every constant invisible to symbol-name
+  queries and the Definition-intent boost. Phase 1 covers Rust only; Python /
+  TypeScript / Go / Java follow-up noted via TODO comment in the chunker.
+- **#142** SCREAMING_SNAKE_CASE pattern in `QueryClassifier` — queries that are a
+  single ALL_CAPS_WITH_UNDERSCORES identifier (e.g. `MAX_BATCH_SIZE`, `BRUSILOV_EPOCH`,
+  `KIKUCHI_MAX_DEPTH`) now classify as `Intent::Definition` instead of `Unknown`.
+  This was a gap in the priority chain: `SNAKE_IDENT_RE` matched lowercase snake_case
+  but not SCREAMING_SNAKE; `ACRONYM_HINT_RE` fired on ALL_CAPS tokens *inside*
+  multi-word queries but not on a whole-query constant name.
+
+### Fixed
+
+- **#142 + #143** Together these two fixes unblock the Definition-intent boost (#122)
+  for constant lookups: the classifier correctly recognises SCREAMING_SNAKE queries,
+  and the corpus now has per-constant chunks with non-null `function_name` for the
+  structural lane to surface.
 
 ---
 

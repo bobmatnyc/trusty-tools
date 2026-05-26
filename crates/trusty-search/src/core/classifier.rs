@@ -59,6 +59,20 @@ static ACRONYM_HINT_RE: OnceLock<Regex> = OnceLock::new();
 // existing 6-word `LONG_NL_RE` so 3-5 word concept queries also classify
 // as Conceptual instead of Unknown.
 static MULTI_NOUN_RE: OnceLock<Regex> = OnceLock::new();
+// SCREAMING_SNAKE_CASE single-identifier pattern (issue #142): the WHOLE
+// query is an ALL_CAPS identifier with underscores, e.g. `BRUSILOV_EPOCH`,
+// `MAX_BATCH_SIZE`, `HNSW_EF_CONSTRUCTION`. These are Rust / Java / Python
+// constants — first-class symbol names that belong in the Definition lane.
+//
+// Distinct from `ACRONYM_HINT_RE` which fires when an ALL_CAPS token appears
+// *inside* a multi-word query. `SCREAM_IDENT_RE` requires the entire trimmed
+// query to be a single constant identifier (no whitespace allowed).
+//
+// Pattern: starts with an uppercase letter, followed by uppercase letters,
+// digits, or underscores, contains at least one underscore (to distinguish
+// from pure acronyms like `HNSW` that are already handled by
+// `ACRONYM_HINT_RE`), and is at least 2 characters total.
+static SCREAM_IDENT_RE: OnceLock<Regex> = OnceLock::new();
 
 impl QueryClassifier {
     /// Classify a query string into a `QueryIntent` for routing weight selection.
@@ -221,6 +235,26 @@ impl QueryClassifier {
             Regex::new(r"^[a-z][a-z0-9_]*_[a-z0-9_]+$").expect("static regex pattern must compile")
         });
         if snake_ident_re.is_match(trimmed) {
+            return QueryIntent::Definition;
+        }
+
+        // SCREAMING_SNAKE_CASE single identifier (issue #142): the entire
+        // query is an ALL_CAPS constant name like `BRUSILOV_EPOCH` or
+        // `MAX_BATCH_SIZE`. These are first-class symbol names in Rust, Java,
+        // and Python; routing to Definition engages the BM25-heavy lane so
+        // the file containing the constant declaration outranks usage sites.
+        //
+        // Checked after `snake_ident_re` (disjoint patterns — no overlap)
+        // and before `acronym_hint_re` (which handles ALL_CAPS tokens *inside*
+        // multi-word queries rather than whole-query identifiers).
+        let scream_ident_re = SCREAM_IDENT_RE.get_or_init(|| {
+            // Whole query: one or more uppercase letters/digits, must contain
+            // at least one underscore, no lowercase letters, no whitespace.
+            // Minimum two chars. Does NOT match single lowercase segments.
+            Regex::new(r"^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$")
+                .expect("static regex pattern must compile")
+        });
+        if scream_ident_re.is_match(trimmed) {
             return QueryIntent::Definition;
         }
 
@@ -822,6 +856,82 @@ mod tests {
         assert_eq!(
             QueryClassifier::classify("Louvain community detection modularity"),
             QueryIntent::Conceptual
+        );
+    }
+
+    // ── SCREAMING_SNAKE_CASE identifier tests (issue #142) ─────────────────
+
+    #[test]
+    fn test_screaming_snake_brusilov_epoch_is_definition() {
+        // Reproduces the exact failing query from the #142 bug report.
+        assert_eq!(
+            QueryClassifier::classify("BRUSILOV_EPOCH"),
+            QueryIntent::Definition
+        );
+    }
+
+    #[test]
+    fn test_screaming_snake_max_batch_size_is_definition() {
+        assert_eq!(
+            QueryClassifier::classify("MAX_BATCH_SIZE"),
+            QueryIntent::Definition
+        );
+    }
+
+    #[test]
+    fn test_screaming_snake_foo_bar_baz_is_definition() {
+        assert_eq!(
+            QueryClassifier::classify("FOO_BAR_BAZ"),
+            QueryIntent::Definition
+        );
+    }
+
+    #[test]
+    fn test_screaming_snake_is_default_doc_excluded_is_definition() {
+        // Acceptance criterion from #142: all-caps version of a known identifier.
+        assert_eq!(
+            QueryClassifier::classify("IS_DEFAULT_DOC_EXCLUDED"),
+            QueryIntent::Definition
+        );
+    }
+
+    #[test]
+    fn test_screaming_snake_does_not_change_multiword_query() {
+        // "HNSW vector similarity" contains an ALL_CAPS token but is NOT a
+        // whole-query SCREAMING_SNAKE identifier (it has whitespace + mixed
+        // case). The existing ACRONYM_HINT path handles it — verify no
+        // regression.
+        assert_eq!(
+            QueryClassifier::classify("HNSW vector similarity"),
+            QueryIntent::Definition
+        );
+    }
+
+    #[test]
+    fn test_regular_snake_case_unaffected_by_scream_rule() {
+        // `authenticate_user` must still be Definition via the snake_ident path.
+        assert_eq!(
+            QueryClassifier::classify("authenticate_user"),
+            QueryIntent::Definition
+        );
+    }
+
+    #[test]
+    fn test_fn_authenticate_unaffected_by_scream_rule() {
+        // `fn authenticate` should remain Definition via `def_re`.
+        assert_eq!(
+            QueryClassifier::classify("fn authenticate"),
+            QueryIntent::Definition
+        );
+    }
+
+    #[test]
+    fn test_lowercase_mixed_words_unaffected_by_scream_rule() {
+        // A plain multi-word lowercase query must not be affected.
+        // It would stay Unknown (3 words, no identifiers).
+        assert_eq!(
+            QueryClassifier::classify("reservation booking flow"),
+            QueryIntent::Unknown
         );
     }
 
