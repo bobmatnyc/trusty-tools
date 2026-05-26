@@ -139,6 +139,24 @@ pub mod embedder_client;
 #[cfg(feature = "bm25")]
 pub mod bm25;
 
+/// Reusable schema-migration kernel (issue #179).
+///
+/// Why: trusty-search, trusty-memory, and other long-lived stores have grown
+/// ad-hoc schema-migration loops that drift apart. Centralising the
+/// `SchemaVersion` newtype, the `Migration<S>` trait, and a `MigrationRunner`
+/// that applies pending steps in order (writing a stamp after each) collapses
+/// those into one shared kernel. The `file_stamp` helper covers the common
+/// "JSON sidecar in the store's data dir" stamp format; redb-stamp users get
+/// a documented recipe instead of a heavyweight dep.
+/// What: gated behind the `migrations` feature flag. Adds no new
+/// dependencies — pure `serde` + `serde_json` + `anyhow` + `tracing` which
+/// the crate already requires.
+/// Test: `cargo test -p trusty-common --features migrations` covers the
+/// runner ordering, crash resumption, write-stamp failure propagation, and
+/// the file-stamp round-trip / atomic-write behaviour.
+#[cfg(feature = "migrations")]
+pub mod migrations;
+
 /// UDS JSON-RPC client for the per-palace `trusty-bm25-daemon` subprocess
 /// (issue #156).
 ///

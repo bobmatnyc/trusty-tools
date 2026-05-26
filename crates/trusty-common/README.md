@@ -38,6 +38,7 @@ trusty-common = { version = "0.3", features = ["axum-server", "mcp", "rpc", "emb
 | `symgraph` | Contracts surface only: `EntityType`, `RawEntity`, `EdgeKind` — no tree-sitter |
 | `symgraph-parser` | Full symbol graph: tree-sitter grammars, `SymbolGraph`, emitter, editor |
 | `symgraph-server` | HTTP server frontend for the symbol graph (implies `symgraph-parser`) |
+| `migrations` | Reusable schema-migration kernel: `SchemaVersion`, `Migration`, `MigrationRunner`, file-stamp helpers |
 
 By default the crate is dependency-light: `tokio`, `serde`, `reqwest`, and
 `tracing`. Pull in only the features you need.
@@ -203,6 +204,40 @@ let graph = SymbolGraph::parse_file("src/main.rs")?;
 library slot. Enable it in at most one crate per build graph (typically
 `open-mpm`). Downstream crates that only need the data types enable `symgraph`
 (contracts only) and stop there.
+
+## Migrations (`migrations` feature)
+
+Shared schema-migration kernel (issue #179) for long-lived trusty-* stores.
+Replaces the ad-hoc "if schema_version < N { … }" branches in trusty-search
+and trusty-memory with one ordered runner that stamps a `SchemaVersion`
+after each successful step.
+
+```rust
+use trusty_common::migrations::{
+    Migration, MigrationRunner, SchemaVersion,
+    file_stamp::{read_version_from_file, write_version_to_file},
+};
+use anyhow::Result;
+use std::path::Path;
+
+struct DropLegacyTables;
+impl Migration<MyStore> for DropLegacyTables {
+    fn from_version(&self) -> SchemaVersion { SchemaVersion::UNVERSIONED }
+    fn label(&self) -> &'static str { "drop legacy tables" }
+    fn apply(&self, store: &MyStore) -> Result<()> { /* … */ Ok(()) }
+}
+
+let runner = MigrationRunner::new(vec![Box::new(DropLegacyTables)]);
+let stamp_path = Path::new("/var/lib/my-store/schema_version.json");
+let current = read_version_from_file(stamp_path)?;
+runner.run(&store, current, |v| write_version_to_file(stamp_path, v))?;
+```
+
+The `file_stamp` module owns the JSON-sidecar stamp format
+(`{ "schema_version": <u32> }`, written atomically via temp + rename). Stores
+that already depend on redb should use the recipe documented in the
+`migrations::redb_stamp` module (kept doc-only here so this feature adds
+zero new dependencies).
 
 ## Development
 

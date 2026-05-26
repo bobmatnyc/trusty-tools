@@ -175,6 +175,11 @@ embedder = ["dep:fastembed", "dep:lru", "dep:parking_lot", "dep:ort"]
 # Enables the `bm25` module: zero-dependency BM25 lexical index +
 # code-aware tokenizer (issue #156). Pure `std` + `tracing` — no new deps.
 bm25 = []
+# Enables the `migrations` module: reusable schema-migration kernel
+# (`SchemaVersion`, `Migration`, `MigrationRunner`, file-stamp helpers).
+# Issue #179. Pure user of existing `serde` / `serde_json` / `anyhow` /
+# `tracing` workspace deps — adds no new dependencies.
+migrations = []
 # Enables the `bm25_client` module: a UDS JSON-RPC client for the per-palace
 # `trusty-bm25-daemon` subprocess (issue #156). Pure user of existing
 # `tokio` / `serde_json` / `anyhow` workspace deps — adds no new deps.
