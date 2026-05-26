@@ -51,3 +51,20 @@ When changing a shared library crate, update all crates in this workspace that d
 
 ### Former repos
 The following repos are now READ-ONLY and point here: trusty-common, trusty-search, trusty-memory, trusty-analyze, trusty-git-analytics, trusty-mpm, open-mpm.
+
+## Single-Install Convention
+
+Each main crate's `cargo install` must produce **every binary required to run that crate**. Users invoke ONE `cargo install <main-crate>` command; sidecar daemons, helper binaries, and any other runtime executables are bundled automatically via `[[bin]]` targets in the main crate.
+
+### Sidecar inventory (audit checklist)
+
+When adding a new sidecar to any main crate, update this list:
+
+| Main crate | Bundled binaries |
+|---|---|
+| trusty-search | `trusty-search`, `trusty-embedderd` ✅ (PR #190) |
+| trusty-memory | `trusty-memory`, `trusty-memory-mcp-bridge`, `trusty-bm25-daemon` ✅ (feat/trusty-memory-bundled-bm25-daemon-install) |
+| trusty-analyze | `trusty-analyze` (audit needed) |
+| trusty-git-analytics | `tga` (audit needed) |
+| trusty-mpm | `tm`, `trusty-mpm-daemon`, `trusty-mpm-mcp`, `trusty-mpm-tui`, `trusty-mpm-telegram` (feature-gated bins) |
+| open-mpm | `open-mpm` (audit needed) |

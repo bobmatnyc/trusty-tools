@@ -12,6 +12,15 @@ homepage = "https://github.com/bobmatnyc/trusty-tools"
 keywords = ["mcp", "bm25", "search", "daemon"]
 categories = ["command-line-utilities"]
 
+[lib]
+# Why: exposing a [lib] target lets trusty-memory bundle the
+# trusty-bm25-daemon binary without a separate `cargo install` step — the
+# bundler crate declares this as a dependency and adds its own thin
+# [[bin]] shim. Mirrors PR #190 (trusty-embedderd / trusty-search).
+# What: rlib so it is linkable from the bundled-install shim.
+# Test: `cargo build -p trusty-bm25-daemon` produces both lib and bin.
+crate-type = ["rlib"]
+
 [[bin]]
 name = "trusty-bm25-daemon"
 path = "src/main.rs"

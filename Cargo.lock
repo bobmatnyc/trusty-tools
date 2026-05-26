@@ -10952,6 +10952,7 @@ dependencies = [
  "tower",
  "tower-http 0.6.11",
  "tracing",
+ "trusty-bm25-daemon",
  "trusty-common",
  "uuid",
 ]

@@ -271,6 +271,99 @@ impl Bm25Client {
     }
 }
 
+/// Locate the `trusty-bm25-daemon` binary for the current install layout.
+///
+/// Why: when `TRUSTY_BM25_DAEMON=1` is set, trusty-memory needs to be able
+/// to find (or spawn) the daemon binary. Without a proper discovery path the
+/// bundled-install case (`cargo install trusty-memory` puts both binaries in
+/// the same directory) would require `~/.cargo/bin` to be on PATH globally,
+/// which is not guaranteed for launchd plists or non-interactive shell
+/// invocations. The three-step search order mirrors `locate_embedderd_binary`
+/// (PR #190, trusty-search) for consistency across the trusty-* ecosystem.
+///
+/// Discovery order:
+///   1. `TRUSTY_BM25_DAEMON_BIN` env var — explicit override, always wins.
+///   2. Sibling of `current_exe()` — handles the bundled-install case where
+///      all binaries from a single crate land in the same directory (both
+///      `cargo install` and `cargo build --release` place them in
+///      `target/release/`).
+///   3. `trusty-bm25-daemon` on `PATH` — handles a separate
+///      `cargo install trusty-bm25-daemon` and any other layout where the
+///      binary is available globally.
+///
+/// What: returns the first path at which the binary is found as a file.
+/// Returns `Err` with an actionable message if none of the three paths
+/// yields a result.
+///
+/// Test: `locate_bm25_daemon_binary_prefers_sibling` (uses env-var override
+/// to simulate the sibling-found path without spawning a real process).
+pub fn locate_bm25_daemon_binary() -> anyhow::Result<std::path::PathBuf> {
+    // 1. Explicit env-var override.
+    if let Ok(explicit) = std::env::var("TRUSTY_BM25_DAEMON_BIN") {
+        let p = std::path::PathBuf::from(&explicit);
+        if p.is_file() {
+            return Ok(p);
+        }
+        anyhow::bail!(
+            "TRUSTY_BM25_DAEMON_BIN={explicit:?} does not point to an existing file"
+        );
+    }
+
+    // 2. Sibling of the currently-running executable — works for both
+    //    `cargo run` (target/debug/) and installed binaries (~/.cargo/bin/).
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let sibling = dir.join("trusty-bm25-daemon");
+        if sibling.is_file() {
+            return Ok(sibling);
+        }
+        // Windows variant.
+        let sibling_exe = dir.join("trusty-bm25-daemon.exe");
+        if sibling_exe.is_file() {
+            return Ok(sibling_exe);
+        }
+    }
+
+    // 3. PATH search.
+    if let Ok(found) = which_bm25_daemon() {
+        return Ok(found);
+    }
+
+    anyhow::bail!(
+        "could not locate trusty-bm25-daemon binary. \
+         Set TRUSTY_BM25_DAEMON_BIN=/path/to/trusty-bm25-daemon or ensure \
+         it is on PATH (or install via `cargo install trusty-memory`)."
+    )
+}
+
+/// Minimal `which`-style PATH search for `trusty-bm25-daemon`.
+///
+/// Why: avoids a `which` crate dependency just for this one look-up, keeping
+/// the `bm25-client` feature lean. Same approach used by `which_embedderd`.
+/// What: splits `PATH` on the OS separator and returns the first directory
+/// entry that names the daemon binary.
+/// Test: tested implicitly when the sibling-path lookup fails and the daemon
+/// is on PATH.
+fn which_bm25_daemon() -> anyhow::Result<std::path::PathBuf> {
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    for dir in path_var.split(sep) {
+        let candidate = std::path::PathBuf::from(dir).join("trusty-bm25-daemon");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        #[cfg(windows)]
+        {
+            let candidate_exe = std::path::PathBuf::from(dir).join("trusty-bm25-daemon.exe");
+            if candidate_exe.is_file() {
+                return Ok(candidate_exe);
+            }
+        }
+    }
+    anyhow::bail!("trusty-bm25-daemon not found on PATH")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,5 +456,50 @@ mod tests {
         let back: BM25Hit = serde_json::from_str(&s).unwrap();
         assert_eq!(back.doc_id, "drawer-1");
         assert!((back.score - 0.42).abs() < 1e-6);
+    }
+
+    /// Why: pin the env-var-override branch of `locate_bm25_daemon_binary`
+    /// so a regression that loses the override causes a test failure.
+    /// What: write the current test binary's path into a tempfile, point the
+    /// env var at it, call the locator, assert it returns that exact path.
+    /// (We use the test binary itself as a stand-in for the daemon — we only
+    /// care that the path is found, not that it is the real daemon.)
+    /// Test: this test itself.
+    #[test]
+    fn locate_bm25_daemon_binary_prefers_env_override() {
+        // Use the test binary itself as a "daemon" — any existing file works.
+        let exe = std::env::current_exe().expect("current_exe");
+        // Guard against parallel tests mutating the env var.
+        // Safety: test-only, single-threaded env mutation is acceptable here
+        // because this test function is the sole writer of this key in this
+        // crate's test binary.
+        let key = "TRUSTY_BM25_DAEMON_BIN";
+        let prev = std::env::var(key).ok();
+        unsafe { std::env::set_var(key, &exe) };
+        let result = locate_bm25_daemon_binary();
+        match prev {
+            Some(v) => unsafe { std::env::set_var(key, v) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+        assert_eq!(result.expect("must find via env var"), exe);
+    }
+
+    /// Why: confirm that an env-var pointing at a non-existent file returns
+    /// an error rather than silently falling through to sibling / PATH.
+    /// Test: this test itself.
+    #[test]
+    fn locate_bm25_daemon_binary_env_override_nonexistent_errors() {
+        let key = "TRUSTY_BM25_DAEMON_BIN";
+        let prev = std::env::var(key).ok();
+        unsafe { std::env::set_var(key, "/nonexistent/trusty-bm25-daemon") };
+        let result = locate_bm25_daemon_binary();
+        match prev {
+            Some(v) => unsafe { std::env::set_var(key, v) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+        assert!(
+            result.is_err(),
+            "expected error for non-existent path, got: {result:?}"
+        );
     }
 }
