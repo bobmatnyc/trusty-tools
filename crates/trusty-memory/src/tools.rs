@@ -1441,13 +1441,13 @@ fn fuse_bm25_into_recall(
         {
             existing.score += bonus;
         }
-        // BM25-only hits are intentionally NOT appended here — without
-        // hydrating the drawer payload (content, tags, importance) from
-        // disk we cannot construct a `RecallResult`, and the per-call disk
-        // walk would defeat the whole purpose of the daemon. The hits that
-        // already appear in the vector list still benefit from the RRF
-        // boost, which is enough to improve identifier-heavy queries.
-        let _ = bonus;
+        // BM25-only hits (those that don't appear in the vector list) are
+        // intentionally NOT appended here — without hydrating the drawer
+        // payload (content, tags, importance) from disk we cannot construct
+        // a `RecallResult`, and the per-call disk walk would defeat the
+        // whole purpose of the daemon. The hits that already appear in the
+        // vector list still benefit from the RRF boost, which is enough to
+        // improve identifier-heavy queries.
     }
     // Re-sort by score desc; preserve layer for tie-breaking (lower layer
     // wins because L0/L1 are pinned identity/essentials).
