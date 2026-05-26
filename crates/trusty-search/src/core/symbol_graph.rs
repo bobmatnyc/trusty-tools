@@ -22,7 +22,6 @@ use petgraph::Direction;
 use serde::{Deserialize, Serialize};
 
 use crate::core::chunker::ChunkType;
-use crate::core::community::{CommunityRecord, LouvainCommunities};
 use crate::core::corpus::{CorpusStore, PersistedKgNode};
 use crate::core::entity::{EdgeKind, EntityType, RawEntity};
 
@@ -389,169 +388,6 @@ impl SymbolGraph {
         let mut out: Vec<(String, usize)> = counts.into_iter().collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
-    }
-
-    /// Run Louvain community detection and persist the resulting partition
-    /// to the supplied corpus store (issue #41 phase 3).
-    ///
-    /// Why: offline community detection runs after a full reindex. By bundling
-    /// "detect + persist" into one entry point, the reindex pipeline doesn't
-    /// have to thread the `LouvainCommunities` through to redb manually, and
-    /// callers can't accidentally compute communities without saving them.
-    /// What: invokes [`LouvainCommunities::detect`], builds one
-    /// [`CommunityRecord`] per community with centroid + dominant files +
-    /// member list, then writes both the records and the per-symbol mapping
-    /// in one redb transaction via [`CorpusStore::save_communities`].
-    /// Test: `test_detect_and_save_communities_round_trip`.
-    pub fn detect_and_save_communities(
-        &self,
-        corpus: &CorpusStore,
-    ) -> anyhow::Result<LouvainCommunities> {
-        let communities = LouvainCommunities::detect(self);
-        let records = self.build_community_records(&communities);
-
-        let serialized: Vec<(u64, Vec<u8>)> = records
-            .iter()
-            .map(|r| {
-                let bytes = serde_json::to_vec(r)
-                    .map_err(|e| anyhow::anyhow!("serialize community {}: {e}", r.id))?;
-                Ok((r.id as u64, bytes))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-
-        let symbol_map: Vec<(String, u64)> = communities
-            .assignments
-            .iter()
-            .map(|(sym, id)| (sym.clone(), *id as u64))
-            .collect();
-
-        corpus.save_communities(&serialized, &symbol_map)?;
-        Ok(communities)
-    }
-
-    /// Build the per-community summary records from a Louvain partition
-    /// (issue #41 phase 3).
-    ///
-    /// Why: extracted so `detect_and_save_communities` reads top-to-bottom and
-    /// so unit tests can assert on the record shape without running redb.
-    /// What: groups the partition's member list by community, picks the
-    /// highest-degree node as the centroid, computes top-3 dominant files by
-    /// member count, and approximates each community's modularity
-    /// contribution by uniformly distributing the total Q across communities
-    /// weighted by member share (a faithful per-community Q would re-run the
-    /// modularity sum for that community alone; the uniform share keeps the
-    /// JSON payload monotone in size).
-    /// Test: covered by `test_detect_and_save_communities_round_trip` and
-    /// `test_community_record_centroid_is_highest_degree`.
-    fn build_community_records(&self, communities: &LouvainCommunities) -> Vec<CommunityRecord> {
-        if communities.community_count == 0 {
-            return Vec::new();
-        }
-        // Bucket symbols by community.
-        let mut buckets: Vec<Vec<String>> = vec![Vec::new(); communities.community_count];
-        for (sym, &cid) in &communities.assignments {
-            if cid < buckets.len() {
-                buckets[cid].push(sym.clone());
-            }
-        }
-
-        // Precompute weighted degree per symbol for centroid selection.
-        let degrees = self.weighted_degree_by_symbol();
-
-        let total_members: usize = buckets.iter().map(|b| b.len()).sum();
-        let mut records: Vec<CommunityRecord> = Vec::with_capacity(buckets.len());
-        for (id, mut members) in buckets.into_iter().enumerate() {
-            members.sort();
-            let member_count = members.len();
-            let centroid_symbol = members
-                .iter()
-                .max_by(|a, b| {
-                    let da = degrees.get(*a).copied().unwrap_or(0.0);
-                    let db = degrees.get(*b).copied().unwrap_or(0.0);
-                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .cloned()
-                .unwrap_or_default();
-            let dominant_files = self.dominant_files_for(&members);
-            let share = if total_members == 0 {
-                0.0
-            } else {
-                member_count as f64 / total_members as f64
-            };
-            records.push(CommunityRecord {
-                id,
-                modularity_contribution: communities.modularity * share,
-                member_count,
-                members,
-                centroid_symbol,
-                dominant_files,
-            });
-        }
-        records
-    }
-
-    /// Compute the weighted incident degree of each symbol — Σ score_multiplier
-    /// over every incoming + outgoing edge.
-    ///
-    /// Why: the centroid of a community is the node with the most "pull" in
-    /// the cluster; weighted degree is the cheapest faithful proxy.
-    /// What: returns `symbol → degree`. Used only by
-    /// [`Self::build_community_records`].
-    /// Test: indirectly via `test_community_record_centroid_is_highest_degree`.
-    fn weighted_degree_by_symbol(&self) -> HashMap<String, f64> {
-        let mut out: HashMap<String, f64> = HashMap::new();
-        for edge in self.graph.edge_references() {
-            let w = edge.weight().score_multiplier() as f64;
-            if let Some(n) = self.graph.node_weight(edge.source()) {
-                *out.entry(n.symbol.clone()).or_insert(0.0) += w;
-            }
-            if let Some(n) = self.graph.node_weight(edge.target()) {
-                *out.entry(n.symbol.clone()).or_insert(0.0) += w;
-            }
-        }
-        out
-    }
-
-    /// Find the top-3 files (by member count) for a list of symbols.
-    ///
-    /// Why: `dominant_files` gives a human-readable hint at what subsystem
-    /// a community represents. Top-3 keeps the JSON small.
-    /// What: counts each symbol's `file`, sorts descending, returns up to 3.
-    fn dominant_files_for(&self, members: &[String]) -> Vec<String> {
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        for sym in members {
-            if let Some(&idx) = self.by_symbol.get(sym) {
-                if let Some(node) = self.graph.node_weight(idx) {
-                    *counts.entry(node.file.clone()).or_insert(0) += 1;
-                }
-            }
-        }
-        let mut pairs: Vec<(String, usize)> = counts.into_iter().collect();
-        pairs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        pairs.into_iter().take(3).map(|(f, _)| f).collect()
-    }
-
-    /// Load persisted communities from the corpus store (issue #41 phase 3).
-    ///
-    /// Why: warm-boot + the `GET /indexes/:id/communities` endpoint need to
-    /// re-hydrate the partition without re-running Louvain.
-    /// What: reads `KG_COMMUNITIES_TABLE`, deserialises every row into a
-    /// [`CommunityRecord`], and returns them sorted by descending member
-    /// count (community 0 is largest). Corrupt rows are logged and skipped.
-    /// Test: `test_detect_and_save_communities_round_trip`.
-    pub fn load_communities(corpus: &CorpusStore) -> anyhow::Result<Vec<CommunityRecord>> {
-        let raw = corpus.load_communities()?;
-        let mut records: Vec<CommunityRecord> = Vec::with_capacity(raw.len());
-        for (id, bytes) in raw {
-            match serde_json::from_slice::<CommunityRecord>(&bytes) {
-                Ok(r) => records.push(r),
-                Err(e) => {
-                    tracing::warn!("communities: skipping corrupt row id={id} ({e})");
-                }
-            }
-        }
-        records.sort_by(|a, b| b.member_count.cmp(&a.member_count).then(a.id.cmp(&b.id)));
-        Ok(records)
     }
 }
 
@@ -921,16 +757,14 @@ impl SymbolGraph {
 
     /// Compute total degree (in + out) for every symbol node.
     ///
-    /// Why: graph-expanded retrieval (issue #41 phase 4) blends RRF scores with
-    /// normalised degree centrality so heavily-connected symbols (subsystem
-    /// entry points, frequently called utilities) surface alongside purely
-    /// semantic matches. Exposing degrees once per built graph lets the
-    /// `GraphScorer` precompute a `symbol → degree/max_degree` table cheaply.
+    /// Why: Degree information is useful for diagnostics (`GET /graph/stats`),
+    /// future ranking experiments, and any caller that needs a quick measure
+    /// of how connected each symbol is in the call graph.
     /// What: returns `symbol → total_degree` where total_degree = in_degree +
     /// out_degree across all edge kinds. Symbols with no edges are present
     /// with value 0.
-    /// Test: covered by `graph_score::tests::high_degree_node_scores_higher`
-    /// which builds a graph with asymmetric degrees and asserts ordering.
+    /// Test: covered indirectly by graph stats tests and the `edge_kind_breakdown`
+    /// integration path.
     pub fn degrees(&self) -> HashMap<String, usize> {
         let mut out: HashMap<String, usize> = HashMap::with_capacity(self.graph.node_count());
         for (sym, &idx) in self.by_symbol.iter() {
@@ -1699,62 +1533,6 @@ mod tests {
         // Documents: `prose_owner` (same file as DocConcept) → `target`.
         let docs = g.neighbors_by_edge("prose_owner", &[EdgeKind::Documents], 1);
         assert!(docs.iter().any(|(n, _, _)| n == "target"), "got {docs:?}");
-    }
-
-    /// Issue #41 phase 3: detect + persist + reload communities preserves
-    /// the partition shape (community count and per-symbol membership).
-    #[test]
-    fn test_detect_and_save_communities_round_trip() {
-        use crate::core::corpus::CorpusStore;
-        // Two cliques connected by a single bridge.
-        let chunks = vec![
-            chunk("a:1", "a.rs", Some("a1"), &["a2", "a3"]),
-            chunk("a:2", "a.rs", Some("a2"), &["a1", "a3"]),
-            chunk("a:3", "a.rs", Some("a3"), &["a1", "a2", "b1"]),
-            chunk("b:1", "b.rs", Some("b1"), &["b2", "b3"]),
-            chunk("b:2", "b.rs", Some("b2"), &["b1", "b3"]),
-            chunk("b:3", "b.rs", Some("b3"), &["b1", "b2"]),
-        ];
-        let g = SymbolGraph::build_from_chunks(&chunks);
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("index.redb");
-        let store = CorpusStore::open(&path).unwrap();
-        let communities = g.detect_and_save_communities(&store).expect("detect+save");
-        assert_eq!(communities.community_count, 2);
-
-        let loaded = SymbolGraph::load_communities(&store).expect("load");
-        assert_eq!(loaded.len(), 2);
-        // community 0 = largest; both communities have 3 members so tie-broken
-        // by id ascending → totals match.
-        let total_members: usize = loaded.iter().map(|c| c.member_count).sum();
-        assert_eq!(total_members, 6);
-        // Point-read symbol_community.
-        let cid_a1 = store.symbol_community("a1").unwrap().expect("a1 mapped");
-        let cid_a2 = store.symbol_community("a2").unwrap().expect("a2 mapped");
-        assert_eq!(cid_a1, cid_a2, "a-clique members share a community");
-    }
-
-    /// Issue #41 phase 3: centroid is the highest-degree node in its community.
-    #[test]
-    fn test_community_record_centroid_is_highest_degree() {
-        // `hub` is connected to three peers; peers are leaves. Centroid must be `hub`.
-        let chunks = vec![
-            chunk("h:1", "h.rs", Some("hub"), &["leaf1", "leaf2", "leaf3"]),
-            chunk("l:1", "h.rs", Some("leaf1"), &[]),
-            chunk("l:2", "h.rs", Some("leaf2"), &[]),
-            chunk("l:3", "h.rs", Some("leaf3"), &[]),
-        ];
-        let g = SymbolGraph::build_from_chunks(&chunks);
-        let communities = LouvainCommunities::detect(&g);
-        let records = g.build_community_records(&communities);
-        assert!(!records.is_empty());
-        // The largest community must include `hub` and its centroid must be `hub`.
-        let hub_cid = communities.assignments["hub"];
-        let rec = records.iter().find(|r| r.id == hub_cid).expect("rec");
-        assert_eq!(rec.centroid_symbol, "hub");
-        // Dominant file should be `h.rs`.
-        assert_eq!(rec.dominant_files.first().map(|s| s.as_str()), Some("h.rs"));
     }
 
     /// Issue #41 phase 2: a graph saved via `save_to_corpus` and reloaded

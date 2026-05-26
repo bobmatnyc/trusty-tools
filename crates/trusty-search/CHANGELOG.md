@@ -13,6 +13,37 @@ _(no unreleased changes)_
 
 ---
 
+## [0.11.0] — 2026-05-26  **BREAKING**
+
+### Removed
+
+- **#152 / #145 PROVENANCE-ONLY decision** — Louvain community detection and
+  `community_cohesion` ranking have been deleted. Empirical data showed the KG
+  ranking lane lost Hit@1 by 16.7 pp vs semantic-only on KG-targeted queries
+  (7/18 vs 10/18). The symbol-graph infrastructure is preserved — `get_call_chain`
+  and `search_kg` MCP tools continue to work.
+
+  Deleted components:
+  - `src/core/community.rs` — entire Louvain implementation (673 lines)
+  - `src/core/indexer/graph_score.rs` — `GraphScorer` / centrality bonus table (309 lines)
+  - `SearchAppState::graph_scorer()` and `invalidate_graph_scorer()` methods
+  - `GraphScorerCache` type alias and `spawn_community_detection` reindex task
+  - `CodeChunk::community_id` field
+  - `GET /indexes/:id/communities` and `GET /indexes/:id/communities/:symbol` endpoints
+  - `meta.graph_scoring` and `meta.community_cohesion` fields from search response
+
+  Migration notes for callers:
+  - `CodeChunk` serialisations with `community_id` are tolerated (ignored on
+    deserialise via `#[serde(default)]`). No schema migration required.
+  - Old redb community tables (`KG_COMMUNITIES_TABLE`, `kg_symbol_community`)
+    remain defined in `corpus.rs` for migration tolerance; they are no longer
+    written or read by the active search path.
+  - Remove any code polling `meta.graph_scoring` or `meta.community_cohesion`
+    from search responses.
+  - Remove any calls to the `/communities` or `/communities/:symbol` endpoints.
+
+---
+
 ## [0.10.0] — 2026-05-25
 
 ### Added

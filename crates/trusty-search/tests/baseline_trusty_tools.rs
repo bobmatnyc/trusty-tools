@@ -1,9 +1,10 @@
 //! Baseline performance regression tests for trusty-search against the trusty-tools project.
 //!
 //! Why: Provides a reproducible regression gate for query latency, result
-//! relevance, graph scoring, community detection quality, and concurrent
-//! request throughput — the four axes most likely to degrade silently as the
-//! indexing pipeline evolves.
+//! relevance, graph scoring, and concurrent request throughput — the three axes
+//! most likely to degrade silently as the indexing pipeline evolves.
+//! Community-detection quality (Louvain) was removed in v0.11.0 per the
+//! PROVENANCE-ONLY decision in issue #145 / #152.
 //!
 //! What: Each test hits the live HTTP daemon at `http://127.0.0.1:7878` (the
 //! default daemon port), exercises a known scenario, and asserts that measured
@@ -23,8 +24,6 @@
 //! - Query latency p50: <= 500 ms
 //! - Query latency p99: <= 2000 ms
 //! - Index node count:  >= 1 000 (indicates indexing succeeded)
-//! - Community count:   >= 5   (indicates Louvain completed)
-//! - Modularity:        >= 0.1 (indicates graph structure is non-degenerate)
 
 use std::path::Path;
 use std::process::Command;
@@ -47,12 +46,6 @@ const LATENCY_P99_THRESHOLD_MS: u128 = 2000;
 /// Minimum graph node count that confirms a successful full reindex.
 const MIN_NODE_COUNT: u64 = 1_000;
 
-/// Minimum Louvain community count expected after reindex.
-const MIN_COMMUNITY_COUNT: usize = 5;
-
-/// Minimum acceptable Louvain modularity (partition quality).
-const MIN_MODULARITY: f64 = 0.1;
-
 /// Canonical regression query set.
 ///
 /// Each entry: (query_text, expected_top_file_fragment, intent_label)
@@ -62,11 +55,6 @@ const MIN_MODULARITY: f64 = 0.1;
 /// in the same run.
 const REGRESSION_QUERIES: &[(&str, &str, &str)] = &[
     ("symbol graph BFS expansion", "symbol_graph", "definition"),
-    (
-        "Louvain community detection modularity",
-        "community",
-        "definition",
-    ),
     (
         "axum middleware concurrency limiter",
         "concurrency",
@@ -383,101 +371,6 @@ async fn test_result_relevance() {
     assert_eq!(
         failures, 0,
         "{failures} relevance failures — see table above"
-    );
-}
-
-/// Confirm that graph scoring is active for a KG-rich query.
-///
-/// Why: Graph scoring adds centrality bonuses that improve result ordering for
-/// structural queries. If the `GraphScorer` failed to build (no communities
-/// computed, empty graph), `meta.graph_scoring` will be `false` — a silent
-/// regression.
-/// What: Searches for a definition query, asserts `meta.graph_scoring == true`.
-/// Test: this IS the test.
-#[tokio::test]
-#[ignore]
-async fn test_graph_scoring_active() {
-    let client = make_client();
-    let (ms, body) = search(&client, "symbol graph BFS").await;
-
-    let graph_scoring = body["meta"]["graph_scoring"].as_bool().unwrap_or(false);
-    println!(
-        "graph_scoring={graph_scoring}, community_cohesion={}, latency={ms} ms",
-        body["meta"]["community_cohesion"]
-    );
-
-    assert!(
-        graph_scoring,
-        "meta.graph_scoring is false — communities may not have been computed yet. \
-         Trigger a full reindex and wait for Louvain to finish: \
-         `trusty-search index /path/to/trusty-tools --name {INDEX_NAME} --force`"
-    );
-}
-
-/// Verify that the Louvain community partition meets minimum quality thresholds.
-///
-/// Why: Community detection quality directly affects graph scoring bonuses and
-/// the `meta.community_cohesion` signal. A degenerate partition (one giant
-/// community or zero communities) indicates the Louvain pass did not run or
-/// the KG is too sparse.
-/// What: `GET /indexes/trusty-tools/communities` → `community_count >= 5`,
-/// `modularity >= 0.1`. Prints the top-5 communities for diagnostics.
-/// Test: this IS the test.
-#[tokio::test]
-#[ignore]
-async fn test_community_detection_quality() {
-    let client = make_client();
-    let resp = client
-        .get(format!("{DAEMON_URL}/indexes/{INDEX_NAME}/communities"))
-        .send()
-        .await
-        .expect("GET /indexes/{INDEX_NAME}/communities should succeed");
-    assert_eq!(resp.status().as_u16(), 200);
-    let body: Value = resp.json().await.expect("should be JSON");
-
-    let community_count = body["community_count"].as_u64().unwrap_or(0) as usize;
-    let modularity = body["modularity"].as_f64().unwrap_or(0.0);
-
-    println!(
-        "\ncommunity_count={community_count}  modularity={modularity:.4} \
-         (thresholds: count>={MIN_COMMUNITY_COUNT}, modularity>={MIN_MODULARITY})"
-    );
-
-    // Print top-5 communities.
-    if let Some(communities) = body["communities"].as_array() {
-        println!("\nTop-5 communities:");
-        println!(
-            "{:<5} {:<40} {:>10}  dominant_files",
-            "rank", "centroid", "members"
-        );
-        println!("{}", "-".repeat(90));
-        for (i, c) in communities.iter().take(5).enumerate() {
-            let centroid = c["centroid_symbol"].as_str().unwrap_or("?");
-            let members = c["member_count"].as_u64().unwrap_or(0);
-            let dominant = c["dominant_files"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .take(2)
-                        .filter_map(|v| v.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default();
-            println!("{:<5} {:<40} {:>10}  {dominant}", i + 1, centroid, members);
-        }
-    }
-
-    assert!(
-        community_count >= MIN_COMMUNITY_COUNT,
-        "community_count {community_count} < MIN_COMMUNITY_COUNT {MIN_COMMUNITY_COUNT} — \
-         Louvain may not have run. Reindex with --force and check daemon logs."
-    );
-    assert!(
-        modularity >= MIN_MODULARITY,
-        "modularity {modularity:.4} < MIN_MODULARITY {MIN_MODULARITY} — \
-         partition is degenerate (possibly one giant community). \
-         Check KG edge density via GET /indexes/{INDEX_NAME}/graph/stats."
     );
 }
 

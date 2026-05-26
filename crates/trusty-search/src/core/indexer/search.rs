@@ -11,7 +11,6 @@
 //! in `indexer::tests`.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
@@ -1017,47 +1016,6 @@ impl CodeIndexer {
             }
             out.push(chunk);
         }
-        // Issue #41 phase 3: attach Louvain community ids per result chunk.
-        // Doing this in a separate pass keeps the per-result loop tight and
-        // lets us snapshot the symbol graph + corpus exactly once.
-        self.attach_community_ids(&mut out).await;
         out
-    }
-
-    /// Populate `community_id` on each result chunk (issue #41 phase 3).
-    ///
-    /// Why: search consumers want to group results by architectural cluster
-    /// without re-querying the community endpoint per result. The lookup is
-    /// `chunk → symbol (in-memory) → community id (redb)`; we batch the
-    /// per-symbol redb point reads through a small HashMap cache so a query
-    /// returning 50 results pays at most one redb hit per unique symbol.
-    /// What: no-op when the corpus store isn't wired or the chunk's primary
-    /// symbol has no community assignment. All failures are silent (search
-    /// must never block on a phase-3 enrichment).
-    /// Test: covered indirectly by the round-trip in
-    /// `symbol_graph::tests::test_detect_and_save_communities_round_trip`.
-    async fn attach_community_ids(&self, results: &mut [CodeChunk]) {
-        let Some(corpus) = self.corpus.as_ref().map(Arc::clone) else {
-            return;
-        };
-        let graph = self.symbol_graph().await;
-        let mut cache: std::collections::HashMap<String, Option<u64>> =
-            std::collections::HashMap::new();
-        for chunk in results.iter_mut() {
-            let Some(sym) = graph.symbol_for_chunk(&chunk.id) else {
-                continue;
-            };
-            let sym_owned = sym.to_string();
-            let cid = if let Some(&cached) = cache.get(&sym_owned) {
-                cached
-            } else {
-                let looked_up = corpus.symbol_community(&sym_owned).ok().flatten();
-                cache.insert(sym_owned, looked_up);
-                looked_up
-            };
-            if let Some(cid) = cid {
-                chunk.community_id = Some(cid);
-            }
-        }
     }
 }

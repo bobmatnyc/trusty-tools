@@ -1,7 +1,6 @@
 pub mod bm25;
 pub mod chunker;
 pub mod classifier;
-pub mod community;
 #[cfg(feature = "clustering")]
 pub mod concept_cluster;
 pub mod corpus;
@@ -23,7 +22,6 @@ pub mod symbol_graph;
 
 pub use chunker::{chunk_ast, chunk_text, ChunkType, RawChunk};
 pub use classifier::{QueryClassifier, QueryIntent};
-pub use community::LouvainCommunities;
 pub use embed::{Embedder, FastEmbedder};
 pub use entity::{extract_entities, EdgeKind, EntityExtractor, EntityType, RawEntity};
 pub use indexer::{CodeChunk, CodeIndexer};

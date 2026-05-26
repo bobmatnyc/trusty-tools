@@ -28,19 +28,6 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, Mutex, Semaphore};
 
-/// Shared handle to the daemon's per-index `GraphScorer` cache (issue #81).
-///
-/// Why: community detection runs on a detached task that finishes after the
-/// reindex handler's queue-time cache invalidation, so the reindex tail needs
-/// a way to re-invalidate the cache once the partition is persisted. Aliasing
-/// the `DashMap` type keeps the long signature readable and avoids pulling the
-/// whole `SearchAppState` into this module.
-/// What: the same `DashMap<IndexId, Arc<GraphScorer>>` that `SearchAppState`
-/// owns; `remove` evicts a stale scorer so the next search rebuilds it.
-/// Test: `tests::community_detection_invalidates_scorer_cache`.
-pub type GraphScorerCache =
-    Arc<DashMap<IndexId, Arc<crate::core::indexer::graph_score::GraphScorer>>>;
-
 /// Machine-wide reindex serializer.
 ///
 /// Why: Historically a 1-permit semaphore here protected the daemon from
@@ -267,7 +254,7 @@ impl Default for ReindexProgress {
 /// progress entries while still letting late SSE subscribers read the final
 /// state for a short window).
 pub fn spawn_reindex(handle: Arc<IndexHandle>, progress: Arc<ReindexProgress>, force: bool) {
-    spawn_reindex_with_cleanup(handle, progress, force, None, None, None);
+    spawn_reindex_with_cleanup(handle, progress, force, None, None);
 }
 
 /// Walk every configured subtree under `handle.root_path`, apply repo-config
@@ -1002,76 +989,6 @@ async fn rebuild_symbol_graph_for_reindex(handle: &IndexHandle) -> KgRebuildOutc
     }
 }
 
-/// Spawn Louvain community detection on a blocking thread (issue #41 phase 3).
-///
-/// Why: detection on a 100k-node graph can take several seconds. Running it
-/// inline in the reindex tail would delay the `complete` SSE event for every
-/// reindex; running it inside the async runtime would block the executor.
-/// `tokio::task::spawn_blocking` keeps both surfaces responsive.
-/// What: snapshots the in-memory `SymbolGraph` + the corpus store, then runs
-/// `detect_and_save_communities` on a blocking thread. Logs the resulting
-/// community count + modularity on success; a failure is `warn`-logged so the
-/// reindex still completes cleanly.
-/// Test: covered indirectly via the persistence round-trip in
-/// `symbol_graph::tests::test_detect_and_save_communities_round_trip`.
-fn spawn_community_detection(handle: &IndexHandle, scorer_cache: Option<GraphScorerCache>) {
-    let indexer_arc = Arc::clone(&handle.indexer);
-    tokio::spawn(async move {
-        let (graph, corpus, index_id) = {
-            let indexer = indexer_arc.read().await;
-            (
-                indexer.snapshot_symbol_graph().await,
-                indexer.corpus_store(),
-                indexer.index_id.clone(),
-            )
-        };
-        let Some(corpus) = corpus else {
-            tracing::debug!(
-                "index '{index_id}': skipping community detection — no corpus store wired"
-            );
-            return;
-        };
-        if graph.node_count() == 0 {
-            tracing::debug!(
-                "index '{index_id}': skipping community detection — empty symbol graph"
-            );
-            return;
-        }
-        let join =
-            tokio::task::spawn_blocking(move || graph.detect_and_save_communities(&corpus)).await;
-        match join {
-            Ok(Ok(communities)) => {
-                tracing::info!(
-                    index = %index_id,
-                    communities = communities.community_count,
-                    modularity = communities.modularity,
-                    "community detection complete"
-                );
-                // Issue #81: communities are detected and persisted *after* the
-                // KG rebuild, on this detached task — strictly later than the
-                // queue-time `invalidate_graph_scorer` call in the reindex
-                // handler. A `GraphScorer` built between queue-time and now
-                // (e.g. a search that raced the reindex) would have been cached
-                // with an empty `community_map`, so `community_cohesion` would
-                // be stuck at 0.0 forever. Invalidate the cache here, once the
-                // partition is durably written, so the next search rebuilds the
-                // scorer against the freshly-persisted communities.
-                if let Some(cache) = scorer_cache {
-                    cache.remove(&IndexId::new(index_id.clone()));
-                    tracing::debug!(
-                        index = %index_id,
-                        "invalidated cached GraphScorer after community detection"
-                    );
-                }
-            }
-            Ok(Err(e)) => {
-                tracing::warn!("index '{index_id}': community detection failed: {e:#}")
-            }
-            Err(e) => tracing::warn!("index '{index_id}': community detection task panicked: {e}"),
-        }
-    });
-}
-
 /// Run-level timing + memory totals collected across every batch.
 struct RunTotals {
     parse_ms: u64,
@@ -1378,7 +1295,6 @@ pub fn spawn_reindex_with_cleanup(
     force: bool,
     cleanup_map: Option<Arc<DashMap<IndexId, Arc<ReindexProgress>>>>,
     aborted_map: Option<Arc<DashMap<IndexId, Instant>>>,
-    scorer_cache: Option<GraphScorerCache>,
 ) {
     let cleanup_id = handle.id.clone();
     tokio::spawn(async move {
@@ -1670,19 +1586,9 @@ pub fn spawn_reindex_with_cleanup(
         // construction is bounded by `TRUSTY_MAX_KG_NODES` and independent of
         // the embedding spike. See `rebuild_symbol_graph_for_reindex`.
         let kg = rebuild_symbol_graph_for_reindex(&handle).await;
-        // Issue #41 phase 3: run Louvain community detection on the freshly
-        // rebuilt KG so agents can query topology. Fire-and-forget on a
-        // blocking thread: detection can take seconds on a 100k-node graph
-        // and we don't want it to delay the `complete` SSE event. A failure
-        // is logged at `warn` — searches still work, they just won't carry a
-        // `community_id` until the next successful reindex.
-        spawn_community_detection(&handle, scorer_cache.clone());
         // Issue #109, Phase 1: with the KG rebuild done, flip the graph
-        // stage to `Ready`. Louvain detection continues on a detached task
-        // (Phase 2 will move it off the synchronous tail entirely), but
-        // searches can already consume the symbol-graph and same-community
-        // signal as soon as the partition lands — invalidate-on-detection
-        // (issue #81) is the other half of that contract.
+        // stage to `Ready`. Symbol graph is fully built — provenance navigation
+        // (`get_call_chain`, `search_kg`) is immediately available.
         mark_graph_ready(&handle).await;
         if mem_limit_hit || mem_abort.load(AtomicOrdering::Acquire) {
             tracing::warn!(
@@ -1793,134 +1699,6 @@ mod tests {
     use crate::core::indexer::CodeIndexer;
     use std::fs;
     use std::sync::atomic::Ordering;
-
-    /// Issue #81: `spawn_community_detection` must evict a cached
-    /// `GraphScorer` once it has persisted the community partition, so a
-    /// scorer that was cached with no communities (e.g. built by a search
-    /// that raced the reindex) is rebuilt with the fresh partition on the
-    /// next lookup — restoring a non-zero `community_cohesion`.
-    ///
-    /// Why: the reindex handler invalidates the scorer cache at *queue* time,
-    /// but Louvain detection runs on a detached task that finishes *later*.
-    /// Any scorer cached in that window held an empty `community_map`, so
-    /// cohesion was permanently stuck at 0.0 until the next reindex. This test
-    /// pins the post-detection eviction.
-    /// What: builds a corpus-backed indexer whose symbol graph is two cliques
-    /// (so Louvain finds ≥1 community), seeds the scorer cache with a stale
-    /// entry, runs `spawn_community_detection`, waits for the persisted
-    /// partition, and asserts (a) the stale cache entry was evicted and (b) a
-    /// scorer rebuilt from the now-persisted communities reports members in
-    /// the same community.
-    /// Test: this test.
-    #[tokio::test]
-    async fn community_detection_invalidates_scorer_cache() {
-        use crate::core::chunker::{ChunkType, RawChunk};
-        use crate::core::corpus::CorpusStore;
-        use crate::core::indexer::graph_score::GraphScorer;
-
-        fn clique_chunk(id: &str, sym: &str, calls: &[&str]) -> RawChunk {
-            RawChunk {
-                id: id.to_string(),
-                file: "a.rs".to_string(),
-                start_line: 1,
-                end_line: 2,
-                content: format!("fn {sym}() {{}}"),
-                function_name: Some(sym.to_string()),
-                language: Some("rust".to_string()),
-                chunk_type: ChunkType::Code,
-                calls: calls.iter().map(|s| s.to_string()).collect(),
-                inherits_from: Vec::new(),
-                chunk_depth: 0,
-                parent_chunk_id: None,
-                child_chunk_ids: Vec::new(),
-                nlp_keywords: Vec::new(),
-                nlp_code_refs: Vec::new(),
-                virtual_terms: Vec::new(),
-            }
-        }
-
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let redb = tmp.path().join("index.redb");
-        let corpus = Arc::new(CorpusStore::open(&redb).expect("open corpus"));
-
-        let mut indexer = CodeIndexer::new("cohesion-test".to_string(), tmp.path());
-        indexer.set_corpus_store(Arc::clone(&corpus));
-        // Two cliques joined by a single bridge edge (a3 → b1). add_chunk
-        // rebuilds the symbol graph each call, so after the last insert the
-        // graph is fully populated and `symbol_for_chunk` resolves.
-        for c in [
-            clique_chunk("a:1", "a1", &["a2", "a3"]),
-            clique_chunk("a:2", "a2", &["a1", "a3"]),
-            clique_chunk("a:3", "a3", &["a1", "a2", "b1"]),
-            clique_chunk("b:1", "b1", &["b2", "b3"]),
-            clique_chunk("b:2", "b2", &["b1", "b3"]),
-            clique_chunk("b:3", "b3", &["b1", "b2"]),
-        ] {
-            indexer.add_chunk(c).await.expect("add_chunk");
-        }
-
-        let handle = Arc::new(IndexHandle::bare(
-            IndexId::new("cohesion-test"),
-            Arc::new(tokio::sync::RwLock::new(indexer)),
-            tmp.path().to_path_buf(),
-        ));
-
-        // Seed the cache with a STALE scorer built from no communities — this
-        // mimics a search that raced the reindex. `same_community` would
-        // return false for every pair, yielding cohesion 0.0.
-        let cache: GraphScorerCache = Arc::new(DashMap::new());
-        let stale = {
-            let idx = handle.indexer.read().await;
-            let graph = idx.snapshot_symbol_graph().await;
-            Arc::new(GraphScorer::build(&graph, &[]))
-        };
-        assert!(
-            !stale.same_community("a1", "a2"),
-            "pre-condition: stale scorer (no communities) must report no cohesion"
-        );
-        cache.insert(IndexId::new("cohesion-test"), Arc::clone(&stale));
-
-        // Run detection with the cache handle; it persists communities and
-        // must evict the stale entry.
-        spawn_community_detection(&handle, Some(Arc::clone(&cache)));
-
-        // Wait for the detached task to persist + invalidate.
-        let mut evicted = false;
-        for _ in 0..100 {
-            if cache.get(&IndexId::new("cohesion-test")).is_none()
-                && corpus
-                    .load_communities()
-                    .map(|v| !v.is_empty())
-                    .unwrap_or(false)
-            {
-                evicted = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        assert!(
-            evicted,
-            "community detection must persist communities and evict the stale scorer"
-        );
-
-        // Rebuilding the scorer from the now-persisted partition must restore
-        // same-community detection (non-zero cohesion).
-        let communities: Vec<_> = corpus
-            .load_communities()
-            .expect("load")
-            .into_iter()
-            .filter_map(|(_, bytes)| {
-                serde_json::from_slice::<crate::core::community::CommunityRecord>(&bytes).ok()
-            })
-            .collect();
-        let graph = handle.indexer.read().await.snapshot_symbol_graph().await;
-        let fresh = GraphScorer::build(&graph, &communities);
-        assert!(
-            fresh.same_community("a1", "a2"),
-            "rebuilt scorer must report a-clique members in the same community \
-             (non-zero cohesion, issue #81)"
-        );
-    }
 
     /// Filter wiring: with `include_paths` set on the handle, the reindex
     /// must walk ONLY those subtrees. Files outside the configured slice

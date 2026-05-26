@@ -253,18 +253,6 @@ pub struct SearchAppState {
     /// it. The render itself is lock-free (PrometheusHandle is Clone).
     /// Test: covered by `metrics_handler_returns_prometheus_text`.
     pub metrics: Option<crate::service::metrics::MetricsState>,
-    /// Per-index cached `GraphScorer` (issue #41 phase 4).
-    ///
-    /// Why: Graph-expanded retrieval blends RRF scores with degree centrality
-    /// and community-centroid status. Computing those tables on every search
-    /// request would dwarf the search cost itself; caching one `Arc<GraphScorer>`
-    /// per index lets each search take O(1) point-lookups per result chunk.
-    /// What: `DashMap<IndexId, Arc<GraphScorer>>` populated lazily on first
-    /// search for an index and invalidated after each reindex (see
-    /// `invalidate_graph_scorer`).
-    /// Test: covered by the search integration tests that exercise the
-    /// post-MMR ranking blend.
-    pub graph_scorers: Arc<DashMap<IndexId, Arc<crate::core::indexer::graph_score::GraphScorer>>>,
 }
 
 impl SearchAppState {
@@ -309,71 +297,7 @@ impl SearchAppState {
             )),
             embed_pool: Arc::new(RwLock::new(None)),
             metrics: None,
-            graph_scorers: Arc::new(DashMap::new()),
         }
-    }
-
-    /// Resolve a cached `GraphScorer` for `index_id`, building it on demand.
-    ///
-    /// Why: Graph scoring needs both the symbol graph and the Louvain
-    /// communities. Both are persisted in redb, so the first lookup pays one
-    /// snapshot + one redb scan; subsequent calls are O(1) `Arc` clones.
-    /// Returns `None` when the index isn't registered, when the symbol graph
-    /// is empty (no useful centrality signal), or when communities haven't
-    /// been computed yet (Louvain runs as a post-reindex pass).
-    /// What: deserialises the persisted community records using `serde_json`
-    /// to match the `save_communities` writer. All errors are swallowed
-    /// (logged at `debug`) — search must never block on a phase-4 enrichment.
-    /// Test: covered indirectly via the `search_handler` integration tests.
-    pub async fn graph_scorer(
-        &self,
-        index_id: &IndexId,
-    ) -> Option<Arc<crate::core::indexer::graph_score::GraphScorer>> {
-        if let Some(scorer) = self.graph_scorers.get(index_id) {
-            return Some(scorer.clone());
-        }
-        let handle = self.registry.get(index_id)?;
-        let indexer = handle.indexer.read().await;
-        let graph = indexer.symbol_graph().await;
-        if graph.node_count() == 0 {
-            return None;
-        }
-        let corpus = indexer.corpus_arc()?;
-        drop(indexer);
-
-        let communities = match corpus.load_communities() {
-            Ok(rows) => rows
-                .into_iter()
-                .filter_map(|(_, bytes)| {
-                    serde_json::from_slice::<crate::core::community::CommunityRecord>(&bytes).ok()
-                })
-                .collect::<Vec<_>>(),
-            Err(e) => {
-                tracing::debug!("graph_scorer: failed to load communities for '{index_id}': {e}");
-                Vec::new()
-            }
-        };
-
-        let scorer = Arc::new(crate::core::indexer::graph_score::GraphScorer::build(
-            &graph,
-            &communities,
-        ));
-        self.graph_scorers
-            .insert(index_id.clone(), Arc::clone(&scorer));
-        Some(scorer)
-    }
-
-    /// Drop any cached `GraphScorer` for `index_id` so the next search request
-    /// rebuilds it against the post-reindex graph + community state.
-    ///
-    /// Why: After a reindex the symbol graph and community partition can both
-    /// change; serving a stale scorer would give wrong centrality bonuses.
-    /// What: One `DashMap::remove` per call; safe to invoke even when no
-    /// scorer is cached.
-    /// Test: covered by `graph_scorer_cache_invalidates_on_reindex` (see
-    /// reindex handler tests).
-    pub fn invalidate_graph_scorer(&self, index_id: &IndexId) {
-        self.graph_scorers.remove(index_id);
     }
 
     /// Builder-style: attach a pre-built embedder worker pool (issue #41
@@ -798,11 +722,6 @@ pub fn build_router(state: SearchAppState) -> Router {
         .route("/indexes/{id}/status", get(index_status_handler))
         .route("/indexes/{id}/graph", get(graph_handler))
         .route("/indexes/{id}/graph/stats", get(graph_stats_handler))
-        .route("/indexes/{id}/communities", get(communities_handler))
-        .route(
-            "/indexes/{id}/communities/{symbol}",
-            get(community_for_symbol_handler),
-        )
         .route("/indexes/{id}/reindex/stream", get(reindex_stream_handler))
         .route("/indexes/{id}/chunks", get(get_index_chunks_handler))
         .route("/indexes/{id}/call_chain", get(call_chain_handler))
@@ -1642,7 +1561,6 @@ async fn delete_index_handler(
     let index_id = IndexId::new(id.clone());
     let removed = state.registry.unregister(&index_id);
     state.reindex_progress.remove(&index_id);
-    state.invalidate_graph_scorer(&index_id);
     if removed {
         // Issue #85: drop the on-disk footprint so the index doesn't come
         // back on the next daemon restart. Best-effort — log on failure.
@@ -1680,7 +1598,6 @@ async fn search_handler(
     // unaware of the index-handle-level capability surface.
     let caps = { handle.stages.read().await.search_capabilities() };
     let semantic_ready = caps.contains(&"vector");
-    let kg_ready = caps.contains(&"kg");
     if query.stage.is_none() && !semantic_ready {
         // Force lexical lane until the embedder catches up. The caller's
         // request is preserved if they explicitly asked for `mode = all`
@@ -1720,64 +1637,7 @@ async fn search_handler(
             filtered_out,
         );
     }
-    // Snapshot the symbol graph for primary-symbol resolution before dropping
-    // the read lock. Cheap `Arc::clone`.
-    let graph_snapshot = indexer.symbol_graph().await;
     drop(indexer);
-
-    // Issue #41 phase 4: blend graph centrality + centroid bonus into the
-    // post-MMR ranking. Cohesion = fraction of top-10 results sharing the top
-    // result's community. Both are best-effort — search must never block on a
-    // missing scorer.
-    //
-    // Issue #109 Phase 1: when the KG lane is not yet ready (or the index
-    // is `lexical_only`), skip the scorer lookup entirely. Asking for a
-    // scorer that hasn't been built yet would spin up Louvain detection
-    // on the hot path; that work belongs to the reindex tail, not search.
-    let (graph_scoring, community_cohesion) = if !kg_ready {
-        (false, 0.0_f32)
-    } else {
-        match state.graph_scorer(&index_id).await {
-            Some(scorer) => {
-                for result in results.iter_mut() {
-                    if let Some(sym) = graph_snapshot.symbol_for_chunk(&result.id) {
-                        result.score += scorer.bonus(sym);
-                    }
-                }
-                results.sort_by(|a, b| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                let top_n = results.iter().take(10).collect::<Vec<_>>();
-                let cohesion = if let Some(head) = top_n.first() {
-                    if let Some(head_sym) = graph_snapshot.symbol_for_chunk(&head.id) {
-                        let total = top_n.len() as f32;
-                        let matches = top_n
-                            .iter()
-                            .filter(|r| {
-                                graph_snapshot
-                                    .symbol_for_chunk(&r.id)
-                                    .map(|s| scorer.same_community(head_sym, s))
-                                    .unwrap_or(false)
-                            })
-                            .count() as f32;
-                        if total > 0.0 {
-                            matches / total
-                        } else {
-                            0.0
-                        }
-                    } else {
-                        0.0
-                    }
-                } else {
-                    0.0
-                };
-                (true, cohesion)
-            }
-            None => (false, 0.0_f32),
-        }
-    };
 
     let latency_ms = started.elapsed().as_millis() as u64;
     tracing::info!(
@@ -1813,8 +1673,6 @@ async fn search_handler(
         "intent": format!("{:?}", intent),
         "latency_ms": latency_ms,
         "meta": {
-            "graph_scoring": graph_scoring,
-            "community_cohesion": community_cohesion,
             "last_indexed": last_indexed,
             "results_may_be_stale": results_may_be_stale,
             // Issue #109 Phase 1: surface which lanes contributed to this
@@ -2563,19 +2421,16 @@ async fn graph_handler(
 /// `GET /indexes/{id}/graph/stats` — symbol-graph summary statistics
 /// (issue #41 phase 2).
 ///
+/// `GET /indexes/{id}/graph/stats` — symbol-graph summary statistics
+/// (issue #41 phase 2).
+///
 /// Why: lets agents and dashboards verify KG health (total nodes/edges plus a
-/// per-`EdgeKind` breakdown and community-detection summary) without parsing
-/// the much larger `/graph` export or scraping Prometheus. The Phase B/C edge
-/// counts here are the load-bearing signal that the entity-derived edges are
-/// actually wired; `community_count` / `modularity` let the monitor TUI render
-/// the STATISTICS panel with one request instead of also probing
-/// `/communities`.
-/// What: snapshots the symbol graph (lock-free after the `Arc` clone), reads
-/// any persisted Louvain partition from the corpus store, and returns
-/// `{ node_count, edge_count, edge_kinds: { CallsFunction: …, … },
-///    community_count, modularity }`. `community_count` is 0 and `modularity`
-/// is 0.0 when no partition has been persisted yet. Returns 404 when the
-/// index id is unknown.
+/// per-`EdgeKind` breakdown) without parsing the much larger `/graph` export
+/// or scraping Prometheus. The Phase B/C edge counts here are the
+/// load-bearing signal that the entity-derived edges are actually wired.
+/// What: snapshots the symbol graph (lock-free after the `Arc` clone) and
+/// returns `{ node_count, edge_count, edge_kinds: { CallsFunction: …, … } }`.
+/// Returns 404 when the index id is unknown.
 /// Test: covered by `graph_stats_handler_returns_breakdown` in this module.
 async fn graph_stats_handler(
     State(state): State<Arc<SearchAppState>>,
@@ -2583,12 +2438,9 @@ async fn graph_stats_handler(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let index_id = IndexId::new(id);
     let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
-    let (graph, corpus) = {
+    let graph = {
         let indexer = handle.indexer.read().await;
-        (
-            indexer.snapshot_symbol_graph().await,
-            indexer.corpus_store(),
-        )
+        indexer.snapshot_symbol_graph().await
     };
     let breakdown = graph.edge_kind_breakdown();
     let mut edge_kinds = serde_json::Map::with_capacity(breakdown.len());
@@ -2596,159 +2448,10 @@ async fn graph_stats_handler(
         edge_kinds.insert(tag, serde_json::Value::from(count));
     }
 
-    // Surface community-detection summary alongside the graph stats so the
-    // monitor TUI / dashboards only need to hit one endpoint to render the
-    // STATISTICS panel (issue: TUI community_count/modularity missing).
-    // Reading communities is best-effort: when the index has not yet run
-    // Louvain detection (or the corpus store is absent), `community_count`
-    // is 0 and `modularity` is 0.0 — the fields are always present so clients
-    // can deserialise without `Option`s.
-    let (community_count, modularity) = match corpus {
-        Some(corpus) => {
-            tokio::task::spawn_blocking(move || crate::core::SymbolGraph::load_communities(&corpus))
-                .await
-                .ok()
-                .and_then(|r| r.ok())
-                .map(|records| {
-                    let count = records.len() as u64;
-                    let m: f64 = records.iter().map(|r| r.modularity_contribution).sum();
-                    (count, m)
-                })
-                .unwrap_or((0, 0.0))
-        }
-        None => (0, 0.0),
-    };
-
     Ok(Json(serde_json::json!({
         "node_count": graph.node_count(),
         "edge_count": graph.edge_count(),
         "edge_kinds": serde_json::Value::Object(edge_kinds),
-        "community_count": community_count,
-        "modularity": modularity,
-    })))
-}
-
-/// Maximum number of members surfaced inline per community in the HTTP
-/// response (issue #41 phase 3).
-///
-/// Why: large communities can contain hundreds of symbols. The HTTP payload
-/// would explode without a cap. The full member list always survives in redb
-/// — clients that need every member can hit
-/// `GET /indexes/:id/communities/:symbol` for any anchor in the community.
-/// What: hard cap of 50 members per community in `GET /indexes/:id/communities`.
-const COMMUNITIES_HTTP_MEMBER_CAP: usize = 50;
-
-/// `GET /indexes/{id}/communities` — list Louvain communities for an index
-/// (issue #41 phase 3).
-///
-/// Why: agents and dashboards use this to map the codebase's topology — the
-/// natural subsystems Louvain discovered, their dominant files, and modularity
-/// of the partition. Server-side truncation of the `members` array keeps
-/// payloads bounded; the full list always lives in redb.
-/// What: loads communities via `SymbolGraph::load_communities`, snapshots the
-/// in-memory partition's modularity from any one record's contribution sum,
-/// and returns `{ community_count, modularity, communities: [...] }`. Returns
-/// `Ok(Json(...))` with an empty community list when communities haven't been
-/// computed yet — agents poll this endpoint after triggering a reindex.
-/// Test: covered by `communities_handler_returns_empty_before_detection` in
-/// this module.
-async fn communities_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
-    let corpus = {
-        let indexer = handle.indexer.read().await;
-        indexer.corpus_store()
-    };
-    let records = match corpus {
-        Some(corpus) => {
-            // Run the read off the async executor — redb is sync.
-            tokio::task::spawn_blocking(move || crate::core::SymbolGraph::load_communities(&corpus))
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        }
-        None => Vec::new(),
-    };
-    let modularity: f64 = records.iter().map(|r| r.modularity_contribution).sum();
-    let communities: Vec<serde_json::Value> = records
-        .iter()
-        .map(|r| {
-            let members_truncated: Vec<&String> =
-                r.members.iter().take(COMMUNITIES_HTTP_MEMBER_CAP).collect();
-            serde_json::json!({
-                "id": r.id,
-                "member_count": r.member_count,
-                "centroid_symbol": r.centroid_symbol,
-                "dominant_files": r.dominant_files,
-                "members": members_truncated,
-                "modularity_contribution": r.modularity_contribution,
-            })
-        })
-        .collect();
-    Ok(Json(serde_json::json!({
-        "community_count": records.len(),
-        "modularity": modularity,
-        "communities": communities,
-    })))
-}
-
-/// `GET /indexes/{id}/communities/{symbol}` — look up the community that
-/// contains a given symbol (issue #41 phase 3).
-///
-/// Why: agents that find a hit in search results often want the surrounding
-/// community to expand their context. This endpoint is a single point-read
-/// keyed by symbol name (URL-encoded for safety with `::` qualifiers).
-/// What: resolves the symbol to a community id via
-/// `CorpusStore::symbol_community`, loads the matching `CommunityRecord`, and
-/// returns siblings (excluding the requested symbol) plus the centroid.
-/// Returns 404 when the symbol is unknown or communities haven't been
-/// computed yet.
-/// Test: covered indirectly via `test_detect_and_save_communities_round_trip`
-/// in `symbol_graph::tests`.
-async fn community_for_symbol_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path((id, symbol_encoded)): Path<(String, String)>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
-    // Axum's `Path` extractor already URL-decodes path segments, so the
-    // captured `symbol_encoded` is already the raw symbol name (e.g.
-    // `Foo::bar`). We keep the variable name for clarity at the call site.
-    let symbol = symbol_encoded.clone();
-    let corpus = {
-        let indexer = handle.indexer.read().await;
-        indexer.corpus_store().ok_or(StatusCode::NOT_FOUND)?
-    };
-    let symbol_clone = symbol.clone();
-    let cid_opt = tokio::task::spawn_blocking(move || corpus.symbol_community(&symbol_clone))
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let Some(cid) = cid_opt else {
-        return Err(StatusCode::NOT_FOUND);
-    };
-    let corpus2 = {
-        let indexer = handle.indexer.read().await;
-        indexer.corpus_store().ok_or(StatusCode::NOT_FOUND)?
-    };
-    let records =
-        tokio::task::spawn_blocking(move || crate::core::SymbolGraph::load_communities(&corpus2))
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let Some(record) = records.iter().find(|r| r.id as u64 == cid) else {
-        return Err(StatusCode::NOT_FOUND);
-    };
-    let siblings: Vec<&String> = record.members.iter().filter(|m| **m != symbol).collect();
-    Ok(Json(serde_json::json!({
-        "community_id": record.id,
-        "community_size": record.member_count,
-        "symbol": symbol,
-        "siblings": siblings,
-        "centroid_symbol": record.centroid_symbol,
     })))
 }
 
@@ -3215,21 +2918,12 @@ async fn reindex_handler(
         .reindex_progress
         .insert(index_id.clone(), Arc::clone(&progress));
 
-    // Issue #41 phase 4: invalidate the cached GraphScorer so the next search
-    // rebuilds it against the post-reindex symbol graph + community partition.
-    state.invalidate_graph_scorer(&index_id);
-
     spawn_reindex_with_cleanup(
         handle,
         progress,
         force,
         Some(Arc::clone(&state.reindex_progress)),
         Some(Arc::clone(&state.last_reindex_aborted_at)),
-        // Issue #81: hand the reindex tail the scorer cache so it can evict a
-        // stale (empty-community) `GraphScorer` once community detection has
-        // persisted the partition. Without this, `community_cohesion` stays
-        // 0.0 for any index whose scorer was cached before detection landed.
-        Some(Arc::clone(&state.graph_scorers)),
     );
 
     Ok(Json(serde_json::json!({

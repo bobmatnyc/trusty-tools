@@ -238,7 +238,6 @@ fn grep_search(root: &Path, term: &str, top_k: usize) -> (Vec<CodeChunk>, u128) 
                 chunk_depth: 0,
                 index_id: None,
                 on_branch: false,
-                community_id: None,
                 archive_reason: None,
             })
         })

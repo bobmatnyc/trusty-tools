@@ -38,7 +38,6 @@ use crate::core::symbol_graph::SymbolGraph;
 pub(crate) mod archive;
 pub(crate) mod docs_penalty;
 mod files;
-pub mod graph_score;
 mod ingest;
 mod persist;
 mod search;
@@ -264,13 +263,6 @@ pub struct CodeChunk {
     // branch context was provided.
     #[serde(default)]
     pub on_branch: bool,
-
-    /// Issue #41 phase 3: Louvain community id for this chunk's primary
-    /// symbol, if any. `None` when the chunk has no associated symbol, the
-    /// symbol has no community assignment, or community detection has not yet
-    /// run. Lets callers group results by architectural cluster.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub community_id: Option<u64>,
 
     /// Issue #75: short label explaining why this chunk was archive-downranked,
     /// when a score multiplier penalty was applied. Examples:
@@ -529,7 +521,6 @@ pub(crate) fn raw_to_code_chunk(
         chunk_depth,
         index_id: None,
         on_branch: false,
-        community_id: None,
         archive_reason: None,
     }
 }
@@ -1122,15 +1113,15 @@ impl CodeIndexer {
         Arc::clone(&*self.symbol_graph.read().await)
     }
 
-    /// Borrow the (optional) durable corpus store (issue #41 phase 3).
+    /// Borrow the (optional) durable corpus store.
     ///
-    /// Why: the reindex orchestrator needs to hand the `CorpusStore` to a
-    /// background community-detection task without exposing every internal
-    /// field. The `Option` and `Arc::clone` are cheap and let the caller hold
-    /// the store independently of any read lock.
+    /// Why: the reindex orchestrator and symbol-graph paths need the
+    /// `CorpusStore` without exposing every internal field. The `Option` and
+    /// `Arc::clone` are cheap and let the caller hold the store independently
+    /// of any read lock.
     /// What: returns `Some(Arc::clone)` when the corpus is wired, `None` for
     /// BM25-only / test indexers built without a data dir.
-    /// Test: indirectly via `service::reindex` community detection trigger.
+    /// Test: indirectly via `service::reindex` graph rebuild trigger.
     pub fn corpus_store(&self) -> Option<Arc<crate::core::corpus::CorpusStore>> {
         self.corpus.as_ref().map(Arc::clone)
     }

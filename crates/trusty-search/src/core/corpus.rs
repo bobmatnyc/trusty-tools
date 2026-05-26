@@ -123,22 +123,22 @@ pub(crate) const KG_EDGES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition:
 pub(crate) const KG_EDGES_REV_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("kg_edges_rev");
 
-/// redb table holding persisted Louvain community records, keyed by
-/// community id (issue #41 phase 3).
+/// redb table holding persisted Louvain community records (migration tolerance).
 ///
-/// Why: offline community detection produces a stable partition of the
-/// symbol graph; persisting it lets agents query knowledge gaps and topology
-/// without re-running Louvain on every restart.
-/// What: `community_id (u64) → &[u8]` where the value is `serde_json`-encoded
-/// [`crate::core::community::CommunityRecord`].
+/// Why: kept for backward-compat with on-disk indexes created before v0.10.0
+/// (issues #41 / #152). The Louvain community detection and `community_cohesion`
+/// ranking were removed in v0.10.0 (PROVENANCE-ONLY decision, issue #145).
+/// This table definition is retained so the redb schema initialisation does not
+/// fail when opening old databases that already have the table.
+/// What: `community_id (u64) → &[u8]` (was serde_json-encoded CommunityRecord).
+/// The table is no longer written or read by the active search path.
 pub(crate) const KG_COMMUNITIES_TABLE: TableDefinition<u64, &[u8]> =
     TableDefinition::new("kg_communities");
 
-/// redb table mapping symbol name → community id (issue #41 phase 3).
+/// redb table mapping symbol → community id (migration tolerance).
 ///
-/// Why: the search hot path needs O(1) "what community does this symbol live
-/// in?" lookups so search results can carry a `community_id` field. A separate
-/// table keeps that lookup cheap without parsing the full community record.
+/// Why: same as `KG_COMMUNITIES_TABLE` — retained to avoid schema errors on
+/// old indexes. Not written or read by the active search path as of v0.10.0.
 /// What: `symbol (str) → community_id (u64)`.
 pub(crate) const KG_SYMBOL_COMMUNITY_TABLE: TableDefinition<&str, u64> =
     TableDefinition::new("kg_symbol_community");
@@ -655,17 +655,15 @@ impl CorpusStore {
         Ok(table.len().context("count kg_nodes")? as usize)
     }
 
-    /// Replace the persisted community records + symbol→community map in one
-    /// atomic transaction (issue #41 phase 3).
+    /// Replace the persisted community records + symbol→community map (migration
+    /// tolerance, not called by the active search path as of v0.10.0).
     ///
-    /// Why: community detection runs offline after a full reindex; persisting
-    /// the partition lets the search hot path attach a `community_id` field to
-    /// every result without re-running Louvain. Doing both writes under one
-    /// transaction guarantees readers never observe a half-rewritten partition.
-    /// What: clears the two community tables then re-inserts the supplied
-    /// records (keyed by `id`) and per-symbol mappings.
-    /// Test: `save_load_communities_roundtrip` round-trips a synthetic
-    /// partition through this method and `load_communities`.
+    /// Why: retained so old tooling that still calls this (e.g. test helpers,
+    /// migration utilities) compiles. The Louvain pipeline was removed in
+    /// v0.10.0 (issue #152); this method is no longer called by the daemon.
+    /// What: clears the two migration-tolerance community tables then re-inserts
+    /// the supplied records and per-symbol mappings in one atomic transaction.
+    /// Test: `save_load_communities_roundtrip` round-trips a synthetic partition.
     pub fn save_communities(
         &self,
         records: &[(u64, Vec<u8>)],
@@ -699,12 +697,14 @@ impl CorpusStore {
         Ok(())
     }
 
-    /// Load persisted community records (issue #41 phase 3).
+    /// Load persisted community records (migration tolerance, not called by
+    /// the active search path as of v0.10.0).
     ///
-    /// Why: warm-boot / HTTP `/communities` endpoint reads the partition
-    /// without re-running Louvain. Returning the raw bytes keeps this layer
-    /// type-agnostic — the caller decodes to its `CommunityRecord` type.
-    /// What: returns `Vec<(community_id, serialized_record_bytes)>`.
+    /// Why: retained for parity with `save_communities` so old code that calls
+    /// both still compiles. The `/communities` HTTP endpoint was removed in
+    /// v0.10.0 (issue #152).
+    /// What: returns `Vec<(community_id, serialized_record_bytes)>` from the
+    /// migration-tolerance `kg_communities` redb table.
     /// Test: `save_load_communities_roundtrip`.
     pub fn load_communities(&self) -> Result<Vec<(u64, Vec<u8>)>> {
         let txn = self.db.begin_read().context("begin communities read txn")?;
@@ -717,13 +717,14 @@ impl CorpusStore {
         Ok(out)
     }
 
-    /// Look up the community id for a single symbol (issue #41 phase 3).
+    /// Look up the community id for a single symbol (migration tolerance, not
+    /// called by the active search path as of v0.10.0).
     ///
-    /// Why: the search materialisation tail calls this once per result chunk
-    /// to attach a `community_id`. Keeping this as a point-read avoids
-    /// loading the full mapping into memory per query.
-    /// What: returns `Ok(Some(id))` when the symbol has a community,
-    /// `Ok(None)` when not (unknown symbol or communities not yet computed).
+    /// Why: retained for parity with `save_communities` / `load_communities`
+    /// so any surviving callers compile. Community id lookups were removed from
+    /// the search materialisation path in v0.10.0 (issue #152).
+    /// What: returns `Ok(Some(id))` when the symbol has an entry in the legacy
+    /// `kg_symbol_community` table; `Ok(None)` otherwise.
     /// Test: `save_load_communities_roundtrip` asserts point reads.
     pub fn symbol_community(&self, symbol: &str) -> Result<Option<u64>> {
         let txn = self

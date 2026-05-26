@@ -976,13 +976,13 @@ impl CodeIndexer {
 
     /// Borrow the durable redb corpus (issue #41 phase 4).
     ///
-    /// Why: The `SearchAppState::graph_scorer` cache needs the persisted
-    /// community records to build a scorer; exposing the `Arc<CorpusStore>`
-    /// keeps the caller decoupled from the indexer's internal lock layout.
+    /// Why: Exposes the `Arc<CorpusStore>` to callers (e.g. `server.rs`) that
+    /// need direct access to the on-disk chunk + symbol tables without holding
+    /// the indexer's internal `RwLock`.
     /// What: Returns `None` for BM25-only / test indexers that have no
     /// on-disk corpus wired; `Some(Arc::clone)` otherwise.
-    /// Test: covered indirectly by the search integration tests that exercise
-    /// the post-MMR graph-bonus blend.
+    /// Test: covered indirectly by the search integration tests and the
+    /// `get_call_chain` / `search_kg` provenance-navigation paths.
     pub fn corpus_arc(&self) -> Option<Arc<crate::core::corpus::CorpusStore>> {
         self.corpus.as_ref().map(Arc::clone)
     }
