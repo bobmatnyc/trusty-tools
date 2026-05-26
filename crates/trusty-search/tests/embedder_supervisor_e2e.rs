@@ -240,6 +240,62 @@ mod e2e {
         }
     }
 
+    /// Closing the parent's stdin write-end causes the child to exit within 2 s.
+    ///
+    /// Why: this is the implicit lifecycle tie — when `trusty-search` exits and
+    /// its `ChildStdin` is dropped, the child sees stdin EOF and must exit
+    /// cleanly (code 0) without needing an explicit kill signal. This validates
+    /// `run_stdio_server`'s EOF-exit branch so the sidecar never becomes a
+    /// zombie when the parent exits.
+    ///
+    /// What: spawn `trusty-embedderd --stdio` with piped stdin/stdout; immediately
+    /// drop the stdin handle (simulating parent exit); assert the child exits
+    /// within 2 s with code 0.
+    ///
+    /// Note: the binary is started but exits before model load on cold runs —
+    /// no ONNX model is needed, so this test runs quickly.
+    ///
+    /// Test: this test. Run with `--include-ignored`.
+    #[tokio::test]
+    #[ignore = "requires trusty-embedderd binary; fast — no ONNX model needed, exits on stdin EOF before model loads"]
+    async fn stdio_eof_terminates_child() {
+        use std::process::Stdio;
+        use tokio::process::Command;
+
+        let binary = locate_embedderd_binary().expect("trusty-embedderd not found on PATH");
+
+        // Spawn the child with piped stdio — same flags EmbedderSupervisor uses.
+        let mut child = Command::new(&binary)
+            .arg("--stdio")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("failed to spawn trusty-embedderd --stdio");
+
+        // Drop stdin immediately — closes the write end of the pipe.
+        // The child's `BufReader::read_line` returns n=0 (EOF) and the
+        // `run_stdio_server` loop exits cleanly with `return Ok(())`.
+        drop(child.stdin.take());
+
+        // The child must exit cleanly within 2 seconds.
+        let exit_status = tokio::time::timeout(std::time::Duration::from_secs(2), child.wait())
+            .await
+            .expect(
+                "child did not exit within 2 s after stdin closed — \
+             lifecycle tie (EOF → clean exit) is broken",
+            )
+            .expect("wait() failed");
+
+        assert!(
+            exit_status.success(),
+            "child exited with non-zero status {:?} after stdin EOF — \
+             expected clean exit (code 0)",
+            exit_status.code()
+        );
+    }
+
     /// When `TRUSTY_EMBEDDERD_BIN` is set to a bad path, `locate_embedderd_binary`
     /// returns an error — not a panic.
     ///
