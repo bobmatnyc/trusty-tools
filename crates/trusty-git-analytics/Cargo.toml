@@ -1,6 +1,6 @@
 [package]
 name = "tga"
-version = "1.0.16"
+version = "1.0.17"
 publish = true
 edition = "2021"
 # Required for `std::sync::LazyLock` used by the shared CLI help wiring
