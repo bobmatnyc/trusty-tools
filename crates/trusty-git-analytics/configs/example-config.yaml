@@ -30,6 +30,26 @@ output:
     - json
     - markdown
 
+# GitHub integration (optional, required to populate the `pull_requests` table).
+#
+# Without this block, `tga collect` skips PR fetching entirely and
+# `tga pr-metrics` returns no data (issue #211). The minimum to enable PR
+# sync is `token` + `fetch_prs: true` + (`repo` OR `org`).
+#
+# Required token scopes:
+#   - `public_repo` for public repositories only
+#   - `repo`        for private repositories
+#
+# The token can be inlined here (not recommended) or sourced from the
+# `GITHUB_TOKEN` env var by leaving `token` unset.
+github:
+  token: "${GITHUB_TOKEN}"
+  # Either single-repo mode:
+  repo: "my-org/my-app"
+  # Or org-wide mode (drives PR fetch from the entries in `repositories[]`):
+  # org: "my-org"
+  fetch_prs: true
+
 # Linear project management integration (optional).
 # Enriches commits that reference Linear issue IDs (e.g. ENG-123) with
 # title, status, team, and assignee from the Linear GraphQL API.

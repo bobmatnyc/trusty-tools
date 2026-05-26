@@ -98,10 +98,10 @@ All other sections are optional. When `output.formats` is omitted, all three for
 | `classification.confidence_threshold` | float | `0.7` | Minimum acceptance confidence |
 | `classification.llm_fallback_threshold` | float | `0.0` | Commits with confidence above this value skip the LLM tier |
 | `classification.llm_fallback_concurrency` | uint | `8` | Max concurrent LLM requests during fallback |
-| `github.token` | string | `$GITHUB_TOKEN` | GitHub PAT for PR fetch |
+| `github.token` | string | `$GITHUB_TOKEN` | GitHub PAT for PR fetch. Required scopes: `public_repo` for public repos, `repo` for private repos. Without a token, GitHub rate-limits anonymous traffic to 60 requests/hour and most PRs will be missed. |
 | `github.org` | string | — | Org slug for org-wide PR queries |
 | `github.repo` | string | — | Single repo slug (`owner/name`) |
-| `github.fetch_prs` | bool | `false` | Fetch pull request metadata |
+| `github.fetch_prs` | bool | `false` | Fetch pull request metadata. **Must be `true` for `tga pr-metrics` to return data** — when left at the default, `tga collect` writes zero rows to `pull_requests` (issue #211). |
 | `github.ticket_regex` | string | — | Override regex for detecting GitHub ticket refs in commit messages |
 | `jira.url` | string | — | JIRA base URL |
 | `jira.username` | string | — | JIRA API username (email for Cloud) |

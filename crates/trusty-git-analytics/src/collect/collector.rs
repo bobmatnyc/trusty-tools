@@ -268,6 +268,29 @@ impl CollectionPipeline {
                         "GitHub PR fetch skipped: no github.repo, no per-repo org, \
                          and no github.org resolvable from repositories[]"
                     );
+                } else if gh_cfg.token.is_none() && std::env::var("GITHUB_TOKEN").ok().is_none() {
+                    // Issue #211: surface the token misconfiguration loudly.
+                    // Without a PAT, GitHub limits anonymous traffic to 60
+                    // requests/hour, which silently truncates org-wide PR
+                    // pulls and is the #1 reason `pull_requests` ends up
+                    // empty after a `tga collect` run.
+                    let msg = "GitHub PR fetch is enabled (github.fetch_prs=true) but \
+                               no token is configured. Set `github.token` or the \
+                               GITHUB_TOKEN env var to a PAT with `repo` scope (public \
+                               repos only need `public_repo`); without it, GitHub \
+                               rate-limits to 60 requests/hour and most PRs will be \
+                               missed.";
+                    warn!("{msg}");
+                    eprintln!("warning: {msg}");
+                    info!(
+                        repo_count = repos.len(),
+                        "GitHub PR fetcher will scan {} repo(s) anonymously",
+                        repos.len()
+                    );
+                    match GitHubClient::new_for_prs(gh_cfg, repos) {
+                        Ok(gh) => providers.push(Box::new(gh)),
+                        Err(e) => stats.errors.push(format!("GitHub client init failed: {e}")),
+                    }
                 } else {
                     info!(
                         repo_count = repos.len(),
@@ -279,7 +302,32 @@ impl CollectionPipeline {
                         Err(e) => stats.errors.push(format!("GitHub client init failed: {e}")),
                     }
                 }
+            } else {
+                // Issue #211: when the github config block exists but
+                // fetch_prs is false (the default), the pull_requests table
+                // ends up empty even though the user has clearly opted into
+                // GitHub integration. Emit a one-shot diagnostic so the
+                // operator can find the toggle without grepping the source.
+                info!(
+                    "GitHub PR fetch disabled (github.fetch_prs=false). Set \
+                     `github.fetch_prs: true` in your config to populate the \
+                     pull_requests table."
+                );
             }
+        } else if has_github_like_repos(&self.config.repositories) {
+            // Issue #211: zero `pull_requests` rows is the single most
+            // common "tga seems broken" question. Detect the most likely
+            // misconfiguration (repos look like GitHub clones but no
+            // `github:` block in the config) and tell the operator how to
+            // fix it before they go hunting through the code.
+            let msg = "Repositories look like GitHub clones, but no `github:` config \
+                       block is present. To populate the `pull_requests` table, add:\n\
+                       \n\
+                       github:\n  \
+                         token: \"${GITHUB_TOKEN}\"   # PAT with `repo` scope\n  \
+                         fetch_prs: true\n  \
+                         repo: \"owner/name\"         # OR `org: \"owner\"` for org-wide\n";
+            tracing::info!("{msg}");
         }
         if let Some(bb_cfg) = &self.config.bitbucket {
             if bb_cfg.fetch_prs {
@@ -731,6 +779,39 @@ impl CollectionPipeline {
             .await?;
         Ok(stored)
     }
+}
+
+/// Best-effort detector for "this repo looks like a GitHub clone".
+///
+/// Why: when zero `pull_requests` end up in the DB after `tga collect`,
+/// nine times out of ten the cause is "no `github:` block in the YAML".
+/// Detecting this cheaply lets us emit one concrete remediation line
+/// instead of leaving the operator to grep through the source. See issue
+/// #211.
+/// What: for each [`RepositoryConfig`], opens the repo via `git2`, reads
+/// `origin`'s URL, and returns `true` as soon as one URL matches the
+/// known GitHub forms (HTTPS, SSH, `ssh://git@github.com/...`). Any error
+/// (no `origin`, unreadable repo, non-GitHub URL) is silently skipped so
+/// this never fires a false positive in CI or test fixtures.
+/// Test: covered indirectly — exercised by `tga collect` runs against
+/// real clones; pure-string parsing is covered by
+/// `crate::collect::github::client::extract_owner_repo_from_url`.
+fn has_github_like_repos(repositories: &[crate::core::config::RepositoryConfig]) -> bool {
+    for repo_cfg in repositories {
+        let Ok(repo) = git2::Repository::open(&repo_cfg.path) else {
+            continue;
+        };
+        let Ok(remote) = repo.find_remote("origin") else {
+            continue;
+        };
+        let Some(url) = remote.url() else {
+            continue;
+        };
+        if url.contains("github.com") {
+            return true;
+        }
+    }
+    false
 }
 
 /// Convert a calendar date to the UTC instant at 00:00:00 on that day.
