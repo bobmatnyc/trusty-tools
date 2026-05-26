@@ -62,6 +62,7 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         | "memory_note"
         | "memory_forget"
         | "palace_create"
+        | "palace_delete"
         | "palace_compact"
         | "kg_assert"
         | "add_alias"

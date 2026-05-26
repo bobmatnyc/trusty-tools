@@ -162,10 +162,12 @@ pub struct StatusPayload {
 
 /// Service-level error type that maps cleanly onto HTTP status codes.
 ///
-/// Why: handlers want to render 400/404/500 from a single point; the service
-/// methods produce a typed error so the binding layer can pick the right
-/// status without parsing strings.
-/// What: three variants matching the legacy `ApiError` constructors.
+/// Why: handlers want to render 400/404/409/500 from a single point; the
+/// service methods produce a typed error so the binding layer can pick the
+/// right status without parsing strings.
+/// What: four variants matching the legacy `ApiError` constructors plus a
+/// dedicated `Conflict` for state-clash errors (issue #180: deleting a
+/// non-empty palace without `force`).
 /// Test: indirectly via the HTTP tests for the corresponding endpoints.
 #[derive(Debug, thiserror::Error)]
 pub enum ServiceError {
@@ -173,6 +175,8 @@ pub enum ServiceError {
     BadRequest(String),
     #[error("{0}")]
     NotFound(String),
+    #[error("{0}")]
+    Conflict(String),
     #[error("{0}")]
     Internal(String),
 }
@@ -183,6 +187,18 @@ impl ServiceError {
     }
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self::NotFound(msg.into())
+    }
+    /// Build a 409 Conflict service error.
+    ///
+    /// Why: palace-delete (issue #180) needs to surface a distinct
+    /// "state precondition failed" status when the caller asks to delete a
+    /// non-empty palace without `force=true`. 400 would be misleading
+    /// (the request itself is well-formed) and 404 would lie about the
+    /// resource's existence.
+    /// What: wraps the message in `ServiceError::Conflict`.
+    /// Test: `delete_palace_refuses_when_drawers_present` in `web::tests`.
+    pub fn conflict(msg: impl Into<String>) -> Self {
+        Self::Conflict(msg.into())
     }
     pub fn internal(msg: impl Into<String>) -> Self {
         Self::Internal(msg.into())
@@ -362,6 +378,63 @@ impl MemoryService {
             source,
         });
         Ok(name)
+    }
+
+    /// Delete a palace from disk, optionally rejecting non-empty palaces.
+    ///
+    /// Why: Issue #180 — operators need a way to drop an entire palace
+    /// without going through drawer-by-drawer deletion. Defaulting to a
+    /// "must be empty" guard prevents fat-finger destruction of populated
+    /// palaces; `force=true` is the explicit opt-in to the destructive path.
+    /// What: 1) confirms the palace exists on disk (else `NotFound`),
+    /// 2) when `!force`, lists drawers via the live handle and returns
+    /// `BadRequest("Palace has drawers; pass force=true to delete")` if
+    /// the palace is non-empty, 3) drops the in-memory registry entry so
+    /// future opens hit the (now-missing) disk state, 4) removes
+    /// `<data_root>/<palace_id>/` recursively via `tokio::fs::remove_dir_all`,
+    /// and 5) emits an aggregate `StatusChanged` so dashboards refresh.
+    /// Test: `delete_palace_removes_dir_when_empty`,
+    /// `delete_palace_refuses_when_drawers_present`,
+    /// `delete_palace_force_removes_populated_palace`,
+    /// `delete_palace_returns_not_found_for_missing_id` in `web::tests`.
+    pub async fn delete_palace(&self, palace_id: &str, force: bool) -> ServiceResult<()> {
+        let palaces = PalaceRegistry::list_palaces(&self.state.data_root)
+            .map_err(|e| ServiceError::internal(format!("list palaces: {e:#}")))?;
+        if !palaces.iter().any(|p| p.id.0 == palace_id) {
+            return Err(ServiceError::not_found(format!(
+                "palace not found: {palace_id}"
+            )));
+        }
+        if !force {
+            // Open the palace just long enough to count its drawers; we don't
+            // hold the handle past this check because the caller is about to
+            // delete the on-disk directory.
+            if let Ok(handle) = self
+                .state
+                .registry
+                .open_palace(&self.state.data_root, &PalaceId::new(palace_id))
+            {
+                if !handle.drawers.read().is_empty() {
+                    return Err(ServiceError::conflict(
+                        "Palace has drawers; pass force=true to delete",
+                    ));
+                }
+            }
+        }
+        // Drop the cached `Arc<PalaceHandle>` and gap cache before unlinking
+        // the directory so subsequent reads can't be served from the stale
+        // in-memory state. The registry's `remove` is a no-op when the entry
+        // is absent (lazy-open palaces that no caller has touched yet).
+        self.state.registry.remove(&PalaceId::new(palace_id));
+        let palace_dir = self.state.data_root.join(palace_id);
+        tokio::fs::remove_dir_all(&palace_dir).await.map_err(|e| {
+            ServiceError::internal(format!("remove palace dir {}: {e}", palace_dir.display()))
+        })?;
+        // Recompute aggregate totals so dashboards drop the deleted palace's
+        // counts. There's no dedicated `PalaceDeleted` event variant yet;
+        // `StatusChanged` is enough to keep the UI in sync.
+        self.state.emit(self.aggregate_status_event());
+        Ok(())
     }
 
     /// Look up a single palace by id and enrich with live handle stats.

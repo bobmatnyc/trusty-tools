@@ -1313,8 +1313,9 @@ mod tests {
         let req = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
         let resp = handle_message(&state, req).await;
         let tools = resp["result"]["tools"].as_array().expect("tools array");
-        // Issue #99 adds `memory_send_message` on top of the baseline 20 tools.
-        assert_eq!(tools.len(), 21);
+        // Issue #99 added `memory_send_message`; issue #180 added
+        // `palace_delete` on top of the 21-tool baseline.
+        assert_eq!(tools.len(), 22);
     }
 
     #[tokio::test]

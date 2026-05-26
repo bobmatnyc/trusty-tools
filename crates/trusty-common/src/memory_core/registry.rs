@@ -111,6 +111,22 @@ impl PalaceRegistry {
         self.gaps_cache.remove(palace_id);
     }
 
+    /// Drop the cached handle (and any cached gaps) for `palace_id`.
+    ///
+    /// Why: Palace deletion (issue #180) must invalidate the in-memory
+    /// `Arc<PalaceHandle>` so future `open_palace` calls hit the disk and
+    /// see the missing directory instead of silently serving the stale
+    /// handle from cache. Without this, the daemon would keep returning
+    /// the deleted palace's KG/drawer state until the next restart.
+    /// What: Removes the registry entry and the associated gap-cache entry.
+    /// Both removes are no-ops when the entries are absent, so this method
+    /// is safe to call on an already-cleared id.
+    /// Test: `registry_remove_clears_cached_handle`.
+    pub fn remove(&self, palace_id: &PalaceId) {
+        self.palaces.remove(palace_id);
+        self.gaps_cache.remove(palace_id);
+    }
+
     /// Open a palace by id, hydrating from `<data_root>/<palace_id>/` on disk.
     ///
     /// Why: The CLI and MCP server look palaces up by id; this is the single
@@ -218,6 +234,28 @@ mod tests {
         reg.register(make_handle("alpha", dir.path()));
         let h = reg.get(&PalaceId::new("alpha")).expect("registered");
         assert_eq!(h.id.as_str(), "alpha");
+    }
+
+    /// Why: Issue #180 — palace deletion must invalidate the in-memory
+    /// `PalaceRegistry` cache so a subsequent `open_palace` doesn't return
+    /// the stale handle for an on-disk-deleted palace.
+    /// What: Register a handle, set a gap entry, call `remove`, and assert
+    /// both the handle and the gap cache entry are gone.
+    /// Test: This test itself.
+    #[test]
+    fn registry_remove_clears_cached_handle() {
+        let dir = tempdir().unwrap();
+        let reg = PalaceRegistry::new();
+        let id = PalaceId::new("doomed");
+        reg.register(make_handle("doomed", dir.path()));
+        reg.set_gaps(id.clone(), Vec::new());
+        assert!(reg.get(&id).is_some());
+        assert!(reg.get_gaps(&id).is_some());
+        reg.remove(&id);
+        assert!(reg.get(&id).is_none());
+        assert!(reg.get_gaps(&id).is_none());
+        // Calling remove again is a no-op.
+        reg.remove(&id);
     }
 
     #[test]
