@@ -252,6 +252,43 @@ impl MemoryClient {
         Ok(parse_recall_hits(&raw))
     }
 
+    /// List drawers in `palace_id`, newest first, with offset pagination.
+    ///
+    /// Why: the TUI activity panel (#184) shows a paged drawer list for the
+    /// selected palace. The daemon's `/api/v1/palaces/{id}/drawers` endpoint
+    /// (extended in the same change-set) supports `sort=created_desc` and an
+    /// `offset` so the panel can walk through arbitrarily many drawers
+    /// without re-sorting on the client.
+    /// What: GETs `…/drawers?limit=<limit>&offset=<offset>&sort=created_desc`
+    /// and projects each entry into a [`DrawerInfo`] via [`parse_drawers`]. A
+    /// non-2xx response yields an error; an empty body yields an empty list.
+    /// Test: live behaviour covered by the trusty-memory daemon suite; the
+    /// projection is unit-tested via [`parse_drawers`].
+    pub async fn list_drawers(
+        &self,
+        palace_id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<Vec<DrawerInfo>> {
+        let raw: serde_json::Value = self
+            .http
+            .get(format!(
+                "{}/api/v1/palaces/{}/drawers",
+                self.base, palace_id,
+            ))
+            .query(&[
+                ("limit", limit.to_string()),
+                ("offset", offset.to_string()),
+                ("sort", "created_desc".to_string()),
+            ])
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(parse_drawers(&raw))
+    }
+
     /// Trigger a dream cycle via `POST /api/v1/dream/run`.
     ///
     /// Why: the memory TUI's `[d]` key runs a dream cycle (merge / prune /
@@ -546,6 +583,114 @@ pub fn parse_palaces(raw: &serde_json::Value) -> Vec<PalaceRow> {
         .collect()
 }
 
+/// One drawer row projected for the TUI activity panel.
+///
+/// Why: the activity panel renders a compact one-line summary per drawer —
+/// truncated id, creation timestamp, creator tag, and memory count.
+/// Keeping a typed projection out of the renderer means the parsing /
+/// creator-tag extraction logic is unit-testable without a live daemon.
+/// What: a stable id, a created_at timestamp (UTC), the resolved creator
+/// label (`"—"` when no creator tag was found), and the drawer's tag list
+/// surfaced so future panels can present richer detail without re-fetching.
+/// Test: `parse_drawers_projects_fields`, `creator_label_picks_first_match`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DrawerInfo {
+    /// Stable drawer identifier (UUID as string).
+    pub id: String,
+    /// Creation timestamp as parsed from the wire payload.
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Resolved creator label (e.g. `"msg:from=cto"`, `"creator:client=mpm"`)
+    /// or `"—"` when no recognised creator tag was attached.
+    pub creator: String,
+    /// All tags as carried on the wire (for downstream filtering / display).
+    pub tags: Vec<String>,
+}
+
+/// Fallback creator label rendered when no recognised creator tag is found.
+///
+/// Why: the panel must distinguish "writer didn't self-identify" from a real
+/// label; using an em-dash mirrors the convention used by the statistics
+/// panel for "never written" timestamps.
+/// What: the literal em-dash glyph.
+/// Test: `creator_label_picks_first_match`.
+pub const NO_CREATOR_LABEL: &str = "—";
+
+/// Project a `…/drawers` JSON payload into [`DrawerInfo`]s.
+///
+/// Why: the endpoint may return either a bare JSON array (the
+/// trusty-memory daemon's current shape) or — defensively — an object with a
+/// `drawers` array. The projection tolerates both, and absent / malformed
+/// fields fall through to safe defaults so a single corrupt row does not
+/// drop the whole page.
+/// What: accepts a JSON array (or object with `drawers`); for each entry
+/// reads `id` (UUID string), `created_at` (RFC 3339), and `tags`, then
+/// resolves the creator label via [`creator_label`].
+/// Test: `parse_drawers_projects_fields`.
+pub fn parse_drawers(raw: &serde_json::Value) -> Vec<DrawerInfo> {
+    let array: Vec<serde_json::Value> = match raw {
+        serde_json::Value::Array(items) => items.clone(),
+        serde_json::Value::Object(obj) => match obj.get("drawers") {
+            Some(serde_json::Value::Array(items)) => items.clone(),
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+    array
+        .into_iter()
+        .map(|item| {
+            let id = item
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let created_at = item
+                .get("created_at")
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc));
+            let tags: Vec<String> = item
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|t| t.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let creator = creator_label(&tags);
+            DrawerInfo {
+                id,
+                created_at,
+                creator,
+                tags,
+            }
+        })
+        .collect()
+}
+
+/// Pick the first recognised creator tag from a drawer's tag list.
+///
+/// Why: trusty-memory drawers carry their writer's identity in tag form —
+/// `msg:from=<peer>` for cross-instance messages, `creator:client=<name>` /
+/// `creator:source=<src>` for HTTP / MCP writers, and `tag:creator:…` for the
+/// legacy CTO/MPM convention. The TUI surfaces whichever match comes first
+/// so the operator can trace authorship at a glance.
+/// What: scans `tags` in order looking for a prefix in
+/// (`msg:from=`, `tag:creator:`, `creator:`). Returns the matching tag
+/// verbatim or [`NO_CREATOR_LABEL`] when none match.
+/// Test: `creator_label_picks_first_match`.
+pub fn creator_label(tags: &[String]) -> String {
+    for tag in tags {
+        if tag.starts_with("msg:from=")
+            || tag.starts_with("tag:creator:")
+            || tag.starts_with("creator:")
+        {
+            return tag.clone();
+        }
+    }
+    NO_CREATOR_LABEL.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -705,5 +850,77 @@ mod tests {
         assert!(parse_memory_event(&serde_json::json!({"type": "connected"})).is_none());
         assert!(parse_memory_event(&serde_json::json!({"type": "lag", "skipped": 2})).is_none());
         assert!(parse_memory_event(&serde_json::json!({"no": "type"})).is_none());
+    }
+
+    #[test]
+    fn parse_drawers_projects_fields() {
+        // Bare array shape — the daemon's current response.
+        let raw = serde_json::json!([
+            {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "created_at": "2026-05-20T12:34:56Z",
+                "tags": ["msg:from=cto", "user-tag"],
+                "content": "ignored by projection",
+            },
+            {
+                "id": "22222222-2222-2222-2222-222222222222",
+                "created_at": "2026-05-19T08:00:00Z",
+                "tags": ["creator:client=mpm", "creator:source=http"],
+            },
+            {
+                "id": "33333333-3333-3333-3333-333333333333",
+                "created_at": "bad-timestamp",
+                "tags": [],
+            },
+        ]);
+        let drawers = parse_drawers(&raw);
+        assert_eq!(drawers.len(), 3);
+        assert_eq!(drawers[0].id, "11111111-1111-1111-1111-111111111111");
+        assert_eq!(drawers[0].creator, "msg:from=cto");
+        assert_eq!(drawers[0].tags.len(), 2);
+        assert!(drawers[0].created_at.is_some());
+
+        assert_eq!(drawers[1].creator, "creator:client=mpm");
+
+        // Malformed timestamp drops to None; missing creator tag → em-dash.
+        assert!(drawers[2].created_at.is_none());
+        assert_eq!(drawers[2].creator, NO_CREATOR_LABEL);
+
+        // Object-wrapped shape.
+        let obj = serde_json::json!({
+            "drawers": [{"id": "abc", "tags": []}],
+        });
+        let drawers = parse_drawers(&obj);
+        assert_eq!(drawers.len(), 1);
+        assert_eq!(drawers[0].id, "abc");
+
+        // Unexpected shape yields an empty list.
+        assert!(parse_drawers(&serde_json::json!("nope")).is_empty());
+    }
+
+    #[test]
+    fn creator_label_picks_first_match() {
+        // First matching tag wins, in the tag list's order.
+        let label = creator_label(&[
+            "user-tag".into(),
+            "msg:from=cto".into(),
+            "creator:client=mpm".into(),
+        ]);
+        assert_eq!(label, "msg:from=cto");
+
+        // `tag:creator:` legacy prefix is recognised.
+        let label = creator_label(&["tag:creator:client=mpm".into()]);
+        assert_eq!(label, "tag:creator:client=mpm");
+
+        // `creator:` alone (HTTP attribution) is recognised.
+        let label = creator_label(&["creator:source=http".into()]);
+        assert_eq!(label, "creator:source=http");
+
+        // No recognised tags → em-dash placeholder.
+        assert_eq!(
+            creator_label(&["user-tag".into(), "kind:note".into()]),
+            NO_CREATOR_LABEL,
+        );
+        assert_eq!(creator_label(&[]), NO_CREATOR_LABEL);
     }
 }

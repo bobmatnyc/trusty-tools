@@ -117,6 +117,15 @@ pub struct CreateDrawerBody {
 }
 
 /// `GET /api/v1/palaces/{id}/drawers` query — service-facing version.
+///
+/// Why: the TUI activity panel (#184) needs paged access to a palace's
+/// drawers in newest-first order. Adding `offset` and `sort` to the existing
+/// query struct keeps the surface compatible (both fields default to absent)
+/// while letting the panel walk through arbitrarily many drawers.
+/// What: optional `room` / `tag` filters, a `limit` (default 50 in the
+/// handler), an `offset` for pagination, and a `sort` selector — `importance`
+/// (the legacy default, descending) or `created_desc` (newest first).
+/// Test: `list_drawers_creates_desc_paginates` in `service::tests`.
 #[derive(Deserialize, Default, Clone, Debug)]
 pub struct ListDrawersQuery {
     #[serde(default)]
@@ -125,6 +134,15 @@ pub struct ListDrawersQuery {
     pub tag: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Number of drawers to skip before returning results. Combined with
+    /// `limit` this paginates the result set. Defaults to 0.
+    #[serde(default)]
+    pub offset: Option<usize>,
+    /// Sort selector: `"importance"` (default — importance descending,
+    /// preserving legacy behaviour) or `"created_desc"` (creation date
+    /// descending, newest first — used by the TUI activity panel).
+    #[serde(default)]
+    pub sort: Option<String>,
 }
 
 /// `POST /api/v1/palaces/{id}/kg` body — service-facing version.
@@ -554,17 +572,44 @@ impl MemoryService {
     // Drawers
     // -----------------------------------------------------------------
 
-    /// List drawers in a palace with optional room/tag/limit filters.
+    /// List drawers in a palace with optional room/tag filters and pagination.
     ///
-    /// Why: deduplicates the open-handle + listing path between HTTP and chat.
-    /// What: opens the palace handle, calls `list_drawers`, returns the
-    /// serialised JSON array.
-    /// Test: `drawers_endpoint_returns_array`.
+    /// Why: deduplicates the open-handle + listing path between HTTP and chat,
+    /// and (issue #184) lets the TUI activity panel page through drawers in
+    /// creation-date order without breaking the importance-sorted default the
+    /// legacy callers rely on.
+    /// What: opens the palace handle, fetches a window of drawers, optionally
+    /// re-sorts by `created_at` descending when `sort = "created_desc"`
+    /// (leaving the importance-desc default untouched), then drops the
+    /// leading `offset` rows and keeps `limit`. For `created_desc` the
+    /// window must cover the full filtered set (otherwise the importance
+    /// pre-sort hides truly-recent low-importance drawers), so the window
+    /// is widened to a sane ceiling (`MAX_DRAWER_WINDOW`); the default
+    /// importance path keeps a tight `limit+offset` window.
+    /// Returns the serialised JSON array.
+    /// Test: `service::tests::list_drawers_creates_desc_paginates`.
     pub async fn list_drawers(&self, id: &str, q: ListDrawersQuery) -> ServiceResult<Value> {
+        const MAX_DRAWER_WINDOW: usize = 10_000;
         let handle = self.open_handle(id)?;
         let room = q.room.as_deref().map(RoomType::parse);
-        let drawers = handle.list_drawers(room, q.tag.clone(), q.limit.unwrap_or(50));
-        Ok(serde_json::to_value(drawers).unwrap_or(json!([])))
+        let limit = q.limit.unwrap_or(50);
+        let offset = q.offset.unwrap_or(0);
+        let by_created = matches!(q.sort.as_deref(), Some("created_desc"));
+        // For created_desc the importance pre-sort would hide low-importance
+        // drawers that happen to be the most recent, so we need to fetch the
+        // full filtered set (capped at MAX_DRAWER_WINDOW). For importance
+        // ordering the legacy `limit + offset` window is sufficient.
+        let window = if by_created {
+            MAX_DRAWER_WINDOW
+        } else {
+            limit.saturating_add(offset).min(MAX_DRAWER_WINDOW)
+        };
+        let mut drawers = handle.list_drawers(room, q.tag.clone(), window);
+        if by_created {
+            drawers.sort_by_key(|d| std::cmp::Reverse(d.created_at));
+        }
+        let page: Vec<_> = drawers.into_iter().skip(offset).take(limit).collect();
+        Ok(serde_json::to_value(page).unwrap_or(json!([])))
     }
 
     /// Store a new drawer and emit the matching activity events.
@@ -1247,5 +1292,154 @@ pub fn service_result_to_anyhow<T: serde::Serialize>(r: ServiceResult<T>) -> Res
     match r {
         Ok(v) => serde_json::to_value(v).context("serialize service result"),
         Err(e) => Err(anyhow!("{e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration as ChronoDuration, Utc};
+    use trusty_common::memory_core::palace::{Drawer, Palace};
+
+    fn test_state() -> AppState {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        // Leak the TempDir guard so the directory survives the test body.
+        std::mem::forget(tmp);
+        AppState::new(root)
+    }
+
+    /// Issue #184 — `sort=created_desc` paginates newest-first and the
+    /// importance default is preserved.
+    ///
+    /// Why: the TUI activity panel needs a stable creation-date ordering with
+    /// offset pagination; the legacy importance-desc default must keep
+    /// working for other callers (e.g. chat tool `list_drawers`).
+    /// What: provisions a fresh palace, drops five drawers in with
+    /// monotonically older `created_at` and shuffled importance, then drives
+    /// `MemoryService::list_drawers` with two pages of `limit=2` and asserts
+    /// the order is newest-first across both pages. Re-runs the same call
+    /// with `sort` unset and confirms the order changes (importance-based).
+    /// Test: this test.
+    #[tokio::test]
+    async fn list_drawers_creates_desc_paginates() {
+        let state = test_state();
+        // Provision a fresh palace via the registry.
+        let palace = Palace {
+            id: PalaceId::new("paging-test"),
+            name: "paging-test".to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: state.data_root.join("paging-test"),
+        };
+        state
+            .registry
+            .create_palace(&state.data_root, palace)
+            .expect("create_palace");
+
+        // Open the handle and seed five drawers with staggered timestamps and
+        // shuffled importance.
+        let handle = state
+            .registry
+            .open_palace(&state.data_root, &PalaceId::new("paging-test"))
+            .expect("open_palace");
+        let room_id = Uuid::nil();
+        let now = Utc::now();
+        // Index 0 is newest; index 4 is oldest.
+        for (i, importance) in [0.1f32, 0.9, 0.3, 0.7, 0.5].iter().enumerate() {
+            let drawer = Drawer {
+                id: Uuid::new_v4(),
+                room_id,
+                content: format!("drawer-{i}"),
+                importance: *importance,
+                source_file: None,
+                created_at: now - ChronoDuration::seconds(i as i64),
+                tags: vec![format!("idx:{i}")],
+                last_accessed_at: None,
+                access_count: 0,
+                drawer_type: Default::default(),
+                expires_at: None,
+            };
+            handle.add_drawer(drawer);
+        }
+        // The handle is `Arc<PalaceHandle>` and the registry caches it; drop
+        // ours so the service can re-open from cache.
+        drop(handle);
+
+        let service = MemoryService::new(state.clone());
+
+        // Page 1 (newest two) under created_desc — expects idx:0 then idx:1.
+        let page1 = service
+            .list_drawers(
+                "paging-test",
+                ListDrawersQuery {
+                    limit: Some(2),
+                    offset: Some(0),
+                    sort: Some("created_desc".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("page 1");
+        let arr = page1.as_array().expect("array");
+        assert_eq!(arr.len(), 2, "page 1 must have 2 rows");
+        assert_eq!(arr[0]["content"].as_str(), Some("drawer-0"));
+        assert_eq!(arr[1]["content"].as_str(), Some("drawer-1"));
+
+        // Page 2 — expects idx:2 then idx:3.
+        let page2 = service
+            .list_drawers(
+                "paging-test",
+                ListDrawersQuery {
+                    limit: Some(2),
+                    offset: Some(2),
+                    sort: Some("created_desc".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("page 2");
+        let arr = page2.as_array().expect("array");
+        assert_eq!(arr.len(), 2, "page 2 must have 2 rows");
+        assert_eq!(arr[0]["content"].as_str(), Some("drawer-2"));
+        assert_eq!(arr[1]["content"].as_str(), Some("drawer-3"));
+
+        // Page 3 — expects idx:4 alone.
+        let page3 = service
+            .list_drawers(
+                "paging-test",
+                ListDrawersQuery {
+                    limit: Some(2),
+                    offset: Some(4),
+                    sort: Some("created_desc".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("page 3");
+        let arr = page3.as_array().expect("array");
+        assert_eq!(arr.len(), 1, "page 3 (tail) must have 1 row");
+        assert_eq!(arr[0]["content"].as_str(), Some("drawer-4"));
+
+        // Importance-desc default — first row is the highest-importance
+        // drawer (idx:1 had importance 0.9), confirming we did not break
+        // the legacy callers.
+        let legacy = service
+            .list_drawers(
+                "paging-test",
+                ListDrawersQuery {
+                    limit: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("legacy");
+        let arr = legacy.as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(
+            arr[0]["content"].as_str(),
+            Some("drawer-1"),
+            "importance default should surface drawer with importance 0.9 first",
+        );
     }
 }

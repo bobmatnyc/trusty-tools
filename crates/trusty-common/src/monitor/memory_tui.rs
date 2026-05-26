@@ -31,7 +31,9 @@ use ratatui::{
 use tokio::sync::mpsc;
 
 use crate::monitor::dashboard::{MemoryData, PalaceRow, format_count};
-use crate::monitor::memory_client::{MemoryClient, MemoryEvent, RecallHit, resolve_memory_url};
+use crate::monitor::memory_client::{
+    DrawerInfo, MemoryClient, MemoryEvent, RecallHit, resolve_memory_url,
+};
 use crate::monitor::tui_common::{
     self, ListFocus, ThreeWaySortKey, enter_tui, leave_tui, left_panel_width, panel_block, truncate,
 };
@@ -68,7 +70,26 @@ const DREAM_BACKOFF_MAX: Duration = Duration::from_secs(300);
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// One-line key hint shown along the bottom of the UI.
-pub const KEY_HINT: &str = "[Tab] focus  [d] dream  [↑↓] select  [Enter] recall  [/] filter  [s] sort  [g] group  [q] quit  [?] help";
+pub const KEY_HINT: &str = "[Tab] focus  [d] dream  [↑↓] select  [Enter] recall  [/] filter  [s] sort  [g] group  [←→] page  [q] quit  [?] help";
+
+/// Default page size for the ACTIVITY drawer list.
+///
+/// Why: the activity panel is narrow and only renders a handful of rows; 20
+/// drawers per page balances "feels paged" with "stays inside one screen
+/// scroll" for typical terminal heights.
+/// What: 20 drawers per fetch.
+/// Test: `drawer_state_default_page_size`.
+pub const DRAWER_PAGE_SIZE: usize = 20;
+
+/// Maximum number of timestamp / creator characters surfaced per drawer row.
+///
+/// Why: the ACTIVITY panel is the right-hand column of the TUI; long creator
+/// tags or full RFC-3339 timestamps would overflow when the terminal is
+/// narrow. Truncating each field independently keeps the row alignment
+/// predictable at all widths.
+/// What: timestamp shown as `MM-DD HH:MM` (11 chars), creator label
+/// truncated to 24 chars with the shared truncate helper.
+const DRAWER_CREATOR_WIDTH: usize = 24;
 
 /// Domain-specific labels for the memory TUI's three sort orders.
 ///
@@ -425,6 +446,105 @@ fn backoff_delay(n: u32) -> Duration {
     Duration::from_secs(secs)
 }
 
+/// Paged drawer list rendered in the ACTIVITY panel when a palace is selected.
+///
+/// Why: issue #184 — operators want to see the actual drawers in a palace
+/// (id, creation timestamp, creator tag, memory count) rather than just the
+/// streamed event log. Keeping the page slice + paging cursor + scope id +
+/// loading flag in a small struct makes the renderer pure and the event-loop
+/// fetch trigger easy to test.
+/// What: `palace_id` records which palace this slice belongs to (so a quick
+/// palace switch doesn't render stale rows), `drawers` holds the latest page,
+/// `offset` is the page anchor (advanced by `←`/`→`), `loading` flips while
+/// a fetch is in flight, and `last_error` captures the most recent fetch
+/// error so the panel can surface it.
+/// Test: `drawer_state_*` unit tests plus the renderer smoke tests.
+#[derive(Debug, Clone, Default)]
+pub struct DrawerListState {
+    /// The palace id this page belongs to (`None` when no palace is scoped,
+    /// e.g. when "All palaces" is selected).
+    pub palace_id: Option<String>,
+    /// The current page of drawers, newest first.
+    pub drawers: Vec<DrawerInfo>,
+    /// Page anchor — the number of drawers skipped before this page.
+    pub offset: usize,
+    /// Whether a fetch is currently in flight; the renderer surfaces this so
+    /// the operator sees the panel reacting to a palace switch.
+    pub loading: bool,
+    /// Most recent fetch error, or `None` when the last fetch succeeded.
+    pub last_error: Option<String>,
+}
+
+impl DrawerListState {
+    /// Build an empty state — no palace, no drawers, page 0.
+    ///
+    /// Why: every fresh [`MemoryTuiState`] starts with the activity panel in
+    /// the "no palace selected" state.
+    /// What: returns the default.
+    /// Test: `drawer_state_default_page_size`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reset the page slice and anchor for a new palace selection.
+    ///
+    /// Why: switching palaces (or back to "All") must drop stale rows so the
+    /// renderer doesn't show another palace's drawers between the selection
+    /// click and the first fetch completion.
+    /// What: clears `drawers`, sets `offset = 0`, sets `palace_id = scope`,
+    /// records `loading = true`, and clears any previous error.
+    /// Test: `drawer_state_reset_on_palace_change`.
+    pub fn reset_for(&mut self, scope: Option<String>) {
+        self.palace_id = scope;
+        self.drawers.clear();
+        self.offset = 0;
+        self.loading = true;
+        self.last_error = None;
+    }
+
+    /// Move to the next page; saturating at the current page when the daemon
+    /// returned fewer than [`DRAWER_PAGE_SIZE`] rows (signalling end-of-list).
+    ///
+    /// Why: `→` navigates forward in the drawer list; without an end-of-list
+    /// guard the operator could page past the last drawer into empty pages.
+    /// What: increments `offset` by [`DRAWER_PAGE_SIZE`] only when the
+    /// current page is full; flips `loading = true` and clears the error so
+    /// the next fetch trigger handles the new anchor.
+    /// Test: `drawer_state_pagination`.
+    pub fn next_page(&mut self) {
+        if self.drawers.len() >= DRAWER_PAGE_SIZE {
+            self.offset = self.offset.saturating_add(DRAWER_PAGE_SIZE);
+            self.loading = true;
+            self.last_error = None;
+        }
+    }
+
+    /// Move to the previous page; saturating at page 0.
+    ///
+    /// Why: `←` navigates backward in the drawer list.
+    /// What: decrements `offset` by [`DRAWER_PAGE_SIZE`] (never below zero);
+    /// flips `loading = true` when the anchor actually changed.
+    /// Test: `drawer_state_pagination`.
+    pub fn prev_page(&mut self) {
+        if self.offset == 0 {
+            return;
+        }
+        self.offset = self.offset.saturating_sub(DRAWER_PAGE_SIZE);
+        self.loading = true;
+        self.last_error = None;
+    }
+
+    /// The current page number (zero-indexed) for display.
+    ///
+    /// Why: the panel title surfaces `page N` so the operator knows where
+    /// they are in the list.
+    /// What: returns `offset / DRAWER_PAGE_SIZE`.
+    /// Test: `drawer_state_pagination`.
+    pub fn page(&self) -> usize {
+        self.offset / DRAWER_PAGE_SIZE.max(1)
+    }
+}
+
 /// All mutable state the memory UI renders and mutates.
 ///
 /// Why: the event loop polls the daemon, streams `/sse` events, and handles
@@ -473,6 +593,10 @@ pub struct MemoryTuiState {
     /// Exponential-backoff gate that throttles repeated dream-cycle attempts
     /// while the daemon is unreachable.
     pub dream_backoff: DreamBackoff,
+    /// Paged drawer list for the ACTIVITY panel when a single palace is
+    /// selected. The "All palaces" row leaves [`DrawerListState::palace_id`]
+    /// set to `None` and the panel falls back to the aggregate event log.
+    pub drawer_list: DrawerListState,
 }
 
 impl MemoryTuiState {
@@ -499,6 +623,7 @@ impl MemoryTuiState {
             sort_key: ThreeWaySortKey::default(),
             group_by_project: false,
             dream_backoff: DreamBackoff::new(),
+            drawer_list: DrawerListState::new(),
         }
     }
 
@@ -830,6 +955,109 @@ pub fn apply_memory_event(state: &mut MemoryTuiState, event: MemoryEvent) {
     }
 }
 
+/// Fetch the drawer page for the current selection and fold the result into
+/// [`MemoryTuiState::drawer_list`].
+///
+/// Why: the activity panel needs a live page slice for whichever palace is
+/// selected; isolating the fetch keeps the event loop free of per-trigger
+/// branching and makes the loading / error transitions easy to reason about.
+/// What: when no single palace is selected, clears the drawer slice and
+/// returns. Otherwise issues `client.list_drawers` for the stored offset and
+/// either replaces `drawers` or records the error. Always flips
+/// `loading = false` so the renderer drops the in-flight badge.
+/// Test: thin I/O glue; pure projection is tested in `memory_client`.
+async fn fetch_drawer_page(state: &mut MemoryTuiState, client: &MemoryClient) {
+    let Some(palace_id) = state.selected_id().map(str::to_string) else {
+        // "All palaces" or no selection — clear the drawer slice; the panel
+        // falls back to the aggregate activity log.
+        state.drawer_list.palace_id = None;
+        state.drawer_list.drawers.clear();
+        state.drawer_list.offset = 0;
+        state.drawer_list.loading = false;
+        state.drawer_list.last_error = None;
+        return;
+    };
+
+    state.drawer_list.palace_id = Some(palace_id.clone());
+    state.drawer_list.loading = true;
+    match client
+        .list_drawers(&palace_id, DRAWER_PAGE_SIZE, state.drawer_list.offset)
+        .await
+    {
+        Ok(rows) => {
+            state.drawer_list.drawers = rows;
+            state.drawer_list.last_error = None;
+        }
+        Err(e) => {
+            state.drawer_list.last_error = Some(e.to_string());
+            state.drawer_list.drawers.clear();
+        }
+    }
+    state.drawer_list.loading = false;
+}
+
+/// Build the rendered lines for the ACTIVITY panel when a palace is selected.
+///
+/// Why: the activity panel shows a compact one-line summary per drawer
+/// (id, timestamp, creator, memory count) plus a header line summarising the
+/// current page. Isolating the line builder makes the content testable
+/// without a terminal backend.
+/// What: returns `Vec<String>` — one row per drawer plus optional header /
+/// error / placeholder lines. When the drawer slice is empty, falls back to
+/// the same `(no activity yet)` placeholder the legacy panel used so the
+/// "All palaces" / never-fetched paths still render cleanly.
+/// Test: `drawer_panel_lines_renders_*`.
+pub fn drawer_panel_lines(state: &MemoryTuiState, total_drawer_count: u64) -> Vec<String> {
+    let dl = &state.drawer_list;
+    if dl.palace_id.is_none() {
+        return vec![];
+    }
+    let mut lines: Vec<String> = Vec::with_capacity(dl.drawers.len() + 2);
+    let from = dl.offset + 1;
+    let to = dl.offset + dl.drawers.len();
+    let header = if dl.drawers.is_empty() {
+        if dl.loading {
+            "loading drawers…".to_string()
+        } else if let Some(err) = &dl.last_error {
+            format!("drawers unavailable: {err}")
+        } else {
+            "(no drawers yet)".to_string()
+        }
+    } else {
+        format!(
+            "drawers {}–{} of {} (page {})",
+            from,
+            to,
+            format_count(total_drawer_count),
+            dl.page() + 1,
+        )
+    };
+    lines.push(header);
+    for d in &dl.drawers {
+        lines.push(format_drawer_row(d));
+    }
+    lines
+}
+
+/// Format one drawer as a single compact activity-panel row.
+///
+/// Why: the panel is narrow; a fixed `<id> <ts> <creator>` column layout
+/// keeps the rendered list scannable.
+/// What: `<truncated-id> <MM-DD HH:MM>  <creator>` — id truncated to 8
+/// chars (the leading UUID block), timestamp rendered in UTC, creator
+/// truncated to [`DRAWER_CREATOR_WIDTH`] chars via the shared truncate
+/// helper. A drawer with no timestamp shows `--`.
+/// Test: `drawer_row_layout`.
+pub fn format_drawer_row(drawer: &DrawerInfo) -> String {
+    let id = truncate(&drawer.id, 8);
+    let ts = match drawer.created_at {
+        Some(t) => t.format("%m-%d %H:%M").to_string(),
+        None => "--         ".to_string(),
+    };
+    let creator = truncate(&drawer.creator, DRAWER_CREATOR_WIDTH);
+    format!("{id} {ts}  {creator}")
+}
+
 /// The memory TUI event loop: poll, render, handle input, drain SSE events.
 ///
 /// Why: kept separate from [`run_with_url`] so terminal setup/teardown wraps it
@@ -854,6 +1082,11 @@ async fn run_loop<B: ratatui::backend::Backend>(
     tokio::spawn(async move {
         sse_client.sse_stream(sse_tx).await;
     });
+
+    // Issue #184: every time the palace selection changes, refresh the
+    // drawer panel. Tracking the previously-shown scope avoids re-fetching
+    // on every render tick.
+    let mut last_drawer_scope: Option<String> = None;
 
     loop {
         terminal.draw(|f| render(f, state))?;
@@ -916,6 +1149,16 @@ async fn run_loop<B: ratatui::backend::Backend>(
                 (MemoryFocus::List, KeyCode::Char('q')) => return Ok(()),
                 (MemoryFocus::List, KeyCode::Up) => navigate_up_visible(state),
                 (MemoryFocus::List, KeyCode::Down) => navigate_down_visible(state),
+                // Drawer-page navigation in the ACTIVITY panel — only when a
+                // single palace is selected. `←` previous page, `→` next.
+                (MemoryFocus::List, KeyCode::Left) if state.selected_id().is_some() => {
+                    state.drawer_list.prev_page();
+                    fetch_drawer_page(state, client).await;
+                }
+                (MemoryFocus::List, KeyCode::Right) if state.selected_id().is_some() => {
+                    state.drawer_list.next_page();
+                    fetch_drawer_page(state, client).await;
+                }
                 (MemoryFocus::List, KeyCode::Char('/')) => {
                     state.filter_active = true;
                     state.filter.clear();
@@ -981,7 +1224,24 @@ async fn run_loop<B: ratatui::backend::Backend>(
 
         if last_poll.elapsed() >= REFRESH_INTERVAL {
             poll_daemon(state, client).await;
+            // Refresh the drawer page in lock-step with the daemon poll so
+            // new drawers appear in the activity panel without needing a
+            // key press (issue #184: "Real-time updates when new drawers
+            // are added while viewing").
+            if state.selected_id().is_some() {
+                fetch_drawer_page(state, client).await;
+            }
             last_poll = Instant::now();
+        }
+
+        // Detect a palace-selection change after key handling and refresh
+        // the drawer slice. Comparing the stored scope means we only fire
+        // the fetch on real changes, not on every render tick.
+        let current_scope = state.selected_id().map(str::to_string);
+        if current_scope != last_drawer_scope {
+            state.drawer_list.reset_for(current_scope.clone());
+            fetch_drawer_page(state, client).await;
+            last_drawer_scope = current_scope;
         }
     }
 }
@@ -995,6 +1255,7 @@ pub fn help_text() -> String {
     [
         "  Tab     switch focus between the palace list and the recall bar",
         "  ↑ / ↓   move the palace selection (when the list has focus)",
+        "  ← / →   page through drawers in the ACTIVITY panel",
         "  All     the top list row fans recalls / stats across every palace",
         "  /       activate the inline palace filter (Esc / Enter close)",
         "  s       cycle palace sort: Activity → Name → Vectors",
@@ -1617,14 +1878,31 @@ pub fn render(frame: &mut Frame, state: &mut MemoryTuiState) {
         ])
         .split(split[1]);
 
-    // ACTIVITY panel — the tail of the scoped feed that fits the panel height.
+    // ACTIVITY panel — when a single palace is selected (issue #184) the
+    // panel renders a paged drawer list; for "All palaces" it falls back to
+    // the streamed event log so cross-palace events stay visible.
     let scope = state.scope_filter();
     let activity_title = match scope {
         Some(id) => format!("ACTIVITY — {id}"),
         None => format!("ACTIVITY — {ALL_LABEL}"),
     };
     let activity_height = right[0].height.saturating_sub(2) as usize;
-    let activity_items: Vec<ListItem> = if state.log.has_scoped(scope) {
+    let drawer_total = state
+        .selected
+        .checked_sub(1)
+        .and_then(|i| state.palaces.get(i))
+        .map(|p| p.drawer_count)
+        .unwrap_or(0);
+    let drawer_lines = drawer_panel_lines(state, drawer_total);
+    let activity_items: Vec<ListItem> = if !drawer_lines.is_empty() {
+        // Truncate to the visible height so the bordered panel does not
+        // clip mid-row.
+        drawer_lines
+            .into_iter()
+            .take(activity_height.max(1))
+            .map(ListItem::new)
+            .collect()
+    } else if state.log.has_scoped(scope) {
         state
             .log
             .tail_scoped(scope, activity_height.max(1))
@@ -2769,5 +3047,179 @@ mod tests {
         }
         // Eventually clamped at the ceiling.
         assert!(last <= DREAM_BACKOFF_MAX);
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #184 — drawer list state + rendering
+    // -----------------------------------------------------------------
+
+    /// Build a [`DrawerInfo`] for tests with the given id index and tags.
+    fn sample_drawer(idx: usize, tags: &[&str]) -> DrawerInfo {
+        use chrono::{TimeZone, Utc};
+        DrawerInfo {
+            id: format!("{idx:08x}-aaaa-bbbb-cccc-dddddddddddd"),
+            created_at: Some(
+                Utc.with_ymd_and_hms(2026, 5, 1, 12, idx as u32 % 60, 0)
+                    .unwrap(),
+            ),
+            creator: crate::monitor::memory_client::creator_label(
+                &tags.iter().map(|s| (*s).to_string()).collect::<Vec<_>>(),
+            ),
+            tags: tags.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn drawer_state_default_page_size() {
+        // A freshly-constructed state holds no rows, no scope, offset 0.
+        let state = DrawerListState::new();
+        assert!(state.palace_id.is_none());
+        assert!(state.drawers.is_empty());
+        assert_eq!(state.offset, 0);
+        assert!(!state.loading);
+        assert!(state.last_error.is_none());
+        assert_eq!(state.page(), 0);
+        // The page-size constant is the contract the panel renders against.
+        assert_eq!(DRAWER_PAGE_SIZE, 20);
+    }
+
+    #[test]
+    fn drawer_state_reset_on_palace_change() {
+        let mut state = DrawerListState {
+            palace_id: Some("old".into()),
+            drawers: vec![sample_drawer(1, &[])],
+            offset: 40,
+            loading: false,
+            last_error: Some("stale".into()),
+        };
+        state.reset_for(Some("new".into()));
+        assert_eq!(state.palace_id.as_deref(), Some("new"));
+        assert!(state.drawers.is_empty());
+        assert_eq!(state.offset, 0);
+        assert!(state.loading, "should mark loading after reset");
+        assert!(state.last_error.is_none());
+
+        // Resetting to None (e.g. "All palaces") is also valid.
+        state.reset_for(None);
+        assert!(state.palace_id.is_none());
+    }
+
+    #[test]
+    fn drawer_state_pagination() {
+        let mut state = DrawerListState::new();
+        // Fill a full page so next_page() advances.
+        state.drawers = (0..DRAWER_PAGE_SIZE)
+            .map(|i| sample_drawer(i, &[]))
+            .collect();
+        state.next_page();
+        assert_eq!(state.offset, DRAWER_PAGE_SIZE);
+        assert_eq!(state.page(), 1);
+        assert!(state.loading);
+
+        // prev_page() walks back one page.
+        state.loading = false;
+        state.prev_page();
+        assert_eq!(state.offset, 0);
+        assert_eq!(state.page(), 0);
+        assert!(state.loading);
+
+        // prev_page() at offset 0 is a no-op (does not flip loading).
+        state.loading = false;
+        state.prev_page();
+        assert_eq!(state.offset, 0);
+        assert!(!state.loading);
+
+        // A short last page (< DRAWER_PAGE_SIZE) blocks further advancement.
+        state.drawers = vec![sample_drawer(0, &[])];
+        state.next_page();
+        assert_eq!(
+            state.offset, 0,
+            "end-of-list page should not advance past last",
+        );
+    }
+
+    #[test]
+    fn drawer_row_layout() {
+        // Compact one-line row: <id8> <MM-DD HH:MM>  <creator>.
+        let drawer = sample_drawer(0xab, &["msg:from=cto"]);
+        let row = format_drawer_row(&drawer);
+        // The id is truncated to 8 chars (the leading UUID block, with a
+        // trailing `…` when cut by the shared truncate helper).
+        assert!(
+            row.starts_with("000000a…") || row.starts_with("000000ab"),
+            "row should start with truncated id, got: {row}",
+        );
+        // Timestamp shape (MM-DD HH:MM).
+        assert!(row.contains("05-01"), "row should carry MM-DD: {row}");
+        // Creator tag is preserved verbatim when it fits.
+        assert!(row.contains("msg:from=cto"), "creator missing: {row}");
+
+        // No-creator drawer renders the em-dash placeholder.
+        let bare = sample_drawer(1, &[]);
+        let row = format_drawer_row(&bare);
+        assert!(
+            row.contains("—"),
+            "missing em-dash for no-creator row: {row}"
+        );
+
+        // No timestamp falls back to `--`.
+        let mut undated = sample_drawer(2, &[]);
+        undated.created_at = None;
+        let row = format_drawer_row(&undated);
+        assert!(row.contains("--"), "missing `--` for undated row: {row}");
+    }
+
+    #[test]
+    fn drawer_panel_lines_renders_no_palace() {
+        // No palace scope → empty lines (renderer falls back to the log).
+        let state = sample_state();
+        assert!(state.drawer_list.palace_id.is_none());
+        let lines = drawer_panel_lines(&state, 0);
+        assert!(lines.is_empty(), "no-scope path should render no lines");
+    }
+
+    #[test]
+    fn drawer_panel_lines_renders_loading_then_rows() {
+        let mut state = sample_state();
+        state.drawer_list.palace_id = Some("default".into());
+        state.drawer_list.loading = true;
+        let lines = drawer_panel_lines(&state, 0);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("loading"));
+
+        // Once rows arrive the header surfaces a page indicator.
+        state.drawer_list.loading = false;
+        state.drawer_list.drawers = vec![
+            sample_drawer(1, &["msg:from=cto"]),
+            sample_drawer(2, &["creator:client=mpm"]),
+        ];
+        let lines = drawer_panel_lines(&state, 14);
+        assert_eq!(lines.len(), 3, "header + 2 rows");
+        assert!(lines[0].contains("drawers 1–2"));
+        assert!(lines[0].contains("page 1"));
+        assert!(lines[1].contains("msg:from=cto"));
+        assert!(lines[2].contains("creator:client=mpm"));
+    }
+
+    #[test]
+    fn drawer_panel_lines_renders_error() {
+        let mut state = sample_state();
+        state.drawer_list.palace_id = Some("default".into());
+        state.drawer_list.loading = false;
+        state.drawer_list.last_error = Some("connection refused".into());
+        let lines = drawer_panel_lines(&state, 0);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("drawers unavailable"));
+        assert!(lines[0].contains("connection refused"));
+    }
+
+    #[test]
+    fn drawer_panel_lines_renders_empty_palace() {
+        let mut state = sample_state();
+        state.drawer_list.palace_id = Some("default".into());
+        state.drawer_list.loading = false;
+        let lines = drawer_panel_lines(&state, 0);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("no drawers yet"));
     }
 }
