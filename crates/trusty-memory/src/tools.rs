@@ -779,10 +779,12 @@ async fn write_drawer(state: &AppState, params: WriteDrawerParams<'_>) -> Result
         .remember_with_options(content, room, tags, importance, opts)
         .await
         .context("PalaceHandle::remember_with_options")?;
-    // Issue #156: opt-in BM25 lexical lane. Fire-and-forget so the
-    // redb write returns immediately; daemon errors are logged but
-    // never block the MCP response.
-    bm25_index_fire_and_forget(state, palace_id, drawer_id, &content_for_kg);
+    // Issue #156 + #231: opt-in BM25 lexical lane. Enqueue onto the
+    // bounded indexer channel so the redb write returns immediately;
+    // a full queue is dropped + logged rather than allowed to grow
+    // unbounded behind a slow daemon (#231). Daemon errors observed
+    // by the worker are logged but never block the MCP response.
+    bm25_index_enqueue(state, palace_id, drawer_id, &content_for_kg);
     // Issue #96: emit a DrawerAdded so the activity feed shows
     // MCP-origin writes with `source = Mcp`.
     let palace_name = lookup_palace_name(state, palace_id);
@@ -1893,50 +1895,147 @@ async fn ensure_bm25_running_for_palace(state: &AppState, palace: &str) -> bool 
     }
 }
 
-/// Fire-and-forget BM25 indexing after a drawer write (issue #156).
+/// Bounded-queue capacity for the BM25 index worker (issue #231).
 ///
-/// Why: `memory_remember` / `memory_note` must return as fast as the redb
-/// write completes. Routing the BM25 daemon call through `tokio::spawn`
-/// keeps the daemon's RTT off the response path entirely, and bails out
-/// cheaply when the env-var-gated client is absent.
-/// What: clones the client `Arc` and the inputs, spawns a detached task that
-/// (a) ensures the daemon is running via the spawn supervisor (issue #193),
-/// and (b) calls `client.index()`. Daemon errors are logged at `warn!` and
-/// dropped — the drawer is durable in redb regardless of whether the BM25
-/// lane saw it.
-/// Test: behaviour is exercised end-to-end by the integration tests in
-/// `trusty-bm25-daemon/tests/`; the no-op branch is covered by
-/// `bm25_client_disabled_by_default`.
-fn bm25_index_fire_and_forget(state: &AppState, palace: &str, drawer_id: Uuid, content: &str) {
-    let Some(client) = state.bm25_client.clone() else {
-        return;
-    };
-    let supervisor = state.bm25_supervisor.clone();
-    let data_dir = bm25_data_dir_for_palace(state, palace);
-    let palace = palace.to_string();
-    let drawer_id_s = drawer_id.to_string();
-    let content = content.to_string();
+/// Why: the previous fire-and-forget design called `tokio::spawn` for every
+/// drawer write, so a burst of `memory_remember` / `memory_note` calls while
+/// the BM25 daemon was slow or unreachable could grow an unbounded number of
+/// in-flight tasks — silent unbounded memory growth and a DoS vector against
+/// the runtime. A bounded mpsc channel caps how many index requests can be
+/// queued at once; once full, additional requests are dropped with a `warn!`
+/// rather than blocking or buffering forever.
+/// What: an arbitrary "comfortable burst" capacity. 256 is large enough that
+/// a normal flurry of writes never spills (and the BM25 daemon's RTT is
+/// typically sub-ms on the loopback socket), but small enough that a wedged
+/// daemon caps memory consumption at a few MB of queued payloads.
+/// Test: implicitly covered by `bm25_index_enqueue` not panicking when the
+/// channel is full and by `bm25_index_queue_drops_when_full` (added below).
+pub const BM25_INDEX_QUEUE_CAPACITY: usize = 256;
+
+/// One pending BM25 index op enqueued by `memory_remember` / `memory_note`
+/// for the per-`AppState` indexer worker to drain (issue #231).
+///
+/// Why: replacing the per-write `tokio::spawn` with a single long-lived
+/// worker task requires a self-contained "do this index call" payload that
+/// can travel through an mpsc channel without borrowing from `AppState`.
+/// Capturing the palace, drawer id, and content here lets the worker
+/// reconstruct the call without re-reading any state.
+/// What: a plain owned-data struct. `Clone` is not derived — the worker
+/// consumes each request exactly once.
+/// Test: exercised end-to-end by `bm25_index_queue_drops_when_full` and
+/// the integration tests in `trusty-bm25-daemon/tests/`.
+#[derive(Debug)]
+pub struct Bm25IndexRequest {
+    /// Palace id whose daemon should index the drawer.
+    pub palace: String,
+    /// Drawer id (stringified) — the daemon uses this as the BM25 doc id.
+    pub drawer_id: String,
+    /// Drawer text content to index.
+    pub content: String,
+    /// On-disk data directory for the palace's BM25 daemon — passed to the
+    /// spawn supervisor's `ensure_running` so the daemon writes its snapshot
+    /// next to the rest of the palace's data.
+    pub data_dir: std::path::PathBuf,
+}
+
+/// Spawn the single long-lived BM25 indexer worker that drains
+/// `bm25_index_rx` and forwards each request to the daemon (issue #231).
+///
+/// Why: previously every `memory_remember` / `memory_note` write spawned a
+/// detached `tokio::task` that called the BM25 daemon — under a write burst
+/// with a slow/unreachable daemon the unbounded task queue grew silently.
+/// A single worker + bounded channel caps back-pressure: when the channel
+/// is full, writers `try_send` instead of `send`, and a full queue causes
+/// a logged drop rather than memory growth. The worker exits gracefully
+/// once the last sender clone (held in `AppState`) is dropped.
+/// What: takes ownership of the receiver and the optional BM25 client +
+/// supervisor `Arc`s, then loops on `rx.recv().await`. For each request,
+/// `ensure_running`s the per-palace daemon (logging + skipping on failure)
+/// and calls `client.index()`. Errors are logged at `warn!` and dropped —
+/// BM25 indexing is best-effort and the drawer is durable in redb regardless.
+/// If `client` is `None` (env var not set at startup) the worker still runs
+/// and silently drops every request, which keeps the channel drained.
+/// Test: indirectly covered by the integration tests in
+/// `trusty-bm25-daemon/tests/`; `bm25_index_queue_drops_when_full` covers the
+/// back-pressure behaviour.
+pub fn spawn_bm25_index_worker(
+    mut rx: tokio::sync::mpsc::Receiver<Bm25IndexRequest>,
+    client: Option<std::sync::Arc<trusty_common::bm25_client::Bm25Client>>,
+    supervisor: Option<std::sync::Arc<crate::bm25_supervisor::Bm25Supervisor>>,
+) {
     tokio::spawn(async move {
-        // Issue #193: try to start the daemon before the first index call.
-        // If the supervisor returns an error we silently skip the index op;
-        // the daemon will be retried on the next fire-and-forget call.
-        if let Some(sup) = supervisor.as_ref() {
-            if let Err(e) = sup.ensure_running(&palace, &data_dir).await {
+        while let Some(req) = rx.recv().await {
+            // No client means the BM25 lane is disabled — drain the queue
+            // (so senders never block) and silently drop every request.
+            let Some(client) = client.as_ref() else {
+                continue;
+            };
+            // Issue #193: try to start the daemon before the first index
+            // call. If the supervisor returns an error we skip this op;
+            // the daemon will be retried on the next request.
+            if let Some(sup) = supervisor.as_ref() {
+                if let Err(e) = sup.ensure_running(&req.palace, &req.data_dir).await {
+                    tracing::warn!(
+                        palace = %req.palace,
+                        "bm25 supervisor failed to start daemon for index (non-fatal): {e:#}"
+                    );
+                    continue;
+                }
+            }
+            if let Err(e) = client.index(&req.drawer_id, &req.content).await {
                 tracing::warn!(
-                    palace = %palace,
-                    "bm25 supervisor failed to start daemon for index (non-fatal): {e:#}"
+                    palace = %req.palace,
+                    drawer_id = %req.drawer_id,
+                    "bm25 daemon index failed (non-fatal): {e:#}"
                 );
-                return;
             }
         }
-        if let Err(e) = client.index(&drawer_id_s, &content).await {
+        tracing::debug!("bm25 index worker exiting (channel closed)");
+    });
+}
+
+/// Enqueue a BM25 index request onto the bounded indexer channel (issue
+/// #231; supersedes the per-write `tokio::spawn` from issue #156).
+///
+/// Why: `memory_remember` / `memory_note` must return as fast as the redb
+/// write completes; the daemon RTT must stay off the response path. Routing
+/// each request through a bounded mpsc channel keeps that property *and*
+/// caps in-flight indexing work — under a sustained burst with a slow daemon
+/// the previous design grew an unbounded task queue, which #231 fixes here.
+/// What: builds a `Bm25IndexRequest` from the caller's data and calls
+/// `try_send` so the caller is never blocked. On `TrySendError::Full` we
+/// log at `warn!` and drop the request — BM25 indexing is best-effort and
+/// the drawer is durable in redb regardless of whether the BM25 lane saw it.
+/// `TrySendError::Closed` shouldn't happen in practice (the worker holds the
+/// receiver for the daemon's lifetime), but if it does we log at `debug!`
+/// and continue — we never let a BM25 hiccup fail a write.
+/// Test: `bm25_index_queue_drops_when_full` covers the full-queue branch.
+fn bm25_index_enqueue(state: &AppState, palace: &str, drawer_id: Uuid, content: &str) {
+    let req = Bm25IndexRequest {
+        palace: palace.to_string(),
+        drawer_id: drawer_id.to_string(),
+        content: content.to_string(),
+        data_dir: bm25_data_dir_for_palace(state, palace),
+    };
+    match state.bm25_index_tx.try_send(req) {
+        Ok(()) => {}
+        Err(tokio::sync::mpsc::error::TrySendError::Full(req)) => {
             tracing::warn!(
-                palace = %palace,
-                drawer_id = %drawer_id_s,
-                "bm25 daemon index failed (non-fatal): {e:#}"
+                palace = %req.palace,
+                drawer_id = %req.drawer_id,
+                "BM25 index queue full — skipping drawer {}",
+                req.drawer_id
             );
         }
-    });
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(req)) => {
+            tracing::debug!(
+                palace = %req.palace,
+                drawer_id = %req.drawer_id,
+                "BM25 index queue closed — skipping drawer {}",
+                req.drawer_id
+            );
+        }
+    }
 }
 
 /// Optional BM25 search lane used by `memory_recall` (issue #156).
@@ -3233,5 +3332,71 @@ mod tests {
             .expect("memory_list");
         let drawers = listed["drawers"].as_array().expect("drawers array");
         assert!(drawers.is_empty(), "no drawer should be written");
+    }
+
+    /// Why (issue #231): the bounded BM25 indexer channel must drop excess
+    /// requests with a logged `warn!` rather than block the writer or grow
+    /// unbounded behind a slow daemon. Verifying this directly at the
+    /// `bm25_index_enqueue` boundary protects the back-pressure contract
+    /// without needing a real BM25 daemon in the test loop.
+    /// What: builds an `AppState` whose worker can't drain (we replace
+    /// `bm25_index_tx` with a fresh, deliberately-unattended channel), then
+    /// hammers `bm25_index_enqueue` past the bound and asserts the channel
+    /// reports `Full` for the overflow. We assert behaviour by inspecting
+    /// the channel state after the burst — the function is `void` so
+    /// observable evidence is "the sender stayed open and the writer never
+    /// blocked even when we shoved >capacity items at it."
+    /// Test: this test.
+    #[tokio::test]
+    async fn bm25_index_queue_drops_when_full() {
+        // Build a normal AppState, then swap in a fresh bounded channel
+        // *without* spawning a drain worker so we can deterministically
+        // observe overflow at `try_send`.
+        let mut state = test_state();
+        let (tx, _rx_held) =
+            tokio::sync::mpsc::channel::<Bm25IndexRequest>(BM25_INDEX_QUEUE_CAPACITY);
+        state.bm25_index_tx = tx;
+
+        // Push CAPACITY items — these must all succeed.
+        for i in 0..BM25_INDEX_QUEUE_CAPACITY {
+            bm25_index_enqueue(
+                &state,
+                "default",
+                Uuid::new_v4(),
+                &format!("filler content {i}"),
+            );
+        }
+        // Sender capacity reports 0 once filled.
+        assert_eq!(
+            state.bm25_index_tx.capacity(),
+            0,
+            "after filling, sender capacity must be 0"
+        );
+
+        // Now push another batch — these must be dropped (logged warn) and
+        // must not panic, block, or close the channel.
+        for i in 0..16 {
+            bm25_index_enqueue(
+                &state,
+                "default",
+                Uuid::new_v4(),
+                &format!("overflow content {i}"),
+            );
+        }
+
+        // The sender must still be live — the channel is not closed by a
+        // full-queue drop. A subsequent send-attempt to the live receiver
+        // must still return `TrySendError::Full`, not `Closed`.
+        let probe_req = Bm25IndexRequest {
+            palace: "default".to_string(),
+            drawer_id: Uuid::new_v4().to_string(),
+            content: "probe".to_string(),
+            data_dir: state.data_root.join("default").join("bm25"),
+        };
+        let probe = state.bm25_index_tx.try_send(probe_req);
+        match probe {
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
+            other => panic!("expected Full overflow, got {other:?}"),
+        }
     }
 }

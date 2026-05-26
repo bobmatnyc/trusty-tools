@@ -608,6 +608,22 @@ pub struct AppState {
     /// Test: `palace_name_cache_populated_after_hydration` and
     /// `palace_name_cache_updates_on_create`.
     pub palace_names: Arc<dashmap::DashMap<String, String>>,
+    /// Bounded sender for the BM25 index worker (issue #231).
+    ///
+    /// Why: the previous fire-and-forget design `tokio::spawn`ed one task per
+    /// `memory_remember` / `memory_note` call, so a write burst against a slow
+    /// or unreachable BM25 daemon grew an unbounded in-flight task queue. A
+    /// single long-lived worker draining a bounded mpsc channel caps that
+    /// back-pressure: writers `try_send` (never block), full-queue requests
+    /// are dropped with a `warn!`, and the worker exits cleanly when the last
+    /// sender is dropped on shutdown.
+    /// What: an `mpsc::Sender` cloned to every `AppState` clone (cheap). The
+    /// matching receiver is consumed by the worker spawned in
+    /// [`AppState::new`] via [`tools::spawn_bm25_index_worker`]. Capacity is
+    /// [`tools::BM25_INDEX_QUEUE_CAPACITY`] (256).
+    /// Test: `bm25_index_queue_drops_when_full` exercises the full-queue
+    /// branch via `bm25_index_enqueue`.
+    pub bm25_index_tx: tokio::sync::mpsc::Sender<tools::Bm25IndexRequest>,
 }
 
 impl AppState {
@@ -628,6 +644,18 @@ impl AppState {
         // daemon — we fall back to a per-process tempdir so emits remain
         // best-effort and the rest of the daemon keeps working.
         let activity_log = open_activity_log_with_fallback(&data_root);
+        // Issue #231: bounded mpsc channel + single long-lived worker
+        // replaces the per-write `tokio::spawn` fire-and-forget pattern so
+        // BM25 indexing back-pressure is capped. The worker is spawned here
+        // unconditionally so the channel always has a drain — even when
+        // `bm25_client` is `None`, the worker just consumes and discards
+        // each request so senders never block on a full queue.
+        let (bm25_index_tx, bm25_index_rx) =
+            tokio::sync::mpsc::channel::<tools::Bm25IndexRequest>(tools::BM25_INDEX_QUEUE_CAPACITY);
+        // `bm25_client` / `bm25_supervisor` start as `None`; the builder
+        // `with_bm25_client_from_env` rebuilds the worker with the real
+        // client + supervisor once env-gated opt-in is resolved.
+        tools::spawn_bm25_index_worker(bm25_index_rx, None, None);
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
             registry: Arc::new(PalaceRegistry::new()),
@@ -655,6 +683,7 @@ impl AppState {
             palace_write_locks: Arc::new(dashmap::DashMap::new()),
             pending_activity_writes: Arc::new(AtomicUsize::new(0)),
             palace_names: Arc::new(dashmap::DashMap::new()),
+            bm25_index_tx,
         }
     }
 
@@ -716,6 +745,22 @@ impl AppState {
             // out-of-band (launchd, systemd, manual) set
             // TRUSTY_BM25_EXTERNAL=1 which makes the supervisor a no-op.
             self.bm25_supervisor = Some(Arc::new(bm25_supervisor::Bm25Supervisor::new()));
+            // Issue #231: rebuild the bounded indexer channel + worker so
+            // the worker holds the now-populated client + supervisor. The
+            // placeholder worker installed by `AppState::new` (with `None`
+            // / `None`) drained the channel into the void — replacing the
+            // sender here closes the placeholder receiver and the
+            // placeholder worker exits cleanly. The new worker takes over
+            // as the sole drain for the indexer queue.
+            let (tx, rx) = tokio::sync::mpsc::channel::<tools::Bm25IndexRequest>(
+                tools::BM25_INDEX_QUEUE_CAPACITY,
+            );
+            tools::spawn_bm25_index_worker(
+                rx,
+                self.bm25_client.clone(),
+                self.bm25_supervisor.clone(),
+            );
+            self.bm25_index_tx = tx;
             tracing::info!(
                 palace = default_palace,
                 "BM25 daemon client + spawn supervisor enabled (TRUSTY_BM25_DAEMON=1)"
@@ -2140,8 +2185,12 @@ mod tests {
     /// `OnceLock` so `/health` reports `addr: None` on the stdio path. A
     /// regression that pre-populates this field would advertise a bogus
     /// address from a stale clone.
-    #[test]
-    fn app_state_starts_with_empty_bound_addr() {
+    ///
+    /// Note (issue #231): now async so it runs inside a Tokio runtime —
+    /// `AppState::new` spawns the bounded BM25 index worker via
+    /// `tokio::spawn`, which requires an active runtime.
+    #[tokio::test]
+    async fn app_state_starts_with_empty_bound_addr() {
         let state = test_state();
         assert!(state.bound_addr.get().is_none());
     }
