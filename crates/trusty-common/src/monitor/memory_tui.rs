@@ -26,9 +26,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{
-        Block, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap,
-    },
+    widgets::{Block, Borders, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap},
 };
 use tokio::sync::mpsc;
 
@@ -74,9 +72,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// One-line key hint shown along the bottom of the UI.
 ///
 /// Why (issue #215): `Tab` cycles `List → DrawerPane → Input → List`, and the
-/// drawer-pane zone adds `Enter` to open the detail modal. The hint surfaces
-/// both flows so the operator doesn't have to discover the modal from the
-/// help overlay.
+/// drawer-pane zone adds `Enter` to open the detail pane. The hint surfaces
+/// both flows so the operator doesn't have to discover the detail split-pane
+/// from the help overlay.
 pub const KEY_HINT: &str = "[Tab] focus  [↑↓] select  [Enter] open/recall  [d] dream  [/] filter  [s] sort  [g] group  [←→] page  [q] quit  [?] help";
 
 /// Default page size for the ACTIVITY drawer list.
@@ -2172,14 +2170,74 @@ pub fn render(frame: &mut Frame, state: &mut MemoryTuiState) {
         &mut palace_state,
     );
 
-    // Right pane: ACTIVITY (top) over STATISTICS (bottom).
+    // Right pane: when the drawer-detail view is open, split the right area
+    // horizontally so DRAWERS + STATISTICS stack on the left (~40 %) and the
+    // detail content fills the right column (~60 %). Otherwise the right area
+    // is the existing ACTIVITY (top) over STATISTICS (bottom) stack.
+    if state.drawer_detail_open {
+        let right_split = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .split(split[1]);
+        render_activity_and_stats(frame, state, right_split[0]);
+        render_detail_pane(frame, state, right_split[1]);
+    } else {
+        render_activity_and_stats(frame, state, split[1]);
+    }
+
+    // RECALL input bar.
+    let input_focused = state.focus == MemoryFocus::Input;
+    let cursor = if input_focused { "_" } else { "" };
+    let input_style = if input_focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("RECALL ▶ ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{}{cursor}", state.input), input_style),
+        ]))
+        .block(panel_block("RECALL", input_focused)),
+        rows[2],
+    );
+
+    // Key-hint footer.
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            KEY_HINT,
+            Style::default().fg(Color::DarkGray),
+        ))),
+        rows[3],
+    );
+
+    if state.show_help {
+        tui_common::render_help_overlay(frame, &help_text());
+    }
+}
+
+/// Render the ACTIVITY / DRAWERS panel stacked over STATISTICS into `area`.
+///
+/// Why: the right-hand stack is rendered in two layouts — the normal mode
+/// fills the whole right column, and the drawer-detail split-pane mode
+/// (issue #215) shrinks it to the left ~40 % of the right column to make
+/// room for the detail pane. Extracting the rendering avoids duplicating
+/// the activity/stats logic across both branches.
+/// What: vertically splits `area` by `tui_common::ACTIVITY_PERCENT` and
+/// renders the drawer-page list (or fallback event log) into the top
+/// region and the [`stats_lines`] readout into the bottom region. The
+/// drawer-pane focus highlight is preserved exactly as before — only the
+/// surrounding container changed.
+/// Test: covered indirectly by `test_render_with_drawer_pane_focus_marker`
+/// (normal layout) and `test_render_with_drawer_detail_open` (split layout).
+fn render_activity_and_stats(frame: &mut Frame, state: &MemoryTuiState, area: Rect) {
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Percentage(tui_common::ACTIVITY_PERCENT),
             Constraint::Percentage(100 - tui_common::ACTIVITY_PERCENT),
         ])
-        .split(split[1]);
+        .split(area);
 
     // ACTIVITY panel — when a single palace is selected (issue #184) the
     // panel renders a paged drawer list; for "All palaces" it falls back to
@@ -2264,88 +2322,64 @@ pub fn render(frame: &mut Frame, state: &mut MemoryTuiState) {
         List::new(stats_items).block(panel_block("STATISTICS", false)),
         right[1],
     );
-
-    // RECALL input bar.
-    let input_focused = state.focus == MemoryFocus::Input;
-    let cursor = if input_focused { "_" } else { "" };
-    let input_style = if input_focused {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("RECALL ▶ ", Style::default().fg(Color::Yellow)),
-            Span::styled(format!("{}{cursor}", state.input), input_style),
-        ]))
-        .block(panel_block("RECALL", input_focused)),
-        rows[2],
-    );
-
-    // Key-hint footer.
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            KEY_HINT,
-            Style::default().fg(Color::DarkGray),
-        ))),
-        rows[3],
-    );
-
-    if state.show_help {
-        tui_common::render_help_overlay(frame, &help_text());
-    }
-
-    // Issue #215: drawer-detail modal floats over the rest of the UI when
-    // open. Render last so it sits on top of everything (including the help
-    // overlay) and is the visual "front" element.
-    if state.drawer_detail_open {
-        render_drawer_detail_modal(frame, state);
-    }
 }
 
-/// Render the drawer-detail modal as a centred floating overlay (issue #215).
+/// Render the drawer-detail content as a stable split pane (issue #215).
 ///
-/// Why: the activity panel only shows a truncated snippet per drawer; the
-/// modal exposes the full body, all tags, and the timestamp for the drawer
-/// the operator opened with `Enter` in the drawer pane.
-/// What: clears a centred rectangle (≈80 % width × ≈70 % height of the
-/// frame) and draws a bordered block carrying a header (drawer id,
-/// timestamp, creator tag, tag list), the verbatim memory bodies separated
-/// by `───` rules, and a `Loading…` placeholder while the fetch is in
-/// flight. `drawer_detail_scroll` scrolls the content vertically.
-///
+/// Why: the previous floating-modal renderer used [`ratatui::widgets::Clear`]
+/// over a computed centred rect, which produced a blank pane on many
+/// terminal sizes (small viewports, narrow widths, or split window
+/// arrangements). Anchoring the detail view inside a Layout-allocated
+/// rectangle removes the geometry computation and keeps the pane visible
+/// at every terminal size.
+/// What: draws a bordered `Paragraph` into `area` containing the body text
+/// returned by [`drawer_detail_body`], wrapped and scrolled by
+/// `state.drawer_detail_scroll`. The title is `"DETAIL — <id-prefix>"`
+/// where `<id-prefix>` is the first 8 characters of the drawer id selected
+/// when the detail view was opened. Falls back to "DETAIL" when the drawer
+/// list is empty or the index is out of range.
 /// Test: smoke-tested via `test_render_with_drawer_detail_open`.
-fn render_drawer_detail_modal(frame: &mut Frame, state: &MemoryTuiState) {
-    let area = frame.area();
-    let w = ((area.width as u32 * 80 / 100) as u16)
-        .max(20)
-        .min(area.width);
-    let h = ((area.height as u32 * 70 / 100) as u16)
-        .max(8)
-        .min(area.height);
-    let rect = Rect {
-        x: area.x + area.width.saturating_sub(w) / 2,
-        y: area.y + area.height.saturating_sub(h) / 2,
-        width: w,
-        height: h,
+fn render_detail_pane(frame: &mut Frame, state: &MemoryTuiState, area: Rect) {
+    // Resolve the drawer id to surface in the title. `drawer_detail_idx`
+    // was recorded as the drawer-cursor position at the moment `Enter`
+    // opened the pane, so it indexes `drawer_list.drawers` directly.
+    let id_prefix = state
+        .drawer_list
+        .drawers
+        .get(state.drawer_detail_idx)
+        .map(|d| {
+            let n = d.id.len().min(8);
+            d.id[..n].to_string()
+        })
+        .unwrap_or_default();
+    let title = if id_prefix.is_empty() {
+        " DETAIL ".to_string()
+    } else {
+        format!(" DETAIL — {id_prefix} ")
     };
-    frame.render_widget(Clear, rect);
+
+    // Match the filter-bar / focused-input convention: yellow + bold for an
+    // active zone. DrawerPane focus is implied while this pane is visible.
+    let border_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
 
     let body = drawer_detail_body(state);
-    let title = drawer_detail_title(state);
     let para = Paragraph::new(body)
         .style(Style::default().fg(Color::White))
         .wrap(Wrap { trim: false })
         .scroll((state.drawer_detail_scroll as u16, 0))
-        .block(
-            Block::default().borders(Borders::ALL).title(Span::styled(
-                title,
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )),
-        );
-    frame.render_widget(para, rect);
+        .block(block);
+    frame.render_widget(para, area);
 }
 
 /// Compose the rendered body text for the drawer-detail modal (issue #215).
@@ -2400,26 +2434,6 @@ pub fn drawer_detail_body(state: &MemoryTuiState) -> String {
         }
     }
     out
-}
-
-/// Title-bar text for the drawer-detail modal (issue #215).
-///
-/// Why: kept separate so a test can verify the title surfaces the current
-/// memory count and the active index without depending on the renderer.
-/// What: returns ` Drawer detail — <i+1>/<n>  (esc/q close, ↑/↓ scroll) `
-/// when at least one memory is loaded, or ` Drawer detail (loading…) ` /
-/// ` Drawer detail (empty) ` for the transient states.
-/// Test: `test_drawer_detail_title`.
-pub fn drawer_detail_title(state: &MemoryTuiState) -> String {
-    if state.drawer_detail_loading {
-        return " Drawer detail (loading…) ".to_string();
-    }
-    if state.drawer_detail_memories.is_empty() {
-        return " Drawer detail (empty) ".to_string();
-    }
-    let n = state.drawer_detail_memories.len();
-    let i = state.drawer_detail_idx.min(n.saturating_sub(1));
-    format!(" Drawer detail — {}/{n}  (esc/q close, ↑/↓ scroll) ", i + 1)
 }
 
 #[cfg(test)]
@@ -3941,30 +3955,6 @@ mod tests {
         assert_eq!(drawer_detail_body(&state), "(no memories returned)");
     }
 
-    /// Why (issue #215): the modal title must show how many memories are
-    /// loaded and which index the operator is viewing, plus a hint at the
-    /// close / scroll bindings.
-    /// What: exercises every title state — loading, empty, and populated.
-    /// Test: itself.
-    #[test]
-    fn test_drawer_detail_title() {
-        let mut state = sample_state();
-        state.drawer_detail_loading = true;
-        assert!(drawer_detail_title(&state).contains("loading…"));
-        state.drawer_detail_loading = false;
-        assert!(drawer_detail_title(&state).contains("(empty)"));
-        state.drawer_detail_memories = vec![
-            MemoryDetail::default(),
-            MemoryDetail::default(),
-            MemoryDetail::default(),
-        ];
-        state.drawer_detail_idx = 1;
-        let title = drawer_detail_title(&state);
-        assert!(title.contains("2/3"), "expected 2/3 index marker: {title}");
-        assert!(title.contains("esc/q close"));
-        assert!(title.contains("↑/↓ scroll"));
-    }
-
     /// Why (issue #215): the activity panel title must surface a `DRAWER ▶`
     /// marker when the drawer pane has focus so the operator sees which
     /// zone owns the cursor.
@@ -3995,22 +3985,33 @@ mod tests {
         );
     }
 
-    /// Why (issue #215): the modal must render without panicking when open
-    /// over the existing layout, and the rendered output must include the
-    /// modal title.
-    /// What: opens the modal with a fake memory and asserts the title is
-    /// visible in the rendered buffer.
+    /// Why (issue #215): when the drawer-detail view is open the renderer
+    /// must produce a stable split-pane layout — DRAWERS + STATISTICS on the
+    /// left of the right column and the DETAIL pane on the right — without
+    /// panicking. Replaces the former floating-modal smoke test that broke
+    /// on small terminals.
+    /// What: opens the detail view with a fake memory and asserts the
+    /// rendered buffer contains both the DETAIL pane title (carrying the
+    /// drawer-id prefix) and the surrounding STATISTICS panel header.
     /// Test: itself.
     #[test]
     fn test_render_with_drawer_detail_open() {
         use chrono::{TimeZone, Utc};
         let mut state = sample_state();
         state.selected = 1;
+        // Seed the drawer list so render_detail_pane can resolve the id
+        // prefix for the title. drawer_detail_idx indexes drawer_list.drawers
+        // (recorded as drawer_cursor at open time).
+        state.drawer_list.palace_id = Some("default".into());
+        state.drawer_list.drawers = vec![DrawerInfo {
+            id: "abc12345-rest-of-uuid".into(),
+            ..Default::default()
+        }];
         state.drawer_detail_open = true;
         state.drawer_detail_idx = 0;
         state.drawer_detail_memories = vec![MemoryDetail {
-            id: "abc-123".into(),
-            content: "Verbatim memory body for the modal".into(),
+            id: "abc12345-rest-of-uuid".into(),
+            content: "Verbatim memory body for the detail pane".into(),
             tags: vec!["msg:from=cto".into()],
             created_at: Some(Utc.with_ymd_and_hms(2026, 5, 20, 12, 34, 56).unwrap()),
         }];
@@ -4018,7 +4019,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
             .draw(|f| render(f, &mut state))
-            .expect("render with modal open must not panic");
+            .expect("render with detail pane open must not panic");
         let buffer = terminal.backend().buffer();
         let content: String = buffer
             .content()
@@ -4026,8 +4027,18 @@ mod tests {
             .map(|cell| cell.symbol().chars().next().unwrap_or(' '))
             .collect();
         assert!(
-            content.contains("Drawer detail"),
-            "expected modal title in rendered output",
+            content.contains("DETAIL"),
+            "expected DETAIL pane title in rendered output: {content}",
+        );
+        assert!(
+            content.contains("abc12345"),
+            "expected drawer-id prefix in DETAIL title: {content}",
+        );
+        // The STATISTICS panel must still render alongside the detail pane
+        // since the right area splits into DRAWERS+STATISTICS + DETAIL.
+        assert!(
+            content.contains("STATISTICS"),
+            "expected STATISTICS panel to remain visible in split layout",
         );
     }
 
