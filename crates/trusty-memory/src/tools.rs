@@ -780,6 +780,17 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
             let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
 
             let handle = open_palace_handle(state, palace)?;
+            // Issue #230: serialise the dedup-check + write sequence
+            // per-palace so two concurrent identical writes can't both
+            // pass the gate. The lock is scoped to the palace id — writes
+            // to different palaces still run in parallel. The guard is
+            // held until the end of this match arm so the post-write
+            // emits / KG extraction also see a consistent view; the redb
+            // write inside `remember_with_options` is the only operation
+            // that strictly needs the lock, but holding it longer is
+            // cheap and keeps the activity-log ordering coherent.
+            let write_lock = state.palace_write_lock(palace);
+            let _write_guard = write_lock.lock().await;
             // Issue #220: rolling dedup window — skip when a near-duplicate
             // landed in the same palace within the last 5 minutes. The
             // `force=true` operator override bypasses the gate so
@@ -903,6 +914,12 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
             }
             CreatorInfo::new_self(MCP_CLIENT_NAME, CreatorSource::Mcp).merge_into(&mut tags);
             let handle = open_palace_handle(state, palace)?;
+            // Issue #230: per-palace write lock — same rationale as
+            // `memory_remember`. Held across the dedup gate and the
+            // `remember_with_options` write so two concurrent identical
+            // notes can't both pass the gate.
+            let write_lock = state.palace_write_lock(palace);
+            let _write_guard = write_lock.lock().await;
             // Issue #220: rolling dedup window — same gate as
             // `memory_remember`. `memory_note` has no `force` arg, so the
             // gate is unconditional: curated short-fact writes that happen
@@ -2934,6 +2951,96 @@ mod tests {
         // Empty/whitespace content is also a pass — the content gate
         // handles the empty case upstream.
         assert!(!dedup_gate(&handle, "   "));
+    }
+
+    /// Why (issue #230): the dedup gate previously had a TOCTOU race —
+    /// two concurrent `memory_remember` calls with identical content
+    /// both saw the empty pre-write snapshot, both passed the gate, and
+    /// both wrote duplicate drawers. The per-palace write mutex on
+    /// `AppState` now serialises the gate-then-write sequence so the
+    /// second writer observes the first writer's drawer in
+    /// `list_drawers` and bails. This test would have failed before the
+    /// fix and passes after.
+    /// What: spawns two `tokio` tasks that race to write the same long
+    /// content into a fresh palace, joins both, then asserts that
+    /// `memory_list` returns exactly one drawer (the loser's envelope
+    /// carries `status = "skipped"` with a `duplicate within window`
+    /// reason).
+    /// Test: itself — fail-then-pass on this commit.
+    #[tokio::test]
+    async fn dedup_gate_blocks_concurrent_duplicate_writes() {
+        let state = std::sync::Arc::new(test_state());
+        let _ = dispatch_tool(&state, "palace_create", json!({"name": "dedup_race"}))
+            .await
+            .expect("palace_create");
+
+        // Long enough to clear the 8-token MCP filter; identical content
+        // in both racers so the dedup gate is the only thing keeping
+        // them from both landing.
+        let text =
+            "Concurrent identical writes must collapse to a single drawer under the dedup gate";
+
+        let s1 = state.clone();
+        let t1 = tokio::spawn(async move {
+            dispatch_tool(
+                &s1,
+                "memory_remember",
+                json!({"palace": "dedup_race", "text": text}),
+            )
+            .await
+        });
+        let s2 = state.clone();
+        let t2 = tokio::spawn(async move {
+            dispatch_tool(
+                &s2,
+                "memory_remember",
+                json!({"palace": "dedup_race", "text": text}),
+            )
+            .await
+        });
+        let r1 = t1.await.expect("join t1").expect("dispatch t1");
+        let r2 = t2.await.expect("join t2").expect("dispatch t2");
+
+        // Exactly one of the two should be `stored`; the other should be
+        // `skipped` with the documented duplicate-window reason.
+        let statuses = [
+            r1["status"].as_str().unwrap_or(""),
+            r2["status"].as_str().unwrap_or(""),
+        ];
+        let stored = statuses.iter().filter(|s| **s == "stored").count();
+        let skipped = statuses.iter().filter(|s| **s == "skipped").count();
+        assert_eq!(
+            stored, 1,
+            "exactly one concurrent write should be stored; got responses {r1:?} {r2:?}"
+        );
+        assert_eq!(
+            skipped, 1,
+            "exactly one concurrent write should be skipped; got responses {r1:?} {r2:?}"
+        );
+        let skipped_reason = if r1["status"] == "skipped" {
+            r1["reason"].as_str().unwrap_or("")
+        } else {
+            r2["reason"].as_str().unwrap_or("")
+        };
+        assert!(
+            skipped_reason.contains("duplicate within window"),
+            "skipped envelope should cite dedup reason; got {skipped_reason:?}"
+        );
+
+        // Belt-and-braces: confirm the palace contains exactly one drawer.
+        let listed = dispatch_tool(
+            &state,
+            "memory_list",
+            json!({"palace": "dedup_race", "limit": 10}),
+        )
+        .await
+        .expect("memory_list");
+        let drawers = listed["drawers"].as_array().expect("drawers array");
+        assert_eq!(
+            drawers.len(),
+            1,
+            "only one drawer should be persisted after concurrent identical writes; got {drawers:?}"
+        );
     }
 
     /// Why: end-to-end confirmation that the blocklist short-circuits the

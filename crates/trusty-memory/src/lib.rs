@@ -540,6 +540,26 @@ pub struct AppState {
     /// Test: covered by `bm25_supervisor_present_when_env_set` and the
     /// `bm25_supervisor::tests` unit tests.
     pub bm25_supervisor: Option<Arc<bm25_supervisor::Bm25Supervisor>>,
+    /// Per-palace write serialisation locks (issue #230).
+    ///
+    /// Why: the dedup gate in `tools.rs` previously read a snapshot of
+    /// existing drawers, checked for near-duplicates via Jaro-Winkler, and
+    /// then issued the write — a classic time-of-check/time-of-use race.
+    /// Two concurrent `memory_remember` calls with the same content could
+    /// both see the pre-write snapshot, both pass the gate, and both land
+    /// duplicate drawers. Serialising the gate-then-write sequence per
+    /// palace closes the window: while one task holds the mutex, any
+    /// concurrent writer for the same palace blocks until the first write
+    /// finishes and is visible to `list_drawers`. The lock is **per
+    /// palace** (not global) so writes to different palaces continue to
+    /// run in parallel.
+    /// What: a `DashMap` keyed by palace id, where each entry is an
+    /// `Arc<tokio::sync::Mutex<()>>`. The mutex is constructed lazily by
+    /// `palace_write_lock` on first access. `Arc` lets callers hold a
+    /// clone of the lock past the lifetime of the `DashMap` entry so the
+    /// map never needs to be held across an `.await`.
+    /// Test: `tools::tests::dedup_gate_blocks_concurrent_duplicate_writes`.
+    pub palace_write_locks: Arc<dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl AppState {
@@ -584,7 +604,36 @@ impl AppState {
             activity_log,
             bm25_client: None,
             bm25_supervisor: None,
+            palace_write_locks: Arc::new(dashmap::DashMap::new()),
         }
+    }
+
+    /// Acquire (lazily, then clone) the per-palace write mutex.
+    ///
+    /// Why (issue #230): the dedup-check + `remember_with_options` write
+    /// sequence in `tools.rs` must be atomic per palace to prevent two
+    /// concurrent identical writes from both passing the dedup gate.
+    /// Callers hold the returned `Arc<Mutex<()>>`'s guard across the gate
+    /// check and the write so the second writer blocks until the first
+    /// write is visible to `list_drawers`. Returning a clone of the `Arc`
+    /// rather than a borrow into the `DashMap` lets the caller `.await`
+    /// while holding the lock without risking a deadlock against any
+    /// future map mutation (DashMap shards are sync mutexes).
+    /// What: looks up the palace id in `palace_write_locks` and returns
+    /// a clone of the existing mutex; on the first call for a palace,
+    /// inserts a freshly-constructed `tokio::sync::Mutex<()>` first. The
+    /// `DashMap::entry().or_insert_with` API guarantees the lazy
+    /// construction is racy-safe — only one mutex is ever inserted per
+    /// palace id.
+    /// Test: `tools::tests::dedup_gate_blocks_concurrent_duplicate_writes`.
+    pub fn palace_write_lock(&self, palace_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        if let Some(existing) = self.palace_write_locks.get(palace_id) {
+            return existing.clone();
+        }
+        self.palace_write_locks
+            .entry(palace_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     /// Builder-style: opt-in to the BM25 lexical lane (issue #156).
