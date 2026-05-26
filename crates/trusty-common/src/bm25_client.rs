@@ -304,9 +304,7 @@ pub fn locate_bm25_daemon_binary() -> anyhow::Result<std::path::PathBuf> {
         if p.is_file() {
             return Ok(p);
         }
-        anyhow::bail!(
-            "TRUSTY_BM25_DAEMON_BIN={explicit:?} does not point to an existing file"
-        );
+        anyhow::bail!("TRUSTY_BM25_DAEMON_BIN={explicit:?} does not point to an existing file");
     }
 
     // 2. Sibling of the currently-running executable — works for both

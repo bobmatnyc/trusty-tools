@@ -467,7 +467,11 @@ mod tests {
             })),
         };
         let resp = dispatch(&state, req).await;
-        assert!(resp.error.is_none(), "initialize must not error: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "initialize must not error: {:?}",
+            resp.error
+        );
         let result = resp.result.expect("result");
         assert_eq!(
             result["protocolVersion"], "2024-11-05",

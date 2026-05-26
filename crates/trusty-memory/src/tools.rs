@@ -19,7 +19,7 @@
 //! - `kg_assert(palace, subject, predicate, object, confidence?, provenance?)` -> ()
 //! - `kg_query(palace, subject)`                    -> Vec<Triple>
 
-use crate::attribution::{CreatorInfo, CreatorSource, MCP_CLIENT_NAME};
+use crate::attribution::{session_tag_from_tags, CreatorInfo, CreatorSource, MCP_CLIENT_NAME};
 use crate::kg_extract::{extract_triples, ExtractInput};
 use crate::{ActivitySource, AppState, DaemonEvent};
 use anyhow::{anyhow, Context, Result};
@@ -585,7 +585,13 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
             // Submission-logging Part B: attach `creator:*` attribution so
             // every MCP-origin drawer carries the writer identity (client
             // = `trusty-memory-mcp`, source = `mcp`, version + cwd of the
-            // MCP server process).
+            // MCP server process). Issue #202: also project a bare-UUID
+            // session tag (when present in the caller's tags) into the
+            // reserved `creator:session=<first-8>` slot so the activity
+            // panel can surface it without inspecting every tag.
+            if let Some(session_tag) = session_tag_from_tags(&tags) {
+                tags.push(session_tag);
+            }
             CreatorInfo::new_self(MCP_CLIENT_NAME, CreatorSource::Mcp).merge_into(&mut tags);
 
             let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -662,6 +668,11 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
                 })
                 .unwrap_or_default();
             // Submission-logging Part B: same attribution as memory_remember.
+            // Issue #202: project a bare-UUID session tag (when present)
+            // into the reserved `creator:session=<first-8>` slot.
+            if let Some(session_tag) = session_tag_from_tags(&tags) {
+                tags.push(session_tag);
+            }
             CreatorInfo::new_self(MCP_CLIENT_NAME, CreatorSource::Mcp).merge_into(&mut tags);
             let handle = open_palace_handle(state, palace)?;
             // Issue #97: mirror memory_remember — keep originals so the KG

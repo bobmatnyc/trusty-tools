@@ -609,7 +609,32 @@ impl MemoryService {
             drawers.sort_by_key(|d| std::cmp::Reverse(d.created_at));
         }
         let page: Vec<_> = drawers.into_iter().skip(offset).take(limit).collect();
-        Ok(serde_json::to_value(page).unwrap_or(json!([])))
+        // Issue #202: enrich every row with a short `snippet` derived from
+        // the drawer's content so the TUI activity panel can render a
+        // glanceable summary without re-parsing the full body. The
+        // snippet is whitespace-collapsed and bounded at
+        // `DRAWER_SNIPPET_MAX_CHARS` (60) — shorter than the SSE preview
+        // because the activity panel renders it on a single narrow row.
+        let payload: Vec<Value> = page
+            .into_iter()
+            .map(|drawer| {
+                let snippet = drawer_snippet(&drawer.content);
+                let mut value = serde_json::to_value(&drawer).unwrap_or_else(|_| json!({}));
+                if let Value::Object(ref mut map) = value {
+                    // `null` when the drawer has no usable content so
+                    // clients can distinguish "no body" from "empty body
+                    // after whitespace collapse".
+                    let snippet_value = if snippet.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::String(snippet)
+                    };
+                    map.insert("snippet".to_string(), snippet_value);
+                }
+                value
+            })
+            .collect();
+        Ok(Value::Array(payload))
     }
 
     /// Store a new drawer and emit the matching activity events.
@@ -636,6 +661,13 @@ impl MemoryService {
         let importance = body.importance.unwrap_or(0.5);
         let content_preview = drawer_content_preview(&body.content);
         let mut tags_with_creator = body.tags;
+        // Issue #202: project a bare-UUID session tag (when the caller
+        // passed one in the request body) into the reserved
+        // `creator:session=<first-8>` slot so the activity panel can
+        // surface session attribution without bespoke parsing.
+        if let Some(session_tag) = crate::attribution::session_tag_from_tags(&tags_with_creator) {
+            tags_with_creator.push(session_tag);
+        }
         creator.merge_into(&mut tags_with_creator);
         let content_for_kg = body.content.clone();
         let tags_for_kg = tags_with_creator.clone();
@@ -1001,6 +1033,17 @@ impl MemoryService {
 /// Maximum characters retained in a drawer's content preview.
 pub const DRAWER_PREVIEW_MAX_CHARS: usize = 80;
 
+/// Maximum characters retained in a drawer-row snippet (issue #202).
+///
+/// Why: the TUI activity panel renders the snippet inline at the end of a
+/// narrow row (`<id> <ts> <creator>  <snippet>`); 60 chars is short
+/// enough to keep the row readable while still showing the key phrase
+/// of most drawers.
+/// What: 60 characters; the trailing `…` from [`drawer_snippet`] counts
+/// against this budget.
+/// Test: `drawer_snippet_truncates_long_content`.
+pub const DRAWER_SNIPPET_MAX_CHARS: usize = 60;
+
 /// Build a single-line preview of drawer content for SSE events.
 ///
 /// Why: the activity feed should show *what* was just stored; multiline /
@@ -1016,6 +1059,33 @@ pub fn drawer_content_preview(content: &str) -> String {
         let kept: String = normalised
             .chars()
             .take(DRAWER_PREVIEW_MAX_CHARS.saturating_sub(1))
+            .collect();
+        format!("{kept}…")
+    }
+}
+
+/// Build a short snippet from a drawer's content for the TUI activity panel
+/// row (issue #202).
+///
+/// Why: the activity panel renders one row per drawer at narrow column
+/// width; a 60-char whitespace-collapsed snippet is long enough to convey
+/// the gist but short enough to fit inline with the id / timestamp /
+/// creator columns. Re-using the preview's whitespace-collapse rule keeps
+/// SSE and `/drawers` snippets visually consistent.
+/// What: collapses whitespace, trims, truncates to
+/// [`DRAWER_SNIPPET_MAX_CHARS`] (60) with a trailing `…` when cut.
+/// Returns the empty string for empty / whitespace-only content so the
+/// caller can omit the `snippet` field entirely.
+/// Test: `drawer_snippet_truncates_long_content`,
+/// `drawer_snippet_handles_empty_content`.
+pub fn drawer_snippet(content: &str) -> String {
+    let normalised: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalised.chars().count() <= DRAWER_SNIPPET_MAX_CHARS {
+        normalised
+    } else {
+        let kept: String = normalised
+            .chars()
+            .take(DRAWER_SNIPPET_MAX_CHARS.saturating_sub(1))
             .collect();
         format!("{kept}…")
     }
@@ -1441,5 +1511,62 @@ mod tests {
             Some("drawer-1"),
             "importance default should surface drawer with importance 0.9 first",
         );
+
+        // Issue #202: every row carries an enriched `snippet` field
+        // derived from the drawer body so the TUI activity panel can
+        // render a glanceable summary without re-parsing.
+        assert_eq!(
+            arr[0]["snippet"].as_str(),
+            Some("drawer-1"),
+            "snippet must be populated for non-empty drawer content",
+        );
+    }
+
+    /// Why: issue #202 — the snippet helper must collapse whitespace,
+    /// trim, and cap at [`DRAWER_SNIPPET_MAX_CHARS`] with a trailing `…`
+    /// when the body overflows, matching the SSE preview's shape but at
+    /// a tighter width.
+    /// What: feeds a multiline / whitespace-heavy body and asserts both
+    /// the truncation and the collapse rule.
+    /// Test: itself.
+    #[test]
+    fn drawer_snippet_truncates_long_content() {
+        // Short content round-trips verbatim.
+        assert_eq!(drawer_snippet("hello world"), "hello world");
+
+        // Whitespace is collapsed.
+        assert_eq!(
+            drawer_snippet("first line\n\nsecond\tline   third"),
+            "first line second line third",
+        );
+
+        // Padding is trimmed.
+        assert_eq!(drawer_snippet("   padded   "), "padded");
+
+        // A body longer than the cap is truncated and ends with `…`.
+        let long = "a".repeat(200);
+        let snippet = drawer_snippet(&long);
+        assert_eq!(snippet.chars().count(), DRAWER_SNIPPET_MAX_CHARS);
+        assert!(
+            snippet.ends_with('…'),
+            "long body must be truncated with ellipsis",
+        );
+
+        // A body sized exactly at the cap is preserved verbatim.
+        let exact = "a".repeat(DRAWER_SNIPPET_MAX_CHARS);
+        assert_eq!(drawer_snippet(&exact), exact);
+    }
+
+    /// Why: empty / whitespace-only bodies must produce an empty
+    /// snippet so the `list_drawers` shaper can omit the `snippet`
+    /// field (rendered as `null` on the wire) instead of an empty
+    /// string. The TUI relies on this distinction to skip the snippet
+    /// column entirely when the body has no usable preview.
+    /// What: feeds empty and whitespace-only strings.
+    /// Test: itself.
+    #[test]
+    fn drawer_snippet_handles_empty_content() {
+        assert_eq!(drawer_snippet(""), "");
+        assert_eq!(drawer_snippet("   \n\t  "), "");
     }
 }

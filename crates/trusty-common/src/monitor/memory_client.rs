@@ -590,8 +590,11 @@ pub fn parse_palaces(raw: &serde_json::Value) -> Vec<PalaceRow> {
 /// Keeping a typed projection out of the renderer means the parsing /
 /// creator-tag extraction logic is unit-testable without a live daemon.
 /// What: a stable id, a created_at timestamp (UTC), the resolved creator
-/// label (`"—"` when no creator tag was found), and the drawer's tag list
-/// surfaced so future panels can present richer detail without re-fetching.
+/// label (`"—"` when no creator tag was found), the drawer's tag list
+/// surfaced so future panels can present richer detail without
+/// re-fetching, and an optional content snippet for inline display
+/// (issue #202; `None` when the body was empty or the daemon predates
+/// the snippet field).
 /// Test: `parse_drawers_projects_fields`, `creator_label_picks_first_match`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DrawerInfo {
@@ -604,6 +607,13 @@ pub struct DrawerInfo {
     pub creator: String,
     /// All tags as carried on the wire (for downstream filtering / display).
     pub tags: Vec<String>,
+    /// Short whitespace-collapsed snippet of the drawer body (issue #202).
+    ///
+    /// Populated by the daemon's `/api/v1/palaces/{id}/drawers` endpoint
+    /// (truncated to ~60 chars with `…`). The client falls back to
+    /// truncating the full `content` field when the daemon predates the
+    /// `snippet` wire field; `None` when neither is available.
+    pub snippet: Option<String>,
 }
 
 /// Fallback creator label rendered when no recognised creator tag is found.
@@ -615,6 +625,17 @@ pub struct DrawerInfo {
 /// Test: `creator_label_picks_first_match`.
 pub const NO_CREATOR_LABEL: &str = "—";
 
+/// Maximum characters retained when the client falls back to truncating
+/// `content` because the daemon didn't return a `snippet` (issue #202).
+///
+/// Why: the activity panel must show a usable snippet against older
+/// daemons that predate the wire field. Matching the server's
+/// `DRAWER_SNIPPET_MAX_CHARS` keeps the rendered width consistent across
+/// daemon versions.
+/// What: 60 characters; matches `trusty_memory::service::DRAWER_SNIPPET_MAX_CHARS`.
+/// Test: `parse_drawers_projects_fields`.
+const DRAWER_SNIPPET_FALLBACK_MAX: usize = 60;
+
 /// Project a `…/drawers` JSON payload into [`DrawerInfo`]s.
 ///
 /// Why: the endpoint may return either a bare JSON array (the
@@ -624,7 +645,10 @@ pub const NO_CREATOR_LABEL: &str = "—";
 /// drop the whole page.
 /// What: accepts a JSON array (or object with `drawers`); for each entry
 /// reads `id` (UUID string), `created_at` (RFC 3339), and `tags`, then
-/// resolves the creator label via [`creator_label`].
+/// resolves the creator label via [`creator_label`]. The optional
+/// `snippet` field is preferred; when absent the client falls back to
+/// truncating `content` to [`DRAWER_SNIPPET_FALLBACK_MAX`] chars so older
+/// daemons still surface a usable snippet (issue #202).
 /// Test: `parse_drawers_projects_fields`.
 pub fn parse_drawers(raw: &serde_json::Value) -> Vec<DrawerInfo> {
     let array: Vec<serde_json::Value> = match raw {
@@ -658,14 +682,55 @@ pub fn parse_drawers(raw: &serde_json::Value) -> Vec<DrawerInfo> {
                 })
                 .unwrap_or_default();
             let creator = creator_label(&tags);
+            // Issue #202: prefer the daemon-supplied `snippet` field
+            // (already truncated and whitespace-collapsed). Fall back
+            // to a client-side truncation of `content` for daemons that
+            // predate the field. `null` / empty / whitespace-only
+            // values yield `None` so the renderer can omit the column.
+            let snippet = item
+                .get("snippet")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    item.get("content")
+                        .and_then(|v| v.as_str())
+                        .map(client_snippet)
+                        .filter(|s| !s.is_empty())
+                });
             DrawerInfo {
                 id,
                 created_at,
                 creator,
                 tags,
+                snippet,
             }
         })
         .collect()
+}
+
+/// Client-side fallback snippet builder for daemons that predate the
+/// `snippet` wire field (issue #202).
+///
+/// Why: keep the activity panel useful across daemon versions; the
+/// projection should still surface a glanceable summary even when the
+/// daemon returns only the raw `content`.
+/// What: whitespace-collapses, trims, and truncates to
+/// [`DRAWER_SNIPPET_FALLBACK_MAX`] with a trailing `…` when cut. Empty
+/// / whitespace-only inputs yield the empty string so the caller can
+/// drop the snippet via `filter(|s| !s.is_empty())`.
+/// Test: covered by `parse_drawers_projects_fields` via the fallback path.
+fn client_snippet(content: &str) -> String {
+    let normalised: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalised.chars().count() <= DRAWER_SNIPPET_FALLBACK_MAX {
+        normalised
+    } else {
+        let kept: String = normalised
+            .chars()
+            .take(DRAWER_SNIPPET_FALLBACK_MAX.saturating_sub(1))
+            .collect();
+        format!("{kept}…")
+    }
 }
 
 /// Pick the first recognised creator tag from a drawer's tag list.
@@ -854,18 +919,22 @@ mod tests {
 
     #[test]
     fn parse_drawers_projects_fields() {
-        // Bare array shape — the daemon's current response.
+        // Bare array shape — the daemon's current response. Row 0
+        // carries an explicit `snippet`; row 1 only has `content` (the
+        // fallback path); row 2 carries neither.
         let raw = serde_json::json!([
             {
                 "id": "11111111-1111-1111-1111-111111111111",
                 "created_at": "2026-05-20T12:34:56Z",
                 "tags": ["msg:from=cto", "user-tag"],
-                "content": "ignored by projection",
+                "content": "ignored when snippet is present",
+                "snippet": "JWT middleware added",
             },
             {
                 "id": "22222222-2222-2222-2222-222222222222",
                 "created_at": "2026-05-19T08:00:00Z",
                 "tags": ["creator:client=mpm", "creator:source=http"],
+                "content": "Plain content for the legacy fallback path",
             },
             {
                 "id": "33333333-3333-3333-3333-333333333333",
@@ -879,12 +948,21 @@ mod tests {
         assert_eq!(drawers[0].creator, "msg:from=cto");
         assert_eq!(drawers[0].tags.len(), 2);
         assert!(drawers[0].created_at.is_some());
+        // Issue #202: explicit snippet wins over content.
+        assert_eq!(drawers[0].snippet.as_deref(), Some("JWT middleware added"));
 
         assert_eq!(drawers[1].creator, "creator:client=mpm");
+        // Issue #202: fall back to truncating `content` when snippet is absent.
+        assert_eq!(
+            drawers[1].snippet.as_deref(),
+            Some("Plain content for the legacy fallback path"),
+        );
 
-        // Malformed timestamp drops to None; missing creator tag → em-dash.
+        // Malformed timestamp drops to None; missing creator tag → em-dash;
+        // no snippet and no content → snippet is None.
         assert!(drawers[2].created_at.is_none());
         assert_eq!(drawers[2].creator, NO_CREATOR_LABEL);
+        assert!(drawers[2].snippet.is_none());
 
         // Object-wrapped shape.
         let obj = serde_json::json!({
@@ -896,6 +974,32 @@ mod tests {
 
         // Unexpected shape yields an empty list.
         assert!(parse_drawers(&serde_json::json!("nope")).is_empty());
+
+        // An explicit `null` snippet (daemon returned `Value::Null`) also
+        // yields `None` — neither the snippet nor the absent content
+        // fields fill it in.
+        let null_snippet = serde_json::json!([{
+            "id": "44444444-4444-4444-4444-444444444444",
+            "snippet": serde_json::Value::Null,
+            "tags": [],
+        }]);
+        let drawers = parse_drawers(&null_snippet);
+        assert!(drawers[0].snippet.is_none());
+
+        // Long content gets truncated by the client fallback.
+        let long_content = "x".repeat(200);
+        let long = serde_json::json!([{
+            "id": "55555555-5555-5555-5555-555555555555",
+            "content": long_content,
+            "tags": [],
+        }]);
+        let drawers = parse_drawers(&long);
+        let snippet = drawers[0].snippet.as_deref().expect("fallback snippet");
+        assert_eq!(snippet.chars().count(), DRAWER_SNIPPET_FALLBACK_MAX);
+        assert!(
+            snippet.ends_with('…'),
+            "long fallback snippet must be truncated with ellipsis",
+        );
     }
 
     #[test]

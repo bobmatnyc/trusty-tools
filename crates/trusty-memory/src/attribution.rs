@@ -65,6 +65,18 @@ pub const CREATOR_SOURCE_PREFIX: &str = "creator:source=";
 /// Test: `creator_info_omits_cwd_when_absent`.
 pub const CREATOR_CWD_PREFIX: &str = "creator:cwd=";
 
+/// Tag prefix carrying the short session id of the writer (issue #202).
+///
+/// Why: when a session UUID is already attached as a bare tag, the TUI
+/// activity panel cannot easily pick it out of the tag list. Emitting a
+/// dedicated `creator:session=<first-8>` tag puts the session shorthand
+/// in the same reserved namespace as the rest of the attribution data so
+/// the dashboard / TUI can render it without bespoke parsing.
+/// What: prefix string; the suffix is the first 8 hex characters of the
+/// originating UUID.
+/// Test: `session_tag_from_tags_returns_first_uuid_short`.
+pub const CREATOR_SESSION_PREFIX: &str = "creator:session=";
+
 /// HTTP request header carrying the writing client's short name.
 ///
 /// Why: lets remote HTTP callers self-identify so the recipient daemon
@@ -238,6 +250,43 @@ pub fn is_creator_tag(tag: &str) -> bool {
     tag.starts_with("creator:")
 }
 
+/// Build a `creator:session=<first-8-chars>` tag from the first bare UUID
+/// found in `tags`, if any (issue #202).
+///
+/// Why: MCP writers (claude-mpm hooks, in particular) already pass the
+/// session UUID as a free-form tag in the `tags` array. Turning that into
+/// an explicit `creator:session=...` tag puts the session id alongside
+/// the rest of the attribution data so the dashboard / TUI can surface
+/// it without inspecting every tag for UUID-shaped strings.
+/// What: scans the slice in order, parses each entry with
+/// `uuid::Uuid::parse_str`, and on the first success returns
+/// `Some("creator:session=<first-8-hex>")`. Returns `None` when no entry
+/// parses as a UUID, or when the matching tag is itself already a
+/// `creator:*` tag (so dashboard-supplied creator tags don't get
+/// re-projected).
+/// Test: `session_tag_from_tags_returns_first_uuid_short`,
+/// `session_tag_from_tags_skips_non_uuid_entries`.
+pub fn session_tag_from_tags(tags: &[String]) -> Option<String> {
+    for tag in tags {
+        // Skip the reserved-namespace tags so a stray
+        // `creator:cwd=<uuid-shaped-path>` can never be misinterpreted
+        // as a session id. We only consider free-form bare tags.
+        if is_creator_tag(tag) {
+            continue;
+        }
+        if let Ok(uuid) = uuid::Uuid::parse_str(tag) {
+            // `uuid.simple()` renders as 32 lowercase hex chars; the
+            // first 8 are the same characters that appear before the
+            // first dash in the hyphenated form. Both forms parse to the
+            // same `Uuid`, so we render canonically here for stability.
+            let simple = uuid.simple().to_string();
+            let short: String = simple.chars().take(8).collect();
+            return Some(format!("{CREATOR_SESSION_PREFIX}{short}"));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,6 +394,62 @@ mod tests {
         assert!(!is_creator_tag("user-tag"));
         assert!(!is_creator_tag("msg:v1"));
         assert!(!is_creator_tag("creatorx"));
+    }
+
+    /// Why: issue #202 — MCP writers (claude-mpm hooks) commonly pass
+    /// the session UUID as a bare tag in the `tags` array. The helper
+    /// must pick out the first parseable UUID and emit the short form
+    /// in the reserved `creator:session=` namespace so the TUI activity
+    /// panel renders it without bespoke parsing.
+    /// What: feeds a mixed tag list and asserts the first 8 hex chars
+    /// of the UUID round-trip into the returned tag.
+    /// Test: itself.
+    #[test]
+    fn session_tag_from_tags_returns_first_uuid_short() {
+        let tags = vec![
+            "user-tag".to_string(),
+            "01919e90-8a2e-7c1d-9f8b-1234567890ab".to_string(),
+            "ignored-second-uuid:11111111-2222-3333-4444-555555555555".to_string(),
+        ];
+        let session = session_tag_from_tags(&tags).expect("session tag");
+        assert_eq!(session, "creator:session=01919e90");
+    }
+
+    /// Why: non-UUID entries (free-form tags, scoped tags like `idx:0`)
+    /// must not be misinterpreted as session ids — the helper has to
+    /// return `None` when no entry parses as a UUID.
+    /// What: feeds a tag list with no UUIDs and asserts `None`.
+    /// Test: itself.
+    #[test]
+    fn session_tag_from_tags_skips_non_uuid_entries() {
+        let tags = vec![
+            "user-tag".to_string(),
+            "idx:0".to_string(),
+            "session-prefix-not-a-uuid".to_string(),
+        ];
+        assert!(session_tag_from_tags(&tags).is_none());
+
+        // Empty list returns `None`.
+        assert!(session_tag_from_tags(&[]).is_none());
+    }
+
+    /// Why: a tag in the reserved `creator:*` namespace must never be
+    /// re-projected as a session id, even if its value parses as a UUID.
+    /// `creator:cwd=` carrying a UUID-shaped temporary path is the
+    /// motivating example.
+    /// What: feeds a `creator:` tag whose value parses as a UUID and a
+    /// real bare UUID later in the list, then asserts the real one wins.
+    /// Test: itself.
+    #[test]
+    fn session_tag_from_tags_skips_reserved_namespace() {
+        let tags = vec![
+            // Reserved namespace tag with a UUID-shaped value — must be skipped.
+            "creator:cwd=11111111-1111-1111-1111-111111111111".to_string(),
+            // The real session tag — must win.
+            "22222222-2222-2222-2222-222222222222".to_string(),
+        ];
+        let session = session_tag_from_tags(&tags).expect("session tag");
+        assert_eq!(session, "creator:session=22222222");
     }
 
     /// Why: the `From<ActivitySource>` impl lets the HTTP path build a

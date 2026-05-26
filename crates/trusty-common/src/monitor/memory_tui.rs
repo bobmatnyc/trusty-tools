@@ -1039,15 +1039,30 @@ pub fn drawer_panel_lines(state: &MemoryTuiState, total_drawer_count: u64) -> Ve
     lines
 }
 
+/// Maximum characters retained for the trailing snippet column.
+///
+/// Why: issue #202 — the activity panel row layout is `<id> <ts>
+/// <creator>  <snippet>`. The snippet column adds new width to an
+/// already narrow panel; capping it keeps rows from wrapping on
+/// reasonable terminal widths.
+/// What: 60 characters with a trailing `…` from the truncate helper
+/// when cut. Matches the server's `DRAWER_SNIPPET_MAX_CHARS`.
+/// Test: `drawer_row_includes_snippet`.
+const DRAWER_SNIPPET_WIDTH: usize = 60;
+
 /// Format one drawer as a single compact activity-panel row.
 ///
 /// Why: the panel is narrow; a fixed `<id> <ts> <creator>` column layout
-/// keeps the rendered list scannable.
+/// keeps the rendered list scannable. Issue #202 appends an optional
+/// snippet column when the daemon supplied one, giving the operator a
+/// glance at the drawer body without opening it.
 /// What: `<truncated-id> <MM-DD HH:MM>  <creator>` — id truncated to 8
 /// chars (the leading UUID block), timestamp rendered in UTC, creator
 /// truncated to [`DRAWER_CREATOR_WIDTH`] chars via the shared truncate
-/// helper. A drawer with no timestamp shows `--`.
-/// Test: `drawer_row_layout`.
+/// helper. When `drawer.snippet` is `Some` and non-empty, a `  <snippet>`
+/// suffix is appended (truncated to [`DRAWER_SNIPPET_WIDTH`]). A drawer
+/// with no timestamp shows `--`.
+/// Test: `drawer_row_layout`, `drawer_row_includes_snippet`.
 pub fn format_drawer_row(drawer: &DrawerInfo) -> String {
     let id = truncate(&drawer.id, 8);
     let ts = match drawer.created_at {
@@ -1055,7 +1070,16 @@ pub fn format_drawer_row(drawer: &DrawerInfo) -> String {
         None => "--         ".to_string(),
     };
     let creator = truncate(&drawer.creator, DRAWER_CREATOR_WIDTH);
-    format!("{id} {ts}  {creator}")
+    let base = format!("{id} {ts}  {creator}");
+    match drawer
+        .snippet
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(snippet) => format!("{base}  {}", truncate(snippet, DRAWER_SNIPPET_WIDTH)),
+        None => base,
+    }
 }
 
 /// The memory TUI event loop: poll, render, handle input, drain SSE events.
@@ -3121,7 +3145,15 @@ mod tests {
                 &tags.iter().map(|s| (*s).to_string()).collect::<Vec<_>>(),
             ),
             tags: tags.iter().map(|s| (*s).to_string()).collect(),
+            snippet: None,
         }
+    }
+
+    /// Build a [`DrawerInfo`] for tests with an explicit snippet (issue #202).
+    fn sample_drawer_with_snippet(idx: usize, tags: &[&str], snippet: &str) -> DrawerInfo {
+        let mut d = sample_drawer(idx, tags);
+        d.snippet = Some(snippet.to_string());
+        d
     }
 
     #[test]
@@ -3222,6 +3254,57 @@ mod tests {
         undated.created_at = None;
         let row = format_drawer_row(&undated);
         assert!(row.contains("--"), "missing `--` for undated row: {row}");
+    }
+
+    /// Why (issue #202): when the daemon returns a `snippet`, the row
+    /// must append it after the creator column so the operator sees a
+    /// glanceable preview of the drawer body without opening it. When
+    /// the snippet is absent the row must collapse back to the legacy
+    /// layout — no trailing separator, no padding artefact.
+    /// What: builds drawers with and without snippets and asserts both
+    /// the appended-snippet and absent-snippet shapes.
+    /// Test: itself.
+    #[test]
+    fn drawer_row_includes_snippet() {
+        // Snippet is appended inline after the creator column.
+        let with_snippet =
+            sample_drawer_with_snippet(3, &["msg:from=cto"], "JWT middleware added to auth flow");
+        let row = format_drawer_row(&with_snippet);
+        assert!(
+            row.contains("msg:from=cto"),
+            "creator must still appear before snippet: {row}",
+        );
+        assert!(
+            row.contains("JWT middleware added to auth flow"),
+            "snippet must be appended: {row}",
+        );
+
+        // No snippet → row falls back to the legacy `<id> <ts> <creator>`
+        // shape with no trailing whitespace.
+        let bare = sample_drawer(4, &["msg:from=cto"]);
+        let row = format_drawer_row(&bare);
+        assert!(
+            !row.ends_with("  "),
+            "no-snippet row must not have trailing whitespace: {row:?}",
+        );
+
+        // Empty / whitespace-only snippet is treated as absent so the
+        // row stays at the legacy width.
+        let empty = sample_drawer_with_snippet(5, &["msg:from=cto"], "   ");
+        let row = format_drawer_row(&empty);
+        assert!(
+            !row.ends_with("  "),
+            "whitespace-only snippet must be elided: {row:?}",
+        );
+
+        // A long snippet is truncated to fit the column.
+        let long = "x".repeat(200);
+        let big = sample_drawer_with_snippet(6, &["msg:from=cto"], &long);
+        let row = format_drawer_row(&big);
+        assert!(
+            row.contains('…'),
+            "long snippet must be truncated with `…`: {row}",
+        );
     }
 
     #[test]
