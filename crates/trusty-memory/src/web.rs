@@ -26,16 +26,11 @@ use axum::{
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashSet;
-use std::sync::Arc;
 use trusty_common::memory_core::community::KnowledgeGap;
-use trusty_common::memory_core::dream::{DreamConfig, Dreamer, PersistedDreamStats};
-use trusty_common::memory_core::palace::{Palace, PalaceId, RoomType};
-use trusty_common::memory_core::retrieval::{
-    recall_deep_with_default_embedder, recall_with_default_embedder, RecallResult,
-};
+use trusty_common::memory_core::palace::{PalaceId, RoomType};
+use trusty_common::memory_core::retrieval::recall_with_default_embedder;
 use trusty_common::memory_core::store::kg::Triple;
-use trusty_common::memory_core::{PalaceHandle, PalaceRegistry};
+use trusty_common::memory_core::PalaceRegistry;
 use uuid::Uuid;
 
 /// Embedded UI assets produced by `pnpm build` in `ui/`.
@@ -706,37 +701,10 @@ fn serve_embedded(path: &str) -> Option<Response> {
 // /api/v1/status, /api/v1/config
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize)]
-struct StatusPayload {
-    version: String,
-    palace_count: usize,
-    default_palace: Option<String>,
-    data_root: String,
-    total_drawers: usize,
-    total_vectors: usize,
-    total_kg_triples: usize,
-}
+pub(crate) use crate::service::StatusPayload;
 
 async fn status(State(state): State<AppState>) -> Json<StatusPayload> {
-    let palaces = PalaceRegistry::list_palaces(&state.data_root).unwrap_or_default();
-    let palace_count = palaces.len();
-    let (mut total_drawers, mut total_vectors, mut total_kg_triples) = (0usize, 0usize, 0usize);
-    for p in &palaces {
-        if let Ok(handle) = state.registry.open_palace(&state.data_root, &p.id) {
-            total_drawers = total_drawers.saturating_add(handle.drawers.read().len());
-            total_vectors = total_vectors.saturating_add(handle.vector_store.index_size());
-            total_kg_triples = total_kg_triples.saturating_add(handle.kg.count_active_triples());
-        }
-    }
-    Json(StatusPayload {
-        version: state.version.clone(),
-        palace_count,
-        default_palace: state.default_palace.clone(),
-        data_root: state.data_root.display().to_string(),
-        total_drawers,
-        total_vectors,
-        total_kg_triples,
-    })
+    Json(crate::service::MemoryService::new(state).status().await)
 }
 
 #[derive(Serialize)]
@@ -755,339 +723,61 @@ async fn config(State(state): State<AppState>) -> Json<ConfigPayload> {
     })
 }
 
-/// Minimal mirror of the user-config schema (the real type lives in the bin
-/// crate; replicating just the fields we need here avoids a cyclic dep).
-#[derive(Deserialize, Default, Clone)]
-struct UserConfigMin {
-    #[serde(default)]
-    openrouter: OpenRouterMin,
-    #[serde(default)]
-    local_model: LocalModelMin,
-    // Carry forward unknown sections by ignoring them on parse.
-}
-
-#[derive(Deserialize, Default, Clone)]
-struct OpenRouterMin {
-    #[serde(default)]
-    api_key: String,
-    #[serde(default)]
-    model: String,
-}
-
-#[derive(Deserialize, Clone)]
-struct LocalModelMin {
-    #[serde(default = "default_local_enabled")]
-    enabled: bool,
-    #[serde(default = "default_local_base_url")]
-    base_url: String,
-    #[serde(default = "default_local_model")]
-    model: String,
-}
-
-fn default_local_enabled() -> bool {
-    true
-}
-fn default_local_base_url() -> String {
-    "http://localhost:11434".to_string()
-}
-fn default_local_model() -> String {
-    "llama3.2".to_string()
-}
-
-impl Default for LocalModelMin {
-    fn default() -> Self {
-        Self {
-            enabled: default_local_enabled(),
-            base_url: default_local_base_url(),
-            model: default_local_model(),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct LoadedUserConfig {
-    pub(crate) openrouter_api_key: String,
-    pub(crate) openrouter_model: String,
-    pub(crate) local_model: trusty_common::LocalModelConfig,
-}
-
-impl Default for LoadedUserConfig {
-    fn default() -> Self {
-        Self {
-            openrouter_api_key: String::new(),
-            openrouter_model: "anthropic/claude-3-5-sonnet".to_string(),
-            local_model: trusty_common::LocalModelConfig::default(),
-        }
-    }
-}
-
-pub(crate) fn load_user_config() -> Option<LoadedUserConfig> {
-    let home = dirs::home_dir()?;
-    let path = home.join(".trusty-memory").join("config.toml");
-    if !path.exists() {
-        return Some(LoadedUserConfig::default());
-    }
-    let raw = std::fs::read_to_string(&path).ok()?;
-    let parsed: UserConfigMin = toml::from_str(&raw).unwrap_or_default();
-    let model = if parsed.openrouter.model.is_empty() {
-        "anthropic/claude-3-5-sonnet".to_string()
-    } else {
-        parsed.openrouter.model
-    };
-    Some(LoadedUserConfig {
-        openrouter_api_key: parsed.openrouter.api_key,
-        openrouter_model: model,
-        local_model: trusty_common::LocalModelConfig {
-            enabled: parsed.local_model.enabled,
-            base_url: parsed.local_model.base_url,
-            model: parsed.local_model.model,
-        },
-    })
-}
+pub(crate) use crate::service::load_user_config;
+#[allow(unused_imports)]
+pub(crate) use crate::service::LoadedUserConfig;
 
 // ---------------------------------------------------------------------------
 // /api/v1/palaces
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize)]
-pub(crate) struct PalaceInfo {
-    id: String,
-    name: String,
-    description: Option<String>,
-    drawer_count: usize,
-    vector_count: usize,
-    kg_triple_count: usize,
-    wing_count: usize,
-    created_at: chrono::DateTime<chrono::Utc>,
-    /// Max `created_at` across this palace's drawers, or `None` if empty.
-    ///
-    /// Why: The UI "sort by activity" mode needs a single timestamp per
-    /// palace so operators can spot recently-written palaces. Computing it
-    /// from the loaded drawer set avoids adding a per-write update path or a
-    /// new on-disk index.
-    /// What: `handle.drawers.read().iter().map(|d| d.created_at).max()`.
-    /// Null when the handle is unavailable or the palace has zero drawers.
-    /// Test: `palace_list_includes_last_write_at` (web tests, added below).
-    last_write_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Distinct-entity count in the KG adjacency (zero when no handle).
-    ///
-    /// Why: The operator TUI surfaces graph breadth alongside triple count;
-    /// a separate field avoids re-querying the KG for every dashboard tick.
-    /// What: `handle.kg.node_count()`. `#[serde(default)]` so older clients
-    /// that don't know the field still deserialise the payload.
-    /// Test: `palace_list_includes_graph_counts`.
-    #[serde(default)]
-    node_count: u64,
-    /// Directed-edge count in the KG adjacency (zero when no handle).
-    ///
-    /// Why: Companion to `node_count` for density at a glance.
-    /// What: `handle.kg.edge_count()`. `#[serde(default)]` for forward-compat.
-    /// Test: `palace_list_includes_graph_counts`.
-    #[serde(default)]
-    edge_count: u64,
-    /// Number of Louvain communities detected in the KG (zero when no handle).
-    ///
-    /// Why: The MEMORY tab shows a community tally so operators can spot
-    /// clustering at a glance without opening the KG explorer.
-    /// What: `handle.kg.community_count()`. `#[serde(default)]` for
-    /// forward-compat.
-    /// Test: `palace_list_includes_graph_counts`.
-    #[serde(default)]
-    community_count: u64,
-    /// `true` while a `Dreamer::dream_cycle` is running against this palace.
-    ///
-    /// Why: Drives the dreaming/compacting spinner in the operator TUI; the
-    /// dashboard polls `/api/v1/palaces` and needs a single boolean signal.
-    /// What: `handle.is_compacting()`, set by `CompactionGuard` in
-    /// `trusty_common::memory_core::dream`. `#[serde(default)]` so old clients
-    /// that don't expect the field deserialise as `false`.
-    /// Test: `palace_list_includes_graph_counts`.
-    #[serde(default)]
-    is_compacting: bool,
-}
-
-/// Build a `PalaceInfo` from a `Palace` row plus an optional opened handle.
-///
-/// Why: Both `list_palaces` and `get_palace_handler` need the same enriched
-/// shape; centralizing the field-pulling avoids drift.
-/// What: Reads drawer count, vector index size, active KG triple count, and
-/// derives wing_count from the number of distinct `room_id`s in the drawer
-/// table (until a dedicated wings/rooms table exists, distinct rooms-by-drawer
-/// is the closest proxy).
-/// Test: `palace_list_includes_richer_counts`.
-pub(crate) fn palace_info_from(palace: &Palace, handle: Option<&Arc<PalaceHandle>>) -> PalaceInfo {
-    let (
-        drawer_count,
-        vector_count,
-        kg_triple_count,
-        wing_count,
-        last_write_at,
-        node_count,
-        edge_count,
-        community_count,
-        is_compacting,
-    ) = if let Some(h) = handle {
-        let drawers = h.drawers.read();
-        let distinct_rooms: HashSet<Uuid> = drawers.iter().map(|d| d.room_id).collect();
-        let last_write = drawers.iter().map(|d| d.created_at).max();
-        (
-            drawers.len(),
-            h.vector_store.index_size(),
-            h.kg.count_active_triples(),
-            distinct_rooms.len(),
-            last_write,
-            h.kg.node_count() as u64,
-            h.kg.edge_count() as u64,
-            h.kg.community_count() as u64,
-            h.is_compacting(),
-        )
-    } else {
-        (0, 0, 0, 0, None, 0, 0, 0, false)
-    };
-    PalaceInfo {
-        id: palace.id.0.clone(),
-        name: palace.name.clone(),
-        description: palace.description.clone(),
-        drawer_count,
-        vector_count,
-        kg_triple_count,
-        wing_count,
-        created_at: palace.created_at,
-        last_write_at,
-        node_count,
-        edge_count,
-        community_count,
-        is_compacting,
-    }
-}
+pub(crate) use crate::service::{palace_info_from, CreatePalaceBody, PalaceInfo};
 
 async fn list_palaces(State(state): State<AppState>) -> Result<Json<Vec<PalaceInfo>>, ApiError> {
-    let palaces = PalaceRegistry::list_palaces(&state.data_root)
-        .map_err(|e| ApiError::internal(format!("list palaces: {e:#}")))?;
-    let mut out = Vec::with_capacity(palaces.len());
-    for p in palaces {
-        let handle = state.registry.open_palace(&state.data_root, &p.id).ok();
-        out.push(palace_info_from(&p, handle.as_ref()));
-    }
-    Ok(Json(out))
-}
-
-#[derive(Deserialize)]
-struct CreatePalaceBody {
-    name: String,
-    #[serde(default)]
-    description: Option<String>,
+    Ok(Json(
+        crate::service::MemoryService::new(state)
+            .list_palaces()
+            .await?,
+    ))
 }
 
 async fn create_palace(
     State(state): State<AppState>,
     Json(body): Json<CreatePalaceBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let name = body.name.trim().to_string();
-    if name.is_empty() {
-        return Err(ApiError::bad_request("name is required"));
-    }
-    let id = PalaceId::new(&name);
-    let palace = Palace {
-        id: id.clone(),
-        name: name.clone(),
-        description: body.description.filter(|s| !s.is_empty()),
-        created_at: chrono::Utc::now(),
-        data_dir: state.data_root.join(&name),
-    };
-    state
-        .registry
-        .create_palace(&state.data_root, palace)
-        .map_err(|e| ApiError::internal(format!("create palace: {e:#}")))?;
-    state.emit(DaemonEvent::PalaceCreated {
-        id: name.clone(),
-        name: name.clone(),
-        source: ActivitySource::Http,
-    });
-    Ok(Json(json!({ "id": name })))
+    let id = crate::service::MemoryService::new(state)
+        .create_palace(body, ActivitySource::Http)
+        .await?;
+    Ok(Json(json!({ "id": id })))
 }
 
 async fn get_palace_handler(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<PalaceInfo>, ApiError> {
-    let palaces = PalaceRegistry::list_palaces(&state.data_root)
-        .map_err(|e| ApiError::internal(format!("list palaces: {e:#}")))?;
-    let palace = palaces
-        .into_iter()
-        .find(|p| p.id.0 == id)
-        .ok_or_else(|| ApiError::not_found(format!("palace not found: {id}")))?;
-    let handle = state
-        .registry
-        .open_palace(&state.data_root, &palace.id)
-        .ok();
-    Ok(Json(palace_info_from(&palace, handle.as_ref())))
+    Ok(Json(
+        crate::service::MemoryService::new(state)
+            .get_palace(&id)
+            .await?,
+    ))
 }
 
 // ---------------------------------------------------------------------------
 // Drawers
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
-struct ListDrawersQuery {
-    #[serde(default)]
-    room: Option<String>,
-    #[serde(default)]
-    tag: Option<String>,
-    #[serde(default)]
-    limit: Option<usize>,
-}
+pub(crate) use crate::service::{drawer_content_preview, CreateDrawerBody, ListDrawersQuery};
 
 async fn list_drawers(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Query(q): Query<ListDrawersQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let handle = open_handle(&state, &id)?;
-    let room = q.room.as_deref().map(RoomType::parse);
-    let drawers = handle.list_drawers(room, q.tag.clone(), q.limit.unwrap_or(50));
-    Ok(Json(serde_json::to_value(drawers).unwrap_or(json!([]))))
-}
-
-#[derive(Deserialize)]
-struct CreateDrawerBody {
-    content: String,
-    #[serde(default)]
-    room: Option<String>,
-    #[serde(default)]
-    tags: Vec<String>,
-    #[serde(default)]
-    importance: Option<f32>,
-}
-
-/// Maximum number of characters retained in a drawer's content preview.
-///
-/// Why: SSE consumers (TUI activity log, dashboard ticker) render the
-/// preview in a single line alongside the palace name; ~80 chars keeps the
-/// line readable on a 100-column terminal without truncating the palace
-/// label.
-const DRAWER_PREVIEW_MAX_CHARS: usize = 80;
-
-/// Build a single-line preview of drawer content for SSE events.
-///
-/// Why: the activity feed should show *what* was just stored, not only the
-/// running drawer count. Multiline / whitespace-heavy bodies otherwise blow
-/// out the log row, so we normalise whitespace and bound the length.
-/// What: collapses every run of ASCII / Unicode whitespace to a single space,
-/// trims leading/trailing whitespace, and truncates to
-/// [`DRAWER_PREVIEW_MAX_CHARS`] characters with a trailing `…` when cut.
-/// Test: `drawer_preview_collapses_whitespace_and_truncates`.
-pub(crate) fn drawer_content_preview(content: &str) -> String {
-    let normalised: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalised.chars().count() <= DRAWER_PREVIEW_MAX_CHARS {
-        normalised
-    } else {
-        let kept: String = normalised
-            .chars()
-            .take(DRAWER_PREVIEW_MAX_CHARS.saturating_sub(1))
-            .collect();
-        format!("{kept}…")
-    }
+    Ok(Json(
+        crate::service::MemoryService::new(state)
+            .list_drawers(&id, q)
+            .await?,
+    ))
 }
 
 async fn create_drawer(
@@ -1096,60 +786,10 @@ async fn create_drawer(
     headers: HeaderMap,
     Json(body): Json<CreateDrawerBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let handle = open_handle(&state, &id)?;
-    let room = body
-        .room
-        .as_deref()
-        .map(RoomType::parse)
-        .unwrap_or(RoomType::General);
-    let importance = body.importance.unwrap_or(0.5);
-    // Compute the preview *before* moving `body.content` into `remember` so
-    // the SSE activity feed can show what was actually stored.
-    let content_preview = drawer_content_preview(&body.content);
-    // Submission-logging Part B: attach `creator:*` attribution tags so
-    // every drawer carries the identity of the client that wrote it.
-    // HTTP clients self-identify via `X-Trusty-Client-Name` /
-    // `X-Trusty-Client-Cwd`; absent headers fall back to
-    // `unknown-http-client` and an empty cwd.
     let creator = creator_info_from_http(&headers);
-    let mut tags_with_creator = body.tags;
-    creator.merge_into(&mut tags_with_creator);
-    // Issue #133: mirror the MCP `memory_remember` path — keep originals so
-    // the auto-KG extractor sees the same content / tags / room that landed
-    // in the drawer. `remember` consumes them, so clone before the call.
-    let content_for_kg = body.content.clone();
-    let tags_for_kg = tags_with_creator.clone();
-    let room_label_for_kg = crate::tools::room_label(&room);
-    let drawer_id = handle
-        .remember(body.content, room, tags_with_creator, importance)
-        .await
-        .map_err(|e| ApiError::internal(format!("remember: {e:#}")))?;
-    let drawer_count = handle.drawers.read().len();
-    let palace_name = PalaceRegistry::list_palaces(&state.data_root)
-        .ok()
-        .and_then(|ps| ps.into_iter().find(|p| p.id.0 == id).map(|p| p.name))
-        .unwrap_or_else(|| id.clone());
-    state.emit(DaemonEvent::DrawerAdded {
-        palace_id: id.clone(),
-        palace_name,
-        drawer_count,
-        timestamp: chrono::Utc::now(),
-        content_preview,
-        source: ActivitySource::Http,
-    });
-    state.emit(aggregate_status_event(&state));
-    // Issue #133: best-effort auto-KG extraction. Mirrors the MCP path
-    // (`tools.rs::memory_remember`). Failures during extraction MUST NOT
-    // fail the HTTP write — the drawer is already on disk; the extractor
-    // logs warnings and swallows errors internally.
-    crate::tools::auto_extract_and_assert(
-        &handle,
-        drawer_id,
-        &content_for_kg,
-        &tags_for_kg,
-        room_label_for_kg.as_deref(),
-    )
-    .await;
+    let drawer_id = crate::service::MemoryService::new(state)
+        .create_drawer(&id, body, creator, ActivitySource::Http)
+        .await?;
     Ok(Json(json!({ "id": drawer_id })))
 }
 
@@ -1157,46 +797,15 @@ async fn delete_drawer(
     State(state): State<AppState>,
     AxumPath((id, drawer_id)): AxumPath<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    let handle = open_handle(&state, &id)?;
-    let uuid = Uuid::parse_str(&drawer_id)
-        .map_err(|_| ApiError::bad_request("drawer_id must be a UUID"))?;
-    handle
-        .forget(uuid)
-        .await
-        .map_err(|e| ApiError::internal(format!("forget: {e:#}")))?;
-    let drawer_count = handle.drawers.read().len();
-    state.emit(DaemonEvent::DrawerDeleted {
-        palace_id: id.clone(),
-        drawer_count,
-        source: ActivitySource::Http,
-    });
-    state.emit(aggregate_status_event(&state));
+    crate::service::MemoryService::new(state)
+        .delete_drawer(&id, &drawer_id, ActivitySource::Http)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Compute the current aggregate `StatusChanged` event by walking all palaces.
-///
-/// Why: Several mutating handlers (drawer add/delete, dream run) need to push
-/// a refreshed status snapshot so dashboard stat cards stay in sync without
-/// the SPA having to issue an extra `/api/v1/status` request.
-/// What: Mirrors the math in the `status` handler — sums drawer count,
-/// vector index size, and active KG triples across every persisted palace.
-/// Test: Indirectly via the SSE integration tests that observe the event.
+/// Backwards-compat re-export — the implementation now lives in `service`.
 pub(crate) fn aggregate_status_event(state: &AppState) -> DaemonEvent {
-    let palaces = PalaceRegistry::list_palaces(&state.data_root).unwrap_or_default();
-    let (mut total_drawers, mut total_vectors, mut total_kg_triples) = (0usize, 0usize, 0usize);
-    for p in &palaces {
-        if let Ok(handle) = state.registry.open_palace(&state.data_root, &p.id) {
-            total_drawers = total_drawers.saturating_add(handle.drawers.read().len());
-            total_vectors = total_vectors.saturating_add(handle.vector_store.index_size());
-            total_kg_triples = total_kg_triples.saturating_add(handle.kg.count_active_triples());
-        }
-    }
-    DaemonEvent::StatusChanged {
-        total_drawers,
-        total_vectors,
-        total_kg_triples,
-    }
+    crate::service::MemoryService::new(state.clone()).aggregate_status_event()
 }
 
 // ---------------------------------------------------------------------------
@@ -1217,44 +826,15 @@ async fn recall_handler(
     AxumPath(id): AxumPath<String>,
     Query(q): Query<RecallQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let handle = open_handle(&state, &id)?;
-    let top_k = q.top_k.unwrap_or(10);
-    let results = if q.deep.unwrap_or(false) {
-        recall_deep_with_default_embedder(&handle, &q.q, top_k).await
-    } else {
-        recall_with_default_embedder(&handle, &q.q, top_k).await
-    }
-    .map_err(|e| ApiError::internal(format!("recall: {e:#}")))?;
-
-    let payload: Vec<Value> = results.into_iter().map(recall_entry_json).collect();
-    Ok(Json(json!(payload)))
+    Ok(Json(
+        crate::service::MemoryService::new(state)
+            .recall(&id, &q.q, q.top_k.unwrap_or(10), q.deep.unwrap_or(false))
+            .await?,
+    ))
 }
 
-/// Flatten a [`RecallResult`] into a single JSON object with the drawer's
-/// fields hoisted to the top level.
-///
-/// Why: Issue #69 — the recall API previously nested the drawer under a
-/// `"drawer"` wrapper (`{"drawer": {"content": …}, "score": …}`), so every
-/// client that looked for `content`/`tags`/`importance` at the top level of an
-/// entry got nothing and recall always appeared to return `[]`. Hoisting the
-/// drawer fields makes `content` directly reachable while keeping `score` and
-/// `layer` alongside as ranking metadata.
-/// What: Serializes the [`Drawer`](trusty_common::memory_core::Drawer) to a
-/// JSON object and inserts `score` and `layer`. The `Drawer` schema has no
-/// `score`/`layer` keys, so there is no field collision. Falls back to a
-/// `{"score", "layer"}`-only object if the drawer fails to serialize (it never
-/// should — `Drawer` is plain `#[derive(Serialize)]` data).
-/// Test: `recall_entry_json_hoists_drawer_fields` asserts `content` is at the
-/// top level and the `drawer` wrapper key is absent.
-fn recall_entry_json(r: RecallResult) -> Value {
-    let mut obj = match serde_json::to_value(&r.drawer) {
-        Ok(Value::Object(map)) => map,
-        _ => serde_json::Map::new(),
-    };
-    obj.insert("score".to_string(), json!(r.score));
-    obj.insert("layer".to_string(), json!(r.layer));
-    Value::Object(obj)
-}
+#[allow(unused_imports)]
+pub(crate) use crate::service::recall_entry_json;
 
 /// `GET /api/v1/recall?q=<query>&top_k=<n>&deep=<bool>` — cross-palace semantic
 /// search.
@@ -1273,9 +853,9 @@ async fn recall_all_handler(
     State(state): State<AppState>,
     Query(q): Query<RecallQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let top_k = q.top_k.unwrap_or(10);
-    let deep = q.deep.unwrap_or(false);
-    let value = crate::chat::execute_recall_all(&state, &q.q, top_k, deep).await;
+    let value = crate::service::MemoryService::new(state)
+        .recall_all(&q.q, q.top_k.unwrap_or(10), q.deep.unwrap_or(false))
+        .await;
     if let Some(err) = value.get("error").and_then(|v| v.as_str()) {
         return Err(ApiError::internal(err.to_string()));
     }
@@ -1296,46 +876,23 @@ async fn kg_query(
     AxumPath(id): AxumPath<String>,
     Query(q): Query<KgQueryParams>,
 ) -> Result<Json<Vec<Triple>>, ApiError> {
-    let handle = open_handle(&state, &id)?;
-    let triples = handle
-        .kg
-        .query_active(&q.subject)
-        .await
-        .map_err(|e| ApiError::internal(format!("kg query: {e:#}")))?;
-    Ok(Json(triples))
+    Ok(Json(
+        crate::service::MemoryService::new(state)
+            .kg_query(&id, &q.subject)
+            .await?,
+    ))
 }
 
-#[derive(Deserialize)]
-struct KgAssertBody {
-    subject: String,
-    predicate: String,
-    object: String,
-    #[serde(default)]
-    confidence: Option<f32>,
-    #[serde(default)]
-    provenance: Option<String>,
-}
+pub(crate) use crate::service::KgAssertBody;
 
 async fn kg_assert(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
     Json(body): Json<KgAssertBody>,
 ) -> Result<StatusCode, ApiError> {
-    let handle = open_handle(&state, &id)?;
-    let triple = Triple {
-        subject: body.subject,
-        predicate: body.predicate,
-        object: body.object,
-        valid_from: chrono::Utc::now(),
-        valid_to: None,
-        confidence: body.confidence.unwrap_or(1.0),
-        provenance: body.provenance,
-    };
-    handle
-        .kg
-        .assert(triple)
-        .await
-        .map_err(|e| ApiError::internal(format!("kg assert: {e:#}")))?;
+    crate::service::MemoryService::new(state)
+        .kg_assert(&id, body)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1383,13 +940,12 @@ async fn kg_list_subjects(
     AxumPath(id): AxumPath<String>,
     Query(q): Query<KgListSubjectsParams>,
 ) -> Result<Json<Vec<String>>, ApiError> {
-    let handle = open_handle(&state, &id)?;
     let limit = q.limit.clamp(1, MAX_KG_LIST_LIMIT);
-    let subjects = handle
-        .kg
-        .list_subjects(limit)
-        .map_err(|e| ApiError::internal(format!("kg list_subjects: {e:#}")))?;
-    Ok(Json(subjects))
+    Ok(Json(
+        crate::service::MemoryService::new(state)
+            .kg_list_subjects(&id, limit)
+            .await?,
+    ))
 }
 
 /// `GET /api/v1/palaces/{id}/kg/subjects_with_counts?limit=N` — list distinct
@@ -1408,12 +964,10 @@ async fn kg_list_subjects_with_counts(
     AxumPath(id): AxumPath<String>,
     Query(q): Query<KgListSubjectsParams>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
-    let handle = open_handle(&state, &id)?;
     let limit = q.limit.clamp(1, MAX_KG_LIST_LIMIT);
-    let rows = handle
-        .kg
-        .list_subjects_with_counts(limit)
-        .map_err(|e| ApiError::internal(format!("kg list_subjects_with_counts: {e:#}")))?;
+    let rows = crate::service::MemoryService::new(state)
+        .kg_list_subjects_with_counts(&id, limit)
+        .await?;
     let out: Vec<Value> = rows
         .into_iter()
         .map(|(subject, count)| json!({ "subject": subject, "count": count }))
@@ -1448,14 +1002,12 @@ async fn kg_list_all(
     AxumPath(id): AxumPath<String>,
     Query(q): Query<KgListAllParams>,
 ) -> Result<Json<Vec<Triple>>, ApiError> {
-    let handle = open_handle(&state, &id)?;
     let limit = q.limit.clamp(1, MAX_KG_LIST_LIMIT);
-    let triples = handle
-        .kg
-        .list_active(limit, q.offset)
-        .await
-        .map_err(|e| ApiError::internal(format!("kg list_active: {e:#}")))?;
-    Ok(Json(triples))
+    Ok(Json(
+        crate::service::MemoryService::new(state)
+            .kg_list_all(&id, limit, q.offset)
+            .await?,
+    ))
 }
 
 /// `GET /api/v1/palaces/{id}/kg/count` — count of currently-active triples.
@@ -1469,203 +1021,56 @@ async fn kg_count(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let handle = open_handle(&state, &id)?;
-    let active = handle.kg.count_active_triples();
+    let active = crate::service::MemoryService::new(state)
+        .kg_count(&id)
+        .await?;
     Ok(Json(json!({ "active": active })))
 }
 
-/// Wire shape returned by `/api/v1/palaces/{id}/kg/graph`.
-///
-/// Why: Issue #97 — the per-palace visual graph view needs a single payload
-/// containing every active triple plus a node-level community count so the
-/// UI can color-code clusters. Splitting into nodes/edges client-side lets
-/// d3-force own the layout while keeping the wire shape compact.
-/// What: `triples` carries the raw `(s, p, o)` list; `community_count` lets
-/// the SPA decide whether to color-code clusters (zero ⇒ no Louvain pass
-/// has run).
-/// Test: `kg_graph_returns_active_triples`.
-#[derive(Serialize)]
-struct KgGraphPayload {
-    triples: Vec<Triple>,
-    node_count: u64,
-    edge_count: u64,
-    community_count: u64,
-}
+pub(crate) use crate::service::KgGraphPayload;
 
-/// Hard cap on triples returned by the per-palace graph endpoint.
-///
-/// Why: The visual graph is unusable past a few thousand triples regardless
-/// of how fast the daemon serves the payload. The spec target is "<1s for
-/// palaces with <500 triples"; this cap protects the daemon from a runaway
-/// fetch on a pathologically large palace.
-/// What: `5_000` — well above the issue's 500-triple sanity benchmark while
-/// staying inside an acceptable single JSON response budget.
-/// Test: `kg_graph_returns_active_triples`.
-const KG_GRAPH_MAX_TRIPLES: usize = 5_000;
-
-/// `GET /api/v1/palaces/{id}/kg/graph` — full graph payload for the SPA.
-///
-/// Why: Issue #97's visual graph view needs every active triple in one call
-/// so the d3-force layout can run without paging. The existing `/kg/all`
-/// endpoint caps page size at 200 — fine for the explorer table but too
-/// small for the visual graph. This handler does a single `list_active`
-/// pass capped at [`KG_GRAPH_MAX_TRIPLES`] and bundles the graph counts in
-/// the same payload.
-/// What: opens the palace handle, calls `KnowledgeGraph::list_active(cap,
-/// 0)`, and returns `{ triples, node_count, edge_count, community_count }`.
-/// Failures surface as `ApiError::internal`.
-/// Test: `kg_graph_returns_active_triples` (web tests).
 async fn kg_graph(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<KgGraphPayload>, ApiError> {
-    let handle = open_handle(&state, &id)?;
-    let triples = handle
-        .kg
-        .list_active(KG_GRAPH_MAX_TRIPLES, 0)
-        .await
-        .map_err(|e| ApiError::internal(format!("kg list_active: {e:#}")))?;
-    let node_count = handle.kg.node_count() as u64;
-    let edge_count = handle.kg.edge_count() as u64;
-    let community_count = handle.kg.community_count() as u64;
-    Ok(Json(KgGraphPayload {
-        triples,
-        node_count,
-        edge_count,
-        community_count,
-    }))
+    Ok(Json(
+        crate::service::MemoryService::new(state)
+            .kg_graph(&id)
+            .await?,
+    ))
 }
 
 // ---------------------------------------------------------------------------
 // Dream cycle status + on-demand run
 // ---------------------------------------------------------------------------
 
-/// Wire payload for dream status endpoints — `last_run_at` may be null when no
-/// cycle has run yet on this palace (or the aggregate has nothing to report).
-#[derive(Serialize, Default)]
-pub(crate) struct DreamStatusPayload {
-    pub(crate) last_run_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub(crate) merged: usize,
-    pub(crate) pruned: usize,
-    pub(crate) compacted: usize,
-    pub(crate) closets_updated: usize,
-    pub(crate) duration_ms: u64,
-}
+pub(crate) use crate::service::DreamStatusPayload;
 
-impl From<PersistedDreamStats> for DreamStatusPayload {
-    fn from(p: PersistedDreamStats) -> Self {
-        Self {
-            last_run_at: Some(p.last_run_at),
-            merged: p.stats.merged,
-            pruned: p.stats.pruned,
-            compacted: p.stats.compacted,
-            closets_updated: p.stats.closets_updated,
-            duration_ms: p.stats.duration_ms,
-        }
-    }
-}
-
-/// GET /api/v1/dream/status — aggregate latest dream stats across all palaces.
-///
-/// Why: The dashboard wants a single "last dream cycle" panel rather than
-/// per-palace details; we sum the per-palace counters and surface the most
-/// recent `last_run_at` so operators can spot a stalled background loop.
-/// What: Walks every palace, loads its `dream_stats.json` if present, sums
-/// counts, and returns the max `last_run_at` (or null if no palace has run).
-/// Test: `dream_status_aggregates_across_palaces` covers the read path.
 async fn dream_status(State(state): State<AppState>) -> Json<DreamStatusPayload> {
-    let palaces = PalaceRegistry::list_palaces(&state.data_root).unwrap_or_default();
-    let mut out = DreamStatusPayload::default();
-    let mut latest: Option<chrono::DateTime<chrono::Utc>> = None;
-    for p in palaces {
-        let data_dir = state.data_root.join(p.id.as_str());
-        let snap = match PersistedDreamStats::load(&data_dir) {
-            Ok(Some(s)) => s,
-            _ => continue,
-        };
-        out.merged = out.merged.saturating_add(snap.stats.merged);
-        out.pruned = out.pruned.saturating_add(snap.stats.pruned);
-        out.compacted = out.compacted.saturating_add(snap.stats.compacted);
-        out.closets_updated = out
-            .closets_updated
-            .saturating_add(snap.stats.closets_updated);
-        out.duration_ms = out.duration_ms.saturating_add(snap.stats.duration_ms);
-        latest = match latest {
-            Some(t) if t >= snap.last_run_at => Some(t),
-            _ => Some(snap.last_run_at),
-        };
-    }
-    out.last_run_at = latest;
-    Json(out)
+    Json(
+        crate::service::MemoryService::new(state)
+            .dream_status_aggregate()
+            .await,
+    )
 }
 
-/// GET /api/v1/palaces/:id/dream/status — per-palace dream stats snapshot.
 async fn palace_dream_status(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<DreamStatusPayload>, ApiError> {
-    let data_dir = state.data_root.join(&id);
-    if !data_dir.exists() {
-        return Err(ApiError::not_found(format!("palace not found: {id}")));
-    }
-    let payload = match PersistedDreamStats::load(&data_dir) {
-        Ok(Some(s)) => s.into(),
-        Ok(None) => DreamStatusPayload::default(),
-        Err(e) => return Err(ApiError::internal(format!("read dream stats: {e:#}"))),
-    };
-    Ok(Json(payload))
+    Ok(Json(
+        crate::service::MemoryService::new(state)
+            .dream_status_for_palace(&id)
+            .await?,
+    ))
 }
 
-/// POST /api/v1/dream/run — run a dream cycle across all palaces on demand.
-///
-/// Why: The dashboard exposes a "Run now" button so operators can force a
-/// cycle without waiting for the idle clock; useful after a bulk ingest or
-/// when diagnosing the dream loop itself.
-/// What: Opens every persisted palace, runs `Dreamer::dream_cycle` with the
-/// default config, and returns the aggregated stats plus the run timestamp.
-/// Errors on individual palaces are logged but don't abort the sweep.
-/// Test: `dream_run_aggregates_stats` covers the round-trip.
 async fn dream_run(State(state): State<AppState>) -> Result<Json<DreamStatusPayload>, ApiError> {
-    let palaces = PalaceRegistry::list_palaces(&state.data_root)
-        .map_err(|e| ApiError::internal(format!("list palaces: {e:#}")))?;
-    let dreamer = Dreamer::new(DreamConfig::default());
-    let mut out = DreamStatusPayload::default();
-    for p in palaces {
-        let handle = match state.registry.open_palace(&state.data_root, &p.id) {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::warn!(palace = %p.id, "dream_run: open failed: {e:#}");
-                continue;
-            }
-        };
-        match dreamer.dream_cycle(&handle).await {
-            Ok(stats) => {
-                out.merged = out.merged.saturating_add(stats.merged);
-                out.pruned = out.pruned.saturating_add(stats.pruned);
-                out.compacted = out.compacted.saturating_add(stats.compacted);
-                out.closets_updated = out.closets_updated.saturating_add(stats.closets_updated);
-                out.duration_ms = out.duration_ms.saturating_add(stats.duration_ms);
-            }
-            Err(e) => tracing::warn!(palace = %p.id, "dream_run: cycle failed: {e:#}"),
-        }
-        // Issue #53: refresh the community-detection cache after each
-        // successful or failed cycle. Even if the dedup/decay pass errored we
-        // still want a fresh gap snapshot — `knowledge_gaps()` reads the KG
-        // directly and is independent of the dream pass results.
-        refresh_gaps_cache(&state, &handle).await;
-    }
-    out.last_run_at = Some(chrono::Utc::now());
-    state.emit(DaemonEvent::DreamCompleted {
-        palace_id: None,
-        merged: out.merged,
-        pruned: out.pruned,
-        compacted: out.compacted,
-        closets_updated: out.closets_updated,
-        duration_ms: out.duration_ms,
-        source: ActivitySource::Http,
-    });
-    state.emit(aggregate_status_event(&state));
-    Ok(Json(out))
+    Ok(Json(
+        crate::service::MemoryService::new(state)
+            .dream_run()
+            .await?,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1966,92 +1371,8 @@ async fn remove_prompt_fact_handler(
     }
 }
 
-/// Recompute the gaps for `handle` and write them to the registry cache.
-///
-/// Why: Wraps the post-dream-cycle bookkeeping in one place so the HTTP
-/// `dream_run` handler and any future schedulers share the exact same
-/// enrichment path. Issue #53 also asks for an LLM-generated
-/// `suggested_exploration` when `OPENROUTER_API_KEY` is set — that step is
-/// best-effort and never blocks cache population.
-/// What: Calls `KnowledgeGraph::knowledge_gaps()`, optionally enriches the
-/// `suggested_exploration` field via `enrich_gap_exploration`, then stores
-/// the resulting vec on `state.registry`. Logs the gap count at `debug!`.
-/// Test: Indirect via `kg_gaps_endpoint_returns_cached_gaps` (which runs a
-/// dream cycle and then reads `/api/v1/kg/gaps`).
-async fn refresh_gaps_cache(state: &AppState, handle: &Arc<PalaceHandle>) {
-    let mut gaps = handle.kg.knowledge_gaps();
-    // LLM enrichment is best-effort. We only attempt it when an API key is
-    // present in the process environment; absence is the common case and the
-    // template `suggested_exploration` from `find_communities` is already a
-    // perfectly serviceable fallback.
-    if let Ok(api_key) = std::env::var("OPENROUTER_API_KEY") {
-        if !api_key.is_empty() {
-            for gap in gaps.iter_mut() {
-                if let Some(enriched) = enrich_gap_exploration(&api_key, gap).await {
-                    gap.suggested_exploration = enriched;
-                }
-            }
-        }
-    }
-    let gap_count = gaps.len();
-    state.registry.set_gaps(handle.id.clone(), gaps);
-    tracing::debug!(palace = %handle.id, gaps = gap_count, "community gaps updated");
-}
-
-/// Ask OpenRouter for a focused exploration question for a single gap.
-///
-/// Why: Issue #53 — when an API key is available the dream cycle should
-/// upgrade the templated `suggested_exploration` to a model-generated
-/// research question. The result is cached for cheap re-reads, so the LLM
-/// cost is paid at most once per dream cycle per gap rather than on every
-/// `/kg/gaps` request.
-/// What: Builds a short user prompt naming up to the first five entities in
-/// the gap, calls `openrouter_chat` (deprecated but still the simplest
-/// one-shot helper in `trusty-common`), and returns the trimmed completion
-/// on success. Returns `None` on any error so the caller can fall back to
-/// the template.
-/// Test: Network-dependent — not unit-tested. Behavioural coverage comes
-/// from manual runs of the dream cycle with `OPENROUTER_API_KEY` set.
-async fn enrich_gap_exploration(api_key: &str, gap: &KnowledgeGap) -> Option<String> {
-    // Limit the entity list we shove into the prompt so we don't blow the
-    // token budget on a 1k-node community.
-    let preview: Vec<&str> = gap.entities.iter().take(5).map(String::as_str).collect();
-    if preview.is_empty() {
-        return None;
-    }
-    let entities = preview.join(", ");
-    let user = format!(
-        "Given these related entities from a knowledge graph: {entities}. \
-         Suggest one specific research question (single sentence, under 25 words) \
-         that would help fill gaps in this knowledge cluster. Return only the question."
-    );
-    let messages = vec![trusty_common::ChatMessage {
-        role: "user".to_string(),
-        content: user,
-        tool_call_id: None,
-        tool_calls: None,
-    }];
-    // `openrouter_chat` is deprecated in favour of `OpenRouterProvider::chat_stream`,
-    // but the one-shot helper is the right tool for this background, best-effort
-    // enrichment — we don't need streaming and we explicitly tolerate failures.
-    #[allow(deprecated)]
-    let res = trusty_common::openrouter_chat(api_key, "openai/gpt-4o-mini", messages).await;
-    match res {
-        Ok(text) => {
-            let trimmed = text.trim().to_string();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            }
-        }
-        Err(e) => {
-            tracing::debug!("openrouter gap enrichment failed (using template): {e:#}");
-            None
-        }
-    }
-}
-
+#[allow(unused_imports)]
+pub(crate) use crate::service::refresh_gaps_cache;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -2100,12 +1421,25 @@ impl IntoResponse for ApiError {
     }
 }
 
+impl From<crate::service::ServiceError> for ApiError {
+    fn from(e: crate::service::ServiceError) -> Self {
+        match e {
+            crate::service::ServiceError::BadRequest(m) => ApiError::bad_request(m),
+            crate::service::ServiceError::NotFound(m) => ApiError::not_found(m),
+            crate::service::ServiceError::Internal(m) => ApiError::internal(m),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::DRAWER_PREVIEW_MAX_CHARS;
     use axum::body::to_bytes;
     use axum::http::Request;
     use tower::util::ServiceExt;
+    use trusty_common::memory_core::palace::Palace;
+    use trusty_common::memory_core::retrieval::RecallResult;
 
     fn test_state() -> AppState {
         let tmp = tempfile::tempdir().expect("tempdir");

@@ -1,118 +1,1069 @@
-//! `ServiceDescriptor` impl for the trusty-memory MCP service.
+//! `MemoryService` — pure business-logic facade over `AppState`.
 //!
-//! Why: open-mpm (and any future host process that links several MCP
-//! services into a single binary) needs a uniform way to enumerate every
-//! tool a linked service contributes and the scopes each tool requires.
-//! The shared `trusty_mcp_core::ServiceDescriptor` trait is that contract:
-//! the host collects `&dyn ServiceDescriptor` impls and feeds them to
-//! `OpenRpcBuilder::from_services` to emit one merged `rpc.discover`
-//! document covering all of them. By implementing the trait here, the
-//! host no longer needs to know anything concrete about trusty-memory.
+//! Why: `web.rs` previously hosted ~5700 lines that mingled axum extraction,
+//! JSON wire shapes, and business logic. Moving the logic into a struct with
+//! `anyhow::Result<Value>` methods lets the HTTP handlers stay one-liners
+//! and lets non-HTTP callers (chat tool dispatch, future RPC bridges) reuse
+//! the same code paths without dragging axum types around.
+//! What: A zero-cost wrapper around [`AppState`] exposing one async method
+//! per logical operation. Each method returns either `anyhow::Result<Value>`
+//! (for handlers that already wrap errors with `ApiError::internal`) or a
+//! domain-specific result the handler maps into JSON.
+//! Test: Each method is covered indirectly via the corresponding HTTP test in
+//! `web::tests` (the handlers delegate here verbatim).
 //!
-//! What: A zero-sized `MemoryMcpService` struct that delegates to the
-//! existing `tool_definitions_with` and `scopes_for_tool` helpers already
-//! used by this crate's standalone `rpc.discover` handler. Reusing those
-//! functions guarantees the host-merged manifest and the standalone one
-//! stay byte-identical.
-//!
-//! Test: `tests` below assert the tool count (11), the name string, and
-//! that the read/write scope split matches what `scopes_for_tool` returns
-//! for representative tools (`memory_recall` → `memory.read`,
-//! `memory_remember` → `memory.write`).
+//! Hard constraint (issue #151): no behaviour change. Every method's success
+//! and failure shapes match what the handler used to produce inline.
 
-use trusty_common::mcp::ServiceDescriptor;
+use crate::attribution::CreatorInfo;
+use crate::{ActivityFilter, ActivitySource, AppState, DaemonEvent};
+use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::HashSet;
+use std::sync::Arc;
+use trusty_common::memory_core::dream::{DreamConfig, Dreamer, PersistedDreamStats};
+use trusty_common::memory_core::palace::{Palace, PalaceId, RoomType};
+use trusty_common::memory_core::retrieval::{
+    recall_across_palaces_with_default_embedder, recall_deep_with_default_embedder,
+    recall_with_default_embedder, RecallResult,
+};
+use trusty_common::memory_core::store::kg::Triple;
+use trusty_common::memory_core::{PalaceHandle, PalaceRegistry};
+use uuid::Uuid;
 
-use crate::openrpc::scopes_for_tool;
-use crate::tools::tool_definitions_with;
+// ---------------------------------------------------------------------------
+// Wire types shared between HTTP handlers and the service layer.
+// ---------------------------------------------------------------------------
 
-/// `ServiceDescriptor` impl that advertises this crate's 11 memory tools.
+/// Serializable palace summary used by `GET /api/v1/palaces` and
+/// `GET /api/v1/palaces/{id}`.
 ///
-/// Why: Lets open-mpm link trusty-memory-mcp directly and include its
-/// tools in a unified `rpc.discover` document without bespoke glue code.
-/// What: Wraps the existing tool definitions and the per-tool scope
-/// mapping behind the shared trait. The struct is unit-like — there is
-/// no per-instance state — so callers can construct it with
-/// `MemoryMcpService` at the call site.
-/// Test: `tests::tools_returns_eleven`, `tests::scopes_for_read_tool`,
-/// `tests::scopes_for_write_tool`, `tests::name_returns_trusty_memory`.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct MemoryMcpService;
+/// Why: Both endpoints return the same enriched shape; centralising the
+/// type in the service layer keeps the wire contract single-source.
+/// What: Mirrors the legacy `PalaceInfo` struct verbatim — counts, timestamps,
+/// graph stats, and the `is_compacting` flag.
+/// Test: `palace_list_includes_richer_counts`, `palace_list_includes_graph_counts`.
+#[derive(Serialize, Clone, Debug)]
+pub struct PalaceInfo {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub drawer_count: usize,
+    pub vector_count: usize,
+    pub kg_triple_count: usize,
+    pub wing_count: usize,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_write_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub node_count: u64,
+    #[serde(default)]
+    pub edge_count: u64,
+    #[serde(default)]
+    pub community_count: u64,
+    #[serde(default)]
+    pub is_compacting: bool,
+}
 
-impl ServiceDescriptor for MemoryMcpService {
-    fn name(&self) -> &str {
-        "trusty-memory"
-    }
+/// Dream statistics wire shape used by both per-palace and aggregate endpoints.
+///
+/// Why: Lifted out of `web.rs` so the service layer owns the type the chat
+/// dispatcher and HTTP handlers both serialise. Stays identical to the
+/// pre-refactor shape.
+/// What: All fields are saturating sums across one or more palaces; the
+/// `last_run_at` is the max across them (or `None` when no palace has run).
+/// Test: `dream_status_aggregates_across_palaces`, `dream_run_aggregates_stats`.
+#[derive(Serialize, Default, Clone, Debug)]
+pub struct DreamStatusPayload {
+    pub last_run_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub merged: usize,
+    pub pruned: usize,
+    pub compacted: usize,
+    pub closets_updated: usize,
+    pub duration_ms: u64,
+}
 
-    fn version(&self) -> &str {
-        env!("CARGO_PKG_VERSION")
-    }
-
-    fn tools(&self) -> Vec<serde_json::Value> {
-        // Why: `tool_definitions_with(false)` matches the schema clients see
-        //      when no default palace is configured — the conservative shape
-        //      where `palace` is a required argument on every palace-scoped
-        //      tool. The host can override later if it wants to surface the
-        //      `has_default = true` variant.
-        let defs = tool_definitions_with(false);
-        defs.get("tools")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    fn scopes_for(&self, tool: &str) -> Vec<String> {
-        scopes_for_tool(tool)
+impl From<PersistedDreamStats> for DreamStatusPayload {
+    fn from(p: PersistedDreamStats) -> Self {
+        Self {
+            last_run_at: Some(p.last_run_at),
+            merged: p.stats.merged,
+            pruned: p.stats.pruned,
+            compacted: p.stats.compacted,
+            closets_updated: p.stats.closets_updated,
+            duration_ms: p.stats.duration_ms,
+        }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// `POST /api/v1/palaces` body — service-facing version.
+#[derive(Deserialize, Clone, Debug)]
+pub struct CreatePalaceBody {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
 
-    #[test]
-    fn name_returns_trusty_memory() {
-        let svc = MemoryMcpService;
-        assert_eq!(svc.name(), "trusty-memory");
+/// `POST /api/v1/palaces/{id}/drawers` body — service-facing version.
+#[derive(Deserialize, Clone, Debug)]
+pub struct CreateDrawerBody {
+    pub content: String,
+    #[serde(default)]
+    pub room: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub importance: Option<f32>,
+}
+
+/// `GET /api/v1/palaces/{id}/drawers` query — service-facing version.
+#[derive(Deserialize, Default, Clone, Debug)]
+pub struct ListDrawersQuery {
+    #[serde(default)]
+    pub room: Option<String>,
+    #[serde(default)]
+    pub tag: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// `POST /api/v1/palaces/{id}/kg` body — service-facing version.
+#[derive(Deserialize, Clone, Debug)]
+pub struct KgAssertBody {
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    #[serde(default)]
+    pub confidence: Option<f32>,
+    #[serde(default)]
+    pub provenance: Option<String>,
+}
+
+/// Knowledge-graph "graph payload" used by `GET /api/v1/palaces/{id}/kg/graph`.
+#[derive(Serialize, Clone, Debug)]
+pub struct KgGraphPayload {
+    pub triples: Vec<Triple>,
+    pub node_count: u64,
+    pub edge_count: u64,
+    pub community_count: u64,
+}
+
+/// Status payload returned by `GET /api/v1/status`.
+#[derive(Serialize, Clone, Debug)]
+pub struct StatusPayload {
+    pub version: String,
+    pub palace_count: usize,
+    pub default_palace: Option<String>,
+    pub data_root: String,
+    pub total_drawers: usize,
+    pub total_vectors: usize,
+    pub total_kg_triples: usize,
+}
+
+/// Service-level error type that maps cleanly onto HTTP status codes.
+///
+/// Why: handlers want to render 400/404/500 from a single point; the service
+/// methods produce a typed error so the binding layer can pick the right
+/// status without parsing strings.
+/// What: three variants matching the legacy `ApiError` constructors.
+/// Test: indirectly via the HTTP tests for the corresponding endpoints.
+#[derive(Debug, thiserror::Error)]
+pub enum ServiceError {
+    #[error("{0}")]
+    BadRequest(String),
+    #[error("{0}")]
+    NotFound(String),
+    #[error("{0}")]
+    Internal(String),
+}
+
+impl ServiceError {
+    pub fn bad_request(msg: impl Into<String>) -> Self {
+        Self::BadRequest(msg.into())
+    }
+    pub fn not_found(msg: impl Into<String>) -> Self {
+        Self::NotFound(msg.into())
+    }
+    pub fn internal(msg: impl Into<String>) -> Self {
+        Self::Internal(msg.into())
+    }
+}
+
+/// Result alias used across the service layer.
+pub type ServiceResult<T> = std::result::Result<T, ServiceError>;
+
+/// Hard cap on triples returned by the per-palace graph endpoint.
+const KG_GRAPH_MAX_TRIPLES: usize = 5_000;
+
+// ---------------------------------------------------------------------------
+// MemoryService — pure business logic facade.
+// ---------------------------------------------------------------------------
+
+/// Wraps [`AppState`] and exposes one async method per logical operation.
+///
+/// Why: see module docs. Lets HTTP handlers stay thin and lets non-HTTP
+/// callers (chat tool dispatch, RPC bridges) reuse the same code paths.
+/// What: `Clone` (cheap — only the inner `AppState` is shared); construct
+/// with `MemoryService::new(state)`.
+/// Test: every method is covered by the corresponding handler test in
+/// `web::tests`.
+#[derive(Clone)]
+pub struct MemoryService {
+    state: AppState,
+}
+
+impl MemoryService {
+    /// Construct a new service wrapper.
+    ///
+    /// Why: handlers cheaply re-wrap their `AppState` on every request; the
+    /// cost is just an `Arc` clone, so we don't bother caching the wrapper.
+    /// What: stores the `AppState` for later method calls.
+    /// Test: trivial — covered indirectly by every handler test.
+    pub fn new(state: AppState) -> Self {
+        Self { state }
     }
 
-    #[test]
-    fn version_matches_cargo_pkg_version() {
-        let svc = MemoryMcpService;
-        assert_eq!(svc.version(), env!("CARGO_PKG_VERSION"));
+    /// Borrow the inner [`AppState`].
+    ///
+    /// Why: some handlers still need direct access (SSE broadcaster, session
+    /// store, etc.) while we incrementally extract code into the service.
+    /// What: returns a borrowed reference to the wrapped `AppState`.
+    /// Test: not directly tested; surface-level accessor.
+    pub fn state(&self) -> &AppState {
+        &self.state
     }
 
-    #[test]
-    fn tools_returns_expected_count() {
-        let svc = MemoryMcpService;
-        let tools = svc.tools();
-        assert_eq!(
-            tools.len(),
-            21,
-            "expected 21 memory tools, got {}",
-            tools.len()
-        );
+    // -----------------------------------------------------------------
+    // Status / config
+    // -----------------------------------------------------------------
+
+    /// Build the aggregate `/api/v1/status` payload.
+    ///
+    /// Why: dashboard widgets and the MCP `get_status` tool need the same
+    /// roll-up; centralising avoids drift between the two surfaces.
+    /// What: walks every persisted palace, sums drawer/vector/triple counts,
+    /// and returns the [`StatusPayload`].
+    /// Test: `status_endpoint_returns_payload`.
+    pub async fn status(&self) -> StatusPayload {
+        let palaces = PalaceRegistry::list_palaces(&self.state.data_root).unwrap_or_default();
+        let palace_count = palaces.len();
+        let (mut total_drawers, mut total_vectors, mut total_kg_triples): (usize, usize, usize) =
+            (0, 0, 0);
+        for p in &palaces {
+            if let Ok(handle) = self
+                .state
+                .registry
+                .open_palace(&self.state.data_root, &p.id)
+            {
+                total_drawers = total_drawers.saturating_add(handle.drawers.read().len());
+                total_vectors = total_vectors.saturating_add(handle.vector_store.index_size());
+                total_kg_triples =
+                    total_kg_triples.saturating_add(handle.kg.count_active_triples());
+            }
+        }
+        StatusPayload {
+            version: self.state.version.clone(),
+            palace_count,
+            default_palace: self.state.default_palace.clone(),
+            data_root: self.state.data_root.display().to_string(),
+            total_drawers,
+            total_vectors,
+            total_kg_triples,
+        }
     }
 
-    #[test]
-    fn scopes_for_read_tool() {
-        let svc = MemoryMcpService;
-        assert_eq!(svc.scopes_for("memory_recall"), vec!["memory.read"]);
+    /// Compute the aggregate `StatusChanged` event used by SSE consumers.
+    ///
+    /// Why: mutating handlers push a refreshed status snapshot so dashboards
+    /// stay in sync without an extra `/api/v1/status` request.
+    /// What: same math as `status()` but returns a `DaemonEvent::StatusChanged`.
+    /// Test: indirectly via SSE integration tests.
+    pub fn aggregate_status_event(&self) -> DaemonEvent {
+        let palaces = PalaceRegistry::list_palaces(&self.state.data_root).unwrap_or_default();
+        let (mut total_drawers, mut total_vectors, mut total_kg_triples): (usize, usize, usize) =
+            (0, 0, 0);
+        for p in &palaces {
+            if let Ok(handle) = self
+                .state
+                .registry
+                .open_palace(&self.state.data_root, &p.id)
+            {
+                total_drawers = total_drawers.saturating_add(handle.drawers.read().len());
+                total_vectors = total_vectors.saturating_add(handle.vector_store.index_size());
+                total_kg_triples =
+                    total_kg_triples.saturating_add(handle.kg.count_active_triples());
+            }
+        }
+        DaemonEvent::StatusChanged {
+            total_drawers,
+            total_vectors,
+            total_kg_triples,
+        }
     }
 
-    #[test]
-    fn scopes_for_write_tool() {
-        let svc = MemoryMcpService;
-        assert_eq!(svc.scopes_for("memory_remember"), vec!["memory.write"]);
+    // -----------------------------------------------------------------
+    // Palaces
+    // -----------------------------------------------------------------
+
+    /// List every palace on disk, enriched with live handle stats.
+    ///
+    /// Why: shared between the HTTP handler and the chat tool dispatcher;
+    /// both want the same `PalaceInfo` shape.
+    /// What: walks the registry and builds a `PalaceInfo` per row.
+    /// Test: `palace_list_includes_richer_counts`, `palace_list_includes_graph_counts`.
+    pub async fn list_palaces(&self) -> ServiceResult<Vec<PalaceInfo>> {
+        let palaces = PalaceRegistry::list_palaces(&self.state.data_root)
+            .map_err(|e| ServiceError::internal(format!("list palaces: {e:#}")))?;
+        let mut out = Vec::with_capacity(palaces.len());
+        for p in palaces {
+            let handle = self
+                .state
+                .registry
+                .open_palace(&self.state.data_root, &p.id)
+                .ok();
+            out.push(palace_info_from(&p, handle.as_ref()));
+        }
+        Ok(out)
     }
 
-    #[test]
-    fn dispatches_through_trait_object() {
-        // Why: open-mpm collects services as `Vec<Box<dyn ServiceDescriptor>>`,
-        //      so we must confirm dynamic dispatch resolves correctly here.
-        let svc: Box<dyn ServiceDescriptor> = Box::new(MemoryMcpService);
-        assert_eq!(svc.name(), "trusty-memory");
-        assert_eq!(svc.tools().len(), 21);
-        assert_eq!(svc.scopes_for("palace_create"), vec!["memory.write"]);
-        assert_eq!(svc.scopes_for("palace_list"), vec!["memory.read"]);
+    /// Create a new palace and emit the corresponding activity event.
+    ///
+    /// Why: trims duplicated work between the HTTP handler and any future
+    /// non-HTTP creation flow.
+    /// What: validates the name, builds the `Palace` row, calls
+    /// `PalaceRegistry::create_palace`, and emits `PalaceCreated`. Returns
+    /// the new palace id.
+    /// Test: covered indirectly by `palace_list_includes_richer_counts` (which
+    /// posts a palace through the HTTP layer then reads it back).
+    pub async fn create_palace(
+        &self,
+        body: CreatePalaceBody,
+        source: ActivitySource,
+    ) -> ServiceResult<String> {
+        let name = body.name.trim().to_string();
+        if name.is_empty() {
+            return Err(ServiceError::bad_request("name is required"));
+        }
+        let id = PalaceId::new(&name);
+        let palace = Palace {
+            id: id.clone(),
+            name: name.clone(),
+            description: body.description.filter(|s| !s.is_empty()),
+            created_at: chrono::Utc::now(),
+            data_dir: self.state.data_root.join(&name),
+        };
+        self.state
+            .registry
+            .create_palace(&self.state.data_root, palace)
+            .map_err(|e| ServiceError::internal(format!("create palace: {e:#}")))?;
+        self.state.emit(DaemonEvent::PalaceCreated {
+            id: name.clone(),
+            name: name.clone(),
+            source,
+        });
+        Ok(name)
+    }
+
+    /// Look up a single palace by id and enrich with live handle stats.
+    ///
+    /// Why: distinct 404 vs. 500 path is needed by both HTTP and chat callers.
+    /// What: returns `NotFound` when the id is unknown, otherwise a fully
+    /// populated `PalaceInfo`.
+    /// Test: indirectly via `health_endpoint_round_trip_with_palace_is_ok`.
+    pub async fn get_palace(&self, id: &str) -> ServiceResult<PalaceInfo> {
+        let palaces = PalaceRegistry::list_palaces(&self.state.data_root)
+            .map_err(|e| ServiceError::internal(format!("list palaces: {e:#}")))?;
+        let palace = palaces
+            .into_iter()
+            .find(|p| p.id.0 == id)
+            .ok_or_else(|| ServiceError::not_found(format!("palace not found: {id}")))?;
+        let handle = self
+            .state
+            .registry
+            .open_palace(&self.state.data_root, &palace.id)
+            .ok();
+        Ok(palace_info_from(&palace, handle.as_ref()))
+    }
+
+    // -----------------------------------------------------------------
+    // Drawers
+    // -----------------------------------------------------------------
+
+    /// List drawers in a palace with optional room/tag/limit filters.
+    ///
+    /// Why: deduplicates the open-handle + listing path between HTTP and chat.
+    /// What: opens the palace handle, calls `list_drawers`, returns the
+    /// serialised JSON array.
+    /// Test: `drawers_endpoint_returns_array`.
+    pub async fn list_drawers(&self, id: &str, q: ListDrawersQuery) -> ServiceResult<Value> {
+        let handle = self.open_handle(id)?;
+        let room = q.room.as_deref().map(RoomType::parse);
+        let drawers = handle.list_drawers(room, q.tag.clone(), q.limit.unwrap_or(50));
+        Ok(serde_json::to_value(drawers).unwrap_or(json!([])))
+    }
+
+    /// Store a new drawer and emit the matching activity events.
+    ///
+    /// Why: HTTP and chat both need the auto-KG-extraction follow-up; this
+    /// method keeps that side-effect chain in one place.
+    /// What: opens the palace, stores the drawer via `PalaceHandle::remember`,
+    /// emits `DrawerAdded` + `StatusChanged`, then triggers
+    /// `tools::auto_extract_and_assert`. Returns the new drawer id.
+    /// Test: `http_create_drawer_runs_auto_kg_extraction`.
+    pub async fn create_drawer(
+        &self,
+        id: &str,
+        body: CreateDrawerBody,
+        creator: CreatorInfo,
+        source: ActivitySource,
+    ) -> ServiceResult<Uuid> {
+        let handle = self.open_handle(id)?;
+        let room = body
+            .room
+            .as_deref()
+            .map(RoomType::parse)
+            .unwrap_or(RoomType::General);
+        let importance = body.importance.unwrap_or(0.5);
+        let content_preview = drawer_content_preview(&body.content);
+        let mut tags_with_creator = body.tags;
+        creator.merge_into(&mut tags_with_creator);
+        let content_for_kg = body.content.clone();
+        let tags_for_kg = tags_with_creator.clone();
+        let room_label_for_kg = crate::tools::room_label(&room);
+        let drawer_id = handle
+            .remember(body.content, room, tags_with_creator, importance)
+            .await
+            .map_err(|e| ServiceError::internal(format!("remember: {e:#}")))?;
+        let drawer_count = handle.drawers.read().len();
+        let palace_name = PalaceRegistry::list_palaces(&self.state.data_root)
+            .ok()
+            .and_then(|ps| ps.into_iter().find(|p| p.id.0 == id).map(|p| p.name))
+            .unwrap_or_else(|| id.to_string());
+        self.state.emit(DaemonEvent::DrawerAdded {
+            palace_id: id.to_string(),
+            palace_name,
+            drawer_count,
+            timestamp: chrono::Utc::now(),
+            content_preview,
+            source,
+        });
+        self.state.emit(self.aggregate_status_event());
+        crate::tools::auto_extract_and_assert(
+            &handle,
+            drawer_id,
+            &content_for_kg,
+            &tags_for_kg,
+            room_label_for_kg.as_deref(),
+        )
+        .await;
+        Ok(drawer_id)
+    }
+
+    /// Forget (delete) a drawer and emit the matching events.
+    ///
+    /// Why: same dedup story as `create_drawer`.
+    /// What: parses the drawer UUID, calls `PalaceHandle::forget`, emits
+    /// `DrawerDeleted` + `StatusChanged`.
+    /// Test: indirectly via the drawer-related HTTP tests.
+    pub async fn delete_drawer(
+        &self,
+        id: &str,
+        drawer_id: &str,
+        source: ActivitySource,
+    ) -> ServiceResult<()> {
+        let handle = self.open_handle(id)?;
+        let uuid = Uuid::parse_str(drawer_id)
+            .map_err(|_| ServiceError::bad_request("drawer_id must be a UUID"))?;
+        handle
+            .forget(uuid)
+            .await
+            .map_err(|e| ServiceError::internal(format!("forget: {e:#}")))?;
+        let drawer_count = handle.drawers.read().len();
+        self.state.emit(DaemonEvent::DrawerDeleted {
+            palace_id: id.to_string(),
+            drawer_count,
+            source,
+        });
+        self.state.emit(self.aggregate_status_event());
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // Recall
+    // -----------------------------------------------------------------
+
+    /// Per-palace recall (semantic search), optionally with deep retrieval.
+    ///
+    /// Why: HTTP and chat tools both perform the same fan-out logic.
+    /// What: opens the palace handle and dispatches to the shallow or deep
+    /// recall helper. Returns a JSON array of flattened drawer rows (the
+    /// `recall_entry_json` shape from issue #69).
+    /// Test: `recall_entry_json_hoists_drawer_fields`.
+    pub async fn recall(
+        &self,
+        id: &str,
+        query: &str,
+        top_k: usize,
+        deep: bool,
+    ) -> ServiceResult<Value> {
+        let handle = self.open_handle(id)?;
+        let results = if deep {
+            recall_deep_with_default_embedder(&handle, query, top_k).await
+        } else {
+            recall_with_default_embedder(&handle, query, top_k).await
+        }
+        .map_err(|e| ServiceError::internal(format!("recall: {e:#}")))?;
+        let payload: Vec<Value> = results.into_iter().map(recall_entry_json).collect();
+        Ok(json!(payload))
+    }
+
+    /// Cross-palace recall.
+    ///
+    /// Why: shared between `/api/v1/recall` and the `memory_recall_all` chat
+    /// tool. Encapsulating the open-everything-fanout-merge dance avoids
+    /// drift.
+    /// What: lists every palace, opens handles (skipping failures with a
+    /// `tracing::warn!`), delegates to
+    /// `recall_across_palaces_with_default_embedder`. Returns a JSON array.
+    /// Test: indirectly via `recall_across_palaces_merges_results` and the
+    /// MCP `memory_recall_all` integration paths.
+    pub async fn recall_all(&self, query: &str, top_k: usize, deep: bool) -> Value {
+        let palaces = match PalaceRegistry::list_palaces(&self.state.data_root) {
+            Ok(v) => v,
+            Err(e) => return json!({ "error": format!("list palaces: {e:#}") }),
+        };
+        let mut handles = Vec::with_capacity(palaces.len());
+        for p in &palaces {
+            match self
+                .state
+                .registry
+                .open_palace(&self.state.data_root, &p.id)
+            {
+                Ok(h) => handles.push(h),
+                Err(e) => {
+                    tracing::warn!(palace = %p.id, "recall_all: open failed: {e:#}");
+                }
+            }
+        }
+        if handles.is_empty() {
+            return json!([]);
+        }
+        match recall_across_palaces_with_default_embedder(&handles, query, top_k, deep).await {
+            Ok(results) => json!(results
+                .into_iter()
+                .map(|r| json!({
+                    "palace_id": r.palace_id,
+                    "drawer_id": r.result.drawer.id.to_string(),
+                    "content": r.result.drawer.content,
+                    "importance": r.result.drawer.importance,
+                    "tags": r.result.drawer.tags,
+                    "score": r.result.score,
+                    "layer": r.result.layer,
+                }))
+                .collect::<Vec<_>>()),
+            Err(e) => json!({ "error": format!("recall_across_palaces: {e:#}") }),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Knowledge graph
+    // -----------------------------------------------------------------
+
+    /// Query the KG for all active triples whose subject matches.
+    pub async fn kg_query(&self, id: &str, subject: &str) -> ServiceResult<Vec<Triple>> {
+        let handle = self.open_handle(id)?;
+        handle
+            .kg
+            .query_active(subject)
+            .await
+            .map_err(|e| ServiceError::internal(format!("kg query: {e:#}")))
+    }
+
+    /// Assert a triple in the KG.
+    pub async fn kg_assert(&self, id: &str, body: KgAssertBody) -> ServiceResult<()> {
+        let handle = self.open_handle(id)?;
+        let triple = Triple {
+            subject: body.subject,
+            predicate: body.predicate,
+            object: body.object,
+            valid_from: chrono::Utc::now(),
+            valid_to: None,
+            confidence: body.confidence.unwrap_or(1.0),
+            provenance: body.provenance,
+        };
+        handle
+            .kg
+            .assert(triple)
+            .await
+            .map_err(|e| ServiceError::internal(format!("kg assert: {e:#}")))
+    }
+
+    /// List distinct subjects in the KG.
+    pub async fn kg_list_subjects(&self, id: &str, limit: usize) -> ServiceResult<Vec<String>> {
+        let handle = self.open_handle(id)?;
+        handle
+            .kg
+            .list_subjects(limit)
+            .map_err(|e| ServiceError::internal(format!("kg list_subjects: {e:#}")))
+    }
+
+    /// List distinct subjects in the KG paired with their active-triple count.
+    pub async fn kg_list_subjects_with_counts(
+        &self,
+        id: &str,
+        limit: usize,
+    ) -> ServiceResult<Vec<(String, u64)>> {
+        let handle = self.open_handle(id)?;
+        handle
+            .kg
+            .list_subjects_with_counts(limit)
+            .map_err(|e| ServiceError::internal(format!("kg list_subjects_with_counts: {e:#}")))
+    }
+
+    /// Page through every active triple.
+    pub async fn kg_list_all(
+        &self,
+        id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> ServiceResult<Vec<Triple>> {
+        let handle = self.open_handle(id)?;
+        handle
+            .kg
+            .list_active(limit, offset)
+            .await
+            .map_err(|e| ServiceError::internal(format!("kg list_active: {e:#}")))
+    }
+
+    /// Return the count of currently-active triples.
+    pub async fn kg_count(&self, id: &str) -> ServiceResult<usize> {
+        let handle = self.open_handle(id)?;
+        Ok(handle.kg.count_active_triples())
+    }
+
+    /// Build the per-palace visual graph payload.
+    pub async fn kg_graph(&self, id: &str) -> ServiceResult<KgGraphPayload> {
+        let handle = self.open_handle(id)?;
+        let triples = handle
+            .kg
+            .list_active(KG_GRAPH_MAX_TRIPLES, 0)
+            .await
+            .map_err(|e| ServiceError::internal(format!("kg list_active: {e:#}")))?;
+        Ok(KgGraphPayload {
+            triples,
+            node_count: handle.kg.node_count() as u64,
+            edge_count: handle.kg.edge_count() as u64,
+            community_count: handle.kg.community_count() as u64,
+        })
+    }
+
+    // -----------------------------------------------------------------
+    // Dream cycle
+    // -----------------------------------------------------------------
+
+    /// Aggregate dream stats across every persisted palace.
+    pub async fn dream_status_aggregate(&self) -> DreamStatusPayload {
+        let palaces = PalaceRegistry::list_palaces(&self.state.data_root).unwrap_or_default();
+        let mut out = DreamStatusPayload::default();
+        let mut latest: Option<chrono::DateTime<chrono::Utc>> = None;
+        for p in palaces {
+            let data_dir = self.state.data_root.join(p.id.as_str());
+            let snap = match PersistedDreamStats::load(&data_dir) {
+                Ok(Some(s)) => s,
+                _ => continue,
+            };
+            out.merged = out.merged.saturating_add(snap.stats.merged);
+            out.pruned = out.pruned.saturating_add(snap.stats.pruned);
+            out.compacted = out.compacted.saturating_add(snap.stats.compacted);
+            out.closets_updated = out
+                .closets_updated
+                .saturating_add(snap.stats.closets_updated);
+            out.duration_ms = out.duration_ms.saturating_add(snap.stats.duration_ms);
+            latest = match latest {
+                Some(t) if t >= snap.last_run_at => Some(t),
+                _ => Some(snap.last_run_at),
+            };
+        }
+        out.last_run_at = latest;
+        out
+    }
+
+    /// Per-palace dream stats snapshot.
+    pub async fn dream_status_for_palace(&self, id: &str) -> ServiceResult<DreamStatusPayload> {
+        let data_dir = self.state.data_root.join(id);
+        if !data_dir.exists() {
+            return Err(ServiceError::not_found(format!("palace not found: {id}")));
+        }
+        match PersistedDreamStats::load(&data_dir) {
+            Ok(Some(s)) => Ok(s.into()),
+            Ok(None) => Ok(DreamStatusPayload::default()),
+            Err(e) => Err(ServiceError::internal(format!("read dream stats: {e:#}"))),
+        }
+    }
+
+    /// Run a dream cycle across every palace.
+    pub async fn dream_run(&self) -> ServiceResult<DreamStatusPayload> {
+        let palaces = PalaceRegistry::list_palaces(&self.state.data_root)
+            .map_err(|e| ServiceError::internal(format!("list palaces: {e:#}")))?;
+        let dreamer = Dreamer::new(DreamConfig::default());
+        let mut out = DreamStatusPayload::default();
+        for p in palaces {
+            let handle = match self
+                .state
+                .registry
+                .open_palace(&self.state.data_root, &p.id)
+            {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!(palace = %p.id, "dream_run: open failed: {e:#}");
+                    continue;
+                }
+            };
+            match dreamer.dream_cycle(&handle).await {
+                Ok(stats) => {
+                    out.merged = out.merged.saturating_add(stats.merged);
+                    out.pruned = out.pruned.saturating_add(stats.pruned);
+                    out.compacted = out.compacted.saturating_add(stats.compacted);
+                    out.closets_updated = out.closets_updated.saturating_add(stats.closets_updated);
+                    out.duration_ms = out.duration_ms.saturating_add(stats.duration_ms);
+                }
+                Err(e) => tracing::warn!(palace = %p.id, "dream_run: cycle failed: {e:#}"),
+            }
+            refresh_gaps_cache(&self.state, &handle).await;
+        }
+        out.last_run_at = Some(chrono::Utc::now());
+        self.state.emit(DaemonEvent::DreamCompleted {
+            palace_id: None,
+            merged: out.merged,
+            pruned: out.pruned,
+            compacted: out.compacted,
+            closets_updated: out.closets_updated,
+            duration_ms: out.duration_ms,
+            source: ActivitySource::Http,
+        });
+        self.state.emit(self.aggregate_status_event());
+        Ok(out)
+    }
+
+    // -----------------------------------------------------------------
+    // Activity log
+    // -----------------------------------------------------------------
+
+    /// Paginated activity-log read.
+    pub async fn list_activity(
+        &self,
+        filter: ActivityFilter,
+        limit: usize,
+        offset: usize,
+    ) -> ServiceResult<(Vec<crate::ActivityEntry>, u64)> {
+        let entries = self
+            .state
+            .activity_log
+            .list(&filter, limit, offset)
+            .map_err(|e| ServiceError::internal(format!("activity list: {e:#}")))?;
+        let total = self
+            .state
+            .activity_log
+            .count()
+            .map_err(|e| ServiceError::internal(format!("activity count: {e:#}")))?;
+        Ok((entries, total))
+    }
+
+    // -----------------------------------------------------------------
+    // Internal helper — open a palace handle or return 404.
+    // -----------------------------------------------------------------
+
+    /// Open the named palace, returning `ServiceError::NotFound` on failure.
+    pub fn open_handle(&self, id: &str) -> ServiceResult<Arc<PalaceHandle>> {
+        self.state
+            .registry
+            .open_palace(&self.state.data_root, &PalaceId::new(id))
+            .map_err(|e| ServiceError::not_found(format!("palace not found: {id} ({e:#})")))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Free helper functions kept module-public so `web.rs` and `chat.rs` can use
+// them without going through the `MemoryService` wrapper. Each is a thin
+// transform (no IO, no global state).
+// ---------------------------------------------------------------------------
+
+/// Maximum characters retained in a drawer's content preview.
+pub const DRAWER_PREVIEW_MAX_CHARS: usize = 80;
+
+/// Build a single-line preview of drawer content for SSE events.
+///
+/// Why: the activity feed should show *what* was just stored; multiline /
+/// whitespace-heavy bodies otherwise blow out the log row.
+/// What: collapses whitespace, trims, truncates to
+/// [`DRAWER_PREVIEW_MAX_CHARS`] with `…` when cut.
+/// Test: `drawer_preview_collapses_whitespace_and_truncates`.
+pub fn drawer_content_preview(content: &str) -> String {
+    let normalised: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalised.chars().count() <= DRAWER_PREVIEW_MAX_CHARS {
+        normalised
+    } else {
+        let kept: String = normalised
+            .chars()
+            .take(DRAWER_PREVIEW_MAX_CHARS.saturating_sub(1))
+            .collect();
+        format!("{kept}…")
+    }
+}
+
+/// Flatten a [`RecallResult`] into a single JSON object with the drawer's
+/// fields hoisted to the top level (issue #69 shape).
+///
+/// Why: clients look for `content`/`tags`/`importance` at the top level of an
+/// entry; nesting under `"drawer"` made recall appear empty.
+/// What: serialises the drawer then inserts `score`/`layer`.
+/// Test: `recall_entry_json_hoists_drawer_fields`.
+pub fn recall_entry_json(r: RecallResult) -> Value {
+    let mut obj = match serde_json::to_value(&r.drawer) {
+        Ok(Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    obj.insert("score".to_string(), json!(r.score));
+    obj.insert("layer".to_string(), json!(r.layer));
+    Value::Object(obj)
+}
+
+/// Build a `PalaceInfo` from a `Palace` row plus an optional opened handle.
+///
+/// Why: both `list_palaces` and `get_palace` need the same enriched shape;
+/// the helper avoids field-set drift between them.
+/// What: reads drawer/vector/triple counts, distinct rooms, max
+/// `created_at`, KG node/edge/community counts, and the `is_compacting` flag.
+/// Test: `palace_list_includes_richer_counts`, `palace_list_includes_graph_counts`.
+pub fn palace_info_from(palace: &Palace, handle: Option<&Arc<PalaceHandle>>) -> PalaceInfo {
+    let (
+        drawer_count,
+        vector_count,
+        kg_triple_count,
+        wing_count,
+        last_write_at,
+        node_count,
+        edge_count,
+        community_count,
+        is_compacting,
+    ) = if let Some(h) = handle {
+        let drawers = h.drawers.read();
+        let distinct_rooms: HashSet<Uuid> = drawers.iter().map(|d| d.room_id).collect();
+        let last_write = drawers.iter().map(|d| d.created_at).max();
+        (
+            drawers.len(),
+            h.vector_store.index_size(),
+            h.kg.count_active_triples(),
+            distinct_rooms.len(),
+            last_write,
+            h.kg.node_count() as u64,
+            h.kg.edge_count() as u64,
+            h.kg.community_count() as u64,
+            h.is_compacting(),
+        )
+    } else {
+        (0, 0, 0, 0, None, 0, 0, 0, false)
+    };
+    PalaceInfo {
+        id: palace.id.0.clone(),
+        name: palace.name.clone(),
+        description: palace.description.clone(),
+        drawer_count,
+        vector_count,
+        kg_triple_count,
+        wing_count,
+        created_at: palace.created_at,
+        last_write_at,
+        node_count,
+        edge_count,
+        community_count,
+        is_compacting,
+    }
+}
+
+/// Recompute the gaps for `handle` and write them to the registry cache.
+///
+/// Why: the dream-run path needs this post-cycle bookkeeping; pulling it out
+/// of `web.rs` keeps the dream code on one side of the wall.
+/// What: calls `knowledge_gaps()`, optionally enriches via
+/// `enrich_gap_exploration`, stores on `state.registry`. Logs gap count.
+/// Test: indirectly via `kg_gaps_endpoint_returns_cached_gaps`.
+pub async fn refresh_gaps_cache(state: &AppState, handle: &Arc<PalaceHandle>) {
+    let mut gaps = handle.kg.knowledge_gaps();
+    if let Ok(api_key) = std::env::var("OPENROUTER_API_KEY") {
+        if !api_key.is_empty() {
+            for gap in gaps.iter_mut() {
+                if let Some(enriched) = enrich_gap_exploration(&api_key, gap).await {
+                    gap.suggested_exploration = enriched;
+                }
+            }
+        }
+    }
+    let gap_count = gaps.len();
+    state.registry.set_gaps(handle.id.clone(), gaps);
+    tracing::debug!(palace = %handle.id, gaps = gap_count, "community gaps updated");
+}
+
+/// Ask OpenRouter for a focused exploration question for a single gap.
+///
+/// Why: see `refresh_gaps_cache`.
+/// What: builds a short user prompt, calls `openrouter_chat`, returns the
+/// trimmed completion (or `None` on any failure).
+/// Test: network-dependent — not unit-tested.
+pub async fn enrich_gap_exploration(
+    api_key: &str,
+    gap: &trusty_common::memory_core::community::KnowledgeGap,
+) -> Option<String> {
+    let preview: Vec<&str> = gap.entities.iter().take(5).map(String::as_str).collect();
+    if preview.is_empty() {
+        return None;
+    }
+    let entities = preview.join(", ");
+    let user = format!(
+        "Given these related entities from a knowledge graph: {entities}. \
+         Suggest one specific research question (single sentence, under 25 words) \
+         that would help fill gaps in this knowledge cluster. Return only the question."
+    );
+    let messages = vec![trusty_common::ChatMessage {
+        role: "user".to_string(),
+        content: user,
+        tool_call_id: None,
+        tool_calls: None,
+    }];
+    #[allow(deprecated)]
+    let res = trusty_common::openrouter_chat(api_key, "openai/gpt-4o-mini", messages).await;
+    match res {
+        Ok(text) => {
+            let trimmed = text.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        }
+        Err(e) => {
+            tracing::debug!("openrouter gap enrichment failed (using template): {e:#}");
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// User config — moved from `web.rs` so chat and HTTP both load it cheaply.
+// ---------------------------------------------------------------------------
+
+/// Minimal mirror of the user-config schema.
+#[derive(Deserialize, Default, Clone)]
+struct UserConfigMin {
+    #[serde(default)]
+    openrouter: OpenRouterMin,
+    #[serde(default)]
+    local_model: LocalModelMin,
+}
+
+#[derive(Deserialize, Default, Clone)]
+struct OpenRouterMin {
+    #[serde(default)]
+    api_key: String,
+    #[serde(default)]
+    model: String,
+}
+
+#[derive(Deserialize, Clone)]
+struct LocalModelMin {
+    #[serde(default = "default_local_enabled")]
+    enabled: bool,
+    #[serde(default = "default_local_base_url")]
+    base_url: String,
+    #[serde(default = "default_local_model")]
+    model: String,
+}
+
+fn default_local_enabled() -> bool {
+    true
+}
+fn default_local_base_url() -> String {
+    "http://localhost:11434".to_string()
+}
+fn default_local_model() -> String {
+    "llama3.2".to_string()
+}
+
+impl Default for LocalModelMin {
+    fn default() -> Self {
+        Self {
+            enabled: default_local_enabled(),
+            base_url: default_local_base_url(),
+            model: default_local_model(),
+        }
+    }
+}
+
+/// Loaded user config (mirrors the public `LoadedUserConfig` from `web.rs`).
+#[derive(Clone)]
+pub struct LoadedUserConfig {
+    pub openrouter_api_key: String,
+    pub openrouter_model: String,
+    pub local_model: trusty_common::LocalModelConfig,
+}
+
+impl Default for LoadedUserConfig {
+    fn default() -> Self {
+        Self {
+            openrouter_api_key: String::new(),
+            openrouter_model: "anthropic/claude-3-5-sonnet".to_string(),
+            local_model: trusty_common::LocalModelConfig::default(),
+        }
+    }
+}
+
+/// Read the user's `~/.trusty-memory/config.toml`, falling back to defaults.
+///
+/// Why: shared between HTTP config endpoint, chat tool dispatch, and
+/// provider auto-detection.
+/// What: returns `Some(LoadedUserConfig)` even when the file is missing
+/// (so callers see defaults consistently); `None` only when the home
+/// directory itself can't be resolved.
+/// Test: indirectly via `config_endpoint_returns_payload`.
+pub fn load_user_config() -> Option<LoadedUserConfig> {
+    let home = dirs::home_dir()?;
+    let path = home.join(".trusty-memory").join("config.toml");
+    if !path.exists() {
+        return Some(LoadedUserConfig::default());
+    }
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let parsed: UserConfigMin = toml::from_str(&raw).unwrap_or_default();
+    let model = if parsed.openrouter.model.is_empty() {
+        "anthropic/claude-3-5-sonnet".to_string()
+    } else {
+        parsed.openrouter.model
+    };
+    Some(LoadedUserConfig {
+        openrouter_api_key: parsed.openrouter.api_key,
+        openrouter_model: model,
+        local_model: trusty_common::LocalModelConfig {
+            enabled: parsed.local_model.enabled,
+            base_url: parsed.local_model.base_url,
+            model: parsed.local_model.model,
+        },
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Convenience helpers for callers that want `anyhow::Result<Value>` shape.
+// ---------------------------------------------------------------------------
+
+/// Convert a `ServiceResult<T>` into `anyhow::Result<Value>` using a serializer.
+///
+/// Why: the chat tool dispatcher needs uniform `Result<Value>` returns to
+/// shove into the LLM's `role: "tool"` message.
+/// What: serialises `T` to JSON; on `Err`, returns the message as an
+/// `anyhow::Error`. The HTTP layer does *not* go through this — it preserves
+/// the `ServiceError` variant for status-code mapping.
+/// Test: trivial wrapper; covered indirectly by the chat tests.
+pub fn service_result_to_anyhow<T: serde::Serialize>(r: ServiceResult<T>) -> Result<Value> {
+    match r {
+        Ok(v) => serde_json::to_value(v).context("serialize service result"),
+        Err(e) => Err(anyhow!("{e}")),
     }
 }

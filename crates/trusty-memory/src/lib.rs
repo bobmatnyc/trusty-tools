@@ -33,15 +33,16 @@ use trusty_common::ChatProvider;
 pub mod activity;
 pub mod attribution;
 pub mod bootstrap;
+pub mod chat;
 pub mod commands;
 pub mod discovery;
 pub mod hook_emit;
 pub mod kg_extract;
+pub mod mcp_service;
 pub mod messaging;
 pub mod openrpc;
 pub mod prompt_facts;
 pub mod prompt_log;
-pub mod chat;
 pub mod service;
 pub mod tools;
 pub mod transport;
@@ -85,7 +86,7 @@ pub fn hook_prompt_excerpt(prompt: &str) -> String {
     }
 }
 
-pub use service::MemoryMcpService;
+pub use mcp_service::MemoryMcpService;
 pub use tools::MemoryMcpServer;
 
 /// Resolve the directory that actually holds the per-palace subdirectories.
