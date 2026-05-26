@@ -30,6 +30,8 @@ trusty-common = { path = "crates/trusty-common", version = "0.4.22" }
 trusty-mcp-core = { path = "crates/trusty-mcp-core", version = "0.1" }
 trusty-embedder = { path = "crates/trusty-embedder", version = "0.1" }
 trusty-symgraph = { path = "crates/trusty-symgraph", version = "0.2.6" }
+# issue #110 Phase 1: embedder process split
+trusty-embedder-client = { path = "crates/trusty-embedder-client", version = "0.1.0" }
 # trusty-mpm internal crates (consumed by trusty-mpm-* sub-crates).
 trusty-mpm-core = { path = "crates/trusty-mpm-core", version = "0.4.0" }
 trusty-mpm-mcp = { path = "crates/trusty-mpm-mcp", version = "0.4.0" }

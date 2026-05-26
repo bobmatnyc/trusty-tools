@@ -7,6 +7,19 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **#110 Phase 1** **Optional remote embedder via `TRUSTY_EMBEDDER` env var.**
+  Set `TRUSTY_EMBEDDER=http://127.0.0.1:7890` to route all embed calls to a
+  running `trusty-embedderd` instance instead of running ONNX in-process.
+  Default behaviour (unset, `local`, or `in-process`) is unchanged.
+  The startup log now always prints `embedder: in-process` or
+  `embedder: remote <url>` so operators can confirm the active mode.
+
+---
+
 ## [0.11.1] — 2026-05-26
 
 ### Added

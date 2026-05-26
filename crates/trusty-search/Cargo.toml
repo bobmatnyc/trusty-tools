@@ -40,6 +40,8 @@ path = "src/main.rs"
 [dependencies]
 # ── Shared trusty-common crates ────────────────────────────────────────────
 trusty-common = { version = "0.4.22", default-features = false, features = ["axum-server", "mcp", "embedder", "embedder-test-support", "symgraph", "monitor-tui"] }  # `symgraph` enables only the contracts surface — no tree-sitter, no `links` conflict; `monitor-tui` powers `trusty-search monitor tui`
+# issue #110 Phase 1: opt-in remote embedder via TRUSTY_EMBEDDER env var.
+trusty-embedder-client = { workspace = true }
 
 # ── Async runtime / HTTP ───────────────────────────────────────────────────
 tokio = { version = "1", features = ["full"] }

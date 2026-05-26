@@ -10896,6 +10896,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-embedder-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "trusty-common",
+]
+
+[[package]]
+name = "trusty-embedderd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.8.9",
+ "clap",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower-http 0.6.11",
+ "tracing",
+ "tracing-subscriber",
+ "trusty-common",
+ "trusty-embedder-client",
+]
+
+[[package]]
 name = "trusty-gworkspace"
 version = "0.1.3"
 dependencies = [
@@ -11225,6 +11257,7 @@ dependencies = [
  "tree-sitter-swift",
  "tree-sitter-typescript",
  "trusty-common",
+ "trusty-embedder-client",
  "usearch",
  "uuid",
  "walkdir",

@@ -266,11 +266,28 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
 /// Now: success is logged at INFO with the embedding dimension so operators
 /// can confirm the model loaded; failure is logged at ERROR and propagated
 /// so the daemon exits non-zero rather than silently degrading.
+///
+/// Why (issue #110 Phase 1): when `TRUSTY_EMBEDDER` is set to an HTTP address
+/// (`http://...`) the daemon switches to `RemoteEmbedderClient` and sends all
+/// embed calls to a running `trusty-embedderd` instance. Default behaviour
+/// (`local`, `in-process`, or unset) is unchanged — `InProcessEmbedderClient`
+/// wraps the existing `FastEmbedder`.
+///
 /// Test: run `trusty-search start` with `RUST_LOG=info` — the log MUST
-/// contain `embedder initialized: dim=384` before any HTTP request is
-/// accepted. Force a failure (e.g. delete the model cache while offline)
-/// and the daemon must exit non-zero, not start in BM25 mode.
+/// contain `embedder: in-process` or `embedder: remote http://...` before any
+/// HTTP request is accepted. Force a failure (e.g. delete the model cache while
+/// offline) and the daemon must exit non-zero, not start in BM25 mode.
 async fn build_embedder() -> Result<std::sync::Arc<dyn crate::core::Embedder>> {
+    // Issue #110 Phase 1: check TRUSTY_EMBEDDER for a remote HTTP address.
+    // A value starting with "http://" or "https://" routes to the remote path.
+    // Unset, "local", or "in-process" all fall through to the default path.
+    let trusty_embedder_env = std::env::var("TRUSTY_EMBEDDER").unwrap_or_default();
+    if trusty_embedder_env.starts_with("http://") || trusty_embedder_env.starts_with("https://") {
+        tracing::info!("embedder: remote {}", trusty_embedder_env);
+        let client = trusty_embedder_client::RemoteEmbedderClient::new(trusty_embedder_env.clone());
+        return Ok(std::sync::Arc::new(RemoteEmbedderAdapter { client }));
+    }
+
     // Issue #41 phase 4: when the candle feature is compiled in AND the
     // operator opts in via `TRUSTY_EMBEDDER=candle`, build a `CandleEmbedder`
     // instead of the ONNX/fastembed path. This bypasses the CoreML jetsam
@@ -278,7 +295,7 @@ async fn build_embedder() -> Result<std::sync::Arc<dyn crate::core::Embedder>> {
     // (384-dim L2-normalised f32).
     #[cfg(feature = "candle")]
     {
-        if std::env::var("TRUSTY_EMBEDDER").ok().as_deref() == Some("candle") {
+        if trusty_embedder_env == "candle" {
             let candle =
                 tokio::task::spawn_blocking(crate::service::candle_embedder::CandleEmbedder::new)
                     .await
@@ -289,6 +306,7 @@ async fn build_embedder() -> Result<std::sync::Arc<dyn crate::core::Embedder>> {
         }
     }
 
+    tracing::info!("embedder: in-process");
     let embedder = crate::core::FastEmbedder::new().await.map_err(|e| {
         tracing::error!("FastEmbedder init failed: {e:#}");
         anyhow::anyhow!("FastEmbedder init failed: {e}")
@@ -306,6 +324,49 @@ async fn build_embedder() -> Result<std::sync::Arc<dyn crate::core::Embedder>> {
     );
     tune_batch_size_for_provider(provider);
     Ok(std::sync::Arc::new(embedder))
+}
+
+/// Adapter that implements trusty-search's `Embedder` trait by delegating to
+/// a `RemoteEmbedderClient` (issue #110 Phase 1).
+///
+/// Why: trusty-search's internal `Embedder` trait uses `&[&str]` slices;
+/// `EmbedderClient` uses `Vec<String>`. This adapter bridges the two without
+/// modifying either side.
+///
+/// What: holds an `Arc<RemoteEmbedderClient>` and impls the local `Embedder`
+/// facade that `CodeIndexer` and `EmbedPool` hold behind `Arc<dyn Embedder>`.
+///
+/// Test: exercised end-to-end when `TRUSTY_EMBEDDER=http://...` is set at
+/// daemon startup; the `bit_identical` integration test validates correctness.
+struct RemoteEmbedderAdapter {
+    client: trusty_embedder_client::RemoteEmbedderClient,
+}
+
+#[async_trait::async_trait]
+impl crate::core::Embedder for RemoteEmbedderAdapter {
+    async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        use trusty_embedder_client::EmbedderClient as _;
+        let mut v = self
+            .client
+            .embed_batch(vec![text.to_string()])
+            .await
+            .map_err(|e| anyhow::anyhow!("remote embed failed: {e}"))?;
+        v.pop()
+            .ok_or_else(|| anyhow::anyhow!("remote embedder returned no vector"))
+    }
+
+    async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        use trusty_embedder_client::EmbedderClient as _;
+        let owned: Vec<String> = texts.iter().map(|s| (*s).to_owned()).collect();
+        self.client
+            .embed_batch(owned)
+            .await
+            .map_err(|e| anyhow::anyhow!("remote embed_batch failed: {e}"))
+    }
+
+    fn dimension(&self) -> usize {
+        trusty_common::embedder::EMBED_DIM
+    }
 }
 
 /// When the resolved execution provider is a GPU, retune `TRUSTY_MAX_BATCH_SIZE`
