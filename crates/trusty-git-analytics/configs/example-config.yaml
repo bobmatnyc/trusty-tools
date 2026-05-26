@@ -59,3 +59,38 @@ linear:
     - "ENG"
     - "FE"
   fetch_on_reference: true
+
+# DORA metrics configuration (issues #207, #208, #212, #213).
+#
+# Drives `tga deployments collect`, `tga incidents collect`, and
+# `tga dora`. The default `deployment_source: git_tags` works against
+# any local checkout without external credentials — flip the tag regex
+# to match your release convention.
+dora:
+  deployment_source: git_tags
+  deployment_tag_pattern: '^v?[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.\-]+)?$'
+  production_branch: main
+  # Per-signal: a commit matching `work_type` (classification category)
+  # OR `commit_message_pattern` within `within_hours` of a deploy counts
+  # as a change-failure-rate event.
+  failure_signals:
+    - work_type: bug_fix
+      on_branch: main
+      within_hours: 48
+    - commit_message_pattern: '(?i)(hotfix|rollback|revert)'
+      within_hours: 24
+  # Optional: directory of Datadog incident exports (.json). When set,
+  # `tga incidents collect` will iterate the directory. The Datadog
+  # parser is currently a stub — see src/commands/incidents.rs.
+  # datadog_dir: "./datadog-exports/"
+
+# JIRA project key → work type mappings (issue #206). The JIRA tier
+# fires before the regex tier so these outrank the generic
+# `jira-ticket` rule (which routes everything to "feature/ticketed").
+jira:
+  jira_project_mappings:
+    TQL: bug_fix
+    APEX: integration
+    INFRA: platform_infrastructure
+    SEC: security
+  # jira_project_mapping_confidence: 0.88   # optional, default 0.88

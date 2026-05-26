@@ -124,6 +124,13 @@ All other sections are optional. When `output.formats` is omitted, all three for
 | `cache.directory` | path | — | Cache directory (supports `~`) |
 | `version` | string | — | Schema version; stored for compatibility |
 | `profile` | string | — | Named profile; stored for compatibility |
+| `dora.deployment_source` | string | `git_tags` | Source for `tga deployments collect`. One of `git_tags`, `github_releases`, `github_actions`, `manual`. |
+| `dora.deployment_tag_pattern` | regex | `^v?[0-9]+\.[0-9]+\.[0-9]+(-...)?$` | Tags matching this regex are ingested as deployments. |
+| `dora.production_branch` | string | `main` | Default branch that production deployments come from. |
+| `dora.failure_signals` | list | `[]` | One signal per entry; `work_type` (classification category) and/or `commit_message_pattern` (regex) + `within_hours` window. |
+| `dora.datadog_dir` | path | — | Directory of Datadog incident exports (.json). Currently a stub — JIRA SRE path is the default MTTR source. |
+| `jira.jira_project_mappings` | map | `{}` | Project key → work type (issue #206). Fires as Tier 1.6 — outranks the generic ticket regex. |
+| `jira.jira_project_mapping_confidence` | float | `0.88` | Per-verdict confidence for the JIRA mapping tier. |
 
 Paths support `~` expansion. Config files from the Python `gitflow-analytics` tool load without changes — unknown keys are silently ignored.
 
@@ -334,6 +341,38 @@ tga override add abc1234 feature feature --notes "manual review"
 tga override list
 tga override remove abc1234 --yes
 ```
+
+### tga rules
+
+Introspect the classification rule set (issue #209). Useful for tuning
+rules and answering "why was this commit classified as X?".
+
+```bash
+tga rules list                       # every loaded rule, sorted by priority
+tga rules show <commit-sha>          # verdict + method recorded for a commit
+tga rules test "feat: add login"     # dry-run the cascade against a message
+```
+
+### tga deployments / tga incidents / tga dora
+
+DORA metrics infrastructure (issues #207, #208, #212, #213).
+
+```bash
+# Step 1: ingest deployment events (default: git tags matching dora.deployment_tag_pattern)
+tga deployments collect
+
+# Step 2 (optional): ingest production incidents from JIRA SRE issues
+tga incidents collect
+
+# Step 3: compute Deployment Frequency, Lead Time, Change Failure Rate, MTTR.
+# Also rebuilds the `deployment_failures` derived join from the current
+# `dora.failure_signals` config — safe to re-run after a config edit.
+tga dora
+```
+
+The four DORA metrics land in pre-computed SQL views
+(`v_deployment_frequency`, `v_lead_time`, `v_change_failure_rate`,
+`v_mttr`) so dashboards can read them directly without re-aggregating.
 
 ## Pipeline Architecture
 

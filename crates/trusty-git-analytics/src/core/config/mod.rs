@@ -78,6 +78,12 @@ pub struct Config {
     #[serde(default)]
     pub pm: Option<PmConfig>,
 
+    /// DORA-metrics configuration: deployment ingestion sources, failure
+    /// signals for change-failure-rate detection, and incident ingestion.
+    /// See [`DoraConfig`].
+    #[serde(default)]
+    pub dora: Option<DoraConfig>,
+
     /// Schema version string (e.g. `"1.0"`).
     ///
     /// Stored for forward compatibility with the Python predecessor's YAML
@@ -418,6 +424,103 @@ pub struct PmConfig {
     pub azure_devops: Option<AzureDevOpsConfig>,
 }
 
+/// DORA-metrics configuration (issues #207, #208, #212, #213).
+///
+/// Why: DORA metrics (deployment frequency, lead time, change failure
+/// rate, mean time to recovery) require ingesting deployment events and
+/// incidents from external sources and tying them back to commits.
+/// What: groups deployment-source selection, failure-signal patterns,
+/// and incident-source paths in one block.
+/// Test: parsed by the YAML loader; consumed by the
+/// `tga deployments collect` and `tga dora` commands.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DoraConfig {
+    /// Source for deployment ingestion.
+    ///
+    /// One of: `github_releases`, `git_tags`, `github_actions`, `manual`.
+    /// Defaults to `git_tags` because it works against any local checkout
+    /// without external credentials.
+    #[serde(default = "default_deployment_source")]
+    pub deployment_source: String,
+
+    /// Regex matching git tags that represent a production deployment.
+    /// Default matches semver tags like `v1.2.3`.
+    #[serde(default = "default_deployment_tag_pattern")]
+    pub deployment_tag_pattern: String,
+
+    /// Default branch that production deployments are cut from.
+    #[serde(default = "default_production_branch")]
+    pub production_branch: String,
+
+    /// Optional GitHub Actions workflow file name (e.g.
+    /// `deploy-production.yml`). Consumed when `deployment_source` is
+    /// `github_actions` — currently stubbed; see source for details.
+    #[serde(default)]
+    pub deployment_workflow: Option<String>,
+
+    /// Failure-signal patterns used by `tga dora` to identify deploys
+    /// that were followed by a change-failure-rate event (issue #208).
+    #[serde(default)]
+    pub failure_signals: Vec<FailureSignal>,
+
+    /// Path to a directory of incident JSON / CSV files (Datadog dump,
+    /// etc.) consumed by `tga deployments collect` (issue #213). When
+    /// `None`, the Datadog path is skipped and only JIRA SRE-derived
+    /// incidents (if configured) populate `fact_incidents`.
+    #[serde(default)]
+    pub datadog_dir: Option<PathBuf>,
+}
+
+fn default_deployment_source() -> String {
+    "git_tags".to_string()
+}
+
+fn default_deployment_tag_pattern() -> String {
+    // Matches `v1.2.3`, `v1.2.3-rc.4`, `1.2.3`.
+    r"^v?[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.\-]+)?$".to_string()
+}
+
+fn default_production_branch() -> String {
+    "main".to_string()
+}
+
+/// One failure-signal rule used by `tga dora` to flag a deploy as a
+/// change-failure-rate event (issue #208).
+///
+/// Why: change-failure-rate is "what % of production deploys were
+/// followed by a failure event within N hours". The signal can be a
+/// classification verdict (`work_type: bug_fix`) or a raw commit-message
+/// pattern; either way the operator owns the policy.
+/// What: combines a `work_type` predicate, an optional branch filter,
+/// an optional regex pattern, and a within-hours window.
+/// Test: parsed alongside `DoraConfig` and consumed by
+/// `commands::dora`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FailureSignal {
+    /// Match classification `category` (case-sensitive). `None` = match
+    /// any classification.
+    #[serde(default)]
+    pub work_type: Option<String>,
+
+    /// Restrict matches to commits on this branch. `None` = no filter.
+    #[serde(default)]
+    pub on_branch: Option<String>,
+
+    /// Regex over the commit message. `None` = no regex filter.
+    /// Validated at load via [`Config::validate_dora_signals`].
+    #[serde(default)]
+    pub commit_message_pattern: Option<String>,
+
+    /// Time window after a deploy in which this signal counts as a
+    /// failure. Defaults to 48 hours.
+    #[serde(default = "default_failure_window_hours")]
+    pub within_hours: u32,
+}
+
+fn default_failure_window_hours() -> u32 {
+    48
+}
+
 /// GitHub API integration settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GithubConfig {
@@ -654,6 +757,19 @@ impl Config {
         // middle of collection.
         if let Some(adc) = self.azure_devops_config() {
             check("pm.azure_devops", &Some(adc.ticket_regex.clone()))?;
+        }
+        // DORA failure signals (issue #208) and deployment-tag pattern
+        // (#207) are user-supplied regexes; reject malformed values at
+        // load time rather than mid-pipeline.
+        if let Some(dora) = &self.dora {
+            check(
+                "dora.deployment_tag_pattern",
+                &Some(dora.deployment_tag_pattern.clone()),
+            )?;
+            for (i, sig) in dora.failure_signals.iter().enumerate() {
+                let label = format!("dora.failure_signals[{i}].commit_message_pattern");
+                check(&label, &sig.commit_message_pattern)?;
+            }
         }
         Ok(())
     }

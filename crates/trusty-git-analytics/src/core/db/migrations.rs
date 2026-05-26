@@ -91,6 +91,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "complexity",
         sql: include_str!("sql/0013_complexity.sql"),
     },
+    Migration {
+        version: 14,
+        name: "dora_tables",
+        sql: include_str!("sql/0014_dora_tables.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

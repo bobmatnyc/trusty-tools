@@ -17,6 +17,9 @@ use tga::core::db::Database;
 
 use crate::commands::aliases::AliasesArgs;
 use crate::commands::backfill::BackfillArgs;
+use crate::commands::deployments::DeploymentsCollectArgs;
+use crate::commands::dora::DoraArgs;
+use crate::commands::incidents::IncidentsCollectArgs;
 use crate::commands::install::InstallArgs;
 use crate::commands::override_cmd::OverrideArgs;
 use crate::commands::pr_metrics::PrMetricsArgs;
@@ -109,6 +112,42 @@ enum Commands {
     Override(OverrideArgs),
     /// Introspect the classification rule set.
     Rules(RulesArgs),
+    /// DORA deployment-event ingestion (issue #207 / #212).
+    Deployments(DeploymentsSubcommandArgs),
+    /// DORA incident ingestion (issue #213).
+    Incidents(IncidentsSubcommandArgs),
+    /// Compute and print DORA metrics (issues #207, #208, #212, #213).
+    Dora(DoraArgs),
+}
+
+/// Args wrapper for the `tga deployments` subcommand tree.
+#[derive(Args, Debug)]
+pub struct DeploymentsSubcommandArgs {
+    /// `tga deployments` operation.
+    #[command(subcommand)]
+    pub subcommand: DeploymentsSubcommand,
+}
+
+/// `tga deployments` subcommand variants.
+#[derive(Subcommand, Debug)]
+pub enum DeploymentsSubcommand {
+    /// Ingest deployment events into `fact_deployments`.
+    Collect(DeploymentsCollectArgs),
+}
+
+/// Args wrapper for the `tga incidents` subcommand tree.
+#[derive(Args, Debug)]
+pub struct IncidentsSubcommandArgs {
+    /// `tga incidents` operation.
+    #[command(subcommand)]
+    pub subcommand: IncidentsSubcommand,
+}
+
+/// `tga incidents` subcommand variants.
+#[derive(Subcommand, Debug)]
+pub enum IncidentsSubcommand {
+    /// Ingest incidents into `fact_incidents`.
+    Collect(IncidentsCollectArgs),
 }
 
 /// Arguments for `tga analyze`.
@@ -347,6 +386,13 @@ async fn main() -> anyhow::Result<()> {
         Commands::Backfill(args) => commands::backfill::run(config, &mut db, args)?,
         Commands::Override(args) => commands::override_cmd::run(config, &mut db, args)?,
         Commands::Rules(args) => commands::rules::run(config, &db, args)?,
+        Commands::Deployments(args) => match args.subcommand {
+            DeploymentsSubcommand::Collect(a) => commands::deployments::run(config, &mut db, a)?,
+        },
+        Commands::Incidents(args) => match args.subcommand {
+            IncidentsSubcommand::Collect(a) => commands::incidents::run(config, &mut db, a)?,
+        },
+        Commands::Dora(args) => commands::dora::run(config, &mut db, args)?,
         // Handled above — match is exhaustive.
         Commands::Install(_) => unreachable!("install dispatched above"),
     }
