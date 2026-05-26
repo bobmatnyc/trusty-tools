@@ -277,31 +277,50 @@ impl ActivityLog {
         matches!(self, Self::Discard)
     }
 
-    /// Append a new entry and return the assigned id.
+    /// Pre-allocate the next sequential id without writing anything.
     ///
-    /// Why: every mutating handler calls this so the feed has a complete
-    /// history. Append also triggers FIFO eviction when the row count
-    /// exceeds [`MAX_ENTRIES`] so the table footprint stays bounded.
-    /// What: on the `Redb` variant, serialises the entry with `serde_json`
-    /// (small overhead, but keeps the schema human-readable for `redb`'s
-    /// `dump` and our own debug tooling), writes it under a freshly-allocated
-    /// id, and prunes the oldest rows past the cap. On the `Discard`
-    /// variant, returns `Ok(0)` without touching any state.
-    /// Test: `appends_assign_monotonic_ids`,
-    /// `appends_evict_oldest_when_capped`,
-    /// `discard_variant_drops_writes_and_returns_empty_reads`.
-    pub fn append(
+    /// Why: `AppState::emit` offloads the redb write to `spawn_blocking`
+    /// (issue #232). When multiple events are emitted in rapid succession the
+    /// blocking-pool workers may execute in any order, so if ID assignment
+    /// happens inside the closure the persisted ordering no longer matches
+    /// the emission order. Calling `alloc_id()` synchronously in the emitting
+    /// thread (before the spawn) reserves the slot in sequence; the closure
+    /// then calls `append_with_id` with that pre-allocated id.
+    /// What: atomically increments `next_id` with `Ordering::SeqCst` and
+    /// returns the old value (the reserved id). Returns `0` for the `Discard`
+    /// variant (consistent with `append_with_id`'s no-op behaviour).
+    /// Test: ordering invariant covered by
+    /// `web::tests::activity_endpoint_lists_recent_emits`.
+    pub fn alloc_id(&self) -> u64 {
+        match self {
+            Self::Redb { next_id, .. } => next_id.fetch_add(1, Ordering::SeqCst),
+            Self::Discard => 0,
+        }
+    }
+
+    /// Append a new entry using a caller-supplied id and return it.
+    ///
+    /// Why: companion to `alloc_id` — the caller reserves an id in the
+    /// emitting thread so the id sequence matches emission order even when
+    /// the actual write is deferred to a blocking-pool thread. Callers that
+    /// do not need ordering guarantees may still call `append`, which calls
+    /// `alloc_id` internally.
+    /// What: identical to `append` except it skips the `fetch_add` and uses
+    /// the supplied `id` directly. On the `Discard` variant, returns `Ok(0)`.
+    /// Test: `appends_assign_monotonic_ids` (via `append`);
+    /// `web::tests::activity_endpoint_lists_recent_emits` (ordering path).
+    pub fn append_with_id(
         &self,
+        id: u64,
         source: ActivitySource,
         palace_id: Option<String>,
         event_type: impl Into<String>,
         payload: impl Serialize,
     ) -> Result<u64> {
-        let (db, next_id) = match self {
-            Self::Redb { db, next_id } => (db, next_id),
+        let db = match self {
+            Self::Redb { db, .. } => db,
             Self::Discard => return Ok(0),
         };
-        let id = next_id.fetch_add(1, Ordering::Relaxed);
         let payload_json = serde_json::to_string(&payload).context("serialize activity payload")?;
         let entry = ActivityEntry {
             id,
@@ -326,6 +345,33 @@ impl ActivityLog {
         // even if the prune step is skipped (e.g. another writer in flight).
         self.prune()?;
         Ok(id)
+    }
+
+    /// Append a new entry and return the assigned id.
+    ///
+    /// Why: every mutating handler calls this so the feed has a complete
+    /// history. Append also triggers FIFO eviction when the row count
+    /// exceeds [`MAX_ENTRIES`] so the table footprint stays bounded.
+    /// What: on the `Redb` variant, allocates an id via `alloc_id`, serialises
+    /// the entry with `serde_json` (small overhead, but keeps the schema
+    /// human-readable for `redb`'s `dump` and our own debug tooling), writes
+    /// it under the allocated id, and prunes the oldest rows past the cap. On
+    /// the `Discard` variant, returns `Ok(0)` without touching any state.
+    /// Note: callers that need the id assigned in the emitting thread (e.g.
+    /// `AppState::emit` which defers the write to `spawn_blocking`) should
+    /// call `alloc_id()` + `append_with_id()` instead.
+    /// Test: `appends_assign_monotonic_ids`,
+    /// `appends_evict_oldest_when_capped`,
+    /// `discard_variant_drops_writes_and_returns_empty_reads`.
+    pub fn append(
+        &self,
+        source: ActivitySource,
+        palace_id: Option<String>,
+        event_type: impl Into<String>,
+        payload: impl Serialize,
+    ) -> Result<u64> {
+        let id = self.alloc_id();
+        self.append_with_id(id, source, palace_id, event_type, payload)
     }
 
     /// Drop oldest rows until the table is at or below [`MAX_ENTRIES`].

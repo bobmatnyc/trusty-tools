@@ -901,13 +901,19 @@ impl AppState {
             let log = Arc::clone(&self.activity_log);
             let event_for_log = event.clone();
             let pending = Arc::clone(&self.pending_activity_writes);
+            // Pre-allocate the sequence id in the emitting thread so the
+            // persisted order matches the emission order even when blocking-pool
+            // workers execute the writes concurrently (issue #247). Without
+            // this, four rapid emits would assign IDs inside their respective
+            // `spawn_blocking` closures in a non-deterministic order.
+            let id = log.alloc_id();
             pending.fetch_add(1, Ordering::SeqCst);
             // Why: the synchronous redb append + fsync must not park an
             // async worker thread (issue #232). Spawn the write on the
             // blocking pool; the JoinHandle is intentionally dropped —
             // the write is best-effort and any failure is logged below.
             tokio::task::spawn_blocking(move || {
-                let result = log.append(source, palace_id, event_type, &event_for_log);
+                let result = log.append_with_id(id, source, palace_id, event_type, &event_for_log);
                 if let Err(e) = result {
                     tracing::warn!("activity_log.append failed for {event_type}: {e:#}");
                 }
