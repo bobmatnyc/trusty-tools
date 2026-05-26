@@ -443,47 +443,7 @@ async fn run_serve(
             // a no-op when the env var is unset so existing deployments
             // see no behavioural change.
             .with_bm25_client_from_env();
-        // Why: previously, `load_palaces_from_disk` was awaited synchronously
-        // before binding the HTTP listener. A single broken `kg.db` (stale
-        // WAL sidecar, corrupt file, permissions) could stall hydration for
-        // seconds per palace, deferring `/health` becoming reachable until
-        // every palace had been visited. The dashboard, MCP clients, and
-        // `launchctl` health-probes all interpret that as "the daemon is
-        // dead", so the launchd job thrashes and operators see no useful
-        // output. Spawning hydration as a background task lets the HTTP
-        // server bind immediately; palaces appear in `palace_list` and the
-        // dashboard as each one finishes opening. Per-palace failures are
-        // already logged and skipped inside `load_palaces_from_disk` so a
-        // single bad `kg.db` can never abort the daemon.
-        // What: `AppState` derives `Clone` (its internals are `Arc`-wrapped),
-        // so the background task gets a cheap clone that shares the same
-        // registry the serving state writes into. We log start, summary, and
-        // total elapsed time so operators can see the warmup completing in
-        // the daemon log.
-        let bg_state = state.clone();
-        tokio::spawn(async move {
-            let started = std::time::Instant::now();
-            tracing::info!("starting background palace hydration");
-            match bg_state.load_palaces_from_disk().await {
-                Ok(count) => tracing::info!(
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    "background palace hydration complete: {count} palaces loaded"
-                ),
-                Err(e) => tracing::error!(
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    "background palace hydration failed: {e:#}"
-                ),
-            }
-            // Issue #42: once palaces are live, kick off auto-discovery
-            // against cwd targeting the default palace (if configured).
-            // Without a default palace there's no obvious destination, so
-            // skip — explicit MCP `discover_aliases` calls still work.
-            if let Some(palace) = bg_state.default_palace.clone() {
-                if let Ok(cwd) = std::env::current_dir() {
-                    bg_state.spawn_alias_discovery(palace, cwd);
-                }
-            }
-        });
+        spawn_startup_tasks(&state);
         run_http(state, addr).await
     } else {
         // Default: dynamic-port HTTP daemon. Mirrors the explicit `--http`
@@ -498,30 +458,57 @@ async fn run_serve(
             // a no-op when the env var is unset so existing deployments
             // see no behavioural change.
             .with_bm25_client_from_env();
-        let bg_state = state.clone();
-        tokio::spawn(async move {
-            let started = std::time::Instant::now();
-            tracing::info!("starting background palace hydration");
-            match bg_state.load_palaces_from_disk().await {
-                Ok(count) => tracing::info!(
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    "background palace hydration complete: {count} palaces loaded"
-                ),
-                Err(e) => tracing::error!(
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    "background palace hydration failed: {e:#}"
-                ),
-            }
-            // Issue #42: once palaces are live, kick off auto-discovery
-            // against cwd targeting the default palace (if configured).
-            // Without a default palace there's no obvious destination, so
-            // skip — explicit MCP `discover_aliases` calls still work.
-            if let Some(palace) = bg_state.default_palace.clone() {
-                if let Ok(cwd) = std::env::current_dir() {
-                    bg_state.spawn_alias_discovery(palace, cwd);
-                }
-            }
-        });
+        spawn_startup_tasks(&state);
         run_http_dynamic(state).await
     }
+}
+
+/// Why: startup tasks (palace hydration, alias discovery) are the same
+///      regardless of whether HTTP binds to a fixed or dynamic port; keeping
+///      the logic in a single helper means a new startup task only has to be
+///      added in one place. Previously, `load_palaces_from_disk` was awaited
+///      synchronously before binding the HTTP listener — a single broken
+///      `kg.db` (stale WAL sidecar, corrupt file, permissions) could stall
+///      hydration for seconds per palace, deferring `/health` becoming
+///      reachable until every palace had been visited. The dashboard, MCP
+///      clients, and `launchctl` health-probes all interpret that as "the
+///      daemon is dead", so the launchd job thrashes and operators see no
+///      useful output. Spawning hydration as a background task lets the HTTP
+///      server bind immediately; palaces appear in `palace_list` and the
+///      dashboard as each one finishes opening. Per-palace failures are
+///      already logged and skipped inside `load_palaces_from_disk` so a
+///      single bad `kg.db` can never abort the daemon.
+/// What: clones `state` (cheap — `AppState` derives `Clone` with `Arc`-wrapped
+///       internals) and spawns a background task that (1) hydrates persisted
+///       palaces from disk with timing logs, and (2) once palaces are live,
+///       kicks off issue-#42 alias auto-discovery against the cwd targeting
+///       the default palace (if configured). Returns immediately — the
+///       spawned task runs concurrently with the HTTP listener bind.
+/// Test: indirectly covered by `run_serve` integration tests; no direct unit
+///       test (process-level entry point, fire-and-forget spawn).
+fn spawn_startup_tasks(state: &AppState) {
+    let bg_state = state.clone();
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        tracing::info!("starting background palace hydration");
+        match bg_state.load_palaces_from_disk().await {
+            Ok(count) => tracing::info!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "background palace hydration complete: {count} palaces loaded"
+            ),
+            Err(e) => tracing::error!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "background palace hydration failed: {e:#}"
+            ),
+        }
+        // Issue #42: once palaces are live, kick off auto-discovery against
+        // cwd targeting the default palace (if configured). Without a default
+        // palace there's no obvious destination, so skip — explicit MCP
+        // `discover_aliases` calls still work.
+        if let Some(palace) = bg_state.default_palace.clone() {
+            if let Ok(cwd) = std::env::current_dir() {
+                bg_state.spawn_alias_discovery(palace, cwd);
+            }
+        }
+    });
 }
