@@ -507,8 +507,8 @@ environment variable (issue #110 Phase 2):
 
 | `TRUSTY_EMBEDDER` value | Behaviour |
 |-------------------------|-----------|
-| unset / `auto` / `stdio` | **Default.** Spawns `trusty-embedderd --stdio` as a supervised child process. Requires `trusty-embedderd` on PATH (`cargo install trusty-embedderd`). Falls back to in-process with a warning if the binary is absent. |
-| `in-process` / `local`  | Legacy in-process ONNX path. No external process needed. Use when `trusty-embedderd` is not installed or for debugging. |
+| unset / `auto` / `stdio` | **Default.** Spawns `trusty-embedderd --stdio` as a supervised child process. `trusty-embedderd` is a **required runtime dependency** — if it is not found on PATH and `TRUSTY_EMBEDDERD_BIN` is unset, `trusty-search start` exits with an actionable error. Install with `cargo install trusty-embedderd --locked`. |
+| `in-process` / `local`  | Explicit escape hatch — in-process ONNX embedding. Use for tests, debugging, or environments where the sidecar cannot be installed. **Never activated silently**: you must set this variable explicitly to use the in-process path. |
 | `http://…`              | HTTP remote — `POST /embed` to a manually-managed `trusty-embedderd` HTTP listener. |
 | `unix:/path/to/sock`    | UDS remote — JSON-RPC 2.0 to a manually-managed `trusty-embedderd --socket` listener. |
 | `candle`                | Candle Metal backend (requires `--features candle`). |

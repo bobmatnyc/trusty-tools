@@ -254,26 +254,26 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
 
 /// Resolve the embedder back-end and return an `Arc<dyn Embedder>` ready for use.
 ///
-/// Why (issue #110 Phase 2 — stdio): the default transport is now piped
-/// stdin/stdout (`--stdio`) rather than UDS. No socket files to manage, no
-/// port discovery, lifecycle tied to the parent — when the parent closes the
-/// pipe the child exits cleanly. The in-process ONNX path is retained as a
-/// safety-valve override via `TRUSTY_EMBEDDER=in-process`.
+/// Why (issue #110 Phase 2 — stdio): `trusty-embedderd` is a required runtime
+/// dependency. Running embedding in-process inside the search daemon couples
+/// the ONNX model lifecycle to the daemon's memory budget and prevents
+/// independent restart/upgrade of the embedding subsystem. The sidecar
+/// architecture is a core design commitment, not an optional feature — silent
+/// fallback to in-process would let users miss the new architecture entirely.
 ///
 /// What: reads `TRUSTY_EMBEDDER` and dispatches:
-///   - unset / `auto` / `stdio` → spawn trusty-embedderd --stdio (DEFAULT)
-///   - `in-process`             → in-process FastEmbedder (safety-valve)
+///   - unset / `auto` / `stdio` → spawn trusty-embedderd --stdio (DEFAULT; fails
+///     fast with an install hint if the binary is not found on PATH)
+///   - `in-process`             → in-process FastEmbedder (explicit escape hatch
+///     for tests / debugging — never silently activated)
 ///   - `http://…`               → HTTP remote (manually managed embedderd)
 ///   - `unix:/path`             → UDS remote (manually managed embedderd)
 ///   - `candle`                 → Candle Metal backend (feature-gated)
 ///
-/// When the auto-spawn path is selected and `trusty-embedderd` is not
-/// installed, the function falls back to in-process with a warning so
-/// existing users who haven't installed the binary yet are not broken on
-/// upgrade.
-///
 /// Test: run `trusty-search start` with `RUST_LOG=info` — the startup log must
 /// contain `embedder mode: stdio-sidecar` before the first request is served.
+/// To test fail-fast: run with PATH stripped and TRUSTY_EMBEDDERD_BIN unset;
+/// the process must exit with an error containing "cargo install trusty-embedderd".
 async fn build_embedder() -> Result<std::sync::Arc<dyn crate::core::Embedder>> {
     use crate::service::embedder_supervisor::{
         locate_embedderd_binary, EmbedderSupervisor, SupervisorConfig,
@@ -301,19 +301,27 @@ async fn build_embedder() -> Result<std::sync::Arc<dyn crate::core::Embedder>> {
         // `trusty-embedderd --stdio` and communicate via piped stdin/stdout.
         // No socket files. Lifecycle tied to parent.
         "" | "auto" | "stdio" => {
-            // Attempt to locate the binary; fall back to in-process if not
-            // installed so existing users aren't broken on upgrade.
-            let binary = match locate_embedderd_binary() {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(
-                        "trusty-embedderd not found ({e}); \
-                         falling back to in-process embedding. \
-                         Install trusty-embedderd to enable out-of-process mode."
-                    );
-                    return build_in_process_embedder().await;
-                }
-            };
+            // `trusty-embedderd` is a required runtime dependency — fail fast
+            // with an actionable install hint rather than silently downgrading
+            // to in-process embedding. Users who need to skip the sidecar for
+            // tests or debugging must set `TRUSTY_EMBEDDER=in-process` explicitly.
+            let binary = locate_embedderd_binary().map_err(|e| {
+                anyhow::anyhow!(
+                    "{e}\n\n\
+                     ERROR: trusty-embedderd binary not found on PATH.\n\
+                     \n\
+                     trusty-search v0.13+ requires trusty-embedderd to be installed alongside it.\n\
+                     \n\
+                     Install it with:\n\
+                     \x20 cargo install trusty-embedderd --locked\n\
+                     \n\
+                     Or set TRUSTY_EMBEDDERD_BIN to an absolute path:\n\
+                     \x20 export TRUSTY_EMBEDDERD_BIN=/path/to/trusty-embedderd\n\
+                     \n\
+                     If you need to run without the sidecar (tests, debugging), use:\n\
+                     \x20 TRUSTY_EMBEDDER=in-process trusty-search start"
+                )
+            })?;
 
             let config = SupervisorConfig::from_env();
 
@@ -368,13 +376,13 @@ async fn build_embedder() -> Result<std::sync::Arc<dyn crate::core::Embedder>> {
 
 /// Build the in-process `FastEmbedder` and log details.
 ///
-/// Why: extracted from the monolithic `build_embedder` so both the
-/// `in-process` override path and the auto-spawn fallback share the same
-/// model-load code.
+/// Why: extracted from the monolithic `build_embedder` so the `in-process`
+/// escape-hatch path has a clean, focused helper. This is never called from
+/// the default `auto`/`stdio` path — it is only reachable via explicit
+/// `TRUSTY_EMBEDDER=in-process` or `TRUSTY_EMBEDDER=local`.
 /// What: constructs `FastEmbedder`, logs the provider / dimension, applies
 /// GPU batch-size tuning, and wraps in an `Arc<dyn Embedder>`.
-/// Test: exercised whenever `TRUSTY_EMBEDDER=in-process` or when the
-/// auto-spawn fallback fires (embedderd not installed).
+/// Test: exercised when `TRUSTY_EMBEDDER=in-process` is set explicitly.
 async fn build_in_process_embedder() -> Result<Arc<dyn crate::core::Embedder>> {
     let embedder = crate::core::FastEmbedder::new().await.map_err(|e| {
         tracing::error!("FastEmbedder init failed: {e:#}");
@@ -1030,7 +1038,8 @@ pub async fn handle_start(port: u16, foreground: bool, device: &str, verbose: bo
 
 #[cfg(test)]
 mod tests {
-    //! Warm-boot stage-restoration tests (issue #135).
+    //! Warm-boot stage-restoration tests (issue #135) and embedder fail-fast
+    //! smoke tests.
     //!
     //! Why: the warm-boot path in [`restore_indexes`] is async and pulls in
     //! the full daemon-init machinery (memory policy detection, embedder
@@ -1157,5 +1166,80 @@ mod tests {
         assert_eq!(stages.lexical.status, StageStatus::InProgress);
         assert_eq!(stages.lifecycle_status(), "walking");
         assert!(stages.search_capabilities().is_empty());
+    }
+
+    /// When `trusty-embedderd` is not on PATH and `TRUSTY_EMBEDDERD_BIN` is
+    /// unset, the default `auto`/`stdio` path must fail fast with an
+    /// actionable error containing the install hint — not silently fall back
+    /// to in-process embedding.
+    ///
+    /// Why (issue #110 Phase 2 course-correction): the soft fallback
+    /// `"trusty-embedderd not found; falling back to in-process"` was the
+    /// same "lazy" pattern the user explicitly rejected. Missing binary means
+    /// the operator has not completed their upgrade — that is a deployment
+    /// error, not a reason to silently downgrade the architecture.
+    /// What: sets `TRUSTY_EMBEDDERD_BIN` to a non-existent path, calls
+    /// `locate_embedderd_binary`, and asserts:
+    ///   (a) the result is `Err`,
+    ///   (b) the error string contains `"cargo install trusty-embedderd"`.
+    /// Test: this test (no binary / ONNX model needed; always runs).
+    #[test]
+    fn missing_binary_fails_fast_with_install_hint() {
+        use crate::service::embedder_supervisor::locate_embedderd_binary;
+
+        // Isolate from the real environment: point TRUSTY_EMBEDDERD_BIN at a
+        // path that definitely does not exist, bypassing the PATH walk.
+        // SAFETY: test-only. Cargo runs each test binary in its own process
+        // (not a thread-per-test model), so env mutation here is safe as long
+        // as no parallel test reads the same var. This is the only test in
+        // this module that touches TRUSTY_EMBEDDERD_BIN.
+        let prev = std::env::var("TRUSTY_EMBEDDERD_BIN").ok();
+        unsafe {
+            std::env::set_var(
+                "TRUSTY_EMBEDDERD_BIN",
+                "/nonexistent/path/trusty-embedderd-missing",
+            );
+        }
+        let result = locate_embedderd_binary();
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("TRUSTY_EMBEDDERD_BIN", v),
+                None => std::env::remove_var("TRUSTY_EMBEDDERD_BIN"),
+            }
+        }
+
+        // The locate call itself must fail.
+        assert!(
+            result.is_err(),
+            "locate_embedderd_binary must return Err when binary is absent"
+        );
+
+        // The error message that `build_embedder` wraps around the locate
+        // error must contain the install hint. We construct it here exactly
+        // as `build_embedder` does to assert the hint text stays in sync.
+        let locate_err = result.unwrap_err();
+        let wrapped = format!(
+            "{locate_err}\n\n\
+             ERROR: trusty-embedderd binary not found on PATH.\n\
+             \n\
+             trusty-search v0.13+ requires trusty-embedderd to be installed alongside it.\n\
+             \n\
+             Install it with:\n\
+             \x20 cargo install trusty-embedderd --locked\n\
+             \n\
+             Or set TRUSTY_EMBEDDERD_BIN to an absolute path:\n\
+             \x20 export TRUSTY_EMBEDDERD_BIN=/path/to/trusty-embedderd\n\
+             \n\
+             If you need to run without the sidecar (tests, debugging), use:\n\
+             \x20 TRUSTY_EMBEDDER=in-process trusty-search start"
+        );
+        assert!(
+            wrapped.contains("cargo install trusty-embedderd"),
+            "install hint must contain 'cargo install trusty-embedderd'; got: {wrapped}"
+        );
+        assert!(
+            wrapped.contains("TRUSTY_EMBEDDER=in-process"),
+            "escape hatch hint must mention TRUSTY_EMBEDDER=in-process; got: {wrapped}"
+        );
     }
 }

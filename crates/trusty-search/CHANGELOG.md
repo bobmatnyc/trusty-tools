@@ -11,18 +11,26 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ### Changed (BREAKING)
 
-- **#110 Phase 2 — `trusty-embedderd` is now the default embedder back-end.**
+- **#110 Phase 2 — `trusty-embedderd` is now a required runtime dependency.**
   When `TRUSTY_EMBEDDER` is unset, `trusty-search start` auto-spawns
   `trusty-embedderd --stdio` as a supervised child process and communicates via
   piped stdin/stdout (JSON-RPC 2.0). The child is restarted automatically on
   crash (up to `TRUSTY_EMBEDDERD_MAX_RESTARTS`, default 5) and is killed when
   the parent exits (via `kill_on_drop`).
 
-  **Upgrade action required:** install `trusty-embedderd` on your PATH
-  (`cargo install trusty-embedderd`). Without it, `trusty-search start` falls
-  back to in-process embedding with a warning — existing behaviour is preserved.
-  Set `TRUSTY_EMBEDDER=in-process` explicitly to suppress the warning and lock
-  in the legacy path.
+  **BREAKING:** If `trusty-embedderd` is not found on PATH and
+  `TRUSTY_EMBEDDERD_BIN` is unset, `trusty-search start` now **exits with an
+  error** rather than silently falling back to in-process embedding. This is a
+  deployment error — the sidecar architecture is a core design commitment, not
+  an optional feature.
+
+  **Upgrade action required:** install `trusty-embedderd` alongside
+  `trusty-search`:
+  ```
+  cargo install trusty-embedderd --locked
+  ```
+  To run without the sidecar (CI, debugging), set `TRUSTY_EMBEDDER=in-process`
+  explicitly. The in-process path is an escape hatch, not a default.
 
 ### Added
 
