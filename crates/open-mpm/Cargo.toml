@@ -88,8 +88,8 @@ comrak = { version = "0.52", default-features = false }
 serde_yml = "0.0.12"
 toml_edit = "0.22"
 base64 = "0.22"
-axum = "0.7"
-tower-http = { version = "0.5", features = ["cors", "compression-gzip", "trace"] }
+axum = { workspace = true }
+tower-http = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 backon = "1"
 indexmap = { version = "2", features = ["serde"] }

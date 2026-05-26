@@ -596,7 +596,7 @@ pub fn build_router_with_config(state: AppState, token: Option<String>) -> Route
 
     let mut router = Router::new()
         .route("/api/task", post(submit_task))
-        .route("/api/task/:id", get(get_task))
+        .route("/api/task/{id}", get(get_task))
         .route("/api/tasks", get(list_tasks))
         .route("/api/clear-context", post(clear_context))
         .route("/api/health", get(health))
@@ -605,23 +605,23 @@ pub fn build_router_with_config(state: AppState, token: Option<String>) -> Route
         .route("/api/projects", get(list_projects).post(connect_project))
         // #451: per-project TOML config lookup (mirrors the on-disk shape of
         // `.open-mpm/projects/<name>.toml` rather than the global registry).
-        .route("/api/projects/:name", get(get_project_config))
+        .route("/api/projects/{name}", get(get_project_config))
         // #407: agent + session listing for the web UI / CLI clients.
         .route("/api/agents", get(list_agents_route))
         .route("/api/sessions", get(list_sessions_route))
         // #371: session recap retrieval
-        .route("/api/sessions/:id/recap", get(get_session_recap))
+        .route("/api/sessions/{id}/recap", get(get_session_recap))
         // #406: CTRL sessions (interactive REPL sessions, optional worktree).
         .route(
             "/api/ctrl/sessions",
             get(list_ctrl_sessions_handler).post(create_ctrl_session_handler),
         )
         .route(
-            "/api/ctrl/sessions/:id",
+            "/api/ctrl/sessions/{id}",
             get(get_ctrl_session_handler).delete(terminate_ctrl_session_handler),
         )
         .route(
-            "/api/ctrl/sessions/:id/attach",
+            "/api/ctrl/sessions/{id}/attach",
             post(attach_ctrl_session_handler),
         )
         // #450: TM (tmux) session management — live tmux state, lifecycle,
@@ -632,17 +632,17 @@ pub fn build_router_with_config(state: AppState, token: Option<String>) -> Route
             get(tm_list_sessions).post(tm_create_session),
         )
         .route(
-            "/api/tm/sessions/:name",
+            "/api/tm/sessions/{name}",
             axum::routing::delete(tm_kill_session),
         )
-        .route("/api/tm/sessions/:name/pause", post(tm_pause_session))
-        .route("/api/tm/sessions/:name/resume", post(tm_resume_session))
-        .route("/api/tm/sessions/:name/send", post(tm_send_message))
-        .route("/api/tm/sessions/:name/pane", get(tm_capture_pane))
+        .route("/api/tm/sessions/{name}/pause", post(tm_pause_session))
+        .route("/api/tm/sessions/{name}/resume", post(tm_resume_session))
+        .route("/api/tm/sessions/{name}/send", post(tm_send_message))
+        .route("/api/tm/sessions/{name}/pane", get(tm_capture_pane))
         // Favorite toggle — POST sets favorite=true, DELETE sets favorite=false.
         // Used by the WebUI star button (#450 spec refinement).
         .route(
-            "/api/tm/sessions/:name/favorite",
+            "/api/tm/sessions/{name}/favorite",
             post(tm_set_favorite).delete(tm_unset_favorite),
         )
         // `tell` routing — `POST /api/tm/tell` with `{project, message,
@@ -661,7 +661,7 @@ pub fn build_router_with_config(state: AppState, token: Option<String>) -> Route
         // static asset from the embedded bundle, falling back to index.html
         // for client-side routing (SPA pattern).
         .route("/", get(serve_index))
-        .route("/*path", get(serve_asset))
+        .route("/{*path}", get(serve_asset))
         .with_state(state);
 
     if let Some(tok) = token {
