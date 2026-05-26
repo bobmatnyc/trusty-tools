@@ -1,17 +1,19 @@
-//! JSON-RPC 2.0 envelope types for the embed daemon.
+//! JSON-RPC 2.0 envelope types for the unified `trusty-embedderd` UDS transport.
 //!
-//! Why: Both the daemon and the in-process `EmbedClient` (in `trusty-common`)
-//! need to agree on the wire format. Centralising the shapes here keeps the
-//! protocol versioned in one place and lets the client crate copy the wire
-//! shape without taking a dependency on this binary.
+//! Why: the UDS listener in `trusty-embedderd` and the `UdsEmbedderClient`
+//! in `trusty-common::embedder_client` must agree on the wire format. These
+//! types live in the daemon so the daemon is the canonical schema owner;
+//! `UdsEmbedderClient` maintains its own private copies of the same shapes
+//! to avoid requiring consumers to depend on this binary crate.
 //!
-//! What: pure serde types describing the `embed` request, the success result,
-//! and the JSON-RPC error envelope. Numeric error codes follow the JSON-RPC
-//! 2.0 spec where applicable (-32600 invalid request, -32601 method not
-//! found, -32700 parse error, -32603 internal error).
+//! What: pure serde types describing the `embed` JSON-RPC request, the
+//! success result, and the error envelope. Numeric error codes follow the
+//! JSON-RPC 2.0 spec where applicable (-32600 invalid request, -32601 method
+//! not found, -32700 parse error, -32603 internal error). Ported from
+//! `trusty-embed-daemon::protocol` (issue #164).
 //!
 //! Test: round-trip serde tests live in this module; integration coverage in
-//! `tests/embed_daemon.rs`.
+//! `tests/concurrent_embed.rs`.
 
 use serde::{Deserialize, Serialize};
 

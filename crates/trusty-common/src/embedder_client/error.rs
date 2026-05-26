@@ -14,8 +14,8 @@
 /// Why: distinct variants allow callers to decide whether to retry (transport
 /// errors), report a bug (dimension mismatch), or surface a model issue.
 ///
-/// What: covers the main failure modes across both the in-process and remote
-/// paths.
+/// What: covers the main failure modes across the in-process, HTTP remote,
+/// and UDS remote paths.
 ///
 /// Test: `error_display` below and the bit_identical integration test.
 #[derive(Debug, thiserror::Error)]
@@ -38,6 +38,15 @@ pub enum EmbedderError {
     /// The remote server returned an error response body.
     #[error("embedder remote error (HTTP {status}): {body}")]
     RemoteError { status: u16, body: String },
+
+    /// A UDS transport error occurred while communicating with trusty-embedderd.
+    ///
+    /// Why: UDS failures (connect refused, broken pipe, decode error) are
+    /// distinct from HTTP transport errors — they carry a descriptive string
+    /// rather than a `reqwest::Error` because the UDS path uses `tokio::net`
+    /// directly without `reqwest`.
+    #[error("embedder UDS error: {0}")]
+    Uds(String),
 }
 
 #[cfg(test)]
@@ -67,5 +76,18 @@ mod tests {
             body: "internal server error".to_string(),
         };
         assert!(e.to_string().contains("500"));
+    }
+
+    #[test]
+    fn error_display_uds() {
+        // Why: verify the UDS variant's Display formatting for log messages.
+        // What: format the variant and check it contains the message.
+        // Test: this test.
+        let e = EmbedderError::Uds(
+            "connect to /tmp/trusty-embedderd.sock failed: no such file".to_string(),
+        );
+        let s = e.to_string();
+        assert!(s.contains("UDS"), "must mention UDS");
+        assert!(s.contains("no such file"), "must contain inner message");
     }
 }

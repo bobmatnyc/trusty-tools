@@ -1,21 +1,24 @@
-//! Tokio-based batching queue in front of a single `FastEmbedder`.
+//! Tokio-based batching queue for the unified `trusty-embedderd` daemon.
 //!
-//! Why: the embed daemon's whole reason for existing is to collapse the
-//! per-call mutex contention of in-process embedding into one batched ONNX
-//! call. The queue collects pending texts inside a small time window
-//! (default 10 ms) or until a batch-size cap (default 32) is reached, then
-//! runs one `embed_batch` and fans the per-text results back to each waiting
-//! caller via `oneshot` channels.
+//! Why: `trusty-embedderd` serves both an HTTP endpoint and a UDS endpoint
+//! from the same ONNX session. Without batching, concurrent callers each
+//! submit a single-item call to the model, wasting the throughput gains of
+//! ONNX's batched execution. The queue collects pending texts inside a small
+//! time window (default 10 ms) or until a batch-size cap (default 32) is
+//! reached, then runs one `embed_batch` and fans the per-text results back to
+//! each waiting caller via `oneshot` channels.
 //!
 //! What: `BatchQueue::new` spawns a worker task that owns the embedder.
 //! Public methods enqueue requests and await the oneshot reply. The worker
 //! exits when the channel is closed (i.e. all `BatchQueue` handles dropped).
+//! Both the HTTP handler and the UDS accept loop hold a clone of `BatchQueue`
+//! and submit through it — the same ONNX session serves both transports.
 //!
 //! Test: `batch_queue_collapses_concurrent_requests` constructs the queue
 //! against a `MockEmbedder`, fires N concurrent `embed_one` calls, and
 //! asserts each gets the expected vector. The test does not assert on batch
 //! grouping (timing-dependent) — that property is observed via tracing in
-//! manual benchmark runs.
+//! manual benchmark runs. Ported from `trusty-embed-daemon` (issue #164).
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -1,5 +1,36 @@
 # Changelog — trusty-common
 
+## [0.5.0] — 2026-05-26
+
+### Added
+
+- **`UdsEmbedderClient`** in `trusty_common::embedder_client` — a new third impl
+  of the `EmbedderClient` trait that communicates with `trusty-embedderd` over a
+  Unix Domain Socket using newline-framed JSON-RPC 2.0 (issue #164, Step A).
+  Provides sub-millisecond in-host embedding without TCP overhead. Re-exported
+  as `pub use uds::UdsEmbedderClient` from the module root.
+
+- **`EmbedderError::Uds(String)`** variant — added to cover UDS transport
+  failures (connect refused, broken pipe, decode error) distinctly from the
+  existing `Transport(reqwest::Error)` HTTP variant.
+
+### Breaking changes
+
+- **`embed-client` feature removed** — the `embed-client` feature flag (and
+  the underlying `trusty_common::embed_client` module) that provided the old
+  `EmbedClient` UDS-only struct have been deleted (issue #164, Step C). The
+  retired `trusty-embed-daemon` binary (PR #157) is also deleted. **Migration**:
+  replace `trusty_common::embed_client::EmbedClient` with
+  `trusty_common::embedder_client::UdsEmbedderClient`. The wire protocol is
+  identical; the main difference is that `UdsEmbedderClient::embed_batch` now
+  implements the `EmbedderClient` trait and returns `EmbedderError` instead of
+  `anyhow::Error`.
+
+### Changed
+
+- Updated `embedder_client` module doc-comment to reflect the three-impl unified
+  surface (InProcess, HTTP, UDS). Removed the "Issue #164 will reconcile" note.
+
 ## [0.4.23] — 2026-05-26
 
 ### Added

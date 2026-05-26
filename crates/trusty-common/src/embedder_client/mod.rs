@@ -1,36 +1,38 @@
-//! RPC types and client implementations for the trusty-embedderd standalone
-//! process (issue #110, Phase 1).
+//! Unified RPC client surface for the `trusty-embedderd` standalone process.
 //!
-//! Why: The existing `FastEmbedder` runs ONNX inside the trusty-search
-//! process, which means a jetsam/OOM kill of the search daemon also kills
-//! the model state. Extracting the embedder into a dedicated process
-//! (`trusty-embedderd`) lets the two crash independently, lets the model stay
-//! resident across search-daemon restarts, and keeps the large ONNX RSS
-//! footprint off the search daemon's budget (issue #110 motivation).
+//! Why: the `FastEmbedder` in-process path serialises all embedding through
+//! one ONNX session, which can be a bottleneck under concurrent load. Extracting
+//! embedding into a dedicated process (`trusty-embedderd`) lets the two crash
+//! independently and keeps the large ONNX RSS footprint off the search daemon's
+//! budget (issue #110 motivation). This module provides the single `EmbedderClient`
+//! trait that abstracts over all three deployment modes:
 //!
-//! What: exposes (1) JSON-over-HTTP wire types, (2) the `EmbedderClient`
-//! trait, (3) `InProcessEmbedderClient` that wraps the existing `FastEmbedder`
-//! for backward compatibility, and (4) `RemoteEmbedderClient` that delegates
-//! to a running `trusty-embedderd` instance over HTTP.
+//! 1. **InProcess** — wraps `FastEmbedder` directly (zero config, backward compat)
+//! 2. **HTTP remote** — `POST /embed` JSON to a running `trusty-embedderd` over TCP
+//! 3. **UDS remote** — newline-framed JSON-RPC 2.0 to `trusty-embedderd` over a
+//!    Unix Domain Socket (issue #164; lower latency than HTTP on local hosts)
+//!
+//! What: exposes (1) JSON-over-HTTP and JSON-over-UDS wire types, (2) the
+//! `EmbedderClient` trait, (3) `InProcessEmbedderClient` for backward
+//! compatibility, (4) `RemoteEmbedderClient` (HTTP), and (5)
+//! `UdsEmbedderClient` (UDS). The `embed_client` module (UDS-only, PR #157)
+//! is retired by issue #164 — use `UdsEmbedderClient` from this module instead.
 //!
 //! Test: `cargo test -p trusty-common --features embedder-client` covers the
-//! error type and `InProcessEmbedderClient` compilation. ONNX-backed tests are
-//! in `trusty-embedderd/tests/bit_identical.rs` (marked `#[ignore]`).
-//!
-//! Note: this module is `embedder_client` (with the `er`) to distinguish from
-//! the existing `embed_client` (without the `er`) which is the UDS module from
-//! PR #157. Issue #164 will reconcile the two embed-client modules into a
-//! single unified interface.
+//! error type, wire-type round-trips, and client construction. ONNX-backed tests
+//! are in `trusty-embedderd/tests/bit_identical.rs` (marked `#[ignore]`).
 
 pub mod error;
 pub mod in_process;
 pub mod remote;
 pub mod types;
+pub mod uds;
 
 pub use error::EmbedderError;
 pub use in_process::InProcessEmbedderClient;
 pub use remote::RemoteEmbedderClient;
 pub use types::{EmbedRequest, EmbedResponse};
+pub use uds::UdsEmbedderClient;
 
 use async_trait::async_trait;
 

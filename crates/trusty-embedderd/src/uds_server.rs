@@ -1,21 +1,20 @@
-//! Unix-domain-socket accept loop and per-connection JSON-RPC dispatch.
+//! Unix-domain-socket accept loop for `trusty-embedderd`.
 //!
-//! Why: the daemon exposes its embed service over a UDS so the trusty-memory
-//! daemon (and other in-host clients) can talk to it without a TCP port. UDS
-//! also gives us a natural file-system credential check (operators can chmod
-//! the socket file if they need to restrict access).
+//! Why: adds a low-latency in-host transport alongside the existing HTTP
+//! listener. Both transports funnel through the same `BatchQueue` instance
+//! so there is exactly one ONNX session regardless of how many clients connect
+//! over how many transports (issue #164).
 //!
-//! What: `run` binds the listener, then loops accepting connections; each
-//! accepted stream is moved into a per-connection task that reads
-//! newline-delimited JSON-RPC frames, dispatches `embed` to the batch queue,
-//! and writes a response frame.
+//! What: `run_uds_accept_loop` binds a `UnixListener` at the given path
+//! and spawns a per-connection task for each accepted stream. Each connection
+//! handler reads newline-delimited JSON-RPC 2.0 frames, dispatches `embed`
+//! requests to the shared `BatchQueue`, and writes response frames. The wire
+//! format is identical to the retired `trusty-embed-daemon` UDS protocol.
 //!
-//! Test: integration coverage in `tests/embed_daemon.rs` (spins up a real
-//! daemon, sends a request, asserts the response).
-//!
-//! The accept loop and dispatch helpers are intentionally generic over the
-//! batch-queue interface — the only embedder-touching code is inside
-//! `BatchQueue` itself.
+//! Test: integration coverage in `tests/concurrent_embed.rs` (UDS-only and
+//! mixed HTTP+UDS concurrent tests). Unit dispatch tests are in
+//! `dispatch_request_*` functions below (shared with the HTTP integration test
+//! plumbing from `trusty-embed-daemon`).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -30,41 +29,44 @@ use crate::protocol::{
     ERR_METHOD_NOT_FOUND, ERR_PARSE, JSONRPC_VERSION, METHOD_EMBED,
 };
 
-/// Bind the UDS listener at `path`.
+/// Bind a `UnixListener` at `path`, cleaning up any stale socket file first.
 ///
-/// Why: extracted so the binary's startup sequence (cleanup → bind) is
-/// readable and so tests can exercise the same bind path against a tempfile
-/// socket.
-/// What: returns the `UnixListener` ready to accept connections. The caller
-/// must have already removed any stale socket file at `path`.
-/// Test: covered by the integration test.
-pub fn bind_listener(path: &Path) -> Result<UnixListener> {
-    UnixListener::bind(path)
-        .with_context(|| format!("bind unix domain socket at {}", path.display()))
+/// Why: a previous run may have left a socket file that would cause `EADDRINUSE`
+/// on the next bind attempt. Removing it first is the idiomatic Unix pattern.
+/// What: removes any existing file at `path` (ignoring "not found"), then
+/// calls `UnixListener::bind`.
+/// Test: covered by the concurrent_embed integration test.
+pub fn bind_uds_listener(path: &Path) -> Result<UnixListener> {
+    // Best-effort cleanup of a stale socket file.
+    if let Err(e) = std::fs::remove_file(path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!("failed to remove stale UDS socket {}: {e}", path.display());
+        }
+    }
+    UnixListener::bind(path).with_context(|| format!("bind UDS socket at {}", path.display()))
 }
 
 /// Accept connections in a loop, spawning a per-connection handler task.
 ///
 /// Why: a single-threaded accept loop with detached per-connection tasks
-/// scales well for the daemon's expected load (dozens of concurrent clients,
-/// short-lived requests) without the complexity of a thread pool.
-/// What: loops `listener.accept().await`; on each accept, clones the
+/// scales well for the daemon's expected load (dozens of concurrent in-host
+/// clients, short-lived requests).
+/// What: loops `listener.accept().await`; on each accepted stream, clones the
 /// `BatchQueue` handle and spawns [`handle_connection`].
-/// Test: covered by the integration test.
-pub async fn run_accept_loop(listener: UnixListener, queue: Arc<BatchQueue>) {
+/// Test: covered by `concurrent_embed.rs` integration test.
+pub async fn run_uds_accept_loop(listener: UnixListener, queue: Arc<BatchQueue>) {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
-                let queue = Arc::clone(&queue);
+                let q = Arc::clone(&queue);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, queue).await {
-                        tracing::warn!("connection handler exited with error: {e:#}");
+                    if let Err(e) = handle_connection(stream, q).await {
+                        tracing::warn!("UDS connection handler exited with error: {e:#}");
                     }
                 });
             }
             Err(e) => {
-                tracing::error!("accept failed: {e}");
-                // Brief pause to avoid a hot error loop if accept is broken.
+                tracing::error!("UDS accept failed: {e}");
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
@@ -73,14 +75,13 @@ pub async fn run_accept_loop(listener: UnixListener, queue: Arc<BatchQueue>) {
 
 /// Per-connection read/dispatch/write loop.
 ///
-/// Why: each connection may carry multiple requests (clients can pipeline)
-/// so we read newline-delimited frames until EOF.
-/// What: wraps the stream's read half in a `BufReader`, calls `read_line`
-/// in a loop, dispatches the parsed request, writes the response as a
-/// single newline-terminated JSON blob. On parse error replies with the
+/// Why: each connection may carry multiple pipelined requests so we read
+/// newline-delimited frames until EOF.
+/// What: wraps the read half in a `BufReader`, calls `read_line` in a loop,
+/// dispatches each parsed request via `dispatch_request`, writes the response
+/// as a single newline-terminated JSON blob. On parse error replies with the
 /// JSON-RPC `-32700` envelope and keeps reading.
-/// Test: integration test exercises the happy path; parse-error path is
-/// covered by `dispatch_request_handles_unknown_method`.
+/// Test: dispatch unit tests below; end-to-end in `tests/concurrent_embed.rs`.
 async fn handle_connection(stream: UnixStream, queue: Arc<BatchQueue>) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -98,7 +99,6 @@ async fn handle_connection(stream: UnixStream, queue: Arc<BatchQueue>) -> Result
         }
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            // Keepalive / blank line — ignore.
             continue;
         }
 
@@ -114,14 +114,12 @@ async fn handle_connection(stream: UnixStream, queue: Arc<BatchQueue>) -> Result
 
 /// Parse one JSON-RPC frame and dispatch it.
 ///
-/// Why: pulled out so we can unit-test the dispatch shape without standing
-/// up a UDS pair.
+/// Why: extracted so unit tests can exercise the dispatch logic without
+/// standing up a real UDS pair.
 /// What: returns the `RpcResponse` to send back. Always returns a response
 /// (no notifications supported); on parse failure the id is `null`.
-/// Test: `dispatch_request_handles_unknown_method` and the integration
-/// happy-path test.
+/// Test: `dispatch_*` tests below.
 pub async fn dispatch_request(frame: &str, queue: &BatchQueue) -> RpcResponse {
-    // Step 1: parse the envelope. If this fails we cannot recover the id.
     let req: RpcRequest = match serde_json::from_str(frame) {
         Ok(r) => r,
         Err(e) => {
@@ -151,7 +149,6 @@ pub async fn dispatch_request(frame: &str, queue: &BatchQueue) -> RpcResponse {
         );
     }
 
-    // Step 2: decode params.
     let Some(params_value) = req.params else {
         return RpcResponse::err(id, ERR_INVALID_REQUEST, "missing params");
     };
@@ -162,7 +159,6 @@ pub async fn dispatch_request(frame: &str, queue: &BatchQueue) -> RpcResponse {
         }
     };
 
-    // Step 3: dispatch.
     match queue.embed_many(params.texts).await {
         Ok(embeddings) => {
             let result = match serde_json::to_value(EmbedResult { embeddings }) {
@@ -190,7 +186,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_request_handles_unknown_method() {
+    async fn dispatch_unknown_method_returns_error() {
+        // Why: callers that send the wrong method name must get a graceful error.
+        // What: dispatch a request with method "bogus"; assert error code -32601.
+        // Test: this test.
         let q = test_queue();
         let frame = r#"{"jsonrpc":"2.0","method":"bogus","params":{},"id":1}"#;
         let resp = dispatch_request(frame, &q).await;
@@ -200,7 +199,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_request_rejects_unknown_jsonrpc_version() {
+    async fn dispatch_rejects_unknown_jsonrpc_version() {
+        // Why: strict version check protects against future protocol changes.
         let q = test_queue();
         let frame = r#"{"jsonrpc":"1.0","method":"embed","params":{"texts":["x"]},"id":2}"#;
         let resp = dispatch_request(frame, &q).await;
@@ -208,30 +208,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_request_returns_parse_error_on_garbage() {
+    async fn dispatch_returns_parse_error_on_garbage() {
+        // Why: non-JSON frames must return a parse-error envelope with id=null.
         let q = test_queue();
-        let frame = "not json at all";
-        let resp = dispatch_request(frame, &q).await;
+        let resp = dispatch_request("not json", &q).await;
         assert_eq!(resp.error.unwrap().code, ERR_PARSE);
         assert_eq!(resp.id, serde_json::Value::Null);
     }
 
     #[tokio::test]
-    async fn dispatch_request_handles_happy_path() {
+    async fn dispatch_happy_path_returns_embeddings() {
+        // Why: the success path must return an embeddings array of correct length.
         let q = test_queue();
-        let frame = r#"{"jsonrpc":"2.0","method":"embed","params":{"texts":["a","b"]},"id":"abc"}"#;
+        let frame = r#"{"jsonrpc":"2.0","method":"embed","params":{"texts":["a","b"]},"id":"xyz"}"#;
         let resp = dispatch_request(frame, &q).await;
         assert!(resp.error.is_none());
         let result = resp.result.unwrap();
-        let embeddings = result
+        let embs = result
             .get("embeddings")
             .and_then(|v| v.as_array())
             .expect("embeddings array");
-        assert_eq!(embeddings.len(), 2);
+        assert_eq!(embs.len(), 2);
     }
 
     #[tokio::test]
-    async fn dispatch_request_rejects_missing_params() {
+    async fn dispatch_rejects_missing_params() {
+        // Why: the embed method requires params; a missing params field must be
+        //      rejected with an invalid-request error.
         let q = test_queue();
         let frame = r#"{"jsonrpc":"2.0","method":"embed","id":3}"#;
         let resp = dispatch_request(frame, &q).await;

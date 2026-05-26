@@ -1,6 +1,6 @@
 [package]
 name = "trusty-common"
-version = "0.4.23"
+version = "0.5.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -153,12 +153,6 @@ rpc = ["dep:uuid"]
 # the ort direct dep. Defaults to bundled ORT linking — see the
 # `embedder-*` sub-features for AL2023 / CUDA / load-dynamic variants.
 embedder = ["dep:fastembed", "dep:lru", "dep:parking_lot", "dep:ort"]
-# Enables the `embed_client` module: a UDS JSON-RPC client for the
-# `trusty-embed-daemon` subprocess. Pure user of existing `tokio` /
-# `serde_json` / `anyhow` workspace deps — adds no new dependencies. The
-# `embedder` feature is NOT implied because callers that only want the
-# subprocess client should not have to compile fastembed/ORT.
-embed-client = []
 # Bundle the ONNX Runtime static libs via fastembed's
 # `ort-download-binaries-native-tls`. Right choice for macOS and modern
 # Linux (glibc ≥ 2.38). Mutually exclusive with `embedder-load-dynamic`

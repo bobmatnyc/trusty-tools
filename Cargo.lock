@@ -10790,7 +10790,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.4.23"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10871,21 +10871,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "trusty-embed-daemon"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "trusty-common",
-]
-
-[[package]]
 name = "trusty-embedder"
 version = "0.1.8"
 dependencies = [
@@ -10897,13 +10882,15 @@ dependencies = [
 
 [[package]]
 name = "trusty-embedderd"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
  "clap",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tower-http 0.6.11",
  "tracing",
