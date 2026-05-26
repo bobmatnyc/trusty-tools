@@ -2254,285 +2254,325 @@ async fn run_connect_subcommand(args: &[String]) -> Result<()> {
     }
 }
 
-/// Handle `open-mpm session <new|list|attach|kill>` (#406).
+/// Handle `open-mpm session <new|list|attach|kill|run>` (#406).
 ///
 /// Why: Gives users a CLI surface to manage interactive REPL sessions backed
 /// by the running open-mpm server, including optional git worktree creation
 /// so multiple agents can work on the same repo in parallel.
-/// What: Dispatches to four subcommands. All flow through HTTP to
-/// `/api/ctrl/sessions*` on the configured `--port` (default 8765).
-/// Test: Smoke-tested by creating, listing, attaching to, and killing a
-/// session against a running server.
+/// What: Resolves the server port and dispatches to a per-subcommand helper.
+/// All subcommands flow through HTTP to `/api/ctrl/sessions*` on the
+/// configured `--port` (default 8765).
+/// Test: Smoke-tested by creating, listing, attaching to, killing, and
+/// running a session against a running server.
 async fn handle_session_subcommand(args: &[String]) -> Result<()> {
     let port = extract_port_flag(args).unwrap_or(8765);
     let base_url = format!("http://127.0.0.1:{}", port);
     let client = reqwest::Client::new();
 
     match args.first().map(|s| s.as_str()) {
-        Some("new") => {
-            let project = extract_flag(args, "--project")
-                .or_else(|| {
-                    std::env::current_dir()
-                        .ok()
-                        .map(|p| p.to_string_lossy().to_string())
-                })
-                .unwrap_or_default();
-            let name = extract_flag(args, "--name")
-                .unwrap_or_else(|| format!("session-{}", &uuid::Uuid::new_v4().to_string()[..8]));
-            let agent = extract_flag(args, "--agent").unwrap_or_else(|| "pm".to_string());
-            let worktree = args.iter().any(|a| a == "--worktree");
-
-            let body = serde_json::json!({
-                "project_path": project,
-                "name": name,
-                "agent": agent,
-                "worktree": worktree,
-            });
-
-            let resp = client
-                .post(format!("{}/api/ctrl/sessions", base_url))
-                .json(&body)
-                .send()
-                .await?;
-
-            if resp.status().is_success() {
-                let session: serde_json::Value = resp.json().await?;
-                // #409: Print session details in a stable, human-readable
-                // block. Order: ID, Name, Project, Agent, Status. Worktree
-                // fields appear only when the server actually provisioned one.
-                println!("Session created:");
-                println!("  ID:      {}", session["id"].as_str().unwrap_or("?"));
-                println!("  Name:    {}", session["name"].as_str().unwrap_or("?"));
-                println!(
-                    "  Project: {}",
-                    session["project_name"].as_str().unwrap_or("?")
-                );
-                println!("  Agent:   {}", session["agent"].as_str().unwrap_or("?"));
-                println!(
-                    "  Status:  {}",
-                    session["status"].as_str().unwrap_or("idle")
-                );
-                if let Some(wt) = session["worktree_path"].as_str() {
-                    println!("  Worktree: {}", wt);
-                    println!(
-                        "  Branch:   {}",
-                        session["worktree_branch"].as_str().unwrap_or("?")
-                    );
-                }
-                println!();
-                println!(
-                    "To attach: om session attach {}",
-                    session["id"].as_str().unwrap_or("?")
-                );
-            } else {
-                eprintln!("Failed to create session: {}", resp.status());
-            }
-        }
-
-        Some("list") => {
-            let project_filter = args
-                .get(1)
-                .filter(|a| !a.starts_with('-'))
-                .map(|p| format!("?project={}", p))
-                .unwrap_or_default();
-
-            let resp = client
-                .get(format!("{}/api/ctrl/sessions{}", base_url, project_filter))
-                .send()
-                .await?;
-
-            if resp.status().is_success() {
-                let data: serde_json::Value = resp.json().await?;
-                let sessions = data["sessions"].as_array().cloned().unwrap_or_default();
-                if sessions.is_empty() {
-                    println!("No sessions found.");
-                } else {
-                    println!(
-                        "{:<36}  {:<20}  {:<15}  {:<8}  STATUS",
-                        "ID", "NAME", "PROJECT", "AGENT"
-                    );
-                    println!("{}", "-".repeat(100));
-                    for s in &sessions {
-                        println!(
-                            "{:<36}  {:<20}  {:<15}  {:<8}  {}{}",
-                            s["id"].as_str().unwrap_or("?"),
-                            s["name"].as_str().unwrap_or("?"),
-                            s["project_name"].as_str().unwrap_or("?"),
-                            s["agent"].as_str().unwrap_or("?"),
-                            s["status"].as_str().unwrap_or("?"),
-                            if s["worktree_path"].is_string() {
-                                " [worktree]"
-                            } else {
-                                ""
-                            },
-                        );
-                    }
-                }
-            } else {
-                eprintln!("Failed to list sessions: {}", resp.status());
-            }
-        }
-
-        Some("attach") => {
-            let id = args
-                .get(1)
-                .ok_or_else(|| anyhow::anyhow!("Usage: om session attach <session-id>"))?;
-
-            let resp = client
-                .post(format!("{}/api/ctrl/sessions/{}/attach", base_url, id))
-                .send()
-                .await?;
-
-            if resp.status().is_success() {
-                let info: serde_json::Value = resp.json().await?;
-                let working_dir = info["working_dir"].as_str().unwrap_or(".").to_string();
-                let agent = info["agent"].as_str().unwrap_or("pm").to_string();
-                let name = info["name"].as_str().unwrap_or("session").to_string();
-
-                println!("Attaching to session '{}' (agent: {})...", name, agent);
-                println!("Working directory: {}", working_dir);
-                println!();
-
-                let exe = std::env::current_exe()?;
-                let mut cmd = std::process::Command::new(&exe);
-                cmd.env("OPEN_MPM_SESSION_ID", id)
-                    .env("OPEN_MPM_AGENT", &agent)
-                    .current_dir(&working_dir);
-
-                let status = cmd.status()?;
-                std::process::exit(status.code().unwrap_or(0));
-            } else if resp.status() == reqwest::StatusCode::NOT_FOUND {
-                eprintln!("Session not found: {}", id);
-            } else {
-                eprintln!("Failed to attach: {}", resp.status());
-            }
-        }
-
-        Some("kill") => {
-            let id = args
-                .get(1)
-                .ok_or_else(|| anyhow::anyhow!("Usage: om session kill <session-id>"))?;
-
-            let resp = client
-                .delete(format!("{}/api/ctrl/sessions/{}", base_url, id))
-                .send()
-                .await?;
-
-            if resp.status().is_success() {
-                println!("Session {} terminated.", id);
-            } else if resp.status() == reqwest::StatusCode::NOT_FOUND {
-                eprintln!("Session not found: {}", id);
-            } else {
-                eprintln!("Failed to terminate session: {}", resp.status());
-            }
-        }
-
-        // #408: `om session run` — supervised workflow executor with retry.
-        // Why: The other subcommands are interactive lifecycle helpers; `run`
-        // is the only one that drives a task to completion in one shot,
-        // returning a structured Success / Blocked outcome.
-        // What: Parses --project / --task / --agent / --max-attempts / --name,
-        // delegates to `CtrlSupervisor`, prints the outcome, exits with the
-        // appropriate code.
-        // Test: `cargo test --workspace` covers the parse/amend helpers; this
-        // arm is exercised manually via `om session run`.
-        Some("run") => {
-            let project = extract_flag(args, "--project")
-                .or_else(|| {
-                    std::env::current_dir()
-                        .ok()
-                        .map(|p| p.to_string_lossy().to_string())
-                })
-                .ok_or_else(|| {
-                    anyhow::anyhow!("--project is required (or run from a project dir)")
-                })?;
-            let task = extract_flag(args, "--task")
-                .ok_or_else(|| anyhow::anyhow!("--task is required"))?;
-            let agent = extract_flag(args, "--agent").unwrap_or_else(|| "pm".to_string());
-            let max_attempts: u32 = extract_flag(args, "--max-attempts")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(3);
-            let name = extract_flag(args, "--name");
-
-            let supervisor = ctrl::CtrlSupervisor::new(
-                std::path::PathBuf::from(&project),
-                task.clone(),
-                agent,
-                max_attempts,
-                name,
-                port,
-            );
-
-            match supervisor.run().await? {
-                ctrl::SupervisorOutcome::Success {
-                    summary,
-                    session_id,
-                    attempts,
-                } => {
-                    println!("✓ Task completed (attempt {}/{})", attempts, max_attempts);
-                    println!("  Session: {}", session_id);
-                    println!();
-                    println!("{}", summary);
-                }
-                ctrl::SupervisorOutcome::SuccessWithCaveats {
-                    summary,
-                    caveats,
-                    session_id,
-                    attempts,
-                } => {
-                    println!(
-                        "✓ Task completed (attempt {}/{}) — with pre-existing test failures",
-                        attempts, max_attempts
-                    );
-                    println!("  Session: {}", session_id);
-                    println!();
-                    println!("{}", summary);
-                    if !caveats.is_empty() {
-                        println!();
-                        println!(
-                            "Note: QA found {} pre-existing failure(s) unrelated to this task:",
-                            caveats.len()
-                        );
-                        for c in &caveats {
-                            println!("  - {}", c);
-                        }
-                        println!();
-                        println!("These are out of scope and were not introduced by this run.");
-                    }
-                }
-                ctrl::SupervisorOutcome::Blocked {
-                    reason,
-                    attempts,
-                    session_id,
-                } => {
-                    eprintln!("✗ Blocked after {} attempt(s)", attempts);
-                    eprintln!("  Session: {} (status: blocked)", session_id);
-                    eprintln!();
-                    eprintln!("Reason: {}", reason);
-                    eprintln!();
-                    eprintln!(
-                        "To retry manually: om session run --project {} --task \"{}\"",
-                        project, task
-                    );
-                    std::process::exit(1);
-                }
-            }
-        }
-
+        Some("new") => handle_session_new(args, &base_url, &client).await,
+        Some("list") => handle_session_list(args, &base_url, &client).await,
+        Some("attach") => handle_session_attach(args, &base_url, &client).await,
+        Some("kill") => handle_session_kill(args, &base_url, &client).await,
+        Some("run") => handle_session_run(args, port).await,
         _ => {
-            println!("Usage: om session <new|list|attach|kill|run> [options]");
+            print_session_usage();
+            Ok(())
+        }
+    }
+}
+
+// Purpose: `om session new` — POST a new session to the server and print
+// the resulting ID, name, agent, status, and worktree info if any.
+async fn handle_session_new(
+    args: &[String],
+    base_url: &str,
+    client: &reqwest::Client,
+) -> Result<()> {
+    let project = extract_flag(args, "--project")
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
+        })
+        .unwrap_or_default();
+    let name = extract_flag(args, "--name")
+        .unwrap_or_else(|| format!("session-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+    let agent = extract_flag(args, "--agent").unwrap_or_else(|| "pm".to_string());
+    let worktree = args.iter().any(|a| a == "--worktree");
+
+    let body = serde_json::json!({
+        "project_path": project,
+        "name": name,
+        "agent": agent,
+        "worktree": worktree,
+    });
+
+    let resp = client
+        .post(format!("{}/api/ctrl/sessions", base_url))
+        .json(&body)
+        .send()
+        .await?;
+
+    if resp.status().is_success() {
+        let session: serde_json::Value = resp.json().await?;
+        // #409: Print session details in a stable, human-readable
+        // block. Order: ID, Name, Project, Agent, Status. Worktree
+        // fields appear only when the server actually provisioned one.
+        println!("Session created:");
+        println!("  ID:      {}", session["id"].as_str().unwrap_or("?"));
+        println!("  Name:    {}", session["name"].as_str().unwrap_or("?"));
+        println!(
+            "  Project: {}",
+            session["project_name"].as_str().unwrap_or("?")
+        );
+        println!("  Agent:   {}", session["agent"].as_str().unwrap_or("?"));
+        println!(
+            "  Status:  {}",
+            session["status"].as_str().unwrap_or("idle")
+        );
+        if let Some(wt) = session["worktree_path"].as_str() {
+            println!("  Worktree: {}", wt);
+            println!(
+                "  Branch:   {}",
+                session["worktree_branch"].as_str().unwrap_or("?")
+            );
+        }
+        println!();
+        println!(
+            "To attach: om session attach {}",
+            session["id"].as_str().unwrap_or("?")
+        );
+    } else {
+        eprintln!("Failed to create session: {}", resp.status());
+    }
+
+    Ok(())
+}
+
+// Purpose: `om session list` — GET sessions from the server, optionally
+// filtered by project, and pretty-print as a fixed-width table.
+async fn handle_session_list(
+    args: &[String],
+    base_url: &str,
+    client: &reqwest::Client,
+) -> Result<()> {
+    let project_filter = args
+        .get(1)
+        .filter(|a| !a.starts_with('-'))
+        .map(|p| format!("?project={}", p))
+        .unwrap_or_default();
+
+    let resp = client
+        .get(format!("{}/api/ctrl/sessions{}", base_url, project_filter))
+        .send()
+        .await?;
+
+    if resp.status().is_success() {
+        let data: serde_json::Value = resp.json().await?;
+        let sessions = data["sessions"].as_array().cloned().unwrap_or_default();
+        if sessions.is_empty() {
+            println!("No sessions found.");
+        } else {
+            println!(
+                "{:<36}  {:<20}  {:<15}  {:<8}  STATUS",
+                "ID", "NAME", "PROJECT", "AGENT"
+            );
+            println!("{}", "-".repeat(100));
+            for s in &sessions {
+                println!(
+                    "{:<36}  {:<20}  {:<15}  {:<8}  {}{}",
+                    s["id"].as_str().unwrap_or("?"),
+                    s["name"].as_str().unwrap_or("?"),
+                    s["project_name"].as_str().unwrap_or("?"),
+                    s["agent"].as_str().unwrap_or("?"),
+                    s["status"].as_str().unwrap_or("?"),
+                    if s["worktree_path"].is_string() {
+                        " [worktree]"
+                    } else {
+                        ""
+                    },
+                );
+            }
+        }
+    } else {
+        eprintln!("Failed to list sessions: {}", resp.status());
+    }
+
+    Ok(())
+}
+
+// Purpose: `om session attach <id>` — POST attach, then re-exec the current
+// binary inside the session's working_dir with OPEN_MPM_SESSION_ID /
+// OPEN_MPM_AGENT exported. This function ends with `process::exit` on
+// success, so it never returns to the caller.
+async fn handle_session_attach(
+    args: &[String],
+    base_url: &str,
+    client: &reqwest::Client,
+) -> Result<()> {
+    let id = args
+        .get(1)
+        .ok_or_else(|| anyhow::anyhow!("Usage: om session attach <session-id>"))?;
+
+    let resp = client
+        .post(format!("{}/api/ctrl/sessions/{}/attach", base_url, id))
+        .send()
+        .await?;
+
+    if resp.status().is_success() {
+        let info: serde_json::Value = resp.json().await?;
+        let working_dir = info["working_dir"].as_str().unwrap_or(".").to_string();
+        let agent = info["agent"].as_str().unwrap_or("pm").to_string();
+        let name = info["name"].as_str().unwrap_or("session").to_string();
+
+        println!("Attaching to session '{}' (agent: {})...", name, agent);
+        println!("Working directory: {}", working_dir);
+        println!();
+
+        let exe = std::env::current_exe()?;
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.env("OPEN_MPM_SESSION_ID", id)
+            .env("OPEN_MPM_AGENT", &agent)
+            .current_dir(&working_dir);
+
+        let status = cmd.status()?;
+        std::process::exit(status.code().unwrap_or(0));
+    } else if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        eprintln!("Session not found: {}", id);
+    } else {
+        eprintln!("Failed to attach: {}", resp.status());
+    }
+
+    Ok(())
+}
+
+// Purpose: `om session kill <id>` — DELETE the session and report success
+// or a not-found / generic failure message.
+async fn handle_session_kill(
+    args: &[String],
+    base_url: &str,
+    client: &reqwest::Client,
+) -> Result<()> {
+    let id = args
+        .get(1)
+        .ok_or_else(|| anyhow::anyhow!("Usage: om session kill <session-id>"))?;
+
+    let resp = client
+        .delete(format!("{}/api/ctrl/sessions/{}", base_url, id))
+        .send()
+        .await?;
+
+    if resp.status().is_success() {
+        println!("Session {} terminated.", id);
+    } else if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        eprintln!("Session not found: {}", id);
+    } else {
+        eprintln!("Failed to terminate session: {}", resp.status());
+    }
+
+    Ok(())
+}
+
+// Purpose: `om session run` (#408) — supervised workflow executor with retry.
+// The other subcommands are interactive lifecycle helpers; `run` is the
+// only one that drives a task to completion in one shot, returning a
+// structured Success / Blocked outcome. Parses --project / --task /
+// --agent / --max-attempts / --name, delegates to `CtrlSupervisor`, and
+// prints the outcome, exiting with the appropriate code on Blocked.
+async fn handle_session_run(args: &[String], port: u16) -> Result<()> {
+    let project = extract_flag(args, "--project")
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
+        })
+        .ok_or_else(|| anyhow::anyhow!("--project is required (or run from a project dir)"))?;
+    let task = extract_flag(args, "--task").ok_or_else(|| anyhow::anyhow!("--task is required"))?;
+    let agent = extract_flag(args, "--agent").unwrap_or_else(|| "pm".to_string());
+    let max_attempts: u32 = extract_flag(args, "--max-attempts")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3);
+    let name = extract_flag(args, "--name");
+
+    let supervisor = ctrl::CtrlSupervisor::new(
+        std::path::PathBuf::from(&project),
+        task.clone(),
+        agent,
+        max_attempts,
+        name,
+        port,
+    );
+
+    match supervisor.run().await? {
+        ctrl::SupervisorOutcome::Success {
+            summary,
+            session_id,
+            attempts,
+        } => {
+            println!("✓ Task completed (attempt {}/{})", attempts, max_attempts);
+            println!("  Session: {}", session_id);
             println!();
-            println!("Commands:");
-            println!("  new    --project <path> --name <name> [--agent <agent>] [--worktree]");
-            println!("  list   [<project-path>]");
-            println!("  attach <session-id>");
-            println!("  kill   <session-id>");
-            println!("  run    --project <path> --task <text> [--agent <agent>]");
-            println!("         [--max-attempts <n>] [--name <name>]");
+            println!("{}", summary);
+        }
+        ctrl::SupervisorOutcome::SuccessWithCaveats {
+            summary,
+            caveats,
+            session_id,
+            attempts,
+        } => {
+            println!(
+                "✓ Task completed (attempt {}/{}) — with pre-existing test failures",
+                attempts, max_attempts
+            );
+            println!("  Session: {}", session_id);
+            println!();
+            println!("{}", summary);
+            if !caveats.is_empty() {
+                println!();
+                println!(
+                    "Note: QA found {} pre-existing failure(s) unrelated to this task:",
+                    caveats.len()
+                );
+                for c in &caveats {
+                    println!("  - {}", c);
+                }
+                println!();
+                println!("These are out of scope and were not introduced by this run.");
+            }
+        }
+        ctrl::SupervisorOutcome::Blocked {
+            reason,
+            attempts,
+            session_id,
+        } => {
+            eprintln!("✗ Blocked after {} attempt(s)", attempts);
+            eprintln!("  Session: {} (status: blocked)", session_id);
+            eprintln!();
+            eprintln!("Reason: {}", reason);
+            eprintln!();
+            eprintln!(
+                "To retry manually: om session run --project {} --task \"{}\"",
+                project, task
+            );
+            std::process::exit(1);
         }
     }
 
     Ok(())
+}
+
+// Purpose: Default-arm usage block for `om session`.
+fn print_session_usage() {
+    println!("Usage: om session <new|list|attach|kill|run> [options]");
+    println!();
+    println!("Commands:");
+    println!("  new    --project <path> --name <name> [--agent <agent>] [--worktree]");
+    println!("  list   [<project-path>]");
+    println!("  attach <session-id>");
+    println!("  kill   <session-id>");
+    println!("  run    --project <path> --task <text> [--agent <agent>]");
+    println!("         [--max-attempts <n>] [--name <name>]");
 }
 
 /// Find `--flag <value>` pair in argv slice.

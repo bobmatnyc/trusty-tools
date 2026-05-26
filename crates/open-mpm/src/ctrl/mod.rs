@@ -4164,31 +4164,43 @@ async fn register_ticketing_tools(registry: &mut ToolRegistry) {
     }
 }
 
-/// Run a single CTRL-level LLM turn with the four tools and apply
-/// any queued side-effects (start_pm) when the turn returns.
+/// Pending side-effect slots populated by tool callbacks during a CTRL turn.
 ///
-/// Why: Non-slash input at the CTRL prompt should go through the assistant,
-/// not directly to a PM, when no PM is active. Keeps the "terse senior dev"
-/// voice as the CTRL experience and lets the LLM auto-route e.g. a bare
-/// path into a start_pm call.
-/// What: Builds the tool registry, calls `llm::chat` once with the CTRL
-/// system prompt, executes any tool calls, drains the pending_connect slot
-/// to perform a real `Ctrl::connect`, and returns the concatenated output
-/// for display.
-/// Test: `ctrl_chat_turn_routes_start_pm` / `ctrl_chat_turn_returns_text`.
-async fn ctrl_chat_turn(ctrl: &mut Ctrl, user_input: &str) -> Result<String> {
-    // #297: Latency tracing for the ctrl dispatch path. Stage timestamps are
-    // emitted at INFO so `RUST_LOG=info` reveals where wall-clock time goes
-    // (config load → credential probe → LLM call → first byte).
-    let dispatch_t0 = std::time::Instant::now();
-    tracing::info!(
-        input_len = user_input.len(),
-        "ctrl_chat_turn: dispatch start"
-    );
-    let client = llm::create_client()?;
-    let pending: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    // #182: optional self-task forwarded after a successful self-connect.
+/// Purpose: Refactor scaffolding for #256 — `ctrl_chat_turn` was decomposed
+/// into named phase helpers; this struct carries the three pending-action
+/// slots (filled by tools while the LLM runs, drained at end-of-turn) so
+/// `drain_ctrl_turn_side_effects` doesn't need a parameter list per slot.
+struct CtrlTurnSideEffects {
+    /// Drained at end-of-turn to perform a real `Ctrl::connect`.
+    pending_connect: Arc<Mutex<Option<String>>>,
+    /// Optional self-task forwarded after a successful self-connect (#182).
+    pending_self_task: Arc<Mutex<Option<String>>>,
+    /// PM-name target queued by `stop_task` (#202).
+    pending_stop: Arc<Mutex<Option<String>>>,
+}
+
+/// Output of `prepare_ctrl_turn_state` — everything the rest of the turn
+/// needs that depends on the live `Ctrl` snapshot.
+///
+/// Purpose: Bundles the tool registry, the materialised OpenAI tool schemas,
+/// and the side-effect slot bundle so the calling function isn't a tuple-soup.
+struct CtrlTurnState {
+    /// Tool registry shared into the LLM dispatch phase.
+    registry: ToolRegistry,
+    /// OpenAI-format tool schemas, materialised once and used for the
+    /// deployment footer's `tools_count`.
+    openai_tools: Vec<ChatCompletionTool>,
+    /// Slots that tool callbacks fill during the LLM call, drained at end.
+    side_effects: CtrlTurnSideEffects,
+}
+
+// Purpose: Build the per-turn registry, snapshot live PM state, and
+// allocate the pending side-effect slots that tool callbacks will fill.
+async fn prepare_ctrl_turn_state(ctrl: &Ctrl) -> Result<CtrlTurnState> {
+    let pending_connect: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let pending_self_task: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let pending_stop: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
     // #185: Snapshot PM handles for the task_status tool. Vec of
     // (name, status_arc, last_message_arc) — the Arc<Mutex<...>> captures
     // give the tool a live read of mutable state without &mut Ctrl.
@@ -4205,11 +4217,10 @@ async fn ctrl_chat_turn(ctrl: &mut Ctrl, user_input: &str) -> Result<String> {
         .iter()
         .map(|(key, h)| (h.name.clone(), key.clone(), h.tx.clone()))
         .collect();
-    // #202: queue slot drained after the turn to actually stop the PM.
-    let pending_stop: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
     let registry = build_ctrl_registry(
         ctrl.memory.clone(),
-        pending.clone(),
+        pending_connect.clone(),
         ctrl.self_project.clone(),
         pending_self_task.clone(),
         task_status_snapshot,
@@ -4221,21 +4232,22 @@ async fn ctrl_chat_turn(ctrl: &mut Ctrl, user_input: &str) -> Result<String> {
     .await;
     let openai_tools: Vec<ChatCompletionTool> = registry.openai_tools()?;
 
-    // #241: Build ctrl's system prompt through the canonical
-    // `SystemPromptBuilder` so it picks up skills declared in `ctrl.toml`,
-    // MCP tool descriptions (role-gated), and project memory recalled from
-    // kuzu-memory. Previously ctrl bypassed the builder and used the raw
-    // `CTRL_SYSTEM_PROMPT` constant, which meant skills configured in TOML
-    // were silently ignored.
-    //
-    // Resolution order for the base content:
-    //   1. `ctrl.toml` on disk (project or `~/.open-mpm/agents/ctrl.toml`)
-    //   2. Built-in `AgentConfig::ctrl_default()`.
-    // The compiled `CTRL_SYSTEM_PROMPT` constant is retained as a final
-    // fallback in case the bundled default ever fails to load.
-    let (agent_cfg, agent_cfg_path): (AgentConfig, Option<PathBuf>) = if let Some(self_path) =
-        &ctrl.self_project
-    {
+    Ok(CtrlTurnState {
+        registry,
+        openai_tools,
+        side_effects: CtrlTurnSideEffects {
+            pending_connect,
+            pending_self_task,
+            pending_stop,
+        },
+    })
+}
+
+// Purpose: Resolve `ctrl.toml` (or fall back to the built-in default) so the
+// caller can build the system prompt against a concrete `AgentConfig`. The
+// returned path is `Some` only when an on-disk override was loaded.
+async fn resolve_ctrl_turn_agent_config(ctrl: &Ctrl) -> (AgentConfig, Option<PathBuf>) {
+    if let Some(self_path) = &ctrl.self_project {
         // #298: Use the ctrl-specific resolver so we prefer ctrl.toml over
         // pm.toml. Sharing the PM resolver caused ctrl turns to load the
         // sonnet PM prompt + delegation tools, blowing latency out to 30s.
@@ -4248,8 +4260,21 @@ async fn ctrl_chat_turn(ctrl: &mut Ctrl, user_input: &str) -> Result<String> {
         }
     } else {
         (AgentConfig::ctrl_default(), None)
-    };
+    }
+}
 
+// Purpose: Assemble the full CTRL system prompt — base TOML/default,
+// agent identity, statically-listed skills, dynamic BM25-selected skills,
+// MCP layer, project memory (PM-mode only), TM session context, self-aware
+// footer, user profile, current date/time, and deployment block.
+async fn build_ctrl_turn_system_prompt(
+    ctrl: &Ctrl,
+    user_input: &str,
+    agent_cfg: &AgentConfig,
+    agent_cfg_path: Option<&Path>,
+    openai_tools_count: usize,
+    mcp_cfg: &crate::mcp::GlobalConfig,
+) -> String {
     let base_prompt = if agent_cfg.system_prompt.content.trim().is_empty() {
         CTRL_SYSTEM_PROMPT.to_string()
     } else {
@@ -4316,8 +4341,6 @@ async fn ctrl_chat_turn(ctrl: &mut Ctrl, user_input: &str) -> Result<String> {
     }
 
     // #241: MCP tool descriptions for role "ctrl".
-    // #244: Use load() (no create-if-absent) for hot-reload after mcp_* tool calls.
-    let mcp_cfg = crate::mcp::GlobalConfig::load().await;
     if let Some(section) = mcp_cfg.render_prompt_section("ctrl") {
         builder = builder.add_mcp_layer(section);
     }
@@ -4412,7 +4435,6 @@ async fn ctrl_chat_turn(ctrl: &mut Ctrl, user_input: &str) -> Result<String> {
             crate::agents::RunnerKind::ClaudeCode => "claude-code (ClaudeCodeAgentRunner)",
             crate::agents::RunnerKind::InProcess => "in-process (InProcessAgentRunner)",
         };
-        let tools_count = openai_tools.len();
         let skills_count = agent_cfg
             .system_prompt
             .skills
@@ -4426,7 +4448,6 @@ async fn ctrl_chat_turn(ctrl: &mut Ctrl, user_input: &str) -> Result<String> {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "(none — running standalone)".to_string());
         let config_label = agent_cfg_path
-            .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "(built-in default — no on-disk ctrl.toml)".to_string());
 
@@ -4436,28 +4457,48 @@ async fn ctrl_chat_turn(ctrl: &mut Ctrl, user_input: &str) -> Result<String> {
             &agent_cfg.agent.model,
             crate::build_info::VERSION,
             skills_count,
-            Some(tools_count),
+            Some(openai_tools_count),
             Some(mcp_count),
             &project_label,
             Some(&config_label),
         ));
     }
 
+    system_prompt
+}
+
+// Purpose: Dispatch the CTRL turn to the LLM — either via the `claude` CLI
+// subprocess short-circuit (OAuth-only) or via the REST/Ollama path with
+// `chat_with_tools_gated`. Returns the assistant text only; tool side
+// effects land in the `CtrlTurnState` slots that were threaded into the
+// registry by `prepare_ctrl_turn_state`.
+//
+// Consumes the registry (wrapped in `Arc` for the dispatcher) so the caller
+// must construct the rest of the turn around its lifetime.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_ctrl_turn_llm(
+    ctrl: &Ctrl,
+    user_input: &str,
+    system_prompt: &str,
+    agent_cfg: AgentConfig,
+    registry: ToolRegistry,
+    mcp_cfg: &crate::mcp::GlobalConfig,
+    dispatch_t0: std::time::Instant,
+) -> Result<String> {
+    let client = llm::create_client()?;
+
     // #271: Replace hardcoded `llm::chat(CTRL_MODEL, …)` with credential-aware
     // dispatch via `chat_with_tools_gated`, mirroring `run_pm_task_with_history`.
     // Why: the legacy stdin REPL was bypassing `pick_credentials()` entirely,
     // so users with `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` configured
     // still got routed via OpenRouter (or 401-failed when only OAuth was set).
-    let mut routed_cfg = agent_cfg.clone();
-    // #297: Stage 1 — agent config loaded. Surface the runner + use_anthropic_direct
-    // so we can correlate slow turns with the loaded TOML at a glance.
+    let mut routed_cfg = agent_cfg;
     tracing::info!(
         elapsed_ms = dispatch_t0.elapsed().as_millis() as u64,
         agent = %routed_cfg.agent.name,
         runner = ?routed_cfg.agent.runner,
         model = %routed_cfg.agent.model,
         use_anthropic_direct = routed_cfg.llm.use_anthropic_direct,
-        config_path = ?agent_cfg_path,
         "ctrl_chat_turn: stage1 config loaded"
     );
 
@@ -4467,9 +4508,6 @@ async fn ctrl_chat_turn(ctrl: &mut Ctrl, user_input: &str) -> Result<String> {
     let creds = llm::credentials::pick_credentials(Some(routed_cfg.agent.runner))
         .ok_or_else(|| anyhow::anyhow!("{}", llm::credentials::missing_credentials_error()))?;
     let claude_cli_short_circuit = apply_credential_routing(&mut routed_cfg, &creds);
-    // #297: Stage 2 — credentials resolved. The label tells us which path
-    // the dispatch is about to take (claude-code → CLI subprocess; anything
-    // else → REST). `model_after_routing` reflects the qualified id used.
     tracing::info!(
         elapsed_ms = dispatch_t0.elapsed().as_millis() as u64,
         creds = creds.label(),
@@ -4478,164 +4516,194 @@ async fn ctrl_chat_turn(ctrl: &mut Ctrl, user_input: &str) -> Result<String> {
         use_anthropic_direct = routed_cfg.llm.use_anthropic_direct,
         "ctrl_chat_turn: stage2 credentials resolved"
     );
-    let response_content: String = if claude_cli_short_circuit {
-        // OAuth-only: drive the turn through the claude CLI subprocess. Tools
-        // are dropped here because the CLI brings its own surface and we have
-        // no graceful way to graft open-mpm tools onto it for a single-shot.
-        let project_for_cli = ctrl
-            .self_project
-            .clone()
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let mut cli_cfg = routed_cfg.clone();
-        cli_cfg.system_prompt.content = system_prompt.clone();
-        run_pm_task_via_claude_cli(&project_for_cli, &cli_cfg, user_input, &[], "").await?
+
+    if claude_cli_short_circuit {
+        run_ctrl_turn_via_claude_cli(ctrl, &routed_cfg, system_prompt, user_input).await
     } else {
-        use async_openai::types::{
-            ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
-            ChatCompletionRequestUserMessageArgs,
-        };
-        let mut messages: Vec<ChatCompletionRequestMessage> = Vec::new();
-        messages.push(
-            ChatCompletionRequestSystemMessageArgs::default()
-                .content(system_prompt.clone())
-                .build()
-                .context("failed to build ctrl_chat_turn system message")?
-                .into(),
-        );
-        messages.push(
-            ChatCompletionRequestUserMessageArgs::default()
-                .content(user_input)
-                .build()
-                .context("failed to build ctrl_chat_turn user message")?
-                .into(),
-        );
-        // #319: Local Ollama fast-path. When enabled in `~/.open-mpm/config.toml`
-        // and the user's intent qualifies (conversational chat or TM-data
-        // query), route this turn to the configured local ollama model
-        // instead of the remote endpoint. ollama availability is probed once
-        // per process (`is_ollama_available_cached`) so the hot path doesn't
-        // pay a TCP probe on every turn. On failure with `fallback_on_error`,
-        // we transparently retry against the remote model.
-        let local_cfg = &mcp_cfg.local_inference;
-        let intent_class = crate::intent::classify_intent(user_input);
-        let local_qualifies = local_cfg.enabled
-            && crate::local_inference::qualifies_for_local_inference(&intent_class, user_input)
-            && crate::local_inference::is_ollama_available_cached(&local_cfg.ollama_host).await;
-        let (effective_model, effective_max_tokens, effective_use_direct) = if local_qualifies {
-            tracing::info!(
-                local_model = %local_cfg.model,
-                ?intent_class,
-                "ctrl_chat_turn: routing to local ollama fast-path"
-            );
-            (
-                local_cfg.model.clone(),
-                local_cfg.max_tokens,
-                false, // ollama is OpenAI-compatible — never use anthropic-direct
-            )
-        } else {
-            (
-                routed_cfg.agent.model.clone(),
-                routed_cfg.llm.max_tokens.max(1024),
-                routed_cfg.llm.use_anthropic_direct,
-            )
-        };
-
-        let adapter = llm::adapter::adapter_for_model(&effective_model);
-        let registry_arc = Arc::new(registry);
-        // #297: Stage 3 — about to make the LLM call. Provider/endpoint
-        // resolution happens inside `chat_with_tools_gated`; logging the
-        // adapter provider here pins the routing decision in the trace.
-        let llm_t0 = std::time::Instant::now();
-        tracing::info!(
-            elapsed_ms = dispatch_t0.elapsed().as_millis() as u64,
-            provider = ?adapter.provider(),
-            model = %effective_model,
-            use_anthropic_direct = effective_use_direct,
-            local_route = local_qualifies,
-            "ctrl_chat_turn: stage3 LLM call starting"
-        );
-        let local_call_result = llm::chat_with_tools_gated(
+        run_ctrl_turn_via_rest(
             &client,
-            &effective_model,
-            &*adapter,
-            messages.clone(),
-            registry_arc.clone(),
-            None,
-            0.2,
-            effective_max_tokens,
-            2,
-            false,
-            None,
-            false,
-            effective_use_direct,
-            &routed_cfg.llm.stop_sequences,
+            user_input,
+            system_prompt,
+            &routed_cfg,
+            registry,
+            mcp_cfg,
+            dispatch_t0,
         )
-        .await;
+        .await
+    }
+}
 
-        let mut used_remote_fallback = false;
-        let (text, _usage) = match local_call_result {
-            Ok(pair) => pair,
-            Err(e) if local_qualifies && local_cfg.fallback_on_error => {
-                tracing::warn!(
-                    error = %e,
-                    "local inference failed, falling back to remote: {e:#}"
-                );
-                used_remote_fallback = true;
-                let remote_adapter = llm::adapter::adapter_for_model(&routed_cfg.agent.model);
-                llm::chat_with_tools_gated(
-                    &client,
-                    &routed_cfg.agent.model,
-                    &*remote_adapter,
-                    messages,
-                    registry_arc,
-                    None,
-                    0.2,
-                    routed_cfg.llm.max_tokens.max(1024),
-                    2,
-                    false,
-                    None,
-                    false,
-                    routed_cfg.llm.use_anthropic_direct,
-                    &routed_cfg.llm.stop_sequences,
-                )
-                .await?
-            }
-            Err(e) => return Err(e),
-        };
-        // #468: Mirror the local→remote fallback surfacing applied in
-        // `run_pm_task_with_history`. ctrl_chat_turn is the conversational
-        // fast path used by both REPL ctrl chat and Telegram (post-#468);
-        // without this prefix the user has no way to tell from the chat
-        // surface that the local Ollama model wasn't actually used.
-        let text = if used_remote_fallback {
-            format!("[⚡ Ollama unavailable — using OpenRouter]\n\n{text}")
-        } else {
-            text
-        };
-        // #297: Stage 4 — LLM call complete. Splitting `llm_ms` from
-        // `dispatch_ms` shows how much of the total the model owns vs
-        // the harness's pre/post processing.
+// Purpose: OAuth-only path — drive the turn through the `claude` CLI
+// subprocess. Tools are dropped because the CLI brings its own surface
+// and we have no graceful way to graft open-mpm tools onto it for a
+// single-shot invocation.
+async fn run_ctrl_turn_via_claude_cli(
+    ctrl: &Ctrl,
+    routed_cfg: &AgentConfig,
+    system_prompt: &str,
+    user_input: &str,
+) -> Result<String> {
+    let project_for_cli = ctrl
+        .self_project
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let mut cli_cfg = routed_cfg.clone();
+    cli_cfg.system_prompt.content = system_prompt.to_string();
+    run_pm_task_via_claude_cli(&project_for_cli, &cli_cfg, user_input, &[], "").await
+}
+
+// Purpose: REST / Ollama path. Builds the chat messages, applies the local
+// Ollama fast-path when it qualifies, falls back to the remote endpoint on
+// local-inference error, and returns the assistant text. Tool calls are
+// drained inline by `chat_with_tools_gated` via the registry's executors.
+#[allow(clippy::too_many_arguments)]
+async fn run_ctrl_turn_via_rest(
+    client: &async_openai::Client<async_openai::config::OpenAIConfig>,
+    user_input: &str,
+    system_prompt: &str,
+    routed_cfg: &AgentConfig,
+    registry: ToolRegistry,
+    mcp_cfg: &crate::mcp::GlobalConfig,
+    dispatch_t0: std::time::Instant,
+) -> Result<String> {
+    use async_openai::types::{
+        ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
+        ChatCompletionRequestUserMessageArgs,
+    };
+    let mut messages: Vec<ChatCompletionRequestMessage> = Vec::new();
+    messages.push(
+        ChatCompletionRequestSystemMessageArgs::default()
+            .content(system_prompt.to_string())
+            .build()
+            .context("failed to build ctrl_chat_turn system message")?
+            .into(),
+    );
+    messages.push(
+        ChatCompletionRequestUserMessageArgs::default()
+            .content(user_input)
+            .build()
+            .context("failed to build ctrl_chat_turn user message")?
+            .into(),
+    );
+    // #319: Local Ollama fast-path. When enabled in `~/.open-mpm/config.toml`
+    // and the user's intent qualifies (conversational chat or TM-data
+    // query), route this turn to the configured local ollama model
+    // instead of the remote endpoint. ollama availability is probed once
+    // per process (`is_ollama_available_cached`) so the hot path doesn't
+    // pay a TCP probe on every turn. On failure with `fallback_on_error`,
+    // we transparently retry against the remote model.
+    let local_cfg = &mcp_cfg.local_inference;
+    let intent_class = crate::intent::classify_intent(user_input);
+    let local_qualifies = local_cfg.enabled
+        && crate::local_inference::qualifies_for_local_inference(&intent_class, user_input)
+        && crate::local_inference::is_ollama_available_cached(&local_cfg.ollama_host).await;
+    let (effective_model, effective_max_tokens, effective_use_direct) = if local_qualifies {
         tracing::info!(
-            llm_ms = llm_t0.elapsed().as_millis() as u64,
-            dispatch_ms = dispatch_t0.elapsed().as_millis() as u64,
-            response_chars = text.len(),
-            "ctrl_chat_turn: stage4 LLM call complete"
+            local_model = %local_cfg.model,
+            ?intent_class,
+            "ctrl_chat_turn: routing to local ollama fast-path"
         );
-        text
+        (
+            local_cfg.model.clone(),
+            local_cfg.max_tokens,
+            false, // ollama is OpenAI-compatible — never use anthropic-direct
+        )
+    } else {
+        (
+            routed_cfg.agent.model.clone(),
+            routed_cfg.llm.max_tokens.max(1024),
+            routed_cfg.llm.use_anthropic_direct,
+        )
     };
 
-    // #271: `chat_with_tools_gated` already drained tool calls (filling the
-    // `pending_*` slots via the tools' own execution). The legacy
-    // `for tc in response.tool_calls` post-loop is no longer needed because
-    // the gated dispatcher executes tools inline. We just collect the
-    // assistant text into `outputs` and proceed with the queued side-effects.
-    let mut outputs: Vec<String> = Vec::new();
-    if !response_content.trim().is_empty() {
-        outputs.push(response_content);
-    }
+    let adapter = llm::adapter::adapter_for_model(&effective_model);
+    let registry_arc = Arc::new(registry);
+    let llm_t0 = std::time::Instant::now();
+    tracing::info!(
+        elapsed_ms = dispatch_t0.elapsed().as_millis() as u64,
+        provider = ?adapter.provider(),
+        model = %effective_model,
+        use_anthropic_direct = effective_use_direct,
+        local_route = local_qualifies,
+        "ctrl_chat_turn: stage3 LLM call starting"
+    );
+    let local_call_result = llm::chat_with_tools_gated(
+        client,
+        &effective_model,
+        &*adapter,
+        messages.clone(),
+        registry_arc.clone(),
+        None,
+        0.2,
+        effective_max_tokens,
+        2,
+        false,
+        None,
+        false,
+        effective_use_direct,
+        &routed_cfg.llm.stop_sequences,
+    )
+    .await;
 
+    let mut used_remote_fallback = false;
+    let (text, _usage) = match local_call_result {
+        Ok(pair) => pair,
+        Err(e) if local_qualifies && local_cfg.fallback_on_error => {
+            tracing::warn!(
+                error = %e,
+                "local inference failed, falling back to remote: {e:#}"
+            );
+            used_remote_fallback = true;
+            let remote_adapter = llm::adapter::adapter_for_model(&routed_cfg.agent.model);
+            llm::chat_with_tools_gated(
+                client,
+                &routed_cfg.agent.model,
+                &*remote_adapter,
+                messages,
+                registry_arc,
+                None,
+                0.2,
+                routed_cfg.llm.max_tokens.max(1024),
+                2,
+                false,
+                None,
+                false,
+                routed_cfg.llm.use_anthropic_direct,
+                &routed_cfg.llm.stop_sequences,
+            )
+            .await?
+        }
+        Err(e) => return Err(e),
+    };
+    // #468: Mirror the local→remote fallback surfacing applied in
+    // `run_pm_task_with_history`. ctrl_chat_turn is the conversational
+    // fast path used by both REPL ctrl chat and Telegram (post-#468);
+    // without this prefix the user has no way to tell from the chat
+    // surface that the local Ollama model wasn't actually used.
+    let text = if used_remote_fallback {
+        format!("[⚡ Ollama unavailable — using OpenRouter]\n\n{text}")
+    } else {
+        text
+    };
+    tracing::info!(
+        llm_ms = llm_t0.elapsed().as_millis() as u64,
+        dispatch_ms = dispatch_t0.elapsed().as_millis() as u64,
+        response_chars = text.len(),
+        "ctrl_chat_turn: stage4 LLM call complete"
+    );
+    Ok(text)
+}
+
+// Purpose: Drain the three pending-side-effect slots (start_pm, self_task,
+// stop_task) populated by tool callbacks during the LLM dispatch, applying
+// each side effect against `ctrl` and appending a status line to `outputs`.
+async fn drain_ctrl_turn_side_effects(
+    ctrl: &mut Ctrl,
+    side_effects: &CtrlTurnSideEffects,
+    outputs: &mut Vec<String>,
+) {
     // Drain any queued start_pm side-effect from the tools.
-    let to_connect = drain_slot(&pending);
+    let to_connect = drain_slot(&side_effects.pending_connect);
     if let Some(path) = to_connect {
         match ctrl.connect(&path).await {
             Ok(msg) => outputs.push(msg),
@@ -4646,7 +4714,7 @@ async fn ctrl_chat_turn(ctrl: &mut Ctrl, user_input: &str) -> Result<String> {
     // #182: If `initiate_self_task` queued a task alongside the connect,
     // forward it to the (now-active) PM so the LLM round-trips through the
     // standard dispatch path without the user retyping the task.
-    let to_self_task = drain_slot(&pending_self_task);
+    let to_self_task = drain_slot(&side_effects.pending_self_task);
     if let Some(task_text) = to_self_task {
         match ctrl.dispatch_task(task_text).await {
             Ok(out) => outputs.push(out),
@@ -4657,7 +4725,7 @@ async fn ctrl_chat_turn(ctrl: &mut Ctrl, user_input: &str) -> Result<String> {
     // #202: drain stop_task — locate the matching PM, send Shutdown, and
     // remove from the active map so subsequent /status calls reflect the
     // change.
-    let to_stop = drain_slot(&pending_stop);
+    let to_stop = drain_slot(&side_effects.pending_stop);
     if let Some(target_name) = to_stop {
         // Find by name (matching the snapshot we built earlier).
         let key_opt = ctrl
@@ -4680,6 +4748,77 @@ async fn ctrl_chat_turn(ctrl: &mut Ctrl, user_input: &str) -> Result<String> {
             outputs.push(format!("stop_task: no PM named {target_name}"));
         }
     }
+}
+
+/// Run a single CTRL-level LLM turn with the four tools and apply
+/// any queued side-effects (start_pm) when the turn returns.
+///
+/// Why: Non-slash input at the CTRL prompt should go through the assistant,
+/// not directly to a PM, when no PM is active. Keeps the "terse senior dev"
+/// voice as the CTRL experience and lets the LLM auto-route e.g. a bare
+/// path into a start_pm call.
+/// What: Reads like a recipe — prepare per-turn state, resolve agent config,
+/// build the system prompt, dispatch the LLM call, then drain pending side
+/// effects. Each phase lives in its own helper above so the function stays
+/// short enough to scan in one screen.
+/// Test: `ctrl_chat_turn_routes_start_pm` / `ctrl_chat_turn_returns_text`.
+async fn ctrl_chat_turn(ctrl: &mut Ctrl, user_input: &str) -> Result<String> {
+    // #297: Latency tracing for the ctrl dispatch path. Stage timestamps are
+    // emitted at INFO so `RUST_LOG=info` reveals where wall-clock time goes
+    // (config load → credential probe → LLM call → first byte).
+    let dispatch_t0 = std::time::Instant::now();
+    tracing::info!(
+        input_len = user_input.len(),
+        "ctrl_chat_turn: dispatch start"
+    );
+
+    let CtrlTurnState {
+        registry,
+        openai_tools,
+        side_effects,
+    } = prepare_ctrl_turn_state(ctrl).await?;
+    let (agent_cfg, agent_cfg_path) = resolve_ctrl_turn_agent_config(ctrl).await;
+
+    // #241: MCP tool descriptions for role "ctrl".
+    // #244: Use load() (no create-if-absent) for hot-reload after mcp_* tool calls.
+    let mcp_cfg = crate::mcp::GlobalConfig::load().await;
+
+    let system_prompt = build_ctrl_turn_system_prompt(
+        ctrl,
+        user_input,
+        &agent_cfg,
+        agent_cfg_path.as_deref(),
+        openai_tools.len(),
+        &mcp_cfg,
+    )
+    .await;
+
+    // Move `registry` into the dispatch helper so it can be wrapped in an
+    // `Arc` for `chat_with_tools_gated`. The pending side-effect slots stay
+    // live through `side_effects` because each tool captured a clone of the
+    // Arcs during `build_ctrl_registry`.
+    let response_content = dispatch_ctrl_turn_llm(
+        ctrl,
+        user_input,
+        &system_prompt,
+        agent_cfg,
+        registry,
+        &mcp_cfg,
+        dispatch_t0,
+    )
+    .await?;
+
+    // #271: `chat_with_tools_gated` already drained tool calls (filling the
+    // `pending_*` slots via the tools' own execution). The legacy
+    // `for tc in response.tool_calls` post-loop is no longer needed because
+    // the gated dispatcher executes tools inline. We just collect the
+    // assistant text into `outputs` and proceed with the queued side-effects.
+    let mut outputs: Vec<String> = Vec::new();
+    if !response_content.trim().is_empty() {
+        outputs.push(response_content);
+    }
+
+    drain_ctrl_turn_side_effects(ctrl, &side_effects, &mut outputs).await;
 
     Ok(outputs.join("\n"))
 }
