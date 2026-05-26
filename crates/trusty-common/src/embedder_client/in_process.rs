@@ -16,9 +16,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use trusty_common::embedder::FastEmbedder;
 
-use crate::{EmbedderClient, EmbedderError};
+use crate::embedder::FastEmbedder;
+
+use super::{EmbedderClient, EmbedderError};
 
 /// Embedder client backed by the in-process ONNX `FastEmbedder`.
 ///
@@ -82,7 +83,7 @@ impl EmbedderClient for InProcessEmbedderClient {
     /// Test: `in_process_embed_batch_empty` verifies empty-input handling.
     /// ONNX round-trip: `cargo test -p trusty-embedderd --test bit_identical -- --include-ignored`.
     async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbedderError> {
-        use trusty_common::embedder::Embedder as _;
+        use crate::embedder::Embedder as _;
         self.inner
             .embed_batch(&texts)
             .await
@@ -101,5 +102,5 @@ mod tests {
     ///
     /// Test: this test — compilation failure means trait impl is broken.
     #[allow(dead_code)]
-    fn assert_trait_impl(_: &dyn crate::EmbedderClient) {}
+    fn assert_trait_impl(_: &dyn super::EmbedderClient) {}
 }

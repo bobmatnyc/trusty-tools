@@ -1,6 +1,6 @@
 [package]
 name = "trusty-common"
-version = "0.4.22"
+version = "0.4.23"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -286,3 +286,15 @@ sqlite-kg = [
 # required. Consumed via `trusty_common::monitor::run()` by the
 # `monitor tui` subcommand of `trusty-search` and `trusty-memory`.
 monitor-tui = ["dep:ratatui", "dep:crossterm", "dep:chrono"]
+# Enables the `embedder_client` module: HTTP client trait + wire types +
+# InProcessEmbedderClient + RemoteEmbedderClient for the `trusty-embedderd`
+# standalone process (issue #110 Phase 1). Formerly the `trusty-embedder-client`
+# crate (MIT) — moved here under Elastic-2.0. Requires `reqwest` (already a
+# workspace dep), `async-trait`, and `thiserror` (already workspace deps).
+# The `embedder` feature is NOT implied so callers that only need the HTTP
+# client path don't pull in fastembed/ORT. Use
+# `features = ["embedder-client", "embedder", "embedder-bundled-ort"]` to get
+# both the in-process and remote paths.
+# Note: module name is `embedder_client` (with `er`) to distinguish from the
+# existing `embed_client` (UDS, PR #157). Issue #164 will reconcile them.
+embedder-client = ["dep:thiserror", "embedder"]

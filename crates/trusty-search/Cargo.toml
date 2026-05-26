@@ -1,6 +1,6 @@
 [package]
 name = "trusty-search"
-version = "0.12.0"
+version = "0.12.1"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"
@@ -39,9 +39,7 @@ path = "src/main.rs"
 
 [dependencies]
 # ── Shared trusty-common crates ────────────────────────────────────────────
-trusty-common = { version = "0.4.22", default-features = false, features = ["axum-server", "mcp", "embedder", "embedder-test-support", "symgraph", "monitor-tui"] }  # `symgraph` enables only the contracts surface — no tree-sitter, no `links` conflict; `monitor-tui` powers `trusty-search monitor tui`
-# issue #110 Phase 1: opt-in remote embedder via TRUSTY_EMBEDDER env var.
-trusty-embedder-client = { workspace = true }
+trusty-common = { version = "0.4.23", default-features = false, features = ["axum-server", "mcp", "embedder", "embedder-test-support", "symgraph", "monitor-tui", "embedder-client"] }  # `symgraph` enables only the contracts surface — no tree-sitter, no `links` conflict; `monitor-tui` powers `trusty-search monitor tui`; `embedder-client` provides EmbedderClient/RemoteEmbedderClient (formerly trusty-embedder-client crate, issue #110 Phase 1)
 
 # ── Async runtime / HTTP ───────────────────────────────────────────────────
 tokio = { version = "1", features = ["full"] }

@@ -13,9 +13,14 @@
 //! for backward compatibility, and (4) `RemoteEmbedderClient` that delegates
 //! to a running `trusty-embedderd` instance over HTTP.
 //!
-//! Test: `cargo test -p trusty-embedder-client` covers the error type and
-//! `InProcessEmbedderClient` compilation. ONNX-backed tests are in
-//! `trusty-embedderd/tests/bit_identical.rs` (marked `#[ignore]`).
+//! Test: `cargo test -p trusty-common --features embedder-client` covers the
+//! error type and `InProcessEmbedderClient` compilation. ONNX-backed tests are
+//! in `trusty-embedderd/tests/bit_identical.rs` (marked `#[ignore]`).
+//!
+//! Note: this module is `embedder_client` (with the `er`) to distinguish from
+//! the existing `embed_client` (without the `er`) which is the UDS module from
+//! PR #157. Issue #164 will reconcile the two embed-client modules into a
+//! single unified interface.
 
 pub mod error;
 pub mod in_process;

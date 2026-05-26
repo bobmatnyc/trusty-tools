@@ -1,5 +1,24 @@
 # Changelog — trusty-embedderd
 
+## [0.2.0] — 2026-05-26
+
+### Changed
+
+- **Dependency change**: replaced `trusty-embedder-client = { workspace = true }`
+  with `trusty-common = { workspace = true, features = ["embedder-client"] }`.
+  Wire types and client trait are now consumed from
+  `trusty_common::embedder_client` instead of the former `trusty_embedder_client`
+  crate. The `tests/bit_identical.rs` integration test updated accordingly.
+  No functional change — binary behaviour and HTTP API are identical.
+
+- **License change**: MIT → **Elastic License 2.0**, matching the rest of the
+  trusty-* ecosystem. The `LICENSE` file is now the canonical Elastic-2.0 text;
+  `Cargo.toml` uses `license-file = "LICENSE"`.
+
+  Note: the `trusty-embedder-client` crate that this daemon previously depended
+  on was shipped as MIT in PR #163 as a temporary state. This release completes
+  the license alignment described in the PR #163 follow-up.
+
 ## [0.1.0] — 2026-05-26
 
 Initial release — issue #110 Phase 1 (RPC + ship service with opt-in).

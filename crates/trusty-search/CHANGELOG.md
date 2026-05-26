@@ -7,6 +7,20 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.12.1] — 2026-05-26
+
+### Changed
+
+- **Internal dep refactor (no behaviour change).** The `trusty-embedder-client`
+  crate dependency has been removed. `EmbedderClient`, `RemoteEmbedderClient`,
+  `EmbedRequest`, and `EmbedResponse` are now re-exported from
+  `trusty_common::embedder_client` (feature `embedder-client`). All call sites
+  updated from `trusty_embedder_client::` to `trusty_common::embedder_client::`.
+  The remote-embedder opt-in path (`TRUSTY_EMBEDDER=http://...`) is fully
+  functional and unchanged.
+
+---
+
 ## [0.12.0] — 2026-05-26
 
 ### Added

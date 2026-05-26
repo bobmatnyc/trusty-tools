@@ -31,7 +31,7 @@ use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 use trusty_common::embedder::{Embedder as _, FastEmbedder};
-use trusty_embedder_client::{EmbedRequest, EmbedResponse};
+use trusty_common::embedder_client::{EmbedRequest, EmbedResponse};
 
 /// CLI arguments for `trusty-embedderd`.
 ///

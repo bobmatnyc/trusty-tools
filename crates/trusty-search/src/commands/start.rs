@@ -284,7 +284,8 @@ async fn build_embedder() -> Result<std::sync::Arc<dyn crate::core::Embedder>> {
     let trusty_embedder_env = std::env::var("TRUSTY_EMBEDDER").unwrap_or_default();
     if trusty_embedder_env.starts_with("http://") || trusty_embedder_env.starts_with("https://") {
         tracing::info!("embedder: remote {}", trusty_embedder_env);
-        let client = trusty_embedder_client::RemoteEmbedderClient::new(trusty_embedder_env.clone());
+        let client =
+            trusty_common::embedder_client::RemoteEmbedderClient::new(trusty_embedder_env.clone());
         return Ok(std::sync::Arc::new(RemoteEmbedderAdapter { client }));
     }
 
@@ -339,13 +340,13 @@ async fn build_embedder() -> Result<std::sync::Arc<dyn crate::core::Embedder>> {
 /// Test: exercised end-to-end when `TRUSTY_EMBEDDER=http://...` is set at
 /// daemon startup; the `bit_identical` integration test validates correctness.
 struct RemoteEmbedderAdapter {
-    client: trusty_embedder_client::RemoteEmbedderClient,
+    client: trusty_common::embedder_client::RemoteEmbedderClient,
 }
 
 #[async_trait::async_trait]
 impl crate::core::Embedder for RemoteEmbedderAdapter {
     async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
-        use trusty_embedder_client::EmbedderClient as _;
+        use trusty_common::embedder_client::EmbedderClient as _;
         let mut v = self
             .client
             .embed_batch(vec![text.to_string()])
@@ -356,7 +357,7 @@ impl crate::core::Embedder for RemoteEmbedderAdapter {
     }
 
     async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
-        use trusty_embedder_client::EmbedderClient as _;
+        use trusty_common::embedder_client::EmbedderClient as _;
         let owned: Vec<String> = texts.iter().map(|s| (*s).to_owned()).collect();
         self.client
             .embed_batch(owned)

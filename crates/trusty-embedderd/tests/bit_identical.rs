@@ -45,7 +45,9 @@ async fn bit_identical_remote_vs_in_process() {
     use std::sync::Arc;
     use tokio::net::TcpListener;
     use trusty_common::embedder::FastEmbedder;
-    use trusty_embedder_client::{EmbedderClient, InProcessEmbedderClient, RemoteEmbedderClient};
+    use trusty_common::embedder_client::{
+        EmbedderClient, InProcessEmbedderClient, RemoteEmbedderClient,
+    };
 
     // ── Step 1: load the FastEmbedder once ──────────────────────────────────
     // We load one instance for the in-process path. The daemon will load its
@@ -158,7 +160,7 @@ fn build_test_app(embedder: std::sync::Arc<trusty_common::embedder::FastEmbedder
         Json, Router,
     };
     use serde_json::json;
-    use trusty_embedder_client::{EmbedRequest, EmbedResponse};
+    use trusty_common::embedder_client::{EmbedRequest, EmbedResponse};
 
     #[derive(Clone)]
     struct TestState {

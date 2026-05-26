@@ -77,4 +77,4 @@ existing in-process FastEmbedder behaviour unchanged.
 
 ## License
 
-MIT
+[Elastic License 2.0](LICENSE) — matching the rest of the trusty-* ecosystem.

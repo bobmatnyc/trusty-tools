@@ -15,7 +15,7 @@
 
 use async_trait::async_trait;
 
-use crate::{EmbedRequest, EmbedResponse, EmbedderClient, EmbedderError};
+use super::{EmbedRequest, EmbedResponse, EmbedderClient, EmbedderError};
 
 /// HTTP embedder client that delegates to a running `trusty-embedderd` instance.
 ///

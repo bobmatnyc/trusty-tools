@@ -119,6 +119,29 @@ pub mod embedder;
 #[cfg(feature = "embed-client")]
 pub mod embed_client;
 
+/// HTTP RPC client and wire types for the `trusty-embedderd` standalone
+/// embedding process (issue #110, Phase 1).
+///
+/// Why: absorbs the former `trusty-embedder-client` crate into `trusty-common`
+/// to reduce crate count and align the client library under Elastic-2.0
+/// licensing. Consumers switch from `trusty_embedder_client::` to
+/// `trusty_common::embedder_client::` imports.
+/// What: Gated behind the `embedder-client` feature. Exposes the
+/// `EmbedderClient` trait, `InProcessEmbedderClient` (wraps `FastEmbedder`),
+/// `RemoteEmbedderClient` (HTTP → `trusty-embedderd`), and the `EmbedRequest`
+/// / `EmbedResponse` wire types. Requires `reqwest` (JSON HTTP) and
+/// `async-trait`; implies `dep:thiserror` for the `EmbedderError` type.
+/// The `embedder` feature is NOT implied — callers that only want the HTTP
+/// client can omit ONNX/fastembed.
+/// Test: `cargo test -p trusty-common --features embedder-client` covers
+/// error-display, JSON round-trip, and URL-assembly tests. ONNX-backed tests
+/// live in `trusty-embedderd/tests/bit_identical.rs` (`#[ignore]`).
+///
+/// Note: `embed_client` (without `er`) is the UDS module from PR #157; this
+/// module is `embedder_client` (with `er`). Issue #164 will reconcile them.
+#[cfg(feature = "embedder-client")]
+pub mod embedder_client;
+
 /// Symbol-graph engine (formerly the `trusty-symgraph` crate).
 ///
 /// Why: All trusty-* tools that touch source code (open-mpm, trusty-search,
