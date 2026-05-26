@@ -18,9 +18,12 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# Tauri is not in [workspace.dependencies]; pinned locally.
 tauri = { version = "2", features = [] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
-anyhow = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+# Workspace `reqwest` is a feature superset (`stream` added on top of
+# `json` + `rustls-tls`); the extra is harmless for the GUI client.
+reqwest = { workspace = true }
+anyhow = { workspace = true }

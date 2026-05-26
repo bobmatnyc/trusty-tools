@@ -33,49 +33,55 @@ path = "src/main.rs"
 # enabled; tga is otherwise independent of trusty-common.
 trusty-common = { workspace = true, features = ["cli-help"] }
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { workspace = true }
 # CLI
-clap = { version = "4", features = ["derive", "env"] }
+clap = { workspace = true }
 # Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_yaml = "0.9"
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 # Database
 # Bumped from 0.31 to align with trusty-memory-core / trusty-cto-db
 # (rusqlite 0.39, libsqlite3-sys 0.37). Cargo's `links = "sqlite3"`
 # uniqueness rule forbids two copies of libsqlite3-sys in one build graph,
 # so every crate using rusqlite in this workspace must agree on a single
 # major version.
-rusqlite = { version = "0.39", features = ["bundled", "chrono"] }
+#
+# Local pin retained: the workspace `rusqlite` entry enables only the
+# `bundled` feature; tga additionally needs the `chrono` feature for typed
+# `DateTime<Utc>` row binding. Adding a feature alongside `workspace = true`
+# is the documented way to extend a shared dep without cloning the version.
+rusqlite = { workspace = true, features = ["chrono"] }
 # Git
-# Disable default ssh+https features to drop the system OpenSSL/libssh2
-# system dependency; vendor libgit2 itself so cross-compiled musl builds
-# don't require libgit2 on the host runner.
-# Bumped from 0.19 to 0.20 to align with trusty-memory-core / open-mpm.
-# Cargo's `links = "git2"` uniqueness rule forbids two copies of libgit2-sys.
+# Local pin retained: the workspace `git2` entry turns on default ssh+https
+# features and `vendored-openssl`; tga explicitly disables defaults to drop
+# the OpenSSL/libssh2 system dependency for cross-compiled musl builds.
+# Switching to `workspace = true` would change the linked TLS stack.
 git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
-# HTTP client — use rustls and disable default features (which include
-# native-tls/hyper-tls and would re-introduce the OpenSSL system dep).
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# HTTP client — workspace entry already declares
+# `default-features = false, features = ["json", "stream", "rustls-tls"]`
+# which is a superset of what tga needs. The `stream` extra is harmless
+# (compiled but unused), so the migration is safe.
+reqwest = { workspace = true }
 # Parallelism
 rayon = "1"
 # Date/time
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { workspace = true }
 # Error handling
-anyhow = "1"
-thiserror = "1"
+anyhow = { workspace = true }
+thiserror = { workspace = true }
 # Regex / pattern matching
-regex = "1"
+regex = { workspace = true }
 aho-corasick = "1"
 # String similarity (identity fuzzy matching)
-strsim = "0.11"
+strsim = { workspace = true }
 # Logging / tracing
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 # Progress bars
 indicatif = "0.17"
 # UUID
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { workspace = true }
 # Hashing (config hash)
 blake3 = "1"
 # CSV generation
@@ -83,9 +89,9 @@ csv = "1"
 # Template engine (for markdown reports)
 tera = "1"
 # Async trait
-async-trait = "0.1"
+async-trait = { workspace = true }
 # Async stream combinators (for bounded-concurrency LLM fallback)
-futures = "0.3"
+futures = { workspace = true }
 
 # Optional: AWS Bedrock runtime client for the Bedrock LLM provider.
 aws-config = { version = "1", optional = true }
@@ -101,7 +107,7 @@ bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime"]
 # HTTP mocking for async reqwest tests
 wiremock = "0.6"
 # Statistical benchmarking
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { workspace = true }
 # Capture tracing events in tests (used by ticket_regex warn-log assertions)
 tracing-test = "0.2"
 
