@@ -32,21 +32,33 @@ use trusty_common::memory_core::retrieval::{
 use trusty_common::memory_core::store::kg::Triple;
 use uuid::Uuid;
 
-/// Look up the friendly palace name (Palace.name) from disk, falling back to
-/// the id when the metadata can't be read.
+/// Look up the friendly palace name (Palace.name) from the in-memory cache,
+/// falling back to the id when the cache misses.
 ///
 /// Why (issue #96): MCP-side emit calls need the same `palace_name` field
 /// the HTTP path emits so the activity feed renders identical labels
-/// regardless of origin. Re-reading the on-disk metadata is the simplest
-/// way to avoid drift — name changes propagate immediately.
-/// What: walks the registry's on-disk listing and returns the matching
-/// `name`. On any error, returns the id verbatim so emit calls never fail.
+/// regardless of origin.
+/// Why (issue #228): the previous implementation called
+/// `PalaceRegistry::list_palaces` — a synchronous filesystem walk — on every
+/// `memory_remember` / `memory_note` write. With N palaces on disk that was
+/// O(N) opendirs + `palace.json` reads per write, blocking the async runtime
+/// thread (this helper had no `spawn_blocking` wrapper, unlike `palace_list`).
+/// The replacement reads `state.palace_names` (a `DashMap` populated at
+/// hydration / create time), which is a lock-free read and never touches
+/// disk.
+/// What: looks up `palace_id` in `state.palace_names`; on miss, returns the
+/// id verbatim so emit calls never fail. Cache misses are non-fatal —
+/// rename / create paths keep the cache in sync, but a fresh-after-restart
+/// palace will hit the miss branch only until hydration completes.
 /// Test: implicit — the MCP emit tests assert the `palace_id` matches; the
-/// fallback is the same id-as-name behaviour the HTTP path uses.
+/// fallback is the same id-as-name behaviour the HTTP path uses. The cache
+/// invariant is covered by `palace_name_cache_populated_after_hydration`
+/// and `palace_name_cache_updates_on_create` in lib.rs.
 fn lookup_palace_name(state: &AppState, palace_id: &str) -> String {
-    trusty_common::memory_core::PalaceRegistry::list_palaces(&state.data_root)
-        .ok()
-        .and_then(|ps| ps.into_iter().find(|p| p.id.0 == palace_id).map(|p| p.name))
+    state
+        .palace_names
+        .get(palace_id)
+        .map(|entry| entry.value().clone())
         .unwrap_or_else(|| palace_id.to_string())
 }
 
@@ -783,7 +795,11 @@ async fn write_drawer(state: &AppState, params: WriteDrawerParams<'_>) -> Result
         content_preview: preview,
         source: ActivitySource::Mcp,
     });
-    state.emit(crate::service::MemoryService::new(state.clone()).aggregate_status_event());
+    // Issue #228: do NOT emit `StatusChanged` on every write — the
+    // aggregate-recompute was O(N palaces) of disk I/O on the hot path.
+    // The periodic ticker spawned by `run_http_on` refreshes dashboard
+    // totals on a fixed cadence; mutations themselves still surface via
+    // the `DrawerAdded` SSE frame above.
     // Issue #97: best-effort auto-extraction. Failures never fail the
     // write — the drawer is already on disk.
     auto_extract_and_assert(
@@ -1122,6 +1138,12 @@ async fn handle_palace_create(state: &AppState, args: Value) -> Result<Value> {
         .registry
         .create_palace(&state.data_root, palace)
         .context("create_palace")?;
+    // Issue #228: keep the in-memory palace-name cache in sync so
+    // subsequent writes can resolve the friendly name without a disk
+    // walk. The id == name pairing matches what the registry persisted.
+    state
+        .palace_names
+        .insert(palace_name.to_string(), palace_name.to_string());
     // Issue #96: emit so MCP-driven palace creation lands in the
     // dashboard activity feed alongside HTTP-origin creates.
     state.emit(DaemonEvent::PalaceCreated {
@@ -1453,7 +1475,8 @@ async fn handle_memory_forget(state: &AppState, args: Value) -> Result<Value> {
         drawer_count,
         source: ActivitySource::Mcp,
     });
-    state.emit(crate::service::MemoryService::new(state.clone()).aggregate_status_event());
+    // Issue #228: skip the per-write `StatusChanged` emit — the ticker
+    // handles aggregate roll-ups.
     Ok(json!({ "status": "deleted", "drawer_id": drawer_id_str, "palace": palace }))
 }
 

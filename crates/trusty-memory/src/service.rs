@@ -279,59 +279,52 @@ impl MemoryService {
     /// and returns the [`StatusPayload`].
     /// Test: `status_endpoint_returns_payload`.
     pub async fn status(&self) -> StatusPayload {
+        // The `/status` endpoint is the one place we still want a disk view —
+        // an operator hitting this endpoint right after restart (before
+        // `load_palaces_from_disk` finishes) should still see every persisted
+        // palace counted, even if it isn't in the in-memory registry yet.
         let palaces = PalaceRegistry::list_palaces(&self.state.data_root).unwrap_or_default();
         let palace_count = palaces.len();
-        let (mut total_drawers, mut total_vectors, mut total_kg_triples): (usize, usize, usize) =
-            (0, 0, 0);
-        for p in &palaces {
-            if let Ok(handle) = self
-                .state
-                .registry
-                .open_palace(&self.state.data_root, &p.id)
-            {
-                total_drawers = total_drawers.saturating_add(handle.drawers.read().len());
-                total_vectors = total_vectors.saturating_add(handle.vector_store.index_size());
-                total_kg_triples =
-                    total_kg_triples.saturating_add(handle.kg.count_active_triples());
-            }
-        }
+        let stats = collect_palace_stats(&self.state, palaces.iter().map(|p| &p.id));
         StatusPayload {
             version: self.state.version.clone(),
             palace_count,
             default_palace: self.state.default_palace.clone(),
             data_root: self.state.data_root.display().to_string(),
-            total_drawers,
-            total_vectors,
-            total_kg_triples,
+            total_drawers: stats.total_drawers,
+            total_vectors: stats.total_vectors,
+            total_kg_triples: stats.total_kg_triples,
         }
     }
 
     /// Compute the aggregate `StatusChanged` event used by SSE consumers.
     ///
-    /// Why: mutating handlers push a refreshed status snapshot so dashboards
-    /// stay in sync without an extra `/api/v1/status` request.
-    /// What: same math as `status()` but returns a `DaemonEvent::StatusChanged`.
-    /// Test: indirectly via SSE integration tests.
+    /// Why: mutating handlers — and the periodic status ticker — push a
+    /// refreshed status snapshot so dashboards stay in sync without an
+    /// extra `/api/v1/status` request.
+    /// Why (issue #228): this used to call `PalaceRegistry::list_palaces`
+    /// (a synchronous disk walk) + `open_palace` (more disk I/O on first
+    /// call) for every palace on every emit. Since every persisted palace
+    /// is already loaded into the in-memory registry by
+    /// `AppState::load_palaces_from_disk` at startup (and every `create_palace`
+    /// keeps it in sync), iterating the in-memory registry returns the same
+    /// counts without touching disk.
+    /// What: iterates `state.registry.list()` (a `DashMap` snapshot) and
+    /// sums the live handle stats via [`collect_palace_stats`]. Returns a
+    /// `DaemonEvent::StatusChanged`. Palaces that fail to resolve in the
+    /// registry (race during shutdown) are silently skipped — the next
+    /// emit will catch them.
+    /// Test: indirectly via SSE integration tests; the math is identical to
+    /// the disk-walk implementation and the `status_endpoint_returns_payload`
+    /// test still passes against `status()` (which keeps the disk view for
+    /// the dedicated endpoint).
     pub fn aggregate_status_event(&self) -> DaemonEvent {
-        let palaces = PalaceRegistry::list_palaces(&self.state.data_root).unwrap_or_default();
-        let (mut total_drawers, mut total_vectors, mut total_kg_triples): (usize, usize, usize) =
-            (0, 0, 0);
-        for p in &palaces {
-            if let Ok(handle) = self
-                .state
-                .registry
-                .open_palace(&self.state.data_root, &p.id)
-            {
-                total_drawers = total_drawers.saturating_add(handle.drawers.read().len());
-                total_vectors = total_vectors.saturating_add(handle.vector_store.index_size());
-                total_kg_triples =
-                    total_kg_triples.saturating_add(handle.kg.count_active_triples());
-            }
-        }
+        let ids: Vec<PalaceId> = self.state.registry.list();
+        let stats = collect_palace_stats(&self.state, ids.iter());
         DaemonEvent::StatusChanged {
-            total_drawers,
-            total_vectors,
-            total_kg_triples,
+            total_drawers: stats.total_drawers,
+            total_vectors: stats.total_vectors,
+            total_kg_triples: stats.total_kg_triples,
         }
     }
 
@@ -398,6 +391,9 @@ impl MemoryService {
             .registry
             .create_palace(&self.state.data_root, palace)
             .map_err(|e| ServiceError::internal(format!("create palace: {e:#}")))?;
+        // Issue #228: keep the in-memory palace-name cache in sync so writes
+        // to this palace can resolve `Palace.name` without a disk walk.
+        self.state.palace_names.insert(name.clone(), name.clone());
         self.state.emit(DaemonEvent::PalaceCreated {
             id: name.clone(),
             name: name.clone(),
@@ -452,6 +448,9 @@ impl MemoryService {
         // in-memory state. The registry's `remove` is a no-op when the entry
         // is absent (lazy-open palaces that no caller has touched yet).
         self.state.registry.remove(&PalaceId::new(palace_id));
+        // Issue #228: drop the palace-name cache entry so future writes never
+        // resolve to a stale label.
+        self.state.palace_names.remove(palace_id);
         let palace_dir = self.state.data_root.join(palace_id);
         tokio::fs::remove_dir_all(&palace_dir).await.map_err(|e| {
             ServiceError::internal(format!("remove palace dir {}: {e}", palace_dir.display()))
@@ -492,6 +491,11 @@ impl MemoryService {
         palace.name = trimmed.to_string();
         trusty_common::memory_core::store::PalaceStore::save_palace(&palace)
             .with_context(|| format!("save palace metadata for {palace_id}"))?;
+        // Issue #228: refresh the in-memory name cache so subsequent writes
+        // surface the new label without a disk walk.
+        self.state
+            .palace_names
+            .insert(palace_id.to_string(), trimmed.to_string());
         let handle = self
             .state
             .registry
@@ -536,6 +540,11 @@ impl MemoryService {
         trusty_common::memory_core::store::PalaceStore::save_palace(&palace).map_err(|e| {
             ServiceError::internal(format!("save palace metadata for {palace_id}: {e}"))
         })?;
+        // Issue #228: refresh the in-memory name cache so subsequent writes
+        // surface the new label without a disk walk.
+        self.state
+            .palace_names
+            .insert(palace_id.to_string(), trimmed.to_string());
         let handle = self
             .state
             .registry
@@ -677,9 +686,14 @@ impl MemoryService {
             .await
             .map_err(|e| ServiceError::internal(format!("remember: {e:#}")))?;
         let drawer_count = handle.drawers.read().len();
-        let palace_name = PalaceRegistry::list_palaces(&self.state.data_root)
-            .ok()
-            .and_then(|ps| ps.into_iter().find(|p| p.id.0 == id).map(|p| p.name))
+        // Issue #228: resolve from the in-memory cache instead of re-walking
+        // the data root on every HTTP `create_drawer` call. Same cache the
+        // MCP `lookup_palace_name` helper consults.
+        let palace_name = self
+            .state
+            .palace_names
+            .get(id)
+            .map(|entry| entry.value().clone())
             .unwrap_or_else(|| id.to_string());
         self.state.emit(DaemonEvent::DrawerAdded {
             palace_id: id.to_string(),
@@ -689,7 +703,10 @@ impl MemoryService {
             content_preview,
             source,
         });
-        self.state.emit(self.aggregate_status_event());
+        // Issue #228: do NOT emit `StatusChanged` on every drawer create —
+        // the periodic ticker (`run_http_on`) refreshes aggregate totals on
+        // a fixed cadence so dashboards stay current without an O(N palaces)
+        // recompute on the write hot path.
         crate::tools::auto_extract_and_assert(
             &handle,
             drawer_id,
@@ -726,7 +743,8 @@ impl MemoryService {
             drawer_count,
             source,
         });
-        self.state.emit(self.aggregate_status_event());
+        // Issue #228: skip the per-write `StatusChanged` emit — the
+        // periodic ticker handles aggregate roll-ups.
         Ok(())
     }
 
@@ -1123,6 +1141,58 @@ pub fn recall_entry_json(r: RecallResult) -> Value {
 /// palace does not appear in `MemoryService::list_palaces`).
 pub(crate) fn is_reserved_system_palace(id: &PalaceId) -> bool {
     id.as_str().starts_with("__")
+}
+
+/// Aggregate counts summed across one or more palaces.
+///
+/// Why (issue #228): both `status()` (the `/api/v1/status` endpoint) and
+/// `aggregate_status_event()` (the SSE `StatusChanged` payload) sum the same
+/// three numbers across every persisted palace. The original implementation
+/// inlined the same `for p in palaces` loop in both methods. Sharing a
+/// single helper eliminates the byte-for-byte duplicate and makes future
+/// changes (e.g. adding a `total_vectors_orphaned` field) land in one place.
+/// What: saturating sums of `drawers.read().len()`, `vector_store.index_size()`,
+/// and `kg.count_active_triples()` across the supplied palace ids.
+/// Test: indirectly via `status_endpoint_returns_payload` and any SSE test
+/// that observes `StatusChanged`.
+pub(crate) struct PalaceStats {
+    pub total_drawers: usize,
+    pub total_vectors: usize,
+    pub total_kg_triples: usize,
+}
+
+/// Sum drawer / vector / KG-triple counts across `ids`, skipping palaces that
+/// cannot be opened.
+///
+/// Why (issue #228): centralises the previously-duplicated loop from
+/// `status()` and `aggregate_status_event()`. Callers pass an iterator of
+/// `PalaceId` so the helper works for both the on-disk view (used by
+/// `status()`) and the in-memory registry view (used by
+/// `aggregate_status_event()` on the SSE hot path).
+/// What: for each id, calls `registry.open_palace` (cheap when the handle is
+/// already cached, slow only on first-ever open) and accumulates the three
+/// counts via `saturating_add` so overflow is impossible. Palaces that fail
+/// to open are silently skipped — one bad palace must not blank the
+/// dashboard.
+/// Test: indirectly through `status_endpoint_returns_payload`.
+pub(crate) fn collect_palace_stats<'a, I>(state: &AppState, ids: I) -> PalaceStats
+where
+    I: IntoIterator<Item = &'a PalaceId>,
+{
+    let (mut total_drawers, mut total_vectors, mut total_kg_triples): (usize, usize, usize) =
+        (0, 0, 0);
+    for id in ids {
+        if let Ok(handle) = state.registry.open_palace(&state.data_root, id) {
+            total_drawers = total_drawers.saturating_add(handle.drawers.read().len());
+            total_vectors = total_vectors.saturating_add(handle.vector_store.index_size());
+            total_kg_triples = total_kg_triples.saturating_add(handle.kg.count_active_triples());
+        }
+    }
+    PalaceStats {
+        total_drawers,
+        total_vectors,
+        total_kg_triples,
+    }
 }
 
 /// Build a `PalaceInfo` from a `Palace` row plus an optional opened handle.

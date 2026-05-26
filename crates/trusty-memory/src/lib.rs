@@ -593,6 +593,21 @@ pub struct AppState {
     /// `tests::emit_persists_mutations_but_skips_status_changed` call
     /// `flush_activity_writes` to drain the counter before reading the log.
     pub pending_activity_writes: Arc<AtomicUsize>,
+    /// In-memory cache mapping palace id → `Palace.name` (issue #228).
+    ///
+    /// Why: every `memory_remember` / `memory_note` write used to call
+    /// `PalaceRegistry::list_palaces` (a synchronous filesystem walk of the
+    /// data root) just to resolve a friendly palace name for the SSE
+    /// `DrawerAdded` event. With N palaces on disk the cost was O(N) opendirs
+    /// plus `palace.json` reads on every write, blocking the async runtime.
+    /// Caching the name in-memory turns the lookup into a `DashMap::get`.
+    /// What: `DashMap<String, String>` populated by `create_palace` and
+    /// `load_palaces_from_disk`, kept in sync by rename / delete paths.
+    /// Missing entries are treated as "name unknown" so callers fall back to
+    /// the palace id and the emit path never fails.
+    /// Test: `palace_name_cache_populated_after_hydration` and
+    /// `palace_name_cache_updates_on_create`.
+    pub palace_names: Arc<dashmap::DashMap<String, String>>,
 }
 
 impl AppState {
@@ -639,6 +654,7 @@ impl AppState {
             bm25_supervisor: None,
             palace_write_locks: Arc::new(dashmap::DashMap::new()),
             pending_activity_writes: Arc::new(AtomicUsize::new(0)),
+            palace_names: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -734,6 +750,7 @@ impl AppState {
     pub async fn load_palaces_from_disk(&self) -> Result<usize> {
         let registry_dir = self.data_root.clone();
         let registry = self.registry.clone();
+        let palace_names = self.palace_names.clone();
         // The directory walk and each `PalaceHandle::open` perform blocking
         // filesystem + redb/usearch I/O — run the whole hydration on the
         // blocking pool so it never parks an async worker thread.
@@ -750,6 +767,12 @@ impl AppState {
                             data_dir = %palace.data_dir.display(),
                             "loaded palace from disk"
                         );
+                        // Issue #228: seed the in-memory name cache so write
+                        // hot paths (memory_remember / memory_note) can resolve
+                        // the friendly palace name without re-walking the data
+                        // root. Insert here (during hydration) is the single
+                        // point of truth for restart-time population.
+                        palace_names.insert(palace.id.0.clone(), palace.name.clone());
                         registry.register_arc(handle);
                         loaded += 1;
                     }
@@ -1227,6 +1250,15 @@ pub async fn run_http_on(state: AppState, listener: tokio::net::TcpListener) -> 
     // recursive directory walk on the request path.
     spawn_disk_size_ticker(state.clone());
 
+    // Issue #228: emit aggregate `StatusChanged` on a fixed cadence rather
+    // than on every drawer write. The previous design called
+    // `aggregate_status_event` from every `memory_remember` / `memory_note`
+    // / `memory_forget` (and the matching HTTP handlers), each of which
+    // walked the data root + opened every palace handle. Coalescing the
+    // emit to a 30 s ticker keeps dashboards live without dragging an
+    // O(N palaces) recompute onto the write hot path.
+    spawn_status_event_ticker(state.clone());
+
     // Capture and advertise the bound address BEFORE serving so the first
     // request handler — and the http_addr discovery file — see the real port
     // even if `local_addr()` would otherwise be racy.
@@ -1405,6 +1437,52 @@ fn spawn_disk_size_ticker(state: AppState) {
             state
                 .disk_bytes
                 .store(bytes, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+}
+
+/// Interval between aggregate-status snapshot emits on the SSE bus.
+///
+/// Why (issue #228): mutations used to fire `StatusChanged` synchronously on
+/// the write path, which forced an O(N palaces) sum of drawer / vector / KG
+/// counts on every `memory_remember`. Coalescing into a fixed-cadence ticker
+/// lets dashboards stay current (a 30 s lag is invisible at human scale)
+/// while keeping the write path free of aggregate work.
+/// What: 30 seconds — short enough that the operator UI doesn't feel stale
+/// between manual writes, long enough that the recompute cost (in-memory
+/// registry walk plus the redb `count_active_triples` per palace) is a
+/// rounding error on the daemon's CPU budget.
+/// Test: covered indirectly — the math has not changed, only the cadence.
+const STATUS_EVENT_TICK_SECS: u64 = 30;
+
+/// Spawn a background ticker that emits `DaemonEvent::StatusChanged` every
+/// [`STATUS_EVENT_TICK_SECS`] seconds (issue #228).
+///
+/// Why: replaces the per-write `state.emit(self.aggregate_status_event())`
+/// call sites that used to recompute the aggregate every time a drawer was
+/// created or deleted. Walking N palaces on every write blocks the async
+/// runtime; coalescing the emit onto a ticker keeps dashboards up-to-date
+/// without that cost.
+/// What: spawns a detached tokio task that holds a full `AppState` clone
+/// (cheap — every field is `Arc`-backed) and ticks every
+/// [`STATUS_EVENT_TICK_SECS`] seconds. Each tick computes
+/// `MemoryService::aggregate_status_event` (which now iterates the
+/// in-memory registry, not disk) and broadcasts it via `state.emit`. If
+/// no SSE subscribers are connected the broadcast `send` is a cheap no-op,
+/// so the ticker imposes no cost when nobody is listening.
+/// Test: not unit-tested (timing-dependent fire-and-forget); the underlying
+/// `aggregate_status_event` math is exercised by the existing
+/// `status_endpoint_returns_payload` path.
+fn spawn_status_event_ticker(state: AppState) {
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(STATUS_EVENT_TICK_SECS));
+        // The first tick fires immediately, which is fine: it gives SSE
+        // subscribers a baseline `StatusChanged` shortly after they connect.
+        loop {
+            interval.tick().await;
+            let event = service::MemoryService::new(state.clone()).aggregate_status_event();
+            state.emit(event);
         }
     });
 }
@@ -1878,6 +1956,79 @@ mod tests {
             .expect("load_palaces_from_disk on empty root");
         assert_eq!(count, 0);
         assert!(state.registry.is_empty());
+    }
+
+    /// Why (issue #228): hydration must seed `state.palace_names` so the
+    /// MCP write hot path (`memory_remember` / `memory_note`) can resolve a
+    /// friendly palace name without re-walking the data root on every call.
+    /// Regression risk: a future refactor that forgets to populate the cache
+    /// would silently degrade write latency.
+    /// What: persists two palaces with distinct `name` values, constructs a
+    /// fresh `AppState`, hydrates from disk, and asserts the cache holds the
+    /// expected mappings.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn palace_name_cache_populated_after_hydration() {
+        use trusty_common::memory_core::{Palace, PalaceId, PalaceRegistry};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        {
+            let writer = PalaceRegistry::new();
+            for (id, name) in [("alpha", "Alpha Project"), ("beta", "Beta Project")] {
+                let palace = Palace {
+                    id: PalaceId::new(id),
+                    name: name.to_string(),
+                    description: None,
+                    created_at: chrono::Utc::now(),
+                    data_dir: root.join(id),
+                };
+                writer.create_palace(&root, palace).expect("persist palace");
+            }
+        }
+
+        let state = AppState::new(root);
+        assert!(
+            state.palace_names.is_empty(),
+            "fresh AppState must start with an empty name cache"
+        );
+        state
+            .load_palaces_from_disk()
+            .await
+            .expect("load_palaces_from_disk");
+
+        assert_eq!(state.palace_names.len(), 2, "cache must hold both palaces");
+        assert_eq!(
+            state.palace_names.get("alpha").map(|e| e.value().clone()),
+            Some("Alpha Project".to_string()),
+        );
+        assert_eq!(
+            state.palace_names.get("beta").map(|e| e.value().clone()),
+            Some("Beta Project".to_string()),
+        );
+    }
+
+    /// Why (issue #228): `palace_create` (MCP tool) and `MemoryService::create_palace`
+    /// (HTTP path) both insert into the name cache so a freshly-created palace
+    /// is resolvable on the very next write — without waiting for the next
+    /// hydration cycle.
+    /// What: dispatches the `palace_create` MCP tool against a tempdir and
+    /// asserts the cache row was written.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn palace_name_cache_updates_on_create() {
+        use serde_json::json;
+
+        let state = test_state();
+        let _ = tools::dispatch_tool(&state, "palace_create", json!({"name": "gamma"}))
+            .await
+            .expect("palace_create");
+        assert_eq!(
+            state.palace_names.get("gamma").map(|e| e.value().clone()),
+            Some("gamma".to_string()),
+            "palace_create must populate the in-memory name cache so writes \
+             can resolve the friendly name without a disk walk"
+        );
     }
 
     /// Why: initialize without a default palace must omit `default_palace`
