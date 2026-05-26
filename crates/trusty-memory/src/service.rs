@@ -324,14 +324,22 @@ impl MemoryService {
     /// List every palace on disk, enriched with live handle stats.
     ///
     /// Why: shared between the HTTP handler and the chat tool dispatcher;
-    /// both want the same `PalaceInfo` shape.
-    /// What: walks the registry and builds a `PalaceInfo` per row.
-    /// Test: `palace_list_includes_richer_counts`, `palace_list_includes_graph_counts`.
+    /// both want the same `PalaceInfo` shape. Issue #185 added the
+    /// reserved-prefix filter so internal "system" palaces (e.g. the
+    /// `__health_probe__` palace used by `/health`) never surface in the
+    /// admin UI, TUI, or any user-facing roster.
+    /// What: walks the registry, drops any palace whose id starts with the
+    /// reserved `__` prefix, and builds a `PalaceInfo` per remaining row.
+    /// Test: `palace_list_includes_richer_counts`, `palace_list_includes_graph_counts`,
+    /// `health_probe_palace_is_invisible` (in `web::tests`).
     pub async fn list_palaces(&self) -> ServiceResult<Vec<PalaceInfo>> {
         let palaces = PalaceRegistry::list_palaces(&self.state.data_root)
             .map_err(|e| ServiceError::internal(format!("list palaces: {e:#}")))?;
         let mut out = Vec::with_capacity(palaces.len());
         for p in palaces {
+            if is_reserved_system_palace(&p.id) {
+                continue;
+            }
             let handle = self
                 .state
                 .registry
@@ -983,6 +991,23 @@ pub fn recall_entry_json(r: RecallResult) -> Value {
     obj.insert("score".to_string(), json!(r.score));
     obj.insert("layer".to_string(), json!(r.layer));
     Value::Object(obj)
+}
+
+/// Reserved-prefix predicate for "system" palaces hidden from user listings.
+///
+/// Why: Issue #185 — the `/health` round-trip writes probe drawers into a
+/// dedicated `__health_probe__` palace. That palace exists on disk but must
+/// never appear in the admin UI, TUI, chat-tool palace roster, or any other
+/// user-facing surface. Centralising the predicate here keeps the convention
+/// (any palace id starting with `__`) in one place so future system palaces
+/// inherit the same hidden-from-users behaviour automatically.
+/// What: Returns `true` iff `id.as_str()` starts with the double-underscore
+/// prefix. Pure function over the id — no I/O, no allocation.
+/// Test: covered indirectly by `health_probe_palace_is_invisible` in
+/// `web::tests` (drives a full `/health` round-trip and asserts the probe
+/// palace does not appear in `MemoryService::list_palaces`).
+pub(crate) fn is_reserved_system_palace(id: &PalaceId) -> bool {
+    id.as_str().starts_with("__")
 }
 
 /// Build a `PalaceInfo` from a `Palace` row plus an optional opened handle.
