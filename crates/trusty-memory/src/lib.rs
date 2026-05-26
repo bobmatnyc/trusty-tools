@@ -33,6 +33,7 @@ use trusty_common::ChatProvider;
 
 pub mod activity;
 pub mod attribution;
+pub mod bm25_supervisor;
 pub mod bootstrap;
 pub mod chat;
 pub mod commands;
@@ -509,6 +510,21 @@ pub struct AppState {
     /// Test: `bm25_client_disabled_by_default`,
     /// `bm25_client_enabled_when_env_set`.
     pub bm25_client: Option<Arc<Bm25Client>>,
+    /// Optional per-palace BM25 daemon spawn supervisor (issue #193).
+    ///
+    /// Why: without an in-process supervisor the BM25 daemon must be
+    /// launched out-of-band (launchd, manual `trusty-bm25-daemon`), which
+    /// is the same UX trap PR #190 fixed for trusty-embedderd. Holding a
+    /// supervisor here lets us spawn the daemon on first BM25 use for a
+    /// palace, restart it if it dies, and reap it on clean shutdown.
+    /// `Some` only when `TRUSTY_BM25_DAEMON=1` at startup — the same gate
+    /// that enables `bm25_client`. When set but `TRUSTY_BM25_EXTERNAL=1`,
+    /// the supervisor's `ensure_running` becomes a no-op that just returns
+    /// the canonical socket path so operators can keep using their own
+    /// process manager.
+    /// Test: covered by `bm25_supervisor_present_when_env_set` and the
+    /// `bm25_supervisor::tests` unit tests.
+    pub bm25_supervisor: Option<Arc<bm25_supervisor::Bm25Supervisor>>,
 }
 
 impl AppState {
@@ -552,6 +568,7 @@ impl AppState {
             prompt_context_cache: Arc::new(RwLock::new(prompt_facts::PromptFactsCache::default())),
             activity_log,
             bm25_client: None,
+            bm25_supervisor: None,
         }
     }
 
@@ -579,9 +596,15 @@ impl AppState {
             // constructed on demand via `Bm25Client::for_palace`.
             let default_palace = self.default_palace.as_deref().unwrap_or("default");
             self.bm25_client = Some(Arc::new(Bm25Client::for_palace(default_palace)));
+            // Issue #193: hand-in-hand with the client, attach a spawn
+            // supervisor so the BM25 daemon is auto-started on first use
+            // for any palace. Operators who want to manage daemons
+            // out-of-band (launchd, systemd, manual) set
+            // TRUSTY_BM25_EXTERNAL=1 which makes the supervisor a no-op.
+            self.bm25_supervisor = Some(Arc::new(bm25_supervisor::Bm25Supervisor::new()));
             tracing::info!(
                 palace = default_palace,
-                "BM25 daemon client enabled (TRUSTY_BM25_DAEMON=1)"
+                "BM25 daemon client + spawn supervisor enabled (TRUSTY_BM25_DAEMON=1)"
             );
         }
         self
@@ -1094,6 +1117,12 @@ pub async fn run_http_on(state: AppState, listener: tokio::net::TcpListener) -> 
     // it's unsupported (e.g. some Docker overlays).
     let uds_sock_path = spawn_uds_listener(state.clone()).await;
 
+    // Keep a handle to the BM25 supervisor (if any) so we can call
+    // `shutdown()` on the exit path. Cloning here is cheap (`Arc`) and
+    // detaches the lifetime of the supervisor from the `state` move into
+    // the router below.
+    let bm25_supervisor = state.bm25_supervisor.clone();
+
     let app = web::router()
         .route("/sse", get(sse_handler))
         .with_state(state);
@@ -1107,6 +1136,15 @@ pub async fn run_http_on(state: AppState, listener: tokio::net::TcpListener) -> 
     }
     if let Some(p) = uds_sock_path.as_ref() {
         let _ = std::fs::remove_file(p);
+    }
+
+    // Issue #193: gracefully reap every spawned BM25 daemon before the
+    // process exits so each one gets a chance to flush its snapshot and
+    // unlink its socket. `kill_on_drop=true` on the children would
+    // SIGKILL them on Drop anyway, but that skips the daemon's own
+    // shutdown sequence and leaves stale sockets behind.
+    if let Some(supervisor) = bm25_supervisor {
+        supervisor.shutdown().await;
     }
 
     serve_result?;
@@ -1938,6 +1976,13 @@ mod tests {
             state.bm25_client.is_none(),
             "bm25_client must be None when TRUSTY_BM25_DAEMON is unset"
         );
+        // Issue #193: the spawn supervisor is bound to the same env gate as
+        // the client — opt-out parity matters so we never accidentally
+        // spawn daemons in deployments that explicitly didn't opt in.
+        assert!(
+            state.bm25_supervisor.is_none(),
+            "bm25_supervisor must be None when TRUSTY_BM25_DAEMON is unset"
+        );
         if let Some(v) = prev {
             unsafe {
                 std::env::set_var("TRUSTY_BM25_DAEMON", v);
@@ -1962,6 +2007,12 @@ mod tests {
         assert!(
             state.bm25_client.is_some(),
             "bm25_client must be Some when TRUSTY_BM25_DAEMON=1"
+        );
+        // Issue #193: opting in to the client must also install the spawn
+        // supervisor so the daemon is auto-started on first use.
+        assert!(
+            state.bm25_supervisor.is_some(),
+            "bm25_supervisor must be Some when TRUSTY_BM25_DAEMON=1"
         );
         match prev {
             Some(v) => unsafe { std::env::set_var("TRUSTY_BM25_DAEMON", v) },

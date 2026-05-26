@@ -1419,6 +1419,57 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
     }
 }
 
+/// Per-palace BM25 data directory derived from the daemon's data root.
+///
+/// Why (issue #193): the spawn supervisor must hand the BM25 daemon a
+/// data-dir argument so each palace's BM25 snapshot lives next to its
+/// other palace data (redb, kg.db, embeddings) — not in a shared scratch
+/// directory. The convention is `<data_root>/<palace>/bm25/`, which is
+/// stable across daemon restarts and lets operators inspect the snapshot
+/// file alongside everything else in the palace.
+/// What: appends `<palace>/bm25` to the daemon's `data_root`. Pure path
+/// arithmetic — no I/O. The supervisor itself creates the directory
+/// before spawning the child.
+/// Test: implicitly via the spawn supervisor's integration test.
+fn bm25_data_dir_for_palace(state: &AppState, palace: &str) -> std::path::PathBuf {
+    state.data_root.join(palace).join("bm25")
+}
+
+/// Try to ensure the BM25 daemon for `palace` is running. Returns `true`
+/// when the daemon is (now) reachable.
+///
+/// Why (issue #193): callers want a single yes/no — should I send a BM25
+/// op to this palace right now? — without each having to thread the
+/// supervisor's `Result` through every code path. When the supervisor
+/// returns an error (binary not found, spawn rejected, socket never
+/// appeared) we log and return `false` so the caller degrades to
+/// vector-only behaviour, exactly as it did before #193 when the daemon
+/// simply wasn't running.
+/// What: when `state.bm25_supervisor` is `None`, returns `true` (the
+/// caller falls back to the original "use the env-var-only socket path"
+/// behaviour). When `Some`, delegates to `ensure_running` and treats any
+/// error as a soft failure — the supervisor's logs explain why.
+/// Test: covered indirectly by the spawn supervisor's unit tests and the
+/// `bm25_supervisor_e2e` integration test.
+async fn ensure_bm25_running_for_palace(state: &AppState, palace: &str) -> bool {
+    let Some(supervisor) = state.bm25_supervisor.as_ref() else {
+        // No supervisor — the client (if present) connects to whatever
+        // socket happens to be live. This matches pre-#193 behaviour.
+        return true;
+    };
+    let data_dir = bm25_data_dir_for_palace(state, palace);
+    match supervisor.ensure_running(palace, &data_dir).await {
+        Ok(_socket) => true,
+        Err(e) => {
+            tracing::warn!(
+                palace = %palace,
+                "bm25 supervisor could not start daemon (degrading to vector-only): {e:#}"
+            );
+            false
+        }
+    }
+}
+
 /// Fire-and-forget BM25 indexing after a drawer write (issue #156).
 ///
 /// Why: `memory_remember` / `memory_note` must return as fast as the redb
@@ -1426,8 +1477,10 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
 /// keeps the daemon's RTT off the response path entirely, and bails out
 /// cheaply when the env-var-gated client is absent.
 /// What: clones the client `Arc` and the inputs, spawns a detached task that
-/// calls `client.index()`. Daemon errors are logged at `warn!` and dropped —
-/// the drawer is durable in redb regardless of whether the BM25 lane saw it.
+/// (a) ensures the daemon is running via the spawn supervisor (issue #193),
+/// and (b) calls `client.index()`. Daemon errors are logged at `warn!` and
+/// dropped — the drawer is durable in redb regardless of whether the BM25
+/// lane saw it.
 /// Test: behaviour is exercised end-to-end by the integration tests in
 /// `trusty-bm25-daemon/tests/`; the no-op branch is covered by
 /// `bm25_client_disabled_by_default`.
@@ -1435,10 +1488,24 @@ fn bm25_index_fire_and_forget(state: &AppState, palace: &str, drawer_id: Uuid, c
     let Some(client) = state.bm25_client.clone() else {
         return;
     };
+    let supervisor = state.bm25_supervisor.clone();
+    let data_dir = bm25_data_dir_for_palace(state, palace);
     let palace = palace.to_string();
     let drawer_id_s = drawer_id.to_string();
     let content = content.to_string();
     tokio::spawn(async move {
+        // Issue #193: try to start the daemon before the first index call.
+        // If the supervisor returns an error we silently skip the index op;
+        // the daemon will be retried on the next fire-and-forget call.
+        if let Some(sup) = supervisor.as_ref() {
+            if let Err(e) = sup.ensure_running(&palace, &data_dir).await {
+                tracing::warn!(
+                    palace = %palace,
+                    "bm25 supervisor failed to start daemon for index (non-fatal): {e:#}"
+                );
+                return;
+            }
+        }
         if let Err(e) = client.index(&drawer_id_s, &content).await {
             tracing::warn!(
                 palace = %palace,
@@ -1457,7 +1524,8 @@ fn bm25_index_fire_and_forget(state: &AppState, palace: &str, drawer_id: Uuid, c
 /// branch explicit at the consumer.
 /// What: returns `None` when the env-var-gated client is absent OR when the
 /// daemon errors (treated as a graceful degradation — the caller falls back
-/// to vector-only results). Otherwise returns the BM25 hits the daemon
+/// to vector-only results). Otherwise ensures the daemon is running via the
+/// spawn supervisor (issue #193), then returns the BM25 hits the daemon
 /// served. `top_k` is forwarded verbatim.
 /// Test: integration coverage via the daemon's `tests/bm25_daemon.rs`; the
 /// `None` path is covered by `bm25_client_disabled_by_default`.
@@ -1468,6 +1536,12 @@ async fn bm25_search_optional(
     top_k: usize,
 ) -> Option<Vec<trusty_common::bm25_client::BM25Hit>> {
     let client = state.bm25_client.as_ref()?;
+    // Issue #193: spawn the daemon if it isn't already running. On error
+    // we fall through to vector-only behaviour exactly as we did before
+    // #193 when the operator forgot to start the daemon manually.
+    if !ensure_bm25_running_for_palace(state, palace).await {
+        return None;
+    }
     match client.search(query, top_k).await {
         Ok(hits) => Some(hits),
         Err(e) => {

@@ -407,7 +407,12 @@ async fn run_serve(
     if let Some(addr) = http {
         let state = AppState::new(data_root)
             .with_default_palace(palace)
-            .with_log_buffer(log_buffer);
+            .with_log_buffer(log_buffer)
+            // Issue #156 + #193: opt in to the BM25 lexical lane (and its
+            // spawn supervisor) when TRUSTY_BM25_DAEMON=1. The builder is
+            // a no-op when the env var is unset so existing deployments
+            // see no behavioural change.
+            .with_bm25_client_from_env();
         // Why: previously, `load_palaces_from_disk` was awaited synchronously
         // before binding the HTTP listener. A single broken `kg.db` (stale
         // WAL sidecar, corrupt file, permissions) could stall hydration for
@@ -457,7 +462,12 @@ async fn run_serve(
         // `~/.trusty-memory/http_addr` for clients to discover.
         let state = AppState::new(data_root)
             .with_default_palace(palace)
-            .with_log_buffer(log_buffer);
+            .with_log_buffer(log_buffer)
+            // Issue #156 + #193: opt in to the BM25 lexical lane (and its
+            // spawn supervisor) when TRUSTY_BM25_DAEMON=1. The builder is
+            // a no-op when the env var is unset so existing deployments
+            // see no behavioural change.
+            .with_bm25_client_from_env();
         let bg_state = state.clone();
         tokio::spawn(async move {
             let started = std::time::Instant::now();

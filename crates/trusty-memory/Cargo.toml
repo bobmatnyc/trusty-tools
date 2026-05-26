@@ -100,6 +100,13 @@ redb = { workspace = true }
 # trusty-analyze, trusty-mpm-core, trusty-gworkspace) so this adds no new
 # lockfile churn.
 sha2 = { workspace = true }
+# Issue #193: the bm25 spawn supervisor sends a graceful SIGTERM to its
+# children before falling back to SIGKILL. tokio::process::Child does not
+# expose SIGTERM directly, so we reach into the raw PID with libc::kill.
+# libc is already a workspace dep used across the trusty-* crates; this is
+# zero lockfile churn (Unix-only — the spawn supervisor is also Unix-only
+# because the daemon protocol is UDS).
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

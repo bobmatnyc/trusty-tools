@@ -10936,6 +10936,7 @@ dependencies = [
  "dashmap 6.2.1",
  "dirs 5.0.1",
  "futures",
+ "libc",
  "mime_guess",
  "redb",
  "reqwest 0.12.28",
