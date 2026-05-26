@@ -105,6 +105,20 @@ pub mod rpc;
 #[cfg(feature = "embedder")]
 pub mod embedder;
 
+/// Client for the `trusty-embed-daemon` subprocess.
+///
+/// Why: trusty-memory and trusty-search need to embed text without holding
+/// an in-process ONNX mutex. `EmbedClient` delegates to the embed daemon
+/// over a Unix domain socket, enabling batching and process isolation
+/// without forcing every consumer to depend on fastembed/ORT.
+/// What: Gated behind the `embed-client` feature. Pulls in no new
+/// dependencies — only `tokio`, `serde_json`, and `anyhow` (all already
+/// required by trusty-common).
+/// Test: `cargo test -p trusty-common --features embed-client` runs the
+/// module's unit tests (request shape, default path).
+#[cfg(feature = "embed-client")]
+pub mod embed_client;
+
 /// Symbol-graph engine (formerly the `trusty-symgraph` crate).
 ///
 /// Why: All trusty-* tools that touch source code (open-mpm, trusty-search,

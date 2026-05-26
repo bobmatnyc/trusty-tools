@@ -10871,6 +10871,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-embed-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "trusty-common",
+]
+
+[[package]]
 name = "trusty-embedder"
 version = "0.1.8"
 dependencies = [
