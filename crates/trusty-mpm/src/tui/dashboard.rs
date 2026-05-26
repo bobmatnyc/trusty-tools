@@ -525,12 +525,17 @@ pub fn help_text() -> String {
 }
 
 /// Render the help overlay listing every key binding.
+///
+/// Why: the body text previously used `Color::White`, which renders the same as
+/// the terminal background on light/white themes — making the overlay's
+/// contents invisible. The default `Color::Reset` always contrasts with the
+/// terminal's own background, so the text stays legible regardless of theme.
 fn render_help_overlay(frame: &mut Frame) {
     let area = centered_rect(58, 13, frame.area());
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(help_text())
-            .style(Style::default().fg(Color::White))
+            .style(Style::default().fg(Color::Reset))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -619,8 +624,13 @@ pub fn render(frame: &mut Frame, state: &DashboardState) {
         .into_iter()
         .skip(offset)
         .map(|(text, role)| {
+            // User turns use the terminal's default foreground (`Reset`) rather
+            // than `Color::White` so the text stays legible on light terminal
+            // themes — `Color::White` paints literal white pixels that vanish
+            // against a white background. Coordinator turns keep their cyan
+            // accent since cyan contrasts with both light and dark themes.
             let color = match role {
-                ChatRole::User => Color::White,
+                ChatRole::User => Color::Reset,
                 ChatRole::Coordinator => Color::Cyan,
             };
             ListItem::new(Line::from(text).style(Style::default().fg(color)))
@@ -942,5 +952,89 @@ mod tests {
         assert_eq!(state.chat_scroll, 4);
         state.scroll_down();
         assert_eq!(state.chat_scroll, 5);
+    }
+
+    /// Regression: the help overlay body must not paint text with
+    /// `Color::White`, because that renders the same colour as the
+    /// background on light terminal themes and the contents disappear.
+    /// The body should use `Color::Reset` so the terminal's default
+    /// foreground contrasts with whatever background the user has.
+    #[test]
+    fn help_overlay_body_text_is_not_white() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let state = DashboardState {
+            show_help: true,
+            ..DashboardState::default()
+        };
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|f| render(f, &state))
+            .expect("render must succeed");
+        let buf = terminal.backend().buffer();
+        // The body text "Enter" appears on the first help-overlay row inside
+        // the centered popup; scan every cell that carries body-text fg and
+        // confirm none use `Color::White`.
+        let mut found_help_text = false;
+        for y in 0..24 {
+            for x in 0..120 {
+                let cell = &buf[(x, y)];
+                if cell.symbol() == "E" || cell.symbol() == "n" || cell.symbol() == "t" {
+                    // Heuristic: only consider cells that are part of the help
+                    // body — those inside the help overlay carry a non-Reset
+                    // glyph and would have previously been styled white.
+                    if cell.fg == Color::White {
+                        panic!(
+                            "help overlay body uses Color::White (invisible on light \
+                             terminals) at ({x},{y}): '{}'",
+                            cell.symbol()
+                        );
+                    }
+                    if cell.symbol() == "E" {
+                        found_help_text = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            found_help_text,
+            "help overlay body did not render any expected text"
+        );
+    }
+
+    /// Regression: chat user messages must not use `Color::White` for the
+    /// foreground, since on a light-themed terminal that renders the same
+    /// colour as the background and the message disappears. User turns
+    /// should adopt the terminal default (`Color::Reset`) instead.
+    #[test]
+    fn chat_user_message_is_not_white() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut state = DashboardState::default();
+        state.push_chat(ChatMessage::user("xyzzy-test-marker"));
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|f| render(f, &state))
+            .expect("render must succeed");
+        let buf = terminal.backend().buffer();
+        // Find the cells carrying the marker token; assert none of them is
+        // styled `Color::White`.
+        let mut saw_marker = false;
+        for y in 0..24 {
+            for x in 0..120 {
+                let cell = &buf[(x, y)];
+                if cell.symbol() == "x" || cell.symbol() == "y" || cell.symbol() == "z" {
+                    if cell.fg == Color::White {
+                        panic!(
+                            "chat user message uses Color::White (invisible on light \
+                             terminals) at ({x},{y}): '{}'",
+                            cell.symbol()
+                        );
+                    }
+                    saw_marker = true;
+                }
+            }
+        }
+        assert!(saw_marker, "chat user message marker was not rendered");
     }
 }
