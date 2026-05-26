@@ -9,6 +9,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// A single commit observed in a repository.
+///
+/// Why: rows in the `commits` SQLite table need a typed in-memory
+/// counterpart that both extractors and aggregators can share.
+/// What: maps 1:1 onto the v1 `commits` schema. `Serialize`/`Deserialize`
+/// derives let report formatters emit it as JSON without a DTO layer.
+/// Test: covered indirectly by every test that inserts into the
+/// `commits` table (see `core::tests::database_opens_with_wal_and_migrations_apply`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Commit {
     /// Primary key (database-assigned).
@@ -62,6 +69,14 @@ pub struct Commit {
 }
 
 /// A canonical author / developer identity.
+///
+/// Why: the same physical developer often commits under multiple
+/// `(name, email)` pairs; the `authors` table holds one row per resolved
+/// identity so reports collapse them.
+/// What: maps to the `authors` v1 schema with the alias list stored as a
+/// JSON-encoded string.
+/// Test: covered by `collect::identity::resolver` tests that exercise the
+/// upsert path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Author {
     /// Primary key (database-assigned).
@@ -78,6 +93,14 @@ pub struct Author {
 }
 
 /// A classification verdict produced by the cascade.
+///
+/// Why: classifications are stored once per unique outcome and referenced
+/// by `commits.classification_id`, so the same `(category, subcategory,
+/// method)` triple is not duplicated per commit.
+/// What: maps to the `classifications` v1 schema; `method` records which
+/// cascade tier produced the verdict.
+/// Test: covered by `classify::pipeline` tests that exercise full-cascade
+/// runs against an in-memory DB.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Classification {
     /// Primary key (database-assigned).
@@ -100,6 +123,14 @@ pub struct Classification {
 }
 
 /// File-level change record attached to a commit.
+///
+/// Why: per-file change data feeds the "files churned" and
+/// "complexity" metrics; the per-file granularity must survive
+/// round-tripping through SQLite.
+/// What: maps to the `files` v1 schema with a typed `change_type`
+/// (added / modified / deleted / renamed).
+/// Test: covered indirectly by the git-extractor tests
+/// (`collect::git::extractor`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileChange {
     /// Primary key (database-assigned).
@@ -122,6 +153,16 @@ pub struct FileChange {
 }
 
 /// A pull request record (typically GitHub).
+///
+/// Why: PR data drives the velocity / DORA lead-time / cycle-time
+/// metrics; storing the full PR row lets us recompute those metrics
+/// without re-fetching from the provider.
+/// What: maps to the `pull_requests` v1 schema. Provider-specific PR
+/// numbering means the `(provider, pr_number, repository)` triple is
+/// the persistence-level unique identity.
+/// Test: covered by `collect::github::client` and
+/// `collect::bitbucket::client` tests that round-trip PR data through
+/// the DB.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PullRequest {
     /// Primary key (database-assigned).
@@ -163,6 +204,13 @@ pub struct PullRequest {
 }
 
 /// Cascade tier that produced a classification.
+///
+/// Why: knowing which tier of the four-tier cascade produced a verdict
+/// lets analytics tools surface low-confidence verdicts (e.g. the
+/// catch-all routes through `LlmFallback` when LLM is enabled).
+/// What: enum tagged with snake_case string values for DB persistence.
+/// Test: covered by `classify::tests::engine_classify_batch_does_not_panic`
+/// which asserts the cascade reports the correct tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClassificationMethod {
@@ -180,6 +228,13 @@ pub enum ClassificationMethod {
 
 impl ClassificationMethod {
     /// Stable string representation used for DB storage.
+    ///
+    /// Why: rusqlite needs a `&str` to bind to the `method` column; the
+    /// values must stay stable across releases so existing rows continue
+    /// to round-trip correctly.
+    /// What: returns the lowercase snake_case label for each variant.
+    /// Test: covered indirectly by every classification test that reads
+    /// or writes the `classifications` table.
     pub fn as_str(&self) -> &'static str {
         match self {
             ClassificationMethod::ExactRule => "exact_rule",
@@ -192,6 +247,12 @@ impl ClassificationMethod {
 }
 
 /// File change kind for [`FileChange`].
+///
+/// Why: distinguishing add / modify / delete / rename lets reports
+/// separate "new code" from "code shuffled around" without re-parsing
+/// the git diff.
+/// What: 4-variant enum with snake_case strings for DB persistence.
+/// Test: covered by `collect::git::diff` extractor tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeType {
@@ -207,6 +268,11 @@ pub enum ChangeType {
 
 impl ChangeType {
     /// Stable string representation used for DB storage.
+    ///
+    /// Why: see [`ClassificationMethod::as_str`] — same persistence
+    /// invariant applies.
+    /// What: returns the snake_case label for each variant.
+    /// Test: covered by `collect::git::diff` tests.
     pub fn as_str(&self) -> &'static str {
         match self {
             ChangeType::Added => "added",
@@ -218,6 +284,11 @@ impl ChangeType {
 }
 
 /// Lifecycle state of a [`PullRequest`].
+///
+/// Why: cycle-time and DORA lead-time only apply to merged PRs;
+/// surfacing the state lets reports filter without joining extra tables.
+/// What: open / closed / merged tri-state with snake_case persistence.
+/// Test: covered by `collect::github::client` round-trip tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrState {
@@ -231,6 +302,11 @@ pub enum PrState {
 
 impl PrState {
     /// Stable string representation used for DB storage.
+    ///
+    /// Why: see [`ClassificationMethod::as_str`] — same persistence
+    /// invariant applies.
+    /// What: returns the snake_case label for each variant.
+    /// Test: covered by `collect::github::client` round-trip tests.
     pub fn as_str(&self) -> &'static str {
         match self {
             PrState::Open => "open",

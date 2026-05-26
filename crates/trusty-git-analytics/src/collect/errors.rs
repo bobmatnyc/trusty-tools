@@ -6,6 +6,15 @@
 use thiserror::Error;
 
 /// Top-level error type for collection-stage operations.
+///
+/// Why: collection spans git2, HTTP clients (GitHub / JIRA / Linear /
+/// Bitbucket / Azure DevOps), the core DB layer, and identity resolution;
+/// a single uniform error keeps the per-provider clients aligned.
+/// What: `thiserror` enum with `From` impls for git2, reqwest, rusqlite,
+/// std::io, and serde_json, plus domain variants for identity / config
+/// failures.
+/// Test: covered indirectly — every provider client and `GitCollector`
+/// test that exercises an error path produces these variants.
 #[derive(Debug, Error)]
 pub enum CollectError {
     /// A `git2`/libgit2 error occurred during repository operations.
@@ -42,4 +51,8 @@ pub enum CollectError {
 }
 
 /// Module-wide `Result` alias.
+///
+/// Why: keeps signatures compact across many provider clients.
+/// What: alias for `std::result::Result<T, CollectError>`.
+/// Test: exercised by every fallible function in `collect`.
 pub type Result<T> = std::result::Result<T, CollectError>;

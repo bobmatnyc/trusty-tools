@@ -4,6 +4,15 @@ use serde::{Deserialize, Serialize};
 
 /// A single classification rule.
 ///
+/// Why: rules are the unit of declarative classification — they decouple
+/// the matcher from policy so a user-supplied rule file can extend the
+/// behaviour without changing code.
+/// What: bundles keywords (Tier 1 exact match), patterns (Tier 2 regex),
+/// the produced `category` / `subcategory`, a `priority` for tie-breaking,
+/// and a `confidence` (0.0–1.0).
+/// Test: covered by `classify::tests::exact_matcher_classifies_*` and
+/// `regex_matcher_*` test cases.
+///
 /// A rule matches when **any** of its `keywords` is present in the commit
 /// message (Tier 1) or **any** of its `patterns` matches (Tier 2). The
 /// resulting verdict carries the rule's `category`, `subcategory`, and
@@ -48,6 +57,13 @@ fn default_confidence() -> f64 {
 }
 
 /// A collection of rules loaded from a file or built into the binary.
+///
+/// Why: rule files often want to inherit the built-in default set and
+/// only add or override specific entries; `extend_defaults` makes that
+/// composition explicit at the file level.
+/// What: holds the loaded version tag, the extend-defaults flag, and the
+/// vector of [`Rule`]s. Rules are not pre-sorted — use [`Self::by_priority`].
+/// Test: covered by `load_rules` round-trip in `classify::tests`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuleSet {
     /// Optional schema version for forward compatibility.
@@ -71,8 +87,15 @@ fn default_true() -> bool {
 }
 
 impl RuleSet {
-    /// Return rules sorted by descending priority. Stable sort preserves
-    /// declaration order for rules with equal priority.
+    /// Return rules sorted by descending priority.
+    ///
+    /// Why: the cascade evaluates the highest-priority rules first so a
+    /// leading `feat(api)!:` beats a stray later `bug` keyword; centralising
+    /// the sort here keeps every consumer aligned.
+    /// What: returns a `Vec<&Rule>` ordered by descending `priority`;
+    /// stable sort preserves declaration order for ties.
+    /// Test: covered by `default_rules_is_non_empty` which iterates the
+    /// sorted vector.
     pub fn by_priority(&self) -> Vec<&Rule> {
         let mut refs: Vec<&Rule> = self.rules.iter().collect();
         refs.sort_by_key(|r| std::cmp::Reverse(r.priority));

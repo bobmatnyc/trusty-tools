@@ -21,6 +21,14 @@ use crate::report::models::{
 };
 
 /// Helper that walks the database and assembles [`ReportData`].
+///
+/// Why: report generation needs a single named entry point so callers (the
+/// CLI, integration tests) can share one aggregation path instead of
+/// duplicating SQL across formatters.
+/// What: namespace type with no fields; all behaviour is on associated
+/// functions like [`Aggregator::build`].
+/// Test: see `report::tests::aggregator_builds_report_data` for end-to-end
+/// coverage from a seeded SQLite DB.
 pub struct Aggregator;
 
 /// Internal row pulled from the commit/classification join.
@@ -117,9 +125,17 @@ fn compile_patterns(patterns: &[&str]) -> Vec<Regex> {
 impl Aggregator {
     /// Build a full [`ReportData`] from the given database.
     ///
-    /// The optional `_config` argument is currently unused but kept on the
-    /// signature so future filtering (date ranges from `RepositoryConfig`,
-    /// include/exclude merges, etc.) can be added without breaking callers.
+    /// Why: report formatters all need the same denormalised view of the
+    /// data; this is the one place that knows how to build it.
+    /// What: loads rows + PR rows, runs aggregation, then layers
+    /// coverage / unresolved-identity diagnostics on top of the result.
+    /// Test: see `report::tests::aggregator_builds_report_data` and
+    /// `aggregator_computes_summary_and_dora_and_quality`.
+    ///
+    /// The `config` argument feeds the configured-alias check used to
+    /// detect "phantom" identities (authors whose email is not in the
+    /// configured alias map) so consumers know whether developer counts
+    /// are inflated by unmapped commit-author identities.
     ///
     /// # Errors
     ///
@@ -283,6 +299,18 @@ impl Aggregator {
         Ok(out)
     }
 
+    /// Build the in-memory [`ReportData`] from already-loaded rows.
+    ///
+    /// Why: keeping the row→report transformation pure (no I/O) makes it
+    /// trivial to unit-test against fixture data and to decompose into
+    /// named phases.
+    /// What: orchestrates the pipeline — pre-pass row flagging,
+    /// single-pass accumulation, materialisation of each output slice,
+    /// and computation of derived metrics (velocity / DORA / quality /
+    /// developer activity).
+    /// Test: indirectly via `Aggregator::build` tests; behaviour is a
+    /// pure refactor — every output field is produced by a named helper
+    /// below.
     fn aggregate(rows: Vec<CommitRow>, prs: Vec<PrRow>) -> ReportData {
         let generated_at = Utc::now().to_rfc3339();
         let mut data = ReportData::empty(generated_at);
@@ -291,490 +319,89 @@ impl Aggregator {
             return data;
         }
 
-        // Compile boilerplate / revert patterns once. Pattern lists are
-        // currently built-in; user-supplied lists can be wired in later
-        // through `analysis.boilerplate_patterns` without changing the
-        // signature.
-        let boilerplate_re = compile_patterns(DEFAULT_BOILERPLATE_PATTERNS);
-        let revert_re = compile_patterns(DEFAULT_REVERT_PATTERNS);
+        // Pre-pass: flag boilerplate / revert rows once and reuse the bits
+        // throughout the rest of the pipeline.
+        let row_flags = compute_row_flags(&rows);
 
-        // Boilerplate / revert flags per row (computed once, reused).
-        let mut row_is_boilerplate: Vec<bool> = Vec::with_capacity(rows.len());
-        let mut row_is_revert: Vec<bool> = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let lines = row.insertions + row.deletions;
-            row_is_boilerplate.push(is_boilerplate(&row.message, lines, &boilerplate_re));
-            row_is_revert.push(is_revert(&row.message, &revert_re));
-        }
-        let boilerplate_count = row_is_boilerplate.iter().filter(|b| **b).count();
-        let revert_count = row_is_revert.iter().filter(|b| **b).count();
+        // Single-pass scan: accumulate per-author / per-repo / per-week /
+        // per-developer state from `rows`.
+        let acc = accumulate_rows(&rows, &row_flags);
 
-        // Period bounds.
-        let mut min_ts = rows[0].timestamp;
-        let mut max_ts = rows[0].timestamp;
-
-        // Per-author state.
-        struct AuthorAcc {
-            name: String,
-            email: String,
-            commits: usize,
-            insertions: i64,
-            deletions: i64,
-            files_changed: i64,
-            categories: HashMap<String, usize>,
-            first: DateTime<Utc>,
-            last: DateTime<Utc>,
-        }
-        // Keyed by author_email only — the same person committing with the same email
-        // but slightly different display names (e.g. "Bob Smith" vs "bobsmith") should
-        // be aggregated into a single author row. We retain the longest display name
-        // seen as the canonical name for that email.
-        let mut authors: HashMap<String, AuthorAcc> = HashMap::new();
-
-        // Per-repo state.
-        struct RepoAcc {
-            commits: usize,
-            authors: HashSet<String>,
-            insertions: i64,
-            deletions: i64,
-            categories: HashMap<String, usize>,
-        }
-        let mut repos: HashMap<String, RepoAcc> = HashMap::new();
-
-        // Weekly buckets keyed by (week, author, repository).
-        struct WeekAcc {
-            commits: usize,
-            insertions: i64,
-            deletions: i64,
-            categories: HashMap<String, usize>,
-        }
-        let mut weekly: BTreeMap<(String, String, String), WeekAcc> = BTreeMap::new();
-
-        let mut category_total: HashMap<String, usize> = HashMap::new();
-
-        // Cross-developer per-week roll-up keyed by week label.
-        #[derive(Default)]
-        struct WeekTotal {
-            commits: usize,
-            categories: HashMap<String, usize>,
-            developers: HashSet<String>,
-        }
-        let mut week_totals: BTreeMap<String, WeekTotal> = BTreeMap::new();
-
-        // Per-developer per-week active-week tracking (email → set of weeks).
-        let mut dev_weeks: HashMap<String, HashSet<String>> = HashMap::new();
-        // Per-developer category histogram for primary_work_type.
-        let mut dev_categories: HashMap<String, HashMap<String, usize>> = HashMap::new();
-        // Per-developer ticketed-commit counter.
-        let mut dev_ticketed: HashMap<String, usize> = HashMap::new();
-
-        for (idx, row) in rows.iter().enumerate() {
-            if row.timestamp < min_ts {
-                min_ts = row.timestamp;
-            }
-            if row.timestamp > max_ts {
-                max_ts = row.timestamp;
-            }
-
-            // Authors. Group by email only; pick the longest display name seen
-            // as the canonical name (heuristic: longer names tend to be the full
-            // "Firstname Lastname" form rather than a short login handle).
-            let key = row.author_email.clone();
-            let a = authors.entry(key).or_insert_with(|| AuthorAcc {
-                name: row.author_name.clone(),
-                email: row.author_email.clone(),
-                commits: 0,
-                insertions: 0,
-                deletions: 0,
-                files_changed: 0,
-                categories: HashMap::new(),
-                first: row.timestamp,
-                last: row.timestamp,
-            });
-            if row.author_name.len() > a.name.len() {
-                a.name = row.author_name.clone();
-            }
-            a.commits += 1;
-            a.insertions += row.insertions;
-            a.deletions += row.deletions;
-            a.files_changed += row.files_changed;
-            if row.timestamp < a.first {
-                a.first = row.timestamp;
-            }
-            if row.timestamp > a.last {
-                a.last = row.timestamp;
-            }
-            if let Some(cat) = &row.category {
-                *a.categories.entry(cat.clone()).or_insert(0) += 1;
-            }
-
-            // Repositories.
-            let r = repos
-                .entry(row.repository.clone())
-                .or_insert_with(|| RepoAcc {
-                    commits: 0,
-                    authors: HashSet::new(),
-                    insertions: 0,
-                    deletions: 0,
-                    categories: HashMap::new(),
-                });
-            r.commits += 1;
-            r.authors.insert(row.author_email.clone());
-            r.insertions += row.insertions;
-            r.deletions += row.deletions;
-            if let Some(cat) = &row.category {
-                *r.categories.entry(cat.clone()).or_insert(0) += 1;
-            }
-
-            // Weekly. Keyed by email (not display name) so that the same identity
-            // committing under multiple names lands in a single weekly bucket.
-            let week = iso_week_label(&row.timestamp);
-            let wkey = (week, row.author_email.clone(), row.repository.clone());
-            let w = weekly.entry(wkey).or_insert_with(|| WeekAcc {
-                commits: 0,
-                insertions: 0,
-                deletions: 0,
-                categories: HashMap::new(),
-            });
-            w.commits += 1;
-            w.insertions += row.insertions;
-            w.deletions += row.deletions;
-            if let Some(cat) = &row.category {
-                *w.categories.entry(cat.clone()).or_insert(0) += 1;
-            }
-
-            // Category totals.
-            if let Some(cat) = &row.category {
-                *category_total.entry(cat.clone()).or_insert(0) += 1;
-            }
-
-            // Cross-developer weekly totals.
-            let week_label = iso_week_label(&row.timestamp);
-            let wt = week_totals.entry(week_label.clone()).or_default();
-            wt.commits += 1;
-            wt.developers.insert(row.author_email.clone());
-            // Treat boilerplate rows as a synthetic category so they show
-            // up in `weekly_categorization.csv` rather than being silently
-            // bucketed into whatever the classifier returned.
-            if row_is_boilerplate[idx] {
-                *wt.categories.entry("boilerplate".to_string()).or_insert(0) += 1;
-            } else if let Some(cat) = &row.category {
-                *wt.categories.entry(cat.clone()).or_insert(0) += 1;
-            } else {
-                *wt.categories.entry("unclassified".to_string()).or_insert(0) += 1;
-            }
-
-            // Per-developer week / category / ticketed tracking.
-            dev_weeks
-                .entry(row.author_email.clone())
-                .or_default()
-                .insert(week_label);
-            if let Some(cat) = &row.category {
-                *dev_categories
-                    .entry(row.author_email.clone())
-                    .or_default()
-                    .entry(cat.clone())
-                    .or_insert(0) += 1;
-            }
-            if row.ticketed {
-                *dev_ticketed.entry(row.author_email.clone()).or_insert(0) += 1;
-            }
-        }
-
-        // Materialize authors.
-        let mut author_summaries: Vec<AuthorSummary> = authors
-            .into_values()
-            .map(|a| AuthorSummary {
-                name: a.name,
-                email: a.email,
-                commit_count: a.commits,
-                insertions: a.insertions,
-                deletions: a.deletions,
-                files_changed: a.files_changed,
-                categories: a.categories,
-                first_commit: a.first.to_rfc3339(),
-                last_commit: a.last.to_rfc3339(),
-            })
-            .collect();
-        author_summaries.sort_by_key(|a| std::cmp::Reverse(a.commit_count));
-
-        // Materialize repositories.
-        let mut repo_summaries: Vec<RepositorySummary> = repos
-            .into_iter()
-            .map(|(name, r)| {
-                let mut top: Vec<(String, usize)> = r.categories.into_iter().collect();
-                top.sort_by_key(|t| std::cmp::Reverse(t.1));
-                RepositorySummary {
-                    name,
-                    commit_count: r.commits,
-                    author_count: r.authors.len(),
-                    insertions: r.insertions,
-                    deletions: r.deletions,
-                    top_categories: top,
-                }
-            })
-            .collect();
-        repo_summaries.sort_by_key(|r| std::cmp::Reverse(r.commit_count));
-
-        // Build email → canonical display name map from the author summaries
-        // so that the weekly activity rows display the same canonical name as
-        // the authors table (avoids "Bob" in one report and "bobmatnyc" in
-        // another for the same underlying identity).
+        // Materialise the canonical author / repo / weekly-activity slices.
+        let author_summaries = materialize_authors(acc.authors);
+        let repo_summaries = materialize_repositories(acc.repos);
         let email_to_name: HashMap<String, String> = author_summaries
             .iter()
             .map(|a| (a.email.clone(), a.name.clone()))
             .collect();
-
-        // Materialize weekly activity. The bucket key uses email; resolve to
-        // canonical display name for the output row.
-        let weekly_activity: Vec<WeeklyActivity> = weekly
-            .into_iter()
-            .map(|((week, email, repository), w)| WeeklyActivity {
-                week,
-                author: email_to_name.get(&email).cloned().unwrap_or(email),
-                repository,
-                commit_count: w.commits,
-                insertions: w.insertions,
-                deletions: w.deletions,
-                categories: w.categories,
-            })
-            .collect();
+        let weekly_activity = materialize_weekly_activity(acc.weekly, &email_to_name);
 
         let total_commits = rows.len();
         let total_authors = author_summaries.len();
-        let total_weeks = week_totals.len();
+        let total_weeks = acc.week_totals.len();
 
-        // ---- Weekly metrics (cross-developer) ----
-        let weekly_metrics: Vec<WeeklyMetrics> = week_totals
-            .iter()
-            .map(|(week, wt)| WeeklyMetrics {
-                week: week.clone(),
-                total_commits: wt.commits,
-                feature_commits: *wt.categories.get("feature").unwrap_or(&0),
-                bugfix_commits: *wt.categories.get("bugfix").unwrap_or(&0),
-                maintenance_commits: *wt.categories.get("maintenance").unwrap_or(&0),
-                refactor_commits: *wt.categories.get("refactor").unwrap_or(&0),
-                test_commits: *wt.categories.get("test").unwrap_or(&0),
-                doc_commits: *wt.categories.get("documentation").unwrap_or(&0)
-                    + *wt.categories.get("docs").unwrap_or(&0),
-                active_developers: wt.developers.len(),
-                story_points: 0.0,
-            })
-            .collect();
+        let weekly_metrics = build_weekly_metrics(&acc.week_totals);
+        let weekly_categorization = build_weekly_categorization(&acc.week_totals);
+        let untracked_commits = build_untracked_commits(&rows, &email_to_name);
 
-        // ---- Weekly categorization ----
-        let mut weekly_categorization: Vec<WeeklyCategorization> = Vec::new();
-        for (week, wt) in &week_totals {
-            let total = wt.commits as f64;
-            let mut entries: Vec<(&String, &usize)> = wt.categories.iter().collect();
-            entries.sort_by_key(|e| e.0);
-            for (cat, count) in entries {
-                weekly_categorization.push(WeeklyCategorization {
-                    week: week.clone(),
-                    change_type: cat.clone(),
-                    commit_count: *count,
-                    pct_of_week: if total > 0.0 {
-                        (*count as f64) * 100.0 / total
-                    } else {
-                        0.0
-                    },
-                });
-            }
-        }
-
-        // ---- Untracked commits ----
-        let mut untracked_commits: Vec<UntrackedCommit> = rows
-            .iter()
-            .filter(|r| !r.ticketed && r.category.as_deref() != Some("boilerplate"))
-            .filter(|r| {
-                // Treat NULL category OR explicit "unclassified" as untracked.
-                r.category.is_none() || r.category.as_deref() == Some("unclassified") || !r.ticketed
-            })
-            .map(|r| UntrackedCommit {
-                sha: r.sha.clone(),
-                author: email_to_name
-                    .get(&r.author_email)
-                    .cloned()
-                    .unwrap_or_else(|| r.author_name.clone()),
-                date: r.timestamp.to_rfc3339(),
-                message: r.message.lines().next().unwrap_or("").to_string(),
-            })
-            .collect();
-        // Deterministic ordering: newest first.
-        untracked_commits.sort_by(|a, b| b.date.cmp(&a.date));
-
-        // ---- Velocity / DORA helpers ----
-        // Cycle times (hours) for merged PRs, outlier-filtered to [0.5, 720].
-        let mut cycle_times: Vec<f64> = prs
-            .iter()
-            .filter_map(|p| {
-                p.merged_at.map(|m| {
-                    let secs = (m - p.created_at).num_seconds();
-                    (secs as f64) / 3600.0
-                })
-            })
-            .filter(|h| *h >= 0.5 && *h <= 720.0)
-            .collect();
-        cycle_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let pr_count = cycle_times.len();
-        let cycle_time_avg = if pr_count == 0 {
-            0.0
-        } else {
-            cycle_times.iter().sum::<f64>() / pr_count as f64
-        };
-        let cycle_time_median = if pr_count == 0 {
-            0.0
-        } else {
-            cycle_times[pr_count / 2]
-        };
-
-        // PRs merged per week (bucket merged_at by ISO week).
-        let mut pr_per_week: HashMap<String, usize> = HashMap::new();
-        for pr in &prs {
-            if let Some(merged) = pr.merged_at {
-                *pr_per_week.entry(iso_week_label(&merged)).or_insert(0) += 1;
-            }
-        }
-        let pr_throughput_per_week = if pr_per_week.is_empty() {
-            0.0
-        } else {
-            pr_per_week.values().copied().sum::<usize>() as f64 / pr_per_week.len() as f64
-        };
-
+        // Velocity inputs depend on PR cycle-time arithmetic; compute once
+        // and reuse for the per-week velocity rows and DORA lead-time.
+        let velocity_inputs = compute_velocity_inputs(&prs);
         let velocity = Some(VelocitySummary {
-            pr_cycle_time_avg_hours: cycle_time_avg,
-            pr_cycle_time_median_hours: cycle_time_median,
-            pr_throughput_per_week,
+            pr_cycle_time_avg_hours: velocity_inputs.cycle_time_avg,
+            pr_cycle_time_median_hours: velocity_inputs.cycle_time_median,
+            pr_throughput_per_week: velocity_inputs.pr_throughput_per_week,
             revision_rate: 0.0,
-            pr_count,
+            pr_count: velocity_inputs.pr_count,
         });
-
-        // ---- Weekly velocity ----
-        let weekly_velocity: Vec<WeeklyVelocity> = week_totals
-            .iter()
-            .map(|(week, wt)| {
-                let prs_merged = *pr_per_week.get(week).unwrap_or(&0);
-                let active = wt.developers.len();
-                let commits_per_dev = if active == 0 {
-                    0.0
-                } else {
-                    wt.commits as f64 / active as f64
-                };
-                WeeklyVelocity {
-                    week: week.clone(),
-                    prs_merged,
-                    avg_pr_cycle_time_hours: cycle_time_avg,
-                    story_points: 0.0,
-                    commits_per_developer: commits_per_dev,
-                }
-            })
-            .collect();
-
-        // ---- DORA ----
-        let total_weeks_f = total_weeks.max(1) as f64;
-        let deploys = prs.iter().filter(|p| p.merged_at.is_some()).count();
-        let deployment_frequency = deploys as f64 / total_weeks_f;
-        let bugfix_total = category_total
-            .get("bugfix")
-            .copied()
-            .unwrap_or(0)
-            .max(revert_count);
-        let change_failure_rate = if total_commits == 0 {
-            0.0
-        } else {
-            bugfix_total as f64 / total_commits as f64
-        };
-        // MTTR approximation: average hours from a revert commit's predecessor
-        // (assumed bug introduction) to the revert itself. Without a richer
-        // mapping we approximate via the gap between consecutive bugfix
-        // commits, capped by available data.
-        let mut bugfix_ts: Vec<DateTime<Utc>> = rows
-            .iter()
-            .zip(row_is_revert.iter())
-            .filter(|(r, is_rev)| **is_rev || r.category.as_deref() == Some("bugfix"))
-            .map(|(r, _)| r.timestamp)
-            .collect();
-        bugfix_ts.sort();
-        let mttr_hours = if bugfix_ts.len() < 2 {
-            0.0
-        } else {
-            let mut gaps: Vec<f64> = Vec::new();
-            for w in bugfix_ts.windows(2) {
-                let secs = (w[1] - w[0]).num_seconds().abs();
-                gaps.push(secs as f64 / 3600.0);
-            }
-            gaps.iter().sum::<f64>() / gaps.len() as f64
-        };
-        let performance_level = dora_level(
-            deployment_frequency,
-            cycle_time_avg,
-            change_failure_rate,
-            mttr_hours,
+        let weekly_velocity = build_weekly_velocity(
+            &acc.week_totals,
+            &velocity_inputs.pr_per_week,
+            velocity_inputs.cycle_time_avg,
         );
-        let dora = Some(DoraMetrics {
-            deployment_frequency,
-            lead_time_hours: cycle_time_avg,
-            change_failure_rate,
-            mttr_hours,
-            performance_level,
-        });
 
-        // ---- Quality ----
-        let bugfix_pct = if total_commits == 0 {
-            0.0
-        } else {
-            bugfix_total as f64 / total_commits as f64
-        };
-        let revert_pct = if total_commits == 0 {
-            0.0
-        } else {
-            revert_count as f64 / total_commits as f64
-        };
-        let raw_quality = 1.0 - (bugfix_pct * 0.4) - (revert_pct * 0.6);
-        let quality_score = raw_quality.clamp(0.0, 1.0);
-        let non_bugfix = total_commits.saturating_sub(bugfix_total);
-        let defect_rate = if non_bugfix == 0 {
-            0.0
-        } else {
-            bugfix_total as f64 / non_bugfix as f64
-        };
-        let quality = Some(QualitySummary {
-            quality_score,
-            revert_count,
-            revert_pct,
-            bugfix_pct,
-            defect_rate,
-        });
-
-        // ---- Developer activity summary + scoring ----
-        let weights = ActivityWeights::default();
-        let developer_activity =
-            compute_developer_activity(&author_summaries, &dev_weeks, &dev_categories, &weights);
-
-        // ---- Summary ----
-        let classified_commits = rows.iter().filter(|r| r.category.is_some()).count();
-        let classification_coverage_pct = if total_commits == 0 {
-            0.0
-        } else {
-            classified_commits as f64 * 100.0 / total_commits as f64
-        };
-        let date_range = format!("{} .. {}", min_ts.to_rfc3339(), max_ts.to_rfc3339());
-        let summary = Some(ReportSummary {
-            date_range,
-            total_commits,
-            total_developers: total_authors,
+        let dora = Some(compute_dora(
+            &rows,
+            &row_flags,
+            &acc.category_total,
+            &prs,
+            velocity_inputs.cycle_time_avg,
             total_weeks,
-            classification_coverage_pct,
-        });
+            acc.revert_count,
+        ));
+
+        let quality = Some(compute_quality(
+            total_commits,
+            &acc.category_total,
+            acc.revert_count,
+        ));
+
+        // Per-developer composite activity score and roll-up rows.
+        let weights = ActivityWeights::default();
+        let developer_activity = compute_developer_activity(
+            &author_summaries,
+            &acc.dev_weeks,
+            &acc.dev_categories,
+            &weights,
+        );
+
+        let summary = Some(build_summary(
+            &rows,
+            total_commits,
+            total_authors,
+            total_weeks,
+            acc.min_ts,
+            acc.max_ts,
+        ));
 
         data.total_commits = total_commits;
         data.total_authors = total_authors;
-        data.period_start = Some(min_ts.to_rfc3339());
-        data.period_end = Some(max_ts.to_rfc3339());
+        data.period_start = Some(acc.min_ts.to_rfc3339());
+        data.period_end = Some(acc.max_ts.to_rfc3339());
         data.authors = author_summaries;
         data.repositories = repo_summaries;
         data.weekly_activity = weekly_activity;
-        data.category_breakdown = category_total;
+        data.category_breakdown = acc.category_total;
         data.weekly_metrics = weekly_metrics;
         data.developer_activity = developer_activity;
         data.summary = summary;
@@ -784,12 +411,673 @@ impl Aggregator {
         data.dora = dora;
         data.velocity = velocity;
         data.quality = quality;
-        data.boilerplate_count = boilerplate_count;
-        data.revert_count = revert_count;
+        data.boilerplate_count = acc.boilerplate_count;
+        data.revert_count = acc.revert_count;
         // Silence unused-field warnings for trackers that today only feed
         // activity scoring; future scoring tweaks will consume these.
-        let _ = dev_ticketed;
+        let _ = acc.dev_ticketed;
         data
+    }
+}
+
+// ===========================================================================
+// Aggregation helpers (decomposed phases of `Aggregator::aggregate`)
+// ===========================================================================
+
+/// Pre-pass boilerplate / revert flags per row.
+///
+/// Why: every later phase (DORA bugfix counting, weekly-categorization
+/// boilerplate bucketing) needs these bits, and recomputing per phase
+/// would scan the row vector multiple times.
+/// What: bundles a parallel `is_boilerplate` / `is_revert` `Vec<bool>`
+/// indexed by row position, plus the aggregate counts.
+/// Test: behavior preserved — the same `is_boilerplate` / `is_revert`
+/// helpers run inline previously.
+struct RowFlags {
+    is_boilerplate: Vec<bool>,
+    is_revert: Vec<bool>,
+    boilerplate_count: usize,
+    revert_count: usize,
+}
+
+/// Why: keep flag computation in one named place so the main aggregate
+/// function reads as a recipe of phases.
+/// What: compiles the default regex sets once, walks the rows, and returns
+/// a [`RowFlags`] capturing both per-row bits and aggregate counts.
+/// Test: indirectly via report tests; identical to the inline loop that
+/// existed in `aggregate` before this refactor.
+fn compute_row_flags(rows: &[CommitRow]) -> RowFlags {
+    let boilerplate_re = compile_patterns(DEFAULT_BOILERPLATE_PATTERNS);
+    let revert_re = compile_patterns(DEFAULT_REVERT_PATTERNS);
+
+    let mut is_boilerplate: Vec<bool> = Vec::with_capacity(rows.len());
+    let mut is_revert: Vec<bool> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let lines = row.insertions + row.deletions;
+        is_boilerplate.push(self::is_boilerplate(&row.message, lines, &boilerplate_re));
+        is_revert.push(self::is_revert(&row.message, &revert_re));
+    }
+    let boilerplate_count = is_boilerplate.iter().filter(|b| **b).count();
+    let revert_count = is_revert.iter().filter(|b| **b).count();
+    RowFlags {
+        is_boilerplate,
+        is_revert,
+        boilerplate_count,
+        revert_count,
+    }
+}
+
+/// Per-author running totals during accumulation.
+struct AuthorAcc {
+    name: String,
+    email: String,
+    commits: usize,
+    insertions: i64,
+    deletions: i64,
+    files_changed: i64,
+    categories: HashMap<String, usize>,
+    first: DateTime<Utc>,
+    last: DateTime<Utc>,
+}
+
+/// Per-repository running totals during accumulation.
+struct RepoAcc {
+    commits: usize,
+    authors: HashSet<String>,
+    insertions: i64,
+    deletions: i64,
+    categories: HashMap<String, usize>,
+}
+
+/// Per-(week, author, repo) running totals during accumulation.
+struct WeekAcc {
+    commits: usize,
+    insertions: i64,
+    deletions: i64,
+    categories: HashMap<String, usize>,
+}
+
+/// Cross-developer per-week running totals during accumulation.
+#[derive(Default)]
+struct WeekTotal {
+    commits: usize,
+    categories: HashMap<String, usize>,
+    developers: HashSet<String>,
+}
+
+/// Bundle of accumulator state that the single-pass scan produces.
+///
+/// Why: the row scan computes many parallel histograms at once; returning
+/// them as a single struct keeps the orchestration in `aggregate` readable.
+/// What: groups author / repo / weekly buckets and per-developer trackers
+/// alongside the period bounds and aggregate counts.
+/// Test: see `Aggregator::build` tests which exercise the full pipeline.
+struct Accumulators {
+    authors: HashMap<String, AuthorAcc>,
+    repos: HashMap<String, RepoAcc>,
+    weekly: BTreeMap<(String, String, String), WeekAcc>,
+    category_total: HashMap<String, usize>,
+    week_totals: BTreeMap<String, WeekTotal>,
+    dev_weeks: HashMap<String, HashSet<String>>,
+    dev_categories: HashMap<String, HashMap<String, usize>>,
+    dev_ticketed: HashMap<String, usize>,
+    min_ts: DateTime<Utc>,
+    max_ts: DateTime<Utc>,
+    boilerplate_count: usize,
+    revert_count: usize,
+}
+
+/// Why: the row scan touches a dozen parallel histograms; isolating it in a
+/// named function lets the aggregator orchestration read as a sequence of
+/// phases.
+/// What: runs one pass over `rows`, updating the per-author / per-repo /
+/// per-week / per-developer accumulators in lockstep. Caller is `aggregate`.
+/// Test: indirectly via the `aggregator_*` tests in `report::tests`; this
+/// is a literal lift of the inline loop that lived in `aggregate`.
+fn accumulate_rows(rows: &[CommitRow], flags: &RowFlags) -> Accumulators {
+    // Period bounds initialised to the first row's timestamp.
+    let mut min_ts = rows[0].timestamp;
+    let mut max_ts = rows[0].timestamp;
+
+    let mut authors: HashMap<String, AuthorAcc> = HashMap::new();
+    let mut repos: HashMap<String, RepoAcc> = HashMap::new();
+    let mut weekly: BTreeMap<(String, String, String), WeekAcc> = BTreeMap::new();
+    let mut category_total: HashMap<String, usize> = HashMap::new();
+    let mut week_totals: BTreeMap<String, WeekTotal> = BTreeMap::new();
+    let mut dev_weeks: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut dev_categories: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    let mut dev_ticketed: HashMap<String, usize> = HashMap::new();
+
+    for (idx, row) in rows.iter().enumerate() {
+        if row.timestamp < min_ts {
+            min_ts = row.timestamp;
+        }
+        if row.timestamp > max_ts {
+            max_ts = row.timestamp;
+        }
+
+        // Authors. Group by email only; pick the longest display name seen
+        // as the canonical name (heuristic: longer names tend to be the full
+        // "Firstname Lastname" form rather than a short login handle).
+        let key = row.author_email.clone();
+        let a = authors.entry(key).or_insert_with(|| AuthorAcc {
+            name: row.author_name.clone(),
+            email: row.author_email.clone(),
+            commits: 0,
+            insertions: 0,
+            deletions: 0,
+            files_changed: 0,
+            categories: HashMap::new(),
+            first: row.timestamp,
+            last: row.timestamp,
+        });
+        if row.author_name.len() > a.name.len() {
+            a.name = row.author_name.clone();
+        }
+        a.commits += 1;
+        a.insertions += row.insertions;
+        a.deletions += row.deletions;
+        a.files_changed += row.files_changed;
+        if row.timestamp < a.first {
+            a.first = row.timestamp;
+        }
+        if row.timestamp > a.last {
+            a.last = row.timestamp;
+        }
+        if let Some(cat) = &row.category {
+            *a.categories.entry(cat.clone()).or_insert(0) += 1;
+        }
+
+        // Repositories.
+        let r = repos
+            .entry(row.repository.clone())
+            .or_insert_with(|| RepoAcc {
+                commits: 0,
+                authors: HashSet::new(),
+                insertions: 0,
+                deletions: 0,
+                categories: HashMap::new(),
+            });
+        r.commits += 1;
+        r.authors.insert(row.author_email.clone());
+        r.insertions += row.insertions;
+        r.deletions += row.deletions;
+        if let Some(cat) = &row.category {
+            *r.categories.entry(cat.clone()).or_insert(0) += 1;
+        }
+
+        // Weekly. Keyed by email (not display name) so that the same identity
+        // committing under multiple names lands in a single weekly bucket.
+        let week = iso_week_label(&row.timestamp);
+        let wkey = (week, row.author_email.clone(), row.repository.clone());
+        let w = weekly.entry(wkey).or_insert_with(|| WeekAcc {
+            commits: 0,
+            insertions: 0,
+            deletions: 0,
+            categories: HashMap::new(),
+        });
+        w.commits += 1;
+        w.insertions += row.insertions;
+        w.deletions += row.deletions;
+        if let Some(cat) = &row.category {
+            *w.categories.entry(cat.clone()).or_insert(0) += 1;
+        }
+
+        // Category totals.
+        if let Some(cat) = &row.category {
+            *category_total.entry(cat.clone()).or_insert(0) += 1;
+        }
+
+        // Cross-developer weekly totals.
+        let week_label = iso_week_label(&row.timestamp);
+        let wt = week_totals.entry(week_label.clone()).or_default();
+        wt.commits += 1;
+        wt.developers.insert(row.author_email.clone());
+        // Treat boilerplate rows as a synthetic category so they show
+        // up in `weekly_categorization.csv` rather than being silently
+        // bucketed into whatever the classifier returned.
+        if flags.is_boilerplate[idx] {
+            *wt.categories.entry("boilerplate".to_string()).or_insert(0) += 1;
+        } else if let Some(cat) = &row.category {
+            *wt.categories.entry(cat.clone()).or_insert(0) += 1;
+        } else {
+            *wt.categories.entry("unclassified".to_string()).or_insert(0) += 1;
+        }
+
+        // Per-developer week / category / ticketed tracking.
+        dev_weeks
+            .entry(row.author_email.clone())
+            .or_default()
+            .insert(week_label);
+        if let Some(cat) = &row.category {
+            *dev_categories
+                .entry(row.author_email.clone())
+                .or_default()
+                .entry(cat.clone())
+                .or_insert(0) += 1;
+        }
+        if row.ticketed {
+            *dev_ticketed.entry(row.author_email.clone()).or_insert(0) += 1;
+        }
+    }
+
+    Accumulators {
+        authors,
+        repos,
+        weekly,
+        category_total,
+        week_totals,
+        dev_weeks,
+        dev_categories,
+        dev_ticketed,
+        min_ts,
+        max_ts,
+        boilerplate_count: flags.boilerplate_count,
+        revert_count: flags.revert_count,
+    }
+}
+
+/// Why: report consumers expect authors sorted by commit count with the
+/// canonical (longest-seen) display name.
+/// What: drains the author accumulator into [`AuthorSummary`] rows and
+/// sorts them by descending commit count.
+/// Test: indirectly via `aggregator_builds_report_data`.
+fn materialize_authors(authors: HashMap<String, AuthorAcc>) -> Vec<AuthorSummary> {
+    let mut summaries: Vec<AuthorSummary> = authors
+        .into_values()
+        .map(|a| AuthorSummary {
+            name: a.name,
+            email: a.email,
+            commit_count: a.commits,
+            insertions: a.insertions,
+            deletions: a.deletions,
+            files_changed: a.files_changed,
+            categories: a.categories,
+            first_commit: a.first.to_rfc3339(),
+            last_commit: a.last.to_rfc3339(),
+        })
+        .collect();
+    summaries.sort_by_key(|a| std::cmp::Reverse(a.commit_count));
+    summaries
+}
+
+/// Why: per-repo rows in reports include the top categories for the repo,
+/// sorted by frequency, so reviewers can see at a glance what work
+/// dominates each codebase.
+/// What: drains the repo accumulator into [`RepositorySummary`] with the
+/// top-categories vector sorted descending by count; the outer Vec is
+/// sorted by descending repo commit count.
+/// Test: indirectly via `aggregator_builds_report_data`.
+fn materialize_repositories(repos: HashMap<String, RepoAcc>) -> Vec<RepositorySummary> {
+    let mut summaries: Vec<RepositorySummary> = repos
+        .into_iter()
+        .map(|(name, r)| {
+            let mut top: Vec<(String, usize)> = r.categories.into_iter().collect();
+            top.sort_by_key(|t| std::cmp::Reverse(t.1));
+            RepositorySummary {
+                name,
+                commit_count: r.commits,
+                author_count: r.authors.len(),
+                insertions: r.insertions,
+                deletions: r.deletions,
+                top_categories: top,
+            }
+        })
+        .collect();
+    summaries.sort_by_key(|r| std::cmp::Reverse(r.commit_count));
+    summaries
+}
+
+/// Why: the weekly bucket key uses email, but reports want canonical
+/// display names so a single identity reads the same across the report.
+/// What: drains the weekly map into [`WeeklyActivity`] rows, resolving each
+/// row's email to its canonical display name via the `email_to_name` lookup
+/// built from the already-materialised author summaries.
+/// Test: indirectly via `aggregator_builds_report_data` (two weekly rows
+/// for two authors in different weeks).
+fn materialize_weekly_activity(
+    weekly: BTreeMap<(String, String, String), WeekAcc>,
+    email_to_name: &HashMap<String, String>,
+) -> Vec<WeeklyActivity> {
+    weekly
+        .into_iter()
+        .map(|((week, email, repository), w)| WeeklyActivity {
+            week,
+            author: email_to_name.get(&email).cloned().unwrap_or(email),
+            repository,
+            commit_count: w.commits,
+            insertions: w.insertions,
+            deletions: w.deletions,
+            categories: w.categories,
+        })
+        .collect()
+}
+
+/// Why: weekly metrics are the cross-developer roll-up used for trend
+/// charts; bucketing per category keeps the schema fixed regardless of
+/// which categories appeared in the data.
+/// What: walks the week-totals map and emits one [`WeeklyMetrics`] row per
+/// ISO week with named bucket counters (feature / bugfix / maintenance /
+/// refactor / test / docs).
+/// Test: indirectly via `aggregator_builds_report_data` (asserts the
+/// weekly_metrics vector is populated).
+fn build_weekly_metrics(week_totals: &BTreeMap<String, WeekTotal>) -> Vec<WeeklyMetrics> {
+    week_totals
+        .iter()
+        .map(|(week, wt)| WeeklyMetrics {
+            week: week.clone(),
+            total_commits: wt.commits,
+            feature_commits: *wt.categories.get("feature").unwrap_or(&0),
+            bugfix_commits: *wt.categories.get("bugfix").unwrap_or(&0),
+            maintenance_commits: *wt.categories.get("maintenance").unwrap_or(&0),
+            refactor_commits: *wt.categories.get("refactor").unwrap_or(&0),
+            test_commits: *wt.categories.get("test").unwrap_or(&0),
+            doc_commits: *wt.categories.get("documentation").unwrap_or(&0)
+                + *wt.categories.get("docs").unwrap_or(&0),
+            active_developers: wt.developers.len(),
+            story_points: 0.0,
+        })
+        .collect()
+}
+
+/// Why: the `weekly_categorization.csv` report needs one row per
+/// (week, change-type) with the percentage share, so consumers can build
+/// stacked-bar charts of "what work happened this week".
+/// What: iterates the week-totals map and emits one row per category seen
+/// in each week, sorted by category name for deterministic output.
+/// Test: covered by `csv_formatter_writes_new_report_files` which writes
+/// the weekly_categorization CSV.
+fn build_weekly_categorization(
+    week_totals: &BTreeMap<String, WeekTotal>,
+) -> Vec<WeeklyCategorization> {
+    let mut rows: Vec<WeeklyCategorization> = Vec::new();
+    for (week, wt) in week_totals {
+        let total = wt.commits as f64;
+        let mut entries: Vec<(&String, &usize)> = wt.categories.iter().collect();
+        entries.sort_by_key(|e| e.0);
+        for (cat, count) in entries {
+            rows.push(WeeklyCategorization {
+                week: week.clone(),
+                change_type: cat.clone(),
+                commit_count: *count,
+                pct_of_week: if total > 0.0 {
+                    (*count as f64) * 100.0 / total
+                } else {
+                    0.0
+                },
+            });
+        }
+    }
+    rows
+}
+
+/// Why: untracked-commit rows surface commits without a ticket reference so
+/// PMs can chase down missing trackable work.
+/// What: filters `rows` to those that are unticketed and not boilerplate,
+/// resolves each row's author email to its canonical display name, and
+/// emits rows sorted newest-first.
+/// Test: covered indirectly via `csv_formatter_writes_new_report_files`
+/// (writes the `untracked.csv` file from this data).
+fn build_untracked_commits(
+    rows: &[CommitRow],
+    email_to_name: &HashMap<String, String>,
+) -> Vec<UntrackedCommit> {
+    let mut out: Vec<UntrackedCommit> = rows
+        .iter()
+        .filter(|r| !r.ticketed && r.category.as_deref() != Some("boilerplate"))
+        .filter(|r| {
+            // Treat NULL category OR explicit "unclassified" as untracked.
+            r.category.is_none() || r.category.as_deref() == Some("unclassified") || !r.ticketed
+        })
+        .map(|r| UntrackedCommit {
+            sha: r.sha.clone(),
+            author: email_to_name
+                .get(&r.author_email)
+                .cloned()
+                .unwrap_or_else(|| r.author_name.clone()),
+            date: r.timestamp.to_rfc3339(),
+            message: r.message.lines().next().unwrap_or("").to_string(),
+        })
+        .collect();
+    // Deterministic ordering: newest first.
+    out.sort_by(|a, b| b.date.cmp(&a.date));
+    out
+}
+
+/// Outputs of [`compute_velocity_inputs`].
+struct VelocityInputs {
+    cycle_time_avg: f64,
+    cycle_time_median: f64,
+    pr_throughput_per_week: f64,
+    pr_count: usize,
+    pr_per_week: HashMap<String, usize>,
+}
+
+/// Why: the velocity summary, weekly-velocity rows, and DORA lead-time all
+/// derive from the same PR cycle-time arithmetic; computing it once keeps
+/// the orchestrator readable and prevents drift between the metrics.
+/// What: filters merged PRs to a sane cycle-time range (0.5–720 hours),
+/// computes mean and median in hours, buckets merge timestamps by ISO week
+/// for throughput, and returns the bundle.
+/// Test: indirectly via `aggregator_computes_summary_and_dora_and_quality`.
+fn compute_velocity_inputs(prs: &[PrRow]) -> VelocityInputs {
+    let mut cycle_times: Vec<f64> = prs
+        .iter()
+        .filter_map(|p| {
+            p.merged_at.map(|m| {
+                let secs = (m - p.created_at).num_seconds();
+                (secs as f64) / 3600.0
+            })
+        })
+        .filter(|h| *h >= 0.5 && *h <= 720.0)
+        .collect();
+    cycle_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let pr_count = cycle_times.len();
+    let cycle_time_avg = if pr_count == 0 {
+        0.0
+    } else {
+        cycle_times.iter().sum::<f64>() / pr_count as f64
+    };
+    let cycle_time_median = if pr_count == 0 {
+        0.0
+    } else {
+        cycle_times[pr_count / 2]
+    };
+
+    let mut pr_per_week: HashMap<String, usize> = HashMap::new();
+    for pr in prs {
+        if let Some(merged) = pr.merged_at {
+            *pr_per_week.entry(iso_week_label(&merged)).or_insert(0) += 1;
+        }
+    }
+    let pr_throughput_per_week = if pr_per_week.is_empty() {
+        0.0
+    } else {
+        pr_per_week.values().copied().sum::<usize>() as f64 / pr_per_week.len() as f64
+    };
+
+    VelocityInputs {
+        cycle_time_avg,
+        cycle_time_median,
+        pr_throughput_per_week,
+        pr_count,
+        pr_per_week,
+    }
+}
+
+/// Why: per-week velocity rows align PR throughput with active-developer
+/// counts so reports can show team-level pace.
+/// What: walks the week-totals map and emits one [`WeeklyVelocity`] row
+/// per ISO week, joining against the `pr_per_week` lookup built by
+/// [`compute_velocity_inputs`].
+/// Test: covered indirectly by `csv_formatter_writes_new_report_files`
+/// (writes the weekly velocity CSV).
+fn build_weekly_velocity(
+    week_totals: &BTreeMap<String, WeekTotal>,
+    pr_per_week: &HashMap<String, usize>,
+    cycle_time_avg: f64,
+) -> Vec<WeeklyVelocity> {
+    week_totals
+        .iter()
+        .map(|(week, wt)| {
+            let prs_merged = *pr_per_week.get(week).unwrap_or(&0);
+            let active = wt.developers.len();
+            let commits_per_dev = if active == 0 {
+                0.0
+            } else {
+                wt.commits as f64 / active as f64
+            };
+            WeeklyVelocity {
+                week: week.clone(),
+                prs_merged,
+                avg_pr_cycle_time_hours: cycle_time_avg,
+                story_points: 0.0,
+                commits_per_developer: commits_per_dev,
+            }
+        })
+        .collect()
+}
+
+/// Why: DORA metrics are the standard rubric stakeholders use to score
+/// engineering performance; computing them in one place keeps the four
+/// values consistent with each other.
+/// What: derives deployment frequency from merged PRs, change-failure-rate
+/// from bugfix totals (clamped by revert count), and MTTR from the spacing
+/// between consecutive bugfix/revert commits; classifies the team via
+/// [`dora_level`].
+/// Test: covered by `aggregator_computes_summary_and_dora_and_quality`
+/// (asserts a well-formed `performance_level` is set).
+fn compute_dora(
+    rows: &[CommitRow],
+    flags: &RowFlags,
+    category_total: &HashMap<String, usize>,
+    prs: &[PrRow],
+    cycle_time_avg: f64,
+    total_weeks: usize,
+    revert_count: usize,
+) -> DoraMetrics {
+    let total_weeks_f = total_weeks.max(1) as f64;
+    let total_commits = rows.len();
+    let deploys = prs.iter().filter(|p| p.merged_at.is_some()).count();
+    let deployment_frequency = deploys as f64 / total_weeks_f;
+    let bugfix_total = category_total
+        .get("bugfix")
+        .copied()
+        .unwrap_or(0)
+        .max(revert_count);
+    let change_failure_rate = if total_commits == 0 {
+        0.0
+    } else {
+        bugfix_total as f64 / total_commits as f64
+    };
+
+    // MTTR approximation: average hours from a revert commit's predecessor
+    // (assumed bug introduction) to the revert itself. Without a richer
+    // mapping we approximate via the gap between consecutive bugfix
+    // commits, capped by available data.
+    let mut bugfix_ts: Vec<DateTime<Utc>> = rows
+        .iter()
+        .zip(flags.is_revert.iter())
+        .filter(|(r, is_rev)| **is_rev || r.category.as_deref() == Some("bugfix"))
+        .map(|(r, _)| r.timestamp)
+        .collect();
+    bugfix_ts.sort();
+    let mttr_hours = if bugfix_ts.len() < 2 {
+        0.0
+    } else {
+        let mut gaps: Vec<f64> = Vec::new();
+        for w in bugfix_ts.windows(2) {
+            let secs = (w[1] - w[0]).num_seconds().abs();
+            gaps.push(secs as f64 / 3600.0);
+        }
+        gaps.iter().sum::<f64>() / gaps.len() as f64
+    };
+    let performance_level = dora_level(
+        deployment_frequency,
+        cycle_time_avg,
+        change_failure_rate,
+        mttr_hours,
+    );
+    DoraMetrics {
+        deployment_frequency,
+        lead_time_hours: cycle_time_avg,
+        change_failure_rate,
+        mttr_hours,
+        performance_level,
+    }
+}
+
+/// Why: a single 0.0–1.0 quality score lets stakeholders compare teams /
+/// time periods without internalising the DORA rubric.
+/// What: combines bugfix-pct and revert-pct (weighted 0.4 / 0.6) into a
+/// clamped score, computes defect-rate as bugfix-over-non-bugfix, and
+/// packages them in a [`QualitySummary`].
+/// Test: covered by `aggregator_computes_summary_and_dora_and_quality`
+/// (asserts `quality_score` is in `[0.0, 1.0]`).
+fn compute_quality(
+    total_commits: usize,
+    category_total: &HashMap<String, usize>,
+    revert_count: usize,
+) -> QualitySummary {
+    let bugfix_total = category_total
+        .get("bugfix")
+        .copied()
+        .unwrap_or(0)
+        .max(revert_count);
+    let bugfix_pct = if total_commits == 0 {
+        0.0
+    } else {
+        bugfix_total as f64 / total_commits as f64
+    };
+    let revert_pct = if total_commits == 0 {
+        0.0
+    } else {
+        revert_count as f64 / total_commits as f64
+    };
+    let raw_quality = 1.0 - (bugfix_pct * 0.4) - (revert_pct * 0.6);
+    let quality_score = raw_quality.clamp(0.0, 1.0);
+    let non_bugfix = total_commits.saturating_sub(bugfix_total);
+    let defect_rate = if non_bugfix == 0 {
+        0.0
+    } else {
+        bugfix_total as f64 / non_bugfix as f64
+    };
+    QualitySummary {
+        quality_score,
+        revert_count,
+        revert_pct,
+        bugfix_pct,
+        defect_rate,
+    }
+}
+
+/// Why: every report needs a one-line "what does this cover" header so
+/// readers can validate scope at a glance.
+/// What: assembles a [`ReportSummary`] with the date range, totals, and
+/// classification coverage percent.
+/// Test: covered by `aggregator_computes_summary_and_dora_and_quality`
+/// (asserts coverage_pct ≈ 50 with one of two commits classified).
+fn build_summary(
+    rows: &[CommitRow],
+    total_commits: usize,
+    total_authors: usize,
+    total_weeks: usize,
+    min_ts: DateTime<Utc>,
+    max_ts: DateTime<Utc>,
+) -> ReportSummary {
+    let classified_commits = rows.iter().filter(|r| r.category.is_some()).count();
+    let classification_coverage_pct = if total_commits == 0 {
+        0.0
+    } else {
+        classified_commits as f64 * 100.0 / total_commits as f64
+    };
+    let date_range = format!("{} .. {}", min_ts.to_rfc3339(), max_ts.to_rfc3339());
+    ReportSummary {
+        date_range,
+        total_commits,
+        total_developers: total_authors,
+        total_weeks,
+        classification_coverage_pct,
     }
 }
 
@@ -903,8 +1191,11 @@ fn dora_level(deploys_per_week: f64, lead_h: f64, cfr: f64, mttr_h: f64) -> Stri
 
 /// Parse an ISO week label of the form `"YYYY-Www"` into `(year, week)`.
 ///
-/// Returns `None` for malformed labels — callers should skip the entry
-/// rather than abort the entire report.
+/// Why: parsing once gives the coverage-drift check a way to look up the
+/// recorded `repo_count` for the week.
+/// What: returns `None` for malformed labels — callers should skip the
+/// entry rather than abort the entire report.
+/// Test: indirectly via `check_weekly_coverage_drift`.
 fn parse_iso_week_label(label: &str) -> Option<(i32, u32)> {
     let (year_s, week_s) = label.split_once("-W")?;
     let year: i32 = year_s.parse().ok()?;
@@ -1005,6 +1296,11 @@ fn configured_alias_emails(config: &Config) -> HashSet<String> {
 }
 
 /// Format an ISO week label such as `"2024-W03"` from a UTC timestamp.
+///
+/// Why: weekly buckets are keyed by a stable lexically-sortable string so
+/// BTreeMap iteration yields chronological output without an extra sort.
+/// What: returns `YYYY-W{:02}` from the timestamp's ISO week.
+/// Test: exercised by every aggregator test (all weekly buckets use this).
 fn iso_week_label(ts: &DateTime<Utc>) -> String {
     let iso = ts.iso_week();
     format!("{}-W{:02}", iso.year(), iso.week())

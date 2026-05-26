@@ -20,6 +20,14 @@ use serde::{Deserialize, Serialize};
 
 /// The seven canonical top-level work categories.
 ///
+/// Why: reports need a stable, closed set of work types to group against;
+/// keeping the top-level enum closed prevents stakeholders from inventing
+/// new categories that diverge across teams.
+/// What: 7+1 variant enum (7 canonical + `Unknown` fallback) with
+/// snake_case serialisation for DB persistence.
+/// Test: `classify::tests::registry_resolves_builtin_subcategories`
+/// asserts every built-in subcategory resolves to one of these.
+///
 /// These are fixed — users cannot add to this list. Subcategories (loaded
 /// from rules and config) all roll up to exactly one of these variants.
 ///
@@ -47,6 +55,12 @@ pub enum TopLevelCategory {
 
 impl TopLevelCategory {
     /// Human-readable display name.
+    ///
+    /// Why: report headers and CSV columns need a friendly label
+    /// distinct from the enum variant identifier.
+    /// What: returns a short capitalised string per variant.
+    /// Test: covered indirectly by markdown report tests
+    /// (`report::tests::markdown_formatter_emits_report_header`).
     pub fn display_name(&self) -> &'static str {
         match self {
             TopLevelCategory::Feature => "Feature",
@@ -62,8 +76,12 @@ impl TopLevelCategory {
 
     /// All canonical variants in the recommended display order.
     ///
-    /// Excludes [`TopLevelCategory::Unknown`] (which is a fallback, not a
-    /// first-class reportable category).
+    /// Why: report iteration order must be stable so output stays diffable
+    /// across runs; centralising the canonical order here avoids drift.
+    /// What: returns a slice of the 7 reportable variants (excludes
+    /// `Unknown`, which is a fallback, not a first-class category).
+    /// Test: covered indirectly by every report formatter that iterates
+    /// categories.
     pub fn all() -> &'static [TopLevelCategory] {
         &[
             TopLevelCategory::Feature,
@@ -78,6 +96,12 @@ impl TopLevelCategory {
 }
 
 /// A subcategory entry — maps a subcategory name to a top-level parent.
+///
+/// Why: users need to extend the taxonomy without modifying the closed
+/// `TopLevelCategory` enum; subcategories are the extension point.
+/// What: bundles the subcategory `name`, its `parent` top-level, and an
+/// optional human-readable `display_name`.
+/// Test: covered by `classify::tests::registry_merges_user_defined`.
 ///
 /// User-defined entries are loaded from YAML config and merged on top of the
 /// built-in defaults. Names are compared case-insensitively.
@@ -94,6 +118,12 @@ pub struct SubcategoryDef {
 
 impl SubcategoryDef {
     /// Construct a new definition.
+    ///
+    /// Why: simple constructor avoids the boilerplate of building the
+    /// struct literal in test fixtures and YAML loaders.
+    /// What: stores `name` (any `Into<String>`), the parent variant, and
+    /// `display_name = None`.
+    /// Test: covered by `classify::tests::registry_merges_user_defined`.
     pub fn new(name: impl Into<String>, parent: TopLevelCategory) -> Self {
         Self {
             name: name.into(),
@@ -104,6 +134,14 @@ impl SubcategoryDef {
 }
 
 /// Registry of all known subcategories (built-in + user-defined).
+///
+/// Why: classification verdicts carry only a `category` string; the
+/// registry is the lookup table that maps that string to its closed
+/// top-level enum.
+/// What: holds a case-insensitive `HashMap` for O(1) resolution plus an
+/// `ordered` Vec preserving registration order for stable iteration.
+/// Test: covered by `classify::tests::registry_resolves_builtin_subcategories`
+/// and `registry_merges_user_defined`.
 ///
 /// Lookups are case-insensitive on the subcategory name. User-defined entries
 /// with the same name as a built-in entry replace the built-in (last-write-wins).
@@ -117,6 +155,14 @@ pub struct TaxonomyRegistry {
 
 impl TaxonomyRegistry {
     /// Build a registry from built-in defaults merged with `user_defs`.
+    ///
+    /// Why: every taxonomy resolution path starts from the same built-in
+    /// baseline; consolidating the merge logic here keeps user overrides
+    /// last-write-wins without duplicating the loop in every caller.
+    /// What: seeds the registry with [`Self::built_in_defs`], then inserts
+    /// `user_defs`; same-name entries replace the built-in in both
+    /// `by_name` and `ordered`.
+    /// Test: covered by `classify::tests::registry_merges_user_defined`.
     ///
     /// User entries override built-in entries that share a (case-insensitive)
     /// name.
@@ -142,11 +188,23 @@ impl TaxonomyRegistry {
     }
 
     /// Build a registry containing only the built-in defaults.
+    ///
+    /// Why: tests and CLI dry-runs often want the stock taxonomy without
+    /// merging any config.
+    /// What: convenience wrapper for `Self::new(Vec::new())`.
+    /// Test: covered by `classify::tests::registry_resolves_builtin_subcategories`.
     pub fn with_builtins() -> Self {
         Self::new(Vec::new())
     }
 
     /// Resolve a subcategory name to its top-level parent.
+    ///
+    /// Why: the cascade emits subcategory strings; downstream reports
+    /// roll them up by top-level category. The registry is the
+    /// single source of truth.
+    /// What: O(1) lookup in a lowercased `HashMap`; returns `None` for
+    /// unregistered names.
+    /// Test: covered by `unknown_subcategory_returns_none_top_level`.
     ///
     /// Returns `None` if the name is not registered. Lookup is
     /// case-insensitive.
@@ -157,11 +215,24 @@ impl TaxonomyRegistry {
     }
 
     /// All registered subcategories in insertion order.
+    ///
+    /// Why: callers iterate this list to surface every known subcategory
+    /// in the same order across runs (built-ins first, user entries last).
+    /// What: returns a borrowed slice of the internal `ordered` Vec.
+    /// Test: covered indirectly by `user_cannot_override_top_level_enum`
+    /// which iterates `all()` to count duplicates.
     pub fn all(&self) -> &[SubcategoryDef] {
         &self.ordered
     }
 
     /// Built-in subcategory definitions.
+    ///
+    /// Why: a single function listing every default subcategory keeps the
+    /// rule set and taxonomy in lockstep — adding a new `category` value
+    /// in the rules requires the matching entry here.
+    /// What: returns the static built-in list with each subcategory mapped
+    /// to its top-level parent.
+    /// Test: covered by `classify::tests::registry_resolves_builtin_subcategories`.
     ///
     /// These map every `category` value emitted by the default ruleset (see
     /// `rules::loader::default_rules`) plus the structural verdicts from the

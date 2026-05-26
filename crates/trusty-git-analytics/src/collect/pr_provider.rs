@@ -16,6 +16,15 @@ use crate::core::models::PullRequest;
 
 /// A source of pull-request metadata (GitHub, Bitbucket, …).
 ///
+/// Why: the collector needs to drive multiple PR sources concurrently
+/// without caring which backend each one is; a single trait makes the
+/// per-provider client interchangeable.
+/// What: defines `name`, async `fetch_pull_requests`, and synchronous
+/// `store_pull_requests` (sync because rusqlite is not async).
+/// Test: covered by the per-provider client tests
+/// (`collect::github::client`, `collect::bitbucket::client`,
+/// `collect::azdo::client`) that implement and exercise this trait.
+///
 /// Implementors are expected to be cheap to construct and `Send + Sync` so
 /// the pipeline can run multiple providers concurrently via
 /// `tokio::task::JoinSet`. `store_pull_requests` runs on the main task — it

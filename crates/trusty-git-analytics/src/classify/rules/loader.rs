@@ -7,7 +7,13 @@ use crate::classify::rules::types::{Rule, RuleSet};
 
 /// Load a [`RuleSet`] from a YAML or JSON file.
 ///
-/// Format is detected by extension (`.json` → JSON, anything else → YAML).
+/// Why: deployments often need to layer project-specific rules on top of the
+/// built-in ruleset; loading from disk decouples the binary from the rule
+/// definitions.
+/// What: detects format by extension (`.json` → JSON, anything else → YAML),
+/// deserializes into [`RuleSet`], and rejects empty rule lists so config
+/// mistakes are surfaced loudly.
+/// Test: see `tga::classify::tests` (round-trips serialization).
 ///
 /// # Errors
 ///
@@ -38,34 +44,76 @@ pub fn load_rules(path: &Path) -> Result<RuleSet> {
 
 /// Return the built-in default ruleset.
 ///
-/// Covers a broad swath of commit-message patterns to keep the
-/// "uncategorized" rate low without an LLM:
+/// Why: a comprehensive baseline ruleset keeps the "uncategorized" rate low
+/// without an LLM. The set is assembled from named category helpers so each
+/// group can be audited or revised in isolation.
+/// What: concatenates rule lists from the per-category builders below and
+/// wraps them in a [`RuleSet`] with `extend_defaults = true`.
+/// Test: `crate::classify::tests::default_rules_is_non_empty` and the
+/// corpus smoke test `corpus_uncategorized_below_1_percent` cover behaviour.
 ///
-/// - Conventional commit prefixes (`feat:`, `fix:`, `chore:`, `docs:`,
-///   `refactor:`, `test:`, `ci:`, `perf:`, `style:`, `build:`, `revert:`)
-///   matched both as exact substrings (Tier 1) and as anchored regex
-///   patterns at the start of the message (Tier 2). The regex form also
-///   accepts optional scopes (`feat(api):`) and breaking-change markers
-///   (`feat!:`).
-/// - GitHub `Merge pull request #N from …` and `Merge branch …` headers.
-/// - "Revert "..."" style headers (in addition to `revert:` prefix).
-/// - Initial-commit / WIP / version-bump conventions.
-/// - Dependency, infrastructure (Docker / k8s / Terraform / GitHub
-///   Actions), and code-review keywords.
-/// - JIRA-style ticket patterns (`PROJ-123`) and GitHub issue refs
-///   (`#123`).
-/// - Lower-priority keyword fallbacks for `bug`, `security`,
-///   `performance`, etc. so that prose commit messages still classify
-///   without LLM help.
+/// Covers (in order of inclusion):
+///
+/// - Conventional commit prefixes (`feat:`, `fix:`, …) — see
+///   [`conventional_commit_rules`].
+/// - Breaking-change marker — see [`breaking_change_rules`].
+/// - GitHub merge / `Revert "..."` headers — see [`merge_plumbing_rules`].
+/// - Initial / bootstrap / version-bump conventions —
+///   see [`initial_and_release_rules`].
+/// - Dependency, infrastructure (Docker / k8s / Terraform / GitHub Actions),
+///   and code-review keywords — see [`dependency_rules`],
+///   [`infra_rules`], [`code_review_and_cleanup_rules`].
+/// - JIRA-style ticket patterns (`PROJ-123`) and GitHub issue refs (`#123`) —
+///   see [`ticket_reference_rules`].
+/// - Lower-priority keyword fallbacks for `bug`, `security`, `performance`,
+///   etc. — see [`generic_keyword_rules`], [`generic_prose_rules`],
+///   [`catch_all_rule`].
 pub fn default_rules() -> RuleSet {
-    let rules = vec![
-        // ================================================================
-        // Tier-2 (regex) rules: anchored, conventional-commit prefixes.
-        //
-        // These run after exact keyword matches but are intentionally high
-        // priority so that a leading `feat(scope)!:` beats a stray "bug"
-        // word later in the message.
-        // ================================================================
+    let mut rules: Vec<Rule> = Vec::new();
+    rules.extend(conventional_commit_rules());
+    rules.extend(breaking_change_rules());
+    rules.extend(merge_plumbing_rules());
+    rules.extend(initial_and_release_rules());
+    rules.extend(dependency_rules());
+    rules.extend(code_review_and_cleanup_rules());
+    rules.extend(infra_rules());
+    rules.extend(generic_keyword_rules());
+    rules.extend(cloud_platform_rules());
+    rules.extend(observability_rules());
+    rules.extend(datastore_rules());
+    rules.extend(messaging_rules());
+    rules.extend(networking_rules());
+    rules.extend(language_tooling_rules());
+    rules.extend(pr_hygiene_rules());
+    rules.extend(experiment_and_rollback_rules());
+    rules.extend(auto_generated_plumbing_rules());
+    rules.extend(translation_rules());
+    rules.extend(documentation_meta_rules());
+    rules.extend(content_and_assets_rules());
+    rules.extend(generic_prose_rules());
+    rules.extend(ticket_reference_rules());
+    rules.push(catch_all_rule());
+
+    RuleSet {
+        version: Some("1.0".into()),
+        extend_defaults: true,
+        rules,
+    }
+}
+
+/// Why: conventional-commit prefixes (`feat:`, `fix:`, etc.) are the
+/// strongest classification signal in modern repos; matching them at high
+/// priority keeps a leading `feat(scope)!:` from being beaten by a stray
+/// later "bug" word.
+/// What: returns the Tier-1/Tier-2 rules for the standard
+/// `feat|fix|chore|docs|refactor|test|ci|perf|style|build|revert` prefixes
+/// plus a few extras (`security:`, `deps:`, `i18n:`, `release:`, `wip:`)
+/// commonly seen in practice. Each rule combines exact-substring keywords
+/// with an anchored regex variant for `feat(scope)!:` forms.
+/// Test: covered by `cc_prefix_variants_with_scope_and_bang` and
+/// `cc_additional_prefixes` in `classify::tests`.
+fn conventional_commit_rules() -> Vec<Rule> {
+    vec![
         Rule {
             id: "cc-feat".into(),
             category: "feature".into(),
@@ -223,28 +271,41 @@ pub fn default_rules() -> RuleSet {
             priority: 85,
             confidence: 0.85,
         },
-        // ================================================================
-        // Breaking-change marker (highest priority — overrides cc-feat etc.)
-        // ================================================================
-        Rule {
-            id: "breaking-change".into(),
-            category: "breaking".into(),
-            subcategory: Some("api".into()),
-            keywords: vec!["breaking change".into(), "breaking-change".into()],
-            patterns: vec![
-                r"(?i)breaking[\s-]change".into(),
-                // Conventional-commit `!:` breaking marker
-                // e.g. `feat(api)!: drop v1`, `refactor!: rename module`.
-                r"(?i)^\s*(feat|fix|chore|refactor|perf|build|docs|ci|style|test)(\([^)]*\))?!:"
-                    .into(),
-            ],
-            priority: 110,
-            confidence: 0.9,
-        },
-        // ================================================================
-        // Merge / git-plumbing patterns (the fuzzy tier also handles these,
-        // but having rules catches them earlier with higher confidence).
-        // ================================================================
+    ]
+}
+
+/// Why: the breaking-change marker must outrank ordinary conventional-commit
+/// rules so `feat(api)!: drop v1` classifies as `breaking`, not `feature`.
+/// What: returns a single rule matching the explicit `BREAKING CHANGE`
+/// trailer and the `!:` shorthand at the start of any conventional prefix.
+/// Test: covered by `cc_prefix_variants_with_scope_and_bang`
+/// (`feat(api)!: drop v1` → `"breaking"`).
+fn breaking_change_rules() -> Vec<Rule> {
+    vec![Rule {
+        id: "breaking-change".into(),
+        category: "breaking".into(),
+        subcategory: Some("api".into()),
+        keywords: vec!["breaking change".into(), "breaking-change".into()],
+        patterns: vec![
+            r"(?i)breaking[\s-]change".into(),
+            // Conventional-commit `!:` breaking marker
+            // e.g. `feat(api)!: drop v1`, `refactor!: rename module`.
+            r"(?i)^\s*(feat|fix|chore|refactor|perf|build|docs|ci|style|test)(\([^)]*\))?!:".into(),
+        ],
+        priority: 110,
+        confidence: 0.9,
+    }]
+}
+
+/// Why: GitHub-generated `Merge pull request #N from …` and `Merge branch …`
+/// commit messages are noise on activity reports; catching them here at high
+/// priority with high confidence stops the fuzzy tier from having to handle
+/// them and tags them deterministically.
+/// What: returns two rules for `merge pull request` / `merge branch` /
+/// `merge tag` headers with subcategory routing.
+/// Test: covered by `merge_patterns_classify_to_merge`.
+fn merge_plumbing_rules() -> Vec<Rule> {
+    vec![
         Rule {
             id: "merge-pr".into(),
             category: "merge".into(),
@@ -266,9 +327,18 @@ pub fn default_rules() -> RuleSet {
             priority: 105,
             confidence: 0.95,
         },
-        // ================================================================
-        // Initial / bootstrap / repo-setup commits.
-        // ================================================================
+    ]
+}
+
+/// Why: bootstrap commits ("Initial commit", "Bootstrap repo") and
+/// version-bump commits ("Release v1.2.3") are categorically distinct from
+/// feature work and should not contaminate developer activity metrics.
+/// What: returns two rules — one for initial/bootstrap headers (→ `chore`),
+/// one for version-bump / release-tagging prose (→ `release`).
+/// Test: covered by `initial_commit_classifies_to_chore` and
+/// `version_bump_classifies_to_release`.
+fn initial_and_release_rules() -> Vec<Rule> {
+    vec![
         Rule {
             id: "initial-commit".into(),
             category: "chore".into(),
@@ -283,9 +353,6 @@ pub fn default_rules() -> RuleSet {
             priority: 95,
             confidence: 0.9,
         },
-        // ================================================================
-        // Version-bump / release tagging.
-        // ================================================================
         Rule {
             id: "version-bump".into(),
             category: "release".into(),
@@ -305,9 +372,17 @@ pub fn default_rules() -> RuleSet {
             priority: 90,
             confidence: 0.9,
         },
-        // ================================================================
-        // Dependency updates — very common "uncategorized" source.
-        // ================================================================
+    ]
+}
+
+/// Why: Dependabot / Renovate / Snyk update commits are a major source of
+/// otherwise-uncategorized output; tagging them as `maintenance/dependencies`
+/// keeps developer activity reports clean.
+/// What: returns two rules — one for prose ("update dependencies",
+/// "bump foo from 1.0 to 2.0") and one for bot author markers.
+/// Test: covered by `dependency_updates_classify_to_maintenance`.
+fn dependency_rules() -> Vec<Rule> {
+    vec![
         Rule {
             id: "kw-deps-update".into(),
             category: "maintenance".into(),
@@ -342,9 +417,19 @@ pub fn default_rules() -> RuleSet {
             priority: 75,
             confidence: 0.9,
         },
-        // ================================================================
-        // Lint / formatting / tooling cleanup.
-        // ================================================================
+    ]
+}
+
+/// Why: linting, formatting, review-feedback, and cleanup commits all share
+/// the property of being maintenance-style rather than feature work; grouping
+/// their rules together keeps the classification policy easy to audit.
+/// What: returns rules for lint runs (rustfmt / prettier / clippy / eslint),
+/// generic format passes, code-review-feedback markers, and cleanup keywords
+/// (`remove unused`, `dead code`).
+/// Test: covered by `lint_and_format_classify_to_style`,
+/// `cleanup_classifies_to_refactor`, `review_feedback_classifies_to_refactor`.
+fn code_review_and_cleanup_rules() -> Vec<Rule> {
+    vec![
         Rule {
             id: "kw-lint".into(),
             category: "style".into(),
@@ -384,9 +469,6 @@ pub fn default_rules() -> RuleSet {
             priority: 65,
             confidence: 0.8,
         },
-        // ================================================================
-        // Code review / PR feedback follow-ups.
-        // ================================================================
         Rule {
             id: "kw-review".into(),
             category: "refactor".into(),
@@ -406,9 +488,6 @@ pub fn default_rules() -> RuleSet {
             priority: 70,
             confidence: 0.8,
         },
-        // ================================================================
-        // Cleanup / housekeeping prose.
-        // ================================================================
         Rule {
             id: "kw-cleanup".into(),
             category: "refactor".into(),
@@ -426,9 +505,17 @@ pub fn default_rules() -> RuleSet {
             priority: 60,
             confidence: 0.8,
         },
-        // ================================================================
-        // Infrastructure / DevOps / CI keywords.
-        // ================================================================
+    ]
+}
+
+/// Why: Dockerfile / k8s / Terraform / GitHub Actions changes are
+/// infrastructure work that should be reported separately from product
+/// development.
+/// What: returns four rules for the major infra ecosystems (Docker,
+/// Kubernetes/Helm, Terraform/Ansible, CI runners).
+/// Test: covered by `infra_keywords_classify_appropriately`.
+fn infra_rules() -> Vec<Rule> {
+    vec![
         Rule {
             id: "kw-docker".into(),
             category: "build".into(),
@@ -492,10 +579,21 @@ pub fn default_rules() -> RuleSet {
             priority: 70,
             confidence: 0.85,
         },
-        // ================================================================
-        // Generic verbs — lowest priority so prefix rules win first.
-        // These convert prose commits into reasonable categories.
-        // ================================================================
+    ]
+}
+
+/// Why: prose commit messages without conventional-commit prefixes still need
+/// a category; these mid-priority keyword rules cover the most common verbs
+/// and topics so the catch-all only fires on truly unstructured prose.
+/// What: returns rules for "add/implement" (→ feature), "fix/resolve"
+/// (→ bugfix), bug/regression prose, security/CVE keywords, performance,
+/// docs, tests, config, database, and WIP markers.
+/// Test: covered by `bug_fix_prose_classifies_to_bugfix`,
+/// `security_prose_classifies_to_security`, `performance_prose_classifies_to_performance`,
+/// `docs_prose_classifies_to_documentation`, `test_prose_classifies_to_test`,
+/// `wip_prose_classifies_to_wip`, and `database_migration_classifies_to_feature`.
+fn generic_keyword_rules() -> Vec<Rule> {
+    vec![
         Rule {
             id: "kw-add-implement".into(),
             category: "feature".into(),
@@ -678,9 +776,17 @@ pub fn default_rules() -> RuleSet {
             priority: 40,
             confidence: 0.65,
         },
-        // ================================================================
-        // Cloud platforms (AWS / GCP / Azure).
-        // ================================================================
+    ]
+}
+
+/// Why: cloud-provider commits (AWS / GCP / Azure) cluster naturally as a
+/// "cloud" category for organisations doing infrastructure work, distinct
+/// from generic build/CI churn.
+/// What: returns three rules, one per provider, with cloud-service keywords
+/// (S3 / EC2 / Lambda for AWS, BigQuery / Cloud Run for GCP, etc.).
+/// Test: smoke-tested via the broad corpus in `corpus_uncategorized_below_1_percent`.
+fn cloud_platform_rules() -> Vec<Rule> {
+    vec![
         Rule {
             id: "kw-cloud-aws".into(),
             category: "cloud".into(),
@@ -749,124 +855,152 @@ pub fn default_rules() -> RuleSet {
             priority: 70,
             confidence: 0.85,
         },
-        // ================================================================
-        // Monitoring / observability.
-        // ================================================================
-        Rule {
-            id: "kw-monitoring".into(),
-            category: "monitoring".into(),
-            subcategory: None,
-            keywords: vec![
-                "datadog".into(),
-                "prometheus".into(),
-                "grafana".into(),
-                "sentry".into(),
-                "newrelic".into(),
-                "new relic".into(),
-                "pagerduty".into(),
-                "splunk".into(),
-                "opentelemetry".into(),
-                "otel".into(),
-                "tracing".into(),
-                "metrics".into(),
-                "alerting".into(),
-                "alert rule".into(),
-                "dashboard".into(),
-                "log aggregation".into(),
-                "elk stack".into(),
-                "kibana".into(),
-                "logstash".into(),
-            ],
-            patterns: vec![],
-            priority: 65,
-            confidence: 0.8,
-        },
-        // ================================================================
-        // Databases.
-        // ================================================================
-        Rule {
-            id: "kw-database".into(),
-            category: "database".into(),
-            subcategory: None,
-            keywords: vec![
-                "postgresql".into(),
-                "postgres".into(),
-                " mysql".into(),
-                "mariadb".into(),
-                "sqlite".into(),
-                " redis".into(),
-                "mongodb".into(),
-                "mongo db".into(),
-                "elasticsearch".into(),
-                "cassandra".into(),
-                "dynamodb".into(),
-                "schema change".into(),
-                "schema migration".into(),
-                "db schema".into(),
-                "database schema".into(),
-                "index migration".into(),
-            ],
-            patterns: vec![],
-            priority: 65,
-            confidence: 0.8,
-        },
-        // ================================================================
-        // Messaging / queues.
-        // ================================================================
-        Rule {
-            id: "kw-messaging".into(),
-            category: "messaging".into(),
-            subcategory: None,
-            keywords: vec![
-                " kafka".into(),
-                "rabbitmq".into(),
-                "rabbit mq".into(),
-                " sqs".into(),
-                " sns".into(),
-                "pub/sub".into(),
-                "pubsub".into(),
-                "nats".into(),
-                "amqp".into(),
-                "message queue".into(),
-                "event bus".into(),
-                "event stream".into(),
-            ],
-            patterns: vec![],
-            priority: 65,
-            confidence: 0.8,
-        },
-        // ================================================================
-        // Networking / web infra.
-        // ================================================================
-        Rule {
-            id: "kw-networking".into(),
-            category: "networking".into(),
-            subcategory: None,
-            keywords: vec![
-                " nginx".into(),
-                "traefik".into(),
-                "load balancer".into(),
-                " cdn".into(),
-                " ssl".into(),
-                " tls".into(),
-                "certificate".into(),
-                "cert manager".into(),
-                "letsencrypt".into(),
-                "let's encrypt".into(),
-                "reverse proxy".into(),
-                "ingress controller".into(),
-                "service mesh".into(),
-                " istio".into(),
-                "linkerd".into(),
-                "envoy proxy".into(),
-            ],
-            patterns: vec![],
-            priority: 65,
-            confidence: 0.8,
-        },
-        // ================================================================
-        // Language / ecosystem tooling.
-        // ================================================================
+    ]
+}
+
+/// Why: monitoring / observability commits (Datadog dashboards, Prometheus
+/// metrics, Sentry alerts) are a distinct slice of platform work worth
+/// reporting separately from features.
+/// What: returns a single rule with the major SaaS vendors and OSS tools
+/// (OpenTelemetry, ELK stack, etc.).
+/// Test: covered indirectly by `corpus_uncategorized_below_1_percent`.
+fn observability_rules() -> Vec<Rule> {
+    vec![Rule {
+        id: "kw-monitoring".into(),
+        category: "monitoring".into(),
+        subcategory: None,
+        keywords: vec![
+            "datadog".into(),
+            "prometheus".into(),
+            "grafana".into(),
+            "sentry".into(),
+            "newrelic".into(),
+            "new relic".into(),
+            "pagerduty".into(),
+            "splunk".into(),
+            "opentelemetry".into(),
+            "otel".into(),
+            "tracing".into(),
+            "metrics".into(),
+            "alerting".into(),
+            "alert rule".into(),
+            "dashboard".into(),
+            "log aggregation".into(),
+            "elk stack".into(),
+            "kibana".into(),
+            "logstash".into(),
+        ],
+        patterns: vec![],
+        priority: 65,
+        confidence: 0.8,
+    }]
+}
+
+/// Why: database-engine commits cluster naturally as their own category,
+/// useful for organisations tracking data-platform work.
+/// What: returns a single rule listing the major relational, key-value, and
+/// document databases plus schema-migration markers.
+/// Test: covered indirectly by the corpus smoke test.
+fn datastore_rules() -> Vec<Rule> {
+    vec![Rule {
+        id: "kw-database".into(),
+        category: "database".into(),
+        subcategory: None,
+        keywords: vec![
+            "postgresql".into(),
+            "postgres".into(),
+            " mysql".into(),
+            "mariadb".into(),
+            "sqlite".into(),
+            " redis".into(),
+            "mongodb".into(),
+            "mongo db".into(),
+            "elasticsearch".into(),
+            "cassandra".into(),
+            "dynamodb".into(),
+            "schema change".into(),
+            "schema migration".into(),
+            "db schema".into(),
+            "database schema".into(),
+            "index migration".into(),
+        ],
+        patterns: vec![],
+        priority: 65,
+        confidence: 0.8,
+    }]
+}
+
+/// Why: message-bus and queueing work (Kafka, RabbitMQ, NATS, SQS) is a
+/// distinct platform slice.
+/// What: returns a single rule covering the major brokers and queue
+/// abstractions.
+/// Test: smoke-covered by the broad corpus.
+fn messaging_rules() -> Vec<Rule> {
+    vec![Rule {
+        id: "kw-messaging".into(),
+        category: "messaging".into(),
+        subcategory: None,
+        keywords: vec![
+            " kafka".into(),
+            "rabbitmq".into(),
+            "rabbit mq".into(),
+            " sqs".into(),
+            " sns".into(),
+            "pub/sub".into(),
+            "pubsub".into(),
+            "nats".into(),
+            "amqp".into(),
+            "message queue".into(),
+            "event bus".into(),
+            "event stream".into(),
+        ],
+        patterns: vec![],
+        priority: 65,
+        confidence: 0.8,
+    }]
+}
+
+/// Why: networking / web-infra commits (nginx, load balancers, TLS, service
+/// meshes) belong together as a platform category.
+/// What: returns a single rule with proxy, load-balancer, TLS, and
+/// service-mesh keywords.
+/// Test: smoke-covered by the broad corpus.
+fn networking_rules() -> Vec<Rule> {
+    vec![Rule {
+        id: "kw-networking".into(),
+        category: "networking".into(),
+        subcategory: None,
+        keywords: vec![
+            " nginx".into(),
+            "traefik".into(),
+            "load balancer".into(),
+            " cdn".into(),
+            " ssl".into(),
+            " tls".into(),
+            "certificate".into(),
+            "cert manager".into(),
+            "letsencrypt".into(),
+            "let's encrypt".into(),
+            "reverse proxy".into(),
+            "ingress controller".into(),
+            "service mesh".into(),
+            " istio".into(),
+            "linkerd".into(),
+            "envoy proxy".into(),
+        ],
+        patterns: vec![],
+        priority: 65,
+        confidence: 0.8,
+    }]
+}
+
+/// Why: language-specific tooling churn (cargo / npm / pip / maven / go)
+/// is tooling work rather than product work and should be tagged for
+/// activity reports.
+/// What: returns one rule per major language ecosystem.
+/// Test: smoke-covered by the broad corpus.
+fn language_tooling_rules() -> Vec<Rule> {
+    vec![
         Rule {
             id: "kw-rust-tooling".into(),
             category: "tooling".into(),
@@ -971,38 +1105,51 @@ pub fn default_rules() -> RuleSet {
             priority: 55,
             confidence: 0.8,
         },
-        // ================================================================
-        // PR hygiene / cleanup of debug artifacts.
-        // ================================================================
-        Rule {
-            id: "kw-pr-hygiene".into(),
-            category: "refactor".into(),
-            subcategory: Some("cleanup".into()),
-            keywords: vec![
-                "remove debug".into(),
-                "remove console.log".into(),
-                "remove console log".into(),
-                "remove print".into(),
-                "remove todo".into(),
-                "remove fixme".into(),
-                "remove commented".into(),
-                "remove logging".into(),
-                "drop debug".into(),
-                "strip debug".into(),
-                "nit:".into(),
-                " nits".into(),
-                "per review".into(),
-                "per cr".into(),
-                "reviewer feedback".into(),
-                "suggested changes".into(),
-            ],
-            patterns: vec![],
-            priority: 60,
-            confidence: 0.8,
-        },
-        // ================================================================
-        // Experiments / spikes / prototypes.
-        // ================================================================
+    ]
+}
+
+/// Why: PR-hygiene commits (removing console.log, addressing review nits)
+/// should be tagged as refactor/cleanup, not feature work.
+/// What: returns a single rule for "remove debug", "nit:", "per review",
+/// etc.
+/// Test: smoke-covered by the broad corpus.
+fn pr_hygiene_rules() -> Vec<Rule> {
+    vec![Rule {
+        id: "kw-pr-hygiene".into(),
+        category: "refactor".into(),
+        subcategory: Some("cleanup".into()),
+        keywords: vec![
+            "remove debug".into(),
+            "remove console.log".into(),
+            "remove console log".into(),
+            "remove print".into(),
+            "remove todo".into(),
+            "remove fixme".into(),
+            "remove commented".into(),
+            "remove logging".into(),
+            "drop debug".into(),
+            "strip debug".into(),
+            "nit:".into(),
+            " nits".into(),
+            "per review".into(),
+            "per cr".into(),
+            "reviewer feedback".into(),
+            "suggested changes".into(),
+        ],
+        patterns: vec![],
+        priority: 60,
+        confidence: 0.8,
+    }]
+}
+
+/// Why: exploratory work (spikes, POCs, prototypes) and rollback commits
+/// have distinct semantics — surfacing them keeps reports honest about how
+/// much "real" work shipped.
+/// What: returns two rules — one for experiment / spike / POC keywords, one
+/// for rollback / undo prose.
+/// Test: smoke-covered by the broad corpus.
+fn experiment_and_rollback_rules() -> Vec<Rule> {
+    vec![
         Rule {
             id: "kw-experiment".into(),
             category: "experiment".into(),
@@ -1024,9 +1171,6 @@ pub fn default_rules() -> RuleSet {
             priority: 50,
             confidence: 0.75,
         },
-        // ================================================================
-        // Rollback (not the `revert:` prefix — prose form).
-        // ================================================================
         Rule {
             id: "kw-rollback".into(),
             category: "rollback".into(),
@@ -1043,55 +1187,70 @@ pub fn default_rules() -> RuleSet {
             priority: 70,
             confidence: 0.85,
         },
-        // ================================================================
-        // Auto-generated git plumbing.
-        // ================================================================
-        Rule {
-            id: "kw-auto-generated".into(),
-            category: "maintenance".into(),
-            subcategory: Some("auto-generated".into()),
-            keywords: vec![
-                "squashed commit".into(),
-                "cherry pick".into(),
-                "cherry-pick".into(),
-                "cherry-picked".into(),
-                "auto-merge".into(),
-                "automerge".into(),
-                "auto generated".into(),
-                "auto-generated".into(),
-            ],
-            patterns: vec![],
-            priority: 80,
-            confidence: 0.9,
-        },
-        // ================================================================
-        // Translations / i18n / l10n prose.
-        // ================================================================
-        Rule {
-            id: "kw-translation".into(),
-            category: "translation".into(),
-            subcategory: None,
-            keywords: vec![
-                "translation".into(),
-                "translations".into(),
-                "translate".into(),
-                "translated".into(),
-                "localize".into(),
-                "localization".into(),
-                "localisation".into(),
-                " locale".into(),
-                "locale file".into(),
-                " i18n".into(),
-                " l10n".into(),
-                "language file".into(),
-            ],
-            patterns: vec![],
-            priority: 60,
-            confidence: 0.85,
-        },
-        // ================================================================
-        // Repo-meta documentation files.
-        // ================================================================
+    ]
+}
+
+/// Why: automatically generated git plumbing (squashed commits, cherry-picks,
+/// auto-merges) is bookkeeping rather than development.
+/// What: returns a single rule with the common plumbing markers.
+/// Test: smoke-covered by the broad corpus.
+fn auto_generated_plumbing_rules() -> Vec<Rule> {
+    vec![Rule {
+        id: "kw-auto-generated".into(),
+        category: "maintenance".into(),
+        subcategory: Some("auto-generated".into()),
+        keywords: vec![
+            "squashed commit".into(),
+            "cherry pick".into(),
+            "cherry-pick".into(),
+            "cherry-picked".into(),
+            "auto-merge".into(),
+            "automerge".into(),
+            "auto generated".into(),
+            "auto-generated".into(),
+        ],
+        patterns: vec![],
+        priority: 80,
+        confidence: 0.9,
+    }]
+}
+
+/// Why: translation / localisation work has its own reporting category;
+/// surfacing it deters under-counting i18n contributions.
+/// What: returns a single rule with localisation prose keywords.
+/// Test: smoke-covered by the broad corpus.
+fn translation_rules() -> Vec<Rule> {
+    vec![Rule {
+        id: "kw-translation".into(),
+        category: "translation".into(),
+        subcategory: None,
+        keywords: vec![
+            "translation".into(),
+            "translations".into(),
+            "translate".into(),
+            "translated".into(),
+            "localize".into(),
+            "localization".into(),
+            "localisation".into(),
+            " locale".into(),
+            "locale file".into(),
+            " i18n".into(),
+            " l10n".into(),
+            "language file".into(),
+        ],
+        patterns: vec![],
+        priority: 60,
+        confidence: 0.85,
+    }]
+}
+
+/// Why: repository-meta documentation (CONTRIBUTING, LICENSE, CODE_OF_CONDUCT)
+/// and API documentation (Swagger / OpenAPI / docstrings) are both
+/// documentation but have distinct subcategories for reporting.
+/// What: returns two rules — one for repo-meta files, one for API/spec docs.
+/// Test: smoke-covered by the broad corpus.
+fn documentation_meta_rules() -> Vec<Rule> {
+    vec![
         Rule {
             id: "kw-repo-meta".into(),
             category: "documentation".into(),
@@ -1115,9 +1274,6 @@ pub fn default_rules() -> RuleSet {
             priority: 60,
             confidence: 0.85,
         },
-        // ================================================================
-        // API docs / specs.
-        // ================================================================
         Rule {
             id: "kw-api-docs".into(),
             category: "documentation".into(),
@@ -1140,9 +1296,17 @@ pub fn default_rules() -> RuleSet {
             priority: 55,
             confidence: 0.85,
         },
-        // ================================================================
-        // Website / marketing / landing content.
-        // ================================================================
+    ]
+}
+
+/// Why: marketing copy, landing pages, and asset updates (icons, fonts, logos)
+/// are categorisable distinctly from product code, useful for reports on
+/// design / marketing throughput.
+/// What: returns two rules — one for content/marketing prose, one for asset
+/// file extensions.
+/// Test: smoke-covered by the broad corpus.
+fn content_and_assets_rules() -> Vec<Rule> {
+    vec![
         Rule {
             id: "kw-content".into(),
             category: "content-docs".into(),
@@ -1162,9 +1326,6 @@ pub fn default_rules() -> RuleSet {
             priority: 55,
             confidence: 0.8,
         },
-        // ================================================================
-        // Assets (images, icons, fonts, svg).
-        // ================================================================
         Rule {
             id: "kw-assets".into(),
             category: "assets".into(),
@@ -1187,10 +1348,19 @@ pub fn default_rules() -> RuleSet {
             priority: 40,
             confidence: 0.7,
         },
-        // ================================================================
-        // Generic single-word / very-short prose verbs (low priority, low conf).
-        // These are the second-to-last safety net before the catch-all.
-        // ================================================================
+    ]
+}
+
+/// Why: very short or generic prose ("Add new module", "update X", "remove Y",
+/// "fix Z") still benefits from a low-confidence verdict so the catch-all
+/// doesn't see it; these rules also handle minimal single-word messages
+/// like "wip", "fix.", "update".
+/// What: returns five rules — generic-add, generic-update, generic-remove,
+/// generic-fix, and single-word minimal patterns. All run at low priority
+/// (≤ 25) so structured commit prefixes win first.
+/// Test: smoke-covered by `corpus_uncategorized_below_1_percent`.
+fn generic_prose_rules() -> Vec<Rule> {
+    vec![
         Rule {
             id: "kw-generic-add".into(),
             category: "feature".into(),
@@ -1288,11 +1458,21 @@ pub fn default_rules() -> RuleSet {
             priority: 25,
             confidence: 0.5,
         },
-        // ================================================================
+    ]
+}
+
+/// Why: ticket-identifier references (JIRA `PROJ-123`, GitHub `#123`) signal
+/// trackable work; classifying them as `feature/ticketed` keeps the report
+/// pipeline's ticketed-stats accurate.
+/// What: returns three rules — bare ticket-only messages, generic JIRA
+/// ticket references inside messages, and GitHub issue refs (`refs #123`).
+/// Test: covered by `regex_matcher_classifies_jira_ticket` and
+/// `regex_matcher_extracts_ticket_id`.
+fn ticket_reference_rules() -> Vec<Rule> {
+    vec![
         // Bare ticket-only message (e.g. "PROJ-123" or "PROJ-456 some work").
         // The standalone "jira-ticket" rule below also matches, but this one
         // has explicit subcategory routing through "maintenance".
-        // ================================================================
         Rule {
             id: "bare-ticket-prefix".into(),
             category: "maintenance".into(),
@@ -1302,9 +1482,6 @@ pub fn default_rules() -> RuleSet {
             priority: 15,
             confidence: 0.5,
         },
-        // ================================================================
-        // Ticket / issue identifiers (regex tier).
-        // ================================================================
         Rule {
             id: "jira-ticket".into(),
             category: "feature".into(),
@@ -1323,32 +1500,26 @@ pub fn default_rules() -> RuleSet {
             priority: 25,
             confidence: 0.6,
         },
-        // ================================================================
-        // Final catch-all safety net.
-        //
-        // Lowest possible priority — matches any non-empty message after
-        // every other rule has had its chance. Confidence is intentionally
-        // low (0.3) so downstream reports can flag these for LLM review.
-        //
-        // Routes to subcategory "uncategorized" (Unknown top-level) so the
-        // result is still semantically marked as unclassified, but the
-        // commit produces a deterministic verdict instead of falling
-        // through to the fuzzy/LLM tiers (which can be slow or unavailable).
-        // ================================================================
-        Rule {
-            id: "catch-all".into(),
-            category: "maintenance".into(),
-            subcategory: Some("uncategorized".into()),
-            keywords: vec![],
-            patterns: vec![r"(?s).+".into()],
-            priority: 1,
-            confidence: 0.3,
-        },
-    ];
+    ]
+}
 
-    RuleSet {
-        version: Some("1.0".into()),
-        extend_defaults: true,
-        rules,
+/// Why: residual prose that escapes every other rule still needs a
+/// deterministic verdict so the pipeline never falls through to the slow
+/// fuzzy or LLM tiers when they are unavailable.
+/// What: returns the lowest-priority catch-all rule that matches any
+/// non-empty message and routes it to `category="maintenance",
+/// subcategory="uncategorized"` at low confidence (0.3). Downstream reports
+/// can filter on subcategory/confidence to flag commits for LLM review.
+/// Test: covered by `corpus_uncategorized_below_1_percent` (asserts zero
+/// `"uncategorized"` top-level verdicts even on adversarial prose).
+fn catch_all_rule() -> Rule {
+    Rule {
+        id: "catch-all".into(),
+        category: "maintenance".into(),
+        subcategory: Some("uncategorized".into()),
+        keywords: vec![],
+        patterns: vec![r"(?s).+".into()],
+        priority: 1,
+        confidence: 0.3,
     }
 }

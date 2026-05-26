@@ -20,6 +20,14 @@ use crate::core::db::Database;
 const DEFAULT_MIN_COVERAGE_PCT: f64 = 20.0;
 
 /// Aggregate statistics from a single pipeline run.
+///
+/// Why: callers (CLI, tests) need a uniform shape describing how many
+/// commits were classified and via which tier; coverage breakdowns let
+/// reports surface gaps per repository.
+/// What: counters per-tier (`by_method`), per-category (`by_category`),
+/// and per-repo coverage. Populated by [`ClassificationPipeline::run`].
+/// Test: covered by `tests::pipeline_runs_against_in_memory_db` and
+/// `pipeline_force_reclassifies_rows`.
 #[derive(Debug, Clone, Default)]
 pub struct ClassificationStats {
     /// Total commits processed.
@@ -40,6 +48,12 @@ pub struct ClassificationStats {
 }
 
 /// Per-repository coverage breakdown.
+///
+/// Why: a global coverage number hides the case where one repo classifies
+/// at 95% and another at 5%; surfacing per-repo coverage lets operators
+/// drill in.
+/// What: total commits, classified count, and percentage (0–100).
+/// Test: covered by classification pipeline integration tests.
 #[derive(Debug, Clone, Default)]
 pub struct RepoCoverage {
     /// Total commits seen for this repository.
@@ -51,6 +65,14 @@ pub struct RepoCoverage {
 }
 
 /// Stage-2 pipeline: classify every unclassified commit currently in the DB.
+///
+/// Why: classification touches multiple tiers (rules / regex / fuzzy / LLM)
+/// and the engine config / taxonomy / JIRA mappings all live in `Config`;
+/// concentrating orchestration here keeps the binary's `commands/classify.rs`
+/// thin.
+/// What: holds the validated [`Config`] plus toggles for `force` re-classify
+/// and `since` lower-bound. Built via [`Self::new`] + builder methods.
+/// Test: covered by `classify::tests::pipeline_runs_against_in_memory_db`.
 pub struct ClassificationPipeline {
     config: Config,
     /// When `true`, re-classify commits that already carry a verdict.
@@ -66,6 +88,13 @@ pub struct ClassificationPipeline {
 
 impl ClassificationPipeline {
     /// Construct a new pipeline bound to the given config.
+    ///
+    /// Why: pipelines start with re-classification disabled by default
+    /// (the common "fill in missing verdicts" case); operators opt in to
+    /// `force` via the builder.
+    /// What: stores the config; sets `force = false`, `since = None`.
+    /// Test: covered by `tests::pipeline_constructs_with_default_config`
+    /// in `collect::tests` and the pipeline integration tests.
     pub fn new(config: Config) -> Self {
         Self {
             config,

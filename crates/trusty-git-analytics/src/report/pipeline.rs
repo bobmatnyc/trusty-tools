@@ -19,11 +19,24 @@ const FORMAT_JSON: &str = "json";
 const FORMAT_MARKDOWN: &str = "markdown";
 
 /// Stage 3 orchestrator.
+///
+/// Why: report generation requires aggregating the DB once and then
+/// dispatching to multiple formatters (CSV / JSON / Markdown); a single
+/// orchestrator means callers don't pick formatters or build paths.
+/// What: holds the validated [`Config`]; `run` does the aggregation and
+/// per-format dispatch and returns a [`ReportStats`].
+/// Test: covered by `report::tests::pipeline_runs_all_formats_when_unspecified`.
 pub struct ReportPipeline {
     config: Config,
 }
 
 /// Summary of a [`ReportPipeline::run`] invocation.
+///
+/// Why: the binary prints what it wrote to the user; tests assert on the
+/// list of produced files.
+/// What: counters plus the absolute paths of every emitted file.
+/// Test: covered by `report::tests::pipeline_runs_all_formats_when_unspecified`
+/// (asserts 14 files written: 9 CSV + 4 JSON + 1 Markdown).
 #[derive(Debug, Clone)]
 pub struct ReportStats {
     /// Total commits that appeared in the report.
@@ -36,6 +49,11 @@ pub struct ReportStats {
 
 impl ReportPipeline {
     /// Construct a new pipeline bound to `config`.
+    ///
+    /// Why: keeps construction trivial — all behaviour lives on
+    /// [`Self::run`].
+    /// What: stores the config; no other initialisation.
+    /// Test: covered by `report::tests::pipeline_constructs_without_panic`.
     pub fn new(config: Config) -> Self {
         Self { config }
     }

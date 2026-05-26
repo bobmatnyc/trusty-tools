@@ -20,6 +20,14 @@ use crate::classify::tiers::ClassificationResult;
 use crate::core::models::ClassificationMethod;
 
 /// Runtime configuration for the [`ClassificationEngine`].
+///
+/// Why: classification tiers (especially LLM) need provider / model /
+/// threshold tuning; bundling those knobs into a config struct keeps the
+/// engine constructor signature stable as new tiers are added.
+/// What: holds LLM toggles (`use_llm`, `llm_model`, `llm_provider`,
+/// `openrouter_api_key`) plus a `confidence_threshold` shared by all tiers.
+/// Test: every classifier test in `classify::tests` builds one via
+/// `Default::default()` or with explicit overrides.
 #[derive(Debug, Clone)]
 pub struct ClassificationEngineConfig {
     /// Whether to engage the LLM tier when tiers 1–3 fail.
@@ -52,6 +60,14 @@ impl Default for ClassificationEngineConfig {
 }
 
 /// Combined classification cascade.
+///
+/// Why: a single engine orchestrates the four-tier cascade
+/// (override → exact → issue-type → regex → JIRA-project → fuzzy → LLM)
+/// so callers don't reimplement the precedence rules.
+/// What: holds one classifier per tier plus the shared taxonomy and
+/// config. `classify` walks the tiers in order; first non-`None` wins.
+/// Test: covered by `classify::tests::engine_classify_batch_does_not_panic`
+/// and the cascade-coverage `corpus_uncategorized_below_1_percent` test.
 pub struct ClassificationEngine {
     override_tier: Option<OverrideTier>,
     exact: ExactMatcher,
@@ -66,6 +82,13 @@ pub struct ClassificationEngine {
 
 impl ClassificationEngine {
     /// Build a new engine from a [`RuleSet`] and configuration.
+    ///
+    /// Why: most callers want the default behaviour — built-in taxonomy,
+    /// no JIRA mappings, no override tier. This constructor is the shortest
+    /// path.
+    /// What: delegates to [`Self::with_taxonomy`] with an empty custom
+    /// taxonomy vec.
+    /// Test: covered by `classify::tests::engine_classify_batch_does_not_panic`.
     ///
     /// The LLM tier is constructed (but only invoked) if `config.use_llm`
     /// is true. The API key is read from the `OPENAI_API_KEY` environment
@@ -84,6 +107,12 @@ impl ClassificationEngine {
     /// Build an engine with user-defined subcategory definitions merged into
     /// the built-in taxonomy registry.
     ///
+    /// Why: organisations often need custom subcategories
+    /// (e.g. `"payments"`, `"auth"`) without forking the binary.
+    /// What: delegates to [`Self::with_taxonomy_and_mappings`] with empty
+    /// JIRA mappings and no override connection.
+    /// Test: covered by `classify::tests::registry_merges_user_defined`.
+    ///
     /// # Errors
     ///
     /// Returns an error if the rules fail to compile.
@@ -97,6 +126,13 @@ impl ClassificationEngine {
 
     /// Full builder allowing JIRA project-key mappings and an optional DB
     /// connection for the manual-override tier.
+    ///
+    /// Why: operators sometimes need to seed both JIRA project keys (so
+    /// `PROJ-123` knows it lives under "Project") and an override database
+    /// (for human-corrected verdicts). This builder accepts both.
+    /// What: delegates to [`Self::with_taxonomy_mappings_and_confidence`]
+    /// with `jira_confidence = None` (use the default 0.88).
+    /// Test: covered by `jira_project_mapping_*` tests.
     ///
     /// # Errors
     ///
@@ -183,6 +219,14 @@ impl ClassificationEngine {
     }
 
     /// Borrow the engine's taxonomy registry.
+    ///
+    /// Why: report formatters that surface top-level categories need to
+    /// resolve subcategory strings; sharing the engine's registry keeps
+    /// the resolution consistent across the run.
+    /// What: returns a shared reference to the internal
+    /// [`TaxonomyRegistry`].
+    /// Test: covered indirectly — every callable engine test holds a
+    /// taxonomy reference.
     pub fn taxonomy(&self) -> &TaxonomyRegistry {
         &self.taxonomy
     }

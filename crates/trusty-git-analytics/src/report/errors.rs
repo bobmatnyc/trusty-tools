@@ -3,6 +3,13 @@
 use thiserror::Error;
 
 /// Errors produced by report aggregation and formatting.
+///
+/// Why: report generation can fail at the DB read, CSV/JSON serialise,
+/// Tera template, or filesystem write phases; one uniform error keeps the
+/// formatter signatures simple.
+/// What: `thiserror` enum with `From` impls for `csv::Error`, JSON,
+/// `tera::Error`, `std::io::Error`, and core errors.
+/// Test: covered indirectly via the formatter tests in `report::tests`.
 #[derive(Debug, Error)]
 pub enum ReportError {
     /// Underlying core error (DB, config, model).
@@ -31,4 +38,8 @@ pub enum ReportError {
 }
 
 /// Module-wide `Result` alias.
+///
+/// Why: keeps signatures compact across all formatter functions.
+/// What: alias for `std::result::Result<T, ReportError>`.
+/// Test: exercised by every fallible function in `report`.
 pub type Result<T> = std::result::Result<T, ReportError>;

@@ -22,6 +22,14 @@ use crate::core::models::ClassificationMethod;
 
 /// Output of any tier: a category verdict plus provenance.
 ///
+/// Why: every classifier tier needs to return the same shape so the cascade
+/// orchestrator can compare tiers' verdicts and decide which to accept.
+/// What: bundles the verdict (`category`, `subcategory`, `top_level`),
+/// confidence, source tier (`method`), extracted ticket id, and an
+/// optional LLM-only complexity score.
+/// Test: covered by `unclassified_defaults_complexity_to_none` and every
+/// classifier test that asserts the verdict shape.
+///
 /// The hierarchy is:
 /// - `top_level` — one of the canonical [`TopLevelCategory`] variants
 ///   (resolved from `category` via the [`crate::classify::taxonomy::TaxonomyRegistry`]).
@@ -59,6 +67,12 @@ pub struct ClassificationResult {
 
 impl ClassificationResult {
     /// Construct an "unclassified" result used as a default when no tier matches.
+    ///
+    /// Why: callers prefer a deterministic verdict over a panic / Option
+    /// when the cascade fails; this is the canonical safe default.
+    /// What: returns `category = "uncategorized"`, `top_level = Unknown`,
+    /// `confidence = 0.0`, `method = FuzzyMatch`, and `complexity = None`.
+    /// Test: covered by `unclassified_defaults_complexity_to_none`.
     ///
     /// `complexity` defaults to `None` — unclassified commits are never
     /// complexity-scored.

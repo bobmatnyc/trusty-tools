@@ -20,6 +20,14 @@ use crate::core::db::{self, Database};
 use crate::core::models::PullRequest;
 
 /// Aggregate statistics for a single pipeline run.
+///
+/// Why: callers (CLI, integration tests) need a single typed object
+/// describing what the run did, both for stdout output and for asserting
+/// expectations in tests.
+/// What: counter struct populated by [`CollectionPipeline::run`]; the
+/// `errors` vec accumulates per-repo non-fatal errors.
+/// Test: covered by `tests::collect_integration_repo` (integration test
+/// that runs the pipeline against a fixture repo).
 #[derive(Debug, Clone, Default)]
 pub struct CollectionStats {
     /// Number of new commit rows written across all repositories.
@@ -40,6 +48,15 @@ pub struct CollectionStats {
 }
 
 /// Top-level Stage 1 orchestrator.
+///
+/// Why: callers should not need to know the order of git extraction,
+/// identity resolution, GitHub fetch, and JIRA fetch — the pipeline owns
+/// the orchestration.
+/// What: holds a validated [`Config`] plus boolean toggles for forced
+/// re-collection, offline runs (`no_fetch`), and PR re-fetch
+/// (`force_refresh_prs`). Constructed via [`Self::new`] + builder methods.
+/// Test: covered by `tests::pipeline_constructs_with_default_config` and
+/// the integration test `tests/integration_test.rs`.
 pub struct CollectionPipeline {
     config: Config,
     force: bool,
@@ -49,6 +66,12 @@ pub struct CollectionPipeline {
 
 impl CollectionPipeline {
     /// Construct a new pipeline from a validated [`Config`].
+    ///
+    /// Why: pipelines start with toggles disabled by default; callers opt
+    /// in to forced re-collection or PR refresh via builder methods.
+    /// What: stores the config; sets `force = no_fetch = force_refresh_prs
+    /// = false`.
+    /// Test: covered by `tests::pipeline_constructs_with_default_config`.
     pub fn new(config: Config) -> Self {
         Self {
             config,
