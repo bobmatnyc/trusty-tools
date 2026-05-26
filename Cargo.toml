@@ -26,10 +26,7 @@ authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 
 [workspace.dependencies]
 # ── Internal crates (path deps so the monorepo builds without publish cycles) ──
-trusty-common = { path = "crates/trusty-common", version = "0.5.0" }
-trusty-mcp-core = { path = "crates/trusty-mcp-core", version = "0.1" }
-trusty-embedder = { path = "crates/trusty-embedder", version = "0.1" }
-trusty-symgraph = { path = "crates/trusty-symgraph", version = "0.2.6" }
+trusty-common = { path = "crates/trusty-common", version = "0.6.0" }
 # trusty-mpm: unified crate (replaces the former trusty-mpm-{core,mcp,client,
 # daemon,cli,tui,telegram} sub-crates). The gui sub-crate is kept separate
 # because it owns Tauri's build.rs and tauri.conf.json.
@@ -84,7 +81,7 @@ notify = "6"
 # Process / system introspection (RSS, CPU sampling for daemon /health).
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 
-# Storage / KG / embeddings (trusty-memory-core).
+# Storage / KG / embeddings (trusty-common memory-core feature).
 usearch = "2.25"
 # Pure-Rust HNSW (issue #50). The `serde` feature does not exist on
 # hnsw_rs 0.3 — vectors are persisted in redb (postcard-encoded) and the
@@ -152,16 +149,15 @@ tree-sitter-swift = "=0.7.0"
 tree-sitter-scala = "0.24"
 
 # ── [patch.crates-io] ──────────────────────────────────────────────────────
-# trusty-search and a handful of other crates depend on trusty-common,
-# trusty-mcp-core, trusty-embedder, and trusty-symgraph by version (because
-# they were previously published from separate repos). In the monorepo we
-# want those resolves to hit the in-tree paths, so patch them here. Cargo
-# only honours `[patch]` tables at the workspace root.
+# trusty-search and a handful of other crates depend on trusty-common by
+# version (because it was previously published from a separate repo). In the
+# monorepo we want those resolves to hit the in-tree path, so patch it here.
+# Cargo only honours `[patch]` tables at the workspace root.
+# Note: trusty-embedder, trusty-mcp-core, and trusty-symgraph were absorbed
+# into trusty-common (refactor: consolidate 5 utility crates into trusty-common).
+# Their [patch] entries are no longer needed.
 [patch.crates-io]
 trusty-common = { path = "crates/trusty-common" }
-trusty-embedder = { path = "crates/trusty-embedder" }
-trusty-mcp-core = { path = "crates/trusty-mcp-core" }
-trusty-symgraph = { path = "crates/trusty-symgraph" }
 
 [profile.dev]
 opt-level = 0

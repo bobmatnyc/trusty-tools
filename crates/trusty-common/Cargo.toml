@@ -1,6 +1,6 @@
 [package]
 name = "trusty-common"
-version = "0.5.0"
+version = "0.6.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -13,6 +13,20 @@ homepage = "https://github.com/bobmatnyc/trusty-tools"
 
 [lib]
 crate-type = ["rlib"]
+
+# Candle Metal RSS validation harness (absorbed from trusty-embedder).
+# Requires the `embedder-candle` feature to be enabled.
+[[bin]]
+name = "candle_metal_bench"
+path = "src/bin/candle_metal_bench.rs"
+required-features = ["embedder-candle"]
+
+# Unified ticketing MCP server (absorbed from trusty-tickets).
+# Requires the `tickets` feature to be enabled.
+[[bin]]
+name = "tickets-mcp"
+path = "src/bin/tickets_mcp.rs"
+required-features = ["tickets"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -105,6 +119,11 @@ regex = { workspace = true, optional = true }
 kuzu = { workspace = true, optional = true }
 redb = { workspace = true, optional = true }
 postcard = { workspace = true, optional = true }
+# Optional: enabled by the `tickets` feature (absorbed from `trusty-tickets`).
+# base64 is used by the JIRA backend for Basic-auth encoding.
+base64 = { workspace = true, optional = true }
+# Optional: enabled by the `tickets` feature for config-file parsing.
+toml = { version = "0.8", optional = true }
 
 # launchd module is macOS-only and needs getuid(2) for the gui/<uid> domain.
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -292,3 +311,8 @@ monitor-tui = ["dep:ratatui", "dep:crossterm", "dep:chrono"]
 # Note: module name is `embedder_client` (with `er`) to distinguish from the
 # existing `embed_client` (UDS, PR #157). Issue #164 will reconcile them.
 embedder-client = ["dep:thiserror", "embedder"]
+# Enables the `tickets` module: unified ticketing MCP server with GitHub,
+# JIRA, and Linear backends (absorbed from the former standalone `trusty-tickets`
+# crate). Pulls in `chrono`, `uuid`, `base64`, `thiserror`, and `toml` as
+# additional optional deps. Requires the `mcp` feature for the stdio loop.
+tickets = ["mcp", "dep:chrono", "dep:uuid", "dep:base64", "dep:thiserror", "dep:toml"]

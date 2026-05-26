@@ -32,8 +32,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
-use trusty_memory::transport::uds::{socket_path, UDS_ADDR_FILE};
 use trusty_memory::resolve_palace_registry_dir;
+use trusty_memory::transport::uds::{socket_path, UDS_ADDR_FILE};
 
 /// Environment variable that, when set, overrides the auto-detected
 /// socket path. Useful for integration tests that spin up a daemon on

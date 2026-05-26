@@ -14,7 +14,7 @@ name = "gworkspace-mcp"
 path = "src/bin/gworkspace-mcp.rs"
 
 [dependencies]
-trusty-common = { path = "../trusty-common", version = "0.5.0", features = ["mcp"] }
+trusty-common = { path = "../trusty-common", version = "0.6.0", features = ["mcp"] }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }

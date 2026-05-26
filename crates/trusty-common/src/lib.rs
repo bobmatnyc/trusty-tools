@@ -161,6 +161,23 @@ pub mod symgraph;
 #[cfg(feature = "memory-core")]
 pub mod memory_core;
 
+/// Unified ticketing MCP server (formerly the `trusty-tickets` crate).
+///
+/// Why: Claude Code and the rest of the trusty-* suite need a single MCP
+/// surface that can talk to GitHub Issues, JIRA, and Linear without the
+/// caller needing to know which backend is configured. Absorbing into
+/// `trusty-common` reduces the workspace crate count and co-locates the
+/// HTTP client surface with the other protocol helpers.
+/// What: Gated behind the `tickets` feature. Exposes `tickets::api::*`
+/// (config, models, Backend trait, three concrete backends), `tickets::server`
+/// (MCP dispatch loop + `run_stdio`), and `tickets::tools` (the tool-list
+/// schema). Requires the `mcp` feature for the stdio loop.
+/// Test: `cargo test -p trusty-common --features tickets` runs the module's
+/// own unit tests (dispatch, tool-list counts, config parsing, serde
+/// round-trips). Live backend tests require env-var credentials.
+#[cfg(feature = "tickets")]
+pub mod tickets;
+
 /// Unified monitor TUI for the trusty-search and trusty-memory daemons
 /// (formerly the `trusty-monitor-tui` crate).
 ///

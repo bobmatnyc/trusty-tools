@@ -33,6 +33,16 @@ pub mod candle_embedder;
 #[cfg(feature = "embedder-candle")]
 pub use candle_embedder::{CandleEmbedder, CandleEmbedderError};
 
+/// Portable resident-set-size (RSS) measurement helper.
+///
+/// Why: The candle Metal validation harness and any future memory-budget
+/// tooling need a portable way to observe in-process RSS without per-OS
+/// glue. Absorbed from the former `trusty-embedder` shim crate.
+/// What: Exposes `rss::current_rss_bytes()` — a thin `sysinfo` wrapper.
+/// Test: `rss::tests::rss_is_nonzero` and `rss_is_under_64gb` cover the
+/// basic sanity invariants.
+pub mod rss;
+
 /// Output dimension of the all-MiniLM-L6-v2 model.
 ///
 /// Note: we now load the INT8-quantised variant (`AllMiniLML6V2Q`) which
