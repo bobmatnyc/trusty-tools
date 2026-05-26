@@ -205,21 +205,19 @@ pub async fn gather_hot_triples(state: &AppState) -> Result<Vec<(String, String,
 /// `remove_prompt_fact`) must update the cache so the next
 /// `get_prompt_context` tool call returns the fresh content. Centralising
 /// the refresh here means the dispatch sites only have to call one function.
+/// The lock is `tokio::sync::RwLock` (issue #229) so the rebuild yields to
+/// the runtime instead of blocking a worker thread for the full KG walk.
 /// What: Calls `gather_hot_triples`, formats via `build_prompt_context`,
-/// then takes the cache's write lock and replaces both the raw triples and
-/// the pre-formatted string in a single assignment. The write is
-/// non-blocking from the caller's perspective: the lock is held only for
-/// the assignment, not the gather/format work.
+/// then takes the cache's async write lock and replaces both the raw
+/// triples and the pre-formatted string in a single assignment. The write
+/// is non-blocking from the caller's perspective: the lock is held only
+/// for the assignment, not the gather/format work.
 /// Test: `rebuild_prompt_cache_reflects_writes` (in `tools::tests`).
 pub async fn rebuild_prompt_cache(state: &AppState) -> Result<()> {
     let triples = gather_hot_triples(state).await?;
     let formatted = build_prompt_context(&triples);
     let cache = state.prompt_context_cache.clone();
-    let mut guard = cache.write().map_err(|e| {
-        // RwLock poisoning is recoverable here — the worst case is a stale
-        // cache, which is strictly better than panicking the MCP loop.
-        anyhow::anyhow!("prompt cache lock poisoned: {e}")
-    })?;
+    let mut guard = cache.write().await;
     *guard = PromptFactsCache { triples, formatted };
     Ok(())
 }

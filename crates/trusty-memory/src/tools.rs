@@ -1487,10 +1487,7 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
                 .filter(|s| !s.is_empty());
 
             let cache_snapshot = {
-                let guard = state
-                    .prompt_context_cache
-                    .read()
-                    .map_err(|e| anyhow!("prompt cache lock poisoned: {e}"))?;
+                let guard = state.prompt_context_cache.read().await;
                 guard.clone()
             };
 
@@ -2254,7 +2251,7 @@ mod tests {
 
         // (c) prompt cache has been refreshed with the formatted block.
         {
-            let guard = state.prompt_context_cache.read().expect("read lock");
+            let guard = state.prompt_context_cache.read().await;
             assert!(
                 guard.formatted.contains("tga → trusty-git-analytics"),
                 "prompt cache should contain alias; got: {}",
@@ -2271,7 +2268,7 @@ mod tests {
         .await
         .expect("add_alias with extra");
         {
-            let guard = state.prompt_context_cache.read().expect("read lock");
+            let guard = state.prompt_context_cache.read().await;
             assert!(
                 guard
                     .formatted
@@ -2291,7 +2288,7 @@ mod tests {
         .expect("remove_prompt_fact");
         assert_eq!(removed["removed"], true);
         {
-            let guard = state.prompt_context_cache.read().expect("read lock");
+            let guard = state.prompt_context_cache.read().await;
             assert!(
                 !guard.formatted.contains("tga → trusty-git-analytics"),
                 "retracted alias still in cache: {}",
@@ -2331,7 +2328,7 @@ mod tests {
 
         // Populate the cache by hand with a known triple set.
         {
-            let mut guard = state.prompt_context_cache.write().expect("write lock");
+            let mut guard = state.prompt_context_cache.write().await;
             let triples = vec![
                 (
                     "tga".to_string(),
@@ -2446,7 +2443,7 @@ mod tests {
 
         // The prompt cache must contain the new alias after discovery.
         {
-            let guard = state.prompt_context_cache.read().expect("read lock");
+            let guard = state.prompt_context_cache.read().await;
             assert!(
                 guard.formatted.contains("tga → trusty-git-analytics"),
                 "prompt cache missing tga alias after discover_aliases; got: {}",

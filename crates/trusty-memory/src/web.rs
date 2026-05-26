@@ -1437,10 +1437,7 @@ async fn prompt_context_handler(
     Query(_q): Query<PromptFactsQuery>,
 ) -> Result<Response, ApiError> {
     let cache_snapshot = {
-        let guard = state
-            .prompt_context_cache
-            .read()
-            .map_err(|e| ApiError::internal(format!("prompt cache lock poisoned: {e}")))?;
+        let guard = state.prompt_context_cache.read().await;
         guard.clone()
     };
     let body = if cache_snapshot.formatted.is_empty() {
@@ -3827,7 +3824,7 @@ mod tests {
 
         // Populate the cache and re-fetch.
         {
-            let mut guard = state.prompt_context_cache.write().expect("write lock");
+            let mut guard = state.prompt_context_cache.write().await;
             let triples = vec![(
                 "tga".to_string(),
                 "is_alias_for".to_string(),
@@ -3893,7 +3890,7 @@ mod tests {
         assert_eq!(v["object"], "trusty-memory");
 
         // The prompt cache must reflect the new alias.
-        let guard = state.prompt_context_cache.read().expect("read lock");
+        let guard = state.prompt_context_cache.read().await;
         assert!(
             guard.formatted.contains("tm → trusty-memory"),
             "cache missing alias; got: {}",
@@ -4035,7 +4032,7 @@ mod tests {
 
         // Cache must no longer contain the alias.
         {
-            let guard = state.prompt_context_cache.read().expect("read lock");
+            let guard = state.prompt_context_cache.read().await;
             assert!(
                 !guard.formatted.contains("ta → trusty-analyze"),
                 "alias still in cache after delete: {}",

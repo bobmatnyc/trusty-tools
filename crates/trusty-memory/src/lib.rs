@@ -21,8 +21,8 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock, RwLock};
-use tokio::sync::{broadcast, OnceCell};
+use std::sync::{Arc, OnceLock};
+use tokio::sync::{broadcast, OnceCell, RwLock};
 use tracing::info;
 use trusty_common::bm25_client::Bm25Client;
 use trusty_common::mcp::initialize_response;
@@ -488,10 +488,12 @@ pub struct AppState {
     /// the KG. The cache is rebuilt by
     /// `prompt_facts::rebuild_prompt_cache` after any write that touches a
     /// hot predicate (`kg_assert`, `add_alias`, `remove_prompt_fact`).
-    /// What: An `Arc<RwLock<PromptFactsCache>>` so the hot read path takes
-    /// a brief read lock and clones the cache; rebuilds take a write lock
-    /// for the assignment only. An empty `triples` vec ↔ "no context
-    /// stored yet" (the tool handler renders a hint).
+    /// What: An `Arc<tokio::sync::RwLock<PromptFactsCache>>` so the hot
+    /// read path takes a brief read lock and clones the cache; rebuilds
+    /// take a write lock for the assignment only. The async-aware lock
+    /// (issue #229) yields to the tokio runtime instead of blocking a
+    /// runtime thread for the rebuild duration. An empty `triples` vec ↔
+    /// "no context stored yet" (the tool handler renders a hint).
     /// Test: `get_prompt_context_returns_cached_or_hint`,
     /// `get_prompt_context_filters_by_query`.
     pub prompt_context_cache: Arc<RwLock<prompt_facts::PromptFactsCache>>,
