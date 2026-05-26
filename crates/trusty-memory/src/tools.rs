@@ -19,6 +19,7 @@
 //! - `kg_assert(palace, subject, predicate, object, confidence?, provenance?)` -> ()
 //! - `kg_query(palace, subject)`                    -> Vec<Triple>
 
+use crate::attribution::{CreatorInfo, CreatorSource, MCP_CLIENT_NAME};
 use crate::kg_extract::{extract_triples, ExtractInput};
 use crate::{ActivitySource, AppState, DaemonEvent};
 use anyhow::{anyhow, Context, Result};
@@ -548,7 +549,7 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
                 .ok_or_else(|| anyhow!("memory_remember: missing 'text'"))?
                 .to_string();
             let room = parse_room(args.get("room").and_then(|v| v.as_str()));
-            let tags: Vec<String> = args
+            let mut tags: Vec<String> = args
                 .get("tags")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
@@ -557,6 +558,11 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
                         .collect()
                 })
                 .unwrap_or_default();
+            // Submission-logging Part B: attach `creator:*` attribution so
+            // every MCP-origin drawer carries the writer identity (client
+            // = `trusty-memory-mcp`, source = `mcp`, version + cwd of the
+            // MCP server process).
+            CreatorInfo::new_self(MCP_CLIENT_NAME, CreatorSource::Mcp).merge_into(&mut tags);
 
             let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -618,7 +624,7 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("memory_note: missing 'content'"))?
                 .to_string();
-            let tags: Vec<String> = args
+            let mut tags: Vec<String> = args
                 .get("tags")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
@@ -627,6 +633,8 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
                         .collect()
                 })
                 .unwrap_or_default();
+            // Submission-logging Part B: same attribution as memory_remember.
+            CreatorInfo::new_self(MCP_CLIENT_NAME, CreatorSource::Mcp).merge_into(&mut tags);
             let handle = open_palace_handle(state, palace)?;
             // Issue #97: mirror memory_remember — keep originals so the KG
             // extractor sees the same content / tags that landed in the
@@ -1306,6 +1314,7 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
                 &to_palace,
                 &purpose,
                 content,
+                CreatorInfo::new_self(MCP_CLIENT_NAME, CreatorSource::Mcp),
             )
             .await
             .context("memory_send_message")?;

@@ -10,11 +10,15 @@
 //! fallback and JSON shape of every read endpoint against an in-memory
 //! palace built on a `tempdir`.
 
+use crate::attribution::{
+    CreatorInfo, CreatorSource, HTTP_DEFAULT_CLIENT, X_TRUSTY_CLIENT_CWD, X_TRUSTY_CLIENT_NAME,
+};
+use crate::hook_emit::HookEventPayload;
 use crate::{ActivityFilter, ActivitySource, AppState, DaemonEvent};
 use axum::{
     body::Body,
     extract::{Path as AxumPath, Query, State},
-    http::{header, HeaderValue, Request, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
@@ -132,6 +136,7 @@ pub fn router() -> Router<AppState> {
         .route("/health", get(health))
         .route("/api/v1/logs/tail", get(logs_tail))
         .route("/api/v1/activity", get(activity_handler))
+        .route("/api/v1/activity/hook", post(hook_activity_handler))
         .route("/api/v1/admin/stop", post(admin_stop))
         .fallback(static_handler);
 
@@ -540,6 +545,72 @@ async fn activity_handler(
         "limit": limit,
         "offset": offset,
     })))
+}
+
+/// `POST /api/v1/activity/hook` — ingest a hook firing for the activity feed.
+///
+/// Why: Claude Code's hooks (`UserPromptSubmit` → `prompt-context`,
+/// `SessionStart` → `inbox-check`) run as ephemeral CLI subprocesses with no
+/// in-process access to `AppState`. Without an ingestion endpoint they had no
+/// way to populate the activity feed, which left the TUI feed empty for any
+/// session whose only daemon traffic was hooks. This endpoint accepts the
+/// hook's self-reported payload and forwards it to `state.emit` so the same
+/// persistence + SSE broadcast pipeline that handles `DrawerAdded`/etc. also
+/// covers `HookFired`.
+/// What: deserialises a [`HookEventPayload`], maps it onto a
+/// `DaemonEvent::HookFired` with `source = ActivitySource::Hook`, hands it to
+/// `state.emit`, and returns `204 No Content`. Errors only happen for
+/// malformed JSON — handled by axum's own `Json` rejection.
+/// Test: `hook_activity_endpoint_appends_to_activity_log`.
+async fn hook_activity_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<HookEventPayload>,
+) -> Result<StatusCode, ApiError> {
+    state.emit(DaemonEvent::HookFired {
+        palace_id: payload.palace_id,
+        palace_name: payload.palace_name,
+        hook_type: payload.hook_type,
+        injection_kind: payload.injection_kind,
+        injection_length: payload.injection_length,
+        trigger_prompt_excerpt: payload.trigger_prompt_excerpt,
+        timestamp: chrono::Utc::now(),
+        duration_ms: payload.duration_ms,
+        source: ActivitySource::Hook,
+    });
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Extract a [`CreatorInfo`] for an HTTP write request.
+///
+/// Why: every HTTP write path (drawers, messages) must attach
+/// attribution tags so operators can trace which client wrote which
+/// drawer. Centralising the extraction here keeps the `X-Trusty-Client-*`
+/// header contract in one place.
+/// What: pulls `X-Trusty-Client-Name` (default
+/// [`HTTP_DEFAULT_CLIENT`]) and the optional `X-Trusty-Client-Cwd`
+/// header off the request, then builds a `CreatorInfo` with
+/// `source = Http` and the current daemon crate version.
+/// Test: `drawer_creator_attribution_http_default`,
+/// `drawer_creator_attribution_http_header`.
+fn creator_info_from_http(headers: &HeaderMap) -> CreatorInfo {
+    let client = headers
+        .get(X_TRUSTY_CLIENT_NAME)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(HTTP_DEFAULT_CLIENT)
+        .to_string();
+    let cwd = headers
+        .get(X_TRUSTY_CLIENT_CWD)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+    CreatorInfo {
+        client,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        source: CreatorSource::Http,
+        cwd,
+    }
 }
 
 /// Parse an optional ISO-8601 timestamp string for the activity filter.
@@ -994,6 +1065,7 @@ pub(crate) fn drawer_content_preview(content: &str) -> String {
 async fn create_drawer(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
     Json(body): Json<CreateDrawerBody>,
 ) -> Result<Json<Value>, ApiError> {
     let handle = open_handle(&state, &id)?;
@@ -1006,14 +1078,22 @@ async fn create_drawer(
     // Compute the preview *before* moving `body.content` into `remember` so
     // the SSE activity feed can show what was actually stored.
     let content_preview = drawer_content_preview(&body.content);
+    // Submission-logging Part B: attach `creator:*` attribution tags so
+    // every drawer carries the identity of the client that wrote it.
+    // HTTP clients self-identify via `X-Trusty-Client-Name` /
+    // `X-Trusty-Client-Cwd`; absent headers fall back to
+    // `unknown-http-client` and an empty cwd.
+    let creator = creator_info_from_http(&headers);
+    let mut tags_with_creator = body.tags;
+    creator.merge_into(&mut tags_with_creator);
     // Issue #133: mirror the MCP `memory_remember` path — keep originals so
     // the auto-KG extractor sees the same content / tags / room that landed
     // in the drawer. `remember` consumes them, so clone before the call.
     let content_for_kg = body.content.clone();
-    let tags_for_kg = body.tags.clone();
+    let tags_for_kg = tags_with_creator.clone();
     let room_label_for_kg = crate::tools::room_label(&room);
     let drawer_id = handle
-        .remember(body.content, room, body.tags, importance)
+        .remember(body.content, room, tags_with_creator, importance)
         .await
         .map_err(|e| ApiError::internal(format!("remember: {e:#}")))?;
     let drawer_count = handle.drawers.read().len();
@@ -3053,6 +3133,7 @@ struct SendMessageBody {
 /// Test: `messages_endpoint_round_trip`.
 async fn send_message_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<SendMessageBody>,
 ) -> Result<Json<Value>, ApiError> {
     let from_palace = body
@@ -3066,6 +3147,7 @@ async fn send_message_handler(
         &body.to_palace,
         &body.purpose,
         body.content,
+        creator_info_from_http(&headers),
     )
     .await
     .map_err(|e| ApiError::internal(format!("send_message: {e:#}")))?;
@@ -5323,5 +5405,329 @@ mod tests {
             .collect();
         assert!(event_types.contains("drawer_added"));
         assert!(event_types.contains("palace_created"));
+    }
+
+    // -----------------------------------------------------------------
+    // Submission-logging tests (Part A: hook activity, Part B: drawer
+    // attribution).
+    // -----------------------------------------------------------------
+
+    /// Why (submission-logging Part A): every hook firing must produce an
+    /// activity-feed entry tagged `source=hook` so a normal Claude Code
+    /// session that only triggers hooks no longer leaves the TUI feed
+    /// empty. The simplest direct check is to POST to the hook ingestion
+    /// endpoint and confirm the new entry shows up in `GET /api/v1/activity`.
+    /// What: posts a `HookEventPayload` to `/api/v1/activity/hook`, then
+    /// queries `/api/v1/activity?source=hook&limit=1` and asserts a row
+    /// exists with the matching event_type and source.
+    /// Test: itself.
+    #[tokio::test]
+    async fn hook_fired_activity_emit_smoke() {
+        let state = test_state();
+        let app = router().with_state(state.clone());
+
+        let payload = serde_json::json!({
+            "palace_id": "alpha",
+            "palace_name": "alpha",
+            "hook_type": "UserPromptSubmit",
+            "injection_kind": "prompt-context",
+            "injection_length": 256,
+            "trigger_prompt_excerpt": "test prompt",
+            "duration_ms": 12,
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/activity/hook")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // Read it back through the activity history endpoint.
+        let app = router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/activity?source=hook&limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let entries = v["entries"].as_array().expect("entries array");
+        assert!(
+            !entries.is_empty(),
+            "expected at least one hook activity row, got {entries:?}"
+        );
+        let first = &entries[0];
+        assert_eq!(first["source"], "hook");
+        assert_eq!(first["event_type"], "hook_fired");
+        assert_eq!(first["palace_id"], "alpha");
+        let body = &first["payload"];
+        assert_eq!(body["hook_type"], "UserPromptSubmit");
+        assert_eq!(body["injection_kind"], "prompt-context");
+    }
+
+    /// Why (submission-logging Part B): an HTTP drawer write with no
+    /// client-identifying header must still produce a drawer carrying a
+    /// `creator:client=unknown-http-client` tag so operators can recognise
+    /// "writer didn't self-identify" as distinct from "writer is known".
+    /// What: creates a palace via the registry, POSTs a drawer with no
+    /// `X-Trusty-Client-Name` header, lists the palace drawers, asserts
+    /// the new drawer carries the four creator tags with the default
+    /// client name and `source=http`.
+    /// Test: itself.
+    #[tokio::test]
+    async fn drawer_creator_attribution_http_default() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let state = AppState::new(root);
+        let palace = trusty_common::memory_core::Palace {
+            id: PalaceId::new("cred-default"),
+            name: "cred-default".to_string(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: state.data_root.join("cred-default"),
+        };
+        state
+            .registry
+            .create_palace(&state.data_root, palace)
+            .expect("create palace");
+
+        let app = router().with_state(state.clone());
+        let body = serde_json::json!({
+            "content": "hello world from anonymous client",
+            "tags": ["user-tag"],
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/palaces/cred-default/drawers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Inspect the persisted drawer's tags.
+        let app = router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/palaces/cred-default/drawers?limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let drawers = v.as_array().expect("drawers array");
+        assert_eq!(drawers.len(), 1, "expected one drawer, got {drawers:?}");
+        let tags: Vec<&str> = drawers[0]["tags"]
+            .as_array()
+            .expect("tags array")
+            .iter()
+            .filter_map(|t| t.as_str())
+            .collect();
+        assert!(
+            tags.contains(&"user-tag"),
+            "user-supplied tag must survive; got {tags:?}"
+        );
+        assert!(
+            tags.contains(&"creator:client=unknown-http-client"),
+            "expected default client tag; got {tags:?}"
+        );
+        assert!(
+            tags.contains(&"creator:source=http"),
+            "expected http source tag; got {tags:?}"
+        );
+        assert!(
+            tags.iter().any(|t| t.starts_with("creator:version=")),
+            "expected creator:version tag; got {tags:?}"
+        );
+    }
+
+    /// Why (submission-logging Part B): when an HTTP client *does* set
+    /// `X-Trusty-Client-Name`, the drawer must carry that exact name in
+    /// its `creator:client=` tag so operators can trace which client wrote
+    /// which drawer.
+    /// What: POST with `X-Trusty-Client-Name: qa-curl` and assert the
+    /// rendered tag matches.
+    /// Test: itself.
+    #[tokio::test]
+    async fn drawer_creator_attribution_http_header() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let state = AppState::new(root);
+        let palace = trusty_common::memory_core::Palace {
+            id: PalaceId::new("cred-header"),
+            name: "cred-header".to_string(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: state.data_root.join("cred-header"),
+        };
+        state
+            .registry
+            .create_palace(&state.data_root, palace)
+            .expect("create palace");
+
+        let app = router().with_state(state.clone());
+        let body = serde_json::json!({
+            "content": "this is enough content to pass the signal/noise filter applied by remember",
+            "tags": [],
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/palaces/cred-header/drawers")
+                    .header("content-type", "application/json")
+                    .header("x-trusty-client-name", "qa-curl")
+                    .header("x-trusty-client-cwd", "/tmp/qa")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let app = router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/palaces/cred-header/drawers?limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let tags: Vec<&str> = v[0]["tags"]
+            .as_array()
+            .expect("tags")
+            .iter()
+            .filter_map(|t| t.as_str())
+            .collect();
+        assert!(
+            tags.contains(&"creator:client=qa-curl"),
+            "expected custom client tag; got {tags:?}"
+        );
+        assert!(
+            tags.contains(&"creator:cwd=/tmp/qa"),
+            "expected cwd tag from header; got {tags:?}"
+        );
+    }
+
+    /// Why (submission-logging Part B): drawers written through the MCP
+    /// tool surface (`memory_remember`) must carry
+    /// `creator:client=trusty-memory-mcp` and `creator:source=mcp` so
+    /// operators can tell MCP-origin drawers apart from HTTP / CLI writes.
+    /// What: dispatches `memory_remember` directly against an in-process
+    /// `AppState` (no HTTP), then lists the palace drawers and asserts
+    /// the MCP attribution tags landed.
+    /// Test: itself.
+    #[tokio::test]
+    async fn drawer_creator_attribution_mcp_default() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let state = AppState::new(root);
+        let palace = trusty_common::memory_core::Palace {
+            id: PalaceId::new("cred-mcp"),
+            name: "cred-mcp".to_string(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: state.data_root.join("cred-mcp"),
+        };
+        state
+            .registry
+            .create_palace(&state.data_root, palace)
+            .expect("create palace");
+
+        let _ = crate::tools::dispatch_tool(
+            &state,
+            "memory_remember",
+            json!({
+                "palace": "cred-mcp",
+                "text": "remember a sentence with enough tokens to pass filters please",
+                "room": "General",
+                "tags": ["from-test"],
+            }),
+        )
+        .await
+        .expect("memory_remember dispatch");
+
+        let app = router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/palaces/cred-mcp/drawers?limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let drawers = v.as_array().expect("drawers array");
+        assert!(!drawers.is_empty(), "expected at least one drawer");
+        let tags: Vec<&str> = drawers[0]["tags"]
+            .as_array()
+            .expect("tags array")
+            .iter()
+            .filter_map(|t| t.as_str())
+            .collect();
+        assert!(
+            tags.contains(&"creator:client=trusty-memory-mcp"),
+            "expected MCP client tag; got {tags:?}"
+        );
+        assert!(
+            tags.contains(&"creator:source=mcp"),
+            "expected MCP source tag; got {tags:?}"
+        );
+    }
+
+    /// Why (submission-logging Part A, failure isolation): if the daemon
+    /// is unreachable when the hook fires, the hook command MUST still
+    /// return `Ok(())` so the user's prompt is not blocked. The activity
+    /// emit failure is surfaced via a stderr warn-log only.
+    /// What: pins a tempdir as the data dir (so `read_daemon_addr`
+    /// returns `Ok(None)` — no http_addr file), runs `handle_prompt_context`,
+    /// and asserts it returns `Ok(())`. Separately verifies the emit
+    /// helper does not panic — covered by `post_hook_event_no_daemon_is_noop`
+    /// in `hook_emit::tests`.
+    /// Test: itself.
+    #[tokio::test]
+    async fn hook_emit_failure_isolated() {
+        let _guard = crate::commands::env_test_lock().lock().await;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // SAFETY: test serialised via env_test_lock.
+        unsafe {
+            std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, tmp.path());
+        }
+        let res = crate::commands::prompt_context::handle_prompt_context().await;
+        unsafe {
+            std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV);
+        }
+        assert!(
+            res.is_ok(),
+            "hook must complete even when daemon emit fails; got {res:?}"
+        );
     }
 }

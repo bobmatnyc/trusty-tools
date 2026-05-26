@@ -42,7 +42,9 @@ use anyhow::Result;
 use serde_json::Value;
 use std::time::{Duration, Instant};
 
+use crate::hook_emit::{post_hook_event, HookEventPayload};
 use crate::prompt_log::{PromptLogEntry, PromptLogger};
+use crate::{hook_prompt_excerpt, HookType, InjectionKind};
 
 /// HTTP path for the global hot-facts block.
 const PROMPT_CONTEXT_PATH: &str = "/api/v1/kg/prompt-context";
@@ -164,6 +166,7 @@ const EMPTY_PLACEHOLDER: &str = "No prompt facts stored yet.";
 /// `prompt_context_recalls_palace_drawers` and
 /// `prompt_context_empty_palace_falls_back_to_global`.
 pub async fn handle_prompt_context() -> Result<()> {
+    let start = Instant::now();
     let trigger_payload = read_stdin_best_effort();
     let body = build_injection_body(&trigger_payload).await;
     if body.ends_with('\n') {
@@ -171,7 +174,38 @@ pub async fn handle_prompt_context() -> Result<()> {
     } else {
         println!("{body}");
     }
+
+    // Submission-logging Part A: emit a `HookFired` activity event so the
+    // dashboard / TUI feed shows this prompt-context invocation. Best-effort
+    // — failures are swallowed inside `post_hook_event` so the hook never
+    // fails because of activity-emit problems.
+    emit_hook_event(&trigger_payload, &body, start).await;
+
     Ok(())
+}
+
+/// POST a `HookFired` event to the daemon's activity ingestion endpoint.
+///
+/// Why: surfaces every prompt-context hook firing in the activity feed
+/// (issue: TUI activity feed was empty in sessions whose only daemon
+/// traffic was hooks).
+/// What: builds a `HookEventPayload` carrying the resolved palace, the
+/// rendered injection length, a short excerpt of the user prompt, and
+/// the hook's elapsed wall-clock duration, then calls `post_hook_event`.
+/// Test: `hook_fired_activity_emit_smoke` in this module.
+async fn emit_hook_event(trigger_payload: &str, injection: &str, start: Instant) {
+    let user_prompt = parse_user_prompt(trigger_payload);
+    let palace_id = resolve_palace_slug(trigger_payload);
+    let payload = HookEventPayload {
+        palace_id: palace_id.clone(),
+        palace_name: palace_id,
+        hook_type: HookType::UserPromptSubmit,
+        injection_kind: InjectionKind::PromptContext,
+        injection_length: injection.len() as u64,
+        trigger_prompt_excerpt: hook_prompt_excerpt(&user_prompt),
+        duration_ms: start.elapsed().as_millis() as u64,
+    };
+    post_hook_event(payload).await;
 }
 
 /// Build the prompt-context injection body for a given stdin payload.

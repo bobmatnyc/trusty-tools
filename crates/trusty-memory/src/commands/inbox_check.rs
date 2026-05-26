@@ -32,7 +32,9 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::time::{Duration, Instant};
 
+use crate::hook_emit::{post_hook_event, HookEventPayload};
 use crate::prompt_log::{PromptLogEntry, PromptLogger};
+use crate::{hook_prompt_excerpt, HookType, InjectionKind};
 
 /// Connect + total request timeout. Kept short so a slow/dead daemon can
 /// never block a Claude Code session for more than a few seconds.
@@ -102,12 +104,33 @@ pub async fn handle_inbox_check(palace: Option<String>) -> Result<()> {
         .or_else(|| crate::messaging::cwd_palace_slug().ok())
         .unwrap_or_else(|| "<unknown>".to_string());
 
+    let injection = run_inbox_fetch(&trigger_prompt, &recipient, start).await;
+
+    // Submission-logging Part A: emit a `HookFired` activity event so the
+    // dashboard / TUI feed sees this SessionStart invocation. Best-effort.
+    emit_hook_event(&trigger_prompt, &injection, &recipient, start).await;
+
+    Ok(())
+}
+
+/// Internal helper that performs the actual inbox fetch + print + log
+/// pipeline.
+///
+/// Why: split out of `handle_inbox_check` so the wrapper can emit the
+/// activity event for *every* exit path (no daemon, empty inbox, real
+/// messages) without duplicating the emit call at every return.
+/// What: same logic as the prior monolithic handler — but returns the
+/// rendered injection (empty string when nothing was emitted) so the
+/// caller can include the size in the activity event payload.
+/// Test: `inbox_check_returns_ok_without_daemon`,
+/// `inbox_check_logs_attempt_without_daemon` (unchanged paths).
+async fn run_inbox_fetch(trigger_prompt: &str, recipient: &str, start: Instant) -> String {
     // Resolve daemon address — missing = exit silently (but still log).
     let addr = match trusty_common::read_daemon_addr("trusty-memory") {
         Ok(Some(addr)) => addr,
         _ => {
-            log_entry(&trigger_prompt, "", 0, &recipient, start);
-            return Ok(());
+            log_entry(trigger_prompt, "", 0, recipient, start);
+            return String::new();
         }
     };
     let base = if addr.starts_with("http://") || addr.starts_with("https://") {
@@ -123,8 +146,8 @@ pub async fn handle_inbox_check(palace: Option<String>) -> Result<()> {
     {
         Ok(c) => c,
         Err(_) => {
-            log_entry(&trigger_prompt, "", 0, &recipient, start);
-            return Ok(());
+            log_entry(trigger_prompt, "", 0, recipient, start);
+            return String::new();
         }
     };
 
@@ -133,24 +156,24 @@ pub async fn handle_inbox_check(palace: Option<String>) -> Result<()> {
     let resp = match client.get(&list_url).send().await {
         Ok(r) => r,
         Err(_) => {
-            log_entry(&trigger_prompt, "", 0, &recipient, start);
-            return Ok(());
+            log_entry(trigger_prompt, "", 0, recipient, start);
+            return String::new();
         }
     };
     if !resp.status().is_success() {
-        log_entry(&trigger_prompt, "", 0, &recipient, start);
-        return Ok(());
+        log_entry(trigger_prompt, "", 0, recipient, start);
+        return String::new();
     }
     let messages: Vec<ServerMessage> = match resp.json().await {
         Ok(v) => v,
         Err(_) => {
-            log_entry(&trigger_prompt, "", 0, &recipient, start);
-            return Ok(());
+            log_entry(trigger_prompt, "", 0, recipient, start);
+            return String::new();
         }
     };
     if messages.is_empty() {
-        log_entry(&trigger_prompt, "", 0, &recipient, start);
-        return Ok(());
+        log_entry(trigger_prompt, "", 0, recipient, start);
+        return String::new();
     }
 
     // Render. We buffer the injection into a string so the same content the
@@ -182,14 +205,37 @@ pub async fn handle_inbox_check(palace: Option<String>) -> Result<()> {
         let _ = client.post(&mark_url).json(&body).send().await;
     }
 
-    log_entry(
-        &trigger_prompt,
-        &injection,
-        messages.len(),
-        &recipient,
-        start,
-    );
-    Ok(())
+    log_entry(trigger_prompt, &injection, messages.len(), recipient, start);
+    injection
+}
+
+/// Emit a `HookFired` activity event for the SessionStart hook firing.
+///
+/// Why: same rationale as `commands::prompt_context::emit_hook_event` —
+/// the activity feed needs to see every hook firing so a normal Claude
+/// Code session populates the feed instead of leaving it empty.
+/// What: builds a `HookEventPayload` carrying the recipient palace
+/// slug, the rendered injection length, a short excerpt of the stdin
+/// payload (typically just session metadata, but harmless), and the
+/// elapsed duration. Best-effort.
+/// Test: covered by the daemon-side test
+/// `hook_activity_endpoint_appends_to_activity_log`.
+async fn emit_hook_event(trigger_prompt: &str, injection: &str, recipient: &str, start: Instant) {
+    let palace_id = if recipient == "<unknown>" || recipient.is_empty() {
+        None
+    } else {
+        Some(recipient.to_string())
+    };
+    let payload = HookEventPayload {
+        palace_id: palace_id.clone(),
+        palace_name: palace_id,
+        hook_type: HookType::SessionStart,
+        injection_kind: InjectionKind::InboxCheck,
+        injection_length: injection.len() as u64,
+        trigger_prompt_excerpt: hook_prompt_excerpt(trigger_prompt),
+        duration_ms: start.elapsed().as_millis() as u64,
+    };
+    post_hook_event(payload).await;
 }
 
 /// Read the hook's stdin into a string, capped at 64 KiB.
