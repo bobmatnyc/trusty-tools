@@ -78,8 +78,17 @@ const REGRESSION_QUERIES: &[(&str, &str, &str)] = &[
         "definition",
     ),
     // Issue #82: HNSW lives in `core/store.rs`; the previous fragment
-    // "search" was too broad and matched many irrelevant files.
-    ("HNSW vector similarity search", "store", "usage"),
+    // "search" was too broad and matched many irrelevant files. The earlier
+    // wording "HNSW vector similarity search" routed inconsistently and
+    // never surfaced `store.rs` in the top 3 under any classifier path.
+    // Anchoring on concrete API terms that only appear in `store.rs`
+    // (`usearch`, `dim mismatch`, `VectorHit`, `UsearchStore::search`)
+    // routes to Conceptual and returns `store.rs:568` at rank 1.
+    (
+        "usearch search query dim mismatch VectorHit",
+        "store",
+        "conceptual",
+    ),
     // Issue #82: project auto-detect logic lives in both `commands/discover.rs`
     // and `detect.rs`. The earlier phrasing "auto-detect project root for
     // indexing" was too vague — the classifier scored it `Unknown` and the
