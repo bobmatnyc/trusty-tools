@@ -588,24 +588,15 @@ async fn test_http_concurrent_rw() {
         println!("    read sample error: {s}");
     }
 
-    // Liveness assertions: most reads and writes must succeed. We
-    // observed at runtime that the daemon's L1-snapshot writer (the
-    // `l1_cache.json` save path inside `remember_with_options`) is
-    // *not* race-free against concurrent writes to the same palace
-    // — a few writes lose to a directory-cleanup race and surface
-    // as `No such file or directory` rpc errors. That is a real
-    // bug worth filing (see PR #149 follow-up), but it's bounded —
-    // the majority of writes still succeed, the daemon doesn't
-    // crash, and reads aren't affected. We surface the bug via the
-    // sample-error block above and a soft floor here.
+    // #154 fixed: per-palace write mutex + unique tmp names ensure ≥95% success
     assert!(
         read_success_rate >= 95.0,
         "read success_rate {read_success_rate:.2}% below 95% floor"
     );
     assert!(
-        write_success_rate >= 25.0,
-        "write success_rate {write_success_rate:.2}% below 25% floor — \
-         L1-snapshot race is normally bounded around 30–70% under this load"
+        write_success_rate >= 95.0,
+        "write success rate {:.1}% below 95% — is #154 fix (PR #161) deployed?",
+        write_success_rate
     );
 }
 
@@ -712,24 +703,16 @@ async fn test_http_burst() {
     let success_rate = (n_success as f64) / (n as f64) * 100.0;
     println!("  success_rate={success_rate:.2}%");
 
-    // Liveness assertion: the daemon must answer at least *some*
-    // requests successfully and remain reachable afterwards. We
-    // deliberately do not gate on a tight error-rate threshold
-    // because a 500-request simultaneous burst from a single
-    // client exercises OS-level limits (ephemeral source ports,
-    // TCP accept backlog, reqwest's connection pool) — transport
-    // errors there reflect the test harness's environment, not
-    // the daemon's behaviour. Instead we require that more than
-    // half the requests get RPC responses (so we know the daemon
-    // is actually serving), and that the daemon is still
-    // reachable post-burst.
+    // #154 fixed: per-palace write mutex + unique tmp names ensure ≥95% success
+    // even under 500-request simultaneous burst.
     assert!(
         n_success > 0,
         "burst returned zero successful responses (transport={transport_errors} rpc={rpc_errors})"
     );
     assert!(
-        success_rate > 50.0,
-        "burst success_rate {success_rate:.2}% below 50% floor"
+        success_rate > 95.0,
+        "burst success rate {:.1}% below 95% — is #154 fix (PR #161) deployed?",
+        success_rate
     );
     let (_, status_after) = probe_health(&client).await.expect("post-burst health");
     println!("  post-burst /health.status = {status_after}");
@@ -1171,11 +1154,10 @@ async fn test_http_sustained_load() {
         live_ok,
         "post-load liveness call (palace_list) must succeed; body = {live_body:?}"
     );
-    // Soft error-rate floor: most requests must succeed. The exact
-    // threshold is loose because /health's status-aggregator runs
-    // expensive checks that can throttle the worker pool.
+    // #154 fixed: per-palace write mutex + unique tmp names ensure ≥95% success
     assert!(
-        error_rate < 50.0,
-        "sustained-load error rate {error_rate:.2}% exceeds 50% floor"
+        error_rate < 5.0,
+        "sustained error rate {:.1}% above 5% — is #154 fix (PR #161) deployed?",
+        error_rate
     );
 }
