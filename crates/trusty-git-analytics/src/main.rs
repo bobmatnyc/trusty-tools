@@ -387,7 +387,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Override(args) => commands::override_cmd::run(config, &mut db, args)?,
         Commands::Rules(args) => commands::rules::run(config, &db, args)?,
         Commands::Deployments(args) => match args.subcommand {
-            DeploymentsSubcommand::Collect(a) => commands::deployments::run(config, &mut db, a)?,
+            DeploymentsSubcommand::Collect(a) => {
+                commands::deployments::run(config, &mut db, a).await?
+            }
         },
         Commands::Incidents(args) => match args.subcommand {
             IncidentsSubcommand::Collect(a) => commands::incidents::run(config, &mut db, a)?,
