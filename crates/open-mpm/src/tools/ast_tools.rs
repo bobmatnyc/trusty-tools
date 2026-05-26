@@ -5,10 +5,10 @@
 //! diffs, syntax errors, and patch IDs without parsing free-form text.
 //! What: Six tools — `get_symbol`, `edit_symbol`, `insert_symbol`,
 //! `add_import`, `validate_syntax`, `apply_patch` — each implementing
-//! `ToolExecutor`. Pending edits land in a process-global `PatchStore` keyed
-//! by uuid; `apply_patch` is the only tool that mutates disk. Public helper
-//! `ast_native_tools()` returns the canonical Vec used to register the
-//! whole bundle on an agent registry.
+//! `ToolExecutor`. Pending edits land in a `PatchStore` keyed by uuid that
+//! is owned by the tool bundle (no process-global state); `apply_patch` is
+//! the only tool that mutates disk. Public helper `ast_native_tools()`
+//! constructs a fresh store and returns the six tools sharing it.
 //! Test: Each tool has a happy-path unit test below; the in-memory
 //! `PatchStore` is exercised end-to-end by `edit_then_apply_round_trips`.
 
@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use once_cell::sync::Lazy;
 use serde_json::{Value, json};
 
 use crate::ast::editor::{
@@ -28,31 +27,46 @@ use crate::ast::kg::SymbolGraph;
 use crate::ast::symbol::{detect_language, list_symbols};
 use crate::tools::traits::{ToolExecutor, ToolResult};
 
-/// Process-wide store of pending patches.
+/// Shared store of pending patches owned by a tool bundle.
 ///
 /// Why: AST tools split "produce a diff" (tool call N) from "apply the diff"
 /// (tool call N+1) so the LLM can review the change before committing. The
 /// orchestrator routes both calls into the same address space, so an
-/// in-process map keyed by uuid is sufficient.
-/// What: `Arc<Mutex<HashMap<String, Patch>>>` lazily initialised on first
-/// use. Concurrent tool calls serialise on the mutex.
+/// in-process map keyed by uuid is sufficient. Threading the store through
+/// the tool instances (rather than a process-global `Lazy`) gives each test
+/// and each tool bundle a fresh, isolated address space — eliminating the
+/// inter-test contamination that the global static caused.
+/// What: `Arc<Mutex<HashMap<String, Patch>>>` constructed once by
+/// `ast_native_tools()` (or directly by tests) and cloned into every tool
+/// that participates in the produce-then-apply protocol.
 /// Test: `edit_then_apply_round_trips`.
-static PATCH_STORE: Lazy<Arc<Mutex<HashMap<String, Patch>>>> =
-    Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+pub type PatchStore = Arc<Mutex<HashMap<String, Patch>>>;
 
-fn store_patch(p: Patch) -> String {
+/// Construct an empty `PatchStore` ready to be cloned into tool instances.
+///
+/// Why: Single canonical constructor so call sites (production
+/// `ast_native_tools` and per-test bundles) never differ in how the inner
+/// mutex / hashmap is initialised.
+/// What: Returns `Arc::new(Mutex::new(HashMap::new()))`.
+/// Test: Implicit in every test that builds a tool with `new_patch_store()`.
+pub fn new_patch_store() -> PatchStore {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+fn store_patch(store: &PatchStore, p: Patch) -> String {
     let id = p.id.clone();
-    PATCH_STORE.lock().unwrap().insert(id.clone(), p);
+    // Why: poisoned mutexes here would mean a panic-during-edit corrupted the
+    // store — recoverable by treating the poisoned lock as still-usable for a
+    // fresh insert. We deliberately `unwrap_or_else(PoisonError::into_inner)`
+    // to keep the tool surface infallible.
+    let mut guard = store.lock().unwrap_or_else(|e| e.into_inner());
+    guard.insert(id.clone(), p);
     id
 }
 
-fn take_patch(id: &str) -> Option<Patch> {
-    PATCH_STORE.lock().unwrap().remove(id)
-}
-
-#[cfg(test)]
-fn clear_store() {
-    PATCH_STORE.lock().unwrap().clear();
+fn take_patch(store: &PatchStore, id: &str) -> Option<Patch> {
+    let mut guard = store.lock().unwrap_or_else(|e| e.into_inner());
+    guard.remove(id)
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -188,7 +202,29 @@ impl ToolExecutor for GetSymbolTool {
 // ──────────────────────────────────────────────────────────────────────────
 
 /// `edit_symbol` — splice replacement source into a named symbol's range.
-pub struct EditSymbolTool;
+///
+/// Why: Pending patches need to land in a store that `apply_patch` can later
+/// drain, but the store must not be process-global (see `PatchStore` docs).
+/// Holding an `Arc<PatchStore>` lets every tool in a bundle share one store
+/// while different bundles (tests, separate agent runs) stay isolated.
+/// What: Carries a clone of the bundle's `PatchStore` and writes pending
+/// patches into it on each `execute()` call.
+/// Test: `edit_then_apply_round_trips`.
+pub struct EditSymbolTool {
+    patch_store: PatchStore,
+}
+
+impl EditSymbolTool {
+    /// Build with an explicit `PatchStore` clone.
+    ///
+    /// Why: Lets bundle constructors (`ast_native_tools`) and tests inject the
+    /// shared store explicitly rather than reaching for a global.
+    /// What: Stores the clone; `execute()` writes pending patches into it.
+    /// Test: Used by every test that constructs `EditSymbolTool`.
+    pub fn new(patch_store: PatchStore) -> Self {
+        Self { patch_store }
+    }
+}
 
 #[async_trait]
 impl ToolExecutor for EditSymbolTool {
@@ -233,7 +269,7 @@ impl ToolExecutor for EditSymbolTool {
             Ok(p) => {
                 let id = p.id.clone();
                 let diff = p.diff.clone();
-                store_patch(p);
+                store_patch(&self.patch_store, p);
                 ToolResult::ok(
                     json!({
                         "patch_id": id,
@@ -253,7 +289,26 @@ impl ToolExecutor for EditSymbolTool {
 // ──────────────────────────────────────────────────────────────────────────
 
 /// `insert_symbol` — insert a new symbol after an anchor symbol.
-pub struct InsertSymbolTool;
+///
+/// Why: Like `EditSymbolTool`, must stage a pending patch into the bundle's
+/// shared `PatchStore` without touching a process-global static.
+/// What: Carries a clone of the bundle's `PatchStore`.
+/// Test: `edit_then_apply_round_trips` and the insert path is exercised by
+/// integration tests in `ast::editor`.
+pub struct InsertSymbolTool {
+    patch_store: PatchStore,
+}
+
+impl InsertSymbolTool {
+    /// Build with an explicit `PatchStore` clone.
+    ///
+    /// Why: Mirror of `EditSymbolTool::new` — explicit injection, no globals.
+    /// What: Stores the clone.
+    /// Test: Used by `ast_native_tools` and tests that build the tool directly.
+    pub fn new(patch_store: PatchStore) -> Self {
+        Self { patch_store }
+    }
+}
 
 #[async_trait]
 impl ToolExecutor for InsertSymbolTool {
@@ -298,7 +353,7 @@ impl ToolExecutor for InsertSymbolTool {
             Ok(p) => {
                 let id = p.id.clone();
                 let diff = p.diff.clone();
-                store_patch(p);
+                store_patch(&self.patch_store, p);
                 ToolResult::ok(
                     json!({
                         "patch_id": id,
@@ -453,7 +508,28 @@ impl ToolExecutor for ValidateSyntaxTool {
 // ──────────────────────────────────────────────────────────────────────────
 
 /// `apply_patch` — commit a pending patch to disk.
-pub struct ApplyPatchTool;
+///
+/// Why: Reads from the bundle's shared `PatchStore` to find a patch produced
+/// by an earlier `edit_symbol` / `insert_symbol` call. Must use the *same*
+/// store the producer wrote to, hence the injected `Arc`.
+/// What: Carries a clone of the bundle's `PatchStore`.
+/// Test: `edit_then_apply_round_trips`.
+pub struct ApplyPatchTool {
+    patch_store: PatchStore,
+}
+
+impl ApplyPatchTool {
+    /// Build with an explicit `PatchStore` clone.
+    ///
+    /// Why: Producers and `apply_patch` must reference the same store.
+    /// `ast_native_tools` and any test that exercises the produce-then-apply
+    /// flow constructs the store once and passes the clone here.
+    /// What: Stores the clone.
+    /// Test: `edit_then_apply_round_trips`.
+    pub fn new(patch_store: PatchStore) -> Self {
+        Self { patch_store }
+    }
+}
 
 #[async_trait]
 impl ToolExecutor for ApplyPatchTool {
@@ -481,7 +557,7 @@ impl ToolExecutor for ApplyPatchTool {
         let Some(id) = args.get("patch_id").and_then(Value::as_str) else {
             return ToolResult::err("apply_patch: missing 'patch_id'");
         };
-        let Some(patch) = take_patch(id) else {
+        let Some(patch) = take_patch(&self.patch_store, id) else {
             return ToolResult::err(format!("apply_patch: no pending patch with id '{id}'"));
         };
         let lines_changed = patch
@@ -515,17 +591,23 @@ impl ToolExecutor for ApplyPatchTool {
 /// Build the canonical 6-tool AST-native bundle.
 ///
 /// Why: Single registration call keeps `[tools] ast_native = true` ergonomic
-/// for callers (in-process runner, CTRL, future agents).
-/// What: Returns a `Vec<Arc<dyn ToolExecutor>>` with the six tools above.
-/// Test: `ast_native_tools_returns_six` — names match and length is 6.
+/// for callers (in-process runner, CTRL, future agents). Each call now
+/// allocates a fresh `PatchStore`, so different bundles (e.g. concurrent
+/// agent runs or per-test bundles) cannot leak pending patches across one
+/// another the way the former process-global static did.
+/// What: Constructs one `PatchStore`, clones it into every producer / consumer
+/// tool, and returns the six tools as `Vec<Arc<dyn ToolExecutor>>`.
+/// Test: `ast_native_tools_returns_six` — names match and length is 6;
+/// `edit_then_apply_round_trips` exercises a bundle end-to-end.
 pub fn ast_native_tools() -> Vec<Arc<dyn ToolExecutor>> {
+    let patch_store = new_patch_store();
     vec![
         Arc::new(GetSymbolTool),
-        Arc::new(EditSymbolTool),
-        Arc::new(InsertSymbolTool),
+        Arc::new(EditSymbolTool::new(patch_store.clone())),
+        Arc::new(InsertSymbolTool::new(patch_store.clone())),
         Arc::new(AddImportTool),
         Arc::new(ValidateSyntaxTool),
-        Arc::new(ApplyPatchTool),
+        Arc::new(ApplyPatchTool::new(patch_store)),
     ]
 }
 
@@ -587,10 +669,12 @@ mod tests {
 
     #[tokio::test]
     async fn edit_then_apply_round_trips() {
-        clear_store();
+        // Why: Producer and consumer tools must share one store. Each test
+        // now owns its own store (no global `clear_store()` needed).
+        let store = new_patch_store();
         let dir = tempdir().unwrap();
         let p = write_tmp(dir.path(), "x.rs", "fn foo() -> i32 { 1 }\n");
-        let edit = EditSymbolTool;
+        let edit = EditSymbolTool::new(store.clone());
         let r = edit
             .execute(json!({
                 "file": p.to_string_lossy(),
@@ -607,7 +691,7 @@ mod tests {
         let on_disk = std::fs::read_to_string(&p).unwrap();
         assert!(on_disk.contains(" 1 "));
 
-        let apply = ApplyPatchTool;
+        let apply = ApplyPatchTool::new(store);
         let r2 = apply.execute(json!({"patch_id": id})).await;
         assert!(!r2.is_error(), "{}", r2.content());
 
@@ -615,6 +699,44 @@ mod tests {
         assert!(
             after.contains("99"),
             "file should contain new body: {after}"
+        );
+    }
+
+    #[tokio::test]
+    async fn separate_bundles_have_isolated_patch_stores() {
+        // Why: Regression guard for #252 — two bundles built via
+        // `ast_native_tools()` must NOT share a patch store, so a pending
+        // patch produced in bundle A cannot be applied by bundle B. This
+        // would have been impossible to assert against the old global static.
+        // What: Stage an edit in bundle A, then try to apply its patch_id via
+        // bundle B's apply_patch tool and expect a "no pending patch" error.
+        // Test: this test.
+        let dir = tempdir().unwrap();
+        let p = write_tmp(dir.path(), "x.rs", "fn foo() -> i32 { 1 }\n");
+        let bundle_a = ast_native_tools();
+        let bundle_b = ast_native_tools();
+
+        // Names from the schema: index 1 = edit_symbol, index 5 = apply_patch.
+        let edit_a = &bundle_a[1];
+        assert_eq!(edit_a.name(), "edit_symbol");
+        let apply_b = &bundle_b[5];
+        assert_eq!(apply_b.name(), "apply_patch");
+
+        let r = edit_a
+            .execute(json!({
+                "file": p.to_string_lossy(),
+                "name": "foo",
+                "new_source": "fn foo() -> i32 { 99 }"
+            }))
+            .await;
+        assert!(!r.is_error(), "{}", r.content());
+        let v: Value = serde_json::from_str(r.content()).unwrap();
+        let id = v["patch_id"].as_str().unwrap().to_string();
+
+        let r2 = apply_b.execute(json!({"patch_id": id})).await;
+        assert!(
+            r2.is_error(),
+            "bundle B must not see bundle A's pending patch"
         );
     }
 
