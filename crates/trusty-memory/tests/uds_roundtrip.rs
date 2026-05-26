@@ -8,6 +8,13 @@
 //! `trusty-memory-mcp-bridge` binary's source contains no redb
 //! references.
 //!
+//! Issue #226: the whole file depends on `trusty_memory::run_http_on`
+//! which is gated behind the `axum-server` feature, so the entire
+//! integration-test compilation unit is gated to match. Library
+//! builds with `--no-default-features` skip this file entirely.
+
+#![cfg(feature = "axum-server")]
+//!
 //! What:
 //!   - `http_rpc_endpoint_roundtrip`: POSTs a JSON-RPC envelope to the
 //!     daemon's `/rpc` route and asserts a valid JSON-RPC response.

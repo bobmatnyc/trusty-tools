@@ -24,7 +24,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::{broadcast, OnceCell, RwLock};
-use tracing::info;
 use trusty_common::bm25_client::Bm25Client;
 use trusty_common::mcp::initialize_response;
 use trusty_common::memory_core::embed::FastEmbedder;
@@ -32,10 +31,23 @@ use trusty_common::memory_core::store::ChatSessionStore;
 use trusty_common::memory_core::PalaceRegistry;
 use trusty_common::ChatProvider;
 
+// Why: `tracing::info` is only used by the axum HTTP-serving helpers
+//      (`run_http_on`, `spawn_uds_listener`). Pulling it in unconditionally
+//      would trigger `unused_imports` warnings when the `axum-server`
+//      feature is disabled. `SocketAddr` is still used by `bound_addr` on
+//      `AppState` so it stays unconditional.
+#[cfg(feature = "axum-server")]
+use tracing::info;
+
 pub mod activity;
 pub mod attribution;
 pub mod bm25_supervisor;
 pub mod bootstrap;
+// Why (issue #226): `chat` and `web` are pure axum HTTP/SSE handler
+//      surfaces. Gating them behind the `axum-server` feature is what lets
+//      library consumers (e.g. `open-mpm` linking only `MemoryMcpService`)
+//      drop axum + tower-http entirely from their build graph.
+#[cfg(feature = "axum-server")]
 pub mod chat;
 pub mod commands;
 pub mod discovery;
@@ -49,6 +61,7 @@ pub mod prompt_log;
 pub mod service;
 pub mod tools;
 pub mod transport;
+#[cfg(feature = "axum-server")]
 pub mod web;
 
 pub use activity::{ActivityEntry, ActivityFilter, ActivityLog, ActivitySource};
@@ -915,7 +928,12 @@ impl AppState {
     pub async fn chat_provider(&self) -> Option<Arc<dyn ChatProvider>> {
         self.chat_provider
             .get_or_init(|| async {
-                let cfg = crate::web::load_user_config().unwrap_or_default();
+                // Why (issue #226): `service::load_user_config` is the
+                //      axum-free home of the loader; the `web::load_user_config`
+                //      re-export only exists for the HTTP handlers. Going
+                //      direct to `service` keeps this method usable when
+                //      the `axum-server` feature is disabled.
+                let cfg = crate::service::load_user_config().unwrap_or_default();
                 if cfg.local_model.enabled {
                     if let Some(mut p) =
                         trusty_common::auto_detect_local_provider(&cfg.local_model.base_url).await
@@ -1170,6 +1188,7 @@ pub async fn bind_dynamic_port() -> Result<tokio::net::TcpListener> {
 /// `cat`); renames `.tmp` → `http_addr`. Best-effort: I/O errors are
 /// returned to the caller so `run_http_on` can log without panicking.
 /// Test: `http_addr_file_round_trip_via_helpers`.
+#[cfg(feature = "axum-server")]
 fn write_http_addr_file(path: &Path, addr: &SocketAddr) -> std::io::Result<()> {
     use std::io::Write;
     if let Some(parent) = path.parent() {
@@ -1199,6 +1218,7 @@ fn write_http_addr_file(path: &Path, addr: &SocketAddr) -> std::io::Result<()> {
 /// port is worse than a missing one).
 /// Test: `cargo test -p trusty-memory web::tests` exercises the router shape;
 /// manual: `curl http://127.0.0.1:<port>/health` returns `ok` with `addr`.
+#[cfg(feature = "axum-server")]
 pub async fn run_http_on(state: AppState, listener: tokio::net::TcpListener) -> Result<()> {
     use axum::routing::get;
 
@@ -1293,6 +1313,7 @@ pub async fn run_http_on(state: AppState, listener: tokio::net::TcpListener) -> 
 /// bound path so the caller can clean it up on shutdown.
 /// Test: covered by `uds_ndjson_roundtrip` in the integration tests
 /// and the unit tests in [`transport::uds`].
+#[cfg(feature = "axum-server")]
 async fn spawn_uds_listener(state: AppState) -> Option<PathBuf> {
     // Use a data-root-scoped socket path so multiple daemons (typical
     // in tests) don't collide on the shared `$TMPDIR/trusty-memory.sock`.
@@ -1332,6 +1353,7 @@ async fn spawn_uds_listener(state: AppState) -> Option<PathBuf> {
 }
 
 /// Convenience: bind `addr` and serve via [`run_http_on`].
+#[cfg(feature = "axum-server")]
 pub async fn run_http(state: AppState, addr: std::net::SocketAddr) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     run_http_on(state, listener).await
@@ -1345,6 +1367,7 @@ pub async fn run_http(state: AppState, addr: std::net::SocketAddr) -> Result<()>
 /// the launchd-managed instance.
 /// What: calls [`bind_dynamic_port`] then [`run_http_on`].
 /// Test: integration via `trusty-memory serve` + `cat ~/.trusty-memory/http_addr`.
+#[cfg(feature = "axum-server")]
 pub async fn run_http_dynamic(state: AppState) -> Result<()> {
     let listener = bind_dynamic_port().await?;
     run_http_on(state, listener).await
@@ -1365,6 +1388,7 @@ pub async fn run_http_dynamic(state: AppState) -> Result<()> {
 /// stalls the async runtime, then stores the byte total atomically.
 /// Test: `health_endpoint_includes_resource_fields` asserts the field shape;
 /// the ticker cadence is not unit-tested (timing-dependent).
+#[cfg(feature = "axum-server")]
 fn spawn_disk_size_ticker(state: AppState) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
@@ -1396,6 +1420,7 @@ fn spawn_disk_size_ticker(state: AppState) {
 /// closure ends the stream.
 /// Test: `web::tests::sse_stream_emits_palace_created` (covers subscribe +
 /// emit + receive); manual: `curl -N http://.../sse`.
+#[cfg(feature = "axum-server")]
 pub(crate) async fn sse_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> impl axum::response::IntoResponse {
@@ -1902,6 +1927,9 @@ mod tests {
     /// `host:port\n`. Clients (cat, sh `$(cat ...)`) trim whitespace, so the
     /// trailing newline is invisible — but anything else (extra whitespace,
     /// multi-line) would break callers.
+    /// Note (issue #226): `write_http_addr_file` is part of the HTTP-serving
+    /// surface gated behind `axum-server`; the test follows the same gate.
+    #[cfg(feature = "axum-server")]
     #[test]
     fn http_addr_file_round_trip_via_helpers() {
         let dir = tempfile::tempdir().unwrap();

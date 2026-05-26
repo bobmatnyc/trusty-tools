@@ -963,7 +963,7 @@ async fn update_palace_handler(
 // Drawers
 // ---------------------------------------------------------------------------
 
-pub(crate) use crate::service::{drawer_content_preview, CreateDrawerBody, ListDrawersQuery};
+pub(crate) use crate::service::{CreateDrawerBody, ListDrawersQuery};
 
 async fn list_drawers(
     State(state): State<AppState>,
@@ -1000,10 +1000,11 @@ async fn delete_drawer(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Backwards-compat re-export — the implementation now lives in `service`.
-pub(crate) fn aggregate_status_event(state: &AppState) -> DaemonEvent {
-    crate::service::MemoryService::new(state.clone()).aggregate_status_event()
-}
+// Why: this shim previously bridged `tools.rs` callers into the service
+//      implementation, but issue #226 moved those callers to use
+//      `crate::service::MemoryService::new(...).aggregate_status_event()`
+//      directly so the call site does not require the `axum-server`
+//      feature. Removing the shim eliminates a dead-code warning.
 
 // ---------------------------------------------------------------------------
 // Recall
@@ -1644,6 +1645,10 @@ impl From<crate::service::ServiceError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Why (issue #226): `drawer_content_preview` is now used via the
+    //      axum-free `service` path; the test still validates the same
+    //      helper, so we import directly to keep the assertions intact.
+    use crate::service::drawer_content_preview;
     use crate::service::DRAWER_PREVIEW_MAX_CHARS;
     use axum::body::to_bytes;
     use axum::http::Request;

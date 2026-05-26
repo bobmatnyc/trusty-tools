@@ -848,6 +848,10 @@ impl RawTriple {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Why (issue #226): `serde_json::json!` is only used by the daemon-based
+    //      tests, which are themselves gated behind `axum-server`. Mirror the
+    //      gate here so `--no-default-features` builds stay warning-free.
+    #[cfg(feature = "axum-server")]
     use serde_json::json;
 
     /// Why (issue #134): the recall query needs the actual prompt text the
@@ -1098,6 +1102,9 @@ mod tests {
     /// contains the rust drawer's content and the relevant-memories
     /// section header.
     /// Test: itself.
+    /// Note (issue #226): gated on `axum-server` because it spins up the
+    /// real HTTP daemon via `run_http_on`.
+    #[cfg(feature = "axum-server")]
     #[tokio::test]
     async fn prompt_context_recalls_palace_drawers() {
         let _guard = crate::commands::env_test_lock().lock().await;
@@ -1185,6 +1192,8 @@ mod tests {
     /// What: spin up the same daemon shape but skip the drawer-population
     /// step; assert the body equals [`EMPTY_PLACEHOLDER`].
     /// Test: itself.
+    /// Note (issue #226): gated on `axum-server`; spawns the HTTP daemon.
+    #[cfg(feature = "axum-server")]
     #[tokio::test]
     async fn prompt_context_empty_palace_falls_back_to_global() {
         let _guard = crate::commands::env_test_lock().lock().await;
@@ -1222,6 +1231,9 @@ mod tests {
     /// project_dir_tmp, project_dir_path, palace_slug, addr_handle)`.
     /// Test: indirectly via `prompt_context_recalls_palace_drawers` and
     /// `prompt_context_empty_palace_falls_back_to_global`.
+    /// Note (issue #226): gated on `axum-server` because `run_http_on` is
+    /// only available when the HTTP-serving surface is compiled in.
+    #[cfg(feature = "axum-server")]
     async fn spin_up_test_daemon_with_palace(
         palace_slug: &str,
     ) -> (
@@ -1307,12 +1319,16 @@ mod tests {
     /// Test-only handle to a spawned daemon — aborts the server task on
     /// drop or explicit `shutdown` so the tempdir cleanup doesn't race
     /// with in-flight requests.
+    /// Note (issue #226): gated on `axum-server` because the only callers
+    /// are HTTP-daemon-dependent tests.
+    #[cfg(feature = "axum-server")]
     struct DaemonHandle {
         #[allow(dead_code)]
         addr: std::net::SocketAddr,
         join: Option<tokio::task::JoinHandle<()>>,
     }
 
+    #[cfg(feature = "axum-server")]
     impl DaemonHandle {
         async fn shutdown(mut self) {
             if let Some(h) = self.join.take() {
@@ -1341,6 +1357,8 @@ mod tests {
     /// signal drawer's content and neither of the deny-listed drawers'
     /// content surfaces.
     /// Test: itself.
+    /// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
+    #[cfg(feature = "axum-server")]
     #[tokio::test]
     async fn prompt_context_recall_filters_deny_tags() {
         let _guard = crate::commands::env_test_lock().lock().await;
@@ -1422,6 +1440,8 @@ mod tests {
     /// and the body falls back to the global / empty placeholder path
     /// (no `Relevant memories` section).
     /// Test: itself.
+    /// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
+    #[cfg(feature = "axum-server")]
     #[tokio::test]
     async fn prompt_context_recall_env_override_extends_deny_list() {
         let _guard = crate::commands::env_test_lock().lock().await;
@@ -1478,6 +1498,8 @@ mod tests {
     /// global-facts-only — crucially, it must not contain any of the
     /// drawer content nor a `Relevant memories` section header.
     /// Test: itself.
+    /// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
+    #[cfg(feature = "axum-server")]
     #[tokio::test]
     async fn prompt_context_recall_all_filtered_falls_back_to_global() {
         let _guard = crate::commands::env_test_lock().lock().await;

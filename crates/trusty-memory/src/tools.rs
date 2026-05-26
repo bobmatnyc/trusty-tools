@@ -810,7 +810,7 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
             // Snapshot the content preview *before* moving `text` into
             // `remember_with_options` so the activity feed shows what was
             // stored (matches the HTTP path's behaviour).
-            let preview = crate::web::drawer_content_preview(&text);
+            let preview = crate::service::drawer_content_preview(&text);
             // Issue #97: keep originals so the auto-KG extractor sees the
             // same content / tags that landed in the drawer.
             // `remember_with_options` consumes them, so clone before the call.
@@ -837,7 +837,7 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
                 content_preview: preview,
                 source: ActivitySource::Mcp,
             });
-            state.emit(crate::web::aggregate_status_event(state));
+            state.emit(crate::service::MemoryService::new(state.clone()).aggregate_status_event());
             // Issue #97: best-effort auto-extraction. Failures never fail
             // the write — the drawer is already on disk.
             auto_extract_and_assert(
@@ -943,7 +943,7 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
             // note() preset skips the token threshold; we keep the default
             // filter for noise patterns. No MCP-stricter min_tokens override
             // is needed because `enforce_min_tokens = false`.
-            let preview = crate::web::drawer_content_preview(&content);
+            let preview = crate::service::drawer_content_preview(&content);
             let drawer_id = handle
                 .remember_with_options(
                     content,
@@ -968,7 +968,7 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
                 content_preview: preview,
                 source: ActivitySource::Mcp,
             });
-            state.emit(crate::web::aggregate_status_event(state));
+            state.emit(crate::service::MemoryService::new(state.clone()).aggregate_status_event());
             // Issue #97: best-effort auto-extraction (same hook as
             // memory_remember). `memory_note` is pinned to the General room.
             auto_extract_and_assert(
@@ -1366,7 +1366,7 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
                 drawer_count,
                 source: ActivitySource::Mcp,
             });
-            state.emit(crate::web::aggregate_status_event(state));
+            state.emit(crate::service::MemoryService::new(state.clone()).aggregate_status_event());
             Ok(json!({"status": "deleted", "drawer_id": drawer_id_str, "palace": palace}))
         }
         "palace_info" => {

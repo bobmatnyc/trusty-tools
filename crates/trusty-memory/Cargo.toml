@@ -26,6 +26,12 @@ crate-type = ["rlib"]
 # Test: `cargo run -p trusty-memory -- --help` lists `serve` and `migrate`.
 name = "trusty-memory"
 path = "src/main.rs"
+# Why: `serve` / `start` boot the axum HTTP/SSE daemon, so the binary needs
+#      the `axum-server` feature compiled in. Listing it here keeps
+#      `--no-default-features` library builds (e.g. open-mpm in-process linker
+#      that only wants `MemoryMcpService`) from accidentally trying to build
+#      this binary without axum and failing to link `run_http_*`.
+required-features = ["axum-server"]
 
 [[bin]]
 # Why: Multi-transport refactor — Claude Code launches MCP servers as
@@ -56,7 +62,14 @@ name = "trusty-bm25-daemon"
 path = "src/bin/bm25_daemon.rs"
 
 [dependencies]
-trusty-common = { path = "../trusty-common", version = "0.6.0", features = ["axum-server", "mcp", "memory-core", "monitor-tui", "bm25-client", "cli-help"] }
+# Why: `axum-server` is gated on this crate's own `axum-server` feature so
+#      downstream library consumers (e.g. `open-mpm` linking
+#      `trusty_memory::MemoryMcpService`) can drop the axum/tower-http
+#      surface entirely by setting `default-features = false`. The default
+#      build for the binary path keeps `axum-server` on (see [features]
+#      below), so existing `cargo install` / `cargo build` flows are
+#      unaffected.
+trusty-common = { path = "../trusty-common", version = "0.6.0", default-features = false, features = ["mcp", "memory-core", "monitor-tui", "bm25-client", "cli-help"] }
 # Why: declaring trusty-bm25-daemon as a Cargo dependency causes `cargo install
 #      trusty-memory` to also build and install the daemon binary alongside
 #      trusty-memory — one install command, three binaries. The shim at
@@ -69,8 +82,13 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-axum = { workspace = true }
-tower-http = { workspace = true }
+# Why (issue #226): axum + tower-http are HTTP-server only. Gating them behind
+#      the `axum-server` feature mirrors the rule already enforced in
+#      `trusty-common` and lets `open-mpm` (which only links
+#      `MemoryMcpService` for in-process `rpc.discover` merging) build a
+#      slimmer dependency tree by setting `default-features = false`.
+axum = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
 clap = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
@@ -116,3 +134,19 @@ strsim = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tower = { workspace = true }
+
+[features]
+# Why (issue #226): library consumers that only need `MemoryMcpService` for
+#      in-process MCP discovery (e.g. `open-mpm`) should not be forced to
+#      compile the axum + tower-http HTTP/SSE surface. Mirrors the
+#      `trusty-common` pattern where `axum-server` gates the same crates.
+# Defaults to `axum-server` so the `trusty-memory` / `trusty-memory-mcp-bridge`
+# / `trusty-bm25-daemon` binaries — and the standard `cargo install
+# trusty-memory` / `cargo test -p trusty-memory` flows — keep building exactly
+# as before. Consumers that want the slim library surface override with
+# `default-features = false`.
+default = ["axum-server"]
+# Enables the axum HTTP/SSE daemon surface (`web`, `chat`, `run_http_*`,
+# `sse_handler`, `bind_dynamic_port`, etc.). Pulls in `axum`, `tower-http`,
+# and the matching `trusty-common/axum-server` feature flag.
+axum-server = ["dep:axum", "dep:tower-http", "trusty-common/axum-server"]
