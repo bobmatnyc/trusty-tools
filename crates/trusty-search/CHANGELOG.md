@@ -23,6 +23,17 @@ _(no unreleased changes)_
   (7/18 vs 10/18). The symbol-graph infrastructure is preserved — `get_call_chain`
   and `search_kg` MCP tools continue to work.
 
+  BREAKING CHANGES:
+  - `CodeChunk.community_id` field removed from schema (read tolerance preserved
+    via `#[serde(default)]` — existing serialised chunks are tolerated on
+    deserialise).
+  - Post-RRF reranker no longer applies `community_cohesion` blending. The
+    `meta.graph_scoring` and `meta.community_cohesion` fields are gone from
+    search response JSON.
+  - `GET /indexes/:id/communities` and `GET /indexes/:id/communities/:symbol`
+    endpoints return 404 (removed, not deprecated).
+  - `spawn_community_detection` removed from the reindex pipeline.
+
   Deleted components:
   - `src/core/community.rs` — entire Louvain implementation (673 lines)
   - `src/core/indexer/graph_score.rs` — `GraphScorer` / centrality bonus table (309 lines)
