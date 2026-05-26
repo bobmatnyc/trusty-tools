@@ -15,6 +15,13 @@ build       = "build.rs"
 [[bin]]
 name = "trusty-analyze"
 path = "src/main.rs"
+# Why (issue #249): the `trusty-analyze` binary boots the axum HTTP daemon and
+# the axum-backed MCP HTTP/SSE transport, so it needs the `http-server` feature
+# compiled in. Listing it here keeps `--no-default-features` library builds
+# (e.g. consumers that only want the CLI types or the pure dispatcher) from
+# accidentally trying to build this binary without axum and failing to link
+# the `service` and `mcp::sse` modules.
+required-features = ["http-server"]
 
 [lib]
 name = "trusty_analyze"
@@ -22,8 +29,12 @@ path = "src/lib.rs"
 
 [dependencies]
 tokio              = { workspace = true }
-axum               = { workspace = true }
-tower-http         = { workspace = true }
+# Why (issue #249): axum + tower-http are HTTP-server only. Gating them behind
+#      the `http-server` feature mirrors the rule already enforced in
+#      `trusty-common` (`axum-server`) and `trusty-memory` so downstream library
+#      consumers can drop the HTTP stack entirely with `default-features = false`.
+axum               = { workspace = true, optional = true }
+tower-http         = { workspace = true, optional = true }
 reqwest            = { workspace = true, features = ["http2"] }
 futures-util       = { workspace = true }
 futures            = { workspace = true }
@@ -47,7 +58,7 @@ redb               = { workspace = true }
 dashmap            = { workspace = true }
 rust-embed         = { workspace = true }
 mime_guess         = { workspace = true }
-trusty-common      = { workspace = true, features = ["axum-server", "symgraph", "cli-help"] }
+trusty-common      = { workspace = true, features = ["symgraph", "cli-help"] }
 tree-sitter            = { workspace = true }
 tree-sitter-rust       = { workspace = true }
 tree-sitter-typescript = { workspace = true }
@@ -76,7 +87,17 @@ ort        = { workspace = true, optional = true }
 tokenizers = { workspace = true, optional = true }
 
 [features]
-default = []
+# Why (issue #249): mirrors the `trusty-common` / `trusty-memory` rule that
+#      axum + tower-http are HTTP-server-only deps. Defaults to `http-server`
+#      so the `trusty-analyze` binary — and the standard `cargo install
+#      trusty-analyze` / `cargo test -p trusty-analyze` flows — keep building
+#      exactly as before. Library consumers that only want the dispatcher /
+#      CLI types override with `default-features = false`.
+default = ["http-server"]
+# Enables the axum HTTP daemon surface (the `service` module and the
+# `mcp::sse` HTTP/SSE transport). Pulls in `axum`, `tower-http`, and the
+# matching `trusty-common/axum-server` feature flag.
+http-server = ["dep:axum", "dep:tower-http", "trusty-common/axum-server"]
 ner     = ["dep:ort", "dep:tokenizers"]
 
 [dev-dependencies]

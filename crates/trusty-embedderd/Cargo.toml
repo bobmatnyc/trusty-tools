@@ -21,6 +21,14 @@ crate-type = ["rlib"]
 [[bin]]
 name = "trusty-embedderd"
 path = "src/main.rs"
+# Why (issue #250): the `trusty-embedderd` binary boots the axum HTTP daemon
+# (and the stdio / UDS transports that share its `AppState`), so it needs the
+# `http-server` feature compiled in. Listing it here keeps
+# `--no-default-features` library builds (e.g. consumers that only want the
+# `protocol` / `batch_queue` modules) from accidentally trying to build this
+# binary without axum and failing to link `run` / `run_with_args` /
+# `health_handler` / `embed_handler`.
+required-features = ["http-server"]
 
 [dependencies]
 # Shared client / wire types — now provided by trusty-common's `embedder-client` feature.
@@ -30,9 +38,13 @@ trusty-common = { workspace = true, features = ["embedder", "embedder-bundled-or
 # CLI argument parsing.
 clap = { workspace = true }
 
-# HTTP server.
-axum = { workspace = true }
-tower-http = { workspace = true }
+# Why (issue #250): axum + tower-http are HTTP-server only. Gating them behind
+# the `http-server` feature mirrors the rule already enforced in
+# `trusty-common` (`axum-server`) and `trusty-memory` so the daemon's logic
+# (BatchQueue, protocol, stdio/UDS transports) can be consumed by a library
+# user with `default-features = false` without dragging the HTTP stack in.
+axum = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
 
 # Async runtime.
 tokio = { workspace = true }
@@ -60,8 +72,19 @@ reqwest = { workspace = true }
 trusty-common = { workspace = true, features = ["embedder", "embedder-bundled-ort", "embedder-client", "embedder-test-support"] }
 
 [features]
+# Why (issue #250): mirrors the `trusty-common` / `trusty-memory` rule that
+#      axum + tower-http are HTTP-server-only deps. Defaults to `http-server`
+#      so the `trusty-embedderd` binary — and the `trusty-search`-bundled
+#      shim binary that calls `trusty_embedderd::run()` — keep building
+#      exactly as before. Library consumers that only need the wire
+#      protocol / batch queue override with `default-features = false`.
+default = ["http-server"]
+# Enables the axum HTTP daemon surface (`Args`, `AppState`, `run`,
+# `run_with_args`, `health_handler`, `embed_handler`). Pulls in `axum` and
+# `tower-http`. The stdio + UDS transports do not require this feature; they
+# are exposed via the always-on `stdio_server` and `uds_server` modules.
+http-server = ["dep:axum", "dep:tower-http"]
 # Forward ORT feature flags so the binary can be compiled with cuda/coreml.
-default = []
 bundled-ort = ["trusty-common/embedder-bundled-ort"]
 cuda = ["trusty-common/embedder-cuda"]
 load-dynamic = ["trusty-common/embedder-load-dynamic"]

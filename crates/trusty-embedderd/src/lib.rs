@@ -22,25 +22,44 @@ pub mod protocol;
 pub mod stdio_server;
 pub mod uds_server;
 
+// Why (issue #250): the daemon's HTTP startup sequence (`run`, `run_with_args`,
+// `AppState`, `health_handler`, `embed_handler`, and the `Args` clap struct
+// that drives them) only compiles under the `http-server` feature, mirroring
+// the `trusty-common` / `trusty-memory` rule that axum + tower-http are
+// HTTP-server-only deps. The `protocol`, `batch_queue`, `stdio_server`, and
+// `uds_server` modules stay unconditional — they have no axum surface.
+#[cfg(feature = "http-server")]
 use std::sync::Arc;
+#[cfg(feature = "http-server")]
 use std::time::Duration;
 
+#[cfg(feature = "http-server")]
 use anyhow::{bail, Context, Result};
+#[cfg(feature = "http-server")]
 use axum::{
     extract::State,
     http::StatusCode,
     routing::{get, post},
     Json, Router,
 };
+#[cfg(feature = "http-server")]
 use clap::Parser;
+#[cfg(feature = "http-server")]
 use serde_json::json;
+#[cfg(feature = "http-server")]
 use tokio::net::TcpListener;
+#[cfg(feature = "http-server")]
 use tokio::signal::unix::{signal, SignalKind};
+#[cfg(feature = "http-server")]
 use tower_http::trace::TraceLayer;
+#[cfg(feature = "http-server")]
 use tracing::info;
+#[cfg(feature = "http-server")]
 use trusty_common::embedder::{Embedder as _, FastEmbedder};
+#[cfg(feature = "http-server")]
 use trusty_common::embedder_client::{EmbedRequest, EmbedResponse};
 
+#[cfg(feature = "http-server")]
 use batch_queue::{BatchConfig, BatchQueue};
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
@@ -54,6 +73,7 @@ use batch_queue::{BatchConfig, BatchQueue};
 /// `--batch-size` and `--batch-window-ms` configure the `BatchQueue`
 /// coalescing window.
 /// Test: `clap::Parser::try_parse_from` in unit tests.
+#[cfg(feature = "http-server")]
 #[derive(Parser, Debug)]
 #[command(
     name = "trusty-embedderd",
@@ -122,6 +142,7 @@ pub struct Args {
 /// What: holds the `BatchQueue` handle so every HTTP request is served through
 /// the shared batching worker rather than calling the ONNX session directly.
 /// Test: constructed in `run` after model load; exercised by handler tests.
+#[cfg(feature = "http-server")]
 #[derive(Clone)]
 pub struct AppState {
     pub queue: Arc<BatchQueue>,
@@ -149,6 +170,7 @@ pub struct AppState {
 /// `curl http://127.0.0.1:7890/health`. For stdio mode:
 /// `cargo run -p trusty-embedderd -- --stdio` (parent drives via pipes).
 /// Covered indirectly by `embedder_supervisor_e2e` in `trusty-search`.
+#[cfg(feature = "http-server")]
 pub async fn run() -> Result<()> {
     let args = Args::parse();
     run_with_args(args).await
@@ -161,6 +183,7 @@ pub async fn run() -> Result<()> {
 /// What: performs the full daemon startup sequence using the provided args.
 /// Test: the public `run()` is tested indirectly via the supervisor e2e tests;
 /// `run_with_args` can be unit-tested with controlled `Args` values.
+#[cfg(feature = "http-server")]
 pub async fn run_with_args(args: Args) -> Result<()> {
     // Init tracing to stderr — never stdout (MCP policy; stdout is used for
     // JSON-RPC frames in --stdio mode).
@@ -321,6 +344,7 @@ pub async fn run_with_args(args: Args) -> Result<()> {
 /// serving requests before sending embedding work.
 /// What: returns a static JSON body with `status`, `model`, and `dim` fields.
 /// Test: `curl http://127.0.0.1:7890/health` returns HTTP 200.
+#[cfg(feature = "http-server")]
 pub async fn health_handler() -> Json<serde_json::Value> {
     Json(json!({
         "status": "ok",
@@ -336,6 +360,7 @@ pub async fn health_handler() -> Json<serde_json::Value> {
 /// What: deserialises `EmbedRequest`, enqueues via `BatchQueue::embed_many`,
 /// and returns `EmbedResponse`. On error returns HTTP 500 with a JSON body.
 /// Test: `cargo test -p trusty-embedderd --test bit_identical -- --include-ignored`
+#[cfg(feature = "http-server")]
 pub async fn embed_handler(
     State(state): State<AppState>,
     Json(req): Json<EmbedRequest>,

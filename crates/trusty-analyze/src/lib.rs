@@ -9,5 +9,10 @@ pub mod core;
 pub mod embedder;
 pub mod lang;
 pub mod mcp;
+// Why (issue #249): the `service` module is the axum HTTP daemon surface and
+// only compiles when the `http-server` feature is enabled. Gating it keeps
+// library consumers that only need the analysis core / dispatcher free of the
+// axum + tower-http stack.
+#[cfg(feature = "http-server")]
 pub mod service;
 pub mod types;

@@ -19,6 +19,11 @@
 //! | `ingest_scip`         | `POST /indexes/:id/scip`                     |
 //! | `analyzer_health`     | `GET /health`                                |
 
+// Why (issue #249): the `sse` submodule is the axum HTTP/SSE transport and
+// only compiles when the `http-server` feature is enabled. The `stdio`
+// transport stays unconditional — MCP clients (Claude Code) that spawn the
+// dispatcher as a subprocess only need stdio, never axum.
+#[cfg(feature = "http-server")]
 pub mod sse;
 pub mod stdio;
 
