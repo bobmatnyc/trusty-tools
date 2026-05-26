@@ -1,11 +1,11 @@
 [package]
 name = "trusty-bm25-daemon"
 version = "0.1.0"
-publish = false
+publish = true
 edition = "2021"
 rust-version = "1.88"
 description = "Per-palace BM25 lexical-index subprocess for the trusty-* ecosystem (issue #156)"
-license = "Elastic-2.0"
+license-file = "LICENSE"
 authors.workspace = true
 repository.workspace = true
 readme = "README.md"

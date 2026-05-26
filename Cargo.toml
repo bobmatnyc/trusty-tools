@@ -166,6 +166,7 @@ tree-sitter-scala = "0.24"
 [patch.crates-io]
 trusty-common = { path = "crates/trusty-common" }
 trusty-embedderd = { path = "crates/trusty-embedderd" }
+trusty-bm25-daemon = { path = "crates/trusty-bm25-daemon" }
 
 [profile.dev]
 opt-level = 0
