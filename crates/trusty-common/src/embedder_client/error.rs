@@ -47,6 +47,15 @@ pub enum EmbedderError {
     /// directly without `reqwest`.
     #[error("embedder UDS error: {0}")]
     Uds(String),
+
+    /// A stdio transport error occurred while communicating with a sidecar
+    /// `trusty-embedderd` process spawned with piped stdin/stdout.
+    ///
+    /// Why: stdio failures (broken pipe, EOF before response, decode error) are
+    /// distinct from UDS and HTTP errors — they indicate the sidecar process
+    /// has crashed or exited unexpectedly and the supervisor should respawn it.
+    #[error("embedder stdio IPC error: {0}")]
+    Stdio(String),
 }
 
 #[cfg(test)]
@@ -89,5 +98,16 @@ mod tests {
         let s = e.to_string();
         assert!(s.contains("UDS"), "must mention UDS");
         assert!(s.contains("no such file"), "must contain inner message");
+    }
+
+    #[test]
+    fn error_display_stdio() {
+        // Why: verify the Stdio variant's Display formatting for log messages.
+        // What: format the variant and check the prefix and inner message.
+        // Test: this test.
+        let e = EmbedderError::Stdio("write to child stdin: broken pipe".to_string());
+        let s = e.to_string();
+        assert!(s.contains("stdio"), "must mention stdio");
+        assert!(s.contains("broken pipe"), "must contain inner message");
     }
 }

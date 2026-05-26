@@ -500,6 +500,31 @@ Set `TRUSTY_DISABLE_MIGRATIONS=1` to skip auto-migrations.
   `AllMiniLML6V2Q`, batch upsert into HNSW, split lock via
   `parse_and_embed_files` / `commit_parsed_batch`, batch size 512)
 
+## Embedder Configuration (Environment Variables)
+
+`trusty-search start` selects an embedding back-end based on the `TRUSTY_EMBEDDER`
+environment variable (issue #110 Phase 2):
+
+| `TRUSTY_EMBEDDER` value | Behaviour |
+|-------------------------|-----------|
+| unset / `auto` / `stdio` | **Default.** Spawns `trusty-embedderd --stdio` as a supervised child process. Requires `trusty-embedderd` on PATH (`cargo install trusty-embedderd`). Falls back to in-process with a warning if the binary is absent. |
+| `in-process` / `local`  | Legacy in-process ONNX path. No external process needed. Use when `trusty-embedderd` is not installed or for debugging. |
+| `http://…`              | HTTP remote — `POST /embed` to a manually-managed `trusty-embedderd` HTTP listener. |
+| `unix:/path/to/sock`    | UDS remote — JSON-RPC 2.0 to a manually-managed `trusty-embedderd --socket` listener. |
+| `candle`                | Candle Metal backend (requires `--features candle`). |
+
+### Supervisor tuning (stdio-sidecar path only)
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `TRUSTY_EMBEDDERD_BIN` | — | Explicit path to the `trusty-embedderd` binary. Overrides PATH search. Must point to an existing file if set. |
+| `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS` | `30` | How long to wait for the sidecar's readiness probe. |
+| `TRUSTY_EMBEDDERD_RESTART_BACKOFF_MAX_SECS` | `60` | Exponential back-off ceiling between crash restarts. |
+| `TRUSTY_EMBEDDERD_MAX_RESTARTS` | `5` | Maximum restarts before the supervisor gives up. |
+| `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` | `60` | Overall timeout for the initial embedder init (all modes). |
+
+---
+
 ## Memory Tuning (Environment Variables)
 
 > **System requirement: 16 GB RAM minimum.** `trusty-search start` performs

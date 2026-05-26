@@ -130,6 +130,8 @@ walkdir = "2"
 ignore = "0.4"
 crossbeam-utils = "0.8"
 dirs = "5"
+# Binary discovery for trusty-embedderd (Phase 2 of #110: auto-spawn).
+which = { workspace = true }
 
 # ── Process memory introspection (TRUSTY_MEMORY_LIMIT_MB, peak RSS log) ────
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }

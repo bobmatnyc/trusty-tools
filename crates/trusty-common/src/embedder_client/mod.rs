@@ -5,18 +5,23 @@
 //! embedding into a dedicated process (`trusty-embedderd`) lets the two crash
 //! independently and keeps the large ONNX RSS footprint off the search daemon's
 //! budget (issue #110 motivation). This module provides the single `EmbedderClient`
-//! trait that abstracts over all three deployment modes:
+//! trait that abstracts over all four deployment modes:
 //!
 //! 1. **InProcess** — wraps `FastEmbedder` directly (zero config, backward compat)
 //! 2. **HTTP remote** — `POST /embed` JSON to a running `trusty-embedderd` over TCP
 //! 3. **UDS remote** — newline-framed JSON-RPC 2.0 to `trusty-embedderd` over a
 //!    Unix Domain Socket (issue #164; lower latency than HTTP on local hosts)
+//! 4. **Stdio sidecar** — newline-framed JSON-RPC 2.0 over piped stdin/stdout of a
+//!    child `trusty-embedderd --stdio` process (issue #110 Phase 2 default).
+//!    Lifecycle is managed by `EmbedderSupervisor`.
 //!
 //! What: exposes (1) JSON-over-HTTP and JSON-over-UDS wire types, (2) the
 //! `EmbedderClient` trait, (3) `InProcessEmbedderClient` for backward
-//! compatibility, (4) `RemoteEmbedderClient` (HTTP), and (5)
-//! `UdsEmbedderClient` (UDS). The `embed_client` module (UDS-only, PR #157)
-//! is retired by issue #164 — use `UdsEmbedderClient` from this module instead.
+//! compatibility, (4) `RemoteEmbedderClient` (HTTP), (5) `UdsEmbedderClient`
+//! (UDS), (6) `StdioEmbedderClient` (stdio sidecar), and (7)
+//! `EmbedderSupervisor` (auto-spawn lifecycle manager). The `embed_client`
+//! module (UDS-only, PR #157) is retired by issue #164 — use `UdsEmbedderClient`
+//! from this module instead.
 //!
 //! Test: `cargo test -p trusty-common --features embedder-client` covers the
 //! error type, wire-type round-trips, and client construction. ONNX-backed tests
@@ -25,12 +30,16 @@
 pub mod error;
 pub mod in_process;
 pub mod remote;
+pub mod stdio;
+pub mod supervisor;
 pub mod types;
 pub mod uds;
 
 pub use error::EmbedderError;
 pub use in_process::InProcessEmbedderClient;
 pub use remote::RemoteEmbedderClient;
+pub use stdio::StdioEmbedderClient;
+pub use supervisor::{EmbedderSupervisor, SupervisorConfig, locate_embedderd_binary};
 pub use types::{EmbedRequest, EmbedResponse};
 pub use uds::UdsEmbedderClient;
 

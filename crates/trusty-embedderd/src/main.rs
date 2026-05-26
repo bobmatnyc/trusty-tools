@@ -3,9 +3,16 @@
 //! Why: running the ONNX model in a dedicated process decouples it from the
 //! trusty-search and trusty-memory daemons — a crash or OOM in one doesn't
 //! affect the others, and the model stays resident across daemon restarts. A
-//! single daemon process serves both an HTTP transport (for network-capable
-//! consumers) and a UDS transport (for low-latency in-host consumers) through
-//! a shared `BatchQueue` so only one ONNX session exists.
+//! single daemon process serves three transports through a shared `BatchQueue`
+//! so only one ONNX session exists:
+//!
+//!  - HTTP (`--http addr:port`): for network-capable consumers.
+//!  - UDS (`--socket /path`): for low-latency in-host consumers.
+//!  - Stdio (`--stdio`): for sidecar mode — read JSON-RPC from stdin,
+//!    write responses to stdout. This is the default auto-spawn mode used by
+//!    `trusty-search` (issue #110 Phase 2). Lifecycle is tied to the parent:
+//!    when the parent closes its write end of the pipe, stdin reaches EOF and
+//!    the daemon exits cleanly.
 //!
 //! This release (v0.3.0) absorbs the work from the retired
 //! `trusty-embed-daemon` crate (issue #157): `BatchQueue`, the UDS accept
@@ -17,9 +24,12 @@
 //!   - `GET /health`  → `{"status":"ok","model":"AllMiniLML6V2Q","dim":384}`
 //!   - `POST /embed`  → `EmbedRequest` → `EmbedResponse`  (HTTP/JSON)
 //!   - `<socket>`     → JSON-RPC 2.0 newline-framed embed method  (UDS)
+//!   - stdin/stdout   → JSON-RPC 2.0 newline-framed embed method  (stdio sidecar)
 //!
-//! At least one of `--http` and `--socket` must be specified.
-//! All logs go to stderr (MCP policy — stdout is never written to).
+//! `--stdio` is mutually exclusive with `--http` and `--socket`.
+//! When neither `--stdio`, `--http`, nor `--socket` is specified, the binary
+//! exits with an error.
+//! All logs go to stderr (MCP policy — stdout is never written to in any mode).
 //!
 //! Test: `cargo test -p trusty-embedderd` (unit + integration).
 //!       `cargo test -p trusty-embedderd --test bit_identical -- --include-ignored`
@@ -46,6 +56,7 @@ use trusty_common::embedder_client::{EmbedRequest, EmbedResponse};
 
 mod batch_queue;
 mod protocol;
+mod stdio_server;
 mod uds_server;
 
 use batch_queue::{BatchConfig, BatchQueue};
@@ -55,9 +66,11 @@ use batch_queue::{BatchConfig, BatchQueue};
 /// CLI arguments for `trusty-embedderd`.
 ///
 /// Why: `clap` derive is the workspace standard for all trusty-* binaries.
-/// What: `--http` for the TCP listener, `--socket` for the UDS listener;
-/// at least one must be supplied. `--batch-size` and `--batch-window-ms`
-/// configure the `BatchQueue` coalescing window.
+/// What: `--stdio` for the sidecar transport (piped stdin/stdout),
+/// `--http` for the TCP listener, `--socket` for the UDS listener.
+/// `--stdio` is mutually exclusive with `--http` and `--socket`.
+/// `--batch-size` and `--batch-window-ms` configure the `BatchQueue`
+/// coalescing window.
 /// Test: `clap::Parser::try_parse_from` in unit tests.
 #[derive(Parser, Debug)]
 #[command(
@@ -66,13 +79,27 @@ use batch_queue::{BatchConfig, BatchQueue};
     about = "Unified ONNX embedding daemon for trusty-tools (issue #164 consolidation)."
 )]
 struct Args {
+    /// Run in stdio sidecar mode: read JSON-RPC requests from stdin,
+    /// write responses to stdout. Mutually exclusive with --http and
+    /// --socket. This is the transport used when trusty-search auto-spawns
+    /// trusty-embedderd as a child process (issue #110 Phase 2 default).
+    ///
+    /// Why: avoids socket-file management — the parent owns the pipe handles
+    /// and the child exits automatically when the parent closes its end.
+    #[arg(long, conflicts_with_all = ["http_addr", "socket"])]
+    stdio: bool,
+
     /// TCP address to listen on for HTTP (host:port).
     ///
     /// Why: configurable so CI / tests can bind to ephemeral ports and avoid
     /// collisions with a running production daemon. Pass an empty string to
-    /// disable the HTTP listener (requires --socket).
-    #[arg(long, default_value = "127.0.0.1:7890", env = "TRUSTY_EMBEDDERD_ADDR")]
-    http: String,
+    /// disable the HTTP listener (requires --socket or --stdio).
+    #[arg(
+        long = "http",
+        default_value = "127.0.0.1:7890",
+        env = "TRUSTY_EMBEDDERD_ADDR"
+    )]
+    http_addr: String,
 
     /// Path for the Unix domain socket.
     ///
@@ -123,19 +150,25 @@ struct AppState {
 /// Entry point.
 ///
 /// Why: load the ONNX model once (expensive), spin up a `BatchQueue`, then
-/// serve requests on whichever transports are configured until interrupted.
+/// serve requests on whichever transport is configured until interrupted.
 ///
 /// What: parse CLI → validate flags → init tracing → load `FastEmbedder` →
-/// spawn `BatchQueue` → optionally bind HTTP → optionally bind UDS → wait
-/// for SIGTERM/SIGINT → remove UDS socket on clean exit.
+/// spawn `BatchQueue` → dispatch to the selected transport:
+///   - `--stdio`: run the stdio sidecar loop (exits on stdin EOF / SIGTERM)
+///   - `--http` / `--socket`: bind listeners, wait for SIGTERM/SIGINT, clean up
+///
+/// Note: in `--stdio` mode stdout is reserved for JSON-RPC frames. All
+/// tracing goes to stderr in every mode.
 ///
 /// Test: `cargo run -p trusty-embedderd -- --http 127.0.0.1:7890` and verify
-/// `curl http://127.0.0.1:7890/health`.
+/// `curl http://127.0.0.1:7890/health`. For stdio mode:
+/// `cargo run -p trusty-embedderd -- --stdio` (parent drives via pipes).
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Init tracing to stderr — never stdout (MCP policy).
+    // Init tracing to stderr — never stdout (MCP policy; stdout is used for
+    // JSON-RPC frames in --stdio mode).
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -145,10 +178,12 @@ async fn main() -> Result<()> {
         .init();
 
     // Validate: at least one transport must be configured.
-    let http_enabled = !args.http.is_empty();
-    let uds_enabled = args.socket.is_some();
-    if !http_enabled && !uds_enabled {
-        bail!("at least one of --http or --socket must be specified");
+    let stdio_mode = args.stdio;
+    let http_enabled = !stdio_mode && !args.http_addr.is_empty();
+    let uds_enabled = !stdio_mode && args.socket.is_some();
+
+    if !stdio_mode && !http_enabled && !uds_enabled {
+        bail!("at least one of --stdio, --http, or --socket must be specified");
     }
 
     let config = BatchConfig {
@@ -156,13 +191,25 @@ async fn main() -> Result<()> {
         batch_window: Duration::from_millis(args.batch_window_ms),
     };
 
-    info!(
-        "trusty-embedderd starting (http={:?}, socket={:?}, batch_size={}, batch_window_ms={})",
-        if http_enabled { Some(&args.http) } else { None },
-        args.socket,
-        config.batch_size,
-        config.batch_window.as_millis(),
-    );
+    if stdio_mode {
+        info!(
+            "trusty-embedderd starting (transport=stdio, batch_size={}, batch_window_ms={})",
+            config.batch_size,
+            config.batch_window.as_millis(),
+        );
+    } else {
+        info!(
+            "trusty-embedderd starting (http={:?}, socket={:?}, batch_size={}, batch_window_ms={})",
+            if http_enabled {
+                Some(&args.http_addr)
+            } else {
+                None
+            },
+            args.socket,
+            config.batch_size,
+            config.batch_window.as_millis(),
+        );
+    }
 
     // Load the ONNX model (expensive one-time init).
     info!("loading AllMiniLML6V2Q model...");
@@ -181,6 +228,30 @@ async fn main() -> Result<()> {
         config.batch_window.as_millis()
     );
 
+    // ── Stdio sidecar mode ───────────────────────────────────────────────────
+    // In stdio mode we own stdout exclusively for JSON-RPC frames. We do NOT
+    // install signal handlers for SIGTERM/SIGINT here — the OS delivers EOF
+    // on stdin when the parent exits, which is the clean termination signal.
+    // We do handle SIGTERM so `kill` works from a shell.
+    if stdio_mode {
+        let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
+        let q = Arc::clone(&queue);
+        tokio::select! {
+            result = stdio_server::run_stdio_server(q) => {
+                if let Err(e) = result {
+                    tracing::error!("stdio server error: {e:#}");
+                    std::process::exit(1);
+                }
+            }
+            _ = sigterm.recv() => {
+                info!("received SIGTERM — shutting down");
+            }
+        }
+        return Ok(());
+    }
+
+    // ── HTTP / UDS listener mode ─────────────────────────────────────────────
+
     // Optionally bind the HTTP listener.
     if http_enabled {
         let state = AppState {
@@ -192,9 +263,9 @@ async fn main() -> Result<()> {
             .layer(TraceLayer::new_for_http())
             .with_state(state);
 
-        let listener = TcpListener::bind(&args.http)
+        let listener = TcpListener::bind(&args.http_addr)
             .await
-            .with_context(|| format!("failed to bind HTTP to {}", args.http))?;
+            .with_context(|| format!("failed to bind HTTP to {}", args.http_addr))?;
         let local_addr = listener.local_addr()?;
         info!("trusty-embedderd HTTP listening on http://{local_addr}");
 

@@ -1,5 +1,21 @@
 # Changelog — trusty-embedderd
 
+## [Unreleased]
+
+### Changed
+
+- **#110 Phase 2 — `trusty-embedderd` is now a core `trusty-search` subprocess.**
+  `trusty-search start` auto-spawns `trusty-embedderd --stdio` as a supervised
+  child process when `TRUSTY_EMBEDDER` is unset. Install this binary alongside
+  `trusty-search` so the default startup path works without explicit configuration:
+  ```bash
+  cargo install trusty-embedderd
+  ```
+  If the binary is absent, `trusty-search` falls back to in-process embedding
+  with a one-time warning.
+
+---
+
 ## [0.3.0] — 2026-05-26
 
 Issue #164 consolidation — absorbs `trusty-embed-daemon` (PR #157), completing
