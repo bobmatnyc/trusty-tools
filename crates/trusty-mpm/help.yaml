@@ -1,0 +1,125 @@
+# Declarative CLI help for trusty-mpm (issue #216).
+#
+# Loaded at startup by `src/bin/tm.rs` via `include_str!` so the help text
+# ships inside the binary. Mirrors the clap definitions in `src/bin/tm.rs`.
+name: trusty-mpm
+tagline: Unified multi-agent orchestration platform (daemon + CLI + TUI + Telegram)
+usage: trusty-mpm [OPTIONS] <COMMAND>
+commands:
+  status:
+    description: Show daemon and session status
+    examples:
+      - cmd: trusty-mpm status
+  start:
+    description: Start the daemon if not running, or show status if running
+    examples:
+      - cmd: trusty-mpm start
+  serve:
+    description: Alias for `start` — start the daemon if not running
+  stop:
+    description: Stop every running trusty-mpm daemon process
+  restart:
+    description: Stop the running daemon and start a fresh one
+  project:
+    description: Define and manage projects (registered working directories)
+    subcommands:
+      list:
+        description: List projects
+      add:
+        description: Add a project
+      remove:
+        description: Remove a project
+      show:
+        description: Show a project's details
+  session:
+    description: Define and manage Claude Code sessions within a project
+    subcommands:
+      list:
+        description: List sessions
+      add:
+        description: Add a session
+      remove:
+        description: Remove a session
+      show:
+        description: Show a session's details
+  events:
+    description: Show the recent hook-event feed
+  doctor:
+    description: Run a full system diagnostic of the trusty-mpm stack
+  tui:
+    description: Launch the ratatui multi-session TUI dashboard
+    flags:
+      - name: url
+        type_hint: URL
+        default: http://127.0.0.1:7880
+        description: Base URL of the trusty-mpm daemon
+      - name: interval-ms
+        type_hint: MS
+        default: "1000"
+        description: Poll interval in milliseconds
+  gui:
+    description: Launch the Tauri desktop GUI
+  telegram:
+    description: Manage the Telegram remote-management bot
+    subcommands:
+      pair:
+        description: Request a one-time pairing code
+      status:
+        description: Show pairing status
+      start:
+        description: Start the Telegram bot process
+      stop:
+        description: Stop a running bot process
+  install:
+    description: Install the bundled framework artifacts to ~/.trusty-mpm/framework/
+    flags:
+      - name: force
+        description: Overwrite artifacts that already exist on disk
+  hook:
+    description: Handle a Claude Code lifecycle hook (PreToolUse/PostToolUse/Stop)
+  daemon:
+    description: Run the trusty-mpm daemon
+    flags:
+      - name: addr
+        type_hint: ADDR
+        default: 127.0.0.1:7880
+        description: Address the daemon HTTP API binds to
+      - name: tailscale
+        description: Also expose the daemon on the Tailscale interface
+      - name: mcp
+        description: Run as an MCP server over stdio instead of HTTP daemon
+  launch:
+    description: Launch a session with full setup (deploys instructions/agents/skills)
+    args: [dir]
+    examples:
+      - cmd: trusty-mpm launch
+      - cmd: trusty-mpm launch ~/Projects/myapp
+  connect:
+    description: Start or attach to a session without running deployment
+    args: [dir]
+  attach:
+    description: Attach to an existing session by ID, name prefix, or project path
+    args: [target]
+    flags:
+      - name: json
+        description: Print session JSON and exit (no TUI)
+  optimizer:
+    description: Inspect or configure the token-use optimizer
+    subcommands:
+      status:
+        description: Show optimizer state
+      enable:
+        description: Enable the optimizer
+      disable:
+        description: Disable the optimizer
+  overseer:
+    description: Inspect the session overseer
+    subcommands:
+      status:
+        description: Show overseer state
+  coordinator:
+    description: Send a message to the cross-session coordinator (alias `coord`)
+    args: [message]
+    examples:
+      - cmd: trusty-mpm coordinator "Pause everything for 5 minutes"
+      - cmd: trusty-mpm coord "@session:foo /run-tests"

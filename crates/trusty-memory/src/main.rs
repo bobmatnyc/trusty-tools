@@ -279,9 +279,39 @@ enum MonitorTarget {
     },
 }
 
+/// Bundled declarative help config (issue #216). Loaded once per process.
+///
+/// Why: every binary in the workspace embeds its `help.yaml` via
+/// `include_str!` so the workspace-shared `trusty_common::help::suggest`
+/// helper has a config to consult when the user types an unknown subcommand.
+/// What: `LazyLock<HelpConfig>` parsed from `help.yaml` at first access.
+/// Test: parse coverage lives in `trusty-common`; this site is exercised
+/// manually via `trusty-memory dotor`.
+static HELP: std::sync::LazyLock<trusty_common::help::HelpConfig> =
+    std::sync::LazyLock::new(|| {
+        trusty_common::help::load_help(include_str!("../help.yaml"))
+            .expect("trusty-memory help.yaml is bundled and valid")
+    });
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    // Why: parse via `try_parse` so we can attach the workspace-shared
+    // "did you mean?" suggestion to clap's standard error rendering before
+    // exiting (issue #216).
+    let argv: Vec<String> = std::env::args().collect();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            e.print().ok();
+            if matches!(
+                e.kind(),
+                clap::error::ErrorKind::InvalidSubcommand | clap::error::ErrorKind::UnknownArgument
+            ) {
+                trusty_common::help::print_suggestion_hint(&argv, &HELP);
+            }
+            std::process::exit(e.exit_code());
+        }
+    };
     // Issue #35: initialise tracing with an in-memory `LogBuffer` so the HTTP
     // daemon's `GET /api/v1/logs/tail` endpoint can serve recent logs. The
     // buffer-backed subscriber still writes the standard `fmt` layer to

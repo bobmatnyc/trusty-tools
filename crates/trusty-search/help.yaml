@@ -1,0 +1,289 @@
+# Declarative CLI help for trusty-search (issue #216).
+#
+# Loaded at startup by `src/main.rs` via `include_str!` so the help text ships
+# inside the binary. The flag and command list mirrors the clap definitions in
+# `src/main.rs`; when adding a new subcommand, update both this file and the
+# clap derive.
+name: trusty-search
+tagline: Hybrid BM25 + vector + knowledge-graph code search daemon and MCP server
+usage: trusty-search [OPTIONS] <COMMAND>
+commands:
+  search:
+    description: Hybrid search in the current project (alias `s`)
+    args: [query]
+    flags:
+      - name: top-k
+        short: k
+        type_hint: N
+        default: "10"
+        description: Number of results to return
+      - name: full
+        short: f
+        description: Show full chunk content instead of compact snippet
+      - name: intent
+        type_hint: INTENT
+        description: Force query intent (definition|usage|conceptual|bugdebt|unknown)
+      - name: no-kg
+        description: Skip knowledge graph expansion
+      - name: offset
+        type_hint: N
+        default: "0"
+        description: Pagination offset
+      - name: budget
+        type_hint: TOKENS
+        default: "8000"
+        description: Max token budget for results
+    examples:
+      - cmd: trusty-search search "fn authenticate"
+      - cmd: trusty-search search "error handling" --intent conceptual
+      - cmd: trusty-search search "TODO FIXME" --intent bugdebt -k 20
+  watch:
+    description: Watch for changes and keep the index updated (alias `w`)
+    args: [path]
+    examples:
+      - cmd: trusty-search watch
+      - cmd: trusty-search watch ~/Projects/myapp
+  status:
+    description: Show daemon status and all index stats (alias `st`)
+    examples:
+      - cmd: trusty-search status
+      - cmd: trusty-search status --json
+  index:
+    description: Register and index a project (alias `idx`)
+    args: [path]
+    flags:
+      - name: name
+        short: n
+        type_hint: NAME
+        description: "Index name (default: directory basename)"
+      - name: force
+        short: f
+        description: Force a full reindex even if the index already has chunks
+      - name: exclude
+        type_hint: GLOB
+        description: Additional glob exclusion patterns
+      - name: timeout
+        type_hint: SECS
+        default: "600"
+        description: SSE stream timeout in seconds
+      - name: lexical-only
+        description: Stage-1-only lexical (BM25) index — no embeddings
+    examples:
+      - cmd: trusty-search index
+      - cmd: trusty-search index ~/Projects/myapp
+      - cmd: trusty-search index --force
+      - cmd: trusty-search index remove
+  init:
+    description: Register current directory as a named index (alias `i`)
+    args: [path]
+    flags:
+      - name: name
+        short: n
+        type_hint: NAME
+        description: "Index name (default: directory basename)"
+      - name: exclude
+        type_hint: GLOB
+        description: Additional glob exclusion patterns
+    examples:
+      - cmd: trusty-search init
+      - cmd: trusty-search init ~/Projects/myapp --name myapp-prod
+  add:
+    description: Add or update a single file in the index
+    args: [file]
+    examples:
+      - cmd: trusty-search add src/main.rs
+  remove:
+    description: Remove a file from the index (alias `rm`)
+    args: [file]
+    examples:
+      - cmd: trusty-search remove src/old.rs
+  cleanup:
+    description: Remove stale empty index registrations (0 chunks)
+    flags:
+      - name: yes
+        short: y
+        description: Skip the confirmation prompt
+      - name: dry-run
+        description: Show what would be removed without deleting anything
+    examples:
+      - cmd: trusty-search cleanup
+      - cmd: trusty-search cleanup --yes
+  reindex:
+    description: Full reindex of current project (see `index --force`)
+    args: [path]
+    flags:
+      - name: timeout
+        type_hint: SECS
+        default: "600"
+        description: SSE stream timeout in seconds
+    examples:
+      - cmd: trusty-search reindex
+  list:
+    description: List all registered indexes with stats (alias `ls`)
+    flags:
+      - name: json
+        description: Emit JSON output
+    examples:
+      - cmd: trusty-search list
+      - cmd: trusty-search list --json
+  query:
+    description: Search across all or named indexes (alias `q`)
+    args: [query]
+    flags:
+      - name: indexes
+        type_hint: NAMES
+        default: "*"
+        description: '"*" for all, or comma-separated names'
+      - name: top-k
+        short: k
+        type_hint: N
+        default: "10"
+        description: Number of results
+      - name: full
+        short: f
+        description: Show full chunk content
+    examples:
+      - cmd: trusty-search query "fn authenticate" --indexes "*"
+      - cmd: trusty-search query "database pool" --indexes proj-a,proj-b
+  health:
+    description: Check daemon liveness (alias for `status`)
+    examples:
+      - cmd: trusty-search health
+  start:
+    description: Start the HTTP daemon
+    flags:
+      - name: port
+        type_hint: PORT
+        default: "7878"
+        description: Port to listen on (auto-walks if busy)
+      - name: foreground
+        description: Run in the foreground instead of forking a background daemon
+      - name: device
+        type_hint: KIND
+        default: auto
+        description: Embedding device (auto|cpu|gpu)
+    examples:
+      - cmd: trusty-search start
+      - cmd: trusty-search start --port 7878
+      - cmd: trusty-search start --foreground
+        note: launchd / systemd / Docker
+  stop:
+    description: Stop the running background daemon
+    examples:
+      - cmd: trusty-search stop
+  serve:
+    description: Start MCP server (stdio by default; add --with-http for HTTP)
+    flags:
+      - name: with-http
+        description: Enable the HTTP/SSE listener in addition to MCP stdio
+      - name: port
+        type_hint: PORT
+        default: "0"
+        description: HTTP port (only used when --with-http is set; 0 = OS picks)
+      - name: http
+        type_hint: ADDR
+        description: 'Legacy: explicit "host:port" bind address'
+    examples:
+      - cmd: trusty-search serve
+        note: MCP stdio only (Claude hook)
+      - cmd: trusty-search serve --with-http --port 7878
+  service:
+    description: Manage the macOS launchd service
+    subcommands:
+      install:
+        description: Install and start as a launchd service
+      uninstall:
+        description: Stop and uninstall the service
+      status:
+        description: Show service status
+      logs:
+        description: Tail service logs
+  dashboard:
+    description: Open the admin panel in the default browser (aliases `dash`, `ui`)
+    examples:
+      - cmd: trusty-search dashboard
+  convert:
+    description: Migrate mcp-vector-search project(s) to trusty-search
+    args: [target]
+    flags:
+      - name: dry-run
+        description: Show what would be converted without contacting the daemon
+      - name: concurrency
+        type_hint: N
+        default: "4"
+        description: Maximum concurrent conversions for "all"
+    examples:
+      - cmd: trusty-search convert project
+      - cmd: trusty-search convert all --dry-run
+  migrate:
+    description: Migrate from another vector-search tool to trusty-search
+    args: [from]
+    flags:
+      - name: dry-run
+        description: Preview changes without modifying files
+      - name: mcp-only
+        description: Only update Claude MCP config files; skip index migration
+      - name: indexes-only
+        description: Only migrate indexes; skip MCP config file updates
+    examples:
+      - cmd: trusty-search migrate mcp-vector-search
+      - cmd: trusty-search migrate mcp-vector-search --dry-run
+  setup:
+    description: Wire trusty-search into Claude Code's settings.json files
+    examples:
+      - cmd: trusty-search setup
+  integrate:
+    description: Wire trusty-search into an IDE (Cursor, etc.)
+    args: [ide]
+    flags:
+      - name: dry-run
+        description: Preview changes without writing
+      - name: global-only
+        description: Only update the global IDE config; skip project files
+      - name: project-only
+        description: Only update project-level files; skip global config
+      - name: no-rules
+        description: Skip writing the rules file
+    examples:
+      - cmd: trusty-search integrate cursor
+      - cmd: trusty-search integrate cursor --global-only
+  doctor:
+    description: Diagnose configuration, model cache, and index health
+    flags:
+      - name: fix
+        description: Attempt to fix detected problems automatically
+    examples:
+      - cmd: trusty-search doctor
+      - cmd: trusty-search doctor --fix
+  config:
+    description: Get or set runtime daemon configuration
+    subcommands:
+      get:
+        description: Print current daemon configuration
+        args: [key]
+      set:
+        description: Update daemon configuration at runtime
+        args: [key, value]
+  monitor:
+    description: Monitor the daemon via web UI or terminal dashboard
+    subcommands:
+      web:
+        description: Print the daemon admin-panel URL and open in browser
+      tui:
+        description: Launch the ratatui dashboard
+      status:
+        description: Print daemon status as JSON or plain text
+        flags:
+          - name: json
+            description: Emit JSON
+      indexes:
+        description: List indexes, or show one when an ID is given
+        args: [id]
+        flags:
+          - name: json
+            description: Emit JSON
+  completions:
+    description: Generate shell completion script
+    args: [shell]
+    examples:
+      - cmd: trusty-search completions zsh > ~/.zsh/completions/_trusty-search

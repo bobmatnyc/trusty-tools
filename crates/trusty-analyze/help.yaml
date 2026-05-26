@@ -1,0 +1,184 @@
+# Declarative CLI help for trusty-analyze (issue #216).
+#
+# Loaded at startup by `src/main.rs` via `include_str!` so the help text ships
+# inside the binary. Mirrors the clap definitions in `src/main.rs`.
+name: trusty-analyze
+tagline: Sidecar code-analysis daemon for trusty-search (complexity, smells, quality)
+usage: trusty-analyze [OPTIONS] <COMMAND>
+commands:
+  serve:
+    description: Run the HTTP sidecar daemon
+    flags:
+      - name: foreground
+        description: Run in foreground (used by launchd service)
+      - name: port
+        type_hint: PORT
+        default: "7879"
+        description: Starting port (auto-detects upward if busy)
+      - name: mcp
+        description: Also run an MCP stdio loop on this process
+      - name: mcp-port
+        type_hint: PORT
+        description: Start MCP HTTP/SSE server on this port
+      - name: fastembed-cache
+        type_hint: PATH
+        default: .fastembed_cache
+        description: Path to the fastembed model cache
+    examples:
+      - cmd: trusty-analyze serve
+      - cmd: trusty-analyze serve --port 7879 --mcp
+  analyze:
+    description: One-shot complexity report for a registered index
+    args: [index_id]
+    flags:
+      - name: top-k
+        type_hint: N
+        default: "20"
+        description: Number of hotspots to report
+    examples:
+      - cmd: trusty-analyze analyze my-project
+  review:
+    description: Analyse a unified git diff and produce a quality review report
+    args: [diff]
+    flags:
+      - name: index-id
+        type_hint: ID
+        description: Index to cross-reference against (required)
+      - name: format
+        type_hint: FMT
+        default: json
+        description: Output format (json|text)
+    examples:
+      - cmd: git diff HEAD~1 | trusty-analyze review --index-id my-proj -
+  deep:
+    description: Run an LLM-augmented deep analysis pass against an index
+    args: [index_id]
+    flags:
+      - name: model
+        type_hint: MODEL
+        description: Optional OpenRouter model id
+      - name: format
+        type_hint: FMT
+        default: json
+        description: Output format (json|text)
+      - name: port
+        type_hint: PORT
+        default: "7879"
+        description: Analyzer daemon port
+    examples:
+      - cmd: trusty-analyze deep my-index
+  facts:
+    description: Manage facts in the analyzer store
+    subcommands:
+      list:
+        description: List all facts (optionally filtered)
+        flags:
+          - name: subject
+            type_hint: STR
+            description: Filter by subject
+          - name: predicate
+            type_hint: STR
+            description: Filter by predicate
+          - name: object
+            type_hint: STR
+            description: Filter by object
+      add:
+        description: Add (upsert) a fact
+        args: [subject, predicate, object, index_id]
+      delete:
+        description: Delete a fact by its u64 id
+        args: [id]
+  health:
+    description: Probe both daemons (trusty-search + trusty-analyze)
+    examples:
+      - cmd: trusty-analyze health
+  mcp:
+    description: Run an MCP stdio server pointed at the analyzer daemon
+    flags:
+      - name: analyzer-url
+        type_hint: URL
+        default: http://127.0.0.1:7879
+        description: Base URL of the analyzer daemon
+  dashboard:
+    description: Open the analyzer dashboard UI in the default browser (alias `dash`)
+    flags:
+      - name: port
+        type_hint: PORT
+        default: "7879"
+        description: Analyzer daemon port
+  start:
+    description: Start the daemon in the background
+    flags:
+      - name: port
+        type_hint: PORT
+        default: "7879"
+        description: Port to listen on
+    examples:
+      - cmd: trusty-analyze start
+  stop:
+    description: Stop the running daemon
+    flags:
+      - name: port
+        type_hint: PORT
+        default: "7879"
+        description: Daemon port
+    examples:
+      - cmd: trusty-analyze stop
+  status:
+    description: Show daemon status (alias `st`)
+    flags:
+      - name: port
+        type_hint: PORT
+        default: "7879"
+        description: Daemon port
+  doctor:
+    description: Diagnose configuration and environment issues
+    flags:
+      - name: port
+        type_hint: PORT
+        default: "7879"
+        description: Daemon port
+  completions:
+    description: Generate shell completion script
+    args: [shell]
+    examples:
+      - cmd: trusty-analyze completions zsh > ~/.zsh/completions/_trusty-analyze
+  service:
+    description: Manage the macOS launchd LaunchAgent
+    subcommands:
+      install:
+        description: Install and start as a launchd service
+      uninstall:
+        description: Stop and uninstall the service
+      status:
+        description: Show service status
+      logs:
+        description: Tail service logs
+  setup:
+    description: Configure integrations (Claude Code, Cursor, claude-mpm)
+    subcommands:
+      claude-code:
+        description: Write .mcp.json for Claude Code
+      cursor:
+        description: Write .cursor/mcp.json
+      claude-mpm:
+        description: Wire into claude-mpm
+      daemon:
+        description: Install the launchd plist
+      all:
+        description: Run every setup target
+  review-pr:
+    description: Fetch a GitHub PR diff and run analysis
+    args: [repo, pr]
+    flags:
+      - name: index-id
+        type_hint: ID
+        description: trusty-search index ID to cross-reference
+      - name: post-comment
+        description: Post analysis as a GitHub PR comment
+      - name: format
+        type_hint: FMT
+        default: text
+        description: Output format
+    examples:
+      - cmd: trusty-analyze review-pr bobmatnyc/trusty-tools 216 --index-id trusty-tools

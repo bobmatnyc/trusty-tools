@@ -9902,6 +9902,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tracing-test",
+ "trusty-common",
  "uuid",
  "wiremock",
 ]
@@ -10846,8 +10847,10 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2 0.10.9",
  "similar",
+ "strsim 0.11.1",
  "syn 2.0.117",
  "sysinfo",
  "tempfile",

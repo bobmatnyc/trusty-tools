@@ -1,0 +1,43 @@
+# Declarative CLI help for trusty-git-analytics / `tga` (issue #216).
+#
+# Loaded at startup by `src/main.rs` via `include_str!` so the help text ships
+# inside the binary. Mirrors the clap definitions in `src/main.rs`.
+name: tga
+tagline: trusty-git-analytics — developer productivity analytics (collect → classify → report)
+usage: tga [OPTIONS] <COMMAND>
+commands:
+  analyze:
+    description: Run the full pipeline (collect → classify → report)
+    flags:
+      - name: skip-collect
+        description: Skip collection (use existing DB data)
+      - name: skip-classify
+        description: Skip classification
+      - name: validate-only
+        description: Validate config without running
+      - name: no-validate
+        description: Skip pre-flight config validation
+    examples:
+      - cmd: tga analyze
+      - cmd: tga analyze --skip-collect
+  collect:
+    description: Stage 1 — collect commits from git repositories
+    flags:
+      - name: validate-only
+        description: Validate config without running
+      - name: no-validate
+        description: Skip pre-flight config validation
+  classify:
+    description: Stage 2 — classify collected commits
+  report:
+    description: Stage 3 — generate reports from classified commits
+  pr-metrics:
+    description: Aggregate pull-request metrics per engineer
+  install:
+    description: Interactive configuration wizard
+  aliases:
+    description: List or merge developer identities (aliases)
+  backfill:
+    description: Retroactive maintenance operations on existing commit rows
+  override:
+    description: Manage manual classification overrides (Tier 0)

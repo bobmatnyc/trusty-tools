@@ -1,0 +1,115 @@
+# Declarative CLI help for trusty-memory (issue #216).
+#
+# Loaded at startup by `src/main.rs` via `include_str!` so the help text ships
+# inside the binary. Mirrors the clap definitions in `src/main.rs`.
+name: trusty-memory
+tagline: Memory-palace MCP server + migration / inbox / KG utilities
+usage: trusty-memory [OPTIONS] <COMMAND>
+commands:
+  start:
+    description: Start the HTTP daemon in the background
+    examples:
+      - cmd: trusty-memory start
+  stop:
+    description: Stop every running trusty-memory daemon process
+    examples:
+      - cmd: trusty-memory stop
+  serve:
+    description: Run the daemon (HTTP/SSE, dynamic port selection)
+    flags:
+      - name: http
+        type_hint: ADDR
+        description: "Bind the HTTP/SSE server to a specific host:port"
+      - name: foreground
+        description: Run the HTTP daemon in the foreground (used by launchd/systemd)
+      - name: palace
+        type_hint: NAME
+        description: Default palace for MCP tool calls when caller omits palace
+    examples:
+      - cmd: trusty-memory serve
+      - cmd: trusty-memory serve --foreground --http 127.0.0.1:7070
+  migrate:
+    description: Migrate from another memory MCP server to trusty-memory
+    args: [target]
+    flags:
+      - name: dry-run
+        description: Print what would change without writing
+      - name: config-only
+        description: Parity flag with trusty-search (no-op today)
+    examples:
+      - cmd: trusty-memory migrate kuzu-memory --dry-run
+  setup:
+    description: First-time setup (data dir + launchd plist + Claude settings)
+    examples:
+      - cmd: trusty-memory setup
+  prompt-context:
+    description: Print the daemon prompt-context block (Claude Code hook)
+    examples:
+      - cmd: trusty-memory prompt-context
+  doctor:
+    description: Diagnose daemon health (fastembed cache, launchd, /health, locks)
+    examples:
+      - cmd: trusty-memory doctor
+  service:
+    description: Manage the macOS launchd LaunchAgent
+    subcommands:
+      install:
+        description: Install and start the LaunchAgent
+      uninstall:
+        description: Stop and remove the LaunchAgent
+      status:
+        description: Show LaunchAgent status
+      logs:
+        description: Tail LaunchAgent logs
+  monitor:
+    description: Monitor the daemon via web UI or terminal dashboard
+    subcommands:
+      web:
+        description: Print the daemon admin-panel URL
+      tui:
+        description: Launch the ratatui dashboard
+      status:
+        description: Print daemon status as JSON or plain text
+        flags:
+          - name: json
+            description: Emit JSON
+      palaces:
+        description: List palaces, or show one when an ID is given
+        args: [id]
+        flags:
+          - name: json
+            description: Emit JSON
+  send-message:
+    description: Send an inter-project message to another palace
+    flags:
+      - name: to
+        type_hint: PALACE
+        description: Recipient palace id (repo slug) — required
+      - name: purpose
+        type_hint: PURPOSE
+        description: Free-text purpose (e.g. task, notify, reply)
+      - name: content
+        type_hint: TEXT
+        description: Message body (plain text)
+      - name: from
+        type_hint: PALACE
+        description: Sender palace id (defaults to cwd-derived slug)
+    examples:
+      - cmd: trusty-memory send-message --to claude-mpm --purpose task --content "Refresh schema"
+  inbox-check:
+    description: Pick up unread inter-project messages for this project
+    flags:
+      - name: palace
+        type_hint: PALACE
+        description: Receiver palace id (defaults to cwd-derived slug)
+    examples:
+      - cmd: trusty-memory inbox-check
+  kg-rebuild:
+    description: Re-run auto-KG extraction across every drawer in a palace
+    flags:
+      - name: palace
+        type_hint: ID
+        description: Restrict the rebuild to one palace (otherwise all palaces)
+    examples:
+      - cmd: trusty-memory kg-rebuild
+      - cmd: trusty-memory kg-rebuild --palace default

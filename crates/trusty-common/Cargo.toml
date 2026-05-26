@@ -125,6 +125,13 @@ base64 = { workspace = true, optional = true }
 # Optional: enabled by the `tickets` feature for config-file parsing.
 toml = { version = "0.8", optional = true }
 
+# Optional: enabled by the `cli-help` feature. Declarative help-config parsing
+# (YAML → `HelpConfig`) plus the "did you mean?" suggester for unknown
+# subcommands. Kept off by default so library consumers that only want the
+# chat / mcp / symgraph surfaces don't pay the parse cost.
+serde_yaml = { workspace = true, optional = true }
+strsim = { workspace = true, optional = true }
+
 # launchd module is macOS-only and needs getuid(2) for the gui/<uid> domain.
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = { workspace = true }
@@ -328,3 +335,10 @@ embedder-client = ["dep:thiserror", "embedder"]
 # crate). Pulls in `chrono`, `uuid`, `base64`, `thiserror`, and `toml` as
 # additional optional deps. Requires the `mcp` feature for the stdio loop.
 tickets = ["mcp", "dep:chrono", "dep:uuid", "dep:base64", "dep:thiserror", "dep:toml"]
+# Enables the `help` module: declarative CLI help loader (`HelpConfig` parsed
+# from a per-binary `help.yaml` bundled via `include_str!`), the canonical
+# `render_help` formatter, and a Jaro-Winkler-based `suggest("did you mean?")`
+# helper consumed by each binary's unknown-subcommand error path. Pulls in
+# `serde_yaml`, `strsim`, `indexmap`, and `thiserror` (all otherwise optional).
+# Issue #216.
+cli-help = ["dep:serde_yaml", "dep:strsim", "dep:indexmap", "dep:thiserror"]

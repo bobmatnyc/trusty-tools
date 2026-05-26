@@ -225,6 +225,21 @@ pub mod memory_core;
 #[cfg(feature = "tickets")]
 pub mod tickets;
 
+/// Declarative CLI help system with "did you mean?" suggestions (issue #216).
+///
+/// Why: every standalone trusty-* binary used to render its `--help` and
+/// unknown-subcommand error output independently, so the formats drifted
+/// apart over time. Centralising the help model into one YAML schema, one
+/// canonical renderer, and one Jaro-Winkler suggester keeps the six binaries
+/// (search, memory, analyze, mpm-cli, tga, open-mpm) speaking with a single
+/// user-facing voice.
+/// What: gated behind the `cli-help` feature. Pulls in `serde_yaml`, `strsim`,
+/// and `indexmap`. Exposes `HelpConfig` / `CommandDef` / `FlagDef` / `Example`
+/// + `load_help` / `render_help` / `suggest`.
+/// Test: `cargo test -p trusty-common --features cli-help`.
+#[cfg(feature = "cli-help")]
+pub mod help;
+
 /// Unified monitor TUI for the trusty-search and trusty-memory daemons
 /// (formerly the `trusty-monitor-tui` crate).
 ///

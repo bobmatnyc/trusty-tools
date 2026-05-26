@@ -751,10 +751,48 @@ async fn main() {
     }
 }
 
+/// Bundled declarative help config (issue #216). Loaded once per process.
+///
+/// Why: every binary in the workspace embeds its `help.yaml` via
+/// `include_str!` so the suggester + render layer stays self-contained — no
+/// runtime file I/O, no version skew between a compiled binary and an
+/// out-of-tree YAML file.
+/// What: `LazyLock<HelpConfig>` parsed from `help.yaml` at first access.
+/// `expect` is acceptable here because the YAML is shipped inside the
+/// binary; a parse failure is a programmer error caught on first run.
+/// Test: `cargo test -p trusty-common --features cli-help` covers the
+/// shared loader; CLI wiring is exercised manually via `trusty-search qury`.
+static HELP: std::sync::LazyLock<trusty_common::help::HelpConfig> =
+    std::sync::LazyLock::new(|| {
+        trusty_common::help::load_help(include_str!("../help.yaml"))
+            .expect("trusty-search help.yaml is bundled and valid")
+    });
+
 async fn run() -> Result<()> {
     dotenvy::from_filename(".env.local").ok();
 
-    let cli = Cli::parse();
+    // Why: parse via `try_parse` so we can attach the workspace-shared
+    // "did you mean?" suggestion to clap's standard error rendering before
+    // exiting (issue #216). On success the parse is indistinguishable from
+    // the original `Cli::parse()` call.
+    let argv: Vec<String> = std::env::args().collect();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            // Let clap render its own helpful error first so the user sees
+            // the unrecognised-token message in the format they already know.
+            e.print().ok();
+            // Then layer on the workspace-shared "did you mean?" suggestion
+            // when the input looks like an unknown subcommand or argument.
+            if matches!(
+                e.kind(),
+                clap::error::ErrorKind::InvalidSubcommand | clap::error::ErrorKind::UnknownArgument
+            ) {
+                trusty_common::help::print_suggestion_hint(&argv, &HELP);
+            }
+            std::process::exit(e.exit_code());
+        }
+    };
 
     // Tracing init + NO_COLOR handling via shared trusty-common helpers.
     //

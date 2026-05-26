@@ -3,6 +3,11 @@ name = "tga"
 version = "1.0.16"
 publish = true
 edition = "2021"
+# Required for `std::sync::LazyLock` used by the shared CLI help wiring
+# (issue #216). tga doesn't need let-chains, so the workspace MSRV (1.88)
+# is intentionally not adopted here — bumping further would expose newer
+# clippy lints unrelated to this change.
+rust-version = "1.80"
 authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 license = "Elastic-2.0"
 repository = "https://github.com/bobmatnyc/trusty-tools"
@@ -24,6 +29,10 @@ name = "tga"
 path = "src/main.rs"
 
 [dependencies]
+# Shared CLI help system (issue #216): declarative `help.yaml` loader +
+# Jaro-Winkler "did you mean?" suggester. Only the `cli-help` feature is
+# enabled; tga is otherwise independent of trusty-common.
+trusty-common = { workspace = true, features = ["cli-help"] }
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 # CLI

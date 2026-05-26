@@ -384,9 +384,38 @@ struct EventRow {
     payload: serde_json::Value,
 }
 
+/// Bundled declarative help config (issue #216). Loaded once per process.
+///
+/// Why: every binary in the workspace embeds its `help.yaml` via
+/// `include_str!` so the workspace-shared `trusty_common::help::suggest`
+/// helper can propose corrections for typos in unknown subcommands.
+/// What: `LazyLock<HelpConfig>` parsed from `help.yaml` at first access.
+/// Test: parse coverage lives in `trusty-common`; this site is exercised
+/// manually via `tm staus`.
+static HELP: std::sync::LazyLock<trusty_common::help::HelpConfig> =
+    std::sync::LazyLock::new(|| {
+        trusty_common::help::load_help(include_str!("../../help.yaml"))
+            .expect("trusty-mpm help.yaml is bundled and valid")
+    });
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    // Why: parse via `try_parse` so we can attach the workspace-shared
+    // "did you mean?" suggestion (issue #216) before exiting on a clap error.
+    let argv: Vec<String> = std::env::args().collect();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            e.print().ok();
+            if matches!(
+                e.kind(),
+                clap::error::ErrorKind::InvalidSubcommand | clap::error::ErrorKind::UnknownArgument
+            ) {
+                trusty_common::help::print_suggestion_hint(&argv, &HELP);
+            }
+            std::process::exit(e.exit_code());
+        }
+    };
 
     // Long-running modes need tracing on stderr (the daemon's MCP mode speaks
     // JSON-RPC on stdout, so all logs must stay off stdout).

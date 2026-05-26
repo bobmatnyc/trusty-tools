@@ -56,7 +56,7 @@ name = "trusty-bm25-daemon"
 path = "src/bin/bm25_daemon.rs"
 
 [dependencies]
-trusty-common = { path = "../trusty-common", version = "0.6.0", features = ["axum-server", "mcp", "memory-core", "monitor-tui", "bm25-client"] }
+trusty-common = { path = "../trusty-common", version = "0.6.0", features = ["axum-server", "mcp", "memory-core", "monitor-tui", "bm25-client", "cli-help"] }
 # Why: declaring trusty-bm25-daemon as a Cargo dependency causes `cargo install
 #      trusty-memory` to also build and install the daemon binary alongside
 #      trusty-memory — one install command, three binaries. The shim at

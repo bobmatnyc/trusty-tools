@@ -81,6 +81,25 @@ use chrono;
 use clap::Parser;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
+/// Bundled declarative help config (issue #216). Loaded once per process.
+///
+/// Why: every standalone trusty-* binary embeds its `help.yaml` via
+/// `include_str!` so the workspace-shared `trusty_common::help::suggest`
+/// helper has a single source of truth for unknown-subcommand hints. The
+/// native `cli::did_you_mean` path that scans `KNOWN_SUBCOMMANDS` still runs
+/// first for the common-case typos; this static covers the residual cases
+/// the clap layer reports as `InvalidSubcommand` / `UnknownArgument`.
+/// What: `LazyLock<HelpConfig>` parsed from `crates/open-mpm/help.yaml` at
+/// first access. `expect` is acceptable because the YAML is shipped inside
+/// the binary; a parse failure would be caught on the first invocation.
+/// Test: parse coverage lives in `trusty-common`; this site is exercised
+/// manually via `open-mpm memori`.
+static HELP: std::sync::LazyLock<trusty_common::help::HelpConfig> =
+    std::sync::LazyLock::new(|| {
+        trusty_common::help::load_help(include_str!("../help.yaml"))
+            .expect("open-mpm help.yaml is bundled and valid")
+    });
+
 /// Top-level clap CLI for the `open-mpm` binary.
 ///
 /// Why: Replaces 200+ lines of hand-rolled `args.iter().any(...)` /
@@ -858,7 +877,28 @@ pub async fn run() -> Result<()> {
     // so the dispatch below can read fields off `cli` instead of rescanning
     // argv five different ways. We use `try_parse_from` so a parse error
     // returns a friendly clap-rendered message instead of panicking.
-    let cli = Cli::try_parse_from(&args).map_err(|e| anyhow::anyhow!("{e}"))?;
+    //
+    // Issue #216: when the parse fails on an unknown subcommand or unknown
+    // argument, attach the workspace-shared `trusty_common::help` suggester
+    // hint. The native open-mpm `cli::did_you_mean` path above
+    // (KNOWN_SUBCOMMANDS scan) catches the common typos before we reach
+    // here; this layer covers residual cases that don't match
+    // `KNOWN_SUBCOMMANDS` but do match the declarative `help.yaml`.
+    let cli = match Cli::try_parse_from(&args) {
+        Ok(cli) => cli,
+        Err(e) => {
+            let kind = e.kind();
+            if matches!(
+                kind,
+                clap::error::ErrorKind::InvalidSubcommand | clap::error::ErrorKind::UnknownArgument
+            ) {
+                eprintln!("{e}");
+                trusty_common::help::print_suggestion_hint(&args, &HELP);
+                std::process::exit(e.exit_code());
+            }
+            return Err(anyhow::anyhow!("{e}"));
+        }
+    };
 
     // #344: Slash-command passthrough. When the first positional token is a
     // slash command (e.g. `open-mpm /service start`, `open-mpm /help`,
