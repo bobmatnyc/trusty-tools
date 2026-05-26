@@ -27,6 +27,20 @@ crate-type = ["rlib"]
 name = "trusty-memory"
 path = "src/main.rs"
 
+[[bin]]
+# Why: Multi-transport refactor — Claude Code launches MCP servers as
+#      stdio child processes, but the trusty-memory daemon owns the redb
+#      locks and must not be re-spawned per session. The bridge is a
+#      ~40-line byte pipe between Claude Code's stdio and the daemon's
+#      Unix domain socket. The bridge MUST NEVER open redb — it has no
+#      database knowledge whatsoever, only `tokio::io::copy_bidirectional`
+#      between stdin/stdout and the socket.
+# What: standalone binary; depends on the library for the socket path
+#      resolution helper and nothing else.
+# Test: `bridge_byte_pipe_smoke` in tests/uds_roundtrip.rs.
+name = "trusty-memory-mcp-bridge"
+path = "src/bin/mcp_bridge.rs"
+
 [dependencies]
 trusty-common = { path = "../trusty-common", version = "0.4.22", features = ["axum-server", "mcp", "memory-core", "monitor-tui"] }
 tokio = { workspace = true }

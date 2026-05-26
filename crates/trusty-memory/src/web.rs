@@ -138,6 +138,12 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/activity", get(activity_handler))
         .route("/api/v1/activity/hook", post(hook_activity_handler))
         .route("/api/v1/admin/stop", post(admin_stop))
+        // Multi-transport refactor: a single JSON-RPC 2.0 endpoint that
+        // accepts the same envelopes the UDS transport speaks. Lets
+        // browser clients, curl, and the stdio bridge fallback hit the
+        // tool surface without learning the REST routes. The REST
+        // routes above remain for backwards compatibility.
+        .route("/rpc", post(rpc_handler))
         .fallback(static_handler);
 
     trusty_common::server::with_standard_middleware(router)
@@ -578,6 +584,30 @@ async fn hook_activity_handler(
         source: ActivitySource::Hook,
     });
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /rpc` — JSON-RPC 2.0 dispatch endpoint.
+///
+/// Why: the multi-transport refactor needs a single HTTP route that
+/// accepts the same envelopes the UDS transport speaks. Browser
+/// clients that want the new tool surface (or third-party scripts
+/// that prefer JSON-RPC to REST) can POST a request envelope here
+/// and get a response back without learning the per-tool REST
+/// vocabulary. The existing `/api/v1/*` REST routes continue to work
+/// unchanged — this is purely additive.
+/// What: deserialises a [`JsonRpcRequest`] from the request body,
+/// calls [`crate::transport::rpc::dispatch`], and returns the
+/// [`JsonRpcResponse`] as JSON. Always returns HTTP 200 with the
+/// envelope inside (JSON-RPC errors are carried in the `error`
+/// field, not the HTTP status). Returns HTTP 400 only on JSON
+/// deserialisation failure of the outer envelope.
+/// Test: `http_rpc_endpoint_roundtrip` in `web::tests`.
+async fn rpc_handler(
+    State(state): State<AppState>,
+    Json(req): Json<crate::transport::rpc::JsonRpcRequest>,
+) -> Json<crate::transport::rpc::JsonRpcResponse> {
+    let resp = crate::transport::rpc::dispatch(&state, req).await;
+    Json(resp)
 }
 
 /// Extract a [`CreatorInfo`] for an HTTP write request.

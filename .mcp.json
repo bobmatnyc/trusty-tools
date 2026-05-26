@@ -17,13 +17,8 @@
     },
     "trusty-memory": {
       "type": "stdio",
-      "command": "trusty-memory",
-      "args": [
-        "serve",
-        "--stdio",
-        "--palace",
-        "trusty-tools"
-      ]
+      "command": "trusty-memory-mcp-bridge",
+      "args": []
     }
   }
 }

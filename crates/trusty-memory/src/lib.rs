@@ -34,6 +34,7 @@ pub mod prompt_facts;
 pub mod prompt_log;
 pub mod service;
 pub mod tools;
+pub mod transport;
 pub mod web;
 
 pub use activity::{ActivityEntry, ActivityFilter, ActivityLog, ActivitySource};
@@ -1083,6 +1084,14 @@ pub async fn run_http_on(state: AppState, listener: tokio::net::TcpListener) -> 
         None
     };
 
+    // Multi-transport refactor: bind the Unix domain socket alongside
+    // the HTTP listener. The UDS serves NDJSON JSON-RPC 2.0 for the
+    // `trusty-memory-mcp-bridge` binary (and any local CLI that wants
+    // to skip HTTP overhead). Failures are logged but never block the
+    // HTTP server from coming up — UDS is best-effort on hosts where
+    // it's unsupported (e.g. some Docker overlays).
+    let uds_sock_path = spawn_uds_listener(state.clone()).await;
+
     let app = web::router()
         .route("/sse", get(sse_handler))
         .with_state(state);
@@ -1094,9 +1103,62 @@ pub async fn run_http_on(state: AppState, listener: tokio::net::TcpListener) -> 
     if let Some(p) = written_path.as_ref() {
         let _ = std::fs::remove_file(p);
     }
+    if let Some(p) = uds_sock_path.as_ref() {
+        let _ = std::fs::remove_file(p);
+    }
 
     serve_result?;
     Ok(())
+}
+
+/// Spawn the UDS accept loop alongside the HTTP server.
+///
+/// Why: UDS is an additive transport — failing to bind it (unusual
+/// $TMPDIR layout, permission error on macOS) should not block the
+/// HTTP daemon from coming up. Logging the failure and returning
+/// `None` lets the caller skip cleanup later.
+/// What: resolves [`transport::uds::socket_path`], cleans any stale
+/// file, binds, writes the `<data_root>/uds_addr` discovery file, and
+/// spawns the accept loop on a background tokio task. Returns the
+/// bound path so the caller can clean it up on shutdown.
+/// Test: covered by `uds_ndjson_roundtrip` in the integration tests
+/// and the unit tests in [`transport::uds`].
+async fn spawn_uds_listener(state: AppState) -> Option<PathBuf> {
+    // Use a data-root-scoped socket path so multiple daemons (typical
+    // in tests) don't collide on the shared `$TMPDIR/trusty-memory.sock`.
+    // Production daemons (those rooted at the canonical data dir) still
+    // get the canonical socket path so the bridge can find it without
+    // reading the discovery file.
+    let sock_path = transport::uds::socket_path_for(&state.data_root);
+    let listener = match transport::uds::bind_uds(&sock_path).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!(
+                "UDS bind at {} failed: {e:#}; continuing without UDS transport",
+                sock_path.display()
+            );
+            return None;
+        }
+    };
+    info!("UDS listener bound at {}", sock_path.display());
+    eprintln!("UDS listener bound at {}", sock_path.display());
+    // Best-effort: write the address discovery file so the bridge can
+    // find the live socket even when the daemon was started with an
+    // unusual $TMPDIR.
+    if let Err(e) = transport::uds::write_uds_addr_file(&state.data_root, &sock_path) {
+        tracing::warn!(
+            "could not write {}/{}: {e:#}",
+            state.data_root.display(),
+            transport::uds::UDS_ADDR_FILE
+        );
+    }
+    let task_state = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = transport::uds::run_uds(task_state, listener).await {
+            tracing::error!("UDS accept loop exited: {e:#}");
+        }
+    });
+    Some(sock_path)
 }
 
 /// Convenience: bind `addr` and serve via [`run_http_on`].
@@ -1557,12 +1619,15 @@ mod tests {
     /// What: under a stubbed data dir, the path ends in
     /// `trusty-memory/http_addr` — matching `trusty_common::read_daemon_addr`'s
     /// expected location.
-    #[test]
-    fn http_addr_path_uses_resolve_data_dir() {
+    #[tokio::test]
+    async fn http_addr_path_uses_resolve_data_dir() {
+        // Hold the env_test_lock so this test does not race with
+        // `prompt_context::tests::*` which spin a real daemon under
+        // the same env override and would otherwise observe a
+        // half-mutated $TRUSTY_DATA_DIR_OVERRIDE.
+        let _guard = crate::commands::env_test_lock().lock().await;
         let tmp = tempfile::tempdir().unwrap();
-        // Pin the data directory so we don't depend on the real HOME / XDG.
-        // SAFETY: single-threaded test; TRUSTY_DATA_DIR_OVERRIDE is a
-        // test-only convention documented in trusty-common.
+        // SAFETY: test-only env mutation serialised by env_test_lock.
         unsafe {
             std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, tmp.path());
         }
