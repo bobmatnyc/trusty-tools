@@ -388,9 +388,6 @@
       {/if}
       <span class="badge badge-muted">{counts.node_count} nodes</span>
       <span class="badge badge-muted">{counts.edge_count} edges</span>
-      {#if counts.community_count > 0}
-        <span class="badge badge-muted">{counts.community_count} communities</span>
-      {/if}
       {#if loadElapsedMs > 0 && !loading}
         <span class="badge badge-muted" title="API + layout time">
           loaded in {loadElapsedMs}ms

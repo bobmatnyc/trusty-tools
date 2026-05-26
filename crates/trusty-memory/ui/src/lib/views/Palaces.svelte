@@ -397,11 +397,6 @@
           <span class="badge badge-graph" title="KG edges">
             {p.edge_count ?? 0} edges
           </span>
-          {#if (p.community_count ?? 0) > 0}
-            <span class="badge badge-graph" title="Louvain communities">
-              {p.community_count} communities
-            </span>
-          {/if}
         </span>
       </button>
       <!-- Sibling of the row button so we don't nest <button> inside

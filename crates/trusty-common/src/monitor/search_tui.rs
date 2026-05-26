@@ -1099,8 +1099,7 @@ pub fn stats_lines(state: &SearchTuiState) -> Vec<String> {
             // Graph stats section — always shown so users know whether the
             // daemon has built a symbol graph for this index. When
             // `node_count == 0` we surface a hint to reindex; otherwise we
-            // emit the full nodes/edges breakdown, edge-kind bars, and (if
-            // present) the communities subsection.
+            // emit the full nodes/edges breakdown and edge-kind bars.
             lines.push(String::new());
             lines.push("Graph:".to_string());
             if idx.node_count == 0 {
@@ -1127,14 +1126,6 @@ pub fn stats_lines(state: &SearchTuiState) -> Vec<String> {
                             bar,
                         ));
                     }
-                }
-                if idx.community_count > 0 {
-                    lines.push(String::new());
-                    lines.push("Communities:".to_string());
-                    lines.push(format!(
-                        "  Count: {}  Modularity: {:.3}",
-                        idx.community_count, idx.modularity,
-                    ));
                 }
             }
             lines
@@ -1554,8 +1545,8 @@ mod tests {
     #[test]
     fn test_stats_lines_graph_section() {
         // An index with non-zero node_count should produce a Graph section
-        // including the nodes/edges line and a Communities section when
-        // community_count is positive.
+        // including the nodes/edges line and edge-kind bars. The Communities
+        // display was retired; the underlying fields stay on the data model.
         let mut state = sample_state();
         state.indexes[0].node_count = 4_821;
         state.indexes[0].edge_count = 12_034;
@@ -1575,11 +1566,9 @@ mod tests {
                 .any(|l| l.contains("Nodes:") && l.contains("4,821") && l.contains("Edges:"))
         );
         assert!(lines.iter().any(|l| l.contains("CallsFunction")));
-        assert!(lines.iter().any(|l| l == "Communities:"));
         assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("Count: 47") && l.contains("Modularity: 0.712"))
+            !lines.iter().any(|l| l.contains("Communities")),
+            "Communities display must not surface in the stats panel"
         );
     }
 
@@ -1587,8 +1576,8 @@ mod tests {
     fn test_stats_lines_no_graph_section() {
         // An index with node_count == 0 should still produce a Graph section
         // header, but the body collapses to a single hint line — and the
-        // full breakdown (Nodes/Edges, Communities) must remain hidden so
-        // the spurious edge/community counters don't leak into the UI.
+        // Nodes/Edges breakdown must remain hidden so the spurious edge
+        // counters don't leak into the UI.
         let mut state = sample_state();
         state.indexes[0].node_count = 0;
         state.indexes[0].edge_count = 100; // ignored without nodes
@@ -1606,8 +1595,8 @@ mod tests {
             "empty-graph hint should appear when node_count == 0"
         );
         assert!(
-            !lines.iter().any(|l| l == "Communities:"),
-            "Communities section must stay hidden without nodes"
+            !lines.iter().any(|l| l.contains("Communities")),
+            "Communities display was retired and must not surface"
         );
         assert!(
             !lines.iter().any(|l| l.contains("Nodes:")),

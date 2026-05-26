@@ -1411,7 +1411,6 @@ pub fn stats_lines(state: &MemoryTuiState) -> Vec<String> {
                 "Knowledge Graph".to_string(),
                 format!("  Nodes:        {}", format_count(palace.node_count)),
                 format!("  Edges:        {}", format_count(palace.edge_count)),
-                format!("  Communities:  {}", format_count(palace.community_count)),
                 format!("  Triples:      {}", format_count(palace.kg_triple_count)),
                 String::new(),
             ];
@@ -2640,7 +2639,6 @@ mod tests {
         assert!(joined.contains("4,321"));
         assert!(joined.contains("Edges:"));
         assert!(joined.contains("12.3k"));
-        assert!(joined.contains("Communities:"));
         assert!(joined.contains("Triples:"));
         assert!(joined.contains("567"));
         assert!(joined.contains("Last write:"));

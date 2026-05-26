@@ -1968,10 +1968,10 @@ pub fn format_with_commas(n: u64) -> String {
 /// drawers, knowledge-graph triples, and the last-write time — rather than
 /// the search-index stats `index_tab_lines` was originally built for.
 /// What: returns a header section (`Vectors` / `Drawers` / `Wings`), a Graph
-/// section (`Triples` / `Communities` / `Nodes` / `Edges` — the latter two
-/// are best-effort and read from the row's KG-side fields if present), and
-/// a freshness section (`Last write`). Numbers are comma-grouped for
-/// readability; missing data renders as `N/A`.
+/// section (`Triples` / `Nodes` / `Edges` — the latter two are best-effort
+/// and read from the row's KG-side fields if present), and a freshness
+/// section (`Last write`). Numbers are comma-grouped for readability;
+/// missing data renders as `N/A`.
 /// Test: `palace_index_tab_lines_shows_graph_section`,
 /// `palace_index_tab_lines_formats_last_write`.
 pub fn palace_index_tab_lines(row: &CollectionRow) -> Vec<String> {
@@ -2006,12 +2006,6 @@ pub fn palace_index_tab_lines(row: &CollectionRow) -> Vec<String> {
         "Nodes:      {:<12} Edges: {}",
         node_cell, edge_cell,
     ));
-    let community_cell = if row.community_count == 0 {
-        "N/A".to_string()
-    } else {
-        format_with_commas(row.community_count)
-    };
-    lines.push(format!("Communities: {community_cell}"));
     lines.push(String::new());
 
     // Freshness section: last write timestamp + activity state.
@@ -2045,11 +2039,10 @@ pub fn palace_index_tab_lines(row: &CollectionRow) -> Vec<String> {
 /// Why: keeping the body builder pure lets a unit test assert the rendered
 /// content without a terminal backend; the per-row stats live on the
 /// [`CollectionRow`] so the renderer reads directly from the screen.
-/// What: returns a header (`Chunks` / `Disk` / `Last index` / `Context`),
-/// a Graph section (`Nodes` / `Edges` + one bar per edge kind, scaled to the
-/// largest kind with `MAX_BAR_WIDTH` blocks), and a Communities section
-/// (`Count` / `Modularity`). If no collection is selected (or the list is
-/// empty), returns a single placeholder line.
+/// What: returns a header (`Chunks` / `Disk` / `Last index` / `Context`)
+/// and a Graph section (`Nodes` / `Edges` + one bar per edge kind, scaled to
+/// the largest kind with `MAX_BAR_WIDTH` blocks). If no collection is
+/// selected (or the list is empty), returns a single placeholder line.
 /// Test: `index_tab_lines_show_graph_stats`,
 /// `index_tab_lines_show_edge_kind_bars`,
 /// `index_tab_lines_empty_when_no_selection`.
@@ -2121,14 +2114,6 @@ pub fn index_tab_lines(screen: &HealthScreen) -> Vec<String> {
         let bar = ascii_bar(ratio, MAX_BAR_WIDTH);
         lines.push(format!("{:<16} {:>6}  {bar}", name, format_count(*count)));
     }
-    lines.push(String::new());
-
-    // Communities section.
-    lines.push("-- Communities ----------------------------------------".to_string());
-    lines.push(format!(
-        "Count:      {:<10} Modularity: {:.3}",
-        row.community_count, row.modularity,
-    ));
 
     lines
 }
@@ -2953,10 +2938,15 @@ mod tests {
                 .iter()
                 .any(|l| l.contains("Nodes:") && l.contains("Edges:"))
         );
+        // The Communities display (`Count:` / `Modularity:` row) was retired;
+        // the data still flows on the row but must not render in the UI.
         assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("Count:") && l.contains("Modularity") && l.contains("0.712"))
+            !lines.iter().any(|l| l.contains("Modularity")),
+            "Modularity must not appear in the index tab"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("Communities")),
+            "Communities section must not appear in the index tab"
         );
     }
 
@@ -3245,17 +3235,17 @@ mod tests {
                 .iter()
                 .any(|l| l.contains("Triples:") && l.contains("6,789"))
         );
-        // Without graph nodes/edges/communities on the wire, those slots
-        // render as N/A rather than 0 so the operator knows they were absent.
+        // Without graph nodes/edges on the wire, those slots render as N/A
+        // rather than 0 so the operator knows they were absent.
         assert!(
             lines
                 .iter()
                 .any(|l| l.contains("Nodes:") && l.contains("N/A"))
         );
+        // The Communities display was retired; verify it no longer surfaces.
         assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("Communities:") && l.contains("N/A"))
+            !lines.iter().any(|l| l.contains("Communities")),
+            "Communities display must not appear in palace index tab"
         );
         assert!(lines.iter().any(|l| l.contains("Activity")));
         assert!(lines.iter().any(|l| l.starts_with("State:")));
