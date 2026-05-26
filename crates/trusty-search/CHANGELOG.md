@@ -7,7 +7,7 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
-## [Unreleased]
+## [0.12.0] — 2026-05-26
 
 ### Added
 
@@ -17,6 +17,12 @@ Versions correspond to `Cargo.toml` patch releases.
   Default behaviour (unset, `local`, or `in-process`) is unchanged.
   The startup log now always prints `embedder: in-process` or
   `embedder: remote <url>` so operators can confirm the active mode.
+
+  New companion crates (v0.1.0, MIT):
+  - `trusty-embedder-client` — `EmbedderClient` trait + JSON/HTTP wire types,
+    `InProcessEmbedderClient` (default), and `RemoteEmbedderClient`
+  - `trusty-embedderd` — standalone daemon that loads `AllMiniLML6V2(Q)` once
+    and serves `POST /embed` + `GET /health` (clap CLI + axum HTTP, stderr logging)
 
 ---
 

@@ -38,7 +38,7 @@ include = [
 # (absorbed from the former `trusty-memory-core` crate in #5 phase 2d).
 trusty-common = { workspace = true, features = ["mcp", "symgraph-parser", "memory-core"] }
 trusty-memory = { path = "../trusty-memory", version = "0.5.1" }
-trusty-search = { path = "../trusty-search", version = "0.11.0" }
+trusty-search = { path = "../trusty-search", version = "0.12.0" }
 tokio = { version = "1", features = ["full"] }
 async-openai = "0.30"
 serde = { version = "1", features = ["derive"] }
