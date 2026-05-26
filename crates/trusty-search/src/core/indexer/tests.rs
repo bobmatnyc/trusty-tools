@@ -1016,29 +1016,33 @@ async fn test_struct_definition_boost_surfaces_struct_over_usage() {
     // behind `retrieval.rs` and `mmr.rs`.
     //
     // Combined fix:
-    //   1. #119 classifies the query as Definition (via the new ALL-CAPS
-    //      acronym hint).
+    //   1. #119 classifies short acronym queries (≤2 tokens) as Definition
+    //      via the ALL-CAPS acronym hint.
     //   2. The structural boost in `apply_score_adjustments` multiplies
     //      the score of any Struct/Enum/Class/Trait chunk whose
     //      `function_name` matches a query token by `STRUCT_DEFINITION_BOOST`.
     //
-    // What: build a corpus with one declaration chunk (Struct, name
-    // `HnswStore`, in `hnsw_store.rs`) plus three usage chunks
-    // (`retrieval.rs`, `mmr.rs`, `search.rs`) that mention `HNSW` heavily
-    // but are typed as plain `Code` chunks. Run the canonical benchmark
-    // query and assert the declaration ranks in the top 3 (acceptance
-    // criterion from the ticket).
+    // Updated for issue #197: the original `HNSW vector similarity search`
+    // query no longer routes to Definition (the token-count guard suppresses
+    // ACRONYM_HINT_RE for multi-word NL-heavy queries) — it now reads as a
+    // Conceptual query, which is the correct semantic intent. The
+    // Definition structural-boost path is still exercised here by the
+    // shorter 2-token acronym query `HNSW lookup`, which preserves the
+    // #117 acceptance criterion: `hnsw_store.rs` (canonical struct decl)
+    // must outrank usage sites for a Definition-intent acronym query.
     // Test: this test.
     use crate::core::chunker::ChunkType;
     use crate::core::classifier::{QueryClassifier, QueryIntent};
 
-    // Sanity: the query must classify as Definition. The acronym-hint rule
-    // from #119 is what makes this true; if it ever regresses, the test
-    // should fail loudly here rather than in the ranking assertion below.
+    // Sanity: the (short, 2-token) query must classify as Definition. The
+    // acronym-hint rule from #119, gated by the #197 token-count guard,
+    // is what makes this true; if it regresses, the test should fail loudly
+    // here rather than in the ranking assertion below.
     assert_eq!(
-        QueryClassifier::classify("HNSW vector similarity search"),
+        QueryClassifier::classify("HNSW lookup"),
         QueryIntent::Definition,
-        "test pre-condition: ALL-CAPS acronym must classify as Definition (#119)"
+        "test pre-condition: short ALL-CAPS acronym query must classify as \
+         Definition (#119 + #197 short-query carve-out)"
     );
 
     let idx = make_indexer();
@@ -1055,36 +1059,36 @@ async fn test_struct_definition_boost_surfaces_struct_over_usage() {
     .await
     .unwrap();
     // 2-4) Three usage chunks in plausible-looking files. They mention
-    //      `HNSW` and the other query tokens enough to dominate BM25 if
-    //      left unboosted (and on v0.8.1 they did exactly that).
+    //      `HNSW` heavily so the BM25 lane would otherwise rank them
+    //      above the declaration (the #117 failure mode).
     idx.add_chunk(raw(
         "use:1",
         "src/retrieval.rs",
-        "// HNSW vector similarity search\n\
-         // Uses HNSW to retrieve top-k vectors with cosine similarity.\n\
-         // HNSW lookup HNSW lookup HNSW search HNSW search HNSW HNSW vector vector similarity similarity",
+        "// HNSW lookup path.\n\
+         // Uses HNSW to retrieve top-k vectors.\n\
+         // HNSW lookup HNSW lookup HNSW HNSW HNSW HNSW HNSW HNSW HNSW HNSW",
     ))
     .await
     .unwrap();
     idx.add_chunk(raw(
         "use:2",
         "src/mmr.rs",
-        "// MMR diversity reranker over HNSW vector similarity search results.\n\
-         // HNSW HNSW HNSW vector similarity similarity search search lambda lambda",
+        "// MMR diversity reranker over HNSW lookup results.\n\
+         // HNSW HNSW HNSW lookup lookup lookup HNSW HNSW HNSW",
     ))
     .await
     .unwrap();
     idx.add_chunk(raw(
         "use:3",
         "src/search.rs",
-        "// Top-level hybrid search: BM25 lane + HNSW vector similarity search lane.\n\
-         // HNSW HNSW vector vector similarity similarity search search RRF fuse fuse",
+        "// Top-level hybrid search: BM25 lane + HNSW lookup lane.\n\
+         // HNSW HNSW HNSW lookup lookup HNSW HNSW lookup HNSW",
     ))
     .await
     .unwrap();
 
     let q = SearchQuery {
-        text: "HNSW vector similarity search".to_string(),
+        text: "HNSW lookup".to_string(),
         top_k: 10,
         expand_graph: false,
         compact: false,
@@ -1096,7 +1100,8 @@ async fn test_struct_definition_boost_surfaces_struct_over_usage() {
     assert!(
         top3_files.contains(&"src/hnsw_store.rs"),
         "issue #117 acceptance: hnsw_store.rs must rank in top-3 for \
-         the canonical query; got top-3 files = {top3_files:?}, full ranking = {:?}",
+         the canonical acronym query; got top-3 files = {top3_files:?}, \
+         full ranking = {:?}",
         results
             .iter()
             .map(|c| (c.file.as_str(), c.score))

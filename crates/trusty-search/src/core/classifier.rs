@@ -268,11 +268,29 @@ impl QueryClassifier {
         // Word-boundary anchored so a query containing the acronym as a
         // substring of a larger word (`URLParser` — already matched by
         // `pascal_ident_re` above) doesn't re-fire here.
+        //
+        // Token-count guard (issue #197): only fire when the query is short
+        // (≤2 tokens) OR has no natural-language (lowercase-leading) tokens.
+        // Multi-word queries with both an ALL_CAPS acronym AND lowercase NL
+        // words (e.g. "HNSW vector similarity search") read as concept
+        // questions, not symbol lookups — they should fall through to the
+        // multi-noun branch and classify as Conceptual so the semantic lane
+        // can surface the canonical struct file (`store.rs`) over docs that
+        // merely mention the acronym (regression from PR #162 dense docs in
+        // `classifier.rs`).
         let acronym_hint_re = ACRONYM_HINT_RE.get_or_init(|| {
             Regex::new(r"\b[A-Z]{2,}[0-9]*\b").expect("static regex pattern must compile")
         });
         if acronym_hint_re.is_match(trimmed) {
-            return QueryIntent::Definition;
+            let token_count = trimmed.split_whitespace().count();
+            let has_nl_words = trimmed
+                .split_whitespace()
+                .any(|t| t.chars().next().is_some_and(|c| c.is_lowercase()));
+            if token_count <= 2 || !has_nl_words {
+                return QueryIntent::Definition;
+            }
+            // fall through — multi-word acronym phrase with NL words → let
+            // the multi-noun branch route this to Conceptual.
         }
 
         // Multi-noun query with no identifier tokens (issue #119): ≥4
@@ -818,15 +836,15 @@ mod tests {
 
     #[test]
     fn test_acronym_struct_hint_is_definition() {
-        // The four canonical struct-name acronyms in the trusty-search
-        // codebase: HNSW (HnswStore), BM25 (Bm25Index), RRF (rrf_fuse),
-        // ORT (ONNX Runtime types). All four were `Unknown` on v0.8.1.
+        // Short acronym queries (≤2 tokens) still route to Definition.
+        // Acronyms in 2-token phrases stay Definition because they read as
+        // symbol lookups (e.g. "BM25 index" / "RRF fusion" / "ORT").
+        // Issue #197 added a token-count guard so longer multi-word queries
+        // with NL words (e.g. "HNSW vector similarity search") fall through
+        // to the multi-noun / Conceptual path — see
+        // `test_multi_word_acronym_with_nl_words_is_conceptual` below.
         assert_eq!(
-            QueryClassifier::classify("HNSW vector similarity search"),
-            QueryIntent::Definition
-        );
-        assert_eq!(
-            QueryClassifier::classify("BM25 inverted index"),
+            QueryClassifier::classify("BM25 index"),
             QueryIntent::Definition
         );
         assert_eq!(
@@ -834,6 +852,35 @@ mod tests {
             QueryIntent::Definition
         );
         assert_eq!(QueryClassifier::classify("ORT"), QueryIntent::Definition);
+        assert_eq!(QueryClassifier::classify("HNSW"), QueryIntent::Definition);
+    }
+
+    #[test]
+    fn test_multi_word_acronym_with_nl_words_is_conceptual() {
+        // Regression for issue #197: multi-word queries that combine an
+        // ALL_CAPS acronym with natural-language tokens (≥3 tokens AND ≥1
+        // lowercase-leading token) read as concept questions, not symbol
+        // lookups. Routing them to Definition with beta=0.7 BM25 caused
+        // dense-doc files (e.g. `classifier.rs` after PR #162's verbose
+        // docs) to outrank the canonical struct file (`store.rs`) for
+        // queries like "HNSW vector similarity search".
+        //
+        // After the token-count guard, ACRONYM_HINT_RE falls through for
+        // these queries, letting the multi-noun branch classify them as
+        // Conceptual (alpha=0.8 semantic). The semantic lane surfaces the
+        // canonical struct file over docs that merely mention the acronym.
+        assert_eq!(
+            QueryClassifier::classify("HNSW vector similarity search"),
+            QueryIntent::Conceptual
+        );
+        // Note: `BM25` (acronym + digits) matches `pascal_ident_re` before
+        // reaching the acronym branch, so multi-word BM25 queries still
+        // classify as Definition via the PascalCase fallback. The guard
+        // only affects pure ALL_CAPS acronyms like HNSW, RRF, ORT, BFS.
+        assert_eq!(
+            QueryClassifier::classify("RRF fusion algorithm explanation"),
+            QueryIntent::Conceptual
+        );
     }
 
     // ── Multi-noun conceptual tests (issue #119) ────────────────────────────
@@ -899,11 +946,18 @@ mod tests {
     fn test_screaming_snake_does_not_change_multiword_query() {
         // "HNSW vector similarity" contains an ALL_CAPS token but is NOT a
         // whole-query SCREAMING_SNAKE identifier (it has whitespace + mixed
-        // case). The existing ACRONYM_HINT path handles it — verify no
-        // regression.
+        // case). The SCREAM_IDENT path therefore must not fire on it.
+        //
+        // Updated for issue #197: this query is 3 tokens with NL words
+        // ("vector", "similarity"), so the ACRONYM_HINT token-count guard
+        // suppresses the Definition route. The multi-noun branch needs ≥4
+        // tokens, so this falls through to Unknown — which is the expected
+        // outcome. (The corresponding 4-word variant
+        // "HNSW vector similarity search" classifies as Conceptual; see
+        // `test_multi_word_acronym_with_nl_words_is_conceptual`.)
         assert_eq!(
             QueryClassifier::classify("HNSW vector similarity"),
-            QueryIntent::Definition
+            QueryIntent::Unknown
         );
     }
 
