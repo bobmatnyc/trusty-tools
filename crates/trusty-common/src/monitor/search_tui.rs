@@ -959,8 +959,18 @@ pub fn index_lines(state: &SearchTuiState) -> Vec<IndexListRow> {
     });
 
     if state.indexes.is_empty() {
+        // While the first daemon poll is still in flight we don't yet know
+        // whether the index list is genuinely empty or just unfetched — show
+        // a "Loading…" placeholder so the left panel doesn't look broken on
+        // startup. Once the poll resolves we fall through to
+        // "(no indexes registered)".
+        let text = if state.daemon_status == DaemonStatus::Connecting {
+            "  Loading…".to_string()
+        } else {
+            "  (no indexes registered)".to_string()
+        };
         rows.push(IndexListRow {
-            text: "  (no indexes registered)".to_string(),
+            text,
             selected: false,
             is_all: false,
             is_header: false,
@@ -1037,12 +1047,18 @@ pub fn index_lines(state: &SearchTuiState) -> Vec<IndexListRow> {
 /// Why: the bottom-right panel shows counts and sizes for whichever index is
 /// selected, or aggregate totals plus a per-index breakdown when "All" is
 /// selected; isolating the builder makes the content testable without a
-/// terminal.
+/// terminal. While the daemon is still being polled for the first time we
+/// surface a "Loading…" placeholder so the panel does not flash zeroes that
+/// are indistinguishable from a genuinely empty daemon.
 /// What: for a single index, returns its id, chunk count, and indexed root
 /// path. For the "All" selection, returns the index count, the summed chunk
-/// count, and one `· <id>: <chunks>` breakdown line per index.
-/// Test: `test_stats_lines`.
+/// count, and one `· <id>: <chunks>` breakdown line per index. Returns
+/// `["Loading…"]` while the daemon status is [`DaemonStatus::Connecting`].
+/// Test: `test_stats_lines`, `test_stats_lines_connecting_shows_loading`.
 pub fn stats_lines(state: &SearchTuiState) -> Vec<String> {
+    if state.daemon_status == DaemonStatus::Connecting {
+        return vec!["Loading…".to_string()];
+    }
     if state.is_all_selected() {
         let total: u64 = state.indexes.iter().map(|i| i.chunk_count).sum();
         let total_nodes: u64 = state.indexes.iter().map(|i| i.node_count).sum();
@@ -1349,6 +1365,10 @@ pub fn render(frame: &mut Frame, state: &mut SearchTuiState) {
             .tail_scoped(scope, activity_height.max(1))
             .map(|line| ListItem::new(line.as_str()))
             .collect()
+    } else if state.daemon_status == DaemonStatus::Connecting {
+        // Distinguish "first poll has not completed" from "genuinely no activity"
+        // so the panel doesn't look broken on startup.
+        vec![ListItem::new("Loading…")]
     } else {
         vec![ListItem::new("(no activity yet)")]
     };
@@ -1748,11 +1768,43 @@ mod tests {
         assert!(rows[3].text.contains("19.0k"));
 
         // An empty index list still shows the "All" row plus a placeholder.
-        let empty = SearchTuiState::new("http://x");
+        // The placeholder text depends on daemon status: "Loading…" while the
+        // first poll is in flight, "(no indexes registered)" once the daemon
+        // is reachable but has no indexes registered.
+        let mut empty = SearchTuiState::new("http://x");
+        empty.daemon_status = DaemonStatus::Online {
+            version: "0.3.65".into(),
+            uptime_secs: 0,
+        };
         let rows = index_lines(&empty);
         assert_eq!(rows.len(), 2);
         assert!(rows[0].is_all);
         assert!(rows[1].text.contains("no indexes"));
+
+        // Before the first daemon poll completes the placeholder switches to
+        // "Loading…" so the panel doesn't look broken on startup.
+        let connecting = SearchTuiState::new("http://x");
+        assert!(matches!(connecting.daemon_status, DaemonStatus::Connecting));
+        let rows = index_lines(&connecting);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].is_all);
+        assert!(
+            rows[1].text.contains("Loading…"),
+            "connecting state must show Loading…, got: {:?}",
+            rows[1].text
+        );
+    }
+
+    #[test]
+    fn test_stats_lines_connecting_shows_loading() {
+        // While the daemon is still in the Connecting state the STATISTICS
+        // panel should surface a single "Loading…" line — never a half-formed
+        // zero-valued snapshot that would be indistinguishable from a real
+        // empty daemon.
+        let state = SearchTuiState::new("http://x");
+        assert!(matches!(state.daemon_status, DaemonStatus::Connecting));
+        let lines = stats_lines(&state);
+        assert_eq!(lines, vec!["Loading…".to_string()]);
     }
 
     #[test]

@@ -1272,8 +1272,17 @@ pub fn palace_lines_at(
     });
 
     if state.palaces.is_empty() {
+        // While the first daemon poll is still in flight we don't yet know
+        // whether the palace list is genuinely empty or just unfetched — show
+        // a "Loading…" placeholder so the left panel doesn't look broken on
+        // startup. Once the poll resolves we fall through to "(no palaces)".
+        let text = if state.daemon_status == DaemonStatus::Connecting {
+            "  Loading…".to_string()
+        } else {
+            "  (no palaces)".to_string()
+        };
         rows.push(PalaceListRow {
-            text: "  (no palaces)".to_string(),
+            text,
             selected: false,
             is_all: false,
             is_header: false,
@@ -1358,13 +1367,19 @@ pub fn palace_lines_at(
 /// Why: the bottom-right panel shows counts and sizes for whichever palace is
 /// selected, or aggregate totals plus a per-palace breakdown when "All" is
 /// selected; isolating the builder makes the content testable without a
-/// terminal.
+/// terminal. While the daemon is still being polled for the first time we
+/// surface a "Loading…" placeholder so the panel does not flash zeroes that
+/// are indistinguishable from a genuinely empty daemon.
 /// What: for a single palace, returns its name, vector count, and id. For the
 /// "All" selection, returns the palace count and the daemon's aggregate
 /// vector / drawer / KG-triple totals, plus one `· <name>: <vectors>`
-/// breakdown line per palace.
-/// Test: `test_stats_lines`.
+/// breakdown line per palace. Returns `["Loading…"]` while the daemon status
+/// is [`DaemonStatus::Connecting`].
+/// Test: `test_stats_lines`, `test_stats_lines_connecting_shows_loading`.
 pub fn stats_lines(state: &MemoryTuiState) -> Vec<String> {
+    if state.daemon_status == DaemonStatus::Connecting {
+        return vec!["Loading…".to_string()];
+    }
     if state.is_all_selected() {
         let stats = state.status.clone().unwrap_or_default();
         let mut lines = vec![
@@ -1630,6 +1645,10 @@ pub fn render(frame: &mut Frame, state: &mut MemoryTuiState) {
             .tail_scoped(scope, activity_height.max(1))
             .map(|line| ListItem::new(line.as_str()))
             .collect()
+    } else if state.daemon_status == DaemonStatus::Connecting {
+        // Distinguish "first poll has not completed" from "genuinely no activity"
+        // so the panel doesn't look broken on startup.
+        vec![ListItem::new("Loading…")]
     } else {
         vec![ListItem::new("(no activity yet)")]
     };
@@ -1838,6 +1857,18 @@ mod tests {
     }
 
     #[test]
+    fn test_stats_lines_connecting_shows_loading() {
+        // While the daemon is still in the Connecting state the STATISTICS
+        // panel should surface a single "Loading…" line — never a half-formed
+        // zero-valued snapshot that would be indistinguishable from a real
+        // empty daemon.
+        let state = MemoryTuiState::new("http://x");
+        assert!(matches!(state.daemon_status, DaemonStatus::Connecting));
+        let lines = stats_lines(&state);
+        assert_eq!(lines, vec!["Loading…".to_string()]);
+    }
+
+    #[test]
     fn test_palace_row_display() {
         // The selection highlight is now applied by the List widget via
         // `highlight_symbol`, so the row text itself begins with a space-
@@ -1894,11 +1925,31 @@ mod tests {
         assert!(rows[2].text.contains("work"));
 
         // An empty palace list still shows the "All" row plus a placeholder.
-        let empty = MemoryTuiState::new("http://x");
+        // The placeholder text depends on daemon status: "Loading…" while the
+        // first poll is in flight, "(no palaces)" once the daemon is reachable
+        // but has no palaces registered.
+        let mut empty = MemoryTuiState::new("http://x");
+        empty.daemon_status = DaemonStatus::Online {
+            version: "0.1.54".into(),
+            uptime_secs: 0,
+        };
         let rows = palace_lines(&empty);
         assert_eq!(rows.len(), 2);
         assert!(rows[0].is_all);
         assert!(rows[1].text.contains("no palaces"));
+
+        // Before the first daemon poll completes the placeholder switches to
+        // "Loading…" so the panel doesn't look broken on startup.
+        let connecting = MemoryTuiState::new("http://x");
+        assert!(matches!(connecting.daemon_status, DaemonStatus::Connecting));
+        let rows = palace_lines(&connecting);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].is_all);
+        assert!(
+            rows[1].text.contains("Loading…"),
+            "connecting state must show Loading…, got: {:?}",
+            rows[1].text
+        );
     }
 
     #[test]
@@ -2621,6 +2672,12 @@ mod tests {
     fn test_stats_graph_section() {
         use chrono::{TimeZone, Utc};
         let mut state = MemoryTuiState::new("http://x");
+        // Drop out of the Connecting → "Loading…" early return so the full
+        // graph section is rendered.
+        state.daemon_status = DaemonStatus::Online {
+            version: "0.1.54".into(),
+            uptime_secs: 0,
+        };
         state.palaces = vec![PalaceRow {
             id: "p1".into(),
             name: "p1".into(),
