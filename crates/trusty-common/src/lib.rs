@@ -105,22 +105,8 @@ pub mod rpc;
 #[cfg(feature = "embedder")]
 pub mod embedder;
 
-/// Client for the `trusty-embed-daemon` subprocess.
-///
-/// Why: trusty-memory and trusty-search need to embed text without holding
-/// an in-process ONNX mutex. `EmbedClient` delegates to the embed daemon
-/// over a Unix domain socket, enabling batching and process isolation
-/// without forcing every consumer to depend on fastembed/ORT.
-/// What: Gated behind the `embed-client` feature. Pulls in no new
-/// dependencies — only `tokio`, `serde_json`, and `anyhow` (all already
-/// required by trusty-common).
-/// Test: `cargo test -p trusty-common --features embed-client` runs the
-/// module's unit tests (request shape, default path).
-#[cfg(feature = "embed-client")]
-pub mod embed_client;
-
-/// HTTP RPC client and wire types for the `trusty-embedderd` standalone
-/// embedding process (issue #110, Phase 1).
+/// HTTP / UDS RPC client and wire types for the `trusty-embedderd` standalone
+/// embedding process (issue #110 Phase 1, consolidated in #164).
 ///
 /// Why: absorbs the former `trusty-embedder-client` crate into `trusty-common`
 /// to reduce crate count and align the client library under Elastic-2.0
@@ -128,17 +114,19 @@ pub mod embed_client;
 /// `trusty_common::embedder_client::` imports.
 /// What: Gated behind the `embedder-client` feature. Exposes the
 /// `EmbedderClient` trait, `InProcessEmbedderClient` (wraps `FastEmbedder`),
-/// `RemoteEmbedderClient` (HTTP → `trusty-embedderd`), and the `EmbedRequest`
-/// / `EmbedResponse` wire types. Requires `reqwest` (JSON HTTP) and
-/// `async-trait`; implies `dep:thiserror` for the `EmbedderError` type.
-/// The `embedder` feature is NOT implied — callers that only want the HTTP
-/// client can omit ONNX/fastembed.
+/// `RemoteEmbedderClient` (HTTP → `trusty-embedderd`), `UdsEmbedderClient`
+/// (UDS → `trusty-embedderd`), and the `EmbedRequest` / `EmbedResponse` wire
+/// types. Requires `reqwest` (JSON HTTP) and `async-trait`; implies
+/// `dep:thiserror` for the `EmbedderError` type. The `embedder` feature is
+/// NOT implied — callers that only want the HTTP/UDS client can omit
+/// ONNX/fastembed.
 /// Test: `cargo test -p trusty-common --features embedder-client` covers
 /// error-display, JSON round-trip, and URL-assembly tests. ONNX-backed tests
-/// live in `trusty-embedderd/tests/bit_identical.rs` (`#[ignore]`).
+/// live in `trusty-embedderd/tests/bit_identical.rs` and `tests/uds_integration.rs`
+/// (both `#[ignore]`).
 ///
-/// Note: `embed_client` (without `er`) is the UDS module from PR #157; this
-/// module is `embedder_client` (with `er`). Issue #164 will reconcile them.
+/// Note: this module replaces the older `embed_client` (without `er`) module
+/// retired in #164 alongside the standalone `trusty-embed-daemon` crate.
 #[cfg(feature = "embedder-client")]
 pub mod embedder_client;
 

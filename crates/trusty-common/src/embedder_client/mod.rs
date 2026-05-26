@@ -20,10 +20,9 @@
 //! in `trusty-embedderd/tests/bit_identical.rs` and `tests/uds_integration.rs`
 //! (both marked `#[ignore]`).
 //!
-//! Note: this module is `embedder_client` (with the `er`) to distinguish from
-//! the existing `embed_client` (without the `er`) which is the UDS module from
-//! PR #157. Issue #164 will reconcile the two embed-client modules into a
-//! single unified interface.
+//! History: this module is the canonical successor to the retired `embed_client`
+//! (without the `er`) UDS module from PR #157 — issue #164 consolidated the two
+//! into a single unified interface that supports both HTTP and UDS transports.
 
 pub mod error;
 pub mod in_process;

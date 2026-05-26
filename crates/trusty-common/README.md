@@ -35,6 +35,7 @@ trusty-common = { version = "0.3", features = ["axum-server", "mcp", "rpc", "emb
 | `embedder-cuda` | GPU-accelerated embedding via CUDA execution provider |
 | `embedder-load-dynamic` | Dynamic ORT loading for AL2023 / glibc < 2.38 builds |
 | `embedder-test-support` | Expose `MockEmbedder` outside `cfg(test)` for downstream tests |
+| `embedder-client` | `EmbedderClient` trait + `InProcess` / `Remote` (HTTP) / `Uds` clients for `trusty-embedderd` (formerly the standalone `trusty-embedder-client` crate; UDS path supersedes the retired `embed_client` module from #157) |
 | `symgraph` | Contracts surface only: `EntityType`, `RawEntity`, `EdgeKind` — no tree-sitter |
 | `symgraph-parser` | Full symbol graph: tree-sitter grammars, `SymbolGraph`, emitter, editor |
 | `symgraph-server` | HTTP server frontend for the symbol graph (implies `symgraph-parser`) |
@@ -177,6 +178,41 @@ use trusty_common::embedder::MockEmbedder;
 
 let embedder = MockEmbedder::new(384); // deterministic zero vectors
 ```
+
+### Embedder Clients (`embedder-client` feature)
+
+Formerly the standalone `trusty-embedder-client` crate (MIT) — folded into
+trusty-common under Elastic-2.0 in #166 and unified with the retired
+`embed_client` UDS module in #164. Provides a single `EmbedderClient` trait
+with three implementations sharing one `EmbedRequest` / `EmbedResponse` wire
+format:
+
+```rust
+use trusty_common::embedder_client::{
+    EmbedderClient, InProcessEmbedderClient, RemoteEmbedderClient, UdsEmbedderClient,
+};
+use std::sync::Arc;
+
+// 1. In-process: wraps a local FastEmbedder. Use when you want zero IPC.
+let inproc = InProcessEmbedderClient::from_arc(Arc::new(local_embedder));
+
+// 2. HTTP-remote: talks to a trusty-embedderd over HTTP. Use for cross-host.
+let http = RemoteEmbedderClient::new("http://127.0.0.1:7890")?;
+
+// 3. UDS-remote: talks to a trusty-embedderd over a Unix domain socket.
+//    Use for on-host callers that want lower latency than HTTP.
+let uds = UdsEmbedderClient::new(UdsEmbedderClient::default_path());
+
+// All three satisfy the same trait, so swapping is a one-line change:
+let client: Arc<dyn EmbedderClient> = Arc::new(uds);
+let vectors = client.embed_batch(vec!["fn auth".into()]).await?;
+```
+
+`UdsEmbedderClient` speaks newline-framed JSON-RPC 2.0 — wire-compatible with
+the protocol previously served by the retired `trusty-embed-daemon`. The
+default socket path (`UdsEmbedderClient::default_path()`) resolves to
+`$TMPDIR/trusty-embedderd.sock`, matching the daemon's default. See
+`crates/trusty-embedderd/README.md` for daemon-side setup.
 
 ### Symbol Graph (`symgraph` / `symgraph-parser` features)
 

@@ -153,12 +153,6 @@ rpc = ["dep:uuid"]
 # the ort direct dep. Defaults to bundled ORT linking — see the
 # `embedder-*` sub-features for AL2023 / CUDA / load-dynamic variants.
 embedder = ["dep:fastembed", "dep:lru", "dep:parking_lot", "dep:ort"]
-# Enables the `embed_client` module: a UDS JSON-RPC client for the
-# `trusty-embed-daemon` subprocess. Pure user of existing `tokio` /
-# `serde_json` / `anyhow` workspace deps — adds no new dependencies. The
-# `embedder` feature is NOT implied because callers that only want the
-# subprocess client should not have to compile fastembed/ORT.
-embed-client = []
 # Bundle the ONNX Runtime static libs via fastembed's
 # `ort-download-binaries-native-tls`. Right choice for macOS and modern
 # Linux (glibc ≥ 2.38). Mutually exclusive with `embedder-load-dynamic`
@@ -294,7 +288,7 @@ monitor-tui = ["dep:ratatui", "dep:crossterm", "dep:chrono"]
 # The `embedder` feature is NOT implied so callers that only need the HTTP
 # client path don't pull in fastembed/ORT. Use
 # `features = ["embedder-client", "embedder", "embedder-bundled-ort"]` to get
-# both the in-process and remote paths.
-# Note: module name is `embedder_client` (with `er`) to distinguish from the
-# existing `embed_client` (UDS, PR #157). Issue #164 will reconcile them.
+# both the in-process and remote paths. Also exposes the `UdsEmbedderClient`
+# for callers that prefer the on-host UDS transport (folded in via #164 Step 1,
+# replacing the former `embed_client` UDS module from #157).
 embedder-client = ["dep:thiserror", "embedder"]
