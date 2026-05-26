@@ -290,34 +290,47 @@ pub enum DaemonEvent {
 }
 
 /// Open the activity log under `data_root`, falling back to a per-process
-/// tempdir when the primary location is unwritable.
+/// tempdir and finally to a no-op `Discard` variant when no writable
+/// directory is available.
 ///
-/// Why (issue #96): the activity log is a best-effort feature — if the data
-/// root is on a read-only mount, missing, or locked by another process, the
-/// daemon should still come up and serve every other endpoint. Falling back
-/// to a `std::env::temp_dir()`-anchored subdirectory keyed by the daemon's
-/// process id keeps the log available for the lifetime of the daemon while
-/// guaranteeing a unique writable directory.
+/// Why (issues #96, #225): the activity log is a best-effort feature — if
+/// the data root is on a read-only mount, missing, or locked by another
+/// process, the daemon should still come up and serve every other endpoint.
+/// The first fallback is a `std::env::temp_dir()`-anchored subdirectory
+/// keyed by the daemon's process id. Issue #225: a previous version called
+/// `expect()` on the tempdir fallback, which crashed the daemon on hosts
+/// where neither `data_root` nor `std::env::temp_dir()` is writable
+/// (read-only containers, locked-down sandboxes). The contract is
+/// "best-effort", so the final fallback is now `ActivityLog::discard()` —
+/// a no-op variant that drops every append and returns empty reads. The
+/// dashboard's activity feed simply shows up empty in that degraded state.
 /// What: tries `ActivityLog::open(data_root)`; on error logs a warning and
-/// retries against `<temp>/trusty-memory-activity-<pid>/`. The final
-/// fallback `expect` is only reachable when even `temp_dir()` is broken,
-/// which is a programmer-error class invariant.
-/// Test: covered indirectly by `app_state_default_constructs` and every
-/// test that builds an `AppState` against a tempdir.
+/// retries against `<temp>/trusty-memory-activity-<pid>/`. If both fail,
+/// emits a final warning and returns `ActivityLog::discard()`.
+/// Test: `open_activity_log_with_fallback_returns_discard_when_unwritable`
+/// covers the discard branch; existing `AppState` construction tests cover
+/// the happy and tempdir-fallback paths.
 fn open_activity_log_with_fallback(data_root: &Path) -> Arc<ActivityLog> {
     match ActivityLog::open(data_root) {
         Ok(log) => Arc::new(log),
-        Err(e) => {
+        Err(primary_err) => {
             tracing::warn!(
-                "could not open activity log at {}: {e:#}; falling back to per-process tempdir",
+                "could not open activity log at {}: {primary_err:#}; falling back to per-process tempdir",
                 data_root.display()
             );
             let fallback =
                 std::env::temp_dir().join(format!("trusty-memory-activity-{}", std::process::id()));
-            Arc::new(
-                ActivityLog::open(&fallback)
-                    .expect("activity fallback log must open in a fresh tempdir"),
-            )
+            match ActivityLog::open(&fallback) {
+                Ok(log) => Arc::new(log),
+                Err(fallback_err) => {
+                    tracing::warn!(
+                        "activity log tempdir fallback at {} also failed: {fallback_err:#}; \
+                         activity feed disabled for this process (no-op log)",
+                        fallback.display()
+                    );
+                    Arc::new(ActivityLog::discard())
+                }
+            }
         }
     }
 }
@@ -1379,6 +1392,89 @@ mod tests {
         assert!(!s.version.is_empty());
         assert!(s.registry.is_empty());
         assert!(s.default_palace.is_none());
+    }
+
+    /// Why (issue #225): the previous implementation called `.expect()` on the
+    /// tempdir fallback, which panicked the daemon at startup on hosts where
+    /// neither the data root nor `std::env::temp_dir()` is writable
+    /// (read-only Docker overlays, locked-down sandboxes). The activity log
+    /// is documented as best-effort, so the fix returns a no-op `Discard`
+    /// variant instead. This test forces both paths to fail and asserts the
+    /// helper returns the discard variant rather than panicking.
+    ///
+    /// Skipped when running as root because `chmod 000` is a no-op for the
+    /// root user — the kernel grants root access regardless of mode bits.
+    /// CI typically runs as non-root, so coverage is preserved in the
+    /// common case; local root invocations simply skip with a warning.
+    #[test]
+    #[cfg(unix)]
+    fn open_activity_log_with_fallback_returns_discard_when_unwritable() {
+        // Skip when running as root — chmod is ignored.
+        // SAFETY: libc::geteuid is a thread-safe syscall with no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!(
+                "skipping open_activity_log_with_fallback_returns_discard_when_unwritable: running as root"
+            );
+            return;
+        }
+
+        use std::os::unix::fs::PermissionsExt;
+
+        // Build two unwritable directories: the primary "data root" and a
+        // shadow "TMPDIR" so the tempdir fallback also fails.
+        let outer = tempfile::tempdir().expect("outer tempdir");
+        let primary = outer.path().join("primary");
+        let tmpdir = outer.path().join("fake-tmp");
+        std::fs::create_dir(&primary).expect("create primary");
+        std::fs::create_dir(&tmpdir).expect("create tmpdir");
+
+        // chmod 000 on both — neither can be opened for write.
+        std::fs::set_permissions(&primary, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod primary");
+        std::fs::set_permissions(&tmpdir, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod tmpdir");
+
+        // Override the tempdir lookup so `open_activity_log_with_fallback`
+        // hits our unwritable fake-tmp instead of the real system temp.
+        // Note: env var mutation is process-global; this test is the only
+        // accessor for `TMPDIR` in this test binary, and we restore the
+        // previous value before returning.
+        let prev_tmpdir = std::env::var_os("TMPDIR");
+        std::env::set_var("TMPDIR", &tmpdir);
+
+        let log = open_activity_log_with_fallback(&primary);
+
+        // Restore TMPDIR ASAP so a panic later in the test doesn't leak it.
+        match prev_tmpdir {
+            Some(v) => std::env::set_var("TMPDIR", v),
+            None => std::env::remove_var("TMPDIR"),
+        }
+
+        // Restore permissions so the outer tempdir can clean up.
+        let _ = std::fs::set_permissions(&primary, std::fs::Permissions::from_mode(0o700));
+        let _ = std::fs::set_permissions(&tmpdir, std::fs::Permissions::from_mode(0o700));
+
+        assert!(
+            log.is_discard(),
+            "expected ActivityLog::Discard when both data root and tempdir are unwritable"
+        );
+
+        // The Discard variant must still satisfy the public contract: no
+        // panic on append/count/list.
+        let id = log
+            .append(
+                ActivitySource::Http,
+                None,
+                "drawer_added",
+                json!({"smoke": true}),
+            )
+            .expect("discard append must succeed");
+        assert_eq!(id, 0);
+        assert_eq!(log.count().expect("discard count"), 0);
+        assert!(log
+            .list(&ActivityFilter::default(), 10, 0)
+            .expect("discard list")
+            .is_empty());
     }
 
     /// Why: Issue #26 — when `serve --palace <name>` is set, the MCP server

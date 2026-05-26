@@ -168,15 +168,37 @@ pub struct ActivityFilter {
 /// Why: held on `AppState` so every emitting handler (HTTP, MCP, Hook) can
 /// record an entry without re-opening the database. redb's `Database`
 /// already supports concurrent access internally; an `Arc` clone is cheap
-/// and lets the type satisfy `AppState: Clone`.
-/// What: holds an `Arc<Database>` plus an `AtomicU64` next-id counter
-/// initialised from the table's current max key. The counter survives clones
-/// because it lives behind the same `Arc`.
-/// Test: `appends_assign_monotonic_ids`.
+/// and lets the type satisfy `AppState: Clone`. The `Discard` variant
+/// (issue #225) keeps the daemon usable when no writable directory is
+/// available (read-only containers, locked-down sandboxes) by silently
+/// dropping every append and returning empty reads — the activity log is
+/// documented as best-effort, so falling back to a no-op is the contract
+/// the rest of the daemon already assumes.
+/// What: an enum with two variants — `Redb` wraps a backing redb database
+/// plus an `AtomicU64` next-id counter initialised from the table's current
+/// max key (the counter survives clones because it lives behind the same
+/// `Arc`); `Discard` is a zero-state variant that drops appends and returns
+/// empty reads / zero counts, used when both the primary data root and the
+/// tempdir fallback are unwritable.
+/// Test: `appends_assign_monotonic_ids` covers `Redb`;
+///       `discard_variant_drops_writes_and_returns_empty_reads` covers `Discard`.
 #[derive(Clone)]
-pub struct ActivityLog {
-    db: Arc<Database>,
-    next_id: Arc<AtomicU64>,
+pub enum ActivityLog {
+    /// redb-backed activity log — the production path.
+    Redb {
+        db: Arc<Database>,
+        next_id: Arc<AtomicU64>,
+    },
+    /// No-op fallback used when no writable directory is available.
+    ///
+    /// Why: callers should never branch on whether the log is functional;
+    /// every method on this variant returns a successful empty result so
+    /// `state.emit` stays best-effort and the dashboard simply shows an
+    /// empty feed.
+    /// What: zero-sized variant — appends are dropped, `count` returns 0,
+    /// `list` returns an empty vec.
+    /// Test: `discard_variant_drops_writes_and_returns_empty_reads`.
+    Discard,
 }
 
 impl ActivityLog {
@@ -188,6 +210,8 @@ impl ActivityLog {
     /// monotonic across daemon restarts.
     /// What: ensures the data dir exists, opens the database, creates the
     /// `activity` table if absent, and seeds `next_id` from `last_key()`.
+    /// Always returns the `Redb` variant on success; use
+    /// `ActivityLog::discard()` to construct the no-op fallback explicitly.
     /// Test: `activity_log_open_creates_db_file`,
     /// `next_id_resumes_from_max_after_reopen`.
     pub fn open(data_root: &Path) -> Result<Self> {
@@ -222,10 +246,35 @@ impl ActivityLog {
             key
         };
 
-        Ok(Self {
+        Ok(Self::Redb {
             db: Arc::new(db),
             next_id: Arc::new(AtomicU64::new(max_key.saturating_add(1))),
         })
+    }
+
+    /// Construct a no-op activity log that drops every write (issue #225).
+    ///
+    /// Why: when neither the primary data root nor the tempdir fallback is
+    /// writable, the daemon must still come up. Returning this variant from
+    /// `open_activity_log_with_fallback` keeps the call sites identical —
+    /// `append`, `count`, and `list` all stay infallible-ish (they return
+    /// `Ok` but do nothing) so callers do not need to branch on whether the
+    /// log is real.
+    /// What: returns `ActivityLog::Discard` — a zero-sized enum variant.
+    /// Test: `discard_variant_drops_writes_and_returns_empty_reads`.
+    pub fn discard() -> Self {
+        Self::Discard
+    }
+
+    /// True when this is the `Discard` (no-op) variant.
+    ///
+    /// Why: exposed for tests and for any future code that wants to surface
+    /// the degraded state in a health endpoint without taking a hard
+    /// dependency on the enum shape.
+    /// What: returns `true` for `ActivityLog::Discard`, `false` otherwise.
+    /// Test: `discard_variant_drops_writes_and_returns_empty_reads`.
+    pub fn is_discard(&self) -> bool {
+        matches!(self, Self::Discard)
     }
 
     /// Append a new entry and return the assigned id.
@@ -233,12 +282,14 @@ impl ActivityLog {
     /// Why: every mutating handler calls this so the feed has a complete
     /// history. Append also triggers FIFO eviction when the row count
     /// exceeds [`MAX_ENTRIES`] so the table footprint stays bounded.
-    /// What: serialises the entry with `serde_json` (small overhead, but
-    /// keeps the schema human-readable for `redb`'s `dump` and our own
-    /// debug tooling), writes it under a freshly-allocated id, and prunes
-    /// the oldest rows past the cap.
+    /// What: on the `Redb` variant, serialises the entry with `serde_json`
+    /// (small overhead, but keeps the schema human-readable for `redb`'s
+    /// `dump` and our own debug tooling), writes it under a freshly-allocated
+    /// id, and prunes the oldest rows past the cap. On the `Discard`
+    /// variant, returns `Ok(0)` without touching any state.
     /// Test: `appends_assign_monotonic_ids`,
-    /// `appends_evict_oldest_when_capped`.
+    /// `appends_evict_oldest_when_capped`,
+    /// `discard_variant_drops_writes_and_returns_empty_reads`.
     pub fn append(
         &self,
         source: ActivitySource,
@@ -246,7 +297,11 @@ impl ActivityLog {
         event_type: impl Into<String>,
         payload: impl Serialize,
     ) -> Result<u64> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (db, next_id) = match self {
+            Self::Redb { db, next_id } => (db, next_id),
+            Self::Discard => return Ok(0),
+        };
+        let id = next_id.fetch_add(1, Ordering::Relaxed);
         let payload_json = serde_json::to_string(&payload).context("serialize activity payload")?;
         let entry = ActivityEntry {
             id,
@@ -258,7 +313,7 @@ impl ActivityLog {
         };
         let bytes = serde_json::to_vec(&entry).context("serialize activity entry")?;
 
-        let write = self.db.begin_write().context("begin_write activity")?;
+        let write = db.begin_write().context("begin_write activity")?;
         {
             let mut table = write
                 .open_table(ACTIVITY_TABLE)
@@ -278,9 +333,14 @@ impl ActivityLog {
     /// Why: keep the on-disk footprint bounded. Called from `append` so the
     /// cap is enforced on every write; tests can also call it directly.
     /// What: counts rows, computes the overflow, and removes the lowest-id
-    /// rows in batches of [`EVICTION_BATCH`].
+    /// rows in batches of [`EVICTION_BATCH`]. On the `Discard` variant,
+    /// returns immediately — there is nothing to evict.
     /// Test: `appends_evict_oldest_when_capped`.
     pub fn prune(&self) -> Result<()> {
+        let db = match self {
+            Self::Redb { db, .. } => db,
+            Self::Discard => return Ok(()),
+        };
         loop {
             let count = self.count()?;
             if count <= MAX_ENTRIES {
@@ -289,10 +349,7 @@ impl ActivityLog {
             let overflow = count - MAX_ENTRIES;
             let to_drop = overflow.min(EVICTION_BATCH);
 
-            let write = self
-                .db
-                .begin_write()
-                .context("begin_write activity (prune)")?;
+            let write = db.begin_write().context("begin_write activity (prune)")?;
             {
                 let mut table = write
                     .open_table(ACTIVITY_TABLE)
@@ -317,10 +374,16 @@ impl ActivityLog {
     ///
     /// Why: exposed for tests and the prune loop; also handy for the
     /// `GET /api/v1/activity` response so the UI can render a total count.
-    /// What: opens a read transaction and calls redb's `Table::len`.
-    /// Test: `appends_evict_oldest_when_capped`.
+    /// What: opens a read transaction and calls redb's `Table::len` on the
+    /// `Redb` variant; returns `0` for the `Discard` variant.
+    /// Test: `appends_evict_oldest_when_capped`,
+    /// `discard_variant_drops_writes_and_returns_empty_reads`.
     pub fn count(&self) -> Result<u64> {
-        let read = self.db.begin_read().context("begin_read activity count")?;
+        let db = match self {
+            Self::Redb { db, .. } => db,
+            Self::Discard => return Ok(0),
+        };
+        let read = db.begin_read().context("begin_read activity count")?;
         let table = read
             .open_table(ACTIVITY_TABLE)
             .context("open_table activity (count)")?;
@@ -337,15 +400,21 @@ impl ActivityLog {
     /// is the simplest correct strategy), and returns at most `limit` rows
     /// starting at `offset`. `limit` is clamped at the call site by the
     /// handler; this method does not clamp so tests can exercise edge cases.
+    /// On the `Discard` variant, returns an empty vec.
     /// Test: `list_returns_newest_first`,
-    /// `list_filters_by_source_palace_and_time`.
+    /// `list_filters_by_source_palace_and_time`,
+    /// `discard_variant_drops_writes_and_returns_empty_reads`.
     pub fn list(
         &self,
         filter: &ActivityFilter,
         limit: usize,
         offset: usize,
     ) -> Result<Vec<ActivityEntry>> {
-        let read = self.db.begin_read().context("begin_read activity list")?;
+        let db = match self {
+            Self::Redb { db, .. } => db,
+            Self::Discard => return Ok(Vec::new()),
+        };
+        let read = db.begin_read().context("begin_read activity list")?;
         let table = read
             .open_table(ACTIVITY_TABLE)
             .context("open_table activity (list)")?;
@@ -632,6 +701,39 @@ mod tests {
             )
             .unwrap();
         assert_eq!(mcp_alpha.len(), 1);
+    }
+
+    #[test]
+    fn discard_variant_drops_writes_and_returns_empty_reads() {
+        // Why: issue #225 — when the data root and tempdir fallback are
+        // both unwritable, `open_activity_log_with_fallback` returns the
+        // `Discard` variant. Verify every method is infallible and a no-op.
+        let log = ActivityLog::discard();
+        assert!(log.is_discard(), "expected Discard variant");
+
+        // append returns Ok and yields the sentinel id 0 without panicking
+        // or mutating state.
+        let id = log
+            .append(ActivitySource::Http, None, "drawer_added", json!({"x": 1}))
+            .expect("discard append must succeed");
+        assert_eq!(id, 0, "discard always returns id 0");
+
+        // count and list always read as empty.
+        assert_eq!(log.count().expect("discard count"), 0);
+        let listed = log
+            .list(&ActivityFilter::default(), 10, 0)
+            .expect("discard list");
+        assert!(listed.is_empty(), "discard list must be empty");
+
+        // prune is a no-op.
+        log.prune().expect("discard prune");
+
+        // A second append still returns 0 — no state is retained.
+        let id2 = log
+            .append(ActivitySource::Mcp, Some("p".into()), "x", json!({}))
+            .expect("discard append (second)");
+        assert_eq!(id2, 0);
+        assert_eq!(log.count().expect("discard count after writes"), 0);
     }
 
     #[test]
