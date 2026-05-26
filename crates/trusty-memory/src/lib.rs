@@ -41,6 +41,7 @@ pub mod messaging;
 pub mod openrpc;
 pub mod prompt_facts;
 pub mod prompt_log;
+pub mod chat;
 pub mod service;
 pub mod tools;
 pub mod transport;
