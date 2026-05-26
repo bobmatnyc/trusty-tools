@@ -152,6 +152,27 @@ pub struct PalaceHandle {
     /// `dream_cycle` and cleared on drop.
     /// Test: `dream::tests::dream_cycle_toggles_is_compacting`.
     pub is_compacting: Arc<AtomicBool>,
+    /// Serialises mutating ops (`remember_with_options`, `forget`) on this
+    /// palace so concurrent writers don't race on the L1 snapshot rename,
+    /// the vector store upsert, the KG SQLite row insert, or the in-memory
+    /// drawer table.
+    ///
+    /// Why: Issue #154 — under 20 concurrent HTTP `memory_remember` calls,
+    /// 30–60 % failed with "save L1 snapshot: io error … No such file or
+    /// directory". The root cause was multiple writers racing on the same
+    /// `l1_cache.json.tmp` file (fixed defensively in `L1Cache`), but the
+    /// broader hazard is that the `remember_with_options` pipeline
+    /// (embed → vector upsert → KG upsert → in-memory push → L1 snapshot)
+    /// has no per-palace ordering guarantee. A per-palace mutex serialises
+    /// those steps so the L1 snapshot always reflects a consistent
+    /// drawer-table state, without blocking reads or cross-palace writes.
+    /// What: `Arc<tokio::sync::Mutex<()>>`. Held only by the mutating
+    /// methods; readers (`recall`, `recall_deep`, `list_drawers`) never
+    /// touch it. Per-palace, not global, so distinct palaces still write
+    /// in parallel. Held across `.await` points, so we use the tokio mutex
+    /// rather than `parking_lot::Mutex` (which would deadlock the runtime).
+    /// Test: `remember_concurrent_does_not_lose_writes` in this module.
+    pub write_mutex: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Options for `PalaceHandle::remember_with_options` (issue #61).
@@ -268,6 +289,7 @@ impl PalaceHandle {
             recall_log: None,
             closets: Arc::new(RwLock::new(HashMap::new())),
             is_compacting: Arc::new(AtomicBool::new(false)),
+            write_mutex: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -392,6 +414,7 @@ impl PalaceHandle {
             recall_log,
             closets: Arc::new(RwLock::new(HashMap::new())),
             is_compacting: Arc::new(AtomicBool::new(false)),
+            write_mutex: Arc::new(tokio::sync::Mutex::new(())),
         };
         Ok(Arc::new(handle))
     }
@@ -522,6 +545,14 @@ impl PalaceHandle {
             ));
         }
 
+        // Issue #154: serialise mutating ops on this palace so concurrent
+        // writers don't race on the L1 snapshot rename, vector upsert, KG
+        // row insert, or in-memory drawer push. Held across the full
+        // pipeline below. Other palaces' writes proceed in parallel.
+        // Reads (`recall`, `list_drawers`, etc.) never acquire this lock,
+        // so the write mutex doesn't impact read throughput.
+        let _write_guard = self.write_mutex.lock().await;
+
         // Issue #61: signal/noise gate. `force == true` bypasses entirely.
         // `enforce_min_tokens` lets `memory_note` keep the noise patterns
         // while permitting short curated facts ("User prefers snake_case").
@@ -638,6 +669,14 @@ impl PalaceHandle {
                 self.id
             ));
         }
+
+        // Issue #154: serialise with concurrent `remember_with_options`
+        // calls so the L1 snapshot rewritten below sees a consistent
+        // drawer-table state and so the vector / KG / in-memory removals
+        // can't interleave with an append. See `write_mutex` docs on
+        // `PalaceHandle`.
+        let _write_guard = self.write_mutex.lock().await;
+
         // Best-effort vector removal — usearch may legitimately not have the
         // key (e.g. if remember failed mid-flight); we propagate other errors.
         if let Err(e) = self.vector_store.remove(id).await {
@@ -1445,6 +1484,85 @@ mod tests {
         assert!(
             !results.iter().any(|r| r.drawer.id == id),
             "forgotten drawer should not appear in recall results"
+        );
+    }
+
+    /// Regression test for issue #154: concurrent `remember_with_options`
+    /// calls on the same palace must not race on the L1 snapshot write.
+    ///
+    /// Why: Pre-fix, 20 concurrent writers against the same palace produced
+    /// 30–60% "No such file or directory" failures because multiple writers
+    /// would write the same `l1_cache.json.tmp` file and the first
+    /// `rename(tmp -> target)` removed the tmp before the second rename
+    /// could see it. The per-palace write mutex + per-call tmp naming
+    /// together eliminate the race.
+    /// What: Spawns 32 concurrent `remember` tasks on the same handle,
+    /// waits for all of them, and asserts every single one returned `Ok`.
+    /// After the burst the drawer table contains all 32 entries.
+    /// Test: this test.
+    #[tokio::test]
+    async fn remember_concurrent_does_not_lose_writes() {
+        use crate::memory_core::palace::Palace;
+        let dir = tempdir().unwrap();
+        let palace = Palace {
+            id: PalaceId::new("concurrent-test"),
+            name: "Concurrent".into(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: dir.path().join("concurrent-test"),
+        };
+        std::fs::create_dir_all(&palace.data_dir).unwrap();
+        let handle = PalaceHandle::open(&palace).unwrap();
+
+        // Spawn 32 concurrent writers. Each writes a distinct payload that
+        // is long enough to pass the default token filter (>=8 tokens).
+        let mut tasks = Vec::with_capacity(32);
+        for i in 0..32u32 {
+            let h = handle.clone();
+            tasks.push(tokio::spawn(async move {
+                h.remember(
+                    format!(
+                        "concurrent write test payload number {i} with enough \
+                         tokens to satisfy the default token filter check"
+                    ),
+                    RoomType::General,
+                    vec!["concurrent".into(), format!("idx-{i}")],
+                    0.5,
+                )
+                .await
+            }));
+        }
+
+        let mut ok = 0usize;
+        let mut errs = Vec::new();
+        for t in tasks {
+            match t.await.expect("task panicked") {
+                Ok(_id) => ok += 1,
+                Err(e) => errs.push(format!("{e:#}")),
+            }
+        }
+        assert_eq!(
+            ok, 32,
+            "expected all 32 concurrent remembers to succeed; failures: {errs:?}"
+        );
+
+        // Every write should be present in the in-memory drawer table.
+        let drawer_count = handle.drawers.read().len();
+        assert_eq!(
+            drawer_count, 32,
+            "expected 32 drawers after concurrent burst, got {drawer_count}"
+        );
+
+        // No leaked tmp files from racing renames.
+        let leaked: Vec<_> = std::fs::read_dir(&palace.data_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("l1_cache.json") && n.contains(".tmp."))
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "expected no .tmp.* orphans after concurrent saves; found {leaked:?}"
         );
     }
 

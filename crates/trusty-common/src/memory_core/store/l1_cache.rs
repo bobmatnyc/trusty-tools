@@ -10,11 +10,26 @@
 
 use crate::memory_core::palace::Drawer;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use thiserror::Error;
 
 /// Filename for the L1 cache snapshot.
 const L1_CACHE_JSON: &str = "l1_cache.json";
+
+/// Monotonic counter that, combined with the process PID, gives every
+/// concurrent `save_l1_cache` invocation its own tmp filename.
+///
+/// Why: Issue #154 — when two writers in the same process raced on
+/// `l1_cache.json.tmp`, the first `rename(tmp -> target)` succeeded and
+/// removed the tmp, then the second `rename` failed with `ENOENT` because
+/// "its" tmp file no longer existed. The reported error was
+/// `"No such file or directory at .../l1_cache.json"` even though it was
+/// really the tmp source that vanished. Per-invocation tmp names eliminate
+/// the trample entirely — each writer renames its own file.
+/// What: `AtomicU64` bumped once per `save_l1_cache` call.
+/// Test: covered by `concurrent_save_l1_cache_no_enoent` in this module.
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Maximum number of drawers stored in the L1 snapshot (mirrors `retrieval::L1_CAP`).
 pub const L1_SNAPSHOT_CAP: usize = 15;
@@ -66,15 +81,33 @@ impl L1Cache {
     /// Persist the top-by-importance drawers to `<data_dir>/l1_cache.json`.
     ///
     /// Why: Atomic JSON snapshot lets the next palace open hydrate L1 in O(1)
-    /// disk reads instead of re-sorting the full drawer table.
+    /// disk reads instead of re-sorting the full drawer table. Concurrency
+    /// hazards (issue #154): two concurrent writers must not stomp on each
+    /// other's tmp file, and the parent directory must exist at rename time
+    /// even if a prior op transiently removed it (e.g. the dream subprocess).
     /// What: Sorts a clone of `drawers` by importance descending, takes the
-    /// first `L1_SNAPSHOT_CAP`, and writes JSON via tmp+rename.
+    /// first `L1_SNAPSHOT_CAP`, writes JSON to a per-call unique tmp path
+    /// (PID + monotonic counter so concurrent writers don't share the tmp),
+    /// re-asserts `create_dir_all` immediately before the rename so the
+    /// destination directory cannot have vanished between this call's first
+    /// `create_dir_all` and its rename, and renames atomically. On rename
+    /// failure the stray tmp is best-effort removed so disk doesn't fill
+    /// with `.tmp.<pid>.<seq>` orphans.
     /// Test: `l1_cache_roundtrip` saves 20 drawers and verifies only the top
-    /// 15 (by importance) come back.
+    /// 15 (by importance) come back. `concurrent_save_l1_cache_no_enoent`
+    /// stresses 16 parallel writers and asserts none hit ENOENT (covers the
+    /// trample race fixed by per-call tmp naming).
     pub fn save_l1_cache(drawers: &[Drawer], data_dir: &Path) -> Result<()> {
         std::fs::create_dir_all(data_dir).map_err(|e| L1CacheError::io(data_dir, e))?;
         let target = data_dir.join(L1_CACHE_JSON);
-        let tmp = data_dir.join(format!("{L1_CACHE_JSON}.tmp"));
+        // Per-invocation tmp filename: PID + monotonic counter. Two
+        // concurrent writers in the same process get distinct tmp paths, so
+        // writer A's `rename(tmp_A -> target)` cannot remove writer B's
+        // `tmp_B`. Different processes get different PIDs, so cross-process
+        // concurrent writes (rare but possible) are also safe.
+        let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let tmp = data_dir.join(format!("{L1_CACHE_JSON}.tmp.{pid}.{seq}"));
 
         let mut sorted: Vec<Drawer> = drawers.to_vec();
         sorted.sort_by(|a, b| {
@@ -87,7 +120,22 @@ impl L1Cache {
         let bytes = serde_json::to_vec_pretty(&sorted)
             .map_err(|e| L1CacheError::json(target.clone(), e))?;
         std::fs::write(&tmp, &bytes).map_err(|e| L1CacheError::io(tmp.clone(), e))?;
-        std::fs::rename(&tmp, &target).map_err(|e| L1CacheError::io(target.clone(), e))?;
+        // Defensive: re-assert the parent dir exists right before rename.
+        // `create_dir_all` is a cheap idempotent syscall when the dir
+        // already exists, and it eliminates a TOCTOU window in case some
+        // other process or test cleanup removed the directory between the
+        // first `create_dir_all` above and this rename.
+        if let Err(e) = std::fs::create_dir_all(data_dir) {
+            // Best-effort tmp cleanup before bubbling the error.
+            let _ = std::fs::remove_file(&tmp);
+            return Err(L1CacheError::io(data_dir, e));
+        }
+        if let Err(e) = std::fs::rename(&tmp, &target) {
+            // Best-effort tmp cleanup so a failed rename doesn't leak
+            // `.tmp.<pid>.<seq>` files into the palace directory.
+            let _ = std::fs::remove_file(&tmp);
+            return Err(L1CacheError::io(target, e));
+        }
         Ok(())
     }
 
@@ -203,5 +251,57 @@ mod tests {
         let tmp = tempdir().unwrap();
         // No snapshot ever written -> always stale.
         assert!(L1Cache::is_stale(tmp.path(), 999_999).unwrap());
+    }
+
+    /// Regression test for issue #154: concurrent `save_l1_cache` calls
+    /// against the same `data_dir` must not race on a shared tmp filename.
+    ///
+    /// Why: Before the per-call tmp naming fix, two writers would both write
+    /// `l1_cache.json.tmp`, then both `rename(tmp -> target)`; the first
+    /// rename consumed the tmp, the second failed with
+    /// "No such file or directory" at the destination path. Reproducing this
+    /// deterministically is hard, but a 16-thread parallel writer pool
+    /// reliably hit it before the fix.
+    /// What: Spawns 16 OS threads that each call `save_l1_cache` 10 times
+    /// against the same directory and asserts every call returns `Ok`. After
+    /// the burst the directory contains exactly one `l1_cache.json` (the
+    /// last winner) and no `.tmp.*` orphans.
+    /// Test: this test.
+    #[test]
+    fn concurrent_save_l1_cache_no_enoent() {
+        let tmp = tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+
+        let mut handles = Vec::with_capacity(16);
+        for thread_id in 0..16u32 {
+            let dir = data_dir.clone();
+            handles.push(std::thread::spawn(move || {
+                for i in 0..10u32 {
+                    let drawers = vec![drawer_with_importance(
+                        &format!("t{thread_id}-i{i}"),
+                        (thread_id as f32) * 0.01 + (i as f32) * 0.001,
+                    )];
+                    L1Cache::save_l1_cache(&drawers, &dir).unwrap_or_else(|e| {
+                        panic!("save_l1_cache (t={thread_id}, i={i}) failed: {e}")
+                    });
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
+
+        // Final state assertions: a real snapshot exists and no .tmp files leak.
+        assert!(data_dir.join(L1_CACHE_JSON).exists());
+        let leaked_tmps: Vec<_> = std::fs::read_dir(&data_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(L1_CACHE_JSON) && n.contains(".tmp."))
+            .collect();
+        assert!(
+            leaked_tmps.is_empty(),
+            "leaked tmp files after concurrent saves: {leaked_tmps:?}"
+        );
     }
 }
