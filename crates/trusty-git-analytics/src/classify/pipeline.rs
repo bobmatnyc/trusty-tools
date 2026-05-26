@@ -181,11 +181,18 @@ impl ClassificationPipeline {
             .map(|j| j.jira_project_mappings.clone())
             .unwrap_or_default();
 
-        ClassificationEngine::with_taxonomy_and_mappings(
+        let jira_confidence = self
+            .config
+            .jira
+            .as_ref()
+            .and_then(|j| j.jira_project_mapping_confidence);
+
+        ClassificationEngine::with_taxonomy_mappings_and_confidence(
             ruleset,
             engine_cfg,
             custom_taxonomy,
             jira_mappings,
+            jira_confidence,
             // Override-tier DB wiring is deferred: rusqlite::Connection is
             // not Send + Sync, so plumbing the live connection through the
             // Rayon batch would require a redesign. The override tier is

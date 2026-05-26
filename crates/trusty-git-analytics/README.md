@@ -362,7 +362,19 @@ Each commit message is tested against tiers in order. The first tier to produce 
 
 **Tier 1.5 — Issue Type** (confidence 0.90): when the commit has ticket references resolving to rows in `issue_cache`, maps the upstream issue type (`bug`, `story`, `task`, `spike`, etc.) directly to a `change_type`.
 
-**Tier 3 — JIRA Project Mapping** (confidence 0.95): when `jira_project_mappings` is configured, maps the JIRA project key prefix of any `[A-Z]+-\d+` reference to a `change_type`.
+**Tier 1.6 — JIRA Project Mapping** (default confidence 0.88, override via `jira.jira_project_mapping_confidence`): when `jira.jira_project_mappings` is configured, maps the JIRA project key prefix of any `[A-Z]+-\d+` reference to a `change_type`. Fires *before* the regex tier so project mappings outrank the generic `jira-ticket` regex rule (issue #206). Example config:
+
+```yaml
+jira:
+  jira_project_mappings:
+    TQL: bug_fix
+    APEX: integration
+    INFRA: platform_infrastructure
+    SEC: security
+  jira_project_mapping_confidence: 0.88   # optional, default 0.88
+```
+
+Tier-0 manual overrides and exact-keyword conventional-commit prefixes (e.g. `fix:`) still beat this tier.
 
 **Tier 4 — Exact (Aho-Corasick)**: builds a single finite-state machine from every keyword list across every rule and scans the message in O(n) time. Matches `feat:`, `fix:`, `chore:`, etc. Confidence 0.85–0.95.
 

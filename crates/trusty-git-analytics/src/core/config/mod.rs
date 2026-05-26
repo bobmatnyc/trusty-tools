@@ -530,16 +530,36 @@ pub struct JiraConfig {
 
     /// Maps JIRA project keys to canonical work types (subcategory names).
     ///
-    /// Used by the Tier 3 [`crate::classify::tiers::jira_project_tier::JiraProjectTier`]
-    /// classifier. Example YAML:
+    /// Used by the Tier 1.6
+    /// [`crate::classify::tiers::jira_project_tier::JiraProjectTier`]
+    /// classifier (issue #206). The tier fires between exact-keyword and
+    /// regex matching, so project mappings outrank the generic
+    /// `jira-ticket` regex rule but still defer to Tier-0 manual
+    /// overrides and exact conventional-commit prefixes.
+    ///
+    /// Accepts the `jira_project_mapping` (singular) alias for parity
+    /// with the issue-#206 spec.
+    ///
+    /// Example YAML:
     /// ```yaml
     /// jira:
     ///   jira_project_mappings:
-    ///     INFRA: platform
-    ///     DATA: feature
+    ///     TQL: bug_fix
+    ///     APEX: integration
+    ///     INFRA: platform_infrastructure
+    ///     SEC: security
     /// ```
-    #[serde(default)]
+    #[serde(default, alias = "jira_project_mapping")]
     pub jira_project_mappings: HashMap<String, String>,
+
+    /// Per-verdict confidence emitted by the JIRA project mapping tier.
+    ///
+    /// Defaults to
+    /// [`crate::classify::tiers::jira_project_tier::DEFAULT_PROJECT_MAPPING_CONFIDENCE`]
+    /// (0.88). Tune downward to make exact-keyword rules win more often,
+    /// upward to crowd out manual overrides less aggressively.
+    #[serde(default)]
+    pub jira_project_mapping_confidence: Option<f64>,
 
     /// Optional override regex for detecting JIRA ticket references in
     /// commit messages.

@@ -108,6 +108,38 @@ impl ClassificationEngine {
         jira_project_mappings: HashMap<String, String>,
         override_conn: Option<Arc<Mutex<Connection>>>,
     ) -> Result<Self> {
+        Self::with_taxonomy_mappings_and_confidence(
+            ruleset,
+            config,
+            custom_taxonomy,
+            jira_project_mappings,
+            None,
+            override_conn,
+        )
+    }
+
+    /// Full builder with the JIRA project-key mapping confidence override.
+    ///
+    /// Why: issue #206 — operators need to tune how aggressively the
+    /// project-key mapping overrides downstream regex/fuzzy verdicts.
+    /// Passing `None` keeps the default
+    /// [`crate::classify::tiers::jira_project_tier::DEFAULT_PROJECT_MAPPING_CONFIDENCE`]
+    /// (0.88).
+    /// What: same as [`Self::with_taxonomy_and_mappings`] but takes an
+    /// extra `jira_confidence` parameter.
+    /// Test: covered by `jira_project_mapping_*` tests in this module.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the rules fail to compile.
+    pub fn with_taxonomy_mappings_and_confidence(
+        ruleset: RuleSet,
+        config: ClassificationEngineConfig,
+        custom_taxonomy: Vec<SubcategoryDef>,
+        jira_project_mappings: HashMap<String, String>,
+        jira_confidence: Option<f64>,
+        override_conn: Option<Arc<Mutex<Connection>>>,
+    ) -> Result<Self> {
         let exact = ExactMatcher::new(&ruleset.rules)?;
         let regex = RegexMatcher::new(&ruleset.rules)?;
         let fuzzy = FuzzyClassifier;
@@ -129,7 +161,13 @@ impl ClassificationEngine {
         };
         let taxonomy = TaxonomyRegistry::new(custom_taxonomy);
         let issue_type = IssueTypeTier::with_taxonomy(taxonomy.clone());
-        let jira_project = JiraProjectTier::with_taxonomy(jira_project_mappings, taxonomy.clone());
+        let jira_project = JiraProjectTier::with_taxonomy_and_confidence(
+            jira_project_mappings,
+            taxonomy.clone(),
+            jira_confidence.unwrap_or(
+                crate::classify::tiers::jira_project_tier::DEFAULT_PROJECT_MAPPING_CONFIDENCE,
+            ),
+        );
         let override_tier = override_conn.map(|c| OverrideTier::with_taxonomy(c, taxonomy.clone()));
         Ok(Self {
             override_tier,
@@ -225,6 +263,22 @@ impl ClassificationEngine {
             }
         }
 
+        // Tier 1.6: JIRA project-key mapping (if configured).
+        //
+        // Issue #206 — JIRA project codes (e.g. `TQL-1234`) carry semantic
+        // meaning that no amount of message parsing can reproduce: `TQL`
+        // is an existing-product bug tracker, `INFRA` is platform work, and
+        // so on. Insert this tier *before* the regex tier so the project
+        // mapping outranks the generic `[A-Z]+-\d+` `jira-ticket` rule
+        // (which routes everything to "feature/ticketed" at confidence
+        // 0.7). Tier-0 manual overrides still win because they short-
+        // circuit above.
+        if !self.jira_project.is_empty() {
+            if let Some(r) = self.jira_project.classify(message) {
+                return Some(r);
+            }
+        }
+
         // Tier 2: regex
         if let Some(rule) = self.regex.classify(message) {
             return Some(ClassificationResult {
@@ -236,13 +290,6 @@ impl ClassificationEngine {
                 ticket_id: RegexMatcher::extract_ticket_id(message),
                 complexity: None,
             });
-        }
-
-        // Tier 3: JIRA project-key mapping (if configured).
-        if !self.jira_project.is_empty() {
-            if let Some(r) = self.jira_project.classify(message) {
-                return Some(r);
-            }
         }
 
         // Tier 3.5: fuzzy heuristics
@@ -317,5 +364,94 @@ impl ClassificationEngine {
                     .unwrap_or_else(ClassificationResult::unclassified)
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::classify::rules::default_rules;
+
+    /// Why: issue #206 requires the JIRA project mapping to fire as a
+    /// Tier-1.6 tiebreaker — between exact-keyword and regex tiers. If
+    /// the ordering regresses, the generic `jira-ticket` regex rule
+    /// (confidence 0.7, category "feature/ticketed") would steal the
+    /// verdict and operators would never see their mapping fire.
+    /// What: build an engine over the default ruleset with one mapping
+    /// (`TQL → bug_fix`) and classify a message that matches both the
+    /// generic ticket pattern and the mapping. Assert the mapping wins.
+    /// Test: pure cascade exercise, no DB.
+    #[test]
+    fn jira_project_mapping_outranks_generic_ticket_regex() {
+        let mut mappings = HashMap::new();
+        mappings.insert("TQL".to_string(), "bug_fix".to_string());
+        let engine = ClassificationEngine::with_taxonomy_and_mappings(
+            default_rules(),
+            ClassificationEngineConfig::default(),
+            Vec::new(),
+            mappings,
+            None,
+        )
+        .expect("engine builds");
+
+        // The catch-all and `jira-ticket` rules would normally classify
+        // this as "feature/ticketed" at confidence 0.7. With the mapping,
+        // we should get "bug_fix" at the JIRA-tier confidence (0.88).
+        let v = engine
+            .classify_sync("TQL-1234 fix null pointer", false)
+            .expect("verdict");
+        assert_eq!(v.category, "bug_fix");
+        assert!((v.confidence - 0.88).abs() < 1e-6);
+        assert_eq!(v.ticket_id.as_deref(), Some("TQL-1234"));
+    }
+
+    /// Why: when the operator configures a per-tier confidence override
+    /// (e.g. to crowd out manual overrides less aggressively), the
+    /// value must reach the verdict.
+    /// What: build an engine with `jira_confidence = Some(0.5)` and
+    /// assert the verdict carries that value.
+    /// Test: pure constructor + classify exercise.
+    #[test]
+    fn jira_project_mapping_confidence_threads_through_engine_builder() {
+        let mut mappings = HashMap::new();
+        mappings.insert("INFRA".to_string(), "platform".to_string());
+        let engine = ClassificationEngine::with_taxonomy_mappings_and_confidence(
+            default_rules(),
+            ClassificationEngineConfig::default(),
+            Vec::new(),
+            mappings,
+            Some(0.5),
+            None,
+        )
+        .expect("engine builds");
+        let v = engine
+            .classify_sync("INFRA-7 patch", false)
+            .expect("verdict");
+        assert!((v.confidence - 0.5).abs() < 1e-6);
+    }
+
+    /// Why: exact-keyword conventional-commit prefixes (`fix:`, `feat:`)
+    /// must still beat the JIRA mapping — they encode developer intent
+    /// at much higher confidence than the project key.
+    /// What: classify a `fix: TQL-1 ...` message with a TQL mapping
+    /// configured; assert the cc-fix rule wins.
+    /// Test: pure cascade exercise.
+    #[test]
+    fn exact_rule_still_beats_jira_project_mapping() {
+        let mut mappings = HashMap::new();
+        mappings.insert("TQL".to_string(), "platform".to_string());
+        let engine = ClassificationEngine::with_taxonomy_and_mappings(
+            default_rules(),
+            ClassificationEngineConfig::default(),
+            Vec::new(),
+            mappings,
+            None,
+        )
+        .expect("engine builds");
+        let v = engine
+            .classify_sync("fix: TQL-1 handle null user", false)
+            .expect("verdict");
+        assert_eq!(v.category, "bugfix");
+        assert_eq!(v.method, ClassificationMethod::ExactRule);
     }
 }

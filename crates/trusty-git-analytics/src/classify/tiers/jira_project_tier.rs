@@ -1,19 +1,23 @@
-//! Tier 3: classify by JIRA project key mapping.
+//! Tier 1.6: classify by JIRA project key mapping.
 //!
 //! Why: Some organizations dedicate JIRA projects to a particular kind of
-//! work (e.g. `INFRA` for platform work, `DATA` for data-pipeline features).
-//! When a commit references a ticket from such a project, the project key
-//! itself is a strong classification signal that no amount of message
-//! parsing can reliably reproduce.
+//! work (e.g. `INFRA` for platform work, `DATA` for data-pipeline features,
+//! `TQL` for an existing-product bug tracker). When a commit references a
+//! ticket from such a project, the project key itself is a strong
+//! classification signal that no amount of message parsing can reliably
+//! reproduce. See issue #206.
 //!
 //! What: Extracts the JIRA project key from a commit message (the prefix
 //! of the first `PROJ-123`-style identifier) and looks it up in a
 //! user-configured `HashMap<String, String>`. On hit, returns a verdict
-//! with confidence 0.95.
+//! with confidence [`DEFAULT_PROJECT_MAPPING_CONFIDENCE`] (0.88) — or the
+//! caller-supplied confidence via
+//! [`JiraProjectTier::with_taxonomy_and_confidence`].
 //!
 //! Test: Configure mappings `{"INFRA": "platform"}`, classify
-//! `"INFRA-42 fix nginx"`, and assert the verdict is `"platform"` with
-//! confidence 0.95; assert that an unmapped key (`"FOO-1"`) yields `None`.
+//! `"INFRA-42 fix nginx"`, and assert the verdict is `"platform"` with the
+//! configured confidence; assert that an unmapped key (`"FOO-1"`) yields
+//! `None`.
 
 use std::collections::HashMap;
 
@@ -35,20 +39,28 @@ fn jira_key_re() -> Option<&'static Regex> {
         .as_ref()
 }
 
-/// Confidence assigned to every verdict from this tier.
-const PROJECT_MAPPING_CONFIDENCE: f64 = 0.95;
+/// Default confidence assigned to every verdict from this tier.
+///
+/// Why: the JIRA project mapping (issue #206) is a tiebreaker — strong
+/// enough to outrank the generic regex `jira-ticket` rule (confidence
+/// 0.7) but soft enough that Tier-0 manual overrides (1.0) and exact-
+/// keyword conventional-commit prefixes (0.95) still win. The 0.88
+/// default sits in this gap by design.
+pub const DEFAULT_PROJECT_MAPPING_CONFIDENCE: f64 = 0.88;
 
-/// Tier-3 JIRA project-key classifier.
+/// Tier-1.6 JIRA project-key classifier.
 pub struct JiraProjectTier {
     mappings: HashMap<String, String>,
     taxonomy: TaxonomyRegistry,
+    confidence: f64,
 }
 
 impl JiraProjectTier {
     /// Construct a new tier with the given `project_key → work_type` map.
     ///
     /// Keys are normalized to uppercase on insert so callers don't have to
-    /// pre-uppercase their config.
+    /// pre-uppercase their config. Confidence defaults to
+    /// [`DEFAULT_PROJECT_MAPPING_CONFIDENCE`].
     pub fn new(mappings: HashMap<String, String>) -> Self {
         Self::with_taxonomy(mappings, TaxonomyRegistry::with_builtins())
     }
@@ -56,6 +68,22 @@ impl JiraProjectTier {
     /// Construct with a custom taxonomy registry (lets user-defined
     /// subcategories resolve to a top-level parent).
     pub fn with_taxonomy(mappings: HashMap<String, String>, taxonomy: TaxonomyRegistry) -> Self {
+        Self::with_taxonomy_and_confidence(mappings, taxonomy, DEFAULT_PROJECT_MAPPING_CONFIDENCE)
+    }
+
+    /// Construct with a custom taxonomy and an explicit per-verdict
+    /// confidence score.
+    ///
+    /// Why: issue #206 specifies the confidence as configurable so users
+    /// can tune how aggressively the JIRA mapping overrides downstream
+    /// regex/fuzzy verdicts.
+    /// What: stores `confidence` verbatim and emits it on every hit.
+    /// Test: covered by `confidence_override_threads_through` below.
+    pub fn with_taxonomy_and_confidence(
+        mappings: HashMap<String, String>,
+        taxonomy: TaxonomyRegistry,
+        confidence: f64,
+    ) -> Self {
         let normalized = mappings
             .into_iter()
             .map(|(k, v)| (k.to_uppercase(), v))
@@ -63,6 +91,7 @@ impl JiraProjectTier {
         Self {
             mappings: normalized,
             taxonomy,
+            confidence,
         }
     }
 
@@ -101,7 +130,7 @@ impl JiraProjectTier {
             category,
             subcategory: None,
             top_level: Some(top_level),
-            confidence: PROJECT_MAPPING_CONFIDENCE,
+            confidence: self.confidence,
             method: ClassificationMethod::RegexRule,
             ticket_id,
             complexity: None,
@@ -125,8 +154,31 @@ mod tests {
         let t = fixture();
         let r = t.classify("INFRA-42 fix nginx config").expect("hit");
         assert_eq!(r.category, "platform");
-        assert!((r.confidence - 0.95).abs() < 1e-9);
+        assert!(
+            (r.confidence - DEFAULT_PROJECT_MAPPING_CONFIDENCE).abs() < 1e-9,
+            "default confidence is {DEFAULT_PROJECT_MAPPING_CONFIDENCE}"
+        );
         assert_eq!(r.ticket_id.as_deref(), Some("INFRA-42"));
+    }
+
+    /// Why: the confidence-override constructor is the issue-#206 hook
+    /// for tuning how aggressively the JIRA mapping overrides downstream
+    /// tiers; a regression where the value is silently dropped would
+    /// break that operator knob.
+    /// What: build a tier with confidence=0.5 and assert the verdict
+    /// reflects it.
+    /// Test: pure constructor exercise.
+    #[test]
+    fn confidence_override_threads_through() {
+        let mut m = HashMap::new();
+        m.insert("INFRA".to_string(), "platform".to_string());
+        let t = JiraProjectTier::with_taxonomy_and_confidence(
+            m,
+            TaxonomyRegistry::with_builtins(),
+            0.5,
+        );
+        let r = t.classify("INFRA-1 any").expect("hit");
+        assert!((r.confidence - 0.5).abs() < 1e-9);
     }
 
     #[test]
