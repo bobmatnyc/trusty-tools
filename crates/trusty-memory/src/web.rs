@@ -3285,6 +3285,7 @@ mod tests {
                     compacted: 3,
                     closets_updated: 4,
                     duration_ms: 100,
+                    ..DreamStats::default()
                 },
                 chrono::Utc::now() - chrono::Duration::seconds(60),
             ),
@@ -3296,6 +3297,7 @@ mod tests {
                     compacted: 30,
                     closets_updated: 40,
                     duration_ms: 200,
+                    ..DreamStats::default()
                 },
                 chrono::Utc::now(),
             ),

@@ -41,6 +41,10 @@ pub struct DreamConfig {
     pub prune_importance: f32,
     /// Wall-clock budget for one dream cycle.
     pub max_cycle_ms: u64,
+    /// Whether to drop low-quality drawers by content inspection during dreaming.
+    pub content_prune_enabled: bool,
+    /// Drawers with fewer than this many whitespace-delimited words are dropped.
+    pub content_prune_min_words: usize,
 }
 
 impl Default for DreamConfig {
@@ -54,9 +58,30 @@ impl Default for DreamConfig {
             // embedder loads. The previous 5s budget was exhausted before the
             // pass could finish on palaces with ~100+ drawers (issue #55).
             max_cycle_ms: 60_000,
+            content_prune_enabled: true,
+            content_prune_min_words: 4,
         }
     }
 }
+
+/// Substring patterns whose presence in a drawer's content marks it as
+/// low-value auto-capture noise that retroactive dreaming should drop.
+///
+/// Why: PR #221 introduced an identical blocklist at the write path
+/// (`trusty-memory/src/tools.rs`) so new writes never land. But drawers
+/// captured before that gate shipped — `Tool use: Bash`, `Claude Code session
+/// ended: <uuid>`, etc. — already pollute existing palaces. The dream cycle
+/// is the right place to retroactively enforce the same policy without
+/// requiring an admin migration script.
+/// What: Substring patterns (not regexes) checked via `str::contains` after
+/// `str::trim_start`. Mirrors the write-path list exactly so both gates stay
+/// in lock-step. Patterns are matched case-sensitively because the
+/// auto-capture hooks always emit the exact English prefix.
+/// Test: `dream_content_prune_drops_blocklist_drawer`.
+const CONTENT_BLOCKLIST: &[&str] = &[
+    "Tool use: ",          // Claude Code tool-use captures
+    "Claude Code session", // Session lifecycle events
+];
 
 /// Per-cycle dream telemetry.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +92,11 @@ pub struct DreamStats {
     /// Orphaned vectors removed from the HNSW index because no surviving
     /// drawer row references them (issue #33).
     pub compacted: usize,
+    /// Drawers dropped by the content-quality prune pass (issue #222):
+    /// matches the blocklist or has fewer than `content_prune_min_words`
+    /// words. Defaults to zero when the pass is disabled.
+    #[serde(default)]
+    pub content_pruned: usize,
     pub duration_ms: u64,
 }
 
@@ -209,6 +239,7 @@ impl Dreamer {
                         palace = %handle.id,
                         merged = stats.merged,
                         pruned = stats.pruned,
+                        content_pruned = stats.content_pruned,
                         compacted = stats.compacted,
                         closets_updated = stats.closets_updated,
                         duration_ms = stats.duration_ms,
@@ -263,6 +294,7 @@ impl Dreamer {
                         palace = %handle.id,
                         merged = stats.merged,
                         pruned = stats.pruned,
+                        content_pruned = stats.content_pruned,
                         compacted = stats.compacted,
                         closets_updated = stats.closets_updated,
                         duration_ms = stats.duration_ms,
@@ -299,6 +331,13 @@ impl Dreamer {
         // panics alike.
         let _compaction_guard = CompactionGuard::new(handle.is_compacting.clone());
 
+        let content_pruned = if self.config.content_prune_enabled {
+            self.content_prune_pass(handle, started, budget)
+                .await
+                .context("dream content prune pass")?
+        } else {
+            0
+        };
         let merged = self
             .dedup_pass(handle, started, budget)
             .await
@@ -323,6 +362,7 @@ impl Dreamer {
             pruned,
             closets_updated,
             compacted,
+            content_pruned,
             duration_ms: started.elapsed().as_millis() as u64,
         };
 
@@ -360,6 +400,53 @@ impl Dreamer {
         }
 
         Ok(stats)
+    }
+
+    /// Drop drawers whose content is recognisably noise: matches the
+    /// `CONTENT_BLOCKLIST` substrings or contains fewer than
+    /// `config.content_prune_min_words` whitespace-delimited words. Returns
+    /// the number of drawers dropped.
+    ///
+    /// Why: The write-path blocklist (PR #221) only gates new writes. Pre-
+    /// existing drawers that slipped through before the gate need periodic
+    /// cleanup; the dream cycle is the right place for retroactive quality
+    /// enforcement so palaces self-heal without admin migrations.
+    /// What: Snapshots the in-memory drawer table, applies the same content
+    /// rule the write path uses (trim leading whitespace, substring-check
+    /// against `CONTENT_BLOCKLIST`) plus a word-count floor, and forgets each
+    /// matching drawer via `PalaceHandle::forget`. Respects the per-cycle
+    /// wall-clock `budget` deadline.
+    /// Test: `dream_content_prune_drops_blocklist_drawer`,
+    /// `dream_content_prune_drops_short_drawer`,
+    /// `dream_content_prune_keeps_good_drawer`.
+    async fn content_prune_pass(
+        &self,
+        handle: &Arc<PalaceHandle>,
+        started: std::time::Instant,
+        budget: Duration,
+    ) -> Result<usize> {
+        let snapshot: Vec<Drawer> = handle.drawers.read().clone();
+        let mut victims: Vec<Uuid> = Vec::new();
+
+        for drawer in snapshot.iter() {
+            if started.elapsed() >= budget {
+                break;
+            }
+            if is_low_quality_content(&drawer.content, self.config.content_prune_min_words) {
+                victims.push(drawer.id);
+            }
+        }
+
+        let count = victims.len();
+        for id in victims {
+            if started.elapsed() >= budget {
+                break;
+            }
+            if let Err(e) = handle.forget(id).await {
+                tracing::warn!(?id, "dream content prune: forget failed: {e:#}");
+            }
+        }
+        Ok(count)
     }
 
     /// Remove orphaned vectors from the HNSW index whose drawer row no longer
@@ -696,6 +783,30 @@ pub fn extract_keywords(content: &str) -> Vec<String> {
     out
 }
 
+/// Returns true when `content` should be dropped by the content-quality
+/// prune pass.
+///
+/// Why: Centralises the "is this drawer noise?" decision so the prune pass
+/// and its tests share one rule. The rule mirrors the write-path gate
+/// (`trusty-memory::tools::blocklist_gate` plus a minimum word-count
+/// floor) so a drawer that wouldn't be written today is also a drawer
+/// that should not survive the next dream cycle.
+/// What: Trims leading whitespace, then returns true iff the trimmed content
+/// contains any `CONTENT_BLOCKLIST` substring, OR the whitespace-delimited
+/// word count is strictly less than `min_words`. An empty `content` (zero
+/// words) is always low-quality whenever `min_words >= 1`.
+/// Test: `dream_content_prune_drops_blocklist_drawer`,
+/// `dream_content_prune_drops_short_drawer`,
+/// `dream_content_prune_keeps_good_drawer`.
+fn is_low_quality_content(content: &str, min_words: usize) -> bool {
+    let trimmed = content.trim_start();
+    if CONTENT_BLOCKLIST.iter().any(|pat| trimmed.contains(pat)) {
+        return true;
+    }
+    let word_count = content.split_whitespace().count();
+    word_count < min_words
+}
+
 /// Current unix timestamp in seconds. Saturates to 0 on clock errors.
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -725,6 +836,11 @@ mod tests {
         assert!((cfg.dedup_threshold - 0.95).abs() < 1e-6);
         assert!((cfg.prune_importance - 0.05).abs() < 1e-6);
         assert_eq!(cfg.max_cycle_ms, 60_000);
+        assert!(
+            cfg.content_prune_enabled,
+            "content-quality pruning is on by default"
+        );
+        assert_eq!(cfg.content_prune_min_words, 4);
     }
 
     /// Why: `touch` must reset the idle clock; with `idle_secs=0` `is_idle`
@@ -1093,5 +1209,127 @@ mod tests {
             !handle.is_compacting(),
             "flag must be cleared after dream_cycle returns"
         );
+    }
+
+    /// Why: Drawers captured before the write-path blocklist landed (PR #221)
+    /// still pollute existing palaces with `Tool use: Bash`-style noise. The
+    /// dream cycle's content-prune pass must drop them retroactively so the
+    /// palace self-heals on the next idle window.
+    /// What: Insert a drawer whose content matches the blocklist prefix and a
+    /// second sentence-length drawer that should survive, run a dream cycle,
+    /// and assert only the noise drawer was content-pruned.
+    /// Test: This test itself.
+    #[tokio::test]
+    async fn dream_content_prune_drops_blocklist_drawer() {
+        let handle = open_test_handle("dream-content-blocklist").await;
+        // `force=true` bypasses the write-path filter so we can plant a
+        // pre-blocklist-era noise drawer that the dream pass must clean up.
+        handle
+            .remember_with_options(
+                "Tool use: Bash".into(),
+                RoomType::General,
+                vec![],
+                0.5,
+                crate::memory_core::retrieval::RememberOptions::forced(),
+            )
+            .await
+            .unwrap();
+        let keep_id = handle
+            .remember(
+                "Refactor the dream loop to add a content-quality prune pass.".into(),
+                RoomType::Backend,
+                vec!["dream".into()],
+                0.7,
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.drawers.read().len(), 2);
+
+        let dreamer = Dreamer::new(DreamConfig::default());
+        let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+        assert_eq!(
+            stats.content_pruned, 1,
+            "expected exactly one blocklist-pruned drawer; got stats={stats:?}"
+        );
+        let surviving: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+        assert_eq!(surviving, vec![keep_id], "noise drawer must be gone");
+    }
+
+    /// Why: Three-word one-liners (and shorter) carry no semantic value but
+    /// burn L1 budget and recall slots; the content-prune pass must drop
+    /// anything under `content_prune_min_words`.
+    /// What: Insert one 2-word drawer and one comfortably long drawer, run
+    /// the cycle, and assert only the short one was pruned.
+    /// Test: This test itself.
+    #[tokio::test]
+    async fn dream_content_prune_drops_short_drawer() {
+        let handle = open_test_handle("dream-content-short").await;
+        // `force=true` bypasses the write-path token-count gate so we can
+        // plant a too-short drawer for the dream pass to clean up.
+        handle
+            .remember_with_options(
+                "hello world".into(),
+                RoomType::General,
+                vec![],
+                0.5,
+                crate::memory_core::retrieval::RememberOptions::forced(),
+            )
+            .await
+            .unwrap();
+        let keep_id = handle
+            .remember(
+                "This drawer has more than four words and should survive.".into(),
+                RoomType::General,
+                vec![],
+                0.6,
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.drawers.read().len(), 2);
+
+        let dreamer = Dreamer::new(DreamConfig::default());
+        let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+        assert_eq!(
+            stats.content_pruned, 1,
+            "expected exactly one short drawer pruned; got stats={stats:?}"
+        );
+        let surviving: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+        assert_eq!(surviving, vec![keep_id], "short drawer must be gone");
+    }
+
+    /// Why: The prune pass must not be over-eager — normal multi-sentence
+    /// drawers should survive untouched even when the cycle runs with default
+    /// config. Without this regression test a future tightening of the
+    /// blocklist or min-word floor could silently delete useful memories.
+    /// What: Insert a single multi-sentence drawer, run the cycle, and assert
+    /// `content_pruned == 0` and the drawer is still present.
+    /// Test: This test itself.
+    #[tokio::test]
+    async fn dream_content_prune_keeps_good_drawer() {
+        let handle = open_test_handle("dream-content-keep").await;
+        let keep_id = handle
+            .remember(
+                "Dreaming runs a content-quality prune pass before dedup. \
+                 It enforces the same rule the write path uses."
+                    .into(),
+                RoomType::Backend,
+                vec!["dream".into()],
+                0.7,
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.drawers.read().len(), 1);
+
+        let dreamer = Dreamer::new(DreamConfig::default());
+        let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+        assert_eq!(
+            stats.content_pruned, 0,
+            "well-formed drawer must not be content-pruned; got stats={stats:?}"
+        );
+        let surviving: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+        assert_eq!(surviving, vec![keep_id], "good drawer must survive");
     }
 }
