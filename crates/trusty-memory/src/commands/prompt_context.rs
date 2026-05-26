@@ -97,6 +97,36 @@ const DRAWER_PREVIEW_CHARS: usize = 220;
 /// Test: not unit-tested (env mutation across parallel tests is hostile).
 pub const ENV_TOP_K: &str = "TRUSTY_MEMORY_PROMPT_TOP_K";
 
+/// Env override for the deny-listed drawer tags filtered out of recall.
+///
+/// Why (issue #139): operators need a way to widen or narrow the noise
+/// filter without a rebuild — e.g. add project-specific synthetic tags
+/// that have polluted a palace from an upstream hook source. Optional —
+/// when unset, the recall path uses [`DEFAULT_DENY_TAGS`].
+/// What: a comma-separated list of tag strings. Whitespace around each
+/// entry is trimmed; empty entries are ignored; matching is case-
+/// insensitive against the drawer's tag list.
+/// Test: `prompt_context_recall_env_override_extends_deny_list` exercises
+/// the env-driven path with a synthetic noise tag.
+pub const ENV_RECALL_DENY_TAGS: &str = "TRUSTY_MEMORY_PROMPT_RECALL_DENY_TAGS";
+
+/// Default deny list applied to recalled drawer tags before composition.
+///
+/// Why (issue #139): live evidence in the user's palace showed that the
+/// auto-capture hook (`trusty-memory hooks fire claude.user-prompt`,
+/// wired by `trusty-mpm-core::session_launch`) persists every user prompt
+/// as a drawer tagged `claude-session` + `user-prompt`. These drawers
+/// dominate recall and crowd out signal content — three sample sessions
+/// returned the literal token "yes" five times across semantically
+/// distinct prompts. Filtering by tag is cheap, safe (empty tag lists
+/// pass through unchanged), and reversible via [`ENV_RECALL_DENY_TAGS`].
+/// What: a `&[&str]` of tag names. A drawer is filtered when ANY of its
+/// tags matches (case-insensitive) ANY entry in this list.
+/// Test: `prompt_context_recall_filters_deny_tags` covers the default
+/// path; `prompt_context_recall_all_filtered_falls_back_to_global` covers
+/// the all-filtered fallback.
+const DEFAULT_DENY_TAGS: &[&str] = &["claude-session", "user-prompt"];
+
 /// Placeholder body emitted when no daemon is reachable or every fetch
 /// returned nothing useful.
 ///
@@ -205,6 +235,12 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
             let drawers_fut = fetch_palace_recall(&client, &base, slug, &user_prompt, top_k);
             let kg_fut = fetch_palace_kg_triples(&client, &base, slug);
             let (drawers, kg_all) = tokio::join!(drawers_fut, kg_fut);
+            // Issue #139: drop low-signal drawers (e.g. `claude-session` /
+            // `user-prompt` auto-captures) before composition. When this
+            // filter empties the recall set, `compose_injection` falls
+            // back to global hot facts via the existing branch below.
+            let deny_tags = configured_deny_tags();
+            let drawers = filter_drawers_by_deny_tags(drawers, &deny_tags);
             let kg_filtered = select_relevant_triples(&kg_all, &user_prompt, top_k);
             (drawers, kg_filtered)
         }
@@ -300,6 +336,73 @@ fn configured_top_k() -> usize {
         .and_then(|v| v.trim().parse::<usize>().ok())
         .map(|k| k.clamp(1, 20))
         .unwrap_or(DEFAULT_TOP_K)
+}
+
+/// Resolve the effective deny-list of drawer tags for prompt-context recall.
+///
+/// Why (issue #139): centralises the env-override + default logic so the
+/// filter call site stays small and the deny list is testable in isolation.
+/// What: returns the lowercase tag strings parsed from
+/// [`ENV_RECALL_DENY_TAGS`] when set (comma-separated, whitespace-trimmed,
+/// empty entries skipped). Falls back to [`DEFAULT_DENY_TAGS`] when the env
+/// var is unset, empty, or contains nothing but whitespace/commas.
+/// Test: not unit-tested directly (env mutation races); covered indirectly
+/// via `prompt_context_recall_env_override_extends_deny_list` and
+/// `prompt_context_recall_filters_deny_tags`.
+fn configured_deny_tags() -> Vec<String> {
+    if let Ok(raw) = std::env::var(ENV_RECALL_DENY_TAGS) {
+        let parsed: Vec<String> = raw
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !parsed.is_empty() {
+            return parsed;
+        }
+    }
+    DEFAULT_DENY_TAGS.iter().map(|s| s.to_lowercase()).collect()
+}
+
+/// Filter recalled drawers, dropping any whose tag list intersects with
+/// `deny_tags`.
+///
+/// Why (issue #139): the live trusty-tools palace was injecting raw past
+/// user prompts ("yes", "status?", "let's minor version bump") on every
+/// `UserPromptSubmit` because the recall result was dominated by drawers
+/// tagged `claude-session` / `user-prompt` from an upstream auto-capture
+/// hook. Tag-based exclusion is the cheapest and lowest-risk fix — empty
+/// tag lists pass through, and the global hot-facts fallback still kicks
+/// in when filtering empties the result.
+/// What: returns a new `Vec<RecalledDrawer>` containing only the drawers
+/// whose tags do NOT contain any entry from `deny_tags` (case-insensitive
+/// match). If `deny_tags` is empty, returns the input unchanged. If a
+/// drawer has no tags, it is always kept (no excluded tag can match).
+/// Failure isolation: never panics — case folding uses `to_lowercase` which
+/// allocates but cannot fail.
+/// Test: `prompt_context_recall_filters_deny_tags`,
+/// `prompt_context_recall_env_override_extends_deny_list`,
+/// `prompt_context_recall_all_filtered_falls_back_to_global`.
+fn filter_drawers_by_deny_tags(
+    drawers: Vec<RecalledDrawer>,
+    deny_tags: &[String],
+) -> Vec<RecalledDrawer> {
+    if deny_tags.is_empty() {
+        return drawers;
+    }
+    drawers
+        .into_iter()
+        .filter(|d| {
+            // Treat missing / empty tag lists as "no excluded tag can match"
+            // — we keep the drawer rather than discard it on absence of
+            // metadata.
+            if d.tags.is_empty() {
+                return true;
+            }
+            !d.tags
+                .iter()
+                .any(|t| deny_tags.iter().any(|deny| deny.eq_ignore_ascii_case(t)))
+        })
+        .collect()
 }
 
 /// Fetch the global prompt-context block (workspace hot facts).
@@ -734,6 +837,51 @@ mod tests {
         assert_eq!(parse_user_prompt(""), "");
     }
 
+    /// Why (issue #139): the deny-tag filter is the load-bearing piece of
+    /// the recall-quality fix; unit-test the boundary conditions in
+    /// isolation so a refactor cannot silently regress them.
+    /// What: case-insensitive matching, empty deny list = passthrough,
+    /// drawers with no tags = kept (no excluded tag can match).
+    /// Test: itself.
+    #[test]
+    fn filter_drawers_by_deny_tags_handles_edge_cases() {
+        let make = |tags: &[&str]| RecalledDrawer {
+            content: "irrelevant".into(),
+            tags: tags.iter().map(|s| s.to_string()).collect(),
+            layer: Some(2),
+        };
+
+        // Empty deny list → passthrough.
+        let drawers = vec![make(&["claude-session"]), make(&["rust"])];
+        let out = filter_drawers_by_deny_tags(drawers.clone(), &[]);
+        assert_eq!(out.len(), 2, "empty deny list must pass everything");
+
+        // Case-insensitive match (deny "claude-session" vs tag "Claude-Session").
+        let drawers = vec![make(&["Claude-Session"]), make(&["rust"])];
+        let out = filter_drawers_by_deny_tags(drawers, &["claude-session".to_string()]);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].tags.iter().any(|t| t == "rust"));
+
+        // Drawer with no tags is always kept.
+        let drawers = vec![make(&[]), make(&["user-prompt"])];
+        let out = filter_drawers_by_deny_tags(drawers, &["user-prompt".to_string()]);
+        assert_eq!(out.len(), 1, "tagless drawers must survive the filter");
+        assert!(out[0].tags.is_empty());
+
+        // Multiple deny entries — any match excludes.
+        let drawers = vec![
+            make(&["claude-session"]),
+            make(&["user-prompt"]),
+            make(&["signal"]),
+        ];
+        let out = filter_drawers_by_deny_tags(
+            drawers,
+            &["claude-session".to_string(), "user-prompt".to_string()],
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].tags, vec!["signal".to_string()]);
+    }
+
     /// Why (issue #134): KG triples should only surface when one of their
     /// endpoints actually appears in the user's prompt; otherwise the
     /// injection just dumps random graph noise.
@@ -1092,10 +1240,14 @@ mod tests {
         // Poll for the addr file (run_http_on writes it after binding).
         // Generous deadline so a contended CI machine doesn't flake — the
         // disk_size_ticker spawned inside `run_http_on` does some setup
-        // work before the addr write lands.
+        // work before the addr write lands. Bumped from 250 to 500
+        // attempts (5 s → 10 s) under issue #139: the recall-quality fix
+        // doubled the number of fixtures spinning a daemon (5 tests now
+        // share this helper), so a heavily loaded host needs more headroom
+        // before the first `http_addr` write lands.
         let addr_file = data_root.join("http_addr");
         let mut attempts = 0;
-        while !addr_file.exists() && attempts < 250 {
+        while !addr_file.exists() && attempts < 500 {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             attempts += 1;
         }
@@ -1139,6 +1291,217 @@ mod tests {
                 std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV);
             }
         }
+    }
+
+    /// Why (issue #139): live evidence from the user's `trusty-tools`
+    /// session showed the prompt-context hook injecting raw past user
+    /// prompts (drawers tagged `claude-session` / `user-prompt` from an
+    /// upstream auto-capture hook) on every UserPromptSubmit, dominating
+    /// real palace knowledge. Filtering by deny-listed tags is the
+    /// cheapest in-tree fix. Verify the default deny list drops both
+    /// auto-capture tags AND keeps a signal drawer untouched.
+    /// What: populate a palace with three drawers — one tagged
+    /// `claude-session`, one tagged `user-prompt`, one tagged with only
+    /// signal tags. The prompt mentions a keyword shared by all three so
+    /// recall returns all three. Assert the injection contains only the
+    /// signal drawer's content and neither of the deny-listed drawers'
+    /// content surfaces.
+    /// Test: itself.
+    #[tokio::test]
+    async fn prompt_context_recall_filters_deny_tags() {
+        let _guard = crate::commands::env_test_lock().lock().await;
+        // Defensive: scrub the env override in case a sibling test set it
+        // and panicked before its cleanup ran. Both vars are pinned to a
+        // known state for this test.
+        unsafe {
+            std::env::remove_var(ENV_RECALL_DENY_TAGS);
+        }
+        let (state, _data_dir_tmp, _project_dir_tmp, project_dir, slug, addr_handle) =
+            spin_up_test_daemon_with_palace("prompt-ctx-deny-tags").await;
+
+        // Three drawers, all mentioning "rust" so recall returns all three.
+        // The first two carry the default deny tags and must be filtered;
+        // their content is sized above the signal-filter threshold so the
+        // remember path accepts them (the deny filter operates on tags,
+        // not content length, so the body must be realistic).
+        // The third has only signal tags and must survive.
+        for (text, tags) in [
+            (
+                "user: how do I use rust async tokio runtime and serde derive macros in this project to glue an http handler to a kafka producer",
+                vec!["claude-session", "user-prompt", "rust"],
+            ),
+            (
+                "user: yes please go ahead and refactor the rust async producer module, this captured prompt fragment should never be surfaced",
+                vec!["user-prompt", "rust"],
+            ),
+            (
+                "Rust integration uses tokio for async tasks and serde for JSON",
+                vec!["rust", "tokio"],
+            ),
+        ] {
+            let tags_json: Vec<Value> = tags.iter().map(|t| json!(t)).collect();
+            let _ = crate::tools::dispatch_tool(
+                &state,
+                "memory_remember",
+                json!({
+                    "palace": slug,
+                    "text": text,
+                    "room": "General",
+                    "tags": tags_json,
+                }),
+            )
+            .await
+            .expect("memory_remember");
+        }
+
+        let payload = json!({
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": project_dir.to_string_lossy(),
+            "prompt": "how does rust integration work?"
+        })
+        .to_string();
+        let body = build_injection_body(&payload).await;
+
+        assert!(
+            body.contains("tokio") && body.contains("serde"),
+            "signal drawer must survive deny filter; got:\n{body}"
+        );
+        assert!(
+            !body.contains("kafka producer"),
+            "claude-session-tagged drawer must be filtered out; got:\n{body}"
+        );
+        assert!(
+            !body.contains("captured prompt fragment"),
+            "user-prompt-tagged drawer must be filtered out; got:\n{body}"
+        );
+
+        addr_handle.shutdown().await;
+    }
+
+    /// Why (issue #139): operators need to widen the deny list at runtime
+    /// without rebuilding the binary — e.g. when a palace accumulates a
+    /// project-specific synthetic tag. The env override
+    /// [`ENV_RECALL_DENY_TAGS`] supplies the comma-separated list.
+    /// What: set the env override to a custom tag, populate a palace
+    /// where the only recallable drawer carries that custom tag plus a
+    /// keyword shared with the prompt, assert the drawer is filtered out
+    /// and the body falls back to the global / empty placeholder path
+    /// (no `Relevant memories` section).
+    /// Test: itself.
+    #[tokio::test]
+    async fn prompt_context_recall_env_override_extends_deny_list() {
+        let _guard = crate::commands::env_test_lock().lock().await;
+        // SAFETY: env_test_lock serialises this section.
+        unsafe {
+            std::env::set_var(ENV_RECALL_DENY_TAGS, "noise-tag");
+        }
+        let (state, _data_dir_tmp, _project_dir_tmp, project_dir, slug, addr_handle) =
+            spin_up_test_daemon_with_palace("prompt-ctx-env-deny").await;
+
+        let _ = crate::tools::dispatch_tool(
+            &state,
+            "memory_remember",
+            json!({
+                "palace": slug,
+                "text": "Rust integration uses tokio and serde for the async layer",
+                "room": "General",
+                "tags": ["noise-tag", "rust"],
+            }),
+        )
+        .await
+        .expect("memory_remember");
+
+        let payload = json!({
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": project_dir.to_string_lossy(),
+            "prompt": "how does rust integration work?"
+        })
+        .to_string();
+        let body = build_injection_body(&payload).await;
+
+        // The single drawer is filtered, so the body should NOT carry its
+        // content. The empty-palace fallback (or the global facts path)
+        // takes over.
+        assert!(
+            !body.contains("tokio and serde"),
+            "noise-tag drawer must be filtered when env override targets it; got:\n{body}"
+        );
+
+        // Clean up the env override so it does not leak to sibling tests.
+        // SAFETY: env_test_lock still held until DaemonHandle::shutdown.
+        unsafe {
+            std::env::remove_var(ENV_RECALL_DENY_TAGS);
+        }
+        addr_handle.shutdown().await;
+    }
+
+    /// Why (issue #139, regression): a palace consisting entirely of
+    /// deny-listed drawers must NOT crash the hook and must NOT inject a
+    /// `Relevant memories` section. The empty-palace fallback path (the
+    /// existing global hot-facts route from #136) must kick in instead.
+    /// What: populate a palace where every drawer carries a deny tag,
+    /// run the hook, assert the body is either the legacy placeholder OR
+    /// global-facts-only — crucially, it must not contain any of the
+    /// drawer content nor a `Relevant memories` section header.
+    /// Test: itself.
+    #[tokio::test]
+    async fn prompt_context_recall_all_filtered_falls_back_to_global() {
+        let _guard = crate::commands::env_test_lock().lock().await;
+        unsafe {
+            std::env::remove_var(ENV_RECALL_DENY_TAGS);
+        }
+        let (state, _data_dir_tmp, _project_dir_tmp, project_dir, slug, addr_handle) =
+            spin_up_test_daemon_with_palace("prompt-ctx-all-filtered").await;
+
+        // Every drawer is deny-listed. Bodies are sized above the signal
+        // filter threshold so memory_remember accepts them — the deny-tag
+        // filter operates downstream on tags, not content length.
+        for (text, tags) in [
+            (
+                "user: status update on the rust async rewrite, the kafka consumer should not surface in any prompt-context injection",
+                vec!["claude-session", "user-prompt", "rust"],
+            ),
+            (
+                "user: yes please continue with the rust refactor on the producer side, this prompt fragment must be filtered out of recall",
+                vec!["claude-session", "rust"],
+            ),
+        ] {
+            let tags_json: Vec<Value> = tags.iter().map(|t| json!(t)).collect();
+            let _ = crate::tools::dispatch_tool(
+                &state,
+                "memory_remember",
+                json!({
+                    "palace": slug,
+                    "text": text,
+                    "room": "General",
+                    "tags": tags_json,
+                }),
+            )
+            .await
+            .expect("memory_remember");
+        }
+
+        let payload = json!({
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": project_dir.to_string_lossy(),
+            "prompt": "tell me about rust"
+        })
+        .to_string();
+        let body = build_injection_body(&payload).await;
+
+        // No drawer content leaks through and no `Relevant memories`
+        // section is rendered — either the global hot-facts section or
+        // the empty-placeholder fallback wins.
+        assert!(
+            !body.contains("kafka consumer") && !body.contains("producer side"),
+            "filtered drawer content must not leak; got:\n{body}"
+        );
+        assert!(
+            !body.contains("Relevant memories"),
+            "no `Relevant memories` section should render when every drawer is filtered; got:\n{body}"
+        );
+
+        addr_handle.shutdown().await;
     }
 
     /// Why (issue #105): even when the daemon is down, the hook must still
