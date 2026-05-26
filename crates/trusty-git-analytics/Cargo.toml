@@ -3,11 +3,10 @@ name = "tga"
 version = "1.0.17"
 publish = true
 edition = "2021"
-# Required for `std::sync::LazyLock` used by the shared CLI help wiring
-# (issue #216). tga doesn't need let-chains, so the workspace MSRV (1.88)
-# is intentionally not adopted here — bumping further would expose newer
-# clippy lints unrelated to this change.
-rust-version = "1.80"
+# Aligned with the workspace MSRV (1.88) per #254. Required for
+# `std::sync::LazyLock` (CLI help wiring, issue #216). tga does not use
+# let-chains, but aligning with the workspace pin prevents MSRV drift.
+rust-version = "1.88"
 authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 license = "Elastic-2.0"
 repository = "https://github.com/bobmatnyc/trusty-tools"

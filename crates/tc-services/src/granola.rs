@@ -141,13 +141,22 @@ fn build_request(name: &str, args: &Value) -> anyhow::Result<(reqwest::Method, S
     let url = match name {
         "granola_list" => format!("{GRANOLA_API_BASE}/documents"),
         "granola_get" => {
-            format!("{GRANOLA_API_BASE}/documents/{}", id.unwrap())
+            format!(
+                "{GRANOLA_API_BASE}/documents/{}",
+                id.expect("guaranteed by ep.needs_id == true")
+            )
         }
         "granola_get_transcript" => {
-            format!("{GRANOLA_API_BASE}/documents/{}/transcript", id.unwrap())
+            format!(
+                "{GRANOLA_API_BASE}/documents/{}/transcript",
+                id.expect("guaranteed by ep.needs_id == true")
+            )
         }
         "granola_get_shared_document" => {
-            format!("{GRANOLA_API_BASE}/documents/{}/shared", id.unwrap())
+            format!(
+                "{GRANOLA_API_BASE}/documents/{}/shared",
+                id.expect("guaranteed by ep.needs_id == true")
+            )
         }
         "granola_search" => {
             let query = args
