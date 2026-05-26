@@ -740,11 +740,14 @@ pub async fn handle_start(port: u16, foreground: bool, device: &str, verbose: bo
     // under realistic workloads. Exit before binding any port or loading
     // the embedder so the operator gets a clear, actionable error.
     const MIN_RAM_MB: u64 = 16 * 1024;
-    if policy.total_ram_mb < MIN_RAM_MB {
+    if policy.total_ram_mb < MIN_RAM_MB
+        && std::env::var("TRUSTY_SKIP_RAM_CHECK").as_deref() != Ok("1")
+    {
         anyhow::bail!(
             "trusty-search requires at least 16 GB of RAM.\n\
              Detected: {} MB ({:.1} GB)\n\
-             Indexing large codebases on machines with less memory is not supported.",
+             Indexing large codebases on machines with less memory is not supported.\n\
+             To bypass on this host set TRUSTY_SKIP_RAM_CHECK=1 in the daemon environment.",
             policy.total_ram_mb,
             policy.total_ram_mb as f64 / 1024.0
         );
