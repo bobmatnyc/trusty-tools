@@ -591,10 +591,17 @@ async fn read_only_memory_remember_returns_clear_error() {
     let _live = lock_palace_files(&data_dir);
     let snap_state = fresh_state(&data_root);
 
+    // Issue #215: pass a long-enough text to clear the content gate so the
+    // dispatch reaches the read-only error path; the gate would otherwise
+    // silently skip the write before the read-only guard fires.
     let res = dispatch_tool(
         &snap_state,
         "memory_remember",
-        json!({"palace": "ro-write", "text": "should be rejected", "room": "General"}),
+        json!({
+            "palace": "ro-write",
+            "text": "this is a long enough write payload to clear the content gate threshold",
+            "room": "General",
+        }),
     )
     .await;
     let err = res.expect_err("remember in snapshot mode must error");

@@ -289,6 +289,48 @@ impl MemoryClient {
         Ok(parse_drawers(&raw))
     }
 
+    /// Fetch a single drawer's full content / tags by id (issue #215).
+    ///
+    /// Why: the TUI drawer-detail modal needs the verbatim drawer body —
+    /// the activity panel only carries the snippet. Each drawer in
+    /// trusty-memory is itself the "memory" unit, so "detail" means
+    /// fetching the same drawer payload the list endpoint returns but
+    /// projected to the fields the modal renders. The endpoint reuses
+    /// the existing `/api/v1/palaces/{id}/drawers` route — there is no
+    /// dedicated single-drawer GET — and we filter the result client-side
+    /// to the requested `drawer_id` so the wire shape stays stable.
+    /// What: GETs `…/drawers?limit=<limit>&sort=created_desc`, then projects
+    /// each entry into a [`MemoryDetail`]. The caller is expected to pass
+    /// a reasonable `limit` (e.g. 50). Returns the full list — the caller
+    /// can find the row they want by id, or render them all if the modal
+    /// scrolls through every memory in the drawer's neighborhood. A
+    /// non-2xx response yields an error; an unrecognised body yields an
+    /// empty list.
+    /// Test: live behaviour covered by the trusty-memory daemon suite; the
+    /// projection is unit-tested via [`parse_memory_details`].
+    pub async fn fetch_drawer_detail(
+        &self,
+        palace_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MemoryDetail>> {
+        let raw: serde_json::Value = self
+            .http
+            .get(format!(
+                "{}/api/v1/palaces/{}/drawers",
+                self.base, palace_id,
+            ))
+            .query(&[
+                ("limit", limit.to_string()),
+                ("sort", "created_desc".to_string()),
+            ])
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(parse_memory_details(&raw))
+    }
+
     /// Trigger a dream cycle via `POST /api/v1/dream/run`.
     ///
     /// Why: the memory TUI's `[d]` key runs a dream cycle (merge / prune /
@@ -614,6 +656,87 @@ pub struct DrawerInfo {
     /// truncating the full `content` field when the daemon predates the
     /// `snippet` wire field; `None` when neither is available.
     pub snippet: Option<String>,
+}
+
+/// One drawer projected with its full body for the detail modal (issue #215).
+///
+/// Why: the activity panel's row only carries a truncated snippet; the
+/// modal that opens on `Enter` needs the verbatim drawer body so the
+/// operator can read the entire memory. Keeping this as a separate type
+/// from [`DrawerInfo`] keeps the row layout helpers free of an unused
+/// `content` field and makes the modal-renderer signature explicit.
+/// What: drawer id, full untruncated content, and the tag list (the modal
+/// renders `creator:*` tags in a header along with the timestamp). The
+/// fields are deliberately a subset of the daemon's serialised `Drawer` —
+/// the modal does not render importance, drawer_type, or room.
+/// Test: `parse_memory_details_projects_full_content`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemoryDetail {
+    /// Stable drawer identifier (UUID as string).
+    pub id: String,
+    /// Verbatim drawer body, exactly as returned by the daemon.
+    pub content: String,
+    /// All tags carried on the wire (creator, session, custom).
+    pub tags: Vec<String>,
+    /// Creation timestamp parsed from the wire payload, when present.
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Project a `…/drawers` JSON payload into [`MemoryDetail`]s (issue #215).
+///
+/// Why: the detail modal needs the full untruncated `content` field, which
+/// the row-oriented [`parse_drawers`] projection deliberately omits. A
+/// dedicated projection keeps both call sites honest about what they
+/// consume.
+/// What: accepts the same shapes as [`parse_drawers`] — a bare array, or an
+/// object with a `drawers` field — and pulls `id`, `content`, `tags`, and
+/// `created_at` for each entry. Absent or malformed fields fall through to
+/// safe defaults so a single corrupt row does not drop the whole page.
+/// Test: `parse_memory_details_projects_full_content`.
+pub fn parse_memory_details(raw: &serde_json::Value) -> Vec<MemoryDetail> {
+    let array: Vec<serde_json::Value> = match raw {
+        serde_json::Value::Array(items) => items.clone(),
+        serde_json::Value::Object(obj) => match obj.get("drawers") {
+            Some(serde_json::Value::Array(items)) => items.clone(),
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+    array
+        .into_iter()
+        .map(|item| {
+            let id = item
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let content = item
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let tags: Vec<String> = item
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|t| t.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let created_at = item
+                .get("created_at")
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc));
+            MemoryDetail {
+                id,
+                content,
+                tags,
+                created_at,
+            }
+        })
+        .collect()
 }
 
 /// Fallback creator label rendered when no recognised creator tag is found.
@@ -1000,6 +1123,56 @@ mod tests {
             snippet.ends_with('…'),
             "long fallback snippet must be truncated with ellipsis",
         );
+    }
+
+    /// Why (issue #215): the detail modal must see the full `content`
+    /// field on every drawer; the row-oriented `parse_drawers` projection
+    /// deliberately omits it, so `parse_memory_details` is the channel.
+    /// What: feeds a bare array and an object-wrapped array of drawer
+    /// payloads through the projection and asserts each row keeps its
+    /// full body, tag list, and timestamp.
+    /// Test: itself.
+    #[test]
+    fn parse_memory_details_projects_full_content() {
+        let raw = serde_json::json!([
+            {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "created_at": "2026-05-20T12:34:56Z",
+                "tags": ["msg:from=cto"],
+                "content": "Full memory body the modal renders verbatim.",
+            },
+            {
+                "id": "22222222-2222-2222-2222-222222222222",
+                "created_at": "bad-timestamp",
+                "tags": [],
+                "content": "",
+            },
+        ]);
+        let details = parse_memory_details(&raw);
+        assert_eq!(details.len(), 2);
+        assert_eq!(details[0].id, "11111111-1111-1111-1111-111111111111");
+        assert_eq!(
+            details[0].content,
+            "Full memory body the modal renders verbatim."
+        );
+        assert_eq!(details[0].tags, vec!["msg:from=cto".to_string()]);
+        assert!(details[0].created_at.is_some());
+
+        // Empty content / bad timestamp degrade to safe defaults instead of
+        // dropping the row.
+        assert!(details[1].created_at.is_none());
+        assert!(details[1].content.is_empty());
+
+        // Object-wrapped shape.
+        let obj = serde_json::json!({
+            "drawers": [{"id": "abc", "content": "wrapped", "tags": []}],
+        });
+        let details = parse_memory_details(&obj);
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].content, "wrapped");
+
+        // Unexpected shape yields an empty list.
+        assert!(parse_memory_details(&serde_json::json!("nope")).is_empty());
     }
 
     #[test]

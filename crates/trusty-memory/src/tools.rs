@@ -50,6 +50,51 @@ fn lookup_palace_name(state: &AppState, palace_id: &str) -> String {
         .unwrap_or_else(|| palace_id.to_string())
 }
 
+/// Minimum standalone-content word count enforced by [`content_gate`].
+///
+/// Why (issue #215): single-word user replies ("yes", "ok", "no thanks") have
+/// no standalone memory value when the surrounding turn isn't captured
+/// alongside them — they end up in the palace as orphan fragments that
+/// pollute recall results. Requiring at least four whitespace-separated tokens
+/// is a cheap heuristic that matches the natural boundary between "just a
+/// reaction" and "an actual statement".
+/// What: the threshold the gate compares against. Tokens are counted via
+/// `split_whitespace().count()`, so punctuation does not inflate the count.
+/// Test: `content_gate_blocks_short_no_context`, `content_gate_keeps_long`.
+const CONTENT_GATE_MIN_WORDS: usize = 4;
+
+/// Gate short standalone content unless a `context` wrapper is supplied.
+///
+/// Why: single-word or very-short standalone user responses ("yes", "ok")
+/// have no standalone memory value (issue #215). Gate them unless a context
+/// is provided.
+/// What: returns `None` if `content` has fewer than [`CONTENT_GATE_MIN_WORDS`]
+/// whitespace-separated tokens AND `context` is `None` (the write should be
+/// skipped). Returns `Some(combined)` where `combined = "<context>\n\n---\n\n<content>"`
+/// when `context` is `Some` and non-empty after trimming. Returns
+/// `Some(content)` unchanged when `content` has at least
+/// [`CONTENT_GATE_MIN_WORDS`] tokens. Tokens are counted on the trimmed
+/// `content` so trailing whitespace doesn't inflate the count.
+/// Test: `content_gate_blocks_short_no_context`,
+/// `content_gate_wraps_short_with_context`,
+/// `content_gate_keeps_long`, `content_gate_blank_context_treated_as_none`.
+fn content_gate(content: &str, context: Option<&str>) -> Option<String> {
+    let trimmed = content.trim();
+    let word_count = trimmed.split_whitespace().count();
+    // Treat a context that is empty or whitespace-only as "no context" — a
+    // caller passing `""` should not unlock a write the gate would otherwise
+    // drop, and the combined output would otherwise begin with a meaningless
+    // separator.
+    let context_clean = context.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(ctx) = context_clean {
+        return Some(format!("{ctx}\n\n---\n\n{content}"));
+    }
+    if word_count < CONTENT_GATE_MIN_WORDS {
+        return None;
+    }
+    Some(content.to_string())
+}
+
 /// Build the strict MCP-level `RememberOptions`.
 ///
 /// Why: Issue #61 — the MCP boundary is where auto-capture hooks deposit
@@ -152,28 +197,30 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
         "tools": [
             {
                 "name": "memory_remember",
-                "description": "Store a memory (drawer) in a palace room. Content is filtered for signal vs. noise (issue #61): rejects empty/very short content, raw tool/commit output, and code-only blobs. Pass force=true to bypass filtering, or use memory_note for short curated facts.",
+                "description": "Store a memory (drawer) in a palace room. Content is filtered for signal vs. noise (issue #61): rejects empty/very short content, raw tool/commit output, and code-only blobs. Issue #215: very short standalone content (< 4 words) is silently dropped unless a `context` is supplied, in which case the context is prepended so the stored memory has standalone value. Pass force=true to bypass filtering, or use memory_note for short curated facts.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "palace": {"type": "string", "description": "Palace ID (optional if server started with --palace)"},
-                        "text":   {"type": "string", "description": "Memory content"},
-                        "room":   {"type": "string", "description": "Room type (optional)"},
-                        "tags":   {"type": "array", "items": {"type": "string"}},
-                        "force":  {"type": "boolean", "description": "Bypass the signal/noise filter. Use sparingly — intended for explicit operator overrides.", "default": false}
+                        "palace":  {"type": "string", "description": "Palace ID (optional if server started with --palace)"},
+                        "text":    {"type": "string", "description": "Memory content"},
+                        "room":    {"type": "string", "description": "Room type (optional)"},
+                        "tags":    {"type": "array", "items": {"type": "string"}},
+                        "force":   {"type": "boolean", "description": "Bypass the signal/noise filter. Use sparingly — intended for explicit operator overrides.", "default": false},
+                        "context": {"type": "string", "description": "Optional surrounding context. When supplied alongside very short content (< 4 words), the context is prepended (separated by `---`) so the stored memory has standalone meaning; without it, short content is dropped (issue #215)."}
                     },
                     "required": memory_remember_required,
                 }
             },
             {
                 "name": "memory_note",
-                "description": "Curated shortcut for short, high-signal facts (\"User prefers snake_case\", \"Deploy target is prod-east\"). Bypasses the token-length filter but still rejects auto-capture noise. Stored as DrawerType::UserFact with importance 1.0.",
+                "description": "Curated shortcut for short, high-signal facts (\"User prefers snake_case\", \"Deploy target is prod-east\"). Bypasses the token-length filter but still rejects auto-capture noise. Stored as DrawerType::UserFact with importance 1.0. Issue #215: a `context` argument can be supplied to wrap an otherwise meaningless single-word response.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "palace":  {"type": "string"},
                         "content": {"type": "string", "description": "Brief fact to remember"},
-                        "tags":    {"type": "array", "items": {"type": "string"}}
+                        "tags":    {"type": "array", "items": {"type": "string"}},
+                        "context": {"type": "string", "description": "Optional surrounding context. Prepended to `content` (separated by `---`) when supplied; with very short content (< 4 words) and no context the write is skipped (issue #215)."}
                     },
                     "required": memory_note_required,
                 }
@@ -567,11 +614,27 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
         "memory_remember" => {
             let palace = resolve_palace(state, &args, "memory_remember")?;
             let palace = palace.as_str();
-            let text = args
+            let raw_text = args
                 .get("text")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("memory_remember: missing 'text'"))?
                 .to_string();
+            // Issue #215: content gate — drop very short standalone content
+            // unless the caller supplied a `context` wrapper. When skipped,
+            // return a success envelope with an explanatory status so the
+            // caller can see the write was a no-op without having to parse
+            // a custom error shape.
+            let ctx = args.get("context").and_then(|v| v.as_str());
+            let text = match content_gate(&raw_text, ctx) {
+                Some(t) => t,
+                None => {
+                    return Ok(json!({
+                        "palace": palace,
+                        "status": "skipped",
+                        "reason": "content gate: skipped (short prompt, no context)",
+                    }));
+                }
+            };
             let room = parse_room(args.get("room").and_then(|v| v.as_str()));
             let mut tags: Vec<String> = args
                 .get("tags")
@@ -653,11 +716,26 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
             // and `importance = 1.0` so the entry surfaces in L1 essentials.
             let palace = resolve_palace(state, &args, "memory_note")?;
             let palace = palace.as_str();
-            let content = args
+            let raw_content = args
                 .get("content")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("memory_note: missing 'content'"))?
                 .to_string();
+            // Issue #215: same content gate as `memory_remember`. A `context`
+            // arg can be passed to wrap a one-word answer; otherwise short
+            // standalone content is silently dropped with an explanatory
+            // status envelope.
+            let ctx = args.get("context").and_then(|v| v.as_str());
+            let content = match content_gate(&raw_content, ctx) {
+                Some(c) => c,
+                None => {
+                    return Ok(json!({
+                        "palace": palace,
+                        "status": "skipped",
+                        "reason": "content gate: skipped (short prompt, no context)",
+                    }));
+                }
+            };
             let mut tags: Vec<String> = args
                 .get("tags")
                 .and_then(|v| v.as_array())
@@ -2353,6 +2431,200 @@ mod tests {
         );
         // Temporal metadata always.
         assert!(predicates.contains(&"bootstrapped_at"));
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #215 — content gate for short prompts
+    // -----------------------------------------------------------------
+
+    /// Why: short single-word content with no `context` must be skipped so
+    /// the palace doesn't accumulate orphan "yes"/"ok" fragments.
+    /// What: passes "yes" through the gate and asserts `None`.
+    /// Test: itself.
+    #[test]
+    fn content_gate_blocks_short_no_context() {
+        assert_eq!(content_gate("yes", None), None);
+        assert_eq!(content_gate("ok", None), None);
+        assert_eq!(
+            content_gate("  no thanks  ", None),
+            None,
+            "2 words still < 4"
+        );
+        assert_eq!(
+            content_gate("one two three", None),
+            None,
+            "3 words still < 4"
+        );
+    }
+
+    /// Why: when the caller wraps a short answer with `context`, the gate
+    /// must keep the content but prepend the context with a `---` separator
+    /// so the stored memory has standalone value.
+    /// What: passes "yes" + context, asserts the combined shape.
+    /// Test: itself.
+    #[test]
+    fn content_gate_wraps_short_with_context() {
+        let combined = content_gate(
+            "yes",
+            Some("Do you want to enable auto-bootstrap on new palaces?"),
+        )
+        .expect("context should unlock the gate");
+        assert_eq!(
+            combined,
+            "Do you want to enable auto-bootstrap on new palaces?\n\n---\n\nyes",
+        );
+        // Even content that would otherwise pass the threshold is wrapped
+        // when context is supplied — the caller is explicit.
+        let combined = content_gate(
+            "the quick brown fox jumps over the lazy dog",
+            Some("Famous typing pangram"),
+        )
+        .expect("long content + context still combines");
+        assert!(combined.starts_with("Famous typing pangram"));
+        assert!(combined.contains("\n\n---\n\n"));
+        assert!(combined.ends_with("the quick brown fox jumps over the lazy dog"));
+    }
+
+    /// Why: content that meets the threshold should pass through untouched
+    /// when no context is supplied — the gate must not rewrite or reformat
+    /// passing content.
+    /// What: passes a 5-word string through and asserts the output equals
+    /// the input verbatim.
+    /// Test: itself.
+    #[test]
+    fn content_gate_keeps_long() {
+        let body = "User prefers snake_case for python";
+        let kept = content_gate(body, None).expect(">= 4 words passes");
+        assert_eq!(kept, body, "passing content must round-trip verbatim");
+        // Exactly four words is the boundary — it must pass.
+        let boundary = "one two three four";
+        assert_eq!(content_gate(boundary, None).as_deref(), Some(boundary));
+    }
+
+    /// Why: an empty or whitespace-only `context` argument must be treated
+    /// the same as `None` so callers can't accidentally smuggle short
+    /// content through by passing `""`.
+    /// What: passes blank context with short content and asserts the gate
+    /// still skips the write.
+    /// Test: itself.
+    #[test]
+    fn content_gate_blank_context_treated_as_none() {
+        assert_eq!(content_gate("yes", Some("")), None);
+        assert_eq!(content_gate("yes", Some("   ")), None);
+        assert_eq!(content_gate("yes", Some("\n\t")), None);
+    }
+
+    /// Why: the dispatch path must return a structured "skipped" envelope
+    /// without writing to the store when the gate fires on `memory_remember`.
+    /// What: dispatch with single-word `text` and no `context`; assert the
+    /// response carries `status = "skipped"` and that no drawer landed.
+    /// Test: itself.
+    #[tokio::test]
+    async fn dispatch_remember_skips_short_no_context() {
+        let state = test_state();
+        let _ = dispatch_tool(&state, "palace_create", json!({"name": "gate"}))
+            .await
+            .expect("palace_create");
+
+        let res = dispatch_tool(
+            &state,
+            "memory_remember",
+            json!({"palace": "gate", "text": "yes"}),
+        )
+        .await
+        .expect("memory_remember (short)");
+        assert_eq!(res["status"], "skipped");
+        assert!(res["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("content gate"));
+        // No drawer was written.
+        let listed = dispatch_tool(
+            &state,
+            "memory_list",
+            json!({"palace": "gate", "limit": 10}),
+        )
+        .await
+        .expect("memory_list");
+        let drawers = listed["drawers"].as_array().expect("drawers array");
+        assert!(
+            drawers.is_empty(),
+            "no drawer should be written; got {drawers:?}"
+        );
+    }
+
+    /// Why: confirm the `context` argument unlocks a short content write —
+    /// the resulting drawer must carry the combined `context + content`
+    /// body so downstream recall sees the wrapping.
+    /// What: dispatch with one-word text plus a context arg, then list and
+    /// assert the stored content begins with the context and ends with the
+    /// original short body.
+    /// Test: itself.
+    #[tokio::test]
+    async fn dispatch_remember_with_context_writes_combined() {
+        let state = test_state();
+        let _ = dispatch_tool(&state, "palace_create", json!({"name": "ctxgate"}))
+            .await
+            .expect("palace_create");
+
+        let res = dispatch_tool(
+            &state,
+            "memory_remember",
+            json!({
+                "palace": "ctxgate",
+                "text": "yes",
+                "context": "Do you want to enable auto-bootstrap on new palaces?",
+                "force": true,
+            }),
+        )
+        .await
+        .expect("memory_remember (with context)");
+        assert_eq!(res["status"], "stored");
+
+        let listed = dispatch_tool(
+            &state,
+            "memory_list",
+            json!({"palace": "ctxgate", "limit": 10}),
+        )
+        .await
+        .expect("memory_list");
+        let drawers = listed["drawers"].as_array().expect("drawers array");
+        assert_eq!(drawers.len(), 1);
+        let body = drawers[0]["content"].as_str().expect("content");
+        assert!(body.starts_with("Do you want to enable auto-bootstrap"));
+        assert!(body.contains("\n\n---\n\n"));
+        assert!(body.ends_with("yes"));
+    }
+
+    /// Why: `memory_note` must respect the same content gate as
+    /// `memory_remember` so the short-prompt protection is uniform across
+    /// the write surface.
+    /// What: dispatch `memory_note` with a one-word content and no context;
+    /// assert it returns a skipped envelope and no drawer is written.
+    /// Test: itself.
+    #[tokio::test]
+    async fn dispatch_note_skips_short_no_context() {
+        let state = test_state();
+        let _ = dispatch_tool(&state, "palace_create", json!({"name": "noteg"}))
+            .await
+            .expect("palace_create");
+
+        let res = dispatch_tool(
+            &state,
+            "memory_note",
+            json!({"palace": "noteg", "content": "ok"}),
+        )
+        .await
+        .expect("memory_note (short)");
+        assert_eq!(res["status"], "skipped");
+        let listed = dispatch_tool(
+            &state,
+            "memory_list",
+            json!({"palace": "noteg", "limit": 10}),
+        )
+        .await
+        .expect("memory_list");
+        assert!(listed["drawers"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

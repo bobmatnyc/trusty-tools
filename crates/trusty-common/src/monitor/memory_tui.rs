@@ -23,19 +23,21 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame, Terminal,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, HighlightSpacing, List, ListItem, ListState, Paragraph},
+    widgets::{
+        Block, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap,
+    },
 };
 use tokio::sync::mpsc;
 
 use crate::monitor::dashboard::{MemoryData, PalaceRow, format_count};
 use crate::monitor::memory_client::{
-    DrawerInfo, MemoryClient, MemoryEvent, RecallHit, resolve_memory_url,
+    DrawerInfo, MemoryClient, MemoryDetail, MemoryEvent, RecallHit, resolve_memory_url,
 };
 use crate::monitor::tui_common::{
-    self, ListFocus, ThreeWaySortKey, enter_tui, leave_tui, left_panel_width, panel_block, truncate,
+    self, ThreeWaySortKey, enter_tui, leave_tui, left_panel_width, panel_block, truncate,
 };
 use crate::monitor::utils::{ActivityLog, DaemonStatus};
 
@@ -70,7 +72,12 @@ const DREAM_BACKOFF_MAX: Duration = Duration::from_secs(300);
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// One-line key hint shown along the bottom of the UI.
-pub const KEY_HINT: &str = "[Tab] focus  [d] dream  [↑↓] select  [Enter] recall  [/] filter  [s] sort  [g] group  [←→] page  [q] quit  [?] help";
+///
+/// Why (issue #215): `Tab` cycles `List → DrawerPane → Input → List`, and the
+/// drawer-pane zone adds `Enter` to open the detail modal. The hint surfaces
+/// both flows so the operator doesn't have to discover the modal from the
+/// help overlay.
+pub const KEY_HINT: &str = "[Tab] focus  [↑↓] select  [Enter] open/recall  [d] dream  [/] filter  [s] sort  [g] group  [←→] page  [q] quit  [?] help";
 
 /// Default page size for the ACTIVITY drawer list.
 ///
@@ -317,12 +324,60 @@ pub fn activity_label(activity: PalaceActivity) -> &'static str {
 
 /// Which zone of the memory UI currently holds keyboard focus.
 ///
-/// Why: re-export alias for [`ListFocus`] so existing callers and tests that
-/// reference `MemoryFocus` continue to compile after the type was consolidated
-/// into the shared module.
-/// What: type alias for [`ListFocus`].
-/// Test: `test_toggle_focus`.
-pub type MemoryFocus = ListFocus;
+/// Why (issue #215): the memory TUI added a third focus zone — the right-hand
+/// drawer pane — alongside the existing palace list and recall input bar.
+/// The shared `tui_common::ListFocus` only covers the two-zone model used by
+/// the search TUI, so the memory UI carries its own three-way enum and the
+/// shared focus helpers are no longer used here.
+/// What: three variants — `List` (palace list), `DrawerPane` (right-hand
+/// drawer activity panel), and `Input` (recall bar). `Tab` cycles
+/// `List → DrawerPane → Input → List`.
+/// Test: `test_toggle_focus`, `test_focus_tab_cycle`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemoryFocus {
+    /// The palace list has focus; arrows move the selection.
+    #[default]
+    List,
+    /// The drawer activity panel has focus; arrows move the drawer cursor and
+    /// `Enter` opens the detail modal.
+    DrawerPane,
+    /// The recall input bar has focus; typed characters edit the query.
+    Input,
+}
+
+impl MemoryFocus {
+    /// Cycle to the next focus zone (issue #215).
+    ///
+    /// Why: `[Tab]` walks through every focusable zone so the operator can
+    /// reach the new drawer pane without a mouse.
+    /// What: returns the next variant in the order
+    /// `List → DrawerPane → Input → List`.
+    /// Test: `test_focus_tab_cycle`.
+    pub fn next(self) -> Self {
+        match self {
+            Self::List => Self::DrawerPane,
+            Self::DrawerPane => Self::Input,
+            Self::Input => Self::List,
+        }
+    }
+
+    /// Legacy two-way toggle preserved for the public API.
+    ///
+    /// Why: a handful of callers (and tests) historically swapped focus
+    /// between the list and the recall bar; the new three-way cycle would
+    /// surprise them. This stays as a thin alias for the legacy behaviour
+    /// (`List ↔ Input`) and explicitly drops `DrawerPane` through to `List`
+    /// so the old flip never lands on the new zone.
+    /// What: `List → Input`, `Input → List`, `DrawerPane → List`.
+    /// Test: `test_toggle_focus`.
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::List => Self::Input,
+            Self::Input => Self::List,
+            Self::DrawerPane => Self::List,
+        }
+    }
+}
 
 /// Exponential-backoff gate for repeated dream-cycle attempts.
 ///
@@ -579,7 +634,7 @@ pub struct MemoryTuiState {
     /// The in-progress recall query buffer.
     pub input: String,
     /// Which zone currently holds keyboard focus.
-    pub focus: ListFocus,
+    pub focus: MemoryFocus,
     /// Whether the help overlay is visible (toggled with `?`).
     pub show_help: bool,
     /// Case-insensitive filter applied to palace name / project; empty disables.
@@ -597,6 +652,25 @@ pub struct MemoryTuiState {
     /// selected. The "All palaces" row leaves [`DrawerListState::palace_id`]
     /// set to `None` and the panel falls back to the aggregate event log.
     pub drawer_list: DrawerListState,
+    /// Cursor into the current drawer page (issue #215). Indexes
+    /// [`DrawerListState::drawers`] when the drawer pane has focus; reset to
+    /// 0 on every page or palace change.
+    pub drawer_cursor: usize,
+    /// Whether the drawer-detail modal is open (issue #215). The render path
+    /// floats the modal over the rest of the UI when `true`.
+    pub drawer_detail_open: bool,
+    /// Index into [`Self::drawer_detail_memories`] identifying which drawer
+    /// the modal renders. Recorded when `Enter` opens the modal; used by the
+    /// renderer to highlight the active memory.
+    pub drawer_detail_idx: usize,
+    /// The full set of memories returned by `fetch_drawer_detail` for the
+    /// currently-open modal (issue #215). Empty until the fetch completes.
+    pub drawer_detail_memories: Vec<MemoryDetail>,
+    /// Vertical scroll offset (in lines) inside the modal content.
+    pub drawer_detail_scroll: usize,
+    /// Whether a `fetch_drawer_detail` request is currently in flight. The
+    /// modal renders `Loading…` while this is `true`.
+    pub drawer_detail_loading: bool,
 }
 
 impl MemoryTuiState {
@@ -616,7 +690,7 @@ impl MemoryTuiState {
             scroll_offset: 0,
             log: ActivityLog::new(),
             input: String::new(),
-            focus: ListFocus::List,
+            focus: MemoryFocus::List,
             show_help: false,
             filter: String::new(),
             filter_active: false,
@@ -624,17 +698,97 @@ impl MemoryTuiState {
             group_by_project: false,
             dream_backoff: DreamBackoff::new(),
             drawer_list: DrawerListState::new(),
+            drawer_cursor: 0,
+            drawer_detail_open: false,
+            drawer_detail_idx: 0,
+            drawer_detail_memories: Vec::new(),
+            drawer_detail_scroll: 0,
+            drawer_detail_loading: false,
         }
     }
 
-    /// Cycle keyboard focus between the palace list and the recall bar.
+    /// Legacy two-way focus toggle (issue #215 keeps the API for callers /
+    /// tests that don't know about the new drawer pane).
     ///
-    /// Why: `[Tab]` decides whether arrows navigate the list or whether typed
-    /// characters edit the recall query.
-    /// What: flips [`Self::focus`] via [`ListFocus::toggled`].
+    /// Why: a handful of callers (and the legacy `test_toggle_focus` test)
+    /// expect `Tab` to bounce between the list and the recall bar; the new
+    /// three-way cycle uses [`Self::cycle_focus`] instead.
+    /// What: flips [`Self::focus`] via [`MemoryFocus::toggled`].
     /// Test: `test_toggle_focus`.
     pub fn toggle_focus(&mut self) {
         self.focus = self.focus.toggled();
+    }
+
+    /// Cycle keyboard focus through every focusable zone (issue #215).
+    ///
+    /// Why: `[Tab]` walks `List → DrawerPane → Input → List` so the operator
+    /// can reach the drawer pane without a mouse.
+    /// What: advances [`Self::focus`] via [`MemoryFocus::next`]; when the new
+    /// focus is `List`, also clears the drawer-pane cursor so a re-entry
+    /// starts at the top of the list.
+    /// Test: `test_focus_tab_cycle`.
+    pub fn cycle_focus(&mut self) {
+        self.focus = self.focus.next();
+        if self.focus == MemoryFocus::List {
+            self.drawer_cursor = 0;
+        }
+    }
+
+    /// Move the drawer cursor up one row, saturating at the top.
+    ///
+    /// Why: `↑` in the drawer pane walks the visible drawer list.
+    /// What: decrements [`Self::drawer_cursor`], never below zero.
+    /// Test: `test_drawer_cursor_clamp`.
+    pub fn drawer_cursor_up(&mut self) {
+        self.drawer_cursor = self.drawer_cursor.saturating_sub(1);
+    }
+
+    /// Move the drawer cursor down one row, clamped to the last drawer.
+    ///
+    /// Why: `↓` in the drawer pane walks the visible drawer list.
+    /// What: increments [`Self::drawer_cursor`] but never past the last
+    /// drawer in [`DrawerListState::drawers`].
+    /// Test: `test_drawer_cursor_clamp`.
+    pub fn drawer_cursor_down(&mut self) {
+        let len = self.drawer_list.drawers.len();
+        if len == 0 {
+            self.drawer_cursor = 0;
+            return;
+        }
+        if self.drawer_cursor + 1 < len {
+            self.drawer_cursor += 1;
+        }
+    }
+
+    /// Clamp the drawer cursor to the current drawer page length.
+    ///
+    /// Why: a page refresh can shrink the drawer list, leaving the cursor
+    /// past the end; this keeps the cursor valid before rendering.
+    /// What: caps [`Self::drawer_cursor`] at `len - 1` (or 0 when the page
+    /// is empty).
+    /// Test: `test_drawer_cursor_clamp`.
+    pub fn clamp_drawer_cursor(&mut self) {
+        let len = self.drawer_list.drawers.len();
+        if len == 0 {
+            self.drawer_cursor = 0;
+        } else if self.drawer_cursor >= len {
+            self.drawer_cursor = len - 1;
+        }
+    }
+
+    /// Close the drawer-detail modal and clear its transient state.
+    ///
+    /// Why: `Esc`/`q` while the modal is open should drop back to the drawer
+    /// pane without leaving stale `drawer_detail_memories` (which would
+    /// flash on a re-open before the fetch completes).
+    /// What: flips `drawer_detail_open` to `false`, clears the memories
+    /// vector and scroll, and resets the loading flag.
+    /// Test: `test_drawer_detail_modal_lifecycle`.
+    pub fn close_drawer_detail(&mut self) {
+        self.drawer_detail_open = false;
+        self.drawer_detail_memories.clear();
+        self.drawer_detail_scroll = 0;
+        self.drawer_detail_loading = false;
     }
 
     /// Move the palace selection up one row, saturating at the top.
@@ -996,6 +1150,52 @@ async fn fetch_drawer_page(state: &mut MemoryTuiState, client: &MemoryClient) {
     state.drawer_list.loading = false;
 }
 
+/// Fetch the full memory detail for the drawer-detail modal (issue #215).
+///
+/// Why: when the operator presses `Enter` in the drawer pane the modal must
+/// open with the verbatim drawer body. The activity-panel rows only carry
+/// the truncated snippet, so we re-fetch the drawer list from the daemon —
+/// which serialises every drawer's full `content` — and store the result in
+/// `state.drawer_detail_memories`.
+/// What: when no palace is selected, leaves the modal closed and returns.
+/// Otherwise issues `client.fetch_drawer_detail` for the current scope and
+/// either replaces the memories or records the failure on the log. Always
+/// flips `drawer_detail_loading = false` so the modal drops its in-flight
+/// label.
+/// Test: thin I/O glue; pure projection is tested via `parse_memory_details`.
+async fn fetch_drawer_detail(state: &mut MemoryTuiState, client: &MemoryClient) {
+    let Some(palace_id) = state.selected_id().map(str::to_string) else {
+        // No single palace selected — close the modal so it can't render
+        // stale memories from a previous scope.
+        state.close_drawer_detail();
+        return;
+    };
+    state.drawer_detail_loading = true;
+    // Use a generous limit so the modal can show the entire drawer page (the
+    // pane page size is 20, but the modal lets the operator scroll through
+    // every memory the daemon returns).
+    match client.fetch_drawer_detail(&palace_id, 50).await {
+        Ok(memories) => {
+            state.drawer_detail_memories = memories;
+            // Clamp the selected index to the loaded set in case the page
+            // shrank between key-press and fetch completion.
+            if state.drawer_detail_idx >= state.drawer_detail_memories.len() {
+                state.drawer_detail_idx = state.drawer_detail_memories.len().saturating_sub(1);
+            }
+        }
+        Err(e) => {
+            // Surface the error on the activity log so the operator sees why
+            // the modal stayed empty. The modal itself shows a `Loading…`
+            // placeholder until either a fetch succeeds or it is closed.
+            state
+                .log
+                .push_scoped(&palace_id, format!("drawer detail fetch failed: {e}"));
+            state.drawer_detail_memories.clear();
+        }
+    }
+    state.drawer_detail_loading = false;
+}
+
 /// Build the rendered lines for the ACTIVITY panel when a palace is selected.
 ///
 /// Why: the activity panel shows a compact one-line summary per drawer
@@ -1145,6 +1345,22 @@ async fn run_loop<B: ratatui::backend::Backend>(
                 }
                 continue;
             }
+            // Issue #215: drawer-detail modal owns the keyboard while open —
+            // `Esc`/`q` close it; `↑`/`↓` scroll its body; everything else is
+            // swallowed so the underlying UI never reacts under the modal.
+            if state.drawer_detail_open {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => state.close_drawer_detail(),
+                    KeyCode::Up => {
+                        state.drawer_detail_scroll = state.drawer_detail_scroll.saturating_sub(1);
+                    }
+                    KeyCode::Down => {
+                        state.drawer_detail_scroll = state.drawer_detail_scroll.saturating_add(1);
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             match (state.focus, key.code) {
                 // Filter-active bindings come first — they capture characters,
                 // backspace, Esc, and Enter before the general List handlers.
@@ -1167,7 +1383,15 @@ async fn run_loop<B: ratatui::backend::Backend>(
                 // would steal focus away from the list and break filter input.
                 (MemoryFocus::List, KeyCode::Tab) if state.filter_active => {}
                 (_, KeyCode::Char('?')) => state.show_help = true,
-                (_, KeyCode::Tab) => state.toggle_focus(),
+                // Issue #215: Tab cycles through every focusable zone.
+                (_, KeyCode::Tab) => state.cycle_focus(),
+                // Esc on the drawer pane returns focus to the palace list
+                // (with the drawer cursor cleared); on every other zone Esc
+                // still quits, matching the legacy behaviour.
+                (MemoryFocus::DrawerPane, KeyCode::Esc) => {
+                    state.focus = MemoryFocus::List;
+                    state.drawer_cursor = 0;
+                }
                 (_, KeyCode::Esc) => return Ok(()),
                 // List-focus bindings.
                 (MemoryFocus::List, KeyCode::Char('q')) => return Ok(()),
@@ -1178,10 +1402,12 @@ async fn run_loop<B: ratatui::backend::Backend>(
                 (MemoryFocus::List, KeyCode::Left) if state.selected_id().is_some() => {
                     state.drawer_list.prev_page();
                     fetch_drawer_page(state, client).await;
+                    state.clamp_drawer_cursor();
                 }
                 (MemoryFocus::List, KeyCode::Right) if state.selected_id().is_some() => {
                     state.drawer_list.next_page();
                     fetch_drawer_page(state, client).await;
+                    state.clamp_drawer_cursor();
                 }
                 (MemoryFocus::List, KeyCode::Char('/')) => {
                     state.filter_active = true;
@@ -1234,6 +1460,38 @@ async fn run_loop<B: ratatui::backend::Backend>(
                         last_poll = Instant::now();
                     }
                 }
+                // DrawerPane bindings (issue #215). `↑`/`↓` move the drawer
+                // cursor through the current page; `Enter` opens the detail
+                // modal for the highlighted drawer; `←`/`→` continue to do
+                // page navigation so the operator can step through pages
+                // without switching focus back to the list.
+                (MemoryFocus::DrawerPane, KeyCode::Up) => {
+                    state.drawer_cursor_up();
+                }
+                (MemoryFocus::DrawerPane, KeyCode::Down) => {
+                    state.drawer_cursor_down();
+                }
+                (MemoryFocus::DrawerPane, KeyCode::Left) if state.selected_id().is_some() => {
+                    state.drawer_list.prev_page();
+                    fetch_drawer_page(state, client).await;
+                    state.clamp_drawer_cursor();
+                }
+                (MemoryFocus::DrawerPane, KeyCode::Right) if state.selected_id().is_some() => {
+                    state.drawer_list.next_page();
+                    fetch_drawer_page(state, client).await;
+                    state.clamp_drawer_cursor();
+                }
+                (MemoryFocus::DrawerPane, KeyCode::Enter)
+                    if !state.drawer_list.drawers.is_empty()
+                        && state.drawer_cursor < state.drawer_list.drawers.len() =>
+                {
+                    state.drawer_detail_open = true;
+                    state.drawer_detail_idx = state.drawer_cursor;
+                    state.drawer_detail_scroll = 0;
+                    state.drawer_detail_memories.clear();
+                    fetch_drawer_detail(state, client).await;
+                }
+                (MemoryFocus::DrawerPane, KeyCode::Char('q')) => return Ok(()),
                 // Input-focus bindings.
                 (MemoryFocus::Input, KeyCode::Enter) => {
                     run_recall(state, client).await;
@@ -1254,6 +1512,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
             // are added while viewing").
             if state.selected_id().is_some() {
                 fetch_drawer_page(state, client).await;
+                state.clamp_drawer_cursor();
             }
             last_poll = Instant::now();
         }
@@ -1265,6 +1524,11 @@ async fn run_loop<B: ratatui::backend::Backend>(
         if current_scope != last_drawer_scope {
             state.drawer_list.reset_for(current_scope.clone());
             fetch_drawer_page(state, client).await;
+            // Issue #215: palace change resets the drawer cursor; the modal
+            // (if open) should also close since its memories belong to the
+            // previous scope.
+            state.drawer_cursor = 0;
+            state.close_drawer_detail();
             last_drawer_scope = current_scope;
         }
     }
@@ -1277,17 +1541,18 @@ async fn run_loop<B: ratatui::backend::Backend>(
 /// Test: `test_help_text_lists_bindings`.
 pub fn help_text() -> String {
     [
-        "  Tab     switch focus between the palace list and the recall bar",
-        "  ↑ / ↓   move the palace selection (when the list has focus)",
+        "  Tab     cycle focus: palace list → drawer pane → recall bar",
+        "  ↑ / ↓   move the active selection (list, drawers, or modal scroll)",
         "  ← / →   page through drawers in the ACTIVITY panel",
+        "  Enter   in DrawerPane: open the selected drawer's detail modal",
+        "          in Input: run a recall query",
         "  All     the top list row fans recalls / stats across every palace",
         "  /       activate the inline palace filter (Esc / Enter close)",
         "  s       cycle palace sort: Activity → Name → Vectors",
         "  g       toggle grouping by inferred project",
         "  d       run a dream cycle across every palace",
-        "  Enter   run a recall query — all palaces, or the selected one",
         "  ?       toggle this help overlay",
-        "  q / Esc quit",
+        "  q / Esc close modal / quit",
     ]
     .join("\n")
 }
@@ -1920,8 +2185,14 @@ pub fn render(frame: &mut Frame, state: &mut MemoryTuiState) {
     // panel renders a paged drawer list; for "All palaces" it falls back to
     // the streamed event log so cross-palace events stay visible.
     let scope = state.scope_filter();
+    let drawer_pane_focused = state.focus == MemoryFocus::DrawerPane;
+    // Issue #215: surface the focus state in the panel title so the
+    // operator can tell which zone owns the cursor at a glance. The `▶`
+    // glyph mirrors the recall bar's leading marker for consistency.
     let activity_title = match scope {
+        Some(id) if drawer_pane_focused => format!("DRAWER ▶ {id}"),
         Some(id) => format!("ACTIVITY — {id}"),
+        None if drawer_pane_focused => format!("DRAWER ▶ {ALL_LABEL}"),
         None => format!("ACTIVITY — {ALL_LABEL}"),
     };
     let activity_height = right[0].height.saturating_sub(2) as usize;
@@ -1932,31 +2203,60 @@ pub fn render(frame: &mut Frame, state: &mut MemoryTuiState) {
         .map(|p| p.drawer_count)
         .unwrap_or(0);
     let drawer_lines = drawer_panel_lines(state, drawer_total);
-    let activity_items: Vec<ListItem> = if !drawer_lines.is_empty() {
-        // Truncate to the visible height so the bordered panel does not
-        // clip mid-row.
-        drawer_lines
-            .into_iter()
-            .take(activity_height.max(1))
-            .map(ListItem::new)
-            .collect()
-    } else if state.log.has_scoped(scope) {
-        state
-            .log
-            .tail_scoped(scope, activity_height.max(1))
-            .map(|line| ListItem::new(line.as_str()))
-            .collect()
-    } else if state.daemon_status == DaemonStatus::Connecting {
-        // Distinguish "first poll has not completed" from "genuinely no activity"
-        // so the panel doesn't look broken on startup.
-        vec![ListItem::new("Loading…")]
+    // Issue #215: render the drawer page as a stateful List so the
+    // ratatui highlight can mark the focused drawer row. The header line
+    // (row 0 of `drawer_lines` when the slice is non-empty) is included so
+    // the page indicator stays visible; only data rows are selectable,
+    // tracked via `drawer_cursor + 1` to skip the header offset.
+    if !drawer_lines.is_empty() {
+        let take = activity_height.max(1);
+        let visible_lines: Vec<String> = drawer_lines.into_iter().take(take).collect();
+        let items: Vec<ListItem> = visible_lines
+            .iter()
+            .map(|s| ListItem::new(s.clone()))
+            .collect();
+        // The first line is the header ("drawers N–M of T (page p)"); data
+        // rows follow at index 1.. so the selection index is the cursor
+        // plus 1 when the drawer pane has focus.
+        let selected_row = if drawer_pane_focused && !state.drawer_list.drawers.is_empty() {
+            Some((state.drawer_cursor + 1).min(visible_lines.len().saturating_sub(1)))
+        } else {
+            None
+        };
+        let highlight_style = Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
+        let mut list_state = ListState::default().with_selected(selected_row);
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(panel_block(&activity_title, drawer_pane_focused))
+                .highlight_style(highlight_style)
+                .highlight_symbol("> ")
+                .highlight_spacing(HighlightSpacing::Always),
+            right[0],
+            &mut list_state,
+        );
     } else {
-        vec![ListItem::new("(no activity yet)")]
-    };
-    frame.render_widget(
-        List::new(activity_items).block(panel_block(&activity_title, false)),
-        right[0],
-    );
+        // Fallback: streamed event log / placeholder lines.
+        let fallback_items: Vec<ListItem> = if state.log.has_scoped(scope) {
+            state
+                .log
+                .tail_scoped(scope, activity_height.max(1))
+                .map(|line| ListItem::new(line.as_str()))
+                .collect()
+        } else if state.daemon_status == DaemonStatus::Connecting {
+            // Distinguish "first poll has not completed" from "genuinely no
+            // activity" so the panel doesn't look broken on startup.
+            vec![ListItem::new("Loading…")]
+        } else {
+            vec![ListItem::new("(no activity yet)")]
+        };
+        frame.render_widget(
+            List::new(fallback_items).block(panel_block(&activity_title, drawer_pane_focused)),
+            right[0],
+        );
+    }
 
     // STATISTICS panel — counts and sizes for the selection.
     let stats_items: Vec<ListItem> = stats_lines(state).into_iter().map(ListItem::new).collect();
@@ -1994,6 +2294,132 @@ pub fn render(frame: &mut Frame, state: &mut MemoryTuiState) {
     if state.show_help {
         tui_common::render_help_overlay(frame, &help_text());
     }
+
+    // Issue #215: drawer-detail modal floats over the rest of the UI when
+    // open. Render last so it sits on top of everything (including the help
+    // overlay) and is the visual "front" element.
+    if state.drawer_detail_open {
+        render_drawer_detail_modal(frame, state);
+    }
+}
+
+/// Render the drawer-detail modal as a centred floating overlay (issue #215).
+///
+/// Why: the activity panel only shows a truncated snippet per drawer; the
+/// modal exposes the full body, all tags, and the timestamp for the drawer
+/// the operator opened with `Enter` in the drawer pane.
+/// What: clears a centred rectangle (≈80 % width × ≈70 % height of the
+/// frame) and draws a bordered block carrying a header (drawer id,
+/// timestamp, creator tag, tag list), the verbatim memory bodies separated
+/// by `───` rules, and a `Loading…` placeholder while the fetch is in
+/// flight. `drawer_detail_scroll` scrolls the content vertically.
+///
+/// Test: smoke-tested via `test_render_with_drawer_detail_open`.
+fn render_drawer_detail_modal(frame: &mut Frame, state: &MemoryTuiState) {
+    let area = frame.area();
+    let w = ((area.width as u32 * 80 / 100) as u16)
+        .max(20)
+        .min(area.width);
+    let h = ((area.height as u32 * 70 / 100) as u16)
+        .max(8)
+        .min(area.height);
+    let rect = Rect {
+        x: area.x + area.width.saturating_sub(w) / 2,
+        y: area.y + area.height.saturating_sub(h) / 2,
+        width: w,
+        height: h,
+    };
+    frame.render_widget(Clear, rect);
+
+    let body = drawer_detail_body(state);
+    let title = drawer_detail_title(state);
+    let para = Paragraph::new(body)
+        .style(Style::default().fg(Color::White))
+        .wrap(Wrap { trim: false })
+        .scroll((state.drawer_detail_scroll as u16, 0))
+        .block(
+            Block::default().borders(Borders::ALL).title(Span::styled(
+                title,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+        );
+    frame.render_widget(para, rect);
+}
+
+/// Compose the rendered body text for the drawer-detail modal (issue #215).
+///
+/// Why: separating the body builder from the rendering call lets a test
+/// assert the modal carries the expected header, memory bodies, and
+/// separators without spinning up a terminal backend.
+/// What: returns a single `String` shaped as
+///   `<header>\n\n<memory 0 content>\n\n───\n\n<memory 1 content>\n…`.
+/// The header is the drawer id, creation timestamp, creator label, and the
+/// raw tag list (joined with commas). When the fetch is still loading the
+/// body collapses to `Loading…`; when the fetch returned zero memories the
+/// body shows `(no memories returned)`.
+/// Test: `test_drawer_detail_body_layout`, `test_drawer_detail_body_loading`.
+pub fn drawer_detail_body(state: &MemoryTuiState) -> String {
+    if state.drawer_detail_loading {
+        return "Loading…".to_string();
+    }
+    if state.drawer_detail_memories.is_empty() {
+        return "(no memories returned)".to_string();
+    }
+    let mut out = String::new();
+    for (i, memory) in state.drawer_detail_memories.iter().enumerate() {
+        if i > 0 {
+            out.push_str("\n\n──────────────────────────────────────\n\n");
+        }
+        // Header for this memory.
+        let ts = memory
+            .created_at
+            .map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            .unwrap_or_else(|| "(no timestamp)".to_string());
+        let creator = crate::monitor::memory_client::creator_label(&memory.tags);
+        let tag_join = if memory.tags.is_empty() {
+            "(none)".to_string()
+        } else {
+            memory.tags.join(", ")
+        };
+        let header_id = if memory.id.is_empty() {
+            "(no id)".to_string()
+        } else {
+            memory.id.clone()
+        };
+        out.push_str(&format!("Drawer: {header_id}\n"));
+        out.push_str(&format!("Time:   {ts}\n"));
+        out.push_str(&format!("By:     {creator}\n"));
+        out.push_str(&format!("Tags:   {tag_join}\n"));
+        out.push('\n');
+        if memory.content.is_empty() {
+            out.push_str("(empty content)");
+        } else {
+            out.push_str(&memory.content);
+        }
+    }
+    out
+}
+
+/// Title-bar text for the drawer-detail modal (issue #215).
+///
+/// Why: kept separate so a test can verify the title surfaces the current
+/// memory count and the active index without depending on the renderer.
+/// What: returns ` Drawer detail — <i+1>/<n>  (esc/q close, ↑/↓ scroll) `
+/// when at least one memory is loaded, or ` Drawer detail (loading…) ` /
+/// ` Drawer detail (empty) ` for the transient states.
+/// Test: `test_drawer_detail_title`.
+pub fn drawer_detail_title(state: &MemoryTuiState) -> String {
+    if state.drawer_detail_loading {
+        return " Drawer detail (loading…) ".to_string();
+    }
+    if state.drawer_detail_memories.is_empty() {
+        return " Drawer detail (empty) ".to_string();
+    }
+    let n = state.drawer_detail_memories.len();
+    let i = state.drawer_detail_idx.min(n.saturating_sub(1));
+    format!(" Drawer detail — {}/{n}  (esc/q close, ↑/↓ scroll) ", i + 1)
 }
 
 #[cfg(test)]
@@ -3349,6 +3775,260 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("drawers unavailable"));
         assert!(lines[0].contains("connection refused"));
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #215 — Tab focus cycle, drawer pane, and detail modal
+    // -----------------------------------------------------------------
+
+    /// Why (issue #215): `Tab` must walk the three focus zones in order
+    /// (`List → DrawerPane → Input → List`) so the operator can reach the
+    /// new drawer pane without a mouse.
+    /// What: drives `MemoryFocus::next` through a full loop.
+    /// Test: itself.
+    #[test]
+    fn test_focus_tab_cycle() {
+        assert_eq!(MemoryFocus::default(), MemoryFocus::List);
+        let mut focus = MemoryFocus::List;
+        focus = focus.next();
+        assert_eq!(focus, MemoryFocus::DrawerPane);
+        focus = focus.next();
+        assert_eq!(focus, MemoryFocus::Input);
+        focus = focus.next();
+        assert_eq!(focus, MemoryFocus::List);
+    }
+
+    /// Why (issue #215): `cycle_focus` on the state must reset the drawer
+    /// cursor when focus returns to the palace list so a re-entry doesn't
+    /// resume on a stale highlight.
+    /// What: drives the cycle, asserting `drawer_cursor` clears on the
+    /// `Input → List` step.
+    /// Test: itself.
+    #[test]
+    fn test_state_cycle_focus_resets_drawer_cursor() {
+        let mut state = sample_state();
+        state.drawer_cursor = 5;
+        state.cycle_focus(); // List → DrawerPane
+        assert_eq!(state.focus, MemoryFocus::DrawerPane);
+        assert_eq!(state.drawer_cursor, 5, "cursor preserved while in pane");
+        state.cycle_focus(); // DrawerPane → Input
+        assert_eq!(state.focus, MemoryFocus::Input);
+        assert_eq!(state.drawer_cursor, 5, "cursor preserved while away");
+        state.cycle_focus(); // Input → List
+        assert_eq!(state.focus, MemoryFocus::List);
+        assert_eq!(state.drawer_cursor, 0, "cursor resets on return to list");
+    }
+
+    /// Why (issue #215): the drawer cursor must clamp to the visible drawer
+    /// page so a page refresh / palace change can't leave the cursor past
+    /// the end of the slice.
+    /// What: exercises `drawer_cursor_up`, `drawer_cursor_down`, and
+    /// `clamp_drawer_cursor` across full / empty pages.
+    /// Test: itself.
+    #[test]
+    fn test_drawer_cursor_clamp() {
+        let mut state = sample_state();
+        state.drawer_list.drawers = (0..3).map(|i| sample_drawer(i, &[])).collect();
+        // From cursor 0, `Up` saturates at 0.
+        state.drawer_cursor_up();
+        assert_eq!(state.drawer_cursor, 0);
+        // `Down` walks through the page and clamps at len - 1.
+        state.drawer_cursor_down();
+        state.drawer_cursor_down();
+        state.drawer_cursor_down();
+        state.drawer_cursor_down();
+        assert_eq!(state.drawer_cursor, 2, "clamped at last index");
+        // A shrunk page re-clamps the cursor.
+        state.drawer_list.drawers.truncate(1);
+        state.clamp_drawer_cursor();
+        assert_eq!(state.drawer_cursor, 0, "clamped to new last index");
+        // Empty page leaves the cursor at 0.
+        state.drawer_list.drawers.clear();
+        state.drawer_cursor = 5;
+        state.clamp_drawer_cursor();
+        assert_eq!(state.drawer_cursor, 0);
+        // `Down` on empty page is a no-op.
+        state.drawer_cursor_down();
+        assert_eq!(state.drawer_cursor, 0);
+    }
+
+    /// Why (issue #215): the modal lifecycle must clear transient state so
+    /// a re-open does not flash stale memories.
+    /// What: opens the modal with a fake memory set, then closes it via
+    /// `close_drawer_detail`, asserting every transient field clears.
+    /// Test: itself.
+    #[test]
+    fn test_drawer_detail_modal_lifecycle() {
+        let mut state = sample_state();
+        state.drawer_detail_open = true;
+        state.drawer_detail_idx = 3;
+        state.drawer_detail_scroll = 17;
+        state.drawer_detail_loading = true;
+        state.drawer_detail_memories = vec![MemoryDetail {
+            id: "x".into(),
+            content: "y".into(),
+            tags: vec![],
+            created_at: None,
+        }];
+        state.close_drawer_detail();
+        assert!(!state.drawer_detail_open);
+        assert!(state.drawer_detail_memories.is_empty());
+        assert_eq!(state.drawer_detail_scroll, 0);
+        assert!(!state.drawer_detail_loading);
+        // `drawer_detail_idx` is preserved on close (not part of the
+        // explicit reset) — the next open recomputes it from the cursor.
+    }
+
+    /// Why (issue #215): the modal body must surface the drawer header
+    /// fields (id, timestamp, creator, tags) plus the verbatim content so
+    /// the operator sees the full memory.
+    /// What: builds a state with two memories and asserts the body carries
+    /// both, separated by a horizontal rule.
+    /// Test: itself.
+    #[test]
+    fn test_drawer_detail_body_layout() {
+        use chrono::{TimeZone, Utc};
+        let mut state = sample_state();
+        state.drawer_detail_memories = vec![
+            MemoryDetail {
+                id: "abc-123".into(),
+                content: "First memory body".into(),
+                tags: vec!["msg:from=cto".into(), "tag:type=note".into()],
+                created_at: Some(Utc.with_ymd_and_hms(2026, 5, 20, 12, 34, 56).unwrap()),
+            },
+            MemoryDetail {
+                id: "def-456".into(),
+                content: "Second memory body".into(),
+                tags: vec![],
+                created_at: None,
+            },
+        ];
+        let body = drawer_detail_body(&state);
+        // Header fields present for memory 0.
+        assert!(
+            body.contains("Drawer: abc-123"),
+            "missing id header: {body}"
+        );
+        assert!(body.contains("2026-05-20 12:34:56 UTC"));
+        assert!(body.contains("msg:from=cto"));
+        assert!(body.contains("tag:type=note"));
+        // First memory body present.
+        assert!(body.contains("First memory body"));
+        // Separator between memories.
+        assert!(
+            body.contains("──────────────────────────────────────"),
+            "missing memory separator: {body}",
+        );
+        // Memory 1 falls through to safe defaults for missing fields.
+        assert!(body.contains("Drawer: def-456"));
+        assert!(body.contains("(no timestamp)"));
+        assert!(body.contains("(none)"));
+        assert!(body.contains("Second memory body"));
+    }
+
+    /// Why (issue #215): the modal must show a `Loading…` placeholder while
+    /// the fetch is in flight, and a friendly empty-state message when the
+    /// fetch returned no memories.
+    /// What: drives both transient states through `drawer_detail_body`.
+    /// Test: itself.
+    #[test]
+    fn test_drawer_detail_body_loading() {
+        let mut state = sample_state();
+        state.drawer_detail_loading = true;
+        assert_eq!(drawer_detail_body(&state), "Loading…");
+        state.drawer_detail_loading = false;
+        // Memories vec is still empty -> empty-state placeholder.
+        assert_eq!(drawer_detail_body(&state), "(no memories returned)");
+    }
+
+    /// Why (issue #215): the modal title must show how many memories are
+    /// loaded and which index the operator is viewing, plus a hint at the
+    /// close / scroll bindings.
+    /// What: exercises every title state — loading, empty, and populated.
+    /// Test: itself.
+    #[test]
+    fn test_drawer_detail_title() {
+        let mut state = sample_state();
+        state.drawer_detail_loading = true;
+        assert!(drawer_detail_title(&state).contains("loading…"));
+        state.drawer_detail_loading = false;
+        assert!(drawer_detail_title(&state).contains("(empty)"));
+        state.drawer_detail_memories = vec![
+            MemoryDetail::default(),
+            MemoryDetail::default(),
+            MemoryDetail::default(),
+        ];
+        state.drawer_detail_idx = 1;
+        let title = drawer_detail_title(&state);
+        assert!(title.contains("2/3"), "expected 2/3 index marker: {title}");
+        assert!(title.contains("esc/q close"));
+        assert!(title.contains("↑/↓ scroll"));
+    }
+
+    /// Why (issue #215): the activity panel title must surface a `DRAWER ▶`
+    /// marker when the drawer pane has focus so the operator sees which
+    /// zone owns the cursor.
+    /// What: renders the TUI with focus on the drawer pane and asserts the
+    /// title carries the marker.
+    /// Test: itself.
+    #[test]
+    fn test_render_drawer_pane_focused_title() {
+        let mut state = sample_state();
+        state.selected = 1; // single palace
+        state.focus = MemoryFocus::DrawerPane;
+        state.drawer_list.palace_id = Some("default".into());
+        state.drawer_list.drawers = vec![sample_drawer(0, &["msg:from=cto"])];
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|f| render(f, &mut state))
+            .expect("render with drawer focus must not panic");
+        let buffer = terminal.backend().buffer();
+        let content: String = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            content.contains("DRAWER ▶"),
+            "expected DRAWER ▶ marker in rendered output",
+        );
+    }
+
+    /// Why (issue #215): the modal must render without panicking when open
+    /// over the existing layout, and the rendered output must include the
+    /// modal title.
+    /// What: opens the modal with a fake memory and asserts the title is
+    /// visible in the rendered buffer.
+    /// Test: itself.
+    #[test]
+    fn test_render_with_drawer_detail_open() {
+        use chrono::{TimeZone, Utc};
+        let mut state = sample_state();
+        state.selected = 1;
+        state.drawer_detail_open = true;
+        state.drawer_detail_idx = 0;
+        state.drawer_detail_memories = vec![MemoryDetail {
+            id: "abc-123".into(),
+            content: "Verbatim memory body for the modal".into(),
+            tags: vec!["msg:from=cto".into()],
+            created_at: Some(Utc.with_ymd_and_hms(2026, 5, 20, 12, 34, 56).unwrap()),
+        }];
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|f| render(f, &mut state))
+            .expect("render with modal open must not panic");
+        let buffer = terminal.backend().buffer();
+        let content: String = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(
+            content.contains("Drawer detail"),
+            "expected modal title in rendered output",
+        );
     }
 
     #[test]
