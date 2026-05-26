@@ -245,14 +245,20 @@ async fn recall_ranks_best_match_first() {
 async fn recall_deep_returns_at_least_as_many_as_shallow() {
     let fx = Fixture::new();
     create_palace(fx.state(), "deep").await;
-    for i in 0..5 {
-        remember(
-            fx.state(),
-            "deep",
-            &format!("Memory drawer number {i} contains useful notes about programming languages and their runtime characteristics"),
-            &[],
-        )
-        .await;
+    // Issue #220: the dedup gate uses Jaro-Winkler similarity > 0.92 to
+    // skip near-duplicates within a 5-minute window. Five drawers
+    // differing only by a single digit (`...number 0...`, `...number 1...`)
+    // would all be dropped as near-duplicates of the first one. Use
+    // materially different prose so each write lands.
+    let bodies = [
+        "Rust enforces ownership and lifetimes at compile time to prevent data races and use-after-free",
+        "Python is dynamically typed with reference counting and a cyclic garbage collector for heap memory",
+        "JavaScript engines such as V8 use just-in-time compilation and generational garbage collection",
+        "Go is a statically typed language with concurrent garbage collection and lightweight goroutines",
+        "Haskell relies on lazy evaluation, type inference, and pure functional programming abstractions",
+    ];
+    for body in bodies {
+        remember(fx.state(), "deep", body, &[]).await;
     }
 
     let shallow = dispatch_tool(

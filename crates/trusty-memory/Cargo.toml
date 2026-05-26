@@ -107,6 +107,11 @@ sha2 = { workspace = true }
 # zero lockfile churn (Unix-only — the spawn supervisor is also Unix-only
 # because the daemon protocol is UDS).
 libc = { workspace = true }
+# Issue #220: rolling dedup window uses Jaro-Winkler similarity to detect
+# near-duplicate memory writes within a short time window. `strsim` is
+# already a workspace dep (used by the cli-help suggest feature in
+# trusty-common), so this adds zero lockfile churn.
+strsim = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

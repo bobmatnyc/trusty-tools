@@ -95,6 +95,111 @@ fn content_gate(content: &str, context: Option<&str>) -> Option<String> {
     Some(content.to_string())
 }
 
+/// Patterns whose content should never be stored as standalone memories.
+///
+/// Why (issue #220): the activity panel was being flooded with low-value
+/// Claude Code auto-captures — `Tool use: Bash`, `Tool use: Edit File: …`,
+/// `Claude Code session ended: <uuid>` — that carry no semantic value once
+/// the surrounding turn is gone. They pollute recall results and burn UI
+/// real estate. A blocklist is the cheapest way to filter them at write
+/// time without coordinating with the auto-capture hook source.
+/// What: substring patterns (not regexes) checked via `str::contains` so
+/// the matcher stays branch-predictable and never panics on malformed
+/// input. Patterns are intentionally lower-case-friendly but matched
+/// case-sensitively because the auto-capture hooks always emit the exact
+/// English prefix.
+/// Test: `blocklist_gate_blocks_tool_use`,
+/// `blocklist_gate_blocks_session_ended`,
+/// `blocklist_gate_passes_normal_content`.
+const BLOCKLIST_PATTERNS: &[&str] = &[
+    "Tool use: ",          // Claude Code tool-use captures
+    "Claude Code session", // Session lifecycle events
+];
+
+/// Rolling-window horizon for the dedup gate.
+///
+/// Why (issue #220): identical content is often emitted multiple times in
+/// quick succession (auto-capture hook bursts, retries, copy-paste). A
+/// 5-minute window catches the burst without rejecting deliberate user
+/// re-statements hours later.
+/// What: `chrono::Duration` value. Drawers created before
+/// `now - DEDUP_WINDOW` are ignored by the dedup pass.
+/// Test: indirect via `dedup_skips_near_duplicate` and
+/// `dedup_allows_different_content` (use the helper directly).
+const DEDUP_WINDOW_MINUTES: i64 = 5;
+
+/// Maximum number of recent drawers the dedup pass scans.
+///
+/// Why: a palace can hold tens of thousands of drawers; we never need to
+/// compare the new write against more than the most-recent handful to
+/// catch the bursty-duplicate case. Capping the scan keeps the hot path
+/// O(1) in the palace size.
+/// What: ceiling on the candidate list pulled from
+/// `PalaceHandle::list_drawers` before the time-window filter.
+/// Test: `dedup_skips_near_duplicate` exercises the scan against a small
+/// candidate set; the cap is enforced by `list_drawers`'s `limit` arg.
+const DEDUP_SCAN_LIMIT: usize = 50;
+
+/// Jaro-Winkler similarity threshold above which a candidate counts as a
+/// near-duplicate of the new content.
+///
+/// Why: 0.92 is the empirically-chosen cutoff documented in the issue —
+/// high enough to allow distinct facts to coexist, low enough to catch
+/// trivial whitespace / punctuation / suffix variation. Jaro-Winkler is
+/// preferred over plain Jaro because the auto-capture noise tends to share
+/// the same prefix (`Tool use: …`, `Edit File: …`), which Jaro-Winkler
+/// weights heavily.
+/// What: `f64` threshold compared against `strsim::jaro_winkler`'s output.
+/// Test: `dedup_skips_near_duplicate`, `dedup_allows_different_content`.
+const DEDUP_SIMILARITY_THRESHOLD: f64 = 0.92;
+
+/// Blocklist gate: returns true when the content should be silently
+/// skipped because it matches a known low-value auto-capture pattern.
+///
+/// Why (issue #220): Centralises the pattern-match logic so both
+/// `memory_remember` and `memory_note` go through the same filter. Trims
+/// leading whitespace before matching so indented variants still hit.
+/// What: returns `true` iff `content.contains(pat)` for any pattern in
+/// `BLOCKLIST_PATTERNS`. Trimming uses `str::trim_start` to keep the
+/// substring check predictable (the suffixes after the prefix can vary).
+/// Test: `blocklist_gate_blocks_tool_use`,
+/// `blocklist_gate_blocks_session_ended`,
+/// `blocklist_gate_passes_normal_content`.
+fn blocklist_gate(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    BLOCKLIST_PATTERNS.iter().any(|pat| trimmed.contains(pat))
+}
+
+/// Dedup gate: returns true when the new content is a near-duplicate of a
+/// drawer written to the same palace within the rolling window.
+///
+/// Why (issue #220): bursts of identical or near-identical content (auto-
+/// capture retries, hook re-emissions, copy-paste artefacts) were
+/// inflating the palace with no recall benefit. A short rolling window
+/// catches the burst without rejecting deliberate re-statements hours
+/// later.
+/// What: pulls up to `DEDUP_SCAN_LIMIT` recent drawers from the live
+/// in-memory table via `list_drawers` (a cheap snapshot, no I/O), filters
+/// to those created within `DEDUP_WINDOW_MINUTES` of `now`, then computes
+/// `strsim::jaro_winkler` against each. Returns `true` on the first match
+/// above `DEDUP_SIMILARITY_THRESHOLD`. Returns `false` if `content` is
+/// empty after trimming (the content gate handles that case separately)
+/// or if the palace has no recent drawers.
+/// Test: `dedup_skips_near_duplicate`, `dedup_allows_different_content`.
+fn dedup_gate(handle: &trusty_common::memory_core::PalaceHandle, content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let now = chrono::Utc::now();
+    let window_start = now - chrono::Duration::minutes(DEDUP_WINDOW_MINUTES);
+    let recent = handle.list_drawers(None, None, DEDUP_SCAN_LIMIT);
+    recent
+        .iter()
+        .filter(|d| d.created_at >= window_start)
+        .any(|d| strsim::jaro_winkler(trimmed, d.content.trim()) > DEDUP_SIMILARITY_THRESHOLD)
+}
+
 /// Build the strict MCP-level `RememberOptions`.
 ///
 /// Why: Issue #61 — the MCP boundary is where auto-capture hooks deposit
@@ -619,6 +724,21 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("memory_remember: missing 'text'"))?
                 .to_string();
+            // Issue #220: blocklist gate — silently drop content matching
+            // known low-value auto-capture patterns (e.g. `Tool use: Bash`,
+            // `Claude Code session ended: …`). Logged at debug so operators
+            // can audit when investigating missing writes.
+            if blocklist_gate(&raw_text) {
+                tracing::debug!(
+                    palace = %palace,
+                    "content gate: skipped (blocked pattern)",
+                );
+                return Ok(json!({
+                    "palace": palace,
+                    "status": "skipped",
+                    "reason": "content gate: skipped (blocked pattern)",
+                }));
+            }
             // Issue #215: content gate — drop very short standalone content
             // unless the caller supplied a `context` wrapper. When skipped,
             // return a success envelope with an explanatory status so the
@@ -660,6 +780,21 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
             let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
 
             let handle = open_palace_handle(state, palace)?;
+            // Issue #220: rolling dedup window — skip when a near-duplicate
+            // landed in the same palace within the last 5 minutes. The
+            // `force=true` operator override bypasses the gate so
+            // intentional re-writes are not silently dropped.
+            if !force && dedup_gate(&handle, &text) {
+                tracing::debug!(
+                    palace = %palace,
+                    "content gate: skipped (duplicate within window)",
+                );
+                return Ok(json!({
+                    "palace": palace,
+                    "status": "skipped",
+                    "reason": "content gate: skipped (duplicate within window)",
+                }));
+            }
             let opts = mcp_remember_opts(force);
             // Snapshot the content preview *before* moving `text` into
             // `remember_with_options` so the activity feed shows what was
@@ -721,6 +856,21 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("memory_note: missing 'content'"))?
                 .to_string();
+            // Issue #220: blocklist gate — silently drop content matching
+            // known low-value auto-capture patterns. Same filter as
+            // `memory_remember` so the gate is uniform across the write
+            // surface.
+            if blocklist_gate(&raw_content) {
+                tracing::debug!(
+                    palace = %palace,
+                    "content gate: skipped (blocked pattern)",
+                );
+                return Ok(json!({
+                    "palace": palace,
+                    "status": "skipped",
+                    "reason": "content gate: skipped (blocked pattern)",
+                }));
+            }
             // Issue #215: same content gate as `memory_remember`. A `context`
             // arg can be passed to wrap a one-word answer; otherwise short
             // standalone content is silently dropped with an explanatory
@@ -753,6 +903,21 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
             }
             CreatorInfo::new_self(MCP_CLIENT_NAME, CreatorSource::Mcp).merge_into(&mut tags);
             let handle = open_palace_handle(state, palace)?;
+            // Issue #220: rolling dedup window — same gate as
+            // `memory_remember`. `memory_note` has no `force` arg, so the
+            // gate is unconditional: curated short-fact writes that happen
+            // to duplicate an existing recent note are still skipped.
+            if dedup_gate(&handle, &content) {
+                tracing::debug!(
+                    palace = %palace,
+                    "content gate: skipped (duplicate within window)",
+                );
+                return Ok(json!({
+                    "palace": palace,
+                    "status": "skipped",
+                    "reason": "content gate: skipped (duplicate within window)",
+                }));
+            }
             // Issue #97: mirror memory_remember — keep originals so the KG
             // extractor sees the same content / tags that landed in the
             // drawer. `remember_with_options` consumes them, so clone before.
@@ -2634,5 +2799,180 @@ mod tests {
             .await
             .expect_err("should error");
         assert!(err.to_string().contains("unknown tool"));
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #220 — blocklist pattern + rolling dedup window
+    // -----------------------------------------------------------------
+
+    /// Why: the blocklist gate must reject Claude Code tool-use captures
+    /// (`Tool use: Bash`, `Tool use: Edit File: …`) because those entries
+    /// have no standalone semantic value.
+    /// What: passes the literal prefix and a realistic example through
+    /// the gate and asserts `true` (blocked).
+    /// Test: itself.
+    #[test]
+    fn blocklist_gate_blocks_tool_use() {
+        assert!(blocklist_gate("Tool use: Bash"));
+        assert!(blocklist_gate(
+            "Tool use: Edit File: /Users/me/Projects/foo/bar.rs"
+        ));
+        // Leading whitespace should not let it through.
+        assert!(blocklist_gate("   Tool use: Read"));
+    }
+
+    /// Why: session-lifecycle events are auto-emitted by Claude Code and
+    /// should not pollute the palace.
+    /// What: passes the prefix through the gate and asserts `true`.
+    /// Test: itself.
+    #[test]
+    fn blocklist_gate_blocks_session_ended() {
+        assert!(blocklist_gate(
+            "Claude Code session ended: 1d2c3b4a-0000-0000-0000-000000000000"
+        ));
+        assert!(blocklist_gate("Claude Code session started"));
+    }
+
+    /// Why: normal user content (with no blocklist substring) must pass
+    /// the gate untouched so the regular content gate (issue #215) gets
+    /// to make the next decision.
+    /// What: passes normal prose / facts through and asserts `false`.
+    /// Test: itself.
+    #[test]
+    fn blocklist_gate_passes_normal_content() {
+        assert!(!blocklist_gate("User prefers snake_case for python"));
+        assert!(!blocklist_gate(
+            "Quokkas are the happiest marsupials in Australia"
+        ));
+        assert!(!blocklist_gate("Note: refactor the dispatcher next sprint"));
+        // Substring-only — a tool-use mention inside legitimate prose is
+        // still blocked. This is intentional: the prefix is rare enough
+        // outside the auto-capture path that the false-positive rate is
+        // acceptable, and a future regex upgrade can tighten it.
+        assert!(blocklist_gate("I used Tool use: Bash here"));
+    }
+
+    /// Why: the dedup gate must reject a fresh write whose content is a
+    /// near-duplicate (Jaro-Winkler > 0.92) of a drawer landed inside the
+    /// rolling window. Without this gate, bursty auto-captures inflate
+    /// the palace with no recall benefit (issue #220).
+    /// What: creates a palace, writes one drawer through the MCP path,
+    /// then runs the gate directly against a string that differs by one
+    /// trailing word — Jaro-Winkler should score that above 0.92 and the
+    /// gate should return `true`.
+    /// Test: itself.
+    #[tokio::test]
+    async fn dedup_skips_near_duplicate() {
+        let state = test_state();
+        let _ = dispatch_tool(&state, "palace_create", json!({"name": "dedup1"}))
+            .await
+            .expect("palace_create");
+
+        // Land the seed drawer through the real write path so its
+        // `created_at` is `Utc::now()` and falls inside the dedup window.
+        let _ = dispatch_tool(
+            &state,
+            "memory_remember",
+            json!({
+                "palace": "dedup1",
+                "text": "The quick brown fox jumped over the lazy dog repeatedly today",
+            }),
+        )
+        .await
+        .expect("memory_remember seed");
+
+        let handle = open_palace_handle(&state, "dedup1").expect("open handle");
+        // Near-duplicate: same prefix, trailing word replaced. Jaro-Winkler
+        // weights the shared prefix heavily so this should clear the 0.92
+        // bar comfortably.
+        assert!(
+            dedup_gate(
+                &handle,
+                "The quick brown fox jumped over the lazy dog repeatedly yesterday"
+            ),
+            "near-duplicate should be detected"
+        );
+        // Exact match also blocks.
+        assert!(
+            dedup_gate(
+                &handle,
+                "The quick brown fox jumped over the lazy dog repeatedly today"
+            ),
+            "exact match should be detected"
+        );
+    }
+
+    /// Why: a write whose content is genuinely different from every drawer
+    /// in the window must pass the dedup gate so the palace can grow.
+    /// What: writes one seed drawer, then runs the gate against an
+    /// unrelated string. Asserts `false`.
+    /// Test: itself.
+    #[tokio::test]
+    async fn dedup_allows_different_content() {
+        let state = test_state();
+        let _ = dispatch_tool(&state, "palace_create", json!({"name": "dedup2"}))
+            .await
+            .expect("palace_create");
+
+        let _ = dispatch_tool(
+            &state,
+            "memory_remember",
+            json!({
+                "palace": "dedup2",
+                "text": "Quokkas are the happiest marsupials in Australia by general consensus",
+            }),
+        )
+        .await
+        .expect("memory_remember seed");
+
+        let handle = open_palace_handle(&state, "dedup2").expect("open handle");
+        // Completely different content — far below 0.92.
+        assert!(
+            !dedup_gate(
+                &handle,
+                "Rust is a systems programming language focused on safety and concurrency"
+            ),
+            "unrelated content should pass the dedup gate"
+        );
+        // Empty/whitespace content is also a pass — the content gate
+        // handles the empty case upstream.
+        assert!(!dedup_gate(&handle, "   "));
+    }
+
+    /// Why: end-to-end confirmation that the blocklist short-circuits the
+    /// MCP `memory_remember` dispatch — no drawer is written, the
+    /// response envelope carries the documented `status = "skipped"` and
+    /// reason. Mirrors the issue-215 short-prompt test.
+    /// What: dispatch a `Tool use:` payload through `memory_remember`,
+    /// then `memory_list` and assert no drawer landed.
+    /// Test: itself.
+    #[tokio::test]
+    async fn dispatch_remember_blocks_blocklist_pattern() {
+        let state = test_state();
+        let _ = dispatch_tool(&state, "palace_create", json!({"name": "blk"}))
+            .await
+            .expect("palace_create");
+
+        let res = dispatch_tool(
+            &state,
+            "memory_remember",
+            json!({"palace": "blk", "text": "Tool use: Bash"}),
+        )
+        .await
+        .expect("memory_remember (blocked)");
+        assert_eq!(res["status"], "skipped");
+        assert!(
+            res["reason"]
+                .as_str()
+                .unwrap_or("")
+                .contains("blocked pattern"),
+            "reason should mention blocked pattern; got {res:?}"
+        );
+
+        let listed = dispatch_tool(&state, "memory_list", json!({"palace": "blk", "limit": 10}))
+            .await
+            .expect("memory_list");
+        let drawers = listed["drawers"].as_array().expect("drawers array");
+        assert!(drawers.is_empty(), "no drawer should be written");
     }
 }
