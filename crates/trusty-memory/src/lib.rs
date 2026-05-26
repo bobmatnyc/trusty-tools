@@ -1582,17 +1582,22 @@ pub(crate) async fn sse_handler(
 mod tests {
     use super::*;
 
-    fn test_state() -> AppState {
+    /// Why: Issue #234 — previously we `mem::forget`ed the `TempDir` so tests
+    /// could keep using `AppState` without juggling the directory handle, but
+    /// that leaked one temp directory per test (262+ accumulated each run).
+    /// What: Returns the `TempDir` alongside the `AppState` so the caller can
+    /// bind it (`let (state, _tmp) = ...;`) and let drop semantics clean up
+    /// when the test scope ends.
+    /// Test: Every test in this module that constructs state.
+    fn test_state() -> (AppState, tempfile::TempDir) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
-        // Leak the tempdir so it lives for the test process; tests are short.
-        std::mem::forget(tmp);
-        AppState::new(root)
+        (AppState::new(root), tmp)
     }
 
     #[tokio::test]
     async fn initialize_returns_protocol_version_and_capabilities() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let req = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -1613,7 +1618,7 @@ mod tests {
 
     #[tokio::test]
     async fn initialized_notification_returns_null() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let req = json!({
             "jsonrpc": "2.0",
             "method": "notifications/initialized",
@@ -1625,7 +1630,7 @@ mod tests {
 
     #[tokio::test]
     async fn tools_list_returns_all_tools() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let req = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
         let resp = handle_message(&state, req).await;
         let tools = resp["result"]["tools"].as_array().expect("tools array");
@@ -1637,7 +1642,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_method_returns_error() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let req = json!({"jsonrpc": "2.0", "id": 4, "method": "wat"});
         let resp = handle_message(&state, req).await;
         assert_eq!(resp["error"]["code"], -32601);
@@ -1645,7 +1650,7 @@ mod tests {
 
     #[tokio::test]
     async fn ping_returns_empty_result() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let req = json!({"jsonrpc": "2.0", "id": 5, "method": "ping"});
         let resp = handle_message(&state, req).await;
         assert!(resp["result"].is_object());
@@ -1653,7 +1658,7 @@ mod tests {
 
     #[tokio::test]
     async fn app_state_default_constructs() {
-        let s = test_state();
+        let (s, _tmp) = test_state();
         assert!(!s.version.is_empty());
         assert!(s.registry.is_empty());
         assert!(s.default_palace.is_none());
@@ -1831,7 +1836,7 @@ mod tests {
     /// without a `palace` argument should error helpfully rather than panic.
     #[tokio::test]
     async fn missing_palace_without_default_errors() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let resp = handle_message(
             &state,
             json!({
@@ -1994,7 +1999,7 @@ mod tests {
     /// brand-new install has nothing to hydrate and should report zero.
     #[tokio::test]
     async fn load_palaces_from_disk_empty_root_returns_zero() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let count = state
             .load_palaces_from_disk()
             .await
@@ -2064,7 +2069,7 @@ mod tests {
     async fn palace_name_cache_updates_on_create() {
         use serde_json::json;
 
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let _ = tools::dispatch_tool(&state, "palace_create", json!({"name": "gamma"}))
             .await
             .expect("palace_create");
@@ -2080,7 +2085,7 @@ mod tests {
     /// from `serverInfo` so clients can detect the unbound mode.
     #[tokio::test]
     async fn initialize_without_default_palace_omits_field() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let init = handle_message(
             &state,
             json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}),
@@ -2159,7 +2164,7 @@ mod tests {
     /// found" path.
     #[tokio::test]
     async fn initialize_does_not_advertise_prompts_capability() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let init = handle_message(
             &state,
             json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}),
@@ -2191,7 +2196,7 @@ mod tests {
     /// `tokio::spawn`, which requires an active runtime.
     #[tokio::test]
     async fn app_state_starts_with_empty_bound_addr() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         assert!(state.bound_addr.get().is_none());
     }
 
@@ -2371,7 +2376,7 @@ mod tests {
     /// Test: this test.
     #[tokio::test]
     async fn emit_persists_mutations_but_skips_status_changed() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         state.emit(DaemonEvent::PalaceCreated {
             id: "p".into(),
             name: "p".into(),
@@ -2416,7 +2421,8 @@ mod tests {
         unsafe {
             std::env::remove_var("TRUSTY_BM25_DAEMON");
         }
-        let state = test_state().with_bm25_client_from_env();
+        let (state, _tmp) = test_state();
+        let state = state.with_bm25_client_from_env();
         assert!(
             state.bm25_client.is_none(),
             "bm25_client must be None when TRUSTY_BM25_DAEMON is unset"
@@ -2448,7 +2454,8 @@ mod tests {
         unsafe {
             std::env::set_var("TRUSTY_BM25_DAEMON", "1");
         }
-        let state = test_state().with_bm25_client_from_env();
+        let (state, _tmp) = test_state();
+        let state = state.with_bm25_client_from_env();
         assert!(
             state.bm25_client.is_some(),
             "bm25_client must be Some when TRUSTY_BM25_DAEMON=1"

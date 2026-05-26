@@ -2161,11 +2161,17 @@ mod tests {
     use super::*;
     use crate::AppState;
 
-    fn test_state() -> AppState {
+    /// Why: Issue #234 — previously we `mem::forget`ed the `TempDir` so tests
+    /// could keep using `AppState` without juggling the directory handle, but
+    /// that leaked one temp directory per test (262+ accumulated each run).
+    /// What: Returns the `TempDir` alongside the `AppState` so the caller can
+    /// bind it (`let (state, _tmp) = ...;`) and let drop semantics clean up
+    /// when the test scope ends.
+    /// Test: Every test in this module that constructs state.
+    fn test_state() -> (AppState, tempfile::TempDir) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
-        AppState::new(root)
+        (AppState::new(root), tmp)
     }
 
     /// Why: Issue #26 — when the server is started with `--palace`, the
@@ -2251,7 +2257,7 @@ mod tests {
     /// configured data root and `palace_list` then sees it.
     #[tokio::test]
     async fn dispatch_palace_create_persists() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let created = dispatch_tool(&state, "palace_create", json!({"name": "alpha"}))
             .await
             .expect("palace_create");
@@ -2268,7 +2274,7 @@ mod tests {
     /// through the MCP tool surface using the real embedder + retrieval path.
     #[tokio::test]
     async fn dispatch_remember_then_recall() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let _ = dispatch_tool(&state, "palace_create", json!({"name": "beta"}))
             .await
             .expect("palace_create");
@@ -2313,7 +2319,7 @@ mod tests {
     /// Test: This test.
     #[tokio::test]
     async fn auto_kg_extraction_hooks_into_memory_remember() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let _ = dispatch_tool(&state, "palace_create", json!({"name": "kgauto"}))
             .await
             .expect("palace_create");
@@ -2378,7 +2384,7 @@ mod tests {
     /// Test: This test.
     #[tokio::test]
     async fn auto_kg_extraction_no_op_does_not_fail_remember() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let _ = dispatch_tool(&state, "palace_create", json!({"name": "kgnoop"}))
             .await
             .expect("palace_create");
@@ -2402,7 +2408,7 @@ mod tests {
     /// through the MCP tool surface.
     #[tokio::test]
     async fn dispatch_kg_assert_then_query() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let _ = dispatch_tool(&state, "palace_create", json!({"name": "gamma"}))
             .await
             .expect("palace_create");
@@ -2446,7 +2452,7 @@ mod tests {
     async fn dispatch_kg_gaps_returns_cached() {
         use trusty_common::memory_core::community::KnowledgeGap;
 
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let _ = dispatch_tool(&state, "palace_create", json!({"name": "delta"}))
             .await
             .expect("palace_create");
@@ -2487,9 +2493,10 @@ mod tests {
     /// `remove_prompt_fact`.
     #[tokio::test]
     async fn add_alias_round_trip_through_prompt_cache() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        // Issue #234: bind `_tmp` so the directory is cleaned up on drop at
+        // end of scope (previously we leaked via `std::mem::forget`).
+        let _tmp = tempfile::tempdir().expect("tempdir");
+        let root = _tmp.path().to_path_buf();
         let state = AppState::new(root).with_default_palace(Some("ctx".to_string()));
 
         // Pre-create the default palace.
@@ -2589,7 +2596,7 @@ mod tests {
     /// and (c) filter by `query` against subject/object case-insensitively.
     #[tokio::test]
     async fn get_prompt_context_serves_cache_and_filters() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
 
         // (a) empty cache -> "No prompt facts stored yet."
         let resp = dispatch_tool(&state, "get_prompt_context", json!({}))
@@ -2677,9 +2684,10 @@ mod tests {
     /// Test: this test itself.
     #[tokio::test]
     async fn dispatch_discover_aliases_inserts_new_and_dedupes() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
+        // Issue #234: bind `_tmp` so the directory is cleaned up on drop at
+        // end of scope (previously we leaked via `std::mem::forget`).
+        let _tmp = tempfile::tempdir().expect("tempdir");
+        let root = _tmp.path().to_path_buf();
         let state = AppState::new(root).with_default_palace(Some("disc".to_string()));
         let _ = dispatch_tool(&state, "palace_create", json!({"name": "disc"}))
             .await
@@ -2747,7 +2755,7 @@ mod tests {
     /// and confirm the temporal triples are present.
     #[tokio::test]
     async fn palace_create_auto_seeds_temporal_metadata() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let created = dispatch_tool(&state, "palace_create", json!({"name": "auto"}))
             .await
             .expect("palace_create");
@@ -2790,7 +2798,7 @@ mod tests {
     /// arrays with no breadcrumb back to the seeding tools.
     #[tokio::test]
     async fn kg_query_emits_hint_when_palace_empty() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let _ = dispatch_tool(&state, "palace_create", json!({"name": "hinted"}))
             .await
             .expect("palace_create");
@@ -2813,7 +2821,7 @@ mod tests {
     /// origin URL, then make them queryable through `kg_query`.
     #[tokio::test]
     async fn kg_bootstrap_seeds_workspace_facts() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let _ = dispatch_tool(&state, "palace_create", json!({"name": "ws"}))
             .await
             .expect("palace_create");
@@ -2954,7 +2962,7 @@ mod tests {
     /// Test: itself.
     #[tokio::test]
     async fn dispatch_remember_skips_short_no_context() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let _ = dispatch_tool(&state, "palace_create", json!({"name": "gate"}))
             .await
             .expect("palace_create");
@@ -2995,7 +3003,7 @@ mod tests {
     /// Test: itself.
     #[tokio::test]
     async fn dispatch_remember_with_context_writes_combined() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let _ = dispatch_tool(&state, "palace_create", json!({"name": "ctxgate"}))
             .await
             .expect("palace_create");
@@ -3037,7 +3045,7 @@ mod tests {
     /// Test: itself.
     #[tokio::test]
     async fn dispatch_note_skips_short_no_context() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let _ = dispatch_tool(&state, "palace_create", json!({"name": "noteg"}))
             .await
             .expect("palace_create");
@@ -3062,7 +3070,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_unknown_tool_errors() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let err = dispatch_tool(&state, "does_not_exist", json!({}))
             .await
             .expect_err("should error");
@@ -3131,7 +3139,7 @@ mod tests {
     /// Test: itself.
     #[tokio::test]
     async fn dedup_skips_near_duplicate() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let _ = dispatch_tool(&state, "palace_create", json!({"name": "dedup1"}))
             .await
             .expect("palace_create");
@@ -3177,7 +3185,7 @@ mod tests {
     /// Test: itself.
     #[tokio::test]
     async fn dedup_allows_different_content() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let _ = dispatch_tool(&state, "palace_create", json!({"name": "dedup2"}))
             .await
             .expect("palace_create");
@@ -3223,7 +3231,8 @@ mod tests {
     /// Test: itself — fail-then-pass on this commit.
     #[tokio::test]
     async fn dedup_gate_blocks_concurrent_duplicate_writes() {
-        let state = std::sync::Arc::new(test_state());
+        let (state, _tmp) = test_state();
+        let state = std::sync::Arc::new(state);
         let _ = dispatch_tool(&state, "palace_create", json!({"name": "dedup_race"}))
             .await
             .expect("palace_create");
@@ -3306,7 +3315,7 @@ mod tests {
     /// Test: itself.
     #[tokio::test]
     async fn dispatch_remember_blocks_blocklist_pattern() {
-        let state = test_state();
+        let (state, _tmp) = test_state();
         let _ = dispatch_tool(&state, "palace_create", json!({"name": "blk"}))
             .await
             .expect("palace_create");
@@ -3352,7 +3361,7 @@ mod tests {
         // Build a normal AppState, then swap in a fresh bounded channel
         // *without* spawning a drain worker so we can deterministically
         // observe overflow at `try_send`.
-        let mut state = test_state();
+        let (mut state, _tmp) = test_state();
         let (tx, _rx_held) =
             tokio::sync::mpsc::channel::<Bm25IndexRequest>(BM25_INDEX_QUEUE_CAPACITY);
         state.bm25_index_tx = tx;
