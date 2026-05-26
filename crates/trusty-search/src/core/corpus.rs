@@ -218,6 +218,10 @@ impl CorpusStore {
                     .context("init kg_communities table")?;
                 txn.open_table(KG_SYMBOL_COMMUNITY_TABLE)
                     .context("init kg_symbol_community table")?;
+                // Migration framework: materialize `_meta` so the schema-version
+                // read never races a missing-table error on fresh databases.
+                txn.open_table(crate::core::migration::META_TABLE)
+                    .context("init _meta table")?;
             }
             txn.commit().context("commit corpus init txn")?;
         }
@@ -736,6 +740,65 @@ impl CorpusStore {
             .get(symbol)
             .context("get symbol_community row")?
             .map(|v| v.value()))
+    }
+
+    /// Read the `schema_version` entry from the `_meta` table (migration
+    /// framework, issue #migration).
+    ///
+    /// Why: the migration runner needs to know the index's current schema
+    /// version before deciding which migrations to apply. Keeping the read
+    /// synchronous (like all other `CorpusStore` methods) lets callers manage
+    /// the async boundary via `spawn_blocking`.
+    /// What: opens a read transaction on `_meta`, looks up
+    /// `META_KEY_SCHEMA_VERSION`, and decodes the 4-byte little-endian value.
+    /// Returns `0` when the table or key is absent (legacy indexes created
+    /// before the migration framework was introduced).
+    /// Test: `test_meta_schema_version_roundtrip` in `corpus::tests`.
+    pub(crate) fn read_schema_version_sync(&self) -> Result<u32> {
+        use crate::core::migration::{META_KEY_SCHEMA_VERSION, META_TABLE};
+        let txn = self.db.begin_read().context("begin _meta read txn")?;
+        let table = match txn.open_table(META_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(0),
+            Err(e) => return Err(anyhow::anyhow!("open _meta table: {e}")),
+        };
+        match table
+            .get(META_KEY_SCHEMA_VERSION)
+            .context("read schema_version")?
+        {
+            Some(v) => {
+                let bytes = v.value();
+                if bytes.len() == 4 {
+                    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+                } else {
+                    Ok(0)
+                }
+            }
+            None => Ok(0),
+        }
+    }
+
+    /// Write the `schema_version` entry to the `_meta` table (migration
+    /// framework, issue #migration).
+    ///
+    /// Why: the migration runner writes the new version after a successful
+    /// `apply` so the version advances durably. Crash between `apply` and this
+    /// write → retry next startup (idempotent `apply` makes that safe).
+    /// What: opens a write transaction, creates `_meta` if absent, and upserts
+    /// `schema_version` as a 4-byte little-endian value.
+    /// Test: `test_meta_schema_version_roundtrip` in `corpus::tests`.
+    pub(crate) fn write_schema_version_sync(&self, version: u32) -> Result<()> {
+        use crate::core::migration::{META_KEY_SCHEMA_VERSION, META_TABLE};
+        let txn = self.db.begin_write().context("begin _meta write txn")?;
+        {
+            let mut table = txn.open_table(META_TABLE).context("open _meta table")?;
+            let bytes = version.to_le_bytes();
+            table
+                .insert(META_KEY_SCHEMA_VERSION, bytes.as_slice())
+                .context("insert schema_version")?;
+        }
+        txn.commit().context("commit _meta write txn")?;
+        Ok(())
     }
 }
 

@@ -10,6 +10,7 @@ pub mod git;
 pub mod indexer;
 pub mod memguard;
 pub mod memory_policy;
+pub mod migration;
 pub mod mmr;
 pub mod ner;
 pub mod project_config;

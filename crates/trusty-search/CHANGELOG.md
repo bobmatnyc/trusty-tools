@@ -7,6 +7,31 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Schema migration framework.** Daemon startup now auto-migrates existing
+  redb indexes when the schema version changes between releases. Migrations are
+  non-blocking — the daemon serves queries at the pre-migration schema quality
+  while each per-index task runs in the background. The schema version is
+  persisted in a new `_meta` redb table after each successful migration step
+  (crash-safe: a crash before the version write triggers a retry on next
+  startup; idempotent `apply` implementations make retries safe).
+  Set `TRUSTY_DISABLE_MIGRATIONS=1` to skip auto-migrations (debugging /
+  one-off restore scenarios).
+
+- **Migration M001: per-`pub const`/`pub static` Rust re-chunking (issue #143).**
+  Indexes created before v0.11.1 had one `ChunkType::Code` chunk per Rust file
+  instead of one `ChunkType::Constant` chunk per `pub const`/`pub static`
+  declaration. M001 re-indexes every affected Rust file on first startup after
+  upgrade, bringing those indexes up to v0.11.1 search quality. Idempotency is
+  guaranteed by a "has Constant chunks?" pre-check; a regex pre-filter
+  (`\bpub\s+(const|static)\b`) skips files that have no qualifying declarations
+  without incurring the ~10 ms/file tree-sitter parse cost.
+
+---
+
 ## [0.12.1] — 2026-05-26
 
 ### Changed

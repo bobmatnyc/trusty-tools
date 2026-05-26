@@ -765,6 +765,32 @@ pub async fn handle_start(port: u16, foreground: bool, device: &str, verbose: bo
                 // Issue #85: restore every index recorded in `indexes.toml`
                 // now that we have a fully-wired hybrid pipeline.
                 restore_indexes(&install_state, &embedder).await;
+                // Schema migration: spawn a per-index background migration task
+                // for every restored index. Migrations are non-blocking — the
+                // daemon keeps serving queries at the pre-migration schema
+                // quality until the task completes. `TRUSTY_DISABLE_MIGRATIONS=1`
+                // skips all migrations (useful for debugging or one-off restores
+                // where migration side-effects are unwanted).
+                if std::env::var("TRUSTY_DISABLE_MIGRATIONS").as_deref() != Ok("1") {
+                    let registry =
+                        std::sync::Arc::new(crate::core::migration::MigrationRegistry::new());
+                    for index_id in install_state.registry.list() {
+                        let Some(handle) = install_state.registry.get(&index_id) else {
+                            continue;
+                        };
+                        let reg = std::sync::Arc::clone(&registry);
+                        tokio::spawn(async move {
+                            if let Err(e) =
+                                crate::core::migration::run_migrations(&handle, &reg).await
+                            {
+                                tracing::warn!(
+                                    index_id = %handle.id,
+                                    "schema migration failed (index kept at current schema): {e:#}"
+                                );
+                            }
+                        });
+                    }
+                }
                 // Issue #41 Phase 1: prime the `trusty_index_count` gauge so
                 // /metrics reports the warm-boot index count before any
                 // mutating request arrives.

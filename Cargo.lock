@@ -10957,72 +10957,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "trusty-mpm-cli"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "clap",
- "colored 2.2.0",
- "dirs 5.0.1",
- "libc",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sysinfo",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "trusty-common",
- "trusty-mpm-client",
- "trusty-mpm-core",
- "trusty-mpm-daemon",
- "trusty-mpm-telegram",
- "trusty-mpm-tui",
-]
-
-[[package]]
-name = "trusty-mpm-client"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "axum 0.8.9",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "trusty-mpm-core",
- "trusty-mpm-daemon",
- "uuid",
-]
-
-[[package]]
-name = "trusty-mpm-core"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "chrono",
- "dirs 5.0.1",
- "gray_matter",
- "libc",
- "nix 0.29.0",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 1.0.69",
- "toml 0.8.23",
- "tracing",
- "utoipa",
- "uuid",
- "walkdir",
-]
-
-[[package]]
-name = "trusty-mpm-daemon"
+name = "trusty-mpm"
 version = "0.4.0"
 dependencies = [
  "anyhow",
@@ -11030,19 +10965,30 @@ dependencies = [
  "axum 0.8.9",
  "chrono",
  "clap",
+ "colored 2.2.0",
+ "crossterm",
  "dashmap 6.2.1",
  "dirs 5.0.1",
  "futures",
+ "gray_matter",
  "http-body-util",
+ "libc",
+ "nix 0.29.0",
  "notify 6.1.1",
  "parking_lot",
+ "ratatui",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "sysinfo",
+ "teloxide 0.13.0",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "toml 0.8.23",
  "tower",
  "tower-http 0.6.11",
@@ -11050,8 +10996,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "trusty-common",
- "trusty-mpm-core",
- "trusty-mpm-mcp",
+ "trusty-mpm-gui",
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",
@@ -11069,63 +11014,6 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tokio",
-]
-
-[[package]]
-name = "trusty-mpm-mcp"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "trusty-common",
- "trusty-mpm-core",
- "uuid",
-]
-
-[[package]]
-name = "trusty-mpm-telegram"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "axum 0.8.9",
- "clap",
- "reqwest 0.12.28",
- "serde_json",
- "teloxide 0.13.0",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "trusty-mpm-client",
- "trusty-mpm-core",
- "trusty-mpm-daemon",
-]
-
-[[package]]
-name = "trusty-mpm-tui"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "crossterm",
- "ratatui",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "trusty-mpm-client",
- "trusty-mpm-core",
- "uuid",
 ]
 
 [[package]]

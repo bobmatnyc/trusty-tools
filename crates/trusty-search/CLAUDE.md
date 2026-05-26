@@ -416,7 +416,7 @@ Serves the embedded Svelte admin UI. Not part of the integration contract.
 - **Vector store**: usearch 2.25 (HNSW), wrapped in `Arc<RwLock<>>` for concurrent reads
 - **Embeddings**: fastembed 5.x (ONNX, all-MiniLM-L6-v2, 384-dim, SIMD/AVX2/NEON)
 - **Lexical**: BM25 (zero-dep port from open-mpm `src/context/bm25.rs`)
-- **KV store**: redb 2.6 (chunk metadata, file→chunks mapping)
+- **KV store**: redb 2.6 (chunk metadata, file→chunks mapping, `_meta` schema version)
 - **File watching**: notify 6 + notify-debouncer-mini 0.4 (500ms debounce, fsevent)
 - **Code parsing**: tree-sitter 0.24 (rust, python, js, ts, go, java, c, cpp)
 - **Graph**: petgraph 0.6 (`SymbolGraph` for callers_of / callees_of)
@@ -430,6 +430,53 @@ Serves the embedded Svelte admin UI. Not part of the integration contract.
 - **Progress display**: indicatif (progress bars during reindex)
 - **Embedded assets**: include_dir (Svelte admin UI compiled into binary)
 - **Content hashing**: sha2 (stable file fingerprints for incremental reindex skip)
+
+## Schema Versioning and Migrations
+
+trusty-search uses a forward-only, idempotent migration framework to evolve the
+redb corpus schema across releases without requiring manual reindexing.
+
+### How it works
+
+Each redb corpus database contains a `_meta` table (keyed `&str → &[u8]`) that
+stores a 4-byte little-endian `u32` under the key `"schema_version"`. Legacy
+databases without this table are treated as version 0.
+
+On daemon startup (after `restore_indexes`), the framework:
+1. Reads each index's stored `schema_version` from redb.
+2. Computes the migration chain: all registered migrations whose
+   `source_version >= current`.
+3. Applies each migration in sequence, writing the new `schema_version` to redb
+   **after** each successful `apply` (crash-safe: a crash before the write
+   causes a retry on next startup; idempotent `apply` implementations make
+   retries safe).
+4. Runs per-index migrations in background `tokio::spawn` tasks — the daemon
+   continues serving queries while migration runs.
+
+Set `TRUSTY_DISABLE_MIGRATIONS=1` to skip auto-migrations.
+
+### Adding a new migration
+
+1. Create `src/core/migration/m00N.rs` implementing `Migration` (`source_version`,
+   `target_version`, `description`, `apply`). The `apply` method must be
+   idempotent.
+2. Register it in `MigrationRegistry::new()` in `src/core/migration/mod.rs`.
+3. Increment `CURRENT_SCHEMA_VERSION` in the same file.
+4. Add unit tests in `m00N::tests` (especially idempotency) and update
+   `CHANGELOG.md`.
+
+### Key types
+
+| Type | Location | Purpose |
+|---|---|---|
+| `CURRENT_SCHEMA_VERSION` | `core::migration` | Monotonic `u32`; bump per migration |
+| `Migration` (trait) | `core::migration` | `source_version`, `target_version`, `description`, `apply` |
+| `MigrationRegistry` | `core::migration` | Ordered list of all migrations; `chain_from(v)` |
+| `run_migrations` | `core::migration` | Runner: reads version, applies chain, writes version |
+| `META_TABLE` | `core::migration` | redb `_meta` table definition |
+| `M001PerPubConstRust` | `core::migration::m001` | Re-chunk Rust `pub const`/`pub static` (issue #143) |
+
+---
 
 ## Multi-Request Design
 
