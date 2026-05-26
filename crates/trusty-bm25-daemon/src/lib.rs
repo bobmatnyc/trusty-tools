@@ -6,9 +6,11 @@
 //! The pattern mirrors PR #190 which did the same for `trusty-embedderd`
 //! inside `trusty-search`.
 //!
-//! What: re-exports the internal daemon modules and exposes the single
-//! `run()` entry point that `main.rs` (and the bundled shim in
-//! `trusty-memory/src/bin/bm25_daemon.rs`) delegate to.
+//! What: re-exports the internal daemon modules and exposes
+//! [`DaemonConfig`] + [`run`] as the in-process entry point. `Cli` is also
+//! re-exported so the binary `src/main.rs` and the bundled shim in
+//! `trusty-memory/src/bin/bm25_daemon.rs` can share the same clap definition
+//! without duplicating flags.
 //!
 //! Test: unit coverage in `protocol`, `socket`, `index`, `batch_queue`, and
 //! `server`. End-to-end coverage in `tests/bm25_daemon.rs`.
@@ -33,8 +35,10 @@ use index::PalaceBm25Index;
 /// CLI flags for the BM25 daemon.
 ///
 /// Why: operators (and parent processes like trusty-memory's subprocess
-/// spawner) configure the daemon by passing flags. Keeping the surface small
-/// matches the daemon's single responsibility.
+/// spawner) configure the daemon by passing flags. Exposing `Cli` from the
+/// library lets the standalone binary (`src/main.rs`) AND the bundled shim
+/// (`trusty-memory/src/bin/bm25_daemon.rs`) share one clap definition —
+/// avoiding two copies that could drift.
 /// What: palace name (determines the default socket path), data directory
 /// (where the snapshot lives), optional socket override, batch-tuning knobs,
 /// and verbosity. All have documented defaults from the batch_queue / socket
@@ -77,47 +81,109 @@ pub struct Cli {
     pub verbose: u8,
 }
 
-/// Run the BM25 daemon from `std::env::args()`.
+impl Cli {
+    /// Project the parsed CLI flags onto the library-facing [`DaemonConfig`].
+    ///
+    /// Why: the library's `run()` deliberately accepts a plain config struct
+    /// so it can be driven from tests or embedders that never touch clap.
+    /// This adapter is the single place that knows how to map CLI flags onto
+    /// the in-process config — both the standalone binary and the bundled
+    /// shim call it.
+    /// What: moves each CLI field into the matching `DaemonConfig` field. The
+    /// `verbose` count is intentionally NOT carried over because tracing
+    /// initialisation is the binary's responsibility (a library caller may
+    /// already have a subscriber installed).
+    /// Test: covered indirectly by the integration test which exercises the
+    /// full CLI → config → run path through the spawned binary.
+    pub fn into_config(self) -> DaemonConfig {
+        DaemonConfig {
+            palace: self.palace,
+            data_dir: self.data_dir,
+            socket: self.socket,
+            write_window_ms: self.write_window_ms,
+            max_batch_size: self.max_batch_size,
+        }
+    }
+}
+
+/// In-process configuration for [`run`].
+///
+/// Why: separating config from CLI parsing lets in-process callers (tests,
+/// embedders, the bundled shim in trusty-memory) construct the daemon
+/// without going through clap or `std::env::args()`. The fields mirror the
+/// CLI surface 1:1, minus the verbosity flag (which is a tracing-init
+/// concern owned by the binary).
+/// What: plain data struct — `palace` identifies the instance and seeds the
+/// default socket name; `data_dir` is where the BM25 snapshot lives;
+/// `socket` overrides the default UDS path when `Some`; `write_window_ms`
+/// and `max_batch_size` tune the write-coalescing queue.
+/// Test: end-to-end coverage in `tests/bm25_daemon.rs` constructs a
+/// `DaemonConfig` indirectly by spawning the binary with matching CLI
+/// flags; unit-level wiring is exercised by `Cli::into_config`.
+#[derive(Debug, Clone)]
+pub struct DaemonConfig {
+    /// Palace name. Used for the default socket filename and log fields.
+    pub palace: String,
+    /// Directory that holds the `bm25_index.json` snapshot. Created if
+    /// missing.
+    pub data_dir: PathBuf,
+    /// Optional override for the UDS path. When `None`, defaults to
+    /// `$TMPDIR/trusty-bm25-<palace>.sock`.
+    pub socket: Option<PathBuf>,
+    /// Write-coalescing window in milliseconds.
+    pub write_window_ms: u64,
+    /// Maximum write ops per coalesced batch.
+    pub max_batch_size: usize,
+}
+
+/// Run the BM25 daemon to completion.
 ///
 /// Why: the library entry point lets the bundled shim in trusty-memory and
 /// the standalone `src/main.rs` both delegate here without duplicating any
-/// daemon logic.
-/// What: parses `Cli` via clap, initialises tracing to stderr, loads or
-/// creates the `PalaceBm25Index`, spawns the batch-queue worker, binds the
-/// Unix domain socket, then drives the accept loop until SIGTERM or SIGINT.
-/// Removes the socket file on clean exit.
+/// daemon logic. Accepting a `DaemonConfig` (instead of parsing
+/// `std::env::args()` internally) keeps the function testable and embeddable
+/// — a caller can construct the config in code and drive the daemon
+/// in-process.
+/// What: loads or creates the `PalaceBm25Index`, spawns the batch-queue
+/// worker, ensures the socket's parent directory exists, cleans up any
+/// stale socket file, binds the Unix domain socket, then drives the accept
+/// loop until SIGTERM or SIGINT. Removes the socket file on clean exit so
+/// the next run does not see EADDRINUSE.
 /// Test: end-to-end coverage in `tests/bm25_daemon.rs` (spawns the binary
 /// and drives it over the UDS protocol).
-pub async fn run() -> Result<()> {
-    let cli = Cli::parse();
-    trusty_common::init_tracing(cli.verbose);
+pub async fn run(config: DaemonConfig) -> Result<()> {
+    let DaemonConfig {
+        palace,
+        data_dir,
+        socket,
+        write_window_ms,
+        max_batch_size,
+    } = config;
 
-    let socket_path = cli
-        .socket
-        .unwrap_or_else(|| socket::default_socket_path(&cli.palace));
+    let socket_path = socket.unwrap_or_else(|| socket::default_socket_path(&palace));
 
-    let config = BatchConfig {
-        max_batch_size: cli.max_batch_size.max(1),
-        write_window: Duration::from_millis(cli.write_window_ms),
+    let batch_config = BatchConfig {
+        max_batch_size: max_batch_size.max(1),
+        write_window: Duration::from_millis(write_window_ms),
     };
 
     tracing::info!(
-        palace = %cli.palace,
-        data_dir = %cli.data_dir.display(),
+        palace = %palace,
+        data_dir = %data_dir.display(),
         socket = %socket_path.display(),
-        max_batch_size = config.max_batch_size,
-        write_window_ms = config.write_window.as_millis(),
+        max_batch_size = batch_config.max_batch_size,
+        write_window_ms = batch_config.write_window.as_millis(),
         "trusty-bm25-daemon starting"
     );
 
     // Step 1: load (or create) the palace BM25 snapshot. This validates the
     // data-dir exists and is writable before we bind the socket.
-    let palace_index = PalaceBm25Index::load_or_create(&cli.data_dir)
-        .with_context(|| format!("load BM25 palace index from {}", cli.data_dir.display()))?;
+    let palace_index = PalaceBm25Index::load_or_create(&data_dir)
+        .with_context(|| format!("load BM25 palace index from {}", data_dir.display()))?;
 
     // Step 2: spawn the batch-queue worker. The worker takes ownership of
     // the index and is the sole writer for the rest of the daemon's lifetime.
-    let queue = Arc::new(BatchQueue::new(palace_index, config));
+    let queue = Arc::new(BatchQueue::new(palace_index, batch_config));
 
     // Step 3: ensure the socket's parent directory exists, then clean up any
     // leftover socket file from a prior crash.
@@ -131,7 +197,7 @@ pub async fn run() -> Result<()> {
     let listener = server::bind_listener(&socket_path)
         .with_context(|| format!("bind bm25 daemon socket at {}", socket_path.display()))?;
     tracing::info!(
-        palace = %cli.palace,
+        palace = %palace,
         socket = %socket_path.display(),
         "trusty-bm25-daemon ready"
     );

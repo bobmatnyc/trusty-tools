@@ -17,8 +17,12 @@ categories = ["command-line-utilities"]
 # trusty-bm25-daemon binary without a separate `cargo install` step — the
 # bundler crate declares this as a dependency and adds its own thin
 # [[bin]] shim. Mirrors PR #190 (trusty-embedderd / trusty-search).
-# What: rlib so it is linkable from the bundled-install shim.
+# What: rlib so it is linkable from the bundled-install shim. Both `name`
+# and `path` are spelled out explicitly so the lib target is unambiguous
+# even if the directory layout changes.
 # Test: `cargo build -p trusty-bm25-daemon` produces both lib and bin.
+name = "trusty_bm25_daemon"
+path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [[bin]]
