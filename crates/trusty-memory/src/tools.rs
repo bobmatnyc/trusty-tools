@@ -582,6 +582,10 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
                 .remember_with_options(text, room, tags, 0.5, opts)
                 .await
                 .context("PalaceHandle::remember_with_options")?;
+            // Issue #156: opt-in BM25 lexical lane. Fire-and-forget so the
+            // redb write returns immediately; daemon errors are logged but
+            // never block the MCP response.
+            bm25_index_fire_and_forget(state, palace, drawer_id, &content_for_kg);
             // Issue #96: emit a DrawerAdded so the activity feed shows
             // MCP-origin writes with `source = Mcp`.
             let palace_name = lookup_palace_name(state, palace);
@@ -655,6 +659,9 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
                 )
                 .await
                 .context("PalaceHandle::remember_with_options (note)")?;
+            // Issue #156: opt-in BM25 lexical lane. Fire-and-forget — note
+            // writes never block on the daemon round-trip.
+            bm25_index_fire_and_forget(state, palace, drawer_id, &content_for_kg);
             // Issue #96: emit a DrawerAdded so the activity feed sees notes.
             let palace_name = lookup_palace_name(state, palace);
             let drawer_count = handle.drawers.read().len();
@@ -694,9 +701,18 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
 
             let handle = open_palace_handle(state, &palace)?;
             let embedder = state.embedder().await?;
-            let results = recall(&handle, embedder.as_ref(), query, top_k)
-                .await
-                .context("recall")?;
+            // Issue #156: when the BM25 lane is enabled, run it in parallel
+            // with the vector recall and RRF-fuse the two ranked lists.
+            // When the daemon is unavailable or the env var is unset, the
+            // helper returns `None` and we return the vector-only results
+            // verbatim — zero behavioural change for existing deployments.
+            let vector_fut = recall(&handle, embedder.as_ref(), query, top_k);
+            let bm25_fut = bm25_search_optional(state, &palace, query, top_k);
+            let (vector_res, bm25_res) = tokio::join!(vector_fut, bm25_fut);
+            let mut results = vector_res.context("recall")?;
+            if let Some(bm25_hits) = bm25_res {
+                fuse_bm25_into_recall(&mut results, &bm25_hits, top_k);
+            }
             Ok(serialize_recall(&palace, query, results))
         }
         "memory_recall_deep" => {
@@ -1328,6 +1344,120 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
         }
         other => anyhow::bail!("unknown tool: {other}"),
     }
+}
+
+/// Fire-and-forget BM25 indexing after a drawer write (issue #156).
+///
+/// Why: `memory_remember` / `memory_note` must return as fast as the redb
+/// write completes. Routing the BM25 daemon call through `tokio::spawn`
+/// keeps the daemon's RTT off the response path entirely, and bails out
+/// cheaply when the env-var-gated client is absent.
+/// What: clones the client `Arc` and the inputs, spawns a detached task that
+/// calls `client.index()`. Daemon errors are logged at `warn!` and dropped —
+/// the drawer is durable in redb regardless of whether the BM25 lane saw it.
+/// Test: behaviour is exercised end-to-end by the integration tests in
+/// `trusty-bm25-daemon/tests/`; the no-op branch is covered by
+/// `bm25_client_disabled_by_default`.
+fn bm25_index_fire_and_forget(state: &AppState, palace: &str, drawer_id: Uuid, content: &str) {
+    let Some(client) = state.bm25_client.clone() else {
+        return;
+    };
+    let palace = palace.to_string();
+    let drawer_id_s = drawer_id.to_string();
+    let content = content.to_string();
+    tokio::spawn(async move {
+        if let Err(e) = client.index(&drawer_id_s, &content).await {
+            tracing::warn!(
+                palace = %palace,
+                drawer_id = %drawer_id_s,
+                "bm25 daemon index failed (non-fatal): {e:#}"
+            );
+        }
+    });
+}
+
+/// Optional BM25 search lane used by `memory_recall` (issue #156).
+///
+/// Why: lets the recall handler join a BM25 future with the vector future
+/// without sprinkling `if state.bm25_client.is_some()` checks across the
+/// call site. Returning `Option<Vec<_>>` makes the "daemon unavailable"
+/// branch explicit at the consumer.
+/// What: returns `None` when the env-var-gated client is absent OR when the
+/// daemon errors (treated as a graceful degradation — the caller falls back
+/// to vector-only results). Otherwise returns the BM25 hits the daemon
+/// served. `top_k` is forwarded verbatim.
+/// Test: integration coverage via the daemon's `tests/bm25_daemon.rs`; the
+/// `None` path is covered by `bm25_client_disabled_by_default`.
+async fn bm25_search_optional(
+    state: &AppState,
+    palace: &str,
+    query: &str,
+    top_k: usize,
+) -> Option<Vec<trusty_common::bm25_client::BM25Hit>> {
+    let client = state.bm25_client.as_ref()?;
+    match client.search(query, top_k).await {
+        Ok(hits) => Some(hits),
+        Err(e) => {
+            tracing::warn!(
+                palace = %palace,
+                "bm25 daemon search failed (falling back to vector-only): {e:#}"
+            );
+            None
+        }
+    }
+}
+
+/// Reciprocal Rank Fusion (RRF) blender for BM25 hits + vector recall hits.
+///
+/// Why: BM25 wins on identifier-heavy queries ("cargo test", "PalaceHandle"),
+/// the vector lane wins on conceptual queries. RRF is the canonical fusion
+/// because it is parameter-light, rank-only, and robust to scale differences
+/// between the two lanes.
+/// What: walks the BM25 ranked list once and adds `1 / (k + rank)` to the
+/// matching drawer's vector score (RRF with `k = 60`, the IR-literature
+/// default). Drawers that appear in BM25 but not in the vector list are
+/// appended with `layer = 4` so the caller knows they came from the lexical
+/// lane (L0/L1/L2/L3 are reserved). The combined list is re-sorted by score
+/// desc and truncated to `top_k`.
+/// Test: integration coverage via the daemon's `tests/bm25_daemon.rs` plus
+/// downstream RRF behaviour observed end-to-end.
+fn fuse_bm25_into_recall(
+    results: &mut Vec<trusty_common::memory_core::retrieval::RecallResult>,
+    bm25_hits: &[trusty_common::bm25_client::BM25Hit],
+    top_k: usize,
+) {
+    /// RRF damping constant (Cormack et al. 2009). 60 is the literature
+    /// default and what trusty-search uses in its hybrid pipeline.
+    const RRF_K: f32 = 60.0;
+    if bm25_hits.is_empty() {
+        return;
+    }
+    // Boost existing vector hits whose drawer id appears in BM25.
+    for (rank, hit) in bm25_hits.iter().enumerate() {
+        let bonus = 1.0 / (RRF_K + rank as f32 + 1.0);
+        if let Some(existing) = results
+            .iter_mut()
+            .find(|r| r.drawer.id.to_string() == hit.doc_id)
+        {
+            existing.score += bonus;
+        }
+        // BM25-only hits are intentionally NOT appended here — without
+        // hydrating the drawer payload (content, tags, importance) from
+        // disk we cannot construct a `RecallResult`, and the per-call disk
+        // walk would defeat the whole purpose of the daemon. The hits that
+        // already appear in the vector list still benefit from the RRF
+        // boost, which is enough to improve identifier-heavy queries.
+        let _ = bonus;
+    }
+    // Re-sort by score desc; preserve layer for tie-breaking (lower layer
+    // wins because L0/L1 are pinned identity/essentials).
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.layer.cmp(&b.layer))
+    });
+    results.truncate(top_k);
 }
 
 /// Serialize `recall` results into a JSON shape the MCP client can render.

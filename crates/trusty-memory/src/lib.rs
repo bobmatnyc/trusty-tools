@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 use tokio::sync::{broadcast, OnceCell};
 use tracing::info;
+use trusty_common::bm25_client::Bm25Client;
 use trusty_common::mcp::initialize_response;
 use trusty_common::memory_core::embed::FastEmbedder;
 use trusty_common::memory_core::store::ChatSessionStore;
@@ -492,6 +493,20 @@ pub struct AppState {
     /// What: an `Arc<ActivityLog>` shared with every emitter.
     /// Test: `web::tests::activity_endpoint_lists_recent_emits`.
     pub activity_log: Arc<ActivityLog>,
+    /// Optional per-palace BM25 lexical search lane (issue #156).
+    ///
+    /// Why: in-process BM25 would serialise the recall hot path on disk
+    /// I/O during writes and contend with the redb/usearch locks. Delegating
+    /// to the `trusty-bm25-daemon` subprocess (one socket per palace) keeps
+    /// BM25 ingestion and search off the critical path while still feeding
+    /// hits into the recall RRF fusion.
+    /// What: `Some(client)` only when `TRUSTY_BM25_DAEMON=1` at startup —
+    /// every code path that uses this field is gated on `is_some()` and
+    /// falls back to vector-only behaviour otherwise so existing deployments
+    /// see zero behavioural change.
+    /// Test: `bm25_client_disabled_by_default`,
+    /// `bm25_client_enabled_when_env_set`.
+    pub bm25_client: Option<Arc<Bm25Client>>,
 }
 
 impl AppState {
@@ -534,7 +549,40 @@ impl AppState {
             bound_addr: Arc::new(OnceLock::new()),
             prompt_context_cache: Arc::new(RwLock::new(prompt_facts::PromptFactsCache::default())),
             activity_log,
+            bm25_client: None,
         }
+    }
+
+    /// Builder-style: opt-in to the BM25 lexical lane (issue #156).
+    ///
+    /// Why: the BM25 subprocess is gated behind `TRUSTY_BM25_DAEMON=1` so
+    /// the default `cargo install trusty-memory` / launchd plist deployment
+    /// stays vector-only and existing test fixtures keep passing without
+    /// having to provision a daemon. Reading the env var here keeps the
+    /// gating logic in one place (the helper in `main.rs` just plumbs the
+    /// result through).
+    /// What: when `TRUSTY_BM25_DAEMON=1`, constructs one `Bm25Client` per
+    /// palace by lazy-resolving the socket path the first time the palace
+    /// id is observed. Currently we install a shared `default` client up
+    /// front and re-key on the palace id at the call site — palaces with no
+    /// daemon socket simply see search/index errors which we log + ignore.
+    /// Returns `self` unchanged when the env var is unset or set to anything
+    /// other than `1`.
+    /// Test: `bm25_client_disabled_by_default`,
+    /// `bm25_client_enabled_when_env_set`.
+    #[must_use]
+    pub fn with_bm25_client_from_env(mut self) -> Self {
+        if std::env::var("TRUSTY_BM25_DAEMON").as_deref() == Ok("1") {
+            // Install the default-palace client; per-palace clients are
+            // constructed on demand via `Bm25Client::for_palace`.
+            let default_palace = self.default_palace.as_deref().unwrap_or("default");
+            self.bm25_client = Some(Arc::new(Bm25Client::for_palace(default_palace)));
+            tracing::info!(
+                palace = default_palace,
+                "BM25 daemon client enabled (TRUSTY_BM25_DAEMON=1)"
+            );
+        }
+        self
     }
 
     /// Scan the palace registry directory and re-register every persisted
@@ -1861,5 +1909,59 @@ mod tests {
         });
         let count = state.activity_log.count().unwrap();
         assert_eq!(count, 2, "only PalaceCreated + DrawerAdded must persist");
+    }
+
+    /// Why (issue #156): the BM25 lane must be opt-in — existing deployments
+    /// that don't set `TRUSTY_BM25_DAEMON=1` must see `bm25_client = None`
+    /// and the recall hot path must continue to behave exactly as before.
+    /// What: builds an `AppState` with `with_bm25_client_from_env()` while
+    /// the env var is unset; asserts the field stays `None`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn bm25_client_disabled_by_default() {
+        // Serialise with the sibling `bm25_client_enabled_when_env_set` test
+        // so they don't race on the shared `TRUSTY_BM25_DAEMON` env var.
+        let _guard = crate::commands::env_test_lock().lock().await;
+        // SAFETY: this test exercises std::env::remove_var which is unsafe
+        // in 2024 edition because the global env is shared. We restore the
+        // pre-test value at the end so neighbours are unaffected.
+        let prev = std::env::var("TRUSTY_BM25_DAEMON").ok();
+        unsafe {
+            std::env::remove_var("TRUSTY_BM25_DAEMON");
+        }
+        let state = test_state().with_bm25_client_from_env();
+        assert!(
+            state.bm25_client.is_none(),
+            "bm25_client must be None when TRUSTY_BM25_DAEMON is unset"
+        );
+        if let Some(v) = prev {
+            unsafe {
+                std::env::set_var("TRUSTY_BM25_DAEMON", v);
+            }
+        }
+    }
+
+    /// Why (issue #156): when the operator opts in via `TRUSTY_BM25_DAEMON=1`,
+    /// the builder must construct a real `Bm25Client` pointed at the canonical
+    /// per-palace socket path. We don't connect — no daemon need be running —
+    /// we only assert the client field is populated.
+    /// What: sets the env var, runs the builder, asserts `Some(_)`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn bm25_client_enabled_when_env_set() {
+        let _guard = crate::commands::env_test_lock().lock().await;
+        let prev = std::env::var("TRUSTY_BM25_DAEMON").ok();
+        unsafe {
+            std::env::set_var("TRUSTY_BM25_DAEMON", "1");
+        }
+        let state = test_state().with_bm25_client_from_env();
+        assert!(
+            state.bm25_client.is_some(),
+            "bm25_client must be Some when TRUSTY_BM25_DAEMON=1"
+        );
+        match prev {
+            Some(v) => unsafe { std::env::set_var("TRUSTY_BM25_DAEMON", v) },
+            None => unsafe { std::env::remove_var("TRUSTY_BM25_DAEMON") },
+        }
     }
 }

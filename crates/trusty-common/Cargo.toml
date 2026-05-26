@@ -172,6 +172,13 @@ rpc = ["dep:uuid"]
 # the ort direct dep. Defaults to bundled ORT linking — see the
 # `embedder-*` sub-features for AL2023 / CUDA / load-dynamic variants.
 embedder = ["dep:fastembed", "dep:lru", "dep:parking_lot", "dep:ort"]
+# Enables the `bm25` module: zero-dependency BM25 lexical index +
+# code-aware tokenizer (issue #156). Pure `std` + `tracing` — no new deps.
+bm25 = []
+# Enables the `bm25_client` module: a UDS JSON-RPC client for the per-palace
+# `trusty-bm25-daemon` subprocess (issue #156). Pure user of existing
+# `tokio` / `serde_json` / `anyhow` workspace deps — adds no new deps.
+bm25-client = []
 # Bundle the ONNX Runtime static libs via fastembed's
 # `ort-download-binaries-native-tls`. Right choice for macOS and modern
 # Linux (glibc ≥ 2.38). Mutually exclusive with `embedder-load-dynamic`

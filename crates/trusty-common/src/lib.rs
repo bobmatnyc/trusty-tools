@@ -126,6 +126,35 @@ pub mod embedder;
 #[cfg(feature = "embedder-client")]
 pub mod embedder_client;
 
+/// Zero-dependency BM25 lexical index + code-aware tokenizer (issue #156).
+///
+/// Why: trusty-memory, trusty-search, and the per-palace
+/// `trusty-bm25-daemon` subprocess all want one shared BM25 implementation
+/// so the tokenizer's camelCase / PascalCase / alpha↔digit splits stay
+/// consistent across the workspace. Originally ported from open-mpm; now
+/// the single source of truth lives here.
+/// What: Gated behind the `bm25` feature. Adds no new dependencies — pure
+/// `std` + `tracing` (already required).
+/// Test: `cargo test -p trusty-common --features bm25`.
+#[cfg(feature = "bm25")]
+pub mod bm25;
+
+/// UDS JSON-RPC client for the per-palace `trusty-bm25-daemon` subprocess
+/// (issue #156).
+///
+/// Why: trusty-memory needs a lexical-search lane without holding an
+/// in-process BM25 index. `Bm25Client` delegates to the per-palace daemon
+/// over `$TMPDIR/trusty-bm25-<palace>.sock`, matching the design of
+/// `EmbedClient` and `trusty-embed-daemon` (PR #157).
+/// What: Gated behind the `bm25-client` feature. Pure user of existing
+/// `tokio` / `serde_json` / `anyhow` workspace deps — adds no new
+/// dependencies.
+/// Test: `cargo test -p trusty-common --features bm25-client` covers
+/// request shape and path defaults; end-to-end coverage lives in
+/// `trusty-bm25-daemon/tests/`.
+#[cfg(feature = "bm25-client")]
+pub mod bm25_client;
+
 /// Symbol-graph engine (formerly the `trusty-symgraph` crate).
 ///
 /// Why: All trusty-* tools that touch source code (open-mpm, trusty-search,

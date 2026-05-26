@@ -39,7 +39,7 @@ path = "src/main.rs"
 
 [dependencies]
 # ── Shared trusty-common crates ────────────────────────────────────────────
-trusty-common = { version = "0.6.0", default-features = false, features = ["axum-server", "mcp", "embedder", "embedder-test-support", "symgraph", "monitor-tui", "embedder-client"] }  # `symgraph` enables only the contracts surface — no tree-sitter, no `links` conflict; `monitor-tui` powers `trusty-search monitor tui`; `embedder-client` provides EmbedderClient/RemoteEmbedderClient/UdsEmbedderClient (issue #164)
+trusty-common = { version = "0.6.0", default-features = false, features = ["axum-server", "mcp", "embedder", "embedder-test-support", "symgraph", "monitor-tui", "embedder-client", "bm25"] }  # `symgraph` enables only the contracts surface — no tree-sitter, no `links` conflict; `monitor-tui` powers `trusty-search monitor tui`; `embedder-client` provides EmbedderClient/RemoteEmbedderClient/UdsEmbedderClient (issue #164); `bm25` is the canonical lexical index (issue #156)
 
 # ── Async runtime / HTTP ───────────────────────────────────────────────────
 tokio = { version = "1", features = ["full"] }

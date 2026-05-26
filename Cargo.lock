@@ -10789,6 +10789,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-bm25-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "trusty-common",
+]
+
+[[package]]
 name = "trusty-common"
 version = "0.6.0"
 dependencies = [
