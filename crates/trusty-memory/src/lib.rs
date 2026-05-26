@@ -22,9 +22,11 @@ use trusty_common::memory_core::PalaceRegistry;
 use trusty_common::ChatProvider;
 
 pub mod activity;
+pub mod attribution;
 pub mod bootstrap;
 pub mod commands;
 pub mod discovery;
+pub mod hook_emit;
 pub mod kg_extract;
 pub mod messaging;
 pub mod openrpc;
@@ -35,6 +37,42 @@ pub mod tools;
 pub mod web;
 
 pub use activity::{ActivityEntry, ActivityFilter, ActivityLog, ActivitySource};
+pub use attribution::{CreatorInfo, CreatorSource};
+
+/// Maximum bytes retained in the trigger-prompt excerpt embedded on a
+/// `HookFired` event.
+///
+/// Why: the full triggering prompt is sensitive and already lives in the
+/// JSONL prompt log; the activity feed only needs enough text to give an
+/// operator a glance — a single-line ~80 char preview matches the existing
+/// `drawer_content_preview` convention so dashboard rows render uniformly.
+/// What: 80 characters; longer prompts are truncated with a trailing `…`.
+/// Test: `hook_excerpt_truncates_long_prompts`.
+pub const HOOK_PROMPT_EXCERPT_CHARS: usize = 80;
+
+/// Reduce a triggering prompt to the short excerpt embedded on a
+/// `HookFired` activity event.
+///
+/// Why: see [`HOOK_PROMPT_EXCERPT_CHARS`]. Centralising the truncation rule
+/// keeps every emitter (HTTP, hook CLI handlers, future tests) producing
+/// the same preview shape so UI rendering is uniform.
+/// What: whitespace-collapses `prompt` and trims to
+/// [`HOOK_PROMPT_EXCERPT_CHARS`] chars with `…` when cut. Empty input
+/// returns an empty string.
+/// Test: `hook_excerpt_truncates_long_prompts`,
+/// `hook_excerpt_collapses_whitespace`.
+pub fn hook_prompt_excerpt(prompt: &str) -> String {
+    let normalised: String = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalised.chars().count() <= HOOK_PROMPT_EXCERPT_CHARS {
+        normalised
+    } else {
+        let kept: String = normalised
+            .chars()
+            .take(HOOK_PROMPT_EXCERPT_CHARS.saturating_sub(1))
+            .collect();
+        format!("{kept}…")
+    }
+}
 
 pub use service::MemoryMcpService;
 pub use tools::MemoryMcpServer;
@@ -64,6 +102,63 @@ pub fn resolve_palace_registry_dir(data_dir: PathBuf) -> PathBuf {
         nested
     } else {
         data_dir
+    }
+}
+
+/// Hook type — labels the Claude Code hook that triggered a submission.
+///
+/// Why: every hook firing produces an activity-feed entry tagged with the
+/// originating hook so operators can tell whether activity came from a user
+/// prompt (`UserPromptSubmit`), a new session (`SessionStart`), or a future
+/// hook variant. Threading this through `DaemonEvent::HookFired` lets the
+/// dashboard badge each row with the hook label.
+/// What: serde-serialised in PascalCase so the wire format matches Claude
+/// Code's own hook-name strings exactly (e.g. `"UserPromptSubmit"`).
+/// Test: `hook_type_serde_round_trips`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum HookType {
+    /// Claude Code's `UserPromptSubmit` hook — fires on every user prompt.
+    UserPromptSubmit,
+    /// Claude Code's `SessionStart` hook — fires once at session open.
+    SessionStart,
+}
+
+impl HookType {
+    /// Stable string label used for the wire format.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::UserPromptSubmit => "UserPromptSubmit",
+            Self::SessionStart => "SessionStart",
+        }
+    }
+}
+
+/// Injection kind — labels what the hook actually injected (or attempted).
+///
+/// Why: distinct from `HookType` because one hook could in principle render
+/// more than one kind of injection (e.g. SessionStart can deliver both an
+/// inbox check and bootstrap context). Tagging the rendered kind explicitly
+/// keeps the activity log searchable when that fan-out lands.
+/// What: serde-serialised as kebab-case so it matches the labels already
+/// used in the JSONL prompt log (`prompt-context-facts`,
+/// `inbox-check-messages`).
+/// Test: `injection_kind_serde_round_trips`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InjectionKind {
+    /// `prompt-context` hook rendered the prompt-facts block.
+    PromptContext,
+    /// `inbox-check` hook delivered unread messages.
+    InboxCheck,
+}
+
+impl InjectionKind {
+    /// Stable string label used for the wire format.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PromptContext => "prompt-context",
+            Self::InboxCheck => "inbox-check",
+        }
     }
 }
 
@@ -134,6 +229,50 @@ pub enum DaemonEvent {
         total_vectors: usize,
         total_kg_triples: usize,
     },
+    /// A Claude Code hook completed and rendered (or attempted to render) an
+    /// injection block.
+    ///
+    /// Why: pre-#XXX the activity feed only fired on drawer / palace / dream
+    /// writes, which meant a normal Claude Code session — whose only daemon
+    /// traffic is hook invocations — left the feed empty. Surfacing every
+    /// hook firing answers the user complaint "no activity in the TUI" and
+    /// gives operators a way to see how often each project palace is
+    /// actually picking up prompt-context / inbox-check work.
+    /// What: carries the resolved palace (or `None` if cwd resolution
+    /// failed), the [`HookType`] label, the [`InjectionKind`] label, the
+    /// rendered injection byte length, a short excerpt of the triggering
+    /// prompt (capped at ~80 chars; the full content stays in the JSONL
+    /// prompt log only), the timestamp, the hook's wall-clock duration,
+    /// and the [`ActivitySource`] tag (always `Hook` for this variant).
+    /// Backwards-compatible: SSE clients that do not recognise the
+    /// `hook_fired` `type` tag can safely ignore the frame.
+    HookFired {
+        /// Resolved palace id (slug) — `None` if cwd resolution failed.
+        #[serde(default)]
+        palace_id: Option<String>,
+        /// Friendly palace name at hook time — `None` if the registry
+        /// could not be consulted (HTTP path uses `palace_id` here when
+        /// no separate name is known).
+        #[serde(default)]
+        palace_name: Option<String>,
+        hook_type: HookType,
+        injection_kind: InjectionKind,
+        /// Rendered injection size in bytes (`0` when no injection was
+        /// emitted, e.g. SessionStart with an empty inbox).
+        injection_length: u64,
+        /// Short excerpt of the triggering prompt for the activity feed
+        /// display. Capped at ~80 chars with a trailing `…` when cut.
+        /// Why: the activity feed renders this directly; full prompt
+        /// content (which may be sensitive) stays in the JSONL log.
+        #[serde(default)]
+        trigger_prompt_excerpt: String,
+        timestamp: chrono::DateTime<chrono::Utc>,
+        /// Hook wall-clock duration in milliseconds.
+        duration_ms: u64,
+        /// Always `ActivitySource::Hook` for this variant; encoded explicitly
+        /// so the same dispatch path (`emit`) can persist + broadcast it.
+        source: ActivitySource,
+    },
 }
 
 /// Open the activity log under `data_root`, falling back to a per-process
@@ -186,6 +325,7 @@ impl DaemonEvent {
             Self::DrawerDeleted { .. } => "drawer_deleted",
             Self::DreamCompleted { .. } => "dream_completed",
             Self::StatusChanged { .. } => "status_changed",
+            Self::HookFired { .. } => "hook_fired",
         }
     }
 
@@ -204,6 +344,7 @@ impl DaemonEvent {
                 Some(palace_id)
             }
             Self::DreamCompleted { palace_id, .. } => palace_id.as_deref(),
+            Self::HookFired { palace_id, .. } => palace_id.as_deref(),
             Self::StatusChanged { .. } => None,
         }
     }
@@ -220,7 +361,8 @@ impl DaemonEvent {
             Self::PalaceCreated { source, .. }
             | Self::DrawerAdded { source, .. }
             | Self::DrawerDeleted { source, .. }
-            | Self::DreamCompleted { source, .. } => Some(*source),
+            | Self::DreamCompleted { source, .. }
+            | Self::HookFired { source, .. } => Some(*source),
             Self::StatusChanged { .. } => None,
         }
     }
@@ -1548,11 +1690,88 @@ mod tests {
                 total_vectors: 0,
                 total_kg_triples: 0,
             },
+            DaemonEvent::HookFired {
+                palace_id: Some("p".into()),
+                palace_name: Some("p".into()),
+                hook_type: HookType::UserPromptSubmit,
+                injection_kind: InjectionKind::PromptContext,
+                injection_length: 12,
+                trigger_prompt_excerpt: "hello".into(),
+                timestamp: chrono::Utc::now(),
+                duration_ms: 5,
+                source: ActivitySource::Hook,
+            },
         ];
         for ev in &cases {
             let json = serde_json::to_value(ev).unwrap();
             assert_eq!(json["type"].as_str(), Some(ev.type_str()));
         }
+    }
+
+    /// Why: `HookType` is serialised on every `HookFired` activity row; its
+    /// wire format must round-trip cleanly so dashboard / TUI consumers can
+    /// safely parse historic entries written by an older daemon build.
+    /// What: serde-encodes each variant, asserts the JSON matches the
+    /// expected PascalCase label, then decodes back.
+    /// Test: itself.
+    #[test]
+    fn hook_type_serde_round_trips() {
+        let cases = [
+            (HookType::UserPromptSubmit, "\"UserPromptSubmit\""),
+            (HookType::SessionStart, "\"SessionStart\""),
+        ];
+        for (ht, expected) in cases {
+            let s = serde_json::to_string(&ht).unwrap();
+            assert_eq!(s, expected, "{ht:?} should serialise to {expected}");
+            let back: HookType = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, ht);
+            assert_eq!(ht.as_str(), expected.trim_matches('"'));
+        }
+    }
+
+    /// Why: same as `hook_type_serde_round_trips` but for `InjectionKind`.
+    /// What: kebab-case round trip on every variant.
+    /// Test: itself.
+    #[test]
+    fn injection_kind_serde_round_trips() {
+        let cases = [
+            (InjectionKind::PromptContext, "\"prompt-context\""),
+            (InjectionKind::InboxCheck, "\"inbox-check\""),
+        ];
+        for (ik, expected) in cases {
+            let s = serde_json::to_string(&ik).unwrap();
+            assert_eq!(s, expected);
+            let back: InjectionKind = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, ik);
+            assert_eq!(ik.as_str(), expected.trim_matches('"'));
+        }
+    }
+
+    /// Why: the activity feed renders the trigger prompt excerpt directly;
+    /// runaway prompts must be capped at [`HOOK_PROMPT_EXCERPT_CHARS`] with
+    /// a `…` marker so the row stays readable.
+    /// What: feeds a 200-character prompt and asserts the excerpt is
+    /// bounded.
+    /// Test: itself.
+    #[test]
+    fn hook_excerpt_truncates_long_prompts() {
+        let long = "x".repeat(200);
+        let excerpt = hook_prompt_excerpt(&long);
+        assert!(excerpt.chars().count() <= HOOK_PROMPT_EXCERPT_CHARS);
+        assert!(excerpt.ends_with('…'));
+        assert_eq!(hook_prompt_excerpt(""), "");
+    }
+
+    /// Why: multi-line prompts must collapse to a single line so the
+    /// activity feed row doesn't blow out vertically.
+    /// What: feeds a multi-line whitespace-heavy prompt and asserts the
+    /// output is a single-spaced single line.
+    /// Test: itself.
+    #[test]
+    fn hook_excerpt_collapses_whitespace() {
+        let input = "hello\n\nworld\t\tfoo";
+        let excerpt = hook_prompt_excerpt(input);
+        assert_eq!(excerpt, "hello world foo");
     }
 
     /// Why (issue #96): `palace_id()` and `source()` feed the persisted

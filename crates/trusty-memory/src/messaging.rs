@@ -192,10 +192,12 @@ pub fn build_message_tags(
 /// are legitimately short messages), return the new drawer id. Centralising
 /// it keeps the three surfaces in lock-step.
 /// What: opens a handle to the recipient palace under `data_root`, writes
-/// the drawer with the message envelope tags, and returns the new drawer
-/// id. The recipient palace must already exist — sending to a non-existent
-/// palace fails fast with a clear error rather than silently creating an
-/// empty inbox.
+/// the drawer with the message envelope tags plus the supplied creator
+/// attribution tags, and returns the new drawer id. The recipient palace
+/// must already exist — sending to a non-existent palace fails fast with
+/// a clear error rather than silently creating an empty inbox. `creator`
+/// is the writer's identity (HTTP / MCP / CLI / hook) — passed by every
+/// caller so noise drawers can be traced back to their origin.
 /// Test: `round_trip_send_and_inbox`.
 pub async fn send_message_to_palace(
     registry: &trusty_common::memory_core::PalaceRegistry,
@@ -204,6 +206,7 @@ pub async fn send_message_to_palace(
     to_palace: &str,
     purpose: &str,
     content: String,
+    creator: crate::attribution::CreatorInfo,
 ) -> Result<Uuid> {
     let pid = trusty_common::memory_core::PalaceId::new(to_palace);
     let handle = registry
@@ -211,7 +214,8 @@ pub async fn send_message_to_palace(
         .with_context(|| format!("open recipient palace {to_palace}"))?;
 
     let sent_at = Utc::now();
-    let tags = build_message_tags(from_palace, to_palace, purpose, sent_at);
+    let mut tags = build_message_tags(from_palace, to_palace, purpose, sent_at);
+    creator.merge_into(&mut tags);
 
     // force=true: bypass the signal/noise filter so short messages
     // ("acknowledged", "ping") are not rejected. Messaging is an
@@ -462,8 +466,20 @@ pub fn cwd_palace_slug_at(start: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::attribution::{CreatorInfo, CreatorSource};
     use std::path::PathBuf;
     use trusty_common::memory_core::{Palace, PalaceId, PalaceRegistry};
+
+    /// Test-only builder for a `CreatorInfo`. Tests don't care which writer
+    /// they simulate; pinning the values here avoids per-test boilerplate.
+    fn test_creator() -> CreatorInfo {
+        CreatorInfo {
+            client: "test-suite".to_string(),
+            version: "0.0.0".to_string(),
+            source: CreatorSource::Mcp,
+            cwd: Some("/tmp/test".to_string()),
+        }
+    }
 
     /// Helper: build a registry + palace under a tempdir and return both.
     fn fresh_palace(id: &str) -> (PalaceRegistry, Arc<PalaceHandle>, PathBuf) {
@@ -596,9 +612,17 @@ mod tests {
     async fn round_trip_send_and_inbox() {
         let (registry, handle_b, root) = fresh_palace("beta");
         // Sender writes into "beta" with from="alpha".
-        let id = send_message_to_palace(&registry, &root, "alpha", "beta", "task", "hello".into())
-            .await
-            .expect("send");
+        let id = send_message_to_palace(
+            &registry,
+            &root,
+            "alpha",
+            "beta",
+            "task",
+            "hello".into(),
+            test_creator(),
+        )
+        .await
+        .expect("send");
         // Inbox-check at beta returns the new message exactly once.
         let unread = list_unread_messages(&handle_b);
         assert_eq!(unread.len(), 1, "first inbox check returns the message");
@@ -632,6 +656,7 @@ mod tests {
                 "inbox-only",
                 "task",
                 format!("body {i}"),
+                test_creator(),
             )
             .await
             .expect("send");
@@ -658,6 +683,7 @@ mod tests {
             "idempotent",
             "task",
             "msg".into(),
+            test_creator(),
         )
         .await
         .expect("send");
@@ -680,6 +706,7 @@ mod tests {
             "concurrent",
             "task",
             "race".into(),
+            test_creator(),
         )
         .await
         .expect("send");
