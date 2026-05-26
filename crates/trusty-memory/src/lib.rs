@@ -21,6 +21,7 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::{broadcast, OnceCell, RwLock};
 use tracing::info;
@@ -560,6 +561,25 @@ pub struct AppState {
     /// map never needs to be held across an `.await`.
     /// Test: `tools::tests::dedup_gate_blocks_concurrent_duplicate_writes`.
     pub palace_write_locks: Arc<dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Counter of in-flight activity-log writes spawned by `emit`
+    /// (issue #232).
+    ///
+    /// Why: `emit` offloads the synchronous redb append to the tokio blocking
+    /// pool via `spawn_blocking` so the async runtime is never parked waiting
+    /// on fsync. The write is fire-and-forget — `emit` returns immediately
+    /// after spawning. Tests that observe the activity log right after a
+    /// burst of `emit` calls need a deterministic synchronization point;
+    /// holding an in-flight counter lets `flush_activity_writes` poll until
+    /// every spawned append has settled, which keeps the assertions
+    /// race-free without forcing every caller to `.await`.
+    /// What: an `Arc<AtomicUsize>` incremented before each `spawn_blocking`
+    /// and decremented inside the closure (after the append completes, even
+    /// if it errored). The counter is cheap (one atomic add per emit) and
+    /// stays at zero in steady-state production traffic.
+    /// Test: `web::tests::activity_endpoint_lists_recent_emits` and
+    /// `tests::emit_persists_mutations_but_skips_status_changed` call
+    /// `flush_activity_writes` to drain the counter before reading the log.
+    pub pending_activity_writes: Arc<AtomicUsize>,
 }
 
 impl AppState {
@@ -605,6 +625,7 @@ impl AppState {
             bm25_client: None,
             bm25_supervisor: None,
             palace_write_locks: Arc::new(dashmap::DashMap::new()),
+            pending_activity_writes: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -771,24 +792,69 @@ impl AppState {
     /// HTTP / Hook origins are visible to the operator. Persistence is
     /// also best-effort — a write failure is logged but never blocks the
     /// SSE broadcast.
+    ///
+    /// Issue #232: the activity-log append is a synchronous redb write +
+    /// fsync. Calling it directly on the async caller's task parked a tokio
+    /// worker thread on disk I/O for every SSE event. We now offload the
+    /// append to the blocking thread pool via `spawn_blocking` and return
+    /// immediately — `emit` stays synchronous so every existing caller
+    /// (including the sync `dispatch_hook_fired` JSON-RPC handler) keeps
+    /// compiling unchanged. The fire-and-forget pattern matches the
+    /// pre-fix semantics (best-effort, never blocks the SSE broadcast)
+    /// while freeing the async runtime to do real work during the write.
     /// What: serialises the event for the log (skipping `StatusChanged`
-    /// which is a recomputed aggregate, not a mutation), then sends it
-    /// over the broadcast channel.
+    /// which is a recomputed aggregate, not a mutation), spawns the redb
+    /// append on `tokio::task::spawn_blocking` keyed by a clone of the
+    /// `Arc<ActivityLog>` and the cloned event, then sends the event over
+    /// the broadcast channel. A `pending_activity_writes` counter is bumped
+    /// before the spawn and decremented inside the closure so
+    /// [`Self::flush_activity_writes`] can drain in tests.
     /// Test: `web::tests::sse_stream_receives_palace_created` confirms a
     /// subscriber observes the emitted event;
-    /// `activity_endpoint_lists_recent_emits` confirms persistence.
+    /// `activity_endpoint_lists_recent_emits` confirms persistence via
+    /// `flush_activity_writes`.
     pub fn emit(&self, event: DaemonEvent) {
         if let Some(source) = event.source() {
             let event_type = event.type_str();
             let palace_id = event.palace_id().map(|s| s.to_string());
-            if let Err(e) = self
-                .activity_log
-                .append(source, palace_id, event_type, &event)
-            {
-                tracing::warn!("activity_log.append failed for {event_type}: {e:#}");
-            }
+            let log = Arc::clone(&self.activity_log);
+            let event_for_log = event.clone();
+            let pending = Arc::clone(&self.pending_activity_writes);
+            pending.fetch_add(1, Ordering::SeqCst);
+            // Why: the synchronous redb append + fsync must not park an
+            // async worker thread (issue #232). Spawn the write on the
+            // blocking pool; the JoinHandle is intentionally dropped —
+            // the write is best-effort and any failure is logged below.
+            tokio::task::spawn_blocking(move || {
+                let result = log.append(source, palace_id, event_type, &event_for_log);
+                if let Err(e) = result {
+                    tracing::warn!("activity_log.append failed for {event_type}: {e:#}");
+                }
+                pending.fetch_sub(1, Ordering::SeqCst);
+            });
         }
         let _ = self.events.send(event);
+    }
+
+    /// Block (asynchronously) until every in-flight activity-log write
+    /// spawned by [`Self::emit`] has settled.
+    ///
+    /// Why: `emit` offloads its redb append to `tokio::task::spawn_blocking`
+    /// and returns immediately (issue #232). Tests that observe the
+    /// activity log right after a burst of emits would otherwise race the
+    /// blocking-pool worker; this helper gives them a deterministic
+    /// synchronization point. Production code never needs to call this —
+    /// the dashboard reads through `GET /api/v1/activity`, which already
+    /// tolerates writes settling asynchronously.
+    /// What: spins on `pending_activity_writes` with a 1 ms yield until the
+    /// counter is zero. Cheap: tests typically emit a handful of events
+    /// and the loop exits within a single scheduler tick.
+    /// Test: covered indirectly by `emit_persists_mutations_but_skips_status_changed`
+    /// and `web::tests::activity_endpoint_lists_recent_emits`.
+    pub async fn flush_activity_writes(&self) {
+        while self.pending_activity_writes.load(Ordering::SeqCst) > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
     }
 
     /// Open (or return cached) the chat-session store for a palace.
@@ -2096,6 +2162,10 @@ mod tests {
             content_preview: "x".into(),
             source: ActivitySource::Mcp,
         });
+        // Issue #232: `emit` now offloads the redb write to `spawn_blocking`,
+        // so the test must wait for the background pool to drain before
+        // asserting on the persisted count.
+        state.flush_activity_writes().await;
         let count = state.activity_log.count().unwrap();
         assert_eq!(count, 2, "only PalaceCreated + DrawerAdded must persist");
     }

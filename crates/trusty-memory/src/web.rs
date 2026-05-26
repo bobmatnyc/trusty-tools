@@ -4114,6 +4114,10 @@ mod tests {
             drawer_count: 0,
             source: ActivitySource::Http,
         });
+        // Issue #232: emits now fire-and-forget the redb write on the
+        // blocking pool; wait for the writes to settle before querying the
+        // activity endpoint.
+        state.flush_activity_writes().await;
 
         let app = router().with_state(state);
         let resp = app
@@ -4204,6 +4208,8 @@ mod tests {
             content_preview: "".into(),
             source: ActivitySource::Mcp,
         });
+        // Issue #232: drain the spawn_blocking writes before querying.
+        state.flush_activity_writes().await;
 
         let app = router().with_state(state);
         let resp = app
@@ -4297,6 +4303,8 @@ mod tests {
         // The activity log should now hold ≥ 2 entries (palace_created +
         // drawer_added). Also confirm the HTTP endpoint surfaces them with
         // `mcp` sources.
+        // Issue #232: drain fire-and-forget activity-log writes first.
+        state.flush_activity_writes().await;
         let app = router().with_state(state);
         let resp = app
             .oneshot(
@@ -4359,6 +4367,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        // Issue #232: the hook handler emits via the fire-and-forget
+        // `spawn_blocking` path; wait for the write to settle before
+        // reading the activity history endpoint.
+        state.flush_activity_writes().await;
 
         // Read it back through the activity history endpoint.
         let app = router().with_state(state);

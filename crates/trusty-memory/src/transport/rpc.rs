@@ -546,6 +546,9 @@ mod tests {
         };
         let resp = dispatch(&state, req).await;
         assert!(resp.error.is_none(), "expected ok, got {:?}", resp.error);
+        // Issue #232: `emit` now fire-and-forgets the redb append on the
+        // blocking pool; flush before observing the persisted count.
+        state.flush_activity_writes().await;
         let count = state.activity_log.count().unwrap();
         assert_eq!(count, 1, "hook_fired must persist one activity row");
     }
