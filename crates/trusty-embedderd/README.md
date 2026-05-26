@@ -133,11 +133,19 @@ Each inner array has 384 elements. An empty `texts` array returns an empty
 ### Default (auto-spawn, stdio sidecar — Phase 2)
 
 `trusty-search start` auto-spawns `trusty-embedderd --stdio` when `TRUSTY_EMBEDDER`
-is unset. Install the binary first:
+is unset. **`trusty-embedderd` is now bundled inside the `trusty-search` install**,
+so one command installs both binaries:
 
 ```bash
-cargo install trusty-embedderd
-trusty-search start   # auto-spawns trusty-embedderd --stdio, supervised
+cargo install trusty-search --locked   # installs trusty-search AND trusty-embedderd
+trusty-search start                    # auto-spawns trusty-embedderd --stdio, supervised
+```
+
+For users who want **only** the embedding daemon (e.g. trusty-memory without
+trusty-search), the standalone install is still available:
+
+```bash
+cargo install trusty-embedderd --locked
 ```
 
 Override with `TRUSTY_EMBEDDER=in-process` to use the legacy in-process path.

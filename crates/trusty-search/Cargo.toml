@@ -32,6 +32,14 @@ crate-type = ["rlib"]
 name = "trusty-search"
 path = "src/main.rs"
 
+[[bin]]
+name = "trusty-embedderd"
+path = "src/bin/trusty-embedderd.rs"
+# Why: bundling trusty-embedderd as a second binary in the trusty-search
+# crate means `cargo install trusty-search` installs both binaries from a
+# single command (issue #187 Phase 2 follow-up). The daemon's logic lives
+# entirely in the trusty-embedderd library crate; this is a thin shim.
+
 # [patch.crates-io] moved to workspace root Cargo.toml — Cargo only honours
 # [patch] tables at the workspace root. The monorepo root patches
 # trusty-common / trusty-embedder / trusty-mcp-core / trusty-symgraph to the
@@ -40,6 +48,15 @@ path = "src/main.rs"
 [dependencies]
 # ── Shared trusty-common crates ────────────────────────────────────────────
 trusty-common = { version = "0.6.0", default-features = false, features = ["axum-server", "mcp", "embedder", "embedder-test-support", "symgraph", "monitor-tui", "embedder-client", "bm25", "migrations"] }  # `symgraph` enables only the contracts surface — no tree-sitter, no `links` conflict; `monitor-tui` powers `trusty-search monitor tui`; `embedder-client` provides EmbedderClient/RemoteEmbedderClient/UdsEmbedderClient (issue #164); `bm25` is the canonical lexical index (issue #156); `migrations` provides the shared schema-migration kernel (issue #179)
+
+# ── Bundled sidecar ─────────────────────────────────────────────────────────
+# Why: the trusty-embedderd binary is a required runtime dependency (issue
+# #187 Phase 2). Declaring trusty-embedderd as a Cargo dependency causes
+# `cargo install trusty-search` to also compile and install the
+# trusty-embedderd binary alongside trusty-search — one install command,
+# two binaries. The shim at src/bin/trusty-embedderd.rs calls
+# `trusty_embedderd::run()` so all daemon logic stays in the library crate.
+trusty-embedderd = { workspace = true }
 
 # ── Async runtime / HTTP ───────────────────────────────────────────────────
 tokio = { version = "1", features = ["full"] }

@@ -11094,6 +11094,7 @@ dependencies = [
  "tree-sitter-swift",
  "tree-sitter-typescript",
  "trusty-common",
+ "trusty-embedderd",
  "usearch",
  "uuid",
  "walkdir",

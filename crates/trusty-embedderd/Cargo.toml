@@ -8,6 +8,15 @@ description = "Unified ONNX embedding daemon with HTTP + UDS transports and Batc
 readme = "README.md"
 homepage = "https://github.com/bobmatnyc/trusty-tools"
 
+[lib]
+name = "trusty_embedderd"
+path = "src/lib.rs"
+# Why: expose the daemon's startup sequence as a library so the bundled shim
+# binary inside `trusty-search` can call `trusty_embedderd::run()` without
+# duplicating any logic. The standalone `trusty-embedderd` binary delegates
+# to the same function. crate-type rlib keeps link semantics clean.
+crate-type = ["rlib"]
+
 [[bin]]
 name = "trusty-embedderd"
 path = "src/main.rs"

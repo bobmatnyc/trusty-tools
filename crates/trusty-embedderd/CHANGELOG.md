@@ -6,13 +6,21 @@
 
 - **#110 Phase 2 — `trusty-embedderd` is now a core `trusty-search` subprocess.**
   `trusty-search start` auto-spawns `trusty-embedderd --stdio` as a supervised
-  child process when `TRUSTY_EMBEDDER` is unset. Install this binary alongside
-  `trusty-search` so the default startup path works without explicit configuration:
+  child process when `TRUSTY_EMBEDDER` is unset.
+
+  **`trusty-embedderd` is now distributed via `cargo install trusty-search`.**
+  A second `[[bin]]` in `trusty-search/Cargo.toml` shims into this crate's
+  library entry point, so one install command produces both binaries:
   ```bash
-  cargo install trusty-embedderd
+  cargo install trusty-search --locked
   ```
-  If the binary is absent, `trusty-search` falls back to in-process embedding
-  with a one-time warning.
+  The standalone `cargo install trusty-embedderd --locked` remains available
+  for advanced users who want only the embedding daemon (e.g. trusty-memory
+  consumers that do not install trusty-search).
+
+- **Library crate** — this crate now exposes a `[lib]` target
+  (`trusty_embedderd::run()`). The previous binary-only surface is still
+  available; the new library surface enables zero-duplication bundling.
 
 ---
 

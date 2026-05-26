@@ -27,6 +27,9 @@ authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 [workspace.dependencies]
 # ── Internal crates (path deps so the monorepo builds without publish cycles) ──
 trusty-common = { path = "crates/trusty-common", version = "0.6.0" }
+# trusty-embedderd: embedding daemon — referenced by trusty-search so
+# `cargo install trusty-search` produces both binaries from one command.
+trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.0" }
 # trusty-mpm: unified crate (replaces the former trusty-mpm-{core,mcp,client,
 # daemon,cli,tui,telegram} sub-crates). The gui sub-crate is kept separate
 # because it owns Tauri's build.rs and tauri.conf.json.

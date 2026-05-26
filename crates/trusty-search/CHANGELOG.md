@@ -9,6 +9,22 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ## [Unreleased]
 
+### Added
+
+- **Bundled install** — `cargo install trusty-search` now produces **both**
+  `trusty-search` and `trusty-embedderd` binaries from a single command.
+  A second `[[bin]]` entry in `trusty-search/Cargo.toml` delegates to the
+  `trusty-embedderd` library crate (`trusty_embedderd::run()`), so the
+  sidecar binary is built and installed alongside the search daemon with
+  zero extra steps. The standalone `cargo install trusty-embedderd` still
+  works for advanced users who want only the embedding daemon.
+
+  **Upgrade action (users coming from Phase 2):** simply run:
+  ```
+  cargo install trusty-search --locked --force
+  ```
+  No separate `cargo install trusty-embedderd` required.
+
 ### Changed (BREAKING)
 
 - **#110 Phase 2 — `trusty-embedderd` is now a required runtime dependency.**
@@ -24,11 +40,12 @@ Versions correspond to `Cargo.toml` patch releases.
   deployment error — the sidecar architecture is a core design commitment, not
   an optional feature.
 
-  **Upgrade action required:** install `trusty-embedderd` alongside
-  `trusty-search`:
+  **Upgrade action required:** install both binaries in one command:
   ```
-  cargo install trusty-embedderd --locked
+  cargo install trusty-search --locked
   ```
+  `cargo install trusty-search` now installs `trusty-embedderd` automatically —
+  no second install command needed (bundled install, see above).
   To run without the sidecar (CI, debugging), set `TRUSTY_EMBEDDER=in-process`
   explicitly. The in-process path is an escape hatch, not a default.
 
