@@ -285,6 +285,20 @@ thin protocol layer on top.
 The embedded Svelte UI is compiled at build time and served via `rust-embed` —
 no separate web server or Node.js installation is needed at runtime.
 
+## Feature Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `axum-server` | **enabled** | Compiles the HTTP server, SSE endpoint, and axum-based REST API. Disable with `default-features = false` when embedding only the in-process MCP tools (e.g. from `open-mpm`). |
+
+```toml
+# Full daemon build — no change needed (axum-server is on by default)
+trusty-memory = { workspace = true }
+
+# rlib consumer — omit the HTTP stack
+trusty-memory = { workspace = true, default-features = false }
+```
+
 ## Development
 
 ```bash
