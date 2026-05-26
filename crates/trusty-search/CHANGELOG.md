@@ -7,7 +7,7 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
-## [Unreleased]
+## [0.11.1] — 2026-05-26
 
 ### Added
 
