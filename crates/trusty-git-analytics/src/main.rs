@@ -20,6 +20,7 @@ use crate::commands::backfill::BackfillArgs;
 use crate::commands::install::InstallArgs;
 use crate::commands::override_cmd::OverrideArgs;
 use crate::commands::pr_metrics::PrMetricsArgs;
+use crate::commands::rules::RulesArgs;
 
 /// Top-level CLI parser.
 #[derive(Parser, Debug)]
@@ -106,6 +107,8 @@ enum Commands {
     Backfill(BackfillArgs),
     /// Manage manual classification overrides (Tier 0).
     Override(OverrideArgs),
+    /// Introspect the classification rule set.
+    Rules(RulesArgs),
 }
 
 /// Arguments for `tga analyze`.
@@ -343,6 +346,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Aliases(args) => commands::aliases::run(config, &mut db, args)?,
         Commands::Backfill(args) => commands::backfill::run(config, &mut db, args)?,
         Commands::Override(args) => commands::override_cmd::run(config, &mut db, args)?,
+        Commands::Rules(args) => commands::rules::run(config, &db, args)?,
         // Handled above — match is exhaustive.
         Commands::Install(_) => unreachable!("install dispatched above"),
     }
