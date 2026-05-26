@@ -601,6 +601,30 @@ struct CommitRow {
     repository: String,
 }
 
+/// Decide whether a `(category, subcategory)` verdict represents a revert.
+///
+/// Why: the `commits.is_revert` boolean must mirror the verdict produced by
+/// the classification cascade so downstream DORA queries (CFR, MTTR) can
+/// join through it without re-running the rules. Issue #210 — before this
+/// helper, `is_revert` was never set at classify-time.
+/// What: returns `true` when `category` or `subcategory` (case-insensitive)
+/// is one of the canonical revert markers: `"revert"`, `"rollback"`.
+/// Test: see `is_revert_verdict_*` unit tests below.
+fn is_revert_verdict(category: &str, subcategory: Option<&str>) -> bool {
+    fn matches(s: &str) -> bool {
+        s.eq_ignore_ascii_case("revert") || s.eq_ignore_ascii_case("rollback")
+    }
+    if matches(category) {
+        return true;
+    }
+    if let Some(sub) = subcategory {
+        if matches(sub) {
+            return true;
+        }
+    }
+    false
+}
+
 fn read_unclassified_commits(db: &Database) -> Result<Vec<CommitRow>> {
     let mut stmt = db
         .connection()
@@ -648,8 +672,17 @@ fn write_results(
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )
             .map_err(crate::core::TgaError::from)?;
+        // The UPDATE also sets `is_revert` so the column stays in sync with
+        // the verdict category. Without this branch, the column remains 0
+        // forever even when classification correctly identified a revert
+        // (issue #210). The downstream `backfill revert-flags` path relies on
+        // commit-message heuristics rather than classification verdicts, so
+        // syncing here is the only place `is_revert` is set automatically.
         let mut update_commit = tx
-            .prepare("UPDATE commits SET classification_id = ?1, confidence = ?2 WHERE id = ?3")
+            .prepare(
+                "UPDATE commits SET classification_id = ?1, confidence = ?2, is_revert = ?3 \
+                 WHERE id = ?4",
+            )
             .map_err(crate::core::TgaError::from)?;
 
         for (commit, result) in commits.iter().zip(results.iter()) {
@@ -664,8 +697,19 @@ fn write_results(
                 ])
                 .map_err(crate::core::TgaError::from)?;
             let classification_id = tx.last_insert_rowid();
+            // Treat `revert` and `rollback` as the canonical revert
+            // categories. Match `subcategory` too because some rules attach
+            // the revert signal at the subcategory level (e.g. a merge
+            // whose subcategory is "revert"). Comparison is
+            // case-insensitive to absorb taxonomy-extension variations.
+            let is_revert = is_revert_verdict(&result.category, result.subcategory.as_deref());
             update_commit
-                .execute(params![classification_id, result.confidence, commit.id])
+                .execute(params![
+                    classification_id,
+                    result.confidence,
+                    if is_revert { 1_i64 } else { 0_i64 },
+                    commit.id,
+                ])
                 .map_err(crate::core::TgaError::from)?;
 
             // "Classified" means non-null, non-`"uncategorized"` category.
@@ -770,6 +814,83 @@ mod tests {
             )
             .expect("insert commit");
         db.connection().last_insert_rowid()
+    }
+
+    /// Why: regression guard for issue #210. `commits.is_revert` was always
+    /// `0` because the classify-time UPDATE never touched it; only the
+    /// commit-message-heuristic backfill ever flipped the column. Any commit
+    /// whose verdict category is `revert` or `rollback` should now show
+    /// `is_revert = 1` after `classify` runs.
+    /// What: seed two commits — one with a `Revert "feat: ..."` message that
+    /// the default ruleset classifies as `cc-revert`, and one ordinary
+    /// `feat: add login` commit — run the synchronous (no-LLM) pipeline,
+    /// then assert the revert commit's `is_revert` is `1` and the feature
+    /// commit's is `0`.
+    /// Test: in-memory DB, default rules, no mocked LLM (use_llm = false).
+    #[tokio::test]
+    async fn pipeline_sets_is_revert_for_revert_verdicts() {
+        let mut db = Database::open_in_memory().expect("db");
+        // `cc-revert` rule (priority 115, confidence 0.9) wins on this msg.
+        let revert_id = insert_commit(&db, "sha-revert", "Revert \"feat: add login\"");
+        // `cc-feat` rule (priority 100, confidence 0.95) wins on this msg.
+        let feature_id = insert_commit(&db, "sha-feat", "feat: add login form");
+
+        let config = Config::default();
+        let pipeline = ClassificationPipeline::new(config);
+        let engine =
+            ClassificationEngine::new(default_rules(), ClassificationEngineConfig::default())
+                .expect("engine builds");
+        pipeline
+            .run_with_engine(&mut db, engine)
+            .await
+            .expect("run pipeline");
+
+        let revert_flag: i64 = db
+            .connection()
+            .query_row(
+                "SELECT is_revert FROM commits WHERE id = ?1",
+                params![revert_id],
+                |row| row.get(0),
+            )
+            .expect("query revert");
+        assert_eq!(
+            revert_flag, 1,
+            "revert verdict must set commits.is_revert=1"
+        );
+
+        let feat_flag: i64 = db
+            .connection()
+            .query_row(
+                "SELECT is_revert FROM commits WHERE id = ?1",
+                params![feature_id],
+                |row| row.get(0),
+            )
+            .expect("query feature");
+        assert_eq!(
+            feat_flag, 0,
+            "non-revert verdict must leave commits.is_revert at 0"
+        );
+    }
+
+    /// Why: `is_revert_verdict` is the single source of truth for which
+    /// classification verdicts flip `commits.is_revert`. A regression here
+    /// (e.g. accepting "reverted" or rejecting "rollback") would propagate
+    /// silently into DORA reports.
+    /// What: exercises every accept/reject path on both `category` and
+    /// `subcategory`.
+    /// Test: pure-function table.
+    #[test]
+    fn is_revert_verdict_recognizes_canonical_markers() {
+        assert!(super::is_revert_verdict("revert", None));
+        assert!(super::is_revert_verdict("Revert", None)); // case-insensitive
+        assert!(super::is_revert_verdict("rollback", None));
+        assert!(super::is_revert_verdict("ROLLBACK", None));
+        assert!(super::is_revert_verdict("merge", Some("revert")));
+        assert!(super::is_revert_verdict("merge", Some("rollback")));
+        assert!(!super::is_revert_verdict("feature", None));
+        assert!(!super::is_revert_verdict("bugfix", Some("hotfix")));
+        // "reverted" is not a canonical marker — only the exact words match.
+        assert!(!super::is_revert_verdict("reverted", None));
     }
 
     /// Why: a complexity score from the LLM must reach the `classifications`
