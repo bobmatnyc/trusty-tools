@@ -912,6 +912,26 @@ Single `tga` crate (consolidated from the original 5-crate workspace):
 | `tga::report` | `src/report/` | Stage 3: CSV/JSON/Markdown output |
 | `commands` (binary-private) | `src/commands/` | Subcommand handlers wired into `src/main.rs` |
 
+## Performance
+
+Benchmarked against the Duetto production corpus (72,608 commits, 20 JIRA projects) on
+Apple M4 Max (128 GB RAM) with tga 1.3.0:
+
+| Metric | Value |
+|--------|-------|
+| CPU classify throughput (rule cascade only) | ~113,000 commits/sec |
+| Coverage — rule tiers only (`--no-external`) | 64.3% of 72,608 commits |
+| Coverage — with JIRA external source | 67.7% of 72,608 commits |
+| Peak RSS (full classify pass) | 235 MB |
+| weighted_sum tier contribution (new in 1.3.0) | 9.6–11.0% of classified commits |
+
+JIRA external-source classification adds 3.4 percentage points of coverage at the cost of
+~23 minutes of network-bound JIRA API time (the rule-cascade itself completes in 0.64s on
+this corpus). Use `--no-external` for fast iteration on rule files.
+
+Full benchmark: [`docs/trusty-git-analytics/regression-testing/v1.3.0-2026-05-27.md`](
+../../docs/trusty-git-analytics/regression-testing/v1.3.0-2026-05-27.md)
+
 ## License
 
 **Non-commercial use only.** See [LICENSE](LICENSE) for terms.
