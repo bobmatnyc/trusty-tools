@@ -824,7 +824,10 @@ impl KgStoreRedb {
         let prefix = subject_prefix(subject);
         let mut to_retract: Vec<(String, String)> = Vec::new();
         {
-            let rtx = self.db().begin_read().context("begin delete_by_subject read")?;
+            let rtx = self
+                .db()
+                .begin_read()
+                .context("begin delete_by_subject read")?;
             let triples = rtx
                 .open_table(TRIPLES)
                 .context("open triples for delete_by_subject scan")?;

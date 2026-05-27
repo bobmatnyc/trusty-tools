@@ -10725,7 +10725,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10744,6 +10744,7 @@ dependencies = [
  "futures-util",
  "genco",
  "git2",
+ "hex",
  "hf-hub 0.3.2",
  "hnsw_rs",
  "indexmap 2.14.0",
@@ -10847,7 +10848,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",

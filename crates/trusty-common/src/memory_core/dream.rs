@@ -1,19 +1,25 @@
-//! Dreaming — background idle-time memory consolidation (NLP-only, no LLM).
+//! Dreaming — background idle-time memory consolidation with optional
+//! inference-backed semantic consolidation.
 //!
 //! Why: Long-running palaces accumulate near-duplicate drawers, low-importance
 //! noise, and stale closet indexes. Periodic consolidation during idle windows
-//! keeps retrieval fast and the L1 cache focused on what matters — without
-//! ever calling an LLM.
+//! keeps retrieval fast and the L1 cache focused on what matters. When an LLM
+//! inference backend is available the optional `SemanticConsolidate` phase also
+//! canonicalizes paraphrases and aliases that the NLP-only passes miss.
 //! What: `DreamConfig` (tunables), `DreamStats` (per-cycle telemetry), and
-//! `Dreamer` (idle clock + `dream_cycle` doing dedup, prune, and closet
-//! refresh).
+//! `Dreamer` (idle clock + `dream_cycle` doing content-prune, dedup, prune,
+//! compaction, closet refresh, and optional semantic consolidation).
 //! Test: `cargo test -p trusty-memory-core dream::tests::` exercises every
-//! moving part — defaults, idle clock, merge, prune, closet refresh.
+//! moving part — defaults, idle clock, merge, prune, closet refresh, and the
+//! semantic-consolidation integration tests.
 
 use crate::memory_core::decay::DecayConfig;
 use crate::memory_core::embed::Embedder;
-use crate::memory_core::palace::Drawer;
+use crate::memory_core::palace::{Drawer, RoomType};
 use crate::memory_core::retrieval::{PalaceHandle, shared_embedder};
+use crate::memory_core::semantic_consolidation::{
+    SemanticConsolidationConfig, SemanticConsolidator, inference_available,
+};
 use crate::memory_core::store::vector::VectorStore;
 use anyhow::{Context, Result};
 use parking_lot::RwLock;
@@ -28,8 +34,11 @@ use uuid::Uuid;
 /// Tunables for the dream loop.
 ///
 /// Why: The defaults bias toward conservative consolidation (rare cycles, only
-/// merge near-identical drawers, only prune truly forgotten ones).
-/// What: Plain values, all overridable.
+/// merge near-identical drawers, only prune truly forgotten ones). The
+/// semantic consolidation sub-config is separate so it can be independently
+/// tuned or disabled.
+/// What: Plain values, all overridable. `semantic` holds the optional
+/// inference-backed phase config.
 /// Test: `dream_config_defaults`.
 #[derive(Debug, Clone)]
 pub struct DreamConfig {
@@ -45,6 +54,17 @@ pub struct DreamConfig {
     pub content_prune_enabled: bool,
     /// Drawers with fewer than this many whitespace-delimited words are dropped.
     pub content_prune_min_words: usize,
+    /// Config for the optional inference-backed semantic consolidation phase.
+    /// The phase only fires when both `semantic.enabled` and a configured LLM
+    /// backend is available; it is silently skipped otherwise.
+    pub semantic: SemanticConsolidationConfig,
+    /// OpenRouter API key for the semantic consolidation phase. When non-empty,
+    /// takes precedence over the `OPENROUTER_API_KEY` environment variable.
+    pub openrouter_api_key: String,
+    /// Whether the local Ollama (or compatible) model server is enabled.
+    /// When `true` and no OpenRouter key is available, the semantic phase uses
+    /// the local model at `http://localhost:11434`.
+    pub local_model_enabled: bool,
 }
 
 impl Default for DreamConfig {
@@ -60,6 +80,9 @@ impl Default for DreamConfig {
             max_cycle_ms: 60_000,
             content_prune_enabled: true,
             content_prune_min_words: 4,
+            semantic: SemanticConsolidationConfig::default(),
+            openrouter_api_key: String::new(),
+            local_model_enabled: true,
         }
     }
 }
@@ -97,6 +120,17 @@ pub struct DreamStats {
     /// words. Defaults to zero when the pass is disabled.
     #[serde(default)]
     pub content_pruned: usize,
+    /// Number of canonical drawers added by the semantic consolidation phase
+    /// (issue #87). Zero when the phase is disabled or no inference backend
+    /// is configured.
+    #[serde(default)]
+    pub semantically_consolidated: usize,
+    /// Number of LLM calls made during the semantic consolidation phase.
+    #[serde(default)]
+    pub semantic_llm_calls: usize,
+    /// Number of LLM response cache hits in the semantic consolidation phase.
+    #[serde(default)]
+    pub semantic_cache_hits: usize,
     pub duration_ms: u64,
 }
 
@@ -185,11 +219,17 @@ impl Drop for CompactionGuard {
 /// Why: We need a small, testable unit that owns the idle clock and the
 /// consolidation logic — separate from the daemon that schedules it.
 /// What: `last_activity` is a unix-seconds atomic touched on every recall /
-/// remember; `dream_cycle` runs synchronously and returns stats.
+/// remember; `dream_cycle` runs synchronously and returns stats. The optional
+/// `consolidator` field allows tests to inject a `MockInference`-backed
+/// `SemanticConsolidator` without touching the real LLM.
 /// Test: `dreamer_touch_resets_idle` plus the cycle tests below.
 pub struct Dreamer {
     pub config: DreamConfig,
     last_activity: Arc<AtomicU64>,
+    /// Injected semantic consolidator (used in tests via `with_consolidator`).
+    /// When `None`, `semantic_consolidation_pass` builds the consolidator from
+    /// `config` at runtime.
+    consolidator: Option<Arc<SemanticConsolidator>>,
 }
 
 impl Dreamer {
@@ -197,12 +237,32 @@ impl Dreamer {
     ///
     /// Why: A fresh palace shouldn't immediately dream — start the idle clock
     /// from "now" so the first cycle waits a full `idle_secs`.
-    /// What: Captures `SystemTime::now()` as unix seconds.
+    /// What: Captures `SystemTime::now()` as unix seconds. The `consolidator`
+    /// field is `None`; the semantic phase will construct it lazily from config.
     /// Test: `dreamer_touch_resets_idle`.
     pub fn new(config: DreamConfig) -> Self {
         Self {
             config,
             last_activity: Arc::new(AtomicU64::new(now_secs())),
+            consolidator: None,
+        }
+    }
+
+    /// Build a new dreamer with an injected `SemanticConsolidator`.
+    ///
+    /// Why: Tests need to supply a `MockInference`-backed consolidator so the
+    /// dream cycle can be verified without making real LLM calls. Production
+    /// code always uses `Dreamer::new`.
+    /// What: Stores the provided `Arc<SemanticConsolidator>` so
+    /// `semantic_consolidation_pass` uses it instead of building one from
+    /// config. The semantic phase is always attempted when the consolidator is
+    /// injected (ignoring `inference_available`).
+    /// Test: `dream_cycle_semantic_consolidation_with_mock`.
+    pub fn with_consolidator(config: DreamConfig, consolidator: Arc<SemanticConsolidator>) -> Self {
+        Self {
+            config,
+            last_activity: Arc::new(AtomicU64::new(now_secs())),
+            consolidator: Some(consolidator),
         }
     }
 
@@ -242,6 +302,8 @@ impl Dreamer {
                         content_pruned = stats.content_pruned,
                         compacted = stats.compacted,
                         closets_updated = stats.closets_updated,
+                        semantically_consolidated = stats.semantically_consolidated,
+                        semantic_llm_calls = stats.semantic_llm_calls,
                         duration_ms = stats.duration_ms,
                         "dream cycle complete"
                     ),
@@ -297,6 +359,8 @@ impl Dreamer {
                         content_pruned = stats.content_pruned,
                         compacted = stats.compacted,
                         closets_updated = stats.closets_updated,
+                        semantically_consolidated = stats.semantically_consolidated,
+                        semantic_llm_calls = stats.semantic_llm_calls,
                         duration_ms = stats.duration_ms,
                         "dream cycle complete"
                     ),
@@ -306,22 +370,31 @@ impl Dreamer {
         })
     }
 
-    /// Run one synchronous dream cycle: dedup, prune, closet refresh, flush.
+    /// Run one synchronous dream cycle: dedup, prune, closet refresh, flush,
+    /// and optional inference-backed semantic consolidation.
     ///
     /// Why: Consolidation must happen as a single, bounded unit so we can
     /// schedule it conservatively and report telemetry to the operator.
     /// What:
-    ///   1. Dedup near-duplicates by L3-searching each drawer; if the top
+    ///   1. Content-prune: drop noise drawers matching the blocklist or below
+    ///      the minimum word count.
+    ///   2. Dedup near-duplicates by L3-searching each drawer; if the top
     ///      neighbor's score >= `dedup_threshold`, merge into the higher-
     ///      importance survivor and `forget` the loser.
-    ///   2. Prune drawers whose effective importance falls below
+    ///   3. Prune drawers whose effective importance falls below
     ///      `prune_importance` AND whose age exceeds 30 days.
-    ///   3. Rebuild the closet index (keyword -> drawer ids) from current
-    ///      drawer table contents.
-    ///   4. Flush the L1 snapshot.
+    ///   4. Compact orphaned vectors from the HNSW index.
+    ///   5. Rebuild the closet index (keyword -> drawer ids).
+    ///   6. (Optional) Semantic consolidation: when an inference backend is
+    ///      available, cluster near-duplicate drawers and canonicalize them via
+    ///      LLM. Original drawers are preserved; canonical drawers are added
+    ///      with a `superseded_by` link in the KG. Gracefully skipped when no
+    ///      inference backend is configured.
+    ///   7. Flush the L1 snapshot.
     ///
     /// Test: `dream_cycle_merges_duplicates`, `dream_cycle_prunes_low_importance`,
-    /// `closet_refresh_builds_index`.
+    /// `closet_refresh_builds_index`, `dream_cycle_semantic_consolidation_with_mock`,
+    /// `dream_cycle_semantic_consolidation_no_inference`.
     pub async fn dream_cycle(&self, handle: &Arc<PalaceHandle>) -> Result<DreamStats> {
         let started = std::time::Instant::now();
         let budget = Duration::from_millis(self.config.max_cycle_ms);
@@ -352,6 +425,10 @@ impl Dreamer {
             .context("dream compact pass")?;
         let closets_updated = self.refresh_closets(handle);
 
+        // ── Phase: Semantic consolidation (optional, inference-gated) ──────────
+        let (semantically_consolidated, semantic_llm_calls, semantic_cache_hits) =
+            self.semantic_consolidation_pass(handle).await;
+
         // Persist the trimmed L1 snapshot so a restart sees the consolidated state.
         if let Err(e) = handle.flush() {
             tracing::warn!("dream flush failed: {e:#}");
@@ -363,6 +440,9 @@ impl Dreamer {
             closets_updated,
             compacted,
             content_pruned,
+            semantically_consolidated,
+            semantic_llm_calls,
+            semantic_cache_hits,
             duration_ms: started.elapsed().as_millis() as u64,
         };
 
@@ -664,6 +744,179 @@ impl Dreamer {
         let mut closets = handle.closets.write();
         *closets = new_index;
         count
+    }
+
+    /// Optional inference-backed semantic consolidation pass.
+    ///
+    /// Why: the NLP-only passes miss semantic equivalence (aliases, paraphrases,
+    /// near-duplicate triples expressed differently). This phase delegates
+    /// canonicalization to a cheap LLM, preserving original drawers and adding
+    /// canonical replacements with `superseded_by` links in the KG.
+    /// What: gates on `inference_available`; when false logs at DEBUG and
+    /// returns `(0, 0, 0)` immediately. When true (or when a consolidator is
+    /// injected via `Dreamer::with_consolidator`), runs consolidation on all
+    /// current drawers, writes each canonical drawer via `handle.remember`,
+    /// and records the `superseded_by` KG triple so the original drawers are
+    /// traceable. Returns `(canonical_count, llm_calls, cache_hits)`.
+    /// Test: `dream_cycle_semantic_consolidation_with_mock` (injected
+    /// consolidator); `dream_cycle_semantic_consolidation_no_inference`.
+    async fn semantic_consolidation_pass(
+        &self,
+        handle: &Arc<PalaceHandle>,
+    ) -> (usize, usize, usize) {
+        if !self.config.semantic.enabled {
+            tracing::debug!(
+                palace = %handle.id,
+                "skipping semantic consolidation: disabled in config"
+            );
+            return (0, 0, 0);
+        }
+
+        // Use the injected consolidator (test path) or build one from config.
+        let consolidator: Arc<SemanticConsolidator> = if let Some(c) = self.consolidator.clone() {
+            c
+        } else {
+            // Production path: gate on inference availability.
+            let api_key = if !self.config.openrouter_api_key.is_empty() {
+                self.config.openrouter_api_key.clone()
+            } else {
+                std::env::var("OPENROUTER_API_KEY").unwrap_or_default()
+            };
+
+            if !inference_available(&api_key, self.config.local_model_enabled) {
+                tracing::debug!(
+                    palace = %handle.id,
+                    "skipping semantic consolidation: inference unavailable \
+                     (set OPENROUTER_API_KEY or enable local_model)"
+                );
+                return (0, 0, 0);
+            }
+
+            // Build the inference backend: prefer local model (free),
+            // fall back to OpenRouter.
+            use crate::memory_core::semantic_consolidation::{
+                OllamaInference, OpenRouterInference,
+            };
+            let backend: Arc<dyn crate::memory_core::semantic_consolidation::Inference> =
+                if self.config.local_model_enabled && api_key.is_empty() {
+                    Arc::new(OllamaInference::new(
+                        "http://localhost:11434",
+                        &self.config.semantic.model,
+                    ))
+                } else {
+                    Arc::new(OpenRouterInference::new(
+                        api_key,
+                        &self.config.semantic.model,
+                    ))
+                };
+
+            Arc::new(SemanticConsolidator::new(
+                backend,
+                self.config.semantic.clone(),
+            ))
+        };
+
+        let snapshot: Vec<Drawer> = handle.drawers.read().clone();
+        if snapshot.is_empty() {
+            return (0, 0, 0);
+        }
+
+        let consolidation_result = consolidator.consolidate(&snapshot).await;
+
+        // Apply results: add canonical drawers, mark superseded ids in KG.
+        let mut canonical_count = 0usize;
+
+        for canonical in &consolidation_result.canonical_drawers {
+            // Add the canonical drawer to the palace.
+            let room_type = RoomType::General;
+            match handle
+                .remember(
+                    canonical.content.clone(),
+                    room_type,
+                    canonical.tags.clone(),
+                    canonical.importance,
+                )
+                .await
+            {
+                Ok(canonical_id) => {
+                    canonical_count += 1;
+                    // Record `superseded_by` triples in the KG for every
+                    // original drawer so the provenance chain is preserved.
+                    for &orig_id in &canonical.canonical_for {
+                        let triple_subject = format!("drawer:{orig_id}");
+                        let triple_object = format!("drawer:{canonical_id}");
+                        let triple = crate::memory_core::store::kg::Triple {
+                            subject: triple_subject,
+                            predicate: "superseded_by".to_string(),
+                            object: triple_object,
+                            valid_from: chrono::Utc::now(),
+                            valid_to: None,
+                            confidence: 1.0,
+                            provenance: Some("dream:semantic_consolidation".to_string()),
+                        };
+                        if let Err(e) = handle.kg.assert(triple).await {
+                            tracing::warn!(
+                                orig = %orig_id,
+                                canonical = %canonical_id,
+                                "failed to write superseded_by triple: {e:#}"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        content = &canonical.content[..canonical.content.len().min(80)],
+                        "dream semantic: failed to add canonical drawer: {e:#}"
+                    );
+                }
+            }
+        }
+
+        // Store aliases as KG triples.
+        for (from, to) in &consolidation_result.aliases {
+            let triple = crate::memory_core::store::kg::Triple {
+                subject: from.clone(),
+                predicate: "alias_of".to_string(),
+                object: to.clone(),
+                valid_from: chrono::Utc::now(),
+                valid_to: None,
+                confidence: 1.0,
+                provenance: Some("dream:semantic_consolidation".to_string()),
+            };
+            if let Err(e) = handle.kg.assert(triple).await {
+                tracing::warn!(
+                    from,
+                    to,
+                    "dream semantic: failed to write alias triple: {e:#}"
+                );
+            }
+        }
+
+        // Log flagged contradictions (no auto-resolution).
+        for (id, reason) in &consolidation_result.flagged_ids {
+            tracing::info!(
+                palace = %handle.id,
+                drawer_id = %id,
+                reason,
+                "dream semantic: flagged drawer for human review (contradiction)"
+            );
+        }
+
+        tracing::debug!(
+            palace = %handle.id,
+            canonical_added = canonical_count,
+            aliases = consolidation_result.aliases.len(),
+            flagged = consolidation_result.flagged_ids.len(),
+            llm_calls = consolidation_result.llm_calls,
+            cache_hits = consolidation_result.cache_hits,
+            "semantic consolidation phase complete"
+        );
+
+        (
+            canonical_count,
+            consolidation_result.llm_calls,
+            consolidation_result.cache_hits,
+        )
     }
 }
 
@@ -1331,5 +1584,234 @@ mod tests {
         );
         let surviving: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
         assert_eq!(surviving, vec![keep_id], "good drawer must survive");
+    }
+
+    // ─── Semantic consolidation integration tests ────────────────────────────
+
+    /// Why: The dream cycle's semantic phase must add canonical drawers and
+    /// preserve the originals when a MockInference returns a Merge action.
+    /// What: Injects a MockInference that merges two drawers into one canonical
+    /// summary; runs dream_cycle; asserts the canonical drawer is added and the
+    /// originals are still present (additive-only).
+    /// Test: This test itself.
+    #[tokio::test]
+    async fn dream_cycle_semantic_consolidation_with_mock() {
+        use crate::memory_core::semantic_consolidation::{
+            ConsolidationAction, MockInference, SemanticConsolidationConfig, SemanticConsolidator,
+        };
+
+        let handle = open_test_handle("dream-semantic-mock").await;
+
+        // Plant two drawers with distinct content (so NLP dedup doesn't remove one).
+        let id1 = handle
+            .remember(
+                "ts is the search tool used for code navigation".into(),
+                RoomType::Backend,
+                vec!["ts".into()],
+                0.7,
+            )
+            .await
+            .unwrap();
+        let id2 = handle
+            .remember(
+                "trusty-search provides hybrid BM25 and vector retrieval".into(),
+                RoomType::Backend,
+                vec!["trusty-search".into()],
+                0.6,
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.drawers.read().len(), 2);
+
+        // Configure the mock to merge both into one canonical summary.
+        let canonical_text = "trusty-search (alias: ts) provides hybrid BM25 + vector code search";
+        let actions = vec![ConsolidationAction::Merge {
+            canonical_content: canonical_text.to_string(),
+            superseded_ids: vec![id1, id2],
+        }];
+        let mock = std::sync::Arc::new(MockInference::new(actions));
+        let call_count = mock.call_count.clone();
+        let cfg = SemanticConsolidationConfig {
+            enabled: true,
+            max_batch_size: 8,
+            max_calls_per_cycle: 20,
+            ..Default::default()
+        };
+        let consolidator = std::sync::Arc::new(SemanticConsolidator::new(mock, cfg));
+
+        let dreamer = Dreamer::with_consolidator(
+            DreamConfig {
+                // High dedup threshold so NLP pass doesn't remove the drawers.
+                dedup_threshold: 0.999,
+                semantic: SemanticConsolidationConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+                ..DreamConfig::default()
+            },
+            consolidator,
+        );
+
+        let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+        // One canonical drawer added.
+        assert_eq!(
+            stats.semantically_consolidated, 1,
+            "expected one canonical drawer; got stats={stats:?}"
+        );
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "expected exactly one LLM call"
+        );
+        assert_eq!(stats.semantic_llm_calls, 1);
+
+        // Original drawers still present (additive-only).
+        let drawer_ids: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+        assert!(
+            drawer_ids.contains(&id1),
+            "original drawer 1 must be preserved"
+        );
+        assert!(
+            drawer_ids.contains(&id2),
+            "original drawer 2 must be preserved"
+        );
+
+        // Canonical drawer was added.
+        let has_canonical = handle
+            .drawers
+            .read()
+            .iter()
+            .any(|d| d.content == canonical_text);
+        assert!(has_canonical, "canonical drawer must be present");
+    }
+
+    /// Why: When no inference backend is configured, the semantic phase must
+    /// silently skip without error and the dream cycle must complete normally
+    /// with the same behavior as pre-#87.
+    /// What: Run dream_cycle with default config (no env var, local_model_enabled=false);
+    /// assert semantically_consolidated == 0 and the cycle succeeds.
+    /// Test: This test itself.
+    #[tokio::test]
+    async fn dream_cycle_semantic_consolidation_no_inference() {
+        // Ensure no env key is set for this test.
+        let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
+
+        let handle = open_test_handle("dream-semantic-no-inference").await;
+        handle
+            .remember(
+                "some memory that should not be semantically consolidated".into(),
+                RoomType::General,
+                vec![],
+                0.5,
+            )
+            .await
+            .unwrap();
+
+        let dreamer = Dreamer::new(DreamConfig {
+            semantic: crate::memory_core::semantic_consolidation::SemanticConsolidationConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            local_model_enabled: false,
+            openrouter_api_key: String::new(),
+            ..DreamConfig::default()
+        });
+
+        let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+        assert_eq!(
+            stats.semantically_consolidated, 0,
+            "no inference available → semantic phase must be no-op"
+        );
+        assert_eq!(
+            stats.semantic_llm_calls, 0,
+            "no LLM calls when inference unavailable"
+        );
+        // Palace must be intact.
+        assert_eq!(
+            handle.drawers.read().len(),
+            1,
+            "drawer must survive untouched"
+        );
+    }
+
+    /// Why: When `semantic.enabled = false`, the phase must be skipped even
+    /// if an inference backend is configured, so operators can opt out cheaply.
+    /// What: Supply a consolidator but set enabled=false; assert the consolidator's
+    /// call_count stays at zero after a dream cycle.
+    /// Test: This test itself.
+    #[tokio::test]
+    async fn dream_cycle_semantic_consolidation_disabled_by_config() {
+        use crate::memory_core::semantic_consolidation::{
+            MockInference, SemanticConsolidationConfig, SemanticConsolidator,
+        };
+
+        let handle = open_test_handle("dream-semantic-disabled").await;
+        handle
+            .remember(
+                "this drawer should not be touched by semantic phase".into(),
+                RoomType::General,
+                vec![],
+                0.5,
+            )
+            .await
+            .unwrap();
+
+        let mock = std::sync::Arc::new(MockInference::no_op());
+        let call_count = mock.call_count.clone();
+        let consolidator = std::sync::Arc::new(SemanticConsolidator::new(
+            mock,
+            SemanticConsolidationConfig::default(),
+        ));
+
+        let dreamer = Dreamer::with_consolidator(
+            DreamConfig {
+                semantic: SemanticConsolidationConfig {
+                    enabled: false, // ← disabled
+                    ..Default::default()
+                },
+                ..DreamConfig::default()
+            },
+            consolidator,
+        );
+
+        let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+        assert_eq!(stats.semantically_consolidated, 0);
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "mock must not be called when semantic phase is disabled"
+        );
+    }
+
+    // ─── RAII env-var guard for tests ────────────────────────────────────────
+    //
+    // Safety: test-only; the tokio::test macro with default settings uses the
+    // current-thread runtime so env-var mutation is single-threaded.
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            // Safety: test-only; single-threaded test execution.
+            unsafe { std::env::remove_var(key) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // Safety: test-only; single-threaded test execution.
+            match &self.previous {
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "trusty-common"
-version = "0.6.2"
+version = "0.7.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -107,6 +107,7 @@ genco = { version = "0.19", optional = true }
 # (issue #51) for the one-shot drain of legacy `.usearch` index files.
 # Default builds no longer link the C++ FFI dependency.
 usearch = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
 hnsw_rs = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 r2d2 = { workspace = true, optional = true }
@@ -288,6 +289,8 @@ memory-core = [
     "dep:redb",
     "dep:postcard",
     "dep:petgraph",
+    "dep:sha2",
+    "dep:hex",
     "embedder",
     "embedder-bundled-ort",
 ]

@@ -986,11 +986,7 @@ impl KnowledgeGraph {
                 .write()
                 .map_err(|_| anyhow::anyhow!("kg adjacency lock poisoned"))?;
             if let Some(&s_idx) = adj.node_index.get(&subject) {
-                let to_remove: Vec<_> = adj
-                    .graph
-                    .edges(s_idx)
-                    .map(|e| e.id())
-                    .collect();
+                let to_remove: Vec<_> = adj.graph.edges(s_idx).map(|e| e.id()).collect();
                 for eid in to_remove {
                     adj.graph.remove_edge(eid);
                 }

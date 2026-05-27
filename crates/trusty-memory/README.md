@@ -133,6 +133,67 @@ All 12 tools are exposed via both the MCP protocol (over the
 | `memory_dream` | `palace?` | Run a consolidation cycle (merge near-duplicates, prune, compact). |
 | `memory_status` | — | Global statistics (total drawers, vectors, KG triples). |
 
+## Dream Cycle: Semantic Consolidation (issue #87)
+
+The `memory_dream` tool (and the background idle-dream timer) now includes an
+**inference-backed semantic consolidation phase** after the existing NLP passes
+(dedup, prune, closet-refresh):
+
+### What it does
+
+1. Groups palace drawers into batches of up to 8 (configurable via `DreamConfig`).
+2. Sends each batch to an LLM backend (OpenRouter or local Ollama) with a
+   structured prompt asking for three actions:
+   - **Alias** — two terms refer to the same concept (e.g. `"ts"` → `"trusty-search"`).
+     A `superseded_by` KG triple is written to link the alias to its canonical form.
+   - **Merge** — a cluster of overlapping drawers is collapsed into one canonical
+     drawer. The original drawers are preserved (additive-only policy); a
+     `superseded_by` KG triple is written from each original to the new canonical
+     drawer so lineage is traceable.
+   - **Flag** — a drawer contradicts another and should be reviewed by a human.
+     Flagged drawers are logged at `WARN` level but not deleted.
+3. Each batch response is cached by a SHA-256 key over the drawer IDs + content,
+   so repeated dream cycles do not re-spend LLM tokens on stable content.
+4. A per-cycle call budget (`max_calls_per_cycle`, default 20) prevents runaway
+   LLM spend on large palaces.
+
+### Configuration
+
+Semantic consolidation is enabled when at least one inference backend is available:
+
+| Priority | When used |
+|---|---|
+| OpenRouter | `OPENROUTER_API_KEY` env var is set, or `DreamConfig.openrouter_api_key` is non-empty |
+| Ollama (local) | `DreamConfig.local_model_enabled = true` AND no OpenRouter key is present |
+| Disabled (no-op) | Neither backend is available — the phase is silently skipped |
+
+The consolidation model defaults to `anthropic/claude-haiku-4-5` for low cost.
+Override via `DreamConfig.semantic.model`.
+
+```toml
+# ~/.trusty-memory/config.toml — set these to enable semantic consolidation
+[openrouter]
+api_key = "sk-or-v1-..."   # enables semantic consolidation via OpenRouter  # pragma: allowlist secret
+
+[local_model]
+enabled = false             # set true + unset api_key to use Ollama instead
+base_url = "http://127.0.0.1:11434"
+model = "llama3"
+```
+
+### Testing
+
+All consolidation tests use `MockInference` — no real API calls are made during
+`cargo test`. Live-inference tests are marked `#[ignore]`:
+
+```bash
+# Unit + integration tests (no network)
+cargo test -p trusty-common --features memory-core -- semantic_consolidation
+
+# Live-network tests (requires OPENROUTER_API_KEY)
+cargo test -p trusty-common --features memory-core -- --include-ignored semantic_consolidation
+```
+
 ### Inter-project messaging (issue #99)
 
 | Tool | Arguments | Description |

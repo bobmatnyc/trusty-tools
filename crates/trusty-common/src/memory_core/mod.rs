@@ -23,9 +23,14 @@ pub mod git;
 pub mod palace;
 pub mod registry;
 pub mod retrieval;
+pub mod semantic_consolidation;
 pub mod store;
 
 pub use community::{KnowledgeGap, find_communities};
 pub use palace::{Drawer, DrawerType, Palace, PalaceId, Room, RoomType, Wing};
 pub use registry::PalaceRegistry;
 pub use retrieval::PalaceHandle;
+pub use semantic_consolidation::{
+    ConsolidationAction, ConsolidationResult, MockInference, OllamaInference, OpenRouterInference,
+    SemanticConsolidationConfig, SemanticConsolidator, inference_available,
+};
