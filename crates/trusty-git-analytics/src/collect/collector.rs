@@ -332,7 +332,7 @@ impl CollectionPipeline {
                 .unwrap_or_else(|| path.display().to_string());
 
             info!(repo = %name, "running reachability scan");
-            match scan_and_persist(&path, conn, cfg) {
+            match scan_and_persist(&path, conn, cfg, Some(&name)) {
                 Ok(r) => {
                     info!(
                         repo = %name,

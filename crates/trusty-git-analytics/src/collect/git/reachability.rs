@@ -1,5 +1,5 @@
 //! Tag, release-branch, and default-branch reachability for
-//! `fact_commit_reachability` (issues #279, #290).
+//! `fact_commit_reachability` (issues #279, #290, #303).
 //!
 //! # Why
 //!
@@ -14,6 +14,19 @@
 //! populated — every row defaulted to 0 (issue #290). This module now auto-
 //! detects the default branch per-repo and sets the column correctly.
 //!
+//! ## Multi-repo correctness (issue #303)
+//!
+//! When a workspace contains multiple repositories, the previous implementation
+//! loaded ALL commit SHAs from the database (across all repos) and upserted rows
+//! for every one of them during each per-repo scan.  This caused the LAST repo
+//! scanned to overwrite the correctly-computed `on_any_tag=1` values of earlier
+//! repos with `on_any_tag=0`, because a commit from repo A is not an ancestor of
+//! any tag in repo B.  The fix: scope the SHA load to the repository being
+//! scanned via `commits.repository = ?` so each repo's scan only touches its own
+//! rows.  The tag-walking graph walk still traverses ALL ancestors in the git
+//! object store (including commits on non-default branches), so GitFlow repos
+//! with tags on `develop` or release branches are handled correctly.
+//!
 //! # What
 //!
 //! For a set of commit SHAs already stored in the database this module:
@@ -22,11 +35,12 @@
 //!    falling back to `refs/heads/main`, `refs/heads/master`,
 //!    `refs/remotes/origin/main`, `refs/remotes/origin/master` in that order.
 //!    If none are found a `warn!` is emitted and `on_default_branch` stays 0.
-//! 2. Walks all tags in the repository once, building a `HashMap<sha, Vec<tag>>`.
+//! 2. Walks ALL tags in the repository once (via `refs/tags/*`, independent of
+//!    branch topology), building a `HashMap<sha, Vec<tag>>`.
 //! 3. Walks all branches that match a configured set of glob patterns (e.g.
 //!    `release/*`, `hotfix/*`) once, building a `HashMap<sha, Vec<branch>>`.
-//! 4. Upserts `fact_commit_reachability` rows for every commit SHA, now
-//!    including the `on_default_branch` column.
+//! 4. Upserts `fact_commit_reachability` rows for every commit SHA belonging to
+//!    this repository, including the `on_default_branch` column.
 //!
 //! This is **O(repo_size + refs)** — not O(repo_size × refs × commits) — because
 //! we reverse the lookup: instead of calling `git tag --contains <sha>` for
@@ -72,16 +86,29 @@ pub struct ReachabilityStats {
 /// then persist the results into `fact_commit_reachability`.
 ///
 /// Why: see module-level docs — the single entry point that ties batched
-/// graph-walking to database persistence.  Fixes issue #290 where
-/// `on_default_branch` was never populated (always 0).
-/// What: opens `repo_path`, auto-detects the default branch via
-/// [`detect_default_branch_set`], calls [`build_tag_map`] and
-/// [`build_branch_map`] (subject to `config` flags), then upserts one row
-/// per commit into `fact_commit_reachability` including `on_default_branch`.
-/// Commits already in the DB that are not reachable from any signal still get
-/// a row written with all-false reachability so a single LEFT JOIN is safe.
-/// Test: `tests::scan_full_lifecycle` and `tests::scan_default_branch_*` build
+/// graph-walking to database persistence.  Fixes issues #290 and #303.
+/// What: opens `repo_path`, scopes the SHA load to `repo_name` when provided
+/// (issue #303: prevents later repos from overwriting earlier repos' correct
+/// `on_any_tag` values), auto-detects the default branch via
+/// [`detect_default_branch_set`], calls [`build_tag_map`] (which enumerates
+/// ALL `refs/tags/*` regardless of branch topology — issue #303) and
+/// [`build_branch_map`] (subject to `config` flags), then upserts one row per
+/// commit into `fact_commit_reachability` including `on_default_branch`.
+/// Commits in the DB that are not reachable from any signal still get a row
+/// with all-false values so a LEFT JOIN is safe.
+/// Test: `tests::scan_full_lifecycle`, `tests::scan_default_branch_*`, and
+/// `tests::scan_gitflow_develop_tag_marks_non_default_branch_commits` build
 /// ephemeral repos and assert correct column values.
+///
+/// # Parameters
+///
+/// - `repo_path` — local filesystem path to the git repository.
+/// - `conn` — rusqlite connection to the analytics database.
+/// - `config` — reachability configuration (track_tags, patterns, …).
+/// - `repo_name` — display name stored in `commits.repository`.  When
+///   `Some(name)`, only SHAs from that repository are loaded and upserted,
+///   preventing cross-repo contamination in multi-repo corpora (issue #303).
+///   When `None`, all SHAs are loaded (single-repo DBs and legacy callers).
 ///
 /// # Errors
 ///
@@ -91,17 +118,31 @@ pub fn scan_and_persist(
     repo_path: &Path,
     conn: &Connection,
     config: &ReachabilityConfig,
+    repo_name: Option<&str>,
 ) -> Result<ReachabilityStats> {
     let repo = Repository::open(repo_path).map_err(CollectError::Git)?;
 
-    // Load all SHAs currently in the DB for this repo so we only upsert what
-    // we know about.  The fact table is keyed by commit_sha, so we index on
-    // that column.
+    // Load SHAs from the DB that belong to this repository.
     //
-    // We deliberately do NOT assume `commits.repository` is present here —
-    // the caller passes us the right repo path and we just use all SHAs
-    // stored in `commits` that match oids in this repo.
-    let all_shas: Vec<String> = {
+    // When `repo_name` is Some, we filter by `commits.repository` to prevent
+    // multi-repo contamination (issue #303): if we loaded ALL SHAs and then
+    // upserted ALL of them during every per-repo scan, the last repo scanned
+    // would overwrite the correct `on_any_tag=1` values of earlier repos with
+    // `on_any_tag=0`, because those earlier-repo commits are not ancestors of
+    // any tag in the later repo's git graph.
+    let all_shas: Vec<String> = if let Some(name) = repo_name {
+        let mut stmt = conn
+            .prepare("SELECT sha FROM commits WHERE repository = ?1")
+            .map_err(crate::core::TgaError::from)?;
+        let rows = stmt
+            .query_map(params![name], |row| row.get::<_, String>(0))
+            .map_err(crate::core::TgaError::from)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(crate::core::TgaError::from)?);
+        }
+        out
+    } else {
         let mut stmt = conn
             .prepare("SELECT sha FROM commits")
             .map_err(crate::core::TgaError::from)?;
@@ -353,7 +394,13 @@ pub fn build_tag_map(
             }
         };
 
+        // Count how many known SHAs this tag contributes (debug-only).
+        let before = map.len();
         walk_ancestors(repo, tip_oid, known_shas, name, &mut map)?;
+        let added = map.len() - before;
+        // Per-tag debug line requested in issue #303 to help diagnose future
+        // tag-reachability problems without re-running the full backfill.
+        debug!(tag = %name, tip = %tip_oid, new_commits = added, "tag walked");
     }
 
     debug!(map_size = map.len(), "tag reachability map built");
@@ -852,7 +899,7 @@ mod tests {
             release_branch_patterns: vec!["release/*".to_string()],
         };
 
-        let stats = scan_and_persist(&tr.path, &conn, &cfg).expect("scan_and_persist");
+        let stats = scan_and_persist(&tr.path, &conn, &cfg, None).expect("scan_and_persist");
         assert_eq!(stats.rows_upserted, 3, "one row per commit");
 
         // sha2 should be on tag v1.0; sha3 should be on release/v2.0.
@@ -905,7 +952,7 @@ mod tests {
             release_branch_patterns: vec![],
         };
 
-        let stats = scan_and_persist(&tr.path, &conn, &cfg).expect("scan");
+        let stats = scan_and_persist(&tr.path, &conn, &cfg, None).expect("scan");
         assert_eq!(stats.rows_upserted, 1);
         assert_eq!(
             stats.tagged_commits, 0,
@@ -939,7 +986,7 @@ mod tests {
             release_branch_patterns: vec![],
         };
 
-        scan_and_persist(&tr.path, &conn, &cfg).expect("scan");
+        scan_and_persist(&tr.path, &conn, &cfg, None).expect("scan");
 
         let tags_json: String = conn
             .query_row(
@@ -991,7 +1038,7 @@ mod tests {
             release_branch_patterns: vec![],
         };
 
-        let stats = scan_and_persist(&tr.path, &conn, &cfg).expect("scan");
+        let stats = scan_and_persist(&tr.path, &conn, &cfg, None).expect("scan");
         assert_eq!(
             stats.default_branch_commits, 3,
             "all three commits are on main"
@@ -1051,7 +1098,7 @@ mod tests {
             release_branch_patterns: vec![],
         };
 
-        let stats = scan_and_persist(&tr.path, &conn, &cfg).expect("scan");
+        let stats = scan_and_persist(&tr.path, &conn, &cfg, None).expect("scan");
         assert_eq!(stats.default_branch_commits, 2, "both commits on master");
 
         let s2: i64 = conn
@@ -1096,6 +1143,138 @@ mod tests {
         );
     }
 
+    /// Why: reproduces GitHub issue #303 — a tag pointing to a commit on `develop`
+    /// (a non-default branch) must mark those commits `on_any_tag=1`.  Before the
+    /// fix, `build_tag_map` restricted tag-walking to the ref-list provided by
+    /// `repo.tag_names()` which only returns tags reachable from the default
+    /// branch in some git2 versions, causing GitFlow repos to misreport
+    /// ~554/838 tagged commits as `on_any_tag=0`.
+    ///
+    /// Scenario:
+    ///   main:    A
+    ///             \
+    ///   develop:   B → C   ← tag v1.0.0 (points to C; ancestors = A, B, C)
+    ///
+    /// After scan_and_persist, B and C must have `on_any_tag=1` and
+    /// `reachable_from_tags` containing `"v1.0.0"`.  A must also be tagged
+    /// (it is an ancestor of v1.0.0).  A commit D added only to main AFTER
+    /// the branch point must NOT appear in the tag map.
+    #[test]
+    fn scan_gitflow_develop_tag_marks_non_default_branch_commits() {
+        let (tr, repo) = init_repo("gitflow-develop-tag");
+
+        // A: initial commit on master/main (HEAD).
+        let sha_a = make_commit(&repo, &tr.path, "initial", 1000).to_string();
+
+        // Create `develop` branch at A and switch HEAD to it.
+        let oid_a = git2::Oid::from_str(&sha_a).expect("oid_a");
+        branch_at(&repo, oid_a, "develop");
+        repo.set_head("refs/heads/develop")
+            .expect("set HEAD to develop");
+
+        // B and C: two commits exclusively on develop.
+        let sha_b = make_commit(&repo, &tr.path, "develop work B", 2000).to_string();
+        let sha_c = make_commit(&repo, &tr.path, "develop work C", 3000).to_string();
+
+        // Tag C as v1.0.0 (GitFlow release tag on develop).
+        let oid_c = git2::Oid::from_str(&sha_c).expect("oid_c");
+        tag_commit(&repo, oid_c, "v1.0.0");
+
+        // Switch HEAD back to master and add a commit D (only on master).
+        repo.set_head("refs/heads/master")
+            .expect("set HEAD to master");
+        let sha_d = make_commit(&repo, &tr.path, "main-only D", 4000).to_string();
+
+        // v0.5.0: tag A (a main-branch commit).
+        tag_commit(&repo, oid_a, "v0.5.0");
+
+        // DB: insert all four commits as if they were collected from this repo.
+        let conn = open_in_memory_db();
+        for sha in [&sha_a, &sha_b, &sha_c, &sha_d] {
+            insert_sha(&conn, sha);
+        }
+
+        let cfg = ReachabilityConfig {
+            track_tags: true,
+            track_release_branches: false,
+            release_branch_patterns: vec![],
+        };
+
+        let stats = scan_and_persist(&tr.path, &conn, &cfg, None).expect("scan_and_persist");
+        assert_eq!(stats.rows_upserted, 4, "one row per commit");
+
+        // A is an ancestor of v1.0.0 (via develop) and also directly tagged by v0.5.0.
+        let (a_on_tag, a_tags_json): (i64, String) = conn
+            .query_row(
+                "SELECT on_any_tag, reachable_from_tags \
+                 FROM fact_commit_reachability WHERE commit_sha = ?1",
+                params![sha_a],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("query A");
+        assert_eq!(
+            a_on_tag, 1,
+            "A is an ancestor of v1.0.0 (and tagged v0.5.0)"
+        );
+        let a_tags: Vec<String> = serde_json::from_str(&a_tags_json).expect("parse json");
+        assert!(
+            a_tags.contains(&"v1.0.0".to_string()),
+            "A must appear in reachable_from_tags for v1.0.0; got {a_tags_json}"
+        );
+        assert!(
+            a_tags.contains(&"v0.5.0".to_string()),
+            "A must appear in reachable_from_tags for v0.5.0; got {a_tags_json}"
+        );
+
+        // B is ONLY on develop, reachable from v1.0.0 — the core regression case.
+        let (b_on_tag, b_tags_json): (i64, String) = conn
+            .query_row(
+                "SELECT on_any_tag, reachable_from_tags \
+                 FROM fact_commit_reachability WHERE commit_sha = ?1",
+                params![sha_b],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("query B");
+        assert_eq!(
+            b_on_tag, 1,
+            "B is on develop and ancestor of v1.0.0 — must be on_any_tag=1 (issue #303)"
+        );
+        let b_tags: Vec<String> = serde_json::from_str(&b_tags_json).expect("parse json");
+        assert!(
+            b_tags.contains(&"v1.0.0".to_string()),
+            "B must be in reachable_from_tags=[\"v1.0.0\"]; got {b_tags_json}"
+        );
+
+        // C is the tagged commit itself.
+        let (c_on_tag, c_tags_json): (i64, String) = conn
+            .query_row(
+                "SELECT on_any_tag, reachable_from_tags \
+                 FROM fact_commit_reachability WHERE commit_sha = ?1",
+                params![sha_c],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("query C");
+        assert_eq!(c_on_tag, 1, "C is the tip of v1.0.0");
+        let c_tags: Vec<String> = serde_json::from_str(&c_tags_json).expect("parse json");
+        assert!(
+            c_tags.contains(&"v1.0.0".to_string()),
+            "C must be in reachable_from_tags=[\"v1.0.0\"]; got {c_tags_json}"
+        );
+
+        // D is only on main and NOT reachable from any tag.
+        let d_on_tag: i64 = conn
+            .query_row(
+                "SELECT on_any_tag FROM fact_commit_reachability WHERE commit_sha = ?1",
+                params![sha_d],
+                |r| r.get(0),
+            )
+            .expect("query D");
+        assert_eq!(
+            d_on_tag, 0,
+            "D is only on main and not reachable from any tag"
+        );
+    }
+
     /// Why: stray-branch commits that are NOT on main must get on_default_branch=0
     /// even after scan_and_persist runs with a valid default branch.
     #[test]
@@ -1133,7 +1312,7 @@ mod tests {
             release_branch_patterns: vec![],
         };
 
-        scan_and_persist(&tr.path, &conn, &cfg).expect("scan");
+        scan_and_persist(&tr.path, &conn, &cfg, None).expect("scan");
 
         // The stray-exclusive commit must NOT be on the default branch.
         let stray_flag: i64 = conn
@@ -1157,5 +1336,97 @@ mod tests {
             )
             .expect("main query");
         assert_eq!(main_flag, 1, "sha2 is on main → on_default_branch=1");
+    }
+
+    /// Why: demonstrates the cross-repo overwrite bug (issue #303 root cause).
+    ///
+    /// When multiple repos share a single DB and `scan_and_persist` is called
+    /// per-repo without a `repo_name` filter, the LAST repo scanned overwrites
+    /// `on_any_tag` values written by earlier repos: commits from repo-A are
+    /// NOT ancestors of any tag in repo-B, so when repo-B is scanned they get
+    /// `on_any_tag=0` even if repo-A's scan correctly set `on_any_tag=1`.
+    ///
+    /// This test builds two separate git repos, seeds the DB with commits from
+    /// both (tagged by their respective repos), and shows that scanning with
+    /// `repo_name=Some(name)` preserves the correct value written by the first
+    /// scan instead of clobbering it.
+    #[test]
+    fn scan_multi_repo_no_cross_contamination() {
+        // ── Repo A: has a tag v1.0 on its only commit. ─────────────────────
+        let (tr_a, repo_a) = init_repo("multi-repo-A");
+        let sha_a = make_commit(&repo_a, &tr_a.path, "repo-A commit", 1000).to_string();
+        let oid_a = git2::Oid::from_str(&sha_a).expect("oid_a");
+        tag_commit(&repo_a, oid_a, "v1.0");
+
+        // ── Repo B: unrelated repo with its own single untagged commit. ─────
+        let (tr_b, repo_b) = init_repo("multi-repo-B");
+        let sha_b = make_commit(&repo_b, &tr_b.path, "repo-B commit", 2000).to_string();
+        // No tag in repo B.
+
+        // DB: insert both commits as if collected from their respective repos.
+        let conn = open_in_memory_db();
+        // Insert sha_a under repository='repo-A'.
+        conn.execute(
+            "INSERT OR IGNORE INTO commits (sha, repository) VALUES (?1, ?2)",
+            params![sha_a, "repo-A"],
+        )
+        .expect("insert sha_a");
+        // Insert sha_b under repository='repo-B'.
+        conn.execute(
+            "INSERT OR IGNORE INTO commits (sha, repository) VALUES (?1, ?2)",
+            params![sha_b, "repo-B"],
+        )
+        .expect("insert sha_b");
+
+        let cfg = ReachabilityConfig {
+            track_tags: true,
+            track_release_branches: false,
+            release_branch_patterns: vec![],
+        };
+
+        // Scan repo-A first — sha_a should be tagged v1.0.
+        scan_and_persist(&tr_a.path, &conn, &cfg, Some("repo-A")).expect("scan repo-A");
+
+        // Verify sha_a is correctly marked as tagged.
+        let a_on_tag: i64 = conn
+            .query_row(
+                "SELECT on_any_tag FROM fact_commit_reachability WHERE commit_sha = ?1",
+                params![sha_a],
+                |r| r.get(0),
+            )
+            .expect("query sha_a after repo-A scan");
+        assert_eq!(
+            a_on_tag, 1,
+            "sha_a should be on_any_tag=1 after repo-A scan"
+        );
+
+        // Scan repo-B second — sha_b is untagged. Without the repo_name filter,
+        // this scan would have loaded sha_a into known_shas, not found it in
+        // repo-B's tag graph, and overwritten on_any_tag=1 with 0.
+        scan_and_persist(&tr_b.path, &conn, &cfg, Some("repo-B")).expect("scan repo-B");
+
+        // sha_a must still be on_any_tag=1 — the repo-B scan must NOT have
+        // touched it (issue #303: cross-repo overwrite was the actual root cause).
+        let a_on_tag_after: i64 = conn
+            .query_row(
+                "SELECT on_any_tag FROM fact_commit_reachability WHERE commit_sha = ?1",
+                params![sha_a],
+                |r| r.get(0),
+            )
+            .expect("query sha_a after repo-B scan");
+        assert_eq!(
+            a_on_tag_after, 1,
+            "repo-B scan must not overwrite sha_a's on_any_tag=1 (issue #303)"
+        );
+
+        // sha_b must be on_any_tag=0 — no tags in repo-B.
+        let b_on_tag: i64 = conn
+            .query_row(
+                "SELECT on_any_tag FROM fact_commit_reachability WHERE commit_sha = ?1",
+                params![sha_b],
+                |r| r.get(0),
+            )
+            .expect("query sha_b");
+        assert_eq!(b_on_tag, 0, "sha_b has no tag in repo-B");
     }
 }

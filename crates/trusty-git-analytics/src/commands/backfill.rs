@@ -143,7 +143,7 @@ fn backfill_reachability(
         total_repos += 1;
         tracing::info!(repo = %name, "backfill reachability scan");
 
-        match scan_and_persist(&path, conn, reach_cfg) {
+        match scan_and_persist(&path, conn, reach_cfg, Some(&name)) {
             Ok(stats) => {
                 println!(
                     "  {name}: {} rows upserted \
