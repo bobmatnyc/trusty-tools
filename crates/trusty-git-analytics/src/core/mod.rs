@@ -12,6 +12,7 @@
 
 pub mod config;
 pub mod db;
+pub mod effort;
 pub mod errors;
 pub mod models;
 

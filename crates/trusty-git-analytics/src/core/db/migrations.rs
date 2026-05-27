@@ -101,6 +101,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "tag_release_branch_reachability",
         sql: include_str!("sql/0015_tag_release_branch_reachability.sql"),
     },
+    Migration {
+        version: 16,
+        name: "fact_commit_effort",
+        sql: include_str!("sql/0016_fact_commit_effort.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

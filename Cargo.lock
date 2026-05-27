@@ -9812,7 +9812,7 @@ dependencies = [
 
 [[package]]
 name = "tga"
-version = "1.4.2"
+version = "1.5.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -10945,7 +10945,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.13.1"
+version = "0.13.2"
 dependencies = [
  "anyhow",
  "async-trait",
