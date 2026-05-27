@@ -139,7 +139,19 @@ pub fn check_model_cache() -> CheckResult {
 }
 
 /// Return the per-user data directory path.
+///
+/// Why: doctor subcommands need a data-dir path independent of the typed
+/// `DaemonError` return from `daemon_dir()`. Honouring `TRUSTY_DATA_DIR`
+/// here ensures `trusty-search doctor` inspects the same directory as the
+/// running daemon when an isolated data dir is active (issue #281).
+/// What: returns `$TRUSTY_DATA_DIR` when set, otherwise the platform-default
+/// `<data_local_dir>/trusty-search`.
+/// Test: set `TRUSTY_DATA_DIR=/tmp/ts-x`; assert `doctor_data_dir()` returns
+/// `PathBuf::from("/tmp/ts-x")`.
 pub fn doctor_data_dir() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("TRUSTY_DATA_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
     dirs::data_local_dir()
         .map(|d| d.join("trusty-search"))
         .unwrap_or_else(|| std::path::PathBuf::from("~/.local/share/trusty-search"))

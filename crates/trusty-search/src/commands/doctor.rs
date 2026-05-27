@@ -55,10 +55,15 @@ pub async fn handle_doctor(fix: bool) -> Result<()> {
 async fn apply_fixes(checks: &[CheckResult], empty_indexes: &[EmptyIndex]) {
     let mut fixed_any = false;
 
-    // Fix 1: Stale lock file.
-    let data_dir = dirs::data_local_dir()
-        .map(|d| d.join("trusty-search"))
-        .unwrap_or_else(|| std::path::PathBuf::from("~/.local/share/trusty-search"));
+    // Fix 1: Stale lock file. Honour TRUSTY_DATA_DIR so doctor targets the
+    // correct daemon when an isolated data dir is active (issue #281).
+    let data_dir = if let Ok(dir) = std::env::var("TRUSTY_DATA_DIR") {
+        std::path::PathBuf::from(dir)
+    } else {
+        dirs::data_local_dir()
+            .map(|d| d.join("trusty-search"))
+            .unwrap_or_else(|| std::path::PathBuf::from("~/.local/share/trusty-search"))
+    };
     let lock_path = data_dir.join("daemon.lock");
     if lock_path.exists() {
         let pid_opt = std::fs::read_to_string(&lock_path)

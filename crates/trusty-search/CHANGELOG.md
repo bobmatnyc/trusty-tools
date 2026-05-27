@@ -90,6 +90,39 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.14.0] — 2026-05-27
+
+### Added
+
+- **`--data-dir <PATH>` flag on `trusty-search start`** (with `TRUSTY_DATA_DIR` env
+  var) — overrides the platform default data directory for redb index storage,
+  PID/port lockfiles, and `indexes.toml`. Enables multiple isolated daemon
+  instances on the same machine; each instance gets its own data dir, binds its
+  own port, and has no knowledge of the others.
+
+  This flag was the key enabler for the Stage-1 cert methodology (issue #281):
+  launching a fresh isolated daemon with `--data-dir /tmp/ts-stage1-cert` and
+  a `HOME` override to suppress auto-discovery let us measure a clean reindex
+  against a known-empty data dir without touching the production daemon on 7878.
+
+  ```bash
+  # Launch isolated cert daemon on a different port with its own data dir
+  HOME=/tmp/ts-cert-home RUST_LOG=info trusty-search start \
+      --data-dir /tmp/ts-stage1-cert \
+      --port 7980 \
+      --foreground
+  ```
+
+  The env var form is convenient for CI and container deployments:
+  ```bash
+  TRUSTY_DATA_DIR=/ci/search-data trusty-search start
+  ```
+
+  See `docs/trusty-search/regression-testing/v0.14.0-stage1-cert-2026-05-27.md`
+  for the Stage-1 certification run that motivated this feature (issue #281).
+
+---
+
 ## [0.12.1] — 2026-05-26
 
 ### Changed

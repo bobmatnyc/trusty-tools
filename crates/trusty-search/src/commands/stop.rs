@@ -20,7 +20,13 @@ pub async fn handle_stop() -> Result<()> {
     // (see trusty-search-service/src/daemon.rs). Read the PID, send
     // SIGTERM, then poll for the port file to disappear as a signal
     // that shutdown completed cleanly.
-    let lock_path = dirs::data_local_dir().map(|d| d.join("trusty-search").join("daemon.lock"));
+    // Resolve lock path via the same override logic as daemon_dir() so that
+    // `stop` targets the correct daemon when TRUSTY_DATA_DIR is set (issue #281).
+    let lock_path = if let Ok(dir) = std::env::var("TRUSTY_DATA_DIR") {
+        Some(std::path::PathBuf::from(dir).join("daemon.lock"))
+    } else {
+        dirs::data_local_dir().map(|d| d.join("trusty-search").join("daemon.lock"))
+    };
     let port_path = daemon_port_path();
 
     let primary_pid = lock_path

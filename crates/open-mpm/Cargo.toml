@@ -44,7 +44,7 @@ trusty-common = { workspace = true, features = ["mcp", "symgraph-parser", "memor
 #      compile the trusty-memory HTTP daemon code paths just to pick up a
 #      zero-sized service descriptor.
 trusty-memory = { path = "../trusty-memory", version = "0.8.0", default-features = false }
-trusty-search = { path = "../trusty-search", version = "0.13.0" }
+trusty-search = { path = "../trusty-search", version = "0.14.0" }
 tokio = { version = "1", features = ["full"] }
 async-openai = "0.30"
 serde = { version = "1", features = ["derive"] }

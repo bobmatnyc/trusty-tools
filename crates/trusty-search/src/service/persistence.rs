@@ -163,12 +163,21 @@ pub struct IndexRegistryFile {
 /// persistence files share one parent on every platform.
 ///
 /// Why: `daemon_dir` lives behind a typed `DaemonError` and is private. We
-/// duplicate the `data_local_dir().join("trusty-search")` lookup here so this
-/// module doesn't take a `DaemonError` dependency just to read its path.
-/// What: returns `<data_local_dir>/trusty-search`. Creates the directory if
-/// missing.
-/// Test: `tests::data_dir_creates_parent` constructs and asserts the dir exists.
+/// duplicate the lookup here so this module doesn't take a `DaemonError`
+/// dependency just to read its path. When `TRUSTY_DATA_DIR` is set (by
+/// `--data-dir` or directly), we honour that override so isolated daemons (e.g.
+/// cert/benchmark runs) store their registry and per-index data in the same
+/// override directory as the daemon lockfile (issue #281).
+/// What: returns `$TRUSTY_DATA_DIR` when set, otherwise
+/// `<data_local_dir>/trusty-search`. Creates the directory if missing.
+/// Test: set `TRUSTY_DATA_DIR=/tmp/ts-test`; call `data_dir()`; assert the
+/// returned path equals `/tmp/ts-test` and `indexes.toml` is created there.
 pub fn data_dir() -> Result<PathBuf> {
+    if let Ok(override_dir) = std::env::var("TRUSTY_DATA_DIR") {
+        let dir = PathBuf::from(override_dir);
+        std::fs::create_dir_all(&dir).context("create TRUSTY_DATA_DIR data dir")?;
+        return Ok(dir);
+    }
     let dir = dirs::data_local_dir()
         .context("could not determine data-local directory")?
         .join("trusty-search");
@@ -701,5 +710,34 @@ root_path = "/tmp/legacy"
         }
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].root_path, PathBuf::from("/new"));
+    }
+
+    /// Why: `data_dir()` must return the override path when `TRUSTY_DATA_DIR`
+    /// is set, so an isolated daemon's `indexes.toml` lands in the override dir
+    /// rather than the platform default (issue #281).
+    /// What: set env var to a tempdir; call `data_dir()`; assert the returned
+    /// path matches the override and the directory exists.
+    /// Test: `data_dir_respects_trusty_data_dir_env_var` (this test).
+    #[test]
+    fn data_dir_respects_trusty_data_dir_env_var() {
+        let tmp = tempfile::tempdir().unwrap();
+        let override_path = tmp.path().to_path_buf();
+        // SAFETY: test-only; TRUSTY_DATA_DIR must not conflict with other
+        // parallel tests that call data_dir(). Use a unique subdir to isolate.
+        let unique = override_path.join("persistence_data_dir_test");
+        std::fs::create_dir_all(&unique).unwrap();
+        unsafe {
+            std::env::set_var("TRUSTY_DATA_DIR", &unique);
+        }
+        let result = data_dir();
+        unsafe {
+            std::env::remove_var("TRUSTY_DATA_DIR");
+        }
+        let dir = result.expect("data_dir with TRUSTY_DATA_DIR must succeed");
+        assert_eq!(dir, unique, "data_dir() should return the override path");
+        assert!(
+            dir.exists(),
+            "data_dir() should ensure the directory exists"
+        );
     }
 }

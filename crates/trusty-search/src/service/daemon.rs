@@ -71,12 +71,14 @@ pub fn daemon_port_path() -> Result<PathBuf, DaemonError> {
 /// Why: launchd re-spawns the daemon without the operator's shell environment,
 /// causing `TRUSTY_MEMORY_LIMIT_MB` and friends to be lost after a restart.
 /// Writing them to a file at `start`-time lets the daemon re-apply them on
-/// every boot, regardless of how it was launched.
-/// What: returns `<data_local_dir>/trusty-search/daemon.env`.
+/// every boot, regardless of how it was launched. When `TRUSTY_DATA_DIR` is
+/// set the file lands in that directory so isolated daemons keep their own
+/// env snapshot distinct from the production daemon.
+/// What: returns `<daemon_dir>/daemon.env` (respecting `TRUSTY_DATA_DIR`).
 /// Test: path ends in `daemon.env`; the parent directory is the same as the
 /// lockfile directory so both are writable under the same permission set.
 pub fn daemon_env_path() -> Option<PathBuf> {
-    dirs::data_local_dir().map(|d| d.join("trusty-search").join("daemon.env"))
+    daemon_dir().ok().map(|d| d.join("daemon.env"))
 }
 
 /// The env-var keys that `trusty-search start` persists and the daemon sources
@@ -193,7 +195,28 @@ pub fn http_addr_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".trusty-search").join("http_addr"))
 }
 
+/// Resolve the root data directory for this daemon instance.
+///
+/// Why: `dirs::data_local_dir()` calls macOS NSFileManager and ignores HOME
+/// overrides, which means only one daemon can run per Mac (issue #281). When
+/// `TRUSTY_DATA_DIR` is set (by `--data-dir` or directly in the environment),
+/// we use that path instead so isolated daemons (e.g. cert/benchmark runs) can
+/// coexist with the production daemon.
+///
+/// What: returns `$TRUSTY_DATA_DIR` when set, otherwise
+/// `<data_local_dir>/trusty-search`. Creates the directory if absent.
+///
+/// Test: set `TRUSTY_DATA_DIR=/tmp/ts-test` before calling; assert the returned
+/// path equals `/tmp/ts-test` and the directory exists.
 fn daemon_dir() -> Result<PathBuf, DaemonError> {
+    // TRUSTY_DATA_DIR wins over the platform default so callers can run
+    // isolated daemons for cert/benchmark work without conflicting with the
+    // production lockfile (issue #281).
+    if let Ok(override_dir) = std::env::var("TRUSTY_DATA_DIR") {
+        let dir = PathBuf::from(override_dir);
+        std::fs::create_dir_all(&dir)?;
+        return Ok(dir);
+    }
     // NB: We use `data_local_dir()` (not the shared `trusty_common::resolve_data_dir`
     // which uses `data_dir()`) because the lockfile path is replicated in `main.rs`
     // (`Stop`, `daemon_port_path`) against `data_local_dir()`. They must agree;
@@ -674,5 +697,56 @@ mod tests {
         // Note: port 0 is special — the shared helper delegates to the OS.
         let l = bind_with_auto_port(0, 1).await.unwrap();
         assert!(l.local_addr().unwrap().port() > 0);
+    }
+
+    /// Why: `daemon_dir()` must respect `TRUSTY_DATA_DIR` so an isolated daemon
+    /// can run alongside the production daemon without lockfile conflicts (#281).
+    /// What: set env var to a tempdir path; assert `daemon_dir()` returns it.
+    /// Test: `daemon_dir_respects_trusty_data_dir_env_var` (this test).
+    #[test]
+    fn daemon_dir_respects_trusty_data_dir_env_var() {
+        let tmp = tempfile::tempdir().unwrap();
+        let override_path = tmp.path().to_path_buf();
+        // SAFETY: test-only, single-threaded portion; no other thread reads
+        // TRUSTY_DATA_DIR in this test binary at the same time.
+        unsafe {
+            std::env::set_var("TRUSTY_DATA_DIR", &override_path);
+        }
+        let result = daemon_dir();
+        unsafe {
+            std::env::remove_var("TRUSTY_DATA_DIR");
+        }
+        let dir = result.expect("daemon_dir with TRUSTY_DATA_DIR should succeed");
+        assert_eq!(dir, override_path, "daemon_dir should return the override");
+        assert!(dir.exists(), "daemon_dir should create the directory");
+    }
+
+    /// Why: `daemon_lock_path()` and `daemon_port_path()` (service side) must
+    /// land under the override directory, not the platform default.
+    /// What: set env var, call both path functions, confirm they start with the
+    /// override root rather than the default data-local dir.
+    /// Test: `daemon_paths_under_data_dir_override` (this test).
+    #[test]
+    fn daemon_paths_under_data_dir_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let override_path = tmp.path().to_path_buf();
+        unsafe {
+            std::env::set_var("TRUSTY_DATA_DIR", &override_path);
+        }
+        let lock = daemon_lock_path();
+        let port = daemon_port_path();
+        unsafe {
+            std::env::remove_var("TRUSTY_DATA_DIR");
+        }
+        let lock = lock.expect("lock path must resolve");
+        let port = port.expect("port path must resolve");
+        assert!(
+            lock.starts_with(&override_path),
+            "lock path {lock:?} should be under override {override_path:?}"
+        );
+        assert!(
+            port.starts_with(&override_path),
+            "port path {port:?} should be under override {override_path:?}"
+        );
     }
 }

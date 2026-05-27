@@ -179,6 +179,42 @@ Once connected, Claude Code can call `search_code`, `index_file`, `list_indexes`
 > The `complexity_hotspots`, `smells`, and `quality` HTTP endpoints are not served
 > from this binary as of v0.2.0.
 
+## Stage 1 IS a daemonized ripgrep
+
+A `lexical_only` index skips embedding entirely. You get BM25 ranking plus
+grep-speed pattern matching via a persistent HTTP daemon — no ONNX, no GPU,
+no model download.
+
+**Certified performance on a 1,155-file Rust workspace (trusty-tools, May 2026):**
+
+| Metric | Value |
+|--------|-------|
+| Reindex time | 5.3 s (5,289 ms) |
+| Throughput | 4,445 chunks/sec |
+| Peak daemon RSS | 698 MB |
+| `/grep` P50 latency | 8 ms (vs ripgrep 9 ms — parity) |
+
+Full measurement details: [`docs/trusty-search/regression-testing/v0.14.0-stage1-cert-2026-05-27.md`](../../docs/trusty-search/regression-testing/v0.14.0-stage1-cert-2026-05-27.md)
+
+**When to use lexical-only**: when you want a daemonized BM25 + ripgrep with
+HTTP/MCP integration but do not need semantic similarity queries. Reindex is
+63× faster than a full hybrid reindex (no embedding), and the daemon fits
+comfortably in 700 MB.
+
+**How to enable** — pass `lexical_only: true` in the index create payload:
+
+```bash
+curl -s -X POST http://127.0.0.1:7878/indexes \
+    -H 'Content-Type: application/json' \
+    -d '{"id":"myproject","root_path":"/path/to/project","lexical_only":true}'
+```
+
+Or use the `--lexical-only` flag with the CLI:
+
+```bash
+trusty-search index /path/to/project --name myproject --lexical-only
+```
+
 ## Memory tiers (auto-tuned at startup)
 
 `MEMORY_LIMIT_MB` is computed dynamically as **25% of detected system RAM, clamped to 1–64 GB**. It is not a fixed tier value. The env var `TRUSTY_MEMORY_LIMIT_MB` overrides it. All other limits below are tier-based.
@@ -233,6 +269,9 @@ trigger chunk's RRF score.
 
 ```bash
 trusty-search start                                  # start HTTP daemon (background)
+trusty-search start --data-dir <PATH>                # start with custom data dir (TRUSTY_DATA_DIR)
+                                                     # enables isolated daemon instances; each instance
+                                                     # gets its own data dir, port, and index registry
 trusty-search stop                                   # stop daemon (SIGTERM via PID lockfile)
 trusty-search index [path] [--name <id>] [--force]   # register + index (primary command)
                                                      # auto-detects ./trusty-search.yaml

@@ -1,6 +1,6 @@
 //! Handler for `trusty-search start` — boots the HTTP daemon.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use colored::Colorize;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU32;
@@ -658,10 +658,59 @@ fn tune_batch_size_for_provider(provider: trusty_common::embedder::ExecutionProv
 /// moved to trusty-analyzer (issue #40).
 /// What: probes the lockfile fast-path, then constructs `SearchAppState` and
 /// hands off to `run_daemon`. Maps `DaemonError::AlreadyRunning` to a friendly
-/// exit-1 message.
+/// exit-1 message. When `data_dir` is `Some`, the override is stamped into
+/// `TRUSTY_DATA_DIR` before any path resolution so every callsite of
+/// `daemon_dir()` / `data_dir()` in the child process sees the same root.
 /// Test: run twice in a row — the second invocation must exit 1 with the
-/// "another daemon is already running" message.
-pub async fn handle_start(port: u16, foreground: bool, device: &str, verbose: bool) -> Result<()> {
+/// "another daemon is already running" message. Run with `--data-dir /tmp/ts-x`
+/// and confirm the lockfile lands in `/tmp/ts-x/daemon.lock`.
+pub async fn handle_start(
+    port: u16,
+    foreground: bool,
+    device: &str,
+    data_dir: Option<&std::path::Path>,
+    verbose: bool,
+) -> Result<()> {
+    // Apply the --data-dir override as early as possible — before the
+    // background self-spawn path so the spawned child inherits the env var.
+    // Precedence: TRUSTY_DATA_DIR (env) > --data-dir (flag). Both code paths
+    // (foreground + background) must see the same root so lockfile probes agree.
+    //
+    // SAFETY: invoked on the main thread before tokio spawns any workers.
+    // Same invariant as the TRUSTY_DEVICE set_var below.
+    if std::env::var_os("TRUSTY_DATA_DIR").is_none() {
+        if let Some(dir) = data_dir {
+            let dir = dir.to_path_buf();
+            // Reject relative paths — a relative data-dir would resolve
+            // differently depending on CWD, breaking daemon re-discovery.
+            anyhow::ensure!(
+                dir.is_absolute(),
+                "--data-dir must be an absolute path (got: {})",
+                dir.display()
+            );
+            // Create the directory now so the child daemon can acquire its
+            // lockfile immediately on first start, and so we can give the
+            // operator a clear error (permission denied) rather than a cryptic
+            // lockfile-creation failure later.
+            std::fs::create_dir_all(&dir)
+                .with_context(|| format!("create --data-dir directory: {}", dir.display()))?;
+            if std::fs::read_dir(&dir)
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(false)
+            {
+                tracing::warn!(
+                    "--data-dir {} is empty (no existing indexes); daemon will start fresh",
+                    dir.display()
+                );
+            }
+            // SAFETY: single-threaded at this point (before tokio workers).
+            unsafe {
+                std::env::set_var("TRUSTY_DATA_DIR", &dir);
+            }
+            tracing::info!("data-dir override: {}", dir.display());
+        }
+    }
+
     // Background self-spawn path: when invoked without `--foreground`, fork a
     // detached copy of ourselves with `--foreground` and return immediately.
     //
@@ -696,6 +745,9 @@ pub async fn handle_start(port: u16, foreground: bool, device: &str, verbose: bo
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
+        // Propagate the data-dir override into the child via env var. Since we
+        // already stamped TRUSTY_DATA_DIR above, the child will inherit it
+        // through the process environment — no extra CLI arg needed.
         let child = cmd
             .spawn()
             .map_err(|e| anyhow::anyhow!("could not spawn detached daemon: {e}"))?;

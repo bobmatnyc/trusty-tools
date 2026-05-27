@@ -132,8 +132,21 @@ pub fn mcp_http_addr_path() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".trusty-search").join("mcp_http_addr"))
 }
 
-/// Path to `~/.local/share/trusty-search/daemon.port` (or platform equivalent).
+/// Path to the daemon port file (`daemon.port` under the resolved data dir).
+///
+/// Why: the port file records which TCP port the running daemon bound, so CLI
+/// subcommands (`status`, `index`, `query`) can discover the daemon without
+/// configuration. When `TRUSTY_DATA_DIR` is set (by `--data-dir` or the env
+/// var), the port file lives in that directory so an isolated test/cert daemon
+/// does not collide with the production daemon's port file (issue #281).
+/// What: returns `$TRUSTY_DATA_DIR/daemon.port` when the env var is set,
+/// otherwise `<data_local_dir>/trusty-search/daemon.port`.
+/// Test: set `TRUSTY_DATA_DIR=/tmp/ts-x`; assert path equals
+/// `/tmp/ts-x/daemon.port`.
 pub fn daemon_port_path() -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("TRUSTY_DATA_DIR") {
+        return Some(std::path::PathBuf::from(dir).join("daemon.port"));
+    }
     dirs::data_local_dir().map(|d| d.join("trusty-search").join("daemon.port"))
 }
 

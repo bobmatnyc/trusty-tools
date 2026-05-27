@@ -363,6 +363,7 @@ enum Commands {
     ///   trusty-search start
     ///   trusty-search start --port 7878
     ///   trusty-search start --foreground --port 7878   # launchd / systemd
+    ///   trusty-search start --data-dir /tmp/test-daemon  # isolated data dir
     #[command(display_order = 20)]
     Start {
         /// Port to listen on (default: 7878, auto-selects next if busy)
@@ -394,6 +395,19 @@ enum Commands {
         /// default.
         #[arg(long, value_parser = ["auto", "cpu", "gpu"], default_value = "auto")]
         device: String,
+
+        /// Override the data directory used by the daemon (lockfile, port file,
+        /// indexes.toml, per-index data).
+        ///
+        /// Equivalent to setting `TRUSTY_DATA_DIR` in the environment.
+        /// `TRUSTY_DATA_DIR` takes precedence over this flag when both are set.
+        /// The directory is created automatically if it does not exist.
+        ///
+        /// Use this to run an isolated daemon (e.g. for cert/benchmark work)
+        /// alongside the production daemon without lockfile conflicts:
+        ///   trusty-search start --data-dir /tmp/ts-cert --port 7879
+        #[arg(long, env = "TRUSTY_DATA_DIR")]
+        data_dir: Option<std::path::PathBuf>,
     },
 
     /// Stop the running background daemon
@@ -894,8 +908,16 @@ async fn run() -> Result<()> {
             port,
             foreground,
             device,
+            data_dir,
         } => {
-            commands::start::handle_start(port, foreground, &device, cli.verbose).await?;
+            commands::start::handle_start(
+                port,
+                foreground,
+                &device,
+                data_dir.as_deref(),
+                cli.verbose,
+            )
+            .await?;
         }
 
         Commands::Stop => {
