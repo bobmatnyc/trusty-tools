@@ -71,7 +71,11 @@ pub fn extract_jira_keys(message: &str) -> Vec<String> {
             // offset into `message`; indexing into `message.as_bytes()` is
             // safe because the regex only matches ASCII characters.
             let end = key.end();
-            if message.as_bytes().get(end).is_some_and(|b| b.is_ascii_digit()) {
+            if message
+                .as_bytes()
+                .get(end)
+                .is_some_and(|b| b.is_ascii_digit())
+            {
                 continue;
             }
             let k = key.as_str().to_string();
@@ -356,7 +360,11 @@ mod tests {
         // The bug: "followed by 5" contains a lone digit; without the
         // post-filter, the regex matched "UIARCH-32885" (consuming the 5).
         let keys = extract_jira_keys("per UIARCH-3288 followed by 5");
-        assert_eq!(keys, vec!["UIARCH-3288"], "must not over-consume the trailing ' 5'");
+        assert_eq!(
+            keys,
+            vec!["UIARCH-3288"],
+            "must not over-consume the trailing ' 5'"
+        );
 
         // Adjacent digit run separated by a hyphen is fine (two distinct keys).
         let keys2 = extract_jira_keys("PROJ-123 and PROJ-456");

@@ -135,15 +135,14 @@ fn build_request(name: &str, args: &Value) -> anyhow::Result<(reqwest::Method, S
     // Validate `id` up-front so arms that use it receive a plain `&str`.
     // This removes the need for any `Option::expect` at each call site and
     // makes the validation visible in one place rather than three.
-    let id: Option<&str> = if ep.needs_id {
-        Some(
-            args.get("id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("granola {name}: missing required string arg 'id'"))?,
-        )
-    } else {
-        None
-    };
+    let id: Option<&str> =
+        if ep.needs_id {
+            Some(args.get("id").and_then(Value::as_str).ok_or_else(|| {
+                anyhow::anyhow!("granola {name}: missing required string arg 'id'")
+            })?)
+        } else {
+            None
+        };
 
     let url = match name {
         "granola_list" => format!("{GRANOLA_API_BASE}/documents"),
