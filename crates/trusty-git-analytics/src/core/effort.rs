@@ -14,14 +14,14 @@
 //!
 //! Coefficients:  α=1.0, β=1.5, γ=0.0 (deferred), δ=1.0
 //!
-//! T-shirt thresholds:
-//! | Size | Score |
-//! |------|-------|
-//! | XS   | ≤ 4   |
-//! | S    | (4,7]  |
-//! | M    | (7,10] |
-//! | L    | (10,14]|
-//! | XL   | > 14  |
+//! T-shirt thresholds (calibrated against 99 trusty-tools commits; see PR #308):
+//! | Size | Score   |
+//! |------|---------|
+//! | XS   | ≤ 6     |
+//! | S    | (6,10]  |
+//! | M    | (10,14] |
+//! | L    | (14,18] |
+//! | XL   | > 18    |
 //!
 //! # Test-LoC detection (path globs, case-insensitive)
 //!
@@ -43,11 +43,14 @@ const ALPHA: f64 = 1.0; // LoC weight
 const BETA: f64 = 1.5; // file-count weight
 const DELTA: f64 = 1.0; // tests-factor weight
 
-/// T-shirt size boundaries.
-const THRESHOLD_XS: f64 = 4.0;
-const THRESHOLD_S: f64 = 7.0;
-const THRESHOLD_M: f64 = 10.0;
-const THRESHOLD_L: f64 = 14.0;
+/// T-shirt size boundaries (calibrated against 99 trusty-tools commits; see PR #308).
+///
+/// These must be kept in sync with the identical constants in
+/// `scripts/compute-effort.sh` (`XS_MAX`, `S_MAX`, `M_MAX`, `L_MAX`).
+const THRESHOLD_XS: f64 = 6.0;
+const THRESHOLD_S: f64 = 10.0;
+const THRESHOLD_M: f64 = 14.0;
+const THRESHOLD_L: f64 = 18.0;
 
 /// T-shirt effort size.
 ///
@@ -57,15 +60,15 @@ const THRESHOLD_L: f64 = 14.0;
 /// Test: [`EffortResult::size_label`] and [`size_for_score`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffortSize {
-    /// Extra-small: score ≤ 4.0
+    /// Extra-small: score ≤ 6.0
     Xs,
-    /// Small: 4.0 < score ≤ 7.0
+    /// Small: 6.0 < score ≤ 10.0
     S,
-    /// Medium: 7.0 < score ≤ 10.0
+    /// Medium: 10.0 < score ≤ 14.0
     M,
-    /// Large: 10.0 < score ≤ 14.0
+    /// Large: 14.0 < score ≤ 18.0
     L,
-    /// Extra-large: score > 14.0
+    /// Extra-large: score > 18.0
     Xl,
 }
 
@@ -125,7 +128,7 @@ impl EffortResult {
 ///
 /// Why: the bash script uses the same thresholds; keeping them in one place
 /// makes it trivial to verify parity.
-/// What: `score ≤ 4 → XS`, `(4,7] → S`, `(7,10] → M`, `(10,14] → L`, `>14 → XL`.
+/// What: `score ≤ 6 → XS`, `(6,10] → S`, `(10,14] → M`, `(14,18] → L`, `>18 → XL`.
 /// Test: [`tests::thresholds_match_spec`].
 pub fn size_for_score(score: f64) -> EffortSize {
     if score <= THRESHOLD_XS {
@@ -271,20 +274,20 @@ mod tests {
         assert_eq!(EffortSize::Xl.label(), "XL");
     }
 
-    /// Why: the threshold boundaries must match the spec exactly.
-    /// What: probes at the boundary values.
+    /// Why: the threshold boundaries must match the spec exactly (PR #308 calibration).
+    /// What: probes at and immediately above each boundary value.
     /// Test: this test itself.
     #[test]
     fn thresholds_match_spec() {
         // Exact boundaries are inclusive at the upper bound.
-        assert_eq!(size_for_score(4.0), EffortSize::Xs);
-        assert_eq!(size_for_score(4.01), EffortSize::S);
-        assert_eq!(size_for_score(7.0), EffortSize::S);
-        assert_eq!(size_for_score(7.01), EffortSize::M);
-        assert_eq!(size_for_score(10.0), EffortSize::M);
-        assert_eq!(size_for_score(10.01), EffortSize::L);
-        assert_eq!(size_for_score(14.0), EffortSize::L);
-        assert_eq!(size_for_score(14.01), EffortSize::Xl);
+        assert_eq!(size_for_score(6.0), EffortSize::Xs);
+        assert_eq!(size_for_score(6.01), EffortSize::S);
+        assert_eq!(size_for_score(10.0), EffortSize::S);
+        assert_eq!(size_for_score(10.01), EffortSize::M);
+        assert_eq!(size_for_score(14.0), EffortSize::M);
+        assert_eq!(size_for_score(14.01), EffortSize::L);
+        assert_eq!(size_for_score(18.0), EffortSize::L);
+        assert_eq!(size_for_score(18.01), EffortSize::Xl);
         assert_eq!(size_for_score(0.0), EffortSize::Xs);
         assert_eq!(size_for_score(100.0), EffortSize::Xl);
     }
@@ -335,7 +338,8 @@ mod tests {
         // 2 files, 30 insertions + 20 deletions = 50 LoC, 0 test LoC
         // tests_factor = 1 - 0.3 * 0 = 1.0
         // score = 1.0*log2(51) + 1.5*log2(3) + 1.0*1.0
-        //       ≈ 5.672 + 2.378 + 1.0 = 9.05  → M
+        //       ≈ 5.672 + 2.378 + 1.0 = 9.05
+        // With PR #308 calibrated thresholds: 9.05 ∈ (6,10] → S
         let result = compute_effort([("src/auth.rs", 25, 15), ("src/config.rs", 5, 5)]);
         assert_eq!(result.loc, 50);
         assert_eq!(result.files, 2);
@@ -344,7 +348,7 @@ mod tests {
 
         let expected_score = 1.0 * 51_f64.log2() + 1.5 * 3_f64.log2() + 1.0 * 1.0;
         assert!((result.score - expected_score).abs() < 1e-9);
-        assert_eq!(result.size, EffortSize::M);
+        assert_eq!(result.size, EffortSize::S);
     }
 
     /// Why: a commit that is entirely test code should have a reduced score
