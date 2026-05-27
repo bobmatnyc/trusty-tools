@@ -26,6 +26,8 @@ use colored::Colorize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::project_root::{project_slug_at, PERSONAL_PALACE};
+
 /// Outcome of a single doctor check.
 ///
 /// Why: keeps the orchestrator able to count failures without re-parsing
@@ -94,6 +96,247 @@ impl CheckResult {
             None => println!("{glyph} {label}"),
         }
     }
+}
+
+/// Outcome of a single palace audit entry for `doctor --fix-palaces`.
+///
+/// Why: separating the palace audit result from the standard `CheckResult`
+/// makes the presentation logic cleaner — palace audit output is tabular
+/// (one row per palace) rather than the pass/warn/fail traffic-light model
+/// used by the daemon health checks.
+/// What: encodes whether a palace is `Ok` (name matches a detectable project
+/// slug or is the `personal` sentinel), `Orphaned` (name does not correspond
+/// to any project directory we can find on disk), or `Empty` (the palace
+/// directory exists but has no `palace.json`).
+/// Test: `find_orphaned_palaces_lists_non_matching_and_empty`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PalaceAuditStatus {
+    /// Palace name matches the current project slug or is `personal`.
+    Ok,
+    /// Palace name does not match any project directory found by walking
+    /// `find_project_root` upward from the palace data directory's parent.
+    /// Advisory: existing data is intact; no mutation is made.
+    Orphaned,
+    /// The palace directory exists under the data root but contains no
+    /// `palace.json` (was never fully initialised, or was manually deleted).
+    Empty,
+}
+
+/// One row in the `doctor --fix-palaces` audit table.
+///
+/// Why: bundles the palace id, its on-disk data directory, and the audit
+/// status into a single struct so the presenter and the audit logic can be
+/// separated cleanly.
+/// What: carries `id` (the palace name used as the on-disk dir name),
+/// `data_dir` (absolute path), and `status`.
+/// Test: `find_orphaned_palaces_lists_non_matching_and_empty`.
+#[derive(Debug, Clone)]
+pub struct PalaceAuditEntry {
+    pub id: String,
+    pub data_dir: PathBuf,
+    pub status: PalaceAuditStatus,
+}
+
+/// Audit every palace subdirectory under `registry_dir` and classify each.
+///
+/// Why: the classification logic is factored out of the presenter so it can
+/// be unit-tested without touching the terminal.
+/// What: walks `registry_dir` one level deep; for each subdirectory, checks
+/// for a `palace.json` (marks `Empty` when absent), then checks whether the
+/// subdirectory name either equals `personal` or matches the slug derived
+/// from any parent directory that is a project root. A palace whose name
+/// equals its own parent directory slug is considered `Ok` (it was created
+/// when standing inside that project). Palaces whose names do not satisfy
+/// either condition are `Orphaned`.
+///
+/// Note: the "matches a project root" check is advisory — we walk *up* from
+/// the palace's own data directory looking for project markers. For palaces
+/// created from within a project, the data directory lives under the data
+/// root (e.g. `~/Library/Application Support/trusty-memory/my-project/`),
+/// which is typically NOT inside any project directory. We therefore
+/// additionally look for a directory on disk whose basename slug equals the
+/// palace id — a heuristic that covers the common case (project at
+/// `~/Projects/my-project`) without requiring a registry of project paths.
+/// Test: `find_orphaned_palaces_lists_non_matching_and_empty`.
+pub fn audit_palaces(registry_dir: &Path) -> Vec<PalaceAuditEntry> {
+    let Ok(entries) = std::fs::read_dir(registry_dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let id = match path.file_name().and_then(|n| n.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        // `Empty` takes priority — no palace.json means it was never
+        // initialised or was partially deleted.
+        if !path.join("palace.json").exists() {
+            out.push(PalaceAuditEntry {
+                id,
+                data_dir: path,
+                status: PalaceAuditStatus::Empty,
+            });
+            continue;
+        }
+        // `personal` is always Ok.
+        if id == PERSONAL_PALACE {
+            out.push(PalaceAuditEntry {
+                id,
+                data_dir: path,
+                status: PalaceAuditStatus::Ok,
+            });
+            continue;
+        }
+        // Check whether any ancestor of `registry_dir` is a project root
+        // whose slug matches the palace id. This catches the case where the
+        // user runs the daemon from inside a project tree.
+        let matches_ancestor = project_slug_at(registry_dir)
+            .map(|slug| slug == id)
+            .unwrap_or(false);
+        if matches_ancestor {
+            out.push(PalaceAuditEntry {
+                id,
+                data_dir: path,
+                status: PalaceAuditStatus::Ok,
+            });
+            continue;
+        }
+        // Heuristic: look for a directory named after the slug in the user's
+        // common project locations. We check `$HOME/Projects/<id>`,
+        // `$HOME/Developer/<id>`, `$HOME/Code/<id>`, and `$HOME/<id>` as
+        // plausible locations. This keeps the check lightweight (no
+        // recursive scan) while catching the most common single-project-dir
+        // layout.
+        let found_on_disk = dirs::home_dir()
+            .map(|home| {
+                let candidates = [
+                    home.join("Projects").join(&id),
+                    home.join("Developer").join(&id),
+                    home.join("Code").join(&id),
+                    home.join(&id),
+                ];
+                candidates.iter().any(|c| c.is_dir())
+            })
+            .unwrap_or(false);
+        let status = if found_on_disk {
+            PalaceAuditStatus::Ok
+        } else {
+            PalaceAuditStatus::Orphaned
+        };
+        out.push(PalaceAuditEntry {
+            id,
+            data_dir: path,
+            status,
+        });
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// Entry point for `trusty-memory doctor --fix-palaces [--fix]`.
+///
+/// Why: issue #88 — users with many accumulated palaces (e.g. 89 from
+/// account-recovery) need a way to see which ones are orphaned without
+/// destructive auto-cleanup. This command provides the read-only audit view
+/// (default) and prints rename suggestions when `--fix` is also given.
+/// Actual renaming is deliberately deferred to a future PR to avoid data
+/// loss during this first conservative implementation.
+/// What: resolves the palace registry directory (same logic as daemon startup),
+/// calls `audit_palaces`, prints a table, and exits 0. The `--fix` flag
+/// adds "rename suggested: X → personal" lines for every `Orphaned` entry
+/// but does NOT mutate the filesystem.
+/// Test: `doctor_fix_palaces_lists_orphaned_dry_run`.
+pub async fn handle_doctor_fix_palaces(suggest_fix: bool) -> Result<()> {
+    let data_dir = match trusty_common::resolve_data_dir("trusty-memory") {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("{} could not resolve data directory: {e:#}", "✗".red());
+            return Ok(());
+        }
+    };
+    let registry_dir = crate::resolve_palace_registry_dir(data_dir);
+
+    println!(
+        "{} Auditing palaces under {}\n",
+        "·".dimmed(),
+        registry_dir.display()
+    );
+
+    let entries = audit_palaces(&registry_dir);
+    if entries.is_empty() {
+        println!("{} No palace directories found.", "·".dimmed());
+        return Ok(());
+    }
+
+    let mut ok_count = 0usize;
+    let mut orphaned_count = 0usize;
+    let mut empty_count = 0usize;
+
+    for entry in &entries {
+        match entry.status {
+            PalaceAuditStatus::Ok => {
+                ok_count += 1;
+                println!(
+                    "✅  {} — {}",
+                    entry.id.green(),
+                    "project palace ok".dimmed()
+                );
+            }
+            PalaceAuditStatus::Orphaned => {
+                orphaned_count += 1;
+                println!(
+                    "⚠️   {} — {}",
+                    entry.id.yellow(),
+                    "orphaned (no matching project directory found on disk)".dimmed()
+                );
+                if suggest_fix {
+                    println!(
+                        "   {} rename suggested: {} → {}",
+                        "→".dimmed(),
+                        entry.id.yellow(),
+                        PERSONAL_PALACE.cyan()
+                    );
+                }
+            }
+            PalaceAuditStatus::Empty => {
+                empty_count += 1;
+                println!(
+                    "❌  {} — {}",
+                    entry.id.red(),
+                    "empty (no palace.json; directory may be a leftover)".dimmed()
+                );
+            }
+        }
+    }
+
+    println!();
+    println!(
+        "{} palace audit: {} ok, {} orphaned, {} empty.",
+        "·".dimmed(),
+        ok_count,
+        orphaned_count,
+        empty_count
+    );
+
+    if orphaned_count > 0 && !suggest_fix {
+        println!(
+            "{} Run with {} to see rename suggestions (no filesystem changes made).",
+            "·".dimmed(),
+            "--fix-palaces --fix".cyan()
+        );
+    }
+    if suggest_fix && orphaned_count > 0 {
+        println!(
+            "{} Rename suggestions printed above (dry-run — no filesystem changes made).",
+            "·".dimmed()
+        );
+    }
+
+    Ok(())
 }
 
 /// Entry point for `trusty-memory doctor`.
@@ -478,6 +721,61 @@ mod tests {
         assert!(
             plist_contains_fastembed_cache_path(&with_key).unwrap(),
             "plist with env var must report true"
+        );
+    }
+
+    /// Why: `audit_palaces` is the core of the `--fix-palaces` audit; it must
+    /// correctly classify palaces as `Ok`, `Orphaned`, and `Empty` so the
+    /// presenter can display actionable information.
+    /// What: build a mock registry under a tempdir with three palace
+    /// directories: one matching the `personal` sentinel (Ok), one with a
+    /// `palace.json` and no matching project directory (Orphaned), and one
+    /// with no `palace.json` at all (Empty). Assert the audit returns three
+    /// entries with the correct statuses.
+    /// Test: pure filesystem.
+    #[test]
+    fn find_orphaned_palaces_lists_non_matching_and_empty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = tmp.path();
+
+        // `personal` → always Ok.
+        let personal = registry.join("personal");
+        std::fs::create_dir_all(&personal).unwrap();
+        std::fs::write(personal.join("palace.json"), b"{}").unwrap();
+
+        // `orphaned-proj` → has palace.json but no matching project on disk.
+        let orphaned = registry.join("orphaned-proj-xyzzy");
+        std::fs::create_dir_all(&orphaned).unwrap();
+        std::fs::write(orphaned.join("palace.json"), b"{}").unwrap();
+
+        // `empty-palace` → no palace.json.
+        let empty = registry.join("empty-palace");
+        std::fs::create_dir_all(&empty).unwrap();
+
+        let entries = audit_palaces(registry);
+
+        let personal_entry = entries.iter().find(|e| e.id == "personal");
+        assert!(personal_entry.is_some(), "personal must appear in audit");
+        assert_eq!(
+            personal_entry.unwrap().status,
+            PalaceAuditStatus::Ok,
+            "personal must be Ok"
+        );
+
+        let orphaned_entry = entries.iter().find(|e| e.id == "orphaned-proj-xyzzy");
+        assert!(orphaned_entry.is_some(), "orphaned entry must appear");
+        assert_eq!(
+            orphaned_entry.unwrap().status,
+            PalaceAuditStatus::Orphaned,
+            "orphaned-proj-xyzzy must be Orphaned"
+        );
+
+        let empty_entry = entries.iter().find(|e| e.id == "empty-palace");
+        assert!(empty_entry.is_some(), "empty entry must appear");
+        assert_eq!(
+            empty_entry.unwrap().status,
+            PalaceAuditStatus::Empty,
+            "empty-palace must be Empty"
         );
     }
 

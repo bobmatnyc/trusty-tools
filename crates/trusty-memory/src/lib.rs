@@ -56,6 +56,15 @@ pub mod kg_extract;
 pub mod mcp_service;
 pub mod messaging;
 pub mod openrpc;
+/// Issue #88: project-root detection and palace-slug enforcement.
+///
+/// Why: prevents unbounded palace creation by anchoring palace names to the
+/// canonical slug of the project directory that contains the CWD, or to the
+/// `personal` sentinel for non-project contexts.
+/// What: exports `find_project_root`, `project_slug_at`, `project_slug`,
+/// `validate_palace_name`, `PERSONAL_PALACE`, and `PROJECT_MARKERS`.
+/// Test: see unit tests inside this module.
+pub mod project_root;
 pub mod prompt_facts;
 pub mod prompt_log;
 pub mod service;
@@ -1598,6 +1607,12 @@ mod tests {
     fn test_state() -> (AppState, tempfile::TempDir) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
+        // Issue #88: bypass palace-slug enforcement so lib tests that call
+        // `palace_create` with arbitrary names keep passing.
+        // SAFETY: constant idempotent write; safe across test threads.
+        unsafe {
+            std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
+        }
         (AppState::new(root), tmp)
     }
 

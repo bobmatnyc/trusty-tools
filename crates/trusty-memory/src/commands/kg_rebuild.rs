@@ -210,6 +210,12 @@ mod tests {
     #[tokio::test]
     async fn kg_rebuild_processes_all_drawers() -> Result<()> {
         let tmp = tempfile::tempdir()?;
+        // Issue #88: bypass palace-slug enforcement for test palaces.
+        // SAFETY: tests using TRUSTY_SKIP_PALACE_ENFORCEMENT set a constant
+        // value "1"; idempotent across concurrent test threads.
+        unsafe {
+            std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
+        }
         let state = AppState::new(tmp.path().to_path_buf());
 
         // Create two palaces, one drawer each.
@@ -271,6 +277,11 @@ mod tests {
     #[tokio::test]
     async fn kg_rebuild_processes_named_palace_only() -> Result<()> {
         let tmp = tempfile::tempdir()?;
+        // Issue #88: bypass palace-slug enforcement for test palaces.
+        // SAFETY: idempotent constant write "1"; safe across test threads.
+        unsafe {
+            std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
+        }
         let state = AppState::new(tmp.path().to_path_buf());
 
         let _ = crate::tools::dispatch_tool(&state, "palace_create", json!({"name": "a"})).await?;

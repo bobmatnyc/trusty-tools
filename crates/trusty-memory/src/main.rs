@@ -162,16 +162,39 @@ enum Command {
     PromptContext,
 
     /// Diagnose daemon health: fastembed cache, launchd plist, HTTP /health,
-    /// and stale palace locks.
+    /// and stale palace locks. With `--fix-palaces`, audit existing palaces
+    /// for project-mapping compliance (issue #88).
     ///
-    /// Why: GH #62 — silent failures (missing `FASTEMBED_CACHE_PATH` in the
-    /// plist, missing model cache, daemon not bound) currently force users
+    /// Why: GH #62 / #88 — silent failures (missing `FASTEMBED_CACHE_PATH` in
+    /// the plist, missing model cache, daemon not bound) currently force users
     /// to grep through several directories by hand. `doctor` runs the
-    /// equivalent checks in one shot.
+    /// equivalent checks in one shot. `--fix-palaces` layers in the palace =
+    /// project audit so users can see which palaces are orphaned (no matching
+    /// project directory on disk).
     /// What: a one-shot CLI command that prints a ✅/❌ line per check and
     /// exits non-zero on any failure. See `commands::doctor`.
     /// Test: `cargo run -p trusty-memory -- doctor` after `setup`.
-    Doctor,
+    ///       `cargo run -p trusty-memory -- doctor --fix-palaces` for the
+    ///       palace audit (read-only by default; add `--fix` to suggest renames).
+    Doctor {
+        /// Audit existing palaces and report orphaned ones (palaces whose name
+        /// does not match any detectable project directory on disk).
+        ///
+        /// Why: issue #88 — users accumulate palaces across many projects;
+        /// `--fix-palaces` surfaces which names are orphaned so they can be
+        /// cleaned up manually or via `--fix`.
+        #[arg(long)]
+        fix_palaces: bool,
+
+        /// Print rename suggestions for orphaned palaces (dry-run by default).
+        ///
+        /// Why: issue #88 conservative default — users may have data in
+        /// orphaned palaces; we never auto-rename without confirmation. `--fix`
+        /// prints the "would rename X → Y" suggestions that can then be
+        /// executed manually.
+        #[arg(long, requires = "fix_palaces")]
+        fix: bool,
+    },
 
     /// Manage the macOS launchd LaunchAgent for the daemon.
     Service {
@@ -361,7 +384,12 @@ async fn main() -> Result<()> {
         Command::Setup => handle_setup(),
         Command::PromptContext => handle_prompt_context().await,
         Command::Service { action } => handle_service(&action),
-        Command::Doctor => trusty_memory::commands::doctor::handle_doctor().await,
+        Command::Doctor { fix_palaces, fix } => {
+            if fix_palaces {
+                trusty_memory::commands::doctor::handle_doctor_fix_palaces(fix).await?;
+            }
+            trusty_memory::commands::doctor::handle_doctor().await
+        }
         Command::Monitor { target } => run_monitor(target).await,
         Command::SendMessage {
             to,

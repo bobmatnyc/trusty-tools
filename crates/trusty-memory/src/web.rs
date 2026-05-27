@@ -1749,6 +1749,16 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
         std::mem::forget(tmp);
+        // Issue #88: bypass the project-slug enforcement gate so tests can
+        // create palaces with arbitrary names without having a real project
+        // root on disk. The env var is harmless once set to "1" because all
+        // tests in this process use the same setting.
+        // SAFETY: no other thread reads/writes this var concurrently — the
+        // const value "1" is idempotent and the write happens before any
+        // test that creates a palace via the HTTP layer.
+        unsafe {
+            std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
+        }
         AppState::new(root)
     }
 

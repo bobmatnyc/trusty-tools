@@ -115,7 +115,7 @@ All 12 tools are exposed via both the MCP protocol (over the
 
 | Tool | Arguments | Description |
 |---|---|---|
-| `palace_create` | `name, description?` | Create a new palace namespace. |
+| `palace_create` | `name, description?` | Create a new palace namespace. See [Palace as Project](#palace-as-project) for naming rules. |
 | `palace_list` | — | List all palaces and their IDs. |
 | `palace_info` | `palace` | Palace metadata and statistics. |
 
@@ -211,6 +211,84 @@ This primitive replaces the Python `/mpm-message` skill in `claude-mpm`
 (which wrote to `~/.claude-mpm/messaging.db` via a process-local SQLite
 file). The companion ticket in `claude-mpm` is `#557`; data migration is
 out of scope here.
+
+## Palace as Project
+
+(Issue #88) Palace names are anchored to the project they belong to.
+
+### One palace per project
+
+When you create a new palace, trusty-memory walks upward from the current
+working directory looking for project markers (`.git`, `Cargo.toml`,
+`pyproject.toml`, `package.json`, `go.mod`) and derives a **canonical slug**
+from the project root's directory name:
+
+```
+/Users/bob/Projects/trusty-tools  →  trusty-tools
+/Users/bob/Projects/My_App!       →  my-app
+/Users/bob/Projects/my project    →  my-project
+```
+
+New palaces must be named with the derived slug:
+
+```bash
+# Inside /Users/bob/Projects/trusty-tools — this succeeds
+palace_create("trusty-tools")
+
+# Any other name fails with a descriptive error:
+# "palace name 'notes' does not match the project slug 'trusty-tools'.
+#  Either use 'trusty-tools' or use 'personal' for non-project memories."
+palace_create("notes")
+```
+
+### The `personal` palace
+
+When operating outside any project directory (no `.git` / `Cargo.toml` /
+etc. found anywhere above CWD), only the special palace name `personal` is
+allowed. This is the "no project, no problem" escape hatch for global notes,
+one-off sessions, and personal task lists.
+
+```bash
+# From any directory without a project root:
+palace_create("personal")  # always succeeds
+palace_create("my-notes")  # fails — no project root detected
+```
+
+### Existing palaces are grandfathered
+
+The enforcement applies **only to new palace creation**. Every palace created
+before this feature was added continues to work without any migration.
+Existing palaces remain read-write and are never auto-renamed.
+
+### `doctor --fix-palaces`
+
+The `doctor --fix-palaces` subcommand audits existing palaces and reports
+which ones are orphaned (name does not correspond to a detectable project
+directory on disk):
+
+```bash
+# Dry-run audit (no filesystem changes):
+trusty-memory doctor --fix-palaces
+
+# Include rename suggestions for orphaned palaces (still read-only):
+trusty-memory doctor --fix-palaces --fix
+```
+
+Output example:
+
+```
+✅  trusty-tools     — project palace ok
+⚠️   old-project     — orphaned (no matching project directory found on disk)
+   → rename suggested: old-project → personal
+❌  broken-palace    — empty (no palace.json; directory may be a leftover)
+
+· palace audit: 1 ok, 1 orphaned, 1 empty.
+```
+
+The `--fix` flag prints rename suggestions but **does not mutate the
+filesystem**. Actual renaming (merging orphaned data into `personal`) is
+planned for a future release. The `doctor` audit is purely advisory for
+existing palaces.
 
 ## Web UI
 

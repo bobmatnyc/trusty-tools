@@ -54,6 +54,13 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let tmp = tempfile::tempdir().expect("tempdir");
+        // Issue #88: bypass palace-slug enforcement so integration tests that
+        // use arbitrary palace names keep passing. The env var is idempotent
+        // ("1" once set stays "1") so concurrent test threads are safe.
+        // SAFETY: constant idempotent write; races are benign.
+        unsafe {
+            std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
+        }
         let state = AppState::new(tmp.path().to_path_buf());
         Self { _tmp: tmp, state }
     }
@@ -522,6 +529,12 @@ where
     F: FnOnce(AppState, String) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
+    // Issue #88: bypass palace-slug enforcement so these tests can use
+    // arbitrary palace names without a matching project root on disk.
+    // SAFETY: constant idempotent write "1"; benign across threads.
+    unsafe {
+        std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
+    }
     let state = AppState::new(data_root.to_path_buf());
     create_palace(&state, palace).await;
     seed(state, palace.to_string()).await;

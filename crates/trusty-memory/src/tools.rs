@@ -1125,6 +1125,22 @@ async fn handle_palace_create(state: &AppState, args: Value) -> Result<Value> {
         .get("name")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("palace_create: missing 'name'"))?;
+
+    // Issue #88: enforce palace = project mapping. New palaces must be named
+    // after the current project slug (derived by walking up from CWD) or the
+    // special `personal` sentinel. Existing palaces are unaffected — this gate
+    // only applies to NEW creation requests.
+    //
+    // Skip enforcement when invoked from a test context (tests use arbitrary
+    // names against tempdir roots that are not real projects). The bypass is
+    // keyed on an env var (`TRUSTY_SKIP_PALACE_ENFORCEMENT=1`) that tests set
+    // locally; production deployments never set it.
+    let skip_enforcement = std::env::var("TRUSTY_SKIP_PALACE_ENFORCEMENT").as_deref() == Ok("1");
+    if !skip_enforcement {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| state.data_root.clone());
+        crate::project_root::validate_palace_name(palace_name, &cwd)?;
+    }
+
     let description = args
         .get("description")
         .and_then(|v| v.as_str())
@@ -2168,7 +2184,23 @@ mod tests {
     /// bind it (`let (state, _tmp) = ...;`) and let drop semantics clean up
     /// when the test scope ends.
     /// Test: Every test in this module that constructs state.
+    ///
+    /// Why (issue #88): sets `TRUSTY_SKIP_PALACE_ENFORCEMENT=1` so that
+    /// existing tests that call `palace_create` with arbitrary names continue
+    /// to work. The enforcement gate in `handle_palace_create` bypasses the
+    /// project-slug check when this env var is set, which is the correct
+    /// behaviour for test helpers that point at isolated tempdirs. Production
+    /// processes never set this variable.
     fn test_state() -> (AppState, tempfile::TempDir) {
+        // SAFETY: tests in this module run in-process; setting the bypass var
+        // here races with any test that reads env before or after, but since
+        // the value is "set to the same constant forever" once any test runs,
+        // the race is benign — all tests should see "1" within the first
+        // iteration. Tests that need stricter serialisation already use
+        // `env_test_lock()`.
+        unsafe {
+            std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
+        }
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
         (AppState::new(root), tmp)

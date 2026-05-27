@@ -379,6 +379,15 @@ impl MemoryService {
         if name.is_empty() {
             return Err(ServiceError::bad_request("name is required"));
         }
+        // Issue #88: enforce palace = project mapping for HTTP-originated
+        // palace creation, mirroring the MCP path in `tools::handle_palace_create`.
+        let skip_enforcement =
+            std::env::var("TRUSTY_SKIP_PALACE_ENFORCEMENT").as_deref() == Ok("1");
+        if !skip_enforcement {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| self.state.data_root.clone());
+            crate::project_root::validate_palace_name(&name, &cwd)
+                .map_err(|e| ServiceError::bad_request(e.to_string()))?;
+        }
         let id = PalaceId::new(&name);
         let palace = Palace {
             id: id.clone(),

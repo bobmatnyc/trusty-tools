@@ -1257,6 +1257,9 @@ mod tests {
             std::env::remove_var(crate::prompt_log::ENV_ENABLED);
             std::env::remove_var(crate::prompt_log::ENV_DIR);
             std::env::remove_var(crate::prompt_log::ENV_HASH_PROMPTS);
+            // Issue #88: bypass palace-slug enforcement so test palaces with
+            // arbitrary names can be created without a matching project root.
+            std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
         }
 
         let data_root = trusty_common::resolve_data_dir("trusty-memory")
