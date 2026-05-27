@@ -10,7 +10,7 @@ one always-on daemon, unlimited named indexes.
 ## System requirements
 
 - **Rust 1.75+** (for source builds)
-- **16 GB RAM minimum** — hard-checked at daemon startup; the daemon will not start on under-spec machines
+- **16 GB RAM minimum (default)** — hard-checked at daemon startup. The daemon exits with an actionable error message on under-spec hosts. Set `TRUSTY_SKIP_RAM_CHECK=1` in the daemon environment to bypass this check for small workloads where peak RAM is known to stay well under the memory limit. Bypass at your own risk on large corpora — the default exists because realistic indexing OOMs without it.
 - **macOS 12+ or Linux** (Windows: not yet supported)
 - **~2 GB disk** for model cache (downloaded on first run to `~/Library/Caches/trusty-search/` on macOS or `$XDG_DATA_HOME/trusty-search/` on Linux)
 
@@ -291,7 +291,7 @@ trusty-search reindex [path]                         # alias for index --force
 Run `trusty-search doctor` for a 6-check diagnostic. Common causes:
 - Another daemon already running: `trusty-search stop` then `trusty-search start`
 - Stale PID lockfile: `trusty-search doctor --fix` removes it automatically
-- Less than 16 GB RAM: the daemon performs a hard RAM check and exits with an error
+- Less than 16 GB RAM: the daemon performs a hard RAM check and exits with an actionable error. Set `TRUSTY_SKIP_RAM_CHECK=1` in the daemon environment to bypass for small workloads; not recommended on large corpora (risk of OOM during indexing)
 
 **Embedder stuck on "initializing"**
 
