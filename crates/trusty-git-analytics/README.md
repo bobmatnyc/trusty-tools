@@ -377,6 +377,59 @@ The four DORA metrics land in pre-computed SQL views
 (`v_deployment_frequency`, `v_lead_time`, `v_change_failure_rate`,
 `v_mttr`) so dashboards can read them directly without re-aggregating.
 
+### Tag & Release-Branch Reachability (issue #279)
+
+`tga collect` automatically populates `fact_commit_reachability` with four new columns that distinguish "deployed via cherry-pick to a release branch and tagged" from "abandoned WIP":
+
+| Column | Type | Meaning |
+|---|---|---|
+| `on_any_tag` | boolean | `true` if any git tag reaches this commit |
+| `reachable_from_tags` | JSON array | Tag names that contain this commit |
+| `on_release_branch` | boolean | `true` if commit is on any configured release branch |
+| `release_branches` | JSON array | Matching release-branch names |
+
+This resolves a systematic blind spot: bug fixes and security patches cherry-picked to `release/*` branches, tagged for production, and never merged to `main` previously showed `on_default_branch = false` — making them indistinguishable from abandoned WIP. With this feature, the 32% "merged rate" for bug fixes turns out to be much higher when deployed-via-tag commits are counted.
+
+**Config:**
+
+```yaml
+reachability:
+  track_tags: true               # default: true
+  track_release_branches: true   # default: true
+  release_branch_patterns:       # default: ["release/*", "hotfix/*", "chore/release-*", "v*"]
+    - "release/*"
+    - "hotfix/*"
+    - "chore/release-*"
+    - "v*"
+```
+
+Set `track_tags: false` to skip the tag scan (useful for trunk-based repos with thousands of tags). The default is `true` because the scan is O(repo + refs), not O(repo × refs × commits).
+
+Optionally disable the scan for a single run:
+
+```bash
+tga collect --skip-tag-reachability
+```
+
+**Useful derived queries:**
+
+```sql
+-- What % of bug fixes actually shipped (via any path)?
+SELECT
+  COUNT(*) FILTER (WHERE on_default_branch OR on_any_tag OR on_release_branch)
+  * 100.0 / COUNT(*) AS shipped_pct
+FROM classifications cl
+JOIN commits c ON c.classification_id = cl.id
+JOIN fact_commit_reachability fcr ON fcr.commit_sha = c.sha
+WHERE cl.category = 'bug_fix';
+
+-- Cherry-pick rate: commits reachable from tags but not on main
+SELECT repo, COUNT(*)
+FROM fact_commit_reachability
+WHERE on_any_tag AND NOT on_default_branch
+GROUP BY repo;
+```
+
 ## Pipeline Architecture
 
 ```

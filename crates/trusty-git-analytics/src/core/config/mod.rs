@@ -84,6 +84,15 @@ pub struct Config {
     #[serde(default)]
     pub dora: Option<DoraConfig>,
 
+    /// Tag and release-branch reachability scanner settings (issue #279).
+    ///
+    /// Controls whether `tga collect` populates the `on_any_tag`,
+    /// `reachable_from_tags`, `on_release_branch`, and `release_branches`
+    /// columns of `fact_commit_reachability`. When absent, defaults to
+    /// tracking both tags and release branches with the standard patterns.
+    #[serde(default)]
+    pub reachability: ReachabilityConfig,
+
     /// Schema version string (e.g. `"1.0"`).
     ///
     /// Stored for forward compatibility with the Python predecessor's YAML
@@ -399,6 +408,53 @@ impl Default for ClassificationConfig {
 
 fn default_true() -> bool {
     true
+}
+
+/// Tag and release-branch reachability configuration (issue #279).
+///
+/// Why: teams using cherry-pick-to-release deployment patterns need to
+/// distinguish "deployed via tag" from "abandoned WIP".  This block controls
+/// whether and how the reachability scanner runs.
+/// What: enables/disables the tag scan, the release-branch scan, and the set
+/// of branch-name glob patterns (e.g. `release/*`, `hotfix/*`) to match.
+/// Test: loaded from YAML alongside the top-level Config; consumed by
+/// `collect::git::reachability::scan_and_persist`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReachabilityConfig {
+    /// If `true`, walk all git tags and populate `on_any_tag` /
+    /// `reachable_from_tags`. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub track_tags: bool,
+
+    /// If `true`, walk branches matching `release_branch_patterns` and
+    /// populate `on_release_branch` / `release_branches`. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub track_release_branches: bool,
+
+    /// Glob patterns for branch names treated as release branches.
+    /// Supports a single `*` wildcard. Defaults to
+    /// `["release/*", "hotfix/*", "chore/release-*", "v*"]`.
+    #[serde(default = "default_release_branch_patterns")]
+    pub release_branch_patterns: Vec<String>,
+}
+
+fn default_release_branch_patterns() -> Vec<String> {
+    vec![
+        "release/*".to_string(),
+        "hotfix/*".to_string(),
+        "chore/release-*".to_string(),
+        "v*".to_string(),
+    ]
+}
+
+impl Default for ReachabilityConfig {
+    fn default() -> Self {
+        Self {
+            track_tags: true,
+            track_release_branches: true,
+            release_branch_patterns: default_release_branch_patterns(),
+        }
+    }
 }
 
 /// Linear project management integration settings.

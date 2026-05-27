@@ -96,6 +96,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "dora_tables",
         sql: include_str!("sql/0014_dora_tables.sql"),
     },
+    Migration {
+        version: 15,
+        name: "tag_release_branch_reachability",
+        sql: include_str!("sql/0015_tag_release_branch_reachability.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

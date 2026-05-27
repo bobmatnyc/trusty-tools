@@ -45,6 +45,8 @@ pub struct CollectionStats {
     pub weeks_skipped: usize,
     /// Per-repo error messages encountered (non-fatal).
     pub errors: Vec<String>,
+    /// Total `fact_commit_reachability` rows upserted across all repos.
+    pub reachability_rows: usize,
 }
 
 /// Top-level Stage 1 orchestrator.
@@ -62,6 +64,9 @@ pub struct CollectionPipeline {
     force: bool,
     no_fetch: bool,
     force_refresh_prs: bool,
+    /// When `true`, skip the tag and release-branch reachability scan
+    /// (i.e. do not populate `fact_commit_reachability` with tag/branch data).
+    skip_tag_reachability: bool,
 }
 
 impl CollectionPipeline {
@@ -78,6 +83,7 @@ impl CollectionPipeline {
             force: false,
             no_fetch: false,
             force_refresh_prs: false,
+            skip_tag_reachability: false,
         }
     }
 
@@ -95,6 +101,19 @@ impl CollectionPipeline {
     /// when the caller has already fetched.
     pub fn with_no_fetch(mut self, no_fetch: bool) -> Self {
         self.no_fetch = no_fetch;
+        self
+    }
+
+    /// If `true`, skip the post-collection tag and release-branch reachability
+    /// scan.
+    ///
+    /// When disabled, `fact_commit_reachability` rows for `on_any_tag`,
+    /// `reachable_from_tags`, `on_release_branch`, and `release_branches` are
+    /// not populated. Useful for trunk-based repos where no tags or release
+    /// branches are used, or to reduce collection time on large repos with
+    /// thousands of tags.
+    pub fn with_skip_tag_reachability(mut self, skip: bool) -> Self {
+        self.skip_tag_reachability = skip;
         self
     }
 
@@ -140,6 +159,15 @@ impl CollectionPipeline {
                 }
             };
             self.collect_repo_by_week(db, &collector, &mut stats);
+        }
+
+        // Tag and release-branch reachability scan (issue #279).
+        // Run once after all per-repo git walks, before PR fetches, because the
+        // reachability data is derived purely from the local git graph.
+        if !self.skip_tag_reachability {
+            self.run_reachability_scan(db, &mut stats);
+        } else {
+            info!("skipping tag/release-branch reachability scan (--skip-tag-reachability)");
         }
 
         // Backfill authors from observed commits.
@@ -266,6 +294,62 @@ impl CollectionPipeline {
         }
 
         Ok(stats)
+    }
+
+    /// Run the tag and release-branch reachability scan for every configured
+    /// repository and accumulate the results into `stats`.
+    ///
+    /// Why: after commits are stored, we can walk the git graph once per repo to
+    /// build the tag/branch ancestry maps and write `fact_commit_reachability`
+    /// rows.  Non-fatal — errors are pushed into `stats.errors` so one broken
+    /// repo (e.g. a bare clone without tags) does not abort the full run.
+    /// What: iterates `self.config.repositories`, resolves each path, calls
+    /// [`crate::collect::git::reachability::scan_and_persist`], and accumulates
+    /// `rows_upserted` into `stats.reachability_rows`.
+    /// Test: covered by the integration test in `reachability::tests`.
+    fn run_reachability_scan(&self, db: &mut Database, stats: &mut CollectionStats) {
+        use crate::collect::git::reachability::scan_and_persist;
+        use crate::core::config::expand_path;
+
+        let cfg = &self.config.reachability;
+
+        if !cfg.track_tags && !cfg.track_release_branches {
+            info!("reachability tracking disabled by config (track_tags=false, track_release_branches=false)");
+            return;
+        }
+
+        let conn = db.connection();
+        for repo_cfg in &self.config.repositories {
+            let path = expand_path(&repo_cfg.path);
+            let name = repo_cfg
+                .name
+                .clone()
+                .or_else(|| {
+                    path.file_name()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| path.display().to_string());
+
+            info!(repo = %name, "running reachability scan");
+            match scan_and_persist(&path, conn, cfg) {
+                Ok(r) => {
+                    info!(
+                        repo = %name,
+                        rows = r.rows_upserted,
+                        tagged = r.tagged_commits,
+                        release_branch = r.release_branch_commits,
+                        "reachability scan complete"
+                    );
+                    stats.reachability_rows += r.rows_upserted;
+                }
+                Err(e) => {
+                    let msg = format!("reachability scan failed for {name}: {e}");
+                    warn!("{msg}");
+                    stats.errors.push(msg);
+                }
+            }
+        }
     }
 
     /// Build the set of [`PrProvider`] instances enabled by the current

@@ -228,6 +228,15 @@ pub struct CollectArgs {
     /// `commit_shas = '[]'`.
     #[arg(long, default_value_t = false)]
     pub force_refresh_prs: bool,
+    /// Skip the post-collection tag and release-branch reachability scan.
+    ///
+    /// When set, `fact_commit_reachability` rows for `on_any_tag`,
+    /// `reachable_from_tags`, `on_release_branch`, and `release_branches`
+    /// are not populated. Useful for trunk-based repos or to cut collection
+    /// time on repositories with thousands of tags. The scan defaults ON
+    /// because its cost is bounded by the number of refs in the repo.
+    #[arg(long, default_value_t = false)]
+    pub skip_tag_reachability: bool,
     /// Run configuration validation and exit (0 on success, 1 on errors).
     #[arg(long, default_value_t = false)]
     pub validate_only: bool,
