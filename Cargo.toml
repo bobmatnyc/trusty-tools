@@ -29,7 +29,7 @@ authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 trusty-common = { path = "crates/trusty-common", version = "0.6.1" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
-trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.0" }
+trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.1" }
 # trusty-bm25-daemon: per-palace BM25 lexical-index daemon — referenced by
 # trusty-memory so `cargo install trusty-memory` produces both binaries from
 # one command (mirrors the trusty-embedderd / trusty-search pattern, PR #190).
