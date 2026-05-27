@@ -264,18 +264,20 @@ pub struct CollectArgs {
 ///
 /// # Multi-source classification (issue #260)
 ///
-/// External ticket sources (JIRA, GitHub Issues) can be configured via a
-/// `sources:` block in the rules YAML. They are consulted between the
-/// manual-override tier and custom rules. Pass `--no-external` to disable
-/// all external lookups (useful in CI or offline environments).
+/// External ticket sources (JIRA, GitHub Issues) are configured under the
+/// `classification.sources:` block in `config.yaml`. They are consulted
+/// between the manual-override tier and custom rules. Pass `--no-external`
+/// to disable all external lookups (useful in CI or offline environments).
 #[derive(Args, Debug)]
 pub struct ClassifyArgs {
     /// Rules file override.
     ///
-    /// The YAML file may optionally contain a `sources:` block to configure
-    /// JIRA and/or GitHub Issues as classification signal sources
-    /// (see issue #260). Set `extend_defaults: true` in the file to merge
-    /// built-in TGA rules alongside your custom rules.
+    /// Custom classification rules file. Set `extend_defaults: true` in the
+    /// file to merge built-in TGA rules alongside your custom rules.
+    ///
+    /// Note: external sources (JIRA/GitHub Issues) are configured separately
+    /// under `classification.sources` in `config.yaml`, NOT in this rules
+    /// file. Use `--no-external` to suppress all external lookups at runtime.
     #[arg(long)]
     pub rules: Option<PathBuf>,
     /// Enable LLM fallback (overrides config).

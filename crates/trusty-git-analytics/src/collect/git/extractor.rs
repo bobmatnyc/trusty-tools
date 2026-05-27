@@ -205,7 +205,7 @@ impl GitCollector {
             };
             walked += 1;
             pb.set_position(walked as u64);
-            if walked % 1000 == 0 {
+            if walked.is_multiple_of(1000) {
                 info!(repo = %self.name, walked, written, "extraction progress");
             }
 

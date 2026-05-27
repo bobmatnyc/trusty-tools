@@ -229,10 +229,17 @@ impl TaxonomyRegistry {
     ///
     /// Why: a single function listing every default subcategory keeps the
     /// rule set and taxonomy in lockstep — adding a new `category` value
-    /// in the rules requires the matching entry here.
+    /// in the rules requires the matching entry here. Aliases (e.g.
+    /// `"bug_fix"` alongside `"bugfix"`) ensure that external sources
+    /// (JIRA, GitHub Issues) emitting underscore-style names and the
+    /// built-in conventional-commit rules emitting hyphen/plain names all
+    /// roll up to the same `TopLevelCategory` without splitting counts in
+    /// reports (issue #271).
     /// What: returns the static built-in list with each subcategory mapped
-    /// to its top-level parent.
-    /// Test: covered by `classify::tests::registry_resolves_builtin_subcategories`.
+    /// to its top-level parent, including underscore aliases for the three
+    /// common collisions: `bug_fix`, `new_feature`, `tech_debt_refactoring`.
+    /// Test: covered by `classify::tests::registry_resolves_builtin_subcategories`
+    /// and `taxonomy::tests::underscore_aliases_resolve_to_same_top_level`.
     ///
     /// These map every `category` value emitted by the default ruleset (see
     /// `rules::loader::default_rules`) plus the structural verdicts from the
@@ -245,11 +252,19 @@ impl TaxonomyRegistry {
             SubcategoryDef::new("enhancement", Feature),
             SubcategoryDef::new("new-feature", Feature),
             SubcategoryDef::new("breaking", Feature),
+            // Alias: external sources (JIRA/GitHub Issues) emit "new_feature"
+            // via label_mappings; normalise to the same TopLevelCategory::Feature
+            // as the built-in "feature" entry (issue #271).
+            SubcategoryDef::new("new_feature", Feature),
             // Bugfix family
             SubcategoryDef::new("bugfix", Bugfix),
             SubcategoryDef::new("bug", Bugfix),
             SubcategoryDef::new("hotfix", Bugfix),
             SubcategoryDef::new("security", Bugfix),
+            // Alias: external sources emit "bug_fix" via label_mappings; normalise
+            // to the same TopLevelCategory::Bugfix as the built-in "bugfix" entry
+            // (issue #271).
+            SubcategoryDef::new("bug_fix", Bugfix),
             // KTLO family (build/ci/ops/release/chore stays in Maintenance below)
             SubcategoryDef::new("ci", Ktlo),
             SubcategoryDef::new("build", Ktlo),
@@ -285,6 +300,11 @@ impl TaxonomyRegistry {
             SubcategoryDef::new("merge", Maintenance),
             // `chore` is conventional-commit "miscellaneous" → Maintenance.
             SubcategoryDef::new("chore", Maintenance),
+            // Alias: external sources emit "tech_debt_refactoring" via
+            // issue_type_mappings; normalise to the same
+            // TopLevelCategory::Maintenance as the built-in "refactor" entry
+            // (issue #271).
+            SubcategoryDef::new("tech_debt_refactoring", Maintenance),
             // Platform-work extensions (cloud / monitoring / db / messaging / networking).
             SubcategoryDef::new("cloud", PlatformWork),
             SubcategoryDef::new("monitoring", PlatformWork),
@@ -385,6 +405,57 @@ mod tests {
             .filter(|d| d.name.eq_ignore_ascii_case("security"))
             .count();
         assert_eq!(count, 1, "duplicate registration must be deduplicated");
+    }
+
+    #[test]
+    fn underscore_aliases_resolve_to_same_top_level() {
+        // Regression test for issue #271: external sources (JIRA/GitHub Issues)
+        // emit underscore-style category names ("bug_fix", "new_feature",
+        // "tech_debt_refactoring") while the built-in cc-* rules emit plain
+        // names ("bugfix", "feature", "refactor"). Both forms must resolve to
+        // the same TopLevelCategory so reports do not split counts between them.
+        let reg = TaxonomyRegistry::with_builtins();
+
+        // bug_fix (external) must equal bugfix (built-in cc-fix).
+        assert_eq!(
+            reg.resolve("bug_fix"),
+            Some(TopLevelCategory::Bugfix),
+            "bug_fix should resolve to Bugfix"
+        );
+        assert_eq!(
+            reg.resolve("bugfix"),
+            Some(TopLevelCategory::Bugfix),
+            "bugfix should resolve to Bugfix"
+        );
+        assert_eq!(
+            reg.resolve("bug_fix"),
+            reg.resolve("bugfix"),
+            "bug_fix and bugfix must map to the same TopLevelCategory"
+        );
+
+        // new_feature (external) must equal feature (built-in cc-feat).
+        assert_eq!(
+            reg.resolve("new_feature"),
+            Some(TopLevelCategory::Feature),
+            "new_feature should resolve to Feature"
+        );
+        assert_eq!(
+            reg.resolve("new_feature"),
+            reg.resolve("feature"),
+            "new_feature and feature must map to the same TopLevelCategory"
+        );
+
+        // tech_debt_refactoring (external) must equal refactor (built-in).
+        assert_eq!(
+            reg.resolve("tech_debt_refactoring"),
+            Some(TopLevelCategory::Maintenance),
+            "tech_debt_refactoring should resolve to Maintenance"
+        );
+        assert_eq!(
+            reg.resolve("tech_debt_refactoring"),
+            reg.resolve("refactor"),
+            "tech_debt_refactoring and refactor must map to the same TopLevelCategory"
+        );
     }
 
     #[test]

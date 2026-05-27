@@ -1,5 +1,4 @@
-# Aligned with the rust-version in Cargo.toml. Bumped from 1.75 to 1.80
-# so issue #216's shared CLI help system can use `std::sync::LazyLock`
-# (stable since 1.80). Workspace MSRV is 1.88 but tga only needs 1.80;
-# avoiding the extra newer-lint surface area minimises churn.
-msrv = "1.80.0"
+# Aligned with rust-version in Cargo.toml and the workspace MSRV.
+# Bumped from 1.80 to 1.88 in issue #254 to eliminate the MSRV mismatch
+# warning from clippy ("MSRV in clippy.toml and Cargo.toml differ").
+msrv = "1.88.0"
