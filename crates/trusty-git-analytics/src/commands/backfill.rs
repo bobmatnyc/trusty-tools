@@ -6,14 +6,11 @@
 //! ingesting new data. Each subcommand supports `--dry-run`, in which case
 //! it reports the number of rows that *would* change without writing.
 
-use std::sync::OnceLock;
-
 use clap::{Args, Subcommand};
 use git2::{Repository, Sort};
-use regex::Regex;
 use rusqlite::{params, Connection};
 use tga::collect::git::scan_and_persist;
-use tga::collect::ticket::is_ticketed;
+use tga::collect::ticket::{extract_ticket_id, is_ticketed};
 use tga::core::config::{expand_path, Config};
 use tga::core::db::Database;
 use tga::core::effort::{compute_effort, FORMULA_VERSION};
@@ -1055,33 +1052,6 @@ fn is_revert(message: &str) -> bool {
     prefix.eq_ignore_ascii_case(b"revert ")
         || prefix.eq_ignore_ascii_case(b"revert:")
         || prefix.eq_ignore_ascii_case(b"revert\"")
-}
-
-/// Extract the first recognizable ticket identifier from a commit message.
-///
-/// Returns `Some("PROJ-123")`, `Some("AB#42")`, `Some("#7")`, or `None`.
-fn extract_ticket_id(message: &str) -> Option<String> {
-    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
-    let patterns = PATTERNS.get_or_init(|| {
-        vec![
-            // Order matters: most specific first.
-            Regex::new(r"\bAB#\d+\b").expect("azdo pattern"),
-            Regex::new(r"\b[A-Z][A-Z0-9]*-\d+\b").expect("jira pattern"),
-            Regex::new(r"(?:^|\s)(#\d+)\b").expect("gh bare pattern"),
-        ]
-    });
-    for (i, p) in patterns.iter().enumerate() {
-        if let Some(m) = p.find(message) {
-            // The gh-bare pattern includes a leading whitespace in its
-            // overall match; strip to just the `#NNN` capture.
-            let raw = m.as_str();
-            if i == 2 {
-                return raw.trim_start().to_string().into();
-            }
-            return Some(raw.to_string());
-        }
-    }
-    None
 }
 
 #[cfg(test)]

@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 use crate::collect::errors::{CollectError, Result};
 use crate::collect::git::diff::{compute_commit_diff, CommitDiff};
 use crate::collect::git::fetch::fetch_remote;
-use crate::collect::ticket::is_ticketed;
+use crate::collect::ticket::{extract_ticket_id, is_ticketed};
 use crate::core::config::{expand_path, RepositoryConfig};
 use crate::core::db::Database;
 
@@ -273,12 +273,16 @@ impl GitCollector {
             let sha_str = oid.to_string();
 
             let ticketed = is_ticketed(&message);
+            // Issue #316: extract the ticket ID at insert time so
+            // `commits.ticket_id` is populated without a separate
+            // `tga backfill ticket-ids` run.
+            let ticket_id = extract_ticket_id(&message);
 
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO commits \
                  (sha, author_name, author_email, timestamp, message, repository, \
-                  files_changed, insertions, deletions, is_merge, ticketed) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                  files_changed, insertions, deletions, is_merge, ticketed, ticket_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     sha_str,
                     author_name,
@@ -291,6 +295,7 @@ impl GitCollector {
                     diff.deletions as i64,
                     is_merge as i64,
                     ticketed as i64,
+                    ticket_id,
                 ],
             )?;
 
@@ -603,6 +608,85 @@ mod tests {
         let mut db = open_in_memory_db();
         let written = collector.collect(&mut db).expect("collect");
         assert_eq!(written, 0, "commit on 2026-05-11 must NOT be in W19 window");
+    }
+
+    /// Issue #316: `tga collect` must populate `commits.ticket_id` at INSERT
+    /// time — no separate `tga backfill ticket-ids` run should be required.
+    ///
+    /// Why: 32% of uncategorized commits (2,006 of 6,212) had extractable JIRA
+    /// IDs (`BB-2746`, `SRE-3104`, `DRE-405`) but NULL `ticket_id` because
+    /// extraction was only performed during backfill, not during collection.
+    /// What: commits with JIRA-style subjects must have their `ticket_id`
+    /// populated immediately after `collect`; plain commits must remain NULL.
+    /// Test: this test itself.
+    #[test]
+    fn collect_populates_ticket_id_at_insert_time() {
+        let (_t, repo) = init_repo("ticket-id-insert");
+        let seconds = utc_seconds(2026, 5, 1, 12, 0, 0);
+        // Three sample commits from issue #316.
+        commit_at(
+            &repo,
+            _t.path.as_path(),
+            seconds,
+            0,
+            "BB-2746: refactor auth",
+        );
+        commit_at(
+            &repo,
+            _t.path.as_path(),
+            seconds - 1,
+            0,
+            "SRE-3104: increase RDS timeout",
+        );
+        commit_at(
+            &repo,
+            _t.path.as_path(),
+            seconds - 2,
+            0,
+            "DRE-405 fix demand calculation",
+        );
+        // A plain commit — ticket_id must stay NULL.
+        commit_at(&repo, _t.path.as_path(), seconds - 3, 0, "misc cleanup");
+
+        let collector = make_collector(_t.path.as_path(), None, None);
+        let mut db = open_in_memory_db();
+        let written = collector.collect(&mut db).expect("collect");
+        assert_eq!(written, 4, "all four commits must be collected");
+
+        let conn = db.connection();
+
+        // Verify all three JIRA commits have the correct ticket_id.
+        for (msg_prefix, expected_id) in &[
+            ("BB-2746:", "BB-2746"),
+            ("SRE-3104:", "SRE-3104"),
+            ("DRE-405 ", "DRE-405"),
+        ] {
+            let ticket_id: Option<String> = conn
+                .query_row(
+                    "SELECT ticket_id FROM commits WHERE message LIKE ?1",
+                    rusqlite::params![format!("{msg_prefix}%")],
+                    |r| r.get(0),
+                )
+                .expect("query ticket_id");
+            assert_eq!(
+                ticket_id.as_deref(),
+                Some(*expected_id),
+                "commit '{msg_prefix}...' must have ticket_id='{expected_id}' after collect"
+            );
+        }
+
+        // Plain commit must have NULL ticket_id.
+        let plain_ticket: Option<String> = conn
+            .query_row(
+                "SELECT ticket_id FROM commits WHERE message = 'misc cleanup'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("query plain ticket_id");
+        assert!(
+            plain_ticket.is_none(),
+            "plain commit must have NULL ticket_id, got {plain_ticket:?}"
+        );
     }
 
     /// Direct unit test of `commit_local_date`: a commit at 2026-05-03

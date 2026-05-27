@@ -53,6 +53,31 @@ fn patterns() -> &'static TicketPatterns {
     })
 }
 
+/// Compiled extraction patterns used by [`extract_ticket_id`], ordered from
+/// most-specific to least-specific so the highest-fidelity match wins.
+struct ExtractPatterns {
+    /// Azure DevOps work-item reference: `AB#123`.
+    azdo: Regex,
+    /// JIRA / Linear style: `PROJ-123`, `ENG-456`, `DRE-405`.
+    jira: Regex,
+    /// GitHub bare issue reference: `#123`.
+    gh_bare: Regex,
+}
+
+/// Global, lazily-initialized extraction pattern set.
+fn extract_patterns() -> &'static ExtractPatterns {
+    static EXTRACT: OnceLock<ExtractPatterns> = OnceLock::new();
+    EXTRACT.get_or_init(|| {
+        // SAFETY of unwrap: all literals are validated by the test
+        // [`extract_patterns_compile`] — any regression is caught at test time.
+        ExtractPatterns {
+            azdo: Regex::new(r"\bAB#\d+\b").expect("azdo extract pattern compiles"),
+            jira: Regex::new(r"\b[A-Z][A-Z0-9]*-\d+\b").expect("jira extract pattern compiles"),
+            gh_bare: Regex::new(r"(?:^|\s)(#\d+)\b").expect("gh_bare extract pattern compiles"),
+        }
+    })
+}
+
 /// Return `true` if `message` contains any recognized ticket reference.
 ///
 /// The check is performed against the full message (subject + body); a
@@ -76,6 +101,56 @@ pub fn is_ticketed(message: &str) -> bool {
         || p.azdo.is_match(message)
 }
 
+/// Extract the first recognizable ticket identifier from a commit message.
+///
+/// Why: `commits.ticket_id` must be populated at insert time so that JIRA
+/// classification and ticket-rate metrics work without requiring a separate
+/// `tga backfill ticket-ids` pass. Issue #316 identified that 32% of
+/// uncategorized commits had clearly extractable JIRA IDs (e.g. `BB-2746`,
+/// `SRE-3104`, `DRE-405`) but NULL `ticket_id` because this extraction
+/// only happened during backfill, not during `tga collect`.
+/// What: tests the message against ADO (`AB#N`), JIRA/Linear (`PROJ-N`),
+/// and GitHub bare (`#N`) patterns in that priority order; returns the
+/// first match as `Some(String)`, or `None` when no ticket ref is found.
+/// Test: `tests::extract_ticket_id_*` below; also exercised by
+/// `collect::git::extractor` tests that verify `ticket_id` is populated
+/// at INSERT time during `tga collect`.
+///
+/// # Examples
+///
+/// ```
+/// use tga::collect::ticket::extract_ticket_id;
+///
+/// assert_eq!(extract_ticket_id("BB-2746: refactor auth"), Some("BB-2746".to_string()));
+/// assert_eq!(extract_ticket_id("SRE-3104: increase RDS timeout"), Some("SRE-3104".to_string()));
+/// assert_eq!(extract_ticket_id("DRE-405 fix demand calculation"), Some("DRE-405".to_string()));
+/// assert_eq!(extract_ticket_id("fixes #99"), Some("#99".to_string()));
+/// assert_eq!(extract_ticket_id("misc cleanup"), None);
+/// ```
+pub fn extract_ticket_id(message: &str) -> Option<String> {
+    let p = extract_patterns();
+
+    // ADO: AB#123 — most specific, checked first.
+    if let Some(m) = p.azdo.find(message) {
+        return Some(m.as_str().to_string());
+    }
+
+    // JIRA / Linear: PROJ-123.
+    if let Some(m) = p.jira.find(message) {
+        return Some(m.as_str().to_string());
+    }
+
+    // GitHub bare: #123 — the capture group strips the leading whitespace
+    // that the pattern uses as a left-boundary guard.
+    if let Some(caps) = p.gh_bare.captures(message) {
+        if let Some(m) = caps.get(1) {
+            return Some(m.as_str().to_string());
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,6 +159,85 @@ mod tests {
     fn patterns_compile() {
         // Force lazy init; if any pattern is malformed this will panic.
         let _ = patterns();
+    }
+
+    #[test]
+    fn extract_patterns_compile() {
+        // Force lazy init; if any pattern is malformed this will panic.
+        let _ = extract_patterns();
+    }
+
+    // ── extract_ticket_id: issue #316 sample commits ──────────────────────
+
+    #[test]
+    fn extract_ticket_id_bb_2746() {
+        // Sample from issue #316 — was producing NULL ticket_id before fix.
+        assert_eq!(
+            extract_ticket_id("BB-2746: refactor auth service"),
+            Some("BB-2746".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_ticket_id_sre_3104() {
+        // Sample from issue #316 — was producing NULL ticket_id before fix.
+        assert_eq!(
+            extract_ticket_id("SRE-3104: increase RDS connection timeout"),
+            Some("SRE-3104".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_ticket_id_dre_405() {
+        // Sample from issue #316 — note: no colon separator, space only.
+        assert_eq!(
+            extract_ticket_id("DRE-405 fix demand calculation"),
+            Some("DRE-405".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_ticket_id_returns_none_for_plain_message() {
+        assert_eq!(extract_ticket_id("misc cleanup"), None);
+        assert_eq!(extract_ticket_id("update README"), None);
+        assert_eq!(extract_ticket_id("bump version to 1.2.3"), None);
+    }
+
+    #[test]
+    fn extract_ticket_id_github_bare_ref() {
+        assert_eq!(extract_ticket_id("fixes #99"), Some("#99".to_string()));
+    }
+
+    #[test]
+    fn extract_ticket_id_azdo_ref() {
+        assert_eq!(
+            extract_ticket_id("AB#42 implement feature"),
+            Some("AB#42".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_ticket_id_azdo_preferred_over_jira() {
+        // When both AB# and JIRA patterns appear, ADO wins (more specific).
+        assert_eq!(
+            extract_ticket_id("AB#10 fixes PROJ-99"),
+            Some("AB#10".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_ticket_id_jira_preferred_over_gh_bare() {
+        // JIRA is checked before bare GitHub ref.
+        assert_eq!(
+            extract_ticket_id("ENG-7 closes #10"),
+            Some("ENG-7".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_ticket_id_multiline_body() {
+        let msg = "Refactor module structure\n\nRelates to SRE-999.\n";
+        assert_eq!(extract_ticket_id(msg), Some("SRE-999".to_string()));
     }
 
     #[test]
