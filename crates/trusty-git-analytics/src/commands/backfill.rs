@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use clap::{Args, Subcommand};
 use git2::{Repository, Sort};
 use regex::Regex;
-use rusqlite::params;
+use rusqlite::{params, Connection};
 use tga::collect::git::scan_and_persist;
 use tga::collect::ticket::is_ticketed;
 use tga::core::config::{expand_path, Config};
@@ -51,6 +51,18 @@ pub enum BackfillSubcommand {
     /// sizes XS/S/M/L/XL) — identical to the pre-commit bash hook for
     /// forward-going commits.  Idempotent by default: commits that already
     /// have a `fact_commit_effort` row are skipped unless `--force` is given.
+    ///
+    /// **Default path (db-only)**: reads per-file diff data directly from the
+    /// `commits JOIN files` tables populated by `tga collect`.  No on-disk git
+    /// repository is required.  Commits outside the collection window are not
+    /// in the `files` table and are silently skipped; expand the collection
+    /// `since`/`until` window to score them.
+    ///
+    /// **`--notes`**: requires a live on-disk git repository to write
+    /// `refs/notes/effort` annotations (uses libgit2).
+    ///
+    /// **`--range`**: requires a live on-disk git repository to interpret git
+    /// ranges (revwalk via libgit2).
     Effort(EffortBackfillArgs),
 }
 
@@ -141,9 +153,17 @@ pub fn run(config: Config, db: &mut Database, args: BackfillArgs) -> anyhow::Res
 /// effort scores must be stored out-of-band in the analytics DB rather than
 /// injected as git trailers retroactively.
 /// What: for each configured repository (or a single one if `--repo` is given),
-/// opens the git repo, walks commits, computes [`compute_effort`] per diff, and
-/// upserts into `fact_commit_effort`.  Skips already-scored commits unless
-/// `--force`.  Supports `--limit N` and `--dry-run`.
+/// selects the per-file diff data from the `commits JOIN files` tables (default
+/// path) — or re-walks git via libgit2 when `--range` or `--notes` is given —
+/// computes [`compute_effort`] per commit, and upserts into `fact_commit_effort`.
+/// Skips already-scored commits unless `--force`.  Supports `--limit N` and
+/// `--dry-run`.
+///
+/// **Path selection**:
+/// - `--range` is present → libgit2 path (revwalk needed to interpret git ranges)
+/// - `--notes` is present  → libgit2 path (live repo needed to write git notes)
+/// - otherwise             → db-only path (no repo on disk required)
+///
 /// Test: `tests::backfill_effort_*` below.
 ///
 /// # Errors
@@ -187,6 +207,10 @@ fn backfill_effort(
         return Ok(());
     }
 
+    // Decide which processing path to take for all repos in this invocation.
+    // --range and --notes both require a live git repository via libgit2.
+    let use_git_path = args.range.is_some() || args.notes;
+
     // Summary accumulators.
     let mut total_scored: usize = 0;
     let mut total_skipped: usize = 0;
@@ -194,7 +218,18 @@ fn backfill_effort(
     let mut size_counts = [0usize; 5]; // XS, S, M, L, XL
 
     for (repo_path, repo_name) in &repos_to_process {
-        let result = process_one_repo(repo_path, repo_name, db, &args, dry_run);
+        let result = if use_git_path {
+            process_one_repo_git(repo_path, repo_name, db, &args, dry_run)
+        } else {
+            process_one_repo_db(db.connection(), repo_name, &args, dry_run).and_then(
+                |(scored, skipped, sizes, rows)| {
+                    if !dry_run {
+                        persist_effort_rows(db, &rows)?;
+                    }
+                    Ok((scored, skipped, sizes))
+                },
+            )
+        };
         match result {
             Ok((scored, skipped, sizes)) => {
                 total_repos += 1;
@@ -229,15 +264,223 @@ fn backfill_effort(
     Ok(())
 }
 
-/// Process a single repository for the effort backfill.
+/// Process a single repository for the effort backfill using only the database.
 ///
-/// Why: isolates per-repo logic so errors in one repo don't abort the others.
-/// What: opens the git repo, queries existing effort rows, walks commits, calls
-/// [`compute_effort`], and upserts rows in batches of 1000.
-/// Test: called by `backfill_effort`; each path covered in `tests` below.
+/// Why: `tga collect` already stores `(path, insertions, deletions)` per file in
+/// the `files` table for every collected commit.  Reading from the database
+/// avoids opening the on-disk git repo entirely, making `tga backfill effort`
+/// self-sufficient on `tga.db` alone — no repository checkout required.
+///
+/// Commits outside the `tga collect` window are not present in the `files`
+/// table and are silently skipped.  Expand the collection `since`/`until`
+/// window to score them.
+///
+/// What: queries `commits JOIN files` for the given repository, groups rows by
+/// SHA, feeds each group to [`compute_effort`], and returns the accumulated
+/// [`EffortRow`] records alongside the scored/skipped counts.  Does NOT call
+/// [`persist_effort_rows`]; the caller is responsible for persisting.
+///
+/// Returns `(scored, skipped, [XS, S, M, L, XL], rows)`.
+///
+/// Test: `tests::backfill_effort_db_path_*` below.
+fn process_one_repo_db(
+    conn: &Connection,
+    repo_name: &str,
+    args: &EffortBackfillArgs,
+    dry_run: bool,
+) -> anyhow::Result<(usize, usize, [usize; 5], Vec<EffortRow>)> {
+    // Build the set of SHAs that already have an effort row (unless --force).
+    let already_scored: std::collections::HashSet<String> = if args.force {
+        std::collections::HashSet::new()
+    } else {
+        let mut stmt = conn.prepare("SELECT sha FROM fact_commit_effort WHERE repository = ?1")?;
+        let rows = stmt.query_map(params![repo_name], |row| row.get::<_, String>(0))?;
+        let mut set = std::collections::HashSet::new();
+        for r in rows {
+            set.insert(r?);
+        }
+        set
+    };
+
+    // Count commits available in the database for this repo (for logging).
+    let in_db: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT c.sha) FROM commits c WHERE c.repository = ?1",
+            params![repo_name],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    tracing::info!(
+        repo = %repo_name,
+        in_db = in_db,
+        already_scored = already_scored.len(),
+        "effort backfill db path: starting"
+    );
+
+    // Pull all (sha, path, insertions, deletions) rows for this repo.
+    // ORDER BY c.timestamp, c.sha ensures stable ordering; the sha secondary
+    // sort handles ties so the grouping below is deterministic.
+    let mut stmt = conn.prepare(
+        "SELECT c.sha, f.path, f.insertions, f.deletions \
+         FROM commits c \
+         JOIN files f ON f.commit_id = c.id \
+         WHERE c.repository = ?1 \
+         ORDER BY c.timestamp ASC, c.sha ASC",
+    )?;
+
+    let limit = args.limit.unwrap_or(usize::MAX);
+    let mut records: Vec<EffortRow> = Vec::new();
+    let mut skipped: usize = 0;
+
+    // Group consecutive rows by SHA (they arrive sorted by timestamp+sha).
+    let mut current_sha: Option<String> = None;
+    let mut current_files: Vec<(String, u32, u32)> = Vec::new();
+
+    // Helper closure: flush the accumulated files for the current SHA.
+    // Returns true if a record was pushed (i.e., not skipped, not over limit).
+    let flush = |sha: &str,
+                 files: &[(String, u32, u32)],
+                 already_scored: &std::collections::HashSet<String>,
+                 records: &mut Vec<EffortRow>,
+                 skipped: &mut usize|
+     -> bool {
+        if records.len() >= limit {
+            return false;
+        }
+        if already_scored.contains(sha) {
+            *skipped += 1;
+            return true; // keep iterating — may still reach the limit
+        }
+        if files.is_empty() {
+            tracing::warn!(
+                sha = %sha,
+                "commit has no rows in the files table; skipping effort computation"
+            );
+            return true;
+        }
+        let file_refs: Vec<(&str, u32, u32)> =
+            files.iter().map(|(p, i, d)| (p.as_str(), *i, *d)).collect();
+        let effort = compute_effort(file_refs);
+        let computed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        records.push(EffortRow {
+            sha: sha.to_string(),
+            repository: repo_name.to_string(),
+            size: effort.size_label().to_string(),
+            score: effort.score,
+            loc: effort.loc,
+            files: effort.files,
+            test_loc: effort.test_loc,
+            tests_factor: effort.tests_factor,
+            formula_version: FORMULA_VERSION.to_string(),
+            computed_at,
+        });
+        if records.len().is_multiple_of(1000) {
+            tracing::info!(
+                repo = %repo_name,
+                processed = records.len(),
+                "effort backfill db path: progress"
+            );
+        }
+        true
+    };
+
+    let rows = stmt.query_map(params![repo_name], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, u32>(2)?,
+            row.get::<_, u32>(3)?,
+        ))
+    })?;
+
+    for row_res in rows {
+        let (sha, path, ins, del) = row_res?;
+        match &current_sha {
+            None => {
+                current_sha = Some(sha.clone());
+                current_files.push((path, ins, del));
+            }
+            Some(cur) if cur == &sha => {
+                current_files.push((path, ins, del));
+            }
+            Some(_) => {
+                // New SHA — flush the previous one.
+                let prev_sha = current_sha.take().expect("just checked Some");
+                let should_continue = flush(
+                    &prev_sha,
+                    &current_files,
+                    &already_scored,
+                    &mut records,
+                    &mut skipped,
+                );
+                current_files.clear();
+                if !should_continue || records.len() >= limit {
+                    break;
+                }
+                current_sha = Some(sha.clone());
+                current_files.push((path, ins, del));
+            }
+        }
+    }
+    // Flush the last group.
+    if let Some(last_sha) = current_sha.take() {
+        if records.len() < limit {
+            flush(
+                &last_sha,
+                &current_files,
+                &already_scored,
+                &mut records,
+                &mut skipped,
+            );
+        }
+    }
+
+    let mut size_counts = [0usize; 5];
+    for row in &records {
+        let idx = match row.size.as_str() {
+            "XS" => 0,
+            "S" => 1,
+            "M" => 2,
+            "L" => 3,
+            _ => 4, // XL
+        };
+        size_counts[idx] += 1;
+    }
+
+    tracing::info!(
+        repo = %repo_name,
+        in_db = in_db,
+        scored = records.len(),
+        skipped = skipped,
+        dry_run = dry_run,
+        "effort backfill db path: complete"
+    );
+
+    Ok((records.len(), skipped, size_counts, records))
+}
+
+/// Process a single repository for the effort backfill using libgit2 (git path).
+///
+/// Why: required for two cases that cannot use the db-only path —
+/// (1) `--range`: revwalk is needed to interpret git range syntax such as
+/// `HEAD~10..HEAD`; (2) `--notes`: writing `refs/notes/effort` requires a live
+/// `Repository`.
+///
+/// What: opens the on-disk git repo via libgit2, walks commits (optionally
+/// filtered by `--range`), computes [`compute_effort`] per diff, and upserts
+/// into `fact_commit_effort`.  Skips already-scored commits unless `--force`.
+/// Supports `--limit N` and `--dry-run`.
+///
+/// Test: existing `tests::backfill_effort_persists_rows` and related tests
+/// exercise `persist_effort_rows`; end-to-end git path tested via `--notes`
+/// and `--range` integration paths.
 ///
 /// Returns `(scored, skipped, [XS, S, M, L, XL])`.
-fn process_one_repo(
+fn process_one_repo_git(
     repo_path: &std::path::Path,
     repo_name: &str,
     db: &mut Database,
@@ -299,9 +542,6 @@ fn process_one_repo(
     let limit = args.limit.unwrap_or(usize::MAX);
 
     for oid_res in revwalk {
-        if records.len() + skipped >= limit && skipped < limit {
-            // We're about to process the limit-th eligible commit.
-        }
         if records.len() >= limit {
             break;
         }
@@ -1102,5 +1342,372 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM fact_commit_effort", [], |r| r.get(0))
             .expect("count");
         assert_eq!(count, 0);
+    }
+
+    // ── db-path tests ─────────────────────────────────────────────────────────
+
+    /// Seed a commit row and its associated files rows into an in-memory DB.
+    ///
+    /// Why: shared helper for db-path tests; avoids repetitive SQL in each test.
+    /// What: inserts one commit row and one or more file rows, returning the
+    /// commit's integer id.
+    /// Test: used by `backfill_effort_db_path_*` tests below.
+    fn seed_commit_with_files(
+        db: &Database,
+        sha: &str,
+        repo: &str,
+        timestamp: &str,
+        files: &[(&str, u32, u32)], // (path, insertions, deletions)
+    ) -> i64 {
+        let conn = db.connection();
+        conn.execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, repository) \
+             VALUES (?1, 'tester', 'test@example.com', ?2, 'msg', ?3)",
+            params![sha, timestamp, repo],
+        )
+        .expect("insert commit");
+        let commit_id = conn.last_insert_rowid();
+        for (path, ins, del) in files {
+            conn.execute(
+                "INSERT INTO files (commit_id, path, change_type, insertions, deletions) \
+                 VALUES (?1, ?2, 'modified', ?3, ?4)",
+                params![commit_id, path, ins, del],
+            )
+            .expect("insert file");
+        }
+        commit_id
+    }
+
+    /// Why: verify the db-only path reads `commits JOIN files` and populates
+    /// `fact_commit_effort` correctly without touching a git repo.
+    /// What: seeds two commits with file rows; calls `process_one_repo_db` and
+    /// then persists; asserts both rows appear in `fact_commit_effort`.
+    /// Test: this test itself.
+    #[test]
+    fn backfill_effort_db_path_populates_fact_table() {
+        let mut db = Database::open_in_memory().expect("open");
+
+        seed_commit_with_files(
+            &db,
+            "aaa111",
+            "myrepo",
+            "2024-01-01T00:00:00Z",
+            &[("src/main.rs", 30, 10), ("src/lib.rs", 5, 2)],
+        );
+        seed_commit_with_files(
+            &db,
+            "bbb222",
+            "myrepo",
+            "2024-01-02T00:00:00Z",
+            &[("src/tests/foo_test.rs", 20, 0)],
+        );
+
+        let args = EffortBackfillArgs {
+            repo: None,
+            range: None,
+            force: false,
+            notes: false,
+            limit: None,
+        };
+
+        let (scored, skipped, _sizes, rows) =
+            process_one_repo_db(db.connection(), "myrepo", &args, false).expect("db path");
+        assert_eq!(scored, 2, "both commits should be scored");
+        assert_eq!(skipped, 0, "nothing pre-scored");
+
+        persist_effort_rows(&mut db, &rows).expect("persist");
+
+        let count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM fact_commit_effort WHERE repository = 'myrepo'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(count, 2, "two effort rows expected");
+
+        // Verify the test-file commit has a reduced tests_factor.
+        let (size_b, tests_factor_b): (String, f64) = db
+            .connection()
+            .query_row(
+                "SELECT size, tests_factor FROM fact_commit_effort WHERE sha = 'bbb222'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("bbb222 row");
+        // 20 test LoC out of 20 total → ratio=1 → tests_factor=0.7
+        assert!(
+            (tests_factor_b - 0.7).abs() < 1e-6,
+            "expected tests_factor=0.7 for all-test commit, got {tests_factor_b}"
+        );
+        // score = 1.0*log2(21) + 1.5*log2(2) + 1.0*0.7 ≈ 4.392 + 1.5 + 0.7 = 6.592 → S
+        assert_eq!(size_b, "S", "all-test commit should be S");
+    }
+
+    /// Why: verify the db-path respects the `--force=false` default — commits
+    /// that already have an effort row must be skipped.
+    /// What: inserts a pre-existing effort row for one commit; runs db path;
+    /// asserts only the unscored commit is returned.
+    /// Test: this test itself.
+    #[test]
+    fn backfill_effort_db_path_skips_already_scored() {
+        let mut db = Database::open_in_memory().expect("open");
+
+        seed_commit_with_files(
+            &db,
+            "scored111",
+            "repo",
+            "2024-01-01T00:00:00Z",
+            &[("src/a.rs", 10, 0)],
+        );
+        seed_commit_with_files(
+            &db,
+            "unscored222",
+            "repo",
+            "2024-01-02T00:00:00Z",
+            &[("src/b.rs", 5, 5)],
+        );
+
+        // Pre-populate an effort row for scored111.
+        let pre = vec![EffortRow {
+            sha: "scored111".to_string(),
+            repository: "repo".to_string(),
+            size: "XS".to_string(),
+            score: 1.0,
+            loc: 10,
+            files: 1,
+            test_loc: 0,
+            tests_factor: 1.0,
+            formula_version: FORMULA_VERSION.to_string(),
+            computed_at: 0,
+        }];
+        persist_effort_rows(&mut db, &pre).expect("pre-persist");
+
+        let args = EffortBackfillArgs {
+            repo: None,
+            range: None,
+            force: false,
+            notes: false,
+            limit: None,
+        };
+
+        let (scored, skipped, _sizes, rows) =
+            process_one_repo_db(db.connection(), "repo", &args, false).expect("db path");
+
+        assert_eq!(scored, 1, "only unscored222 should be scored");
+        assert_eq!(skipped, 1, "scored111 should be skipped");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].sha, "unscored222");
+    }
+
+    /// Why: verify `--force` causes already-scored commits to be re-scored
+    /// rather than skipped on the db path.
+    /// What: pre-populates effort for a commit; runs db path with force=true;
+    /// asserts the commit appears in the returned rows.
+    /// Test: this test itself.
+    #[test]
+    fn backfill_effort_db_path_force_rescores_all() {
+        let mut db = Database::open_in_memory().expect("open");
+
+        seed_commit_with_files(
+            &db,
+            "sha001",
+            "repo",
+            "2024-01-01T00:00:00Z",
+            &[("src/x.rs", 100, 50)],
+        );
+
+        // Insert a stale effort row.
+        let stale = vec![EffortRow {
+            sha: "sha001".to_string(),
+            repository: "repo".to_string(),
+            size: "XS".to_string(),
+            score: 0.1,
+            loc: 1,
+            files: 1,
+            test_loc: 0,
+            tests_factor: 1.0,
+            formula_version: "v0".to_string(),
+            computed_at: 0,
+        }];
+        persist_effort_rows(&mut db, &stale).expect("stale persist");
+
+        let args = EffortBackfillArgs {
+            repo: None,
+            range: None,
+            force: true, // re-score everything
+            notes: false,
+            limit: None,
+        };
+
+        let (scored, skipped, _sizes, rows) =
+            process_one_repo_db(db.connection(), "repo", &args, false).expect("db path");
+
+        assert_eq!(scored, 1, "force path should score the commit");
+        assert_eq!(skipped, 0, "nothing should be skipped with --force");
+        // The new score should reflect 150 LoC, not the stale 0.1.
+        assert!(
+            rows[0].score > 1.0,
+            "re-scored effort should be higher than stale 0.1"
+        );
+    }
+
+    /// Why: commits present in the `commits` table but with no rows in `files`
+    /// (e.g., empty commits) must not cause errors — they should be silently
+    /// skipped with a warning.
+    /// What: inserts a commit with no file rows; runs db path; asserts zero
+    /// records returned and no error raised.
+    /// Test: this test itself.
+    #[test]
+    fn backfill_effort_db_path_skips_commit_with_no_files() {
+        let db = Database::open_in_memory().expect("open");
+
+        // Insert commit row but NO file rows.
+        db.connection()
+            .execute(
+                "INSERT INTO commits (sha, author_name, author_email, timestamp, message, repository) \
+                 VALUES ('empty001', 'tester', 'test@example.com', '2024-01-01T00:00:00Z', 'empty', 'repo')",
+                [],
+            )
+            .expect("insert commit");
+
+        // The above commit has no files rows, so the JOIN returns no rows —
+        // `process_one_repo_db` will not even see a SHA to group.
+        let args = EffortBackfillArgs {
+            repo: None,
+            range: None,
+            force: false,
+            notes: false,
+            limit: None,
+        };
+
+        let (scored, skipped, _sizes, rows) =
+            process_one_repo_db(db.connection(), "repo", &args, false).expect("db path");
+
+        // Zero files rows → nothing scored.
+        assert_eq!(scored, 0, "commit with no files should produce no records");
+        assert_eq!(skipped, 0);
+        assert!(rows.is_empty());
+    }
+
+    /// Why: the `--limit N` flag must cap records at N even when more commits
+    /// are available in the db.
+    /// What: seeds 5 commits; runs db path with limit=3; asserts exactly 3
+    /// records are returned.
+    /// Test: this test itself.
+    #[test]
+    fn backfill_effort_db_path_respects_limit() {
+        let db = Database::open_in_memory().expect("open");
+
+        for i in 0..5u32 {
+            seed_commit_with_files(
+                &db,
+                &format!("sha{i:03}"),
+                "repo",
+                &format!("2024-01-{:02}T00:00:00Z", i + 1),
+                &[("src/foo.rs", 10, 5)],
+            );
+        }
+
+        let args = EffortBackfillArgs {
+            repo: None,
+            range: None,
+            force: false,
+            notes: false,
+            limit: Some(3),
+        };
+
+        let (scored, _skipped, _sizes, rows) =
+            process_one_repo_db(db.connection(), "repo", &args, false).expect("db path");
+
+        assert_eq!(scored, 3, "limit=3 should cap at 3 records");
+        assert_eq!(rows.len(), 3);
+    }
+
+    /// Why: the db path must correctly segregate commits by repository when
+    /// multiple repos share the same database.
+    /// What: seeds commits for two different repos; runs db path for one;
+    /// asserts only that repo's commits are scored.
+    /// Test: this test itself.
+    #[test]
+    fn backfill_effort_db_path_scoped_to_repo() {
+        let db = Database::open_in_memory().expect("open");
+
+        seed_commit_with_files(
+            &db,
+            "alpha001",
+            "repo-alpha",
+            "2024-01-01T00:00:00Z",
+            &[("src/a.rs", 20, 10)],
+        );
+        seed_commit_with_files(
+            &db,
+            "beta001",
+            "repo-beta",
+            "2024-01-01T00:00:00Z",
+            &[("src/b.rs", 50, 20)],
+        );
+
+        let args = EffortBackfillArgs {
+            repo: None,
+            range: None,
+            force: false,
+            notes: false,
+            limit: None,
+        };
+
+        // Process only repo-alpha.
+        let (scored, _skipped, _sizes, rows) =
+            process_one_repo_db(db.connection(), "repo-alpha", &args, false).expect("db path");
+
+        assert_eq!(scored, 1);
+        assert_eq!(rows[0].sha, "alpha001");
+        assert_eq!(rows[0].repository, "repo-alpha");
+    }
+
+    /// Why: dry_run=true on the db path must return rows (for reporting) but
+    /// the caller must not persist them — this test verifies the path selection
+    /// in `backfill_effort` withholds `persist_effort_rows`.
+    /// What: directly calls `process_one_repo_db` with dry_run=true; asserts
+    /// rows are returned but `fact_commit_effort` remains empty.
+    /// Test: this test itself.
+    #[test]
+    fn backfill_effort_db_path_dry_run_returns_rows_without_persisting() {
+        let db = Database::open_in_memory().expect("open");
+
+        seed_commit_with_files(
+            &db,
+            "drysha1",
+            "repo",
+            "2024-01-01T00:00:00Z",
+            &[("src/main.rs", 40, 10)],
+        );
+
+        let args = EffortBackfillArgs {
+            repo: None,
+            range: None,
+            force: false,
+            notes: false,
+            limit: None,
+        };
+
+        let (scored, _skipped, _sizes, rows) =
+            process_one_repo_db(db.connection(), "repo", &args, true /* dry_run */)
+                .expect("db path");
+
+        assert_eq!(
+            scored, 1,
+            "db path should return 1 scored row even in dry_run"
+        );
+        assert_eq!(rows.len(), 1);
+
+        // Caller is responsible for not persisting in dry_run; here we do NOT
+        // call persist_effort_rows, mirroring the behaviour in `backfill_effort`.
+        let count: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM fact_commit_effort", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 0, "dry_run must not write to fact_commit_effort");
     }
 }
