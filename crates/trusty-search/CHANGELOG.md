@@ -7,9 +7,43 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
-## [Unreleased]
+## [0.15.0] - 2026-05-27
 
 ### Added
+
+- **Issue #317 — Three-phase reindex progress bar (Walking → Chunking →
+  Embedding).** The CLI reindex progress bar now shows file enumeration
+  explicitly instead of several silent seconds before the first bar appeared.
+  A single `ProgressBar` is reused across all three phases — the bar resets
+  its position to 0 and updates its label at each phase boundary, "quickly
+  filling to 100% then restarting" exactly as requested:
+
+  - **Walking files…** — the daemon emits a new `walk_complete` SSE event
+    after the file-system walk finishes. The bar fills instantaneously (the
+    walk is synchronous on the daemon; the event arrives the moment it's done).
+  - **Chunking…** — the `start` event (emitted immediately after
+    `walk_complete`) triggers this brief label while the daemon begins the
+    parse/embed pipeline. On large repos this handoff is visible for a fraction
+    of a second before the first `batch` event arrives.
+  - **Embedding chunks…** — the first `batch` event flips the bar into this
+    phase and it fills as batches arrive, exactly as the old `ParseEmbed` phase
+    did. For `lexical_only` indexes the embed phase is skipped; the bar stays
+    on **Chunking** (there are no `batch` events for BM25-only indexes).
+
+  **Daemon side:** a new `walk_complete` SSE event is emitted before the
+  existing `start` event. Shape: `{"event":"walk_complete","total_files":1155}`.
+  Old CLI clients that don't recognise `walk_complete` simply ignore it and
+  wait for `start` — fully backward-compatible. New CLI clients talking to an
+  old daemon (no `walk_complete`) fall back to the legacy two-phase flow
+  (`start` → Embedding) automatically.
+
+  **Decision on chunk+embed split (3 phases vs 2):** the daemon's pipelined
+  orchestrator fuses parse+embed per batch — there is no clean "all chunks,
+  then all embeds" split. `Chunking` is therefore a synthetic brief phase
+  (the label shown between `walk_complete` and the first `batch` event, which
+  is typically under one second). `Embedding` covers the rest of the pipeline
+  exactly as the old `ParseEmbed` variant did. This matches Option 2 from the
+  design spec and delivers the three visible phase labels the user asked for.
 
 - **Bundled install** — `cargo install trusty-search` now produces **both**
   `trusty-search` and `trusty-embedderd` binaries from a single command.

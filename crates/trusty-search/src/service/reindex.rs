@@ -1434,6 +1434,18 @@ pub fn spawn_reindex_with_cleanup(
             }
         }
         progress.total_files.store(total, Ordering::Release);
+        // Issue #317: emit `walk_complete` BEFORE the existing `start` event so
+        // new CLI clients can render a dedicated "Walking files…" phase that
+        // transitions to "Chunking…" the moment the file count is known. Old
+        // CLI clients that don't recognise `walk_complete` simply ignore it and
+        // keep waiting for `start` as before — fully backward-compatible.
+        progress
+            .push(serde_json::json!({
+                "event": "walk_complete",
+                "total_files": total,
+                "index_id": index_id.0,
+            }))
+            .await;
         progress
             .push(serde_json::json!({
                 "event": "start",
@@ -2067,14 +2079,34 @@ mod tests {
         assert_eq!(progress.indexed.load(Ordering::Acquire), 2);
 
         let events = progress.events.lock().await;
-        assert!(events
-            .first()
-            .map(|s| s.contains("\"start\""))
-            .unwrap_or(false));
-        assert!(events
-            .last()
-            .map(|s| s.contains("\"complete\""))
-            .unwrap_or(false));
+        // Issue #317: the daemon now emits `walk_complete` BEFORE `start` so
+        // the CLI can render a dedicated "Walking files…" phase. The first
+        // event is `walk_complete`; `start` is the second event. Older
+        // assertions that expected `start` to be first are updated here.
+        assert!(
+            events
+                .first()
+                .map(|s| s.contains("\"walk_complete\""))
+                .unwrap_or(false),
+            "first event must be walk_complete (issue #317); got: {:?}",
+            events.first()
+        );
+        assert!(
+            events
+                .get(1)
+                .map(|s| s.contains("\"start\""))
+                .unwrap_or(false),
+            "second event must be start; got: {:?}",
+            events.get(1)
+        );
+        assert!(
+            events
+                .last()
+                .map(|s| s.contains("\"complete\""))
+                .unwrap_or(false),
+            "last event must be complete; got: {:?}",
+            events.last()
+        );
     }
 
     /// Issue #100 follow-up: end-to-end guard that the walker → chunker →

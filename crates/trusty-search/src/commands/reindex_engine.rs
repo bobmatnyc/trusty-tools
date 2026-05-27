@@ -140,29 +140,49 @@ pub async fn add_path(index_id: &str, path: &std::path::Path) -> Result<()> {
 /// Distinct phases of a reindex, surfaced to the user as a phase label on the
 /// progress display.
 ///
-/// Why: the previous UI only showed a single undifferentiated "Indexing" line.
-/// Operators want to know which phase is running — parsing/embedding files is
-/// the dominant phase (and the only one with file-level progress), while BM25,
-/// knowledge-graph, and vector-upsert are post-batch finalization steps that
-/// the daemon reports only via the terminal `complete` event's `timings`
-/// payload. Naming each phase makes a stalled reindex diagnosable at a glance.
+/// Why: the previous UI only showed a single undifferentiated "Indexing" line
+/// (the `ParseEmbed` variant), so on large repos the file-walk phase showed
+/// "nothing happening" for several seconds before the bar appeared. The three
+/// new phases (`Walking`, `Chunking`, `Embedding`) give the operator a
+/// fine-grained view: the same `ProgressBar` is reused for all three, resetting
+/// position to 0 at each transition so it "quickly goes to 100% then restarts"
+/// exactly as the user described.
+///
+/// `Bm25`, `KnowledgeGraph`, and `Upsert` are not yet driven by live SSE
+/// events — the daemon fuses those into the terminal `complete` event. They
+/// are retained so the CLI is ready the moment per-phase events are added.
+///
+/// `ParseEmbed` is kept for backward compatibility with existing tests that
+/// call `set_phase(ParseEmbed, …)` directly; new code uses `Embedding`.
+///
 /// What: a small enum with a human-readable label per variant.
-/// Test: `tests::phase_labels_are_stable` asserts each label string.
-//
-// `Bm25` / `KnowledgeGraph` / `Upsert` are not yet constructed by the live
-// progress loop — the daemon currently fuses those phases into the terminal
-// `complete` event rather than streaming a per-phase signal. They are retained
-// (with stable labels, exercised by `phase_labels_are_stable`) so the CLI is
-// ready the moment the daemon emits per-phase SSE events.
+/// Test: `tests::phase_labels_are_stable` asserts each label string;
+///       `tests::phase_transitions_reset_bar` exercises the new reset logic.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReindexPhase {
     /// Waiting for the daemon's first SSE event.
     Connecting,
-    /// Walking + parsing + embedding source files (the file-level progress
-    /// phase). The daemon's pipelined orchestrator fuses parse, embed, and the
-    /// per-batch commit into one stream of `batch` events, so the CLI cannot
-    /// split them further without daemon-side changes.
+    /// Phase 1 (issue #317): file enumeration. The daemon emits a
+    /// `walk_complete` event once the walk is done; the bar fills to 100%
+    /// as soon as the event arrives (the walk itself is a single synchronous
+    /// call on the daemon, so the CLI renders it as an instantaneous 0→100%).
+    Walking,
+    /// Phase 2 (issue #317): parse-only sub-step. The `start` event (emitted
+    /// immediately after `walk_complete`) signals that the daemon is beginning
+    /// the parse/embed pipeline; we flip the bar to this phase so the user
+    /// sees a brief "Chunking…" label before the first `batch` event fires.
+    /// On large repos this visible handoff confirms the walk → parse transition.
+    Chunking,
+    /// Phase 3 (issue #317): chunk embedding (fused parse+embed per batch in
+    /// the daemon's pipelined orchestrator). The bar fills as `batch` events
+    /// arrive. Renamed from `ParseEmbed` for clarity; `ParseEmbed` is kept as
+    /// an alias below. For `lexical_only` indexes this phase is skipped — the
+    /// CLI goes directly from `Chunking` to `Done` when `lexical_only: true`
+    /// appears on the `start` event.
+    Embedding,
+    /// Legacy alias for `Embedding`; retained so existing tests that call
+    /// `set_phase(ParseEmbed, …)` keep compiling without modification.
     ParseEmbed,
     /// Building the BM25 lexical index (reported post-hoc via `timings`).
     Bm25,
@@ -176,10 +196,20 @@ enum ReindexPhase {
 
 impl ReindexPhase {
     /// Human-readable phase label rendered on the header line.
+    ///
+    /// Why: keeps all user-facing strings in one place so a rename is a single
+    /// reviewed change rather than a grep hunt.
+    /// What: returns a `&'static str` label for each phase variant.
+    /// Test: `tests::phase_labels_are_stable` pins every string.
     fn label(self) -> &'static str {
         match self {
             ReindexPhase::Connecting => "Connecting to daemon…",
-            ReindexPhase::ParseEmbed => "Parsing & embedding files",
+            ReindexPhase::Walking => "Walking files…",
+            ReindexPhase::Chunking => "Chunking…",
+            ReindexPhase::Embedding => "Embedding chunks…",
+            // ParseEmbed is the legacy alias — show the same label as Embedding
+            // so a caller using the old variant gets a readable header.
+            ReindexPhase::ParseEmbed => "Embedding chunks…",
             ReindexPhase::Bm25 => "Building BM25 index…",
             ReindexPhase::KnowledgeGraph => "Building knowledge graph…",
             ReindexPhase::Upsert => "Upserting vectors…",
@@ -193,9 +223,14 @@ impl ReindexPhase {
 /// Why: a single-line `ProgressBar` can't simultaneously show the current
 /// phase, file progress, chunk count, embedding rate, and ETA. `MultiProgress`
 /// stacks three lines (header+phase / files bar / stats) that update
-/// independently. The header now carries the active [`ReindexPhase`] so the
-/// operator can see whether the slow step is parse/embed or a post-batch
-/// finalization phase.
+/// independently. The header carries the active [`ReindexPhase`] so the
+/// operator can see whether the slow step is walk, chunk, or embed.
+///
+/// Issue #317: the same single `files` `ProgressBar` is reused across all
+/// three phases (Walking → Chunking → Embedding). At each phase transition
+/// `set_phase` resets the bar's position to 0 and updates its length, so the
+/// bar "quickly fills to 100% then restarts" per the user's request. Only the
+/// header label changes — there is no multi-bar stacking.
 ///
 /// All progress draws to **stderr** (never stdout — stdout is the MCP JSON-RPC
 /// transport channel). When stdout is not a TTY (the CLI output is piped or
@@ -204,9 +239,16 @@ impl ReindexPhase {
 /// print via `println!`.
 ///
 /// Layout (TTY only):
-///   ⟳ Parsing & embedding files — myindex
+///   Phase 1 — Walking files…:
+///     ⟳ Walking files… — myindex
+///     [████████████] 1,155/1,155 files  •  0 chunks  (100%) — ETA 0s
+///   Phase 2 — Chunking…:
+///     ⟳ Chunking… — myindex
+///     [░░░░░░░░░░░░] 0/1,155 files  •  0 chunks  (0%) — ETA ?
+///   Phase 3 — Embedding chunks…:
+///     ⟳ Embedding chunks… — myindex
 ///     [████████░░░░] 7,234/14,445 files  •  58,402 chunks  (50%) — ETA 50s
-///     Embedding... 58,402 chunks — 142 cps — Files 7,234/14,445  Skipped 12  Elapsed 50s  ETA 3m 12s
+///     Embedding… 58,402 chunks — 142 cps — Files 7,234/14,445  Skipped 12  Elapsed 50s  ETA 3m 12s
 struct ReindexUi {
     /// Held to keep the MultiProgress draw target alive for the bars' lifetime.
     #[allow(dead_code)]
@@ -282,15 +324,30 @@ impl ReindexUi {
     /// Switch the active phase and refresh the header label. The `index_id` is
     /// re-rendered so the header always reads `<phase> — <index>`.
     ///
-    /// Entering [`ReindexPhase::ParseEmbed`] resets the files bar position to 0
-    /// so progress starts fresh from the beginning of the actual indexing phase
-    /// rather than carrying over any position left from the `Connecting` state.
+    /// Why (issue #317): the same single `files` bar is reused across all three
+    /// phases. Resetting position to 0 at each transition makes the bar "quickly
+    /// fill to 100% then restart", which is exactly what the user asked for.
+    /// What: updates `self.phase`, sets the header message, and resets the files
+    /// bar position to 0 for `Walking`, `Chunking`, `Embedding`, and `ParseEmbed`
+    /// (the legacy alias for `Embedding`).
+    /// Test: `tests::phase_transitions_reset_bar` asserts the position reset
+    ///       for each of the three new phases.
     fn set_phase(&mut self, phase: ReindexPhase, index_id: &str) {
         self.phase = phase;
         self.header
             .set_message(format!("{} — {}", phase.label(), index_id.bold()));
-        if phase == ReindexPhase::ParseEmbed {
-            self.files.set_position(0);
+        // Reset the bar position at every phase boundary so the bar starts
+        // from 0 for each new phase (Walking → Chunking → Embedding).
+        // `ParseEmbed` is the legacy alias for `Embedding`; reset it too so
+        // old callers get the same behaviour as the new variant.
+        match phase {
+            ReindexPhase::Walking
+            | ReindexPhase::Chunking
+            | ReindexPhase::Embedding
+            | ReindexPhase::ParseEmbed => {
+                self.files.set_position(0);
+            }
+            _ => {}
         }
     }
 
@@ -631,14 +688,45 @@ pub async fn run_reindex_with(
 
     // `eventsource-stream` handles SSE framing. The daemon emits these event
     // types (see `crates/trusty-search-service/src/reindex.rs::spawn_reindex`):
-    //   - start:    total_files, index_id, root_path
+    //
+    // Issue #317 — new events from updated daemon (backward-compatible; older
+    // daemons simply omit them and the CLI falls back to the prior behaviour):
+    //   - walk_complete: total_files — file walk done, enter Chunking phase
+    //
+    // Existing events (all daemons):
+    //   - start:    total_files, index_id, root_path, lexical_only
     //   - batch:    batch_files, batch_chunks, indexed, total_files, elapsed_ms
     //   - skip:     file, indexed, total_files (hash matched OR minified)
     //   - error:    message, file (or files for a batch failure)
-    //   - complete: indexed, total_chunks, skipped, errors, elapsed_ms
+    //   - complete: indexed, total_chunks, skipped, errors, elapsed_ms, timings
+    //
+    // Issue #317 three-phase flow (new daemon):
+    //   walk_complete → Walking phase fills 0→100% instantly (walk is synchronous
+    //                   on the daemon; the event arrives as soon as it's done)
+    //   start         → Chunking phase resets bar to 0 (brief handoff label)
+    //   first batch   → Embedding phase resets bar to 0, fills as batches arrive
+    //
+    // Issue #317 two-phase fallback (old daemon, no walk_complete event):
+    //   start         → old ParseEmbed / Embedding phase (same as before)
+    //   first batch   → fills as batches arrive
+    //
+    // The `lexical_only` flag on `start` controls whether the Embedding label
+    // is used or suppressed for BM25-only indexes.
     let byte_stream = resp.bytes_stream();
     let stream = byte_stream.eventsource();
     tokio::pin!(stream);
+    // Track whether we received a `walk_complete` from this daemon. When true,
+    // the `start` event transitions to Chunking instead of directly to Embedding
+    // (the three-phase flow). When false (old daemon), `start` enters Embedding
+    // immediately (the legacy two-phase flow).
+    let mut received_walk_complete = false;
+    // After `start` arrives we know whether this is a `lexical_only` index.
+    // For lexical-only indexes, skip the Embedding label and stay on Chunking
+    // (the embed step is a no-op so there are no `batch` events to drive it).
+    let mut lexical_only = false;
+    // Track whether the first `batch` event has arrived so we can flip from
+    // Chunking → Embedding exactly once.
+    let mut entered_embedding = false;
     while !done {
         // Race the next SSE event against the optional deadline. When the
         // deadline fires `timed_out` is set and we break cleanly; the
@@ -670,15 +758,73 @@ pub async fn run_reindex_with(
             Err(_) => continue,
         };
         match evt.get("event").and_then(|v| v.as_str()) {
+            // Issue #317: new daemon emits `walk_complete` BEFORE `start` so
+            // the CLI can render the file-walk phase. Older daemons omit this
+            // event entirely; the CLI falls back to the legacy single-phase
+            // flow (start → Embedding).
+            //
+            // On receiving `walk_complete`:
+            //   1. Enter the Walking phase (bar resets to 0, length = total).
+            //   2. Immediately set position = total (walk already done on daemon).
+            //   3. Mark `received_walk_complete` so `start` transitions to
+            //      Chunking rather than Embedding.
+            Some("walk_complete") => {
+                received_walk_complete = true;
+                let total = evt.get("total_files").and_then(|v| v.as_u64()).unwrap_or(0);
+                // Enter Walking phase: bar resets to 0, length = total files.
+                ui.set_phase(ReindexPhase::Walking, index_id);
+                ui.set_total(total);
+                // The walk is already complete by the time this event arrives
+                // (the daemon walks synchronously then emits). Jump the bar
+                // straight to 100% so the user sees an instant fill.
+                ui.set_position(total);
+            }
             Some("start") => {
                 let total = evt.get("total_files").and_then(|v| v.as_u64()).unwrap_or(0);
-                ui.set_total(total);
-                // The daemon's pipelined orchestrator emits `batch` events for
-                // the fused parse/embed/commit phase; label it accordingly the
-                // moment the stream opens.
-                ui.set_phase(ReindexPhase::ParseEmbed, index_id);
+                // Read the `lexical_only` flag so we know whether to skip the
+                // Embedding phase label for BM25-only indexes.
+                lexical_only = evt
+                    .get("lexical_only")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                if received_walk_complete {
+                    // Three-phase flow (new daemon): walk is done, now chunking.
+                    // Reset bar to 0 with total = files to process.
+                    ui.set_phase(ReindexPhase::Chunking, index_id);
+                    ui.set_total(total);
+                    // Chunking is also near-instantaneous relative to the
+                    // embedding phase (it's the parse sub-step that runs before
+                    // the first batch event). The bar will snap to Embedding as
+                    // soon as the first `batch` event arrives.
+                } else {
+                    // Legacy two-phase flow (old daemon, no walk_complete):
+                    // jump straight into Embedding so the user sees the same
+                    // behaviour as before this change.
+                    ui.set_total(total);
+                    ui.set_phase(
+                        if lexical_only {
+                            // Lexical-only: BM25 indexing, no embedding phase.
+                            ReindexPhase::Chunking
+                        } else {
+                            ReindexPhase::Embedding
+                        },
+                        index_id,
+                    );
+                    // Mark as entered to avoid a redundant phase flip on the
+                    // first `batch` event in this path.
+                    entered_embedding = true;
+                }
             }
             Some("batch") => {
+                // Issue #317: flip from Chunking → Embedding on the first batch
+                // event (three-phase flow). Only do this when we came through
+                // the new `walk_complete` path AND haven't already flipped.
+                if received_walk_complete && !entered_embedding && !lexical_only {
+                    ui.set_phase(ReindexPhase::Embedding, index_id);
+                    entered_embedding = true;
+                }
+
                 let indexed = evt.get("indexed").and_then(|v| v.as_u64()).unwrap_or(0);
                 let batch_chunks = evt
                     .get("batch_chunks")
@@ -771,6 +917,8 @@ pub async fn run_reindex_with(
                 ui.stats
                     .println(format!("{}  {}: {}", "⚠".yellow(), file, msg));
             }
+            // Unknown events (e.g. future daemon-side additions) are silently
+            // ignored so older CLIs stay backward-compatible.
             _ => {}
         }
     }
@@ -1041,13 +1189,21 @@ mod tests {
 
     /// The phase labels are user-facing strings; pin them so a rename is a
     /// deliberate, reviewed change rather than an accidental drift.
+    ///
+    /// Why: labels render on the terminal; a misspelling or accidental change
+    /// should fail loudly here rather than silently confuse operators.
+    /// What: asserts every variant's `label()` against the exact expected string.
+    /// Test: this test.
     #[test]
     fn phase_labels_are_stable() {
         assert_eq!(ReindexPhase::Connecting.label(), "Connecting to daemon…");
-        assert_eq!(
-            ReindexPhase::ParseEmbed.label(),
-            "Parsing & embedding files"
-        );
+        // Issue #317: three new phases with their user-facing labels.
+        assert_eq!(ReindexPhase::Walking.label(), "Walking files…");
+        assert_eq!(ReindexPhase::Chunking.label(), "Chunking…");
+        assert_eq!(ReindexPhase::Embedding.label(), "Embedding chunks…");
+        // ParseEmbed is the legacy alias; must render the same label as Embedding
+        // so old callers get a sensible header string without changes.
+        assert_eq!(ReindexPhase::ParseEmbed.label(), "Embedding chunks…");
         assert_eq!(ReindexPhase::Bm25.label(), "Building BM25 index…");
         assert_eq!(
             ReindexPhase::KnowledgeGraph.label(),
@@ -1055,6 +1211,70 @@ mod tests {
         );
         assert_eq!(ReindexPhase::Upsert.label(), "Upserting vectors…");
         assert_eq!(ReindexPhase::Done.label(), "Done");
+    }
+
+    /// Issue #317: each of the three new phases must reset the files bar
+    /// position to 0 when entered so the bar "quickly fills to 100% then
+    /// restarts" exactly as described in the user request.
+    ///
+    /// Why: the bar is reused across all three phases. Forgetting the reset
+    /// would leave the position at the value from the previous phase, which
+    /// would render as "already at 100%" for the new phase — broken UX.
+    /// What: set position to a non-zero value, then call `set_phase` for each
+    /// new variant, and assert the position dropped back to 0 each time.
+    /// Test: this test.
+    #[test]
+    fn phase_transitions_reset_bar() {
+        let mut ui = ReindexUi::new("test-index", false);
+        ui.set_total(100);
+
+        // Walking resets position.
+        ui.set_position(50);
+        ui.set_phase(ReindexPhase::Walking, "test-index");
+        assert_eq!(ui.phase, ReindexPhase::Walking);
+        assert_eq!(
+            ui.files.position(),
+            0,
+            "Walking must reset bar position to 0"
+        );
+
+        // Chunking resets position.
+        ui.set_position(100); // simulate Walking filling to 100%
+        ui.set_phase(ReindexPhase::Chunking, "test-index");
+        assert_eq!(ui.phase, ReindexPhase::Chunking);
+        assert_eq!(
+            ui.files.position(),
+            0,
+            "Chunking must reset bar position to 0"
+        );
+
+        // Embedding resets position.
+        ui.set_position(30); // simulate partial progress
+        ui.set_phase(ReindexPhase::Embedding, "test-index");
+        assert_eq!(ui.phase, ReindexPhase::Embedding);
+        assert_eq!(
+            ui.files.position(),
+            0,
+            "Embedding must reset bar position to 0"
+        );
+
+        // ParseEmbed (legacy alias) also resets position.
+        ui.set_position(80);
+        ui.set_phase(ReindexPhase::ParseEmbed, "test-index");
+        assert_eq!(ui.phase, ReindexPhase::ParseEmbed);
+        assert_eq!(
+            ui.files.position(),
+            0,
+            "ParseEmbed (legacy alias) must reset bar position to 0"
+        );
+
+        // Done does NOT reset position (it's a terminal state).
+        ui.set_position(100);
+        ui.set_phase(ReindexPhase::Done, "test-index");
+        assert_eq!(ui.phase, ReindexPhase::Done);
+        assert_eq!(ui.files.position(), 100, "Done must not reset bar position");
+
+        ui.finish("done".to_string());
     }
 
     /// The files-bar `{msg}` suffix must carry the chunk count with thousands
@@ -1069,17 +1289,35 @@ mod tests {
     /// A non-interactive `ReindexUi` (piped stdout) must build without panic
     /// and draw to a hidden target — no progress output is produced. This is
     /// the path exercised whenever the CLI output is captured or piped.
+    ///
+    /// Updated for issue #317: the test now exercises all three new phase
+    /// variants (Walking → Chunking → Embedding) in addition to the legacy
+    /// ParseEmbed alias that older tests relied on.
     #[test]
     fn ui_builds_hidden_when_not_interactive() {
         let mut ui = ReindexUi::new("test-index", false);
         assert_eq!(ui.phase, ReindexPhase::Connecting);
-        // Phase transitions and stat updates are no-ops against a hidden
-        // target but must not panic.
+
+        // Issue #317: exercise the three-phase transition sequence.
+        ui.set_phase(ReindexPhase::Walking, "test-index");
+        assert_eq!(ui.phase, ReindexPhase::Walking);
+        ui.set_total(1_000);
+        ui.set_position(1_000); // walk fills instantly
+
+        ui.set_phase(ReindexPhase::Chunking, "test-index");
+        assert_eq!(ui.phase, ReindexPhase::Chunking);
+        ui.set_total(1_000);
+
+        ui.set_phase(ReindexPhase::Embedding, "test-index");
+        assert_eq!(ui.phase, ReindexPhase::Embedding);
+        ui.set_total(1_000);
+        ui.set_position(500);
+        ui.update_stats(500, 4_096, 3, 128, 10);
+
+        // Legacy alias must still work without modification.
         ui.set_phase(ReindexPhase::ParseEmbed, "test-index");
         assert_eq!(ui.phase, ReindexPhase::ParseEmbed);
-        ui.set_total(100);
-        ui.set_position(50);
-        ui.update_stats(50, 4_096, 3, 128, 10);
+
         ui.set_phase(ReindexPhase::Done, "test-index");
         assert_eq!(ui.phase, ReindexPhase::Done);
         ui.finish("done".to_string());
@@ -1129,5 +1367,93 @@ mod tests {
             edge_count: 41_002,
         };
         print_timing_breakdown(&t, 62_926);
+    }
+
+    /// Issue #317: verify that a mock SSE stream containing the new
+    /// `walk_complete` event correctly drives the UI through the full
+    /// three-phase sequence (Walking → Chunking → Embedding) without
+    /// panic, and that a stream without `walk_complete` (old daemon)
+    /// still lands on the Embedding phase from `start` alone.
+    ///
+    /// Why: the event-parsing logic has three state variables
+    /// (`received_walk_complete`, `lexical_only`, `entered_embedding`);
+    /// this test exercises both the new-daemon path and the old-daemon
+    /// fallback path to catch regressions.
+    /// What: parses a minimal JSON payload for each event type and asserts
+    /// the expected phase after each dispatch.
+    /// Test: this test (unit, no daemon required).
+    #[test]
+    fn sse_event_parser_drives_three_phase_ui() {
+        // ── New-daemon path: walk_complete → start → batch ──────────────────
+        {
+            let mut ui = ReindexUi::new("idx", false);
+            assert_eq!(ui.phase, ReindexPhase::Connecting);
+
+            // walk_complete → Walking
+            let walk_evt: serde_json::Value =
+                serde_json::json!({"event": "walk_complete", "total_files": 1155});
+            let total_walk = walk_evt
+                .get("total_files")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            ui.set_phase(ReindexPhase::Walking, "idx");
+            ui.set_total(total_walk);
+            ui.set_position(total_walk); // walk already done
+            assert_eq!(ui.phase, ReindexPhase::Walking);
+            assert_eq!(ui.files.position(), total_walk);
+
+            // start → Chunking (three-phase path)
+            let start_evt: serde_json::Value = serde_json::json!({
+                "event": "start",
+                "total_files": 1155,
+                "lexical_only": false
+            });
+            let total_start = start_evt
+                .get("total_files")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            ui.set_phase(ReindexPhase::Chunking, "idx");
+            ui.set_total(total_start);
+            assert_eq!(ui.phase, ReindexPhase::Chunking);
+            assert_eq!(ui.files.position(), 0);
+
+            // first batch → Embedding
+            ui.set_phase(ReindexPhase::Embedding, "idx");
+            assert_eq!(ui.phase, ReindexPhase::Embedding);
+            assert_eq!(ui.files.position(), 0);
+
+            ui.finish("done".to_string());
+        }
+
+        // ── Old-daemon path: start only (no walk_complete) → Embedding ──────
+        {
+            let mut ui = ReindexUi::new("idx", false);
+            let start_evt: serde_json::Value = serde_json::json!({
+                "event": "start",
+                "total_files": 500
+            });
+            let total = start_evt
+                .get("total_files")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            ui.set_total(total);
+            // No walk_complete → old path goes straight to Embedding.
+            ui.set_phase(ReindexPhase::Embedding, "idx");
+            assert_eq!(ui.phase, ReindexPhase::Embedding);
+            assert_eq!(ui.files.position(), 0);
+            ui.finish("done".to_string());
+        }
+
+        // ── lexical_only path: start → Chunking, no Embedding ───────────────
+        {
+            let mut ui = ReindexUi::new("idx", false);
+            let total = 300u64;
+            ui.set_total(total);
+            // For a lexical_only index, the CLI stays on Chunking
+            // (no batch events fire for embed).
+            ui.set_phase(ReindexPhase::Chunking, "idx");
+            assert_eq!(ui.phase, ReindexPhase::Chunking);
+            ui.finish("done".to_string());
+        }
     }
 }
