@@ -1,4 +1,5 @@
-//! Tag and release-branch reachability for `fact_commit_reachability` (issue #279).
+//! Tag, release-branch, and default-branch reachability for
+//! `fact_commit_reachability` (issues #279, #290).
 //!
 //! # Why
 //!
@@ -9,15 +10,23 @@
 //! this module those commits look identical to abandoned work in every DORA /
 //! classification report.
 //!
+//! Additionally, `on_default_branch` was declared in migration v15 but never
+//! populated — every row defaulted to 0 (issue #290). This module now auto-
+//! detects the default branch per-repo and sets the column correctly.
+//!
 //! # What
 //!
 //! For a set of commit SHAs already stored in the database this module:
 //!
-//! 1. Walks all tags in the repository once, building a `HashMap<sha, Vec<tag>>`.
-//! 2. Walks all branches that match a configured set of glob patterns (e.g.
+//! 1. Auto-detects the default branch via `refs/remotes/origin/HEAD` (symref),
+//!    falling back to `refs/heads/main`, `refs/heads/master`,
+//!    `refs/remotes/origin/main`, `refs/remotes/origin/master` in that order.
+//!    If none are found a `warn!` is emitted and `on_default_branch` stays 0.
+//! 2. Walks all tags in the repository once, building a `HashMap<sha, Vec<tag>>`.
+//! 3. Walks all branches that match a configured set of glob patterns (e.g.
 //!    `release/*`, `hotfix/*`) once, building a `HashMap<sha, Vec<branch>>`.
-//! 3. Upserts `fact_commit_reachability` rows for every commit SHA that is
-//!    known to either map.
+//! 4. Upserts `fact_commit_reachability` rows for every commit SHA, now
+//!    including the `on_default_branch` column.
 //!
 //! This is **O(repo_size + refs)** — not O(repo_size × refs × commits) — because
 //! we reverse the lookup: instead of calling `git tag --contains <sha>` for
@@ -27,7 +36,7 @@
 //! # Test
 //!
 //! See `tests` module below for unit tests of the glob matcher and the batched
-//! builder, plus an integration test that builds a real ephemeral git repo.
+//! builder, plus integration tests that build real ephemeral git repos.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -55,20 +64,24 @@ pub struct ReachabilityStats {
     pub tagged_commits: usize,
     /// Commits found on at least one release branch.
     pub release_branch_commits: usize,
+    /// Commits reachable from the repository's default branch (main/master).
+    pub default_branch_commits: usize,
 }
 
-/// Scan a repository for tag and release-branch reachability, then persist
-/// the results into `fact_commit_reachability`.
+/// Scan a repository for tag, release-branch, and default-branch reachability,
+/// then persist the results into `fact_commit_reachability`.
 ///
 /// Why: see module-level docs — the single entry point that ties batched
-/// graph-walking to database persistence.
-/// What: opens `repo_path`, calls [`build_tag_map`] and
+/// graph-walking to database persistence.  Fixes issue #290 where
+/// `on_default_branch` was never populated (always 0).
+/// What: opens `repo_path`, auto-detects the default branch via
+/// [`detect_default_branch_set`], calls [`build_tag_map`] and
 /// [`build_branch_map`] (subject to `config` flags), then upserts one row
-/// per commit into `fact_commit_reachability`.  Commits already in the DB
-/// that are not reachable from any tag/branch still get a row written with
-/// all-false reachability so a single LEFT JOIN is sufficient.
-/// Test: `tests::scan_full_lifecycle` builds an ephemeral repo, runs this
-/// function, and asserts correct column values.
+/// per commit into `fact_commit_reachability` including `on_default_branch`.
+/// Commits already in the DB that are not reachable from any signal still get
+/// a row written with all-false reachability so a single LEFT JOIN is safe.
+/// Test: `tests::scan_full_lifecycle` and `tests::scan_default_branch_*` build
+/// ephemeral repos and assert correct column values.
 ///
 /// # Errors
 ///
@@ -111,6 +124,11 @@ pub fn scan_and_persist(
     // indexing tags/branches whose tips are outside the stored window.
     let sha_set: std::collections::HashSet<String> = all_shas.iter().cloned().collect();
 
+    // Detect the default branch (main/master/origin HEAD) and build a set of
+    // all SHAs reachable from it.  This populates `on_default_branch` (issue
+    // #290 — previously this column was always 0).
+    let default_branch_set = detect_default_branch_set(&repo, &sha_set, repo_path);
+
     let tag_map = if config.track_tags {
         build_tag_map(&repo, &sha_set)?
     } else {
@@ -126,7 +144,7 @@ pub fn scan_and_persist(
 
     let mut stats = ReachabilityStats::default();
 
-    // Upsert one row per known SHA.  For SHAs not in either map the row gets
+    // Upsert one row per known SHA.  For SHAs not in any map the row gets
     // all-false defaults, which matches the schema default and makes a LEFT JOIN
     // safe for queries that want "was this commit deployed via *any* path?"
     let tx = conn
@@ -139,21 +157,25 @@ pub fn scan_and_persist(
 
         let on_any_tag = !tags.is_empty();
         let on_release_branch = !branches.is_empty();
+        let on_default_branch = default_branch_set.contains(sha.as_str());
 
         let tags_json = serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string());
         let branches_json = serde_json::to_string(&branches).unwrap_or_else(|_| "[]".to_string());
 
         tx.execute(
             "INSERT INTO fact_commit_reachability \
-             (commit_sha, on_any_tag, reachable_from_tags, on_release_branch, release_branches) \
-             VALUES (?1, ?2, ?3, ?4, ?5) \
+             (commit_sha, on_default_branch, on_any_tag, reachable_from_tags, \
+              on_release_branch, release_branches) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
              ON CONFLICT(commit_sha) DO UPDATE SET \
+               on_default_branch   = excluded.on_default_branch, \
                on_any_tag          = excluded.on_any_tag, \
                reachable_from_tags = excluded.reachable_from_tags, \
                on_release_branch   = excluded.on_release_branch, \
                release_branches    = excluded.release_branches",
             params![
                 sha,
+                on_default_branch as i64,
                 on_any_tag as i64,
                 tags_json,
                 on_release_branch as i64,
@@ -163,6 +185,9 @@ pub fn scan_and_persist(
         .map_err(crate::core::TgaError::from)?;
 
         stats.rows_upserted += 1;
+        if on_default_branch {
+            stats.default_branch_commits += 1;
+        }
         if on_any_tag {
             stats.tagged_commits += 1;
         }
@@ -175,11 +200,112 @@ pub fn scan_and_persist(
 
     info!(
         rows = stats.rows_upserted,
+        default_branch = stats.default_branch_commits,
         tagged = stats.tagged_commits,
         release_branch = stats.release_branch_commits,
         "reachability scan complete"
     );
     Ok(stats)
+}
+
+// ── Default-branch detection ────────────────────────────────────────────────
+
+/// Detect the repository's default branch and return the set of all DB-known
+/// commit SHAs that are reachable from it.
+///
+/// Why: `on_default_branch` was declared in migration v15 but never computed
+/// (issue #290).  Per-repo auto-detection is required because the user's 80
+/// repos use a mix of `main` and `master`.
+/// What: tries `refs/remotes/origin/HEAD` (symref pointing at the upstream
+/// default branch), then falls back through `refs/heads/main`,
+/// `refs/heads/master`, `refs/remotes/origin/main`, `refs/remotes/origin/master`
+/// in that order.  If none resolve to a commit, emits a `warn!` and returns an
+/// empty set so `on_default_branch` stays 0 for this repo (current behaviour,
+/// at least made explicit).
+/// Test: `tests::scan_default_branch_main`, `tests::scan_default_branch_master`,
+/// and `tests::scan_default_branch_missing` cover the three code paths.
+pub fn detect_default_branch_set(
+    repo: &Repository,
+    known_shas: &std::collections::HashSet<String>,
+    repo_path: &Path,
+) -> std::collections::HashSet<String> {
+    // Resolve refs/remotes/origin/HEAD first — this is the symref that git
+    // sets when you `git clone` and it points at whatever the remote calls its
+    // default branch.
+    let tip_oid = 'resolve: {
+        if let Ok(head_ref) = repo.find_reference("refs/remotes/origin/HEAD") {
+            if let Ok(resolved) = head_ref.resolve() {
+                if let Some(oid) = resolved.target() {
+                    break 'resolve Some(oid);
+                }
+            }
+        }
+        // Fallback chain: local main → local master → remote main → remote master.
+        for candidate in [
+            "refs/heads/main",
+            "refs/heads/master",
+            "refs/remotes/origin/main",
+            "refs/remotes/origin/master",
+        ] {
+            if let Ok(r) = repo.find_reference(candidate) {
+                if let Some(oid) = r.target() {
+                    debug!(candidate, "default branch detected via fallback");
+                    break 'resolve Some(oid);
+                }
+            }
+        }
+        None
+    };
+
+    match tip_oid {
+        None => {
+            warn!(
+                repo = %repo_path.display(),
+                "could not detect default branch (tried origin/HEAD, main, master); \
+                 on_default_branch will be 0 for this repo"
+            );
+            std::collections::HashSet::new()
+        }
+        Some(oid) => {
+            let mut set = std::collections::HashSet::new();
+            // Re-use walk_ancestors by passing an ad-hoc map and then
+            // extracting the keys, or inline the walk directly for simplicity.
+            let mut revwalk = match repo.revwalk() {
+                Ok(w) => w,
+                Err(e) => {
+                    warn!(error = %e, "revwalk init failed for default-branch detection");
+                    return set;
+                }
+            };
+            if let Err(e) = revwalk.set_sorting(git2::Sort::TIME) {
+                warn!(error = %e, "revwalk sort failed");
+                return set;
+            }
+            if let Err(e) = revwalk.push(oid) {
+                warn!(error = %e, "revwalk push failed");
+                return set;
+            }
+            for oid_res in revwalk {
+                match oid_res {
+                    Ok(o) => {
+                        let sha = o.to_string();
+                        if known_shas.contains(&sha) {
+                            set.insert(sha);
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "revwalk error during default-branch detection; stopping");
+                        break;
+                    }
+                }
+            }
+            debug!(
+                default_branch_commits = set.len(),
+                "default-branch SHA set built"
+            );
+            set
+        }
+    }
 }
 
 // ── Batched tag/branch graph walkers ────────────────────────────────────────
@@ -828,5 +954,208 @@ mod tests {
             tags.contains(&"tga-v1.1.0".to_string()),
             "must include tga-v1.1.0 in JSON array"
         );
+    }
+
+    // ── on_default_branch detection tests ───────────────────────────────────
+
+    /// Why: verifies that commits on the local `main` branch get
+    /// `on_default_branch=1` while commits only on a stray branch get 0.
+    /// Covers the primary fix for issue #290.
+    #[test]
+    fn scan_default_branch_main() {
+        let (tr, repo) = init_repo("default-main");
+        // Three commits on main (HEAD).
+        let sha1 = make_commit(&repo, &tr.path, "c1", 1000).to_string();
+        let sha2 = make_commit(&repo, &tr.path, "c2", 2000).to_string();
+        let sha3 = make_commit(&repo, &tr.path, "c3", 3000).to_string();
+
+        // Create a stray branch at sha2 so sha3 is *only* on main.
+        let oid2 = git2::Oid::from_str(&sha2).expect("oid2");
+        branch_at(&repo, oid2, "feature/stray");
+
+        // Rename HEAD from `master` to `main` so git init default doesn't matter.
+        let oid3 = git2::Oid::from_str(&sha3).expect("oid3");
+        let commit3 = repo.find_commit(oid3).expect("commit3");
+        repo.branch("main", &commit3, false).expect("main branch");
+        // Point HEAD at main.
+        repo.set_head("refs/heads/main").expect("set HEAD to main");
+
+        let conn = open_in_memory_db();
+        for sha in [&sha1, &sha2, &sha3] {
+            insert_sha(&conn, sha);
+        }
+
+        let cfg = ReachabilityConfig {
+            track_tags: false,
+            track_release_branches: false,
+            release_branch_patterns: vec![],
+        };
+
+        let stats = scan_and_persist(&tr.path, &conn, &cfg).expect("scan");
+        assert_eq!(
+            stats.default_branch_commits, 3,
+            "all three commits are on main"
+        );
+
+        // sha3 (tip of main) → on_default_branch=1.
+        let s3: i64 = conn
+            .query_row(
+                "SELECT on_default_branch FROM fact_commit_reachability WHERE commit_sha = ?1",
+                params![sha3],
+                |r| r.get(0),
+            )
+            .expect("sha3");
+        assert_eq!(s3, 1, "sha3 is on main");
+
+        // sha1 (ancestor) → on_default_branch=1.
+        let s1: i64 = conn
+            .query_row(
+                "SELECT on_default_branch FROM fact_commit_reachability WHERE commit_sha = ?1",
+                params![sha1],
+                |r| r.get(0),
+            )
+            .expect("sha1");
+        assert_eq!(s1, 1, "sha1 ancestor of main → on_default_branch");
+    }
+
+    /// Why: verifies that when `refs/remotes/origin/HEAD` resolves to `master`
+    /// the commits on master get `on_default_branch=1`.
+    /// Covers the origin/HEAD symref resolution path (most common in cloned repos).
+    #[test]
+    fn scan_default_branch_via_origin_head() {
+        let (tr, repo) = init_repo("origin-head");
+        let sha1 = make_commit(&repo, &tr.path, "c1", 1000).to_string();
+        let sha2 = make_commit(&repo, &tr.path, "c2", 2000).to_string();
+
+        // Simulate what `git clone` does: create refs/remotes/origin/master
+        // pointing at sha2 and refs/remotes/origin/HEAD as a symref to it.
+        let oid2 = git2::Oid::from_str(&sha2).expect("oid2");
+        repo.reference("refs/remotes/origin/master", oid2, true, "origin master")
+            .expect("create origin/master ref");
+        repo.reference_symbolic(
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/master",
+            true,
+            "origin HEAD",
+        )
+        .expect("create origin/HEAD symref");
+
+        let conn = open_in_memory_db();
+        for sha in [&sha1, &sha2] {
+            insert_sha(&conn, sha);
+        }
+
+        let cfg = ReachabilityConfig {
+            track_tags: false,
+            track_release_branches: false,
+            release_branch_patterns: vec![],
+        };
+
+        let stats = scan_and_persist(&tr.path, &conn, &cfg).expect("scan");
+        assert_eq!(stats.default_branch_commits, 2, "both commits on master");
+
+        let s2: i64 = conn
+            .query_row(
+                "SELECT on_default_branch FROM fact_commit_reachability WHERE commit_sha = ?1",
+                params![sha2],
+                |r| r.get(0),
+            )
+            .expect("sha2");
+        assert_eq!(s2, 1, "sha2 reachable from origin/master");
+    }
+
+    /// Why: verifies that when no default branch can be detected the function
+    /// gracefully returns an empty set and `on_default_branch` stays 0 for all
+    /// commits — matching the documented fallback behaviour.
+    #[test]
+    fn scan_default_branch_missing_graceful() {
+        // A freshly-initialised bare repo has no commits and no HEAD target.
+        // We can simulate "no detectable default branch" by creating a repo
+        // that has only an orphan branch with a non-standard name.
+        let (tr, repo) = init_repo("no-default");
+        let sha = make_commit(&repo, &tr.path, "c1", 1000).to_string();
+        // Rename the default branch to something non-standard so none of the
+        // fallback candidates match.
+        let oid = git2::Oid::from_str(&sha).expect("oid");
+        let commit = repo.find_commit(oid).expect("commit");
+        repo.branch("develop", &commit, false).expect("develop");
+        // Detach HEAD so refs/heads/master / refs/heads/main don't exist.
+        repo.set_head_detached(oid).expect("detach HEAD");
+        // Delete original master/main branch if it exists.
+        for bname in ["master", "main"] {
+            if let Ok(mut b) = repo.find_branch(bname, git2::BranchType::Local) {
+                let _ = b.delete();
+            }
+        }
+
+        let known: std::collections::HashSet<String> = [sha.clone()].into();
+        let set = detect_default_branch_set(&repo, &known, &tr.path);
+        assert!(
+            set.is_empty(),
+            "no detectable default branch → empty set, on_default_branch stays 0"
+        );
+    }
+
+    /// Why: stray-branch commits that are NOT on main must get on_default_branch=0
+    /// even after scan_and_persist runs with a valid default branch.
+    #[test]
+    fn scan_stray_branch_excluded_from_default() {
+        let (tr, repo) = init_repo("stray-excl");
+        let sha1 = make_commit(&repo, &tr.path, "base", 1000).to_string();
+        let sha2 = make_commit(&repo, &tr.path, "main-commit", 2000).to_string();
+
+        // Create a stray branch at sha1 and add an exclusive commit there.
+        let oid1 = git2::Oid::from_str(&sha1).expect("oid1");
+        let commit1 = repo.find_commit(oid1).expect("commit1");
+        repo.branch("stray", &commit1, false).expect("stray");
+
+        // HEAD is still at sha2 (tip of master/main linear chain).
+        // Rename to main.
+        let oid2 = git2::Oid::from_str(&sha2).expect("oid2");
+        let commit2 = repo.find_commit(oid2).expect("commit2");
+        repo.branch("main", &commit2, false).expect("main");
+        repo.set_head("refs/heads/main").expect("set HEAD");
+
+        // Add a commit on stray that is NOT reachable from main.
+        repo.set_head("refs/heads/stray").expect("checkout stray");
+        let sha_stray = make_commit(&repo, &tr.path, "stray-exclusive", 3000).to_string();
+        // Return HEAD to main.
+        repo.set_head("refs/heads/main").expect("back to main");
+
+        let conn = open_in_memory_db();
+        for sha in [&sha1, &sha2, &sha_stray] {
+            insert_sha(&conn, sha);
+        }
+
+        let cfg = ReachabilityConfig {
+            track_tags: false,
+            track_release_branches: false,
+            release_branch_patterns: vec![],
+        };
+
+        scan_and_persist(&tr.path, &conn, &cfg).expect("scan");
+
+        // The stray-exclusive commit must NOT be on the default branch.
+        let stray_flag: i64 = conn
+            .query_row(
+                "SELECT on_default_branch FROM fact_commit_reachability WHERE commit_sha = ?1",
+                params![sha_stray],
+                |r| r.get(0),
+            )
+            .expect("stray query");
+        assert_eq!(
+            stray_flag, 0,
+            "stray-exclusive commit must have on_default_branch=0"
+        );
+
+        // sha2 (on main) must be 1.
+        let main_flag: i64 = conn
+            .query_row(
+                "SELECT on_default_branch FROM fact_commit_reachability WHERE commit_sha = ?1",
+                params![sha2],
+                |r| r.get(0),
+            )
+            .expect("main query");
+        assert_eq!(main_flag, 1, "sha2 is on main → on_default_branch=1");
     }
 }

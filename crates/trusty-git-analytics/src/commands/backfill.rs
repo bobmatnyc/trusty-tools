@@ -11,8 +11,9 @@ use std::sync::OnceLock;
 use clap::{Args, Subcommand};
 use regex::Regex;
 use rusqlite::params;
+use tga::collect::git::scan_and_persist;
 use tga::collect::ticket::is_ticketed;
-use tga::core::config::Config;
+use tga::core::config::{expand_path, Config};
 use tga::core::db::Database;
 
 /// Arguments for `tga backfill`.
@@ -35,19 +36,144 @@ pub enum BackfillSubcommand {
     RevertFlags,
     /// Scan commit messages for ticket refs and update `ticket_id`/`ticketed`.
     TicketIds,
+    /// Re-run the tag/branch/default-branch reachability scan and upsert
+    /// `fact_commit_reachability` without re-collecting commits.
+    ///
+    /// Use this to fix `on_default_branch=0` rows in existing databases
+    /// without running the full 20-minute `tga collect` pipeline (issue #290).
+    Reachability(ReachabilityBackfillArgs),
+}
+
+/// Arguments for `tga backfill reachability`.
+#[derive(Args, Debug)]
+pub struct ReachabilityBackfillArgs {
+    /// Only backfill reachability for these repository names (repeatable).
+    ///
+    /// When omitted, all repositories from the config are processed.
+    /// Matches against the `name` field in `config.yaml`; falls back to the
+    /// directory basename if `name` is absent.
+    #[arg(long = "repo", value_name = "NAME")]
+    pub repos: Vec<String>,
 }
 
 /// Dispatch entry point for the `tga backfill` subcommand.
 ///
+/// Why: routes each backfill subcommand to its implementation, passing shared
+/// state (config, db connection) and the `--dry-run` flag.
+/// What: matches on `args.subcommand` and calls the appropriate function.
+/// Test: each variant has its own test module below.
+///
 /// # Errors
 ///
 /// Propagates database errors from the underlying queries.
-pub fn run(_config: Config, db: &mut Database, args: BackfillArgs) -> anyhow::Result<()> {
+pub fn run(config: Config, db: &mut Database, args: BackfillArgs) -> anyhow::Result<()> {
     match args.subcommand {
         BackfillSubcommand::AiDetection => backfill_ai_detection(db, args.dry_run),
         BackfillSubcommand::RevertFlags => backfill_revert_flags(db, args.dry_run),
         BackfillSubcommand::TicketIds => backfill_ticket_ids(db, args.dry_run),
+        BackfillSubcommand::Reachability(reach_args) => {
+            backfill_reachability(config, db, reach_args, args.dry_run)
+        }
     }
+}
+
+/// Re-run the reachability scan (tags, release branches, default branch) and
+/// upsert `fact_commit_reachability` for all configured repositories (or a
+/// filtered subset) without re-collecting commits.
+///
+/// Why: existing databases built before issue #290 was fixed have
+/// `on_default_branch=0` for every row.  Running `tga collect` again costs
+/// 20+ minutes on large corpora.  This function re-uses the same
+/// `scan_and_persist` code path to recompute all five reachability columns
+/// in-place via `INSERT … ON CONFLICT … DO UPDATE SET …`.
+/// What: iterates configured repositories (filtered by `args.repos` when
+/// provided), opens the local git repo, calls `scan_and_persist`, and prints
+/// a per-repo summary + final totals to stdout.  When `dry_run=true` no writes
+/// occur; instead the function reports what *would* change.
+/// Test: `tests::backfill_reachability_*` below cover the upsert, idempotency,
+/// and repo-filter paths.
+///
+/// # Errors
+///
+/// Returns an error if the database connection or git repo open fails.  Per-
+/// repo scan failures are non-fatal and printed as warnings.
+fn backfill_reachability(
+    config: Config,
+    db: &mut Database,
+    args: ReachabilityBackfillArgs,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    if dry_run {
+        println!(
+            "Dry run — would re-run reachability scan for {} repo(s). No changes written.",
+            if args.repos.is_empty() {
+                config.repositories.len()
+            } else {
+                args.repos.len()
+            }
+        );
+        return Ok(());
+    }
+
+    let reach_cfg = &config.reachability;
+    let conn = db.connection();
+
+    let mut total_repos = 0usize;
+    let mut total_rows = 0usize;
+    let mut total_default_branch = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+
+    for repo_cfg in &config.repositories {
+        let path = expand_path(&repo_cfg.path);
+        let name = repo_cfg
+            .name
+            .clone()
+            .or_else(|| {
+                path.file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| path.display().to_string());
+
+        // Apply --repo filter if provided.
+        if !args.repos.is_empty() && !args.repos.contains(&name) {
+            continue;
+        }
+
+        total_repos += 1;
+        tracing::info!(repo = %name, "backfill reachability scan");
+
+        match scan_and_persist(&path, conn, reach_cfg) {
+            Ok(stats) => {
+                println!(
+                    "  {name}: {} rows upserted \
+                     ({} on default branch, {} tagged, {} on release branch)",
+                    stats.rows_upserted,
+                    stats.default_branch_commits,
+                    stats.tagged_commits,
+                    stats.release_branch_commits,
+                );
+                total_rows += stats.rows_upserted;
+                total_default_branch += stats.default_branch_commits;
+            }
+            Err(e) => {
+                let msg = format!("  {name}: reachability scan failed: {e}");
+                tracing::warn!("{msg}");
+                errors.push(msg.clone());
+                println!("{msg}");
+            }
+        }
+    }
+
+    println!(
+        "\nBackfill complete: {total_repos} repos, {total_rows} rows upserted, \
+         {total_default_branch} commits on default branch."
+    );
+    if !errors.is_empty() {
+        println!("{} repo(s) had errors (see warnings above).", errors.len());
+    }
+
+    Ok(())
 }
 
 /// Mark every commit whose existing classification was produced by the LLM

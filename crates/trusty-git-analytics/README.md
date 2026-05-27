@@ -316,14 +316,18 @@ tga backfill <SUBCOMMAND> [--dry-run]
 | `ai-detection` | Re-run LLM classification on low-confidence prior LLM verdicts |
 | `revert-flags` | Scan commit messages for revert patterns and set `is_revert` |
 | `ticket-ids` | Scan commit messages for ticket refs and update `ticket_id`/`ticketed` |
+| `reachability` | Re-run the full reachability scan (default branch + tags + release branches) and upsert `fact_commit_reachability` without re-collecting commits — use this to fix `on_default_branch=0` rows in existing databases (issue #290) |
 
 | Flag | Description |
 |------|-------------|
 | `--dry-run` | Report how many rows would change without writing |
+| `--repo NAME` | (reachability only) Only backfill the named repository (repeatable) |
 
 ```bash
 tga backfill revert-flags --dry-run
 tga backfill ticket-ids
+tga backfill reachability           # fix on_default_branch for all repos
+tga backfill reachability --repo my-service  # single repo only
 ```
 
 ### tga override
@@ -379,16 +383,26 @@ The four DORA metrics land in pre-computed SQL views
 (`v_deployment_frequency`, `v_lead_time`, `v_change_failure_rate`,
 `v_mttr`) so dashboards can read them directly without re-aggregating.
 
-### Tag & Release-Branch Reachability (issue #279)
+### Tag & Release-Branch Reachability (issues #279, #290)
 
-`tga collect` automatically populates `fact_commit_reachability` with four new columns that distinguish "deployed via cherry-pick to a release branch and tagged" from "abandoned WIP":
+`tga collect` automatically populates `fact_commit_reachability` with five columns that distinguish "deployed via cherry-pick to a release branch and tagged" from "abandoned WIP":
 
 | Column | Type | Meaning |
 |---|---|---|
+| `on_default_branch` | boolean | `true` if the commit is reachable from the repo's default branch (`main`/`master`) |
 | `on_any_tag` | boolean | `true` if any git tag reaches this commit |
 | `reachable_from_tags` | JSON array | Tag names that contain this commit |
 | `on_release_branch` | boolean | `true` if commit is on any configured release branch |
 | `release_branches` | JSON array | Matching release-branch names |
+
+**`on_default_branch` fix (1.4.1 — issue #290):** Prior to 1.4.1, `on_default_branch`
+was declared in the schema but never populated — every row had `on_default_branch = 0`.
+`tga collect` now auto-detects each repo's default branch via `refs/remotes/origin/HEAD`
+(the symref set by `git clone`), falling back through `refs/heads/main`,
+`refs/heads/master`, `refs/remotes/origin/main`, `refs/remotes/origin/master`.
+If none of these refs exist for a repo, a warning is logged and `on_default_branch`
+stays 0 for that repo's commits. To fix existing databases without re-running the
+full collection pipeline, see `tga backfill reachability` below.
 
 This resolves a systematic blind spot: bug fixes and security patches cherry-picked to `release/*` branches, tagged for production, and never merged to `main` previously showed `on_default_branch = false` — making them indistinguishable from abandoned WIP. With this feature, the 32% "merged rate" for bug fixes turns out to be much higher when deployed-via-tag commits are counted.
 
@@ -852,6 +866,39 @@ for a fully annotated example covering all six sources.
 See also: [Rules YAML schema](#rules-yaml-schema) for commit-message rule authoring.
 
 ## Operational Notes
+
+### Fixing `on_default_branch = 0` for existing databases (1.4.1 — issue #290)
+
+If your `tga.db` was built before 1.4.1, every row in `fact_commit_reachability`
+has `on_default_branch = 0` because the column was never populated. You can fix
+this **without re-running the full collection pipeline** (which can take 20+
+minutes on large corpora):
+
+```bash
+# Verify the problem (sum should be 0 on a pre-1.4.1 DB)
+sqlite3 tga.db "SELECT SUM(on_default_branch), COUNT(*) FROM fact_commit_reachability;"
+
+# Fix in-place — upserts all five reachability columns, no row deletion
+tga backfill reachability
+
+# Verify the fix (sum should now be > 0 for repos with main/master)
+sqlite3 tga.db "SELECT SUM(on_default_branch), SUM(on_any_tag), COUNT(*) FROM fact_commit_reachability;"
+sqlite3 tga.db "SELECT repo, SUM(on_default_branch) FROM fact_commit_reachability GROUP BY repo LIMIT 10;"
+```
+
+The backfill is **idempotent** — running it multiple times produces identical
+results and never deletes rows. Only the five reachability columns are touched.
+
+**Auto-detection logic:** for each repository, tga tries (in order):
+1. `refs/remotes/origin/HEAD` (symref — set by `git clone`, points at whatever
+   the remote considers its default branch)
+2. `refs/heads/main`
+3. `refs/heads/master`
+4. `refs/remotes/origin/main`
+5. `refs/remotes/origin/master`
+
+If none of the above resolve to a commit, a `WARN` is logged and
+`on_default_branch` remains 0 for that repo.
 
 ### SQLite WAL durability (fixed in 1.4.0 — issue #298)
 

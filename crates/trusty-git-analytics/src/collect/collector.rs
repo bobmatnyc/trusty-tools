@@ -337,6 +337,7 @@ impl CollectionPipeline {
                     info!(
                         repo = %name,
                         rows = r.rows_upserted,
+                        default_branch = r.default_branch_commits,
                         tagged = r.tagged_commits,
                         release_branch = r.release_branch_commits,
                         "reachability scan complete"
