@@ -87,12 +87,18 @@ mod tests {
     #[test]
     fn search_service_tool_count() {
         let svc = SearchMcpService;
-        // Why: trusty-search advertises an 18-tool surface (issue #76 added
-        //      `get_call_chain`; the `/grep` MCP tool added another in
-        //      commit 3f2f1c6; bundling of trusty-bm25-daemon and
-        //      trusty-embedderd surface (PR #190/#191) added 3 more);
-        //      drift here would mean the upstream service descriptor
-        //      changed unexpectedly.
+        // Why: open-mpm's service registry must advertise exactly the same
+        //      tools that trusty-search exposes.  A count mismatch means the
+        //      descriptor in `trusty-search/src/service/mcp_descriptor.rs`
+        //      changed without a corresponding update here, which would cause
+        //      silent tool-routing failures at runtime.
+        // Source of truth: `SearchMcpService::tools()` delegates to
+        //      `trusty_search::mcp::tools::tool_descriptors()`.  When that
+        //      list changes, update this assertion and the comment below.
+        // History: started at 12; issue #76 added `get_call_chain` (→13);
+        //          the `/grep` MCP tool added another (→14 … →15); bundling
+        //          trusty-bm25-daemon + trusty-embedderd surfaces via
+        //          PR #190/#191 added 3 more (→18 — closes #174).
         assert_eq!(svc.tools().len(), 18);
     }
 
