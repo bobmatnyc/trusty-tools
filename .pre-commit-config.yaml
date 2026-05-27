@@ -86,6 +86,25 @@ repos:
       - id: commitizen
         stages: [commit-msg]
 
+  # Empirical commit-effort scoring — appends Effort/Effort-Score/
+  # Effort-Breakdown trailers to commit messages. Non-destructive: never
+  # blocks a commit; computation failures log a warning and exit 0.
+  # See docs/research/commit-effort-spec-*.md for the formula and thresholds.
+  - repo: local
+    hooks:
+      - id: insert-effort-trailers
+        name: Insert commit-effort trailers
+        entry: scripts/insert-effort-trailers.sh
+        language: script
+        stages: [prepare-commit-msg]
+        # Don't run for merge / squash sources (the hook itself also detects
+        # these via $2, but excluding them here saves the shell invocation).
+        always_run: true
+        pass_filenames: false
+        # prepare-commit-msg passes the message-file path as the first
+        # positional argument; pre-commit's "args" injects extra args after
+        # any hook-framework-supplied ones, so we leave args empty here.
+
 # Configuration for specific file types
 exclude: |
   (?x)^(
