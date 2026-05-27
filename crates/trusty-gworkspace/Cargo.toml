@@ -2,7 +2,7 @@
 name = "trusty-gworkspace"
 version = "0.1.3"
 publish = false
-edition = "2024" # edition 2024: uses let-chains
+edition = "2024" # edition 2024 required: let-chains used in api/client.rs, api/services/gmail/, api/services/docs/ (issue #258)
 description = "Google Workspace MCP server for the Trusty suite"
 license = "Elastic-2.0"
 
