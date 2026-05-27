@@ -124,39 +124,42 @@ fn endpoint_for(name: &str) -> Option<Endpoint> {
 ///
 /// Why: Centralises path templating + query-string assembly so `execute()`
 /// stays focused on the HTTP round-trip.
-/// What: Returns an `anyhow::Err` (recoverable) if a required `id`/`query`
-/// argument is missing or not a string.
+/// What: Returns `anyhow::Err` (recoverable) if a required `id`/`query`
+/// argument is missing or not a string. The `id` argument is validated eagerly
+/// before the `match` so that tools requiring it receive a `&str` directly —
+/// eliminating any `Option::expect` calls (issue #253).
+/// Test: `build_request_requires_id` covers the missing-id error path.
 fn build_request(name: &str, args: &Value) -> anyhow::Result<(reqwest::Method, String)> {
     let ep = endpoint_for(name).ok_or_else(|| anyhow::anyhow!("granola: unknown tool '{name}'"))?;
 
-    let id =
-        if ep.needs_id {
-            Some(args.get("id").and_then(Value::as_str).ok_or_else(|| {
-                anyhow::anyhow!("granola {name}: missing required string arg 'id'")
-            })?)
-        } else {
-            None
-        };
+    // Validate `id` up-front so arms that use it receive a plain `&str`.
+    // This removes the need for any `Option::expect` at each call site and
+    // makes the validation visible in one place rather than three.
+    let id: Option<&str> = if ep.needs_id {
+        Some(
+            args.get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("granola {name}: missing required string arg 'id'"))?,
+        )
+    } else {
+        None
+    };
 
     let url = match name {
         "granola_list" => format!("{GRANOLA_API_BASE}/documents"),
         "granola_get" => {
-            format!(
-                "{GRANOLA_API_BASE}/documents/{}",
-                id.expect("guaranteed by ep.needs_id == true")
-            )
+            // id is validated above; ep.needs_id == true for this arm.
+            let id = id.ok_or_else(|| anyhow::anyhow!("granola_get: id missing"))?;
+            format!("{GRANOLA_API_BASE}/documents/{id}")
         }
         "granola_get_transcript" => {
-            format!(
-                "{GRANOLA_API_BASE}/documents/{}/transcript",
-                id.expect("guaranteed by ep.needs_id == true")
-            )
+            let id = id.ok_or_else(|| anyhow::anyhow!("granola_get_transcript: id missing"))?;
+            format!("{GRANOLA_API_BASE}/documents/{id}/transcript")
         }
         "granola_get_shared_document" => {
-            format!(
-                "{GRANOLA_API_BASE}/documents/{}/shared",
-                id.expect("guaranteed by ep.needs_id == true")
-            )
+            let id =
+                id.ok_or_else(|| anyhow::anyhow!("granola_get_shared_document: id missing"))?;
+            format!("{GRANOLA_API_BASE}/documents/{id}/shared")
         }
         "granola_search" => {
             let query = args
