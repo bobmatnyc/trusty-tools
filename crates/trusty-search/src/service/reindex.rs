@@ -14,7 +14,7 @@
 //! Test: see `crates/trusty-search-service/src/reindex.rs#tests`.
 
 use crate::core::indexer::{CommitTimings, ParsedBatch};
-use crate::core::memguard::{current_rss_mb, index_memory_limit_mb};
+use crate::core::memguard::{current_rss_mb, current_rss_mb_for_pid, index_memory_limit_mb};
 use crate::core::registry::{IndexHandle, IndexId, IndexStages, StageState, StageStatus};
 use crate::service::walker::{should_skip_content, walk_source_files_with_options, WalkOptions};
 use anyhow::Context;
@@ -23,7 +23,7 @@ use dashmap::DashMap;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, Mutex, Semaphore};
@@ -254,7 +254,7 @@ impl Default for ReindexProgress {
 /// progress entries while still letting late SSE subscribers read the final
 /// state for a short window).
 pub fn spawn_reindex(handle: Arc<IndexHandle>, progress: Arc<ReindexProgress>, force: bool) {
-    spawn_reindex_with_cleanup(handle, progress, force, None, None);
+    spawn_reindex_with_cleanup(handle, progress, force, None, None, None);
 }
 
 /// Walk every configured subtree under `handle.root_path`, apply repo-config
@@ -398,6 +398,65 @@ fn spawn_memory_poller(
                         mem_abort.store(true, AtomicOrdering::Release);
                         // Keep polling so peak_rss continues to track until
                         // the main loop notices the flag.
+                    }
+                }
+            }
+            ticker.tick().await;
+        }
+    });
+    (handle, stop)
+}
+
+/// Spawn a background poller that tracks the peak RSS of the embedderd sidecar
+/// during a reindex run (issue #282).
+///
+/// Why: the daemon's own RSS poller (see `spawn_memory_poller`) covers only the
+/// daemon parent process. The embedderd sidecar process owns the ONNX arena and
+/// routinely uses 2–3 GB more than the daemon during active embedding; omitting
+/// it leaves operators with an incomplete picture for capacity planning and
+/// regression testing. This helper samples the sidecar every ~500 ms and
+/// records the maximum so the SSE `complete` event can carry
+/// `embedderd_peak_rss_mb` alongside the existing `peak_rss_mb`.
+///
+/// What: reads the current sidecar PID from `embedderd_pid_slot` on each tick.
+/// A PID of 0 (no sidecar, or sidecar exited mid-run) causes the sample to be
+/// skipped gracefully. Stops when `stop` is set to `true` by the orchestrator.
+///
+/// Test: `embedder_supervisor_e2e.rs::embedderd_peak_rss_captured_on_complete`
+/// (marked `#[ignore]`; requires the real sidecar binary).
+fn spawn_embedderd_rss_poller(
+    embedderd_pid_slot: Arc<AtomicU32>,
+    peak_embedderd_rss: Arc<AtomicU64>,
+) -> (tokio::task::JoinHandle<()>, Arc<AtomicBool>) {
+    /// Polling cadence for the embedderd RSS sampler. 500 ms is fine-grained
+    /// enough to catch mid-reindex spikes without measurable overhead
+    /// (one `sysinfo` refresh per tick costs ~1–3 ms on macOS/Linux).
+    const EMBEDDERD_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = stop.clone();
+    let handle = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(EMBEDDERD_POLL_INTERVAL);
+        // Drop the first immediate tick to avoid a double-sample with the
+        // synchronous initial read taken before spawning.
+        ticker.tick().await;
+        loop {
+            if stop_clone.load(AtomicOrdering::Acquire) {
+                break;
+            }
+            let pid = embedderd_pid_slot.load(AtomicOrdering::Acquire);
+            if let Some(rss) = current_rss_mb_for_pid(pid) {
+                // Monotonic peak update (same CAS loop as the main poller).
+                let mut prev = peak_embedderd_rss.load(AtomicOrdering::Acquire);
+                while rss > prev {
+                    match peak_embedderd_rss.compare_exchange_weak(
+                        prev,
+                        rss,
+                        AtomicOrdering::AcqRel,
+                        AtomicOrdering::Acquire,
+                    ) {
+                        Ok(_) => break,
+                        Err(cur) => prev = cur,
                     }
                 }
             }
@@ -1008,10 +1067,15 @@ struct RunTotals {
 ///
 /// Why: extracted from `spawn_reindex_with_cleanup` (issue #98) so the
 /// orchestrator doesn't carry a ~30-line JSON literal at its tail.
+///
+/// `embedderd_peak_rss_mb` — peak RSS of the embedderd sidecar during the
+/// reindex run (issue #282). `None` when the sidecar was not running or
+/// sampling failed for every poll tick.
 async fn emit_complete_event(
     progress: &ReindexProgress,
     started: Instant,
     peak_rss_mb: u64,
+    embedderd_peak_rss_mb: Option<u64>,
     totals: &RunTotals,
     kg: &KgRebuildOutcome,
 ) {
@@ -1039,37 +1103,43 @@ async fn emit_complete_event(
     } else {
         "complete"
     };
-    progress
-        .push(serde_json::json!({
-            "event": "complete",
-            "status": status_str,
-            "indexed": indexed_final,
-            "indexed_new": indexed_new,
-            "total_chunks": total_chunks,
-            "skipped": skipped_final,
-            "errors": progress.errors.load(Ordering::Acquire),
-            "elapsed_ms": elapsed_ms,
-            "chunks_per_sec": chunks_per_sec,
-            "peak_rss_mb": peak_rss_mb,
-            "memory_limit_hit": totals.mem_limit_hit,
-            // Issue #100: surface budget truncation so callers can flag
-            // indexes truncated by `TRUSTY_MAX_CHUNKS`. Mirrors
-            // `memory_limit_hit` — non-zero/true ⇒ the index is incomplete.
-            "walk_truncated_by_budget": totals.chunks_dropped_by_cap > 0,
-            "chunks_dropped_by_cap": totals.chunks_dropped_by_cap,
-            "kg_skipped": kg.kg_skipped,
-            "timings": {
-                "parse_ms": totals.parse_ms,
-                "embed_ms": totals.embed_ms,
-                "bm25_ms": totals.bm25_ms,
-                "vector_upsert_ms": totals.vector_upsert_ms,
-                "kg_ms": kg.kg_ms,
-                "vector_count": totals.vector_count,
-                "symbol_count": kg.symbol_count,
-                "edge_count": kg.edge_count,
-            },
-        }))
-        .await;
+    let mut event = serde_json::json!({
+        "event": "complete",
+        "status": status_str,
+        "indexed": indexed_final,
+        "indexed_new": indexed_new,
+        "total_chunks": total_chunks,
+        "skipped": skipped_final,
+        "errors": progress.errors.load(Ordering::Acquire),
+        "elapsed_ms": elapsed_ms,
+        "chunks_per_sec": chunks_per_sec,
+        "peak_rss_mb": peak_rss_mb,
+        "memory_limit_hit": totals.mem_limit_hit,
+        // Issue #100: surface budget truncation so callers can flag
+        // indexes truncated by `TRUSTY_MAX_CHUNKS`. Mirrors
+        // `memory_limit_hit` — non-zero/true ⇒ the index is incomplete.
+        "walk_truncated_by_budget": totals.chunks_dropped_by_cap > 0,
+        "chunks_dropped_by_cap": totals.chunks_dropped_by_cap,
+        "kg_skipped": kg.kg_skipped,
+        "timings": {
+            "parse_ms": totals.parse_ms,
+            "embed_ms": totals.embed_ms,
+            "bm25_ms": totals.bm25_ms,
+            "vector_upsert_ms": totals.vector_upsert_ms,
+            "kg_ms": kg.kg_ms,
+            "vector_count": totals.vector_count,
+            "symbol_count": kg.symbol_count,
+            "edge_count": kg.edge_count,
+        },
+    });
+    // Issue #282: include the sidecar peak RSS when available; omit the key
+    // when `None` so consumers can tell "sidecar not running" from "sidecar
+    // running but RSS was 0" (the latter cannot happen in practice because
+    // a live process always has RSS > 0).
+    if let Some(n) = embedderd_peak_rss_mb {
+        event["embedderd_peak_rss_mb"] = serde_json::Value::Number(n.into());
+    }
+    progress.push(event).await;
 }
 
 /// Begin the atomic-swap corpus staging for a `--force` reindex (issue #28,
@@ -1289,12 +1359,18 @@ async fn abort_force_corpus_swap(handle: &IndexHandle, index_id: &IndexId, tmp_p
 
 /// Variant of `spawn_reindex` that GC's the progress map after completion.
 /// See `spawn_reindex` for the rationale.
+///
+/// `embedderd_pid_slot` — when `Some`, the orchestrator spawns a concurrent
+/// RSS poller for the embedderd sidecar (issue #282) and includes
+/// `embedderd_peak_rss_mb` in the SSE `complete` event. Pass
+/// `state.embedderd_pid_slot.clone()` from the HTTP handler.
 pub fn spawn_reindex_with_cleanup(
     handle: Arc<IndexHandle>,
     progress: Arc<ReindexProgress>,
     force: bool,
     cleanup_map: Option<Arc<DashMap<IndexId, Arc<ReindexProgress>>>>,
     aborted_map: Option<Arc<DashMap<IndexId, Instant>>>,
+    embedderd_pid_slot: Option<Arc<AtomicU32>>,
 ) {
     let cleanup_id = handle.id.clone();
     tokio::spawn(async move {
@@ -1451,6 +1527,26 @@ pub fn spawn_reindex_with_cleanup(
             peak_rss_atomic.clone(),
             index_id.0.clone(),
         );
+
+        // Issue #282: if the caller provided the embedderd PID slot, spawn a
+        // concurrent RSS poller for the sidecar process. 0-PID ticks are
+        // silently skipped so non-sidecar modes incur no overhead.
+        let peak_embedderd_rss_atomic = Arc::new(AtomicU64::new(0));
+        let (embedderd_poller_handle, embedderd_poller_stop) =
+            if let Some(pid_slot) = embedderd_pid_slot.as_ref() {
+                // Take an initial sample before the batch loop begins.
+                let initial_pid = pid_slot.load(AtomicOrdering::Acquire);
+                if let Some(rss) = current_rss_mb_for_pid(initial_pid) {
+                    peak_embedderd_rss_atomic.store(rss, AtomicOrdering::Release);
+                }
+                let (h, s) = spawn_embedderd_rss_poller(
+                    Arc::clone(pid_slot),
+                    Arc::clone(&peak_embedderd_rss_atomic),
+                );
+                (Some(h), Some(s))
+            } else {
+                (None, None)
+            };
 
         // Phase 2: pipelined parse/embed/commit (issue #20).
         //
@@ -1643,6 +1739,38 @@ pub fn spawn_reindex_with_cleanup(
         // Best-effort: don't fail completion if the poller is wedged.
         let _ = poller_handle.await;
 
+        // Issue #282: stop the embedderd poller (if running) and take a final
+        // synchronous sample so the peak covers the post-KG phase too.
+        if let Some(stop) = embedderd_poller_stop {
+            stop.store(true, AtomicOrdering::Release);
+        }
+        if let Some(h) = embedderd_poller_handle {
+            let _ = h.await;
+        }
+        // Final synchronous sample for the sidecar: the KG rebuild may push
+        // the sidecar's RSS higher than any background tick caught.
+        if let Some(pid_slot) = embedderd_pid_slot.as_ref() {
+            let pid = pid_slot.load(AtomicOrdering::Acquire);
+            if let Some(rss) = current_rss_mb_for_pid(pid) {
+                let prev = peak_embedderd_rss_atomic.load(AtomicOrdering::Acquire);
+                if rss > prev {
+                    peak_embedderd_rss_atomic.store(rss, AtomicOrdering::Release);
+                }
+            }
+        }
+        // Materialise the Option: `None` when no sidecar slot was provided or
+        // the sidecar was never observed alive (peak stayed 0).
+        let embedderd_peak_rss_mb: Option<u64> = if embedderd_pid_slot.is_some() {
+            let v = peak_embedderd_rss_atomic.load(AtomicOrdering::Acquire);
+            if v > 0 {
+                Some(v)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Issue #120: distinguish memory-abort from clean completion so the
         // HTTP reindex_handler can apply a cooldown before honouring the next
         // reindex request. Also record the abort timestamp on the shared map
@@ -1713,7 +1841,15 @@ pub fn spawn_reindex_with_cleanup(
             mem_limit_hit,
             chunks_dropped_by_cap: total_chunks_dropped_by_cap,
         };
-        emit_complete_event(&progress, started, peak_rss_mb, &totals, &kg).await;
+        emit_complete_event(
+            &progress,
+            started,
+            peak_rss_mb,
+            embedderd_peak_rss_mb,
+            &totals,
+            &kg,
+        )
+        .await;
 
         // Issue #112: refresh the per-index context embedding from the
         // root-level metadata files. Best-effort — failure here is logged

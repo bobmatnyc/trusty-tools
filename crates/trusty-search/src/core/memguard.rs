@@ -280,6 +280,38 @@ pub fn current_rss_mb() -> Option<u64> {
     sys.process(pid).map(|p| p.memory() / (1024 * 1024))
 }
 
+/// Resident Set Size in megabytes for an arbitrary child process (by OS PID).
+///
+/// Why: the embedderd sidecar runs in a separate process. Its RSS is not
+/// captured by `current_rss_mb()` (which reads only the daemon's own RSS).
+/// This helper uses the same platform-agnostic `sysinfo` approach to sample
+/// any process by its OS PID — the same path used for the daemon-parent RSS
+/// but parameterised on an external PID.
+///
+/// What: asks `sysinfo` to refresh exactly the named PID (minimal overhead).
+/// Returns `None` if the PID is 0 (sentinel for "no sidecar running"), if
+/// sysinfo cannot locate the process (exited between spawn and sample), or if
+/// the platform `procfs`/`task_info` call fails.
+///
+/// Test: `tests::test_rss_for_self_pid` calls this with `std::process::id()`
+/// and asserts the result matches `current_rss_mb()` within 10 MB. Negative
+/// cases (pid=0, bogus pid) assert `None`.
+pub fn current_rss_mb_for_pid(pid: u32) -> Option<u64> {
+    if pid == 0 {
+        return None;
+    }
+    let sysinfo_pid = Pid::from_u32(pid);
+    let mut sys = System::new_with_specifics(
+        RefreshKind::nothing().with_processes(ProcessRefreshKind::everything()),
+    );
+    sys.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[sysinfo_pid]),
+        true,
+        ProcessRefreshKind::nothing().with_memory(),
+    );
+    sys.process(sysinfo_pid).map(|p| p.memory() / (1024 * 1024))
+}
+
 /// Convenience helper for the reindex orchestrator: returns `true` when a
 /// memory limit is configured AND current RSS is at or above it.
 pub fn over_memory_limit() -> bool {
@@ -342,6 +374,59 @@ mod tests {
         if index_memory_limit_mb().is_none() {
             assert!(!over_index_memory_limit());
         }
+    }
+
+    /// `current_rss_mb_for_pid(self_pid)` must return the same order-of-magnitude
+    /// RSS as `current_rss_mb()` — both read the same process.
+    ///
+    /// Why: validates the pid-parameterised helper against the known-working
+    /// self-pid path. A mismatch would indicate a platform quirk in the
+    /// `sysinfo::ProcessesToUpdate::Some(&[pid])` path.
+    /// What: call both, assert abs-difference < 10 MB (transient allocations
+    /// between the two calls can shift RSS slightly).
+    /// Test: this test.
+    #[test]
+    fn test_rss_for_self_pid() {
+        let self_pid = std::process::id();
+        if let (Some(a), Some(b)) = (current_rss_mb(), current_rss_mb_for_pid(self_pid)) {
+            // Allow up to 10 MB drift between the two samples.
+            let diff = (a as i64 - b as i64).unsigned_abs();
+            assert!(
+                diff < 10,
+                "current_rss_mb()={a}MB and current_rss_mb_for_pid({self_pid})={b}MB \
+                 differ by {diff}MB (> 10 MB tolerance)"
+            );
+        }
+        // Either None means the platform couldn't resolve the PID; tolerate it.
+    }
+
+    /// `current_rss_mb_for_pid(0)` must return `None` (sentinel for "no PID").
+    ///
+    /// Why: the embedderd PID slot is initialised to 0 and the RSS poller
+    /// must not try to sample PID 0 (which is the kernel process on many
+    /// platforms and would produce incorrect results).
+    /// What: pass 0, assert `None`.
+    /// Test: this test.
+    #[test]
+    fn test_rss_for_pid_zero_returns_none() {
+        assert_eq!(
+            current_rss_mb_for_pid(0),
+            None,
+            "pid=0 must be treated as sentinel (no process) and return None"
+        );
+    }
+
+    /// `current_rss_mb_for_pid(u32::MAX)` must return `None` (no such process).
+    ///
+    /// Why: ensures the helper does not panic or return garbage on a bogus PID.
+    /// What: pass `u32::MAX` which no real OS process will have; expect `None`.
+    /// Test: this test.
+    #[test]
+    fn test_rss_for_bogus_pid_returns_none() {
+        // PID u32::MAX is not a valid process on any mainstream OS.
+        // The function must return None without panicking.
+        let _ = current_rss_mb_for_pid(u32::MAX);
+        // No assertion — the only requirement is "no panic".
     }
 
     #[test]

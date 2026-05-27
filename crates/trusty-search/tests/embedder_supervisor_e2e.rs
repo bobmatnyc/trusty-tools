@@ -29,9 +29,14 @@ mod e2e {
     async fn supervisor_spawns_and_serves_embed_requests() {
         let binary = locate_embedderd_binary().expect("trusty-embedderd not found on PATH");
         let cfg = SupervisorConfig::default().into_common();
-        let (supervisor, slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+        let (supervisor, slot, pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
             .await
             .expect("spawn_stdio failed");
+        // Issue #282: verify that the PID slot is populated immediately after
+        // spawn (non-zero means the child started and the supervisor recorded
+        // its PID in the atomic slot).
+        let initial_pid = pid_slot.load(std::sync::atomic::Ordering::Acquire);
+        assert!(initial_pid > 0, "pid_slot should be non-zero after spawn");
         supervisor.start_supervisor_task();
 
         let client: Arc<dyn EmbedderClient> = slot.read().await.clone();
@@ -83,7 +88,7 @@ mod e2e {
 
         // Sidecar vector.
         let binary = locate_embedderd_binary().expect("trusty-embedderd not found");
-        let (supervisor, slot) =
+        let (supervisor, slot, _pid_slot) =
             EmbedderSupervisor::spawn_stdio(binary, SupervisorConfig::default().into_common())
                 .await
                 .expect("spawn_stdio failed");
@@ -122,7 +127,7 @@ mod e2e {
         ];
 
         let binary = locate_embedderd_binary().expect("trusty-embedderd not found");
-        let (supervisor, slot) =
+        let (supervisor, slot, _pid_slot) =
             EmbedderSupervisor::spawn_stdio(binary, SupervisorConfig::default().into_common())
                 .await
                 .expect("spawn_stdio failed");
@@ -156,9 +161,14 @@ mod e2e {
             max_restarts: 3,
             ..SupervisorConfig::default()
         };
-        let (supervisor, slot) = EmbedderSupervisor::spawn_stdio(binary, cfg.into_common())
-            .await
-            .expect("spawn_stdio failed");
+        let (supervisor, slot, pid_slot) =
+            EmbedderSupervisor::spawn_stdio(binary, cfg.into_common())
+                .await
+                .expect("spawn_stdio failed");
+        // Issue #282: record the initial PID; after a crash + restart the slot
+        // must be updated to the new child's PID.
+        let pid_before_crash = pid_slot.load(std::sync::atomic::Ordering::Acquire);
+        assert!(pid_before_crash > 0, "initial pid_slot should be non-zero");
         supervisor.start_supervisor_task();
 
         // First embed succeeds.
@@ -171,6 +181,18 @@ mod e2e {
 
         // Give the supervisor loop time to restart and re-populate the slot.
         tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+
+        // Issue #282: pid_slot must point to the new child after restart.
+        let pid_after_restart = pid_slot.load(std::sync::atomic::Ordering::Acquire);
+        assert!(
+            pid_after_restart > 0,
+            "pid_slot should be non-zero after restart"
+        );
+        // The supervisor should have assigned a fresh PID.
+        assert_ne!(
+            pid_before_crash, pid_after_restart,
+            "pid_slot should differ after crash restart (new child = new PID)"
+        );
 
         // Post-restart embed must also succeed (slot now points to new client).
         let client2 = slot.read().await.clone();
@@ -191,7 +213,7 @@ mod e2e {
     #[ignore = "requires trusty-embedderd binary + ONNX model (~15 s)"]
     async fn supervisor_handles_empty_batch() {
         let binary = locate_embedderd_binary().expect("trusty-embedderd not found");
-        let (supervisor, slot) =
+        let (supervisor, slot, _pid_slot) =
             EmbedderSupervisor::spawn_stdio(binary, SupervisorConfig::default().into_common())
                 .await
                 .expect("spawn_stdio failed");
@@ -215,7 +237,7 @@ mod e2e {
     #[ignore = "requires trusty-embedderd binary + ONNX model (~20 s)"]
     async fn supervisor_handles_concurrent_requests() {
         let binary = locate_embedderd_binary().expect("trusty-embedderd not found");
-        let (supervisor, slot) =
+        let (supervisor, slot, _pid_slot) =
             EmbedderSupervisor::spawn_stdio(binary, SupervisorConfig::default().into_common())
                 .await
                 .expect("spawn_stdio failed");

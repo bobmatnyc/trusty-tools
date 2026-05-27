@@ -3,6 +3,7 @@
 use anyhow::Result;
 use colored::Colorize;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -277,7 +278,16 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
 /// contain `embedder mode: stdio-sidecar` before the first request is served.
 /// To test fail-fast: run with PATH stripped and TRUSTY_EMBEDDERD_BIN unset;
 /// the process must exit with an error containing "cargo install trusty-embedderd".
-async fn build_embedder() -> Result<std::sync::Arc<dyn crate::core::Embedder>> {
+///
+/// Returns `(embedder, embedderd_pid_slot)`. `embedderd_pid_slot` is `Some` only
+/// for the stdio-sidecar path and holds an `Arc<AtomicU32>` owned by the
+/// `EmbedderSupervisor` loop — the loop keeps it updated with the current child
+/// OS PID (0 when no live process) so callers can sample the sidecar's RSS
+/// without holding any mutex. Non-stdio paths return `None`.
+async fn build_embedder() -> Result<(
+    std::sync::Arc<dyn crate::core::Embedder>,
+    Option<Arc<AtomicU32>>,
+)> {
     use crate::service::embedder_supervisor::{
         locate_embedderd_binary, EmbedderSupervisor, SupervisorConfig,
     };
@@ -294,7 +304,7 @@ async fn build_embedder() -> Result<std::sync::Arc<dyn crate::core::Embedder>> {
                     .map_err(|e| anyhow::anyhow!("candle embedder init task panicked: {e}"))??;
             let dim = candle.dimension();
             tracing::info!("embedder initialized: model=all-MiniLM-L6-v2 dim={dim} backend=candle");
-            return Ok(std::sync::Arc::new(candle));
+            return Ok((std::sync::Arc::new(candle), None));
         }
     }
 
@@ -330,9 +340,17 @@ async fn build_embedder() -> Result<std::sync::Arc<dyn crate::core::Embedder>> {
 
             tracing::info!("embedder mode: stdio-sidecar (binary={})", binary.display());
 
-            let (supervisor, slot) = EmbedderSupervisor::spawn_stdio(binary, config.into_common())
-                .await
-                .map_err(|e| anyhow::anyhow!("failed to spawn trusty-embedderd --stdio: {e}"))?;
+            // Issue #282: `spawn_stdio` now returns a third element — the
+            // `child_pid_slot` Arc<AtomicU32> owned by the supervisor.  The
+            // supervisor loop keeps it updated with the live child PID (0 when
+            // no process is running) so callers can sample the sidecar's RSS
+            // without acquiring any mutex.
+            let (supervisor, slot, child_pid_slot) =
+                EmbedderSupervisor::spawn_stdio(binary, config.into_common())
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("failed to spawn trusty-embedderd --stdio: {e}")
+                    })?;
 
             // `start_supervisor_task` consumes the supervisor (detaches the
             // loop as a background Tokio task). The child's `kill_on_drop`
@@ -343,22 +361,26 @@ async fn build_embedder() -> Result<std::sync::Arc<dyn crate::core::Embedder>> {
             // `SlotEmbedderAdapter` forwards embed calls to whatever client is
             // currently stored in the slot. The supervisor swaps the slot on
             // crash-restart so callers transparently use the new sidecar.
-            Ok(Arc::new(SlotEmbedderAdapter { slot }))
+            Ok((Arc::new(SlotEmbedderAdapter { slot }), Some(child_pid_slot)))
         }
 
         // ── In-process safety-valve ────────────────────────────────────────
         "in-process" | "local" => {
             tracing::info!("embedder mode: in-process (override via TRUSTY_EMBEDDER=in-process)");
-            build_in_process_embedder().await
+            let embedder = build_in_process_embedder().await?;
+            Ok((embedder, None))
         }
 
         // ── HTTP remote (manually managed embedderd) ───────────────────────
         addr if addr.starts_with("http://") || addr.starts_with("https://") => {
             tracing::info!("embedder mode: remote http ({})", addr);
             let client = trusty_common::embedder_client::RemoteEmbedderClient::new(addr.to_owned());
-            Ok(Arc::new(RemoteEmbedderAdapter {
-                client: EmbedderClientKind::Http(client),
-            }))
+            Ok((
+                Arc::new(RemoteEmbedderAdapter {
+                    client: EmbedderClientKind::Http(client),
+                }),
+                None,
+            ))
         }
 
         // ── UDS remote (manually managed embedderd) ────────────────────────
@@ -366,7 +388,7 @@ async fn build_embedder() -> Result<std::sync::Arc<dyn crate::core::Embedder>> {
             let sock = PathBuf::from(&path["unix:".len()..]);
             tracing::info!("embedder mode: remote uds ({})", sock.display());
             let client = trusty_common::embedder_client::UdsEmbedderClient::new(sock);
-            Ok(Arc::new(UdsEmbedderAdapter { client }))
+            Ok((Arc::new(UdsEmbedderAdapter { client }), None))
         }
 
         other => anyhow::bail!(
@@ -924,7 +946,13 @@ pub async fn handle_start(port: u16, foreground: bool, device: &str, verbose: bo
             tokio::time::timeout(Duration::from_secs(init_timeout_secs), init_handle).await;
 
         match init_result {
-            Ok(Ok(Ok(embedder))) => {
+            Ok(Ok(Ok((embedder, pid_slot)))) => {
+                // Issue #282: if the sidecar path returned a PID slot, install
+                // it on the state so `/health` and the reindex RSS poller can
+                // read the child PID lock-free.
+                if let Some(slot) = pid_slot {
+                    install_state.install_embedderd_pid_slot(slot).await;
+                }
                 install_state.install_embedder(Arc::clone(&embedder)).await;
                 // Issue #41 Phase 1: build the embedder worker pool now that
                 // the model is loaded. The pool shares the same `Arc<dyn

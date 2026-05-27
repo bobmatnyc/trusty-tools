@@ -25,6 +25,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -121,6 +122,11 @@ fn parse_env<T: std::str::FromStr + Copy>(name: &str, default: T) -> T {
 /// swaps the live client pointer. On `max_restarts` consecutive failures it
 /// logs an error and stops trying.
 ///
+/// `child_pid_slot` is an `Arc<AtomicU32>` shared with callers so they can
+/// read the current OS PID of the sidecar without holding any lock. The slot
+/// is updated to 0 whenever the sidecar exits and to the new PID whenever a
+/// fresh process is spawned.
+///
 /// Test: `supervisor_spawns_mock_child_and_embeds`,
 /// `supervisor_restarts_on_crash` (integration; requires the binary built).
 pub struct EmbedderSupervisor {
@@ -129,41 +135,56 @@ pub struct EmbedderSupervisor {
     child: Arc<tokio::sync::Mutex<Option<Child>>>,
     /// Pointer shared with callers; swapped on each respawn.
     client_slot: Arc<RwLock<Arc<dyn EmbedderClient>>>,
+    /// Current OS PID of the sidecar process. 0 = no live process.
+    /// Shared with callers so they can read the PID without acquiring
+    /// the child mutex (e.g. for RSS sampling in the reindex poller).
+    child_pid_slot: Arc<AtomicU32>,
     config: SupervisorConfig,
 }
 
 impl EmbedderSupervisor {
-    /// Spawn `trusty-embedderd --stdio` and return a `(supervisor, client_slot)` pair.
+    /// Spawn `trusty-embedderd --stdio` and return a `(supervisor, client_slot,
+    /// child_pid_slot)` triple.
     ///
     /// Why: the caller keeps the `client_slot` behind an `Arc<RwLock<…>>` so
     /// `embed_batch` always reads the current live client. The supervisor keeps
     /// a clone of the same slot and swaps it on each respawn.
+    /// `child_pid_slot` lets the caller sample the sidecar's OS PID for RSS
+    /// monitoring (issue #282) without holding any mutex; the supervisor updates
+    /// it automatically on spawn and exit.
     ///
     /// What: spawns the child with `Stdio::piped()` for both stdin and stdout,
     /// `Stdio::inherit()` for stderr (so the child's logs flow to the parent's
     /// stderr), and `kill_on_drop(true)` as a safety net.  Extracts the pipe
     /// handles, constructs `StdioEmbedderClient`, stores it in `client_slot`.
+    /// Sets `child_pid_slot` to the fresh process's OS PID.
     ///
     /// Test: `supervisor_spawns_mock_child_and_embeds`.
     pub async fn spawn_stdio(
         binary_path: impl Into<PathBuf>,
         config: SupervisorConfig,
-    ) -> Result<(Self, Arc<RwLock<Arc<dyn EmbedderClient>>>)> {
+    ) -> Result<(Self, Arc<RwLock<Arc<dyn EmbedderClient>>>, Arc<AtomicU32>)> {
         let binary_path = binary_path.into();
         let (child, client) = spawn_child(&binary_path, &config).await?;
+
+        // Capture the initial PID before moving `child` into the Arc<Mutex>.
+        let initial_pid: u32 = child.id().unwrap_or(0);
+        let child_pid_slot = Arc::new(AtomicU32::new(initial_pid));
 
         let client_slot: Arc<RwLock<Arc<dyn EmbedderClient>>> =
             Arc::new(RwLock::new(Arc::new(client)));
         let client_slot_clone = Arc::clone(&client_slot);
+        let child_pid_slot_clone = Arc::clone(&child_pid_slot);
 
         let supervisor = Self {
             binary_path,
             child: Arc::new(tokio::sync::Mutex::new(Some(child))),
             client_slot,
+            child_pid_slot,
             config,
         };
 
-        Ok((supervisor, client_slot_clone))
+        Ok((supervisor, client_slot_clone, child_pid_slot_clone))
     }
 
     /// Detach the supervisor background task.
@@ -174,6 +195,8 @@ impl EmbedderSupervisor {
     /// What: consumes `self` and spawns a Tokio task that calls `child.wait()`
     /// in a loop. On non-zero exit: exponential back-off, respawn, swap in new
     /// client. On `max_restarts` consecutive failures: log ERROR and stop.
+    /// `child_pid_slot` is updated to the new PID on each respawn and cleared
+    /// to 0 when the sidecar exits for the last time.
     ///
     /// Test: `supervisor_restarts_on_crash`.
     pub fn start_supervisor_task(self) {
@@ -181,6 +204,7 @@ impl EmbedderSupervisor {
             self.binary_path,
             self.child,
             self.client_slot,
+            self.child_pid_slot,
             self.config,
         ));
     }
@@ -290,11 +314,15 @@ async fn spawn_child(
 /// What: calls `child.wait()`, handles crash/exit, applies exponential back-off,
 /// respawns, and atomically swaps in the new `StdioEmbedderClient`. Exits when
 /// the process exits cleanly (code 0) or when `max_restarts` is exceeded.
+/// `child_pid_slot` is updated to the new PID after each successful respawn and
+/// cleared to 0 when supervision terminates so RSS samplers stop sampling a
+/// dead PID.
 /// Test: `supervisor_restarts_on_crash`.
 async fn supervision_loop(
     binary_path: PathBuf,
     child_slot: Arc<tokio::sync::Mutex<Option<Child>>>,
     client_slot: Arc<RwLock<Arc<dyn EmbedderClient>>>,
+    child_pid_slot: Arc<AtomicU32>,
     config: SupervisorConfig,
 ) {
     let mut consecutive_failures: u32 = 0;
@@ -308,15 +336,21 @@ async fn supervision_loop(
                     Ok(status) => status,
                     Err(e) => {
                         tracing::error!("EmbedderSupervisor: wait() failed: {e}");
+                        // Clear the PID slot so samplers stop polling a dead PID.
+                        child_pid_slot.store(0, AtomicOrdering::Release);
                         return;
                     }
                 },
                 None => {
                     // Sidecar was explicitly shut down; stop supervising.
+                    child_pid_slot.store(0, AtomicOrdering::Release);
                     return;
                 }
             }
         };
+
+        // Clear PID immediately after process exit.
+        child_pid_slot.store(0, AtomicOrdering::Release);
 
         if exit_status.success() {
             tracing::info!("EmbedderSupervisor: sidecar exited cleanly — stopping supervision");
@@ -350,6 +384,10 @@ async fn supervision_loop(
         // Respawn.
         match spawn_child(&binary_path, &config).await {
             Ok((new_child, new_client)) => {
+                // Publish the new PID before swapping the client so any
+                // RSS sampler that wakes up after the swap sees a valid PID.
+                let new_pid = new_child.id().unwrap_or(0);
+
                 // Swap the live client so subsequent embed calls use the new
                 // sidecar. Callers hold `Arc<RwLock<Arc<dyn EmbedderClient>>>`;
                 // they `.read().clone()` to get a current handle per call, so
@@ -365,9 +403,14 @@ async fn supervision_loop(
                     *child_guard = Some(new_child);
                 }
 
+                // Publish the PID after the child handle is in place.
+                child_pid_slot.store(new_pid, AtomicOrdering::Release);
+
                 // Reset consecutive failure count — the new process is up.
                 consecutive_failures = 0;
-                tracing::info!("EmbedderSupervisor: sidecar restarted successfully");
+                tracing::info!(
+                    "EmbedderSupervisor: sidecar restarted successfully (pid={new_pid})"
+                );
             }
             Err(e) => {
                 tracing::error!("EmbedderSupervisor: respawn failed: {e:#}");

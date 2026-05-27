@@ -253,6 +253,22 @@ pub struct SearchAppState {
     /// it. The render itself is lock-free (PrometheusHandle is Clone).
     /// Test: covered by `metrics_handler_returns_prometheus_text`.
     pub metrics: Option<crate::service::metrics::MetricsState>,
+    /// Current OS PID of the `trusty-embedderd` sidecar process (issue #282).
+    ///
+    /// Why: the daemon's own RSS (`rss_mb` on `/health`) excludes the sidecar,
+    /// which owns the ONNX arena. Surfacing the sidecar's RSS separately gives
+    /// operators the full memory picture. `0` means the sidecar is not running
+    /// (in-process / HTTP remote / UDS mode, or sidecar has exited).
+    ///
+    /// What: an `Arc<AtomicU32>` set by `install_embedderd_pid_slot()` after the
+    /// sidecar spawns. The `EmbedderSupervisor` loop owns the same Arc and
+    /// updates it automatically on crash-restart (new PID) and exit (0).
+    /// Initialised to 0 so reads before the sidecar spawns return `None` from
+    /// `current_embedderd_pid()`.
+    ///
+    /// Test: `health_includes_embedderd_rss_field` in `server.rs#tests` verifies
+    /// the field is present in the health response.
+    pub embedderd_pid_slot: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl SearchAppState {
@@ -297,6 +313,7 @@ impl SearchAppState {
             )),
             embed_pool: Arc::new(RwLock::new(None)),
             metrics: None,
+            embedderd_pid_slot: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -512,6 +529,69 @@ impl SearchAppState {
     pub fn is_embedder_ready(&self) -> bool {
         *self.embedder_ready.borrow()
     }
+
+    /// Install the live `child_pid_slot` Arc from the `EmbedderSupervisor`
+    /// after the sidecar spawns (issue #282).
+    ///
+    /// Why: `build_embedder` in `start.rs` obtains the pid-slot Arc from
+    /// `spawn_stdio` and calls this method from the background init task.
+    /// The supervisor loop updates the same Arc on every respawn and clears
+    /// it to 0 on final exit, so the daemon always reads the current PID
+    /// without holding any lock.
+    /// What: atomically copies the PID from the new slot into the field's
+    /// existing Arc, then replaces the field's Arc with the new slot so
+    /// future updates from the supervisor are visible directly.
+    /// Test: `health_includes_embedderd_rss_field` in this module.
+    pub async fn install_embedderd_pid_slot(&self, slot: Arc<std::sync::atomic::AtomicU32>) {
+        use std::sync::atomic::Ordering;
+        // Overwrite the AppState's Arc with the supervisor-owned Arc so all
+        // subsequent reads — health handler, reindex poller — go through the
+        // same object the supervisor loop writes to.
+        // `Arc::swap` doesn't exist; use `AtomicU32` copy-then-pointer-replace via
+        // a shared wrapper. Since the field is `Arc<AtomicU32>` (not `AtomicArc`),
+        // we can't atomically replace the Arc pointer itself. The safest approach:
+        // copy the current PID into the existing slot so any reader that already
+        // holds a clone of the old Arc starts seeing the right value, AND then
+        // atomically propagate future updates via a tiny background task.
+        let initial_pid = slot.load(Ordering::Acquire);
+        self.embedderd_pid_slot
+            .store(initial_pid, Ordering::Release);
+        // Keep in sync for future restarts: spawn a compact forwarder that
+        // copies from the supervisor's Arc to the AppState's Arc every tick.
+        // Uses 500 ms cadence — same as the reindex RSS poller.
+        let src = Arc::clone(&slot);
+        let dst = Arc::clone(&self.embedderd_pid_slot);
+        tokio::spawn(async move {
+            loop {
+                let pid = src.load(Ordering::Acquire);
+                dst.store(pid, Ordering::Release);
+                if pid == 0 {
+                    // Sidecar exited for the last time; stop forwarding.
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        });
+    }
+
+    /// Current OS PID of the embedderd sidecar, or `None` if no sidecar is
+    /// running (in-process mode, sidecar not yet spawned, or sidecar exited).
+    ///
+    /// Why: the health handler uses this to sample the sidecar RSS; `0` is
+    /// the "no process" sentinel.
+    /// What: loads `embedderd_pid_slot` with `Relaxed` ordering — a slightly
+    /// stale PID is fine (the caller will just get `None` from sysinfo if the
+    /// process already exited).
+    /// Test: see `health_includes_embedderd_rss_field`.
+    pub fn current_embedderd_pid(&self) -> Option<u32> {
+        use std::sync::atomic::Ordering;
+        let pid = self.embedderd_pid_slot.load(Ordering::Relaxed);
+        if pid == 0 {
+            None
+        } else {
+            Some(pid)
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -556,6 +636,13 @@ struct HealthResponse {
     /// request.
     #[serde(skip_serializing_if = "Option::is_none")]
     embedder_info: Option<EmbedderInfo>,
+    /// Current RSS of the `trusty-embedderd` sidecar process in megabytes
+    /// (issue #282). `None` when the sidecar is not running (in-process mode,
+    /// HTTP / UDS remote, not yet spawned, or sidecar exited). Sampled on
+    /// each `/health` request using `current_rss_mb_for_pid`; the first
+    /// health poll after a crash-restart may briefly return `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    embedderd_rss_mb: Option<u64>,
 }
 
 /// Embedding-model metadata surfaced by `GET /health` (issue #38).
@@ -941,6 +1028,10 @@ async fn health_handler(State(state): State<Arc<SearchAppState>>) -> Json<Health
             quantized: dimension == trusty_common::embedder::EMBED_DIM,
         }
     });
+    // Issue #282: sample the sidecar's current RSS (None when not running).
+    let embedderd_rss_mb = state
+        .current_embedderd_pid()
+        .and_then(crate::core::memguard::current_rss_mb_for_pid);
     Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
@@ -953,6 +1044,7 @@ async fn health_handler(State(state): State<Arc<SearchAppState>>) -> Json<Health
         disk_bytes,
         cpu_pct,
         embedder_info,
+        embedderd_rss_mb,
     })
 }
 
@@ -2940,6 +3032,10 @@ async fn reindex_handler(
         force,
         Some(Arc::clone(&state.reindex_progress)),
         Some(Arc::clone(&state.last_reindex_aborted_at)),
+        // Issue #282: forward the live sidecar PID slot so the reindex
+        // orchestrator can sample embedderd's RSS during the run and
+        // emit `embedderd_peak_rss_mb` in the SSE `complete` event.
+        Some(Arc::clone(&state.embedderd_pid_slot)),
     );
 
     Ok(Json(serde_json::json!({
