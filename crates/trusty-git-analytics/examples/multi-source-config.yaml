@@ -1,10 +1,15 @@
 # multi-source-config.yaml
 #
-# Fully annotated tga config showing multi-source classification (issue #260)
-# and the corrected custom-rules priority defaults (issue #259).
+# Fully annotated tga config showing multi-source classification (issues #260,
+# #272, #273, #274, #275) and the corrected custom-rules priority defaults
+# (issue #259).
 #
-# Run:
-#   JIRA_API_TOKEN=<token> GITHUB_TOKEN=<pat> tga classify --config multi-source-config.yaml
+# Run all sources:
+#   JIRA_API_TOKEN=<token> GITHUB_TOKEN=<pat> \
+#   LINEAR_API_KEY=<key> SHORTCUT_API_TOKEN=<token> \
+#   CONFLUENCE_API_TOKEN=<token> CONFLUENCE_EMAIL=<email> \
+#   DD_API_KEY=<key> DD_APP_KEY=<key> \
+#   tga classify --config multi-source-config.yaml
 #
 # To disable external sources for a single run (e.g. in CI without credentials):
 #   tga classify --config multi-source-config.yaml --no-external
@@ -24,7 +29,12 @@ classification:
   # here apply unless you set extend_defaults: true.
   rules_file: ./my-rules.yaml
 
-  # External classification sources (issue #260).
+  # WAL checkpoint frequency (new in 1.4.0 — issue #298).
+  # When non-zero, a PASSIVE checkpoint is issued every N classified commits
+  # to cap the data-loss window during long runs. 0 = disabled (default).
+  checkpoint_every: 1000
+
+  # External classification sources (issue #260 + 1.4.0 additions).
   # Sources are consulted in order; the first non-None signal wins.
   # Each unique ticket is fetched at most once per run (in-memory cache).
   # On HTTP failure or missing token the source is skipped with a warning.
@@ -117,6 +127,117 @@ classification:
         dependencies: tech_debt_refactoring
         good first issue: new_feature
         help wanted: new_feature
+
+    # -----------------------------------------------------------------
+    # Linear (new in 1.4.0 — issue #272)
+    # -----------------------------------------------------------------
+    - type: linear
+      # Personal API Key from https://linear.app/settings/api
+      # Set it as:  export LINEAR_API_KEY="lin_api_..."
+      api_key_env: LINEAR_API_KEY  # pragma: allowlist secret
+
+      # Restrict processing to these Linear team key prefixes.
+      # Linear keys and JIRA keys share the same PROJ-NNN shape. Listing your
+      # Linear team keys here prevents Linear from processing keys that belong
+      # to your JIRA instance (and vice-versa when both sources are active).
+      # Leave empty (or omit) to process all PROJ-NNN references via Linear.
+      team_keys:
+        - ENG
+        - MOBILE
+
+      # Map Linear fields to TGA category strings.
+      # Priority: issue_type > labels > cycle (first match wins).
+      field_mappings:
+        issue_type:
+          Bug: bug_fix
+          Feature: new_feature
+          Improvement: tech_debt_refactoring
+          Chore: tech_debt_refactoring
+        labels:
+          security: security
+          ktlo: tech_debt_refactoring
+          performance: performance
+        cycle:
+          # Active cycle/sprint name → category (fires last).
+          # Useful when cycle names encode work type (e.g. "Security Sprint").
+          "Security Sprint": security
+
+    # -----------------------------------------------------------------
+    # Shortcut (new in 1.4.0 — issue #273)
+    # -----------------------------------------------------------------
+    - type: shortcut
+      # API token from https://app.shortcut.com/settings/api-tokens
+      # Set it as:  export SHORTCUT_API_TOKEN="..."
+      api_token_env: SHORTCUT_API_TOKEN
+
+      # Two reference forms are recognized in commit messages:
+      #   [ch1234]   — bracket form (most common)
+      #   sc-1234    — sc-prefix form (common in branch names)
+      field_mappings:
+        story_type:
+          bug: bug_fix
+          feature: new_feature
+          chore: tech_debt_refactoring
+        labels:
+          security: security
+          performance: performance
+          documentation: documentation
+        workflow_state:
+          # Workflow state name → category. Fires last.
+          "In Development": new_feature
+          "In Review": new_feature
+
+    # -----------------------------------------------------------------
+    # Confluence (new in 1.4.0 — issue #274)
+    # Note: Confluence confidence is fixed at 0.80 (lower than the standard
+    # 0.92 for JIRA/GitHub/Linear/Shortcut) because page labels are a weaker
+    # signal than issue type or story category.
+    # -----------------------------------------------------------------
+    - type: confluence
+      # Atlassian base URL (same as your JIRA instance if using Atlassian Cloud).
+      base_url: "https://yourco.atlassian.net"
+
+      # Confluence Cloud requires Basic auth: email + API token.
+      # Set them as:
+      #   export CONFLUENCE_API_TOKEN="your-token"
+      #   export CONFLUENCE_EMAIL="you@yourco.com"
+      token_env: CONFLUENCE_API_TOKEN
+      email_env: CONFLUENCE_EMAIL
+
+      # Two reference forms are recognized in commit messages:
+      #   /wiki/spaces/SPACE/pages/12345  — URL form (page ID extracted)
+      #   [CONF-12345]                    — Smart Commit form
+      label_mappings:
+        runbook: devops
+        architecture: tech_debt_refactoring
+        security: security
+        on-call: devops
+
+    # -----------------------------------------------------------------
+    # Datadog (new in 1.4.0 — issue #275)
+    # Matches commit SHAs found in commit messages against the Datadog
+    # Events API. A deployment event that references the SHA causes this
+    # commit to be classified as `devops` (or the `default_category` below).
+    # Confidence is fixed at 0.95.
+    # -----------------------------------------------------------------
+    - type: datadog
+      # API key from https://app.datadoghq.com/organization-settings/api-keys
+      # Application key from https://app.datadoghq.com/organization-settings/application-keys
+      # Set them as:
+      #   export DD_API_KEY="..."
+      #   export DD_APP_KEY="..."
+      api_key_env: DD_API_KEY  # pragma: allowlist secret
+      app_key_env: DD_APP_KEY  # pragma: allowlist secret
+
+      # Datadog site (default: "datadoghq.com").
+      # Use "datadoghq.eu" for the EU region.
+      site: datadoghq.com
+
+      # Category written when a deployment event is found for this commit's SHA.
+      default_category: devops   # default: "devops"
+
+      # How many days back to search for deployment events.
+      lookback_days: 30          # default: 30
 
   # Optional LLM fallback for commits with low-confidence verdicts.
   # use_llm: false

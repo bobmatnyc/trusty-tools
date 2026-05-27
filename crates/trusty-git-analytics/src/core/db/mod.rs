@@ -154,4 +154,155 @@ impl Database {
             .map_err(TgaError::from)?;
         Ok(v)
     }
+
+    /// Checkpoint the WAL into the main database file.
+    ///
+    /// Why: SQLite WAL mode defers writes to a separate `-wal` file; if the
+    /// process exits (or is killed) before a checkpoint, the main database
+    /// file can lag behind the WAL. On clean exit callers should call
+    /// `wal_checkpoint(CheckpointMode::Truncate)` to flush and zero the WAL,
+    /// guaranteeing durability. During long-running writes, periodic
+    /// `wal_checkpoint(CheckpointMode::Passive)` calls limit the data-loss
+    /// window on crash. See bug #298.
+    ///
+    /// What: executes `PRAGMA wal_checkpoint(<mode>)` and logs the result.
+    /// Returns `Ok(())` on success; returns an error if the checkpoint pragma
+    /// fails (e.g. `SQLITE_CORRUPT`).
+    ///
+    /// # Checkpoint modes
+    ///
+    /// - [`CheckpointMode::Passive`] — copies frames from the WAL without
+    ///   blocking writers. Safe to call mid-run; used for periodic crash-
+    ///   resilience checkpoints.
+    /// - [`CheckpointMode::Truncate`] — flushes all WAL frames to the main
+    ///   database and truncates the WAL file to zero. Call on clean exit to
+    ///   guarantee durability and cap the WAL file size.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TgaError::DbError`] if the pragma query fails.
+    ///
+    /// # Test
+    ///
+    /// See `tests::wal_checkpoint_truncate_zeroes_wal_on_file_db`.
+    pub fn wal_checkpoint(&self, mode: CheckpointMode) -> Result<()> {
+        let mode_str = match mode {
+            CheckpointMode::Passive => "PASSIVE",
+            CheckpointMode::Truncate => "TRUNCATE",
+        };
+        // `wal_checkpoint()` returns three columns (busy, log, checkpointed).
+        // We query them for logging purposes but do not fail on non-zero
+        // "busy" — a passive checkpoint may leave some WAL frames uncopied
+        // when another reader/writer holds a lock.
+        let (busy, log, checkpointed): (i64, i64, i64) = self
+            .conn
+            .query_row(&format!("PRAGMA wal_checkpoint({mode_str})"), [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map_err(TgaError::from)?;
+        info!(
+            mode = mode_str,
+            busy, log, checkpointed, "WAL checkpoint complete"
+        );
+        Ok(())
+    }
+}
+
+/// WAL checkpoint mode.
+///
+/// Why: the two modes have different safety vs. throughput trade-offs; having
+/// a typed enum prevents mixing up the string literals at call sites.
+/// What: `Passive` for mid-run crash-resilience calls; `Truncate` for the
+/// clean-exit flush.
+/// Test: used by `Database::wal_checkpoint`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointMode {
+    /// Copy frames without blocking; some frames may remain if a reader
+    /// holds a lock.
+    Passive,
+    /// Flush all frames and truncate the WAL file to zero. Requires
+    /// exclusive access; retry if blocked.
+    Truncate,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Why: regression guard for issue #298. `wal_checkpoint(Passive)` must
+    /// succeed on an in-memory database (WAL is a no-op for `:memory:`, but
+    /// the pragma must not return an error). Verifies the PRAGMA syntax is
+    /// correct and the return columns are mapped properly.
+    /// What: open an in-memory DB, call both checkpoint modes, assert no error.
+    /// Test: pure DB exercise, no I/O besides SQLite.
+    #[test]
+    fn wal_checkpoint_succeeds_on_in_memory_db() {
+        let db = Database::open_in_memory().expect("open");
+        // In-memory DBs use `memory` journal mode, not WAL. SQLite still
+        // accepts the checkpoint pragma but returns (0, 0, 0) — no error.
+        db.wal_checkpoint(CheckpointMode::Passive)
+            .expect("passive checkpoint must not fail");
+        db.wal_checkpoint(CheckpointMode::Truncate)
+            .expect("truncate checkpoint must not fail");
+    }
+
+    /// Why: the checkpoint must succeed and the WAL file must be small (or
+    /// absent) after a TRUNCATE on a real file-backed database with WAL mode.
+    /// What: create a temp file DB, write 100 rows, call TRUNCATE, assert the
+    /// WAL file is 0 bytes or absent.
+    /// Test: uses `tempfile::NamedTempFile` for a real filesystem DB.
+    #[test]
+    fn wal_checkpoint_truncate_zeroes_wal_on_file_db() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let db_path = tmp.path().to_path_buf();
+        // Keep the file alive through the test by converting to a persist path.
+        tmp.keep().expect("keep tempfile");
+
+        {
+            let db = Database::open(&db_path).expect("open");
+            // Verify WAL mode is active.
+            assert_eq!(db.journal_mode().expect("journal_mode"), "wal");
+
+            // Write rows to ensure the WAL has content.
+            for i in 0..100 {
+                db.connection()
+                    .execute(
+                        "INSERT INTO commits \
+                         (sha, author_name, author_email, timestamp, message, repository) \
+                         VALUES (?1, 'a', 'a@x', '2024-01-01T00:00:00Z', 'msg', 'repo')",
+                        rusqlite::params![format!("sha-{i}")],
+                    )
+                    .expect("insert");
+            }
+
+            // TRUNCATE checkpoint: must flush and zero the WAL.
+            db.wal_checkpoint(CheckpointMode::Truncate)
+                .expect("truncate checkpoint");
+        }
+
+        // After the connection drops, check the WAL file.
+        let wal_path = db_path.with_extension("db-wal");
+        if wal_path.exists() {
+            let wal_size = std::fs::metadata(&wal_path).expect("wal metadata").len();
+            assert_eq!(
+                wal_size, 0,
+                "WAL file must be zero bytes after TRUNCATE checkpoint, got {wal_size} bytes"
+            );
+        }
+        // If the WAL file doesn't exist, the checkpoint succeeded completely.
+
+        // Verify all rows are in the main DB by opening it fresh.
+        let db2 = Database::open(&db_path).expect("reopen");
+        let count: i64 = db2
+            .connection()
+            .query_row("SELECT COUNT(*) FROM commits", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(count, 100, "all 100 rows must be durable after checkpoint");
+
+        // Cleanup.
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(&wal_path);
+        let shm_path = db_path.with_extension("db-shm");
+        let _ = std::fs::remove_file(&shm_path);
+    }
 }

@@ -20,26 +20,49 @@ use std::sync::Mutex;
 use tracing::debug;
 
 use super::{
+    confluence, datadog,
     github_issues::{self, GitHubRef},
-    jira, ExternalSignal, SourceConfig,
+    jira, linear, shortcut, ExternalSignal, SourceConfig,
 };
 
-/// In-memory cache for JIRA lookups (`key → Option<ExternalSignal>`).
-type JiraCache = HashMap<String, Option<ExternalSignal>>;
-/// In-memory cache for GitHub Issues lookups (`"owner/repo#N" → Option<ExternalSignal>`).
-type GithubCache = HashMap<String, Option<ExternalSignal>>;
+/// In-memory cache type alias (key → Option<ExternalSignal>).
+type Cache = HashMap<String, Option<ExternalSignal>>;
 
 /// Per-source internal state.
 enum SourceState {
     Jira {
         config: super::JiraSourceConfig,
-        cache: Mutex<JiraCache>,
+        cache: Mutex<Cache>,
         /// Test-only base URL override (points at a wiremock server).
         base_url_override: Option<String>,
     },
     GithubIssues {
         config: super::GithubIssuesSourceConfig,
-        cache: Mutex<GithubCache>,
+        cache: Mutex<Cache>,
+        /// Test-only API base URL override.
+        api_base_override: Option<String>,
+    },
+    Linear {
+        config: super::LinearSourceConfig,
+        cache: Mutex<Cache>,
+        /// Test-only GraphQL base URL override.
+        api_base_override: Option<String>,
+    },
+    Shortcut {
+        config: super::ShortcutSourceConfig,
+        cache: Mutex<Cache>,
+        /// Test-only REST base URL override.
+        api_base_override: Option<String>,
+    },
+    Confluence {
+        config: super::ConfluenceSourceConfig,
+        cache: Mutex<Cache>,
+        /// Test-only base URL override.
+        api_base_override: Option<String>,
+    },
+    Datadog {
+        config: super::DatadogSourceConfig,
+        cache: Mutex<Cache>,
         /// Test-only API base URL override.
         api_base_override: Option<String>,
     },
@@ -82,6 +105,26 @@ impl ExternalSourceResolver {
                 },
                 SourceConfig::GithubIssues(g) => SourceState::GithubIssues {
                     config: g.clone(),
+                    cache: Mutex::new(HashMap::new()),
+                    api_base_override: None,
+                },
+                SourceConfig::Linear(l) => SourceState::Linear {
+                    config: l.clone(),
+                    cache: Mutex::new(HashMap::new()),
+                    api_base_override: None,
+                },
+                SourceConfig::Shortcut(s) => SourceState::Shortcut {
+                    config: s.clone(),
+                    cache: Mutex::new(HashMap::new()),
+                    api_base_override: None,
+                },
+                SourceConfig::Confluence(c) => SourceState::Confluence {
+                    config: c.clone(),
+                    cache: Mutex::new(HashMap::new()),
+                    api_base_override: None,
+                },
+                SourceConfig::Datadog(d) => SourceState::Datadog {
+                    config: d.clone(),
                     cache: Mutex::new(HashMap::new()),
                     api_base_override: None,
                 },
@@ -236,6 +279,198 @@ impl ExternalSourceResolver {
                 }
                 None
             }
+
+            SourceState::Linear {
+                config,
+                cache,
+                api_base_override,
+            } => {
+                let keys = linear::extract_linear_keys(message);
+                if keys.is_empty() {
+                    return None;
+                }
+                // Filter by team_keys if configured.
+                let filtered: Vec<String> = keys
+                    .into_iter()
+                    .filter(|k| linear::matches_team_key(k, &config.team_keys))
+                    .collect();
+                if filtered.is_empty() {
+                    return None;
+                }
+
+                // Cache check.
+                {
+                    let guard = cache.lock().expect("linear cache lock");
+                    for k in &filtered {
+                        if let Some(Some(sig)) = guard.get(k.as_str()) {
+                            debug!(key = k.as_str(), "linear cache hit");
+                            return Some(sig.clone());
+                        }
+                    }
+                }
+
+                // Fetch misses.
+                let fetched = linear::fetch_issues_batch(
+                    &self.client,
+                    config,
+                    &filtered,
+                    api_base_override.as_deref(),
+                )
+                .await;
+
+                {
+                    let mut guard = cache.lock().expect("linear cache lock");
+                    for (k, sig) in &fetched {
+                        guard.insert(k.clone(), sig.clone());
+                    }
+                }
+
+                for k in &filtered {
+                    if let Some(Some(sig)) = fetched.get(k.as_str()) {
+                        return Some(sig.clone());
+                    }
+                }
+                None
+            }
+
+            SourceState::Shortcut {
+                config,
+                cache,
+                api_base_override,
+            } => {
+                let ids = shortcut::extract_shortcut_ids(message);
+                if ids.is_empty() {
+                    return None;
+                }
+
+                // Cache check.
+                {
+                    let guard = cache.lock().expect("shortcut cache lock");
+                    for id in &ids {
+                        let k = id.to_string();
+                        if let Some(Some(sig)) = guard.get(&k) {
+                            debug!(story_id = id, "shortcut cache hit");
+                            return Some(sig.clone());
+                        }
+                    }
+                }
+
+                // Fetch misses.
+                let fetched = shortcut::fetch_stories_batch(
+                    &self.client,
+                    config,
+                    &ids,
+                    api_base_override.as_deref(),
+                )
+                .await;
+
+                {
+                    let mut guard = cache.lock().expect("shortcut cache lock");
+                    for (k, sig) in &fetched {
+                        guard.insert(k.clone(), sig.clone());
+                    }
+                }
+
+                for id in &ids {
+                    let k = id.to_string();
+                    if let Some(Some(sig)) = fetched.get(&k) {
+                        return Some(sig.clone());
+                    }
+                }
+                None
+            }
+
+            SourceState::Confluence {
+                config,
+                cache,
+                api_base_override,
+            } => {
+                let ids = confluence::extract_confluence_ids(message);
+                if ids.is_empty() {
+                    return None;
+                }
+
+                // Cache check.
+                {
+                    let guard = cache.lock().expect("confluence cache lock");
+                    for id in &ids {
+                        let k = id.to_string();
+                        if let Some(Some(sig)) = guard.get(&k) {
+                            debug!(page_id = id, "confluence cache hit");
+                            return Some(sig.clone());
+                        }
+                    }
+                }
+
+                // Fetch misses.
+                let fetched = confluence::fetch_pages_batch(
+                    &self.client,
+                    config,
+                    &ids,
+                    api_base_override.as_deref(),
+                )
+                .await;
+
+                {
+                    let mut guard = cache.lock().expect("confluence cache lock");
+                    for (k, sig) in &fetched {
+                        guard.insert(k.clone(), sig.clone());
+                    }
+                }
+
+                for id in &ids {
+                    let k = id.to_string();
+                    if let Some(Some(sig)) = fetched.get(&k) {
+                        return Some(sig.clone());
+                    }
+                }
+                None
+            }
+
+            SourceState::Datadog {
+                config,
+                cache,
+                api_base_override,
+            } => {
+                let shas = datadog::extract_commit_shas(message);
+                if shas.is_empty() {
+                    return None;
+                }
+
+                // Cache check.
+                {
+                    let guard = cache.lock().expect("datadog cache lock");
+                    for sha in &shas {
+                        if let Some(Some(sig)) = guard.get(sha.as_str()) {
+                            debug!(sha = sha.as_str(), "datadog cache hit");
+                            return Some(sig.clone());
+                        }
+                    }
+                }
+
+                // Fetch misses.
+                let fetched = datadog::check_shas_batch(
+                    &self.client,
+                    config,
+                    &shas,
+                    api_base_override.as_deref(),
+                )
+                .await;
+
+                {
+                    let mut guard = cache.lock().expect("datadog cache lock");
+                    for (k, sig) in &fetched {
+                        guard.insert(k.clone(), sig.clone());
+                    }
+                }
+
+                for sha in &shas {
+                    if let Some(Some(sig)) = fetched.get(sha.as_str()) {
+                        return Some(sig.clone());
+                    }
+                }
+                None
+            }
         }
     }
 
@@ -266,6 +501,75 @@ impl ExternalSourceResolver {
     #[cfg(test)]
     pub fn with_github_api_base(mut self, idx: usize, url: String) -> Self {
         if let Some(SourceState::GithubIssues {
+            ref mut api_base_override,
+            ..
+        }) = self.sources.get_mut(idx)
+        {
+            *api_base_override = Some(url);
+        }
+        self
+    }
+
+    /// Override the Linear GraphQL base URL for a source at index `idx`.
+    ///
+    /// Why: integration tests use wiremock servers on random ports; this seam
+    /// lets tests inject the mock URL without touching the config struct.
+    /// What: replaces `api_base_override` for the Linear source at `idx`.
+    /// Test: used by Linear integration tests.
+    #[cfg(test)]
+    pub fn with_linear_api_base(mut self, idx: usize, url: String) -> Self {
+        if let Some(SourceState::Linear {
+            ref mut api_base_override,
+            ..
+        }) = self.sources.get_mut(idx)
+        {
+            *api_base_override = Some(url);
+        }
+        self
+    }
+
+    /// Override the Shortcut REST base URL for a source at index `idx`.
+    ///
+    /// Why: same as `with_jira_base_url` but for Shortcut integration tests.
+    /// What: replaces `api_base_override` for the Shortcut source at `idx`.
+    /// Test: used by Shortcut integration tests.
+    #[cfg(test)]
+    pub fn with_shortcut_api_base(mut self, idx: usize, url: String) -> Self {
+        if let Some(SourceState::Shortcut {
+            ref mut api_base_override,
+            ..
+        }) = self.sources.get_mut(idx)
+        {
+            *api_base_override = Some(url);
+        }
+        self
+    }
+
+    /// Override the Confluence base URL for a source at index `idx`.
+    ///
+    /// Why: same as `with_jira_base_url` but for Confluence integration tests.
+    /// What: replaces `api_base_override` for the Confluence source at `idx`.
+    /// Test: used by Confluence integration tests.
+    #[cfg(test)]
+    pub fn with_confluence_base_url(mut self, idx: usize, url: String) -> Self {
+        if let Some(SourceState::Confluence {
+            ref mut api_base_override,
+            ..
+        }) = self.sources.get_mut(idx)
+        {
+            *api_base_override = Some(url);
+        }
+        self
+    }
+
+    /// Override the Datadog API base URL for a source at index `idx`.
+    ///
+    /// Why: same as `with_jira_base_url` but for Datadog integration tests.
+    /// What: replaces `api_base_override` for the Datadog source at `idx`.
+    /// Test: used by Datadog integration tests.
+    #[cfg(test)]
+    pub fn with_datadog_api_base(mut self, idx: usize, url: String) -> Self {
+        if let Some(SourceState::Datadog {
             ref mut api_base_override,
             ..
         }) = self.sources.get_mut(idx)

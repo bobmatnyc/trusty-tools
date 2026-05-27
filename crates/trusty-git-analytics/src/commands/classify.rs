@@ -2,7 +2,7 @@
 
 use tga::classify::ClassificationPipeline;
 use tga::core::config::{ClassificationConfig, Config};
-use tga::core::db::Database;
+use tga::core::db::{CheckpointMode, Database};
 
 use crate::ClassifyArgs;
 
@@ -54,10 +54,23 @@ pub async fn run(config: Config, db: &mut Database, args: ClassifyArgs) -> anyho
     if args.backfill_complexity {
         let updated = pipeline.backfill_complexity(db).await?;
         println!("Backfilled complexity for {updated} commit(s)");
+        // Checkpoint the WAL after backfill too (issue #298).
+        if let Err(e) = db.wal_checkpoint(CheckpointMode::Truncate) {
+            tracing::warn!(error = %e, "WAL TRUNCATE checkpoint failed after backfill");
+        }
         return Ok(());
     }
 
     let stats = pipeline.run(db).await?;
+
+    // Issue #298: call PRAGMA wal_checkpoint(TRUNCATE) on clean exit to flush
+    // the WAL into the main DB file and zero the WAL. Without this the main
+    // DB file can lag behind the WAL, causing post-run queries to see a prior
+    // state of the classifications table.
+    if let Err(e) = db.wal_checkpoint(CheckpointMode::Truncate) {
+        tracing::warn!(error = %e, "WAL TRUNCATE checkpoint failed after classify — \
+            the WAL may not be flushed; run `sqlite3 <db> 'PRAGMA wal_checkpoint(TRUNCATE)'` manually");
+    }
 
     println!(
         "Classified {}/{} commits ({:.1}% coverage)",

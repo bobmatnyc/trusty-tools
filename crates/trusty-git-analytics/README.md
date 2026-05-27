@@ -6,6 +6,8 @@ Analyze git repositories to measure developer productivity — classify commit w
 
 `tga` walks one or more local git repositories, collects every commit into a SQLite database, classifies each commit into a work category (feature, bugfix, refactor, etc.) using a multi-tier classification cascade (including the new weighted-sum Tier 2.5 added in 1.3.0), then aggregates the results into per-author, per-week, DORA, velocity, and quality reports. It is a feature-complete Rust port of [gitflow-analytics](https://github.com/bobmatnyc/gitflow-analytics) with the same YAML config schema and the same SQLite schema — existing config files work without modification.
 
+1.4.0 adds four new external classification sources (Linear, Shortcut, Confluence, Datadog) and fixes a SQLite WAL data-loss bug (issue #298) that could cause up to 22 minutes of classification work to be silently discarded on exit.
+
 ## Installation
 
 ### From crates.io (recommended)
@@ -763,10 +765,120 @@ tga classify --no-external
 See [`examples/multi-source-config.yaml`](examples/multi-source-config.yaml)
 for a fully annotated example.
 
-**Deferred sources** (planned for a future release): Linear, Shortcut,
-Confluence, Datadog.
+    # --- Linear source (new in 1.4.0) ---
+    - type: linear
+      api_key_env: LINEAR_API_KEY         # Personal API Key (not OAuth)
+      team_keys: ["ENG", "INFRA"]         # Empty = match all Linear teams.
+                                          # Use this to disambiguate from JIRA keys
+                                          # when both follow the PROJ-NNN pattern.
+      field_mappings:
+        issue_type:
+          Bug: bug_fix
+          Feature: new_feature
+          Improvement: tech_debt_refactoring
+        labels:
+          security: security
+          ktlo: tech_debt_refactoring
+        cycle:
+          "Sprint 42": new_feature        # active cycle/sprint → category
+
+    # --- Shortcut source (new in 1.4.0) ---
+    - type: shortcut
+      api_token_env: SHORTCUT_API_TOKEN
+      field_mappings:
+        story_type:
+          bug: bug_fix
+          feature: new_feature
+          chore: tech_debt_refactoring
+        labels:
+          security: security
+        workflow_state:
+          "In Progress": new_feature      # state name → category
+
+    # --- Confluence source (new in 1.4.0) ---
+    # Note: Confluence confidence is fixed at 0.80 (lower than the default 0.92).
+    # References are extracted from /wiki/spaces/.../pages/<id> URLs and
+    # Smart Commit tags ([CONF-<id>] in commit messages).
+    - type: confluence
+      base_url: "https://yourco.atlassian.net"
+      token_env: CONFLUENCE_API_TOKEN
+      email_env: CONFLUENCE_EMAIL         # Confluence Cloud Basic auth email
+      label_mappings:
+        runbook: devops
+        architecture: tech_debt_refactoring
+        security: security
+
+    # --- Datadog source (new in 1.4.0) ---
+    # Matches commit SHAs (7–40 hex chars) in commit messages against the
+    # Datadog Events API deployment events. Confidence is fixed at 0.95.
+    - type: datadog
+      api_key_env: DD_API_KEY
+      app_key_env: DD_APP_KEY
+      site: datadoghq.com                 # optional, default "datadoghq.com"
+      default_category: devops            # category written when a deployment
+                                          # event is found (default: "devops")
+      lookback_days: 30                   # how far back to search events (default: 30)
+```
+
+**Linear key disambiguation**: Linear keys and JIRA keys share the same
+`PROJ-NNN` shape. Set `team_keys` on the Linear source to the exact team
+prefixes you use — keys that do not match any configured prefix are silently
+skipped by the Linear source (and may still be picked up by JIRA if that
+source is also configured).
+
+**Shortcut reference formats**: two forms are recognized automatically:
+- `[ch1234]` — bracket form (in commit message body or subject)
+- `sc-1234` — sc-prefix form (common in branch names carried into messages)
+
+**Confluence reference formats**: two forms are recognized:
+- `/wiki/spaces/MYSPACE/pages/12345` — full URL (page ID extracted)
+- `[CONF-12345]` — Smart Commit tag (page ID after the hyphen)
+
+**Credential handling for new sources**:
+
+```bash
+export LINEAR_API_KEY="lin_api_..."  # pragma: allowlist secret
+export SHORTCUT_API_TOKEN="..."      # pragma: allowlist secret
+export CONFLUENCE_API_TOKEN="..."    # pragma: allowlist secret
+export CONFLUENCE_EMAIL="you@yourco.com"
+export DD_API_KEY="..."              # pragma: allowlist secret
+export DD_APP_KEY="..."              # pragma: allowlist secret
+tga classify --config config.yaml
+```
+
+See [`examples/multi-source-config.yaml`](examples/multi-source-config.yaml)
+for a fully annotated example covering all six sources.
 
 See also: [Rules YAML schema](#rules-yaml-schema) for commit-message rule authoring.
+
+## Operational Notes
+
+### SQLite WAL durability (fixed in 1.4.0 — issue #298)
+
+`tga` opens its database in WAL (Write-Ahead Log) mode for concurrent-read
+performance. Prior to 1.4.0, the WAL was never explicitly checkpointed on
+exit, so the main `.db` file could lag behind the `-wal` sidecar. On a large
+corpus this meant up to 22 minutes of classification work was held only in the
+WAL and could be lost if the file was copied or the process was killed.
+
+**1.4.0 fix**: `tga classify` now calls `PRAGMA wal_checkpoint(TRUNCATE)` on
+clean exit, flushing all WAL frames into the main database file and zeroing
+the WAL. In addition, a periodic `PRAGMA wal_checkpoint(PASSIVE)` fires every
+`classification.checkpoint_every` commits (default 0 = disabled) to cap the
+data-loss window during long runs.
+
+```yaml
+classification:
+  checkpoint_every: 1000  # PASSIVE checkpoint every 1000 classified commits
+                          # (0 = off, which is the default)
+```
+
+The checkpoint is non-fatal: if it fails (e.g., `SQLITE_CORRUPT`), `tga`
+logs a `WARN` and continues. You can manually flush at any time:
+
+```bash
+sqlite3 tga.db 'PRAGMA wal_checkpoint(TRUNCATE)'
+```
 
 ## Output Formats
 

@@ -392,6 +392,25 @@ pub struct ClassificationConfig {
     #[serde(default)]
     pub no_external: bool,
 
+    /// Issue a `PRAGMA wal_checkpoint(PASSIVE)` every N commits during
+    /// classification to limit crash-window data loss (issue #298).
+    ///
+    /// On a 22-minute classify run with no intermediate checkpoints, a crash
+    /// can lose all classifications since the last automatic SQLite checkpoint.
+    /// Setting this to a positive value periodically flushes the WAL so the
+    /// maximum data-loss window is bounded.
+    ///
+    /// - `0` (default) — no periodic checkpoints (only the on-exit
+    ///   `TRUNCATE` checkpoint runs).
+    /// - `> 0` — checkpoint every N commits written.
+    ///
+    /// Recommended for corpora > 5000 commits: set to `5000`.
+    /// This field is also accepted at `dora.classify.checkpoint_every` in
+    /// the YAML for backward-compat, but `classification.checkpoint_every`
+    /// is the canonical location.
+    #[serde(default)]
+    pub checkpoint_every: usize,
+
     /// External classification sources to consult before commit-message rules.
     ///
     /// Each entry describes one external system (JIRA or GitHub Issues).
@@ -450,6 +469,7 @@ impl Default for ClassificationConfig {
             no_external: false,
             sources: Vec::new(),
             weighted_sum: crate::classify::tiers::weighted_sum::WeightedSumConfig::default(),
+            checkpoint_every: 0,
         }
     }
 }

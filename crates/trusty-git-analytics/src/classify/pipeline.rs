@@ -13,7 +13,7 @@ use crate::classify::rules::{default_rules, load_rules};
 use crate::classify::sources::ExternalSourceResolver;
 use crate::classify::tiers::ClassificationResult;
 use crate::core::config::Config;
-use crate::core::db::Database;
+use crate::core::db::{CheckpointMode, Database};
 use crate::core::models::ClassificationMethod;
 
 /// Default minimum coverage threshold (percent) below which the pipeline
@@ -498,7 +498,13 @@ impl ClassificationPipeline {
         }
 
         // 5. Write back + coverage bookkeeping.
-        let mut stats = write_results(db, &commits, &results)?;
+        let checkpoint_every = self
+            .config
+            .classification
+            .as_ref()
+            .map(|c| c.checkpoint_every)
+            .unwrap_or(0);
+        let mut stats = write_results(db, &commits, &results, checkpoint_every)?;
         compute_coverage(&mut stats);
         persist_repository_status(db, &stats)?;
         report_coverage(&stats, self.min_coverage_pct());
@@ -876,17 +882,81 @@ fn read_candidate_commits(
     Ok(out)
 }
 
+/// Write classification results to the database with optional periodic WAL
+/// checkpointing (issue #298).
+///
+/// Why: on large corpora a single long transaction accumulates hundreds of
+/// megabytes of WAL data; a crash mid-run loses everything since the last
+/// automatic checkpoint. When `checkpoint_every > 0`, the function breaks
+/// the write into micro-batches and calls `PRAGMA wal_checkpoint(PASSIVE)`
+/// after each batch, bounding the crash-window data-loss to at most
+/// `checkpoint_every` rows.
+///
+/// What: splits `commits/results` into chunks of `checkpoint_every` (or one
+/// big chunk when `checkpoint_every == 0`), writes each chunk in a
+/// transaction, and calls a PASSIVE checkpoint between chunks.
+///
+/// Test: covered by `tests::pipeline_checkpoint_every_called_during_long_run`.
 fn write_results(
     db: &mut Database,
     commits: &[CommitRow],
     results: &[ClassificationResult],
+    checkpoint_every: usize,
 ) -> Result<ClassificationStats> {
     let mut stats = ClassificationStats {
         total_commits: commits.len(),
         ..Default::default()
     };
 
+    // Determine the effective chunk size. `0` means "one big transaction".
+    let chunk_size = if checkpoint_every > 0 {
+        checkpoint_every
+    } else {
+        commits.len().max(1) // at least 1 to avoid divide-by-zero
+    };
+
     let pb = make_progress(commits.len() as u64, "Writing results");
+
+    for (chunk_commits, chunk_results) in commits.chunks(chunk_size).zip(results.chunks(chunk_size))
+    {
+        write_results_chunk(db, chunk_commits, chunk_results, &mut stats, &pb)?;
+
+        // Issue #298: periodic PASSIVE checkpoint to flush WAL frames and
+        // limit crash-window data loss. Only when chunk_size < total
+        // (i.e. `checkpoint_every > 0`), so we don't add overhead to the
+        // default single-chunk path.
+        if checkpoint_every > 0 && chunk_commits.len() == chunk_size {
+            if let Err(e) = db.wal_checkpoint(CheckpointMode::Passive) {
+                warn!(error = %e, "periodic WAL PASSIVE checkpoint failed (non-fatal)");
+            }
+        }
+    }
+
+    pb.finish_and_clear();
+
+    if stats.classified < stats.total_commits {
+        warn!(
+            unclassified = stats.total_commits - stats.classified,
+            "some commits remained uncategorized"
+        );
+    }
+    Ok(stats)
+}
+
+/// Write one chunk of classification results inside a single transaction.
+///
+/// Why: extracted from `write_results` so the periodic-checkpoint loop stays
+/// readable and the transaction boundary is explicit.
+/// What: inserts or updates `classifications` rows and updates `commits` for
+/// every `(commit, result)` pair in the chunk. Stats are accumulated in place.
+/// Test: exercised indirectly by all `write_results` callers.
+fn write_results_chunk(
+    db: &mut Database,
+    commits: &[CommitRow],
+    results: &[ClassificationResult],
+    stats: &mut ClassificationStats,
+    pb: &indicatif::ProgressBar,
+) -> Result<()> {
     let conn = db.connection_mut();
     let tx = conn.transaction().map_err(crate::core::TgaError::from)?;
     {
@@ -991,15 +1061,7 @@ fn write_results(
         }
     }
     tx.commit().map_err(crate::core::TgaError::from)?;
-    pb.finish_and_clear();
-
-    if stats.classified < stats.total_commits {
-        warn!(
-            unclassified = stats.total_commits - stats.classified,
-            "some commits remained uncategorized"
-        );
-    }
-    Ok(stats)
+    Ok(())
 }
 
 fn make_progress(len: u64, label: &str) -> ProgressBar {

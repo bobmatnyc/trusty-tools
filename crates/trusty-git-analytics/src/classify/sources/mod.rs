@@ -9,15 +9,20 @@
 //!
 //! What: defines [`SourceConfig`] (the YAML-deserialisable config for each
 //! source), [`ExternalSourceResolver`] (the per-run cache and dispatcher),
-//! and per-source client implementations in [`jira`] and [`github_issues`].
+//! and per-source client implementations in [`jira`], [`github_issues`],
+//! [`linear`], [`shortcut`], [`confluence`], and [`datadog`].
 //!
 //! Test: unit-test ticket-key extraction regexes in `tests::*_ticket_extraction`;
 //! integration-test the resolver with mock HTTP in
 //! `tests::resolver_uses_cached_jira_result`.
 
+pub mod confluence;
+pub mod datadog;
 pub mod github_issues;
 pub mod jira;
+pub mod linear;
 pub mod resolver;
+pub mod shortcut;
 
 pub use resolver::ExternalSourceResolver;
 
@@ -31,7 +36,7 @@ use serde::{Deserialize, Serialize};
 /// implementation, keeping the YAML schema stable even as new source types
 /// are added.
 /// What: a closed `#[serde(tag = "type", rename_all = "snake_case")]` enum
-/// covering JIRA and GitHub Issues (issue #260 MVP).
+/// covering JIRA, GitHub Issues, Linear, Shortcut, Confluence, and Datadog.
 /// Test: round-trip deserialization covered by `config::tests`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -40,6 +45,21 @@ pub enum SourceConfig {
     Jira(JiraSourceConfig),
     /// GitHub Issues integration.
     GithubIssues(GithubIssuesSourceConfig),
+    /// Linear GraphQL API integration (issue #272).
+    Linear(LinearSourceConfig),
+    /// Shortcut (formerly Clubhouse) REST API integration (issue #273).
+    Shortcut(ShortcutSourceConfig),
+    /// Confluence page-label classification source (issue #274).
+    ///
+    /// Note: lower default confidence (0.80) — Confluence labels are
+    /// typically organisational rather than work-type indicators. Treat as
+    /// informational signal only; pair with a higher-confidence source.
+    Confluence(ConfluenceSourceConfig),
+    /// Datadog deployment-event classification source (issue #275).
+    ///
+    /// Confidence defaults to 0.95 — deployment evidence is a strong
+    /// work-type signal.
+    Datadog(DatadogSourceConfig),
 }
 
 /// Configuration for one JIRA source.
@@ -182,6 +202,220 @@ pub struct GithubIssuesSourceConfig {
 
 fn default_github_token_env() -> String {
     "GITHUB_TOKEN".to_string()
+}
+
+/// Configuration for one Linear source (issue #272).
+///
+/// Why: Linear issue types are the highest-confidence classification signal
+/// for Linear-heavy shops. Like JIRA, the issue type tells us far more than
+/// the commit message alone.
+/// What: holds the API key environment variable, the optional team-key filter
+/// (so Linear keys are not confused with identically-shaped JIRA keys), and
+/// field mappings for issue type, labels, and cycle.
+/// Test: see `tests::linear_source_config_deserializes` and the
+/// `linear::tests` module.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LinearSourceConfig {
+    /// Name of the environment variable carrying the Linear Personal API Key.
+    /// The key is read at runtime — never stored in config files.
+    #[serde(default = "default_linear_api_key_env")]
+    pub api_key_env: String,
+
+    /// Limit lookups to issues whose team prefix matches one of these keys
+    /// (e.g. `["ENG", "BE"]`). Empty = all teams (no filter).
+    ///
+    /// Linear key prefixes are user-defined per workspace. The filter is the
+    /// primary disambiguation mechanism between Linear keys and JIRA keys
+    /// that share the same `TEAM-NNN` shape.
+    #[serde(default)]
+    pub team_keys: Vec<String>,
+
+    /// Maps Linear issue fields to TGA category strings.
+    #[serde(default)]
+    pub field_mappings: LinearFieldMappings,
+}
+
+fn default_linear_api_key_env() -> String {
+    "LINEAR_API_TOKEN".to_string()
+}
+
+/// Field-level mappings for Linear issue metadata.
+///
+/// Why: different Linear workspaces use different issue-type names; mapping
+/// them explicitly keeps the mapping auditable.
+/// What: three sub-maps — `issue_type`, `labels`, and `cycle`.
+/// Test: covered by `linear::tests::classify_issue_type_wins`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct LinearFieldMappings {
+    /// Maps Linear issue-type names (e.g. `"Bug"`, `"Feature"`) to TGA
+    /// categories.
+    #[serde(default)]
+    pub issue_type: HashMap<String, String>,
+
+    /// Maps Linear label names to TGA categories.
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
+
+    /// Maps Linear cycle / sprint names to TGA categories.
+    #[serde(default)]
+    pub cycle: HashMap<String, String>,
+}
+
+/// Configuration for one Shortcut (formerly Clubhouse) source (issue #273).
+///
+/// Why: Shortcut story types are explicit classification signals — `bug`,
+/// `feature`, `chore` map directly to TGA categories with high confidence.
+/// What: holds the API token environment variable, the workspace ID (for
+/// log context), and field mappings for story type, labels, and workflow
+/// state.
+/// Test: see `tests::shortcut_source_config_deserializes` and the
+/// `shortcut::tests` module.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ShortcutSourceConfig {
+    /// Name of the environment variable carrying the Shortcut API token.
+    /// The token is read at runtime — never stored in config files.
+    #[serde(default = "default_shortcut_api_token_env")]
+    pub api_token_env: String,
+
+    /// Workspace identifier. Used for log context only; the REST API does
+    /// not require it in the URL (stories are globally unique by ID).
+    #[serde(default)]
+    pub workspace_id: String,
+
+    /// Maps Shortcut story fields to TGA category strings.
+    #[serde(default)]
+    pub field_mappings: ShortcutFieldMappings,
+}
+
+fn default_shortcut_api_token_env() -> String {
+    "SHORTCUT_API_TOKEN".to_string()
+}
+
+/// Field-level mappings for Shortcut story metadata.
+///
+/// Why: Shortcut's three story types (`bug`, `feature`, `chore`) map cleanly
+/// to TGA categories; labels and workflow state provide fallback signals.
+/// What: three sub-maps — `story_type`, `labels`, and `workflow_state`.
+/// Test: covered by `shortcut::tests::classify_story_type_wins`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ShortcutFieldMappings {
+    /// Maps Shortcut story-type strings (`"bug"`, `"feature"`, `"chore"`)
+    /// to TGA categories.
+    #[serde(default)]
+    pub story_type: HashMap<String, String>,
+
+    /// Maps Shortcut label names to TGA categories.
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
+
+    /// Maps Shortcut workflow-state names to TGA categories (optional).
+    #[serde(default)]
+    pub workflow_state: HashMap<String, String>,
+}
+
+/// Configuration for one Confluence source (issue #274).
+///
+/// Why: Confluence page labels carry organisational classification signal —
+/// runbooks suggest devops work, RFCs suggest refactoring. Signal quality
+/// is lower than JIRA/Linear so the default confidence is 0.80.
+/// What: holds the base URL, auth env vars, and label-to-category mappings.
+/// Test: see `tests::confluence_source_config_deserializes` and the
+/// `confluence::tests` module.
+///
+/// Note: treat this as an informational signal only. Pair with a
+/// higher-confidence source (JIRA, Linear) for production use.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfluenceSourceConfig {
+    /// Confluence instance base URL, e.g.
+    /// `"https://yourco.atlassian.net/wiki"`.
+    pub base_url: String,
+
+    /// Name of the env var carrying the Confluence API token.
+    #[serde(default = "default_confluence_token_env")]
+    pub token_env: String,
+
+    /// Name of the env var carrying the Confluence user email (for
+    /// Atlassian Cloud Basic auth).
+    #[serde(default = "default_confluence_email_env")]
+    pub email_env: String,
+
+    /// Maps Confluence page label names to TGA categories.
+    ///
+    /// Example:
+    /// ```yaml
+    /// label_mappings:
+    ///   runbook: devops
+    ///   rfc: tech_debt_refactoring
+    ///   incident: bug_fix
+    /// ```
+    #[serde(default)]
+    pub label_mappings: HashMap<String, String>,
+}
+
+fn default_confluence_token_env() -> String {
+    "CONFLUENCE_API_TOKEN".to_string()
+}
+
+fn default_confluence_email_env() -> String {
+    "CONFLUENCE_EMAIL".to_string()
+}
+
+/// Configuration for one Datadog deployment-event source (issue #275).
+///
+/// Why: deployment evidence is the strongest possible work-type signal —
+/// if a commit was deployed, it is devops work regardless of the message.
+/// What: holds the Datadog API / application key env vars, the optional
+/// DD site, the optional service filter, the category to assign, and the
+/// override confidence (default 0.95).
+/// Test: see `tests::datadog_source_config_deserializes` and the
+/// `datadog::tests` module.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DatadogSourceConfig {
+    /// Name of the env var carrying the Datadog API key.
+    #[serde(default = "default_datadog_api_key_env")]
+    pub api_key_env: String,
+
+    /// Name of the env var carrying the Datadog application key.
+    #[serde(default = "default_datadog_app_key_env")]
+    pub app_key_env: String,
+
+    /// Datadog site (e.g. `"datadoghq.com"`, `"datadoghq.eu"`).
+    /// Defaults to `"datadoghq.com"` when absent.
+    #[serde(default)]
+    pub dd_site: Option<String>,
+
+    /// Optional service name filter. When set, only deployment events for
+    /// this service name are considered. When absent, any deployment event
+    /// matching the commit SHA is accepted.
+    #[serde(default)]
+    pub service: Option<String>,
+
+    /// TGA category to assign when a deployment event is found.
+    /// Defaults to `"devops"`.
+    #[serde(default = "default_datadog_category")]
+    pub default_category: String,
+
+    /// Override confidence for this source. Defaults to 0.95.
+    #[serde(default)]
+    pub confidence: Option<f64>,
+}
+
+fn default_datadog_api_key_env() -> String {
+    "DATADOG_API_KEY".to_string()
+}
+
+fn default_datadog_app_key_env() -> String {
+    "DATADOG_APP_KEY".to_string()
+}
+
+fn default_datadog_category() -> String {
+    "devops".to_string()
 }
 
 /// A resolved classification signal from an external source.
@@ -356,5 +590,114 @@ keywords: ["bugfix:"]
             rule.priority, 110,
             "Rule.priority must default to 110 (above built-in 100)"
         );
+    }
+
+    /// Why: the Linear source config must round-trip through YAML so teams
+    /// can drop a `type: linear` block into their rules file.
+    /// What: deserialize a minimal Linear config and assert fields.
+    /// Test: pure deserialization, no HTTP.
+    #[test]
+    fn linear_source_config_deserializes() {
+        let yaml = r#"
+type: linear
+api_key_env: LINEAR_API_TOKEN
+team_keys: ["ENG"]
+field_mappings:
+  issue_type:
+    Bug: bug_fix
+  labels: {}
+  cycle: {}
+"#;
+        let cfg: SourceConfig = serde_yaml::from_str(yaml).expect("deserialize");
+        match cfg {
+            SourceConfig::Linear(l) => {
+                assert_eq!(l.api_key_env, "LINEAR_API_TOKEN");
+                assert_eq!(l.team_keys, vec!["ENG"]);
+                assert_eq!(
+                    l.field_mappings.issue_type.get("Bug"),
+                    Some(&"bug_fix".to_string())
+                );
+            }
+            other => panic!("expected Linear variant, got {other:?}"),
+        }
+    }
+
+    /// Why: the Shortcut source config must round-trip through YAML.
+    /// What: deserialize a minimal Shortcut config and assert fields.
+    /// Test: pure deserialization, no HTTP.
+    #[test]
+    fn shortcut_source_config_deserializes() {
+        let yaml = r#"
+type: shortcut
+api_token_env: SHORTCUT_API_TOKEN
+workspace_id: myco
+field_mappings:
+  story_type:
+    bug: bug_fix
+  labels: {}
+  workflow_state: {}
+"#;
+        let cfg: SourceConfig = serde_yaml::from_str(yaml).expect("deserialize");
+        match cfg {
+            SourceConfig::Shortcut(s) => {
+                assert_eq!(s.api_token_env, "SHORTCUT_API_TOKEN");
+                assert_eq!(s.workspace_id, "myco");
+                assert_eq!(
+                    s.field_mappings.story_type.get("bug"),
+                    Some(&"bug_fix".to_string())
+                );
+            }
+            other => panic!("expected Shortcut variant, got {other:?}"),
+        }
+    }
+
+    /// Why: the Confluence source config must round-trip through YAML.
+    /// What: deserialize a minimal Confluence config and assert fields.
+    /// Test: pure deserialization, no HTTP.
+    #[test]
+    fn confluence_source_config_deserializes() {
+        let yaml = r#"
+type: confluence
+base_url: "https://myco.atlassian.net/wiki"
+token_env: CONFLUENCE_API_TOKEN
+email_env: CONFLUENCE_EMAIL
+label_mappings:
+  runbook: devops
+"#;
+        let cfg: SourceConfig = serde_yaml::from_str(yaml).expect("deserialize");
+        match cfg {
+            SourceConfig::Confluence(c) => {
+                assert_eq!(c.base_url, "https://myco.atlassian.net/wiki");
+                assert_eq!(c.token_env, "CONFLUENCE_API_TOKEN");
+                assert_eq!(c.label_mappings.get("runbook"), Some(&"devops".to_string()));
+            }
+            other => panic!("expected Confluence variant, got {other:?}"),
+        }
+    }
+
+    /// Why: the Datadog source config must round-trip through YAML.
+    /// What: deserialize a minimal Datadog config and assert fields.
+    /// Test: pure deserialization, no HTTP.
+    #[test]
+    fn datadog_source_config_deserializes() {
+        let yaml = r#"
+type: datadog
+api_key_env: DATADOG_API_KEY
+app_key_env: DATADOG_APP_KEY
+default_category: devops
+confidence: 0.95
+"#;
+        let cfg: SourceConfig = serde_yaml::from_str(yaml).expect("deserialize");
+        match cfg {
+            SourceConfig::Datadog(d) => {
+                assert_eq!(d.api_key_env, "DATADOG_API_KEY");
+                assert_eq!(d.default_category, "devops");
+                assert!(d
+                    .confidence
+                    .map(|c| (c - 0.95_f64).abs() < f64::EPSILON)
+                    .unwrap_or(false));
+            }
+            other => panic!("expected Datadog variant, got {other:?}"),
+        }
     }
 }
