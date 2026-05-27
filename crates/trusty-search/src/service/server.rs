@@ -1375,6 +1375,9 @@ async fn create_index_handler(
         lexical_only,
         stages: Arc::new(tokio::sync::RwLock::new(stages)),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
+        walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
+            crate::core::registry::WalkDiagnostics::default(),
+        )),
     };
     state.registry.register(handle);
     // Issue #41 Phase 1: refresh the index-count gauge so /metrics reflects
@@ -1821,6 +1824,7 @@ async fn global_search_handler(
         // own capability surface — the per-index loop below downshifts to
         // lexical when the semantic lane isn't ready (issue #109 Phase 1).
         stage: None,
+        refine_query: None,
     };
 
     // Run all per-index searches concurrently. Any index that errors is
@@ -2251,6 +2255,10 @@ async fn index_status_handler(
                 .load(std::sync::atomic::Ordering::Acquire);
             (n > 0, n)
         });
+    // Issue #280: snapshot the walk diagnostics so operators can diagnose
+    // zero-chunk indexes without reading daemon logs.  Use `clone()` so the
+    // read lock is released before we build the JSON response.
+    let walk_diag = handle.walk_diagnostics.read().await.clone();
     Ok(Json(serde_json::json!({
         "index_id": index_id.0,
         "root_path": handle.root_path,
@@ -2267,6 +2275,11 @@ async fn index_status_handler(
         "respect_gitignore": handle.respect_gitignore,
         "walk_truncated_by_budget": walk_truncated_by_budget,
         "chunks_dropped_by_cap": chunks_dropped_by_cap,
+        // Issue #280: walk diagnostic fields.
+        "last_walk_started_at": walk_diag.last_walk_started_at,
+        "last_walk_files_seen": walk_diag.last_walk_files_seen,
+        "last_walk_files_skipped": walk_diag.last_walk_files_skipped,
+        "last_walk_error": walk_diag.last_walk_error,
     })))
 }
 
@@ -2906,6 +2919,9 @@ async fn reindex_handler(
                     lexical_only: handle.lexical_only,
                     stages: Arc::clone(&handle.stages),
                     search_pressure: Arc::clone(&handle.search_pressure),
+                    // Preserve walk diagnostics across root-path override — a
+                    // subsequent reindex will refresh the snapshot.
+                    walk_diagnostics: Arc::clone(&handle.walk_diagnostics),
                 };
                 handle = state.registry.register(new_handle);
             }

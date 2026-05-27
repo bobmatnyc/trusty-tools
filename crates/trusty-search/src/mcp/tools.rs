@@ -706,6 +706,12 @@ impl McpServer {
         if let Some(ea) = args.get("exclude_archived").and_then(Value::as_bool) {
             body["exclude_archived"] = Value::Bool(ea);
         }
+        // Issue #147: pass refine_query through to the search body for the
+        // KG lane. The field is ignored by lexical / semantic lanes since
+        // `expand_with_kg` only reads it when the graph stage is active.
+        if let Some(rq) = args.get("refine_query").and_then(Value::as_str) {
+            body["refine_query"] = Value::String(rq.to_string());
+        }
 
         let resp = self
             .post(&format!("/indexes/{index_id}/search"), &body)
@@ -1007,19 +1013,20 @@ pub fn tool_descriptors() -> Value {
         },
         {
             "name": "search_kg",
-            "description": "Explore code structure from a known seed — either a chunk_id (from a previous search result) or a symbol name. Returns chunks connected to the seed via `calls`, `called_by`, `contains`, `inherits` edges. Best for: \"what calls `validate_token`\", \"what does `Authenticator` use internally\", impact analysis before a refactor. Don't use for: free-text discovery (use `search_semantic`) or initial entry-point finding (use `search_lexical` first). Requires Stage 3 (symbol graph) to be ready. Returns empty if the seed is not in the index. Cheap once you have a seed.",
+            "description": "Explore code structure from a known seed — either a chunk_id (from a previous search result) or a symbol name. Returns chunks connected to the seed via `calls`, `called_by`, `contains`, `inherits` edges. Best for: \"what calls `validate_token`\", \"what does `Authenticator` use internally\", impact analysis before a refactor. Don't use for: free-text discovery (use `search_semantic`) or initial entry-point finding (use `search_lexical` first). Requires Stage 3 (symbol graph) to be ready. Returns empty if the seed is not in the index. Cheap once you have a seed. Optional `refine_query`: provide a longer natural-language description to rerank and filter the expanded neighbourhood by semantic relevance — useful when the seed chunk is correct but you want only the most relevant callers/callees (issue #147).",
             "inputSchema": {
                 "type": "object",
                 "required": ["index_id", "query"],
                 "properties": {
-                    "index_id":         { "type": "string" },
-                    "query":            { "type": "string", "description": "Seed: a symbol name or chunk_id from a previous result" },
-                    "top_k":            { "type": "integer", "default": 10 },
-                    "mode":             { "type": "string", "enum": ["code", "text", "data"], "default": "code" }
+                    "index_id":      { "type": "string" },
+                    "query":         { "type": "string", "description": "Seed: a symbol name or chunk_id from a previous result" },
+                    "top_k":         { "type": "integer", "default": 10 },
+                    "mode":          { "type": "string", "enum": ["code", "text", "data"], "default": "code" },
+                    "refine_query":  { "type": "string", "description": "Optional: rerank and filter expanded KG neighbours by cosine similarity to this natural-language description. Neighbours below the 0.4 cosine threshold are dropped. Omit to use default KG expansion without filtering." }
                 },
                 "examples": [
                     { "index_id": "trusty-tools", "query": "validate_token" },
-                    { "index_id": "trusty-tools", "query": "Authenticator" }
+                    { "index_id": "trusty-tools", "query": "Authenticator", "refine_query": "callers that handle token refresh in the auth middleware" }
                 ]
             }
         },

@@ -1321,8 +1321,42 @@ pub fn spawn_reindex_with_cleanup(
         reset_stages_for_reindex(&handle).await;
 
         // Phase 1: walk + filter the source tree (helper-extracted: issue #98).
+        //
+        // Issue #280: stamp walk-start time before collecting files so the
+        // diagnostics are accurate even if the collection itself is slow.
+        {
+            let mut diag = handle.walk_diagnostics.write().await;
+            diag.last_walk_started_at = Some(now_rfc3339());
+            diag.last_walk_files_seen = 0;
+            diag.last_walk_files_skipped = 0;
+            diag.last_walk_error = None;
+        }
         let walk = collect_files_to_index(&handle);
         let total = walk.files.len();
+        // Issue #280: persist walk counters so the status endpoint can answer
+        // "why is this index empty?" without the operator needing to read logs.
+        // `skipped_dirs` from the walker tracks gitignore / binary / oversize
+        // skips — the closest available proxy for "files skipped".
+        // When the walk produced zero files we record a descriptive error
+        // string so an operator running `curl /indexes/:id/status | jq` can see
+        // the likely cause without diving into daemon logs.
+        {
+            let mut diag = handle.walk_diagnostics.write().await;
+            diag.last_walk_files_seen = total as u64;
+            diag.last_walk_files_skipped = walk.skipped_dirs as u64;
+            if total == 0 {
+                let reason = if !handle.root_path.exists() {
+                    format!("root path does not exist: {}", handle.root_path.display())
+                } else {
+                    format!(
+                        "walk produced zero files under {}; check gitignore rules, \
+                         path_filter, and extension allow-list",
+                        handle.root_path.display()
+                    )
+                };
+                diag.last_walk_error = Some(reason);
+            }
+        }
         progress.total_files.store(total, Ordering::Release);
         progress
             .push(serde_json::json!({
@@ -1739,6 +1773,9 @@ mod tests {
             lexical_only: false,
             stages: Arc::new(tokio::sync::RwLock::new(IndexStages::default())),
             search_pressure: Arc::new(tokio::sync::Notify::new()),
+            walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
+                crate::core::registry::WalkDiagnostics::default(),
+            )),
         });
         let progress = Arc::new(ReindexProgress::new());
         spawn_reindex(handle.clone(), progress.clone(), false);
@@ -1816,6 +1853,9 @@ mod tests {
             lexical_only: false,
             stages: Arc::new(tokio::sync::RwLock::new(IndexStages::default())),
             search_pressure: Arc::new(tokio::sync::Notify::new()),
+            walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
+                crate::core::registry::WalkDiagnostics::default(),
+            )),
         });
         let progress = Arc::new(ReindexProgress::new());
         spawn_reindex(handle.clone(), progress.clone(), false);
@@ -2190,6 +2230,9 @@ mod tests {
             lexical_only,
             stages: Arc::new(tokio::sync::RwLock::new(stages)),
             search_pressure: Arc::new(tokio::sync::Notify::new()),
+            walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
+                crate::core::registry::WalkDiagnostics::default(),
+            )),
         })
     }
 
@@ -2377,5 +2420,93 @@ mod tests {
         assert!(caps.contains(&"vector"));
         assert!(caps.contains(&"kg"));
         assert_eq!(handle.stages.read().await.lifecycle_status(), "ready");
+    }
+
+    // ── Issue #280: walk diagnostic fields ──────────────────────────────
+
+    /// After a successful reindex, `walk_diagnostics` on the handle must carry
+    /// a non-None `last_walk_started_at`, a positive `last_walk_files_seen`
+    /// count, and a `None` `last_walk_error`.
+    ///
+    /// Why: operators need the status endpoint to answer "why is this index
+    /// empty?" without diving into daemon logs.  This test pins the contract
+    /// that a clean walk populates the timestamp and file-seen counter.
+    /// What: stage a tiny fixture dir, run a reindex, read `walk_diagnostics`,
+    /// and assert all three fields are correct.
+    /// Test: this test.
+    #[tokio::test]
+    async fn walk_diagnostics_populated_after_reindex() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        fs::write(root.join("diag_check.rs"), "fn diag_fn() {}\n").unwrap();
+
+        let handle = make_handle_with_flag("diag-test", root.clone(), false);
+        let progress = Arc::new(ReindexProgress::new());
+        spawn_reindex(handle.clone(), progress.clone(), false);
+
+        for _ in 0..100 {
+            if progress.status.load() == ReindexStatus::Complete {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(progress.status.load(), ReindexStatus::Complete);
+
+        let diag = handle.walk_diagnostics.read().await.clone();
+        assert!(
+            diag.last_walk_started_at.is_some(),
+            "last_walk_started_at must be set after reindex, got {:?}",
+            diag
+        );
+        assert!(
+            diag.last_walk_files_seen > 0,
+            "last_walk_files_seen must be > 0 when files exist, got {:?}",
+            diag
+        );
+        assert!(
+            diag.last_walk_error.is_none(),
+            "last_walk_error must be None on a clean walk, got {:?}",
+            diag.last_walk_error
+        );
+    }
+
+    /// When the root path has no source files (e.g. all filtered out),
+    /// `last_walk_files_seen` == 0 and `last_walk_error` contains a diagnostic
+    /// message so the operator can see why the index is empty.
+    ///
+    /// Why: a zero-file walk is the most common cause of zero-chunk indexes.
+    /// The walk_error message is the first thing an operator would check.
+    /// What: create an empty fixture dir (no .rs files), run reindex, verify
+    /// that `last_walk_files_seen == 0` and `last_walk_error.is_some()`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn walk_diagnostics_error_set_when_zero_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        // No source files in the directory — walk will produce zero files.
+
+        let handle = make_handle_with_flag("diag-zero-test", root.clone(), false);
+        let progress = Arc::new(ReindexProgress::new());
+        spawn_reindex(handle.clone(), progress.clone(), false);
+
+        for _ in 0..100 {
+            if progress.status.load() == ReindexStatus::Complete {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(progress.status.load(), ReindexStatus::Complete);
+
+        let diag = handle.walk_diagnostics.read().await.clone();
+        assert_eq!(
+            diag.last_walk_files_seen, 0,
+            "last_walk_files_seen must be 0 for empty directory, got {:?}",
+            diag
+        );
+        assert!(
+            diag.last_walk_error.is_some(),
+            "last_walk_error must be set when zero files are found, got {:?}",
+            diag
+        );
     }
 }

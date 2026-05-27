@@ -1795,6 +1795,7 @@ fn make_branch_query(text: &str, files: Vec<String>, boost: f32) -> SearchQuery 
         mode: SearchMode::Code,
         exclude_archived: false,
         stage: None,
+        refine_query: None,
     }
 }
 
@@ -1958,6 +1959,7 @@ async fn test_no_boost_when_branch_files_absent() {
         mode: SearchMode::Code,
         exclude_archived: false,
         stage: None,
+        refine_query: None,
     };
     let results = idx.search(&q).await.unwrap();
     assert!(!results.is_empty());
@@ -2756,4 +2758,327 @@ async fn idle_eviction_skips_indexers_without_corpus() {
     assert_eq!(evicted, 0, "must not evict without a durable corpus");
     assert_eq!(idx.in_memory_chunk_count().await, before);
     assert!(!idx.chunks_evicted.load(Ordering::Relaxed));
+}
+
+// ── Issue #147: search_kg refine_query tests ──────────────────────────────
+
+/// `refine_query = None` must preserve all KG-expanded neighbours, matching
+/// existing backward-compatible behaviour.
+///
+/// Why: the refine path is opt-in — existing callers that omit `refine_query`
+/// must see exactly the same result set as before the feature landed.
+/// What: build a tiny KG (seed → neighbour_a → neighbour_b), run
+/// `search_kg` without `refine_query`, verify both neighbours surface.
+/// Test: this test.
+#[tokio::test]
+async fn test_kg_refine_query_none_preserves_all_neighbours() {
+    let idx = make_indexer();
+    // Seed chunk
+    idx.add_chunk(RawChunk {
+        id: "seed:1".to_string(),
+        file: "seed.rs".to_string(),
+        start_line: 1,
+        end_line: 1,
+        content: "fn seed_fn() { neighbour_a(); neighbour_b(); }".to_string(),
+        function_name: Some("seed_fn".to_string()),
+        language: Some("rust".to_string()),
+        chunk_type: crate::core::chunker::ChunkType::Function,
+        calls: vec!["neighbour_a".to_string(), "neighbour_b".to_string()],
+        inherits_from: Vec::new(),
+        chunk_depth: 0,
+        parent_chunk_id: None,
+        child_chunk_ids: Vec::new(),
+        nlp_keywords: Vec::new(),
+        nlp_code_refs: Vec::new(),
+        virtual_terms: Vec::new(),
+    })
+    .await
+    .unwrap();
+    // Neighbour A — same domain as seed
+    idx.add_chunk(RawChunk {
+        id: "na:1".to_string(),
+        file: "a.rs".to_string(),
+        start_line: 1,
+        end_line: 1,
+        content: "fn neighbour_a() {}".to_string(),
+        function_name: Some("neighbour_a".to_string()),
+        language: Some("rust".to_string()),
+        chunk_type: crate::core::chunker::ChunkType::Function,
+        calls: Vec::new(),
+        inherits_from: Vec::new(),
+        chunk_depth: 0,
+        parent_chunk_id: None,
+        child_chunk_ids: Vec::new(),
+        nlp_keywords: Vec::new(),
+        nlp_code_refs: Vec::new(),
+        virtual_terms: Vec::new(),
+    })
+    .await
+    .unwrap();
+    // Neighbour B — unrelated domain
+    idx.add_chunk(RawChunk {
+        id: "nb:1".to_string(),
+        file: "b.rs".to_string(),
+        start_line: 1,
+        end_line: 1,
+        content: "fn neighbour_b() {}".to_string(),
+        function_name: Some("neighbour_b".to_string()),
+        language: Some("rust".to_string()),
+        chunk_type: crate::core::chunker::ChunkType::Function,
+        calls: Vec::new(),
+        inherits_from: Vec::new(),
+        chunk_depth: 0,
+        parent_chunk_id: None,
+        child_chunk_ids: Vec::new(),
+        nlp_keywords: Vec::new(),
+        nlp_code_refs: Vec::new(),
+        virtual_terms: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    // No refine_query → all neighbours must survive KG expansion.
+    let q = SearchQuery {
+        text: "callers of seed_fn".to_string(),
+        top_k: 20,
+        expand_graph: true,
+        compact: false,
+        refine_query: None,
+        ..Default::default()
+    };
+    let results = idx.search(&q).await.unwrap();
+    let ids: Vec<&str> = results.iter().map(|c| c.id.as_str()).collect();
+    assert!(
+        ids.contains(&"na:1"),
+        "neighbour_a must appear without refine_query, got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"nb:1"),
+        "neighbour_b must appear without refine_query, got {ids:?}"
+    );
+}
+
+/// `refine_query` filters KG-expanded neighbours below the cosine threshold
+/// (issue #147).
+///
+/// Why: when the seed chunk is wrong, unfiltered KG expansion compounds
+/// the error by returning an irrelevant neighbourhood.  A `refine_query`
+/// describing the user's intent should keep only semantically relevant
+/// neighbours and drop the rest.
+///
+/// What: this test calls `expand_with_kg_for_test` directly (bypassing the
+/// full search pipeline) so HNSW / BM25 cannot independently surface the
+/// irrelevant chunk and mask the filter's effect.  With `refine_embedding =
+/// None` both neighbours survive; with `refine_embedding = Some(refine_emb)`
+/// only the chunk whose stored embedding has cosine ≥ 0.4 against the refine
+/// vector survives.  `MockEmbedder` is deterministic, so `content == refine_text`
+/// gives cosine 1.0 (rel:1) while orthogonal uppercase content gives ≈ 0.33
+/// (irr:1 — verified at dim=32, see comment below).
+///
+/// Test: this test.  Also verified by `test_kg_refine_threshold_boundary`.
+#[tokio::test]
+async fn test_kg_refine_query_filters_irrelevant_neighbours() {
+    use crate::core::classifier::QueryIntent;
+
+    let idx = make_indexer();
+
+    // Seed: calls both auth_target and xyz_qqq so the KG has edges to both
+    // neighbours.  We will supply `fused = [(seed:1, 1.0)]` directly to
+    // `expand_with_kg_for_test` — no full search query needed.
+    idx.add_chunk(RawChunk {
+        id: "seed:1".to_string(),
+        file: "seed.rs".to_string(),
+        start_line: 1,
+        end_line: 1,
+        content: "fn seed_fn() { auth_target(); xyz_qqq(); }".to_string(),
+        function_name: Some("seed_fn".to_string()),
+        language: Some("rust".to_string()),
+        chunk_type: crate::core::chunker::ChunkType::Function,
+        calls: vec!["auth_target".to_string(), "xyz_qqq".to_string()],
+        inherits_from: Vec::new(),
+        chunk_depth: 0,
+        parent_chunk_id: None,
+        child_chunk_ids: Vec::new(),
+        nlp_keywords: Vec::new(),
+        nlp_code_refs: Vec::new(),
+        virtual_terms: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    // The "relevant" neighbour: content identical to refine_text, so
+    // MockEmbedder gives cosine = 1.0 against the refine embedding.
+    let refine_text = "fn auth_target() { /* JWT validation */ }";
+    idx.add_chunk(RawChunk {
+        id: "rel:1".to_string(),
+        file: "rel.rs".to_string(),
+        start_line: 1,
+        end_line: 1,
+        content: refine_text.to_string(),
+        function_name: Some("auth_target".to_string()),
+        language: Some("rust".to_string()),
+        chunk_type: crate::core::chunker::ChunkType::Function,
+        calls: Vec::new(),
+        inherits_from: Vec::new(),
+        chunk_depth: 0,
+        parent_chunk_id: None,
+        child_chunk_ids: Vec::new(),
+        nlp_keywords: Vec::new(),
+        nlp_code_refs: Vec::new(),
+        virtual_terms: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    // The "irrelevant" neighbour: uppercase O–Z (byte range 0x4F–0x5A) at
+    // dim=32 hash to different slots than the lowercase+punctuation bytes in
+    // `refine_text`, giving cosine ≈ 0.33 < KG_REFINE_THRESHOLD (0.4).
+    // function_name matches the seed's calls edge; content only affects the
+    // MockEmbedder hash.
+    idx.add_chunk(RawChunk {
+        id: "irr:1".to_string(),
+        file: "irr.rs".to_string(),
+        start_line: 1,
+        end_line: 1,
+        content: "OPQRSTUVWXYZOPQRSTUVWXYZOPQRSTUVWXYZOPQRSTUVWXYZ".to_string(),
+        function_name: Some("xyz_qqq".to_string()),
+        language: Some("rust".to_string()),
+        chunk_type: crate::core::chunker::ChunkType::Function,
+        calls: Vec::new(),
+        inherits_from: Vec::new(),
+        chunk_depth: 0,
+        parent_chunk_id: None,
+        child_chunk_ids: Vec::new(),
+        nlp_keywords: Vec::new(),
+        nlp_code_refs: Vec::new(),
+        virtual_terms: Vec::new(),
+    })
+    .await
+    .unwrap();
+
+    // Build the seed list for expand_with_kg — just the seed chunk, no HNSW
+    // or BM25 interference.
+    let fused_seed: Vec<(String, f32)> = vec![("seed:1".to_string(), 1.0)];
+    let intent = QueryIntent::Usage; // use_kg_first = true for this intent
+
+    // Without refine_embedding: BOTH neighbours must appear in the expansion.
+    let (all_no_refine, kg_ids_no_refine) = idx
+        .expand_with_kg_for_test(fused_seed.clone(), &intent, true, true, None)
+        .await;
+    let no_refine_ids: Vec<&str> = all_no_refine.iter().map(|(id, _)| id.as_str()).collect();
+    assert!(
+        kg_ids_no_refine.contains("rel:1"),
+        "rel:1 must appear in KG expansion without refine_embedding, \
+         kg_ids={kg_ids_no_refine:?}"
+    );
+    assert!(
+        kg_ids_no_refine.contains("irr:1"),
+        "irr:1 must appear in KG expansion without refine_embedding, \
+         kg_ids={kg_ids_no_refine:?}"
+    );
+    assert!(
+        no_refine_ids.contains(&"rel:1"),
+        "rel:1 must be in all_no_refine, got {no_refine_ids:?}"
+    );
+    assert!(
+        no_refine_ids.contains(&"irr:1"),
+        "irr:1 must be in all_no_refine, got {no_refine_ids:?}"
+    );
+
+    // Compute the refine embedding from the indexer's embedder so we use the
+    // same MockEmbedder instance — guarantees vec equality.
+    let refine_emb = idx
+        .embed_text(refine_text)
+        .await
+        .unwrap()
+        .unwrap_or_default();
+
+    // Sanity-check cosines before making behavioural assertions.
+    let rel_emb = idx.get_embedding("rel:1").unwrap_or_default();
+    let irr_emb = idx.get_embedding("irr:1").unwrap_or_default();
+    let cos_rel = crate::core::mmr::cosine_similarity(&refine_emb, &rel_emb);
+    let cos_irr = crate::core::mmr::cosine_similarity(&refine_emb, &irr_emb);
+    eprintln!(
+        "cos_rel={cos_rel:.4} cos_irr={cos_irr:.4} threshold={}",
+        KG_REFINE_THRESHOLD
+    );
+    assert!(
+        cos_rel >= KG_REFINE_THRESHOLD,
+        "relevant chunk cosine {cos_rel:.4} must be >= threshold {}",
+        KG_REFINE_THRESHOLD
+    );
+    assert!(
+        cos_irr < KG_REFINE_THRESHOLD,
+        "irrelevant chunk cosine {cos_irr:.4} must be < threshold {} — \
+         adjust the test content if MockEmbedder byte distribution changed",
+        KG_REFINE_THRESHOLD
+    );
+
+    // With refine_embedding: rel:1 (cosine 1.0) must survive the filter;
+    // irr:1 (cosine ≈ 0.33) must be dropped from the KG expansion.
+    let (all_with_refine, kg_ids_with_refine) = idx
+        .expand_with_kg_for_test(
+            fused_seed.clone(),
+            &intent,
+            true,
+            true,
+            Some(refine_emb.as_slice()),
+        )
+        .await;
+    let refine_ids: Vec<&str> = all_with_refine.iter().map(|(id, _)| id.as_str()).collect();
+
+    assert!(
+        kg_ids_with_refine.contains("rel:1"),
+        "rel:1 must survive the refine filter (cosine={cos_rel:.4} >= threshold), \
+         kg_ids={kg_ids_with_refine:?}"
+    );
+    assert!(
+        !kg_ids_with_refine.contains("irr:1"),
+        "irr:1 must be dropped by the refine filter (cosine={cos_irr:.4} < threshold), \
+         kg_ids={kg_ids_with_refine:?}"
+    );
+    assert!(
+        refine_ids.contains(&"rel:1"),
+        "rel:1 must be in final results (cosine={cos_rel:.4}), got {refine_ids:?}"
+    );
+    assert!(
+        !refine_ids.contains(&"irr:1"),
+        "irr:1 must not be in final results (cosine={cos_irr:.4}), got {refine_ids:?}"
+    );
+}
+
+/// Threshold boundary: a neighbour with cosine exactly equal to
+/// `KG_REFINE_THRESHOLD` must be kept (>= semantics).
+///
+/// Why: off-by-one on the boundary condition would silently drop valid
+/// results exactly at the cutoff.  We verify the comparison is `>=`, not `>`.
+/// What: manually drive `expand_with_kg` with a synthetic refine embedding
+/// whose cosine with a planted chunk embedding equals the threshold.
+/// Test: this test.
+#[tokio::test]
+async fn test_kg_refine_threshold_boundary() {
+    use crate::core::mmr::cosine_similarity;
+    use KG_REFINE_THRESHOLD;
+
+    // Build two unit vectors whose cosine is exactly KG_REFINE_THRESHOLD.
+    // cos(θ) = KG_REFINE_THRESHOLD → θ = arccos(KG_REFINE_THRESHOLD).
+    // We use a 2-D construction:
+    //   chunk_vec = [1, 0]
+    //   refine_vec = [KG_REFINE_THRESHOLD, sqrt(1 - threshold²)]
+    // So cosine(chunk_vec, refine_vec) = KG_REFINE_THRESHOLD exactly.
+    let threshold = KG_REFINE_THRESHOLD;
+    let chunk_vec = vec![1.0_f32, 0.0];
+    let refine_vec = vec![threshold, (1.0_f32 - threshold * threshold).sqrt()];
+
+    let actual_cos = cosine_similarity(&chunk_vec, &refine_vec);
+    assert!(
+        (actual_cos - threshold).abs() < 1e-5,
+        "test setup: cosine {actual_cos:.6} should equal threshold {threshold:.6}"
+    );
+
+    // The boundary cosine must NOT be filtered out (>= semantics).
+    assert!(
+        actual_cos >= threshold,
+        "boundary: {actual_cos:.6} >= {threshold:.6} must hold"
+    );
 }

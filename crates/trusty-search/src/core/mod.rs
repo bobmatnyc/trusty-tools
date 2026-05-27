@@ -30,6 +30,6 @@ pub use memory_policy::{
     resolve_coreml_batch_size, resolve_coreml_tripwire_mb, MemoryPolicy, MemoryTier,
 };
 pub use mmr::{cosine_similarity, mmr_rerank};
-pub use registry::{IndexHandle, IndexId, IndexRegistry};
+pub use registry::{IndexHandle, IndexId, IndexRegistry, WalkDiagnostics};
 pub use scip_ingest::{CodeEntityIndex, ScipEdge, ScipEntityRef, ScipIndex};
 pub use symbol_graph::{SymbolGraph, SymbolNode};

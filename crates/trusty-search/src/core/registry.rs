@@ -308,6 +308,51 @@ pub struct IndexHandle {
     /// Test: not directly tested in Phase 1 — the stub is best-effort and
     /// the search handler's existing latency tests cover regression.
     pub search_pressure: Arc<tokio::sync::Notify>,
+
+    /// Walk diagnostic snapshot (issue #280).
+    ///
+    /// Why: when a reindex produces zero chunks, operators need to know
+    /// whether the walk itself failed (permission error, all files filtered,
+    /// root path missing) or if parsing/embedding was the culprit. This
+    /// field is updated at the start and end of every walk, giving
+    /// `GET /indexes/:id/status` enough information to answer "why is this
+    /// index empty?".
+    /// What: `Arc<RwLock<WalkDiagnostics>>` so the reindex background task
+    /// can write without rebuilding the handle, and the HTTP handler can
+    /// read without waiting for the reindex to finish.
+    /// Test: `walk_diagnostics_populated_after_reindex` in
+    /// `service::reindex::tests`.
+    pub walk_diagnostics: Arc<tokio::sync::RwLock<WalkDiagnostics>>,
+}
+
+/// Diagnostic snapshot of the most recent walk (issue #280).
+///
+/// Why: expose enough information in `GET /indexes/:id/status` for
+/// operators to diagnose why a reindex produced zero chunks.
+/// What: four fields — timestamp, file counts, and first error — updated
+/// atomically at walk start and walk end.  All fields use `Option` and
+/// `#[serde(default)]` for backward compatibility when loading old persisted
+/// index records.
+/// Test: `walk_diagnostics_populated_after_reindex` and
+/// `walk_diagnostics_error_captured_on_failure` in `service::reindex::tests`.
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WalkDiagnostics {
+    /// RFC-3339 timestamp of when the most recent walk began.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_walk_started_at: Option<String>,
+    /// Number of files the walker observed (before hash-skip / minified
+    /// filtering).
+    #[serde(default)]
+    pub last_walk_files_seen: u64,
+    /// Number of files skipped by the walker (gitignore, binary, oversize,
+    /// SKIP_DIRS, etc.).  This is the `skipped_dirs` counter returned by
+    /// `walk_source_files_with_options`.
+    #[serde(default)]
+    pub last_walk_files_skipped: u64,
+    /// Human-readable error string if the walk aborted with a top-level
+    /// error.  `None` on a clean walk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_walk_error: Option<String>,
 }
 
 impl IndexHandle {
@@ -340,6 +385,7 @@ impl IndexHandle {
             lexical_only: false,
             stages: Arc::new(RwLock::new(IndexStages::default())),
             search_pressure: Arc::new(tokio::sync::Notify::new()),
+            walk_diagnostics: Arc::new(tokio::sync::RwLock::new(WalkDiagnostics::default())),
         }
     }
 }

@@ -252,6 +252,9 @@ trusty-search reindex [path]                         # alias for index --force
 | Tool            | Description                                          |
 |-----------------|------------------------------------------------------|
 | `search_code`   | Hybrid search (BM25 + HNSW + KG, RRF-fused)          |
+| `search_kg`     | KG-first graph-walk search; accepts optional `refine_query` (see below) |
+| `search_semantic` | Vector-only semantic search lane                   |
+| `search_lexical`| BM25/token lexical search lane                       |
 | `search_similar`| Code-to-code similarity from a seed file/function    |
 | `index_file`    | Add or replace a single file in the index            |
 | `remove_file`   | Remove a file and all its chunks                     |
@@ -259,10 +262,50 @@ trusty-search reindex [path]                         # alias for index --force
 | `create_index`  | Register a new (empty) index                         |
 | `delete_index`  | Drop an index from the registry                      |
 | `reindex`       | Fire-and-forget full reindex (SSE progress)          |
-| `index_status`  | Per-index chunk count and root path                  |
+| `index_status`  | Per-index stats including walk diagnostics (see below) |
 | `list_chunks`   | Paginated enumeration of chunks `(file, start_line)` |
 | `search_health` | Daemon liveness probe                                |
 | `chat`          | OpenRouter Q&A with auto-injected search context     |
+
+### `search_kg` — `refine_query` parameter (issue #147)
+
+`search_kg` performs a graph-walk expanding the KG neighbourhood of each top
+hit. When the seed chunk is a weak or wrong match, the unfiltered neighbourhood
+can compound the error with unrelated results.
+
+Pass an optional `refine_query` string to describe the target concept in
+natural language. The daemon embeds both the `refine_query` and every
+KG-expanded neighbour, then discards neighbours whose cosine similarity against
+`refine_query` is below **0.4**. Surviving neighbours are re-ranked by cosine
+score so the strongest semantic match appears first. Seeds from the primary
+fused list are never filtered.
+
+```json
+{
+  "tool": "search_kg",
+  "index_id": "myproj",
+  "query": "authenticate",
+  "refine_query": "JWT token validation and expiry checking"
+}
+```
+
+When `refine_query` is absent the behaviour is identical to the previous version
+(fully backward-compatible).
+
+### `index_status` — walk diagnostic fields (issue #280)
+
+`GET /indexes/:id/status` (and the `index_status` MCP tool) now include four
+fields that let operators diagnose why a reindex produced zero chunks:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `last_walk_started_at` | `string \| null` | RFC 3339 timestamp of the most recent walk start |
+| `last_walk_files_seen` | `number` | Files discovered by the walk (after gitignore/extension filtering) |
+| `last_walk_files_skipped` | `number` | Directories skipped (gitignore, build artefacts, etc.) |
+| `last_walk_error` | `string \| null` | Set when the walk found zero indexable files; describes probable cause |
+
+These fields are populated every time a reindex task runs. On a healthy index
+with chunks you will see `last_walk_error: null` and `last_walk_files_seen > 0`.
 
 ## Stack
 
@@ -310,6 +353,31 @@ TRUSTY_MEMORY_LIMIT_MB=2048 trusty-search start
 ```
 
 Or wait for the soft cap to trip — the partial index is usable immediately.
+
+**Reindex produced zero chunks**
+
+If `index_status` shows `chunk_count: 0` after a reindex, check the walk
+diagnostic fields:
+
+```bash
+# Via CLI (pipe through jq if available)
+trusty-search status --index myproj
+
+# Via HTTP
+curl http://127.0.0.1:<port>/indexes/myproj/status | jq .
+```
+
+Look for `last_walk_error`. Common causes and fixes:
+
+| `last_walk_error` message | Cause | Fix |
+|--------------------------|-------|-----|
+| `root path does not exist: /…` | Index was registered with a path that no longer exists | Re-register with the correct path: `trusty-search index /new/path --name myproj` |
+| `walk produced zero files … check gitignore rules` | All discovered files were excluded by `.gitignore`, extension allow-list, or `path_filter` | Check `.gitignore` for overly broad rules; ensure at least one supported extension (`.rs`, `.py`, `.ts`, etc.) exists under the root path |
+
+If `last_walk_error` is `null` but `chunk_count` is still 0, the walk found
+files but the chunker produced no output — this usually means all files are
+binary or exceed the size limit. Check `RUST_LOG=debug trusty-search start` for
+per-file warnings.
 
 **Port conflict**
 

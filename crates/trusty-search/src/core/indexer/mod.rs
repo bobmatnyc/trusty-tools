@@ -44,6 +44,9 @@ mod persist;
 mod search;
 
 #[cfg(test)]
+pub(crate) use search::KG_REFINE_THRESHOLD;
+
+#[cfg(test)]
 mod tests;
 
 /// LRU capacity (entries) for the per-indexer query embedding cache.
@@ -392,6 +395,25 @@ pub struct SearchQuery {
     /// Test: `service::reindex::tests::stage_1_completes_and_search_works_before_embedding`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage: Option<SearchStage>,
+
+    /// Optional refining query for `search_kg` (issue #147).
+    ///
+    /// Why: when the seed chunk picked by stage 1 (`search_lexical`) is wrong,
+    /// `search_kg`'s graph expansion compounds the error — every neighbour
+    /// traversed is irrelevant to the user's intent. Providing a longer, more
+    /// specific natural-language description here lets the search pipeline
+    /// rerank the expanded neighbourhood by cosine similarity to the refining
+    /// text and filter out low-relevance neighbours before returning.
+    /// What: when `Some`, the `search` pipeline (for `stage = Graph`) embeds
+    /// this string and uses cosine similarity to score every KG-expanded
+    /// neighbour. Neighbours below [`KG_REFINE_THRESHOLD`] are dropped; the
+    /// rest are reranked by their cosine score. When `None`, existing behaviour
+    /// is preserved (no rerank, no filter). 100% backward compatible.
+    /// Test: `test_kg_refine_query_filters_irrelevant_neighbours` and
+    /// `test_kg_refine_query_none_preserves_all_neighbours` in
+    /// `core::indexer::tests`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refine_query: Option<String>,
 }
 
 /// Stage selector for a single search query (issue #109, Phase 1; extended
@@ -459,6 +481,7 @@ impl Default for SearchQuery {
             mode: SearchMode::default(),
             exclude_archived: false,
             stage: None,
+            refine_query: None,
         }
     }
 }

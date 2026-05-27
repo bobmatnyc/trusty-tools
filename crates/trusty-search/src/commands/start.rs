@@ -247,6 +247,9 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
             lexical_only,
             stages: Arc::new(tokio::sync::RwLock::new(stages)),
             search_pressure: Arc::new(tokio::sync::Notify::new()),
+            walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
+                crate::core::registry::WalkDiagnostics::default(),
+            )),
         };
         state.registry.register(handle);
     }

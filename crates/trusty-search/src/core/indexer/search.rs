@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use crate::core::classifier::{QueryClassifier, QueryIntent};
 use crate::core::entity::EdgeKind;
 use crate::core::git::{normalize_path, resolve_branch_files};
+use crate::core::mmr::cosine_similarity;
 use crate::core::search::rrf::{rrf_fuse, RRF_K};
 
 use super::archive::{self, MarkerCache};
@@ -32,6 +33,15 @@ use super::{
 /// fallback rows never out-rank a real BM25/vector hit — they only surface
 /// when the primary lanes returned nothing.
 const GREP_FALLBACK_SCORE: f32 = 0.001;
+
+/// Minimum cosine similarity a KG-expanded neighbour must have against the
+/// `refine_query` embedding before it is kept (issue #147).
+///
+/// Why: 0.4 is empirically safe — embeddings for unrelated code concepts
+/// typically score below 0.3, while semantically related code clusters score
+/// 0.5–1.0.  The threshold is applied as `>= KG_REFINE_THRESHOLD` so
+/// exactly-equal values (boundary case) are kept.
+pub(crate) const KG_REFINE_THRESHOLD: f32 = 0.4;
 
 /// Merge a grep lane into an already-RRF-fused list (issue #75).
 ///
@@ -544,13 +554,32 @@ impl CodeIndexer {
         //        for graph expansion by picking `search_kg`.
         //      * `None` (default)        → existing behaviour: KG runs iff
         //        `use_kg_first && query.expand_graph`.
+        //
+        // Issue #147: embed `refine_query` (when present) for use in
+        // KG-neighbourhood reranking. This is done here (not inside
+        // `expand_with_kg`) so the await point is outside the expand helper
+        // and any error is surfaced at the `search` boundary.
+        let refine_embedding: Option<Vec<f32>> = if skip_kg {
+            None
+        } else {
+            match &query.refine_query {
+                Some(rq) if !rq.is_empty() => self.embed_query(rq).await?,
+                _ => None,
+            }
+        };
         let (all, kg_ids) = if skip_kg {
             (fused, std::collections::HashSet::new())
         } else {
             let effective_use_kg = use_kg_first || force_kg;
             let effective_expand = query.expand_graph || force_kg;
-            self.expand_with_kg(fused, &intent, effective_use_kg, effective_expand)
-                .await
+            self.expand_with_kg(
+                fused,
+                &intent,
+                effective_use_kg,
+                effective_expand,
+                refine_embedding.as_deref(),
+            )
+            .await
         };
 
         // 4a) Re-rank by score after KG expansion (issue #94): KG-expanded
@@ -943,20 +972,79 @@ impl CodeIndexer {
     /// bookkeeping out of `search`.
     /// What: returns `(all_candidates, kg_only_ids)`. `all_candidates`
     /// starts as `fused` and is extended with KG-derived `(id, score)` pairs.
-    /// Test: covered by `test_kg_expansion_marks_neighbours_with_hybrid_kg`
-    /// and `test_kg_expansion_disabled_by_expand_graph_false`.
+    ///
+    /// When `refine_embedding` is `Some`, each KG-expanded neighbour is scored
+    /// by cosine similarity against the refine query embedding (issue #147).
+    /// Neighbours below [`KG_REFINE_THRESHOLD`] are dropped; the rest are
+    /// reranked by their cosine score so the strongest semantic match floats to
+    /// the top.  Seeds from the primary fused list are never filtered — only
+    /// the newly-expanded KG neighbours are subject to the threshold.
+    ///
+    /// Test: covered by `test_kg_expansion_marks_neighbours_with_hybrid_kg`,
+    /// `test_kg_expansion_disabled_by_expand_graph_false`,
+    /// `test_kg_refine_query_filters_irrelevant_neighbours`, and
+    /// `test_kg_refine_query_none_preserves_all_neighbours`.
+    /// Why: exposed for direct unit-testing (issue #147) so tests can verify
+    /// the refine-filter in isolation without going through the full search
+    /// pipeline where HNSW may independently surface neighbours.
+    /// What: thin visibility lift — same implementation, called from tests.
+    /// Test: `test_kg_refine_query_filters_irrelevant_neighbours`.
+    #[cfg(test)]
+    pub(super) async fn expand_with_kg_for_test(
+        &self,
+        fused: Vec<(String, f32)>,
+        intent: &QueryIntent,
+        use_kg_first: bool,
+        expand_graph: bool,
+        refine_embedding: Option<&[f32]>,
+    ) -> (Vec<(String, f32)>, std::collections::HashSet<String>) {
+        self.expand_with_kg(fused, intent, use_kg_first, expand_graph, refine_embedding)
+            .await
+    }
+
     async fn expand_with_kg(
         &self,
         fused: Vec<(String, f32)>,
         intent: &QueryIntent,
         use_kg_first: bool,
         expand_graph: bool,
+        refine_embedding: Option<&[f32]>,
     ) -> (Vec<(String, f32)>, std::collections::HashSet<String>) {
         let mut all = fused.clone();
         if !(use_kg_first && expand_graph) {
             return (all, std::collections::HashSet::new());
         }
-        let expanded = self.kg_expand(&fused, intent.clone()).await;
+        let mut expanded = self.kg_expand(&fused, intent.clone()).await;
+
+        // Issue #147: when a refine embedding is provided, score each expanded
+        // neighbour by cosine similarity to the refine query, drop those below
+        // the threshold, and reorder by cosine score so the best semantic match
+        // is nearest the front. The seed set (`fused`) is intentionally left
+        // unfiltered — we don't want to drop a correct seed just because its
+        // chunk text is not the most fluent match for the natural-language query.
+        if let Some(refine_emb) = refine_embedding {
+            let mut scored: Vec<(String, f32)> = Vec::with_capacity(expanded.len());
+            for (id, _kg_score) in &expanded {
+                // Look up the pre-computed embedding for this neighbour chunk.
+                // Chunks that have no stored embedding (BM25-only indexes) get
+                // a zero cosine score and are dropped at the threshold check.
+                let cos = self
+                    .get_embedding(id)
+                    .map(|emb| cosine_similarity(refine_emb, &emb))
+                    .unwrap_or(0.0);
+                if cos >= KG_REFINE_THRESHOLD {
+                    scored.push((id.clone(), cos));
+                }
+            }
+            // Sort by cosine score descending (stable tie-break by id).
+            scored.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            expanded = scored;
+        }
+
         let kg_ids: std::collections::HashSet<String> =
             expanded.iter().map(|(id, _)| id.clone()).collect();
         all.extend(expanded);
