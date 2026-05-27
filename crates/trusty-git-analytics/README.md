@@ -244,16 +244,19 @@ Stage 2: run the classification cascade over collected commits.
 ```bash
 tga classify [--config <PATH>] [--database <PATH>]
              [--rules <PATH>] [--use-llm] [--backfill-complexity]
+             [--no-external]
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--rules <PATH>` | Override `classification.rules_file` from config |
+| `--rules <PATH>` | Override `classification.rules_file` from config. Custom rules default to priority 110 (above built-in 100) and are standalone by default (`extend_defaults: false`). |
 | `--use-llm` | Enable LLM fallback regardless of config setting |
 | `--backfill-complexity` | Fill missing complexity scores (1–5) for already-classified commits via the LLM, without re-running the full cascade; category, confidence, and method are left untouched |
+| `--no-external` | Disable all external classification sources (JIRA, GitHub Issues) for this run, even if configured in the rules file or config |
 
 ```bash
 tga classify --rules ./custom-rules.yaml --use-llm
+tga classify --no-external   # offline / CI mode
 ```
 
 ### tga report
@@ -470,6 +473,108 @@ tga classify --rules ./my-rules.yaml
 # classification:
 #   rules_file: ./my-rules.yaml
 ```
+
+### Rule Priority and extend_defaults (issue #259)
+
+Custom rules default to **priority 110** — one step above the highest built-in rule priority (100). This means user rules win over the default ruleset without needing an explicit `priority:` entry in every rule.
+
+Custom rule files also default to **standalone** mode (`extend_defaults: false`): only the rules in the file are applied. Opt in to merging with the built-in defaults by adding `extend_defaults: true`.
+
+```yaml
+# my-rules.yaml — standalone by default (no built-in rules loaded)
+extend_defaults: false   # optional: explicitly document the default
+rules:
+  - id: my-deploy
+    category: deployment
+    keywords: ["deploy:", "release:"]
+    # priority defaults to 110 — beats the built-in cc-feat (100)
+```
+
+```yaml
+# my-addons.yaml — augments the defaults
+extend_defaults: true
+rules:
+  - id: my-payments
+    category: payments
+    keywords: ["payment:", "billing:"]
+    confidence: 0.92
+```
+
+### Multi-source classification (issue #260)
+
+`tga classify` can consult external ticket systems — JIRA Cloud/Server and
+GitHub Issues — as high-confidence classification signals **before** the
+commit-message rule tiers run.
+
+**Priority model** (highest to lowest):
+
+1. Manual overrides (`tga override add`)
+2. External sources — JIRA issue type / GitHub Issues labels (confidence 0.92)
+3. Custom regex rules (default priority 110)
+4. Built-in TGA rules (priority 100)
+5. LLM fallback (when `use_llm: true`)
+
+**Configuration** — add a `sources:` list to `config.yaml` under
+`classification:`:
+
+```yaml
+classification:
+  sources:
+    # JIRA source
+    - type: jira
+      base_url: "https://yourco.atlassian.net"
+      token_env: JIRA_API_TOKEN      # env var carrying the API token
+      username: "you@yourco.com"     # omit for Bearer-only tokens
+      project_keys: ["PROJ", "ENG"]  # empty = all projects
+      field_mappings:
+        issue_type:
+          Bug: bug_fix
+          Story: new_feature
+          Task: tech_debt_refactoring
+          Epic: new_feature
+        labels:
+          ktlo: tech_debt_refactoring
+          security: security
+        components:
+          Platform: platform_infrastructure
+
+    # GitHub Issues source
+    - type: github_issues
+      repo: "acme/widgets"
+      token_env: GITHUB_TOKEN
+      label_mappings:
+        bug: bug_fix
+        enhancement: new_feature
+        dependencies: tech_debt_refactoring
+        documentation: documentation
+```
+
+Credentials are read from the **named environment variables** at runtime —
+never store tokens directly in config files:
+
+```bash
+export JIRA_API_TOKEN="your-jira-api-token"
+export GITHUB_TOKEN="your-github-pat"
+tga classify --config config.yaml
+```
+
+**Caching**: each unique ticket is fetched at most once per `tga classify`
+run (in-memory cache, never persisted to disk). On HTTP failure or missing
+token, the source is skipped with a warning and the pipeline falls through
+to commit-message rules.
+
+**Disabling external sources**: use `--no-external` to skip all sources for
+a run (useful in CI or offline environments):
+
+```bash
+tga classify --no-external
+```
+
+See [`examples/multi-source-config.yaml`](examples/multi-source-config.yaml)
+for a fully annotated example.
+
+**Deferred sources** (planned for a future release): Linear, Shortcut,
+Confluence, Datadog.
 
 ## Output Formats
 

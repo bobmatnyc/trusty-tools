@@ -224,6 +224,9 @@ pub enum ClassificationMethod {
     LlmFallback,
     /// Set manually by a user override.
     Manual,
+    /// Derived from an external ticket source (JIRA issue type or GitHub
+    /// Issues label). Added for issue #260.
+    ExternalSource,
 }
 
 impl ClassificationMethod {
@@ -242,6 +245,7 @@ impl ClassificationMethod {
             ClassificationMethod::FuzzyMatch => "fuzzy_match",
             ClassificationMethod::LlmFallback => "llm_fallback",
             ClassificationMethod::Manual => "manual",
+            ClassificationMethod::ExternalSource => "external_source",
         }
     }
 }

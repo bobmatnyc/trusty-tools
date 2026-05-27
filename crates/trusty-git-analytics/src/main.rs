@@ -238,9 +238,44 @@ pub struct CollectArgs {
 }
 
 /// Arguments for `tga classify`.
+///
+/// # Rule / category interaction (issue #259)
+///
+/// When `--rules` is supplied, the provided YAML file is treated as a
+/// **complete** ruleset — built-in TGA rules are NOT merged unless the file
+/// explicitly sets `extend_defaults: true`. Custom rules default to
+/// `priority: 110`, which places them above the built-in conventional-commit
+/// tier (`priority: 100`) so they win without requiring an explicit
+/// `priority:` on every entry.
+///
+/// To register custom category names for rollup reporting, add a
+/// `custom_categories:` block to `config.yaml`:
+///
+/// ```yaml
+/// classification:
+///   custom_categories:
+///     - name: "bug_fix"
+///       parent: "bugfix"
+///     - name: "new_feature"
+///       parent: "feature"
+///     - name: "tech_debt_refactoring"
+///       parent: "maintenance"
+/// ```
+///
+/// # Multi-source classification (issue #260)
+///
+/// External ticket sources (JIRA, GitHub Issues) can be configured via a
+/// `sources:` block in the rules YAML. They are consulted between the
+/// manual-override tier and custom rules. Pass `--no-external` to disable
+/// all external lookups (useful in CI or offline environments).
 #[derive(Args, Debug)]
 pub struct ClassifyArgs {
     /// Rules file override.
+    ///
+    /// The YAML file may optionally contain a `sources:` block to configure
+    /// JIRA and/or GitHub Issues as classification signal sources
+    /// (see issue #260). Set `extend_defaults: true` in the file to merge
+    /// built-in TGA rules alongside your custom rules.
     #[arg(long)]
     pub rules: Option<PathBuf>,
     /// Enable LLM fallback (overrides config).
@@ -271,6 +306,14 @@ pub struct ClassifyArgs {
     /// subset of already-classified commits in the window is rewritten.
     #[arg(long, value_name = "DATE")]
     pub since: Option<String>,
+    /// Disable all external classification sources (JIRA, GitHub Issues).
+    ///
+    /// When set, external ticket lookups configured under `sources:` in the
+    /// rules file are skipped. Useful for CI environments without network
+    /// access or when API credentials are not available. The classification
+    /// cascade falls through to commit-message rules and LLM as normal.
+    #[arg(long, default_value_t = false)]
+    pub no_external: bool,
 }
 
 /// Arguments for `tga report`.

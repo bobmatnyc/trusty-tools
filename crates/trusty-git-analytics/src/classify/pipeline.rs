@@ -10,9 +10,11 @@ use tracing::{info, warn};
 use crate::classify::classifier::{ClassificationEngine, ClassificationEngineConfig};
 use crate::classify::errors::Result;
 use crate::classify::rules::{default_rules, load_rules};
+use crate::classify::sources::ExternalSourceResolver;
 use crate::classify::tiers::ClassificationResult;
 use crate::core::config::Config;
 use crate::core::db::Database;
+use crate::core::models::ClassificationMethod;
 
 /// Default minimum coverage threshold (percent) below which the pipeline
 /// emits a warning. Used when no config-level override is supplied.
@@ -231,14 +233,46 @@ impl ClassificationPipeline {
         )
     }
 
+    /// Build an [`ExternalSourceResolver`] from the pipeline's config, or
+    /// return `None` when external sources are disabled or none are configured.
+    ///
+    /// Why: the resolver is an optional component — teams without JIRA/GitHub
+    /// or running in offline CI should not pay any overhead for it. This
+    /// method centralises the "should I build a resolver?" decision.
+    /// What: returns `None` when `no_external` is `true` OR when the
+    /// `sources` list is empty; otherwise constructs a fresh resolver.
+    /// Test: exercised by the pipeline integration tests via `run`.
+    fn build_resolver(&self) -> Option<ExternalSourceResolver> {
+        let no_external = self
+            .config
+            .classification
+            .as_ref()
+            .map(|c| c.no_external)
+            .unwrap_or(false);
+        if no_external {
+            return None;
+        }
+        let sources = self
+            .config
+            .classification
+            .as_ref()
+            .map(|c| c.sources.as_slice())
+            .unwrap_or(&[]);
+        if sources.is_empty() {
+            return None;
+        }
+        Some(ExternalSourceResolver::new(sources))
+    }
+
     /// Execute the pipeline against `db`.
     ///
     /// Workflow:
     /// 1. Build the [`ClassificationEngine`] from config (rules + LLM tier).
-    /// 2. Query all commits with `classification_id IS NULL`.
-    /// 3. Classify in parallel (Rayon) using tiers 0–3.
-    /// 4. Optionally invoke the async LLM tier for low-confidence verdicts.
-    /// 5. Write `classifications` rows (including `complexity`) and update
+    /// 2. Optionally build an [`ExternalSourceResolver`] from `config.sources`.
+    /// 3. Query all commits with `classification_id IS NULL`.
+    /// 4. Classify in parallel (Rayon) using tiers 0–3.
+    /// 5. Optionally invoke the async LLM tier for low-confidence verdicts.
+    /// 6. Write `classifications` rows (including `complexity`) and update
     ///    each commit's `classification_id` and `confidence`.
     ///
     /// # Errors
@@ -247,7 +281,10 @@ impl ClassificationPipeline {
     pub async fn run(&self, db: &mut Database) -> Result<ClassificationStats> {
         // 1. Build engine.
         let engine = self.build_engine()?;
-        self.run_with_engine(db, engine).await
+        // 2. Build optional external source resolver.
+        let resolver = self.build_resolver();
+        self.run_with_engine_and_resolver(db, engine, resolver)
+            .await
     }
 
     /// Run the classification pipeline using a caller-supplied engine.
@@ -260,10 +297,31 @@ impl ClassificationPipeline {
     /// # Errors
     ///
     /// Returns an error if DB queries or write-back fail.
+    #[allow(dead_code)]
     pub(crate) async fn run_with_engine(
         &self,
         db: &mut Database,
         engine: ClassificationEngine,
+    ) -> Result<ClassificationStats> {
+        self.run_with_engine_and_resolver(db, engine, None).await
+    }
+
+    /// Run with a caller-supplied engine and optional external resolver.
+    ///
+    /// Why: tests need to inject both a mock LLM engine and a mock external
+    /// resolver independently; this overload allows both injections at once.
+    /// What: the innermost execution entry point; all other `run*` variants
+    /// delegate here.
+    /// Test: used by resolver integration tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if DB queries or write-back fail.
+    pub(crate) async fn run_with_engine_and_resolver(
+        &self,
+        db: &mut Database,
+        engine: ClassificationEngine,
+        resolver: Option<ExternalSourceResolver>,
     ) -> Result<ClassificationStats> {
         // 2. Read candidate commits. The default flow returns only the
         //    rows that lack a verdict; `--force` widens this to every row
@@ -292,10 +350,48 @@ impl ClassificationPipeline {
             .collect();
         let mut results = engine.classify_batch(&pairs);
 
+        // Apply Tier-0 manual overrides (highest precedence).
         for (idx, commit) in commits.iter().enumerate() {
             if let Some(r) = overrides.get(&commit.id) {
                 results[idx] = r.clone();
             }
+        }
+
+        // Tier 0.5: external sources (JIRA / GitHub Issues).
+        //
+        // Why: external ticket-type signals are more authoritative than
+        // commit-message heuristics but must still defer to manual overrides
+        // (Tier 0). We run the resolver serially (network I/O bound) for
+        // commits that do not already have a Tier-0 override verdict.
+        // The resolver caches results in-memory so the same ticket is only
+        // fetched once per run, keeping the HTTP budget proportional to the
+        // number of *unique* referenced tickets — not the number of commits.
+        if let Some(res) = &resolver {
+            let pb = make_progress(commits.len() as u64, "External sources");
+            for (idx, commit) in commits.iter().enumerate() {
+                // Skip commits already resolved by Tier 0 (manual override).
+                if overrides.contains_key(&commit.id) {
+                    pb.inc(1);
+                    continue;
+                }
+                if let Some(signal) = res.resolve(&commit.message).await {
+                    let top_level = engine.taxonomy().resolve(&signal.category);
+                    results[idx] = ClassificationResult {
+                        category: signal.category,
+                        subcategory: None,
+                        top_level,
+                        confidence: signal.confidence,
+                        method: ClassificationMethod::ExternalSource,
+                        ticket_id:
+                            crate::classify::tiers::regex_tier::RegexMatcher::extract_ticket_id(
+                                &commit.message,
+                            ),
+                        complexity: None,
+                    };
+                }
+                pb.inc(1);
+            }
+            pb.finish_and_clear();
         }
 
         // 4. LLM fallback (async, bounded-concurrency) for entries whose

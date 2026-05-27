@@ -15,6 +15,7 @@ pub mod classifier;
 pub mod errors;
 pub mod pipeline;
 pub mod rules;
+pub mod sources;
 pub mod taxonomy;
 pub mod tiers;
 

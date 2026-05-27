@@ -1,0 +1,116 @@
+# multi-source-config.yaml
+#
+# Fully annotated tga config showing multi-source classification (issue #260)
+# and the corrected custom-rules priority defaults (issue #259).
+#
+# Run:
+#   JIRA_API_TOKEN=<token> GITHUB_TOKEN=<pat> tga classify --config multi-source-config.yaml
+#
+# To disable external sources for a single run (e.g. in CI without credentials):
+#   tga classify --config multi-source-config.yaml --no-external
+
+repositories:
+  - path: ~/code/my-project
+    name: my-project
+
+output:
+  directory: ./reports
+  formats: [csv, json, markdown]
+
+classification:
+  # Optional: path to custom rules. Custom rules default to priority 110,
+  # which places them above the built-in rules (priority 100). The file is
+  # standalone by default (extend_defaults: false); only the rules listed
+  # here apply unless you set extend_defaults: true.
+  rules_file: ./my-rules.yaml
+
+  # External classification sources (issue #260).
+  # Sources are consulted in order; the first non-None signal wins.
+  # Each unique ticket is fetched at most once per run (in-memory cache).
+  # On HTTP failure or missing token the source is skipped with a warning.
+  sources:
+    # -----------------------------------------------------------------
+    # JIRA Cloud / Server
+    # -----------------------------------------------------------------
+    - type: jira
+      # Base URL of your JIRA instance.
+      base_url: "https://yourco.atlassian.net"
+
+      # Name of the environment variable carrying the API token.
+      # For JIRA Cloud: create a token at
+      #   https://id.atlassian.com/manage-profile/security/api-tokens
+      # Set it as:  export JIRA_API_TOKEN="your-token"
+      token_env: JIRA_API_TOKEN
+
+      # JIRA Cloud requires Basic auth: "email:token" base64-encoded.
+      # Set username here; omit for pure Bearer token (JIRA Server).
+      username: "you@yourco.com"
+
+      # Limit JIRA lookups to these project keys.
+      # An empty list (or omitting the key) means "query any project key
+      # found in commit messages".
+      project_keys:
+        - PROJ
+        - ENG
+        - INFRA
+
+      # Map JIRA issue fields to TGA category strings.
+      # Priority: issue_type > labels > components (first match wins).
+      field_mappings:
+        issue_type:
+          # Standard JIRA issue types -> TGA categories
+          Bug: bug_fix
+          Story: new_feature
+          Task: tech_debt_refactoring
+          Epic: new_feature
+          Improvement: new_feature
+          Sub-task: tech_debt_refactoring
+          Technical Debt: tech_debt_refactoring
+          Spike: wip
+        labels:
+          # Label-to-category fallback (fires when issue_type is unmapped)
+          ktlo: tech_debt_refactoring
+          security: security
+          performance: performance
+          documentation: documentation
+          testing: test
+        components:
+          # Component-to-category fallback (fires when neither issue_type
+          # nor labels match)
+          Platform: platform_infrastructure
+          CI/CD: ci
+          Security: security
+
+    # -----------------------------------------------------------------
+    # GitHub Issues
+    # -----------------------------------------------------------------
+    - type: github_issues
+      # Default repository for bare "#NNN" references.
+      # Qualified "owner/repo#NNN" references override this for that ref.
+      repo: "acme/widgets"
+
+      # Name of the environment variable carrying the GitHub PAT.
+      # Required scopes: repo (private) or public_repo (public).
+      # Set it as:  export GITHUB_TOKEN="ghp_..."
+      token_env: GITHUB_TOKEN
+
+      # Map GitHub issue label names to TGA category strings.
+      # First matching label in the issue's label list wins.
+      label_mappings:
+        bug: bug_fix
+        enhancement: new_feature
+        feature: new_feature
+        refactor: tech_debt_refactoring
+        performance: performance
+        documentation: documentation
+        test: test
+        ci: ci
+        security: security
+        dependencies: tech_debt_refactoring
+        good first issue: new_feature
+        help wanted: new_feature
+
+  # Optional LLM fallback for commits with low-confidence verdicts.
+  # use_llm: false
+  # llm_model: gpt-4o-mini
+  # llm_fallback_threshold: 0.35

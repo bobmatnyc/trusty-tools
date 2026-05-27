@@ -339,6 +339,27 @@ pub struct ClassificationConfig {
     /// you hit upstream rate limits.
     #[serde(default = "default_llm_fallback_concurrency")]
     pub llm_fallback_concurrency: usize,
+
+    /// When `true`, all external classification sources (JIRA, GitHub Issues)
+    /// are disabled for this run, regardless of `sources:` configuration in
+    /// the rules file.
+    ///
+    /// Set via the `--no-external` CLI flag or in `config.yaml` for permanent
+    /// offline / CI mode. Defaults to `false`.
+    #[serde(default)]
+    pub no_external: bool,
+
+    /// External classification sources to consult before commit-message rules.
+    ///
+    /// Each entry describes one external system (JIRA or GitHub Issues).
+    /// When a commit message contains a ticket key matching the source's
+    /// pattern, the source is queried for issue type/labels which are then
+    /// used to derive a classification category via the configured mappings.
+    ///
+    /// Populated from the `sources:` block in the rules YAML or from
+    /// `config.yaml`. Ignored when `no_external` is `true`.
+    #[serde(default)]
+    pub sources: Vec<crate::classify::sources::SourceConfig>,
 }
 
 fn default_confidence_threshold() -> f64 {
@@ -370,6 +391,8 @@ impl Default for ClassificationConfig {
             min_coverage_pct: default_min_coverage_pct(),
             llm_fallback_threshold: 0.0,
             llm_fallback_concurrency: default_llm_fallback_concurrency(),
+            no_external: false,
+            sources: Vec::new(),
         }
     }
 }

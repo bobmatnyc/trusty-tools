@@ -8,9 +8,12 @@ use crate::ClassifyArgs;
 
 /// Run the classification stage over previously-collected commits.
 ///
-/// Honors `--rules`, `--use-llm`, and `--force` / `--since` overrides by
-/// mutating the [`ClassificationConfig`] section of the loaded YAML config
-/// and configuring the pipeline accordingly.
+/// Why: wire CLI flags (`--rules`, `--use-llm`, `--force`, `--since`,
+/// `--no-external`) into the [`ClassificationPipeline`] without exposing the
+/// pipeline internals in `main.rs`.
+/// What: mutates the `ClassificationConfig` section of the loaded YAML config
+/// to honor each override, then builds and runs the pipeline.
+/// Test: integration-tested via pipeline unit tests in `classify::pipeline::tests`.
 pub async fn run(config: Config, db: &mut Database, args: ClassifyArgs) -> anyhow::Result<()> {
     let mut cfg = config;
 
@@ -24,6 +27,11 @@ pub async fn run(config: Config, db: &mut Database, args: ClassifyArgs) -> anyho
         }
         if args.use_llm {
             c.use_llm = true;
+        }
+        // When --no-external is passed, suppress all external classification
+        // sources for this run regardless of what the rules file configures.
+        if args.no_external {
+            c.no_external = true;
         }
     }
 
