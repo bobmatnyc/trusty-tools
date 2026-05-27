@@ -1,6 +1,44 @@
 //! Rule and rule-set data structures.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Deserialize the `patterns` / `pattern` field from a YAML rule entry.
+///
+/// Why: user-authored rules YAMLs naturally write `pattern: "(?i)^feat"` (singular
+/// string) while the struct field is `Vec<String>`. Without this deserializer
+/// `serde_yaml` rejects the scalar value when the target type is a sequence, and
+/// because the field is `#[serde(default)]` the error is silently swallowed,
+/// leaving `patterns = []`. That is the root cause of issue #259 — rules with an
+/// empty pattern list never fire, causing 100% "uncategorized" results. This
+/// function handles three cases so neither existing nor new YAML files break:
+///
+/// - Absent key (field omitted) → `vec![]`
+/// - Single string (`pattern: "foo"`) → `vec!["foo"]`
+/// - Sequence (`patterns: ["foo", "bar"]`) → `vec!["foo", "bar"]`
+///
+/// What: deserializes via an `#[serde(untagged)]` enum that matches all three
+/// shapes, then maps each variant to the appropriate `Vec<String>`.
+/// Test: covered by `rule_singular_pattern_deserializes`,
+/// `rule_plural_patterns_deserializes`, and `rule_missing_patterns_field_gives_empty_vec`
+/// in `classify::rules::types::tests`, and by the end-to-end tests in
+/// `classify::rules::loader::tests`.
+fn deserialize_patterns_field<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrVecOrNull {
+        Single(String),
+        Many(Vec<String>),
+        Null,
+    }
+    match StringOrVecOrNull::deserialize(deserializer)? {
+        StringOrVecOrNull::Single(s) => Ok(vec![s]),
+        StringOrVecOrNull::Many(v) => Ok(v),
+        StringOrVecOrNull::Null => Ok(vec![]),
+    }
+}
 
 /// A single classification rule.
 ///
@@ -40,7 +78,24 @@ pub struct Rule {
     pub keywords: Vec<String>,
 
     /// Regex patterns to match against the commit message.
-    #[serde(default)]
+    ///
+    /// Accepts both the singular YAML key `pattern:` (a string or a list of strings)
+    /// and the plural key `patterns:` (a list of strings). User-authored rule files
+    /// naturally reach for `pattern: "(?i)^feat"` which, without this alias, would be
+    /// silently dropped by serde because the target type is `Vec<String>`. The
+    /// `deserialize_with` helper coerces a scalar string to a single-element vec.
+    ///
+    /// **Either form is accepted:**
+    ///
+    /// ```yaml
+    /// pattern: "(?i)^feat[:(]"            # singular string → vec!["(?i)^feat[:(]"]
+    /// patterns: ["(?i)^feat", "(?i)^feature"]  # plural list  → vec as-is
+    /// ```
+    #[serde(
+        default,
+        alias = "pattern",
+        deserialize_with = "deserialize_patterns_field"
+    )]
     pub patterns: Vec<String>,
 
     /// Priority (higher = checked first).
@@ -121,5 +176,104 @@ impl RuleSet {
         let mut refs: Vec<&Rule> = self.rules.iter().collect();
         refs.sort_by_key(|r| std::cmp::Reverse(r.priority));
         refs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Singular `pattern:` key with a string value deserializes into a
+    /// single-element `patterns` vec.
+    ///
+    /// Why: this is the primary regression guarded by issue #259. User YAMLs
+    /// (and the issue body itself) write `pattern: "..."` (natural English
+    /// singular). Before the fix serde silently dropped the unknown key,
+    /// giving `patterns = []` — so rules never fired.
+    /// What: parses a minimal YAML rule with `pattern:` (singular string) and
+    /// asserts that `rule.patterns` has exactly one element matching the input.
+    /// Test: this test IS the regression test — watch it fail against the old
+    /// `patterns: Vec<String>` field (no alias, no custom deserializer).
+    #[test]
+    fn rule_singular_pattern_deserializes() {
+        let yaml = r#"
+id: test-1
+category: new_feature
+pattern: "(?i)^feat"
+"#;
+        let rule: Rule = serde_yaml::from_str(yaml).expect("deserialize");
+        assert_eq!(
+            rule.patterns,
+            vec!["(?i)^feat".to_string()],
+            "singular `pattern:` must be coerced to a single-element vec"
+        );
+    }
+
+    /// Plural `patterns:` key with a YAML list deserializes unchanged.
+    ///
+    /// Why: existing rule files that already use `patterns:` (plural) must
+    /// continue to work after adding the singular alias and custom deserializer.
+    /// What: parses a minimal YAML rule with `patterns:` as a two-element list
+    /// and asserts both elements are preserved in order.
+    /// Test: verify the happy path was not broken by the alias addition.
+    #[test]
+    fn rule_plural_patterns_deserializes() {
+        let yaml = r#"
+id: test-2
+category: new_feature
+patterns:
+  - "(?i)^feat"
+  - "(?i)^feature"
+"#;
+        let rule: Rule = serde_yaml::from_str(yaml).expect("deserialize");
+        assert_eq!(rule.patterns.len(), 2);
+        assert_eq!(rule.patterns[0], "(?i)^feat");
+        assert_eq!(rule.patterns[1], "(?i)^feature");
+    }
+
+    /// A rule with neither `pattern:` nor `patterns:` gives an empty vec
+    /// (not a parse error).
+    ///
+    /// Why: rules that match only on keywords have no patterns field at all;
+    /// this must remain valid and produce `patterns = []`.
+    /// What: parses a rule with only `keywords:` and asserts `patterns` is
+    /// empty and the parse succeeds.
+    /// Test: ensures the `#[serde(default)]` fallback still works alongside
+    /// the custom deserializer.
+    #[test]
+    fn rule_missing_patterns_field_gives_empty_vec() {
+        let yaml = r#"
+id: test-3
+category: bugfix
+keywords:
+  - "fix:"
+"#;
+        let rule: Rule = serde_yaml::from_str(yaml).expect("deserialize");
+        assert!(rule.patterns.is_empty());
+        assert_eq!(rule.keywords, vec!["fix:".to_string()]);
+    }
+
+    /// A singular `pattern:` value still compiles as a valid regex that
+    /// matches the intended commit message, exercising the full round-trip.
+    ///
+    /// Why: end-to-end check that the coerced string is not mangled — a
+    /// deserialization that produces `patterns = [""]` would pass the
+    /// structural check above but still silently mismatch everything.
+    /// What: deserializes a rule, compiles its single pattern with the
+    /// `regex` crate, and asserts it matches an expected commit message.
+    /// Test: confirms the regex is intact after string→vec coercion.
+    #[test]
+    fn rule_singular_pattern_regex_compiles_and_matches() {
+        let yaml = r#"
+id: test-4
+category: new_feature
+pattern: "(?i)^feat[:(]"
+"#;
+        let rule: Rule = serde_yaml::from_str(yaml).expect("deserialize");
+        assert_eq!(rule.patterns.len(), 1);
+        let re = regex::Regex::new(&rule.patterns[0]).expect("compile");
+        assert!(re.is_match("feat: add login flow"));
+        assert!(re.is_match("feat(api): new endpoint"));
+        assert!(!re.is_match("fix: null deref"));
     }
 }

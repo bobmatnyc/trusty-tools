@@ -503,11 +503,12 @@ Commits that match no rule are assigned category `uncategorized` with confidence
 
 ### Custom Rules File
 
-Supply your own rules alongside the defaults:
+Supply your own rules as a YAML (or JSON) file:
 
 ```yaml
 # my-rules.yaml
 version: "1.0"
+extend_defaults: false   # true = merge with built-ins; false = standalone (default)
 rules:
   - id: my-deploy
     category: deployment
@@ -526,6 +527,41 @@ tga classify --rules ./my-rules.yaml
 # classification:
 #   rules_file: ./my-rules.yaml
 ```
+
+### Rules YAML schema
+
+Each entry under `rules:` is a **Rule** with these fields:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `id` | string | **required** | Unique rule identifier (used in logs and `tga rules test`) |
+| `category` | string | **required** | The classification label written to the database |
+| `subcategory` | string | `null` | Optional leaf label (e.g. `"sql-injection"` under `category: "security"`) |
+| `keywords` | list of strings | `[]` | Exact substrings, matched case-insensitively via Aho-Corasick |
+| `pattern` / `patterns` | string or list | `[]` | Regex patterns (see note below) |
+| `priority` | integer | `110` | Higher = checked first. Custom-rule default (110) beats built-ins (peak 115 for `cc-revert`, 100 for `cc-feat`/`cc-fix`) |
+| `confidence` | float 0–1 | `0.85` | Score attached to the verdict; only accepted if ≥ `confidence_threshold` |
+
+**`pattern:` vs `patterns:`** — both key names are accepted:
+
+```yaml
+# Singular string (most natural for a single regex)
+pattern: "(?i)^feat[:(]"
+
+# Plural list (multiple alternates for one rule)
+patterns:
+  - "(?i)^feat[:(]"
+  - "(?i)^feature[:(]"
+```
+
+Using `pattern:` with a single string is exactly equivalent to `patterns:` with a single-element list. Both forms were silently mishandled in versions ≤ 1.2.0 (issue #259); if you had rules that never fired, this was the cause.
+
+The top-level `RuleSet` also has two optional fields:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `version` | string | `null` | Schema version tag (informational) |
+| `extend_defaults` | bool | `false` | When `true`, custom rules are merged with the built-in set; same-`id` entries override the built-in |
 
 ### Rule Priority and extend_defaults (issue #259)
 
@@ -553,18 +589,34 @@ rules:
     confidence: 0.92
 ```
 
+**Diagnosing rules that never fire**: if your custom categories never appear in reports, run:
+
+```bash
+tga rules list --rules ./my-rules.yaml   # shows all loaded rules with their matchers
+tga rules test "feat: add login" --rules ./my-rules.yaml   # dry-run a message
+tga classify -vv --rules ./my-rules.yaml   # verbose mode shows per-rule decisions
+```
+
+A `WARN rule has no keywords or patterns` in the log output means a rule's YAML key was silently dropped — the most common cause is writing `pattern:` (singular) in a version before 1.2.1. Upgrade to 1.2.1+ and both `pattern:` and `patterns:` are accepted.
+
+See also: [Multi-source classification](#multi-source-classification-issue-260) for external ticket system integration.
+
 ### Multi-source classification (issue #260)
 
 `tga classify` can consult external ticket systems — JIRA Cloud/Server and
 GitHub Issues — as high-confidence classification signals **before** the
 commit-message rule tiers run.
 
+External sources fire as **Tier 0.5** — after manual overrides, before
+commit-message rules — with a fixed confidence of `0.92`. They are enabled
+by default when configured; use `--no-external` to opt out for a run.
+
 **Priority model** (highest to lowest):
 
-1. Manual overrides (`tga override add`)
+1. Manual overrides (`tga override add`, confidence 1.0)
 2. External sources — JIRA issue type / GitHub Issues labels (confidence 0.92)
-3. Custom regex rules (default priority 110)
-4. Built-in TGA rules (priority 100)
+3. Custom commit-message rules (default priority 110)
+4. Built-in TGA commit-message rules (priority 100)
 5. LLM fallback (when `use_llm: true`)
 
 **Configuration** — add a `sources:` list to `config.yaml` under
@@ -572,49 +624,65 @@ commit-message rule tiers run.
 
 ```yaml
 classification:
+  no_external: false    # opt-out flag; sources fire by default once configured
   sources:
-    # JIRA source
+
+    # --- JIRA source ---
     - type: jira
       base_url: "https://yourco.atlassian.net"
-      token_env: JIRA_API_TOKEN      # env var carrying the API token
-      username: "you@yourco.com"     # omit for Bearer-only tokens
-      project_keys: ["PROJ", "ENG"]  # empty = all projects
+      token_env: JIRA_API_TOKEN      # name of the env var holding your API token
+      email_env: JIRA_USER_EMAIL     # optional — only needed for JIRA Cloud Basic auth
+      project_keys: ["PROJ", "ENG"]  # empty list = match all projects
       field_mappings:
+        # Maps JIRA issue type → tga category. Case-sensitive on the JIRA side.
         issue_type:
           Bug: bug_fix
           Story: new_feature
           Task: tech_debt_refactoring
+          Sub-task: tech_debt_refactoring
           Epic: new_feature
+        # Maps JIRA labels → tga category. Labels are case-sensitive.
         labels:
           ktlo: tech_debt_refactoring
           security: security
+        # Maps JIRA components → tga category.
         components:
+          "CI/CD": devops
           Platform: platform_infrastructure
 
-    # GitHub Issues source
+    # --- GitHub Issues source ---
     - type: github_issues
-      repo: "acme/widgets"
-      token_env: GITHUB_TOKEN
+      repo: "acme/widgets"           # "owner/repo" slug
+      token_env: GITHUB_TOKEN        # name of the env var holding your PAT
       label_mappings:
         bug: bug_fix
         enhancement: new_feature
         dependencies: tech_debt_refactoring
         documentation: documentation
+        security: security
 ```
 
-Credentials are read from the **named environment variables** at runtime —
-never store tokens directly in config files:
+**Field-mapping precedence within a JIRA source** (highest to lowest):
+`issue_type` → `labels` → `components`. The first mapping that matches wins.
+
+**Credential handling**: tokens are read from the **named environment
+variables** at runtime — never store them directly in config files:
 
 ```bash
 export JIRA_API_TOKEN="your-jira-api-token"
+export JIRA_USER_EMAIL="you@yourco.com"   # JIRA Cloud only
 export GITHUB_TOKEN="your-github-pat"
 tga classify --config config.yaml
 ```
 
+**Failure mode**: a missing token, HTTP 401/404, or network error causes the
+source to be skipped with a `WARN` log and the pipeline falls through to
+commit-message rules for affected commits. Classification never panics on
+source failures.
+
 **Caching**: each unique ticket is fetched at most once per `tga classify`
-run (in-memory cache, never persisted to disk). On HTTP failure or missing
-token, the source is skipped with a warning and the pipeline falls through
-to commit-message rules.
+run (in-memory dedup, never persisted to disk). A 15 000-commit run against
+a project with 500 unique JIRA tickets makes 500 API calls, not 15 000.
 
 **Disabling external sources**: use `--no-external` to skip all sources for
 a run (useful in CI or offline environments):
@@ -628,6 +696,8 @@ for a fully annotated example.
 
 **Deferred sources** (planned for a future release): Linear, Shortcut,
 Confluence, Datadog.
+
+See also: [Rules YAML schema](#rules-yaml-schema) for commit-message rule authoring.
 
 ## Output Formats
 

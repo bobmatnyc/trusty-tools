@@ -1,6 +1,6 @@
 [package]
 name = "tga"
-version = "1.2.0"
+version = "1.2.1"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.88) per #254. Required for
@@ -110,6 +110,8 @@ wiremock = "0.6"
 criterion = { workspace = true }
 # Capture tracing events in tests (used by ticket_regex warn-log assertions)
 tracing-test = "0.2"
+# Temporary files for rule-loader tests
+tempfile = { workspace = true }
 
 [[bench]]
 name = "tga_bench"

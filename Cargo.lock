@@ -9812,7 +9812,7 @@ dependencies = [
 
 [[package]]
 name = "tga"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -9835,6 +9835,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "strsim 0.11.1",
+ "tempfile",
  "tera",
  "thiserror 1.0.69",
  "tokio",
