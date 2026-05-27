@@ -194,6 +194,7 @@ impl ClassificationPipeline {
                 llm_provider: c.llm_provider.clone(),
                 openrouter_api_key: c.openrouter_api_key.clone(),
                 confidence_threshold: c.confidence_threshold,
+                weighted_sum: c.weighted_sum.clone(),
             },
             None => ClassificationEngineConfig::default(),
         };
@@ -396,9 +397,9 @@ impl ClassificationPipeline {
 
         // 4. LLM fallback (async, bounded-concurrency) for entries whose
         //    verdict confidence is at or below `llm_fallback_threshold`. The
-        //    default threshold is `0.0`, preserving legacy behaviour; raising
-        //    it to `~0.35` routes catch-all (`confidence = 0.3`) verdicts
-        //    through the LLM.
+        //    default threshold is `0.65` (1.3.0+), which routes low-confidence
+        //    deterministic verdicts (fuzzy 0.40/0.60, weighted-sum below 0.65)
+        //    through the LLM when `use_llm: true`.
         //
         //    Fan-out is bounded by `llm_fallback_concurrency` via
         //    `buffer_unordered`, which yields ~order-of-magnitude wall-clock
@@ -424,7 +425,7 @@ impl ClassificationPipeline {
                 .classification
                 .as_ref()
                 .map(|c| c.llm_fallback_threshold)
-                .unwrap_or(0.0);
+                .unwrap_or(0.65);
             let concurrency = self
                 .config
                 .classification

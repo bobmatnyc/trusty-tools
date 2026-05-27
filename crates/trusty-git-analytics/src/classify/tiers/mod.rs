@@ -14,6 +14,7 @@ pub mod jira_project_tier;
 pub mod llm;
 pub mod override_tier;
 pub mod regex_tier;
+pub mod weighted_sum;
 
 use serde::{Deserialize, Serialize};
 

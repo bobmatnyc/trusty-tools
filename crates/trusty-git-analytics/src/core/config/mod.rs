@@ -331,14 +331,43 @@ pub struct ClassificationConfig {
     ///
     /// After tiers 1–3 produce a verdict, the LLM fallback fires for any
     /// commit whose `confidence <= llm_fallback_threshold` (and only when
-    /// [`Self::use_llm`] is true). The catch-all rule emits `confidence = 0.3`,
-    /// so a value of `0.35` will route catch-all hits through the LLM while
-    /// a value of `0.0` preserves the legacy behaviour of only invoking the
-    /// LLM on truly empty (`confidence == 0.0`) verdicts.
+    /// [`Self::use_llm`] is true).
     ///
-    /// Defaults to `0.0` for backwards compatibility.
-    #[serde(default)]
+    /// **Default (1.3.0+): `0.65`** — The weighted-sum tier (Tier 2.5) emits
+    /// calibrated verdicts in `[0.55, 0.95]`. The legacy fuzzy tier emits
+    /// `0.40` (short-message chore) and `0.60` (bare-ticket feature). With
+    /// the 0.65 default, any deterministic verdict below 0.65 routes to the
+    /// LLM when `use_llm: true`, which includes the low-confidence fuzzy
+    /// outputs as well as low-scoring weighted-sum verdicts.
+    ///
+    /// **Migration note**: users with `use_llm: false` (the default) see no
+    /// behaviour change — the threshold only matters when LLM is enabled.
+    /// Users with `use_llm: true` who relied on the 0.0 default to skip the
+    /// LLM for fuzzy-tier verdicts should pin `llm_fallback_threshold: 0.0`
+    /// explicitly to restore the previous behaviour.
+    ///
+    /// The legacy catch-all rule emits `confidence = 0.3`, so setting this
+    /// to `0.35` still routes those through the LLM. The new default of `0.65`
+    /// is a broader net that covers fuzzy-tier verdicts (0.40, 0.60) as well.
+    #[serde(default = "default_llm_fallback_threshold")]
     pub llm_fallback_threshold: f64,
+
+    /// Configuration for the weighted-sum tier (Tier 2.5).
+    ///
+    /// Tier 2.5 sits between the regex tier (Tier 2) and the fuzzy tier (Tier
+    /// 3). It composes five cheap signals — keyword density, ticket-prefix
+    /// presence, message-length bucket, merge indicator, and file-path bucket
+    /// — into per-category scores and emits a calibrated verdict when the
+    /// argmax exceeds `min_confidence` (default 0.55).
+    ///
+    /// Set `weighted_sum.enabled: false` to disable the tier entirely and
+    /// restore pre-1.3.0 behaviour (regex falls directly to fuzzy).
+    /// This tier is intentionally active even when `extend_defaults: false`
+    /// because it composes signals rather than emitting hardcoded built-in
+    /// category strings; it respects user taxonomies through the engine's
+    /// taxonomy registry.
+    #[serde(default)]
+    pub weighted_sum: crate::classify::tiers::weighted_sum::WeightedSumConfig,
 
     /// Maximum number of concurrent in-flight LLM fallback requests.
     ///
@@ -392,6 +421,19 @@ fn default_llm_fallback_concurrency() -> usize {
     8
 }
 
+/// Default LLM fallback threshold (1.3.0+).
+///
+/// Why: raised from 0.0 to 0.65 in 1.3.0 so that low-confidence deterministic
+/// verdicts (fuzzy tier: 0.40 chore, 0.60 feature; weighted-sum tier: anything
+/// below 0.65) automatically route to the LLM when `use_llm: true`. Users with
+/// `use_llm: false` see no behaviour change.
+/// What: returns the default threshold value of 0.65.
+/// Test: see `pipeline_writes_complexity_to_db` (pipeline test) which pins
+/// `llm_fallback_threshold: 1.0` explicitly to force LLM routing.
+fn default_llm_fallback_threshold() -> f64 {
+    0.65
+}
+
 impl Default for ClassificationConfig {
     fn default() -> Self {
         Self {
@@ -403,10 +445,11 @@ impl Default for ClassificationConfig {
             confidence_threshold: default_confidence_threshold(),
             custom_categories: Vec::new(),
             min_coverage_pct: default_min_coverage_pct(),
-            llm_fallback_threshold: 0.0,
+            llm_fallback_threshold: default_llm_fallback_threshold(),
             llm_fallback_concurrency: default_llm_fallback_concurrency(),
             no_external: false,
             sources: Vec::new(),
+            weighted_sum: crate::classify::tiers::weighted_sum::WeightedSumConfig::default(),
         }
     }
 }

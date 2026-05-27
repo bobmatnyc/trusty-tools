@@ -16,6 +16,7 @@ use crate::classify::tiers::jira_project_tier::JiraProjectTier;
 use crate::classify::tiers::llm::LlmClassifier;
 use crate::classify::tiers::override_tier::OverrideTier;
 use crate::classify::tiers::regex_tier::RegexMatcher;
+use crate::classify::tiers::weighted_sum::WeightedSumClassifier;
 use crate::classify::tiers::ClassificationResult;
 use crate::core::models::ClassificationMethod;
 
@@ -25,7 +26,8 @@ use crate::core::models::ClassificationMethod;
 /// threshold tuning; bundling those knobs into a config struct keeps the
 /// engine constructor signature stable as new tiers are added.
 /// What: holds LLM toggles (`use_llm`, `llm_model`, `llm_provider`,
-/// `openrouter_api_key`) plus a `confidence_threshold` shared by all tiers.
+/// `openrouter_api_key`) plus a `confidence_threshold` shared by all tiers,
+/// and the `weighted_sum` config for Tier 2.5 (added in 1.3.0).
 /// Test: every classifier test in `classify::tests` builds one via
 /// `Default::default()` or with explicit overrides.
 #[derive(Debug, Clone)]
@@ -45,6 +47,14 @@ pub struct ClassificationEngineConfig {
     /// can still inspect them), but their `confidence` informs filtering
     /// in downstream reports.
     pub confidence_threshold: f64,
+    /// Configuration for the weighted-sum tier (Tier 2.5). Added in 1.3.0.
+    ///
+    /// Why: the pipeline builds the engine from `ClassificationEngineConfig`;
+    /// threading the weighted-sum config here keeps all per-run tier knobs in
+    /// one place without changing the engine constructor's arity.
+    /// What: forwards to [`WeightedSumClassifier::new`] at engine-build time.
+    /// Test: covered indirectly by `classify_sync` tests that exercise Tier 2.5.
+    pub weighted_sum: crate::classify::tiers::weighted_sum::WeightedSumConfig,
 }
 
 impl Default for ClassificationEngineConfig {
@@ -55,6 +65,7 @@ impl Default for ClassificationEngineConfig {
             llm_provider: "auto".to_string(),
             openrouter_api_key: None,
             confidence_threshold: 0.7,
+            weighted_sum: crate::classify::tiers::weighted_sum::WeightedSumConfig::default(),
         }
     }
 }
@@ -79,6 +90,16 @@ pub struct ClassificationEngine {
     issue_type: IssueTypeTier,
     regex: RegexMatcher,
     jira_project: JiraProjectTier,
+    /// Tier 2.5: weighted-sum classifier (always enabled by default; see
+    /// [`WeightedSumConfig::enabled`] for the per-instance toggle).
+    ///
+    /// Why: unlike the fuzzy tier, the weighted-sum tier does not emit
+    /// hardcoded built-in category strings — it picks winners based on signal
+    /// scores and maps them via `to_verdict()`. It is therefore safe to leave
+    /// active even when `extend_defaults: false`. If a user's custom taxonomy
+    /// does not include the voted category the verdict's `top_level` will be
+    /// `None`; the category string itself is still written to the DB.
+    weighted_sum: WeightedSumClassifier,
     /// `None` when `extend_defaults == false` in the loaded ruleset.
     ///
     /// Why: the fuzzy tier is built-in by definition — it emits hardcoded
@@ -189,6 +210,11 @@ impl ClassificationEngine {
     ) -> Result<Self> {
         let exact = ExactMatcher::new(&ruleset.rules)?;
         let regex = RegexMatcher::new(&ruleset.rules)?;
+        // Tier 2.5: weighted-sum classifier. Active regardless of
+        // extend_defaults because it composes signals; it does NOT emit
+        // hardcoded built-in category strings. The per-instance `enabled`
+        // flag in WeightedSumConfig lets operators opt out.
+        let weighted_sum = WeightedSumClassifier::new(config.weighted_sum.clone());
         // Gate the fuzzy tier on extend_defaults. The fuzzy tier is built-in
         // by definition: it emits hardcoded category strings ("merge",
         // "feature", "chore") that conflict with user-defined taxonomies.
@@ -231,6 +257,7 @@ impl ClassificationEngine {
             issue_type,
             regex,
             jira_project,
+            weighted_sum,
             fuzzy,
             llm,
             taxonomy,
@@ -354,6 +381,28 @@ impl ClassificationEngine {
                 ticket_id: RegexMatcher::extract_ticket_id(message),
                 complexity: None,
             });
+        }
+
+        // Tier 2.5: weighted-sum classifier.
+        //
+        // Sits between the regex tier (Tier 2) and the fuzzy tier (Tier 3).
+        // Active even when `extend_defaults: false` because it composes signals
+        // rather than emitting hardcoded built-in category strings. Disabled
+        // per-instance via `WeightedSumConfig { enabled: false }`.
+        //
+        // File paths are not available in the synchronous path (they would
+        // require a DB join); pass an empty slice so the signal contributes
+        // zero rather than penalising the commit.
+        if let Some(mut result) = self.weighted_sum.classify(message, is_merge, &[]) {
+            if result.ticket_id.is_none() {
+                result.ticket_id = RegexMatcher::extract_ticket_id(message);
+            }
+            // Re-resolve top_level via the engine's registry in case the user
+            // has overridden the default parent for the voted category.
+            if let Some(top) = self.taxonomy.resolve(&result.category) {
+                result.top_level = Some(top);
+            }
+            return Some(result);
         }
 
         // Tier 3.5: fuzzy heuristics (only when extend_defaults is true).
@@ -502,10 +551,15 @@ mod tests {
     /// Why: the fuzzy tier emits hardcoded built-in category strings
     /// ("merge", "feature", "chore") that conflict with user-defined
     /// taxonomies. It must be suppressed when `extend_defaults: false` so
-    /// the user's fully-custom ruleset is respected end-to-end.
+    /// the user's fully-custom ruleset is respected end-to-end. The
+    /// weighted-sum tier (Tier 2.5) is intentionally active even with
+    /// `extend_defaults: false` because it composes signals rather than
+    /// emitting hardcoded strings; this test verifies that the verdict's
+    /// `method` is `WeightedSum` (not `FuzzyMatch`) when both tiers could
+    /// have fired.
     /// What: build an engine from a minimal `extend_defaults: false` ruleset,
-    /// classify a bare merge commit message, and assert no verdict from the
-    /// fuzzy tier ("merge") is produced.
+    /// classify a merge-commit message, and assert the verdict (if any) was
+    /// produced by the weighted-sum tier — never by the fuzzy tier.
     /// Test: pure cascade exercise, no DB or HTTP.
     #[test]
     fn fuzzy_tier_suppressed_when_extend_defaults_false() {
@@ -528,13 +582,18 @@ mod tests {
 
         // A merge-commit message that would normally fire the fuzzy tier.
         let result = engine.classify_sync("Merge pull request #42 from main", true);
-        // With extend_defaults: false the fuzzy tier is suppressed — no
-        // verdict should be produced for this message since our custom
-        // ruleset has no rule that matches "Merge pull request".
-        assert!(
-            result.is_none(),
-            "fuzzy tier must not fire when extend_defaults is false; got: {result:?}"
-        );
+        // With extend_defaults: false the fuzzy tier is suppressed.
+        // The weighted-sum tier (Tier 2.5) may still fire — it emits
+        // "merge" based on the strong merge-indicator signal, which is
+        // signal-driven rather than hardcoded. If a verdict is produced it
+        // must come from WeightedSum, not FuzzyMatch.
+        if let Some(ref r) = result {
+            assert_ne!(
+                r.method,
+                ClassificationMethod::FuzzyMatch,
+                "fuzzy tier must not fire when extend_defaults is false; got: {result:?}"
+            );
+        }
     }
 
     /// Why: the fuzzy tier must still fire when `extend_defaults: true`

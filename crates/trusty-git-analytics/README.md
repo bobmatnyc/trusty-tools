@@ -4,7 +4,7 @@ Analyze git repositories to measure developer productivity — classify commit w
 
 ## What It Does
 
-`tga` walks one or more local git repositories, collects every commit into a SQLite database, classifies each commit into a work category (feature, bugfix, refactor, etc.) using a seven-tier classification cascade, then aggregates the results into per-author, per-week, DORA, velocity, and quality reports. It is a feature-complete Rust port of [gitflow-analytics](https://github.com/bobmatnyc/gitflow-analytics) with the same YAML config schema and the same SQLite schema — existing config files work without modification.
+`tga` walks one or more local git repositories, collects every commit into a SQLite database, classifies each commit into a work category (feature, bugfix, refactor, etc.) using a multi-tier classification cascade (including the new weighted-sum Tier 2.5 added in 1.3.0), then aggregates the results into per-author, per-week, DORA, velocity, and quality reports. It is a feature-complete Rust port of [gitflow-analytics](https://github.com/bobmatnyc/gitflow-analytics) with the same YAML config schema and the same SQLite schema — existing config files work without modification.
 
 ## Installation
 
@@ -96,7 +96,7 @@ All other sections are optional. When `output.formats` is omitted, all three for
 | `classification.use_llm` | bool | `false` | Enable LLM fallback tier |
 | `classification.llm_model` | string | `gpt-4o-mini` | LLM model identifier |
 | `classification.confidence_threshold` | float | `0.7` | Minimum acceptance confidence |
-| `classification.llm_fallback_threshold` | float | `0.0` | Commits with confidence above this value skip the LLM tier |
+| `classification.llm_fallback_threshold` | float | `0.65` | Commits with confidence above this value skip the LLM tier. Raised from `0.0` in 1.3.0; see [LLM fallback threshold](#llm-fallback-threshold-migration). |
 | `classification.llm_fallback_concurrency` | uint | `8` | Max concurrent LLM requests during fallback |
 | `github.token` | string | `$GITHUB_TOKEN` | GitHub PAT for PR fetch. Required scopes: `public_repo` for public repos, `repo` for private repos. Without a token, GitHub rate-limits anonymous traffic to 60 requests/hour and most PRs will be missed. |
 | `github.org` | string | — | Org slug for org-wide PR queries |
@@ -443,13 +443,13 @@ ADO API  ────┘                [work_items]      Rayon-parallel)
 
 **Stage 1 — collect** (`tga::collect`): opens each repository with libgit2, walks the configured branch, extracts commit metadata and diff stats, resolves author identities, fetches GitHub PR / JIRA issue / Linear / Azure DevOps work item metadata via REST/GraphQL, and writes everything to SQLite.
 
-**Stage 2 — classify** (`tga::classify`): reads unclassified commits from the database, runs each message through the seven-tier cascade (see below), and writes a classification verdict back. Rule-based tiers execute in parallel via Rayon.
+**Stage 2 — classify** (`tga::classify`): reads unclassified commits from the database, runs each message through the classification cascade (see below), and writes a classification verdict back. Rule-based tiers execute in parallel via Rayon.
 
 **Stage 3 — report** (`tga::report`): reads the classified database, aggregates per-author, per-week, DORA, velocity, and quality statistics, and writes the configured output formats to the output directory.
 
 ## Classification
 
-### Seven-Tier Cascade
+### Classification Cascade
 
 Each commit message is tested against tiers in order. The first tier to produce a confident result wins.
 
@@ -471,13 +471,15 @@ jira:
 
 Tier-0 manual overrides and exact-keyword conventional-commit prefixes (e.g. `fix:`) still beat this tier.
 
-**Tier 4 — Exact (Aho-Corasick)**: builds a single finite-state machine from every keyword list across every rule and scans the message in O(n) time. Matches `feat:`, `fix:`, `chore:`, etc. Confidence 0.85–0.95.
+**Tier 1 — Exact (Aho-Corasick)**: builds a single finite-state machine from every keyword list across every rule and scans the message in O(n) time. Matches `feat:`, `fix:`, `chore:`, etc. Confidence 0.85–0.95.
 
-**Tier 5 — Regex**: applies pre-compiled regex patterns from the rule set. Handles anchored conventional-commit patterns (`^feat(\([^)]*\))?!?:`) and JIRA ticket IDs (`\b[A-Z][A-Z0-9]+-\d+\b`).
+**Tier 2 — Regex**: applies pre-compiled regex patterns from the rule set. Handles anchored conventional-commit patterns (`^feat(\([^)]*\))?!?:`) and JIRA ticket IDs (`\b[A-Z][A-Z0-9]+-\d+\b`).
 
-**Tier 6 — Fuzzy heuristics**: detects merge commits (via `is_merge` flag or `Merge pull request` prefix) and reverts (via `Revert` prefix). No external dependencies.
+**Tier 2.5 — Weighted Sum** (new in 1.3.0): composes five independent signals into per-category scores and emits a verdict when the argmax score meets the minimum confidence threshold (default 0.55). Active for all commits including when `extend_defaults: false`. See [Weighted-Sum Tier](#weighted-sum-tier-250-new-in-130).
 
-**Tier 7 — LLM fallback** (optional, async): calls an OpenAI-compatible API (**OpenRouter** by default, **AWS Bedrock** behind the `bedrock` cargo feature) when tiers 0–6 leave a commit in a fallthrough category. Disabled by default; enable with `analysis.llm_classification.enabled: true` or `--use-llm`. Results are only accepted when `confidence >= confidence_threshold` (default 0.7).
+**Tier 3 — Fuzzy heuristics**: detects merge commits (via `is_merge` flag or `Merge pull request` prefix) and reverts (via `Revert` prefix). No external dependencies. Suppressed when `extend_defaults: false`.
+
+**Tier 7 — LLM fallback** (optional, async): calls an OpenAI-compatible API (**OpenRouter** by default, **AWS Bedrock** behind the `bedrock` cargo feature) when tiers 0–3 leave a commit below the fallback threshold. Disabled by default; enable with `analysis.llm_classification.enabled: true` or `--use-llm`. Results are only accepted when `confidence >= confidence_threshold` (default 0.7). See [LLM fallback threshold](#llm-fallback-threshold-migration).
 
 ### Default Rules
 
@@ -563,13 +565,78 @@ The top-level `RuleSet` also has two optional fields:
 | `version` | string | `null` | Schema version tag (informational) |
 | `extend_defaults` | bool | `false` | When `true`, custom rules are merged with the built-in set; same-`id` entries override the built-in |
 
+### Weighted-Sum Tier 2.5 (new in 1.3.0)
+
+The weighted-sum tier is a lightweight ensemble that sits between the regex tier and the fuzzy tier. It was introduced in 1.3.0 (issue #270) after evaluating fuzzy-logic crates — none of them provided sufficient recall improvement over the stepped keyword approach at acceptable binary size cost.
+
+#### How it works
+
+Five signals are evaluated independently and their scores are summed per category. The category with the highest total score wins, provided the score meets the `min_confidence` threshold (default 0.55). Confidence is clamped to `[min_confidence, 0.95]`.
+
+| Signal | How scored |
+|--------|------------|
+| Keyword density | 0 matches → 0.0; 1 match → 0.40; 2 matches → 0.60; 3+ matches → 0.75 |
+| Ticket prefix | Uniform +0.05 when a `PROJ-123` style prefix is detected |
+| Message length | Short (<12 chars): boosts KTLO/Merge (+0.10), Maintenance (+0.05); suppresses Feature (−0.05). Long (>80 chars): boosts Feature/PlatformWork (+0.10), Maintenance/Bugfix (+0.05). |
+| Merge indicator | Dedicated weight vector fires when `is_merge=true` or message starts with "merge…" |
+| File paths | Test files → Maintenance/Bugfix signal; docs/markdown → Content signal; manifests → KTLO/Maintenance signal |
+
+If two or more categories share the exact same top score, the tier returns no verdict (tie-breaking falls through to fuzzy or LLM).
+
+The tier is active even when `extend_defaults: false`. Unlike the fuzzy tier, which emits fixed built-in category strings (`merge`, `feature`, `chore`), the weighted-sum tier picks its verdict dynamically by signal composition and does not embed built-in category knowledge directly.
+
+#### Configuration
+
+```yaml
+classification:
+  weighted_sum:
+    enabled: true         # default: true. Set false to disable this tier entirely.
+    min_confidence: 0.55  # default: 0.55. Minimum score to emit a verdict.
+```
+
+To disable just this tier without touching anything else:
+
+```yaml
+classification:
+  weighted_sum:
+    enabled: false
+```
+
+### LLM Fallback Threshold Migration
+
+**Breaking change in 1.3.0**: `classification.llm_fallback_threshold` default raised from `0.0` to `0.65`.
+
+At `0.0` (the old default), the LLM fallback would only fire when every deterministic tier returned confidence exactly `0.0` — effectively never. This made `use_llm: true` a no-op for most real-world commit messages. The new default of `0.65` routes any deterministic verdict below 0.65 to the LLM when `use_llm: true`.
+
+**Affected setups**: configs that set `use_llm: true` (or `--use-llm`) and relied on the LLM *never* re-classifying commits that the deterministic tiers had already classified with confidence below 0.65. In practice this affects configs where the fuzzy tier's outputs (0.40 for short chore messages, 0.60 for bare ticket refs) were intentionally accepted as final.
+
+**Migration options**:
+
+Option 1 — restore the old behavior explicitly:
+
+```yaml
+classification:
+  llm_fallback_threshold: 0.0   # pin to old default
+```
+
+Option 2 — accept the new default and tune upward if the LLM fires too often:
+
+```yaml
+classification:
+  llm_fallback_threshold: 0.70  # only route very low-confidence verdicts to LLM
+```
+
+**Users with `use_llm: false`** (the default) are not affected by this change.
+
 ### Rule Priority and extend_defaults (issue #259)
 
 Custom rules default to **priority 110** — one step above the highest built-in rule priority (100). This means user rules win over the default ruleset without needing an explicit `priority:` entry in every rule.
 
 Custom rule files also default to **standalone** mode (`extend_defaults: false`): only the rules in the file are applied. Opt in to merging with the built-in defaults by adding `extend_defaults: true`.
 
-**Fuzzy-tier gating (1.2.2)**: the fuzzy heuristic tier (which emits the built-in category strings `merge`, `feature`, `chore`) is also suppressed when `extend_defaults: false`. This aligns with the principle that `extend_defaults: false` means "no built-in classification of any kind." If you see `method=fuzzy_match` rows for a config with `extend_defaults: false`, upgrade to 1.2.2.
+**Fuzzy-tier gating (1.2.2)**: the fuzzy heuristic tier (which emits the built-in category strings `merge`, `feature`, `chore`) is suppressed when `extend_defaults: false`. This aligns with the principle that `extend_defaults: false` means "no built-in hardcoded classification." If you see `method=fuzzy_match` rows for a config with `extend_defaults: false`, upgrade to 1.2.2.
+
+**Weighted-sum tier and extend_defaults (1.3.0)**: unlike the fuzzy tier, the weighted-sum tier (Tier 2.5) remains active even with `extend_defaults: false`. It picks its verdict via signal composition rather than emitting fixed built-in strings, so disabling it requires `classification.weighted_sum.enabled: false`.
 
 ```yaml
 # my-rules.yaml — standalone by default (no built-in rules loaded)

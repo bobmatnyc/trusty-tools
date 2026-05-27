@@ -227,6 +227,13 @@ pub enum ClassificationMethod {
     /// Derived from an external ticket source (JIRA issue type or GitHub
     /// Issues label). Added for issue #260.
     ExternalSource,
+    /// Composed from multiple weak signals via a weighted-sum model.
+    ///
+    /// Tier 2.5 — sits between the regex tier (Tier 2) and the fuzzy tier
+    /// (Tier 3). Blends keyword-density, ticket-prefix presence, message-length
+    /// bucket, merge indicator, and file-path signals into per-category scores.
+    /// Added for issue #270.
+    WeightedSum,
 }
 
 impl ClassificationMethod {
@@ -246,6 +253,7 @@ impl ClassificationMethod {
             ClassificationMethod::LlmFallback => "llm_fallback",
             ClassificationMethod::Manual => "manual",
             ClassificationMethod::ExternalSource => "external_source",
+            ClassificationMethod::WeightedSum => "weighted_sum",
         }
     }
 }
