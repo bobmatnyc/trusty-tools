@@ -1,6 +1,6 @@
 [package]
 name = "trusty-memory"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 description = "MCP server (stdio + HTTP/SSE) for trusty-memory"
 license = "MIT"
@@ -130,6 +130,9 @@ libc = { workspace = true }
 # already a workspace dep (used by the cli-help suggest feature in
 # trusty-common), so this adds zero lockfile churn.
 strsim = { workspace = true }
+# Issue #278: encode/decode triple IDs as URL-safe base64 for the
+# `DELETE /kg/triples/<id>` endpoint. Already in the workspace dependency table.
+base64 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

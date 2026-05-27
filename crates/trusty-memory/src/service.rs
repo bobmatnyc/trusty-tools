@@ -858,6 +858,30 @@ impl MemoryService {
             .map_err(|e| ServiceError::internal(format!("kg assert: {e:#}")))
     }
 
+    /// Retract the single active triple identified by `(subject, predicate)`.
+    ///
+    /// Why: Issue #278 — the `DELETE /kg/triples/<id>` HTTP endpoint needs a
+    /// service-layer method so the HTTP handler stays a thin adapter.
+    /// What: Opens the palace handle, calls `KnowledgeGraph::retract`, and
+    /// maps the closed count to a 204/404 signal: `Ok(true)` when at least
+    /// one interval was closed, `Ok(false)` when no active triple matched.
+    /// Test: Covered by `kg_delete_triple_returns_204_on_success` in
+    /// `web::tests`.
+    pub async fn kg_retract_triple(
+        &self,
+        id: &str,
+        subject: &str,
+        predicate: &str,
+    ) -> ServiceResult<bool> {
+        let handle = self.open_handle(id)?;
+        let closed = handle
+            .kg
+            .retract(subject, predicate)
+            .await
+            .map_err(|e| ServiceError::internal(format!("kg retract: {e:#}")))?;
+        Ok(closed > 0)
+    }
+
     /// List distinct subjects in the KG.
     pub async fn kg_list_subjects(&self, id: &str, limit: usize) -> ServiceResult<Vec<String>> {
         let handle = self.open_handle(id)?;

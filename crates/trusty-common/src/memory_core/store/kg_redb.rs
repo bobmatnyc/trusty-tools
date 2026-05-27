@@ -806,6 +806,61 @@ impl KgStoreRedb {
         Ok(())
     }
 
+    /// Delete all active triples whose subject matches `subject`.
+    ///
+    /// Why: Cascade-delete on drawer removal (issue #278) — when a drawer is
+    /// forgotten, every triple extracted from it (identified by the
+    /// `drawer:<uuid>` subject prefix) must be removed so the KG does not
+    /// accumulate orphaned edges.
+    /// What: Performs a prefix scan over TRIPLES using `subject_prefix(subject)`,
+    /// collects every active (non-history, non-closed) `(subject, predicate)`
+    /// pair, and retracts each via the existing `retract` path so secondary
+    /// indexes and the active count table are kept consistent. Returns the
+    /// number of active rows closed.
+    /// Test: `cascade_delete_removes_triples_for_subject` in this module's
+    /// test section.
+    pub fn delete_by_subject(&self, subject: &str) -> Result<usize> {
+        self.check_writable()?;
+        let prefix = subject_prefix(subject);
+        let mut to_retract: Vec<(String, String)> = Vec::new();
+        {
+            let rtx = self.db().begin_read().context("begin delete_by_subject read")?;
+            let triples = rtx
+                .open_table(TRIPLES)
+                .context("open triples for delete_by_subject scan")?;
+            let mut end = prefix.clone();
+            end.push(0xFF);
+            let range = triples
+                .range::<&[u8]>(prefix.as_slice()..end.as_slice())
+                .context("range scan for delete_by_subject")?;
+            for entry in range {
+                let (k, v) = entry.context("read row in delete_by_subject")?;
+                if k.value().starts_with(b"hist:") {
+                    continue;
+                }
+                let value: TripleValue =
+                    decode_value(v.value()).context("decode value in delete_by_subject")?;
+                if value.valid_to_ms.is_some() {
+                    // Already closed — skip.
+                    continue;
+                }
+                if let Some((s, p)) = decode_triple_key(k.value()) {
+                    to_retract.push((s, p));
+                }
+            }
+        }
+        let mut closed = 0usize;
+        for (s, p) in &to_retract {
+            match self.retract(s, p) {
+                Ok(n) => closed += n,
+                Err(e) => {
+                    tracing::warn!(subject = %s, predicate = %p, "delete_by_subject: retract failed: {e:#}");
+                }
+            }
+        }
+        Ok(closed)
+    }
+
     /// Load all drawers from the table.
     ///
     /// Why: Cold-start retrieval needs the full drawer table to map every HNSW

@@ -25,6 +25,39 @@ use std::collections::HashSet;
 use trusty_common::memory_core::store::kg::Triple;
 use uuid::Uuid;
 
+/// Default tags that cause a drawer to be skipped during auto-extraction.
+///
+/// Why: Drawers tagged with these labels are by definition non-factual project
+/// knowledge (test fixtures, QA scaffolding, synthetic content) and should not
+/// pollute the KG with noise triples.
+/// What: A static slice of lowercase tag strings; matched case-insensitively
+/// during extraction.
+/// Test: `extract_triples_skips_denied_tags`.
+pub const DEFAULT_DENY_TAGS: &[&str] = &["cross-project-qa", "test", "fixture"];
+
+/// Configuration for a single extraction pass.
+///
+/// Why: Bundles per-run configuration so `extract_triples` can be called with
+/// different deny-lists (e.g. the default prod list vs. an empty list in
+/// integration tests) without changing the function signature.
+/// What: Contains a `deny_tags` slice; the extractor skips any drawer whose
+/// tags intersect this set.
+/// Test: `extract_triples_skips_denied_tags`, `extract_triples_empty_deny_list`.
+#[derive(Debug, Clone)]
+pub struct KgExtractConfig<'a> {
+    /// Tags that cause extraction to be skipped entirely. Compared
+    /// case-insensitively against the drawer's tag list.
+    pub deny_tags: &'a [&'a str],
+}
+
+impl Default for KgExtractConfig<'_> {
+    fn default() -> Self {
+        Self {
+            deny_tags: DEFAULT_DENY_TAGS,
+        }
+    }
+}
+
 /// Provenance tag stamped on every auto-extracted triple.
 ///
 /// Why: Operators need a stable string to filter / retract the auto-extracted
@@ -107,16 +140,51 @@ pub struct ExtractInput<'a> {
     pub room: Option<&'a str>,
 }
 
+/// Run the deterministic heuristic extractor with default config.
+///
+/// Why: Convenience wrapper that uses [`KgExtractConfig::default`] (the
+/// production deny-list) so call sites that do not need a custom config
+/// remain unchanged.
+/// What: Delegates to [`extract_triples_with_config`] with a default config.
+/// Test: All existing tests call this helper and implicitly exercise the default
+/// deny-list path.
+pub fn extract_triples(input: &ExtractInput<'_>) -> Vec<Triple> {
+    extract_triples_with_config(input, &KgExtractConfig::default())
+}
+
 /// Run the deterministic heuristic extractor.
 ///
 /// Why: Single entry point so `memory_remember`, `memory_note`, and the
 /// back-fill CLI all share the same logic. Pure function — no I/O, no async —
-/// so it can be unit-tested cheaply.
-/// What: Walks `tags`, content tokens, and a small pattern list to emit
-/// `Triple`s; deduplicates so the same `(subject, predicate, object)` never
-/// appears twice in a single pass.
-/// Test: see the four tests at the bottom of this file.
-pub fn extract_triples(input: &ExtractInput<'_>) -> Vec<Triple> {
+/// so it can be unit-tested cheaply. Accepts a [`KgExtractConfig`] so callers
+/// can override the deny-list without touching the function signature.
+/// What: First checks whether any of the drawer's tags appear in
+/// `config.deny_tags` (case-insensitive); when a match is found the function
+/// returns immediately with an empty vec and logs a debug message. Otherwise
+/// walks `tags`, content tokens, and a small pattern list to emit `Triple`s;
+/// deduplicates so the same `(subject, predicate, object)` never appears twice
+/// in a single pass.
+/// Test: `extract_triples_skips_denied_tags`, `extract_triples_emits_tag_triples`,
+/// plus all other tests in this file.
+pub fn extract_triples_with_config(
+    input: &ExtractInput<'_>,
+    config: &KgExtractConfig<'_>,
+) -> Vec<Triple> {
+    // Deny-list check: if any tag on this drawer is in the deny set, skip
+    // extraction entirely. The check is case-insensitive to tolerate mixed-
+    // case tags from different clients.
+    let denied = input.tags.iter().any(|t| {
+        let lower = t.trim().to_lowercase();
+        config.deny_tags.contains(&lower.as_str())
+    });
+    if denied {
+        tracing::debug!(
+            drawer_id = %input.drawer_id,
+            tags = ?input.tags,
+            "kg_extract: skipping drawer — tag matches deny-list"
+        );
+        return Vec::new();
+    }
     let now = Utc::now();
     let subject = drawer_subject(input.drawer_id);
     let mut out: Vec<Triple> = Vec::new();
@@ -468,5 +536,73 @@ mod tests {
         assert_eq!(triples[0].subject, "tag:meeting");
         assert_eq!(triples[0].predicate, "tags");
         assert_eq!(triples[0].object, drawer_subject(id));
+    }
+
+    /// Why: Drawers tagged with deny-listed labels (test fixtures, QA scaffolding)
+    /// must not pollute the KG with non-factual content.
+    /// What: A drawer with the `test` tag must produce zero triples even when
+    /// it also has a room and content with extractable patterns.
+    /// Test: This test.
+    #[test]
+    fn extract_triples_skips_denied_tags() {
+        let id = Uuid::new_v4();
+        let tags = vec!["test".to_string(), "rust".to_string()];
+        let triples = extract_triples(&ExtractInput {
+            drawer_id: id,
+            content: "rustc is a compiler",
+            tags: &tags,
+            room: Some("Backend"),
+        });
+        assert!(
+            triples.is_empty(),
+            "a drawer with a deny-list tag must produce zero triples, got {triples:?}"
+        );
+    }
+
+    /// Why: Deny-list matching is case-insensitive so `TEST` and `Test` are
+    /// blocked the same as `test`.
+    /// What: A drawer tagged `FIXTURE` (upper-case) must still produce zero
+    /// triples.
+    /// Test: This test.
+    #[test]
+    fn extract_triples_deny_list_is_case_insensitive() {
+        let id = Uuid::new_v4();
+        let tags = vec!["FIXTURE".to_string()];
+        let triples = extract_triples(&ExtractInput {
+            drawer_id: id,
+            content: "some content",
+            tags: &tags,
+            room: None,
+        });
+        assert!(
+            triples.is_empty(),
+            "upper-cased deny tag must still be blocked"
+        );
+    }
+
+    /// Why: An empty deny-list (e.g. in integration tests that want to exercise
+    /// extraction regardless of tags) must not suppress any triples.
+    /// What: Calling `extract_triples_with_config` with `deny_tags = &[]` on a
+    /// drawer tagged `test` must produce the normal tag triple.
+    /// Test: This test.
+    #[test]
+    fn extract_triples_empty_deny_list_passes_through() {
+        let id = Uuid::new_v4();
+        let tags = vec!["test".to_string()];
+        let config = KgExtractConfig { deny_tags: &[] };
+        let triples = extract_triples_with_config(
+            &ExtractInput {
+                drawer_id: id,
+                content: "anything",
+                tags: &tags,
+                room: None,
+            },
+            &config,
+        );
+        // "test" tag should produce a tag triple when the deny-list is empty.
+        assert!(
+            !triples.is_empty(),
+            "empty deny-list must not suppress extraction"
+        );
     }
 }

@@ -107,6 +107,11 @@ enum Command {
     },
 
     /// Migrate from another memory MCP server to trusty-memory.
+    ///
+    /// For `kuzu-memory`: rewrites Claude `mcpServers` config entries.
+    /// For `kuzu-data`: imports entity/relation data from a kuzu-memory
+    /// `store.redb` file into a trusty-memory palace (requires `--from`
+    /// and `--palace`).
     Migrate {
         /// What to migrate from.
         #[arg(value_enum)]
@@ -120,6 +125,20 @@ enum Command {
         /// migration only has a config phase, so this flag is a no-op.
         #[arg(long)]
         config_only: bool,
+
+        /// Path to the kuzu-memory `store.redb` file (required for
+        /// `kuzu-data`).
+        #[arg(long, value_name = "PATH")]
+        from: Option<std::path::PathBuf>,
+
+        /// Target palace name to import into (required for `kuzu-data`).
+        /// The palace is created if it does not already exist.
+        #[arg(long, value_name = "NAME")]
+        palace: Option<String>,
+
+        /// Maximum number of entities to import (default: import all).
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
     },
 
     /// First-time setup: data dir + launchd (macOS) + Claude settings patch.
@@ -335,7 +354,10 @@ async fn main() -> Result<()> {
             target,
             dry_run,
             config_only,
-        } => handle_migrate(target, dry_run, config_only),
+            from,
+            palace,
+            limit,
+        } => handle_migrate(target, dry_run, config_only, from, palace, limit),
         Command::Setup => handle_setup(),
         Command::PromptContext => handle_prompt_context().await,
         Command::Service { action } => handle_service(&action),

@@ -299,6 +299,59 @@ trusty-memory = { workspace = true }
 trusty-memory = { workspace = true, default-features = false }
 ```
 
+## Migration
+
+### From kuzu-memory (MCP config, issue #278)
+
+If you're switching from the legacy `kuzu-memory` Python MCP server, rewrite
+every Claude `mcpServers` config entry in one command:
+
+```bash
+# Dry-run: see what would change
+trusty-memory migrate kuzu-memory --dry-run
+
+# Apply: rewrite all Claude settings files atomically
+trusty-memory migrate kuzu-memory
+```
+
+### Knowledge-graph hygiene (issue #278)
+
+Auto-KG extraction skips drawers tagged `cross-project-qa`, `test`, or
+`fixture` so synthetic content never pollutes the graph. Drawers deleted via
+`memory_forget` cascade-delete their derived triples automatically.
+
+The REST endpoint `DELETE /api/v1/palaces/{id}/kg/triples/{triple_id}` lets
+you surgically remove a single active triple; `triple_id` is the base64url
+encoding of `subject + "\0" + predicate`.
+
+### From kuzu-memory data (issue #277)
+
+Import entities and relations from a kuzu-memory `store.redb` into a
+trusty-memory palace:
+
+```bash
+# Dry-run: see what would be imported
+trusty-memory migrate kuzu-data \
+  --from ~/.open-mpm/memory/store.redb \
+  --palace my-palace \
+  --dry-run
+
+# Apply the import (idempotent — safe to re-run)
+trusty-memory migrate kuzu-data \
+  --from ~/.open-mpm/memory/store.redb \
+  --palace my-palace
+
+# Cap at 100 entities
+trusty-memory migrate kuzu-data \
+  --from ~/.open-mpm/memory/store.redb \
+  --palace my-palace \
+  --limit 100
+```
+
+Each kuzu-memory entity becomes one drawer; each relation becomes one KG
+triple. Re-running is idempotent: entity IDs are SHA-256-derived UUIDs so
+duplicate imports produce the same drawer ID and are silently skipped.
+
 ## Development
 
 ```bash

@@ -15,6 +15,7 @@
 pub mod doctor;
 pub mod inbox_check;
 pub mod kg_rebuild;
+pub mod kuzu_migrate;
 pub mod migrate;
 pub mod migrations;
 pub mod monitor;

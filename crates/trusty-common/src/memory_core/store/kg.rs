@@ -957,6 +957,83 @@ impl KnowledgeGraph {
         self.store.is_read_only()
     }
 
+    /// Delete all active triples whose subject is `drawer:<drawer_id>`.
+    ///
+    /// Why: Issue #278 (cascade-delete) — when a drawer is forgotten via
+    /// `PalaceHandle::forget`, every auto-extracted triple anchored to that
+    /// drawer (identified by the `drawer:<uuid>` subject prefix) would otherwise
+    /// remain as orphaned edges, polluting the KG with facts that reference a
+    /// non-existent source. This method closes them all in one shot.
+    /// What: Delegates to `KgStoreRedb::delete_by_subject` using the canonical
+    /// `drawer:<uuid>` subject format (`drawer:<hyphenated-uuid>`), then drops
+    /// the corresponding edges from the in-memory adjacency so subsequent graph
+    /// queries see a consistent view without a restart.
+    /// Test: `cascade_delete_removes_triples_for_drawer`.
+    pub async fn cascade_delete_by_drawer(&self, drawer_id: Uuid) -> Result<usize> {
+        // Canonical subject format used by `kg_extract.rs::drawer_subject`.
+        let subject = format!("drawer:{drawer_id}");
+        let store = self.store.clone();
+        let subject_clone = subject.clone();
+        let closed = tokio::task::spawn_blocking(move || store.delete_by_subject(&subject_clone))
+            .await
+            .context("cascade_delete_by_drawer spawn_blocking join error")??;
+
+        // Sync the in-memory adjacency — remove every edge from the drawer's
+        // node so the graph view reflects the deletion without a restart.
+        if closed > 0 {
+            let mut adj = self
+                .adj
+                .write()
+                .map_err(|_| anyhow::anyhow!("kg adjacency lock poisoned"))?;
+            if let Some(&s_idx) = adj.node_index.get(&subject) {
+                let to_remove: Vec<_> = adj
+                    .graph
+                    .edges(s_idx)
+                    .map(|e| e.id())
+                    .collect();
+                for eid in to_remove {
+                    adj.graph.remove_edge(eid);
+                }
+            }
+        }
+        Ok(closed)
+    }
+
+    /// Synchronous triple assert; see `KgWriter::assert_sync`.
+    ///
+    /// Why: CLI commands (e.g. `migrate kuzu-data`) run outside a tokio
+    /// runtime and need a direct write path without spawning an executor.
+    /// What: Delegates to `KgWriter::assert_sync` on the bypass path.
+    /// Test: Used by `kuzu_migrate::tests` and the fixture-based integration
+    /// test in `tests/kuzu_migrate_tests.rs`.
+    pub fn assert_sync(&self, triple: &Triple) -> Result<()> {
+        self.writer.assert_sync(triple)
+    }
+
+    /// Synchronous drawer upsert; see `KgWriter::upsert_drawer_sync`.
+    ///
+    /// Why: Same motivation as `assert_sync` — CLI migrate commands need a
+    /// synchronous write path.
+    /// What: Delegates to `KgWriter::upsert_drawer_sync`.
+    /// Test: Used by `kuzu_migrate::tests`.
+    pub fn upsert_drawer_sync(&self, drawer: &Drawer) -> Result<()> {
+        self.writer.upsert_drawer_sync(drawer)
+    }
+
+    /// Expose the underlying store for read-only inspection (e.g. schema
+    /// discovery in migrate commands).
+    ///
+    /// Why: CLI commands that need to call store methods not exposed on
+    /// `KnowledgeGraph` directly (e.g. `query_active` in a sync context)
+    /// need access to the raw store reference. The store reference is
+    /// `Arc<KgStoreRedb>` so cloning it is cheap.
+    /// What: Returns a clone of the `Arc<KgStoreRedb>` via the writer's
+    /// `store()` accessor.
+    /// Test: Used by `kuzu_migrate` for idempotency checks.
+    pub fn store(&self) -> std::sync::Arc<KgStoreRedb> {
+        self.writer.store()
+    }
+
     /// Dump every triple including closed history rows.
     ///
     /// Why: Issue #45's SQLite → redb migration walks the entire SQLite table.

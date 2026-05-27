@@ -115,6 +115,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/palaces/{id}/kg/graph", get(kg_graph))
         .route("/api/v1/palaces/{id}/kg/count", get(kg_count))
         .route(
+            "/api/v1/palaces/{id}/kg/triples/{triple_id}",
+            delete(kg_delete_triple),
+        )
+        .route(
             "/api/v1/palaces/{id}/dream/status",
             get(palace_dream_status),
         )
@@ -1225,6 +1229,91 @@ async fn kg_count(
     Ok(Json(json!({ "active": active })))
 }
 
+/// Separator byte sequence used inside a URL-safe base64 triple ID.
+///
+/// Why: The triple primary key is `(subject, predicate)`. Encoding them as a
+/// single opaque ID lets the REST path look like `/kg/triples/<id>` (a
+/// resource identifier) rather than carrying both parts in the URL path, which
+/// would require double-escaping arbitrary strings. A `\0` separator is safe
+/// because neither subjects nor predicates ever contain null bytes.
+/// What: Used by [`encode_triple_id`] and [`decode_triple_id`].
+/// Test: `decode_triple_id_round_trips`.
+const TRIPLE_ID_SEPARATOR: u8 = 0x00;
+
+/// Encode a `(subject, predicate)` pair as a URL-safe base64 triple ID.
+///
+/// Why: Produces a single opaque string that can travel as a URL path segment
+/// without percent-encoding. The null-byte separator ensures the encoding is
+/// injective (no two distinct pairs can produce the same encoded string).
+/// What: `base64url(subject_bytes + "\0" + predicate_bytes)`, no padding.
+/// Test: `decode_triple_id_round_trips`.
+// Only used in tests (for round-trip assertions); suppress the dead_code lint
+// that fires in non-test builds because `pub(crate)` alone doesn't silence it.
+#[allow(dead_code)]
+pub(crate) fn encode_triple_id(subject: &str, predicate: &str) -> String {
+    use base64::Engine as _;
+    let mut buf = Vec::with_capacity(subject.len() + 1 + predicate.len());
+    buf.extend_from_slice(subject.as_bytes());
+    buf.push(TRIPLE_ID_SEPARATOR);
+    buf.extend_from_slice(predicate.as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&buf)
+}
+
+/// Decode a URL-safe base64 triple ID back to `(subject, predicate)`.
+///
+/// Why: The handler for `DELETE /kg/triples/<id>` needs to recover the
+/// `(subject, predicate)` pair from the opaque path segment to call the
+/// service layer.
+/// What: Decodes base64url, splits on the first null byte. Returns `None`
+/// when the input is not valid base64url or contains no null separator.
+/// Test: `decode_triple_id_round_trips`.
+pub(crate) fn decode_triple_id(id: &str) -> Option<(String, String)> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(id)
+        .ok()?;
+    let sep_pos = bytes.iter().position(|&b| b == TRIPLE_ID_SEPARATOR)?;
+    let subject = String::from_utf8(bytes[..sep_pos].to_vec()).ok()?;
+    let predicate = String::from_utf8(bytes[sep_pos + 1..].to_vec()).ok()?;
+    Some((subject, predicate))
+}
+
+/// `DELETE /api/v1/palaces/{id}/kg/triples/{triple_id}` — surgically remove
+/// one active triple by its opaque base64url-encoded `(subject, predicate)` ID.
+///
+/// Why: Issue #278 — the existing `(subject, predicate)` retract via
+/// `/kg/prompt-facts` is scope-wide (retract across all palaces). This
+/// endpoint targets exactly one triple in exactly one palace, giving callers
+/// a surgical way to delete a specific edge without affecting other palaces
+/// or other predicates for the same subject.
+/// What: Decodes `triple_id` (base64url of `subject\0predicate`) back into
+/// `(subject, predicate)`, retracts the active interval via
+/// `MemoryService::kg_retract_triple`, and returns:
+///   - `204 No Content` on success
+///   - `404 Not Found` when the triple_id is malformed or no active triple
+///     matched
+///
+/// Test: `kg_delete_triple_returns_204_on_success` and
+/// `kg_delete_triple_returns_404_for_missing`.
+async fn kg_delete_triple(
+    State(state): State<AppState>,
+    AxumPath((id, triple_id)): AxumPath<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let (subject, predicate) = decode_triple_id(&triple_id).ok_or_else(|| {
+        ApiError::not_found("invalid triple id — expected base64url(subject\\0predicate)")
+    })?;
+    let found = crate::service::MemoryService::new(state)
+        .kg_retract_triple(&id, &subject, &predicate)
+        .await?;
+    if found {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found(format!(
+            "no active triple with subject={subject:?} predicate={predicate:?} in palace {id:?}"
+        )))
+    }
+}
+
 pub(crate) use crate::service::KgGraphPayload;
 
 async fn kg_graph(
@@ -2291,11 +2380,14 @@ mod tests {
             .expect("create_palace");
 
         let app = router().with_state(state.clone());
+        // Why: tag "test" is in the KG extraction deny-list (issue #278), so we
+        // use "backend" and "kg" tags to exercise the auto-extraction path
+        // without triggering the deny-list skip.
         let body = json!({
             "content": "trusty-memory is a Rust crate that ships an MCP server. \
                         It tracks #mcp and #rust topics with care.",
             "room": "Backend",
-            "tags": ["test", "kg"],
+            "tags": ["backend", "kg"],
             "importance": 0.5,
         })
         .to_string();
@@ -2348,10 +2440,12 @@ mod tests {
         );
         // Spot-check the tag-as-subject encoding survived (matches the MCP
         // path's behaviour and proves the extractor saw the body's tags).
+        // Note: "test" is in the deny-list, so we use "backend" in the drawer
+        // tags above (issue #278); assert on that tag instead.
         assert!(
             auto.iter()
-                .any(|t| t["subject"].as_str() == Some("tag:test")),
-            "expected `tag:test` auto-extracted edge, got: {auto:?}"
+                .any(|t| t["subject"].as_str() == Some("tag:backend")),
+            "expected `tag:backend` auto-extracted edge, got: {auto:?}"
         );
         // Hashtag mention triples (room-aware extractor).
         assert!(
@@ -4658,5 +4752,52 @@ mod tests {
             res.is_ok(),
             "hook must complete even when daemon emit fails; got {res:?}"
         );
+    }
+
+    /// Why: The base64url triple-ID round-trip is the core invariant for
+    /// `DELETE /kg/triples/<id>` — if encode/decode aren't inverses, the
+    /// handler will always 404 on valid IDs.
+    /// What: Encodes a (subject, predicate) pair, decodes the result, and
+    /// asserts exact equality with the originals. Also tests the null-byte
+    /// separator and URL-safety.
+    /// Test: This test.
+    #[test]
+    fn decode_triple_id_round_trips() {
+        let cases = [
+            ("drawer:some-uuid", "has_tag"),
+            ("entity:alice", "works_at"),
+            ("entity:project/foo", "depends_on"),
+            // edge: empty predicate
+            ("subject", ""),
+            // edge: subject with slashes + predicate with colons
+            ("path/to/node", "rel:type:sub"),
+        ];
+        for (subject, predicate) in cases {
+            let encoded = encode_triple_id(subject, predicate);
+            // Must be URL-safe: no +, /, or = characters.
+            assert!(
+                !encoded.contains('+') && !encoded.contains('/') && !encoded.contains('='),
+                "encoded triple id {encoded:?} is not URL-safe"
+            );
+            let (s, p) = decode_triple_id(&encoded)
+                .unwrap_or_else(|| panic!("decode_triple_id failed for {encoded:?}"));
+            assert_eq!(s, subject, "subject mismatch for ({subject}, {predicate})");
+            assert_eq!(
+                p, predicate,
+                "predicate mismatch for ({subject}, {predicate})"
+            );
+        }
+    }
+
+    /// Why: `decode_triple_id` must return `None` on garbage input (not panic).
+    /// What: Passes invalid base64 and base64 without a null separator; asserts None.
+    /// Test: This test.
+    #[test]
+    fn decode_triple_id_returns_none_for_invalid_input() {
+        assert!(decode_triple_id("not!!valid%%base64").is_none());
+        // Valid base64url but no null separator → no split possible.
+        use base64::Engine as _;
+        let no_sep = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"no-separator");
+        assert!(decode_triple_id(&no_sep).is_none());
     }
 }

@@ -43,13 +43,18 @@ const TRUSTY_KEY: &str = "trusty-memory";
 /// Why: model the migration source as an enum (validated at parse time by
 /// clap) so additional sources can be added later without changing the
 /// CLI surface.
-/// What: a single variant today — `kuzu-memory`.
+/// What: two variants today — `kuzu-memory` (config migration) and
+/// `kuzu-data` (data migration from a kuzu-memory `store.redb`).
 /// Test: `cargo run -p trusty-memory -- migrate bogus` → clap rejects with
 /// a usage hint.
 #[derive(Debug, Clone, ValueEnum)]
 pub enum MigrateTarget {
     /// Migrate from kuzu-memory (rewrites Claude `mcpServers` entries).
     KuzuMemory,
+    /// Import entity/relation data from a kuzu-memory `store.redb` file into
+    /// a trusty-memory palace.
+    #[value(name = "kuzu-data")]
+    KuzuData,
 }
 
 /// Outcome of attempting to migrate one Claude settings file.
@@ -85,23 +90,39 @@ pub struct ConfigMigrateResult {
 /// Entry point for `trusty-memory migrate`.
 ///
 /// Why: a single command that switches a machine from kuzu-memory to
-/// trusty-memory, rewriting every Claude MCP settings file in one go.
-/// What: discovers settings files, migrates each, prints a summary table.
+/// trusty-memory. `kuzu-memory` rewrites every Claude MCP settings file.
+/// `kuzu-data` imports entity/relation data from a kuzu-memory `store.redb`
+/// into a target palace.
+/// What: dispatches to the appropriate handler based on the `target` variant.
 /// The `_config_only` flag is accepted for CLI parity with
-/// `trusty-search migrate` but is a no-op today (the migration only has a
-/// config phase).
+/// `trusty-search migrate` but only applies to `kuzu-memory` (the config
+/// migration).
 /// Test: `migrate kuzu-memory --dry-run` enumerates without writing.
-pub fn handle_migrate(target: MigrateTarget, dry_run: bool, _config_only: bool) -> Result<()> {
-    // `target` has one variant today; the match keeps future sources explicit.
+pub fn handle_migrate(
+    target: MigrateTarget,
+    dry_run: bool,
+    _config_only: bool,
+    kuzu_from: Option<std::path::PathBuf>,
+    kuzu_palace: Option<String>,
+    kuzu_limit: Option<usize>,
+) -> Result<()> {
     match target {
-        MigrateTarget::KuzuMemory => {}
+        MigrateTarget::KuzuMemory => {
+            if dry_run {
+                println!("{} Dry run — no files will be modified.\n", "·".dimmed());
+            }
+            run_config_phase(dry_run)
+        }
+        MigrateTarget::KuzuData => {
+            let from = kuzu_from
+                .ok_or_else(|| anyhow::anyhow!("migrate kuzu-data requires --from <store.redb>"))?;
+            let palace = kuzu_palace
+                .ok_or_else(|| anyhow::anyhow!("migrate kuzu-data requires --palace <name>"))?;
+            crate::commands::kuzu_migrate::handle_kuzu_data_migrate(
+                &from, &palace, dry_run, kuzu_limit,
+            )
+        }
     }
-
-    if dry_run {
-        println!("{} Dry run — no files will be modified.\n", "·".dimmed());
-    }
-
-    run_config_phase(dry_run)
 }
 
 /// Scan + rewrite every Claude settings file.

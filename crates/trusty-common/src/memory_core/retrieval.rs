@@ -689,6 +689,13 @@ impl PalaceHandle {
             tracing::warn!(?id, "drawer metadata delete failed: {e:#}");
         }
 
+        // Issue #278 (cascade-delete): remove all KG triples whose subject is
+        // `drawer:<id>` — these are auto-extracted facts whose source drawer no
+        // longer exists. Failure is best-effort (warn, don't abort the forget).
+        if let Err(e) = self.kg.cascade_delete_by_drawer(id).await {
+            tracing::warn!(?id, "kg cascade_delete_by_drawer failed: {e:#}");
+        }
+
         {
             let mut drawers = self.drawers.write();
             drawers.retain(|d| d.id != id);
