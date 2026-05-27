@@ -42,9 +42,17 @@ classification:
       # Set it as:  export JIRA_API_TOKEN="your-token"
       token_env: JIRA_API_TOKEN
 
-      # JIRA Cloud requires Basic auth: "email:token" base64-encoded.
-      # Set username here; omit for pure Bearer token (JIRA Server).
-      username: "you@yourco.com"
+      # JIRA Cloud requires Basic auth: email + token base64-encoded.
+      #
+      # Recommended: use `email_env:` so the email address is read from the
+      # environment at request time and never stored in the config file.
+      #   export JIRA_EMAIL="you@yourco.com"
+      email_env: JIRA_EMAIL
+      #
+      # Alternative (backward compat): set the literal email here.
+      # Only one of `email_env` or `username` is needed; `username` wins if
+      # both are present.
+      # username: "you@yourco.com"
 
       # Limit JIRA lookups to these project keys.
       # An empty list (or omitting the key) means "query any project key

@@ -159,9 +159,18 @@ pub fn classify_issue(issue: &JiraIssue, config: &JiraSourceConfig) -> Option<Ex
 ///
 /// Why: the HTTP call must be isolated here so the resolver can inject a
 /// mock client via its trait seam for testing.
+///
 /// What: issues `GET {base_url}/rest/api/3/issue/{key}?fields=issuetype,labels,components`
-/// with Basic auth (email + token) or Bearer auth (token-only). Returns
-/// `None` on any HTTP error or when the token env var is unset.
+/// with the auth mode determined by the config:
+///
+/// 1. `username` set (literal) → Basic auth with that literal email + token.
+/// 2. `email_env` set → Basic auth with `std::env::var(email_env)` + token
+///    (resolved at request time, not config-load time).
+/// 3. Neither set → Bearer auth (token-only; rare for Atlassian Cloud which
+///    requires Basic auth — a `warn!` is emitted).
+///
+/// Returns `None` on any HTTP error or when the token env var is unset.
+///
 /// Test: integration-tested via the resolver with wiremock in
 /// `resolver::tests`.
 ///
@@ -181,7 +190,9 @@ pub async fn fetch_issue(
         _ => {
             warn!(
                 token_env = %config.token_env,
-                "JIRA token env var is unset or empty; skipping external lookup"
+                "JIRA token env var `{}` is not set in the tga process environment — \
+                 did you `export {}` before running tga?",
+                config.token_env, config.token_env,
             );
             return None;
         }
@@ -192,10 +203,33 @@ pub async fn fetch_issue(
 
     let mut req = client.get(&url);
 
-    // Basic auth (email + token) if username is configured; otherwise Bearer.
+    // Auth priority:
+    //   1. username (literal email) — backward compat.
+    //   2. email_env (env-var indirection) — recommended for Atlassian Cloud.
+    //   3. Bearer token-only — unusual for Cloud; emit a warning.
     if let Some(username) = &config.username {
         req = req.basic_auth(username, Some(&token));
+    } else if let Some(env_name) = &config.email_env {
+        match std::env::var(env_name) {
+            Ok(email) if !email.is_empty() => {
+                req = req.basic_auth(email, Some(&token));
+            }
+            _ => {
+                warn!(
+                    email_env = %env_name,
+                    "JIRA email env var `{env_name}` is not set in the tga process \
+                     environment — did you `export {env_name}` before running tga? \
+                     Falling back to Bearer auth (may return 403 on Atlassian Cloud).",
+                );
+                req = req.bearer_auth(&token);
+            }
+        }
     } else {
+        warn!(
+            "No JIRA email configured (neither `username` nor `email_env` is set). \
+             Using Bearer auth — this typically returns HTTP 403 on Atlassian Cloud. \
+             Add `email_env: JIRA_EMAIL` to your source config.",
+        );
         req = req.bearer_auth(&token);
     }
 
@@ -312,6 +346,7 @@ mod tests {
             base_url: "https://acme.atlassian.net".to_string(),
             token_env: "JIRA_API_TOKEN".to_string(),
             username: None,
+            email_env: None,
             project_keys: vec![],
             field_mappings: Default::default(),
         };
@@ -353,6 +388,7 @@ mod tests {
             base_url: "https://acme.atlassian.net".to_string(),
             token_env: "JIRA_API_TOKEN".to_string(),
             username: None,
+            email_env: None,
             project_keys: vec![],
             field_mappings: Default::default(),
         };
@@ -386,9 +422,56 @@ mod tests {
             base_url: "https://acme.atlassian.net".to_string(),
             token_env: "JIRA_API_TOKEN".to_string(),
             username: None,
+            email_env: None,
             project_keys: vec![],
             field_mappings: Default::default(),
         };
         assert!(classify_issue(&issue, &config).is_none());
+    }
+
+    /// Why: `email_env` round-trips through YAML deserialization so users who
+    /// write `email_env: JIRA_EMAIL` in their config get the field populated
+    /// rather than a silent unknown-field error.
+    /// What: deserialize a JIRA source config with `email_env:` and assert the
+    /// field is `Some("JIRA_EMAIL")`.
+    /// Test: pure deserialization; no HTTP.
+    #[test]
+    fn jira_config_email_env_deserializes() {
+        use super::super::SourceConfig;
+        let yaml = r#"
+type: jira
+base_url: "https://acme.atlassian.net"
+token_env: JIRA_API_TOKEN
+email_env: JIRA_EMAIL
+project_keys: ["PROJ"]
+"#;
+        let cfg: SourceConfig = serde_yaml::from_str(yaml).expect("deserialize");
+        match cfg {
+            SourceConfig::Jira(j) => {
+                assert_eq!(j.email_env.as_deref(), Some("JIRA_EMAIL"));
+                assert_eq!(j.username, None);
+            }
+            other => panic!("expected Jira variant, got {other:?}"),
+        }
+    }
+
+    /// Why: `deny_unknown_fields` on `JiraSourceConfig` must turn a YAML typo
+    /// (e.g. `emial_env:`) into a loud parse error instead of silently
+    /// dropping the field.
+    /// What: attempt to deserialize a config with an unknown field and assert
+    /// the result is `Err`.
+    /// Test: pure deserialization; no HTTP.
+    #[test]
+    fn jira_config_unknown_field_is_rejected() {
+        let yaml = r#"
+type: jira
+base_url: "https://acme.atlassian.net"
+token_env: JIRA_API_TOKEN
+emial_env: JIRA_EMAIL
+"#;
+        // The SourceConfig tagged enum peels off `type:` before forwarding to
+        // JiraSourceConfig, so this error surfaces via the inner struct.
+        let result: Result<super::super::SourceConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err(), "unknown field must be rejected");
     }
 }

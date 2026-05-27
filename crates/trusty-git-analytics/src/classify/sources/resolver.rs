@@ -309,6 +309,7 @@ mod tests {
             base_url: "https://acme.atlassian.net".to_string(),
             token_env: "JIRA_API_TOKEN".to_string(),
             username: None,
+            email_env: None,
             project_keys: vec!["PROJ".to_string()],
             field_mappings: JiraFieldMappings::default(),
         };
@@ -351,6 +352,7 @@ mod tests {
             base_url: server.uri(),
             token_env: "JIRA_API_TOKEN_TEST_BUG".to_string(),
             username: None,
+            email_env: None,
             project_keys: vec![],
             field_mappings: JiraFieldMappings {
                 issue_type: issue_type_map,
@@ -407,6 +409,7 @@ mod tests {
             base_url: server.uri(),
             token_env: "JIRA_API_TOKEN_CACHE_TEST".to_string(),
             username: None,
+            email_env: None,
             project_keys: vec![],
             field_mappings: JiraFieldMappings {
                 issue_type: issue_type_map,
@@ -443,6 +446,7 @@ mod tests {
             base_url: "https://acme.atlassian.net".to_string(),
             token_env: "JIRA_TOKEN_DEFINITELY_NOT_SET_XYZ".to_string(),
             username: None,
+            email_env: None,
             project_keys: vec![],
             field_mappings: JiraFieldMappings::default(),
         };

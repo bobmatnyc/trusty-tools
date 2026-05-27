@@ -267,7 +267,12 @@ pub struct OutputConfig {
 }
 
 /// Classification cascade configuration.
+///
+/// `deny_unknown_fields` closes the class of silent-drop bugs seen in
+/// issues #259 and #286. Any YAML key under `classification:` that is not
+/// a recognised field is rejected at load time with a clear error message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClassificationConfig {
     /// Path to user-supplied rules YAML/JSON.
     #[serde(default)]
@@ -1019,6 +1024,24 @@ mod tests {
         assert!(
             msg.contains("ticket_regex"),
             "error should name the field: {msg}"
+        );
+    }
+
+    /// Why: `deny_unknown_fields` on `ClassificationConfig` closes the
+    /// silent-drop bug class. An unknown key under `classification:` (e.g. a
+    /// YAML typo) must be rejected loudly at parse time.
+    /// What: deserialize a `ClassificationConfig` fragment containing an
+    /// unknown field and assert the result is `Err`.
+    /// Test: pure deserialization regression guard.
+    #[test]
+    fn classification_config_unknown_field_is_rejected() {
+        // `rules_path:` is a plausible typo for `rules_file:`.
+        let yaml = "rules_path: ./my-rules.yaml\nuse_llm: false\n";
+        let result: std::result::Result<ClassificationConfig, serde_yaml::Error> =
+            serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "ClassificationConfig with unknown `rules_path:` must be rejected"
         );
     }
 }

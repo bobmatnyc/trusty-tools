@@ -569,6 +569,8 @@ Custom rules default to **priority 110** — one step above the highest built-in
 
 Custom rule files also default to **standalone** mode (`extend_defaults: false`): only the rules in the file are applied. Opt in to merging with the built-in defaults by adding `extend_defaults: true`.
 
+**Fuzzy-tier gating (1.2.2)**: the fuzzy heuristic tier (which emits the built-in category strings `merge`, `feature`, `chore`) is also suppressed when `extend_defaults: false`. This aligns with the principle that `extend_defaults: false` means "no built-in classification of any kind." If you see `method=fuzzy_match` rows for a config with `extend_defaults: false`, upgrade to 1.2.2.
+
 ```yaml
 # my-rules.yaml — standalone by default (no built-in rules loaded)
 extend_defaults: false   # optional: explicitly document the default

@@ -50,8 +50,10 @@ pub enum SourceConfig {
 /// What: holds the JIRA base URL, the environment-variable name carrying the
 /// API token, the project keys to scope queries to, and field mappings that
 /// convert JIRA issue_type/labels/components to TGA category strings.
-/// Test: see `tests::jira_config_deserializes` in this module.
+/// Test: see `tests::jira_source_config_deserializes` and
+/// `tests::jira_source_config_email_env_deserializes` in this module.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct JiraSourceConfig {
     /// JIRA Cloud / Server base URL (e.g. `https://yourco.atlassian.net`).
     pub base_url: String,
@@ -64,10 +66,37 @@ pub struct JiraSourceConfig {
     #[serde(default = "default_jira_token_env")]
     pub token_env: String,
 
-    /// Optional JIRA username (email) for Basic-auth token requests.
-    /// If omitted, the token is passed as a Bearer token.
+    /// Optional JIRA username (literal email) for Basic-auth requests.
+    ///
+    /// If set, this literal string is used as the Basic-auth username
+    /// together with the token from `token_env`. Kept for backward
+    /// compatibility. Prefer `email_env` for new configurations so the
+    /// email address is not stored in the config file.
+    ///
+    /// If both `username` and `email_env` are present, `username` wins.
+    /// If neither is set, the token is sent as a Bearer token (uncommon
+    /// for Atlassian Cloud, which requires Basic auth).
     #[serde(default)]
     pub username: Option<String>,
+
+    /// Name of the environment variable carrying the JIRA user email.
+    ///
+    /// Mirrors `token_env` for the email half of Atlassian Cloud Basic
+    /// auth. The env var is resolved at request time (not at config-load)
+    /// so `export JIRA_EMAIL=you@co.com` before running `tga` is
+    /// sufficient even if the config file was loaded before the export.
+    ///
+    /// Example YAML:
+    /// ```yaml
+    /// type: jira
+    /// base_url: "https://yourco.atlassian.net"
+    /// token_env: JIRA_API_TOKEN
+    /// email_env: JIRA_EMAIL          # <-- recommended for Atlassian Cloud
+    /// ```
+    ///
+    /// Ignored when `username` is also set (literal wins).
+    #[serde(default)]
+    pub email_env: Option<String>,
 
     /// Limit queries to issues under these project keys.
     /// Empty list means no project filter (query any project found in commits).
@@ -98,6 +127,7 @@ fn default_jira_token_env() -> String {
 /// What: three sub-maps — `issue_type`, `labels`, and `components`.
 /// Test: covered by `jira::tests::field_mapping_resolves_issue_type`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
 pub struct JiraFieldMappings {
     /// Maps JIRA issue-type names (e.g. `"Story"`, `"Bug"`) to TGA categories.
     #[serde(default)]
@@ -121,6 +151,7 @@ pub struct JiraFieldMappings {
 /// label-to-category mapping.
 /// Test: see `tests::github_issues_config_deserializes`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct GithubIssuesSourceConfig {
     /// Repository slug in `owner/name` form, e.g. `"acme/widgets"`.
     ///
@@ -221,6 +252,37 @@ field_mappings:
                     j.field_mappings.labels.get("ktlo"),
                     Some(&"tech_debt_refactoring".to_string())
                 );
+            }
+            other => panic!("expected Jira variant, got {other:?}"),
+        }
+    }
+
+    /// Why: `email_env:` is the recommended way for Atlassian Cloud users to
+    /// supply the Basic-auth email address without storing it in config files.
+    /// Before this fix the field didn't exist, so YAML configs with `email_env:`
+    /// would have the field silently dropped (serde default = None), causing
+    /// Bearer auth and HTTP 403 on every JIRA call.
+    /// What: deserialize a Jira source config with `email_env: JIRA_EMAIL` and
+    /// assert the field is populated; `username` should remain `None`.
+    /// Test: pure deserialization; no HTTP.
+    #[test]
+    fn jira_source_config_email_env_deserializes() {
+        let yaml = r#"
+type: jira
+base_url: "https://duettoresearch.atlassian.net"
+token_env: JIRA_API_TOKEN
+email_env: JIRA_EMAIL
+project_keys: ["DUE"]
+"#;
+        let cfg: SourceConfig = serde_yaml::from_str(yaml).expect("deserialize");
+        match cfg {
+            SourceConfig::Jira(j) => {
+                assert_eq!(j.email_env.as_deref(), Some("JIRA_EMAIL"));
+                assert_eq!(
+                    j.username, None,
+                    "username must remain None when only email_env is set"
+                );
+                assert_eq!(j.token_env, "JIRA_API_TOKEN");
             }
             other => panic!("expected Jira variant, got {other:?}"),
         }

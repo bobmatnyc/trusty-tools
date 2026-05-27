@@ -49,13 +49,20 @@ where
 /// the produced `category` / `subcategory`, a `priority` for tie-breaking,
 /// and a `confidence` (0.0–1.0).
 /// Test: covered by `classify::tests::exact_matcher_classifies_*` and
-/// `regex_matcher_*` test cases.
+/// `regex_matcher_*` test cases; unknown-field rejection covered by
+/// `tests::rule_unknown_field_is_rejected`.
 ///
 /// A rule matches when **any** of its `keywords` is present in the commit
 /// message (Tier 1) or **any** of its `patterns` matches (Tier 2). The
 /// resulting verdict carries the rule's `category`, `subcategory`, and
 /// `confidence`.
+///
+/// `deny_unknown_fields` closes the class of silent-drop bugs seen in
+/// issues #259 (`pattern:` vs `patterns:`) and #286 (`email_env:`). Any
+/// YAML key that is not a recognised field name (or alias) causes a loud
+/// parse error at load time rather than being silently ignored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Rule {
     /// Unique rule identifier (used in logs and overrides).
     pub id: String,
@@ -137,8 +144,12 @@ fn default_rule_priority() -> i32 {
 /// composition explicit at the file level.
 /// What: holds the loaded version tag, the extend-defaults flag, and the
 /// vector of [`Rule`]s. Rules are not pre-sorted — use [`Self::by_priority`].
-/// Test: covered by `load_rules` round-trip in `classify::tests`.
+/// Test: covered by `load_rules` round-trip in `classify::tests`;
+/// unknown-field rejection covered by `tests::rule_set_unknown_field_is_rejected`.
+///
+/// `deny_unknown_fields` prevents silent YAML typos from going unnoticed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuleSet {
     /// Optional schema version for forward compatibility.
     #[serde(default)]
@@ -275,5 +286,48 @@ pattern: "(?i)^feat[:(]"
         assert!(re.is_match("feat: add login flow"));
         assert!(re.is_match("feat(api): new endpoint"));
         assert!(!re.is_match("fix: null deref"));
+    }
+
+    /// Why: `deny_unknown_fields` on `Rule` must turn a field typo (e.g.
+    /// `method: regex_rule` — user's incidental bug from QA repro #286) into
+    /// a loud parse error at load time instead of silently being ignored.
+    /// What: attempt to deserialize a rule with `method: regex_rule` and
+    /// assert the result is `Err`.
+    /// Test: pure deserialization regression guard.
+    #[test]
+    fn rule_unknown_field_is_rejected() {
+        let yaml = r#"
+id: test-5
+category: bug_fix
+keywords: ["bugfix:"]
+method: regex_rule
+"#;
+        let result: Result<Rule, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "Rule with unknown `method:` field must be rejected at parse time"
+        );
+    }
+
+    /// Why: `deny_unknown_fields` on `RuleSet` must reject a YAML typo in
+    /// the outer envelope (e.g. `extends_defaults:` instead of
+    /// `extend_defaults:`).
+    /// What: attempt to deserialize a rule set with a misspelled top-level
+    /// key and assert the result is `Err`.
+    /// Test: pure deserialization regression guard.
+    #[test]
+    fn rule_set_unknown_field_is_rejected() {
+        let yaml = r#"
+extends_defaults: false
+rules:
+  - id: my-rule
+    category: bug_fix
+    keywords: ["bugfix:"]
+"#;
+        let result: Result<RuleSet, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "RuleSet with unknown `extends_defaults:` (typo) must be rejected"
+        );
     }
 }

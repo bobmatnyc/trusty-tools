@@ -66,6 +66,11 @@ impl Default for ClassificationEngineConfig {
 /// so callers don't reimplement the precedence rules.
 /// What: holds one classifier per tier plus the shared taxonomy and
 /// config. `classify` walks the tiers in order; first non-`None` wins.
+/// The fuzzy tier is gated by `extend_defaults`: when `false`, the fuzzy
+/// tier is suppressed because it emits hardcoded built-in category strings
+/// (`"merge"`, `"feature"`, `"chore"`) that conflict with user-defined
+/// taxonomies, violating the principle that `extend_defaults: false` means
+/// "no built-in classification of any kind".
 /// Test: covered by `classify::tests::engine_classify_batch_does_not_panic`
 /// and the cascade-coverage `corpus_uncategorized_below_1_percent` test.
 pub struct ClassificationEngine {
@@ -74,7 +79,13 @@ pub struct ClassificationEngine {
     issue_type: IssueTypeTier,
     regex: RegexMatcher,
     jira_project: JiraProjectTier,
-    fuzzy: FuzzyClassifier,
+    /// `None` when `extend_defaults == false` in the loaded ruleset.
+    ///
+    /// Why: the fuzzy tier is built-in by definition — it emits hardcoded
+    /// category strings (`"merge"`, `"feature"`, `"chore"`) regardless of
+    /// user taxonomy. Gating it behind `extend_defaults` ensures it never
+    /// fires when the user has elected a fully custom taxonomy.
+    fuzzy: Option<FuzzyClassifier>,
     llm: Option<LlmClassifier>,
     taxonomy: TaxonomyRegistry,
     config: ClassificationEngineConfig,
@@ -178,7 +189,16 @@ impl ClassificationEngine {
     ) -> Result<Self> {
         let exact = ExactMatcher::new(&ruleset.rules)?;
         let regex = RegexMatcher::new(&ruleset.rules)?;
-        let fuzzy = FuzzyClassifier;
+        // Gate the fuzzy tier on extend_defaults. The fuzzy tier is built-in
+        // by definition: it emits hardcoded category strings ("merge",
+        // "feature", "chore") that conflict with user-defined taxonomies.
+        // When extend_defaults is false the user has elected a fully custom
+        // taxonomy, so the fuzzy tier must be suppressed entirely.
+        let fuzzy = if ruleset.extend_defaults {
+            Some(FuzzyClassifier)
+        } else {
+            None
+        };
         let llm = if config.use_llm {
             match LlmClassifier::from_provider(
                 &config.llm_provider,
@@ -336,17 +356,22 @@ impl ClassificationEngine {
             });
         }
 
-        // Tier 3.5: fuzzy heuristics
-        if let Some(mut result) = self.fuzzy.classify(message, is_merge) {
-            if result.ticket_id.is_none() {
-                result.ticket_id = RegexMatcher::extract_ticket_id(message);
+        // Tier 3.5: fuzzy heuristics (only when extend_defaults is true).
+        // The fuzzy tier emits hardcoded built-in category strings ("merge",
+        // "feature", "chore"). When the user's ruleset has extend_defaults:
+        // false the fuzzy field is None, and this block is skipped entirely.
+        if let Some(fuzzy) = &self.fuzzy {
+            if let Some(mut result) = fuzzy.classify(message, is_merge) {
+                if result.ticket_id.is_none() {
+                    result.ticket_id = RegexMatcher::extract_ticket_id(message);
+                }
+                // Re-resolve top_level via the engine's registry in case user
+                // overrides changed the parent for the fuzzy verdict's category.
+                if let Some(top) = self.taxonomy.resolve(&result.category) {
+                    result.top_level = Some(top);
+                }
+                return Some(result);
             }
-            // Re-resolve top_level via the engine's registry in case user
-            // overrides changed the parent for the fuzzy verdict's category.
-            if let Some(top) = self.taxonomy.resolve(&result.category) {
-                result.top_level = Some(top);
-            }
-            return Some(result);
         }
 
         None
@@ -472,6 +497,69 @@ mod tests {
             .classify_sync("INFRA-7 patch", false)
             .expect("verdict");
         assert!((v.confidence - 0.5).abs() < 1e-6);
+    }
+
+    /// Why: the fuzzy tier emits hardcoded built-in category strings
+    /// ("merge", "feature", "chore") that conflict with user-defined
+    /// taxonomies. It must be suppressed when `extend_defaults: false` so
+    /// the user's fully-custom ruleset is respected end-to-end.
+    /// What: build an engine from a minimal `extend_defaults: false` ruleset,
+    /// classify a bare merge commit message, and assert no verdict from the
+    /// fuzzy tier ("merge") is produced.
+    /// Test: pure cascade exercise, no DB or HTTP.
+    #[test]
+    fn fuzzy_tier_suppressed_when_extend_defaults_false() {
+        use crate::classify::rules::{Rule, RuleSet};
+        let ruleset = RuleSet {
+            version: None,
+            extend_defaults: false, // user has a custom-only taxonomy
+            rules: vec![Rule {
+                id: "my-deploy".to_string(),
+                category: "deployment".to_string(),
+                subcategory: None,
+                keywords: vec!["deploy:".to_string()],
+                patterns: vec![],
+                priority: 110,
+                confidence: 0.9,
+            }],
+        };
+        let engine = ClassificationEngine::new(ruleset, ClassificationEngineConfig::default())
+            .expect("engine builds");
+
+        // A merge-commit message that would normally fire the fuzzy tier.
+        let result = engine.classify_sync("Merge pull request #42 from main", true);
+        // With extend_defaults: false the fuzzy tier is suppressed — no
+        // verdict should be produced for this message since our custom
+        // ruleset has no rule that matches "Merge pull request".
+        assert!(
+            result.is_none(),
+            "fuzzy tier must not fire when extend_defaults is false; got: {result:?}"
+        );
+    }
+
+    /// Why: the fuzzy tier must still fire when `extend_defaults: true`
+    /// to preserve backward-compatible behaviour for users who opt in to
+    /// the built-in ruleset.
+    /// What: build an engine from the default ruleset (extend_defaults: true)
+    /// and classify a merge commit; assert the fuzzy tier fires.
+    /// Test: pure cascade exercise.
+    #[test]
+    fn fuzzy_tier_active_when_extend_defaults_true() {
+        let ruleset = {
+            let mut rs = default_rules();
+            rs.extend_defaults = true;
+            rs
+        };
+        let engine = ClassificationEngine::new(ruleset, ClassificationEngineConfig::default())
+            .expect("engine builds");
+
+        let result = engine.classify_sync("Merge pull request #42 from main", true);
+        assert!(
+            result.is_some(),
+            "fuzzy tier must fire for merge commits when extend_defaults is true"
+        );
+        let r = result.unwrap();
+        assert_eq!(r.category, "merge");
     }
 
     /// Why: exact-keyword conventional-commit prefixes (`fix:`, `feat:`)
