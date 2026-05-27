@@ -8,7 +8,7 @@ edition = "2021"
 # let-chains, but aligning with the workspace pin prevents MSRV drift.
 rust-version = "1.88"
 authors = ["Bob Matsuoka <bob@matsuoka.com>"]
-license = "Elastic-2.0"
+license-file = "LICENSE"
 repository = "https://github.com/bobmatnyc/trusty-tools"
 description = "Developer productivity analytics — git commit collection, classification, and reporting"
 keywords = ["git", "analytics", "productivity", "developer-metrics"]
