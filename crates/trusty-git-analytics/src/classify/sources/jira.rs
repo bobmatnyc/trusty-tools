@@ -28,14 +28,21 @@ use super::{ExternalSignal, JiraSourceConfig, EXTERNAL_SOURCE_CONFIDENCE};
 /// Why: ticket keys in commit messages are the join key between a commit and
 /// its JIRA issue; extracting them accurately is the critical first step.
 /// What: matches one or more uppercase letters (optionally digits), then `-`,
-/// then one or more digits. The `\b` word-boundary anchor prevents partial
-/// matches inside longer identifiers.
-/// Test: covered by `tests::extract_jira_keys_*`.
+/// then 1–7 digits (bounding the digit run prevents over-matching trailing
+/// digit runs — issue #285).  The leading `\b` anchor prevents partial
+/// matches inside longer identifiers.  A post-filter in `extract_jira_keys`
+/// rejects any match whose next character in the source string is a digit,
+/// covering the case where the greedy digit bound is still reached before a
+/// longer run ends (e.g. `UIARCH-32885` must not yield `UIARCH-3288` when
+/// the regex crate's lack of lookahead would otherwise accept it).
+/// Test: covered by `tests::extract_jira_keys_*`, including
+/// `tests::extract_jira_keys_no_trailing_digit_overreach`.
 fn jira_key_regex() -> Regex {
-    // Intentionally compiled fresh per call (cheap). Uses a word-boundary
-    // anchor on both ends to avoid matching hex color codes (#FFFFFF) or
-    // partial strings.
-    Regex::new(r"\b([A-Z][A-Z0-9]{0,9}-\d+)\b").expect("static regex is valid")
+    // `\d{1,7}` caps the digit run at 7 digits (the highest realistic JIRA
+    // ticket number at scale is ~9 999 999).  The Rust `regex` crate does not
+    // support lookahead, so the trailing non-digit guard is enforced by the
+    // post-filter in `extract_jira_keys` rather than inline in the pattern.
+    Regex::new(r"\b([A-Z][A-Z0-9]{0,9}-\d{1,7})").expect("static regex is valid")
 }
 
 /// Extract all JIRA ticket keys from a commit message.
@@ -44,15 +51,29 @@ fn jira_key_regex() -> Regex {
 /// of them maximises the chance of finding one that maps to a configured
 /// project key.
 /// What: returns a `Vec<String>` of unique ticket keys found in `message`,
-/// in left-to-right order of first appearance.
-/// Test: covered by `tests::extract_jira_keys_single` and
-/// `tests::extract_jira_keys_multiple`.
+/// in left-to-right order of first appearance.  Matches followed immediately
+/// by another digit are dropped (post-filter for issue #285: the bounded
+/// `\d{1,7}` regex alone cannot prevent `UIARCH-3288` from being returned
+/// from `UIARCH-32885` because the regex would still accept the shorter run;
+/// checking `message.as_bytes()[end]` is a digit is the authoritative guard).
+/// Test: covered by `tests::extract_jira_keys_single`,
+/// `tests::extract_jira_keys_multiple_and_dedup`, and
+/// `tests::extract_jira_keys_no_trailing_digit_overreach`.
 pub fn extract_jira_keys(message: &str) -> Vec<String> {
     let re = jira_key_regex();
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for cap in re.captures_iter(message) {
         if let Some(key) = cap.get(1) {
+            // Post-filter: reject a match whose immediately-following byte is
+            // an ASCII digit.  This is the authoritative guard against
+            // trailing-digit over-match (issue #285).  `key.end()` is a byte
+            // offset into `message`; indexing into `message.as_bytes()` is
+            // safe because the regex only matches ASCII characters.
+            let end = key.end();
+            if message.as_bytes().get(end).is_some_and(|b| b.is_ascii_digit()) {
+                continue;
+            }
             let k = key.as_str().to_string();
             if seen.insert(k.clone()) {
                 out.push(k);
@@ -321,6 +342,34 @@ mod tests {
     fn extract_jira_keys_ignores_lowercase() {
         assert!(extract_jira_keys("proj-123 lowercase").is_empty());
         assert!(extract_jira_keys("no ticket here").is_empty());
+    }
+
+    /// Why: the old unbounded `\d+` regex over-matched trailing digit runs —
+    /// `UIARCH-32885` was extracted from "per UIARCH-3288 followed by 5"
+    /// instead of the correct `UIARCH-3288` (issue #285, live repro against
+    /// duettoresearch.atlassian.net).
+    /// What: asserts the correct key is extracted when the JIRA key is
+    /// immediately followed by whitespace and then more digits.
+    /// Test: pure regex, no HTTP.
+    #[test]
+    fn extract_jira_keys_no_trailing_digit_overreach() {
+        // The bug: "followed by 5" contains a lone digit; without the
+        // post-filter, the regex matched "UIARCH-32885" (consuming the 5).
+        let keys = extract_jira_keys("per UIARCH-3288 followed by 5");
+        assert_eq!(keys, vec!["UIARCH-3288"], "must not over-consume the trailing ' 5'");
+
+        // Adjacent digit run separated by a hyphen is fine (two distinct keys).
+        let keys2 = extract_jira_keys("PROJ-123 and PROJ-456");
+        assert_eq!(keys2, vec!["PROJ-123", "PROJ-456"]);
+
+        // A key directly adjacent to more digits (no space) must not be extracted.
+        let keys3 = extract_jira_keys("PROJ-12345678");
+        // 8 digits — exceeds the 7-digit cap, so nothing should match.
+        assert!(keys3.is_empty(), "8-digit run should not match: {keys3:?}");
+
+        // Normal 7-digit key at the cap must still match when followed by space.
+        let keys4 = extract_jira_keys("PROJ-9999999 is the limit");
+        assert_eq!(keys4, vec!["PROJ-9999999"]);
     }
 
     /// Why: `classify_issue` must prefer issue-type over labels over
