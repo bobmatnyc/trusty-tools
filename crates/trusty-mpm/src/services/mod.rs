@@ -13,7 +13,7 @@ pub mod discoverer;
 pub mod manifest;
 
 pub use discoverer::{
-    Discoverer, HealthResult, HealthState, ServiceStatus, CACHE_TTL, HEALTH_PROBE_TIMEOUT,
+    CACHE_TTL, Discoverer, HEALTH_PROBE_TIMEOUT, HealthResult, HealthState, ServiceStatus,
 };
 pub use manifest::{
     ManifestValidationError, PortDiscovery, ServiceDecl, ServicesManifest, expand_tilde,

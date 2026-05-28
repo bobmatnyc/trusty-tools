@@ -14,7 +14,7 @@ edition = "2024"
 rust-version = "1.88"
 # Inherited by the trusty-mpm-* crates which declare `version.workspace = true`.
 # Other crates set their own `version` and are unaffected.
-version = "0.4.0"
+version = "0.5.0"
 # NOTE: workspace-level license preserved because several existing crates
 # (trusty-common, trusty-mcp-core, trusty-mpm-core, …) reference it via
 # `license.workspace = true`. Per migration instructions we must not alter
@@ -37,7 +37,7 @@ trusty-bm25-daemon = { path = "crates/trusty-bm25-daemon", version = "0.1.0" }
 # trusty-mpm: unified crate (replaces the former trusty-mpm-{core,mcp,client,
 # daemon,cli,tui,telegram} sub-crates). The gui sub-crate is kept separate
 # because it owns Tauri's build.rs and tauri.conf.json.
-trusty-mpm = { path = "crates/trusty-mpm", version = "0.4.0" }
+trusty-mpm = { path = "crates/trusty-mpm", version = "0.5.0" }
 
 # ── Async runtime / HTTP ────────────────────────────────────────────────────
 anyhow = "1"

@@ -1,5 +1,68 @@
 # Changelog — trusty-mpm
 
+## [0.5.0] — 2026-05-28
+
+### Added: `tm services` — canonical service-discovery CLI (issue #339)
+
+**New subcommand**: `tm services <action>` — replaces ad-hoc `lsof`/`curl`/`ps`
+patterns for discovering the port, health, and status of every trusty-* daemon.
+
+#### Subcommands
+
+| Command | Description |
+|---------|-------------|
+| `tm services list [--json]` | Table of all declared services with running/down status, port, version, and health |
+| `tm services status <name> [--json]` | Detailed block for one service |
+| `tm services port <name>` | Print just the port number (scriptable) |
+| `tm services url <name>` | Print the full base URL |
+| `tm services health <name>` | Probe the `/health` endpoint; exit 0 if healthy |
+| `tm services log <name>` | Print the log file path if it exists |
+| `tm services init [--force]` | Write the default manifest to `~/.claude-mpm/services.yaml` |
+| `tm services restart <name>` | Execute the manifest `restart_cmd` |
+
+#### Manifest
+
+Default manifest embedded in the binary covers 6 services:
+
+- `trusty-search` — port 7878, `/health` confirmed
+- `trusty-analyze` — port 7879, `/health` confirmed
+- `trusty-mpm-daemon` — port 7880, `/health` confirmed at `daemon/api.rs:74`
+- `trusty-memory` — dynamic port (7070-7079) via `~/.trusty-memory/http_addr`
+- `trusty-embedderd` — UDS sidecar, pgrep-only (no HTTP surface)
+- `trusty-bm25-daemon` — UDS sidecar, pgrep-only (no HTTP surface)
+
+Custom manifests can be placed at `~/.claude-mpm/services.yaml` (use `tm services init`).
+
+#### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Running/healthy (list always exits 0) |
+| 1 | Service declared but down, or health probe failed |
+| 2 | Service name not in manifest |
+
+#### Scriptable usage
+
+```bash
+PORT=$(tm services port trusty-search)
+URL=$(tm services url trusty-search)
+tail -f $(tm services log trusty-search)
+```
+
+#### Architecture
+
+- `crates/trusty-mpm/src/services/manifest.rs` — `ServicesManifest`, `ServiceDecl`,
+  `PortDiscovery` enum, `ManifestValidationError` (thiserror)
+- `crates/trusty-mpm/src/services/discoverer.rs` — `Discoverer` with 5-second
+  TTL cache; `ProcessProber`/`PortProber`/`HttpProber`/`VersionRunner` trait
+  seams for unit testing
+- `crates/trusty-mpm/assets/default-services.yaml` — embedded default manifest
+
+**Tests**: 21 new unit tests (8 manifest + 13 discoverer, all mocked) + 11 CLI
+parse tests + 2 ignore-gated integration smoke tests.
+
+---
+
 ## [consolidation] — 2026-05-26
 
 **Combined 7 trusty-mpm-\* sub-crates into one crate with feature-gated `[[bin]]` targets.**

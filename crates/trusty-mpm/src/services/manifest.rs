@@ -183,16 +183,9 @@ impl ServicesManifest {
         }
 
         for (name, decl) in &self.services {
-            // Port range check — only when a port is specified.
-            // Note: u16 already enforces 0-65535; we additionally reject 0.
-            if let Some(port) = decl.default_port {
-                if port == 0 {
-                    return Err(ManifestValidationError::InvalidPort(
-                        name.clone(),
-                        port as u32,
-                    ));
-                }
-                // u16 range is already 0-65535; port 0 is the only invalid case.
+            // Port range check — u16 covers 0-65535; additionally reject 0.
+            if let Some(0) = decl.default_port {
+                return Err(ManifestValidationError::InvalidPort(name.clone(), 0));
             }
 
             // File discovery requires port_file.
@@ -203,8 +196,8 @@ impl ServicesManifest {
             // process_match must not contain shell metacharacters.
             if let Some(pm) = &decl.process_match {
                 const METACHARACTERS: &[char] = &[
-                    '|', ';', '&', '$', '`', '(', ')', '{', '}', '<', '>', '!', '*', '?', '[',
-                    ']', '\\', '"', '\'',
+                    '|', ';', '&', '$', '`', '(', ')', '{', '}', '<', '>', '!', '*', '?', '[', ']',
+                    '\\', '"', '\'',
                 ];
                 if pm.chars().any(|c| METACHARACTERS.contains(&c)) {
                     return Err(ManifestValidationError::UnsafeProcessMatch(
@@ -214,14 +207,14 @@ impl ServicesManifest {
                 }
             }
 
-            // health_url template must contain {port} if it references a port.
-            if let Some(url) = &decl.health_url {
-                if !url.contains("{port}") {
-                    return Err(ManifestValidationError::InvalidHealthUrl(
-                        name.clone(),
-                        url.clone(),
-                    ));
-                }
+            // health_url template must contain {port} for port expansion.
+            if let Some(url) = &decl.health_url
+                && !url.contains("{port}")
+            {
+                return Err(ManifestValidationError::InvalidHealthUrl(
+                    name.clone(),
+                    url.clone(),
+                ));
             }
         }
 
@@ -237,8 +230,9 @@ impl ServicesManifest {
     /// directory cannot be resolved (unusual, but possible in CI containers).
     /// Test: `manifest_expands_tilde`.
     pub fn expand_paths(&mut self) -> anyhow::Result<()> {
-        let home = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("could not resolve home directory for tilde expansion"))?;
+        let home = dirs::home_dir().ok_or_else(|| {
+            anyhow::anyhow!("could not resolve home directory for tilde expansion")
+        })?;
         for decl in self.services.values_mut() {
             if let Some(p) = &decl.log_path {
                 decl.log_path = Some(expand_tilde(p, &home));
@@ -290,8 +284,7 @@ mod tests {
     /// Parse the full default YAML; assert all 6 services are present.
     #[test]
     fn manifest_parse_happy_path() {
-        let m: ServicesManifest =
-            serde_yaml::from_str(DEFAULT_MANIFEST_YAML).expect("parse");
+        let m: ServicesManifest = serde_yaml::from_str(DEFAULT_MANIFEST_YAML).expect("parse");
         assert_eq!(m.version, 1);
         assert_eq!(m.services.len(), 6);
         assert!(m.services.contains_key("trusty-search"));
@@ -415,17 +408,15 @@ services:
     #[test]
     fn manifest_expands_tilde() {
         let home = dirs::home_dir().expect("home dir available in test");
-        let yaml = format!(
-            r#"
+        let yaml = r#"
 version: 1
 services:
   my-svc:
     description: "Tilde test"
     log_path: "~/some/log/path"
     port_file: "~/port-file"
-"#
-        );
-        let mut m: ServicesManifest = serde_yaml::from_str(&yaml).expect("parse");
+"#;
+        let mut m: ServicesManifest = serde_yaml::from_str(yaml).expect("parse");
         m.expand_paths().expect("expand");
         let svc = &m.services["my-svc"];
         let expected_log = home.join("some/log/path").to_string_lossy().into_owned();
