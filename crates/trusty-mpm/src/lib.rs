@@ -20,6 +20,18 @@
 
 // ── Always-on library modules ────────────────────────────────────────────────
 
+/// Service manifest schema, discovery engine, and status types for `tm services`.
+///
+/// Why: agents need a canonical, scriptable interface for service discovery that
+/// replaces ad-hoc `lsof`/`curl`/`pgrep` patterns hardcoded in prompts. This
+/// module provides the stable contract (`ServicesManifest`) and the runtime
+/// probe engine (`Discoverer`).
+/// What: re-exports `ServicesManifest`, `Discoverer`, `ServiceStatus`,
+/// `HealthState`, and the manifest validation / tilde-expansion helpers.
+/// Test: `cargo test -p trusty-mpm` exercises the manifest and discoverer unit
+/// test suites; the integration smoke test requires a live trusty-search daemon.
+pub mod services;
+
 /// Domain types, artifact model, and IPC protocol.
 ///
 /// Why: shared types used by every trusty-mpm component. Centralizing them
