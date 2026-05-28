@@ -8,8 +8,9 @@ orchestrator — all co-located under one Cargo workspace.
 
 This is a **Rust workspace** (Cargo workspace, resolver v2, glob members
 `crates/*`) under the Elastic License 2.0 (per-crate; a few crates are MIT —
-see each `Cargo.toml`). The workspace version field and `rust-version` are
-inherited by the `trusty-mpm-*` family; other crates set their own version.
+see each `Cargo.toml`). Every crate manages its own `version` field independently;
+`[workspace.package]` shares `rust-version`, `edition`, `license`, `repository`,
+and `authors` but no longer carries a version field (see #343).
 
 **MSRV**: `1.88` — required for stabilised let-chains used by edition-2024 crates.
 
@@ -280,8 +281,10 @@ Release workflow:
    manually, follow it with `codesign --force --sign - ~/.cargo/bin/<binary>`
    to regenerate the ad-hoc signature against the final file.
 
-The `trusty-mpm-*` family shares a single workspace version (declared under
-`[workspace.package]`) and is bumped together.
+Every crate manages its own version independently in its own `Cargo.toml`.
+The `[workspace.package]` table no longer carries a `version` field (see #343).
+When publishing, bump only the crates that actually changed — do not cascade
+version bumps to siblings with no functional changes.
 
 ## Cross-Crate Development Workflow
 

@@ -12,9 +12,9 @@ exclude = []
 edition = "2024"
 # Required for let-chains used by trusty-mpm crates (stabilized in 1.88).
 rust-version = "1.88"
-# Inherited by the trusty-mpm-* crates which declare `version.workspace = true`.
-# Other crates set their own `version` and are unaffected.
-version = "0.4.0"
+# version = "0.4.0" — REMOVED. Every crate manages its own version independently
+# in its own Cargo.toml. See issue #343 and CLAUDE.md "Git Tag / Release Convention".
+# When publishing, bump only the crates that actually changed.
 # NOTE: workspace-level license preserved because several existing crates
 # (trusty-common, trusty-mcp-core, trusty-mpm-core, …) reference it via
 # `license.workspace = true`. Per migration instructions we must not alter
