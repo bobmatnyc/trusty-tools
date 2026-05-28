@@ -272,6 +272,9 @@ trusty-search start                                  # start HTTP daemon (backgr
 trusty-search start --data-dir <PATH>                # start with custom data dir (TRUSTY_DATA_DIR)
                                                      # enables isolated daemon instances; each instance
                                                      # gets its own data dir, port, and index registry
+trusty-search start --no-auto-discover               # skip startup auto-discovery scan
+                                                     # (also: TRUSTY_NO_AUTO_DISCOVER=1)
+                                                     # daemon serves only already-registered indexes
 trusty-search stop                                   # stop daemon (SIGTERM via PID lockfile)
 trusty-search index [path] [--name <id>] [--force]   # register + index (primary command)
                                                      # auto-detects ./trusty-search.yaml

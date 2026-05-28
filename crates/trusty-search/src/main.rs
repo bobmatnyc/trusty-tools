@@ -408,6 +408,24 @@ enum Commands {
         ///   trusty-search start --data-dir /tmp/ts-cert --port 7879
         #[arg(long, env = "TRUSTY_DATA_DIR")]
         data_dir: Option<std::path::PathBuf>,
+
+        /// Suppress the auto-discovery scan at startup.
+        ///
+        /// By default the daemon walks `scan_paths` (from
+        /// `~/.config/trusty-search/config.yaml`) after hydrating its registry
+        /// from `indexes.toml` and indexes any project not yet registered.
+        /// Pass this flag (or set `TRUSTY_NO_AUTO_DISCOVER=1`) to skip that
+        /// scan entirely — the daemon will only serve indexes that are already
+        /// present in `indexes.toml` or registered manually at runtime.
+        ///
+        /// Useful when the scan-paths tree is very large, when the daemon is
+        /// started in a CI/CD environment that should not discover arbitrary
+        /// repositories, or when reproducible startup behaviour is required.
+        ///
+        /// Precedence: CLI flag > `TRUSTY_NO_AUTO_DISCOVER` env var > default
+        /// (auto-discover enabled).
+        #[arg(long, env = "TRUSTY_NO_AUTO_DISCOVER")]
+        no_auto_discover: bool,
     },
 
     /// Stop the running background daemon
@@ -909,6 +927,7 @@ async fn run() -> Result<()> {
             foreground,
             device,
             data_dir,
+            no_auto_discover,
         } => {
             commands::start::handle_start(
                 port,
@@ -916,6 +935,7 @@ async fn run() -> Result<()> {
                 &device,
                 data_dir.as_deref(),
                 cli.verbose,
+                no_auto_discover,
             )
             .await?;
         }

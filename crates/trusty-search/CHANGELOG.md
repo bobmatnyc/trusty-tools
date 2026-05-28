@@ -7,6 +7,32 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.15.1] - 2026-05-27
+
+### Added
+
+- **Issue #314 — `--no-auto-discover` flag and `TRUSTY_NO_AUTO_DISCOVER` env
+  var for `trusty-search start`.** When either is set, the post-hydration
+  auto-discovery scan (which walks `scan_paths` and indexes any unregistered
+  project) is skipped entirely. The daemon starts with only the indexes already
+  present in `indexes.toml` or registered at runtime.
+
+  Precedence: CLI flag > env var > default (auto-discover enabled).
+
+  Useful for CI/CD environments that must not discover arbitrary repositories,
+  when the scan-paths tree is very large, or when reproducible startup
+  behaviour is required.
+
+  ```bash
+  # Suppress auto-discovery via flag:
+  trusty-search start --no-auto-discover
+
+  # Suppress via env var (e.g. in a systemd unit or launchd plist):
+  TRUSTY_NO_AUTO_DISCOVER=1 trusty-search start
+  ```
+
+---
+
 ## [0.15.0] - 2026-05-27
 
 ### Added

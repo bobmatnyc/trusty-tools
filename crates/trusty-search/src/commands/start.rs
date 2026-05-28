@@ -661,15 +661,20 @@ fn tune_batch_size_for_provider(provider: trusty_common::embedder::ExecutionProv
 /// exit-1 message. When `data_dir` is `Some`, the override is stamped into
 /// `TRUSTY_DATA_DIR` before any path resolution so every callsite of
 /// `daemon_dir()` / `data_dir()` in the child process sees the same root.
+/// When `no_auto_discover` is `true` (or `TRUSTY_NO_AUTO_DISCOVER=1` is set),
+/// the post-hydration auto-discovery scan is skipped entirely so the daemon
+/// serves only indexes already in `indexes.toml` or registered at runtime.
 /// Test: run twice in a row — the second invocation must exit 1 with the
 /// "another daemon is already running" message. Run with `--data-dir /tmp/ts-x`
-/// and confirm the lockfile lands in `/tmp/ts-x/daemon.lock`.
+/// and confirm the lockfile lands in `/tmp/ts-x/daemon.lock`. Run with
+/// `--no-auto-discover` and verify no "auto-discover" log lines appear.
 pub async fn handle_start(
     port: u16,
     foreground: bool,
     device: &str,
     data_dir: Option<&std::path::Path>,
     verbose: bool,
+    no_auto_discover: bool,
 ) -> Result<()> {
     // Apply the --data-dir override as early as possible — before the
     // background self-spawn path so the spawned child inherits the env var.
@@ -741,8 +746,11 @@ pub async fn handle_start(
             .arg("--port")
             .arg(port.to_string())
             .arg("--device")
-            .arg(device)
-            .stdin(std::process::Stdio::null())
+            .arg(device);
+        if no_auto_discover {
+            cmd.arg("--no-auto-discover");
+        }
+        cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         // Propagate the data-dir override into the child via env var. Since we
@@ -1055,7 +1063,14 @@ pub async fn handle_start(
                 // the user's configured (or default) scan paths and index any
                 // not yet known to the daemon. Spawned as a separate task so
                 // it cannot block the embedder-ready handoff above.
-                tokio::spawn(crate::commands::discover::auto_discover_and_index());
+                // Issue #314: skip when `--no-auto-discover` / `TRUSTY_NO_AUTO_DISCOVER=1`.
+                if !no_auto_discover {
+                    tokio::spawn(crate::commands::discover::auto_discover_and_index());
+                } else {
+                    tracing::info!(
+                        "auto-discover: disabled via --no-auto-discover / TRUSTY_NO_AUTO_DISCOVER"
+                    );
+                }
             }
             Ok(Ok(Err(e))) => {
                 let msg = format!("embedder init failed: {e}");
@@ -1326,6 +1341,80 @@ mod tests {
         assert!(
             wrapped.contains("TRUSTY_EMBEDDER=in-process"),
             "escape hatch hint must mention TRUSTY_EMBEDDER=in-process; got: {wrapped}"
+        );
+    }
+
+    /// Verify the `no_auto_discover` config-resolution rules in isolation.
+    ///
+    /// Why (issue #314): the gate logic lives in `handle_start` which requires
+    /// a full daemon boot to exercise end-to-end. Testing the *decision* (should
+    /// the scan run?) as a pure boolean helper keeps the test deterministic and
+    /// free of filesystem / network side-effects.
+    ///
+    /// What: mirrors the exact precedence implemented at the `tokio::spawn` call
+    /// site — CLI flag (`no_auto_discover: bool`) wins over the
+    /// `TRUSTY_NO_AUTO_DISCOVER` env var, which in turn wins over the default
+    /// (false = scan enabled).
+    ///
+    /// Test: this test. Run with:
+    ///   `cargo test -p trusty-search -- no_auto_discover_resolution`
+    #[test]
+    fn no_auto_discover_resolution() {
+        /// Pure function that mirrors the gate condition in `handle_start`.
+        /// Returns `true` when auto-discovery should be **skipped**.
+        ///
+        /// Why: extracted so we can drive it with arbitrary (cli_flag, env)
+        /// combinations without touching the real environment or daemon state.
+        /// What: CLI flag takes unconditional precedence; env var is read only
+        /// when the flag is `false`.
+        /// Test: see the outer `no_auto_discover_resolution` test.
+        fn should_skip_discovery(cli_flag: bool, env_val: Option<&str>) -> bool {
+            if cli_flag {
+                return true;
+            }
+            // Mirror the clap `env = "TRUSTY_NO_AUTO_DISCOVER"` resolution:
+            // any non-empty value that parses as a bool-ish "1" / "true" skips.
+            matches!(env_val, Some("1") | Some("true"))
+        }
+
+        // Default: scan is enabled (no flag, no env).
+        assert!(
+            !should_skip_discovery(false, None),
+            "scan must be enabled by default"
+        );
+
+        // CLI flag alone suppresses scan.
+        assert!(
+            should_skip_discovery(true, None),
+            "--no-auto-discover must suppress scan"
+        );
+
+        // Env var "1" suppresses scan when flag is false.
+        assert!(
+            should_skip_discovery(false, Some("1")),
+            "TRUSTY_NO_AUTO_DISCOVER=1 must suppress scan"
+        );
+
+        // Env var "true" suppresses scan when flag is false.
+        assert!(
+            should_skip_discovery(false, Some("true")),
+            "TRUSTY_NO_AUTO_DISCOVER=true must suppress scan"
+        );
+
+        // CLI flag takes precedence even when env would also suppress.
+        assert!(
+            should_skip_discovery(true, Some("1")),
+            "CLI flag must take precedence"
+        );
+
+        // Unrecognised env value does NOT suppress (e.g. leftover "0").
+        assert!(
+            !should_skip_discovery(false, Some("0")),
+            "TRUSTY_NO_AUTO_DISCOVER=0 must not suppress scan"
+        );
+        assert!(
+            !should_skip_discovery(false, Some("")),
+            "empty env value must not suppress scan"
         );
     }
 }
