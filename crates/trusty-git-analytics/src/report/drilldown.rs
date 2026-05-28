@@ -1,12 +1,17 @@
-//! Per-engineer drill-down queries: effort histogram, PR metrics, commit summary.
+//! Per-engineer drill-down queries, data model, and report formatters.
 //!
-//! This module provides the raw data-access layer for `tga author <email>`.
-//! Each free function maps to one section of the output report and is
-//! independently testable with a seeded in-memory SQLite database.
+//! This module provides:
+//! - Raw data-access free functions (effort histogram, PR metrics, commit summary)
+//! - [`AuthorDrilldownData`] — the assembled report model
+//! - [`format_markdown`] / [`format_json`] — output renderers for `tga author`
+//!
+//! Each data-access function is independently testable with a seeded in-memory
+//! SQLite database.
 
 use std::collections::HashMap;
 
 use rusqlite::params;
+use serde::{Deserialize, Serialize};
 
 use crate::core::db::Database;
 use crate::report::errors::{ReportError, Result};
@@ -242,7 +247,7 @@ pub fn query_pr_metrics(
         let mut v = Vec::new();
         for r in rows {
             let h = r.map_err(crate::core::TgaError::from)?;
-            if h >= CYCLE_TIME_MIN_HOURS && h <= CYCLE_TIME_MAX_HOURS {
+            if (CYCLE_TIME_MIN_HOURS..=CYCLE_TIME_MAX_HOURS).contains(&h) {
                 v.push(h);
             }
         }
@@ -365,9 +370,7 @@ pub fn query_commit_summary(
         .map_err(crate::core::TgaError::from)?;
 
     let repo_rows = repo_stmt
-        .query_map(params![email, since, until], |row| {
-            row.get::<_, String>(0)
-        })
+        .query_map(params![email, since, until], |row| row.get::<_, String>(0))
         .map_err(crate::core::TgaError::from)?;
 
     let mut repositories = Vec::new();
@@ -397,10 +400,50 @@ pub fn query_commit_summary(
 /// Test: see `tests::extract_logins_from_aliases`.
 pub fn extract_provider_logins(aliases_json: &str) -> Vec<String> {
     let aliases: Vec<String> = serde_json::from_str(aliases_json).unwrap_or_default();
-    aliases
-        .into_iter()
-        .filter(|a| !a.contains('@'))
-        .collect()
+    aliases.into_iter().filter(|a| !a.contains('@')).collect()
+}
+
+/// Query per-category commit counts for a single canonical author.
+///
+/// Why: the Category Breakdown section of `tga author` reuses the
+/// `classifications` join to show how an engineer's commits are distributed
+/// across work types; this query is cheaper than running `Aggregator::build_filtered`.
+/// What: joins `commits` → `classifications` → `authors`, groups by category,
+/// returns `HashMap<category, count>`. Commits with no classification are excluded.
+/// Test: see `tests::category_counts_basic`.
+pub fn query_author_categories(
+    db: &Database,
+    email: &str,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<HashMap<String, usize>> {
+    let conn = db.connection();
+    let mut stmt = conn
+        .prepare(
+            "SELECT cl.category, COUNT(*) \
+             FROM commits c \
+             JOIN authors a ON a.id = c.author_id \
+             LEFT JOIN classifications cl ON cl.id = c.classification_id \
+             WHERE LOWER(a.canonical_email) = LOWER(?1) \
+               AND cl.category IS NOT NULL \
+               AND (?2 IS NULL OR c.timestamp >= ?2) \
+               AND (?3 IS NULL OR c.timestamp <= ?3) \
+             GROUP BY cl.category",
+        )
+        .map_err(crate::core::TgaError::from)?;
+
+    let rows = stmt
+        .query_map(params![email, since, until], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(crate::core::TgaError::from)?;
+
+    let mut map: HashMap<String, usize> = HashMap::new();
+    for r in rows {
+        let (cat, cnt) = r.map_err(crate::core::TgaError::from)?;
+        map.insert(cat, cnt as usize);
+    }
+    Ok(map)
 }
 
 /// Fetch `(id, canonical_name, aliases_json)` for the given canonical email.
@@ -427,6 +470,263 @@ pub fn lookup_author_for_drilldown(
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(ReportError::Core(crate::core::TgaError::from(e))),
     }
+}
+
+// ─── Report model ────────────────────────────────────────────────────────────
+
+/// Fully assembled per-engineer drill-down report.
+///
+/// Why: formatters (Markdown, JSON) need a single input struct so they can
+/// be called independently of the DB; decoupling the data model from both
+/// the query layer and the formatters keeps each layer testable in isolation.
+/// What: aggregates all drill-down sections — commit summary, effort histogram,
+/// PR metrics, category breakdown — plus header metadata for the report.
+/// Test: see `tests::format_markdown_contains_headers` and
+/// `tests::format_json_parses` below.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthorDrilldownData {
+    /// ISO 8601 UTC timestamp at which the report was generated.
+    pub generated_at: String,
+    /// Canonical email (as stored in `authors.canonical_email`).
+    pub email: String,
+    /// Canonical display name.
+    pub name: String,
+    /// Report window.
+    pub period: ReportPeriod,
+    /// Commit-level aggregate.
+    pub commits: CommitSection,
+    /// Effort histogram section.
+    pub effort: EffortSection,
+    /// Pull-request metrics section.
+    pub pull_requests: PrSection,
+    /// Per-category commit counts.
+    pub categories: HashMap<String, usize>,
+}
+
+/// Date window for the report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportPeriod {
+    /// Lower bound (ISO 8601 date or timestamp), `None` = all history.
+    pub since: Option<String>,
+    /// Upper bound (ISO 8601 date or timestamp), `None` = present.
+    pub until: Option<String>,
+}
+
+/// Commit-level aggregate section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitSection {
+    /// Total commits in the window.
+    pub total: u64,
+    /// Commits with `ticketed = 1`.
+    pub ticketed: u64,
+    /// `ticketed / total`, in `[0.0, 1.0]`. `None` when total == 0.
+    pub ticket_coverage: Option<f64>,
+    /// Distinct repositories touched.
+    pub repositories: Vec<String>,
+    /// Earliest commit timestamp (ISO 8601). `None` when total == 0.
+    pub first_commit: Option<String>,
+    /// Latest commit timestamp (ISO 8601). `None` when total == 0.
+    pub last_commit: Option<String>,
+    /// Total insertions.
+    pub insertions: i64,
+    /// Total deletions.
+    pub deletions: i64,
+}
+
+/// Effort histogram section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffortSection {
+    /// Commits that have a row in `fact_commit_effort`.
+    pub scored_commits: u64,
+    /// Total commits (scored + unscored).
+    pub total_commits: u64,
+    /// Bucket → commit count (XS/S/M/L/XL).
+    pub histogram: HashMap<String, u32>,
+}
+
+/// Pull-request metrics section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrSection {
+    /// Total PRs (all states) matching any of the engineer's provider logins.
+    pub total: u64,
+    /// Merged PRs.
+    pub merged: u64,
+    /// Average cycle time (hours). `None` when no merged PRs with valid timestamps.
+    pub avg_cycle_time_hours: Option<f64>,
+    /// Median (p50) cycle time (hours). `None` when no merged PRs.
+    pub median_cycle_time_hours: Option<f64>,
+    /// p95 cycle time (hours). `None` when < 20 merged PRs.
+    pub p95_cycle_time_hours: Option<f64>,
+}
+
+// ─── Formatters ──────────────────────────────────────────────────────────────
+
+/// Render an [`AuthorDrilldownData`] as a Markdown report string.
+///
+/// Why: `tga author --format markdown` (the default) targets human readers;
+/// the output mirrors the structure in spec §6 so automated doc generation
+/// can consume it too.
+/// What: produces the exact table structure from spec §6, including section
+/// headers, the effort histogram with coverage fraction, and the PR metrics
+/// table. Cycle-time fields show `—` when `None`; p95 shows `(< 20 PRs)`
+/// when omitted due to insufficient sample.
+/// Test: see `tests::format_markdown_contains_headers`.
+pub fn format_markdown(data: &AuthorDrilldownData) -> String {
+    let mut out = String::new();
+
+    // Header.
+    let period_str = match (&data.period.since, &data.period.until) {
+        (Some(s), Some(u)) => format!("{s} – {u}"),
+        (Some(s), None) => format!("{s} – present"),
+        (None, Some(u)) => format!("all history – {u}"),
+        (None, None) => "all history".to_string(),
+    };
+    let generated_date = data.generated_at.get(..10).unwrap_or(&data.generated_at);
+    out.push_str(&format!(
+        "# Engineer Report: {} <{}>\n",
+        data.name, data.email
+    ));
+    out.push_str(&format!(
+        "Generated: {generated_date} | Period: {period_str}\n\n"
+    ));
+
+    // Summary table.
+    out.push_str("## Summary\n");
+    out.push_str("| Metric          | Value                     |\n");
+    out.push_str("|-----------------|---------------------------|\n");
+    out.push_str(&format!(
+        "| Total commits   | {:<25} |\n",
+        data.commits.total
+    ));
+    let repos_str = data.commits.repositories.join(", ");
+    out.push_str(&format!(
+        "| Repositories    | {:<25} |\n",
+        if repos_str.is_empty() {
+            "—".to_string()
+        } else {
+            repos_str
+        }
+    ));
+    out.push_str(&format!(
+        "| First commit    | {:<25} |\n",
+        data.commits
+            .first_commit
+            .as_deref()
+            .and_then(|s| s.get(..10))
+            .unwrap_or("—")
+    ));
+    out.push_str(&format!(
+        "| Last commit     | {:<25} |\n",
+        data.commits
+            .last_commit
+            .as_deref()
+            .and_then(|s| s.get(..10))
+            .unwrap_or("—")
+    ));
+    let coverage_str = match (data.commits.total, data.commits.ticket_coverage) {
+        (0, _) => "no commits in scope".to_string(),
+        (total, Some(cov)) => {
+            format!(
+                "{} / {} ({:.0}%)",
+                data.commits.ticketed,
+                total,
+                cov * 100.0
+            )
+        }
+        (total, None) => format!("{} / {} (0%)", data.commits.ticketed, total),
+    };
+    out.push_str(&format!("| Ticket coverage | {:<25} |\n", coverage_str));
+    out.push('\n');
+
+    // Effort histogram.
+    out.push_str(&format!(
+        "## Effort Histogram ({} / {} commits scored)\n",
+        data.effort.scored_commits, data.effort.total_commits
+    ));
+    out.push_str("| Size | Count | % scored |\n");
+    out.push_str("|------|-------|----------|\n");
+    let scored = data.effort.scored_commits as f64;
+    for size in &["XS", "S", "M", "L", "XL"] {
+        let count = data.effort.histogram.get(*size).copied().unwrap_or(0);
+        let pct = if scored > 0.0 {
+            format!("{:.0}%", f64::from(count) / scored * 100.0)
+        } else {
+            "—".to_string()
+        };
+        out.push_str(&format!("| {:<4} | {:>5} | {:>8} |\n", size, count, pct));
+    }
+    out.push('\n');
+
+    // PR metrics.
+    out.push_str("## Pull Request Metrics\n");
+    out.push_str("| Metric             | Value     |\n");
+    out.push_str("|--------------------|-----------||\n");
+    out.push_str(&format!(
+        "| Total PRs          | {:<9} |\n",
+        data.pull_requests.total
+    ));
+    out.push_str(&format!(
+        "| Merged PRs         | {:<9} |\n",
+        data.pull_requests.merged
+    ));
+    let fmt_ct = |v: Option<f64>| -> String {
+        v.map(|h| format!("{h:.1} h"))
+            .unwrap_or_else(|| "—".to_string())
+    };
+    out.push_str(&format!(
+        "| Avg cycle time     | {:<9} |\n",
+        fmt_ct(data.pull_requests.avg_cycle_time_hours)
+    ));
+    out.push_str(&format!(
+        "| Median cycle time  | {:<9} |\n",
+        fmt_ct(data.pull_requests.median_cycle_time_hours)
+    ));
+    let p95_str = match data.pull_requests.p95_cycle_time_hours {
+        Some(h) => format!("{h:.1} h"),
+        None if data.pull_requests.merged < 20 => "(< 20 PRs)".to_string(),
+        None => "—".to_string(),
+    };
+    out.push_str(&format!("| p95 cycle time     | {:<9} |\n", p95_str));
+
+    if data.pull_requests.total == 0 {
+        out.push_str(
+            "\n> No pull requests found. Ensure provider logins are mapped via \
+                      `tga aliases add-login`.\n",
+        );
+    }
+    out.push('\n');
+
+    // Category breakdown.
+    if !data.categories.is_empty() {
+        out.push_str("## Category Breakdown\n");
+        out.push_str("| Category    | Commits | % total |\n");
+        out.push_str("|-------------|---------|--------|\n");
+        let total_cats: usize = data.categories.values().sum();
+        let mut cats: Vec<(&String, &usize)> = data.categories.iter().collect();
+        cats.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        for (cat, count) in cats {
+            let pct = if total_cats > 0 {
+                format!("{:.0}%", *count as f64 / total_cats as f64 * 100.0)
+            } else {
+                "—".to_string()
+            };
+            out.push_str(&format!("| {:<11} | {:>7} | {:>7} |\n", cat, count, pct));
+        }
+        out.push('\n');
+    }
+
+    out
+}
+
+/// Render an [`AuthorDrilldownData`] as a JSON string.
+///
+/// Why: `tga author --format json` targets programmatic consumers (CI
+/// dashboards, team tooling) that need structured, machine-readable output.
+/// What: serialises the struct to pretty-printed JSON via serde. All
+/// `Option<f64>` fields render as JSON `null` when absent.
+/// Test: see `tests::format_json_parses`.
+pub fn format_json(data: &AuthorDrilldownData) -> crate::report::errors::Result<String> {
+    serde_json::to_string_pretty(data).map_err(ReportError::Json)
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -482,7 +782,13 @@ mod tests {
     /// the UNIQUE constraint added in migration v12).
     static PR_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
 
-    fn seed_pr(db: &Database, author: &str, state: &str, created_at: &str, merged_at: Option<&str>) {
+    fn seed_pr(
+        db: &Database,
+        author: &str,
+        state: &str,
+        created_at: &str,
+        merged_at: Option<&str>,
+    ) {
         let pr_num = PR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         db.connection()
             .execute(
@@ -582,7 +888,10 @@ mod tests {
         let logins = vec!["alice-gh".to_string()];
         let m = query_pr_metrics(&db, &logins, None, None).expect("query");
         assert_eq!(m.merged, 20);
-        assert!(m.p95_cycle_time_hours.is_some(), "p95 should appear at n=20");
+        assert!(
+            m.p95_cycle_time_hours.is_some(),
+            "p95 should appear at n=20"
+        );
     }
 
     #[test]
@@ -619,5 +928,83 @@ mod tests {
         let json = r#"["alice@example.com","alice-old@example.com","alice-dev","alice-gh"]"#;
         let logins = extract_provider_logins(json);
         assert_eq!(logins, vec!["alice-dev", "alice-gh"]);
+    }
+
+    fn make_sample_drilldown() -> AuthorDrilldownData {
+        let mut histogram = HashMap::new();
+        histogram.insert("XS".to_string(), 5u32);
+        histogram.insert("S".to_string(), 10u32);
+        histogram.insert("M".to_string(), 3u32);
+
+        let mut categories = HashMap::new();
+        categories.insert("feature".to_string(), 8usize);
+        categories.insert("bugfix".to_string(), 4usize);
+
+        AuthorDrilldownData {
+            generated_at: "2026-05-28T10:00:00Z".to_string(),
+            email: "alice@example.com".to_string(),
+            name: "Alice Smith".to_string(),
+            period: ReportPeriod {
+                since: Some("2025-01-01".to_string()),
+                until: Some("2026-05-28".to_string()),
+            },
+            commits: CommitSection {
+                total: 18,
+                ticketed: 7,
+                ticket_coverage: Some(7.0 / 18.0),
+                repositories: vec!["acme/api".to_string()],
+                first_commit: Some("2025-01-07T09:12:00Z".to_string()),
+                last_commit: Some("2026-05-22T16:44:00Z".to_string()),
+                insertions: 500,
+                deletions: 200,
+            },
+            effort: EffortSection {
+                scored_commits: 18,
+                total_commits: 18,
+                histogram,
+            },
+            pull_requests: PrSection {
+                total: 10,
+                merged: 9,
+                avg_cycle_time_hours: Some(14.3),
+                median_cycle_time_hours: Some(9.1),
+                p95_cycle_time_hours: None,
+            },
+            categories,
+        }
+    }
+
+    #[test]
+    fn format_markdown_contains_headers() {
+        // Why: asserts the mandatory section headers and key values appear in output.
+        let data = make_sample_drilldown();
+        let md = format_markdown(&data);
+        assert!(md.contains("# Engineer Report: Alice Smith <alice@example.com>"));
+        assert!(md.contains("## Summary"));
+        assert!(md.contains("## Effort Histogram"));
+        assert!(md.contains("## Pull Request Metrics"));
+        assert!(md.contains("## Category Breakdown"));
+        assert!(md.contains("feature"));
+        assert!(md.contains("acme/api"));
+        assert!(md.contains("18")); // total commits
+    }
+
+    #[test]
+    fn format_json_parses() {
+        // Why: the JSON output must round-trip through serde without loss.
+        let data = make_sample_drilldown();
+        let json_str = format_json(&data).expect("json");
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("valid json");
+        assert_eq!(parsed["email"].as_str(), Some("alice@example.com"));
+        assert_eq!(parsed["commits"]["total"].as_u64(), Some(18));
+        assert_eq!(
+            parsed["effort"]["histogram"]["XS"].as_u64(),
+            Some(5),
+            "XS bucket should be 5"
+        );
+        assert!(
+            parsed["pull_requests"]["p95_cycle_time_hours"].is_null(),
+            "p95 should be null when None"
+        );
     }
 }

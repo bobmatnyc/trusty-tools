@@ -16,6 +16,7 @@ use tga::core::config::{Config, ConfigValidator};
 use tga::core::db::Database;
 
 use crate::commands::aliases::AliasesArgs;
+use crate::commands::author::AuthorArgs;
 use crate::commands::backfill::BackfillArgs;
 use crate::commands::deployments::DeploymentsCollectArgs;
 use crate::commands::dora::DoraArgs;
@@ -92,6 +93,8 @@ impl From<LogLevel> for tracing::Level {
 /// Top-level subcommands.
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Per-engineer drill-down report for a single canonical identity.
+    Author(AuthorArgs),
     /// Run the full pipeline: collect → classify → report.
     Analyze(AnalyzeArgs),
     /// Collect commits from git repositories into the database (Stage 1).
@@ -635,6 +638,7 @@ async fn main() -> anyhow::Result<()> {
     let mut db = Database::open(&cli.database)?;
 
     match cli.command {
+        Commands::Author(args) => commands::author::run(config, &db, args)?,
         Commands::Analyze(args) => commands::analyze::run(config, &mut db, args).await?,
         Commands::Collect(args) => commands::collect::run(config, &mut db, args).await?,
         Commands::Classify(args) => commands::classify::run(config, &mut db, args).await?,

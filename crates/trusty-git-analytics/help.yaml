@@ -6,6 +6,18 @@ name: tga
 tagline: trusty-git-analytics — developer productivity analytics (collect → classify → report)
 usage: tga [OPTIONS] <COMMAND>
 commands:
+  author:
+    description: Per-engineer drill-down report (commits, effort, PRs, categories)
+    flags:
+      - name: format
+        description: Output format (markdown or json)
+      - name: since
+        description: Lower date bound (YYYY-MM-DD)
+      - name: until
+        description: Upper date bound (YYYY-MM-DD)
+    examples:
+      - cmd: tga author alice@example.com
+      - cmd: tga author alice@example.com --format json --since 2026-01-01
   analyze:
     description: Run the full pipeline (collect → classify → report)
     flags:

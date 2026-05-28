@@ -216,7 +216,9 @@ fn add_login(db: &mut Database, email: &str, provider: &str, login: &str) -> any
         anyhow::bail!("login must not be empty");
     }
     if login.contains('@') {
-        anyhow::bail!("login '{login}' looks like an email address; provider logins must not contain '@'");
+        anyhow::bail!(
+            "login '{login}' looks like an email address; provider logins must not contain '@'"
+        );
     }
 
     let (id, _name, aliases_json) = lookup_author(db, email)?
