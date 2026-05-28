@@ -5,6 +5,55 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-05-28
+
+### Added
+
+- **`tga author <email>` per-engineer drill-down subcommand (#325)** — produces a
+  focused report for a single canonical identity covering four sections:
+
+  - **Commit Summary** — total commits, ticket coverage fraction, repositories
+    touched, first/last commit dates, total insertions/deletions.
+  - **Effort Histogram** — XS/S/M/L/XL bucket counts from `fact_commit_effort`
+    (populated by `tga backfill effort`), with a "N / M commits scored" coverage
+    header so readers know if the histogram is incomplete.
+  - **Pull Request Metrics** — total PRs, merged PRs, avg/median/p95 cycle time
+    (hours). Cycle times are filtered to the [0.5, 720] hour window matching
+    the existing velocity computation. p95 is omitted when fewer than 20 merged
+    PRs are present in scope.
+  - **Category Breakdown** — per-category commit counts (feature, bugfix,
+    maintenance, etc.) from the classifications table.
+
+  Supports `--format markdown` (default, human-readable tables) and
+  `--format json` (machine-readable, suitable for CI dashboards). Both `--since`
+  and `--until` (ISO8601 `YYYY-MM-DD`) are included in the MVP to scope the
+  report to a specific time window.
+
+- **`tga aliases add-login <email> <provider> <login>` subcommand (#325)** —
+  appends a provider login (e.g. GitHub username) to `authors.aliases` so that
+  `tga author` can match pull-request authorship across providers without a
+  schema migration. Provider is validated against the allow-list
+  (`github`, `gitlab`, `ado`, `bitbucket`). Duplicate logins are silently
+  ignored (idempotent). This is a one-time setup operation per developer per
+  provider:
+  ```bash
+  tga aliases add-login alice@example.com github alice-gh
+  tga aliases add-login bob@example.com github bobm
+  ```
+
+### Implementation notes
+
+- PR canonicalization uses option (a) from the spec: provider logins are stored
+  in `authors.aliases` as non-email entries (no `@`). The PR query extracts
+  logins from the JSON array at query time. No schema migration is required.
+- Median and p95 cycle time are computed in Rust by sorting the raw duration
+  vector — SQLite has no native `MEDIAN` aggregate.
+- The effort histogram join path: `fact_commit_effort.sha → commits.sha →
+  commits.author_id → authors.canonical_email`.
+- When `tga author` is called and no PRs are found, a note in the PR Metrics
+  section instructs the user to run `tga aliases add-login` to map provider
+  logins.
+
 ## [2.0.0] - 2026-05-28
 
 ### BREAKING CHANGES

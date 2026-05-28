@@ -321,9 +321,10 @@ tga dora --since 2026-04-01
 | `tga collect` | Stage 1: extract commits into the database | `--repos`, `--branch`, `--weeks`, `--from`, `--to`, `--force`, `--head-only`, `--no-fetch`, `--strict-fetch`, `--verbose-fetch`, `--dry-run` |
 | `tga classify` | Stage 2: classify collected commits | `--repos`, `--weeks`, `--since`, `--until`, `--force`, `--rules`, `--use-llm`, `--no-external` |
 | `tga report` | Stage 3: generate CSV/JSON/Markdown reports | `--output`, `--formats`, `--author` |
+| `tga author` | Per-engineer drill-down (commits, effort, PRs, categories) | `<email>`, `--format`, `--since`, `--until` |
 | `tga pr-metrics` | Pull-request metrics per engineer | `--weeks`, `--csv`, `--output` |
 | `tga install` | Interactive first-time config wizard | `--output`, `--force` |
-| `tga aliases` | Manage developer identity aliases | `list`, `merge <src> <dst>` |
+| `tga aliases` | Manage developer identity aliases | `list`, `merge <src> <dst>`, `add-login <email> <provider> <login>` |
 | `tga backfill` | Retroactive maintenance on existing rows | `--repos`, `--weeks`, `--since`, `--until`, `--dry-run` |
 | `tga override` | Pin classification verdicts (Tier 0) | `add`, `list`, `remove` |
 | `tga rules` | Introspect the active rule set | `list`, `show <sha>`, `test "<message>"` |
