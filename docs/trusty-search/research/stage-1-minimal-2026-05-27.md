@@ -501,3 +501,78 @@ All work targets a single PR, releasing as v0.17.0.
 feature is a small config addition + one conditional guard in the reindex
 orchestrator. Complexity comes entirely from ensuring tests and warm-boot paths
 are consistent, not from the implementation itself.
+
+---
+
+## Decisions (locked 2026-05-27)
+
+These answers were provided by the user after reviewing the open questions in
+Section 7. They are binding for the v0.17.0 implementation.
+
+### D1 — `lexical_only` / `skip_kg` coupling (Q3 in spec)
+
+**Decision**: Keep the two flags independent in 0.17.0; revisit later.
+
+`--lexical-only` does **not** imply `--no-kg`. The two flags are orthogonal
+knobs: `--lexical-only` stops after Stage 1 (no embedding); `--no-kg`
+suppresses the Phase 3 KG rebuild. Neither implies the other. This preserves
+backward compatibility for any operator that uses `--lexical-only` and
+inspects KG results (theoretically possible before 0.16.0 even though the
+search capabilities gate hid them from search).
+
+Future: once the flag combination `--lexical-only --no-kg` proves widely
+adopted, a future release can consider making `lexical_only → skip_kg`
+implicit, with a deprecation cycle.
+
+### D2 — KG query behavior on `skip_kg` indexes (Q2 in spec)
+
+**Decision**: Return a structured 503 / KG-unavailable error.
+
+`get_call_chain` and other KG-dependent endpoints must return a **typed
+error** indicating the KG was intentionally skipped, NOT a silent empty result.
+Tooling and humans must be able to distinguish "no symbols found" from "KG
+disabled."
+
+Error contract (binding):
+- **HTTP**: `503 Service Unavailable` with body
+  `{"error": "kg_unavailable", "reason": "skipped_by_config", "index": "<id>"}`.
+- **MCP / JSON-RPC**: error code `-32010` (reserved for KG-unavailable
+  conditions in trusty-search), message `"KG unavailable: skipped_by_config"`.
+- Affected endpoints: `GET /indexes/:id/call_chain` and `search_kg` MCP tool.
+- The `search_kg` tool already uses the `STAGE_NOT_READY` error path when the
+  `graph` stage is `Skipped`; the `skip_kg` path should produce the same
+  `STAGE_NOT_READY` response (since `graph` is permanently `Skipped`).
+  `get_call_chain` needs a new explicit 503 guard since it currently falls
+  through to an empty graph result rather than an error.
+
+### D3 — YAML config support (Q4 in spec)
+
+**Decision**: Include `skip_kg` as a first-class field in `trusty-search.yaml`
+in 0.17.0. CLI and YAML must stay in sync — both surfaces support `skip_kg`
+from day one.
+
+`IndexConfig` in `repo_config.rs` gains a `skip_kg: bool` field (default
+`false`, `#[serde(default)]`). The multi-index YAML path in
+`commands/index.rs` threads `filters.skip_kg` the same way it threads
+`filters.lexical_only`.
+
+### D4 — Environment variable (not in original Q, added for completeness)
+
+**Decision**: Add `TRUSTY_NO_KG=1` env var as a machine-wide override (despite
+the original spec recommendation against it). Rationale: the user specified
+this in the implementation plan. `TRUSTY_NO_KG` sets `skip_kg: true` globally
+when the env var is `"1"`, `"true"`, or `"yes"` (case-insensitive). It is
+treated as a default that can be overridden per-index by the YAML field.
+
+### Consequent spec updates
+
+- **Section 2 (API/flag shape)**: the env-var `TRUSTY_NO_KG` is now supported
+  as a machine-wide default (contrary to the earlier "none recommended"
+  recommendation; user decision overrides).
+- **Section 5 (Search-time behavior)**: `get_call_chain` returns 503
+  `kg_unavailable` rather than silently returning an empty graph. The MCP
+  `search_kg` tool already produces `STAGE_NOT_READY` when `graph = Skipped`;
+  no additional change needed there since `skip_kg` pre-sets `graph = Skipped`.
+- **Section 7, Q2**: resolved by D2 above.
+- **Section 7, Q3**: resolved by D1 above.
+- **Section 7, Q4**: resolved by D3 above.
