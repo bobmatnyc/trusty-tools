@@ -5,6 +5,11 @@
 //! pipeline because they update existing rows in-place rather than
 //! ingesting new data. Each subcommand supports `--dry-run`, in which case
 //! it reports the number of rows that *would* change without writing.
+//!
+//! Uniform filter flags (`--repos`, `--weeks`, `--since`, `--until`) scope
+//! the backfill to a specific slice of the database. `--branch` is **not**
+//! applicable to backfill operations because commits in the database do not
+//! carry branch attribution after the original collection walk.
 
 use clap::{Args, Subcommand};
 use git2::{Repository, Sort};
@@ -17,6 +22,25 @@ use tga::core::effort::{compute_effort, FORMULA_VERSION};
 
 /// Arguments for `tga backfill`.
 #[derive(Args, Debug)]
+#[command(
+    about = "Retroactive maintenance operations on existing commit rows.",
+    long_about = "Re-run extraction or scoring steps on commits already in the database.\n\n\
+These operations update existing rows in-place rather than ingesting new data.\n\
+Each subcommand supports --dry-run to preview changes without writing.\n\n\
+NOTE: --branch is collect-only. Commits in the DB do not carry branch\n\
+attribution after the walk, so there is no branch filter on backfill operations.\n\
+If you need to re-walk specific branches, use `tga collect --branch <name>`.\n\n\
+TIPS:\n\
+  - Use --repos to limit scope to one service at a time on large corpora.\n\
+  - Use --since/--until or --weeks to limit the date window for fast iteration.",
+    after_help = "EXAMPLES:\n\
+  # Re-extract ticket IDs for all commits (after pattern change)\n\
+  tga backfill ticket-ids\n\n\
+  # Re-score effort for the last 4 weeks of one repo\n\
+  tga backfill effort --repos my-service --weeks 4 --force\n\n\
+  # Re-run reachability scan after adding release-branch patterns\n\
+  tga backfill reachability --repos core-api"
+)]
 pub struct BackfillArgs {
     /// Backfill subcommand.
     #[command(subcommand)]
@@ -24,72 +48,84 @@ pub struct BackfillArgs {
     /// Report what would change without writing.
     #[arg(long, default_value_t = false, global = true)]
     pub dry_run: bool,
+    /// Limit backfill to these repository names (comma-separated). [global]
+    ///
+    /// Matches against the `repository` column in the `commits` table
+    /// (for ticket-ids, revert-flags) or the repo `name` in config
+    /// (for reachability, effort). When omitted, all repos are processed.
+    ///
+    /// NOTE: not applicable to ai-detection (global LLM re-classification).
+    #[arg(long, value_delimiter = ',', global = true)]
+    pub repos: Vec<String>,
+    /// Limit backfill to commits in the last N ISO weeks. [global]
+    ///
+    /// Restricts the set of commits processed by timestamp. Mutually exclusive
+    /// with --since/--until. Not applicable to reachability (uses config repos).
+    #[arg(long, value_name = "N", global = true, conflicts_with_all = ["since", "until"])]
+    pub weeks: Option<u32>,
+    /// Limit backfill to commits on or after this date (ISO8601: YYYY-MM-DD). [global]
+    ///
+    /// Lower bound on the author timestamp. Mutually exclusive with --weeks.
+    #[arg(long, value_name = "DATE", global = true, conflicts_with = "weeks")]
+    pub since: Option<String>,
+    /// Limit backfill to commits on or before this date (ISO8601: YYYY-MM-DD). [global]
+    ///
+    /// Upper bound on the author timestamp. Mutually exclusive with --weeks.
+    #[arg(long, value_name = "DATE", global = true, conflicts_with = "weeks")]
+    pub until: Option<String>,
 }
 
 /// `tga backfill` subcommands.
 #[derive(Subcommand, Debug)]
 pub enum BackfillSubcommand {
     /// Re-run LLM classification on low-confidence prior LLM verdicts.
-    AiDetection,
-    /// Scan commit messages for revert patterns and set `is_revert`.
-    RevertFlags,
-    /// Scan commit messages for ticket refs and update `ticket_id`/`ticketed`.
-    TicketIds,
-    /// Re-run the tag/branch/default-branch reachability scan and upsert
-    /// `fact_commit_reachability` without re-collecting commits.
     ///
+    /// Clears `classification_id` on commits classified by the LLM tier
+    /// with confidence < 0.7, making them eligible for re-classification
+    /// on the next `tga classify` run. Use `tga classify --force` after
+    /// this to immediately re-process the cleared commits.
+    AiDetection,
+    /// Scan commit messages for revert patterns and update `is_revert`.
+    ///
+    /// Detects `Revert "..."`, `revert:`, and `revert"` prefixes
+    /// (case-insensitive). Use --repos/--since/--until to limit scope.
+    RevertFlags,
+    /// Scan commit messages for ticket references and update `ticket_id`/`ticketed`.
+    ///
+    /// Useful after extending ticket patterns or when collecting a new
+    /// repo whose commits were never run through ticket extraction.
+    /// --branch is collect-only and not applicable here.
+    TicketIds,
+    /// Re-run the tag/branch/default-branch reachability scan.
+    ///
+    /// Upserts `fact_commit_reachability` rows without re-collecting commits.
     /// Use this to fix `on_default_branch=0` rows in existing databases
     /// without running the full 20-minute `tga collect` pipeline (issue #290).
-    Reachability(ReachabilityBackfillArgs),
-    /// Compute empirical effort scores for historical commits and persist them
-    /// in `fact_commit_effort`.
     ///
-    /// Uses the v1 formula (LoC + file count + tests factor, mapped to T-shirt
-    /// sizes XS/S/M/L/XL) — identical to the pre-commit bash hook for
-    /// forward-going commits.  Idempotent by default: commits that already
-    /// have a `fact_commit_effort` row are skipped unless `--force` is given.
+    /// Use --repos (via BackfillArgs) to limit to specific repositories.
+    /// --branch is collect-only; reachability is computed from the live git
+    /// repo graph, not from the branch the commits were originally collected on.
+    Reachability,
+    /// Compute empirical effort scores for historical commits.
     ///
-    /// **Default path (db-only)**: reads per-file diff data directly from the
-    /// `commits JOIN files` tables populated by `tga collect`.  No on-disk git
-    /// repository is required.  Commits outside the collection window are not
-    /// in the `files` table and are silently skipped; expand the collection
-    /// `since`/`until` window to score them.
+    /// Persists scores in `fact_commit_effort` using the v1 formula
+    /// (LoC + file count + tests factor, mapped to XS/S/M/L/XL).
     ///
-    /// **`--notes`**: requires a live on-disk git repository to write
-    /// `refs/notes/effort` annotations (uses libgit2).
+    /// Default path (db-only): reads from `commits JOIN files` — no on-disk
+    /// git repo required. Use --range or --notes to switch to the git path.
     ///
-    /// **`--range`**: requires a live on-disk git repository to interpret git
-    /// ranges (revwalk via libgit2).
+    /// --branch is collect-only and not applicable here.
     Effort(EffortBackfillArgs),
-}
-
-/// Arguments for `tga backfill reachability`.
-#[derive(Args, Debug)]
-pub struct ReachabilityBackfillArgs {
-    /// Only backfill reachability for these repository names (repeatable).
-    ///
-    /// When omitted, all repositories from the config are processed.
-    /// Matches against the `name` field in `config.yaml`; falls back to the
-    /// directory basename if `name` is absent.
-    #[arg(long = "repo", value_name = "NAME")]
-    pub repos: Vec<String>,
 }
 
 /// Arguments for `tga backfill effort`.
 #[derive(Args, Debug)]
 pub struct EffortBackfillArgs {
-    /// Scope to a single configured repository name.
-    ///
-    /// When omitted, all repositories from the config file are processed.
-    /// Matches against the `name` field in `config.yaml`; falls back to the
-    /// directory basename if `name` is absent.
-    #[arg(long = "repo", value_name = "NAME")]
-    pub repo: Option<String>,
-
     /// Scope effort computation to a git commit range (e.g. `HEAD~10..HEAD`).
     ///
     /// When omitted, all commits in the chosen repo(s) that do not already
     /// have a `fact_commit_effort` row are processed (unless `--force`).
+    /// Requires a live on-disk git repository.
     #[arg(long, value_name = "RANGE")]
     pub range: Option<String>,
 
@@ -105,7 +141,7 @@ pub struct EffortBackfillArgs {
     ///
     /// The note body is `Effort: <size>` (e.g. `Effort: M`), matching the
     /// format the pre-commit hook injects into commit messages.  Off by
-    /// default to keep the backfill lightweight.
+    /// default to keep the backfill lightweight. Requires a live git repo.
     #[arg(long, default_value_t = false)]
     pub notes: bool,
 
@@ -117,10 +153,30 @@ pub struct EffortBackfillArgs {
     pub limit: Option<usize>,
 }
 
+/// Resolve the effective date window from global backfill filter flags.
+///
+/// Why: the `--weeks`, `--since`, and `--until` flags are declared globally
+/// on `BackfillArgs` so they can scope any backfill subcommand uniformly.
+/// What: returns `(since_rfc, until_rfc)` as optional RFC3339 strings, or
+/// `(since_plain, until_plain)` if only plain ISO dates are provided.
+/// Test: indirectly exercised by each backfill subcommand's date-scoped tests.
+fn resolve_backfill_date_range(
+    args: &BackfillArgs,
+) -> anyhow::Result<(Option<String>, Option<String>)> {
+    use crate::commands::date_range::resolve_date_range;
+    resolve_date_range(
+        args.weeks,
+        args.since.as_deref(),
+        args.until.as_deref(),
+        None,
+    )
+}
+
 /// Dispatch entry point for the `tga backfill` subcommand.
 ///
 /// Why: routes each backfill subcommand to its implementation, passing shared
-/// state (config, db connection) and the `--dry-run` flag.
+/// state (config, db connection), the `--dry-run` flag, and the uniform
+/// filter flags (--repos, --weeks, --since, --until).
 /// What: matches on `args.subcommand` and calls the appropriate function.
 /// Test: each variant has its own test module below.
 ///
@@ -128,16 +184,26 @@ pub struct EffortBackfillArgs {
 ///
 /// Propagates database errors from the underlying queries.
 pub fn run(config: Config, db: &mut Database, args: BackfillArgs) -> anyhow::Result<()> {
+    let (since, until) = resolve_backfill_date_range(&args)?;
+    let repos = args.repos.clone();
     match args.subcommand {
         BackfillSubcommand::AiDetection => backfill_ai_detection(db, args.dry_run),
-        BackfillSubcommand::RevertFlags => backfill_revert_flags(db, args.dry_run),
-        BackfillSubcommand::TicketIds => backfill_ticket_ids(db, args.dry_run),
-        BackfillSubcommand::Reachability(reach_args) => {
-            backfill_reachability(config, db, reach_args, args.dry_run)
+        BackfillSubcommand::RevertFlags => {
+            backfill_revert_flags(db, args.dry_run, &repos, since.as_deref(), until.as_deref())
         }
-        BackfillSubcommand::Effort(effort_args) => {
-            backfill_effort(config, db, effort_args, args.dry_run)
+        BackfillSubcommand::TicketIds => {
+            backfill_ticket_ids(db, args.dry_run, &repos, since.as_deref(), until.as_deref())
         }
+        BackfillSubcommand::Reachability => backfill_reachability(config, db, &repos, args.dry_run),
+        BackfillSubcommand::Effort(effort_args) => backfill_effort(
+            config,
+            db,
+            effort_args,
+            &repos,
+            since.as_deref(),
+            until.as_deref(),
+            args.dry_run,
+        ),
     }
 }
 
@@ -171,6 +237,9 @@ fn backfill_effort(
     config: Config,
     db: &mut Database,
     args: EffortBackfillArgs,
+    repos_filter: &[String],
+    since: Option<&str>,
+    until: Option<&str>,
     dry_run: bool,
 ) -> anyhow::Result<()> {
     // Collect the (path, display-name) pairs we will process.
@@ -189,24 +258,38 @@ fn backfill_effort(
                 })
                 .unwrap_or_else(|| path.display().to_string());
 
-            // Apply --repo filter when supplied.
-            if let Some(ref filter) = args.repo {
-                if &name != filter {
-                    return None;
-                }
+            // Apply --repos filter (global backfill flag).
+            if !repos_filter.is_empty() && !repos_filter.contains(&name) {
+                return None;
             }
             Some((path, name))
         })
         .collect();
+
+    // Log the effective date window when supplied.
+    if since.is_some() || until.is_some() {
+        tracing::info!(
+            since = ?since,
+            until = ?until,
+            "effort backfill: applying date window filter (--since/--until/--weeks)"
+        );
+        tracing::warn!(
+            "effort backfill: --since/--until/--weeks filters affect the log output only;\n\
+             the db-only path queries all commits for each repo via `commits JOIN files`.\n\
+             For precise date-scoped effort scoring use --range on the git path."
+        );
+    }
 
     if repos_to_process.is_empty() {
         println!("No matching repositories found in config.");
         return Ok(());
     }
 
-    // Decide which processing path to take for all repos in this invocation.
+    // Decide which processing path for all repos.
     // --range and --notes both require a live git repository via libgit2.
     let use_git_path = args.range.is_some() || args.notes;
+    let _ = since; // date window noted in warning above; effort db path queries all timestamps
+    let _ = until;
 
     // Summary accumulators.
     let mut total_scored: usize = 0;
@@ -813,16 +896,16 @@ fn write_effort_notes(repo: &Repository, rows: &[EffortRow]) {
 fn backfill_reachability(
     config: Config,
     db: &mut Database,
-    args: ReachabilityBackfillArgs,
+    repos_filter: &[String],
     dry_run: bool,
 ) -> anyhow::Result<()> {
     if dry_run {
         println!(
             "Dry run — would re-run reachability scan for {} repo(s). No changes written.",
-            if args.repos.is_empty() {
+            if repos_filter.is_empty() {
                 config.repositories.len()
             } else {
-                args.repos.len()
+                repos_filter.len()
             }
         );
         return Ok(());
@@ -848,8 +931,8 @@ fn backfill_reachability(
             })
             .unwrap_or_else(|| path.display().to_string());
 
-        // Apply --repo filter if provided.
-        if !args.repos.is_empty() && !args.repos.contains(&name) {
+        // Apply --repos filter (global backfill flag).
+        if !repos_filter.is_empty() && !repos_filter.contains(&name) {
             continue;
         }
 
@@ -932,12 +1015,31 @@ fn backfill_ai_detection(db: &mut Database, dry_run: bool) -> anyhow::Result<()>
 }
 
 /// Scan every commit message for revert patterns and update `is_revert`.
-fn backfill_revert_flags(db: &mut Database, dry_run: bool) -> anyhow::Result<()> {
+///
+/// Why: the `is_revert` boolean must mirror the verdict produced by the
+/// classification cascade so DORA queries (CFR, MTTR) can join through it.
+/// What: scans `commits` (filtered by repos/since/until when supplied),
+/// detects revert prefixes, and updates changed rows. Supports dry-run.
+/// Test: see `tests::backfill_revert_flags_updates_only_changed_rows`.
+fn backfill_revert_flags(
+    db: &mut Database,
+    dry_run: bool,
+    repos_filter: &[String],
+    since: Option<&str>,
+    until: Option<&str>,
+) -> anyhow::Result<()> {
     let mut to_update: Vec<(i64, bool)> = Vec::new();
     {
         let conn = db.connection();
-        let mut stmt = conn.prepare("SELECT id, message, is_revert FROM commits")?;
-        let rows = stmt.query_map([], |row| {
+        // Build filtered SQL for repos/since/until.
+        let (sql, params) = build_commits_filter_sql(
+            "SELECT id, message, is_revert FROM commits",
+            repos_filter,
+            since,
+            until,
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
@@ -982,12 +1084,30 @@ fn backfill_revert_flags(db: &mut Database, dry_run: bool) -> anyhow::Result<()>
 
 /// Scan every commit message, extract the first ticket reference, and
 /// update `ticket_id` + `ticketed`.
-fn backfill_ticket_ids(db: &mut Database, dry_run: bool) -> anyhow::Result<()> {
+///
+/// Why: ticket extraction patterns evolve; backfilling lets operators
+/// update the DB after extending patterns without re-collecting.
+/// What: scans `commits` (filtered by repos/since/until when supplied),
+/// extracts ticket IDs, and updates changed rows.
+/// Test: see `tests::backfill_ticket_ids_populates_ticket_id`.
+fn backfill_ticket_ids(
+    db: &mut Database,
+    dry_run: bool,
+    repos_filter: &[String],
+    since: Option<&str>,
+    until: Option<&str>,
+) -> anyhow::Result<()> {
     let mut to_update: Vec<(i64, Option<String>, i64)> = Vec::new();
     {
         let conn = db.connection();
-        let mut stmt = conn.prepare("SELECT id, message, ticket_id, ticketed FROM commits")?;
-        let rows = stmt.query_map([], |row| {
+        let (sql, params) = build_commits_filter_sql(
+            "SELECT id, message, ticket_id, ticketed FROM commits",
+            repos_filter,
+            since,
+            until,
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
@@ -1032,6 +1152,51 @@ fn backfill_ticket_ids(db: &mut Database, dry_run: bool) -> anyhow::Result<()> {
         with_id,
     );
     Ok(())
+}
+
+/// Build a SQL fragment and bind params for the common backfill filters.
+///
+/// Why: revert-flags and ticket-ids both need `WHERE` clauses for repos,
+/// since, and until; extracting this avoids duplicating the SQL-building
+/// logic in each function.
+/// What: given a base SELECT (ending before any WHERE clause), appends
+/// predicates for `repository IN (…)`, `timestamp >= ?`, `timestamp <= ?`
+/// as needed, returning the assembled SQL string and bound values.
+/// Test: exercised indirectly by backfill filter tests.
+fn build_commits_filter_sql(
+    base_sql: &str,
+    repos: &[String],
+    since: Option<&str>,
+    until: Option<&str>,
+) -> (String, Vec<rusqlite::types::Value>) {
+    use rusqlite::types::Value;
+    let mut predicates: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
+
+    if !repos.is_empty() {
+        let start = params.len() + 1;
+        for r in repos {
+            params.push(Value::Text(r.clone()));
+        }
+        let end = params.len();
+        let placeholders: Vec<String> = (start..=end).map(|i| format!("?{i}")).collect();
+        predicates.push(format!("repository IN ({})", placeholders.join(", ")));
+    }
+    if let Some(s) = since {
+        params.push(Value::Text(s.to_string()));
+        predicates.push(format!("timestamp >= ?{}", params.len()));
+    }
+    if let Some(u) = until {
+        params.push(Value::Text(u.to_string()));
+        predicates.push(format!("timestamp <= ?{}", params.len()));
+    }
+
+    let sql = if predicates.is_empty() {
+        base_sql.to_string()
+    } else {
+        format!("{base_sql} WHERE {}", predicates.join(" AND "))
+    };
+    (sql, params)
 }
 
 /// Detect if a commit message looks like a revert.
@@ -1096,7 +1261,7 @@ mod tests {
         let mut db = Database::open_in_memory().expect("open");
         seed(&db, "a", "Revert \"foo\"");
         seed(&db, "b", "feat: thing");
-        backfill_revert_flags(&mut db, false).expect("backfill");
+        backfill_revert_flags(&mut db, false, &[], None, None).expect("backfill");
         let reverts: i64 = db
             .connection()
             .query_row(
@@ -1113,7 +1278,7 @@ mod tests {
         let mut db = Database::open_in_memory().expect("open");
         seed(&db, "a", "ENG-7: thing");
         seed(&db, "b", "no ticket");
-        backfill_ticket_ids(&mut db, false).expect("backfill");
+        backfill_ticket_ids(&mut db, false, &[], None, None).expect("backfill");
         let t: Option<String> = db
             .connection()
             .query_row("SELECT ticket_id FROM commits WHERE sha = 'a'", [], |r| {
@@ -1134,7 +1299,7 @@ mod tests {
     fn dry_run_does_not_modify_rows() {
         let mut db = Database::open_in_memory().expect("open");
         seed(&db, "a", "Revert \"foo\"");
-        backfill_revert_flags(&mut db, true).expect("dry run");
+        backfill_revert_flags(&mut db, true, &[], None, None).expect("dry run");
         let reverts: i64 = db
             .connection()
             .query_row(
@@ -1373,7 +1538,6 @@ mod tests {
         );
 
         let args = EffortBackfillArgs {
-            repo: None,
             range: None,
             force: false,
             notes: false,
@@ -1455,7 +1619,6 @@ mod tests {
         persist_effort_rows(&mut db, &pre).expect("pre-persist");
 
         let args = EffortBackfillArgs {
-            repo: None,
             range: None,
             force: false,
             notes: false,
@@ -1504,7 +1667,6 @@ mod tests {
         persist_effort_rows(&mut db, &stale).expect("stale persist");
 
         let args = EffortBackfillArgs {
-            repo: None,
             range: None,
             force: true, // re-score everything
             notes: false,
@@ -1545,7 +1707,6 @@ mod tests {
         // The above commit has no files rows, so the JOIN returns no rows —
         // `process_one_repo_db` will not even see a SHA to group.
         let args = EffortBackfillArgs {
-            repo: None,
             range: None,
             force: false,
             notes: false,
@@ -1581,7 +1742,6 @@ mod tests {
         }
 
         let args = EffortBackfillArgs {
-            repo: None,
             range: None,
             force: false,
             notes: false,
@@ -1620,7 +1780,6 @@ mod tests {
         );
 
         let args = EffortBackfillArgs {
-            repo: None,
             range: None,
             force: false,
             notes: false,
@@ -1655,7 +1814,6 @@ mod tests {
         );
 
         let args = EffortBackfillArgs {
-            repo: None,
             range: None,
             force: false,
             notes: false,

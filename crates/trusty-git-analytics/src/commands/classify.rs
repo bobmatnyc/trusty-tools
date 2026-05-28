@@ -4,13 +4,17 @@ use tga::classify::ClassificationPipeline;
 use tga::core::config::{ClassificationConfig, Config};
 use tga::core::db::{CheckpointMode, Database};
 
+use crate::commands::date_range::resolve_date_range;
 use crate::ClassifyArgs;
 
 /// Run the classification stage over previously-collected commits.
 ///
-/// Why: wire CLI flags (`--rules`, `--use-llm`, `--force`, `--since`,
-/// `--no-external`) into the [`ClassificationPipeline`] without exposing the
-/// pipeline internals in `main.rs`.
+/// Why: wire CLI flags (`--rules`, `--use-llm`, `--force`, `--repos`,
+/// `--weeks`, `--since/--until`, `--no-external`) into the
+/// [`ClassificationPipeline`] without exposing the pipeline internals in
+/// `main.rs`.  The new uniform filter flags (`--repos`, `--weeks`,
+/// `--since/--until`) enable surgical re-classification of slices without
+/// touching the full DB.
 /// What: mutates the `ClassificationConfig` section of the loaded YAML config
 /// to honor each override, then builds and runs the pipeline.
 /// Test: integration-tested via pipeline unit tests in `classify::pipeline::tests`.
@@ -35,19 +39,36 @@ pub async fn run(config: Config, db: &mut Database, args: ClassifyArgs) -> anyho
         }
     }
 
-    // --since without --force is a no-op (default flow already skips
+    // Resolve the date window from --weeks / --since / --until.
+    // Priority: --weeks > --since/--until.
+    let (resolved_since, resolved_until) = resolve_date_range(
+        args.weeks,
+        args.since.as_deref(),
+        args.until.as_deref(),
+        None,
+    )?;
+
+    // Effective since: resolved window (from --weeks or --since) drives the
+    // pipeline's `with_since` filter.  When --weeks is given we only have a
+    // lower bound; when --since is given directly we may also have --until.
+    let effective_since = resolved_since;
+    let effective_until = resolved_until;
+
+    // --since/--until without --force is a no-op (default flow already skips
     // classified rows). Flag this rather than silently ignoring it so the
     // operator notices the missing `--force`.
-    if args.since.is_some() && !args.force {
+    if (effective_since.is_some() || effective_until.is_some()) && !args.force {
         tracing::warn!(
-            "--since was supplied without --force; ignoring it. \
+            "--since/--until/--weeks was supplied without --force; ignoring date window. \
              Pass --force to re-classify commits already in the DB."
         );
     }
 
     let pipeline = ClassificationPipeline::new(cfg)
         .with_force(args.force)
-        .with_since(args.since.clone());
+        .with_since(effective_since.clone())
+        .with_until(effective_until.clone())
+        .with_repos(args.repos.clone());
 
     // Backfill mode: fill in only the missing complexity scores and return,
     // leaving existing category/confidence/method verdicts untouched.

@@ -53,6 +53,13 @@ pub struct GitCollector {
     /// `refs/remotes/origin/*` ref so that commits on non-default branches
     /// are not silently excluded.
     head_only: bool,
+    /// Explicit branch list from `--branch <NAME[,NAME…]>`.
+    ///
+    /// When non-empty, overrides all other revwalk seeding logic: the walk
+    /// seeds from `refs/heads/<name>` + `refs/remotes/origin/<name>` for
+    /// each listed name.  An empty vec means "no restriction" (use the
+    /// default all-branches or head_only logic).
+    explicit_branches: Vec<String>,
 }
 
 impl GitCollector {
@@ -98,6 +105,7 @@ impl GitCollector {
             no_fetch: false,
             remote_name: "origin".to_string(),
             head_only: config.head_only,
+            explicit_branches: Vec::new(),
         })
     }
 
@@ -132,6 +140,23 @@ impl GitCollector {
     /// `tests::multi_branch_coverage`.
     pub fn with_head_only(mut self, head_only: bool) -> Self {
         self.head_only = head_only;
+        self
+    }
+
+    /// Restrict the revwalk to an explicit list of branch names.
+    ///
+    /// Why: the `--branch <NAME[,NAME…]>` CLI flag enables surgical re-runs
+    /// on specific branches without modifying the YAML config.  When set, this
+    /// takes priority over `head_only` and the all-branches default, seeding
+    /// only the listed names.
+    /// What: for each name, pushes `refs/heads/<name>` and
+    /// `refs/remotes/origin/<name>`.  Names not found in the repo are logged as
+    /// warnings but do not abort collection.  An empty `Vec` (the default)
+    /// means no restriction — fall through to `head_only` / all-branches logic.
+    /// Test: see `tests::branch_filter_walks_only_named_branch` and
+    /// `tests::branch_filter_composes_with_repos`.
+    pub fn with_explicit_branches(mut self, branches: Vec<String>) -> Self {
+        self.explicit_branches = branches;
         self
     }
 
@@ -187,73 +212,123 @@ impl GitCollector {
 
         let mut revwalk = repo.revwalk()?;
         revwalk.set_sorting(Sort::TIME)?;
-        // Revwalk seeding: three cases in priority order.
+        // Revwalk seeding: four cases in priority order.
         //
-        // 1. Explicit per-repo `branch` override — unchanged from 1.x, walks
+        // 1. `explicit_branches` non-empty — `--branch <NAME[,NAME…]>` CLI
+        //    filter.  Walks only the listed branches (both local heads and
+        //    remote-tracking copies).  Names not found emit a warning.
+        // 2. Explicit per-repo `branch` override — unchanged from 1.x, walks
         //    only that branch's ancestry.
-        // 2. `head_only = true` — legacy escape hatch, seeds from HEAD only.
-        // 3. Default (2.0.0+): push every `refs/heads/*` and every
+        // 3. `head_only = true` — legacy escape hatch, seeds from HEAD only.
+        // 4. Default (2.0.0+): push every `refs/heads/*` and every
         //    `refs/remotes/origin/*` so commits on non-default branches are
         //    not silently excluded.  The revwalk's internal dedup ensures each
         //    commit is yielded at most once even when reachable from multiple
         //    refs.  The `INSERT OR IGNORE` on the `commits` SHA primary key
         //    provides a second safety net.
-        match (&self.branch, self.head_only) {
-            (Some(name), _) => {
-                // Explicit per-repo branch override still works as before.
-                let refname = format!("refs/heads/{name}");
-                if revwalk.push_ref(&refname).is_err() {
-                    // Try as a generic revision (could be a tag or remote ref).
-                    revwalk.push_ref(name)?;
-                }
-            }
-            (None, true) => {
-                // Legacy escape hatch: --head-only flag or per-repo head_only: true.
-                debug!(repo = %self.name, "head_only mode: seeding revwalk from HEAD only (legacy 1.x behaviour)");
-                revwalk.push_head()?;
-            }
-            (None, false) => {
-                // NEW DEFAULT (2.0.0+): push every local branch head and
-                // every remote tracking ref so multi-branch repos don't lose
-                // commits that never landed on the default branch.
-                let mut heads_pushed = 0u32;
-                let mut remotes_pushed = 0u32;
-                let refs = repo.references()?;
-                for r in refs.flatten() {
-                    let Some(name) = r.name() else { continue };
-                    if name.starts_with("refs/heads/") {
-                        if revwalk.push_ref(name).is_ok() {
-                            heads_pushed += 1;
-                        }
-                    } else if name.starts_with("refs/remotes/origin/")
-                        && name != "refs/remotes/origin/HEAD"
-                        && revwalk.push_ref(name).is_ok()
-                    {
-                        remotes_pushed += 1;
-                    }
-                }
-                let total = heads_pushed + remotes_pushed;
-                if total > 0 {
-                    info!(
-                        repo = %self.name,
-                        refs_walked = total,
-                        heads = heads_pushed,
-                        remote_tracking = remotes_pushed,
-                        "all-branch walk: pushed {} refs ({} heads + {} remote-tracking)",
-                        total,
-                        heads_pushed,
-                        remotes_pushed,
-                    );
-                } else {
-                    // Fallback: repos with weird ref layouts (e.g. detached
-                    // HEAD with no local branches — common in CI shallow
-                    // clones) still get some coverage.
+        if !self.explicit_branches.is_empty() {
+            // Arm 1: --branch filter — seed only the listed branch names.
+            let mut pushed = 0u32;
+            for branch_name in &self.explicit_branches {
+                let local_ref = format!("refs/heads/{branch_name}");
+                let remote_ref = format!("refs/remotes/origin/{branch_name}");
+                let local_ok = revwalk.push_ref(&local_ref).is_ok();
+                let remote_ok = revwalk.push_ref(&remote_ref).is_ok();
+                if local_ok || remote_ok {
+                    pushed += 1;
                     debug!(
                         repo = %self.name,
-                        "no refs/heads/* or refs/remotes/origin/* found; \
-                         falling back to HEAD for revwalk seed"
+                        branch = %branch_name,
+                        local = local_ok,
+                        remote = remote_ok,
+                        "--branch filter: pushed refs for branch"
                     );
+                } else {
+                    warn!(
+                        repo = %self.name,
+                        branch = %branch_name,
+                        "--branch filter: branch '{}' not found in repo '{}' \
+                         (neither refs/heads/{} nor refs/remotes/origin/{}); skipping",
+                        branch_name,
+                        self.name,
+                        branch_name,
+                        branch_name,
+                    );
+                }
+            }
+            if pushed == 0 {
+                // None of the listed branches exist in this repo — nothing to walk.
+                warn!(
+                    repo = %self.name,
+                    "--branch filter found no matching refs; producing zero commits for this repo"
+                );
+            } else {
+                info!(
+                    repo = %self.name,
+                    branches_found = pushed,
+                    "--branch filter: walking {} of {} requested branches",
+                    pushed,
+                    self.explicit_branches.len(),
+                );
+            }
+        } else {
+            match (&self.branch, self.head_only) {
+                (Some(name), _) => {
+                    // Arm 2: Explicit per-repo branch override still works as before.
+                    let refname = format!("refs/heads/{name}");
+                    if revwalk.push_ref(&refname).is_err() {
+                        // Try as a generic revision (could be a tag or remote ref).
+                        revwalk.push_ref(name)?;
+                    }
+                }
+                (None, true) => {
+                    // Arm 3: Legacy escape hatch: --head-only flag or per-repo head_only: true.
+                    debug!(repo = %self.name, "head_only mode: seeding revwalk from HEAD only (legacy 1.x behaviour)");
                     revwalk.push_head()?;
+                }
+                (None, false) => {
+                    // Arm 4 (NEW DEFAULT 2.0.0+): push every local branch head and
+                    // every remote tracking ref so multi-branch repos don't lose
+                    // commits that never landed on the default branch.
+                    let mut heads_pushed = 0u32;
+                    let mut remotes_pushed = 0u32;
+                    let refs = repo.references()?;
+                    for r in refs.flatten() {
+                        let Some(name) = r.name() else { continue };
+                        if name.starts_with("refs/heads/") {
+                            if revwalk.push_ref(name).is_ok() {
+                                heads_pushed += 1;
+                            }
+                        } else if name.starts_with("refs/remotes/origin/")
+                            && name != "refs/remotes/origin/HEAD"
+                            && revwalk.push_ref(name).is_ok()
+                        {
+                            remotes_pushed += 1;
+                        }
+                    }
+                    let total = heads_pushed + remotes_pushed;
+                    if total > 0 {
+                        info!(
+                            repo = %self.name,
+                            refs_walked = total,
+                            heads = heads_pushed,
+                            remote_tracking = remotes_pushed,
+                            "all-branch walk: pushed {} refs ({} heads + {} remote-tracking)",
+                            total,
+                            heads_pushed,
+                            remotes_pushed,
+                        );
+                    } else {
+                        // Fallback: repos with weird ref layouts (e.g. detached
+                        // HEAD with no local branches — common in CI shallow
+                        // clones) still get some coverage.
+                        debug!(
+                            repo = %self.name,
+                            "no refs/heads/* or refs/remotes/origin/* found; \
+                             falling back to HEAD for revwalk seed"
+                        );
+                        revwalk.push_head()?;
+                    }
                 }
             }
         }

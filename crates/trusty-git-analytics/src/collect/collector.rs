@@ -77,6 +77,13 @@ pub struct CollectionPipeline {
     /// the rest.  The global flag here is OR-ed with the per-repo flag — if
     /// either is `true`, that repo walks HEAD only.
     head_only: bool,
+    /// Explicit branch list for the `--branch` CLI filter.
+    ///
+    /// When non-empty, the revwalk is seeded from only these branch names
+    /// (both `refs/heads/<name>` and `refs/remotes/origin/<name>` for each).
+    /// Mutually exclusive with `head_only` — the CLI enforces this via
+    /// `conflicts_with`.  An empty Vec means "no restriction" (the default).
+    branches: Vec<String>,
 }
 
 impl CollectionPipeline {
@@ -95,6 +102,7 @@ impl CollectionPipeline {
             force_refresh_prs: false,
             skip_tag_reachability: false,
             head_only: false,
+            branches: Vec::new(),
         }
     }
 
@@ -142,6 +150,25 @@ impl CollectionPipeline {
         self
     }
 
+    /// Restrict the revwalk to an explicit list of branch names.
+    ///
+    /// Why: the `--branch <NAME[,NAME…]>` CLI flag lets callers scope collection
+    /// to specific branches without touching the YAML config.  This is the
+    /// pipeline-level counterpart that threads the list down to each
+    /// `GitCollector`.
+    /// What: when `branches` is non-empty, each `GitCollector` seeds the
+    /// revwalk from `refs/heads/<name>` + `refs/remotes/origin/<name>` for
+    /// every listed name, emitting a warning for names not found in a given
+    /// repo.  An empty `branches` (the default) means "no restriction".
+    /// Mutually exclusive with `head_only` — enforced at the CLI layer via
+    /// `conflicts_with`.
+    /// Test: see `tests::branch_filter_walks_only_named_branch` in
+    /// `collect::git::extractor::tests`.
+    pub fn with_branches(mut self, branches: Vec<String>) -> Self {
+        self.branches = branches;
+        self
+    }
+
     /// If `true`, re-fetch Azure DevOps pull requests even when their IDs are
     /// already present in `pull_requests`.
     ///
@@ -182,7 +209,8 @@ impl CollectionPipeline {
             let collector = match GitCollector::new(repo_cfg) {
                 Ok(c) => c
                     .no_fetch(self.no_fetch)
-                    .with_head_only(effective_head_only),
+                    .with_head_only(effective_head_only)
+                    .with_explicit_branches(self.branches.clone()),
                 Err(e) => {
                     let msg = format!("failed to open repo {}: {e}", repo_cfg.path.display());
                     warn!("{msg}");

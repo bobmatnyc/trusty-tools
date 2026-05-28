@@ -72,8 +72,9 @@ pub struct RepoCoverage {
 /// and the engine config / taxonomy / JIRA mappings all live in `Config`;
 /// concentrating orchestration here keeps the binary's `commands/classify.rs`
 /// thin.
-/// What: holds the validated [`Config`] plus toggles for `force` re-classify
-/// and `since` lower-bound. Built via [`Self::new`] + builder methods.
+/// What: holds the validated [`Config`] plus toggles for `force` re-classify,
+/// `since`/`until` date bounds, and `repos` filter. Built via [`Self::new`] +
+/// builder methods.
 /// Test: covered by `classify::tests::pipeline_runs_against_in_memory_db`.
 pub struct ClassificationPipeline {
     config: Config,
@@ -86,6 +87,16 @@ pub struct ClassificationPipeline {
     /// Only consulted when `force == true`; without force the default
     /// "missing-verdict" filter is the only selector. See [`Self::with_since`].
     since: Option<String>,
+    /// Optional upper bound on `commits.timestamp` (ISO8601: `YYYY-MM-DD`).
+    ///
+    /// Scopes re-classification to commits on or before this date.
+    /// See [`Self::with_until`].
+    until: Option<String>,
+    /// Optional repository filter: only classify commits from these repos.
+    ///
+    /// When non-empty, only commits whose `repository` column matches one of
+    /// the listed names are considered. See [`Self::with_repos`].
+    repos: Vec<String>,
 }
 
 impl ClassificationPipeline {
@@ -102,6 +113,8 @@ impl ClassificationPipeline {
             config,
             force: false,
             since: None,
+            until: None,
+            repos: Vec::new(),
         }
     }
 
@@ -130,6 +143,31 @@ impl ClassificationPipeline {
     /// Test: covered by the same integration test as `with_force`.
     pub fn with_since(mut self, since: Option<String>) -> Self {
         self.since = since;
+        self
+    }
+
+    /// Bound classification to commits on or before the given ISO8601 date.
+    ///
+    /// Why: complements `with_since` to allow a bounded window like
+    /// `--since 2026-01-01 --until 2026-03-31` without touching commits
+    /// outside that quarter.
+    /// What: stores the string; the read query appends a `timestamp <= ?`
+    /// predicate when set.
+    /// Test: covered by pipeline integration tests that exercise date windows.
+    pub fn with_until(mut self, until: Option<String>) -> Self {
+        self.until = until;
+        self
+    }
+
+    /// Restrict classification to commits from specific repositories.
+    ///
+    /// Why: the `--repos` filter lets operators classify only a slice of the
+    /// DB (e.g. one service) without running across the full corpus.
+    /// What: when non-empty, adds a `WHERE repository IN (…)` clause to the
+    /// candidate commit query.
+    /// Test: see `tests::classify_repos_filter_*` in this module.
+    pub fn with_repos(mut self, repos: Vec<String>) -> Self {
+        self.repos = repos;
         self
     }
 
@@ -326,13 +364,21 @@ impl ClassificationPipeline {
     ) -> Result<ClassificationStats> {
         // 2. Read candidate commits. The default flow returns only the
         //    rows that lack a verdict; `--force` widens this to every row
-        //    (optionally bounded by `--since`).
-        let commits = read_candidate_commits(db, self.force, self.since.as_deref())?;
+        //    (optionally bounded by `--since`/`--until`/`--repos`).
+        let commits = read_candidate_commits(
+            db,
+            self.force,
+            self.since.as_deref(),
+            self.until.as_deref(),
+            &self.repos,
+        )?;
         let total = commits.len();
         info!(
             total,
             force = self.force,
             since = ?self.since,
+            until = ?self.until,
+            repos = ?self.repos,
             "starting classification"
         );
 
@@ -822,49 +868,69 @@ fn is_revert_verdict(category: &str, subcategory: Option<&str>) -> bool {
 /// Read candidates for the classification cascade.
 ///
 /// Why: `--force` (issue #205) re-classifies commits that already have a
-/// verdict, optionally bounded by `--since DATE`. The default flow keeps
-/// the historical "skip-if-classified" semantics so incremental runs stay
-/// cheap.
-/// What: builds a SELECT whose WHERE clause toggles based on `force`:
+/// verdict, optionally bounded by `--since`/`--until`/`--repos`. The
+/// default flow keeps the historical "skip-if-classified" semantics so
+/// incremental runs stay cheap.
+/// What: dynamically builds a WHERE clause from the supplied filters:
 ///
-///   * `!force`               → `WHERE classification_id IS NULL` (legacy)
-///   * `force, since = None`  → no WHERE (every commit)
-///   * `force, since = Some`  → `WHERE timestamp >= ?`
+///   * `!force`               → `classification_id IS NULL`
+///   * `since`                → `timestamp >= ?`
+///   * `until`                → `timestamp <= ?`
+///   * `repos` non-empty      → `repository IN (?,?,…)`
 ///
+/// Filters compose: all supplied predicates are AND-ed together.
 /// Test: covered by `read_candidate_commits_*` unit tests and the
 /// `pipeline_force_*` integration tests in this module.
 fn read_candidate_commits(
     db: &Database,
     force: bool,
     since: Option<&str>,
+    until: Option<&str>,
+    repos: &[String],
 ) -> Result<Vec<CommitRow>> {
-    use rusqlite::params_from_iter;
     use rusqlite::types::Value;
 
-    let (sql, params): (&str, Vec<Value>) = match (force, since) {
-        (false, _) => (
-            "SELECT id, sha, message, is_merge, repository, classification_id \
-             FROM commits WHERE classification_id IS NULL",
-            Vec::new(),
-        ),
-        (true, None) => (
-            "SELECT id, sha, message, is_merge, repository, classification_id \
-             FROM commits",
-            Vec::new(),
-        ),
-        (true, Some(date)) => (
-            "SELECT id, sha, message, is_merge, repository, classification_id \
-             FROM commits WHERE timestamp >= ?1",
-            vec![Value::Text(date.to_string())],
-        ),
+    // Build the WHERE clause dynamically so we can compose all filters.
+    let mut predicates: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
+
+    if !force {
+        predicates.push("classification_id IS NULL".to_string());
+    }
+    if let Some(s) = since {
+        params.push(Value::Text(s.to_string()));
+        predicates.push(format!("timestamp >= ?{}", params.len()));
+    }
+    if let Some(u) = until {
+        params.push(Value::Text(u.to_string()));
+        predicates.push(format!("timestamp <= ?{}", params.len()));
+    }
+    if !repos.is_empty() {
+        // Append repo values to params and compute their 1-based placeholder indices.
+        let start = params.len() + 1;
+        for r in repos {
+            params.push(Value::Text(r.clone()));
+        }
+        let end = params.len();
+        let placeholders: Vec<String> = (start..=end).map(|i| format!("?{i}")).collect();
+        predicates.push(format!("repository IN ({})", placeholders.join(", ")));
+    }
+
+    let where_clause = if predicates.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", predicates.join(" AND "))
     };
+    let sql = format!(
+        "SELECT id, sha, message, is_merge, repository, classification_id FROM commits{where_clause}"
+    );
 
     let mut stmt = db
         .connection()
-        .prepare(sql)
+        .prepare(&sql)
         .map_err(crate::core::TgaError::from)?;
     let rows = stmt
-        .query_map(params_from_iter(params.iter()), |row| {
+        .query_map(rusqlite::params_from_iter(params.iter()), |row| {
             Ok(CommitRow {
                 id: row.get(0)?,
                 sha: row.get(1)?,
@@ -1336,18 +1402,19 @@ mod tests {
             .expect("insert unclassified");
 
         // Default flow: only the unclassified row.
-        let v = super::read_candidate_commits(&db, false, None).expect("default");
+        let v = super::read_candidate_commits(&db, false, None, None, &[]).expect("default");
         let shas: Vec<&str> = v.iter().map(|c| c.sha.as_str()).collect();
         assert_eq!(shas, vec!["null"]);
 
         // --force: every row.
-        let v = super::read_candidate_commits(&db, true, None).expect("force");
+        let v = super::read_candidate_commits(&db, true, None, None, &[]).expect("force");
         let mut shas: Vec<&str> = v.iter().map(|c| c.sha.as_str()).collect();
         shas.sort();
         assert_eq!(shas, vec!["new", "null", "old"]);
 
         // --force --since 2025-01-01: only "new" (timestamp >= bound).
-        let v = super::read_candidate_commits(&db, true, Some("2025-01-01")).expect("force+since");
+        let v = super::read_candidate_commits(&db, true, Some("2025-01-01"), None, &[])
+            .expect("force+since");
         let shas: Vec<&str> = v.iter().map(|c| c.sha.as_str()).collect();
         assert_eq!(shas, vec!["new"]);
     }

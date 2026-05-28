@@ -64,7 +64,8 @@ pub async fn run(config: Config, db: &mut Database, args: CollectArgs) -> anyhow
         .with_no_fetch(args.no_fetch)
         .with_force_refresh_prs(args.force_refresh_prs)
         .with_skip_tag_reachability(args.skip_tag_reachability)
-        .with_head_only(args.head_only);
+        .with_head_only(args.head_only)
+        .with_branches(args.branch);
 
     // In dry-run mode, redirect all writes to an ephemeral in-memory
     // database. The real `db` is never opened for write.
