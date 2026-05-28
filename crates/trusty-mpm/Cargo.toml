@@ -83,11 +83,16 @@ name = "trusty-mpm-gui"
 path = "src/bin/trusty-mpm-gui.rs"
 required-features = ["gui"]
 
-# ── Integration test ───────────────────────────────────────────────────────────
+# ── Integration tests ─────────────────────────────────────────────────────────
 [[test]]
 name = "e2e"
 path = "tests/e2e/main.rs"
 required-features = ["daemon"]
+
+# Services discovery integration test (gated #[ignore]; run with --include-ignored).
+[[test]]
+name = "services_integration"
+path = "tests/services_integration.rs"
 
 # ── Always-on dependencies ─────────────────────────────────────────────────────
 # Required by the `core` and `client` library modules (compiled unconditionally).
