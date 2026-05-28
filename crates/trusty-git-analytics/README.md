@@ -169,6 +169,136 @@ When `developer_aliases` is non-empty it takes precedence over `team.members`. U
 
 See [`configs/example-config.yaml`](configs/example-config.yaml) for a working example that covers multiple repositories, developer aliases, and CSV+Markdown output.
 
+## Common Workflows
+
+### First-time setup
+
+```bash
+# 1. Generate config.yaml interactively
+tga install
+
+# 2. Collect all history across all repos (full branch coverage, tga 2.0.0+)
+tga collect
+
+# 3. Classify all collected commits
+tga classify
+
+# 4. Generate reports
+tga report
+```
+
+### Routine weekly run
+
+```bash
+# Collect last 4 weeks (incremental; already-collected weeks are skipped)
+tga collect --weeks 4
+
+# Classify any unclassified commits
+tga classify
+
+# Regenerate reports
+tga report
+```
+
+### Scoped re-run for one service
+
+```bash
+# Re-collect only one repo, forcing re-walk of the last 8 weeks
+tga collect --repos my-service --weeks 8 --force
+
+# Re-classify only that repo
+tga classify --force --repos my-service --weeks 8
+
+# Reports always cover the full DB — no scoping needed
+tga report
+```
+
+### Upgrade from tga ≤ 1.5.4 (branch coverage fix)
+
+```bash
+# Re-collect all history to pick up commits from non-default branches
+tga collect --force
+
+# Re-classify everything (force overwrites prior verdicts)
+tga classify --force
+
+# Regenerate reports
+tga report
+```
+
+### Restrict collection to specific branches
+
+```bash
+# Walk only 'main' and 'release/1.0' branches for all repos
+tga collect --branch main,release/1.0
+
+# Walk only 'main' for one specific repo
+tga collect --repos my-service --branch main
+```
+
+### Update rules and re-classify
+
+```bash
+# Preview which rules will fire (dry-run)
+tga rules test "feat: add login page" --rules ./my-rules.yaml
+
+# Re-classify all commits with the new rules (force overwrites existing verdicts)
+tga classify --rules ./my-rules.yaml --force
+
+# Scope re-classification to the last 4 weeks only
+tga classify --rules ./my-rules.yaml --force --weeks 4
+```
+
+### Fix existing database (backfill operations)
+
+```bash
+# Fix on_default_branch = 0 for pre-1.4.1 databases
+tga backfill reachability
+
+# Re-extract ticket IDs after extending ticket patterns
+tga backfill ticket-ids
+
+# Score historical commit effort (persists in fact_commit_effort)
+tga backfill effort --repos my-service
+
+# Preview revert-flag changes without writing
+tga backfill revert-flags --dry-run
+```
+
+### DORA metrics pipeline
+
+```bash
+# Ingest deployment events (default: git tags matching dora.deployment_tag_pattern)
+tga deployments collect
+
+# Ingest incidents from JIRA SRE issues or Datadog
+tga incidents collect
+
+# Compute and display the four DORA metrics
+tga dora
+
+# Limit to events since the start of Q2
+tga dora --since 2026-04-01
+```
+
+## CLI Subcommand Reference
+
+| Subcommand | Purpose | Key flags |
+|------------|---------|-----------|
+| `tga analyze` | Full pipeline (collect → classify → report) in one command | `--weeks`, `--from`, `--to`, `--force`, `--skip-collect`, `--skip-classify`, `--dry-run` |
+| `tga collect` | Stage 1: extract commits into the database | `--repos`, `--branch`, `--weeks`, `--from`, `--to`, `--force`, `--head-only`, `--dry-run` |
+| `tga classify` | Stage 2: classify collected commits | `--repos`, `--weeks`, `--since`, `--until`, `--force`, `--rules`, `--use-llm`, `--no-external` |
+| `tga report` | Stage 3: generate CSV/JSON/Markdown reports | `--output`, `--formats`, `--author` |
+| `tga pr-metrics` | Pull-request metrics per engineer | `--weeks`, `--csv`, `--output` |
+| `tga install` | Interactive first-time config wizard | `--output`, `--force` |
+| `tga aliases` | Manage developer identity aliases | `list`, `merge <src> <dst>` |
+| `tga backfill` | Retroactive maintenance on existing rows | `--repos`, `--weeks`, `--since`, `--until`, `--dry-run` |
+| `tga override` | Pin classification verdicts (Tier 0) | `add`, `list`, `remove` |
+| `tga rules` | Introspect the active rule set | `list`, `show <sha>`, `test "<message>"` |
+| `tga deployments` | DORA: ingest deployment events | `collect [--source]` |
+| `tga incidents` | DORA: ingest production incidents | `collect [--source]` |
+| `tga dora` | DORA: compute and display all four metrics | `--since` |
+
 ## CLI Reference
 
 All subcommands accept these global flags:
@@ -216,7 +346,8 @@ Stage 1: extract commits from git repositories into the database.
 
 ```bash
 tga collect [--config <PATH>] [--database <PATH>]
-            [--repos <NAME,...>] [--from <DATE>] [--to <DATE>] [--weeks <N>]
+            [--repos <NAME,...>] [--branch <NAME[,NAME…]>]
+            [--from <DATE>] [--to <DATE>] [--weeks <N>]
             [--since <DATE>] [--until <DATE>] [--dry-run]
             [--force-refresh-prs] [--validate-only] [--no-validate]
             [--head-only]
@@ -241,6 +372,7 @@ tga collect --force   # re-walk all weeks with full branch coverage
 | Flag | Description |
 |------|-------------|
 | `--repos <NAME,...>` | Comma-separated list of repository names to collect; others are skipped |
+| `--branch <NAME[,NAME…]>` | Restrict the revwalk to these branch names (seeds from both `refs/heads/<name>` and `refs/remotes/origin/<name>`); mutually exclusive with `--head-only` |
 | `--from <DATE>` | Collect commits on or after this ISO 8601 date; mutually exclusive with `--weeks` |
 | `--to <DATE>` | Collect commits on or before this ISO 8601 date; defaults to today |
 | `--since <DATE>` | Legacy alias for `--from` (Python-predecessor compatibility); `--from` takes precedence |
@@ -250,12 +382,14 @@ tga collect --force   # re-walk all weeks with full branch coverage
 | `--force-refresh-prs` | Re-fetch ADO pull requests even when already cached (backfills pre-v1.0.9 rows) |
 | `--validate-only` | Run configuration validation and exit (0 on success, 1 on errors) |
 | `--no-validate` | Skip pre-flight configuration validation |
-| `--head-only` | Restore legacy HEAD-only revwalk (tga ≤ 1.5.4 behaviour); also available per-repo via `head_only: true` in YAML |
+| `--head-only` | Restore legacy HEAD-only revwalk (tga ≤ 1.5.4 behaviour); mutually exclusive with `--branch`; also available per-repo via `head_only: true` in YAML |
 
 ```bash
 tga collect --repos my-project --from 2024-01-01 --to 2024-03-31
 tga collect --weeks 4           # collect last 4 weeks across all repos
 tga collect --force             # re-collect all history (e.g. after upgrading to 2.0.0)
+tga collect --branch main       # walk only the main branch for all repos
+tga collect --branch main,release/1.0 --repos my-service  # branch + repo filter
 tga collect --head-only         # legacy HEAD-only walk for all repos
 ```
 
@@ -265,12 +399,18 @@ Stage 2: run the classification cascade over collected commits.
 
 ```bash
 tga classify [--config <PATH>] [--database <PATH>]
-             [--rules <PATH>] [--use-llm] [--backfill-complexity]
+             [--repos <NAME,...>] [--weeks <N>] [--since <DATE>] [--until <DATE>]
+             [--force] [--rules <PATH>] [--use-llm] [--backfill-complexity]
              [--no-external]
 ```
 
 | Flag | Description |
 |------|-------------|
+| `--repos <NAME,...>` | Limit re-classification to these repository names (comma-separated) |
+| `--weeks <N>` | Limit to commits in the last N ISO weeks; mutually exclusive with `--since`/`--until` |
+| `--since <DATE>` | Lower bound on author timestamp (ISO 8601 `YYYY-MM-DD`); mutually exclusive with `--weeks` |
+| `--until <DATE>` | Upper bound on author timestamp (ISO 8601 `YYYY-MM-DD`); mutually exclusive with `--weeks` |
+| `--force` | Re-classify commits that already have a verdict (useful after updating rules) |
 | `--rules <PATH>` | Override `classification.rules_file` from config. Custom rules default to priority 110 (above built-in 100) and are standalone by default (`extend_defaults: false`). |
 | `--use-llm` | Enable LLM fallback regardless of config setting |
 | `--backfill-complexity` | Fill missing complexity scores (1–5) for already-classified commits via the LLM, without re-running the full cascade; category, confidence, and method are left untouched |
@@ -278,7 +418,9 @@ tga classify [--config <PATH>] [--database <PATH>]
 
 ```bash
 tga classify --rules ./custom-rules.yaml --use-llm
-tga classify --no-external   # offline / CI mode
+tga classify --no-external                         # offline / CI mode
+tga classify --force --repos my-service --weeks 4  # re-classify one repo, last 4 weeks
+tga classify --force --since 2026-01-01            # re-classify from a date forward
 ```
 
 ### tga report
@@ -337,10 +479,15 @@ revision-count data is not yet tracked.
 ### tga backfill
 
 Retroactive maintenance operations that update existing commit rows in place
-(outside the normal `collect → classify → report` pipeline).
+(outside the normal `collect → classify → report` pipeline). All global filter
+flags (`--repos`, `--weeks`, `--since`, `--until`) scope the operation uniformly.
+
+**Note:** `--branch` is collect-only. Commits in the database do not carry branch
+attribution after collection, so there is no branch filter for backfill operations.
 
 ```bash
 tga backfill <SUBCOMMAND> [--dry-run]
+             [--repos <NAME,...>] [--weeks <N>] [--since <DATE>] [--until <DATE>]
 ```
 
 | Subcommand | Description |
@@ -348,18 +495,24 @@ tga backfill <SUBCOMMAND> [--dry-run]
 | `ai-detection` | Re-run LLM classification on low-confidence prior LLM verdicts |
 | `revert-flags` | Scan commit messages for revert patterns and set `is_revert` |
 | `ticket-ids` | Scan commit messages for ticket refs and update `ticket_id`/`ticketed` |
-| `reachability` | Re-run the full reachability scan (default branch + tags + release branches) and upsert `fact_commit_reachability` without re-collecting commits — use this to fix `on_default_branch=0` rows in existing databases (issue #290) |
+| `reachability` | Re-run the full reachability scan and upsert `fact_commit_reachability` without re-collecting (fixes `on_default_branch=0` rows in existing databases, issue #290) |
+| `effort` | Compute empirical effort scores (XS/S/M/L/XL) for historical commits and persist in `fact_commit_effort` |
 
-| Flag | Description |
-|------|-------------|
+| Global flag | Description |
+|-------------|-------------|
 | `--dry-run` | Report how many rows would change without writing |
-| `--repo NAME` | (reachability only) Only backfill the named repository (repeatable) |
+| `--repos <NAME,...>` | Limit to these repository names (comma-separated) |
+| `--weeks <N>` | Limit to commits in the last N ISO weeks; mutually exclusive with `--since`/`--until` |
+| `--since <DATE>` | Lower bound on author timestamp (ISO 8601 `YYYY-MM-DD`); mutually exclusive with `--weeks` |
+| `--until <DATE>` | Upper bound on author timestamp (ISO 8601 `YYYY-MM-DD`); mutually exclusive with `--weeks` |
 
 ```bash
 tga backfill revert-flags --dry-run
 tga backfill ticket-ids
-tga backfill reachability           # fix on_default_branch for all repos
-tga backfill reachability --repo my-service  # single repo only
+tga backfill reachability                      # fix on_default_branch for all repos
+tga backfill reachability --repos my-service   # single repo only
+tga backfill effort --repos api --weeks 4      # effort for one repo, last 4 weeks
+tga backfill ticket-ids --since 2026-01-01     # ticket IDs from a date forward
 ```
 
 ### tga override

@@ -18,6 +18,26 @@ use tga::core::db::Database;
 
 /// Arguments for `tga override`.
 #[derive(Args, Debug)]
+#[command(
+    about = "Manage manual classification overrides (Tier 0 of the cascade).",
+    long_about = "Insert, list, or remove commit-level classification overrides.\n\n\
+Overrides are stored in the `classification_overrides` table and consulted as\n\
+Tier 0 by the classification engine — they win over all rules-based and LLM\n\
+verdicts unconditionally. Use them to fix mislabelled commits or to pin a\n\
+verdict for a specific commit before a release report.\n\n\
+After adding or removing overrides, run `tga classify --force --repos <name>`\n\
+to apply the change to the classifications table immediately.",
+    after_help = "EXAMPLES:\n\
+  # Pin commit abc123 as a bugfix in the my-service repo\n\
+  tga override add abc123 bugfix bug_fix --repo my-service\n\n\
+  # List all overrides for auditing\n\
+  tga override list\n\n\
+  # Remove an override (restores the cascade-based verdict)\n\
+  tga override remove abc123 --yes\n\n\
+TIPS:\n\
+  - After adding an override, re-run `tga classify --force` to propagate it.\n\
+  - Use `tga rules show <sha>` to check the current verdict before overriding."
+)]
 pub struct OverrideArgs {
     /// `override` subcommand to run.
     #[command(subcommand)]

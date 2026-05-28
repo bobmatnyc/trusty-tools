@@ -33,6 +33,24 @@ use tga::core::db::Database;
 /// always report `0.0`. The CLI shape is stable, so populating them later
 /// is a non-breaking change.
 #[derive(Args, Debug)]
+#[command(
+    about = "Aggregate pull-request metrics per engineer.",
+    long_about = "Read the pull_requests table (populated during `tga collect`) and emit\n\
+per-author metrics: PRs opened, merged, merge rate, and average cycle time.\n\n\
+Note: pr_comments_given and avg_revisions are always 0 until a future schema\n\
+migration adds the underlying review-comment and revision-count columns.\n\
+The CSV shape is stable, so adding those columns later is non-breaking.",
+    after_help = "EXAMPLES:\n\
+  # Print an aligned text table for all time\n\
+  tga pr-metrics\n\n\
+  # Limit to PRs opened in the last 8 weeks\n\
+  tga pr-metrics --weeks 8\n\n\
+  # Emit CSV to a file for further analysis\n\
+  tga pr-metrics --csv --output pr-metrics.csv\n\n\
+TIPS:\n\
+  - Run `tga collect` first to populate the pull_requests table.\n\
+  - Combine with `tga report` for full author-level productivity data."
+)]
 pub struct PrMetricsArgs {
     /// Limit metrics to PRs created within the last N weeks.
     #[arg(long, value_name = "N")]

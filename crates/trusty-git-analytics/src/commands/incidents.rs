@@ -25,6 +25,23 @@ use tga::core::db::Database;
 
 /// Arguments for `tga incidents collect`.
 #[derive(Args, Debug)]
+#[command(
+    about = "Ingest production incidents into fact_incidents.",
+    long_about = "Walk configured incident sources and persist incident records into\n\
+`fact_incidents`. Supported sources:\n\n\
+  jira     -- query work_items for SRE bugs and incidents (default; no credentials)\n\
+  datadog  -- walk dora.datadog_dir for .json incident files\n\n\
+Both sources can run in the same invocation when --source is omitted.\n\
+Rows already present are skipped (idempotent UPSERT semantics).",
+    after_help = "EXAMPLES:\n\
+  # Ingest from all configured sources\n\
+  tga incidents collect\n\n\
+  # Ingest from Datadog JSON exports only\n\
+  tga incidents collect --source datadog\n\n\
+TIPS:\n\
+  - Set `dora.datadog_dir` in config.yaml to point at your exported JSON files.\n\
+  - After ingestion, run `tga dora` to compute MTTR and Change Failure Rate."
+)]
 pub struct IncidentsCollectArgs {
     /// Restrict ingestion to a single source (`jira`, `datadog`). When
     /// unset, every configured source is consulted.

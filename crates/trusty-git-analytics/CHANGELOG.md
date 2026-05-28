@@ -22,6 +22,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   For a per-repo opt-out, set `head_only: true` in the `repositories[].head_only`
   field of your YAML config.
 
+- **`--branch <NAME[,NAME…]>` flag on `tga collect` (#332)** — restrict the
+  revwalk to one or more branch names (comma-separated). Seeds from both
+  `refs/heads/<name>` and `refs/remotes/origin/<name>`, so local and
+  remote-tracking copies are both covered. Mutually exclusive with `--head-only`.
+  Per-repo branch overrides in YAML (`repositories[].branch`) are unchanged and
+  still take precedence over the per-repo logic, but the new `--branch` flag
+  takes precedence over everything for the current CLI invocation.
+  Example: `tga collect --branch main,release/1.0 --repos my-service`
+
+- **Uniform `--repos`, `--weeks`, `--since`, `--until`, `--force` filters on
+  `tga classify` (#332)** — `tga classify` now accepts the same date/repo filter
+  flags used by `tga collect`, enabling surgical re-classification of a specific
+  slice without touching the full database:
+  ```bash
+  tga classify --force --repos my-service --weeks 4
+  tga classify --force --since 2026-01-01 --until 2026-03-31
+  ```
+  Supplying `--since`/`--until`/`--weeks` without `--force` emits a `WARN`
+  (the filter is a no-op for new commits but is a footgun without `--force`).
+
+- **Uniform global filter flags on all `tga backfill` subcommands (#332)** —
+  `--repos`, `--weeks`, `--since`, and `--until` are now declared as `global`
+  flags on `BackfillArgs`, scoping every subcommand (ticket-ids, revert-flags,
+  reachability, effort) uniformly. The old per-subcommand `--repo` flag on
+  `reachability` is replaced by the global `--repos` (plural, comma-separated).
+  ```bash
+  tga backfill ticket-ids --repos api --since 2026-01-01
+  tga backfill effort --repos core --weeks 8 --force
+  tga backfill reachability --repos my-service
+  ```
+
+- **Comprehensive CLI documentation (#333)** — every subcommand now has:
+  - `about` (one-line description shown in `tga --help`)
+  - `long_about` (multi-paragraph context shown in `tga <subcommand> --help`)
+  - `after_help` with 2-3 concrete examples and `TIPS` lines
+  - Per-flag `help` strings on every newly-added flag
+  Subcommands with new docs: `analyze`, `classify`, `report`, `backfill`,
+  `pr-metrics`, `install`, `aliases`, `override`, `rules`, `deployments collect`,
+  `incidents collect`, `dora`.
+
+- **README "Common Workflows" section (#333)** — the README now opens with a
+  "Common Workflows" section covering first-time setup, routine weekly runs,
+  scoped re-runs, branch-restricted collection, rule tuning, backfill operations,
+  and the DORA metrics pipeline. A "CLI Subcommand Reference" table lists every
+  subcommand with its purpose and key flags.
+
 ### Migration
 
 Existing `tga.db` files were collected with the buggy HEAD-only walker and are

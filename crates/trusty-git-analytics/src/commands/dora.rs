@@ -28,6 +28,26 @@ use tga::core::db::Database;
 
 /// Arguments for `tga dora`.
 #[derive(Args, Debug)]
+#[command(
+    about = "Compute and display DORA metrics (lead time, deployment frequency, MTTR, CFR).",
+    long_about = "Compute the four DORA (DevOps Research and Assessment) metrics from the\n\
+ingested deployment and incident data:\n\n\
+  Deployment Frequency   -- how often code reaches production (per repo, per week)\n\
+  Lead Time for Changes  -- mean hours from commit to production deploy\n\
+  Change Failure Rate    -- fraction of deploys that triggered an incident\n\
+  Mean Time To Recovery  -- mean hours per incident until resolution\n\n\
+Reads from `fact_deployments` (tga deployments collect) and `fact_incidents`\n\
+(tga incidents collect). Rebuilds the `deployment_failures` join from scratch\n\
+on every run so failure-signal config changes take effect immediately.",
+    after_help = "EXAMPLES:\n\
+  # Print all four DORA metrics for the full time range\n\
+  tga dora\n\n\
+  # Limit metrics to events since the start of the year\n\
+  tga dora --since 2026-01-01\n\n\
+TIPS:\n\
+  - Run `tga deployments collect` and `tga incidents collect` before `tga dora`.\n\
+  - Configure failure signals in config.yaml under `dora.failure_signals`."
+)]
 pub struct DoraArgs {
     /// Limit metrics to events on or after this ISO8601 date.
     #[arg(long, value_name = "DATE")]

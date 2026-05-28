@@ -152,6 +152,26 @@ pub enum IncidentsSubcommand {
 
 /// Arguments for `tga analyze`.
 #[derive(Args, Debug)]
+#[command(
+    about = "Run the full pipeline: collect → classify → report.",
+    long_about = "Run all three stages (collect, classify, report) in sequence against the\n\
+configured repositories.\n\n\
+This is the normal production command for routine analytics runs. Individual\n\
+stages can be invoked separately (tga collect / tga classify / tga report) when\n\
+you need surgical control over a single step.\n\n\
+NOTE: --branch is available via `tga collect` when running stages individually.\n\
+Use `tga analyze --skip-collect && tga collect --branch main` for branched runs.",
+    after_help = "EXAMPLES:\n\
+  # Standard weekly run (collect last 4 weeks, classify, report)\n\
+  tga analyze --weeks 4\n\n\
+  # Full history refresh after upgrading (re-collects all weeks)\n\
+  tga analyze --force\n\n\
+  # Skip slow collection; re-classify and regenerate reports only\n\
+  tga analyze --skip-collect\n\n\
+TIPS:\n\
+  - Run `tga collect --branch main --force` first to restrict the corpus.\n\
+  - Use --dry-run to preview collection work without database writes."
+)]
 pub struct AnalyzeArgs {
     /// Skip collection (use existing DB data).
     #[arg(long)]
@@ -272,8 +292,20 @@ pub struct CollectArgs {
     #[arg(long, value_name = "N", conflicts_with_all = ["from", "to"])]
     pub weeks: Option<u32>,
     /// Skip the pre-walk `git fetch` step (use only local refs). [default: false]
+    ///
+    /// WARNING: skipping fetch means the walk operates on whatever is already in
+    /// your local object store. Commits pushed to the remote after the last local
+    /// fetch will be silently absent from the results.
     #[arg(long, default_value_t = false)]
     pub no_fetch: bool,
+    /// Exit non-zero if any repository's fetch failed (default: failures are
+    /// visible in the summary but collection still exits 0). Useful for CI.
+    #[arg(long, default_value_t = false)]
+    pub strict_fetch: bool,
+    /// Print a success line for every fetched repo in the fetch summary
+    /// (default: only failures are printed). [default: false]
+    #[arg(long, default_value_t = false)]
+    pub verbose_fetch: bool,
     /// Perform all steps except writing to the database (log intent only).
     #[arg(long, default_value_t = false)]
     pub dry_run: bool,

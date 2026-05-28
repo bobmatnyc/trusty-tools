@@ -40,6 +40,25 @@ const GITHUB_TOKEN_ENV: &str = "GITHUB_TOKEN";
 
 /// Arguments for `tga deployments collect`.
 #[derive(Args, Debug)]
+#[command(
+    about = "Ingest deployment events into fact_deployments.",
+    long_about = "Walk the configured deployment source and persist deployment events into\n\
+`fact_deployments`. Supported sources:\n\n\
+  git_tags         -- match tags against dora.deployment_tag_pattern (default)\n\
+  github_releases  -- paginate GitHub Releases API (requires GITHUB_TOKEN)\n\
+  github_actions   -- paginate GitHub Actions runs (requires GITHUB_TOKEN)\n\
+  manual           -- no-op (operator INSERTs directly into fact_deployments)\n\n\
+The source is configured via `dora.deployment_source` in config.yaml.\n\
+Use --source to override at runtime without editing the config file.",
+    after_help = "EXAMPLES:\n\
+  # Ingest from the configured source (usually git_tags)\n\
+  tga deployments collect\n\n\
+  # Force GitHub Releases source regardless of config\n\
+  tga deployments collect --source github_releases\n\n\
+TIPS:\n\
+  - Set GITHUB_TOKEN before using github_releases or github_actions sources.\n\
+  - After ingestion, run `tga dora` to compute deployment frequency and lead time."
+)]
 pub struct DeploymentsCollectArgs {
     /// Override the deployment source from the CLI (defaults to
     /// `dora.deployment_source` or `git_tags` if no DORA config is

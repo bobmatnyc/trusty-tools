@@ -15,6 +15,26 @@ use tga::core::db::Database;
 
 /// Arguments for `tga aliases`.
 #[derive(Args, Debug)]
+#[command(
+    about = "List, merge, or manage developer identity aliases.",
+    long_about = "Manage the identity resolution table that maps commit author metadata\n\
+(name + email combinations) to a single canonical identity per engineer.\n\n\
+Merging two identities reassigns all commits from the source to the destination\n\
+and deletes the source row. Subsequent pipeline stages and reports will see only\n\
+the consolidated identity.\n\n\
+tga automatically resolves identity during collection using fuzzy matching.\n\
+Use these subcommands for manual corrections and audits.",
+    after_help = "EXAMPLES:\n\
+  # List all canonical identities in the database\n\
+  tga aliases list\n\n\
+  # Merge a work email into the canonical personal-account identity\n\
+  tga aliases merge old@contractor.com alice@company.com\n\n\
+  # Merge without the confirmation prompt\n\
+  tga aliases merge old@example.com alice@example.com --yes\n\n\
+TIPS:\n\
+  - Run `tga report --author alice@company.com` to verify the merge result.\n\
+  - Use the canonical email from `tga aliases list` as the --author value."
+)]
 pub struct AliasesArgs {
     /// Aliases subcommand.
     #[command(subcommand)]

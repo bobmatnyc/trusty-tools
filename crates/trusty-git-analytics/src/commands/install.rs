@@ -13,6 +13,25 @@ use tga::core::config::Config;
 
 /// Arguments for `tga install`.
 #[derive(Args, Debug)]
+#[command(
+    about = "Interactive configuration wizard for first-time setup.",
+    long_about = "Walk through a series of prompts to generate a config.yaml bootstrapped\n\
+with the minimal required fields (git repo paths, date range, optional API keys).\n\n\
+Press <enter> at each prompt to accept the default shown in brackets.\n\
+Optional credentials left blank are omitted from the generated file.\n\n\
+The wizard does NOT need an existing database or config — it is designed to\n\
+run on a fresh checkout before any other tga command.",
+    after_help = "EXAMPLES:\n\
+  # First-time setup (writes config.yaml in the current directory)\n\
+  tga install\n\n\
+  # Write config to a custom path\n\
+  tga install --output /etc/tga/config.yaml\n\n\
+  # Overwrite an existing config without prompting\n\
+  tga install --force\n\n\
+TIPS:\n\
+  - After running install, validate the config with `tga collect --validate-only`.\n\
+  - Re-run at any time to regenerate the config from scratch."
+)]
 pub struct InstallArgs {
     /// Path to write the generated config to.
     ///

@@ -21,6 +21,26 @@ use tga::core::db::Database;
 
 /// Arguments for `tga rules`.
 #[derive(Args, Debug)]
+#[command(
+    about = "Introspect or validate the active classification rule set.",
+    long_about = "Three subcommands for tuning and debugging the classification cascade:\n\n\
+  tga rules list   -- print every rule the engine will load (default + overrides)\n\
+  tga rules show   -- print the verdict and method recorded for a commit SHA\n\
+  tga rules test   -- dry-run the cascade against a single commit message\n\n\
+Rules are loaded in priority order: manual overrides (Tier 0) > external ticket\n\
+sources (Tier 1) > regex rules (Tier 2) > LLM fallback (Tier 3). This command\n\
+helps answer \"why was this commit classified as X?\" and \"will my new rule fire?\".",
+    after_help = "EXAMPLES:\n\
+  # Show every rule currently active (built-in + custom --rules file)\n\
+  tga rules list\n\n\
+  # Debug the verdict for a specific commit\n\
+  tga rules show abc123def456\n\n\
+  # Test a commit message against the current rule set\n\
+  tga rules test \"fix: resolve null pointer in auth handler\"\n\n\
+TIPS:\n\
+  - Use `tga rules list --rules custom.yaml` to preview a new rule file.\n\
+  - `tga rules show` reads from the DB; run classify first if the commit is new."
+)]
 pub struct RulesArgs {
     /// Subcommand to dispatch.
     #[command(subcommand)]
