@@ -336,6 +336,13 @@ pub struct ReportArgs {
     /// Output formats (csv, json, markdown — comma-separated).
     #[arg(long, value_delimiter = ',')]
     pub formats: Vec<String>,
+    /// Scope the report to a single canonical identity.
+    ///
+    /// Must match the `canonical_email` field in the `authors` table
+    /// (case-insensitive). If the email is not found, `tga report`
+    /// exits non-zero and suggests `tga aliases list`.
+    #[arg(long, value_name = "EMAIL")]
+    pub author: Option<String>,
 }
 
 /// Run config validation and decide whether the caller should exit.

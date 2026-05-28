@@ -350,4 +350,169 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    // =========================================================================
+    // Author filter tests (issue #324)
+    // =========================================================================
+
+    /// Seed a DB with two authors linked to the `authors` table (canonical
+    /// identity rows) so that `resolve_canonical_email` / `load_rows_filtered`
+    /// paths are fully exercised.
+    fn seed_db_with_authors() -> Database {
+        let db = Database::open_in_memory().expect("open db");
+        let conn = db.connection();
+
+        // Insert canonical author rows.
+        conn.execute(
+            "INSERT INTO authors (id, canonical_name, canonical_email, aliases) \
+             VALUES (1, 'Alice Smith', 'alice@example.com', '[]')",
+            [],
+        )
+        .expect("insert author alice");
+        conn.execute(
+            "INSERT INTO authors (id, canonical_name, canonical_email, aliases) \
+             VALUES (2, 'Bob Jones', 'bob@example.com', '[]')",
+            [],
+        )
+        .expect("insert author bob");
+
+        conn.execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, repository, \
+                 files_changed, insertions, deletions, is_merge, author_id) \
+             VALUES ('aaa111', 'Alice Smith', 'alice@example.com', '2024-01-15T10:00:00+00:00', \
+                 'feat: add login', 'repo-a', 3, 50, 5, 0, 1)",
+            [],
+        )
+        .expect("insert alice commit 1");
+
+        conn.execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, repository, \
+                 files_changed, insertions, deletions, is_merge, author_id) \
+             VALUES ('aaa222', 'Alice Smith', 'alice@example.com', '2024-01-16T10:00:00+00:00', \
+                 'feat: add logout', 'repo-a', 2, 20, 3, 0, 1)",
+            [],
+        )
+        .expect("insert alice commit 2");
+
+        conn.execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, repository, \
+                 files_changed, insertions, deletions, is_merge, author_id) \
+             VALUES ('bbb111', 'Bob Jones', 'bob@example.com', '2024-01-22T11:00:00+00:00', \
+                 'fix: edge case', 'repo-a', 1, 10, 2, 0, 2)",
+            [],
+        )
+        .expect("insert bob commit");
+
+        db
+    }
+
+    #[test]
+    fn aggregator_author_filter_returns_single_author() {
+        // Why: validates that `build_filtered` with a known email returns only
+        // that author's commits and excludes all others.
+        let db = seed_db_with_authors();
+        let cfg = baseline_config();
+
+        let data = Aggregator::build_filtered(&db, &cfg, Some("alice@example.com"))
+            .expect("build filtered");
+
+        assert_eq!(
+            data.total_commits, 2,
+            "should contain only alice's 2 commits, got {}",
+            data.total_commits
+        );
+        assert_eq!(
+            data.total_authors, 1,
+            "should contain only 1 author (alice), got {}",
+            data.total_authors
+        );
+        assert_eq!(
+            data.authors[0].email, "alice@example.com",
+            "the sole author should be alice"
+        );
+    }
+
+    #[test]
+    fn aggregator_author_filter_case_insensitive() {
+        // Why: git emails in the wild mix case; the filter must be
+        // case-insensitive so `ALICE@EXAMPLE.COM` resolves the same as
+        // `alice@example.com`.
+        let db = seed_db_with_authors();
+        let cfg = baseline_config();
+
+        let data = Aggregator::build_filtered(&db, &cfg, Some("ALICE@EXAMPLE.COM"))
+            .expect("case-insensitive filter");
+
+        assert_eq!(data.total_commits, 2);
+        assert_eq!(data.total_authors, 1);
+    }
+
+    #[test]
+    fn aggregator_author_filter_unknown_email_errors() {
+        // Why: a typo in the email should fail loudly with a suggestion, not
+        // silently produce an empty report.
+        let db = seed_db_with_authors();
+        let cfg = baseline_config();
+
+        let result = Aggregator::build_filtered(&db, &cfg, Some("nobody@example.com"));
+
+        assert!(
+            result.is_err(),
+            "expected an error for unknown email, got Ok"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("nobody@example.com"),
+            "error should contain the supplied email; got: {msg}"
+        );
+        assert!(
+            msg.contains("tga aliases list"),
+            "error should suggest `tga aliases list`; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn aggregator_author_filter_none_returns_all() {
+        // Why: omitting `--author` must behave identically to the pre-existing
+        // `Aggregator::build` path — backwards compatibility is not regressed.
+        let db = seed_db_with_authors();
+        let cfg = baseline_config();
+
+        let unfiltered = Aggregator::build(&db, &cfg).expect("unfiltered");
+        let filtered_none = Aggregator::build_filtered(&db, &cfg, None).expect("filtered none");
+
+        assert_eq!(unfiltered.total_commits, filtered_none.total_commits);
+        assert_eq!(unfiltered.total_authors, filtered_none.total_authors);
+    }
+
+    #[test]
+    fn pipeline_author_filter_single_author() {
+        // Why: validates the full pipeline path (`run_with_filter`) so that
+        // all formatters receive the scoped data without crashing.
+        let db = seed_db_with_authors();
+        let dir = tmp_dir("pipeline-author");
+        let cfg = Config {
+            repositories: vec![RepositoryConfig {
+                path: PathBuf::from("/tmp/repo-a"),
+                name: Some("repo-a".into()),
+                ..Default::default()
+            }],
+            output: Some(OutputConfig {
+                directory: Some(dir.clone()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let pipeline = ReportPipeline::new(cfg);
+        let stats = pipeline
+            .run_with_filter(&db, Some("alice@example.com"))
+            .expect("run with filter");
+
+        assert_eq!(stats.total_commits, 2, "filtered report: 2 alice commits");
+        assert_eq!(stats.total_authors, 1, "filtered report: 1 author");
+        // 14 files still written (formatters are unchanged).
+        assert_eq!(stats.files_written.len(), 14);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

@@ -5,6 +5,20 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.4] - 2026-05-28
+
+### Added
+
+- **`--author <email>` filter on `tga report` (#324)** — Scope any report run
+  to a single canonical identity by passing `--author <canonical_email>`.  The
+  filter matches case-insensitively against the `canonical_email` field in the
+  `authors` table, so `ALICE@EXAMPLE.COM` and `alice@example.com` are
+  equivalent.  All formatters (CSV, JSON, Markdown) receive the single-engineer
+  `ReportData` unchanged — no formatter logic was modified.  When the supplied
+  email does not match any canonical identity, `tga report` exits non-zero with
+  a helpful message directing the user to `tga aliases list`.
+  Omitting `--author` preserves the existing full-team aggregate behaviour.
+
 ## [1.5.3] - 2026-05-27
 
 ### Fixed

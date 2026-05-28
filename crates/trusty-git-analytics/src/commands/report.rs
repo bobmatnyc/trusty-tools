@@ -8,8 +8,14 @@ use crate::ReportArgs;
 
 /// Generate reports from the classified commits stored in `db`.
 ///
-/// Applies `--output` and `--formats` CLI overrides on top of the
-/// [`OutputConfig`] in the loaded YAML config.
+/// Why: provides a focused entry point for stage-3 report generation so the
+/// binary can apply CLI overrides (output directory, formats, author filter)
+/// without polluting the pipeline or aggregator with argument-parsing logic.
+/// What: materialises an `OutputConfig` if none exists yet, applies
+/// `--output` / `--formats` / `--author` overrides, then delegates to
+/// [`ReportPipeline::run`].
+/// Test: covered indirectly via `report::tests::pipeline_runs_all_formats_when_unspecified`;
+/// the `--author` path is unit-tested in `report::tests::aggregator_author_filter_*`.
 pub fn run(config: Config, db: &Database, args: ReportArgs) -> anyhow::Result<()> {
     let mut cfg = config;
 
@@ -27,7 +33,7 @@ pub fn run(config: Config, db: &Database, args: ReportArgs) -> anyhow::Result<()
     }
 
     let pipeline = ReportPipeline::new(cfg);
-    let stats = pipeline.run(db)?;
+    let stats = pipeline.run_with_filter(db, args.author.as_deref())?;
 
     println!(
         "Generated {} report file(s) ({} commits, {} authors)",

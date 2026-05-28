@@ -13,7 +13,7 @@ use tracing::{debug, warn};
 
 use crate::core::config::Config;
 use crate::core::db::Database;
-use crate::report::errors::Result;
+use crate::report::errors::{ReportError, Result};
 use crate::report::models::{
     ActivityWeights, AuthorSummary, DeveloperActivitySummary, DoraMetrics, QualitySummary,
     ReportData, ReportSummary, RepositorySummary, UntrackedCommit, VelocitySummary, WeeklyActivity,
@@ -141,9 +141,48 @@ impl Aggregator {
     ///
     /// Returns [`crate::report::ReportError::Core`] if the underlying queries fail.
     pub fn build(db: &Database, config: &Config) -> Result<ReportData> {
-        let rows = Self::load_rows(db)?;
+        Self::build_filtered(db, config, None)
+    }
+
+    /// Build a [`ReportData`] optionally scoped to one canonical identity.
+    ///
+    /// Why: `tga report --author <email>` lets users drill into a single
+    /// engineer's contribution without generating a full team report.
+    /// What: when `author_email` is `Some`, validates that the email exists
+    /// in the `authors` table (case-insensitive) before filtering the commit
+    /// rows to that identity; when `None`, behaves identically to
+    /// [`Self::build`].
+    /// Test: see `report::tests::aggregator_author_filter_returns_single_author`
+    /// and `aggregator_author_filter_unknown_email_errors`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`ReportError::Report`] (exit-non-zero) when `author_email`
+    ///   is provided but does not match any `canonical_email` in the
+    ///   `authors` table.
+    /// - Returns [`crate::report::ReportError::Core`] if underlying queries fail.
+    pub fn build_filtered(
+        db: &Database,
+        config: &Config,
+        author_email: Option<&str>,
+    ) -> Result<ReportData> {
+        // Validate and canonicalize the author filter before loading rows.
+        let canonical_email: Option<String> = if let Some(email) = author_email {
+            let resolved = Self::resolve_canonical_email(db, email)?;
+            Some(resolved)
+        } else {
+            None
+        };
+
+        let rows = Self::load_rows_filtered(db, canonical_email.as_deref())?;
         let prs = Self::load_prs(db).unwrap_or_default();
-        let unresolved_db = Self::count_unresolved_author_commits(db).unwrap_or(0);
+        let unresolved_db = if canonical_email.is_none() {
+            Self::count_unresolved_author_commits(db).unwrap_or(0)
+        } else {
+            // When scoped to one author, the "unresolved" count is not
+            // meaningful for the per-author view — suppress it.
+            0
+        };
         let mut data = Self::aggregate(rows, prs);
 
         // Issue #68 / #67: surface coverage and unresolved-identity counts
@@ -242,7 +281,48 @@ impl Aggregator {
         Ok(out)
     }
 
-    fn load_rows(db: &Database) -> Result<Vec<CommitRow>> {
+    /// Resolve an author email filter to the stored `canonical_email`.
+    ///
+    /// Why: `canonical_email` values in the DB may differ in case from what
+    /// the user typed; resolving once up-front ensures the SQL `WHERE` clause
+    /// uses the exact stored value and produces consistent results across
+    /// collation settings.
+    /// What: queries `authors` with a case-insensitive match on
+    /// `LOWER(canonical_email)`; returns the stored value on success, or a
+    /// helpful `ReportError::Report` that names the `tga aliases list`
+    /// remedy when no match exists.
+    /// Test: see `report::tests::aggregator_author_filter_unknown_email_errors`.
+    fn resolve_canonical_email(db: &Database, email: &str) -> Result<String> {
+        let conn = db.connection();
+        let lower = email.to_lowercase();
+        let result: rusqlite::Result<String> = conn.query_row(
+            "SELECT canonical_email FROM authors WHERE LOWER(canonical_email) = LOWER(?1) LIMIT 1",
+            rusqlite::params![lower],
+            |row| row.get(0),
+        );
+        match result {
+            Ok(stored) => Ok(stored),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Err(ReportError::Report(format!(
+                "no canonical identity with canonical_email '{email}' found in authors table.\n\
+                 Run `tga aliases list` to see all canonical identities, or \
+                 `tga aliases merge` to consolidate duplicate identities."
+            ))),
+            Err(e) => Err(ReportError::Core(crate::core::TgaError::from(e))),
+        }
+    }
+
+    /// Load commit rows, optionally filtered to a single canonical email.
+    ///
+    /// Why: separating row loading from the `build_filtered` orchestration
+    /// keeps the SQL in one place and makes the filter opt-in without
+    /// duplicating the large query string.
+    /// What: when `author_email` is `Some`, appends
+    /// `WHERE LOWER(a.canonical_email) = LOWER(?)` to the base JOIN query;
+    /// when `None`, returns all rows.
+    /// Test: covered by `aggregator_author_filter_returns_single_author`
+    /// (filters to alice's rows) and `aggregator_builds_report_data`
+    /// (no filter, returns all rows).
+    fn load_rows_filtered(db: &Database, author_email: Option<&str>) -> Result<Vec<CommitRow>> {
         let conn = db.connection();
         // Prefer the canonical identity from the `authors` table when the
         // commit has been linked (i.e. `author_id IS NOT NULL`). This ensures
@@ -254,9 +334,13 @@ impl Aggregator {
         // Falls back to the raw commit fields when no `author_id` is set
         // (which can happen for commits inserted before
         // `upsert_observed_authors` ran).
-        let mut stmt = conn
-            .prepare(
-                "SELECT c.sha, \
+        //
+        // The optional `author_email` filter restricts to rows whose resolved
+        // canonical email matches case-insensitively.  We use
+        // `LOWER(COALESCE(...)) = LOWER(?)` so that the filter still works
+        // for commits that pre-date `upsert_observed_authors` and fall back
+        // to the raw `c.author_email` field.
+        let sql_base = "SELECT c.sha, \
                         COALESCE(a.canonical_name,  c.author_name)  AS author_name, \
                         COALESCE(NULLIF(a.canonical_email, ''), c.author_email) AS author_email, \
                         c.timestamp, c.repository, \
@@ -264,37 +348,55 @@ impl Aggregator {
                         c.message, c.ticketed \
                  FROM commits c \
                  LEFT JOIN authors a ON a.id = c.author_id \
-                 LEFT JOIN classifications cl ON cl.id = c.classification_id",
-            )
-            .map_err(crate::core::TgaError::from)?;
+                 LEFT JOIN classifications cl ON cl.id = c.classification_id";
 
-        let rows = stmt
-            .query_map([], |row| {
-                let ts_str: String = row.get(3)?;
-                let timestamp = DateTime::parse_from_rfc3339(&ts_str)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now());
-                let ticketed: i64 = row.get(10).unwrap_or(0);
-                Ok(CommitRow {
-                    sha: row.get(0)?,
-                    author_name: row.get(1)?,
-                    author_email: row.get(2)?,
-                    timestamp,
-                    repository: row.get(4)?,
-                    insertions: row.get(5)?,
-                    deletions: row.get(6)?,
-                    files_changed: row.get(7)?,
-                    category: row.get(8)?,
-                    message: row.get(9)?,
-                    ticketed: ticketed != 0,
-                })
+        let row_mapper = |row: &rusqlite::Row<'_>| -> rusqlite::Result<CommitRow> {
+            let ts_str: String = row.get(3)?;
+            let timestamp = DateTime::parse_from_rfc3339(&ts_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            let ticketed: i64 = row.get(10).unwrap_or(0);
+            Ok(CommitRow {
+                sha: row.get(0)?,
+                author_name: row.get(1)?,
+                author_email: row.get(2)?,
+                timestamp,
+                repository: row.get(4)?,
+                insertions: row.get(5)?,
+                deletions: row.get(6)?,
+                files_changed: row.get(7)?,
+                category: row.get(8)?,
+                message: row.get(9)?,
+                ticketed: ticketed != 0,
             })
-            .map_err(crate::core::TgaError::from)?;
+        };
 
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r.map_err(crate::core::TgaError::from)?);
+        let mut out: Vec<CommitRow> = Vec::new();
+
+        if let Some(email) = author_email {
+            let sql = format!(
+                "{sql_base} \
+                 WHERE LOWER(COALESCE(NULLIF(a.canonical_email, ''), c.author_email)) = LOWER(?1)"
+            );
+            let mut stmt = conn.prepare(&sql).map_err(crate::core::TgaError::from)?;
+            let rows = stmt
+                .query_map(rusqlite::params![email], row_mapper)
+                .map_err(crate::core::TgaError::from)?;
+            for r in rows {
+                out.push(r.map_err(crate::core::TgaError::from)?);
+            }
+        } else {
+            let mut stmt = conn
+                .prepare(sql_base)
+                .map_err(crate::core::TgaError::from)?;
+            let rows = stmt
+                .query_map([], row_mapper)
+                .map_err(crate::core::TgaError::from)?;
+            for r in rows {
+                out.push(r.map_err(crate::core::TgaError::from)?);
+            }
         }
+
         debug!(count = out.len(), "loaded commit rows for aggregation");
         Ok(out)
     }

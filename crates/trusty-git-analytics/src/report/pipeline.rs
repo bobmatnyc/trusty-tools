@@ -68,7 +68,25 @@ impl ReportPipeline {
     ///
     /// Propagates any aggregator, formatter, or I/O failure.
     pub fn run(&self, db: &Database) -> Result<ReportStats> {
-        let data = Aggregator::build(db, &self.config)?;
+        self.run_with_filter(db, None)
+    }
+
+    /// Aggregate the database, optionally scoped to one canonical identity,
+    /// and write all configured report formats.
+    ///
+    /// Why: `tga report --author <email>` needs to scope the report to a
+    /// single canonical identity; this method threads the filter through to
+    /// the aggregator without duplicating the full run logic.
+    /// What: delegates to [`Aggregator::build_filtered`] when `author_email`
+    /// is `Some`; falls back to the full aggregate when `None`.  All
+    /// formatters receive the (possibly filtered) [`ReportData`] unchanged.
+    /// Test: covered by `report::tests::pipeline_author_filter_single_author`.
+    pub fn run_with_filter(
+        &self,
+        db: &Database,
+        author_email: Option<&str>,
+    ) -> Result<ReportStats> {
+        let data = Aggregator::build_filtered(db, &self.config, author_email)?;
         let output_dir = self.resolve_output_dir();
         std::fs::create_dir_all(&output_dir)?;
         info!(dir = %output_dir.display(), "writing reports");

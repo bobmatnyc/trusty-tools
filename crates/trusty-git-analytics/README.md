@@ -268,16 +268,28 @@ Stage 3: generate reports from classified commits.
 ```bash
 tga report [--config <PATH>] [--database <PATH>]
            [--output <DIR>] [--formats <FMT,...>]
+           [--author <EMAIL>]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--output <DIR>` | Override `output.directory` from config |
 | `--formats <FMT,...>` | Comma-separated: `csv`, `json`, `markdown` |
+| `--author <EMAIL>` | Scope report to one canonical identity (matches `canonical_email` case-insensitively) |
 
 ```bash
+# Full team report
 tga report --output ./q1-reports --formats csv,json
+
+# Single-engineer report
+tga report --author alice@example.com --output ./alice-q1
+
+# List available canonical identities
+tga aliases list
 ```
+
+If `--author` is supplied but the email is not in the `authors` table, `tga report`
+exits non-zero with a suggestion to run `tga aliases list`.
 
 ### tga pr-metrics
 
