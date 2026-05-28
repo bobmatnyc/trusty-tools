@@ -236,6 +236,38 @@ tga collect --branch main,release/1.0
 tga collect --repos my-service --branch main
 ```
 
+### Monitor fetch health across many repos
+
+By default `tga collect` always fetches each repo before walking and prints an
+end-of-run summary:
+
+```
+Fetch summary: 116 / 118 repos updated (2 failure(s), 0 skipped)
+  - ml_pricing_engine: could not find remote 'origin'
+  - datapipelines: authentication required
+```
+
+```bash
+# Use --strict-fetch in CI to fail the run if any fetch fails
+tga collect --strict-fetch
+
+# See per-repo success lines too (useful for debugging network topology)
+tga collect --verbose-fetch
+
+# Skip fetching entirely (stale data warning is printed to stderr)
+tga collect --no-fetch
+```
+
+Per-repo fetch timeouts can be set in the YAML config to prevent a slow remote
+from blocking the entire run:
+
+```yaml
+repositories:
+  - path: ~/code/slow-repo
+    name: slow-repo
+    fetch_timeout_secs: 30   # optional; enforcement is pending a future release
+```
+
 ### Update rules and re-classify
 
 ```bash
@@ -286,7 +318,7 @@ tga dora --since 2026-04-01
 | Subcommand | Purpose | Key flags |
 |------------|---------|-----------|
 | `tga analyze` | Full pipeline (collect → classify → report) in one command | `--weeks`, `--from`, `--to`, `--force`, `--skip-collect`, `--skip-classify`, `--dry-run` |
-| `tga collect` | Stage 1: extract commits into the database | `--repos`, `--branch`, `--weeks`, `--from`, `--to`, `--force`, `--head-only`, `--dry-run` |
+| `tga collect` | Stage 1: extract commits into the database | `--repos`, `--branch`, `--weeks`, `--from`, `--to`, `--force`, `--head-only`, `--no-fetch`, `--strict-fetch`, `--verbose-fetch`, `--dry-run` |
 | `tga classify` | Stage 2: classify collected commits | `--repos`, `--weeks`, `--since`, `--until`, `--force`, `--rules`, `--use-llm`, `--no-external` |
 | `tga report` | Stage 3: generate CSV/JSON/Markdown reports | `--output`, `--formats`, `--author` |
 | `tga pr-metrics` | Pull-request metrics per engineer | `--weeks`, `--csv`, `--output` |
@@ -382,6 +414,9 @@ tga collect --force   # re-walk all weeks with full branch coverage
 | `--force-refresh-prs` | Re-fetch ADO pull requests even when already cached (backfills pre-v1.0.9 rows) |
 | `--validate-only` | Run configuration validation and exit (0 on success, 1 on errors) |
 | `--no-validate` | Skip pre-flight configuration validation |
+| `--no-fetch` | Skip the pre-walk `git fetch`; use only local refs. A warning is printed to stderr so you know the data may be stale. |
+| `--strict-fetch` | Exit non-zero if any repository's fetch fails (default: failures are shown in the summary but exit code is 0). Useful for CI. |
+| `--verbose-fetch` | Print a success line per fetched repository in the fetch summary (default: only failures are shown). |
 | `--head-only` | Restore legacy HEAD-only revwalk (tga ≤ 1.5.4 behaviour); mutually exclusive with `--branch`; also available per-repo via `head_only: true` in YAML |
 
 ```bash

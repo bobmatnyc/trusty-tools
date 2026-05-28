@@ -235,4 +235,52 @@ mod tests {
             prf.outcome
         );
     }
+
+    /// Why: the end-of-run fetch summary must include `Failed` entries for
+    /// repos whose remote exists but cannot be reached.  This test proves that
+    /// `fetch_remote_with_outcome` returns a `Failed` variant (not a panic or
+    /// an `Err`) when the remote's URL is unreachable.
+    /// What: creates two git repos, adds repo-b as an "origin" remote on
+    /// repo-a, then deletes repo-b so the URL is valid-looking but the target
+    /// directory is gone.  The fetch attempt against that dead path must
+    /// produce `FetchOutcome::Failed`.
+    /// Test: this test itself — covers the `Failed` branch of
+    /// `fetch_remote_with_outcome` and by extension `fetch_and_record`.
+    #[test]
+    fn fetch_remote_with_outcome_returns_failed_for_dead_remote() {
+        let td_remote = tempfile::tempdir().expect("tempdir for remote");
+        // Initialise a bare remote repo so git2 can point an origin at a valid path.
+        let _remote = git2::Repository::init_bare(td_remote.path()).expect("init bare");
+
+        let td_local = tempfile::tempdir().expect("tempdir for local");
+        let local = git2::Repository::init(td_local.path()).expect("init local");
+
+        // Set the origin remote to the path of the bare repo, then remove it
+        // to make the URL dead without being syntactically invalid.
+        let remote_url = td_remote.path().to_str().expect("valid utf8").to_string();
+        local
+            .remote("origin", &remote_url)
+            .expect("add remote origin");
+        // Drop td_remote explicitly to delete the directory.
+        drop(td_remote);
+        // Reopen local after remote dir is gone.
+        let local2 = git2::Repository::open(td_local.path()).expect("reopen local");
+
+        let outcome = fetch_remote_with_outcome(&local2, "origin")
+            .expect("no Err — soft-fail policy means we return Ok(Failed)");
+        assert!(
+            matches!(outcome, FetchOutcome::Failed { .. }),
+            "expected Failed for dead remote path, got {outcome:?}"
+        );
+
+        // Also verify the fetch_and_record wrapper preserves the repo name.
+        let local3 = git2::Repository::open(td_local.path()).expect("reopen local 3");
+        let prf = fetch_and_record(&local3, "dead-remote-repo", "origin");
+        assert_eq!(prf.repo, "dead-remote-repo");
+        assert!(
+            matches!(prf.outcome, FetchOutcome::Failed { .. }),
+            "expected Failed in PerRepoFetch, got {:?}",
+            prf.outcome
+        );
+    }
 }

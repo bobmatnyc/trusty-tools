@@ -53,6 +53,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tga backfill reachability --repos my-service
   ```
 
+- **Per-repo fetch visibility with `--strict-fetch` and `--verbose-fetch` (#334)** —
+  `tga collect` now tracks the outcome of the pre-walk `git fetch` for every
+  repository and prints an end-of-run fetch summary to stderr:
+
+  ```
+  Fetch summary: 116 / 118 repos updated (2 failure(s), 0 skipped)
+    - ml_pricing_engine: could not find remote 'origin'
+    - datapipelines: authentication required
+  ```
+
+  Successful fetches are omitted from the summary unless `--verbose-fetch` is
+  passed. `--strict-fetch` causes `tga collect` to exit non-zero after the
+  summary if any repository had a fetch failure — useful for CI pipelines that
+  treat stale-data as a hard error.
+
+  When `--no-fetch` is active, a warning is printed to stderr at the start of
+  collection:
+  ```
+  WARNING: --no-fetch active. Local clones may be stale. tga collect will walk
+  only what's already in your local object store.
+  ```
+
+  The optional per-repo `repositories[].fetch_timeout_secs: <N>` config field
+  stores a per-repo fetch timeout in seconds; enforcement via a watchdog thread
+  is scheduled for a future release.
+
 - **Comprehensive CLI documentation (#333)** — every subcommand now has:
   - `about` (one-line description shown in `tga --help`)
   - `long_about` (multi-paragraph context shown in `tga <subcommand> --help`)
