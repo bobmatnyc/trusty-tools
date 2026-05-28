@@ -41,6 +41,9 @@ pub struct AliasesArgs {
     pub subcommand: AliasesSubcommand,
 }
 
+/// Valid provider identifiers for `tga aliases add-login`.
+const VALID_PROVIDERS: &[&str] = &["github", "gitlab", "ado", "bitbucket"];
+
 /// `tga aliases` subcommands.
 #[derive(Subcommand, Debug)]
 pub enum AliasesSubcommand {
@@ -56,6 +59,22 @@ pub enum AliasesSubcommand {
         #[arg(long, default_value_t = false)]
         yes: bool,
     },
+    /// Append a provider login to an author's alias list for PR canonicalization.
+    ///
+    /// Provider logins (e.g. GitHub usernames) are stored in `authors.aliases`
+    /// alongside email aliases so that `tga author <email>` can resolve
+    /// pull-request authorship across providers without a schema migration.
+    ///
+    /// Example:
+    ///   tga aliases add-login alice@example.com github alice-dev
+    AddLogin {
+        /// Canonical email of the author to update.
+        email: String,
+        /// Provider the login belongs to (github, gitlab, ado, bitbucket).
+        provider: String,
+        /// Provider login / username to append.
+        login: String,
+    },
 }
 
 /// Dispatch entry point for the `tga aliases` subcommand.
@@ -69,6 +88,11 @@ pub fn run(_config: Config, db: &mut Database, args: AliasesArgs) -> anyhow::Res
         AliasesSubcommand::Merge { src, dst, yes } => {
             merge(db, &src, &dst, yes, &mut io::stdin().lock())
         }
+        AliasesSubcommand::AddLogin {
+            email,
+            provider,
+            login,
+        } => add_login(db, &email, &provider, &login),
     }
 }
 
@@ -173,6 +197,49 @@ fn merge<R: BufRead>(
     Ok(())
 }
 
+/// Append a provider login to `authors.aliases` for the named identity.
+///
+/// Why: `tga author <email>` resolves PR authorship by looking up provider
+/// logins stored in `authors.aliases`; this subcommand is the one-time setup
+/// operation that populates those mappings without requiring a schema migration.
+/// What: parses the existing `aliases` JSON array, appends `login` (if not
+/// already present), writes back. Validates provider against the allow-list.
+/// Test: see `add_login_round_trips` and `add_login_deduplicates` below.
+fn add_login(db: &mut Database, email: &str, provider: &str, login: &str) -> anyhow::Result<()> {
+    if !VALID_PROVIDERS.contains(&provider) {
+        anyhow::bail!(
+            "invalid provider '{provider}'; must be one of: {}",
+            VALID_PROVIDERS.join(", ")
+        );
+    }
+    if login.is_empty() {
+        anyhow::bail!("login must not be empty");
+    }
+    if login.contains('@') {
+        anyhow::bail!("login '{login}' looks like an email address; provider logins must not contain '@'");
+    }
+
+    let (id, _name, aliases_json) = lookup_author(db, email)?
+        .ok_or_else(|| anyhow::anyhow!("identity not found: {email}. Run `tga aliases list`."))?;
+
+    let mut aliases: Vec<String> = serde_json::from_str(&aliases_json).unwrap_or_default();
+    if aliases.contains(&login.to_string()) {
+        println!("Login '{login}' already present in aliases for {email}. No change.");
+        return Ok(());
+    }
+    aliases.push(login.to_string());
+    aliases.sort();
+    let updated_json = serde_json::to_string(&aliases)?;
+
+    let conn = db.connection_mut();
+    conn.execute(
+        "UPDATE authors SET aliases = ?1 WHERE id = ?2",
+        params![updated_json, id],
+    )?;
+    println!("Added login '{login}' ({provider}) to {email}");
+    Ok(())
+}
+
 /// Fetch `(id, canonical_name, aliases_json)` for the row whose email matches.
 fn lookup_author(db: &Database, email: &str) -> anyhow::Result<Option<(i64, String, String)>> {
     let conn = db.connection();
@@ -259,6 +326,66 @@ mod tests {
         let mut input: &[u8] = b"y\n";
         let err = merge(&mut db, "a@example.com", "a@example.com", true, &mut input).unwrap_err();
         assert!(err.to_string().contains("identical"));
+    }
+
+    #[test]
+    fn add_login_round_trips() {
+        // Why: verifies that a login is stored and readable back from aliases JSON.
+        let mut db = Database::open_in_memory().expect("open");
+        insert_author(&db, "Alice", "alice@example.com");
+        add_login(&mut db, "alice@example.com", "github", "alice-dev").expect("add login");
+
+        let aliases_json: String = db
+            .connection()
+            .query_row(
+                "SELECT aliases FROM authors WHERE canonical_email = 'alice@example.com'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("fetch");
+        let aliases: Vec<String> = serde_json::from_str(&aliases_json).unwrap();
+        assert!(aliases.contains(&"alice-dev".to_string()));
+    }
+
+    #[test]
+    fn add_login_deduplicates() {
+        // Why: calling add-login twice with the same login must be idempotent.
+        let mut db = Database::open_in_memory().expect("open");
+        insert_author(&db, "Alice", "alice@example.com");
+        add_login(&mut db, "alice@example.com", "github", "alice-dev").expect("first");
+        add_login(&mut db, "alice@example.com", "github", "alice-dev").expect("second");
+
+        let aliases_json: String = db
+            .connection()
+            .query_row(
+                "SELECT aliases FROM authors WHERE canonical_email = 'alice@example.com'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("fetch");
+        let aliases: Vec<String> = serde_json::from_str(&aliases_json).unwrap();
+        let count = aliases.iter().filter(|a| a.as_str() == "alice-dev").count();
+        assert_eq!(count, 1, "duplicate login must not be stored");
+    }
+
+    #[test]
+    fn add_login_rejects_invalid_provider() {
+        // Why: only known provider identifiers should be accepted.
+        let mut db = Database::open_in_memory().expect("open");
+        insert_author(&db, "Alice", "alice@example.com");
+        let err = add_login(&mut db, "alice@example.com", "slack", "alice-dev").unwrap_err();
+        assert!(err.to_string().contains("invalid provider"));
+    }
+
+    #[test]
+    fn add_login_rejects_email_as_login() {
+        // Why: logins must be provider handles, not email addresses; the '@' check
+        // guards against accidentally storing an email in the login slot.
+        let mut db = Database::open_in_memory().expect("open");
+        insert_author(&db, "Alice", "alice@example.com");
+        let err =
+            add_login(&mut db, "alice@example.com", "github", "alice@example.com").unwrap_err();
+        assert!(err.to_string().contains("looks like an email"));
     }
 
     #[test]
