@@ -494,6 +494,13 @@ async fn reset_stages_for_reindex(handle: &Arc<IndexHandle>) {
             graph: StageState::skipped(),
         };
     } else {
+        // Issue #313: skip_kg forces graph to Skipped from the start of the
+        // reindex. Semantic is unaffected (skip_kg is orthogonal to embedding).
+        let graph_init = if handle.skip_kg {
+            StageState::skipped()
+        } else {
+            StageState::pending()
+        };
         *stages = IndexStages {
             lexical: StageState {
                 status: StageStatus::InProgress,
@@ -501,7 +508,7 @@ async fn reset_stages_for_reindex(handle: &Arc<IndexHandle>) {
                 ..Default::default()
             },
             semantic: StageState::pending(),
-            graph: StageState::pending(),
+            graph: graph_init,
         };
     }
 }
@@ -554,7 +561,8 @@ async fn mark_semantic_ready_graph_in_progress(
     stages.semantic.completed_at = Some(now_rfc3339());
     stages.semantic.embedded = Some(embedded);
     stages.semantic.total = Some(total);
-    if stages.graph.status == StageStatus::Pending {
+    // Issue #313: skip_kg holds graph in Skipped — do not flip to InProgress.
+    if !handle.skip_kg && stages.graph.status == StageStatus::Pending {
         stages.graph.status = StageStatus::InProgress;
         stages.graph.started_at = Some(now_rfc3339());
     }
@@ -565,7 +573,8 @@ async fn mark_semantic_ready_graph_in_progress(
 /// `status` field reports `"ready"`.
 async fn mark_graph_ready(handle: &Arc<IndexHandle>) {
     let mut stages = handle.stages.write().await;
-    if handle.lexical_only {
+    // Both lexical_only and skip_kg keep the graph stage Skipped — nothing to do.
+    if handle.lexical_only || handle.skip_kg {
         return;
     }
     stages.graph.status = StageStatus::Ready;
@@ -1727,24 +1736,42 @@ pub fn spawn_reindex_with_cleanup(
         // Issue #90: always run, even after a memory abort — graph
         // construction is bounded by `TRUSTY_MAX_KG_NODES` and independent of
         // the embedding spike. See `rebuild_symbol_graph_for_reindex`.
-        let kg = rebuild_symbol_graph_for_reindex(&handle).await;
-        // Issue #109, Phase 1: with the KG rebuild done, flip the graph
-        // stage to `Ready`. Symbol graph is fully built — provenance navigation
-        // (`get_call_chain`, `search_kg`) is immediately available.
-        mark_graph_ready(&handle).await;
-        if mem_limit_hit || mem_abort.load(AtomicOrdering::Acquire) {
-            tracing::warn!(
-                "reindex: memory limit was breached during batch processing for \
-                 index {} (peak_rss={}MB, limit={:?}MB) — KG was still rebuilt \
-                 (symbols={}, edges={}) because graph construction is bounded by \
-                 TRUSTY_MAX_KG_NODES and independent of the embedding spike",
+        //
+        // Issue #313: skip_kg indexes bypass Phase 3 entirely. The graph stage
+        // stays Skipped (set at reset_stages_for_reindex) and kg_ms /
+        // symbol_count / edge_count report 0 in the complete event.
+        let kg = if handle.skip_kg {
+            tracing::info!(
+                "reindex[{}]: KG construction skipped (skip_kg=true)",
                 index_id.0,
-                peak_rss_atomic.load(AtomicOrdering::Acquire),
-                mem_limit,
-                kg.symbol_count,
-                kg.edge_count,
             );
-        }
+            KgRebuildOutcome {
+                symbol_count: 0,
+                edge_count: 0,
+                kg_ms: 0,
+                kg_skipped: true,
+            }
+        } else {
+            let outcome = rebuild_symbol_graph_for_reindex(&handle).await;
+            // Issue #109, Phase 1: with the KG rebuild done, flip the graph
+            // stage to `Ready`. Symbol graph is fully built — provenance navigation
+            // (`get_call_chain`, `search_kg`) is immediately available.
+            mark_graph_ready(&handle).await;
+            if mem_limit_hit || mem_abort.load(AtomicOrdering::Acquire) {
+                tracing::warn!(
+                    "reindex: memory limit was breached during batch processing for \
+                     index {} (peak_rss={}MB, limit={:?}MB) — KG was still rebuilt \
+                     (symbols={}, edges={}) because graph construction is bounded by \
+                     TRUSTY_MAX_KG_NODES and independent of the embedding spike",
+                    index_id.0,
+                    peak_rss_atomic.load(AtomicOrdering::Acquire),
+                    mem_limit,
+                    outcome.symbol_count,
+                    outcome.edge_count,
+                );
+            }
+            outcome
+        };
 
         // Stop the background poller and collect the true peak it observed.
         poller_stop.store(true, AtomicOrdering::Release);
@@ -1919,6 +1946,7 @@ mod tests {
             context_summary: Arc::new(tokio::sync::RwLock::new(None)),
             indexed_head_sha: Arc::new(tokio::sync::RwLock::new(None)),
             lexical_only: false,
+            skip_kg: false,
             stages: Arc::new(tokio::sync::RwLock::new(IndexStages::default())),
             search_pressure: Arc::new(tokio::sync::Notify::new()),
             walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
@@ -1999,6 +2027,7 @@ mod tests {
             context_summary: Arc::new(tokio::sync::RwLock::new(None)),
             indexed_head_sha: Arc::new(tokio::sync::RwLock::new(None)),
             lexical_only: false,
+            skip_kg: false,
             stages: Arc::new(tokio::sync::RwLock::new(IndexStages::default())),
             search_pressure: Arc::new(tokio::sync::Notify::new()),
             walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
@@ -2370,12 +2399,36 @@ mod tests {
         root: std::path::PathBuf,
         lexical_only: bool,
     ) -> Arc<IndexHandle> {
+        make_handle_with_flags(id, root, lexical_only, false)
+    }
+
+    /// Extended handle builder used by skip_kg tests.
+    ///
+    /// Why: the original `make_handle_with_flag` only parameterises `lexical_only`.
+    /// Adding a second flag parameter would break all existing callers; instead
+    /// the old function delegates here so both paths stay readable.
+    /// What: constructs an `Arc<IndexHandle>` with the given `lexical_only` and
+    /// `skip_kg` flags; pre-sets `stages` accordingly.
+    /// Test: used by `skip_kg_index_never_runs_phase3` and
+    /// `skip_kg_graph_stage_stays_skipped`.
+    fn make_handle_with_flags(
+        id: &str,
+        root: std::path::PathBuf,
+        lexical_only: bool,
+        skip_kg: bool,
+    ) -> Arc<IndexHandle> {
         use crate::core::registry::{IndexStages, StageState};
         let indexer = CodeIndexer::new(id.to_string(), root.clone());
         let stages = if lexical_only {
             IndexStages {
                 lexical: StageState::pending(),
                 semantic: StageState::skipped(),
+                graph: StageState::skipped(),
+            }
+        } else if skip_kg {
+            IndexStages {
+                lexical: StageState::pending(),
+                semantic: StageState::pending(),
                 graph: StageState::skipped(),
             }
         } else {
@@ -2396,6 +2449,7 @@ mod tests {
             context_summary: Arc::new(tokio::sync::RwLock::new(None)),
             indexed_head_sha: Arc::new(tokio::sync::RwLock::new(None)),
             lexical_only,
+            skip_kg,
             stages: Arc::new(tokio::sync::RwLock::new(stages)),
             search_pressure: Arc::new(tokio::sync::Notify::new()),
             walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
@@ -2552,6 +2606,70 @@ mod tests {
         // `indexed_lexical`, since semantic + graph are permanently
         // Skipped (which the lifecycle helper treats as terminal).
         assert_eq!(stages.lifecycle_status(), "ready");
+    }
+
+    /// Issue #313: a `skip_kg` index permanently keeps the graph stage at
+    /// `Skipped`. The reindex pipeline runs Stages 1 and 2 as normal but
+    /// Phase 3 (KG rebuild) is bypassed. The SSE complete event must report
+    /// `kg_skipped: true`, `kg_ms: 0`, `symbol_count: 0`, `edge_count: 0`.
+    /// `search_capabilities` must never include `"kg"`.
+    ///
+    /// Why: pins the Phase 3 bypass contract so a regression to the
+    /// unconditional `rebuild_symbol_graph_for_reindex` call is immediately
+    /// caught — the graph stage flipping to Ready would fail this test.
+    /// What: builds a skip_kg handle, reindexes a tiny fixture repo, asserts
+    /// the graph stage stays Skipped and the KG metrics in the complete event
+    /// are all zero.
+    /// Test: this test.
+    #[tokio::test]
+    async fn skip_kg_index_never_runs_phase3() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        fs::write(root.join("b.rs"), "pub fn skip_kg_func() { let x = 1; }\n").unwrap();
+
+        let handle = make_handle_with_flags("skip-kg-test", root.clone(), false, true);
+        // Pre-condition: graph stage pre-set to Skipped.
+        assert_eq!(
+            handle.stages.read().await.graph.status,
+            crate::core::registry::StageStatus::Skipped
+        );
+
+        let progress = Arc::new(ReindexProgress::new());
+        spawn_reindex(handle.clone(), progress.clone(), false);
+        for _ in 0..200 {
+            if progress.status.load() == ReindexStatus::Complete {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(progress.status.load(), ReindexStatus::Complete);
+
+        // After reindex: graph must STILL be Skipped.
+        let stages = handle.stages.read().await.clone();
+        assert_eq!(
+            stages.lexical.status,
+            crate::core::registry::StageStatus::Ready,
+            "lexical must be Ready"
+        );
+        assert_eq!(
+            stages.graph.status,
+            crate::core::registry::StageStatus::Skipped,
+            "skip_kg must never flip graph away from Skipped"
+        );
+        let caps = stages.search_capabilities();
+        assert!(
+            !caps.contains(&"kg"),
+            "skip_kg must not advertise kg capability: {caps:?}"
+        );
+
+        // Symbol graph must be empty (Phase 3 was skipped).
+        let indexer = handle.indexer.read().await;
+        let graph = indexer.snapshot_symbol_graph().await;
+        assert_eq!(
+            graph.node_count(),
+            0,
+            "symbol graph must be empty when skip_kg=true"
+        );
     }
 
     /// Issue #109 Phase 1: as stages advance from `Pending` →

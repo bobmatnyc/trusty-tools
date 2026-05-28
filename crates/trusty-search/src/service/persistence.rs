@@ -97,6 +97,22 @@ pub struct PersistedIndex {
     /// Test: `lexical_only_round_trips` in this module.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lexical_only: bool,
+
+    /// Stage-1-minimal mode (issue #313): when `true`, the KG rebuild
+    /// (Phase 3 of `spawn_reindex_with_cleanup`) is skipped entirely.
+    /// The graph stage is permanently `Skipped` at warm-boot and after
+    /// every reindex. `get_call_chain` and `search_kg` return a
+    /// `503 kg_unavailable` error rather than an empty result.
+    ///
+    /// Why: for pure BM25 / lexical deployments the petgraph DiGraph can
+    /// consume 50–100 MB of heap for a large corpus. Setting this flag
+    /// avoids building the graph at all, not just gating it at query time.
+    /// Orthogonal to `lexical_only` — both flags may be set independently.
+    /// What: `#[serde(default)]` so existing `indexes.toml` files load as
+    /// `false`; only `true` is written to disk to keep the file compact.
+    /// Test: `skip_kg_round_trips` in this module.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skip_kg: bool,
 }
 
 /// Why: serde's `default` attribute needs a free function (closures aren't
@@ -147,6 +163,7 @@ impl Default for PersistedIndex {
             include_docs: true,
             respect_gitignore: true,
             lexical_only: false,
+            skip_kg: false,
         }
     }
 }
@@ -687,6 +704,83 @@ root_path = "/tmp/legacy"
         let entries = load_index_registry_at(&path).unwrap();
         assert_eq!(entries.len(), 1);
         assert!(entries[0].lexical_only);
+    }
+
+    /// Issue #313: `skip_kg` defaults to `false` and is omitted from the TOML
+    /// when unset, preserving the compact shape of existing `indexes.toml`
+    /// files. An explicit `true` survives a save/load round-trip, and an
+    /// `indexes.toml` written by an older daemon (without the field) loads as
+    /// `false` (full KG pipeline unchanged).
+    ///
+    /// Why: pins the backward-compat contract so a daemon upgrade never
+    /// silently drops the KG for existing indexes.
+    /// What: default constructor, missing-field deserialization, and
+    /// explicit-true round-trip — the same three shapes as `lexical_only`.
+    /// Test: this test.
+    #[test]
+    fn skip_kg_round_trips() {
+        // Default constructor returns false.
+        assert!(!PersistedIndex::default().skip_kg);
+
+        // Loading legacy TOML without the field gives false (KG enabled).
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::fs::write(
+            &path,
+            r#"
+[[index]]
+id = "legacy"
+root_path = "/tmp/legacy"
+"#,
+        )
+        .unwrap();
+        let entries = load_index_registry_at(&path).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(
+            !entries[0].skip_kg,
+            "missing field must default to false (issue #313 back-compat)"
+        );
+
+        // Explicit true survives round-trip and is written to disk.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        save_index_registry_at(
+            &path,
+            &[PersistedIndex {
+                id: "no_kg".into(),
+                root_path: PathBuf::from("/tmp/v"),
+                skip_kg: true,
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        let s = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            s.contains("skip_kg"),
+            "explicit true must be serialised — TOML was: {s}"
+        );
+        let entries = load_index_registry_at(&path).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].skip_kg);
+
+        // skip_kg and lexical_only can coexist independently.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        save_index_registry_at(
+            &path,
+            &[PersistedIndex {
+                id: "both_flags".into(),
+                root_path: PathBuf::from("/tmp/v"),
+                lexical_only: true,
+                skip_kg: true,
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        let entries = load_index_registry_at(&path).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].lexical_only, "lexical_only preserved");
+        assert!(entries[0].skip_kg, "skip_kg preserved");
     }
 
     #[test]

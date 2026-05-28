@@ -198,6 +198,20 @@ enum Commands {
         #[arg(long)]
         lexical_only: bool,
 
+        /// Skip the Knowledge Graph (Phase 3 / KG rebuild) during reindex (issue #313).
+        ///
+        /// When set, the reindex pipeline skips tree-sitter symbol extraction
+        /// and the petgraph KG build. Stages 1 and 2 (BM25 + vector embed)
+        /// still run normally. The `get_call_chain` endpoint returns a
+        /// structured 503 `kg_unavailable` response for this index.
+        ///
+        /// The choice is persisted to `indexes.toml` so it survives daemon
+        /// restarts; to opt back in, delete and re-create the index without
+        /// this flag. Also expressible as `TRUSTY_NO_KG=1` (machine-wide
+        /// default) or `skip_kg: true` in `trusty-search.yaml`.
+        #[arg(long)]
+        no_kg: bool,
+
         /// Optional subcommand. When absent, the default register+reindex flow runs.
         #[command(subcommand)]
         action: Option<IndexAction>,
@@ -874,14 +888,23 @@ async fn run() -> Result<()> {
             exclude,
             timeout,
             lexical_only,
+            no_kg,
             action,
         } => match action {
             Some(IndexAction::Remove { path: rm_path }) => {
                 commands::index_remove::handle_index_remove(rm_path).await?;
             }
             None => {
-                commands::index::handle_index(path, name, force, exclude, timeout, lexical_only)
-                    .await?;
+                commands::index::handle_index(
+                    path,
+                    name,
+                    force,
+                    exclude,
+                    timeout,
+                    lexical_only,
+                    no_kg,
+                )
+                .await?;
             }
         },
 

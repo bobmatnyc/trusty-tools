@@ -52,6 +52,7 @@ pub async fn handle_index(
     cli_exclude: Vec<String>,
     timeout_secs: u64,
     lexical_only: bool,
+    no_kg: bool,
 ) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_default();
 
@@ -118,6 +119,10 @@ pub async fn handle_index(
                 // multi-index YAML. Per-index YAML config does not yet
                 // carry a `lexical_only:` field (future work).
                 filters.lexical_only = lexical_only;
+                // Issue #313: `--no-kg` CLI flag ORs with the YAML
+                // `skip_kg` field so the CLI can always escalate to
+                // skip-kg even when the YAML file doesn't set it.
+                filters.skip_kg = filters.skip_kg || no_kg;
                 index_one_with_filters(&idx.name, &project_path, force, timeout_secs, &filters)
                     .await?;
             }
@@ -140,12 +145,14 @@ pub async fn handle_index(
     // Issue #109, Phase 1: when `--lexical-only` is set, always go through
     // the filtered path so the daemon receives the opt-in even when no
     // other filter fields are populated.
-    if exclude_globs.is_empty() && !lexical_only {
+    // Issue #313: `--no-kg` likewise forces the filtered path.
+    if exclude_globs.is_empty() && !lexical_only && !no_kg {
         index_one(&index_name, &project_path, force, timeout_secs).await
     } else {
         let filters = RegisterFilters {
             exclude_globs,
             lexical_only,
+            skip_kg: no_kg,
             ..RegisterFilters::default()
         };
         index_one_with_filters(&index_name, &project_path, force, timeout_secs, &filters).await
@@ -248,6 +255,10 @@ pub(crate) fn filters_from_index_config(idx: &IndexConfig) -> RegisterFilters {
         // YAML-driven multi-index config doesn't expose `lexical_only` in
         // v0.9.0 — the CLI flag is the only way to opt in for now.
         lexical_only: false,
+        // Issue #313: `skip_kg` is a first-class YAML field (D3). When set
+        // in the per-index YAML block it propagates here; the CLI `--no-kg`
+        // flag can override it upward (see `handle_index`).
+        skip_kg: idx.skip_kg,
     }
 }
 

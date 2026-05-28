@@ -282,6 +282,20 @@ pub struct IndexHandle {
     /// `service::reindex::tests`.
     pub lexical_only: bool,
 
+    /// Stage-1-minimal mode (issue #313): when `true`, the Phase 3 KG
+    /// rebuild is skipped entirely during `spawn_reindex_with_cleanup`. The
+    /// graph stage is permanently `Skipped` at registration and warm-boot.
+    /// `get_call_chain` and `search_kg` return a 503 `kg_unavailable` error.
+    ///
+    /// Why: for pure BM25/lexical deployments the petgraph DiGraph can
+    /// consume 50–100 MB of heap. Setting this flag avoids allocating the
+    /// graph at all — not merely gating it at query time. Orthogonal to
+    /// `lexical_only`: both flags may be set independently.
+    /// What: a bare `bool`, set once at `POST /indexes` and persisted to
+    /// `indexes.toml` so it survives daemon restarts. Defaults to `false`.
+    /// Test: `skip_kg_index_never_runs_phase3` in `service::reindex::tests`.
+    pub skip_kg: bool,
+
     /// Per-stage lifecycle state surface for the staged pipeline
     /// (issue #109, Phase 1).
     ///
@@ -383,6 +397,7 @@ impl IndexHandle {
             context_summary: Arc::new(RwLock::new(None)),
             indexed_head_sha: Arc::new(RwLock::new(None)),
             lexical_only: false,
+            skip_kg: false,
             stages: Arc::new(RwLock::new(IndexStages::default())),
             search_pressure: Arc::new(tokio::sync::Notify::new()),
             walk_diagnostics: Arc::new(tokio::sync::RwLock::new(WalkDiagnostics::default())),

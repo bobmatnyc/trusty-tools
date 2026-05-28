@@ -52,6 +52,14 @@ pub(crate) struct WarmBootInputs {
     /// from a prior non-lexical-only life lying around; the staged pipeline
     /// must not surface it.
     pub lexical_only: bool,
+
+    /// `skip_kg` flag (issue #313): when `true`, the graph stage is forced to
+    /// `Skipped` regardless of on-disk state. Independent of `lexical_only`.
+    /// Why: a `skip_kg` index that happened to have a graph on disk (e.g. from
+    /// a prior full-pipeline reindex) must not advertise the KG lane on
+    /// warm-boot — the `skip_kg` config intent wins unconditionally.
+    /// Test: `warm_boot_respects_skip_kg_flag` in this module.
+    pub skip_kg: bool,
 }
 
 /// Pure classifier: given the four warm-boot signals, decide where each of
@@ -103,6 +111,11 @@ pub(crate) fn derive_warm_boot_stages(inputs: WarmBootInputs) -> IndexStages {
     // Semantic + graph: forced to `Skipped` for `lexical_only` indexes
     // regardless of on-disk state. Otherwise read directly from the
     // inspection signals.
+    //
+    // Issue #313: `skip_kg` forces the graph stage to `Skipped` independently
+    // of `lexical_only`. A `skip_kg` index that happened to have a graph on
+    // disk (from a prior full-pipeline reindex) must not advertise the KG lane
+    // — the config flag wins unconditionally.
     let (semantic, graph) = if inputs.lexical_only {
         (StageState::skipped(), StageState::skipped())
     } else {
@@ -114,7 +127,10 @@ pub(crate) fn derive_warm_boot_stages(inputs: WarmBootInputs) -> IndexStages {
         } else {
             StageState::pending()
         };
-        let graph = if inputs.graph_node_count > 0 {
+        let graph = if inputs.skip_kg {
+            // skip_kg: graph is permanently Skipped regardless of on-disk state.
+            StageState::skipped()
+        } else if inputs.graph_node_count > 0 {
             StageState {
                 status: StageStatus::Ready,
                 ..Default::default()
@@ -192,6 +208,10 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
         // past the indexed commit. Best-effort: `None` outside a git repo.
         let indexed_head_sha = crate::core::git::head_sha(&entry.root_path);
         let lexical_only = entry.lexical_only;
+        // Issue #313: read skip_kg from the persisted entry. When true, the
+        // graph stage is forced to Skipped at warm-boot regardless of on-disk
+        // state (config intent wins over stale on-disk graph data).
+        let skip_kg = entry.skip_kg;
         // Issue #135: inspect the on-disk artifacts that
         // `build_indexer_with_persisted_state` just restored and derive the
         // staged-pipeline state from them. Before this, every warm-booted
@@ -218,15 +238,17 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
             hnsw_snapshot_ready,
             graph_node_count,
             lexical_only,
+            skip_kg,
         });
         tracing::info!(
             "warm-boot: index '{}' restored — chunks={} hnsw_snapshot={} graph_nodes={} \
-             lexical_only={} → stages(lexical={:?}, semantic={:?}, graph={:?})",
+             lexical_only={} skip_kg={} → stages(lexical={:?}, semantic={:?}, graph={:?})",
             entry.id,
             chunk_count,
             hnsw_snapshot_ready,
             graph_node_count,
             lexical_only,
+            skip_kg,
             stages.lexical.status,
             stages.semantic.status,
             stages.graph.status,
@@ -246,6 +268,7 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
             context_summary: Arc::new(tokio::sync::RwLock::new(None)),
             indexed_head_sha: Arc::new(tokio::sync::RwLock::new(indexed_head_sha)),
             lexical_only,
+            skip_kg,
             stages: Arc::new(tokio::sync::RwLock::new(stages)),
             search_pressure: Arc::new(tokio::sync::Notify::new()),
             walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
@@ -1163,6 +1186,7 @@ mod tests {
             hnsw_snapshot_ready: false,
             graph_node_count: 0,
             lexical_only: false,
+            skip_kg: false,
         }
     }
 
@@ -1240,6 +1264,7 @@ mod tests {
             hnsw_snapshot_ready: true,
             graph_node_count: 7_402,
             lexical_only: true,
+            skip_kg: false,
         });
         assert_eq!(stages.lexical.status, StageStatus::Ready);
         assert_eq!(stages.semantic.status, StageStatus::Skipped);
@@ -1262,10 +1287,67 @@ mod tests {
             hnsw_snapshot_ready: false,
             graph_node_count: 0,
             lexical_only: false,
+            skip_kg: false,
         });
         assert_eq!(stages.lexical.status, StageStatus::InProgress);
         assert_eq!(stages.lifecycle_status(), "walking");
         assert!(stages.search_capabilities().is_empty());
+    }
+
+    /// Issue #313: a `skip_kg` index that happens to have a non-empty symbol
+    /// graph on disk (from a prior full-pipeline reindex) must NOT surface the
+    /// `kg` lane on warm-boot. The `skip_kg` flag wins over on-disk state.
+    ///
+    /// Why: an operator who flipped `skip_kg = true` expects no KG anywhere
+    /// — including after a daemon restart that inherits stale redb graph bytes.
+    /// The flag is the source of truth; on-disk evidence is subordinate.
+    /// What: set `graph_node_count = 7_402` (non-zero, would normally produce
+    /// `graph = Ready`) alongside `skip_kg = true`; assert graph = Skipped
+    /// and `"kg"` is absent from search_capabilities.
+    /// Test: this test.
+    #[test]
+    fn warm_boot_respects_skip_kg_flag() {
+        // skip_kg wins over non-empty on-disk graph.
+        let stages = derive_warm_boot_stages(WarmBootInputs {
+            chunk_count: 14_823,
+            hnsw_snapshot_ready: true,
+            graph_node_count: 7_402,
+            lexical_only: false,
+            skip_kg: true,
+        });
+        assert_eq!(
+            stages.graph.status,
+            StageStatus::Skipped,
+            "skip_kg must force graph to Skipped even when on-disk graph is non-empty"
+        );
+        assert_eq!(
+            stages.semantic.status,
+            StageStatus::Ready,
+            "skip_kg must not affect the semantic lane"
+        );
+        let caps = stages.search_capabilities();
+        assert!(
+            !caps.contains(&"kg"),
+            "skip_kg must suppress the kg capability"
+        );
+        assert!(
+            caps.contains(&"vector"),
+            "skip_kg must not suppress the vector capability"
+        );
+
+        // skip_kg + lexical_only together: both semantic and graph are Skipped.
+        let stages_both = derive_warm_boot_stages(WarmBootInputs {
+            chunk_count: 14_823,
+            hnsw_snapshot_ready: true,
+            graph_node_count: 7_402,
+            lexical_only: true,
+            skip_kg: true,
+        });
+        assert_eq!(stages_both.semantic.status, StageStatus::Skipped);
+        assert_eq!(stages_both.graph.status, StageStatus::Skipped);
+        let caps = stages_both.search_capabilities();
+        assert!(!caps.contains(&"vector"));
+        assert!(!caps.contains(&"kg"));
     }
 
     /// When `trusty-embedderd` is not on PATH and `TRUSTY_EMBEDDERD_BIN` is

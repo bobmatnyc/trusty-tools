@@ -729,6 +729,20 @@ pub struct CreateIndexRequest {
     /// Default `None` (treated as `false` — full pipeline).
     #[serde(default)]
     pub lexical_only: Option<bool>,
+
+    /// Stage-1-minimal mode (issue #313): when `true`, the Phase 3 KG
+    /// rebuild is skipped entirely during reindex. The graph stage is
+    /// permanently `Skipped`. `get_call_chain` and `search_kg` return a
+    /// 503 `kg_unavailable` error. Orthogonal to `lexical_only`.
+    /// Default `None` (treated as `false` — KG is built as normal).
+    ///
+    /// Why: exposes the per-index KG-suppression flag on the wire so callers
+    /// can register a skip_kg index in one `POST /indexes` call.
+    /// What: `None` maps to `false`; `true` is stored in `indexes.toml` and
+    /// survives daemon restarts.
+    /// Test: `skip_kg_index_never_runs_phase3` in `service::reindex::tests`.
+    #[serde(default)]
+    pub skip_kg: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1419,6 +1433,13 @@ async fn create_index_handler(
     // Issue #109, Phase 1: staged-pipeline opt-out. `None` on the wire ⇒
     // `false` (full pipeline) so existing callers see no behaviour change.
     let lexical_only: bool = req.lexical_only.unwrap_or(false);
+    // Issue #313: KG-skip flag. `None` on the wire ⇒ `false` (KG built as
+    // normal). TRUSTY_NO_KG=1 provides a machine-wide default that operators
+    // can set without modifying per-index config.
+    let skip_kg: bool = req.skip_kg.unwrap_or_else(|| {
+        let v = std::env::var("TRUSTY_NO_KG").unwrap_or_default();
+        matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+    });
     if let Err(e) = crate::service::persistence::upsert_index_registry_entry(
         crate::service::persistence::PersistedIndex {
             id: req.id.clone(),
@@ -1431,6 +1452,7 @@ async fn create_index_handler(
             include_docs,
             respect_gitignore,
             lexical_only,
+            skip_kg,
         },
     ) {
         tracing::warn!("could not persist index registry for {}: {e}", req.id);
@@ -1441,10 +1463,17 @@ async fn create_index_handler(
     let indexed_head_sha = crate::core::git::head_sha(&req.root_path);
     // Issue #109, Phase 1: pre-mark semantic + graph as `Skipped` for
     // lexical-only indexes so the search handler never tries the HNSW lane.
+    // Issue #313: pre-mark graph as `Skipped` for skip_kg indexes.
     let stages = if lexical_only {
         crate::core::registry::IndexStages {
             lexical: crate::core::registry::StageState::pending(),
             semantic: crate::core::registry::StageState::skipped(),
+            graph: crate::core::registry::StageState::skipped(),
+        }
+    } else if skip_kg {
+        crate::core::registry::IndexStages {
+            lexical: crate::core::registry::StageState::pending(),
+            semantic: crate::core::registry::StageState::pending(),
             graph: crate::core::registry::StageState::skipped(),
         }
     } else {
@@ -1465,6 +1494,7 @@ async fn create_index_handler(
         context_summary: Arc::new(tokio::sync::RwLock::new(None)),
         indexed_head_sha: Arc::new(tokio::sync::RwLock::new(indexed_head_sha)),
         lexical_only,
+        skip_kg,
         stages: Arc::new(tokio::sync::RwLock::new(stages)),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
         walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
@@ -2359,6 +2389,7 @@ async fn index_status_handler(
         "stages": stages_snapshot,
         "search_capabilities": search_capabilities,
         "lexical_only": handle.lexical_only,
+        "skip_kg": handle.skip_kg,
         "path_filter": path_filter,
         "has_context_embedding": has_context_embedding,
         "context_summary": context_summary,
@@ -2848,7 +2879,7 @@ async fn call_chain_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
     Query(params): Query<CallChainParams>,
-) -> Result<Response, (StatusCode, String)> {
+) -> Result<Response, (StatusCode, axum::Json<serde_json::Value>)> {
     use crate::service::call_chain::{render_call_chain, CallChainRequest};
 
     let req = CallChainRequest {
@@ -2858,15 +2889,34 @@ async fn call_chain_handler(
         max_depth: params.max_depth,
         include_source: params.include_source,
     };
-    let validated = req
-        .validate()
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let validated = req.validate().map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
 
     let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or((
-        StatusCode::NOT_FOUND,
-        format!("unknown index: {}", index_id.0),
-    ))?;
+    let handle = state.registry.get(&index_id).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({ "error": format!("unknown index: {}", index_id.0) })),
+        )
+    })?;
+
+    // Issue #313: skip_kg indexes have no symbol graph — return a structured
+    // 503 so callers can distinguish "KG disabled" from "no symbols found".
+    if handle.skip_kg {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({
+                "error": "kg_unavailable",
+                "reason": "skipped_by_config",
+                "index": index_id.0,
+            })),
+        ));
+    }
+
     let (graph, chunks) = {
         let indexer = handle.indexer.read().await;
         let graph = indexer.snapshot_symbol_graph().await;
@@ -2874,8 +2924,12 @@ async fn call_chain_handler(
         (graph, chunks)
     };
 
-    let text = render_call_chain(&validated, graph.as_ref(), &chunks)
-        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+    let text = render_call_chain(&validated, graph.as_ref(), &chunks).map_err(|e| {
+        (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({ "error": e })),
+        )
+    })?;
     Ok((
         StatusCode::OK,
         [(
@@ -3009,6 +3063,10 @@ async fn reindex_handler(
                     // and stages snapshot across the root override — a
                     // root_path override is not an opt-out change.
                     lexical_only: handle.lexical_only,
+                    // Issue #313: preserve the skip_kg flag across the
+                    // root_path override — the operator's KG choice is
+                    // orthogonal to the path being indexed.
+                    skip_kg: handle.skip_kg,
                     stages: Arc::clone(&handle.stages),
                     search_pressure: Arc::clone(&handle.search_pressure),
                     // Preserve walk diagnostics across root-path override — a
@@ -3641,6 +3699,7 @@ mod tests {
                 include_docs: None,
                 respect_gitignore: None,
                 lexical_only: None,
+                skip_kg: None,
             }),
         )
         .await;
@@ -4050,6 +4109,7 @@ mod tests {
                 include_docs: None,
                 respect_gitignore: None,
                 lexical_only: None,
+                skip_kg: None,
             }),
         )
         .await;
@@ -4088,6 +4148,7 @@ mod tests {
                 include_docs: None,
                 respect_gitignore: None,
                 lexical_only: None,
+                skip_kg: None,
             }),
         )
         .await;
@@ -4142,6 +4203,7 @@ mod tests {
                 include_docs: None,
                 respect_gitignore: None,
                 lexical_only: None,
+                skip_kg: None,
             }),
         )
         .await;
@@ -4185,6 +4247,7 @@ mod tests {
                 include_docs: None,
                 respect_gitignore: None,
                 lexical_only: None,
+                skip_kg: None,
             }),
         )
         .await;

@@ -1117,6 +1117,17 @@ pub struct RegisterFilters {
     /// this index as `lexical_only` — the reindex pipeline skips Stages 2/3
     /// permanently. Persisted on the daemon side via `indexes.toml`.
     pub lexical_only: bool,
+    /// Issue #313: when `true`, the CLI tells the daemon to register this
+    /// index with `skip_kg = true` — Phase 3 KG rebuild is suppressed
+    /// permanently. Persisted on the daemon side via `indexes.toml`.
+    ///
+    /// Why: exposes the KG-skip flag at the CLI-to-daemon boundary so
+    /// `trusty-search index --no-kg` and the YAML `skip_kg: true` field can
+    /// both reach the daemon's create-index handler without extra scaffolding.
+    /// What: when `true`, the request body sent to `POST /indexes` includes
+    /// `"skip_kg": true`. The daemon stores it in `indexes.toml`.
+    /// Test: covered by `skip_kg_index_never_runs_phase3` (end-to-end).
+    pub skip_kg: bool,
 }
 
 /// Variant of [`register_index_with_daemon`] that forwards filter/domain
@@ -1151,6 +1162,9 @@ pub async fn register_index_with_daemon_filtered(
     }
     if filters.lexical_only {
         create_body["lexical_only"] = serde_json::json!(true);
+    }
+    if filters.skip_kg {
+        create_body["skip_kg"] = serde_json::json!(true);
     }
     match client.post(&create_url).json(&create_body).send().await {
         Ok(resp) if resp.status().is_success() => {
