@@ -123,3 +123,47 @@ commands:
     examples:
       - cmd: trusty-mpm coordinator "Pause everything for 5 minutes"
       - cmd: trusty-mpm coord "@session:foo /run-tests"
+  services:
+    description: Inspect and probe workspace service daemons (trusty-search, trusty-memory, etc.)
+    examples:
+      - cmd: trusty-mpm services list
+      - cmd: trusty-mpm services status trusty-search
+      - cmd: trusty-mpm services port trusty-search
+    subcommands:
+      list:
+        description: List all declared services with their current status
+        flags:
+          - name: json
+            description: Output as JSON array
+      status:
+        description: Show detailed status for one service
+        args: [name]
+        flags:
+          - name: json
+            description: Output as JSON object
+      port:
+        description: Print just the port number (scriptable)
+        args: [name]
+        examples:
+          - cmd: PORT=$(trusty-mpm services port trusty-search)
+      url:
+        description: Print the full base URL (scriptable)
+        args: [name]
+        examples:
+          - cmd: URL=$(trusty-mpm services url trusty-search)
+      health:
+        description: Probe the health endpoint and print OK or FAIL
+        args: [name]
+      log:
+        description: Print the path to the most-recent log file (scriptable)
+        args: [name]
+        examples:
+          - cmd: tail -f $(trusty-mpm services log trusty-search)
+      init:
+        description: Write the default manifest to ~/.claude-mpm/services.yaml
+        flags:
+          - name: force
+            description: Overwrite an existing manifest
+      restart:
+        description: Restart a service using its manifest restart_cmd
+        args: [name]
