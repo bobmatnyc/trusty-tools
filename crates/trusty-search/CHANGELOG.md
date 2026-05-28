@@ -7,6 +7,39 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.17.0] - 2026-05-27
+
+### Added
+
+- **Issue #313 — Stage-1-minimal (`skip_kg`) mode.** A new additive flag
+  `skip_kg: bool` on `PersistedIndex`, `IndexHandle`, and `IndexConfig` lets
+  operators permanently suppress the Phase 3 Knowledge Graph rebuild for a
+  specific index without disabling the embedder / vector search.
+
+  **Three surfaces (D3):**
+  - CLI: `trusty-search index --no-kg`
+  - YAML: `skip_kg: true` in `trusty-search.yaml`
+  - Env: `TRUSTY_NO_KG=1` (machine-wide default applied at `POST /indexes`)
+
+  **Orthogonality (D1):** `skip_kg` and `lexical_only` are independent flags.
+  Both can be set simultaneously. `lexical_only` suppresses Stages 2 and 3;
+  `skip_kg` suppresses Stage 3 only, leaving vector embeddings intact.
+
+  **503 contract (D2):** `GET /indexes/:id/call_chain` returns a structured
+  503 JSON error `{ "error": "kg_unavailable", "reason": "skipped_by_config",
+  "index": "…" }` when `skip_kg=true`. Callers must handle this status and
+  not treat it as an index-absent 404.
+
+  **Warm-boot:** on daemon restart, indexes with `skip_kg=true` have their
+  graph stage initialised as `Skipped` rather than `Pending`, so no spurious
+  KG-rebuild attempt is triggered.
+
+  **Performance savings (per index):** ~50–100 MB heap (symbol graph), ~400 ms
+  per reindex (tree-sitter extraction pass). Recommended for large
+  documentation-only or generated-code sub-indexes in polyrepos.
+
+---
+
 ## [0.16.0] - 2026-05-27
 
 ### Changed

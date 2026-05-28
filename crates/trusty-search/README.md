@@ -215,6 +215,56 @@ Or use the `--lexical-only` flag with the CLI:
 trusty-search index /path/to/project --name myproject --lexical-only
 ```
 
+### Skip-KG mode (`--no-kg`) — issue #313
+
+A `skip_kg` index runs Stages 1 and 2 (BM25 + vector embed) normally but
+permanently skips the Phase 3 Knowledge Graph rebuild (tree-sitter symbol
+extraction + petgraph construction). Useful for large documentation-heavy or
+generated-code sub-indexes in polyrepos where call-chain navigation is never
+needed.
+
+**Savings per index:** ~50–100 MB heap (symbol graph not allocated), ~400 ms
+per reindex (tree-sitter extraction pass skipped).
+
+**503 contract:** `GET /indexes/:id/call_chain` returns a structured 503 error
+when `skip_kg=true`:
+```json
+{ "error": "kg_unavailable", "reason": "skipped_by_config", "index": "myproject" }
+```
+Callers must handle 503 and not assume 404 (index absent).
+
+**Three ways to enable:**
+
+CLI (`--no-kg` — orthogonal to `--lexical-only`):
+```bash
+trusty-search index /path/to/project --name myproject --no-kg
+```
+
+YAML (`trusty-search.yaml`):
+```yaml
+version: 1
+indexes:
+  - name: docs
+    paths: [docs/]
+    skip_kg: true
+```
+
+HTTP API:
+```bash
+curl -s -X POST http://127.0.0.1:7878/indexes \
+    -H 'Content-Type: application/json' \
+    -d '{"id":"myproject","root_path":"/path/to/project","skip_kg":true}'
+```
+
+Machine-wide default (`TRUSTY_NO_KG=1` env var applies to every new index):
+```bash
+export TRUSTY_NO_KG=1
+trusty-search index /path/to/project --name myproject
+```
+
+`skip_kg` and `lexical_only` are orthogonal (D1) — setting both suppresses
+both the embedder (Stage 2) and the KG rebuild (Stage 3), leaving only BM25.
+
 ## Memory tiers (auto-tuned at startup)
 
 `MEMORY_LIMIT_MB` is computed dynamically as **25% of detected system RAM, clamped to 1–64 GB**. It is not a fixed tier value. The env var `TRUSTY_MEMORY_LIMIT_MB` overrides it. All other limits below are tier-based.
