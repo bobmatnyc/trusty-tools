@@ -24,7 +24,17 @@ mod banner;
 mod bridge;
 mod commands;
 mod dispatch;
+// Why: Event renderer staged for the REPL streaming loop but not yet routed
+// through the active rendering path. Keep so the public API stays stable
+// when the streaming integration lands.
+#[allow(dead_code)]
 mod event_display;
+// Why: Lightweight ANSI markdown renderer prepared for use by the REPL chat
+// printer but not yet wired into the active rendering path. Keep the module
+// (with its self-contained tests) so the implementation is ready when the
+// REPL adds markdown rendering. The `dead_code` allow suppresses warnings
+// for the not-yet-invoked public helpers.
+#[allow(dead_code)]
 mod markdown;
 mod ollama;
 pub(crate) mod status_bar;

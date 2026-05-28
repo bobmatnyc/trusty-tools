@@ -178,6 +178,11 @@ pub fn migrate_if_needed(open_mpm_dir: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    // Why: These tests hold `ENV_GUARD` (a `std::sync::Mutex`) across async
+    // I/O to serialize global env-var mutation between tests. See the
+    // ENV_GUARD doc comment below for the full rationale.
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use serde_json::json;
     use std::sync::Mutex;

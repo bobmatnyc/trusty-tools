@@ -42,7 +42,6 @@ pub fn render_markdown_ansi(text: &str) -> String {
 
     let mut out = String::with_capacity(text.len() + 64);
     let mut in_fence = false;
-    let mut fence_lang: Option<String> = None;
 
     for (idx, line) in text.split('\n').enumerate() {
         if idx > 0 {
@@ -50,11 +49,13 @@ pub fn render_markdown_ansi(text: &str) -> String {
         }
 
         // Code fence delimiter handling. We toggle state and emit a dim
-        // marker line so the user can still see fence boundaries.
+        // marker line so the user can still see fence boundaries. The
+        // opening fence's language tag is rendered inline; it isn't
+        // carried across iterations because each delimiter line ends with
+        // `continue`, so we compute it locally.
         if let Some(rest) = line.trim_start().strip_prefix("```") {
             if in_fence {
                 in_fence = false;
-                fence_lang = None;
                 out.push_str(DIM);
                 out.push_str("```");
                 out.push_str(RESET);
@@ -62,15 +63,10 @@ pub fn render_markdown_ansi(text: &str) -> String {
             } else {
                 in_fence = true;
                 let lang = rest.trim();
-                fence_lang = if lang.is_empty() {
-                    None
-                } else {
-                    Some(lang.to_string())
-                };
                 out.push_str(DIM);
                 out.push_str("```");
-                if let Some(l) = &fence_lang {
-                    out.push_str(l);
+                if !lang.is_empty() {
+                    out.push_str(lang);
                 }
                 out.push_str(RESET);
                 continue;
@@ -126,7 +122,7 @@ pub fn render_markdown_ansi(text: &str) -> String {
         {
             out.push_str(indent);
             out.push_str(FG_YELLOW);
-            out.push_str("•");
+            out.push('•');
             out.push_str(RESET);
             out.push(' ');
             out.push_str(&render_inline(rest));

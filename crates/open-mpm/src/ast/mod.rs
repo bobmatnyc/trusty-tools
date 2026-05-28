@@ -203,7 +203,7 @@ mod tests {
 
         let registry = pre_index_directory(dir.path(), dir.path()).unwrap();
         assert!(
-            registry.len() >= 1,
+            !registry.is_empty(),
             "expected at least one symbol, got {}",
             registry.len()
         );

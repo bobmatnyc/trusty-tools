@@ -33,7 +33,7 @@ pub fn did_you_mean<'a>(
     let mut best: Option<(&str, usize)> = None;
     for &cand in candidates {
         let d = levenshtein(&input, &cand.to_lowercase());
-        if d <= max_distance && best.map_or(true, |(_, bd)| d < bd) {
+        if d <= max_distance && best.is_none_or(|(_, bd)| d < bd) {
             best = Some((cand, d));
         }
     }

@@ -35,7 +35,7 @@ use self::adapter::RegistryToolExecutor;
 use self::config::{DriverKind, EndpointConfig, ToolRegistryConfig};
 use self::direct::DirectDriver;
 use self::discovery::DiscoveredTool;
-use self::driver::{ArcDriver, RegistryDriver};
+use self::driver::ArcDriver;
 use self::scope::{ScopePattern, filter_by_endpoint_scopes};
 
 /// Public builder. Constructed from a `GlobalConfig`; `build()` consumes it.
@@ -170,7 +170,7 @@ mod tests {
     use serde_json::Value;
 
     use self::discovery::{EndpointCapabilities, EndpointManifest, ServerInfo, SideEffects};
-    use self::driver::{BatchCall, BatchResult};
+    use self::driver::{BatchCall, BatchResult, RegistryDriver};
 
     /// Mock driver returning a fixed manifest. Used to exercise the
     /// scope-filter / adapter wiring without an HTTP server.

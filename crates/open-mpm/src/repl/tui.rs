@@ -49,18 +49,13 @@ use super::statusline::{StatuslineConfig, render_statusline};
 ///   yellow/amber label to signal project scope vs. personal scope at a glance.
 /// What: Carried in `ReplApp`; updated via `ReplEvent::AgentScopeChanged`.
 /// Test: `repl_app_agent_scope_default`, `agent_scope_label_color_user`, `agent_scope_label_color_project`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum AgentScope {
     /// User-level agent (ctrl, izzie, cto-assistant). Label color = cyan.
+    #[default]
     User,
     /// PM connected to a specific project. Label color = yellow.
     Project,
-}
-
-impl Default for AgentScope {
-    fn default() -> Self {
-        AgentScope::User
-    }
 }
 
 /// Which slash command opened the picker — drives selection routing on Enter.
@@ -409,6 +404,12 @@ pub enum ReplEvent {
     /// Raw terminal key event from the input thread.
     Key(KeyEvent),
     /// Terminal was resized — repaint will pick up new dims.
+    ///
+    /// Why: The repaint loop only needs the signal that a resize happened to
+    /// refresh terminal dimensions via `crossterm::terminal::size()`; the
+    /// carried width/height are kept for future selective-redraw paths but
+    /// are not currently read at the match site.
+    #[allow(dead_code)]
     Resize(u16, u16),
     /// User submitted a line. Dispatched by the input handler so the outer
     /// task can forward to the LLM. The state update (echoing the user line
@@ -468,10 +469,16 @@ pub enum ReplEvent {
     /// Update the statusline's TM session count (#319). Emitted on startup
     /// after the initial reconcile and by background monitor ticks when the
     /// session count changes.
+    ///
+    /// Why: The constructor sites currently live behind feature-gated monitor
+    /// hooks that may not compile into every build profile; keep the variant
+    /// (and its match arm) so the wiring is ready when the hooks are enabled.
+    #[allow(dead_code)]
     TmSessionCount(usize),
     /// Update the statusline's claude-mpm session count (#331). Emitted at
     /// the same points as `TmSessionCount` — counts only sessions whose
     /// `adapter_type == AdapterType::ClaudeMpm`.
+    #[allow(dead_code)]
     ClaudeMpmSessionCount(usize),
     /// Mouse-wheel scroll delta (#329). Negative = older (up), positive =
     /// newer (down). Forwarded from the key reader thread which sees
@@ -698,6 +705,11 @@ impl ReplApp {
     }
 
     /// Up-arrow history navigation.
+    ///
+    /// Why: Exercised by `repl_app_history_prev_next`; the production key-handler
+    /// currently routes Up directly to the underlying `history` index, but the
+    /// helper is kept (and tested) so the navigation logic stays unit-coverable.
+    #[allow(dead_code)]
     pub fn history_prev(&mut self) {
         if self.history.is_empty() {
             return;
@@ -1095,7 +1107,7 @@ async fn process_event<H: ReplHandler + 'static>(
                 let h = handler.clone();
                 let dtx = tx.clone();
                 let app_for_quit = app.clone();
-                let task_slot = current_task.clone();
+                let _task_slot = current_task.clone();
                 let handle = tokio::spawn(async move {
                     let res = h.handle_input(line, dtx.clone()).await;
                     match res {
@@ -1381,23 +1393,23 @@ fn handle_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
                 // mouse selection. Falls through to "cursor to end" when
                 // input is non-empty (preserves the readline End-of-line
                 // muscle memory).
-                if app.input_buf.is_empty() {
-                    if let Some(block) = &app.last_bash_block {
-                        // #323: Only paste the first non-empty line — the
-                        // REPL input is single-line. Multi-line blocks are
-                        // common (sequential commands like `git add -A` then
-                        // `git commit -m "msg"`); pasting the whole block
-                        // would silently truncate at the first `\n` on submit.
-                        let first_line = block
-                            .lines()
-                            .find(|l| !l.trim().is_empty())
-                            .unwrap_or("")
-                            .to_string();
-                        if !first_line.is_empty() {
-                            app.input_buf = first_line;
-                            app.cursor_pos = app.input_buf.len();
-                            return None;
-                        }
+                if app.input_buf.is_empty()
+                    && let Some(block) = &app.last_bash_block
+                {
+                    // #323: Only paste the first non-empty line — the
+                    // REPL input is single-line. Multi-line blocks are
+                    // common (sequential commands like `git add -A` then
+                    // `git commit -m "msg"`); pasting the whole block
+                    // would silently truncate at the first `\n` on submit.
+                    let first_line = block
+                        .lines()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("")
+                        .to_string();
+                    if !first_line.is_empty() {
+                        app.input_buf = first_line;
+                        app.cursor_pos = app.input_buf.len();
+                        return None;
                     }
                 }
                 app.cursor_pos = app.input_buf.len();
@@ -1517,13 +1529,11 @@ fn handle_picker_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
             }
             picker.selected = (picker.selected + 1) % picker.items.len();
         }
-        KeyCode::Enter => {
-            if !picker.items.is_empty() {
-                let selected = picker.items[picker.selected].clone();
-                let kind = picker.kind.clone();
-                app.picker = None;
-                app.pending_picker_selection = Some((kind, selected));
-            }
+        KeyCode::Enter if !picker.items.is_empty() => {
+            let selected = picker.items[picker.selected].clone();
+            let kind = picker.kind.clone();
+            app.picker = None;
+            app.pending_picker_selection = Some((kind, selected));
         }
         KeyCode::Esc => {
             app.picker = None;
@@ -1765,7 +1775,7 @@ fn strip_vendor_prefix(model: &str) -> String {
 fn is_redundant_thinking_step(step: &str) -> bool {
     let trimmed: String = step
         .trim()
-        .trim_end_matches(|c: char| c == '.' || c == '…')
+        .trim_end_matches(['.', '…'])
         .trim()
         .to_ascii_lowercase();
     matches!(trimmed.as_str(), "" | "thinking" | "working" | "processing")
@@ -2944,11 +2954,8 @@ fn draw_banner(f: &mut ratatui::Frame, app: &ReplApp, area: Rect) {
 /// Test: `code_fence_lang_*` asserts bash/sh/empty/non-fence cases.
 fn code_fence_lang(line: &str) -> Option<String> {
     let t = line.trim();
-    if let Some(rest) = t.strip_prefix("```") {
-        Some(rest.trim().to_ascii_lowercase())
-    } else {
-        None
-    }
+    t.strip_prefix("```")
+        .map(|rest| rest.trim().to_ascii_lowercase())
 }
 
 /// Whether a fenced-code-block language tag denotes an executable shell.
@@ -3367,7 +3374,7 @@ fn build_chat_lines(app: &ReplApp, terminal_width: usize) -> Vec<Line<'static>> 
                         // subsequent rendering. Treat malformed/nested cases
                         // as unclosed: don't consume the line at j.
                         let j_is_closer = j < body_lines.len()
-                            && code_fence_lang(body_lines[j]).map_or(false, |lang| lang.is_empty());
+                            && code_fence_lang(body_lines[j]).is_some_and(|lang| lang.is_empty());
                         if j_is_closer {
                             lines.push(Line::from(vec![
                                 Span::raw("   "),
@@ -3403,7 +3410,11 @@ fn build_chat_lines(app: &ReplApp, terminal_width: usize) -> Vec<Line<'static>> 
                         // Indent under the `⏺ ` glyph (3 spaces) — matches
                         // how non-table continuation lines are indented so
                         // the table aligns with surrounding body text.
-                        let indent = if emitted_first { "   " } else { "   " };
+                        // Both branches currently render the same three-space
+                        // continuation indent; kept as a single constant for
+                        // clarity (and to make future per-branch styling a
+                        // one-line tweak).
+                        let indent = "   ";
                         // Available width: the chat pane width. Subtract a
                         // tiny safety margin for ratatui's wrap behavior.
                         let avail = terminal_width.saturating_sub(1);

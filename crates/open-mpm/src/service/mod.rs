@@ -139,13 +139,15 @@ pub async fn is_service_running(port: u16) -> bool {
     if read_pid_file().is_none() {
         return false;
     }
-    if let Some(state) = read_pid_file() {
-        if state.port == port && pid_alive(state.pid) && health_ok(port).await {
-            return true;
-        }
-        // Stale pid file detected. We don't remove it here — that's
-        // start_service's job — but we don't claim it's running either.
+    if let Some(state) = read_pid_file()
+        && state.port == port
+        && pid_alive(state.pid)
+        && health_ok(port).await
+    {
+        return true;
     }
+    // Stale pid file detected. We don't remove it here — that's
+    // start_service's job — but we don't claim it's running either.
     // Fallback: a healthy port is enough to count as "running" even
     // without a pid file (externally-launched daemons).
     health_ok(port).await

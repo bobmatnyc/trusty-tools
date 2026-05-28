@@ -66,7 +66,7 @@ impl ToolExecutor for GetComplexityHotspotsTool {
                 all.push((a.file.clone(), f));
             }
         }
-        all.sort_by(|a, b| b.1.cognitive_complexity.cmp(&a.1.cognitive_complexity));
+        all.sort_by_key(|b| std::cmp::Reverse(b.1.cognitive_complexity));
         let hotspots: Vec<Value> = all
             .into_iter()
             .take(top_n)

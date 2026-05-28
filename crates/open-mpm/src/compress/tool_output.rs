@@ -160,7 +160,7 @@ pub fn filter_git_diff(output: &str) -> String {
 
     // Second pass: emit, collapsing context runs.
     let mut out: Vec<String> = Vec::new();
-    let mut hunk_idx: usize = 0;
+    let hunk_idx: usize = 0;
     let mut in_context_run = false;
     let mut had_any_context = false;
     for line in &lines {
@@ -699,9 +699,9 @@ mod tests {
             input.push_str(&format!("commit abc123{i:03}def456789\n"));
             input.push_str("Author: Alice <alice@example.com>\n");
             input.push_str("Date:   Mon Jan 1 12:00:00 2024 +0000\n");
-            input.push_str("\n");
+            input.push('\n');
             input.push_str(&format!("    feat: subject line {i}\n"));
-            input.push_str("\n");
+            input.push('\n');
         }
         // 60 lines total
         let out = compress_tool_output("git_log", &input);
@@ -731,7 +731,7 @@ mod tests {
             input.push_str(&format!("// comment {i}\n"));
         }
         for _ in 0..60 {
-            input.push_str("\n");
+            input.push('\n');
         }
         let out = compress_tool_output("read_file", &input);
         assert!(!out.contains("// comment"));

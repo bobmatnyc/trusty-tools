@@ -84,6 +84,11 @@ impl SmellType {
         }
     }
 
+    // Why: We deliberately return `Option<Self>` here rather than implementing
+    // `std::str::FromStr` (which forces a `Result<Self, Err>` API and an error
+    // type that callers would have to import). Internal call sites chain this
+    // through `and_then`, so `Option` matches the consumer shape exactly.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "LongMethod" => Some(Self::LongMethod),
@@ -121,6 +126,8 @@ impl Severity {
         }
     }
 
+    // Why: Option-returning by design — see SmellType::from_str.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "info" => Some(Self::Info),

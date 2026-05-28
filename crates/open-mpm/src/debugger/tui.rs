@@ -240,11 +240,9 @@ fn handle_key(app: &mut DebugApp, tmux: &TmuxAdapter, code: KeyCode, mods: KeyMo
     match (app.focus, code) {
         (_, KeyCode::Tab) => app.cycle_focus(),
         (Focus::Input, KeyCode::Esc) => app.input.clear(),
-        (Focus::Input, KeyCode::Enter) => {
-            if !app.input.is_empty() {
-                let _ = tmux.send_line(&app.session_name, &app.input);
-                app.input.clear();
-            }
+        (Focus::Input, KeyCode::Enter) if !app.input.is_empty() => {
+            let _ = tmux.send_line(&app.session_name, &app.input);
+            app.input.clear();
         }
         (Focus::Input, KeyCode::Backspace) => {
             app.input.pop();

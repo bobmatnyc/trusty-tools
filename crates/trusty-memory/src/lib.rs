@@ -1513,6 +1513,7 @@ fn spawn_disk_size_ticker(state: AppState) {
 /// registry walk plus the redb `count_active_triples` per palace) is a
 /// rounding error on the daemon's CPU budget.
 /// Test: covered indirectly — the math has not changed, only the cadence.
+#[allow(dead_code)]
 const STATUS_EVENT_TICK_SECS: u64 = 30;
 
 /// Spawn a background ticker that emits `DaemonEvent::StatusChanged` every
@@ -1533,6 +1534,7 @@ const STATUS_EVENT_TICK_SECS: u64 = 30;
 /// Test: not unit-tested (timing-dependent fire-and-forget); the underlying
 /// `aggregate_status_event` math is exercised by the existing
 /// `status_endpoint_returns_payload` path.
+#[allow(dead_code)]
 fn spawn_status_event_ticker(state: AppState) {
     tokio::spawn(async move {
         let mut interval =

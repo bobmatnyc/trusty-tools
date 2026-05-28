@@ -243,18 +243,18 @@ impl CtrlSupervisor {
             };
 
             // Success short-circuit.
-            if let Some(s) = summary_opt.as_ref() {
-                if s.outcome == WorkflowOutcome::Success {
-                    if let Some(mut sess) = SessionStore::find(&session_id) {
-                        sess.status = SessionStatus::Idle;
-                        let _ = SessionStore::upsert(sess);
-                    }
-                    return Ok(SupervisorOutcome::Success {
-                        summary: s.summary.clone(),
-                        session_id,
-                        attempts: attempt,
-                    });
+            if let Some(s) = summary_opt.as_ref()
+                && s.outcome == WorkflowOutcome::Success
+            {
+                if let Some(mut sess) = SessionStore::find(&session_id) {
+                    sess.status = SessionStatus::Idle;
+                    let _ = SessionStore::upsert(sess);
                 }
+                return Ok(SupervisorOutcome::Success {
+                    summary: s.summary.clone(),
+                    session_id,
+                    attempts: attempt,
+                });
             }
 
             // Classify the partial / fail / crash and ask the policy what to do.
@@ -649,17 +649,17 @@ pub fn should_retry(reason: PartialReason, attempt: u32, max_attempts: u32) -> R
 /// retry / escalate when the report is unparseable.
 /// Test: Covered by both report-parsing tests.
 fn detect_outcome(content: &str) -> WorkflowOutcome {
-    if let Some(verdict) = extract_section(content, "Final Verdict") {
-        if let Some(o) = match_outcome(&verdict) {
-            return o;
-        }
+    if let Some(verdict) = extract_section(content, "Final Verdict")
+        && let Some(o) = match_outcome(&verdict)
+    {
+        return o;
     }
     for line in content.lines() {
         let lower = line.to_ascii_lowercase();
-        if lower.contains("**status**") || lower.starts_with("status:") {
-            if let Some(o) = match_outcome(line) {
-                return o;
-            }
+        if (lower.contains("**status**") || lower.starts_with("status:"))
+            && let Some(o) = match_outcome(line)
+        {
+            return o;
         }
     }
     if let Some(o) = match_outcome(content) {

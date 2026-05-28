@@ -17,17 +17,13 @@ use serde::{Deserialize, Serialize};
 /// `side_effects` field — kept as the OpenRPC enum.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum SideEffects {
+    #[default]
     None,
     Read,
     Write,
     External,
-}
-
-impl Default for SideEffects {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

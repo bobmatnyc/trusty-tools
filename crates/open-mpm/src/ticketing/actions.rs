@@ -410,12 +410,11 @@ pub async fn build_actions_client(
     token: Option<&str>,
     repo: Option<&str>,
 ) -> Option<Arc<dyn ActionsClient>> {
-    if let (Some(t), Some(r)) = (token, repo) {
-        if !t.is_empty() {
-            if let Ok(c) = GitHubActionsClient::new(t, r) {
-                return Some(Arc::new(c));
-            }
-        }
+    if let (Some(t), Some(r)) = (token, repo)
+        && !t.is_empty()
+        && let Ok(c) = GitHubActionsClient::new(t, r)
+    {
+        return Some(Arc::new(c));
     }
     if gh_available().await {
         return Some(Arc::new(GhActionsCliClient::new(repo.map(String::from))));

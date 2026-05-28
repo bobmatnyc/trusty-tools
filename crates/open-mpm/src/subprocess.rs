@@ -675,6 +675,10 @@ fn record_mistake_fire_and_forget(
 /// Setting it per-`Command` (not via `std::env::set_var`) is safe under tokio.
 /// What: Merges config_dir env injection with the full env + context variant.
 /// Test: Used by `ctrl::run_pm_task`; verify child receives correct TOML path.
+// Why: Thin adapter over `spawn_and_run_inner` — every argument is forwarded
+// 1:1 into the `SpawnConfig` struct below, so collapsing them here just
+// duplicates work that struct already does.
+#[allow(clippy::too_many_arguments)]
 async fn spawn_subagent_with_config_dir(
     agent_name: &str,
     task: &str,

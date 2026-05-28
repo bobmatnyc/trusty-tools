@@ -556,7 +556,7 @@ impl OpenMpmRepl {
         let display: Vec<&crate::registry::ProjectEntry> = if show_all {
             let mut all: Vec<&crate::registry::ProjectEntry> =
                 entries.iter().filter(|e| e.is_real_project()).collect();
-            all.sort_by(|a, b| b.last_active().cmp(&a.last_active()));
+            all.sort_by_key(|b| std::cmp::Reverse(b.last_active()));
             all
         } else {
             crate::registry::discover_active_projects(
@@ -1274,10 +1274,10 @@ fn expand_tilde(input: &str) -> PathBuf {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(input));
     }
-    if let Some(rest) = input.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
+    if let Some(rest) = input.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(rest);
     }
     PathBuf::from(input)
 }

@@ -373,25 +373,24 @@ async fn run_code_search(
         .and_then(|p| p.parent()) // project root
         .map(Path::to_path_buf);
 
-    if let Some(root) = project_root {
-        if let Some(client) =
+    if let Some(root) = project_root
+        && let Some(client) =
             crate::search::service_client::SearchDaemonClient::connect_if_running(&root).await
-        {
-            // Pull a slightly larger pool when filtering so the post-filter
-            // result count still has a chance of reaching `top_k`.
-            let fetch_k = if lang.is_some() { top_k * 4 } else { top_k };
-            let mut hits = client.search(query, fetch_k).await?;
-            if let Some(lang_filter) = lang {
-                hits.retain(|c| c.language == lang_filter);
-                hits.truncate(top_k);
-            }
-            if hits.is_empty() {
-                println!("No results found.");
-                return Ok(());
-            }
-            println!("{}", format_code_results(&hits, json)?);
+    {
+        // Pull a slightly larger pool when filtering so the post-filter
+        // result count still has a chance of reaching `top_k`.
+        let fetch_k = if lang.is_some() { top_k * 4 } else { top_k };
+        let mut hits = client.search(query, fetch_k).await?;
+        if let Some(lang_filter) = lang {
+            hits.retain(|c| c.language == lang_filter);
+            hits.truncate(top_k);
+        }
+        if hits.is_empty() {
+            println!("No results found.");
             return Ok(());
         }
+        println!("{}", format_code_results(&hits, json)?);
+        return Ok(());
     }
 
     // Daemon not running — open the store directly and run hybrid search

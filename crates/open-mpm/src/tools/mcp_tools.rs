@@ -380,6 +380,11 @@ pub fn mcp_tool_executors() -> Vec<Arc<dyn ToolExecutor>> {
 
 #[cfg(test)]
 mod tests {
+    // Why: These tests hold `HOME_LOCK` (a `std::sync::Mutex`) across async
+    // I/O to serialize global $HOME mutation between tests. See
+    // `crate::test_env` for the rationale.
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use crate::test_env::HOME_LOCK;
     use std::path::PathBuf;

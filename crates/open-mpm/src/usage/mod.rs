@@ -132,10 +132,10 @@ pub async fn append_usage(project_dir: &Path, record: &UsageRecord) {
 /// else the empty path (which `append_usage` will treat as cwd).
 /// Test: Indirectly via `append_usage_*` tests passing an explicit tempdir.
 pub fn project_dir() -> std::path::PathBuf {
-    if let Ok(d) = std::env::var("OPEN_MPM_PROJECT_DIR") {
-        if !d.is_empty() {
-            return std::path::PathBuf::from(d);
-        }
+    if let Ok(d) = std::env::var("OPEN_MPM_PROJECT_DIR")
+        && !d.is_empty()
+    {
+        return std::path::PathBuf::from(d);
     }
     std::env::current_dir().unwrap_or_default()
 }
@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn task_prefix_does_not_split_multibyte_codepoints() {
         // 70 emoji × 4 UTF-8 bytes each — must take 60 chars, not 60 bytes.
-        let task: String = std::iter::repeat('🦀').take(70).collect();
+        let task: String = std::iter::repeat_n('🦀', 70).collect();
         let r = UsageRecord::new("a", "m", "openrouter", 0, 0, 0, &task);
         assert_eq!(r.task_prefix.chars().count(), 60);
     }

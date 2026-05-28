@@ -378,14 +378,14 @@ impl ProjectInitializer {
         }
 
         // Persist the updated seed-state so we can skip unchanged docs next run.
-        if let Ok(bytes) = serde_json::to_vec_pretty(&seeded) {
-            if let Err(e) = tokio::fs::write(&seeded_path, &bytes).await {
-                tracing::warn!(
-                    error = %e,
-                    path = %seeded_path.display(),
-                    "seed_documentation: write tracker failed (continuing)"
-                );
-            }
+        if let Ok(bytes) = serde_json::to_vec_pretty(&seeded)
+            && let Err(e) = tokio::fs::write(&seeded_path, &bytes).await
+        {
+            tracing::warn!(
+                error = %e,
+                path = %seeded_path.display(),
+                "seed_documentation: write tracker failed (continuing)"
+            );
         }
 
         // Update the initialized marker with seeded_docs count for inspection.
@@ -1208,6 +1208,13 @@ fn render_mcp_description(
 
 #[cfg(test)]
 mod tests {
+    // Why: These tests hold `HOME_LOCK` (a `std::sync::Mutex`) across async
+    // I/O to serialize global $HOME mutation between tests. The lock is
+    // intentionally held for the full test body; see `crate::test_env` for
+    // the rationale. The tokio multi-threaded test runtime keeps this from
+    // deadlocking.
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use tempfile::tempdir;
 

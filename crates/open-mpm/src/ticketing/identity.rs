@@ -104,10 +104,10 @@ impl GitHubSection {
         if let Some(n) = name {
             return self.identities.iter().find(|i| i.name == n);
         }
-        if let Some(default_name) = &self.default_identity {
-            if let Some(found) = self.identities.iter().find(|i| &i.name == default_name) {
-                return Some(found);
-            }
+        if let Some(default_name) = &self.default_identity
+            && let Some(found) = self.identities.iter().find(|i| &i.name == default_name)
+        {
+            return Some(found);
         }
         self.identities.first()
     }

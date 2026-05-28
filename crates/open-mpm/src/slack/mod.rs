@@ -822,25 +822,25 @@ async fn handle_command(
                 }
             };
             // RBAC enforcement: persona allow-list. `None` => unrestricted.
-            if let Some(allowed) = &user_cfg.allowed_personas {
-                if !allowed.iter().any(|p| p == &requested) {
-                    info!(
-                        user_id = %user_id,
-                        persona = %requested,
-                        "slack: /slack-switch rejected (persona not in allow-list)"
-                    );
-                    return post_message(
-                        bot_token,
-                        &channel,
-                        &format!(
-                            ":lock: Not authorized to switch to *{}*. Allowed: {}",
-                            requested,
-                            allowed.join(", ")
-                        ),
-                        None,
-                    )
-                    .await;
-                }
+            if let Some(allowed) = &user_cfg.allowed_personas
+                && !allowed.iter().any(|p| p == &requested)
+            {
+                info!(
+                    user_id = %user_id,
+                    persona = %requested,
+                    "slack: /slack-switch rejected (persona not in allow-list)"
+                );
+                return post_message(
+                    bot_token,
+                    &channel,
+                    &format!(
+                        ":lock: Not authorized to switch to *{}*. Allowed: {}",
+                        requested,
+                        allowed.join(", ")
+                    ),
+                    None,
+                )
+                .await;
             }
             {
                 let mut map = sessions.lock().await;

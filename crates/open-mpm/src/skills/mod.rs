@@ -834,14 +834,14 @@ impl SkillsLoader {
         let cache_key = compute_cache_key(task, &skill_index);
 
         // Cache lookup.
-        if let Ok(cache) = llm_skill_cache().lock() {
-            if let Some(hit) = cache.get(&cache_key) {
-                tracing::debug!(
-                    skills = ?hit,
-                    "LLM skill selection cache hit"
-                );
-                return Ok(hit.clone());
-            }
+        if let Ok(cache) = llm_skill_cache().lock()
+            && let Some(hit) = cache.get(&cache_key)
+        {
+            tracing::debug!(
+                skills = ?hit,
+                "LLM skill selection cache hit"
+            );
+            return Ok(hit.clone());
         }
 
         // Need an API key to call OpenRouter.

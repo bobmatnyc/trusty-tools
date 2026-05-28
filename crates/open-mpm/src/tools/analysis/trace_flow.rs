@@ -7,8 +7,8 @@
 //! callers/callees up to `max_depth`.
 //! Test: `trace_flow_outgoing_smoke`.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::collections::HashSet;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};

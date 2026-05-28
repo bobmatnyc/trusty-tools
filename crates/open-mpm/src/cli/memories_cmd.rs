@@ -231,10 +231,15 @@ pub async fn run_memories_command(args: &[String]) -> Result<()> {
             input,
             from_committed,
         } => {
+            // Why: Both the `--from-committed` and default branches currently
+            // resolve to the same shared-memories file under `.open-mpm/`.
+            // The flag is kept on the CLI for forward compatibility (e.g. if
+            // we later split the committed vs. local file paths) but it has
+            // no effect today — flatten the branches to satisfy
+            // `clippy::if_same_then_else` without changing behavior.
+            let _ = from_committed;
             let in_path = if let Some(p) = input {
                 p
-            } else if from_committed {
-                cwd.join(".open-mpm").join(SHARED_MEMORIES_FILENAME)
             } else {
                 cwd.join(".open-mpm").join(SHARED_MEMORIES_FILENAME)
             };
@@ -255,10 +260,10 @@ pub async fn run_memories_command(args: &[String]) -> Result<()> {
 /// Resolve the active session_id: prefer the run id env var, fall back to the
 /// most recent registered session, finally "default".
 pub fn current_session_id() -> String {
-    if let Ok(rid) = std::env::var("OPEN_MPM_RUN_ID") {
-        if !rid.is_empty() {
-            return rid;
-        }
+    if let Ok(rid) = std::env::var("OPEN_MPM_RUN_ID")
+        && !rid.is_empty()
+    {
+        return rid;
     }
     "default".to_string()
 }
@@ -423,11 +428,11 @@ pub async fn import_file(project_root: &Path, input: &Path) -> Result<usize> {
     let mut tracker = read_tracker(&tracker_path).await;
 
     let key = input.to_string_lossy().to_string();
-    if let Some(prev) = tracker.files.get(&key) {
-        if prev.hash == hash {
-            // Already imported the exact same contents.
-            return Ok(0);
-        }
+    if let Some(prev) = tracker.files.get(&key)
+        && prev.hash == hash
+    {
+        // Already imported the exact same contents.
+        return Ok(0);
     }
 
     // Imported memories live in their own session dir so they're easy to
@@ -568,21 +573,21 @@ async fn list_sessions(project_root: &Path, scope: &str) -> Result<()> {
                 // Best-effort tally — a session whose dim doesn't match (or
                 // that has no records) just contributes zero to the totals.
                 let path = entry.path();
-                if let Ok(store) = RedbUsearchStore::open(&path, ALL_MINI_LM_L6_V2_DIM) {
-                    if let Ok(recs) = store.list_segment(Segment::AgentMemory).await {
-                        for (id, _vec, payload) in recs {
-                            if is_auxiliary_id(&id) {
-                                continue;
-                            }
-                            let tag = payload
-                                .get("tag")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("(untagged)")
-                                .to_string();
-                            let top = tag.split('/').next().unwrap_or(&tag).to_string();
-                            *top_counts.entry(top).or_insert(0) += 1;
-                            *sub_counts.entry(tag).or_insert(0) += 1;
+                if let Ok(store) = RedbUsearchStore::open(&path, ALL_MINI_LM_L6_V2_DIM)
+                    && let Ok(recs) = store.list_segment(Segment::AgentMemory).await
+                {
+                    for (id, _vec, payload) in recs {
+                        if is_auxiliary_id(&id) {
+                            continue;
                         }
+                        let tag = payload
+                            .get("tag")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("(untagged)")
+                            .to_string();
+                        let top = tag.split('/').next().unwrap_or(&tag).to_string();
+                        *top_counts.entry(top).or_insert(0) += 1;
+                        *sub_counts.entry(tag).or_insert(0) += 1;
                     }
                 }
             }
@@ -600,7 +605,7 @@ async fn list_sessions(project_root: &Path, scope: &str) -> Result<()> {
                             (sub, *c)
                         })
                         .collect();
-                    subs.sort_by(|a, b| b.1.cmp(&a.1));
+                    subs.sort_by_key(|b| std::cmp::Reverse(b.1));
                     if subs.is_empty() {
                         println!("  {top}/    {n} entries");
                     } else {

@@ -177,10 +177,10 @@ impl MessageBus {
                 continue;
             }
             // Probe liveness with a quick connect attempt.
-            if UnixStream::connect(&path).await.is_ok() {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    result.push(stem.to_string());
-                }
+            if UnixStream::connect(&path).await.is_ok()
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            {
+                result.push(stem.to_string());
             }
         }
         Ok(result)

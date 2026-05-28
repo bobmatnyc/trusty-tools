@@ -242,7 +242,7 @@ impl ToolExecutor for MemoryRecallTool {
         // over-fetch so a tiny index still works.
         let needs_filter = scope == "session" || scope == "imported" || tag_filter.is_some();
         let search_limit = if needs_filter {
-            (limit * 4).max(20).min(50)
+            (limit * 4).clamp(20, 50)
         } else {
             limit
         };

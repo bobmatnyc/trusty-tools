@@ -674,7 +674,7 @@ fn intent_class_debug_display() {
 fn intent_class_clone_and_copy() {
     let a = IntentClass::Research;
     let b = a;
-    let c = a.clone();
+    let c = a;
     assert_eq!(a, b);
     assert_eq!(a, c);
 }

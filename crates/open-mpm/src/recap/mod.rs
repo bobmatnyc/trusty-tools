@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::Path;
 
 /// A (phase_name, phase_result) pair for a single completed phase.
 pub type RecapPhase = (String, String);
@@ -109,13 +109,13 @@ pub fn assemble_recap(session_id: &str, recent_tasks: &[RecapTask]) -> Recap {
 
     for (_, narrative, phases) in recent_tasks {
         // Extract commit hash if present
-        if let Some(m) = extract_commit(narrative) {
-            if !rows.iter().any(|r: &RecapRow| r.step == "Commit") {
-                rows.push(RecapRow {
-                    step: "Commit".into(),
-                    result: m,
-                });
-            }
+        if let Some(m) = extract_commit(narrative)
+            && !rows.iter().any(|r: &RecapRow| r.step == "Commit")
+        {
+            rows.push(RecapRow {
+                step: "Commit".into(),
+                result: m,
+            });
         }
         // Add phase rows (deduped by step name)
         for (phase_name, phase_result) in phases {
@@ -187,7 +187,7 @@ fn capitalise(s: &str) -> String {
 /// storage trivial and inspectable.
 /// What: Creates the `recaps/` subdir if missing, then writes pretty JSON.
 /// Test: covered by integration; unit test would require a temp dir.
-pub fn save_recap(state_dir: &PathBuf, recap: &Recap) -> Result<()> {
+pub fn save_recap(state_dir: &Path, recap: &Recap) -> Result<()> {
     let dir = state_dir.join("recaps");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.json", recap.session_id));
@@ -203,7 +203,7 @@ pub fn save_recap(state_dir: &PathBuf, recap: &Recap) -> Result<()> {
 /// What: Reads `state_dir/recaps/{session_id}.json` and deserialises. Any
 /// error (missing file, malformed JSON) returns None; the API maps that to 404.
 /// Test: covered by integration; round-trip with `save_recap`.
-pub fn load_recap(state_dir: &PathBuf, session_id: &str) -> Option<Recap> {
+pub fn load_recap(state_dir: &Path, session_id: &str) -> Option<Recap> {
     let path = state_dir.join("recaps").join(format!("{session_id}.json"));
     let json = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&json).ok()

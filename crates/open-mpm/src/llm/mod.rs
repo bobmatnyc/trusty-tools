@@ -817,7 +817,7 @@ pub async fn chat_with_tools(
 /// serde failure the messages vec is left untouched (fail-open).
 /// Test: Covered indirectly via `thinking_classifier` unit tests; behaviour
 /// here is a thin Value-level mutation with no LLM dependency.
-fn maybe_inject_qwen3_think(messages: &mut Vec<ChatCompletionRequestMessage>) {
+fn maybe_inject_qwen3_think(messages: &mut [ChatCompletionRequestMessage]) {
     // Walk in reverse — find the last user message.
     let last_user_idx = messages.iter().enumerate().rev().find_map(|(i, m)| {
         let v = serde_json::to_value(m).ok()?;
@@ -869,11 +869,10 @@ fn maybe_inject_qwen3_think(messages: &mut Vec<ChatCompletionRequestMessage>) {
             if let Some(first_text) = parts
                 .iter_mut()
                 .find(|p| p.get("text").and_then(|t| t.as_str()).is_some())
+                && let Some(t) = first_text.get_mut("text")
             {
-                if let Some(t) = first_text.get_mut("text") {
-                    let s = t.as_str().unwrap_or("").to_string();
-                    *t = serde_json::Value::String(format!("/think\n{s}"));
-                }
+                let s = t.as_str().unwrap_or("").to_string();
+                *t = serde_json::Value::String(format!("/think\n{s}"));
             }
         }
         _ => return,
@@ -884,6 +883,11 @@ fn maybe_inject_qwen3_think(messages: &mut Vec<ChatCompletionRequestMessage>) {
     }
 }
 
+// Why: This is the workhorse function-call loop and every parameter is
+// independently load-bearing (model routing, sampling, gating flags, etc.).
+// A wrapper struct would just punt the documentation problem one layer up
+// without reducing complexity at the call sites.
+#[allow(clippy::too_many_arguments)]
 pub async fn chat_with_tools_gated(
     client: &Client<OpenAIConfig>,
     model: &str,

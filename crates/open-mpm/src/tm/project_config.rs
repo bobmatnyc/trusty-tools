@@ -341,12 +341,11 @@ pub fn next_session_name(project: &str, harness: &str, existing_names: &[String]
     let prefix = format!("{}-{}-", project, harness);
     let mut max_serial: u32 = 0;
     for name in existing_names {
-        if let Some(rest) = name.strip_prefix(&prefix) {
-            if let Ok(n) = rest.parse::<u32>() {
-                if n > max_serial {
-                    max_serial = n;
-                }
-            }
+        if let Some(rest) = name.strip_prefix(&prefix)
+            && let Ok(n) = rest.parse::<u32>()
+            && n > max_serial
+        {
+            max_serial = n;
         }
     }
     format!("{}{}", prefix, max_serial + 1)

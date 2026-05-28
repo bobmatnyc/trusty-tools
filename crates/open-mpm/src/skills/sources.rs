@@ -159,7 +159,7 @@ impl SkillSourceRegistry {
         };
 
         // Stable sort: higher priority wins, ties keep config order.
-        sources.sort_by(|a, b| b.priority.cmp(&a.priority));
+        sources.sort_by_key(|b| std::cmp::Reverse(b.priority));
 
         // Warn (do not block) on unapproved enabled sources.
         for s in &sources {
@@ -187,7 +187,7 @@ impl SkillSourceRegistry {
     #[cfg(test)]
     pub fn from_sources(project_root: &Path, sources: Vec<SkillSource>) -> Self {
         let mut sources = sources;
-        sources.sort_by(|a, b| b.priority.cmp(&a.priority));
+        sources.sort_by_key(|b| std::cmp::Reverse(b.priority));
         Self {
             sources,
             project_root: project_root.to_path_buf(),

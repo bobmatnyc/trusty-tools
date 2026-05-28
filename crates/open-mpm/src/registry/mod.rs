@@ -135,10 +135,10 @@ impl ProjectEntry {
             return false;
         }
         // Exclude entries whose final component starts with `.tmp`.
-        if let Some(name) = path.file_name() {
-            if name.to_string_lossy().starts_with(".tmp") {
-                return false;
-            }
+        if let Some(name) = path.file_name()
+            && name.to_string_lossy().starts_with(".tmp")
+        {
+            return false;
         }
         true
     }
@@ -159,10 +159,8 @@ pub fn extract_github_repo(origin: &str) -> Option<String> {
         rest
     } else if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
         rest
-    } else if let Some(rest) = trimmed.strip_prefix("ssh://git@github.com/") {
-        rest
     } else {
-        return None;
+        trimmed.strip_prefix("ssh://git@github.com/")?
     };
     let body = body.strip_suffix(".git").unwrap_or(body);
     let body = body.trim_end_matches('/');
@@ -474,7 +472,7 @@ impl ProjectRegistry {
             .into_values()
             .filter(|e| e.status == ProjectStatus::Active)
             .collect();
-        active.sort_by(|a, b| b.last_run.cmp(&a.last_run));
+        active.sort_by_key(|b| std::cmp::Reverse(b.last_run));
         Ok(active)
     }
 
@@ -536,7 +534,7 @@ pub fn discover_active_projects<'a>(
             recent || has_session
         })
         .collect();
-    out.sort_by(|a, b| b.last_active().cmp(&a.last_active()));
+    out.sort_by_key(|b| std::cmp::Reverse(b.last_active()));
     out
 }
 

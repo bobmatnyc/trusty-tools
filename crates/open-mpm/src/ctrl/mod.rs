@@ -977,6 +977,11 @@ fn apply_credential_routing(
 ///   `None` so call sites can pass only what they have on hand.
 /// Test: `build_deployment_footer_includes_required_fields`,
 ///   `build_deployment_footer_omits_optional_fields_when_none`.
+// Why: Footer assembly genuinely needs every one of these fields and they
+// are all flat scalars — bundling them into a struct just to satisfy the
+// 7-argument heuristic would obscure the call sites without buying real
+// abstraction. Allow locally.
+#[allow(clippy::too_many_arguments)]
 fn build_deployment_footer(
     agent_name: &str,
     runner_label: &str,
@@ -3974,6 +3979,10 @@ async fn build_tm_context_block(state_dir: &Path) -> String {
 }
 
 /// Build the CTRL tool registry for a single LLM turn.
+// Why: Each Arc<Mutex<…>> here is wired into a distinct CTRL tool; collapsing
+// them into a single context struct would tightly couple unrelated tools and
+// fight the per-tool ownership story. Allow locally.
+#[allow(clippy::too_many_arguments)]
 async fn build_ctrl_registry(
     memory: Arc<Mutex<Vec<String>>>,
     pending_connect: Arc<Mutex<Option<String>>>,
@@ -4570,21 +4579,18 @@ async fn run_ctrl_turn_via_rest(
         ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
         ChatCompletionRequestUserMessageArgs,
     };
-    let mut messages: Vec<ChatCompletionRequestMessage> = Vec::new();
-    messages.push(
+    let messages: Vec<ChatCompletionRequestMessage> = vec![
         ChatCompletionRequestSystemMessageArgs::default()
             .content(system_prompt.to_string())
             .build()
             .context("failed to build ctrl_chat_turn system message")?
             .into(),
-    );
-    messages.push(
         ChatCompletionRequestUserMessageArgs::default()
             .content(user_input)
             .build()
             .context("failed to build ctrl_chat_turn user message")?
             .into(),
-    );
+    ];
     // #319: Local Ollama fast-path. When enabled in `~/.open-mpm/config.toml`
     // and the user's intent qualifies (conversational chat or TM-data
     // query), route this turn to the configured local ollama model

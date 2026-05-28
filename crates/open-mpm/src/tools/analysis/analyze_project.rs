@@ -145,7 +145,7 @@ impl ToolExecutor for AnalyzeProjectTool {
         }
 
         // Top 10 hotspots by cognitive complexity.
-        all_funcs.sort_by(|a, b| b.1.cognitive_complexity.cmp(&a.1.cognitive_complexity));
+        all_funcs.sort_by_key(|b| std::cmp::Reverse(b.1.cognitive_complexity));
         let hotspots: Vec<Value> = all_funcs
             .iter()
             .take(10)

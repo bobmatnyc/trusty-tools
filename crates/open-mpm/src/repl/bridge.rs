@@ -72,7 +72,7 @@ impl tui::ReplHandler for ReplBridge {
 
         // Try slash command first.
         if trimmed.starts_with('/') {
-            let cmd = trimmed.splitn(2, char::is_whitespace).next().unwrap_or("");
+            let cmd = trimmed.split(char::is_whitespace).next().unwrap_or("");
             if cmd == "/exit" || cmd == "/quit" || cmd == "/disconnect" {
                 return Ok(false);
             }
@@ -108,13 +108,13 @@ impl tui::ReplHandler for ReplBridge {
             // hardcoded short list of common Anthropic models.
             // Test: Manual via tmux REPL.
             let cmd_only = trimmed
-                .splitn(2, char::is_whitespace)
+                .split(char::is_whitespace)
                 .next()
                 .unwrap_or("")
                 .trim();
             let arg_only = trimmed
-                .splitn(2, char::is_whitespace)
-                .nth(1)
+                .split_once(char::is_whitespace)
+                .map(|x| x.1)
                 .map(str::trim)
                 .unwrap_or("");
             if arg_only.is_empty() && cmd_only == "/switch" {

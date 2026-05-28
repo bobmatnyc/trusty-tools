@@ -28,7 +28,7 @@ use walkdir::WalkDir;
 use crate::context::bm25::Bm25Index;
 use crate::context::indexer::tokenize;
 use crate::memory::{Embedder, MemoryStore, Segment};
-use crate::search::query_classifier::{ClassifiedQuery, QueryIntent, classify_query};
+use crate::search::query_classifier::{ClassifiedQuery, classify_query};
 
 /// Maximum number of characters kept per chunk text payload.
 ///

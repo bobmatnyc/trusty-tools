@@ -9,6 +9,14 @@
 //! Test: `status_line_format_includes_segments` verifies the rendered string
 //! shape; visual verification on a TTY confirms placement.
 
+// Why: The status-bar surface is partially wired — `StatusBar::new` is called
+// in the REPL constructor, but the per-segment toggles, token accumulator,
+// `format_line`, `render`, and `format_elapsed` helpers are staged for the
+// streaming integration. Tests below exercise the helpers directly, so they
+// must remain reachable. Suppress dead-code warnings module-wide rather than
+// scattering individual `#[allow]`s.
+#![allow(dead_code)]
+
 use std::io::{IsTerminal, Write};
 use std::time::Instant;
 

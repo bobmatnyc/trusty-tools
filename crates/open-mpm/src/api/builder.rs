@@ -132,10 +132,10 @@ fn list_files_in_dir(dir: &Path) -> Vec<String> {
                 .unwrap_or(true)
         });
     for entry in walker.flatten() {
-        if entry.file_type().is_file() {
-            if let Ok(rel) = entry.path().strip_prefix(dir) {
-                out.push(rel.to_string_lossy().replace('\\', "/"));
-            }
+        if entry.file_type().is_file()
+            && let Ok(rel) = entry.path().strip_prefix(dir)
+        {
+            out.push(rel.to_string_lossy().replace('\\', "/"));
         }
     }
     out.sort();

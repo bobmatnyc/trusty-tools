@@ -10,7 +10,7 @@
 //! Test: See unit tests below — count, schemas, and required-argument
 //! validation.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -55,7 +55,7 @@ fn fn_schema(name: &str, description: &str, params: Value) -> Value {
     })
 }
 
-fn open_repo(root: &PathBuf) -> std::result::Result<GitRepo, String> {
+fn open_repo(root: &Path) -> std::result::Result<GitRepo, String> {
     GitRepo::open(root).map_err(|e| format!("failed to open git repo at {}: {e}", root.display()))
 }
 

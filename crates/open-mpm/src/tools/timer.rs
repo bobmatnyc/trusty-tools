@@ -184,7 +184,7 @@ impl ToolExecutor for PollUntilTool {
             .get("contains_text")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        if condition == "contains" && contains_text.as_ref().map_or(true, |s| s.is_empty()) {
+        if condition == "contains" && contains_text.as_ref().is_none_or(|s| s.is_empty()) {
             return ToolResult::err(
                 "poll_until: 'contains_text' is required when condition=contains",
             );
@@ -198,8 +198,7 @@ impl ToolExecutor for PollUntilTool {
             .get("timeout_ms")
             .and_then(|v| v.as_u64())
             .unwrap_or(POLL_TIMEOUT_DEFAULT_MS)
-            .min(POLL_TIMEOUT_MAX_MS)
-            .max(1_000);
+            .clamp(1_000, POLL_TIMEOUT_MAX_MS);
 
         let is_url = target.starts_with("http://") || target.starts_with("https://");
         let started = Instant::now();

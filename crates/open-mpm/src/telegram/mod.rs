@@ -302,21 +302,20 @@ impl TelegramPidGuard {
         }
 
         // If a PID file exists, decide live vs. stale.
-        if let Ok(contents) = std::fs::read_to_string(&path) {
-            if let Ok(existing_pid) = contents.trim().parse::<i32>() {
-                if telegram_pid_alive(existing_pid) {
-                    return Err(anyhow!(
-                        "Telegram daemon already running (PID {existing_pid}). \
+        if let Ok(contents) = std::fs::read_to_string(&path)
+            && let Ok(existing_pid) = contents.trim().parse::<i32>()
+            && telegram_pid_alive(existing_pid)
+        {
+            return Err(anyhow!(
+                "Telegram daemon already running (PID {existing_pid}). \
                          Stop it before starting another, or delete {} if you \
                          are sure it is stale.",
-                        path.display()
-                    ));
-                }
-                // Stale lock: the recorded process is gone. Fall through to
-                // overwrite it.
-            }
-            // Unparseable contents are treated as stale too.
+                path.display()
+            ));
         }
+        // Stale lock: the recorded process is gone. Fall through to
+        // overwrite it.
+        // Unparseable contents are treated as stale too.
 
         let pid = std::process::id();
         std::fs::write(&path, pid.to_string())
@@ -640,6 +639,10 @@ fn verify_pair_attempt(
 }
 
 /// Dispatch a parsed slash command.
+// Why: teloxide's dptree dispatch passes injected state as positional
+// arguments; this function reflects the dispatch signature exactly so a
+// wrapper struct would just have to be unpacked at every call site.
+#[allow(clippy::too_many_arguments)]
 async fn handle_command(
     bot: Bot,
     msg: Message,
@@ -1258,11 +1261,9 @@ fn convert_pairs(input: &str, delim: &str, open: &str, close: &str) -> String {
 /// leak into Telegram messages.
 fn strip_ansi(s: &str) -> String {
     // Reuse the project's existing strip-ansi crate via the `strip_ansi_escapes` dep.
-    match strip_ansi_escapes::strip_str(s) {
-        // strip_str returns String in newer versions; the result here is
-        // already a clean &str / String depending on crate version.
-        v => v,
-    }
+    // `strip_str` returns String in newer versions; the result is a clean
+    // String regardless of crate version, so just pass it through.
+    strip_ansi_escapes::strip_str(s)
 }
 
 /// Last-resort: remove all `<...>` tags and unescape HTML entities so the

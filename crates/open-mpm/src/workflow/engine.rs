@@ -520,20 +520,17 @@ impl WorkflowEngine {
         // happens *after* the directory exists (std::fs::canonicalize requires
         // the path to exist on disk). If canonicalization fails for any reason,
         // fall back to the original path to avoid breaking the run.
-        let out_dir: Option<PathBuf> = match out_dir {
-            Some(dir) => Some(
-                std::fs::canonicalize(&dir)
-                    .inspect_err(|e| {
-                        tracing::warn!(
-                            out_dir = %dir.display(),
-                            error = %e,
-                            "failed to canonicalize out_dir; using original path"
-                        );
-                    })
-                    .unwrap_or(dir),
-            ),
-            None => None,
-        };
+        let out_dir: Option<PathBuf> = out_dir.map(|dir| {
+            std::fs::canonicalize(&dir)
+                .inspect_err(|e| {
+                    tracing::warn!(
+                        out_dir = %dir.display(),
+                        error = %e,
+                        "failed to canonicalize out_dir; using original path"
+                    );
+                })
+                .unwrap_or(dir)
+        });
 
         // #222: Resolve `code_dir` — the destination for generated source files.
         // When unset, falls back to `out_dir` so legacy callers see no behavior
@@ -670,27 +667,25 @@ impl WorkflowEngine {
         // and the workflow integration suite.
         let any_ast_phase = def.phases.iter().any(|p| p.ast_native == Some(true))
             || crate::ast::is_ast_native_overridden();
-        if any_ast_phase {
-            if let Some(dir) = code_dir.as_ref().filter(|d| d.exists()) {
-                let started = std::time::Instant::now();
-                match crate::ast::pre_index_directory(dir, dir) {
-                    Ok(registry) => {
-                        let symbol_count = registry.len();
-                        crate::ast::set_pre_indexed_registry(registry);
-                        info!(
-                            duration_ms = started.elapsed().as_millis() as u64,
-                            symbols = symbol_count,
-                            path = %dir.display(),
-                            "AST pre-index complete"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            path = %dir.display(),
-                            "AST pre-index failed, continuing with empty registry"
-                        );
-                    }
+        if any_ast_phase && let Some(dir) = code_dir.as_ref().filter(|d| d.exists()) {
+            let started = std::time::Instant::now();
+            match crate::ast::pre_index_directory(dir, dir) {
+                Ok(registry) => {
+                    let symbol_count = registry.len();
+                    crate::ast::set_pre_indexed_registry(registry);
+                    info!(
+                        duration_ms = started.elapsed().as_millis() as u64,
+                        symbols = symbol_count,
+                        path = %dir.display(),
+                        "AST pre-index complete"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = %dir.display(),
+                        "AST pre-index failed, continuing with empty registry"
+                    );
                 }
             }
         }
@@ -1502,13 +1497,12 @@ impl WorkflowEngine {
             // from prior runs that were never cleaned up.
             if phase.name == "plan"
                 && let Some(dir) = out_dir.as_deref()
+                && let Err(e) = relocate_plan_outputs_from_project_root(dir).await
             {
-                if let Err(e) = relocate_plan_outputs_from_project_root(dir).await {
-                    tracing::warn!(
-                        error = %e,
-                        "post-plan relocation check failed; continuing"
-                    );
-                }
+                tracing::warn!(
+                    error = %e,
+                    "post-plan relocation check failed; continuing"
+                );
             }
 
             // #123: After the code phase for a claude-code runner, reconcile
@@ -1529,13 +1523,13 @@ impl WorkflowEngine {
                 // (legacy mode), behavior is unchanged.
                 let target = code_dir.as_deref().or(out_dir.as_deref());
                 let assignments_dir = out_dir.as_deref().or(target);
-                if let (Some(target), Some(asg_dir)) = (target, assignments_dir) {
-                    if let Err(e) = reconcile_code_outputs_against(asg_dir, target).await {
-                        tracing::warn!(
-                            error = %e,
-                            "post-code reconciliation check failed; continuing"
-                        );
-                    }
+                if let (Some(target), Some(asg_dir)) = (target, assignments_dir)
+                    && let Err(e) = reconcile_code_outputs_against(asg_dir, target).await
+                {
+                    tracing::warn!(
+                        error = %e,
+                        "post-code reconciliation check failed; continuing"
+                    );
                 }
             }
 

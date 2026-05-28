@@ -1628,20 +1628,21 @@ mod main_tests {
     }
 }
 
-/// Bundled agent config directory — honors `OPEN_MPM_CONFIG_DIR` with a
-/// CWD-relative `.open-mpm/` fallback (#167).
-///
-/// Why: The registry search-path function wants the "bundled" config root
-/// (it appends `/agents` internally). We honor the same env var as
-/// `agents::mod::agent_config_path` so packaged binaries can point the
-/// loader at a vendored config tree.
-/// What: Returns `${OPEN_MPM_CONFIG_DIR}` as-is if set (so search_paths
-/// appends `/agents`), else `./.open-mpm`. Note: the repo's bundled config
-/// lives at `.open-mpm/` now (formerly `config/`); runtime state is in
-/// `.open-mpm/state/` (gitignored).
-// Why: `default_bundled_config_dir` is defined once in `crate::lib` and
-//      pulled in at the top of this file via `use crate::default_bundled_config_dir;`.
-//      No duplicate definition here.
+// Bundled agent config directory — honors `OPEN_MPM_CONFIG_DIR` with a
+// CWD-relative `.open-mpm/` fallback (#167).
+//
+// Why: The registry search-path function wants the "bundled" config root
+// (it appends `/agents` internally). We honor the same env var as
+// `agents::mod::agent_config_path` so packaged binaries can point the
+// loader at a vendored config tree.
+// What: Returns `${OPEN_MPM_CONFIG_DIR}` as-is if set (so search_paths
+// appends `/agents`), else `./.open-mpm`. Note: the repo's bundled config
+// lives at `.open-mpm/` now (formerly `config/`); runtime state is in
+// `.open-mpm/state/` (gitignored).
+//
+// Note: `default_bundled_config_dir` is defined once in `crate::lib` and
+//       pulled in at the top of this file via `use crate::default_bundled_config_dir;`.
+//       No duplicate definition here.
 
 /// Persist post-run skill effectiveness + usage to `~/.open-mpm/skills/index.json`
 /// (#171, #174).

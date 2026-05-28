@@ -48,7 +48,7 @@ use crate::ctrl_session::{
     Session as CtrlSession, SessionStatus as CtrlSessionStatus, SessionStore,
 };
 use crate::events::{self, EVENT_LINE_PREFIX, Event};
-use crate::recap::{self, Recap, RecapConfig, RecapPhase, RecapTask, RecapTracker};
+use crate::recap::{self, RecapConfig, RecapPhase, RecapTask, RecapTracker};
 use crate::registry::{ProjectEntry, ProjectRegistry, discover_active_projects};
 use crate::tm::TmManager;
 use crate::tm::project::{AdapterType, TmProject};
@@ -117,7 +117,7 @@ async fn serve_asset(
     let path = path.trim_start_matches('/');
     match UiAssets::get(path) {
         Some(f) => {
-            let mime = mime_guess::from_path(&path).first_or_octet_stream();
+            let mime = mime_guess::from_path(path).first_or_octet_stream();
             // Vite emits content-hashed filenames under `assets/` (e.g.
             // `assets/index-abc123.js`), so the bytes at a given URL never
             // change — safe to cache forever. Other top-level assets (favicon,
@@ -383,11 +383,11 @@ async fn load_persisted_tasks() -> Option<TaskStore> {
 async fn persist_tasks(responses: &HashMap<String, PmResponse>) {
     let path = tasks_persistence_path();
     let tmp = path.with_extension("json.tmp");
-    if let Some(parent) = path.parent() {
-        if let Err(e) = tokio::fs::create_dir_all(parent).await {
-            tracing::warn!(?e, "failed to create state dir for tasks.json");
-            return;
-        }
+    if let Some(parent) = path.parent()
+        && let Err(e) = tokio::fs::create_dir_all(parent).await
+    {
+        tracing::warn!(?e, "failed to create state dir for tasks.json");
+        return;
     }
     let json = match serde_json::to_vec(responses) {
         Ok(j) => j,
@@ -1182,7 +1182,7 @@ async fn list_projects(
             .into_iter()
             .filter(|e| e.is_real_project())
             .collect();
-        v.sort_by(|a, b| b.last_active().cmp(&a.last_active()));
+        v.sort_by_key(|b| std::cmp::Reverse(b.last_active()));
         v
     } else {
         let window = chrono::Duration::days(14);
@@ -1595,20 +1595,19 @@ async fn terminate_ctrl_session_handler(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    if let Some(session) = SessionStore::find(&uuid) {
-        if let Some(wt_path) = &session.worktree_path {
-            if wt_path.exists() {
-                let _ = std::process::Command::new("git")
-                    .args([
-                        "worktree",
-                        "remove",
-                        "--force",
-                        wt_path.to_str().unwrap_or(""),
-                    ])
-                    .current_dir(&session.project_path)
-                    .output();
-            }
-        }
+    if let Some(session) = SessionStore::find(&uuid)
+        && let Some(wt_path) = &session.worktree_path
+        && wt_path.exists()
+    {
+        let _ = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "remove",
+                "--force",
+                wt_path.to_str().unwrap_or(""),
+            ])
+            .current_dir(&session.project_path)
+            .output();
     }
 
     let found = SessionStore::terminate(&uuid).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -2508,6 +2507,14 @@ async fn maybe_emit_recap(state: &AppState, session_id: &str) {
 
 #[cfg(test)]
 mod tests {
+    // Why: These tests use `crate::test_env::HOME_LOCK` (a `std::sync::Mutex`)
+    // to serialize cross-module mutation of `$HOME` while the test body
+    // performs async I/O. Holding a sync mutex across `.await` would be a
+    // bug in production code, but here the lock is held intentionally for
+    // the full test body so two tests don't race on the global env var. The
+    // tokio multi-threaded test runtime keeps the lock from causing deadlock.
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};

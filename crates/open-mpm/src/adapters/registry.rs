@@ -89,7 +89,7 @@ impl AdapterRegistry {
             let result = adapter.detect(pane_output);
             if result.matched
                 && result.confidence >= 0.7
-                && best.map_or(true, |(_, c)| result.confidence > c)
+                && best.is_none_or(|(_, c)| result.confidence > c)
             {
                 best = Some((id, result.confidence));
             }

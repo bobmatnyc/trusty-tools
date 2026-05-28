@@ -1244,6 +1244,11 @@ fn agents_dir() -> PathBuf {
     }
 }
 
+// Why: Helper kept available for ad-hoc tooling that needs the flat
+// `<name>.toml` path. No longer invoked by the main loader path which prefers
+// the directory-package layout; retained behind `#[allow(dead_code)]` so
+// future tools can reuse it without re-deriving the join logic.
+#[allow(dead_code)]
 fn agent_config_path(name: &str) -> PathBuf {
     agents_dir().join(format!("{name}.toml"))
 }

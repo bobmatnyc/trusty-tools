@@ -664,7 +664,7 @@ mod tests {
         assert!(!r.is_error());
         let v: Value = serde_json::from_str(r.content()).unwrap();
         assert_eq!(v["valid"], false);
-        assert!(v["errors"].as_array().unwrap().len() >= 1);
+        assert!(!v["errors"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
