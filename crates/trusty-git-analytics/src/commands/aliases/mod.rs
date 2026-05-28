@@ -1,4 +1,4 @@
-//! `tga aliases` — list and merge developer identities.
+//! `tga aliases` — list, merge, and manage developer identities.
 //!
 //! Backed by the `authors` table (one row per canonical identity) and the
 //! `commits.author_id` foreign key. Merging two identities reassigns all
@@ -12,6 +12,9 @@ use clap::{Args, Subcommand};
 use rusqlite::params;
 use tga::core::config::Config;
 use tga::core::db::Database;
+
+mod crud;
+mod suggest;
 
 /// Arguments for `tga aliases`.
 #[derive(Args, Debug)]
@@ -27,10 +30,14 @@ Use these subcommands for manual corrections and audits.",
     after_help = "EXAMPLES:\n\
   # List all canonical identities in the database\n\
   tga aliases list\n\n\
+  # Show the full profile (canonical email, name, aliases, stats) for an identity\n\
+  tga aliases show alice@company.com\n\n\
   # Merge a work email into the canonical personal-account identity\n\
   tga aliases merge old@contractor.com alice@company.com\n\n\
-  # Merge without the confirmation prompt\n\
-  tga aliases merge old@example.com alice@example.com --yes\n\n\
+  # Auto-detect probable alias pairs from commit history\n\
+  tga aliases suggest\n\n\
+  # Detach a previously-merged alias back to its own identity\n\
+  tga aliases unmerge old@contractor.com\n\n\
 TIPS:\n\
   - Run `tga report --author alice@company.com` to verify the merge result.\n\
   - Use the canonical email from `tga aliases list` as the --author value."
@@ -42,7 +49,7 @@ pub struct AliasesArgs {
 }
 
 /// Valid provider identifiers for `tga aliases add-login`.
-const VALID_PROVIDERS: &[&str] = &["github", "gitlab", "ado", "bitbucket"];
+pub(crate) const VALID_PROVIDERS: &[&str] = &["github", "gitlab", "ado", "bitbucket"];
 
 /// `tga aliases` subcommands.
 #[derive(Subcommand, Debug)]
@@ -60,13 +67,6 @@ pub enum AliasesSubcommand {
         yes: bool,
     },
     /// Append a provider login to an author's alias list for PR canonicalization.
-    ///
-    /// Provider logins (e.g. GitHub usernames) are stored in `authors.aliases`
-    /// alongside email aliases so that `tga author <email>` can resolve
-    /// pull-request authorship across providers without a schema migration.
-    ///
-    /// Example:
-    ///   tga aliases add-login alice@example.com github alice-dev
     AddLogin {
         /// Canonical email of the author to update.
         email: String,
@@ -75,14 +75,65 @@ pub enum AliasesSubcommand {
         /// Provider login / username to append.
         login: String,
     },
+    /// Create a new canonical identity from scratch.
+    Add {
+        /// Canonical email to register.
+        email: String,
+        /// Display name for the new identity (defaults to the email local-part).
+        #[arg(long)]
+        name: Option<String>,
+        /// Optional alias email(s) to associate with this identity.
+        #[arg(long = "alias")]
+        aliases: Vec<String>,
+    },
+    /// Remove a single alias from an identity without deleting the canonical row.
+    RemoveAlias {
+        /// Alias email or login to detach from the canonical identity.
+        alias: String,
+        /// Canonical email whose alias list will be modified.
+        canonical: String,
+    },
+    /// Show full profile for one canonical identity.
+    Show {
+        /// Canonical email to look up.
+        email: String,
+    },
+    /// Undo a prior merge — detach an alias back to its own identity row.
+    Unmerge {
+        /// Alias email to detach into its own identity row.
+        alias: String,
+    },
+    /// Update the display name of an identity without touching email/aliases.
+    Rename {
+        /// Canonical email of the identity to rename.
+        email: String,
+        /// New display name.
+        #[arg(long)]
+        name: String,
+    },
+    /// Auto-detect probable alias pairs from commit history.
+    Suggest {
+        /// Minimum confidence (0.0–1.0) below which suggestions are omitted.
+        #[arg(long, default_value_t = 0.85)]
+        confidence: f64,
+        /// Automatically merge HIGH-confidence pairs above `--confidence`.
+        #[arg(long, default_value_t = false)]
+        auto_accept: bool,
+    },
 }
 
 /// Dispatch entry point for the `tga aliases` subcommand.
 ///
+/// Why: each subcommand has its own handler; this is the thin wiring layer
+/// the binary calls after CLI parsing.
+/// What: matches on the parsed [`AliasesSubcommand`] and forwards to the
+/// per-operation function with the live database handle.
+/// Test: covered by per-handler tests in this module and its submodules.
+///
 /// # Errors
 ///
 /// Returns any database or I/O error raised by the underlying operation.
-pub fn run(_config: Config, db: &mut Database, args: AliasesArgs) -> anyhow::Result<()> {
+pub fn run(config: Config, db: &mut Database, args: AliasesArgs) -> anyhow::Result<()> {
     match args.subcommand {
         AliasesSubcommand::List => list(db),
         AliasesSubcommand::Merge { src, dst, yes } => {
@@ -93,6 +144,21 @@ pub fn run(_config: Config, db: &mut Database, args: AliasesArgs) -> anyhow::Res
             provider,
             login,
         } => add_login(db, &email, &provider, &login),
+        AliasesSubcommand::Add {
+            email,
+            name,
+            aliases,
+        } => crud::add(db, &email, name.as_deref(), &aliases),
+        AliasesSubcommand::RemoveAlias { alias, canonical } => {
+            crud::remove_alias(db, &alias, &canonical)
+        }
+        AliasesSubcommand::Show { email } => crud::show(db, &email),
+        AliasesSubcommand::Unmerge { alias } => crud::unmerge(db, &alias),
+        AliasesSubcommand::Rename { email, name } => crud::rename(db, &email, &name),
+        AliasesSubcommand::Suggest {
+            confidence,
+            auto_accept,
+        } => suggest::run(&config, db, confidence, auto_accept),
     }
 }
 
@@ -243,7 +309,10 @@ fn add_login(db: &mut Database, email: &str, provider: &str, login: &str) -> any
 }
 
 /// Fetch `(id, canonical_name, aliases_json)` for the row whose email matches.
-fn lookup_author(db: &Database, email: &str) -> anyhow::Result<Option<(i64, String, String)>> {
+pub(crate) fn lookup_author(
+    db: &Database,
+    email: &str,
+) -> anyhow::Result<Option<(i64, String, String)>> {
     let conn = db.connection();
     let mut stmt =
         conn.prepare("SELECT id, canonical_name, aliases FROM authors WHERE canonical_email = ?1")?;
@@ -259,7 +328,7 @@ fn lookup_author(db: &Database, email: &str) -> anyhow::Result<Option<(i64, Stri
 mod tests {
     use super::*;
 
-    fn insert_author(db: &Database, name: &str, email: &str) -> i64 {
+    pub(crate) fn insert_author(db: &Database, name: &str, email: &str) -> i64 {
         db.connection()
             .execute(
                 "INSERT INTO authors (canonical_name, canonical_email, aliases) VALUES (?1, ?2, '[]')",
@@ -269,7 +338,7 @@ mod tests {
         db.connection().last_insert_rowid()
     }
 
-    fn insert_commit(db: &Database, sha: &str, author_id: i64) {
+    pub(crate) fn insert_commit(db: &Database, sha: &str, author_id: i64) {
         db.connection()
             .execute(
                 "INSERT INTO commits (sha, author_id, author_name, author_email, timestamp, \
@@ -332,7 +401,6 @@ mod tests {
 
     #[test]
     fn add_login_round_trips() {
-        // Why: verifies that a login is stored and readable back from aliases JSON.
         let mut db = Database::open_in_memory().expect("open");
         insert_author(&db, "Alice", "alice@example.com");
         add_login(&mut db, "alice@example.com", "github", "alice-dev").expect("add login");
@@ -351,7 +419,6 @@ mod tests {
 
     #[test]
     fn add_login_deduplicates() {
-        // Why: calling add-login twice with the same login must be idempotent.
         let mut db = Database::open_in_memory().expect("open");
         insert_author(&db, "Alice", "alice@example.com");
         add_login(&mut db, "alice@example.com", "github", "alice-dev").expect("first");
@@ -372,7 +439,6 @@ mod tests {
 
     #[test]
     fn add_login_rejects_invalid_provider() {
-        // Why: only known provider identifiers should be accepted.
         let mut db = Database::open_in_memory().expect("open");
         insert_author(&db, "Alice", "alice@example.com");
         let err = add_login(&mut db, "alice@example.com", "slack", "alice-dev").unwrap_err();
@@ -381,8 +447,6 @@ mod tests {
 
     #[test]
     fn add_login_rejects_email_as_login() {
-        // Why: logins must be provider handles, not email addresses; the '@' check
-        // guards against accidentally storing an email in the login slot.
         let mut db = Database::open_in_memory().expect("open");
         insert_author(&db, "Alice", "alice@example.com");
         let err =

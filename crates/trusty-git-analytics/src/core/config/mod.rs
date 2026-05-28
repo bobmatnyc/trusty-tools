@@ -244,6 +244,22 @@ pub struct TeamConfig {
     /// Free-form aliases map: alias → canonical name.
     #[serde(default)]
     pub aliases: HashMap<String, String>,
+
+    /// Preferred email domain when selecting the canonical email for a
+    /// newly-discovered identity (issue #349).
+    ///
+    /// Why: by default `tga collect` records the first-seen `author_email`
+    /// as the canonical identity. For organisations where most people commit
+    /// under multiple email domains (work / personal / GitHub noreply), this
+    /// produces inconsistent canonical addresses. Setting `canonical_domain`
+    /// prefers any email whose domain matches over a first-seen non-matching
+    /// address.
+    /// What: when set, the resolver prefers an email whose domain equals this
+    /// value (case-insensitive) over the raw observed email, falling back to
+    /// the raw value if no domain-matching candidate is available.
+    /// Test: see `collect::identity::resolver::tests::canonical_domain_preferred`.
+    #[serde(default)]
+    pub canonical_domain: Option<String>,
 }
 
 /// A canonical team member with optional alias list.
