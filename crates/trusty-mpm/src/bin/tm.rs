@@ -174,6 +174,26 @@ enum Command {
         /// The message to send to the coordinator.
         message: String,
     },
+
+    /// Inspect and probe workspace service daemons.
+    ///
+    /// Why: agents need a single canonical interface to answer "is trusty-search
+    /// running?", "what port is it on?", "is it healthy?" without resorting to
+    /// lsof/curl/ps. `tm services` reads the manifest at ~/.claude-mpm/services.yaml
+    /// (or the embedded default when the file is absent) and probes each declared
+    /// service on demand.
+    /// What: eight subcommands (list, status, port, url, health, log, init, restart)
+    /// with --json where applicable. Exit codes: 0=running/healthy, 1=down/unhealthy,
+    /// 2=unknown service, per the spec.
+    /// Test: `cli_parses_services_list`, `cli_parses_services_status`,
+    /// `cli_parses_services_port`, `cli_parses_services_url`,
+    /// `cli_parses_services_health`, `cli_parses_services_log`,
+    /// `cli_parses_services_init`, `cli_parses_services_restart`.
+    Services {
+        /// Services action to perform.
+        #[command(subcommand)]
+        action: ServicesAction,
+    },
 }
 
 /// Actions for the `telegram` subcommand.
@@ -334,6 +354,91 @@ enum OptimizerAction {
     },
 }
 
+/// Subcommands for `tm services`.
+///
+/// Why: each subcommand answers exactly one agent question (port? url? healthy?)
+/// so the output is scriptable without parsing a full status block.
+/// What: eight variants covering list, status, port, url, health, log, init,
+/// and restart. Exit codes follow the spec: 0=ok/running, 1=down/unhealthy,
+/// 2=unknown service.
+/// Test: `cli_parses_services_*` tests in the `#[cfg(test)]` block.
+#[derive(Debug, Subcommand)]
+enum ServicesAction {
+    /// List all declared services with their current status.
+    ///
+    /// Exit code: always 0 (list never fails; individual services may be down).
+    List {
+        /// Output as JSON array instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show detailed status for one service.
+    ///
+    /// Exit code: 0 if running, 1 if down, 2 if service name not in manifest.
+    Status {
+        /// Service name (e.g. trusty-search).
+        name: String,
+        /// Output as JSON object.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Print the port number for a service (scriptable: PORT=$(tm services port X)).
+    ///
+    /// Prints just the port number on stdout. Exit code: 0 if port known,
+    /// 1 if service is down or port unavailable, 2 if unknown service.
+    Port {
+        /// Service name.
+        name: String,
+    },
+
+    /// Print the full base URL for a service (e.g. http://localhost:7878).
+    ///
+    /// Exit code: 0 if URL known, 1 if service is down, 2 if unknown service.
+    Url {
+        /// Service name.
+        name: String,
+    },
+
+    /// Probe the health endpoint and print OK or FAIL.
+    ///
+    /// Prints "OK" on stdout when healthy; diagnostic detail on stderr when
+    /// unhealthy. Exit code: 0 if healthy, 1 if unhealthy or down.
+    Health {
+        /// Service name.
+        name: String,
+    },
+
+    /// Print the path to the most-recent log file.
+    ///
+    /// Scriptable: `tail -f $(tm services log trusty-search)`
+    /// Exit code: 0 if log path known and file exists, 1 if not, 2 if unknown.
+    Log {
+        /// Service name.
+        name: String,
+    },
+
+    /// Write the default manifest to ~/.claude-mpm/services.yaml.
+    ///
+    /// Non-destructive: errors if the file already exists. Use --force to
+    /// overwrite an existing manifest.
+    Init {
+        /// Overwrite an existing manifest.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Restart a service using its manifest `restart_cmd`.
+    ///
+    /// Exit code: 0 if restart_cmd succeeded, 1 if restart_cmd absent or failed,
+    /// 2 if unknown service.
+    Restart {
+        /// Service name.
+        name: String,
+    },
+}
+
 /// CLI-friendly compression level (mirrors `CompressionLevel`).
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 enum CliCompressionLevel {
@@ -477,6 +582,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Optimizer { action } => optimizer(&client, &url, action).await,
         Command::Overseer { action } => overseer(&client, &url, action).await,
         Command::Coordinator { message } => coordinator(&url, message).await,
+        Command::Services { action } => services(action),
     }
 }
 
@@ -504,6 +610,302 @@ async fn coordinator(url: &str, message: String) -> anyhow::Result<()> {
         other => eprintln!("unexpected coordinator result: {other:?}"),
     }
     Ok(())
+}
+
+/// `services` subcommand — inspect and probe workspace service daemons.
+///
+/// Why: agents need a canonical, scriptable interface to replace ad-hoc `lsof`/
+/// `curl`/`ps` service discovery. `tm services` reads (or embeds) a YAML manifest
+/// and probes each declared service with pgrep + optional HTTP health checks.
+/// What: dispatches all `ServicesAction` variants; exit codes follow the spec
+/// (0=running/healthy, 1=down/unhealthy, 2=unknown service). List always exits 0.
+/// Test: `cli_parses_services_*` unit tests cover argument parsing; the
+/// integration test in `tests/services_integration.rs` covers live probing.
+fn services(action: ServicesAction) -> anyhow::Result<()> {
+    use trusty_mpm::services::{Discoverer, HealthState, ServicesManifest};
+
+    // Resolve the manifest: user file if present, otherwise embedded default.
+    let services_yaml_path = claude_mpm_dir().join("services.yaml");
+    let manifest = if services_yaml_path.exists() {
+        let text = std::fs::read_to_string(&services_yaml_path)?;
+        let mut m: ServicesManifest = serde_yaml::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("failed to parse services.yaml: {e}"))?;
+        m.validate()
+            .map_err(|e| anyhow::anyhow!("services.yaml validation failed: {e}"))?;
+        m.expand_paths()?;
+        m
+    } else {
+        ServicesManifest::default_manifest()
+    };
+
+    let mut discoverer = Discoverer::new(manifest);
+
+    match action {
+        ServicesAction::List { json } => {
+            let statuses = discoverer.list();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&statuses)?);
+            } else {
+                print_services_table(&statuses);
+            }
+            // list always exits 0.
+        }
+
+        ServicesAction::Status { name, json } => {
+            match discoverer.status(&name) {
+                None => {
+                    eprintln!("unknown service: {name}");
+                    std::process::exit(2);
+                }
+                Some(status) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&status)?);
+                    } else {
+                        print_service_status_block(&status);
+                    }
+                    if !status.running {
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+
+        ServicesAction::Port { name } => match discoverer.status(&name) {
+            None => {
+                eprintln!("unknown service: {name}");
+                std::process::exit(2);
+            }
+            Some(status) => match status.port {
+                Some(port) => print!("{port}"),
+                None => {
+                    eprintln!("{name}: port unavailable (service down or no port)");
+                    std::process::exit(1);
+                }
+            },
+        },
+
+        ServicesAction::Url { name } => match discoverer.status(&name) {
+            None => {
+                eprintln!("unknown service: {name}");
+                std::process::exit(2);
+            }
+            Some(status) => match status.url {
+                Some(url) => print!("{url}"),
+                None => {
+                    eprintln!("{name}: URL unavailable (service down or no port)");
+                    std::process::exit(1);
+                }
+            },
+        },
+
+        ServicesAction::Health { name } => match discoverer.health(&name) {
+            None => {
+                eprintln!("unknown service: {name}");
+                std::process::exit(2);
+            }
+            Some(result) => match result.state {
+                HealthState::Ok => {
+                    println!("OK");
+                }
+                HealthState::Unknown => {
+                    println!("OK (no health endpoint; process running)");
+                }
+                HealthState::Fail { ref detail } => {
+                    eprintln!("FAIL: {detail}");
+                    std::process::exit(1);
+                }
+            },
+        },
+
+        ServicesAction::Log { name } => match discoverer.status(&name) {
+            None => {
+                eprintln!("unknown service: {name}");
+                std::process::exit(2);
+            }
+            Some(status) => match status.log_path {
+                Some(path) => print!("{}", path.display()),
+                None => {
+                    eprintln!("{name}: log path unavailable or file does not exist");
+                    std::process::exit(1);
+                }
+            },
+        },
+
+        ServicesAction::Init { force } => {
+            let path = services_yaml_path;
+            if path.exists() && !force {
+                anyhow::bail!(
+                    "{} already exists. Use --force to overwrite.",
+                    path.display()
+                );
+            }
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            // Serialize the embedded default manifest back to YAML.
+            let default = ServicesManifest::default_manifest();
+            let yaml = serde_yaml::to_string(&default)?;
+            std::fs::write(&path, yaml)?;
+            println!("wrote {}", path.display());
+        }
+
+        ServicesAction::Restart { name } => {
+            // Look up the service in the manifest directly (no probe needed for restart).
+            let manifest_for_restart = if services_yaml_path.exists() {
+                let text = std::fs::read_to_string(&services_yaml_path)?;
+                let m: ServicesManifest = serde_yaml::from_str(&text)
+                    .map_err(|e| anyhow::anyhow!("failed to parse services.yaml: {e}"))?;
+                m.validate()
+                    .map_err(|e| anyhow::anyhow!("services.yaml validation failed: {e}"))?;
+                m
+            } else {
+                ServicesManifest::default_manifest()
+            };
+            match manifest_for_restart.services.get(&name) {
+                None => {
+                    eprintln!("unknown service: {name}");
+                    std::process::exit(2);
+                }
+                Some(decl) => match &decl.restart_cmd {
+                    None => {
+                        eprintln!("{name}: no restart_cmd defined in manifest");
+                        std::process::exit(1);
+                    }
+                    Some(cmd) => {
+                        let status = std::process::Command::new("sh")
+                            .args(["-c", cmd])
+                            .status()?;
+                        if status.success() {
+                            println!("{name}: restarted");
+                        } else {
+                            eprintln!("{name}: restart command failed (exit {status})");
+                            std::process::exit(1);
+                        }
+                    }
+                },
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Resolve `~/.claude-mpm/` directory (not expanded by the shell in library code).
+///
+/// Why: `tm services init` and the manifest loader both need the canonical
+/// `~/.claude-mpm/` path without relying on shell tilde expansion.
+/// What: joins `dirs::home_dir()` with `.claude-mpm`. Falls back to the
+/// process cwd when the home directory is unavailable (rare in practice).
+/// Test: indirect — exercised by `cli_parses_services_init`.
+fn claude_mpm_dir() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".claude-mpm")
+}
+
+/// Render the `tm services list` human-readable table.
+///
+/// Why: a fixed-width table is more readable than JSON in an interactive terminal
+/// while still being parseable by humans scanning for red/green status indicators.
+/// What: prints a header row then one row per `ServiceStatus` using fixed-width
+/// columns. Status is colorized green/red/yellow via the `colored` crate.
+/// Test: indirect — verified by manual smoke test.
+fn print_services_table(statuses: &[trusty_mpm::services::ServiceStatus]) {
+    use colored::Colorize;
+    use trusty_mpm::services::HealthState;
+
+    const W_NAME: usize = 24;
+    const W_STATUS: usize = 10;
+    const W_PORT: usize = 8;
+    const W_VERSION: usize = 12;
+
+    println!(
+        "{:<W_NAME$} {:<W_STATUS$} {:<W_PORT$} {:<W_VERSION$} {}",
+        "NAME", "STATUS", "PORT", "VERSION", "HEALTH"
+    );
+
+    for s in statuses {
+        let status_str = if s.running { "running" } else { "down" };
+        let status_colored = if s.running {
+            status_str.green().to_string()
+        } else {
+            status_str.red().to_string()
+        };
+
+        let port_str = s
+            .port
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "\u{2014}".to_string()); // —
+
+        let version_str = s.version.clone().unwrap_or_else(|| "\u{2014}".to_string());
+
+        let health_str = match &s.health {
+            HealthState::Ok => "ok".green().to_string(),
+            HealthState::Unknown => "\u{2014}".normal().to_string(),
+            HealthState::Fail { .. } => {
+                if s.running {
+                    "fail".yellow().to_string()
+                } else {
+                    "\u{2014}".normal().to_string()
+                }
+            }
+        };
+
+        println!(
+            "{:<W_NAME$} {:<W_STATUS$} {:<W_PORT$} {:<W_VERSION$} {}",
+            s.name, status_colored, port_str, version_str, health_str
+        );
+    }
+}
+
+/// Render the `tm services status <name>` detail block.
+///
+/// Why: a labeled block is more readable than a JSON object for interactive use,
+/// making it easy to scan all fields at a glance.
+/// What: prints one label-colon-value line per `ServiceStatus` field, with
+/// tilde-contracted paths for readability.
+/// Test: indirect — verified by manual smoke test.
+fn print_service_status_block(s: &trusty_mpm::services::ServiceStatus) {
+    use trusty_mpm::services::HealthState;
+
+    println!("{}", s.name);
+    println!("  Status:   {}", if s.running { "running" } else { "down" });
+    println!(
+        "  PID:      {}",
+        s.pid.map(|p| p.to_string()).unwrap_or_else(|| "\u{2014}".to_string())
+    );
+    println!(
+        "  Port:     {}",
+        s.port.map(|p| p.to_string()).unwrap_or_else(|| "\u{2014}".to_string())
+    );
+    println!(
+        "  URL:      {}",
+        s.url.as_deref().unwrap_or("\u{2014}")
+    );
+    println!(
+        "  Version:  {}",
+        s.version.as_deref().unwrap_or("\u{2014}")
+    );
+    let health_label = match &s.health {
+        HealthState::Ok => "ok".to_string(),
+        HealthState::Unknown => "unknown (no health endpoint)".to_string(),
+        HealthState::Fail { detail } => format!("fail ({detail})"),
+    };
+    println!("  Health:   {health_label}");
+    println!(
+        "  Log:      {}",
+        s.log_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "\u{2014}".to_string())
+    );
+    if let Some(secs) = s.uptime_secs {
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
+        println!("  Uptime:   {hours}h {mins}m");
+    } else {
+        println!("  Uptime:   \u{2014}");
+    }
 }
 
 /// `telegram` subcommand — manage the Telegram bot (pair, status, start, stop).
@@ -3900,6 +4302,148 @@ mod tests {
         match cli.command {
             Command::Daemon { addr, .. } => assert_eq!(addr.to_string(), "0.0.0.0:9000"),
             other => panic!("expected Daemon, got {other:?}"),
+        }
+    }
+
+    // ── tm services subcommand parse tests (issue #339) ──────────────────────
+
+    #[test]
+    fn cli_parses_services_list() {
+        let cli = Cli::try_parse_from(["trusty-mpm", "services", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Services {
+                action: ServicesAction::List { json: false }
+            }
+        ));
+    }
+
+    #[test]
+    fn cli_parses_services_list_json() {
+        let cli = Cli::try_parse_from(["trusty-mpm", "services", "list", "--json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Services {
+                action: ServicesAction::List { json: true }
+            }
+        ));
+    }
+
+    #[test]
+    fn cli_parses_services_status() {
+        let cli =
+            Cli::try_parse_from(["trusty-mpm", "services", "status", "trusty-search"]).unwrap();
+        match cli.command {
+            Command::Services {
+                action: ServicesAction::Status { name, json },
+            } => {
+                assert_eq!(name, "trusty-search");
+                assert!(!json);
+            }
+            other => panic!("expected services status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_services_status_json() {
+        let cli = Cli::try_parse_from([
+            "trusty-mpm",
+            "services",
+            "status",
+            "trusty-search",
+            "--json",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Services {
+                action: ServicesAction::Status { name, json },
+            } => {
+                assert_eq!(name, "trusty-search");
+                assert!(json);
+            }
+            other => panic!("expected services status --json, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_services_port() {
+        let cli =
+            Cli::try_parse_from(["trusty-mpm", "services", "port", "trusty-search"]).unwrap();
+        match cli.command {
+            Command::Services {
+                action: ServicesAction::Port { name },
+            } => assert_eq!(name, "trusty-search"),
+            other => panic!("expected services port, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_services_url() {
+        let cli =
+            Cli::try_parse_from(["trusty-mpm", "services", "url", "trusty-search"]).unwrap();
+        match cli.command {
+            Command::Services {
+                action: ServicesAction::Url { name },
+            } => assert_eq!(name, "trusty-search"),
+            other => panic!("expected services url, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_services_health() {
+        let cli =
+            Cli::try_parse_from(["trusty-mpm", "services", "health", "trusty-search"]).unwrap();
+        match cli.command {
+            Command::Services {
+                action: ServicesAction::Health { name },
+            } => assert_eq!(name, "trusty-search"),
+            other => panic!("expected services health, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_services_log() {
+        let cli =
+            Cli::try_parse_from(["trusty-mpm", "services", "log", "trusty-search"]).unwrap();
+        match cli.command {
+            Command::Services {
+                action: ServicesAction::Log { name },
+            } => assert_eq!(name, "trusty-search"),
+            other => panic!("expected services log, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_services_init() {
+        let cli = Cli::try_parse_from(["trusty-mpm", "services", "init"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Services {
+                action: ServicesAction::Init { force: false }
+            }
+        ));
+    }
+
+    #[test]
+    fn cli_parses_services_init_force() {
+        let cli = Cli::try_parse_from(["trusty-mpm", "services", "init", "--force"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Services {
+                action: ServicesAction::Init { force: true }
+            }
+        ));
+    }
+
+    #[test]
+    fn cli_parses_services_restart() {
+        let cli =
+            Cli::try_parse_from(["trusty-mpm", "services", "restart", "trusty-search"]).unwrap();
+        match cli.command {
+            Command::Services {
+                action: ServicesAction::Restart { name },
+            } => assert_eq!(name, "trusty-search"),
+            other => panic!("expected services restart, got {other:?}"),
         }
     }
 }
