@@ -11,6 +11,7 @@
 //! - [`models`] — aggregated data structures
 
 pub mod aggregator;
+pub mod drilldown;
 pub mod errors;
 pub mod formatters;
 pub mod models;
