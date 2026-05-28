@@ -5,6 +5,51 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-05-28
+
+### BREAKING CHANGES
+
+- **`tga collect` now walks ALL local branches and remote tracking refs by
+  default** (`refs/heads/*` + `refs/remotes/origin/*`), not just HEAD ancestry
+  (#331). This fixes a data-integrity bug where commits on non-default branches
+  (PR branches, feature branches, hotfixes) were silently excluded — the
+  HEAD-only walk was losing ~56% of commits in multi-branch repos.
+
+### Added
+
+- **`--head-only` flag on `tga collect`** — restores the legacy HEAD-only walk
+  (≤ 1.5.4 behaviour) for all repositories when passed on the command line.
+  For a per-repo opt-out, set `head_only: true` in the `repositories[].head_only`
+  field of your YAML config.
+
+### Migration
+
+Existing `tga.db` files were collected with the buggy HEAD-only walker and are
+missing commits from non-default branches. To recover the full commit history:
+
+```bash
+tga collect --force
+```
+
+The `--force` flag bypasses the `collection_runs` skip mechanism, allowing
+already-"collected" weeks to be re-walked with the new all-branches coverage.
+Expect significantly more commits per week after re-collecting (the bug was
+losing ~56% of commits on multi-repo orgs).
+
+### Internal
+
+- New `head_only: bool` field on `GitCollector` and `CollectionPipeline` with
+  `with_head_only(bool)` builder method on each.
+- Revwalk seeding logic in `extractor.rs::collect_window` now has three arms:
+  explicit `branch` override (unchanged), `head_only = true` (legacy escape
+  hatch), and the new default (push all `refs/heads/*` + `refs/remotes/origin/*`
+  except `refs/remotes/origin/HEAD` which is a symref).
+- The all-branch walk falls back to `HEAD` for repos with a detached HEAD and
+  no local branches (common in CI shallow clones).
+- Regression tests added for all four scenarios: all-branch coverage,
+  `--head-only` legacy behaviour, explicit `branch:` override, and
+  detached-HEAD fallback (tests in `collect::git::extractor::tests`).
+
 ## [1.5.4] - 2026-05-28
 
 ### Added

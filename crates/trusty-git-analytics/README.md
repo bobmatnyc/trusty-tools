@@ -219,6 +219,23 @@ tga collect [--config <PATH>] [--database <PATH>]
             [--repos <NAME,...>] [--from <DATE>] [--to <DATE>] [--weeks <N>]
             [--since <DATE>] [--until <DATE>] [--dry-run]
             [--force-refresh-prs] [--validate-only] [--no-validate]
+            [--head-only]
+```
+
+**Branch coverage (tga 2.0.0+):** By default `tga collect` walks ALL local
+branches (`refs/heads/*`) and remote tracking refs (`refs/remotes/origin/*`),
+so commits on PR branches, feature branches, and hotfixes are not silently
+excluded. This fixes a data-integrity bug (#331) that was losing ~56% of
+commits in multi-branch repos when using the HEAD-only default from tga ≤ 1.5.4.
+
+To restore the legacy HEAD-only behaviour, pass `--head-only` globally or set
+`head_only: true` on individual repository entries in your YAML config.
+
+**Migration from tga ≤ 1.5.4:** existing databases are missing commits from
+non-default branches. Re-collect with `--force` to recover that history:
+
+```bash
+tga collect --force   # re-walk all weeks with full branch coverage
 ```
 
 | Flag | Description |
@@ -233,10 +250,13 @@ tga collect [--config <PATH>] [--database <PATH>]
 | `--force-refresh-prs` | Re-fetch ADO pull requests even when already cached (backfills pre-v1.0.9 rows) |
 | `--validate-only` | Run configuration validation and exit (0 on success, 1 on errors) |
 | `--no-validate` | Skip pre-flight configuration validation |
+| `--head-only` | Restore legacy HEAD-only revwalk (tga ≤ 1.5.4 behaviour); also available per-repo via `head_only: true` in YAML |
 
 ```bash
 tga collect --repos my-project --from 2024-01-01 --to 2024-03-31
-tga collect --weeks 4   # collect last 4 weeks across all repos
+tga collect --weeks 4           # collect last 4 weeks across all repos
+tga collect --force             # re-collect all history (e.g. after upgrading to 2.0.0)
+tga collect --head-only         # legacy HEAD-only walk for all repos
 ```
 
 ### tga classify

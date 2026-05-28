@@ -67,6 +67,16 @@ pub struct CollectionPipeline {
     /// When `true`, skip the tag and release-branch reachability scan
     /// (i.e. do not populate `fact_commit_reachability` with tag/branch data).
     skip_tag_reachability: bool,
+    /// When `true`, seed every repository's revwalk from HEAD only (legacy
+    /// 1.x behaviour).  When `false` (default since 2.0.0), all local branch
+    /// heads and `refs/remotes/origin/*` refs are pushed so commits on
+    /// non-default branches are not silently excluded.
+    ///
+    /// A per-repo `head_only: true` in `RepositoryConfig` provides the same
+    /// opt-out for a single repository while keeping all-branch coverage for
+    /// the rest.  The global flag here is OR-ed with the per-repo flag — if
+    /// either is `true`, that repo walks HEAD only.
+    head_only: bool,
 }
 
 impl CollectionPipeline {
@@ -84,6 +94,7 @@ impl CollectionPipeline {
             no_fetch: false,
             force_refresh_prs: false,
             skip_tag_reachability: false,
+            head_only: false,
         }
     }
 
@@ -114,6 +125,20 @@ impl CollectionPipeline {
     /// thousands of tags.
     pub fn with_skip_tag_reachability(mut self, skip: bool) -> Self {
         self.skip_tag_reachability = skip;
+        self
+    }
+
+    /// Enable or disable the global HEAD-only revwalk escape hatch.
+    ///
+    /// Why: tga 2.0.0 changed the default to walk all local branches and remote
+    /// tracking refs. This method lets the CLI `--head-only` flag propagate to
+    /// every per-repo collector in the pipeline.  Per-repo `head_only: true` in
+    /// `RepositoryConfig` provides the same opt-out for individual repos.
+    /// What: when `true`, overrides all repos to seed from HEAD only; when
+    /// `false` (the default), repos use their per-config `head_only` setting.
+    /// Test: see `tests::head_only_legacy_behavior` in extractor.rs.
+    pub fn with_head_only(mut self, head_only: bool) -> Self {
+        self.head_only = head_only;
         self
     }
 
@@ -149,8 +174,15 @@ impl CollectionPipeline {
         let resolver = IdentityResolver::from_config(&self.config);
 
         for repo_cfg in &self.config.repositories {
+            // Per-repo head_only is OR-ed with the global pipeline flag: if
+            // either is true, that repo walks HEAD only.  This lets operators
+            // set `--head-only` globally (the CLI flag) or `head_only: true`
+            // per repo in YAML without requiring both to be set.
+            let effective_head_only = self.head_only || repo_cfg.head_only;
             let collector = match GitCollector::new(repo_cfg) {
-                Ok(c) => c.no_fetch(self.no_fetch),
+                Ok(c) => c
+                    .no_fetch(self.no_fetch)
+                    .with_head_only(effective_head_only),
                 Err(e) => {
                     let msg = format!("failed to open repo {}: {e}", repo_cfg.path.display());
                     warn!("{msg}");

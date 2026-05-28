@@ -205,6 +205,22 @@ pub struct RepositoryConfig {
     /// `github.org` convention).
     #[serde(default, alias = "owner")]
     pub org: Option<String>,
+
+    /// Per-repo opt-out of all-branch walking.
+    ///
+    /// Why: the 2.0.0 default changed to walk all local branches and remote
+    /// tracking refs (`refs/heads/*` + `refs/remotes/origin/*`).  Setting
+    /// `head_only: true` restores the legacy HEAD-only walk for a specific
+    /// repository while keeping all-branch coverage for every other repo.
+    /// Global opt-out is available via the `--head-only` CLI flag on
+    /// `tga collect`.
+    /// What: when `true`, the `GitCollector` seeds the revwalk from HEAD only
+    /// (same behaviour as tga ≤ 1.5.4).  When `false` (the default), all
+    /// local heads and `refs/remotes/origin/*` are pushed.
+    /// Test: see `tests::multi_branch_coverage` and related in
+    /// `collect::git::extractor`.
+    #[serde(default)]
+    pub head_only: bool,
 }
 
 /// Team roster and identity aliases.

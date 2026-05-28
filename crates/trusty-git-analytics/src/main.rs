@@ -244,6 +244,22 @@ pub struct CollectArgs {
     /// dynamically by CI).
     #[arg(long, default_value_t = false)]
     pub no_validate: bool,
+    /// Restore legacy HEAD-only revwalk for all repositories.
+    ///
+    /// tga 2.0.0 changed the default to walk ALL local branches and remote
+    /// tracking refs (refs/heads/* + refs/remotes/origin/*), fixing a
+    /// data-integrity bug where commits on non-default branches (PR branches,
+    /// feature branches, hotfixes) were silently excluded (#331).
+    ///
+    /// Pass --head-only to revert to the 1.x HEAD-only walk for all repos.
+    /// For a per-repo opt-out, set `head_only: true` in the repository entry
+    /// in your YAML config.
+    ///
+    /// NOTE: existing tga.db files collected with tga <= 1.5.4 are missing
+    /// commits from non-default branches.  Run `tga collect --force` after
+    /// upgrading to 2.0.0 to recover that history.
+    #[arg(long, default_value_t = false)]
+    pub head_only: bool,
 }
 
 /// Arguments for `tga classify`.
