@@ -212,6 +212,18 @@ application/binary code and `thiserror` for library error types. Reserve
 `expect()` only for cases that are genuinely programmer errors (invariants that
 can never occur at runtime).
 
+🔴 **500-line file size hard cap** — no source file (`.rs`) should exceed 500 lines.
+Files approaching this limit are a signal to split into focused submodules before the
+next feature lands on them. When splitting, prefer: one public module per logical
+concept, a thin `mod.rs` that re-exports, and sibling files with clear single
+responsibilities. File a refactor ticket for any existing file that already exceeds
+500 lines rather than continuing to grow it.
+
+Current known violations (file refactor tickets open):
+- `crates/open-mpm/src/ctrl/mod.rs` (~5,730 lines) → #170
+- `crates/open-mpm/src/runtime.rs` (~5,148 lines) → #171
+- `crates/open-mpm/src/workflow/engine.rs` (~4,965 lines) → #172
+
 🔴 **`thiserror` for libraries, `anyhow` for binaries** — library crates
 (`trusty-common`, `trusty-mcp-core`, etc.) define structured error enums with
 `#[derive(thiserror::Error)]`. Binary and daemon crates use `anyhow::Result`
@@ -516,6 +528,12 @@ installed, the build script fails loudly. Install pnpm or set
 🟡 **`[patch.crates-io]` only works at the workspace root** — do not add
 `[patch]` tables inside individual crate `Cargo.toml` files; Cargo ignores
 them. All patches must live in the root `Cargo.toml`.
+
+🔴 **Growing a file past 500 lines instead of splitting** — the compiler does not
+stop you, but continued feature additions to a 1,000+ line file make the module
+harder to review, reason about, and test. Split proactively. The open-mpm `ctrl/`,
+`runtime.rs`, and `workflow/engine.rs` files (#170, #171, #172) are the canonical
+bad examples of what happens when this rule isn't enforced.
 
 🟢 **MSRV drift** — the workspace pins `rust-version = "1.88"`. Running
 `rustup update` and picking up a new nightly may introduce syntax that
