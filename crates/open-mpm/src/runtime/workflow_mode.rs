@@ -607,8 +607,7 @@ pub(super) async fn run_workflow(
             // never delay the main workflow result.
             let project_root = project_path.clone();
             tokio::spawn(async move {
-                if let Err(e) = super::subagent_mode::trigger_postmortem(&project_root, &sid).await
-                {
+                if let Err(e) = super::postmortem::trigger_postmortem(&project_root, &sid).await {
                     tracing::warn!(error = %e, "postmortem agent dispatch failed");
                 }
             });
