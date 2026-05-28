@@ -235,7 +235,7 @@ impl HttpProber for RealHttpProber {
             Err(e) => {
                 return HealthState::Fail {
                     detail: format!("failed to build HTTP client: {e}"),
-                }
+                };
             }
         };
         match client.get(url).send() {
@@ -428,10 +428,10 @@ impl Discoverer {
 
     /// Return cached status if fresh, otherwise probe and cache.
     fn probe_or_cached(&mut self, name: &str, decl: &ServiceDecl) -> ServiceStatus {
-        if let Some((inserted_at, cached)) = self.cache.get(name) {
-            if inserted_at.elapsed() < CACHE_TTL {
-                return cached.clone();
-            }
+        if let Some((inserted_at, cached)) = self.cache.get(name)
+            && inserted_at.elapsed() < CACHE_TTL
+        {
+            return cached.clone();
         }
         let status = self.probe(name, decl);
         self.cache
@@ -483,14 +483,10 @@ impl Discoverer {
 
         let uptime_secs = pid.and_then(|p| self.probe_uptime(p));
 
-        let log_path = decl.log_path.as_ref().map(|p| {
+        let log_path = decl.log_path.as_ref().and_then(|p| {
             let expanded = expand_tilde_owned(p);
-            if expanded.exists() {
-                Some(expanded)
-            } else {
-                None
-            }
-        }).flatten();
+            expanded.exists().then_some(expanded)
+        });
 
         ServiceStatus {
             name: name.to_string(),
@@ -551,12 +547,10 @@ impl Discoverer {
             None => return HealthState::Unknown,
         };
         // Extract the port from the base URL (e.g. "http://localhost:7878").
-        let port_str = url
-            .rsplit(':')
-            .next()
-            .unwrap_or("0");
+        let port_str = url.rsplit(':').next().unwrap_or("0");
         let health_url = template.replace("{port}", port_str);
-        self.http_prober.get_health(&health_url, HEALTH_PROBE_TIMEOUT)
+        self.http_prober
+            .get_health(&health_url, HEALTH_PROBE_TIMEOUT)
     }
 
     /// Run the version command and return the first stdout line.
@@ -599,7 +593,6 @@ impl Discoverer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
     use std::sync::Arc;
     use std::sync::Mutex;
 
@@ -909,7 +902,9 @@ mod tests {
             Box::new(MockVersionRunner { version: None }),
         );
         let status = d.status("test-svc").unwrap();
-        assert!(matches!(status.health, HealthState::Fail { ref detail } if detail.contains("refused")));
+        assert!(
+            matches!(status.health, HealthState::Fail { ref detail } if detail.contains("refused"))
+        );
     }
 
     #[test]

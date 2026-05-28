@@ -651,24 +651,22 @@ fn services(action: ServicesAction) -> anyhow::Result<()> {
             // list always exits 0.
         }
 
-        ServicesAction::Status { name, json } => {
-            match discoverer.status(&name) {
-                None => {
-                    eprintln!("unknown service: {name}");
-                    std::process::exit(2);
+        ServicesAction::Status { name, json } => match discoverer.status(&name) {
+            None => {
+                eprintln!("unknown service: {name}");
+                std::process::exit(2);
+            }
+            Some(status) => {
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&status)?);
+                } else {
+                    print_service_status_block(&status);
                 }
-                Some(status) => {
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&status)?);
-                    } else {
-                        print_service_status_block(&status);
-                    }
-                    if !status.running {
-                        std::process::exit(1);
-                    }
+                if !status.running {
+                    std::process::exit(1);
                 }
             }
-        }
+        },
 
         ServicesAction::Port { name } => match discoverer.status(&name) {
             None => {
@@ -820,8 +818,8 @@ fn print_services_table(statuses: &[trusty_mpm::services::ServiceStatus]) {
     const W_VERSION: usize = 12;
 
     println!(
-        "{:<W_NAME$} {:<W_STATUS$} {:<W_PORT$} {:<W_VERSION$} {}",
-        "NAME", "STATUS", "PORT", "VERSION", "HEALTH"
+        "{:<W_NAME$} {:<W_STATUS$} {:<W_PORT$} {:<W_VERSION$} HEALTH",
+        "NAME", "STATUS", "PORT", "VERSION"
     );
 
     for s in statuses {
@@ -872,20 +870,18 @@ fn print_service_status_block(s: &trusty_mpm::services::ServiceStatus) {
     println!("  Status:   {}", if s.running { "running" } else { "down" });
     println!(
         "  PID:      {}",
-        s.pid.map(|p| p.to_string()).unwrap_or_else(|| "\u{2014}".to_string())
+        s.pid
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "\u{2014}".to_string())
     );
     println!(
         "  Port:     {}",
-        s.port.map(|p| p.to_string()).unwrap_or_else(|| "\u{2014}".to_string())
+        s.port
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "\u{2014}".to_string())
     );
-    println!(
-        "  URL:      {}",
-        s.url.as_deref().unwrap_or("\u{2014}")
-    );
-    println!(
-        "  Version:  {}",
-        s.version.as_deref().unwrap_or("\u{2014}")
-    );
+    println!("  URL:      {}", s.url.as_deref().unwrap_or("\u{2014}"));
+    println!("  Version:  {}", s.version.as_deref().unwrap_or("\u{2014}"));
     let health_label = match &s.health {
         HealthState::Ok => "ok".to_string(),
         HealthState::Unknown => "unknown (no health endpoint)".to_string(),
@@ -4367,8 +4363,7 @@ mod tests {
 
     #[test]
     fn cli_parses_services_port() {
-        let cli =
-            Cli::try_parse_from(["trusty-mpm", "services", "port", "trusty-search"]).unwrap();
+        let cli = Cli::try_parse_from(["trusty-mpm", "services", "port", "trusty-search"]).unwrap();
         match cli.command {
             Command::Services {
                 action: ServicesAction::Port { name },
@@ -4379,8 +4374,7 @@ mod tests {
 
     #[test]
     fn cli_parses_services_url() {
-        let cli =
-            Cli::try_parse_from(["trusty-mpm", "services", "url", "trusty-search"]).unwrap();
+        let cli = Cli::try_parse_from(["trusty-mpm", "services", "url", "trusty-search"]).unwrap();
         match cli.command {
             Command::Services {
                 action: ServicesAction::Url { name },
@@ -4403,8 +4397,7 @@ mod tests {
 
     #[test]
     fn cli_parses_services_log() {
-        let cli =
-            Cli::try_parse_from(["trusty-mpm", "services", "log", "trusty-search"]).unwrap();
+        let cli = Cli::try_parse_from(["trusty-mpm", "services", "log", "trusty-search"]).unwrap();
         match cli.command {
             Command::Services {
                 action: ServicesAction::Log { name },

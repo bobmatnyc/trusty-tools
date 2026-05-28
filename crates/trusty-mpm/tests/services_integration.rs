@@ -57,7 +57,10 @@ fn smoke_test_services_health_against_live_trusty_search() {
         .health("trusty-search")
         .expect("trusty-search must be in the manifest");
 
-    println!("health result: name={}, state={:?}, message={}", result.name, result.state, result.message);
+    println!(
+        "health result: name={}, state={:?}, message={}",
+        result.name, result.state, result.message
+    );
     assert_eq!(
         result.state,
         HealthState::Ok,
