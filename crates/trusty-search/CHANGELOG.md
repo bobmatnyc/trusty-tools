@@ -7,6 +7,36 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.18.0] - 2026-05-28
+
+### Changed
+
+- **Reduced default redb page-cache ceiling from 512 MB to 64 MB** (#329).
+  Empirical profiling showed the actual redb working set for the trusty-tools
+  corpus (23,513 chunks) is ~87 MB: a 512 MB cap run peaked at 557 MB RSS while
+  an 8 MB cap run peaked at 470 MB — a difference of exactly 87 MB. The 512 MB
+  ceiling was massively over-provisioned. The new 64 MB default captures the full
+  working set with ~27 MB of headroom for B-tree internal nodes and future corpus
+  growth, without the 33% indexing speed penalty observed at 8 MB (where I/O
+  pressure becomes the bottleneck). Peak RSS during `--force` reindex of the
+  trusty-tools corpus drops from 557 MB to ~470 MB (-15%). Override via
+  `TRUSTY_REDB_CACHE_MB=<MB>` env var if needed.
+
+### Performance
+
+- See `docs/trusty-search/regression-testing/v0.18.0-redb-cap-reduction-cert-2026-05-28.md`
+  for full cert numbers (3-run peak RSS distribution and reindex time comparison).
+
+### Notes
+
+- This is the B.2 quick-win from #329. The deferred B.1 (eliminate doc_terms),
+  B.3 (lazy chunk LRU), and B.5 (posting compression) optimizations are tracked
+  in the #329 follow-up work.
+- Warm reindex is unchanged (empirically free — see profiling doc §9 M2).
+- The `TRUSTY_REDB_CACHE_MB` env var override was already present; no API change.
+
+---
+
 ## [0.17.0] - 2026-05-27
 
 ### Added
