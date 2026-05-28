@@ -238,6 +238,11 @@ tga collect --repos my-service --branch main
 
 ### Monitor fetch health across many repos
 
+`tga` fetches via libgit2 with full TLS support — `https://` remotes (GitHub,
+GitLab, Bitbucket, etc.) work out of the box without a system `git` pre-fetch.
+On macOS the native Security framework is used; on Linux openssl is vendored
+statically; on Windows Schannel is used.
+
 By default `tga collect` always fetches each repo before walking and prints an
 end-of-run summary:
 

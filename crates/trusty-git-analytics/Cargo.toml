@@ -1,6 +1,6 @@
 [package]
 name = "tga"
-version = "2.1.0"
+version = "2.1.1"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.88) per #254. Required for
@@ -55,9 +55,14 @@ rusqlite = { workspace = true, features = ["chrono"] }
 # Git
 # Local pin retained: the workspace `git2` entry turns on default ssh+https
 # features and `vendored-openssl`; tga explicitly disables defaults to drop
-# the OpenSSL/libssh2 system dependency for cross-compiled musl builds.
-# Switching to `workspace = true` would change the linked TLS stack.
-git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+# the libssh2 system dependency. The `https` and `vendored-openssl` features
+# are added here (#337) so `tga collect` can fetch from https:// remotes
+# without an external system git:
+#   - macOS: uses the native Security framework (no openssl runtime dep)
+#   - Linux: vendors openssl statically (portable binaries, no system libssl)
+#   - Windows: uses Schannel (no openssl runtime dep)
+# SSH transport remains disabled (out of scope for this fix).
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "https", "vendored-openssl"] }
 # HTTP client — workspace entry already declares
 # `default-features = false, features = ["json", "stream", "rustls-tls"]`
 # which is a superset of what tga needs. The `stream` extra is harmless

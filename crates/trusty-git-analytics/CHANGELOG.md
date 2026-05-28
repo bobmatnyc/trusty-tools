@@ -5,6 +5,20 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] - 2026-05-28
+
+### Fixed
+
+- **HTTPS remote fetch support** (#337). Enable `git2` `https` and `vendored-openssl`
+  features so `tga collect` can fetch from `https://` remotes without an external
+  system `git` pre-fetch. The always-fetch behavior shipped in 2.0.0 now works for
+  the common case of GitHub/GitLab https remotes:
+  - macOS: uses the native Security framework (no openssl runtime dependency)
+  - Linux: vendors openssl statically (portable binaries, no system libssl)
+  - Windows: uses Schannel (no openssl runtime dependency)
+- The pre-2.1.1 workaround (pre-fetch with system git, then `tga collect --no-fetch`)
+  is no longer necessary for https remotes.
+
 ## [2.1.0] - 2026-05-28
 
 ### Added
