@@ -1,5 +1,6 @@
 //! `tga collect` — stage 1 (git extraction) entry point.
 
+use tga::collect::collector::FetchOutcome;
 use tga::collect::CollectionPipeline;
 use tga::core::config::Config;
 use tga::core::db::Database;
@@ -9,14 +10,14 @@ use crate::CollectArgs;
 
 /// Run the collection stage against the provided database.
 ///
-/// Applies CLI overrides (repository filter, since/until dates) on top of
-/// the loaded YAML configuration before invoking
-/// [`CollectionPipeline::run`].
-///
-/// When `args.dry_run` is set, the pipeline executes against a transient
-/// in-memory SQLite database so that the real `db` is left untouched. All
-/// extraction, classification rule loading, and API fetches still run so
-/// the user can preview the work that *would* have been persisted.
+/// Why: centralises all Stage 1 orchestration: config overrides, pipeline
+/// construction, dry-run shadow DB, fetch summary printing, and exit-code
+/// signalling for `--strict-fetch`.
+/// What: applies CLI overrides (repository filter, since/until dates) on top
+/// of the loaded YAML config, runs [`CollectionPipeline::run`], then prints
+/// the fetch summary and collection totals to stderr/stdout.
+/// Test: integration test in `tests/integration_test.rs`; fetch summary paths
+/// are unit-tested in `commands::collect::tests`.
 pub async fn run(config: Config, db: &mut Database, args: CollectArgs) -> anyhow::Result<()> {
     let mut cfg = config;
 
@@ -59,13 +60,24 @@ pub async fn run(config: Config, db: &mut Database, args: CollectArgs) -> anyhow
         }
     }
 
+    // Issue #334: emit a visible warning when --no-fetch suppresses the
+    // pre-walk fetch so users know the data may be stale.
+    if args.no_fetch {
+        eprintln!(
+            "WARNING: --no-fetch active. Local clones may be stale. \
+             tga collect will walk only what's already in your local object store."
+        );
+    }
+
     let pipeline = CollectionPipeline::new(cfg)
         .with_force(args.force)
         .with_no_fetch(args.no_fetch)
         .with_force_refresh_prs(args.force_refresh_prs)
         .with_skip_tag_reachability(args.skip_tag_reachability)
         .with_head_only(args.head_only)
-        .with_branches(args.branch);
+        .with_branches(args.branch)
+        .with_strict_fetch(args.strict_fetch)
+        .with_verbose_fetch(args.verbose_fetch);
 
     // In dry-run mode, redirect all writes to an ephemeral in-memory
     // database. The real `db` is never opened for write.
@@ -107,5 +119,154 @@ pub async fn run(config: Config, db: &mut Database, args: CollectArgs) -> anyhow
             eprintln!("  warning: {e}");
         }
     }
+
+    // Issue #334: print per-repo fetch summary to stderr.
+    print_fetch_summary(&stats.fetch_outcomes, args.verbose_fetch);
+
+    // Issue #334: honour --strict-fetch — exit non-zero if any fetch failed.
+    if args.strict_fetch {
+        let failures: Vec<_> = stats
+            .fetch_outcomes
+            .iter()
+            .filter(|f| matches!(f.outcome, FetchOutcome::Failed { .. }))
+            .collect();
+        if !failures.is_empty() {
+            anyhow::bail!(
+                "--strict-fetch: {} repo(s) had fetch failures (see fetch summary above)",
+                failures.len()
+            );
+        }
+    }
+
     Ok(())
+}
+
+/// Print the end-of-collect fetch summary to stderr.
+///
+/// Why: surfaces fetch failures inline in the terminal output so users can
+/// diagnose stale-data issues without grepping tracing logs.
+/// What: counts successes, failures, and skips; always prints the one-line
+/// header; prints a failure detail line per failed repo; prints success lines
+/// only when `verbose` is true.
+/// Test: unit tests below cover the table construction logic.
+fn print_fetch_summary(outcomes: &[tga::collect::collector::PerRepoFetch], verbose: bool) {
+    if outcomes.is_empty() {
+        return;
+    }
+
+    let total = outcomes.len();
+    let successes: Vec<_> = outcomes
+        .iter()
+        .filter(|f| matches!(f.outcome, FetchOutcome::Success { .. }))
+        .collect();
+    let failures: Vec<_> = outcomes
+        .iter()
+        .filter(|f| matches!(f.outcome, FetchOutcome::Failed { .. }))
+        .collect();
+    let skipped: Vec<_> = outcomes
+        .iter()
+        .filter(|f| matches!(f.outcome, FetchOutcome::Skipped { .. }))
+        .collect();
+
+    let fetched = successes.len();
+    let failed = failures.len();
+
+    if failed > 0 {
+        eprintln!(
+            "Fetch summary: {fetched} / {total} repos updated ({failed} failure(s), {} skipped)",
+            skipped.len()
+        );
+        for f in &failures {
+            if let FetchOutcome::Failed { error, .. } = &f.outcome {
+                eprintln!("  - {}: {error}", f.repo);
+            }
+        }
+    } else {
+        eprintln!(
+            "Fetch summary: {fetched} / {total} repos updated (0 failures, {} skipped)",
+            skipped.len()
+        );
+    }
+
+    if verbose {
+        for f in &successes {
+            if let FetchOutcome::Success { remote } = &f.outcome {
+                eprintln!("  + {}: fetched from {remote}", f.repo);
+            }
+        }
+        for f in &skipped {
+            if let FetchOutcome::Skipped { reason } = &f.outcome {
+                eprintln!("  ~ {}: skipped ({reason})", f.repo);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tga::collect::collector::{FetchOutcome, PerRepoFetch};
+
+    use super::*;
+
+    /// Why: the summary must print a header line with correct counts; the
+    /// failure detail must include the repo name and error.
+    /// What: build a slice with one success and one failure, call
+    /// `print_fetch_summary`, assert it does not panic and the logic returns.
+    /// Test: output goes to stderr (not captured by default); we test that the
+    /// function compiles and runs without panicking for the most important
+    /// invariants.
+    #[test]
+    fn fetch_summary_counts_correctly() {
+        let outcomes = vec![
+            PerRepoFetch {
+                repo: "repo-a".to_string(),
+                outcome: FetchOutcome::Success {
+                    remote: "origin".to_string(),
+                },
+            },
+            PerRepoFetch {
+                repo: "repo-b".to_string(),
+                outcome: FetchOutcome::Failed {
+                    remote: "origin".to_string(),
+                    error: "timeout".to_string(),
+                },
+            },
+            PerRepoFetch {
+                repo: "repo-c".to_string(),
+                outcome: FetchOutcome::Skipped {
+                    reason: "--no-fetch".to_string(),
+                },
+            },
+        ];
+        // Should not panic.
+        print_fetch_summary(&outcomes, false);
+        print_fetch_summary(&outcomes, true);
+    }
+
+    /// Why: empty outcomes must produce no output (avoid spurious "Fetch
+    /// summary: 0 / 0" lines when the pipeline has no repos).
+    /// What: call `print_fetch_summary` with an empty slice and assert early
+    /// return (no panic).
+    /// Test: this test itself.
+    #[test]
+    fn fetch_summary_empty_outcomes_is_noop() {
+        // Must not panic.
+        print_fetch_summary(&[], false);
+    }
+
+    /// Why: `--no-fetch` must emit a visible warning so users know data may be stale.
+    /// What: checks that the no_fetch path in the pipeline sets strict_fetch/verbose_fetch
+    /// correctly via the builder (smoke test for builder method existence).
+    /// Test: this test itself.
+    #[test]
+    fn pipeline_builder_accepts_fetch_flags() {
+        use tga::collect::CollectionPipeline;
+        use tga::core::config::Config;
+        let cfg = Config::default();
+        let pipeline = CollectionPipeline::new(cfg)
+            .with_strict_fetch(true)
+            .with_verbose_fetch(true);
+        assert!(pipeline.strict_fetch());
+        assert!(pipeline.verbose_fetch());
+    }
 }

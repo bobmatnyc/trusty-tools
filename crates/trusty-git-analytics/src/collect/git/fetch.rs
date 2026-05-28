@@ -19,22 +19,35 @@ use std::path::PathBuf;
 use git2::{Cred, CredentialType, FetchOptions, RemoteCallbacks, Repository};
 use tracing::{info, warn};
 
+use crate::collect::collector::{FetchOutcome, PerRepoFetch};
 use crate::collect::errors::Result;
 
 /// Fetch all refs from the configured remote before walking.
 ///
-/// Returns `Ok(())` if:
-/// - the fetch succeeds,
-/// - the repository has no remote with the requested name (purely local
-///   repos are a supported case), or
-/// - authentication fails non-interactively (warn-and-continue so a CI
-///   misconfiguration doesn't break the whole pipeline).
-///
-/// # Errors
-///
-/// Currently returns [`crate::collect::CollectError`] only for unexpected libgit2 errors
-/// that aren't classified as auth/transport failures.
+/// Why: backwards-compatible soft-fail wrapper; callers that do not need
+/// per-repo outcome tracking use this.
+/// What: returns `Ok(())` whether the fetch succeeds or fails so that
+/// collection can always proceed on whatever the local clone has.
+/// Test: covered indirectly by extractor tests that call `GitCollector::collect`.
 pub fn fetch_remote(repo: &Repository, remote_name: &str) -> Result<()> {
+    fetch_remote_with_outcome(repo, remote_name).map(|_| ())
+}
+
+/// Fetch all refs from the configured remote and return a typed outcome.
+///
+/// Why: `fetch_remote` discards success/failure information; this variant
+/// surfaces it as a [`FetchOutcome`] so the CLI can print an end-of-run
+/// summary table (requirement #334).
+/// What: attempts `git fetch <remote_name>`.  Returns:
+///   - `FetchOutcome::Success` on a clean fetch,
+///   - `FetchOutcome::Skipped` when the named remote does not exist
+///     (local-only repos are a supported case — not an error),
+///   - `FetchOutcome::Failed` for any auth/transport/git2 error.
+///
+/// Test: unit test `tests::fetch_outcome_skipped_for_local_repo` in this
+/// module verifies the Skipped path; Failed and Success paths are exercised
+/// by integration tests against real git fixtures.
+pub fn fetch_remote_with_outcome(repo: &Repository, remote_name: &str) -> Result<FetchOutcome> {
     let mut remote = match repo.find_remote(remote_name) {
         Ok(r) => r,
         Err(e) => {
@@ -44,7 +57,9 @@ pub fn fetch_remote(repo: &Repository, remote_name: &str) -> Result<()> {
                 error = %e,
                 "no matching remote; skipping fetch (local-only repo)"
             );
-            return Ok(());
+            return Ok(FetchOutcome::Skipped {
+                reason: "no remote configured".to_string(),
+            });
         }
     };
 
@@ -60,26 +75,57 @@ pub fn fetch_remote(repo: &Repository, remote_name: &str) -> Result<()> {
 
     // Fetch with default refspecs (empty slice == use configured refspecs).
     match remote.fetch(&[] as &[&str], Some(&mut fetch_options), None) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            info!(remote = remote_name, "fetch succeeded");
+            Ok(FetchOutcome::Success {
+                remote: remote_name.to_string(),
+            })
+        }
         Err(e) => {
             // git2 lumps auth, transport, and certificate problems together;
-            // treat anything in the auth/transport family as a soft failure.
-            if is_auth_or_transport_error(&e) {
-                warn!(
-                    remote = remote_name,
-                    error = %e,
-                    "fetch failed (auth/transport) — continuing with local refs"
-                );
-                Ok(())
+            // treat anything in the auth/transport family as a soft failure
+            // but record the error string so the end-of-run summary is useful.
+            let kind = if is_auth_or_transport_error(&e) {
+                "auth/transport"
             } else {
-                warn!(
-                    remote = remote_name,
-                    error = %e,
-                    "fetch failed — continuing with local refs"
-                );
-                Ok(())
-            }
+                "git"
+            };
+            warn!(
+                remote = remote_name,
+                error = %e,
+                kind,
+                "fetch failed — continuing with local refs"
+            );
+            Ok(FetchOutcome::Failed {
+                remote: remote_name.to_string(),
+                error: e.to_string(),
+            })
         }
+    }
+}
+
+/// Build a [`PerRepoFetch`] by running a tracked fetch for a named repository.
+///
+/// Why: wraps `fetch_remote_with_outcome` with the repo display name so the
+/// returned value is ready to push into [`crate::collect::collector::CollectionStats::fetch_outcomes`].
+/// What: opens the repo, runs `fetch_remote_with_outcome`, and packages the
+/// result with `repo_name`.  If opening the repo fails, returns a Failed
+/// outcome rather than propagating the error (consistent with the soft-fail
+/// policy for all per-repo operations).
+/// Test: covered by the integration test in `collector::tests`.
+pub fn fetch_and_record(repo: &Repository, repo_name: &str, remote_name: &str) -> PerRepoFetch {
+    match fetch_remote_with_outcome(repo, remote_name) {
+        Ok(outcome) => PerRepoFetch {
+            repo: repo_name.to_string(),
+            outcome,
+        },
+        Err(e) => PerRepoFetch {
+            repo: repo_name.to_string(),
+            outcome: FetchOutcome::Failed {
+                remote: remote_name.to_string(),
+                error: e.to_string(),
+            },
+        },
     }
 }
 
@@ -149,4 +195,44 @@ fn is_auth_or_transport_error(e: &git2::Error) -> bool {
             | git2::ErrorClass::Net
             | git2::ErrorClass::Callback
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Why: local-only repos (no remotes) are a valid configuration; the
+    /// fetch path must return Skipped rather than an error.
+    /// What: creates a temp in-memory git repo with no remotes, calls
+    /// `fetch_remote_with_outcome`, and asserts the Skipped variant.
+    /// Test: this test itself.
+    #[test]
+    fn fetch_outcome_skipped_for_local_repo() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let repo = git2::Repository::init(td.path()).expect("init");
+        // No remote configured → expect Skipped.
+        let outcome =
+            fetch_remote_with_outcome(&repo, "origin").expect("no error expected from soft-fail");
+        assert!(
+            matches!(outcome, FetchOutcome::Skipped { .. }),
+            "expected Skipped, got {outcome:?}"
+        );
+    }
+
+    /// Why: ensure that `fetch_and_record` wraps the outcome with the correct
+    /// repo name without panicking.
+    /// What: uses the same local-only repo and verifies PerRepoFetch.repo field.
+    /// Test: this test itself.
+    #[test]
+    fn fetch_and_record_sets_repo_name() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let repo = git2::Repository::init(td.path()).expect("init");
+        let prf = fetch_and_record(&repo, "my-repo", "origin");
+        assert_eq!(prf.repo, "my-repo");
+        assert!(
+            matches!(prf.outcome, FetchOutcome::Skipped { .. }),
+            "expected Skipped, got {:?}",
+            prf.outcome
+        );
+    }
 }

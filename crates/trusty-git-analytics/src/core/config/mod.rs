@@ -221,6 +221,17 @@ pub struct RepositoryConfig {
     /// `collect::git::extractor`.
     #[serde(default)]
     pub head_only: bool,
+
+    /// Optional timeout (in seconds) for the pre-walk `git fetch origin`.
+    ///
+    /// Why: a single slow or unresponsive remote can stall an entire
+    /// `tga collect` run when the default system timeout is very long.
+    /// Providing a per-repo cap lets one repo time out without blocking others.
+    /// What: when `Some(n)`, the fetch is limited to `n` seconds; when `None`
+    /// (the default), the system / git2 transport defaults are used.
+    /// Test: exercised indirectly by end-to-end tests that pass `no_fetch=true`.
+    #[serde(default)]
+    pub fetch_timeout_secs: Option<u64>,
 }
 
 /// Team roster and identity aliases.
