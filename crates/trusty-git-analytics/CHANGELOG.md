@@ -5,6 +5,12 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.3] - 2026-05-27
+
+### Fixed
+
+- **`JiraProjectTier` (Tier 1.6) and `IssueTypeTier` (Tier 1.5) misreport classification method (#319)** — Commits classified via `jira.jira_project_mappings` (Tier 1.6) were persisted with `method = 'regex_rule'` instead of `'external_source'`, causing JIRA project-key-driven verdicts to be attributed to the regex bucket in analytics dashboards. Similarly, PM issue-type-driven verdicts (Tier 1.5, e.g. JIRA `"Bug"` → `bugfix`, Linear `"Story"` → `feature`) were misreported as `'exact_rule'`. Both tiers now correctly emit `ClassificationMethod::ExternalSource` since classification is driven by external ticket-system metadata, not commit-message text patterns. The regression became observable after the 1.5.2 fix to inline `commits.ticket_id` population (#316) — once users could see which commits had JIRA ticket IDs, the misattributed method in `classifications.method` was detectable. No schema migration required; re-running `tga classify` on affected date ranges will repopulate the correct method values.
+
 ## [1.5.2] - 2026-05-27
 
 ### Fixed

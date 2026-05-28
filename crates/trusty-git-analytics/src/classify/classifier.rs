@@ -623,9 +623,12 @@ mod tests {
 
     /// Why: exact-keyword conventional-commit prefixes (`fix:`, `feat:`)
     /// must still beat the JIRA mapping — they encode developer intent
-    /// at much higher confidence than the project key.
+    /// at much higher confidence than the project key. The cascade runs
+    /// Tier 1 (ExactRule) before Tier 1.6 (JiraProjectTier), so the
+    /// cc-fix ExactRule verdict is returned before the JIRA tier is
+    /// consulted.
     /// What: classify a `fix: TQL-1 ...` message with a TQL mapping
-    /// configured; assert the cc-fix rule wins.
+    /// configured; assert the cc-fix rule wins and reports ExactRule.
     /// Test: pure cascade exercise.
     #[test]
     fn exact_rule_still_beats_jira_project_mapping() {
@@ -644,5 +647,39 @@ mod tests {
             .expect("verdict");
         assert_eq!(v.category, "bugfix");
         assert_eq!(v.method, ClassificationMethod::ExactRule);
+    }
+
+    /// Why: the JIRA project-key tier (Tier 1.6) must report
+    /// `ExternalSource` rather than `RegexRule` so that analytics
+    /// dashboards correctly attribute JIRA-project-driven verdicts to the
+    /// external-source bucket. Before tga 1.5.3 the wrong method caused
+    /// JIRA contribution to appear as ~1% (`regex_rule`) when it should
+    /// have been 5–10% (`external_source`) (issue #319).
+    /// What: classify a bare JIRA-key message with a project mapping and
+    /// assert the verdict's method is `ExternalSource`.
+    /// Test: pure cascade exercise, no DB.
+    #[test]
+    fn jira_project_tier_reports_external_source_method() {
+        let mut mappings = HashMap::new();
+        mappings.insert("TQL".to_string(), "bug_fix".to_string());
+        let engine = ClassificationEngine::with_taxonomy_and_mappings(
+            default_rules(),
+            ClassificationEngineConfig::default(),
+            Vec::new(),
+            mappings,
+            None,
+        )
+        .expect("engine builds");
+        // No conventional-commit prefix: the JIRA project tier fires (not ExactRule).
+        let v = engine
+            .classify_sync("TQL-1234 fix null pointer", false)
+            .expect("verdict");
+        assert_eq!(
+            v.method,
+            ClassificationMethod::ExternalSource,
+            "JIRA project-key mapping must report ExternalSource, not RegexRule"
+        );
+        assert_eq!(v.category, "bug_fix");
+        assert_eq!(v.ticket_id.as_deref(), Some("TQL-1234"));
     }
 }

@@ -131,7 +131,16 @@ impl JiraProjectTier {
             subcategory: None,
             top_level: Some(top_level),
             confidence: self.confidence,
-            method: ClassificationMethod::RegexRule,
+            // Why: the verdict comes from an external JIRA project-key mapping
+            // (operator-supplied semantic context), not from a regex pattern
+            // in the commit message. Labelling it `RegexRule` caused all
+            // JIRA-project-mapped commits to appear as `regex_rule` in the
+            // `classifications.method` column, hiding the JIRA contribution
+            // from analytics dashboards (issue #319 / tga 1.5.3 regression
+            // fix). `ExternalSource` is the correct label — it covers all
+            // paths where classification is driven by external ticket-system
+            // metadata rather than message-text heuristics.
+            method: ClassificationMethod::ExternalSource,
             ticket_id,
             complexity: None,
         })

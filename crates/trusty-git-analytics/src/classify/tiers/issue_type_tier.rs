@@ -91,7 +91,16 @@ impl IssueTypeTier {
             subcategory: None,
             top_level: Some(top_level),
             confidence: ISSUE_TYPE_CONFIDENCE,
-            method: ClassificationMethod::ExactRule,
+            // Why: the verdict is derived from a PM-system issue type field
+            // (e.g. JIRA `"Bug"`, Linear `"Story"`) — an external ticket-system
+            // signal, not a commit-message heuristic. Using `ExactRule` here
+            // caused PM-issue-type-classified commits to report as `exact_rule`
+            // in analytics, conflating rule-file keyword matches with PM
+            // metadata signals. `ExternalSource` is the correct label — it
+            // covers all paths where classification is driven by external
+            // ticket-system metadata rather than message-text patterns.
+            // Fixed in tga 1.5.3 (issue #319).
+            method: ClassificationMethod::ExternalSource,
             ticket_id: None,
             complexity: None,
         })
