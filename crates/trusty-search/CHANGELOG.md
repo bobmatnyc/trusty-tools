@@ -7,6 +7,47 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.16.0] - 2026-05-27
+
+### Changed
+
+- **Issue #315 — Lazy `trusty-embedderd` spawn with single-flight + optional
+  idle shutdown.** `trusty-search start` no longer spawns the `trusty-embedderd`
+  subprocess at daemon boot. Instead, a `LazyEmbedderHandle` is armed at
+  startup and the child process starts on the first call to `embed` or
+  `embed_batch` (reindex, hybrid search, `context_inference`). For
+  `lexical_only` deployments with no semantic workloads the sidecar is never
+  spawned, saving ~123 MB RSS.
+
+  **Startup log change:** the boot log now contains
+  `"embedderd supervisor armed, deferred spawn enabled"` instead of the
+  previous "spawning sidecar" message. The first embed request logs
+  `"LazyEmbedderHandle: first embed request — spawning trusty-embedderd"`.
+
+  **Single-flight guarantee:** concurrent first callers serialise on an
+  internal `Mutex`; exactly one spawn attempt is made regardless of how many
+  embed calls arrive simultaneously.
+
+  **Optional idle shutdown** (`TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS`, default
+  `0` = disabled): when set to a non-zero value, the sidecar is killed after
+  that many seconds of inactivity and the spawn gate is reset so the next
+  embed request triggers a fresh spawn. Useful for `lexical_only` deployments
+  that occasionally run a reindex.
+
+  **Escape hatches unaffected:**
+  - `TRUSTY_EMBEDDER=in-process` — no supervisor, no change.
+  - `TRUSTY_EMBEDDER=http://...` or `unix://...` — no spawn, no change.
+  - Binary discovery (`TRUSTY_EMBEDDERD_BIN`, PATH) still runs at daemon boot
+    and fails fast if the binary is missing, preserving the existing install-hint
+    error for misconfigured deployments.
+
+  ```bash
+  # Arm idle-shutdown for a lexical_only deployment:
+  TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS=300 trusty-search start
+  ```
+
+---
+
 ## [0.15.1] - 2026-05-27
 
 ### Added

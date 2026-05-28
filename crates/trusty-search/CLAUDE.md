@@ -507,7 +507,7 @@ environment variable (issue #110 Phase 2):
 
 | `TRUSTY_EMBEDDER` value | Behaviour |
 |-------------------------|-----------|
-| unset / `auto` / `stdio` | **Default.** Spawns `trusty-embedderd --stdio` as a supervised child process. `trusty-embedderd` is a **required runtime dependency** — if it is not found on PATH and `TRUSTY_EMBEDDERD_BIN` is unset, `trusty-search start` exits with an actionable error. **`cargo install trusty-search` installs `trusty-embedderd` automatically** — no separate install needed. |
+| unset / `auto` / `stdio` | **Default.** Arms a `LazyEmbedderHandle` at boot (issue #315 — deferred spawn). `trusty-embedderd --stdio` is spawned on the **first embed request** (reindex, hybrid search, `context_inference`), not at daemon startup. `trusty-embedderd` is a **required runtime dependency** — binary discovery still runs at boot and fails fast with an install hint if the binary is missing. **`cargo install trusty-search` installs `trusty-embedderd` automatically.** |
 | `in-process` / `local`  | Explicit escape hatch — in-process ONNX embedding. Use for tests, debugging, or environments where the sidecar cannot be installed. **Never activated silently**: you must set this variable explicitly to use the in-process path. |
 | `http://…`              | HTTP remote — `POST /embed` to a manually-managed `trusty-embedderd` HTTP listener. |
 | `unix:/path/to/sock`    | UDS remote — JSON-RPC 2.0 to a manually-managed `trusty-embedderd --socket` listener. |
@@ -521,6 +521,7 @@ environment variable (issue #110 Phase 2):
 | `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS` | `30` | How long to wait for the sidecar's readiness probe. |
 | `TRUSTY_EMBEDDERD_RESTART_BACKOFF_MAX_SECS` | `60` | Exponential back-off ceiling between crash restarts. |
 | `TRUSTY_EMBEDDERD_MAX_RESTARTS` | `5` | Maximum restarts before the supervisor gives up. |
+| `TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS` | `0` | **Idle shutdown (issue #315).** After this many seconds with no embed request the sidecar is killed and the spawn gate is reset so the next request triggers a fresh spawn. `0` (default) disables idle-shutdown entirely. Useful for `lexical_only` deployments that only occasionally need embeddings. |
 | `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` | `60` | Overall timeout for the initial embedder init (all modes). |
 
 ---

@@ -266,8 +266,10 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
 /// fallback to in-process would let users miss the new architecture entirely.
 ///
 /// What: reads `TRUSTY_EMBEDDER` and dispatches:
-///   - unset / `auto` / `stdio` → spawn trusty-embedderd --stdio (DEFAULT; fails
-///     fast with an install hint if the binary is not found on PATH)
+///   - unset / `auto` / `stdio` → arm a `LazyEmbedderHandle` (issue #315,
+///     deferred spawn — the child process starts on the first embed request,
+///     not at daemon boot). Fails fast with an install hint if the binary is
+///     not on PATH.
 ///   - `in-process`             → in-process FastEmbedder (explicit escape hatch
 ///     for tests / debugging — never silently activated)
 ///   - `http://…`               → HTTP remote (manually managed embedderd)
@@ -275,21 +277,23 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
 ///   - `candle`                 → Candle Metal backend (feature-gated)
 ///
 /// Test: run `trusty-search start` with `RUST_LOG=info` — the startup log must
-/// contain `embedder mode: stdio-sidecar` before the first request is served.
+/// contain `"embedderd supervisor armed, deferred spawn enabled"` before the
+/// first request is served, and `"spawning trusty-embedderd"` only when the
+/// first hybrid search or reindex arrives.
 /// To test fail-fast: run with PATH stripped and TRUSTY_EMBEDDERD_BIN unset;
 /// the process must exit with an error containing "cargo install trusty-embedderd".
 ///
 /// Returns `(embedder, embedderd_pid_slot)`. `embedderd_pid_slot` is `Some` only
-/// for the stdio-sidecar path and holds an `Arc<AtomicU32>` owned by the
-/// `EmbedderSupervisor` loop — the loop keeps it updated with the current child
-/// OS PID (0 when no live process) so callers can sample the sidecar's RSS
-/// without holding any mutex. Non-stdio paths return `None`.
+/// for the stdio-sidecar path and holds an `Arc<AtomicU32>` that the
+/// `LazyEmbedderHandle` keeps updated with the current child OS PID (0 when no
+/// live process) so callers can sample the sidecar's RSS without holding any
+/// mutex. Non-stdio paths return `None`.
 async fn build_embedder() -> Result<(
     std::sync::Arc<dyn crate::core::Embedder>,
     Option<Arc<AtomicU32>>,
 )> {
     use crate::service::embedder_supervisor::{
-        locate_embedderd_binary, EmbedderSupervisor, SupervisorConfig,
+        locate_embedderd_binary, LazyEmbedderHandle, SupervisorConfig,
     };
 
     let trusty_embedder_env = std::env::var("TRUSTY_EMBEDDER").unwrap_or_default();
@@ -309,10 +313,17 @@ async fn build_embedder() -> Result<(
     }
 
     match trusty_embedder_env.as_str() {
-        // ── Auto-spawn stdio sidecar (Phase 2 default) ─────────────────────
-        // `TRUSTY_EMBEDDER` unset, "auto", or "stdio" → spawn
-        // `trusty-embedderd --stdio` and communicate via piped stdin/stdout.
-        // No socket files. Lifecycle tied to parent.
+        // ── Lazy-spawn stdio sidecar (issue #315 — deferred boot default) ──
+        // `TRUSTY_EMBEDDER` unset, "auto", or "stdio" → arm a
+        // `LazyEmbedderHandle`. The child is NOT spawned here; the first call
+        // to `embed` / `embed_batch` triggers the spawn so `lexical_only`
+        // deployments with no semantic workloads never pay the ~123 MB RSS
+        // cost.
+        //
+        // Binary discovery and config parsing still happen here (at daemon
+        // boot) so any misconfiguration (missing binary, bad env var) fails
+        // fast with an actionable error rather than surfacing silently on the
+        // first embed request.
         "" | "auto" | "stdio" => {
             // `trusty-embedderd` is a required runtime dependency — fail fast
             // with an actionable install hint rather than silently downgrading
@@ -338,30 +349,19 @@ async fn build_embedder() -> Result<(
 
             let config = SupervisorConfig::from_env();
 
-            tracing::info!("embedder mode: stdio-sidecar (binary={})", binary.display());
+            tracing::info!(
+                "embedder mode: stdio-sidecar lazy (binary={}, idle_shutdown_secs={})",
+                binary.display(),
+                config.idle_shutdown_secs,
+            );
 
-            // Issue #282: `spawn_stdio` now returns a third element — the
-            // `child_pid_slot` Arc<AtomicU32> owned by the supervisor.  The
-            // supervisor loop keeps it updated with the live child PID (0 when
-            // no process is running) so callers can sample the sidecar's RSS
-            // without acquiring any mutex.
-            let (supervisor, slot, child_pid_slot) =
-                EmbedderSupervisor::spawn_stdio(binary, config.into_common())
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("failed to spawn trusty-embedderd --stdio: {e}")
-                    })?;
+            // Issue #315: construct the lazy handle (no child spawned yet).
+            // The handle wraps the binary path and config; the child process
+            // starts on the first `embed_batch` call.
+            let handle = Arc::new(LazyEmbedderHandle::new(binary, config));
+            let pid_slot = handle.app_pid_slot();
 
-            // `start_supervisor_task` consumes the supervisor (detaches the
-            // loop as a background Tokio task). The child's `kill_on_drop`
-            // ensures cleanup when trusty-search exits; the supervisor loop
-            // handles crash-restart while running.
-            supervisor.start_supervisor_task();
-
-            // `SlotEmbedderAdapter` forwards embed calls to whatever client is
-            // currently stored in the slot. The supervisor swaps the slot on
-            // crash-restart so callers transparently use the new sidecar.
-            Ok((Arc::new(SlotEmbedderAdapter { slot }), Some(child_pid_slot)))
+            Ok((Arc::new(LazySlotEmbedderAdapter { handle }), Some(pid_slot)))
         }
 
         // ── In-process safety-valve ────────────────────────────────────────
@@ -530,45 +530,44 @@ impl crate::core::Embedder for UdsEmbedderAdapter {
     }
 }
 
-/// Adapter for the stdio sidecar path that reads through the supervisor's
-/// `Arc<RwLock<Arc<dyn EmbedderClient>>>` slot.
+/// Adapter for the lazy stdio sidecar path (issue #315).
 ///
-/// Why: the supervisor atomically swaps the live `StdioEmbedderClient` inside
-/// the slot on each crash-restart. Wrapping the slot access in this adapter
-/// keeps the swap transparent to all call sites — they hold one
-/// `Arc<SlotEmbedderAdapter>` and never see the underlying swap.
+/// Why: `LazyEmbedderHandle` defers the child spawn to the first embed call.
+/// This adapter satisfies the `Arc<dyn Embedder>` interface that the rest of
+/// the daemon holds, forwarding every `embed` / `embed_batch` call through
+/// `LazyEmbedderHandle::embed_via` which triggers the spawn on first use and
+/// then routes through the supervisor's slot on all subsequent calls.
 ///
-/// What: each `embed` / `embed_batch` call acquires a read lock, clones the
-/// inner `Arc<dyn EmbedderClient>`, releases the lock immediately, and
-/// delegates. The read lock is held only for the clone — actual embedding work
-/// happens outside the lock so a restart swap doesn't block in-flight calls.
+/// What: holds an `Arc<LazyEmbedderHandle>` and delegates both `embed` and
+/// `embed_batch` through `embed_via`. The lazy handle handles single-flight
+/// spawn, crash-restart transparency, and optional idle-shutdown internally.
 ///
 /// Test: exercised whenever `TRUSTY_EMBEDDER` is unset or set to `auto` /
-/// `stdio`; the `supervisor_spawns_and_serves_embed_requests` integration test
-/// validates round-trip correctness.
-struct SlotEmbedderAdapter {
-    slot: Arc<tokio::sync::RwLock<Arc<dyn trusty_common::embedder_client::EmbedderClient>>>,
+/// `stdio`. The `supervisor_spawns_and_serves_embed_requests` integration test
+/// validates round-trip correctness (marked `#[ignore]`, requires binary).
+struct LazySlotEmbedderAdapter {
+    handle: Arc<crate::service::embedder_supervisor::LazyEmbedderHandle>,
 }
 
 #[async_trait::async_trait]
-impl crate::core::Embedder for SlotEmbedderAdapter {
+impl crate::core::Embedder for LazySlotEmbedderAdapter {
     async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
-        let client = self.slot.read().await.clone();
-        let mut v = client
-            .embed_batch(vec![text.to_string()])
+        let text_owned = text.to_string();
+        let mut v = self
+            .handle
+            .embed_via(|client| async move { client.embed_batch(vec![text_owned]).await })
             .await
-            .map_err(|e| anyhow::anyhow!("stdio embed failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("lazy-stdio embed failed: {e}"))?;
         v.pop()
-            .ok_or_else(|| anyhow::anyhow!("stdio embedder returned no vector"))
+            .ok_or_else(|| anyhow::anyhow!("lazy-stdio embedder returned no vector"))
     }
 
     async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
-        let client = self.slot.read().await.clone();
         let owned: Vec<String> = texts.iter().map(|s| (*s).to_owned()).collect();
-        client
-            .embed_batch(owned)
+        self.handle
+            .embed_via(|client| async move { client.embed_batch(owned).await })
             .await
-            .map_err(|e| anyhow::anyhow!("stdio embed_batch failed: {e}"))
+            .map_err(|e| anyhow::anyhow!("lazy-stdio embed_batch failed: {e}"))
     }
 
     fn dimension(&self) -> usize {
