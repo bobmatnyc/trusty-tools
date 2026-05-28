@@ -19,7 +19,9 @@ Versions correspond to `Cargo.toml` patch releases.
   working set with ~27 MB of headroom for B-tree internal nodes and future corpus
   growth, without the 33% indexing speed penalty observed at 8 MB (where I/O
   pressure becomes the bottleneck). Peak RSS during `--force` reindex of the
-  trusty-tools corpus drops from 557 MB to ~470 MB (-15%). Override via
+  trusty-tools corpus drops from 571 MB (v0.17.0 baseline) to 518 MB median
+  (3-run distribution: 515/518/522 MB) — a 53 MB / 9.3% reduction with
+  negligible timing impact (+1.6%, within noise). Override via
   `TRUSTY_REDB_CACHE_MB=<MB>` env var if needed.
 
 ### Performance
