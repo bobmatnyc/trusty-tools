@@ -488,6 +488,15 @@ cargo run -p trusty-mpm-cli -- --help
 # trusty-memory (MCP server + embedded Svelte UI)
 RUST_LOG=info cargo run -p trusty-memory
 
+# Fire-and-forget memory note from any agent (no MCP tool needed):
+# Sub-agents spawned via Claude Code's Agent tool do not inherit MCP
+# connections, so they cannot call `mcp__trusty-memory__memory_remember`
+# directly. The `note` subcommand POSTs to the daemon's HTTP endpoint
+# (`POST /api/v1/remember`) and returns immediately — the dispatch runs
+# on a detached `tokio::spawn`. Failures degrade to stderr + zero exit.
+trusty-memory note "key fact here" --palace my-project
+trusty-memory note "another fact" --palace my-project --tag style --tag preferences
+
 # Build a specific binary in release mode
 cargo build --release -p trusty-search
 ./target/release/trusty-search start

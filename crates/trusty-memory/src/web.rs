@@ -155,6 +155,15 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/activity", get(activity_handler))
         .route("/api/v1/activity/hook", post(hook_activity_handler))
         .route("/api/v1/admin/stop", post(admin_stop))
+        // Issue: fire-and-forget memory save for callers that cannot speak
+        // MCP. Sub-agents spawned via Claude Code's Agent tool inherit no
+        // MCP connections, so `memory_remember` is unreachable to them.
+        // This endpoint lets the agent shell out to `trusty-memory note`
+        // (which in turn POSTs here) and the request returns 202 the moment
+        // the body is parsed — the actual `memory_remember` dispatch runs
+        // on a detached `tokio::spawn`. Failures are logged at warn but
+        // never surface to the caller because the contract is one-way.
+        .route("/api/v1/remember", post(remember_async))
         // Multi-transport refactor: a single JSON-RPC 2.0 endpoint that
         // accepts the same envelopes the UDS transport speaks. Lets
         // browser clients, curl, and the stdio bridge fallback hit the
@@ -528,6 +537,99 @@ async fn admin_stop(State(_state): State<AppState>) -> Json<Value> {
         std::process::exit(0);
     });
     Json(serde_json::json!({ "ok": true, "message": "shutting down" }))
+}
+
+// ---------------------------------------------------------------------------
+// Fire-and-forget memory save (`POST /api/v1/remember`)
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /api/v1/remember`.
+///
+/// Why: agents spawned via Claude Code's Agent tool do not inherit any MCP
+/// connections, so the `memory_remember` MCP tool is unreachable to them.
+/// Exposing a plain HTTP entry point lets those agents shell out via the
+/// `trusty-memory note` CLI (or any `curl` call) without learning MCP.
+/// What: `content` is the drawer body and is required; `palace` falls back
+/// to the daemon's `--palace` default when omitted; `tags` is optional and
+/// passed through verbatim to the underlying handler.
+/// Test: `remember_async_*` tests in this module.
+#[derive(Debug, Deserialize)]
+struct RememberAsyncBody {
+    /// Drawer body. Required.
+    content: String,
+    /// Target palace. When `None`, the daemon's `--palace` default is used;
+    /// callers without a default-palace configured must pass this field or
+    /// the spawned task logs a warning and drops the request.
+    #[serde(default)]
+    palace: Option<String>,
+    /// Optional tag list to attach to the drawer.
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+}
+
+/// `POST /api/v1/remember` — fire-and-forget memory save.
+///
+/// Why: sub-agents spawned via Claude Code's Agent tool have no MCP
+/// connection (MCP servers are not inherited across sub-agent spawns), so
+/// they cannot invoke `mcp__trusty-memory__memory_remember` directly. They
+/// can, however, run shell commands — this endpoint plus the
+/// `trusty-memory note` CLI gives them a writable handle that needs no
+/// MCP plumbing. The contract is one-way: the request is parsed, validated,
+/// and queued on a `tokio::spawn`, then `202 Accepted` is returned
+/// immediately. Failures during the spawned dispatch (palace not found,
+/// content gate skip, redb error) are logged at `warn` but never propagate
+/// back to the caller because the agent has already exited by then.
+/// What: deserialises the body, rejects an empty `content` with 400 (the
+/// only synchronous validation), then maps `{content, palace, tags}` →
+/// `{text, palace, tags}` (the field names `handle_memory_remember`
+/// expects) and dispatches `memory_remember` from a detached task. Returns
+/// `202 Accepted` with `{"status":"queued"}`.
+/// Test: `remember_async_returns_202_and_persists` (happy path) and
+/// `remember_async_rejects_empty_content` (input validation).
+async fn remember_async(
+    State(state): State<AppState>,
+    Json(body): Json<RememberAsyncBody>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let content = body.content.trim();
+    if content.is_empty() {
+        return Err(ApiError::bad_request(
+            "remember: 'content' must be a non-empty string",
+        ));
+    }
+
+    // Build the MCP-shaped args once on the request thread so deserialisation
+    // errors never end up swallowed by the spawned task. `handle_memory_remember`
+    // expects `text` (not `content`), so translate the field name here.
+    let mut args = serde_json::Map::new();
+    args.insert("text".to_string(), Value::String(content.to_string()));
+    if let Some(p) = body.palace {
+        args.insert("palace".to_string(), Value::String(p));
+    }
+    if let Some(tags) = body.tags {
+        args.insert(
+            "tags".to_string(),
+            Value::Array(tags.into_iter().map(Value::String).collect()),
+        );
+    }
+    let args = Value::Object(args);
+
+    let state_for_task = state.clone();
+    tokio::spawn(async move {
+        match crate::tools::dispatch_tool(&state_for_task, "memory_remember", args).await {
+            Ok(v) => {
+                tracing::debug!(target: "trusty_memory::remember_async", result = %v, "queued remember succeeded");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "trusty_memory::remember_async",
+                    error = %format!("{e:#}"),
+                    "queued remember failed (caller already returned 202)",
+                );
+            }
+        }
+    });
+
+    Ok((StatusCode::ACCEPTED, Json(json!({ "status": "queued" }))))
 }
 
 // ---------------------------------------------------------------------------
@@ -2275,6 +2377,118 @@ mod tests {
         let Json(body) = admin_stop(State(state)).await;
         assert_eq!(body["ok"], Value::Bool(true));
         assert_eq!(body["message"].as_str(), Some("shutting down"));
+    }
+
+    /// `POST /api/v1/remember` returns 202 Accepted with a `queued` envelope
+    /// and the spawned task actually persists a drawer in the target palace.
+    ///
+    /// Why: this is the central contract of the fire-and-forget endpoint —
+    /// the response must come back immediately (no waiting on the redb write)
+    /// and the work must still happen. Without this test the endpoint could
+    /// silently regress to either "returns 202 but never writes" or "blocks
+    /// the caller on the dispatch".
+    /// What: provisions a palace, POSTs `{content, palace, tags}` to the
+    /// endpoint, asserts 202 + `{status:"queued"}`, then polls the palace's
+    /// drawer list (up to ~2 s) until the spawned task lands the write.
+    /// Test: this test.
+    #[tokio::test]
+    async fn remember_async_returns_202_and_persists() {
+        let state = test_state();
+        // Pre-create the target palace so the spawned task does not race
+        // against palace_create — we want to assert only the persist path.
+        let palace = Palace {
+            id: PalaceId::new("remember-async"),
+            name: "remember-async".to_string(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: state.data_root.join("remember-async"),
+        };
+        state
+            .registry
+            .create_palace(&state.data_root, palace)
+            .expect("create_palace");
+
+        let app = router().with_state(state.clone());
+        let body = json!({
+            "content": "Trusty-memory note CLI ships a fire-and-forget HTTP endpoint for sub-agents.",
+            "palace": "remember-async",
+            "tags": ["docs", "note-cli"],
+        })
+        .to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/remember")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::ACCEPTED,
+            "remember endpoint must respond 202 immediately"
+        );
+        let bytes = to_bytes(resp.into_body(), 1024).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["status"], "queued");
+
+        // Wait for the spawned task to finish. The dedup/blocklist gates run
+        // on the spawn thread, so we cannot synchronously await the write;
+        // poll the registry until the drawer lands or the deadline expires.
+        let handle = state
+            .registry
+            .open_palace(&state.data_root, &PalaceId::new("remember-async"))
+            .expect("open palace");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let count = handle.drawers.read().len();
+            if count >= 1 {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("spawned remember task never persisted a drawer (count={count})");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// `POST /api/v1/remember` with empty `content` returns 400 — the only
+    /// synchronous validation the endpoint performs.
+    ///
+    /// Why: empty content is a programming error in the caller (the spawned
+    /// task would just hit the content-gate and silently drop the request),
+    /// so we surface it as a 400 before queueing. Every other failure mode
+    /// (palace not found, blocklist, dedup) is logged on the spawn task and
+    /// still returns 202 because the agent has already exited by then.
+    /// What: POST `{content: ""}` and assert 400. Also covers the trim path —
+    /// whitespace-only content is treated as empty.
+    /// Test: this test.
+    #[tokio::test]
+    async fn remember_async_rejects_empty_content() {
+        let state = test_state();
+        let app = router().with_state(state);
+        for body in [json!({"content": ""}), json!({"content": "   \n  "})] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/remember")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "empty content must be rejected; body={body}"
+            );
+        }
     }
 
     #[tokio::test]

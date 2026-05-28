@@ -21,6 +21,7 @@ use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use trusty_memory::commands::inbox_check::handle_inbox_check;
 use trusty_memory::commands::migrate::{handle_migrate, MigrateTarget};
+use trusty_memory::commands::note::handle_note;
 use trusty_memory::commands::prompt_context::handle_prompt_context;
 use trusty_memory::commands::send_message::handle_send_message;
 use trusty_memory::commands::service::{handle_service, ServiceAction};
@@ -261,6 +262,33 @@ enum Command {
         palace: Option<String>,
     },
 
+    /// Fire-and-forget save of a memory note to the running daemon.
+    ///
+    /// Why: sub-agents spawned via Claude Code's Agent tool do not inherit
+    /// any MCP connections, so the `mcp__trusty-memory__memory_remember`
+    /// tool is unreachable to them. They can still execute shell commands,
+    /// so this subcommand POSTs to `POST /api/v1/remember` and returns
+    /// immediately — the daemon dispatches `memory_remember` on a detached
+    /// task. Errors degrade to stderr warnings + zero exit because the
+    /// agent has already left the room by the time the write completes.
+    ///
+    /// Example: `trusty-memory note "User prefers tabs" --palace my-project \
+    ///           --tag style --tag preferences`.
+    Note {
+        /// Drawer body. Required.
+        #[arg(value_name = "CONTENT")]
+        content: String,
+
+        /// Target palace (defaults to the daemon's `--palace` default when
+        /// omitted; required when the daemon was started without one).
+        #[arg(long, value_name = "NAME")]
+        palace: Option<String>,
+
+        /// Tag to attach to the drawer. Repeatable.
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
+    },
+
     /// Re-run auto-KG extraction across every drawer in a palace.
     ///
     /// Why: Issue #97 — `memory_remember` now extracts triples on write,
@@ -398,6 +426,11 @@ async fn main() -> Result<()> {
             from,
         } => handle_send_message(to, purpose, content, from).await,
         Command::InboxCheck { palace } => handle_inbox_check(palace).await,
+        Command::Note {
+            content,
+            palace,
+            tags,
+        } => handle_note(content, palace, tags).await,
         Command::KgRebuild { palace } => {
             trusty_memory::commands::kg_rebuild::handle_kg_rebuild(palace).await
         }
