@@ -35,7 +35,9 @@ pub mod util;
 #[cfg(test)]
 mod tests;
 
-pub use socket::{CtrlSocket, ctrl_socket_path, cwd_project_id, is_connection_refused};
+pub use socket::{
+    BindOutcome, CtrlSocket, ctrl_socket_path, cwd_project_id, is_connection_refused,
+};
 pub use supervisor::{CtrlSupervisor, SupervisorOutcome};
 
 // Public surface re-exports — preserve the v0.38.x API for downstream callers

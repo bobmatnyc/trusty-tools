@@ -98,19 +98,52 @@ pub fn ctrl_socket_path(project_id: &str) -> PathBuf {
         .join(format!("{project_id}.ctrl.sock"))
 }
 
-/// Returns true when an `io::Error` indicates "no peer is listening on this
-/// socket" — i.e., the socket file exists but no process owns it.
+/// `ENOTSOCK` — "Socket operation on non-socket". Raised by
+/// `UnixStream::connect` when the path exists but is a regular file (e.g. a
+/// crashed controller left a placeholder, or a name collision). Same numeric
+/// value on Linux and macOS, so a raw-errno check is portable here. We can't
+/// match on `ErrorKind` because std maps this to the unstable `Uncategorized`
+/// variant.
+const ENOTSOCK: i32 = 38;
+
+/// Returns true when an `io::Error` indicates the socket file is stale — i.e.
+/// the path either doesn't exist, has no listening peer, or isn't a socket at
+/// all. In every such case taking over the path is safe.
 ///
-/// Why: We treat this case as "stale socket" and cleanup + retry binding
+/// Why: We treat these cases as "stale socket" and cleanup + retry binding
 /// rather than aborting. Other I/O errors (permission denied, I/O failure)
 /// should bubble up.
-/// What: Matches `ConnectionRefused` (the most common stale-socket signal)
-/// plus a couple of platform variants we have observed.
+/// What: Matches `ConnectionRefused` (the common stale-socket signal),
+/// `NotFound` (no file), and the `ENOTSOCK` raw errno (path is a non-socket
+/// file).
+/// Test: `is_connection_refused_classifies_enotsock` plus the bind_singleton
+/// stale-takeover test.
 pub fn is_connection_refused(err: &io::Error) -> bool {
     matches!(
         err.kind(),
         io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
-    )
+    ) || err.raw_os_error() == Some(ENOTSOCK)
+}
+
+/// Outcome of an attempt to become the singleton controller for a project.
+///
+/// Why: `bind_singleton` has to distinguish three states the caller treats
+/// differently — "I am now the controller", "someone else already is, route
+/// to them", and "binding genuinely failed (I/O error)". Returning a typed
+/// outcome instead of a bare `io::Result<UnixListener>` lets `run_ctrl_inner`
+/// branch without re-probing or string-matching error kinds.
+/// What: Either the freshly-bound `UnixListener` (we won the singleton race),
+/// or `AlreadyRunning` carrying the live `UnixStream` to the existing
+/// controller (the probe succeeded, so we refused to clobber its socket).
+/// Test: `bind_singleton_refuses_when_controller_alive` and
+/// `bind_singleton_binds_when_socket_absent` / `..._stale` in the tests module.
+#[derive(Debug)]
+pub enum BindOutcome {
+    /// This process is now the controller; it owns `listener`.
+    Bound(UnixListener),
+    /// A live controller already owns the socket. The open `UnixStream` is
+    /// returned so the caller can immediately route to it without re-probing.
+    AlreadyRunning(UnixStream),
 }
 
 /// Helpers grouped under one type for clear ergonomics at the call site.
@@ -160,6 +193,48 @@ impl CtrlSocket {
         UnixListener::bind(path)
     }
 
+    /// Singleton-safe bind: probe first, only clobber a confirmed-dead socket.
+    ///
+    /// Why: Plain [`bind`](Self::bind) unconditionally `remove_file`s the
+    /// existing socket before binding. If a live controller already owns it,
+    /// that removal breaks the running controller — the exact race the design
+    /// doc flags (`process-model-and-event-architecture.md`, Q1: "the second
+    /// one removes the stale socket on startup, breaking the first"). Bare
+    /// `open-mpm` re-invocations reach the become-controller path without the
+    /// argv-gated probe in `mode_dispatch`, so the singleton guarantee has to
+    /// live here, atomically with the bind, to be race-safe.
+    /// What: Probes `path` with `timeout`. If a controller answers, returns
+    /// [`BindOutcome::AlreadyRunning`] with the open stream and binds nothing.
+    /// If the probe fails with a stale-socket signal (connection-refused /
+    /// not-found / timeout), removes the stale file and binds a fresh listener,
+    /// returning [`BindOutcome::Bound`]. Any other probe error (e.g. permission
+    /// denied) is treated conservatively as "do not clobber" and propagated.
+    /// Test: `bind_singleton_refuses_when_controller_alive`,
+    /// `bind_singleton_binds_when_socket_absent`, and
+    /// `bind_singleton_binds_over_stale_socket`.
+    pub async fn bind_singleton(path: &Path, timeout: Duration) -> io::Result<BindOutcome> {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        match Self::probe(path, timeout).await {
+            // A controller answered — refuse to clobber; hand the stream back.
+            Ok(stream) => Ok(BindOutcome::AlreadyRunning(stream)),
+            // Stale socket (or no socket at all): safe to take over.
+            Err(e) if is_connection_refused(&e) || e.kind() == io::ErrorKind::TimedOut => {
+                Self::cleanup(path);
+                Ok(BindOutcome::Bound(UnixListener::bind(path)?))
+            }
+            // Any other error (permission denied, etc.): do NOT clobber.
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Convenience: [`bind_singleton`](Self::bind_singleton) with the default
+    /// [`DEFAULT_PROBE_TIMEOUT`].
+    pub async fn bind_singleton_default(path: &Path) -> io::Result<BindOutcome> {
+        Self::bind_singleton(path, DEFAULT_PROBE_TIMEOUT).await
+    }
+
     /// Remove a stale socket file. Best-effort: errors are ignored.
     ///
     /// Why: Called from two paths (after a failed probe in main.rs, and
@@ -184,6 +259,21 @@ mod tests {
         assert_eq!(sanitize_project_id("my project"), "my_project");
         assert_eq!(sanitize_project_id("a/b\\c"), "a_b_c");
         assert_eq!(sanitize_project_id(""), "unknown");
+    }
+
+    #[test]
+    fn is_connection_refused_classifies_enotsock() {
+        let refused = io::Error::from(io::ErrorKind::ConnectionRefused);
+        assert!(is_connection_refused(&refused));
+        let not_found = io::Error::from(io::ErrorKind::NotFound);
+        assert!(is_connection_refused(&not_found));
+        let enotsock = io::Error::from_raw_os_error(ENOTSOCK);
+        assert!(is_connection_refused(&enotsock), "ENOTSOCK must be stale");
+        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+        assert!(
+            !is_connection_refused(&denied),
+            "permission-denied must NOT be treated as stale"
+        );
     }
 
     #[test]
@@ -256,6 +346,80 @@ mod tests {
             .expect("probe should connect to fresh listener");
         drop(stream);
         drop(listener);
+        CtrlSocket::cleanup(&path);
+    }
+
+    /// Why: The core singleton guarantee — if a controller is already
+    /// listening, a second process must NOT clobber its socket. This is the
+    /// race the design doc calls out (Q1). We assert the live stream is
+    /// returned instead of a fresh listener.
+    #[tokio::test]
+    async fn bind_singleton_refuses_when_controller_alive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("alive.ctrl.sock");
+        // First "controller" wins the socket.
+        let first = CtrlSocket::bind(&path).await.unwrap();
+
+        // Second invocation must detect the live controller and refuse.
+        let outcome = CtrlSocket::bind_singleton(&path, Duration::from_millis(200))
+            .await
+            .expect("bind_singleton should classify a live controller as AlreadyRunning");
+        match outcome {
+            BindOutcome::AlreadyRunning(stream) => drop(stream),
+            BindOutcome::Bound(_) => {
+                panic!("bind_singleton clobbered a live controller's socket")
+            }
+        }
+        // The first controller's listener is still usable.
+        drop(first);
+        CtrlSocket::cleanup(&path);
+    }
+
+    /// Why: On a clean machine (no prior controller, no socket file) the first
+    /// invocation must successfully become the controller.
+    #[tokio::test]
+    async fn bind_singleton_binds_when_socket_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("fresh.ctrl.sock");
+        let outcome = CtrlSocket::bind_singleton(&path, Duration::from_millis(50))
+            .await
+            .expect("bind_singleton should bind when no socket exists");
+        match outcome {
+            BindOutcome::Bound(listener) => {
+                // Confirm it's live by probing it.
+                let stream = CtrlSocket::probe(&path, Duration::from_millis(200))
+                    .await
+                    .expect("freshly bound socket should accept a probe");
+                drop(stream);
+                drop(listener);
+            }
+            BindOutcome::AlreadyRunning(_) => {
+                panic!("bind_singleton reported AlreadyRunning for an absent socket")
+            }
+        }
+        CtrlSocket::cleanup(&path);
+    }
+
+    /// Why: When a controller was hard-killed (`kill -9`), the socket file
+    /// remains but nothing listens. The next invocation must clean it up and
+    /// take over — otherwise the project is permanently stuck.
+    #[tokio::test]
+    async fn bind_singleton_binds_over_stale_socket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("stale-takeover.ctrl.sock");
+        // Simulate a leftover socket file with no listener.
+        tokio::fs::write(&path, b"stale").await.unwrap();
+        assert!(path.exists());
+
+        let outcome = CtrlSocket::bind_singleton(&path, Duration::from_millis(50))
+            .await
+            .expect("bind_singleton should take over a stale socket");
+        match outcome {
+            BindOutcome::Bound(listener) => drop(listener),
+            BindOutcome::AlreadyRunning(_) => {
+                panic!("bind_singleton treated a stale socket as a live controller")
+            }
+        }
         CtrlSocket::cleanup(&path);
     }
 

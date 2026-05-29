@@ -26,7 +26,7 @@ use crate::registry::ProjectRegistry;
 use crate::session_record;
 
 use super::ctrl_turn::ctrl_chat_turn;
-use super::socket::{CtrlSocket, ctrl_socket_path, cwd_project_id};
+use super::socket::{BindOutcome, CtrlSocket, ctrl_socket_path, cwd_project_id};
 use super::socket_listener::spawn_socket_listener;
 use super::state::{Ctrl, PmMsg};
 use super::util::{append_pm_message, detect_self_project};
@@ -341,15 +341,32 @@ async fn run_ctrl_inner(with_stdin: bool, ready_tx: Option<oneshot::Sender<()>>)
         }
     }
 
+    // Singleton enforcement (#192): probe-then-bind atomically so a second
+    // controller never clobbers a live one's socket. `bind_singleton` returns
+    // `AlreadyRunning` when a controller already owns the socket — in that case
+    // we do NOT start our own accept loop (which would have stolen the socket
+    // file and broken the first controller's CLI forwarding). We still proceed
+    // with the rest of setup so this process can serve as a local REPL, but it
+    // intentionally relinquishes the singleton command port to the incumbent.
     let project_id = cwd_project_id();
     let sock_path = ctrl_socket_path(&project_id);
-    match CtrlSocket::bind(&sock_path).await {
-        Ok(listener) => {
+    match CtrlSocket::bind_singleton_default(&sock_path).await {
+        Ok(BindOutcome::Bound(listener)) => {
             tracing::info!(
                 "[open-mpm] controller socket listening at {}",
                 sock_path.display()
             );
             tokio::spawn(spawn_socket_listener(listener));
+        }
+        Ok(BindOutcome::AlreadyRunning(stream)) => {
+            // Drop the probe stream immediately — we only used it to confirm a
+            // live incumbent. This process becomes a local-only REPL and leaves
+            // the command port to the existing controller.
+            drop(stream);
+            tracing::warn!(
+                path = %sock_path.display(),
+                "ctrl: another controller already owns the socket — running as local REPL only (CLI forwarding routes to the incumbent)"
+            );
         }
         Err(e) => {
             tracing::warn!(
