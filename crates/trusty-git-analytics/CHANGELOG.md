@@ -5,6 +5,41 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] - 2026-05-29
+
+### Fixed
+
+- **`tga classify` no longer hangs ~120s at exit with external sources enabled
+  (#397, bug 1)** — `tga` used the default multi-threaded Tokio runtime via
+  `#[tokio::main]`. On return the runtime drop blocks until every background
+  task finishes, including `reqwest`'s keep-alive connection-pool reaper, whose
+  idle sockets against a live server (e.g. JIRA/Atlassian) linger up to the
+  ~90s pool idle timeout. The process therefore completed all work, printed its
+  summary, then hung before terminating. `main` now builds the runtime
+  explicitly and calls `Runtime::shutdown_timeout(0)` after the async body
+  completes, dropping idle connection tasks immediately so the process exits
+  promptly. All real work is awaited before shutdown, so nothing is discarded.
+
+- **`tga classify` no longer fails with "database is locked" immediately after
+  `tga collect` (#397, bug 3)** — connections were opened without a
+  `busy_timeout`, so a `classify` that opened while a just-finished `collect`
+  was still flushing/checkpointing its WAL hit `SQLITE_BUSY` and failed
+  instantly. Every connection now sets `PRAGMA busy_timeout = 5000`, so a
+  transient checkpoint lock is waited out (up to 5s) instead of erroring.
+
+- **`classifications.complexity` (1–5) is now populatable via a discoverable
+  command (#397, bug 2)** — the complexity scoring logic shipped in 2.2.0
+  (the LLM tier produces scores; the pipeline persists them) but was only
+  reachable via the non-obvious `tga classify --backfill-complexity` flag. The
+  normal `tga classify` run only consults the LLM for low-confidence commits,
+  so rule-/JIRA-resolved commits keep `complexity = NULL`. A new
+  `tga backfill complexity` subcommand exposes the existing
+  `ClassificationPipeline::backfill_complexity` operation where operators look
+  for it. It fills every `complexity IS NULL` (non-`exact_rule`) row via the
+  LLM, supports `--dry-run` and `--use-llm`, and leaves
+  category/confidence/method untouched. (No new scoring feature was built; this
+  is a wiring/discoverability fix.)
+
 ## [2.2.0] - 2026-05-29
 
 ### Added

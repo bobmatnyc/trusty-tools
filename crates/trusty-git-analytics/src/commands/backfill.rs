@@ -14,10 +14,11 @@
 use clap::{Args, Subcommand};
 use git2::{Repository, Sort};
 use rusqlite::{params, Connection};
+use tga::classify::ClassificationPipeline;
 use tga::collect::git::scan_and_persist;
 use tga::collect::ticket::{extract_ticket_id, is_ticketed};
 use tga::core::config::{expand_path, Config};
-use tga::core::db::Database;
+use tga::core::db::{CheckpointMode, Database};
 use tga::core::effort::{compute_effort, FORMULA_VERSION};
 
 /// Arguments for `tga backfill`.
@@ -116,6 +117,34 @@ pub enum BackfillSubcommand {
     ///
     /// --branch is collect-only and not applicable here.
     Effort(EffortBackfillArgs),
+    /// Fill in missing `complexity` scores (1–5) for already-classified commits.
+    ///
+    /// The `complexity` column is only ever populated by the LLM tier, which
+    /// the normal `tga classify` run consults solely for low-confidence
+    /// commits. Commits resolved by rules or external sources (JIRA/GitHub)
+    /// therefore keep `complexity = NULL`. This subcommand asks the LLM for a
+    /// 1–5 complexity score for every classification with `complexity IS NULL`
+    /// and a non-`exact_rule` method, leaving category/confidence/method
+    /// untouched. Requires `use_llm: true` (or `--use-llm`) and an LLM API key.
+    ///
+    /// Equivalent to `tga classify --backfill-complexity`; exposed here so the
+    /// operation is discoverable under `tga backfill` (issue #397, bug 2).
+    /// --repos/--since/--until/--weeks do not scope this operation: all NULL
+    /// rows are processed.
+    Complexity(ComplexityBackfillArgs),
+}
+
+/// Arguments for `tga backfill complexity`.
+#[derive(Args, Debug)]
+pub struct ComplexityBackfillArgs {
+    /// Enable the LLM tier for this run even if `config.classification.use_llm`
+    /// is `false`.
+    ///
+    /// Complexity scoring is LLM-only, so the LLM tier must be on. Pass this
+    /// flag (or set `use_llm: true` in config) along with an API key
+    /// (`OPENAI_API_KEY` / `OPENROUTER_API_KEY`).
+    #[arg(long, default_value_t = false)]
+    pub use_llm: bool,
 }
 
 /// Arguments for `tga backfill effort`.
@@ -183,7 +212,7 @@ fn resolve_backfill_date_range(
 /// # Errors
 ///
 /// Propagates database errors from the underlying queries.
-pub fn run(config: Config, db: &mut Database, args: BackfillArgs) -> anyhow::Result<()> {
+pub async fn run(config: Config, db: &mut Database, args: BackfillArgs) -> anyhow::Result<()> {
     let (since, until) = resolve_backfill_date_range(&args)?;
     let repos = args.repos.clone();
     match args.subcommand {
@@ -204,7 +233,79 @@ pub fn run(config: Config, db: &mut Database, args: BackfillArgs) -> anyhow::Res
             until.as_deref(),
             args.dry_run,
         ),
+        BackfillSubcommand::Complexity(complexity_args) => {
+            backfill_complexity(config, db, complexity_args, args.dry_run).await
+        }
     }
+}
+
+// ── backfill complexity ────────────────────────────────────────────────────────
+
+/// Fill in missing `complexity` scores for already-classified commits.
+///
+/// Why: the `complexity` column added in 2.2.0 is only ever written by the LLM
+/// tier, and the normal `tga classify` run consults the LLM solely for
+/// low-confidence commits. On a corpus where most commits are resolved by
+/// rules or external sources (JIRA/GitHub), `complexity` stays `NULL` for
+/// nearly every row. The population logic already exists
+/// ([`ClassificationPipeline::backfill_complexity`]) and was reachable via
+/// `tga classify --backfill-complexity`, but operators looked for it under
+/// `tga backfill` and found nothing — so it appeared the feature was never
+/// shipped (issue #397, bug 2). This makes the operation discoverable here.
+/// What: builds a [`ClassificationPipeline`] from config (forcing `use_llm` on
+/// when `--use-llm` is passed), invokes `backfill_complexity`, and checkpoints
+/// the WAL on completion. In `--dry-run` it reports the candidate count without
+/// calling the LLM or writing.
+/// Test: `tests::backfill_complexity_dry_run_reports_candidates` (dry-run path)
+/// and the library-level `pipeline::tests::backfill_complexity_updates_only_null_rows`
+/// (population path, mock LLM).
+///
+/// # Errors
+///
+/// Returns an error if pipeline construction, the LLM calls, or DB access fail.
+async fn backfill_complexity(
+    config: Config,
+    db: &mut Database,
+    args: ComplexityBackfillArgs,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    if dry_run {
+        // Count candidate rows without invoking the LLM or writing anything.
+        let candidates: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM classifications \
+                 WHERE complexity IS NULL AND method != 'exact_rule'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        println!(
+            "Dry run — would request complexity scores for {candidates} classification(s) \
+             (complexity IS NULL, method != 'exact_rule'). No changes written."
+        );
+        return Ok(());
+    }
+
+    // Force the LLM tier on when requested; complexity scoring is LLM-only.
+    let mut cfg = config;
+    if args.use_llm {
+        let classification = cfg
+            .classification
+            .get_or_insert_with(tga::core::config::ClassificationConfig::default);
+        classification.use_llm = true;
+    }
+
+    let pipeline = ClassificationPipeline::new(cfg);
+    let updated = pipeline.backfill_complexity(db).await?;
+    println!("Backfilled complexity for {updated} commit(s)");
+
+    // Flush the WAL after the backfill so the scores are durable in the main
+    // DB file (mirrors the post-classify checkpoint, issue #298).
+    if let Err(e) = db.wal_checkpoint(CheckpointMode::Truncate) {
+        tracing::warn!(error = %e, "WAL TRUNCATE checkpoint failed after complexity backfill");
+    }
+    Ok(())
 }
 
 // ── backfill effort ──────────────────────────────────────────────────────────
@@ -1305,6 +1406,53 @@ mod tests {
             )
             .expect("q");
         assert_eq!(reverts, 0);
+    }
+
+    /// Why: regression guard for issue #397 bug 2. `tga backfill complexity`
+    /// must be wired and its dry-run path must report the count of NULL-complexity
+    /// candidates without invoking the LLM (so it works offline) and without
+    /// mutating any row.
+    /// What: seed one classification with `complexity IS NULL` (regex_rule,
+    /// eligible) and one already-scored row (must not be counted); run the
+    /// dry-run backfill; assert no LLM is needed and nothing is written.
+    /// Test: in-memory DB; dry_run=true short-circuits before any LLM call.
+    #[tokio::test]
+    async fn backfill_complexity_dry_run_reports_candidates_without_writing() {
+        let mut db = Database::open_in_memory().expect("open");
+
+        // Candidate: NULL complexity, non-exact method.
+        db.connection()
+            .execute(
+                "INSERT INTO classifications (category, confidence, method, complexity) \
+                 VALUES ('feature', 0.5, 'regex_rule', NULL)",
+                [],
+            )
+            .expect("insert null-complexity row");
+        // Not a candidate: already scored.
+        db.connection()
+            .execute(
+                "INSERT INTO classifications (category, confidence, method, complexity) \
+                 VALUES ('bugfix', 0.8, 'regex_rule', 3)",
+                [],
+            )
+            .expect("insert scored row");
+
+        let args = ComplexityBackfillArgs { use_llm: false };
+        // dry_run=true must not hit the network; Config::default() has no LLM key.
+        backfill_complexity(Config::default(), &mut db, args, true)
+            .await
+            .expect("dry-run complexity backfill");
+
+        // Nothing changed: the NULL row is still NULL, the scored row still 3.
+        let null_count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM classifications WHERE complexity IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count null");
+        assert_eq!(null_count, 1, "dry-run must not write complexity scores");
     }
 
     // ── effort backfill tests ─────────────────────────────────────────────────

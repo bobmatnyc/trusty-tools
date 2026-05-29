@@ -566,8 +566,45 @@ static HELP: std::sync::LazyLock<trusty_common::help::HelpConfig> =
             .expect("tga help.yaml is bundled and valid")
     });
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Process entry point.
+///
+/// Why: a plain `#[tokio::main]` builds a multi-threaded runtime and, on
+/// return, drops it — which blocks until every background task the runtime
+/// spawned has finished. `reqwest`'s default `Client` keeps idle HTTP
+/// keep-alive connections in a pool whose reaper runs as such a background
+/// task; against a live server (e.g. JIRA/Atlassian) those sockets linger up
+/// to the pool idle timeout (~90s). The result is that `tga classify` with
+/// external sources enabled finishes all work, prints its summary, then hangs
+/// ~120s at exit waiting on the runtime drop before the process finally
+/// terminates (issue #397, bug 1).
+/// What: builds the multi-threaded runtime explicitly, runs the async body to
+/// completion, then calls [`tokio::runtime::Runtime::shutdown_timeout`] with a
+/// zero deadline so any still-idle connection-pool tasks are dropped
+/// immediately instead of blocking the process exit. All real work is already
+/// awaited inside `run`, so nothing useful is discarded.
+/// Test: `cargo test -p tga` (the existing suite) plus the manual repro in the
+/// issue; clean-exit timing is host-dependent so it is not unit-asserted.
+fn main() -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(run());
+    // Drop idle background tasks (e.g. reqwest's keep-alive connection pool)
+    // immediately rather than waiting on the runtime's default drop, which
+    // would block until those tasks wind down on their own.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(0));
+    result
+}
+
+/// Async program body, invoked by [`main`] on an explicit runtime.
+///
+/// Why: split out from `main` so the runtime can be shut down with a bounded
+/// timeout after the body completes (see [`main`]).
+/// What: parses CLI args, initializes tracing/config, opens the DB, and
+/// dispatches the chosen subcommand.
+/// Test: exercised end-to-end by every CLI invocation; per-command behavior is
+/// covered by each command module's tests.
+async fn run() -> anyhow::Result<()> {
     // Why: parse via `try_parse` so we can attach the workspace-shared
     // "did you mean?" suggestion (issue #216) before exiting on a clap error.
     let argv: Vec<String> = std::env::args().collect();
@@ -645,7 +682,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Report(args) => commands::report::run(config, &db, args)?,
         Commands::PrMetrics(args) => commands::pr_metrics::run(config, &db, args)?,
         Commands::Aliases(args) => commands::aliases::run(config, &mut db, args)?,
-        Commands::Backfill(args) => commands::backfill::run(config, &mut db, args)?,
+        Commands::Backfill(args) => commands::backfill::run(config, &mut db, args).await?,
         Commands::Override(args) => commands::override_cmd::run(config, &mut db, args)?,
         Commands::Rules(args) => commands::rules::run(config, &db, args)?,
         Commands::Deployments(args) => match args.subcommand {

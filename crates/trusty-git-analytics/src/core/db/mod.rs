@@ -4,6 +4,7 @@
 //! pragmas on every connection open (see `Database::apply_pragmas`):
 //!
 //! - `journal_mode = WAL` — concurrent reads during write-heavy collection
+//! - `busy_timeout = 5000` — wait up to 5 s for a lock before erroring
 //! - `synchronous = NORMAL` — durability with reasonable performance
 //! - `foreign_keys = ON` — enforce FK constraints
 //! - `cache_size = -65536` — 64 MB page cache (negative = KB)
@@ -91,11 +92,22 @@ impl Database {
     ///
     /// Pragmas applied (see module-level docs for rationale):
     /// - `journal_mode = WAL`
+    /// - `busy_timeout = 5000`
     /// - `synchronous = NORMAL`
     /// - `foreign_keys = ON`
     /// - `cache_size = -65536` (64 MB)
     /// - `temp_store = MEMORY`
     /// - `mmap_size = 268435456` (256 MB)
+    ///
+    /// Why the `busy_timeout`: in WAL mode a brief exclusive lock is taken
+    /// during checkpointing and at the tail of a write transaction. If
+    /// `tga classify` opens the DB while a just-finished `tga collect` is
+    /// still flushing/checkpointing its WAL, SQLite returns `SQLITE_BUSY`
+    /// ("database is locked") *immediately* with no retry — surfacing as a
+    /// hard failure to the operator (issue #397, bug 3). Setting
+    /// `busy_timeout` makes SQLite block and retry for up to 5 s, which is
+    /// far longer than any transient checkpoint lock, so the second command
+    /// waits the lock out instead of erroring.
     fn apply_pragmas(conn: &Connection) -> Result<()> {
         // `journal_mode` is a query-style pragma; use query_row to honor it.
         let mode: String = conn
@@ -103,15 +115,20 @@ impl Database {
             .map_err(TgaError::from)?;
         debug!(journal_mode = %mode, "applied WAL pragma");
         // Bundle the remaining pragmas in a single batch — none of them
-        // return rows so `execute_batch` is appropriate.
+        // return rows so `execute_batch` is appropriate. `busy_timeout` is
+        // first so a transient lock from a concurrent writer is waited out
+        // rather than failing the rest of the batch.
         conn.execute_batch(
-            "PRAGMA synchronous = NORMAL; \
+            "PRAGMA busy_timeout = 5000; \
+             PRAGMA synchronous = NORMAL; \
              PRAGMA foreign_keys = ON; \
              PRAGMA cache_size = -65536; \
              PRAGMA temp_store = MEMORY; \
              PRAGMA mmap_size = 268435456;",
         )?;
-        debug!("applied SQLite tuning pragmas (cache=64MB, mmap=256MB, temp=memory)");
+        debug!(
+            "applied SQLite tuning pragmas (busy_timeout=5s, cache=64MB, mmap=256MB, temp=memory)"
+        );
         Ok(())
     }
 
@@ -244,6 +261,61 @@ mod tests {
             .expect("passive checkpoint must not fail");
         db.wal_checkpoint(CheckpointMode::Truncate)
             .expect("truncate checkpoint must not fail");
+    }
+
+    /// Why: regression guard for issue #397 bug 3. Every connection must set a
+    /// non-zero `busy_timeout` so that a `classify` opened immediately after a
+    /// `collect` waits out the brief WAL checkpoint lock instead of failing
+    /// with "database is locked". Without the pragma, `busy_timeout` is 0 and
+    /// any contended lock errors instantly.
+    /// What: open a DB and read back `PRAGMA busy_timeout`; assert it is 5000ms.
+    /// Test: pure pragma read; works on in-memory and file DBs identically.
+    #[test]
+    fn busy_timeout_is_set_to_5000ms() {
+        let db = Database::open_in_memory().expect("open");
+        let timeout: i64 = db
+            .connection()
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .expect("query busy_timeout");
+        assert_eq!(
+            timeout, 5000,
+            "busy_timeout must be 5000ms so contended opens wait rather than erroring"
+        );
+    }
+
+    /// Why: a second connection opened against the same file-backed WAL
+    /// database (the `collect` → `classify` sequence) must succeed even while
+    /// the first connection holds an open write transaction for a moment;
+    /// `busy_timeout` makes the second connection wait rather than fail with
+    /// "database is locked" (issue #397 bug 3). This asserts the second open
+    /// applies its pragmas (including `busy_timeout`) without erroring while
+    /// the first connection is live.
+    /// What: open a file DB, keep it open, open a *second* `Database` on the
+    /// same path, and assert both report a 5000ms `busy_timeout`.
+    /// Test: uses a real temp-file DB so WAL locking semantics apply.
+    #[test]
+    fn second_open_on_same_file_succeeds_with_busy_timeout() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let db_path = tmp.path().to_path_buf();
+        tmp.keep().expect("keep tempfile");
+
+        let db1 = Database::open(&db_path).expect("first open");
+        assert_eq!(db1.journal_mode().expect("journal_mode"), "wal");
+
+        // A second connection (mimicking `tga classify` after `tga collect`)
+        // must open cleanly and also carry the busy_timeout pragma.
+        let db2 = Database::open(&db_path).expect("second open must not fail");
+        let timeout: i64 = db2
+            .connection()
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .expect("query busy_timeout");
+        assert_eq!(timeout, 5000);
+
+        drop(db1);
+        drop(db2);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     }
 
     /// Why: the checkpoint must succeed and the WAL file must be small (or
