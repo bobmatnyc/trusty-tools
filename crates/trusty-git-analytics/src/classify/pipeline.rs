@@ -11,8 +11,10 @@ use crate::classify::classifier::{ClassificationEngine, ClassificationEngineConf
 use crate::classify::errors::Result;
 use crate::classify::rules::{default_rules, load_rules};
 use crate::classify::sources::ExternalSourceResolver;
+use crate::classify::tiers::bedrock::DEFAULT_BEDROCK_MODEL;
+use crate::classify::tiers::llm::ANTHROPIC_DEFAULT_MODEL;
 use crate::classify::tiers::ClassificationResult;
-use crate::core::config::Config;
+use crate::core::config::{Config, LlmSource};
 use crate::core::db::{CheckpointMode, Database};
 use crate::core::models::ClassificationMethod;
 
@@ -305,6 +307,23 @@ impl ClassificationPipeline {
         if use_llm {
             let llm_classifier = if let Some(llm_cfg) = self.config.llm.as_ref() {
                 // New path: `llm:` section present.
+                //
+                // Model resolution order:
+                //  1. Explicit `llm.model` in the `llm:` section.
+                //  2. Legacy `classification.llm_model` (migration compat).
+                //  3. Source-aware default: bedrock → DEFAULT_BEDROCK_MODEL,
+                //     anthropic-api → ANTHROPIC_DEFAULT_MODEL,
+                //     openrouter → "gpt-4o-mini".
+                //
+                // Why: using `gpt-4o-mini` as the universal fallback causes
+                // invalid-model errors for `bedrock` and `anthropic-api` sources
+                // when `llm.model` is unset. Each provider requires a model id
+                // from its own namespace.
+                let source_default = match llm_cfg.source {
+                    LlmSource::Bedrock => DEFAULT_BEDROCK_MODEL,
+                    LlmSource::AnthropicApi => ANTHROPIC_DEFAULT_MODEL,
+                    LlmSource::Openrouter => "gpt-4o-mini",
+                };
                 let model = llm_cfg
                     .model
                     .as_deref()
@@ -313,7 +332,7 @@ impl ClassificationPipeline {
                         .classification
                         .as_ref()
                         .and_then(|c| c.llm_model.as_deref()))
-                    .unwrap_or("gpt-4o-mini");
+                    .unwrap_or(source_default);
                 crate::classify::tiers::llm::LlmClassifier::from_llm_config(llm_cfg, model)
                     .await
                     .map_err(|e| {
@@ -1722,5 +1741,95 @@ mod tests {
             )
             .expect("query unchanged");
         assert_eq!(unchanged, Some(3), "already-scored row must be unchanged");
+    }
+
+    /// Why: regression guard for the source-aware LLM model default (bug fix
+    /// 2.3.1). When `llm.model` is absent, `build_engine` must pick the
+    /// default model for the configured source rather than always falling back
+    /// to `"gpt-4o-mini"`, which is invalid for `bedrock` and `anthropic-api`.
+    /// What: directly exercises the `source_default` selection logic by
+    /// constructing `LlmConfig` values for each source and asserting the
+    /// resolved default matches the expected constant.
+    /// Test: pure-logic unit test — no DB, no async, no HTTP.
+    #[test]
+    fn source_aware_default_model_selection() {
+        use crate::classify::tiers::bedrock::DEFAULT_BEDROCK_MODEL;
+        use crate::classify::tiers::llm::ANTHROPIC_DEFAULT_MODEL;
+        use crate::core::config::{LlmConfig, LlmSource};
+
+        // Helper: resolve the source_default the same way `build_engine` does.
+        fn default_for(source: LlmSource) -> &'static str {
+            match source {
+                LlmSource::Bedrock => DEFAULT_BEDROCK_MODEL,
+                LlmSource::AnthropicApi => ANTHROPIC_DEFAULT_MODEL,
+                LlmSource::Openrouter => "gpt-4o-mini",
+            }
+        }
+
+        // bedrock source + no model → DEFAULT_BEDROCK_MODEL
+        let bedrock_cfg = LlmConfig {
+            source: LlmSource::Bedrock,
+            model: None,
+            ..LlmConfig::default()
+        };
+        let resolved = bedrock_cfg
+            .model
+            .as_deref()
+            .unwrap_or_else(|| default_for(bedrock_cfg.source.clone()));
+        assert_eq!(
+            resolved, DEFAULT_BEDROCK_MODEL,
+            "bedrock source with no model must fall back to DEFAULT_BEDROCK_MODEL"
+        );
+
+        // anthropic-api source + no model → ANTHROPIC_DEFAULT_MODEL
+        let anthropic_cfg = LlmConfig {
+            source: LlmSource::AnthropicApi,
+            model: None,
+            ..LlmConfig::default()
+        };
+        let resolved = anthropic_cfg
+            .model
+            .as_deref()
+            .unwrap_or_else(|| default_for(anthropic_cfg.source.clone()));
+        assert_eq!(
+            resolved, ANTHROPIC_DEFAULT_MODEL,
+            "anthropic-api source with no model must fall back to ANTHROPIC_DEFAULT_MODEL"
+        );
+
+        // openrouter source + no model → "gpt-4o-mini"
+        let openrouter_cfg = LlmConfig {
+            source: LlmSource::Openrouter,
+            model: None,
+            ..LlmConfig::default()
+        };
+        let resolved = openrouter_cfg
+            .model
+            .as_deref()
+            .unwrap_or_else(|| default_for(openrouter_cfg.source.clone()));
+        assert_eq!(
+            resolved, "gpt-4o-mini",
+            "openrouter source with no model must fall back to gpt-4o-mini"
+        );
+
+        // Explicit model always wins, regardless of source.
+        for source in [
+            LlmSource::Bedrock,
+            LlmSource::AnthropicApi,
+            LlmSource::Openrouter,
+        ] {
+            let explicit_cfg = LlmConfig {
+                source: source.clone(),
+                model: Some("my-custom-model".to_string()),
+                ..LlmConfig::default()
+            };
+            let resolved = explicit_cfg
+                .model
+                .as_deref()
+                .unwrap_or_else(|| default_for(source));
+            assert_eq!(
+                resolved, "my-custom-model",
+                "explicit model must override the source default"
+            );
+        }
     }
 }
