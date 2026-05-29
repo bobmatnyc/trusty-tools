@@ -1,6 +1,24 @@
 # trusty-mpm — documentation
 
-MPM platform — 8 binary crates: `trusty-mpm-core`, `-mcp`, `-daemon`, `-client`, `-cli`, `-tui`, `-telegram`, `-gui`. Docs covering any of the eight live here.
+Unified MPM platform — one crate (`crates/trusty-mpm`) with feature-gated
+`[[bin]]` targets: the CLI (`tm` / `trusty-mpm`), the daemon (`trusty-mpmd`), an
+in-session MCP server, a TUI (`trusty-mpm-tui`), and a Telegram bot
+(`trusty-mpm-telegram`); the Tauri GUI lives in the sibling `trusty-mpm-gui`
+crate and is wrapped via the optional `gui` feature. Docs covering any surface
+live here.
+
+## Canonical specification
+
+The authoritative product + engineering spec for trusty-mpm lives in
+[**`spec/`**](spec/):
+
+- [spec/README.md](spec/README.md) — index, status legend, reading order, and the
+  open-mpm relationship.
+- [spec/PRD.md](spec/PRD.md) — vision, personas, status-tagged functional
+  requirements grouped by surface.
+- [spec/ARCHITECTURE.md](spec/ARCHITECTURE.md) — multi-binary topology,
+  single-daemon coordination, MCP framing, HTTP API, filesystem layout.
+- [spec/COMPONENTS.md](spec/COMPONENTS.md) — per-binary and per-subsystem specs.
 
 ## Layout
 
