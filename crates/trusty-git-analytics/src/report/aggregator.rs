@@ -46,8 +46,15 @@ struct CommitRow {
     ticketed: bool,
 }
 
-/// Minimal PR row used by velocity / DORA computations.
+/// Minimal PR row used by velocity / DORA computations and (issue #377)
+/// abandoned-PR counting.
 struct PrRow {
+    /// PR author login as recorded by the provider (e.g. GitHub login).
+    /// Note: this is NOT a canonical engineer email — see
+    /// [`build_abandoned_pr_counts`] for the attribution limitation.
+    author: String,
+    /// Provider lifecycle state: `"open"`, `"closed"`, or `"merged"`.
+    state: String,
     created_at: DateTime<Utc>,
     merged_at: Option<DateTime<Utc>>,
 }
@@ -66,9 +73,6 @@ const DEFAULT_BOILERPLATE_PATTERNS: &[&str] = &[
     r"[Gg]enerated by",
     r"[Aa]uto-generated",
 ];
-
-/// Default revert-detection patterns.
-const DEFAULT_REVERT_PATTERNS: &[&str] = &[r"^[Rr]evert", r"^[Ff]ix.*[Rr]evert"];
 
 /// Boilerplate threshold (avg lines per commit) above which a commit is
 /// flagged independently of message-pattern match.
@@ -91,18 +95,6 @@ fn is_boilerplate(message: &str, lines_changed: i64, patterns: &[Regex]) -> bool
             return true;
         }
     }
-    patterns.iter().any(|p| p.is_match(first_line))
-}
-
-/// Heuristic revert detector.
-///
-/// Why: revert commits indicate broken changes and contribute to quality /
-/// DORA change-failure-rate metrics.
-/// What: returns `true` if the message's first line matches any revert
-/// pattern.
-/// Test: `"Revert \"feat: x\""` → `true`; `"feat: x"` → `false`.
-fn is_revert(message: &str, patterns: &[Regex]) -> bool {
-    let first_line = message.lines().next().unwrap_or(message);
     patterns.iter().any(|p| p.is_match(first_line))
 }
 
@@ -245,26 +237,31 @@ impl Aggregator {
     /// Load PR rows for velocity / DORA computations.
     ///
     /// Why: lead-time, cycle-time, and deployment frequency depend on
-    /// merged-PR timing.
-    /// What: returns the subset of `pull_requests` with parseable timestamps;
-    /// rows with un-parseable timestamps are silently dropped.
+    /// merged-PR timing; issue #377 additionally needs `author` and `state`
+    /// to count closed-but-unmerged ("abandoned") PRs per engineer.
+    /// What: returns the subset of `pull_requests` with a parseable
+    /// `created_at`; rows with an un-parseable created timestamp are silently
+    /// dropped (they cannot be week-bucketed).
     /// Test: insert a row with valid `created_at`/`merged_at`, assert vector
-    /// length 1 with matching timestamps.
+    /// length 1 with matching timestamps; abandoned-PR counting is covered by
+    /// `aggregator_counts_abandoned_prs`.
     fn load_prs(db: &Database) -> Result<Vec<PrRow>> {
         let conn = db.connection();
         let mut stmt = conn
-            .prepare("SELECT created_at, merged_at FROM pull_requests")
+            .prepare("SELECT created_at, merged_at, author, state FROM pull_requests")
             .map_err(crate::core::TgaError::from)?;
         let rows = stmt
             .query_map([], |row| {
                 let created: String = row.get(0)?;
                 let merged: Option<String> = row.get(1)?;
-                Ok((created, merged))
+                let author: String = row.get(2)?;
+                let state: String = row.get(3)?;
+                Ok((created, merged, author, state))
             })
             .map_err(crate::core::TgaError::from)?;
         let mut out = Vec::new();
         for r in rows {
-            let (created_s, merged_s) = r.map_err(crate::core::TgaError::from)?;
+            let (created_s, merged_s, author, state) = r.map_err(crate::core::TgaError::from)?;
             let created_at = match DateTime::parse_from_rfc3339(&created_s) {
                 Ok(dt) => dt.with_timezone(&Utc),
                 Err(_) => continue,
@@ -274,6 +271,8 @@ impl Aggregator {
                 .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                 .map(|dt| dt.with_timezone(&Utc));
             out.push(PrRow {
+                author,
+                state,
                 created_at,
                 merged_at,
             });
@@ -436,7 +435,11 @@ impl Aggregator {
             .iter()
             .map(|a| (a.email.clone(), a.name.clone()))
             .collect();
-        let weekly_activity = materialize_weekly_activity(acc.weekly, &email_to_name);
+        // Issue #377: abandoned (closed-unmerged) PRs, bucketed per week per
+        // author login, for best-effort per-engineer attribution.
+        let abandoned_by_week_identity = build_abandoned_pr_counts(&prs);
+        let weekly_activity =
+            materialize_weekly_activity(acc.weekly, &email_to_name, &abandoned_by_week_identity);
 
         let total_commits = rows.len();
         let total_authors = author_summaries.len();
@@ -550,14 +553,15 @@ struct RowFlags {
 /// existed in `aggregate` before this refactor.
 fn compute_row_flags(rows: &[CommitRow]) -> RowFlags {
     let boilerplate_re = compile_patterns(DEFAULT_BOILERPLATE_PATTERNS);
-    let revert_re = compile_patterns(DEFAULT_REVERT_PATTERNS);
 
     let mut is_boilerplate: Vec<bool> = Vec::with_capacity(rows.len());
     let mut is_revert: Vec<bool> = Vec::with_capacity(rows.len());
     for row in rows {
         let lines = row.insertions + row.deletions;
         is_boilerplate.push(self::is_boilerplate(&row.message, lines, &boilerplate_re));
-        is_revert.push(self::is_revert(&row.message, &revert_re));
+        // Issue #377: route revert detection through the shared core helper so
+        // the report-time revert rate matches the persisted `is_revert` column.
+        is_revert.push(crate::core::revert::is_revert(&row.message));
     }
     let boilerplate_count = is_boilerplate.iter().filter(|b| **b).count();
     let revert_count = is_revert.iter().filter(|b| **b).count();
@@ -597,6 +601,12 @@ struct WeekAcc {
     insertions: i64,
     deletions: i64,
     categories: HashMap<String, usize>,
+    /// Revert commits in this bucket (issue #377 quality metric).
+    reverts: usize,
+    /// Bugfix-classified commits in this bucket (issue #377).
+    bugfixes: usize,
+    /// Ticketed commits in this bucket (issue #377).
+    ticketed: usize,
 }
 
 /// Cross-developer per-week running totals during accumulation.
@@ -717,12 +727,28 @@ fn accumulate_rows(rows: &[CommitRow], flags: &RowFlags) -> Accumulators {
             insertions: 0,
             deletions: 0,
             categories: HashMap::new(),
+            reverts: 0,
+            bugfixes: 0,
+            ticketed: 0,
         });
         w.commits += 1;
         w.insertions += row.insertions;
         w.deletions += row.deletions;
         if let Some(cat) = &row.category {
             *w.categories.entry(cat.clone()).or_insert(0) += 1;
+        }
+        // Issue #377: per-(week, engineer, repo) quality signals. `is_revert`
+        // is the shared-helper verdict computed in `compute_row_flags`;
+        // `bugfix` comes from the classifier category; `ticketed` from the
+        // commit's ticket-reference flag.
+        if flags.is_revert[idx] {
+            w.reverts += 1;
+        }
+        if row.category.as_deref() == Some("bugfix") {
+            w.bugfixes += 1;
+        }
+        if row.ticketed {
+            w.ticketed += 1;
         }
 
         // Category totals.
@@ -840,19 +866,82 @@ fn materialize_repositories(repos: HashMap<String, RepoAcc>) -> Vec<RepositorySu
 fn materialize_weekly_activity(
     weekly: BTreeMap<(String, String, String), WeekAcc>,
     email_to_name: &HashMap<String, String>,
+    abandoned_by_week_identity: &HashMap<(String, String), usize>,
 ) -> Vec<WeeklyActivity> {
     weekly
         .into_iter()
-        .map(|((week, email, repository), w)| WeeklyActivity {
-            week,
-            author: email_to_name.get(&email).cloned().unwrap_or(email),
-            repository,
-            commit_count: w.commits,
-            insertions: w.insertions,
-            deletions: w.deletions,
-            categories: w.categories,
+        .map(|((week, email, repository), w)| {
+            let author = email_to_name.get(&email).cloned().unwrap_or(email.clone());
+            // Issue #377 quality score for this (week, engineer, repo) bucket.
+            let (quality_score, quality_tshirt) =
+                crate::core::quality::score_and_tshirt(crate::core::quality::QualityInputs {
+                    commits: w.commits,
+                    reverts: w.reverts,
+                    bugfixes: w.bugfixes,
+                    ticketed: w.ticketed,
+                });
+            // Best-effort abandoned-PR attribution: match the PR author login
+            // against either the resolved display name or the email
+            // (case-insensitive). See `build_abandoned_pr_counts` for why this
+            // is heuristic. Repository is not part of the PR identity key, so
+            // a week's abandoned PRs land on the engineer's first repo bucket
+            // for that week — counted once via the `.remove`-style guard would
+            // require mutation; instead we look up by (week, identity) and
+            // accept that an engineer active in multiple repos in one week
+            // sees the same abandoned count echoed per repo row. Downstream
+            // joins on (week, author) so this is acceptable and documented.
+            let abandoned_pr_count = abandoned_by_week_identity
+                .get(&(week.clone(), author.to_lowercase()))
+                .or_else(|| abandoned_by_week_identity.get(&(week.clone(), email.to_lowercase())))
+                .copied()
+                .unwrap_or(0);
+            WeeklyActivity {
+                week,
+                author,
+                repository,
+                commit_count: w.commits,
+                insertions: w.insertions,
+                deletions: w.deletions,
+                categories: w.categories,
+                revert_count: w.reverts,
+                bugfix_count: w.bugfixes,
+                ticketed_count: w.ticketed,
+                quality_score,
+                quality_tshirt,
+                abandoned_pr_count,
+            }
         })
         .collect()
+}
+
+/// Build a `(iso_week, author_identity_lowercased) → abandoned_pr_count` map.
+///
+/// Why: closed-but-unmerged PRs are a strong quality signal that today is
+/// impossible to compute downstream (issue #377). Counting them per engineer
+/// per week lets reports surface the abandoned-PR rate.
+/// What: filters `prs` to `state == "closed" && merged_at.is_none()`, buckets
+/// each by the ISO week of its `created_at` (abandoned PRs have no merge/close
+/// timestamp available, so creation week is the only stable anchor), and keys
+/// the count by the lowercased author login.
+///
+/// Limitation: the PR `author` is a provider login (e.g. a GitHub handle),
+/// NOT a canonical engineer email. TGA has no login→engineer mapping at
+/// aggregation time, so attribution in [`materialize_weekly_activity`] is a
+/// best-effort case-insensitive match of the login against the engineer's
+/// display name or email. When a login matches neither, the abandoned PR is
+/// counted here but cannot be attributed to a weekly-activity row and is
+/// effectively dropped from the per-engineer column. A future change that
+/// persists a login→author_id mapping would make this exact.
+/// Test: `aggregator_counts_abandoned_prs` in `report::tests`.
+fn build_abandoned_pr_counts(prs: &[PrRow]) -> HashMap<(String, String), usize> {
+    let mut out: HashMap<(String, String), usize> = HashMap::new();
+    for pr in prs {
+        if pr.state == "closed" && pr.merged_at.is_none() {
+            let week = iso_week_label(&pr.created_at);
+            *out.entry((week, pr.author.to_lowercase())).or_insert(0) += 1;
+        }
+    }
+    out
 }
 
 /// Why: weekly metrics are the cross-developer roll-up used for trend

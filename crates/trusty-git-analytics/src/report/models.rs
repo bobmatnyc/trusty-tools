@@ -66,6 +66,31 @@ pub struct WeeklyActivity {
     pub deletions: i64,
     /// Per-category counts within this bucket.
     pub categories: HashMap<String, usize>,
+    /// Commits in this bucket detected as reverts (issue #377). Negative
+    /// quality signal — feeds [`Self::quality_score`].
+    #[serde(default)]
+    pub revert_count: usize,
+    /// Commits in this bucket classified as `bugfix` (issue #377). Exposed so
+    /// the bugfix rate behind the quality score is auditable downstream.
+    #[serde(default)]
+    pub bugfix_count: usize,
+    /// Commits in this bucket carrying a ticket reference (issue #377).
+    /// Positive quality signal.
+    #[serde(default)]
+    pub ticketed_count: usize,
+    /// Per-engineer-per-week quality score in `[0.0, 1.0]` (higher is
+    /// better). See [`crate::core::quality`] for the formula orientation.
+    #[serde(default)]
+    pub quality_score: f64,
+    /// Quality T-shirt bucket as the string `"1".."5"` (5 = best), parallel
+    /// to `effort_tshirt` so consumers can join it the same way.
+    #[serde(default)]
+    pub quality_tshirt: String,
+    /// Closed-but-unmerged ("abandoned") PRs attributed to this engineer in
+    /// this week (issue #377). Best-effort attribution by author login; see
+    /// the aggregator note on its limitations.
+    #[serde(default)]
+    pub abandoned_pr_count: usize,
 }
 
 /// Per-week aggregated metrics across all developers and repositories.

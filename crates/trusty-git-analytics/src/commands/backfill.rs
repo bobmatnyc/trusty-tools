@@ -1201,22 +1201,18 @@ fn build_commits_filter_sql(
 
 /// Detect if a commit message looks like a revert.
 ///
-/// Matches:
-///   * messages starting with `Revert ` (case-insensitive — `git revert`
-///     auto-generates `Revert "<original subject>"`).
-///   * messages starting with `revert:` (Conventional Commits style).
+/// Why: the `commits.is_revert` column written by `tga backfill is-revert`
+/// must agree with the revert rate the report computes from the same commit
+/// messages. Issue #377 unified both paths onto
+/// [`tga::core::revert::is_revert`]; this thin wrapper preserves the
+/// existing call sites while delegating to the single source of truth.
+/// What: forwards to [`tga::core::revert::is_revert`], which catches
+/// `Revert "..."`, `revert:`, `revert(scope):`, `^revert`, and `^fix.*revert`
+/// (case-insensitive, first-line only).
+/// Test: `tests::revert_detector_matches_expected_forms` below, plus the
+/// canonical coverage in `crate::core::revert::tests`.
 fn is_revert(message: &str) -> bool {
-    let trimmed = message.trim_start();
-    // The longest prefix we test is 7 bytes (`revert ` / `revert:` /
-    // `revert"`). All candidates are pure ASCII, so a byte-bounded slice is
-    // a safe split point and avoids allocating a lowercased copy of the
-    // whole (potentially large) commit message on every commit.
-    let head = trimmed.as_bytes();
-    let bound = head.len().min(7);
-    let prefix = &head[..bound];
-    prefix.eq_ignore_ascii_case(b"revert ")
-        || prefix.eq_ignore_ascii_case(b"revert:")
-        || prefix.eq_ignore_ascii_case(b"revert\"")
+    tga::core::revert::is_revert(message)
 }
 
 #[cfg(test)]

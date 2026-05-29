@@ -69,6 +69,12 @@ pub fn write_weekly_csv(data: &ReportData, output_dir: &Path) -> Result<PathBuf>
         "insertions",
         "deletions",
         "categories",
+        "revert_count",
+        "bugfix_count",
+        "ticketed_count",
+        "quality_score",
+        "quality_tshirt",
+        "abandoned_pr_count",
     ])?;
     for row in &data.weekly_activity {
         let categories = serialize_categories(&row.categories);
@@ -80,6 +86,12 @@ pub fn write_weekly_csv(data: &ReportData, output_dir: &Path) -> Result<PathBuf>
             &row.insertions.to_string(),
             &row.deletions.to_string(),
             categories.as_str(),
+            &row.revert_count.to_string(),
+            &row.bugfix_count.to_string(),
+            &row.ticketed_count.to_string(),
+            &format!("{:.4}", row.quality_score),
+            row.quality_tshirt.as_str(),
+            &row.abandoned_pr_count.to_string(),
         ])?;
     }
     w.flush()?;

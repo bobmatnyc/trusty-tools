@@ -9,12 +9,16 @@
 //! - [`db`] — SQLite database wrapper with WAL mode and versioned migrations
 //! - [`errors`] — crate-wide error enum and `Result` alias
 //! - [`models`] — domain structs for commits, authors, classifications, etc.
+//! - [`quality`] — per-engineer-per-week quality scoring (1–5 T-shirt)
+//! - [`revert`] — shared commit-message revert detection
 
 pub mod config;
 pub mod db;
 pub mod effort;
 pub mod errors;
 pub mod models;
+pub mod quality;
+pub mod revert;
 
 pub use errors::{Result, TgaError};
 

@@ -353,6 +353,196 @@ mod tests {
     }
 
     // =========================================================================
+    // Quality metric tests (issue #377)
+    // =========================================================================
+
+    /// Seed one engineer in a single week with a known mix of commit kinds so
+    /// the per-week quality score is deterministic.
+    fn seed_quality_db() -> Database {
+        let db = Database::open_in_memory().expect("open db");
+        let conn = db.connection();
+        // bugfix classification (id=2) so a categorized bugfix exists.
+        conn.execute(
+            "INSERT INTO classifications (id, category, subcategory, ticket_id, confidence, method) \
+             VALUES (2, 'bugfix', NULL, NULL, 0.9, 'exact_rule')",
+            [],
+        )
+        .expect("insert bugfix classification");
+
+        // Four commits by Carol in the same ISO week (2024-W03):
+        //  1. plain ticketed feature  (ticketed=1)
+        //  2. ticketed feature        (ticketed=1)
+        //  3. a revert                (revert detected from message)
+        //  4. a classified bugfix     (category=bugfix, not ticketed)
+        let rows = [
+            ("c1", "ENG-1 add feature", 1_i64, None::<i64>),
+            ("c2", "ENG-2 more feature", 1, None),
+            ("c3", "Revert \"ENG-3 bad change\"", 0, None),
+            ("c4", "patch up edge case", 0, Some(2)),
+        ];
+        for (sha, msg, ticketed, cls) in rows {
+            conn.execute(
+                "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                     repository, files_changed, insertions, deletions, is_merge, ticketed, \
+                     classification_id) \
+                 VALUES (?1, 'Carol', 'carol@example.com', '2024-01-15T10:00:00+00:00', ?2, \
+                     'repo-a', 1, 5, 1, 0, ?3, ?4)",
+                rusqlite::params![sha, msg, ticketed, cls],
+            )
+            .expect("insert quality commit");
+        }
+        db
+    }
+
+    #[test]
+    fn weekly_activity_carries_quality_columns() {
+        let db = seed_quality_db();
+        let cfg = baseline_config();
+        let data = Aggregator::build(&db, &cfg).expect("aggregate");
+
+        // One weekly bucket: (2024-W03, Carol, repo-a).
+        assert_eq!(data.weekly_activity.len(), 1);
+        let wa = &data.weekly_activity[0];
+        assert_eq!(wa.commit_count, 4);
+        assert_eq!(wa.revert_count, 1, "one revert commit");
+        assert_eq!(wa.bugfix_count, 1, "one classified bugfix");
+        assert_eq!(wa.ticketed_count, 2, "two ticketed commits");
+
+        // Expected score with the v1 orientation:
+        //   revert_rate = 1/4 = 0.25, bugfix_rate = 1/4 = 0.25, ticket = 2/4 = 0.5
+        //   0.35*(1-0.25) + 0.40*(1-0.25) + 0.25*0.5
+        //   = 0.2625 + 0.30 + 0.125 = 0.6875 ⇒ band 4.
+        assert!(
+            (wa.quality_score - 0.6875).abs() < 1e-9,
+            "quality_score = {}",
+            wa.quality_score
+        );
+        assert_eq!(wa.quality_tshirt, "4");
+    }
+
+    #[test]
+    fn weekly_quality_perfect_when_clean_and_ticketed() {
+        // All commits ticketed, no reverts, no bugfixes ⇒ score 1.0, tshirt 5.
+        let db = Database::open_in_memory().expect("open db");
+        let conn = db.connection();
+        for i in 0..3 {
+            conn.execute(
+                "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                     repository, files_changed, insertions, deletions, is_merge, ticketed) \
+                 VALUES (?1, 'Dave', 'dave@example.com', '2024-02-05T10:00:00+00:00', \
+                     'ENG-9 clean work', 'repo-a', 1, 3, 1, 0, 1)",
+                [format!("d{i}")],
+            )
+            .expect("seed clean commit");
+        }
+        let data = Aggregator::build(&db, &baseline_config()).expect("aggregate");
+        assert_eq!(data.weekly_activity.len(), 1);
+        let wa = &data.weekly_activity[0];
+        assert!(
+            (wa.quality_score - 1.0).abs() < 1e-9,
+            "{}",
+            wa.quality_score
+        );
+        assert_eq!(wa.quality_tshirt, "5");
+        assert_eq!(wa.revert_count, 0);
+        assert_eq!(wa.bugfix_count, 0);
+        assert_eq!(wa.ticketed_count, 3);
+        assert_eq!(wa.abandoned_pr_count, 0);
+    }
+
+    #[test]
+    fn aggregator_counts_abandoned_prs() {
+        // Seed a commit so a weekly-activity row exists for the engineer, then
+        // a closed-unmerged PR authored by the same identity in the same week.
+        let db = Database::open_in_memory().expect("open db");
+        let conn = db.connection();
+        conn.execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, repository, \
+                 files_changed, insertions, deletions, is_merge, ticketed) \
+             VALUES ('e1', 'eve', 'eve@example.com', '2024-01-15T10:00:00+00:00', \
+                 'ENG-1 work', 'repo-a', 1, 5, 1, 0, 1)",
+            [],
+        )
+        .expect("seed commit");
+        // Abandoned PR: state=closed, merged_at NULL, author login = display name.
+        conn.execute(
+            "INSERT INTO pull_requests (pr_number, title, author, state, created_at, merged_at) \
+             VALUES (10, 'wip', 'eve', 'closed', '2024-01-15T09:00:00+00:00', NULL)",
+            [],
+        )
+        .expect("seed abandoned pr");
+        // A merged PR by the same author must NOT count as abandoned.
+        conn.execute(
+            "INSERT INTO pull_requests (pr_number, title, author, state, created_at, merged_at) \
+             VALUES (11, 'done', 'eve', 'merged', '2024-01-15T08:00:00+00:00', \
+                 '2024-01-15T12:00:00+00:00')",
+            [],
+        )
+        .expect("seed merged pr");
+
+        let data = Aggregator::build(&db, &baseline_config()).expect("aggregate");
+        assert_eq!(data.weekly_activity.len(), 1);
+        assert_eq!(
+            data.weekly_activity[0].abandoned_pr_count, 1,
+            "exactly one closed-unmerged PR attributed to eve"
+        );
+    }
+
+    #[test]
+    fn weekly_csv_includes_quality_columns() {
+        let db = seed_quality_db();
+        let cfg = baseline_config();
+        let data = Aggregator::build(&db, &cfg).expect("aggregate");
+
+        let dir = tmp_dir("weekly-quality-csv");
+        let path = csv_fmt::write_weekly_csv(&data, &dir).expect("write weekly");
+        let text = std::fs::read_to_string(&path).expect("read");
+        let header = text.lines().next().expect("header line");
+        for col in [
+            "revert_count",
+            "bugfix_count",
+            "ticketed_count",
+            "quality_score",
+            "quality_tshirt",
+            "abandoned_pr_count",
+        ] {
+            assert!(header.contains(col), "header missing {col}: {header}");
+        }
+        // The single data row should carry tshirt "4" (see the formula test).
+        assert!(
+            text.contains(",4,"),
+            "expected quality_tshirt 4 in row: {text}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn json_report_exposes_weekly_quality_fields() {
+        // Why: the Duetto warehouse ingests the JSON report; the new quality
+        // fields must round-trip through the full `ReportData` serialization,
+        // not just the dedicated CSV.
+        let db = seed_quality_db();
+        let cfg = baseline_config();
+        let data = Aggregator::build(&db, &cfg).expect("aggregate");
+
+        let dir = tmp_dir("json-quality");
+        let path = json_fmt::write_json(&data, &dir).expect("write json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
+                .expect("valid json");
+        let wa = &parsed["weekly_activity"][0];
+        assert_eq!(wa["revert_count"], 1);
+        assert_eq!(wa["bugfix_count"], 1);
+        assert_eq!(wa["ticketed_count"], 2);
+        assert_eq!(wa["quality_tshirt"], "4");
+        assert!(wa["quality_score"].as_f64().expect("score is f64") > 0.68);
+        assert_eq!(wa["abandoned_pr_count"], 0);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // =========================================================================
     // Author filter tests (issue #324)
     // =========================================================================
 
