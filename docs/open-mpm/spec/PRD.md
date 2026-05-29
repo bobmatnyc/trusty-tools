@@ -121,7 +121,7 @@ an inline status tag. Source paths are cited where known.
 **FR-1.4 — Credential-correct PM turns** 🟡
 - *Vision:* Every PM/CTRL turn routes through `pick_credentials()` so the configured provider priority is honored.
 - *Current:* The ratatui path (`run_pm_task_with_history`) routes correctly.
-- *Gap:* **Credential-routing bug** — the legacy stdin REPL turn (`ctrl_chat_turn`, ~`src/ctrl/mod.rs:3391`) hardcodes `CTRL_MODEL` and calls `llm::chat()` directly *without* `pick_credentials()`, so it always routes via OpenRouter regardless of configured credentials.
+- *Gap:* **Credential-routing bug** — the legacy stdin REPL turn (`ctrl_chat_turn`, `crates/open-mpm/src/ctrl/ctrl_turn/dispatch.rs:48`) hardcodes `CTRL_MODEL` and calls `llm::chat()` directly *without* `pick_credentials()`, so it always routes via OpenRouter regardless of configured credentials. (#408; supersedes pre-refactor `src/ctrl/mod.rs:3391` from #358–#366 cap-sweep module split.)
 
 **FR-1.5 — User-level cancellation** 🔵
 - *Vision:* A user can cancel an in-flight PM/agent task from any surface.

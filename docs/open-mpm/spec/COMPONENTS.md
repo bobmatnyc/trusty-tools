@@ -39,8 +39,8 @@ The credential-correct PM path is `run_pm_task_with_history`.
 
 **Known gaps.**
 - 🟡 **Credential-routing bug:** `ctrl_chat_turn` (legacy stdin REPL,
-  ~`src/ctrl/mod.rs:3391`) hardcodes `CTRL_MODEL` and calls `llm::chat()` without
-  `pick_credentials()`, so it always routes via OpenRouter (PRD FR-1.4).
+  `crates/open-mpm/src/ctrl/ctrl_turn/dispatch.rs:48`) hardcodes `CTRL_MODEL` and calls `llm::chat()` without
+  `pick_credentials()`, so it always routes via OpenRouter. (#408; supersedes pre-refactor `src/ctrl/mod.rs:3391` from #358–#366 cap-sweep module split.) (PRD FR-1.4).
 - 🟡 **No singleton enforcement:** two near-simultaneous invocations can race on
   the socket instead of the second auto-routing (PRD FR-1.3).
 - 🟡 **Oversized file:** `src/ctrl/mod.rs` ~5,730 lines (#170), partially split.

@@ -303,11 +303,11 @@ on `OpenMpmRepl`. They are injected **after** `AgentConfig::load()` and **before
 `apply_credential_routing()`, so a session override **takes precedence over both
 the TOML `model` and the env-var credential**. ✅
 
-> **Caveat:** the legacy stdin REPL turn `ctrl_chat_turn` (~`src/ctrl/mod.rs:3391`)
+> **Caveat:** the legacy stdin REPL turn `ctrl_chat_turn` (`crates/open-mpm/src/ctrl/ctrl_turn/dispatch.rs:48`)
 > hardcodes `CTRL_MODEL` and calls `llm::chat()` directly *without*
 > `pick_credentials()`, so that one path always routes via OpenRouter regardless
 > of overrides/credentials. The ratatui `run_pm_task_with_history` path routes
-> correctly. (PRD FR-1.4) 🟡
+> correctly. (#408; supersedes pre-refactor `src/ctrl/mod.rs:3391` from #358–#366 cap-sweep module split.) (PRD FR-1.4) 🟡
 
 ### 5.6 Model qualification
 
