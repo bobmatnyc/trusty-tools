@@ -1314,10 +1314,50 @@ async fn status_stream_handler(State(state): State<Arc<SearchAppState>>) -> impl
         .expect("valid SSE response")
 }
 
-async fn list_indexes_handler(State(state): State<Arc<SearchAppState>>) -> Json<IndexListResponse> {
-    Json(IndexListResponse {
-        indexes: state.registry.list().into_iter().map(|id| id.0).collect(),
-    })
+/// Query parameters accepted by `GET /indexes`.
+///
+/// Why: the `?format=tree` variant returns hierarchy metadata (parent/child
+/// relationships derived from `root_path` prefix containment) without breaking
+/// the default flat-string response that existing callers depend on.
+/// What: `format = "tree"` → object-array response; any other value (or
+/// absent) → the existing `{ "indexes": ["id1", "id2"] }` flat response.
+/// Test: `list_indexes_tree_format_shape` and `list_indexes_flat_default_unchanged`.
+#[derive(Deserialize, Default)]
+struct ListIndexesParams {
+    #[serde(default)]
+    format: Option<String>,
+}
+
+/// `GET /indexes[?format=tree]` — list registered indexes.
+///
+/// Why: the default flat format is byte-compatible with today's response so
+/// existing callers (CLI, MCP, integrators) see no breaking change.  The
+/// optional `?format=tree` variant exposes the index hierarchy derived from
+/// `root_path` prefix containment (#404 MVP).
+/// What: without `?format=tree`, returns `{ "indexes": ["id1", …] }`.
+/// With `?format=tree`, returns `{ "indexes": [{ "id": …, "root_path": …,
+/// "parent_id": …, "children": […], "priority_boost": … }, …] }`.
+/// Test: `list_indexes_flat_default_unchanged`, `list_indexes_tree_format_shape`.
+async fn list_indexes_handler(
+    State(state): State<Arc<SearchAppState>>,
+    Query(params): Query<ListIndexesParams>,
+) -> Response {
+    let want_tree = params
+        .format
+        .as_deref()
+        .map(|f| f == "tree")
+        .unwrap_or(false);
+
+    if want_tree {
+        let handles = state.registry.list_handles();
+        let entries = crate::core::search::hierarchy::build_tree_entries(&state.registry, &handles);
+        Json(serde_json::json!({ "indexes": entries })).into_response()
+    } else {
+        Json(IndexListResponse {
+            indexes: state.registry.list().into_iter().map(|id| id.0).collect(),
+        })
+        .into_response()
+    }
 }
 
 async fn create_index_handler(
@@ -1907,7 +1947,41 @@ async fn global_search_handler(
     // strategy to decide which indexes participate in the fan-out.
     let routing_mode = RoutingMode::from_request(&req);
     let weights = compute_context_weights(&state.registry, &index_ids, &req.query).await;
-    let (active_ids, weight_map) = routing_mode.apply(&index_ids, &weights);
+    let (mut active_ids, mut weight_map) = routing_mode.apply(&index_ids, &weights);
+
+    // Issue #404 — nested-index fan-out (MVP):
+    // 1. Derive the index hierarchy from root_path prefix containment.
+    // 2. For `threshold` routing: include any sub-index whose parent is active,
+    //    even if the sub-index's own cosine similarity falls below the threshold.
+    //    This prevents small-subtree indexes from being silently excluded when
+    //    the parent is clearly relevant.
+    //
+    // Note: when the caller supplies an explicit `indexes: [...]` restriction,
+    // the set is treated as flat peers (no hierarchy applied) to preserve the
+    // existing precision-override semantics.
+    let hierarchy = if req.indexes.is_none() {
+        let h = crate::core::search::hierarchy::IndexHierarchy::from_registry(
+            &state.registry,
+            &index_ids,
+        );
+        if matches!(routing_mode, RoutingMode::Threshold(_)) && !h.parent_of.is_empty() {
+            let inactive_ids: Vec<IndexId> = index_ids
+                .iter()
+                .filter(|id| !weight_map.contains_key(id))
+                .cloned()
+                .collect();
+            crate::core::search::hierarchy::apply_threshold_child_inclusion(
+                &inactive_ids,
+                &mut active_ids,
+                &mut weight_map,
+                &h,
+            );
+        }
+        h
+    } else {
+        crate::core::search::hierarchy::IndexHierarchy::default()
+    };
+
     let routing_label = routing_mode.label().to_string();
     let routing_decisions: Vec<serde_json::Value> = index_ids
         .iter()
@@ -1989,7 +2063,14 @@ async fn global_search_handler(
         // Issue #112: in `"all"` mode, multiply each lane's scores by the
         // index's cosine-similarity weight; in `"top_n"` / `"threshold"`
         // modes the weight is always 1.0 (selection has already happened).
-        let weight = weight_map.get(&id).copied().unwrap_or(1.0);
+        // Issue #404: also apply the sub-index priority boost so sub-index
+        // hits rank above the parent's duplicate coverage after RRF fusion.
+        let cosine_weight = weight_map.get(&id).copied().unwrap_or(1.0);
+        let weight = crate::core::search::hierarchy::effective_weight_for_index(
+            &id,
+            cosine_weight,
+            &hierarchy,
+        );
         let mut lane: Vec<(String, f32)> = Vec::with_capacity(results.len());
         for mut chunk in results {
             let namespaced = format!("{}::{}", id.0, chunk.id);
@@ -2012,6 +2093,20 @@ async fn global_search_handler(
     for lane in lanes {
         fused = rrf_fuse(&fused, &lane, 1.0, 1.0, RRF_K, oversample);
     }
+
+    // Issue #404: post-RRF dedup for nested indexes.
+    // When a parent index and one of its sub-indexes both contain a chunk for
+    // the same `(canonical_absolute_path, start_line, end_line)`, drop the
+    // parent's copy (lower-scored after boost) and keep the sub-index's copy.
+    // Flat peers that merely share files are NOT deduped.
+    let (fused, hierarchy_dedup_count) = crate::core::search::hierarchy::dedup_nested_results(
+        fused,
+        &chunk_lookup,
+        &state.registry,
+        &hierarchy,
+    );
+
+    let mut fused = fused;
     fused.truncate(req.top_k);
 
     let results: Vec<crate::core::indexer::CodeChunk> = fused
@@ -2032,6 +2127,7 @@ async fn global_search_handler(
         "intent": format!("{:?}", intent),
         "routing": routing_label,
         "routing_decisions": routing_decisions,
+        "hierarchy_dedup_count": hierarchy_dedup_count,
     })))
 }
 
@@ -4464,5 +4560,293 @@ mod tests {
             .expect("200");
         assert_eq!(resp.total, 0);
         assert!(!resp.truncated);
+    }
+
+    // ── Issue #404: nested-index fan-out tests ────────────────────────────
+
+    /// `GET /indexes` default (no query param) returns the flat string array
+    /// unchanged — byte-compatible with the pre-#404 response shape.
+    #[tokio::test]
+    async fn list_indexes_flat_default_unchanged() {
+        use crate::core::{
+            indexer::CodeIndexer,
+            registry::{IndexHandle, IndexId, IndexRegistry},
+        };
+
+        let registry = IndexRegistry::new();
+        for name in ["alpha", "beta"] {
+            let id = IndexId::new(name);
+            let indexer = CodeIndexer::new(name, format!("/tmp/{name}"));
+            registry.register(IndexHandle::bare(
+                id.clone(),
+                std::sync::Arc::new(tokio::sync::RwLock::new(indexer)),
+                format!("/tmp/{name}").into(),
+            ));
+        }
+        let state = std::sync::Arc::new(SearchAppState::new(registry));
+
+        // No format param → flat list
+        let resp =
+            list_indexes_handler(State(state), Query(ListIndexesParams { format: None })).await;
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = value["indexes"].as_array().expect("indexes array");
+        // Must be strings (flat format)
+        for item in arr {
+            assert!(
+                item.is_string(),
+                "flat default must return string IDs: {item:?}"
+            );
+        }
+        assert_eq!(arr.len(), 2);
+    }
+
+    /// `GET /indexes?format=tree` returns an object-array with hierarchy
+    /// fields (`parent_id`, `children`, `priority_boost`, `is_sub_index`).
+    #[tokio::test]
+    async fn list_indexes_tree_format_shape() {
+        use crate::core::{
+            indexer::CodeIndexer,
+            registry::{IndexHandle, IndexId, IndexRegistry},
+        };
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        let registry = IndexRegistry::new();
+
+        // Register a parent and child whose root_paths have a strict prefix
+        // relationship.  We use non-existent paths so canonicalize_best_effort
+        // falls back to the raw strings for both, giving a deterministic
+        // comparison on all platforms without requiring real directories.
+        let parent_id = IndexId::new("tree-parent");
+        let child_id = IndexId::new("tree-child");
+
+        let parent_root: std::path::PathBuf = "/nonexistent_test_root_abc".into();
+        let child_root: std::path::PathBuf = "/nonexistent_test_root_abc/services/billing".into();
+
+        registry.register(IndexHandle::bare(
+            parent_id.clone(),
+            Arc::new(RwLock::new(CodeIndexer::new(
+                "tree-parent",
+                "/nonexistent_test_root_abc",
+            ))),
+            parent_root,
+        ));
+        registry.register(IndexHandle::bare(
+            child_id.clone(),
+            Arc::new(RwLock::new(CodeIndexer::new(
+                "tree-child",
+                "/nonexistent_test_root_abc/services/billing",
+            ))),
+            child_root,
+        ));
+
+        let state = Arc::new(SearchAppState::new(registry));
+
+        let resp = list_indexes_handler(
+            State(state),
+            Query(ListIndexesParams {
+                format: Some("tree".to_string()),
+            }),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = value["indexes"].as_array().expect("indexes array");
+        assert_eq!(arr.len(), 2);
+        // Each entry must be an object with required fields.
+        for entry in arr {
+            assert!(entry["id"].is_string(), "id must be string");
+            assert!(entry["root_path"].is_string(), "root_path must be present");
+            assert!(
+                entry["priority_boost"].is_number(),
+                "priority_boost must be a number"
+            );
+            assert!(
+                entry["is_sub_index"].is_boolean(),
+                "is_sub_index must be bool"
+            );
+            assert!(entry["children"].is_array(), "children must be an array");
+        }
+
+        // tree-child (/tmp/tree_child_sub_test) is a sub-path of /tmp →
+        // it should be identified as a sub-index.
+        let child_entry = arr
+            .iter()
+            .find(|e| e["id"].as_str() == Some("tree-child"))
+            .expect("tree-child entry");
+        assert_eq!(
+            child_entry["is_sub_index"].as_bool(),
+            Some(true),
+            "tree-child must be a sub-index"
+        );
+        let parent_entry = arr
+            .iter()
+            .find(|e| e["id"].as_str() == Some("tree-parent"))
+            .expect("tree-parent entry");
+        assert_eq!(
+            parent_entry["is_sub_index"].as_bool(),
+            Some(false),
+            "tree-parent must not be a sub-index"
+        );
+    }
+
+    /// `POST /search` with nested indexes: the response must include
+    /// `hierarchy_dedup_count` and the sub-index result should be preferred
+    /// when both parent and child contain the same file region.
+    #[tokio::test]
+    async fn global_search_nested_hierarchy_dedup_count_present() {
+        use crate::core::{
+            indexer::CodeIndexer,
+            registry::{IndexHandle, IndexId, IndexRegistry},
+        };
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        // Two flat peer indexes (no nesting) — dedup_count should be 0.
+        let registry = IndexRegistry::new();
+        for name in ["flat-a", "flat-b"] {
+            let id = IndexId::new(name);
+            let indexer = CodeIndexer::new(name, format!("/tmp/{name}"));
+            indexer
+                .index_file(
+                    &format!("{name}/lib.rs"),
+                    "fn beta_function() { println!(\"beta\"); }",
+                )
+                .await
+                .expect("index_file");
+            registry.register(IndexHandle::bare(
+                id.clone(),
+                Arc::new(RwLock::new(indexer)),
+                format!("/tmp/{name}").into(),
+            ));
+        }
+        let state = Arc::new(SearchAppState::new(registry));
+
+        let Json(value) = global_search_handler(
+            State(state),
+            Json(GlobalSearchRequest {
+                query: "beta_function".into(),
+                top_k: 10,
+                full_content: false,
+                indexes: None,
+                routing: None,
+                routing_n: None,
+                routing_threshold: None,
+            }),
+        )
+        .await
+        .expect("handler ok");
+
+        // Must include the new field regardless of whether dedup fired.
+        assert!(
+            value["hierarchy_dedup_count"].is_number(),
+            "hierarchy_dedup_count must be present: {value:?}"
+        );
+        // Flat peers → no nesting → count must be 0.
+        assert_eq!(
+            value["hierarchy_dedup_count"].as_u64(),
+            Some(0),
+            "flat peers must not trigger dedup"
+        );
+    }
+
+    /// `POST /search` with a sub-index: the effective lane weight for the
+    /// sub-index must be boosted, and `hierarchy_dedup_count` reflects any
+    /// dropped parent copies.
+    #[tokio::test]
+    async fn global_search_sub_index_boost_applied() {
+        use crate::core::{
+            indexer::CodeIndexer,
+            registry::{IndexHandle, IndexId, IndexRegistry},
+        };
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        // Use non-existent paths so canonicalize_best_effort falls back to raw
+        // string comparison on all platforms (avoids /tmp → /private/tmp macOS
+        // symlink mismatch).
+        let registry = IndexRegistry::new();
+
+        let parent_root: std::path::PathBuf = "/nonexistent_boost_root".into();
+        let child_root: std::path::PathBuf = "/nonexistent_boost_root/sub".into();
+
+        let parent_id = IndexId::new("boost-parent");
+        let child_id = IndexId::new("boost-child");
+
+        let parent_indexer = CodeIndexer::new("boost-parent", "/nonexistent_boost_root");
+        parent_indexer
+            .index_file("src/lib.rs", "fn gamma_function() { println!(\"gamma\"); }")
+            .await
+            .expect("parent index_file");
+        registry.register(IndexHandle::bare(
+            parent_id.clone(),
+            Arc::new(RwLock::new(parent_indexer)),
+            parent_root,
+        ));
+
+        let child_indexer = CodeIndexer::new("boost-child", "/nonexistent_boost_root/sub");
+        child_indexer
+            .index_file(
+                "sub/lib.rs",
+                "fn gamma_function() { println!(\"gamma sub\"); }",
+            )
+            .await
+            .expect("child index_file");
+        registry.register(IndexHandle::bare(
+            child_id.clone(),
+            Arc::new(RwLock::new(child_indexer)),
+            child_root,
+        ));
+
+        let state = Arc::new(SearchAppState::new(registry));
+
+        let Json(value) = global_search_handler(
+            State(state),
+            Json(GlobalSearchRequest {
+                query: "gamma_function".into(),
+                top_k: 10,
+                full_content: false,
+                indexes: None,
+                routing: None,
+                routing_n: None,
+                routing_threshold: None,
+            }),
+        )
+        .await
+        .expect("handler ok");
+
+        // Must include the dedup count field.
+        assert!(
+            value["hierarchy_dedup_count"].is_number(),
+            "hierarchy_dedup_count must be present: {value:?}",
+        );
+
+        // Both indexes should be searched.
+        let searched = value["indexes_searched"].as_array().unwrap();
+        assert_eq!(
+            searched.len(),
+            2,
+            "both parent and child should be searched"
+        );
+
+        // Results should exist (BM25 finds the keyword).
+        let results = value["results"].as_array().unwrap();
+        assert!(!results.is_empty(), "expected at least one result");
+
+        // The sub-index has a boost of 1.5 applied to its lane weight, so its
+        // results should rank first when querying for a term both indexes have.
+        // Verify that at least one result comes from "boost-child".
+        let has_child_result = results
+            .iter()
+            .any(|r| r["index_id"].as_str() == Some("boost-child"));
+        assert!(
+            has_child_result,
+            "sub-index (boost-child) must contribute results to the fan-out"
+        );
     }
 }

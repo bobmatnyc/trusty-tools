@@ -643,6 +643,18 @@ impl IndexRegistry {
         self.indexes.iter().map(|r| r.key().clone()).collect()
     }
 
+    /// Return all registered handles as `Arc<IndexHandle>` values.
+    ///
+    /// Why: `GET /indexes?format=tree` needs the `root_path` of every handle to
+    /// build the hierarchy entries; iterating by ID + `get()` would require
+    /// a separate lock acquisition per entry.  A single shard-iteration pass is
+    /// cheaper and avoids re-cloning the ID vector.
+    /// What: iterates the DashMap once, cloning each `Arc<IndexHandle>`.
+    /// Test: implied by `list_indexes_tree_format_shape` server tests.
+    pub fn list_handles(&self) -> Vec<Arc<IndexHandle>> {
+        self.indexes.iter().map(|r| Arc::clone(&*r)).collect()
+    }
+
     /// Drop an index from the registry. Returns true if the entry existed.
     ///
     /// Why: `DELETE /indexes/:id` (admin UI) needs a way to evict an index
