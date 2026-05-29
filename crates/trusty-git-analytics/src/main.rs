@@ -34,8 +34,8 @@ use crate::commands::rules::RulesArgs;
     long_about = "trusty-git-analytics — developer productivity analytics.\n\n\
         Three-stage pipeline: collect → classify → report. Run `tga analyze` \
         for the full pipeline, or invoke each stage individually.\n\n\
-        Architecture decisions are documented in docs/adr/. See \
-        docs/adr/README.md for the format and process.",
+        Architecture decisions are documented in docs/trusty-git-analytics/decisions/. See \
+        docs/trusty-git-analytics/decisions/README.md for the format and process.",
     version,
     propagate_version = true
 )]

@@ -23,11 +23,21 @@ These are distinct from [regression-testing/](../regression-testing/) (which tra
 
 ### Validation / Audits
 
-- [`candle-metal-validation-2026-05-22.md`](candle-metal-validation-2026-05-22.md) — Candle vs ORT-CoreML embedder validation on Apple Silicon. Status: PENDING hardware run.
+- [`candle-metal-validation-2026-05-22.md`](candle-metal-validation-2026-05-22.md) — Candle vs ORT-CoreML embedder validation on Apple Silicon.
+- [`bm25-memory-2026-05-28.md`](bm25-memory-2026-05-28.md) — BM25 index memory-footprint investigation.
 
 ### Decision Documents
 
-(To be populated as engineering sessions generate decision artifacts. The stage-3-kg-decision-2026-05-25.md is currently being drafted in parallel.)
+- [`stage-1-minimal-2026-05-27.md`](stage-1-minimal-2026-05-27.md) — Stage-1 minimal pipeline decision.
+- [`stage-3-kg-decision-2026-05-25.md`](stage-3-kg-decision-2026-05-25.md) — Stage-3 knowledge-graph indexing decision.
+- [`phase3-async-symbol-graph-decision-2026-05-27.md`](phase3-async-symbol-graph-decision-2026-05-27.md) — Phase-3 async symbol-graph decision.
+- [`nested-index-fanout-rfc-2026-05-29.md`](nested-index-fanout-rfc-2026-05-29.md) — RFC: nested-index graph + fan-out prioritization.
+
+### Comparisons & Integration (migrated from in-crate `docs/`)
+
+- [`trusty-search-vs-mcp-vector-search-2026-05-12.md`](trusty-search-vs-mcp-vector-search-2026-05-12.md) — Feature/performance comparison against mcp-vector-search.
+- [`mcp-vector-search-integration.md`](mcp-vector-search-integration.md) — Integration notes for mcp-vector-search.
+- [`nlp-er-kg-indexing.md`](nlp-er-kg-indexing.md) — NLP / entity-resolution / knowledge-graph indexing investigation.
 
 ---
 

@@ -1,6 +1,6 @@
 -- Initial schema for trusty-git-analytics core tables.
 -- This migration creates the foundational tables required by the pipeline.
--- See docs/requirements/database-schema.md for the full schema reference.
+-- See docs/trusty-git-analytics/requirements/database-schema.md for the full schema reference.
 
 CREATE TABLE IF NOT EXISTS authors (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,

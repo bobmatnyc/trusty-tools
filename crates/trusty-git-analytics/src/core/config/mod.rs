@@ -1,7 +1,7 @@
 //! Configuration types deserialized from YAML.
 //!
 //! The full configuration schema is documented in
-//! `docs/requirements/configuration.md`. This module implements the practical
+//! `docs/trusty-git-analytics/requirements/configuration.md`. This module implements the practical
 //! subset needed by the pipeline; unknown YAML keys are ignored (forward
 //! compatible) so newer config files can be loaded by older binaries without
 //! a hard failure.

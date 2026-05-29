@@ -1359,7 +1359,7 @@ fn compute_developer_activity(
 
 /// DORA performance-level classifier.
 ///
-/// Why: surface the four-band rubric defined in `docs/requirements/reporting.md`.
+/// Why: surface the four-band rubric defined in `docs/trusty-git-analytics/requirements/reporting.md`.
 /// What: returns `"elite" | "high" | "medium" | "low"` based on the four DORA
 /// metrics.
 /// Test: feed elite-range inputs (>= 1 deploy/week, < 1h lead, < 0.15 cfr,

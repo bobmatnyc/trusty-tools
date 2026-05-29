@@ -70,14 +70,14 @@ Migration runner applies versioned SQL migrations on startup (v1–v18 from Pyth
 
 🔴 **Critical**: Always use WAL journal mode: `PRAGMA journal_mode=WAL`.
 
-Reference: `docs/requirements/database-schema.md`
+Reference: `docs/trusty-git-analytics/requirements/database-schema.md`
 
 ## Configuration
 
 YAML file, same structure as Python version. Deserialized via `serde_yaml` into structs in
 `src/core/config/`. Support `~` expansion for paths.
 
-Reference: `docs/requirements/configuration.md`
+Reference: `docs/trusty-git-analytics/requirements/configuration.md`
 
 ## CLI Structure
 
@@ -86,7 +86,7 @@ Binary: `tga` (produced by `src/main.rs`)
 Subcommands: `analyze` (full pipeline), `collect` (stage 1), `classify` (stage 2),
              `report` (stage 3)
 
-Reference: `docs/requirements/cli-commands.md`
+Reference: `docs/trusty-git-analytics/requirements/cli-commands.md`
 
 ## Development Commands
 
@@ -141,13 +141,13 @@ cargo check
 - `--dry-run` flags on mutating commands
 
 ### ⚪ Informational
-- `docs/requirements/` contains full specification — read before implementing any module
+- `docs/trusty-git-analytics/requirements/` contains full specification — read before implementing any module
 - Python predecessor at `/Users/masa/Projects/gitflow-analytics` for reference behavior
 - KuzuMemory MCP tools (`kuzu_recall`, `kuzu_learn`, `kuzu_enhance`) available for context
 
 ## Requirements Reference
 
-All specification documents are in `docs/requirements/`:
+All specification documents are in `docs/trusty-git-analytics/requirements/`:
 
 | File | Covers |
 |------|--------|

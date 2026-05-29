@@ -111,7 +111,7 @@ The wizard writes `config.yaml` in the current directory.
 ### Step 3: Review config.yaml
 
 Open `config.yaml` and confirm the repository paths and any credentials look correct.
-See the [Configuration Reference](configuration-reference.md) for all available options.
+See the [Configuration Reference](../developer/configuration-reference.md) for all available options.
 
 ### Step 4: Run the full pipeline
 
@@ -486,7 +486,8 @@ classifications.
    ```bash
    echo $OPENROUTER_API_KEY
    ```
-   Or set it in config: `classification.openrouter_api_key: "sk-or-..."`
+   Or set it in config: `classification.openrouter_api_key: "sk-or-..."` <!-- pragma: allowlist secret -->
+   (the `sk-or-...` shown here is a placeholder, not a real key)
 2. Check the `llm_provider` setting. Default is `auto`, which prefers OpenRouter when
    `OPENROUTER_API_KEY` is present, otherwise falls back to OpenAI.
 3. Run with `-vv` to see LLM request/response logging:

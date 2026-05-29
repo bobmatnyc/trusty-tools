@@ -7,6 +7,15 @@ Sidecar code-analysis daemon for [trusty-search](../trusty-search). Fetches chun
 corpora from the trusty-search daemon, runs static analysis, and serves results via
 HTTP (port 7879) and MCP stdio.
 
+## 📚 Documentation
+
+Full documentation lives at the workspace top level in
+[`docs/trusty-analyze/`](../../docs/trusty-analyze/): the
+[research](../../docs/trusty-analyze/research/),
+[sessions](../../docs/trusty-analyze/sessions/), and
+[regression-testing](../../docs/trusty-analyze/regression-testing/) subdirs.
+This README and the rustdoc stay in-crate; everything else lives under `docs/`.
+
 ## Installation
 
 ```bash

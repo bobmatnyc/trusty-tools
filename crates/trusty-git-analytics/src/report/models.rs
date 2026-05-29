@@ -244,7 +244,7 @@ pub struct QualitySummary {
 
 /// Configurable weights for composite developer activity score.
 ///
-/// Defaults match the values in `docs/requirements/reporting.md`. The five
+/// Defaults match the values in `docs/trusty-git-analytics/requirements/reporting.md`. The five
 /// components are normalized via min-max scaling across the reporting period
 /// and then linearly combined.
 #[derive(Debug, Clone, Serialize, Deserialize)]

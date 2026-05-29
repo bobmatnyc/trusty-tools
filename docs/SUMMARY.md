@@ -46,11 +46,33 @@
 - [Research](./open-mpm/research/README.md)
 - [Archive](./open-mpm/_archive/README.md)
 
-# Other Crates
+# trusty-search
 
-- [trusty-search](./trusty-search/research/README.md)
-- [trusty-memory](./trusty-memory/README.md)
-- [trusty-common](./trusty-common/README.md)
-- [trusty-analyze](./trusty-analyze/README.md)
-- [trusty-git-analytics](./trusty-git-analytics/README.md)
-- [trusty-mpm](./trusty-mpm/README.md)
+- [Overview](./trusty-search/README.md)
+- [Research](./trusty-search/research/README.md)
+- [Regression Testing](./trusty-search/regression-testing/README.md)
+- [Sessions](./trusty-search/sessions/README.md)
+
+# trusty-git-analytics
+
+- [Overview](./trusty-git-analytics/README.md)
+- [Requirements](./trusty-git-analytics/requirements/index.md)
+- [Decisions](./trusty-git-analytics/decisions/README.md)
+- [Regression Testing](./trusty-git-analytics/regression-testing/README.md)
+
+# trusty-memory
+
+- [Overview](./trusty-memory/README.md)
+
+# trusty-common
+
+- [Overview](./trusty-common/README.md)
+
+# trusty-analyze
+
+- [Overview](./trusty-analyze/README.md)
+
+# trusty-mpm
+
+- [Overview](./trusty-mpm/README.md)
+- [Research](./trusty-mpm/research/README.md)

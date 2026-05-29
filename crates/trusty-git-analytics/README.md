@@ -8,6 +8,15 @@ Analyze git repositories to measure developer productivity — classify commit w
 
 1.4.0 adds four new external classification sources (Linear, Shortcut, Confluence, Datadog) and fixes a SQLite WAL data-loss bug (issue #298) that could cause up to 22 minutes of classification work to be silently discarded on exit.
 
+## 📚 Documentation
+
+Full documentation lives at the workspace top level in
+[`docs/trusty-git-analytics/`](../../docs/trusty-git-analytics/): requirements
+specifications, developer/user guides, crate-specific
+[decision records](../../docs/trusty-git-analytics/decisions/), and
+[regression-testing snapshots](../../docs/trusty-git-analytics/regression-testing/).
+This README and the rustdoc stay in-crate; everything else lives under `docs/`.
+
 ## Installation
 
 ### From crates.io (recommended)

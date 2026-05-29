@@ -358,9 +358,10 @@ trusty-analyze/
 │   └── trusty-analyze-mcp/            MCP stdio + SSE server
 │       └── src/
 │           └── lib.rs
-└── docs/
-    └── research/                       design notes and research
 ```
+
+Documentation lives at the workspace top level under
+`docs/trusty-analyze/` (research, sessions, regression-testing), not in-crate.
 
 ---
 

@@ -242,8 +242,9 @@ using `criterion`.
 
 ## Architecture Decision Records
 
-Significant design decisions are documented as ADRs in `docs/adr/`. See
-`docs/adr/README.md` for the format. New ADRs should be written for: library
+Significant design decisions are documented as ADRs in
+`docs/trusty-git-analytics/decisions/`. See
+`docs/trusty-git-analytics/decisions/README.md` for the format. New ADRs should be written for: library
 choices, schema decisions, performance trade-offs, and any decision that
 future contributors would otherwise have to reverse-engineer.
 

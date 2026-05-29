@@ -46,6 +46,10 @@ Examples:
 
 - [`v1.3.0-2026-05-27.md`](v1.3.0-2026-05-27.md) — **First published tga benchmark.** 72k-commit Duetto corpus. CPU throughput: ~113k commits/s (no JIRA). Coverage: 67.7% with JIRA, 64.3% without. Peak RSS: 235 MB. weighted_sum tier (new in 1.3.0) contributes 9.6–11.0% of classified commits.
 
+### Cross-implementation comparison
+
+- [`comparison.md`](comparison.md) — Benchmark comparison between Rust `tga` (0.1.0) and the Python `gitflow-analytics` (v3.16.4) predecessor: throughput, accuracy, and bugs discovered during the port.
+
 ### Latest
 
 [`current.md`](current.md) — symlink to the latest version snapshot (currently v1.3.0-2026-05-27).

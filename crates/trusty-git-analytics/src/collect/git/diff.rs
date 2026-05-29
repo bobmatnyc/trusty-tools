@@ -48,7 +48,7 @@ pub struct FileDiff {
 ///
 /// Propagates any `git2` errors from tree lookups or diff computation.
 pub fn compute_commit_diff(repo: &Repository, commit: &Commit<'_>) -> Result<CommitDiff> {
-    // PROFILING NOTE (see docs/adr/0002-performance-hotspots.md):
+    // PROFILING NOTE (see docs/trusty-git-analytics/decisions/0002-performance-hotspots.md):
     // `commit.tree()?` and `commit.parent(0)?.tree()?` are libgit2 object
     // lookups against the on-disk ODB. Profiles on a 58K-commit monolith
     // show ~35% of `collect_window` time is spent in these two calls.

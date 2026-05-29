@@ -25,7 +25,7 @@
 //! parallel SQLite access, prefer `rusqlite`'s built-in
 //! `Connection::open_with_flags` per worker over a pool.
 //!
-//! See `docs/adr/0001-sqlite-tuning.md` for the rationale behind each
+//! See `docs/trusty-git-analytics/decisions/0001-sqlite-tuning.md` for the rationale behind each
 //! pragma value.
 
 use std::path::Path;

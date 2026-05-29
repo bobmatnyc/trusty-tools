@@ -19,7 +19,6 @@ exclude = [
     ".claude-mpm/*",
     ".fastembed_cache/*",
     ".github/*",
-    "docs/*",
     "configs/*",
 ]
 

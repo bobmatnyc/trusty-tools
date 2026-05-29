@@ -7,6 +7,16 @@
 Machine-wide, blazingly fast hybrid code search service. One install per machine,
 one always-on daemon, unlimited named indexes.
 
+## 📚 Documentation
+
+Full documentation lives at the workspace top level in
+[`docs/trusty-search/`](../../docs/trusty-search/): the
+[research](../../docs/trusty-search/research/) and
+[regression-testing](../../docs/trusty-search/regression-testing/) indexes,
+engineering [sessions](../../docs/trusty-search/sessions/), and the
+[example multi-index config](../../docs/trusty-search/examples/trusty-search.yaml).
+This README and the rustdoc stay in-crate; everything else lives under `docs/`.
+
 ## System requirements
 
 - **Rust 1.75+** (for source builds)
@@ -161,7 +171,7 @@ Once connected, Claude Code can call `search_code`, `index_file`, `list_indexes`
   flag needed since v0.3.13)
 - **Multi-index repo support** — drop a `trusty-search.yaml` at the repo root
   to define per-directory named indexes; `trusty-search index` reads it
-  automatically (see [`docs/examples/trusty-search.yaml`](docs/examples/trusty-search.yaml))
+  automatically (see [`docs/trusty-search/examples/trusty-search.yaml`](../../docs/trusty-search/examples/trusty-search.yaml))
 - **Incremental reindex** — sha2 content fingerprints skip unchanged files
   across daemon restarts; `--force` triggers a full rebuild
 - **Zero cold-start queries** — HNSW kept hot (`Duration::MAX` cool-after),
@@ -492,8 +502,8 @@ pipeline, multi-request design, memory tuning reference, and release process.
 
 - [CLAUDE.md](./CLAUDE.md) — full architecture + HTTP API reference
 - [CHANGELOG.md](./CHANGELOG.md) — release history
-- [docs/examples/trusty-search.yaml](./docs/examples/trusty-search.yaml) — multi-index repo config
-- [docs/research/](./docs/research/) — design + comparison documents
+- [docs/trusty-search/examples/trusty-search.yaml](../../docs/trusty-search/examples/trusty-search.yaml) — multi-index repo config
+- [docs/trusty-search/research/](../../docs/trusty-search/research/) — design + comparison documents
 
 ## License
 

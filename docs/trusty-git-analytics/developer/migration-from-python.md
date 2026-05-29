@@ -277,8 +277,8 @@ cargo build --release
 ## Getting Help
 
 - **Issue tracker**: https://github.com/bobmatnyc/trusty-git-analytics/issues
-- **Requirements docs**: `docs/requirements/` (full schema specs)
-- **Architecture notes**: `docs/architecture.md`
+- **Requirements docs**: `docs/trusty-git-analytics/requirements/` (full schema specs)
+- **Architecture notes**: `docs/trusty-git-analytics/developer/architecture.md`
 
 When filing a bug, include:
 

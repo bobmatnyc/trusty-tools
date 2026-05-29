@@ -58,10 +58,11 @@ Examples:
 - [`synthetic-corpus-baseline-2026-05-25.md`](synthetic-corpus-baseline-2026-05-25.md) — Non-circular 47-file synthetic corpus (#123 v2). Eliminates BM25 circular-bias contamination. Clean Hit@1: 43% lexical, 43% hybrid on definitions.
 - [`open-mpm-baseline-2026-05-25.md`](open-mpm-baseline-2026-05-25.md) — First organic-corpus measurement (282 files / 6,611 chunks via v0.10.0).
 - [`baseline-performance-2026-05-22.md`](baseline-performance-2026-05-22.md) — Pre-session baseline performance reference.
+- [`search-perf-2026-05-12.md`](search-perf-2026-05-12.md) — Early search-performance measurements (migrated from the in-crate `docs/performance/`).
 
 ### Latest
 
-[`current.md`](current.md) — symlink to the latest version snapshot (currently v0.10.0-2026-05-25).
+[`current.md`](current.md) — symlink to the latest version snapshot (currently v0.13.1-2026-05-27).
 
 ## Caveat: BM25 Circular Bias (#123)
 

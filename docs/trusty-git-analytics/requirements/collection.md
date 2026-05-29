@@ -112,7 +112,7 @@ Server / Data Center is **not** supported.
   merged PRs. Post-merge edits (title/description/reviewer changes) bump
   `updated_on`, biasing recorded `merged_at` later than the actual merge
   moment. Bias is one-directional and bounded in practice. See
-  [ADR-0003 §6](../adr/0003-bitbucket-pr-provider.md) for the full rationale.
+  [ADR-0003 §6](../decisions/0003-bitbucket-pr-provider.md) for the full rationale.
 
 ### Incremental Fetch
 
