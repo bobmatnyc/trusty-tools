@@ -1,0 +1,8 @@
+# .trusty-tools/trusty-memory.yaml
+# This file pins the trusty-memory palace slug for this project.
+# Commit it so the linkage survives directory renames and drive reorgs.
+# Schema: https://github.com/bobmatnyc/trusty-tools (trusty-tools convention)
+
+schema_version: 1
+palace: trusty-tools
+note: pinned before drive reorg
