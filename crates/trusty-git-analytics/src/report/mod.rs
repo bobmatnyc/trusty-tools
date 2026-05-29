@@ -662,6 +662,210 @@ mod tests {
         );
     }
 
+    // =========================================================================
+    // fact_weekly_quality persistence tests (issue #445 batch B, task 1)
+    // =========================================================================
+
+    /// Why: `persist_weekly_quality` must UPSERT the same values the aggregator
+    /// computed into `fact_weekly_quality`, and running it twice must not
+    /// duplicate rows (idempotent).
+    /// What: seed the quality DB, build a report (which calls persist internally),
+    /// then call `persist_weekly_quality` again; assert the row count is still 1
+    /// and the values match the aggregator's weekly_activity output.
+    /// Test: this test itself.
+    #[test]
+    fn persist_weekly_quality_upserts_rows_and_is_idempotent() {
+        let db = seed_quality_db();
+        let cfg = baseline_config();
+        let data = Aggregator::build(&db, &cfg).expect("aggregate (first — writes quality rows)");
+
+        // The aggregator's build path already called persist internally.
+        let wa = &data.weekly_activity[0];
+
+        // Read back the persisted row.
+        let (score, tshirt, rc, bc, tc, cc): (f64, i64, i64, i64, i64, i64) = db
+            .connection()
+            .query_row(
+                "SELECT quality_score, quality_tshirt, revert_count, bugfix_count, \
+                 ticketed_count, commit_count FROM fact_weekly_quality \
+                 WHERE author_email = 'carol@example.com'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .expect("read persisted quality row");
+
+        // Values must match the aggregator's weekly_activity output.
+        assert!(
+            (score - wa.quality_score).abs() < 1e-9,
+            "persisted quality_score {score} must match aggregator score {}",
+            wa.quality_score
+        );
+        assert_eq!(tshirt, wa.quality_tshirt.parse::<i64>().unwrap_or(0));
+        assert_eq!(rc, wa.revert_count as i64);
+        assert_eq!(bc, wa.bugfix_count as i64);
+        assert_eq!(tc, wa.ticketed_count as i64);
+        assert_eq!(cc, wa.commit_count as i64);
+
+        // Idempotency: call persist again; row count must still be 1.
+        Aggregator::persist_weekly_quality(&db, &data).expect("second persist");
+        let count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM fact_weekly_quality WHERE author_email = 'carol@example.com'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(count, 1, "UPSERT must not duplicate the grain row");
+    }
+
+    // =========================================================================
+    // avg_complexity tests (issue #445 batch B, task 2)
+    // =========================================================================
+
+    /// Why: `avg_complexity` must be `None` when no commit in the bucket has a
+    /// non-null `classifications.complexity` value, and `Some(mean)` when at
+    /// least one commit does. This validates both the all-null and mixed cases.
+    /// What: seeds a classification with `complexity = 3`, links it to one
+    /// commit; seeds a second commit with no complexity. Asserts avg = 3.0 (only
+    /// non-null values average) and the all-null baseline returns None.
+    /// Test: this test itself.
+    #[test]
+    fn avg_complexity_is_mean_of_non_null_values() {
+        let db = Database::open_in_memory().expect("open db");
+        let conn = db.connection();
+
+        // Insert a classification with complexity = 3.
+        conn.execute(
+            "INSERT INTO classifications (id, category, subcategory, confidence, method, complexity) \
+             VALUES (10, 'feature', NULL, 0.9, 'llm', 3)",
+            [],
+        )
+        .expect("insert classification with complexity");
+        // Insert a classification with complexity = 5.
+        conn.execute(
+            "INSERT INTO classifications (id, category, subcategory, confidence, method, complexity) \
+             VALUES (11, 'feature', NULL, 0.9, 'llm', 5)",
+            [],
+        )
+        .expect("insert classification complexity=5");
+
+        // Three commits by Eve in 2024-W03: two with complexity, one without.
+        conn.execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                 repository, files_changed, insertions, deletions, is_merge, classification_id) \
+             VALUES ('e1', 'Eve', 'eve@complexity.example', '2024-01-15T10:00:00+00:00', \
+                 'feat: x', 'repo-c', 1, 5, 1, 0, 10)",
+            [],
+        )
+        .expect("commit with complexity=3");
+        conn.execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                 repository, files_changed, insertions, deletions, is_merge, classification_id) \
+             VALUES ('e2', 'Eve', 'eve@complexity.example', '2024-01-16T10:00:00+00:00', \
+                 'feat: y', 'repo-c', 1, 3, 1, 0, 11)",
+            [],
+        )
+        .expect("commit with complexity=5");
+        conn.execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                 repository, files_changed, insertions, deletions, is_merge) \
+             VALUES ('e3', 'Eve', 'eve@complexity.example', '2024-01-17T10:00:00+00:00', \
+                 'chore: no complexity', 'repo-c', 1, 1, 1, 0)",
+            [],
+        )
+        .expect("commit without complexity");
+
+        let cfg = baseline_config();
+        let data = Aggregator::build(&db, &cfg).expect("aggregate");
+
+        // Find Eve's weekly activity row.
+        let wa = data
+            .weekly_activity
+            .iter()
+            .find(|r| r.author == "Eve" || r.author.contains("eve@complexity"))
+            .expect("Eve's weekly row must exist");
+
+        // Expected: avg of [3, 5] = 4.0 (null-complexity commit is excluded).
+        assert_eq!(
+            wa.avg_complexity,
+            Some(4.0),
+            "avg_complexity must be 4.0 (mean of 3 and 5)"
+        );
+    }
+
+    /// Why: when ALL commits in a bucket have null complexity (e.g. all resolved
+    /// by exact_rule), `avg_complexity` must be `None` — not `Some(0.0)`.
+    /// What: uses `seed_db()` which has no complexity values; asserts None.
+    /// Test: this test itself.
+    #[test]
+    fn avg_complexity_is_none_when_all_null() {
+        let db = seed_db();
+        let cfg = baseline_config();
+        let data = Aggregator::build(&db, &cfg).expect("aggregate");
+
+        for wa in &data.weekly_activity {
+            assert_eq!(
+                wa.avg_complexity, None,
+                "avg_complexity must be None when no classifications carry a complexity score"
+            );
+        }
+    }
+
+    /// Why: the weekly CSV must include the `avg_complexity` column so warehouse
+    /// ingestion picks it up without schema changes.
+    /// What: seeds a classification with complexity, builds report, writes CSV,
+    /// asserts the header contains `avg_complexity` and a data row has a value.
+    /// Test: this test itself.
+    #[test]
+    fn weekly_csv_includes_avg_complexity_column() {
+        let db = Database::open_in_memory().expect("open db");
+        let conn = db.connection();
+        conn.execute(
+            "INSERT INTO classifications (id, category, subcategory, confidence, method, complexity) \
+             VALUES (20, 'feature', NULL, 0.9, 'llm', 4)",
+            [],
+        )
+        .expect("insert classification");
+        conn.execute(
+            "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                 repository, files_changed, insertions, deletions, is_merge, classification_id) \
+             VALUES ('cx1', 'Frank', 'frank@example.com', '2024-01-15T10:00:00+00:00', \
+                 'feat: z', 'repo-a', 1, 5, 1, 0, 20)",
+            [],
+        )
+        .expect("insert commit");
+
+        let cfg = baseline_config();
+        let data = Aggregator::build(&db, &cfg).expect("aggregate");
+
+        let dir = tmp_dir("csv-complexity");
+        let path = csv_fmt::write_weekly_csv(&data, &dir).expect("write weekly csv");
+        let text = std::fs::read_to_string(&path).expect("read csv");
+        let header = text.lines().next().expect("header");
+
+        assert!(
+            header.contains("avg_complexity"),
+            "weekly CSV header must contain avg_complexity; got: {header}"
+        );
+        // The data row should have a non-empty avg_complexity (4.0000).
+        assert!(
+            text.contains("4.0000"),
+            "CSV should contain avg_complexity = 4.0000 for Frank's row; got:\n{text}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn aggregator_author_filter_none_returns_all() {
         // Why: omitting `--author` must behave identically to the pre-existing

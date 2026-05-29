@@ -111,6 +111,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "pushdown_445",
         sql: include_str!("sql/0017_pushdown_445.sql"),
     },
+    Migration {
+        version: 18,
+        name: "fact_weekly_quality",
+        sql: include_str!("sql/0018_fact_weekly_quality.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.
@@ -268,6 +273,124 @@ mod tests {
             top,
             Some("feature".to_string()),
             "top_level_category must be 'feature'"
+        );
+    }
+
+    /// Why: regression guard for issue #445 batch B. Migration v18 creates
+    /// `fact_weekly_quality` with all required columns and a PRIMARY KEY on
+    /// (author_email, iso_year, iso_week, repository).
+    /// What: opens an in-memory DB (which runs all migrations up to v18),
+    /// UPSERTs a quality row, reads it back, verifies all columns, and
+    /// confirms that re-inserting the same grain key overwrites rather than
+    /// duplicating (UPSERT semantics).
+    /// Test: this test itself.
+    #[test]
+    fn migration_v18_creates_fact_weekly_quality() {
+        let db = Database::open_in_memory().expect("open db");
+        let conn = db.connection();
+
+        // Insert a quality row.
+        conn.execute(
+            "INSERT OR REPLACE INTO fact_weekly_quality \
+             (author_email, iso_year, iso_week, repository, quality_score, quality_tshirt, \
+              revert_count, bugfix_count, ticketed_count, commit_count, formula_version, \
+              computed_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                "alice@example.com",
+                2026_i64,
+                5_i64,
+                "testrepo",
+                0.6875_f64,
+                4_i64,
+                1_i64,
+                1_i64,
+                2_i64,
+                4_i64,
+                "v1",
+                1_000_000_i64,
+            ],
+        )
+        .expect("insert quality row");
+
+        // Read it back and verify columns.
+        let (score, tshirt, reverts, bugfixes, ticketed, commits): (f64, i64, i64, i64, i64, i64) =
+            conn.query_row(
+                "SELECT quality_score, quality_tshirt, revert_count, bugfix_count, \
+                 ticketed_count, commit_count \
+                 FROM fact_weekly_quality \
+                 WHERE author_email = 'alice@example.com' AND iso_year = 2026 \
+                   AND iso_week = 5 AND repository = 'testrepo'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .expect("read back");
+        assert!(
+            (score - 0.6875).abs() < 1e-9,
+            "quality_score must be 0.6875, got {score}"
+        );
+        assert_eq!(tshirt, 4, "quality_tshirt must be 4");
+        assert_eq!(reverts, 1);
+        assert_eq!(bugfixes, 1);
+        assert_eq!(ticketed, 2);
+        assert_eq!(commits, 4);
+
+        // Verify UPSERT: second insert with updated score must overwrite (not duplicate).
+        conn.execute(
+            "INSERT OR REPLACE INTO fact_weekly_quality \
+             (author_email, iso_year, iso_week, repository, quality_score, quality_tshirt, \
+              revert_count, bugfix_count, ticketed_count, commit_count, formula_version, \
+              computed_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                "alice@example.com",
+                2026_i64,
+                5_i64,
+                "testrepo",
+                1.0_f64, // updated score
+                5_i64,
+                0_i64,
+                0_i64,
+                4_i64,
+                4_i64,
+                "v1",
+                2_000_000_i64,
+            ],
+        )
+        .expect("upsert quality row");
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM fact_weekly_quality \
+                 WHERE author_email = 'alice@example.com' AND iso_year = 2026 \
+                   AND iso_week = 5 AND repository = 'testrepo'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(count, 1, "UPSERT must not duplicate the grain row");
+
+        let new_score: f64 = conn
+            .query_row(
+                "SELECT quality_score FROM fact_weekly_quality \
+                 WHERE author_email = 'alice@example.com' AND iso_year = 2026 \
+                   AND iso_week = 5 AND repository = 'testrepo'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("new score");
+        assert!(
+            (new_score - 1.0).abs() < 1e-9,
+            "UPSERT must overwrite the score with 1.0, got {new_score}"
         );
     }
 

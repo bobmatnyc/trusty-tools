@@ -97,6 +97,13 @@ pub struct WeeklyActivity {
     /// get an org-wide AI-adoption count.
     #[serde(default)]
     pub ai_assisted_count: usize,
+    /// Mean LLM-assigned complexity score (1–5) across commits in this bucket
+    /// that have a non-null `classifications.complexity` value (issue #445
+    /// batch B, request #6). `None` when no commit in the bucket has been
+    /// assigned a complexity score (e.g., all classified by rules/external
+    /// sources or no classification at all).
+    #[serde(default)]
+    pub avg_complexity: Option<f64>,
 }
 
 /// Per-week aggregated metrics across all developers and repositories.

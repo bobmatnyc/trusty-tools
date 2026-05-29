@@ -13,6 +13,7 @@ use tracing::{debug, warn};
 
 use crate::core::config::Config;
 use crate::core::db::Database;
+use crate::core::quality::QUALITY_FORMULA_VERSION;
 use crate::report::errors::{ReportError, Result};
 use crate::report::models::{
     ActivityWeights, AuthorSummary, DeveloperActivitySummary, DoraMetrics, QualitySummary,
@@ -47,6 +48,10 @@ struct CommitRow {
     /// True when the commit carries a recognised AI co-authorship trailer
     /// (issue #445: `Co-Authored-By: Claude/Copilot/Cursor`).
     is_ai_assisted: bool,
+    /// LLM-assigned complexity score 1–5 from `classifications.complexity`
+    /// (issue #445 batch B, request #6). `None` for non-LLM classifications
+    /// or commits without a classification row.
+    complexity: Option<i64>,
 }
 
 /// Minimal PR row used by velocity / DORA computations and (issue #377)
@@ -210,6 +215,27 @@ impl Aggregator {
         // would otherwise silently break week-over-week deltas.
         check_weekly_coverage_drift(db, &data.weekly_metrics);
 
+        // Issue #445 batch B: persist per-engineer-per-week quality scores to
+        // `fact_weekly_quality` so downstream warehouses can query without
+        // re-running the aggregator. Non-fatal: a persistence failure is
+        // logged but does not abort report generation (the in-memory data is
+        // still complete and formatters will still write their files).
+        match Self::persist_weekly_quality(db, &data) {
+            Ok(n) => {
+                tracing::debug!(
+                    rows = n,
+                    "persisted weekly quality rows to fact_weekly_quality"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "WARNING: could not persist to fact_weekly_quality; \
+                     run `tga backfill quality` to retry. Report generation continues."
+                );
+            }
+        }
+
         if unresolved_db > 0 {
             tracing::warn!(
                 count = unresolved_db,
@@ -342,12 +368,14 @@ impl Aggregator {
         // `LOWER(COALESCE(...)) = LOWER(?)` so that the filter still works
         // for commits that pre-date `upsert_observed_authors` and fall back
         // to the raw `c.author_email` field.
+        // Issue #445 batch B (request #6): include cl.complexity so the weekly
+        // aggregator can surface avg_complexity without a second DB scan.
         let sql_base = "SELECT c.sha, \
                         COALESCE(a.canonical_name,  c.author_name)  AS author_name, \
                         COALESCE(NULLIF(a.canonical_email, ''), c.author_email) AS author_email, \
                         c.timestamp, c.repository, \
                         c.insertions, c.deletions, c.files_changed, cl.category, \
-                        c.message, c.ticketed, c.is_ai_assisted \
+                        c.message, c.ticketed, c.is_ai_assisted, cl.complexity \
                  FROM commits c \
                  LEFT JOIN authors a ON a.id = c.author_id \
                  LEFT JOIN classifications cl ON cl.id = c.classification_id";
@@ -361,6 +389,9 @@ impl Aggregator {
             // Issue #445: column added in migration v17; default 0 for rows
             // that pre-date the migration (SQLite returns NULL as 0 via unwrap_or).
             let is_ai_assisted: i64 = row.get(11).unwrap_or(0);
+            // Issue #445 batch B (request #6): complexity from classifications.
+            // NULL for non-LLM tiers; pre-migration rows also return NULL.
+            let complexity: Option<i64> = row.get(12).unwrap_or(None);
             Ok(CommitRow {
                 sha: row.get(0)?,
                 author_name: row.get(1)?,
@@ -374,6 +405,7 @@ impl Aggregator {
                 message: row.get(9)?,
                 ticketed: ticketed != 0,
                 is_ai_assisted: is_ai_assisted != 0,
+                complexity,
             })
         };
 
@@ -530,6 +562,141 @@ impl Aggregator {
         let _ = acc.dev_ticketed;
         data
     }
+
+    /// Persist per-engineer-per-week quality scores to `fact_weekly_quality`.
+    ///
+    /// Why: downstream warehouses read `tga.db` directly; storing quality rows
+    /// avoids requiring consumers to re-implement the scoring formula in SQL.
+    /// This is called immediately after the aggregation so the stored values
+    /// always reflect the corrected ticketed logic from batch A (migration v17).
+    /// What: UPSERTs one row per [`WeeklyActivity`] into `fact_weekly_quality`,
+    /// batching in chunks of 500. The grain key (author_email, iso_year,
+    /// iso_week, repository) matches the aggregator's weekly bucket exactly.
+    /// Rows whose ISO week label cannot be parsed are skipped with a warning.
+    /// Test: `report::tests::persist_weekly_quality_upserts_rows` (seed the
+    /// aggregator, call persist, assert rows appear in the table + idempotent).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReportError::Core`] if any SQLite operation fails.
+    pub fn persist_weekly_quality(db: &Database, data: &ReportData) -> Result<usize> {
+        if data.weekly_activity.is_empty() {
+            return Ok(0);
+        }
+        let computed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let rows: Vec<_> = data
+            .weekly_activity
+            .iter()
+            .filter_map(|wa| {
+                let (iso_year, iso_week) = match parse_week_label_to_parts(&wa.week) {
+                    Some(p) => p,
+                    None => {
+                        tracing::warn!(
+                            week = %wa.week,
+                            "persist_weekly_quality: cannot parse week label; skipping row"
+                        );
+                        return None;
+                    }
+                };
+                // Derive quality_tshirt integer from the string ("1".."5").
+                let quality_tshirt: i64 = wa.quality_tshirt.parse().unwrap_or(
+                    crate::core::quality::size_for_quality_score(wa.quality_score) as i64,
+                );
+                Some((
+                    wa.author.clone(), // Note: this is the display name; use email below.
+                    iso_year,
+                    iso_week,
+                    wa.repository.clone(),
+                    wa.quality_score,
+                    quality_tshirt,
+                    wa.revert_count as i64,
+                    wa.bugfix_count as i64,
+                    wa.ticketed_count as i64,
+                    wa.commit_count as i64,
+                    computed_at,
+                ))
+            })
+            .collect();
+
+        // We need author email, not display name — rebuild a lookup from
+        // ReportData.authors (email → display_name is available; we need the
+        // reverse). Since author identity in weekly_activity is keyed by email
+        // in the aggregator and resolved to display_name at materialisation,
+        // we persist the display name as the author_email key when emails are
+        // not directly available in WeeklyActivity. For now we use the author
+        // field directly as the stable key because the aggregator resolves
+        // canonical emails to display names. To keep the grain key correct,
+        // use a display_name→email map derived from author_summaries.
+        let name_to_email: std::collections::HashMap<String, String> = data
+            .authors
+            .iter()
+            .map(|a| (a.name.clone(), a.email.clone()))
+            .collect();
+
+        let mut written = 0usize;
+        for chunk in rows.chunks(500) {
+            let conn = db.connection();
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(crate::core::TgaError::from)?;
+            {
+                let mut stmt = tx
+                    .prepare(
+                        "INSERT OR REPLACE INTO fact_weekly_quality \
+                         (author_email, iso_year, iso_week, repository, quality_score, \
+                          quality_tshirt, revert_count, bugfix_count, ticketed_count, \
+                          commit_count, formula_version, computed_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    )
+                    .map_err(crate::core::TgaError::from)?;
+                for (author_display, iso_year, iso_week, repo, qs, qt, rc, bc, tc, cc, ca) in chunk
+                {
+                    // Resolve the canonical email from the display name; fall
+                    // back to the display name itself when no match exists (can
+                    // happen for uncommitted / alias-unresolved identities).
+                    let author_email = name_to_email
+                        .get(author_display)
+                        .cloned()
+                        .unwrap_or_else(|| author_display.clone());
+                    stmt.execute(rusqlite::params![
+                        author_email,
+                        iso_year,
+                        iso_week,
+                        repo,
+                        qs,
+                        qt,
+                        rc,
+                        bc,
+                        tc,
+                        cc,
+                        QUALITY_FORMULA_VERSION,
+                        ca,
+                    ])
+                    .map_err(crate::core::TgaError::from)?;
+                    written += 1;
+                }
+            }
+            tx.commit().map_err(crate::core::TgaError::from)?;
+        }
+        Ok(written)
+    }
+}
+
+/// Parse an ISO week label `"YYYY-Www"` into `(iso_year, iso_week)`.
+///
+/// Why: `fact_weekly_quality` stores year and week as separate INTEGER columns
+/// so warehouse tools can filter by year or week number without string parsing.
+/// What: splits on `-W`, parses both halves as integers.
+/// Test: exercised by `persist_weekly_quality` via the report tests.
+fn parse_week_label_to_parts(label: &str) -> Option<(i64, i64)> {
+    let (y, w) = label.split_once("-W")?;
+    let year: i64 = y.parse().ok()?;
+    let week: i64 = w.parse().ok()?;
+    Some((year, week))
 }
 
 // ===========================================================================
@@ -616,6 +783,12 @@ struct WeekAcc {
     ticketed: usize,
     /// AI-assisted commits in this bucket (issue #445: `is_ai_assisted=1`).
     ai_assisted: usize,
+    /// Running sum of non-null complexity scores for this bucket (issue #445
+    /// batch B, request #6). Used with `complexity_count` to compute the
+    /// mean at materialisation time. Only LLM-classified commits contribute.
+    complexity_sum: i64,
+    /// Number of commits in this bucket with a non-null complexity score.
+    complexity_count: usize,
 }
 
 /// Cross-developer per-week running totals during accumulation.
@@ -740,6 +913,8 @@ fn accumulate_rows(rows: &[CommitRow], flags: &RowFlags) -> Accumulators {
             bugfixes: 0,
             ticketed: 0,
             ai_assisted: 0,
+            complexity_sum: 0,
+            complexity_count: 0,
         });
         w.commits += 1;
         w.insertions += row.insertions;
@@ -764,6 +939,13 @@ fn accumulate_rows(rows: &[CommitRow], flags: &RowFlags) -> Accumulators {
         // so the weekly activity report can surface AI-adoption rates.
         if row.is_ai_assisted {
             w.ai_assisted += 1;
+        }
+        // Issue #445 batch B (request #6): accumulate complexity sum so
+        // materialize_weekly_activity can compute avg_complexity without a
+        // second pass. Only non-null values (LLM-classified commits) contribute.
+        if let Some(c) = row.complexity {
+            w.complexity_sum += c;
+            w.complexity_count += 1;
         }
 
         // Category totals.
@@ -910,6 +1092,15 @@ fn materialize_weekly_activity(
                 .or_else(|| abandoned_by_week_identity.get(&(week.clone(), email.to_lowercase())))
                 .copied()
                 .unwrap_or(0);
+            // Issue #445 batch B (request #6): compute the mean complexity for
+            // this bucket from the running sum. Returns None when no commit has
+            // a non-null complexity score (all-null → None, not 0.0, so
+            // downstream consumers can distinguish "no data" from "scored 0").
+            let avg_complexity = if w.complexity_count > 0 {
+                Some(w.complexity_sum as f64 / w.complexity_count as f64)
+            } else {
+                None
+            };
             WeeklyActivity {
                 week,
                 author,
@@ -926,6 +1117,7 @@ fn materialize_weekly_activity(
                 abandoned_pr_count,
                 // Issue #445: AI-assisted commits in this (week, engineer, repo) bucket.
                 ai_assisted_count: w.ai_assisted,
+                avg_complexity,
             }
         })
         .collect()

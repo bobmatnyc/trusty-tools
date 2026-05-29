@@ -77,9 +77,16 @@ pub fn write_weekly_csv(data: &ReportData, output_dir: &Path) -> Result<PathBuf>
         "abandoned_pr_count",
         // Issue #445: AI-adoption column — commits with a known AI co-author trailer.
         "ai_assisted_count",
+        // Issue #445 batch B (request #6): mean LLM-assigned complexity for
+        // this bucket; empty string when no commit has a complexity score.
+        "avg_complexity",
     ])?;
     for row in &data.weekly_activity {
         let categories = serialize_categories(&row.categories);
+        let avg_complexity_str = match row.avg_complexity {
+            Some(c) => format!("{:.4}", c),
+            None => String::new(),
+        };
         w.write_record([
             row.week.as_str(),
             row.author.as_str(),
@@ -95,6 +102,7 @@ pub fn write_weekly_csv(data: &ReportData, output_dir: &Path) -> Result<PathBuf>
             row.quality_tshirt.as_str(),
             &row.abandoned_pr_count.to_string(),
             &row.ai_assisted_count.to_string(),
+            avg_complexity_str.as_str(),
         ])?;
     }
     w.flush()?;

@@ -22,6 +22,7 @@ use tga::collect::ticket::{extract_ticket_id, is_ticketed};
 use tga::core::config::{expand_path, Config};
 use tga::core::db::{CheckpointMode, Database};
 use tga::core::effort::{compute_effort, effort_tshirt_from_size, FORMULA_VERSION};
+use tga::report::aggregator::Aggregator;
 
 /// Arguments for `tga backfill`.
 #[derive(Args, Debug)]
@@ -166,6 +167,18 @@ pub enum BackfillSubcommand {
     /// Maps the text size label (XS/S/M/L/XL) to the numeric T-shirt integer
     /// (1–5) for existing rows that pre-date migration v17.
     EffortTshirt,
+    /// Recompute and persist per-engineer-per-week quality scores to
+    /// `fact_weekly_quality` for all historical data (issue #445 batch B).
+    ///
+    /// Reads the full `commits` table (left-joined against `classifications`
+    /// and `authors`), re-runs the aggregator's weekly bucketing logic, and
+    /// UPSERTs every (author, week, repo) grain into `fact_weekly_quality`.
+    /// Idempotent — running twice produces the same result. Supports --dry-run
+    /// to report the row count without writing.
+    ///
+    /// No LLM required — quality scoring is a pure formula applied to
+    /// per-bucket counts of reverts, bugfixes, and ticketed commits.
+    Quality,
 }
 
 /// Arguments for `tga backfill complexity`.
@@ -282,6 +295,7 @@ pub async fn run(config: Config, db: &mut Database, args: BackfillArgs) -> anyho
         ),
         BackfillSubcommand::TopLevel => backfill_top_level(db, args.dry_run),
         BackfillSubcommand::EffortTshirt => backfill_effort_tshirt(db, args.dry_run),
+        BackfillSubcommand::Quality => backfill_quality(db, args.dry_run),
     }
 }
 
@@ -1656,6 +1670,76 @@ fn backfill_effort_tshirt(db: &mut Database, dry_run: bool) -> anyhow::Result<()
     Ok(())
 }
 
+// ── backfill quality (issue #445 batch B) ─────────────────────────────────────
+
+/// Recompute and persist per-engineer-per-week quality scores for all historical
+/// data into `fact_weekly_quality`.
+///
+/// Why: `fact_weekly_quality` (migration v18) is populated automatically when a
+/// `tga report` run calls `Aggregator::persist_weekly_quality`. For databases
+/// collected before batch B was deployed, or for databases where quality rows
+/// need to be corrected after `tga backfill ticketed` changed the `ticketed`
+/// values, this subcommand recomputes the full table from scratch.
+/// What: delegates to `Aggregator::build` (which re-aggregates the commits
+/// table) and then calls `Aggregator::persist_weekly_quality`. The aggregator
+/// shares the same bucketing logic used at report time, so the stored values
+/// are guaranteed to match what a fresh `tga report` would produce. In
+/// `--dry-run` mode it counts the weekly-activity rows and prints the estimate
+/// without writing anything.
+/// Test: `tests::backfill_quality_populates_and_is_idempotent`.
+///
+/// # Errors
+///
+/// Propagates aggregator / database errors. The aggregator itself is non-fatal
+/// on empty databases (returns an empty `ReportData`).
+fn backfill_quality(db: &mut Database, dry_run: bool) -> anyhow::Result<()> {
+    // Build report data without writing CSV/JSON — we only need the
+    // weekly_activity slice to feed `persist_weekly_quality`.
+    let config = tga::core::config::Config::default();
+    // Use `build` instead of `build_filtered` to get all historical rows.
+    // Note: `Aggregator::build` also calls `persist_weekly_quality` internally,
+    // so we just let it do the work and report the final count.
+    if dry_run {
+        // Estimate: count distinct (author_email, iso_year, iso_week, repository)
+        // tuples that would be written by running the aggregator.
+        let candidate: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM ( \
+                     SELECT DISTINCT \
+                         COALESCE(NULLIF(a.canonical_email, ''), c.author_email) AS ae, \
+                         CAST(strftime('%Y', c.timestamp) AS INTEGER) AS yr, \
+                         CAST(strftime('%W', c.timestamp) AS INTEGER) AS wk, \
+                         c.repository \
+                     FROM commits c \
+                     LEFT JOIN authors a ON a.id = c.author_id \
+                 )",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        println!(
+            "Dry run — would write approximately {candidate} quality row(s) \
+             to fact_weekly_quality. No changes written."
+        );
+        return Ok(());
+    }
+
+    let data =
+        Aggregator::build(db, &config).map_err(|e| anyhow::anyhow!("aggregation failed: {e}"))?;
+
+    let written = Aggregator::persist_weekly_quality(db, &data)
+        .map_err(|e| anyhow::anyhow!("quality persist failed: {e}"))?;
+
+    println!("Backfilled fact_weekly_quality: {written} row(s) written (UPSERT semantics).");
+
+    // Flush the WAL so the new rows are durable in the main DB file.
+    if let Err(e) = db.wal_checkpoint(tga::core::db::CheckpointMode::Truncate) {
+        tracing::warn!(error = %e, "WAL TRUNCATE checkpoint failed after quality backfill");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2501,5 +2585,109 @@ mod tests {
             )
             .expect("read effort_tshirt");
         assert_eq!(tshirt, Some(4), "L size must map to effort_tshirt=4");
+    }
+
+    /// Why: regression guard for issue #445 batch B. `backfill_quality` must
+    /// populate `fact_weekly_quality` for all historical weeks, and running it
+    /// twice must produce the same result (idempotent UPSERT).
+    /// What: seeds two commits by the same author in the same ISO week with known
+    /// quality signals (one revert, one ticketed feature). Runs `backfill_quality`
+    /// once and checks the written row; runs it again and checks the row count
+    /// is still 1 (UPSERT did not duplicate).
+    /// Test: this test itself.
+    #[test]
+    fn backfill_quality_populates_and_is_idempotent() {
+        let mut db = Database::open_in_memory().expect("open");
+        // Seed: one revert + one ticketed feature by Alice in 2024-W03.
+        db.connection()
+            .execute(
+                "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                     repository, files_changed, insertions, deletions, is_merge, ticketed) \
+                 VALUES ('q1', 'Alice', 'alice@example.com', '2024-01-15T10:00:00+00:00', \
+                     'ENG-1 feature', 'repo-a', 1, 5, 1, 0, 1)",
+                [],
+            )
+            .expect("seed ticketed feature");
+        db.connection()
+            .execute(
+                "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                     repository, files_changed, insertions, deletions, is_merge, ticketed) \
+                 VALUES ('q2', 'Alice', 'alice@example.com', '2024-01-16T10:00:00+00:00', \
+                     'Revert \"ENG-1 feature\"', 'repo-a', 1, 2, 5, 0, 0)",
+                [],
+            )
+            .expect("seed revert");
+
+        // First backfill — should write 1 row.
+        backfill_quality(&mut db, false).expect("first backfill");
+        let count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM fact_weekly_quality WHERE author_email = 'alice@example.com'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count after first backfill");
+        assert_eq!(count, 1, "first backfill must write exactly 1 row");
+
+        // Second backfill — idempotent: still 1 row.
+        backfill_quality(&mut db, false).expect("second backfill (idempotency)");
+        let count2: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM fact_weekly_quality WHERE author_email = 'alice@example.com'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count after second backfill");
+        assert_eq!(
+            count2, 1,
+            "second backfill must not add duplicate rows (UPSERT semantics)"
+        );
+
+        // Verify the quality_score is plausible (1 revert, 1 ticketed, 2 commits,
+        // 0 bugfixes): 0.35*(1-0.5) + 0.40*(1-0) + 0.25*0.5 = 0.175+0.40+0.125 = 0.7.
+        let score: f64 = db
+            .connection()
+            .query_row(
+                "SELECT quality_score FROM fact_weekly_quality WHERE author_email = 'alice@example.com'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read quality_score");
+        assert!(
+            (score - 0.700).abs() < 0.001,
+            "quality_score must be ~0.70 for this fixture, got {score:.6}"
+        );
+    }
+
+    /// Why: regression guard for issue #445 batch B. `backfill_quality --dry-run`
+    /// must estimate the row count without writing to `fact_weekly_quality`.
+    /// What: seed two commits; run dry-run backfill; assert `fact_weekly_quality`
+    /// is still empty and the exit code is Ok.
+    /// Test: this test itself.
+    #[test]
+    fn backfill_quality_dry_run_does_not_write() {
+        let mut db = Database::open_in_memory().expect("open");
+        db.connection()
+            .execute(
+                "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                     repository, files_changed, insertions, deletions, is_merge) \
+                 VALUES ('dq1', 'Bob', 'bob@example.com', '2024-02-05T10:00:00+00:00', \
+                     'feat: x', 'repo-b', 1, 3, 1, 0)",
+                [],
+            )
+            .expect("seed commit");
+
+        backfill_quality(&mut db, true).expect("dry-run quality backfill must not error");
+
+        let count: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM fact_weekly_quality", [], |r| r.get(0))
+            .expect("count after dry-run");
+        assert_eq!(
+            count, 0,
+            "dry-run must not write any rows to fact_weekly_quality"
+        );
     }
 }
