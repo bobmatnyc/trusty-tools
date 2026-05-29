@@ -1480,6 +1480,19 @@ async fn create_index_handler(
         let v = std::env::var("TRUSTY_NO_KG").unwrap_or_default();
         matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
     });
+    // Issue #403: new indexes use colocated storage (`<root>/.trusty-search/`).
+    // Register the root in `roots.toml` so the startup scanner can find it on
+    // the next daemon boot, and ensure `.trusty-search/` is git-ignored.
+    let colocated = true;
+    if let Err(e) = crate::service::roots_registry::upsert_root(req.root_path.clone()) {
+        tracing::warn!("could not register root in roots.toml for {}: {e}", req.id);
+    }
+    if let Err(e) = crate::service::colocated_storage::ensure_gitignored(&req.root_path) {
+        tracing::warn!(
+            "could not add .trusty-search/ to .gitignore for {}: {e}",
+            req.id
+        );
+    }
     if let Err(e) = crate::service::persistence::upsert_index_registry_entry(
         crate::service::persistence::PersistedIndex {
             id: req.id.clone(),
@@ -1493,6 +1506,7 @@ async fn create_index_handler(
             respect_gitignore,
             lexical_only,
             skip_kg,
+            colocated,
         },
     ) {
         tracing::warn!("could not persist index registry for {}: {e}", req.id);

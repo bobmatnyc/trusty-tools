@@ -113,6 +113,23 @@ pub struct PersistedIndex {
     /// Test: `skip_kg_round_trips` in this module.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub skip_kg: bool,
+
+    /// Issue #403: whether this index uses colocated storage (`<root_path>/.trusty-search/`)
+    /// rather than the legacy global data directory (`<data_dir>/indexes/<id>/`).
+    ///
+    /// Why: colocated storage keeps index data inside the project tree so two
+    /// git worktrees at different filesystem paths have independent indexes, and
+    /// moving a project tree does not invalidate its index. This flag is set by
+    /// `trusty-search index` (new indexes) and by `trusty-search migrate storage`
+    /// (migrated legacy indexes). Older `indexes.toml` files never set this field
+    /// so they load as `false` (legacy global storage) — no back-compat breakage.
+    /// What: when `true`, all persistence path helpers (`hnsw_path`,
+    /// `corpus_redb_path`, `schema_version_path`, `corpus_redb_tmp_path`) route
+    /// to `<root_path>/.trusty-search/` instead of `<data_dir>/indexes/<id>/`.
+    /// `#[serde(default)]` ensures the field is absent in TOML for false (compact).
+    /// Test: `colocated_flag_round_trips` in this module.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub colocated: bool,
 }
 
 /// Why: serde's `default` attribute needs a free function (closures aren't
@@ -164,6 +181,7 @@ impl Default for PersistedIndex {
             respect_gitignore: true,
             lexical_only: false,
             skip_kg: false,
+            colocated: false,
         }
     }
 }
@@ -294,6 +312,71 @@ pub fn schema_version_path(index_id: &str) -> Result<PathBuf> {
 /// Test: covered by `tests::test_force_reindex_atomic_corpus_swap`.
 pub fn corpus_redb_tmp_path(index_id: &str) -> Result<PathBuf> {
     Ok(index_data_dir(index_id)?.join("index.redb.tmp"))
+}
+
+/// Resolve the HNSW snapshot path for `entry`, routing to colocated or legacy
+/// storage based on `entry.colocated`.
+///
+/// Why: the persistence path helpers take only an `index_id` but colocated
+/// indexes need the `root_path` to find `<root>/.trusty-search/hnsw.usearch`.
+/// This helper unifies both cases so callers do not have to branch.
+/// What: when `entry.colocated`, returns
+/// `<root_path>/.trusty-search/hnsw.usearch`; otherwise delegates to `hnsw_path`.
+/// Test: `colocated_hnsw_path_resolves_under_root` in `colocated_storage` tests.
+pub fn hnsw_path_for_entry(entry: &PersistedIndex) -> Result<PathBuf> {
+    if entry.colocated {
+        crate::service::colocated_storage::colocated_hnsw_path(&entry.root_path)
+    } else {
+        hnsw_path(&entry.id)
+    }
+}
+
+/// Resolve the redb corpus path for `entry`, routing to colocated or legacy
+/// storage based on `entry.colocated`.
+///
+/// Why: see `hnsw_path_for_entry`.
+/// What: when `entry.colocated`, returns
+/// `<root_path>/.trusty-search/index.redb`; otherwise delegates to
+/// `corpus_redb_path`.
+/// Test: covered by colocated-index persistence integration tests.
+pub fn corpus_redb_path_for_entry(entry: &PersistedIndex) -> Result<PathBuf> {
+    if entry.colocated {
+        crate::service::colocated_storage::colocated_redb_path(&entry.root_path)
+    } else {
+        corpus_redb_path(&entry.id)
+    }
+}
+
+/// Resolve the schema-version stamp path for `entry`, routing to colocated or
+/// legacy storage based on `entry.colocated`.
+///
+/// Why: see `hnsw_path_for_entry`.
+/// What: when `entry.colocated`, returns
+/// `<root_path>/.trusty-search/schema_version.json`; otherwise delegates to
+/// `schema_version_path`.
+/// Test: covered by colocated-index persistence integration tests.
+pub fn schema_version_path_for_entry(entry: &PersistedIndex) -> Result<PathBuf> {
+    if entry.colocated {
+        crate::service::colocated_storage::colocated_schema_version_path(&entry.root_path)
+    } else {
+        schema_version_path(&entry.id)
+    }
+}
+
+/// Resolve the staging redb corpus path for `entry`, routing to colocated or
+/// legacy storage based on `entry.colocated`.
+///
+/// Why: see `hnsw_path_for_entry`.
+/// What: when `entry.colocated`, returns
+/// `<root_path>/.trusty-search/index.redb.tmp`; otherwise delegates to
+/// `corpus_redb_tmp_path`.
+/// Test: covered by colocated-index persistence integration tests.
+pub fn corpus_redb_tmp_path_for_entry(entry: &PersistedIndex) -> Result<PathBuf> {
+    if entry.colocated {
+        crate::service::colocated_storage::colocated_redb_tmp_path(&entry.root_path)
+    } else {
+        corpus_redb_tmp_path(&entry.id)
+    }
 }
 
 /// Load the registry file. Missing file → empty registry (first-run case).
@@ -781,6 +864,76 @@ root_path = "/tmp/legacy"
         assert_eq!(entries.len(), 1);
         assert!(entries[0].lexical_only, "lexical_only preserved");
         assert!(entries[0].skip_kg, "skip_kg preserved");
+    }
+
+    /// Issue #403: `colocated` defaults to `false` so existing `indexes.toml`
+    /// files load as legacy global storage. An explicit `true` survives a
+    /// save/load round-trip, and is written to TOML only when set.
+    ///
+    /// Why: pins the backward-compat contract: a legacy `indexes.toml` without
+    /// the field keeps using global storage after a daemon upgrade.
+    /// What: default constructor, missing-field deserialization, explicit-true
+    /// round-trip, and verification that `colocated = true` + root_path-aware
+    /// helpers resolve inside the root.
+    /// Test: this test.
+    #[test]
+    fn colocated_flag_round_trips() {
+        // Default constructor returns false.
+        assert!(!PersistedIndex::default().colocated);
+
+        // Loading legacy TOML without the field gives false (global storage).
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::fs::write(
+            &path,
+            r#"
+[[index]]
+id = "legacy"
+root_path = "/tmp/legacy_col"
+"#,
+        )
+        .unwrap();
+        let entries = load_index_registry_at(&path).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(
+            !entries[0].colocated,
+            "missing field must default to false (issue #403 back-compat)"
+        );
+
+        // Explicit true survives round-trip and is written to disk.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let root_dir = tempfile::tempdir().unwrap();
+        save_index_registry_at(
+            &path,
+            &[PersistedIndex {
+                id: "colocated_idx".into(),
+                root_path: root_dir.path().to_path_buf(),
+                colocated: true,
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        let s = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            s.contains("colocated"),
+            "explicit true must be serialised — TOML was: {s}"
+        );
+        let entries = load_index_registry_at(&path).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].colocated);
+
+        // The root-path-aware helpers must resolve inside the root when colocated.
+        let hnsw = super::hnsw_path_for_entry(&entries[0]).unwrap();
+        assert!(
+            hnsw.starts_with(root_dir.path()),
+            "colocated hnsw path must be inside root; got {hnsw:?}"
+        );
+        let redb = super::corpus_redb_path_for_entry(&entries[0]).unwrap();
+        assert!(
+            redb.starts_with(root_dir.path()),
+            "colocated redb path must be inside root; got {redb:?}"
+        );
     }
 
     #[test]

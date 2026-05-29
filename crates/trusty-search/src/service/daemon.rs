@@ -561,18 +561,42 @@ pub async fn flush_all_indexes_on_shutdown(state: &SearchAppState) {
         let Some(handle) = state.registry.get(&id) else {
             continue;
         };
-        let chunks_path = match crate::service::persistence::chunks_path(&id.0) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!("shutdown: chunks path unresolvable for '{}': {e}", id.0);
-                continue;
+        // Issue #403: route HNSW + chunks paths to colocated or legacy storage
+        // based on whether the index has a `.trusty-search/` dir in its root.
+        let is_colocated =
+            crate::service::colocated_storage::has_colocated_storage(&handle.root_path);
+        let chunks_path = if is_colocated {
+            // Colocated indexes write their corpus to redb only (no JSON fallback).
+            // Provide a dummy path — `flush_corpus_to_disk` won't use it when a
+            // `CorpusStore` is wired; the redb file lives in `.trusty-search/`.
+            handle.root_path.join(".trusty-search").join("chunks.json")
+        } else {
+            match crate::service::persistence::chunks_path(&id.0) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!("shutdown: chunks path unresolvable for '{}': {e}", id.0);
+                    continue;
+                }
             }
         };
-        let hnsw_path = match crate::service::persistence::hnsw_path(&id.0) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!("shutdown: hnsw path unresolvable for '{}': {e}", id.0);
-                continue;
+        let hnsw_path = if is_colocated {
+            match crate::service::colocated_storage::colocated_hnsw_path(&handle.root_path) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(
+                        "shutdown: colocated hnsw path unresolvable for '{}': {e}",
+                        id.0
+                    );
+                    continue;
+                }
+            }
+        } else {
+            match crate::service::persistence::hnsw_path(&id.0) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!("shutdown: hnsw path unresolvable for '{}': {e}", id.0);
+                    continue;
+                }
             }
         };
         let indexer = handle.indexer.read().await;

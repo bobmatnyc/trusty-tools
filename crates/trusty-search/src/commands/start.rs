@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::core::registry::{IndexHandle, IndexId, IndexStages, StageState, StageStatus};
-use crate::service::persistence::load_index_registry;
-use crate::service::persistence_loader::build_indexer_with_persisted_state;
+use crate::service::persistence::{load_index_registry, PersistedIndex};
+use crate::service::persistence_loader::build_indexer_from_entry;
 use crate::service::SearchAppState;
 
 /// Inputs to [`derive_warm_boot_stages`] — every signal the pure stage
@@ -153,130 +153,212 @@ pub(crate) fn derive_warm_boot_stages(inputs: WarmBootInputs) -> IndexStages {
 /// snapshot and chunk corpus from disk so the index comes back warm (no
 /// re-indexing required).
 ///
+/// Issue #403: Warm-boot from indexes.toml (legacy global indexes) AND from
+/// filesystem-discovered colocated `.trusty-search/` indexes (dual discovery).
+///
 /// Why (issue #85): before this hook, the daemon had no way to remember
 /// which projects were registered — every restart required the user to run
 /// `trusty-search index <path>` again. Now the registry is durable and
 /// HNSW + chunks are restored automatically.
-/// What: iterates registry entries, skips any that the in-memory registry
-/// already has (idempotent — `create_index` may have raced ahead), then
-/// constructs an `IndexHandle` via the shared `build_indexer_with_persisted_state`
-/// helper.
+/// What: loads `indexes.toml` for legacy global indexes AND scans tracked roots
+/// (from `roots.toml`) for colocated `.trusty-search/` directories, then
+/// registers each discovered index. Deduplicates by index id so a root that
+/// has been migrated (appears in both sources) is only loaded once.
+/// Constructs each `IndexHandle` via `build_indexer_from_entry`, which routes
+/// to colocated or legacy storage based on the `colocated` flag.
 /// Test: integration test in `tests/integration_tests.rs` that writes a
 /// registry file, calls this hook, and asserts the registry list matches.
 async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core::Embedder>) {
-    let entries = match load_index_registry() {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!("could not read indexes.toml at startup: {e}");
-            return;
-        }
-    };
-    if entries.is_empty() {
+    let all_entries = collect_all_index_entries();
+    if all_entries.is_empty() {
         return;
     }
     tracing::info!(
-        "warm-boot: restoring {} index registration(s) from indexes.toml",
-        entries.len()
+        "warm-boot: restoring {} index registration(s) (legacy + colocated)",
+        all_entries.len()
     );
-    for entry in entries {
-        let id = IndexId::new(entry.id.clone());
-        if state.registry.get(&id).is_some() {
-            // A live create_index handler beat us to it — skip.
-            continue;
-        }
-        let mut indexer =
-            build_indexer_with_persisted_state(&entry.id, entry.root_path.clone(), embedder).await;
-        // Restore per-index filters and domain vocabulary from indexes.toml.
-        // Resolve `include_paths` to absolute under `root_path` so the reindex
-        // walker can prune without per-call path arithmetic. `.` and empty
-        // entries collapse to "walk the whole root".
-        let include_paths: Vec<std::path::PathBuf> = entry
-            .include_paths
-            .iter()
-            .filter(|p| !p.trim().is_empty() && p.trim() != ".")
-            .map(|p| entry.root_path.join(p.trim()))
-            .collect();
-        let extensions: Vec<String> = entry
-            .extensions
-            .iter()
-            .map(|e| e.trim_start_matches('.').to_string())
-            .filter(|e| !e.is_empty())
-            .collect();
-        indexer.set_domain_terms(entry.domain_terms.clone());
-        // Issue #75: capture the current git HEAD SHA at registration so the
-        // search response can flag staleness when the working tree advances
-        // past the indexed commit. Best-effort: `None` outside a git repo.
-        let indexed_head_sha = crate::core::git::head_sha(&entry.root_path);
-        let lexical_only = entry.lexical_only;
-        // Issue #313: read skip_kg from the persisted entry. When true, the
-        // graph stage is forced to Skipped at warm-boot regardless of on-disk
-        // state (config intent wins over stale on-disk graph data).
-        let skip_kg = entry.skip_kg;
-        // Issue #135: inspect the on-disk artifacts that
-        // `build_indexer_with_persisted_state` just restored and derive the
-        // staged-pipeline state from them. Before this, every warm-booted
-        // index landed with `stages = Pending` and `search_capabilities`
-        // computed from that — so the search handler silently disabled the
-        // vector + KG lanes on every existing index until the user ran a
-        // force reindex. That broke the v0.9.0 upgrade path for everyone with
-        // a populated `indexes.toml`.
-        //
-        // The inspection is cheap: `chunk_count` is one redb metadata read,
-        // `hnsw.usearch` is a `path.exists()` filesystem call (the dim /
-        // deserialise check already happened inside the loader), and the
-        // symbol-graph node count is an `Arc::clone` + in-memory read.
-        let chunk_count = indexer
-            .corpus_store()
-            .and_then(|c| c.chunk_count().ok())
-            .unwrap_or(0);
-        let hnsw_snapshot_ready = crate::service::persistence::hnsw_path(&entry.id)
-            .map(|p| crate::service::persistence::has_persisted_hnsw(&p))
-            .unwrap_or(false);
-        let graph_node_count = indexer.snapshot_symbol_graph().await.node_count();
-        let stages = derive_warm_boot_stages(WarmBootInputs {
-            chunk_count,
-            hnsw_snapshot_ready,
-            graph_node_count,
-            lexical_only,
-            skip_kg,
-        });
-        tracing::info!(
-            "warm-boot: index '{}' restored — chunks={} hnsw_snapshot={} graph_nodes={} \
-             lexical_only={} skip_kg={} → stages(lexical={:?}, semantic={:?}, graph={:?})",
-            entry.id,
-            chunk_count,
-            hnsw_snapshot_ready,
-            graph_node_count,
-            lexical_only,
-            skip_kg,
-            stages.lexical.status,
-            stages.semantic.status,
-            stages.graph.status,
-        );
-        let handle = IndexHandle {
-            id: id.clone(),
-            indexer: Arc::new(tokio::sync::RwLock::new(indexer)),
-            root_path: entry.root_path,
-            include_paths,
-            exclude_globs: entry.exclude_globs,
-            extensions,
-            domain_terms: entry.domain_terms,
-            include_docs: entry.include_docs,
-            respect_gitignore: entry.respect_gitignore,
-            path_filter: entry.path_filter,
-            context_embedding: Arc::new(tokio::sync::RwLock::new(None)),
-            context_summary: Arc::new(tokio::sync::RwLock::new(None)),
-            indexed_head_sha: Arc::new(tokio::sync::RwLock::new(indexed_head_sha)),
-            lexical_only,
-            skip_kg,
-            stages: Arc::new(tokio::sync::RwLock::new(stages)),
-            search_pressure: Arc::new(tokio::sync::Notify::new()),
-            walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
-                crate::core::registry::WalkDiagnostics::default(),
-            )),
-        };
-        state.registry.register(handle);
+    for entry in all_entries {
+        restore_one_index(state, embedder, entry).await;
     }
+}
+
+/// Collect all index entries from BOTH the legacy `indexes.toml` registry AND
+/// the filesystem-discovered colocated `.trusty-search/` directories.
+///
+/// Why: dual discovery is the compatibility bridge between the pre-#403 global
+/// storage layout and the new colocated layout. Legacy indexes loaded from
+/// `indexes.toml` keep working unchanged; newly created colocated indexes are
+/// found by scanning the tracked roots in `roots.toml`.
+/// What: merges entries, deduplicating by index id (legacy wins over colocated
+/// when both exist with the same id — the operator should run
+/// `trusty-search migrate storage` to formally migrate).
+/// Test: `dual_discovery_finds_legacy_and_colocated` in the tests block.
+fn collect_all_index_entries() -> Vec<PersistedIndex> {
+    use crate::service::fs_discovery::{scan_roots_for_colocated_indexes, DEFAULT_SCAN_DEPTH};
+    use crate::service::roots_registry::load_roots;
+
+    let mut all: Vec<PersistedIndex> = Vec::new();
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // 1. Legacy global indexes from indexes.toml (unchanged behaviour).
+    match load_index_registry() {
+        Ok(entries) => {
+            for e in entries {
+                seen_ids.insert(e.id.clone());
+                all.push(e);
+            }
+        }
+        Err(e) => {
+            tracing::warn!("could not read indexes.toml at startup: {e}");
+        }
+    }
+
+    // 2. Colocated indexes discovered by scanning tracked roots.
+    let tracked_roots: Vec<std::path::PathBuf> = match load_roots() {
+        Ok(r) => r.into_iter().map(|r| r.path).collect(),
+        Err(e) => {
+            tracing::warn!("could not read roots.toml at startup: {e}");
+            Vec::new()
+        }
+    };
+
+    if !tracked_roots.is_empty() {
+        let discovered = scan_roots_for_colocated_indexes(&tracked_roots, DEFAULT_SCAN_DEPTH);
+        for colocated in discovered {
+            if seen_ids.contains(&colocated.id) {
+                // Already loaded from indexes.toml or a duplicate root scan.
+                tracing::debug!(
+                    "dual-discovery: colocated index '{}' at {} skipped (already in registry)",
+                    colocated.id,
+                    colocated.root_path.display()
+                );
+                continue;
+            }
+            seen_ids.insert(colocated.id.clone());
+            // Build a PersistedIndex for this colocated discovery with sensible
+            // defaults (no per-index config) — operators who need custom
+            // include_paths/exclude_globs must register explicitly via `trusty-search index`.
+            all.push(PersistedIndex {
+                id: colocated.id,
+                root_path: colocated.root_path,
+                colocated: true,
+                ..Default::default()
+            });
+        }
+    }
+
+    all
+}
+
+/// Register one index entry into the in-memory registry, restoring HNSW + corpus.
+///
+/// Why: extracted so the loop in `restore_indexes` remains readable and so
+/// colocated-index integration tests can drive this path directly.
+/// What: skips entries already in the in-memory registry (idempotent), builds
+/// the indexer via `build_indexer_from_entry` (which routes to colocated or
+/// legacy storage), and registers the resulting `IndexHandle`.
+/// Test: covered by the warm-boot integration tests.
+async fn restore_one_index(
+    state: &SearchAppState,
+    embedder: &Arc<dyn crate::core::Embedder>,
+    entry: PersistedIndex,
+) {
+    let id = IndexId::new(entry.id.clone());
+    if state.registry.get(&id).is_some() {
+        // A live create_index handler beat us to it — skip.
+        return;
+    }
+    let mut indexer = build_indexer_from_entry(&entry, embedder).await;
+    // Restore per-index filters and domain vocabulary from indexes.toml.
+    // Resolve `include_paths` to absolute under `root_path` so the reindex
+    // walker can prune without per-call path arithmetic. `.` and empty
+    // entries collapse to "walk the whole root".
+    let include_paths: Vec<std::path::PathBuf> = entry
+        .include_paths
+        .iter()
+        .filter(|p| !p.trim().is_empty() && p.trim() != ".")
+        .map(|p| entry.root_path.join(p.trim()))
+        .collect();
+    let extensions: Vec<String> = entry
+        .extensions
+        .iter()
+        .map(|e| e.trim_start_matches('.').to_string())
+        .filter(|e| !e.is_empty())
+        .collect();
+    indexer.set_domain_terms(entry.domain_terms.clone());
+    // Issue #75: capture the current git HEAD SHA at registration so the
+    // search response can flag staleness when the working tree advances
+    // past the indexed commit. Best-effort: `None` outside a git repo.
+    let indexed_head_sha = crate::core::git::head_sha(&entry.root_path);
+    let lexical_only = entry.lexical_only;
+    // Issue #313: read skip_kg from the persisted entry. When true, the
+    // graph stage is forced to Skipped at warm-boot regardless of on-disk
+    // state (config intent wins over stale on-disk graph data).
+    let skip_kg = entry.skip_kg;
+    // Issue #135: inspect the on-disk artifacts that
+    // `build_indexer_from_entry` just restored and derive the staged-pipeline
+    // state from them. Before this, every warm-booted index landed with
+    // `stages = Pending` and `search_capabilities` computed from that —
+    // so the search handler silently disabled the vector + KG lanes on every
+    // existing index until the user ran a force reindex.
+    //
+    // The inspection is cheap: `chunk_count` is one redb metadata read,
+    // `hnsw.usearch` is a `path.exists()` filesystem call (the dim /
+    // deserialise check already happened inside the loader), and the
+    // symbol-graph node count is an `Arc::clone` + in-memory read.
+    let chunk_count = indexer
+        .corpus_store()
+        .and_then(|c| c.chunk_count().ok())
+        .unwrap_or(0);
+    let hnsw_snapshot_ready = crate::service::persistence::hnsw_path_for_entry(&entry)
+        .map(|p| crate::service::persistence::has_persisted_hnsw(&p))
+        .unwrap_or(false);
+    let graph_node_count = indexer.snapshot_symbol_graph().await.node_count();
+    let stages = derive_warm_boot_stages(WarmBootInputs {
+        chunk_count,
+        hnsw_snapshot_ready,
+        graph_node_count,
+        lexical_only,
+        skip_kg,
+    });
+    tracing::info!(
+        "warm-boot: index '{}' restored (colocated={}) — chunks={} hnsw_snapshot={} \
+         graph_nodes={} lexical_only={} skip_kg={} → \
+         stages(lexical={:?}, semantic={:?}, graph={:?})",
+        entry.id,
+        entry.colocated,
+        chunk_count,
+        hnsw_snapshot_ready,
+        graph_node_count,
+        lexical_only,
+        skip_kg,
+        stages.lexical.status,
+        stages.semantic.status,
+        stages.graph.status,
+    );
+    let handle = IndexHandle {
+        id: id.clone(),
+        indexer: Arc::new(tokio::sync::RwLock::new(indexer)),
+        root_path: entry.root_path,
+        include_paths,
+        exclude_globs: entry.exclude_globs,
+        extensions,
+        domain_terms: entry.domain_terms,
+        include_docs: entry.include_docs,
+        respect_gitignore: entry.respect_gitignore,
+        path_filter: entry.path_filter,
+        context_embedding: Arc::new(tokio::sync::RwLock::new(None)),
+        context_summary: Arc::new(tokio::sync::RwLock::new(None)),
+        indexed_head_sha: Arc::new(tokio::sync::RwLock::new(indexed_head_sha)),
+        lexical_only,
+        skip_kg,
+        stages: Arc::new(tokio::sync::RwLock::new(stages)),
+        search_pressure: Arc::new(tokio::sync::Notify::new()),
+        walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
+            crate::core::registry::WalkDiagnostics::default(),
+        )),
+    };
+    state.registry.register(handle);
 }
 
 /// Resolve the embedder back-end and return an `Arc<dyn Embedder>` ready for use.

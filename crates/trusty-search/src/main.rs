@@ -566,7 +566,7 @@ enum Commands {
     ///   trusty-search migrate mcp-vector-search --indexes-only
     #[command(display_order = 26)]
     Migrate {
-        /// Migration source: "mcp-vector-search"
+        /// Migration source: "mcp-vector-search" or "storage"
         #[arg(value_name = "FROM")]
         target: commands::migrate::MigrateTarget,
 
@@ -581,6 +581,26 @@ enum Commands {
         /// Only migrate indexes; skip MCP config file updates
         #[arg(long, conflicts_with = "mcp_only")]
         indexes_only: bool,
+    },
+
+    /// Move legacy index storage into per-project .trusty-search/ directories (issue #403)
+    ///
+    /// Relocates each registered index's data files (redb corpus, HNSW snapshot,
+    /// schema stamp) from the global `<data-dir>/indexes/<id>/` directory into
+    /// `<root_path>/.trusty-search/` inside the project tree. No re-index is needed
+    /// — the data is just moved. After running, restart the daemon.
+    ///
+    /// Indexes whose `root_path` no longer exists on disk are skipped (reported
+    /// as "root missing"). Already-colocated indexes are silently skipped.
+    ///
+    /// Examples:
+    ///   trusty-search migrate-storage             # move all legacy indexes
+    ///   trusty-search migrate-storage --dry-run   # preview without moving
+    #[command(display_order = 27, name = "migrate-storage")]
+    MigrateStorage {
+        /// Preview changes without moving any files or updating the registry
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Wire trusty-search into Claude Code's settings.json files
@@ -999,6 +1019,10 @@ async fn run() -> Result<()> {
             indexes_only,
         } => {
             commands::migrate::handle_migrate(target, dry_run, mcp_only, indexes_only).await?;
+        }
+
+        Commands::MigrateStorage { dry_run } => {
+            commands::migrate_storage::handle_migrate_storage(dry_run)?;
         }
 
         Commands::Setup => {

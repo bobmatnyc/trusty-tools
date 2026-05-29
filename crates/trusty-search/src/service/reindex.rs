@@ -1184,15 +1184,30 @@ async fn begin_force_corpus_swap(handle: &IndexHandle, index_id: &IndexId) -> Op
             return None;
         }
     }
-    let tmp_path = match crate::service::persistence::corpus_redb_tmp_path(&index_id.0) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(
-                "force reindex: cannot resolve staging corpus path for '{}' ({e}) — \
-                 reindex will write directly to the live corpus",
-                index_id.0
-            );
-            return None;
+    // Issue #403: route tmp corpus path to colocated or legacy storage.
+    let tmp_path = if crate::service::colocated_storage::has_colocated_storage(&handle.root_path) {
+        match crate::service::colocated_storage::colocated_redb_tmp_path(&handle.root_path) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    "force reindex: cannot resolve colocated staging corpus path for '{}' ({e}) — \
+                     reindex will write directly to the live corpus",
+                    index_id.0
+                );
+                return None;
+            }
+        }
+    } else {
+        match crate::service::persistence::corpus_redb_tmp_path(&index_id.0) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    "force reindex: cannot resolve staging corpus path for '{}' ({e}) — \
+                     reindex will write directly to the live corpus",
+                    index_id.0
+                );
+                return None;
+            }
         }
     };
     // Open the staging store on a blocking worker (redb's API is sync).
@@ -1248,16 +1263,32 @@ async fn begin_force_corpus_swap(handle: &IndexHandle, index_id: &IndexId) -> Op
 /// indexer. Any failure leaves the previous live corpus in place and logs at
 /// `warn` — a botched swap must not crash the daemon.
 async fn commit_force_corpus_swap(handle: &IndexHandle, index_id: &IndexId, tmp_path: &Path) {
-    let live_path = match crate::service::persistence::corpus_redb_path(&index_id.0) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(
-                "force reindex: cannot resolve live corpus path for '{}' ({e}) — \
-                 staged corpus left at {}",
-                index_id.0,
-                tmp_path.display()
-            );
-            return;
+    // Issue #403: route live corpus path to colocated or legacy storage.
+    let live_path = if crate::service::colocated_storage::has_colocated_storage(&handle.root_path) {
+        match crate::service::colocated_storage::colocated_redb_path(&handle.root_path) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    "force reindex: cannot resolve colocated live corpus path for '{}' ({e}) — \
+                     staged corpus left at {}",
+                    index_id.0,
+                    tmp_path.display()
+                );
+                return;
+            }
+        }
+    } else {
+        match crate::service::persistence::corpus_redb_path(&index_id.0) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    "force reindex: cannot resolve live corpus path for '{}' ({e}) — \
+                     staged corpus left at {}",
+                    index_id.0,
+                    tmp_path.display()
+                );
+                return;
+            }
         }
     };
     // Drop the staging store's last Arc so redb releases the temp file before
@@ -1326,7 +1357,12 @@ async fn abort_force_corpus_swap(handle: &IndexHandle, index_id: &IndexId, tmp_p
         let mut indexer = handle.indexer.write().await;
         let _ = indexer.take_corpus_store();
     }
-    let live_path = crate::service::persistence::corpus_redb_path(&index_id.0);
+    // Issue #403: route live corpus path to colocated or legacy storage.
+    let live_path = if crate::service::colocated_storage::has_colocated_storage(&handle.root_path) {
+        crate::service::colocated_storage::colocated_redb_path(&handle.root_path)
+    } else {
+        crate::service::persistence::corpus_redb_path(&index_id.0)
+    };
     let tmp = tmp_path.to_path_buf();
     let index_id_inner = index_id.0.clone();
     let restored = tokio::task::spawn_blocking(

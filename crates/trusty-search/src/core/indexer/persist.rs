@@ -473,6 +473,7 @@ impl CodeIndexer {
         }
 
         let index_id = self.index_id.clone();
+        let root_path = self.root_path.clone();
         let store = self.store.clone();
         let chunks = self.chunks.clone();
         let entities = self.entities.clone();
@@ -486,6 +487,8 @@ impl CodeIndexer {
         // behaviour for test / BM25-only indexers.
         let persist_chunks_json = self.corpus.is_none();
         tokio::spawn(async move {
+            // Issue #403: route HNSW path to colocated or legacy storage.
+            let is_colocated = crate::service::colocated_storage::has_colocated_storage(&root_path);
             // Re-resolve paths in the task so the persistence layer's path
             // resolution failures don't crash the commit caller. The chunks
             // JSON path is only needed in the legacy (no redb) mode.
@@ -503,14 +506,27 @@ impl CodeIndexer {
             } else {
                 None
             };
-            let hnsw_path = match crate::service::persistence::hnsw_path(&index_id) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::debug!(
-                        "incremental persist: cannot resolve hnsw path for '{index_id}': {e}"
-                    );
-                    persist_state.in_flight.store(false, Ordering::Release);
-                    return;
+            let hnsw_path = if is_colocated {
+                match crate::service::colocated_storage::colocated_hnsw_path(&root_path) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::debug!(
+                            "incremental persist: cannot resolve colocated hnsw path for '{index_id}': {e}"
+                        );
+                        persist_state.in_flight.store(false, Ordering::Release);
+                        return;
+                    }
+                }
+            } else {
+                match crate::service::persistence::hnsw_path(&index_id) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::debug!(
+                            "incremental persist: cannot resolve hnsw path for '{index_id}': {e}"
+                        );
+                        persist_state.in_flight.store(false, Ordering::Release);
+                        return;
+                    }
                 }
             };
 
