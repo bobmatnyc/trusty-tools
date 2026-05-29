@@ -1751,6 +1751,10 @@ pub fn spawn_reindex_with_cleanup(
         // Issue #313: skip_kg indexes bypass Phase 3 entirely. The graph stage
         // stays Skipped (set at reset_stages_for_reindex) and kg_ms /
         // symbol_count / edge_count report 0 in the complete event.
+        // Issue #401: emit `kg_start` before the KG rebuild so the CLI can
+        // activate the KG progress bar. Skipped for skip_kg indexes (bar would
+        // never complete). This event is backward-compatible — old CLI versions
+        // that don't recognise it simply ignore it.
         let kg = if handle.skip_kg {
             tracing::info!(
                 "reindex[{}]: KG construction skipped (skip_kg=true)",
@@ -1763,7 +1767,31 @@ pub fn spawn_reindex_with_cleanup(
                 kg_skipped: true,
             }
         } else {
+            // Emit `kg_start` so the CLI activates the KG progress bar (issue #401).
+            // The event is intentionally minimal — the CLI only needs to know the
+            // KG phase has begun; the final symbol/edge counts arrive in `kg_complete`.
+            progress
+                .push(serde_json::json!({
+                    "event": "kg_start",
+                    "index_id": index_id.0,
+                }))
+                .await;
+
             let outcome = rebuild_symbol_graph_for_reindex(&handle).await;
+
+            // Issue #401: emit `kg_complete` with timing + graph stats so the CLI
+            // can snap the KG bar to 100% and display the summary. Backward-
+            // compatible: old CLI versions ignore the unknown event type.
+            progress
+                .push(serde_json::json!({
+                    "event": "kg_complete",
+                    "index_id": index_id.0,
+                    "kg_ms": outcome.kg_ms,
+                    "symbol_count": outcome.symbol_count,
+                    "edge_count": outcome.edge_count,
+                }))
+                .await;
+
             // Issue #109, Phase 1: with the KG rebuild done, flip the graph
             // stage to `Ready`. Symbol graph is fully built — provenance navigation
             // (`get_call_chain`, `search_kg`) is immediately available.

@@ -25,6 +25,7 @@ pub mod format;
 pub mod index_resolve;
 pub mod log_rotation;
 pub mod reindex_engine;
+pub(crate) mod reindex_ui;
 
 // Per-subcommand handlers
 pub mod add;
