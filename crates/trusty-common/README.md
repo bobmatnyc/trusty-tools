@@ -4,9 +4,12 @@
 [![License: Elastic-2.0](https://img.shields.io/badge/License-Elastic--2.0-blue.svg)](https://www.elastic.co/licensing/elastic-license)
 
 Shared utility surface for the `trusty-*` AI tooling ecosystem. This crate is
-the result of consolidating several formerly separate crates into one:
-`trusty-mcp-core`, `trusty-rpc`, `trusty-embedder`, and `trusty-symgraph` have
-all been absorbed here.
+the result of consolidating several formerly separate crates into one. The
+following have all been absorbed here behind feature flags: `trusty-mcp-core`
+(`mcp`), `trusty-rpc` (`rpc`), `trusty-embedder` (`embedder`),
+`trusty-embedder-client` (`embedder-client`), `trusty-symgraph` (`symgraph` /
+`symgraph-parser`), `trusty-memory-core` (`memory-core`), `trusty-tickets`
+(`tickets`), and `trusty-monitor-tui` (`monitor-tui`).
 
 Each subsystem is feature-gated so consumers only pay for what they use.
 
@@ -14,13 +17,13 @@ Each subsystem is feature-gated so consumers only pay for what they use.
 
 ```toml
 [dependencies]
-trusty-common = "0.3"
+trusty-common = "0.8"
 ```
 
 With optional features:
 
 ```toml
-trusty-common = { version = "0.3", features = ["axum-server", "mcp", "rpc", "embedder"] }
+trusty-common = { version = "0.8", features = ["axum-server", "mcp", "rpc", "embedder"] }
 ```
 
 ## Feature Flags
@@ -35,9 +38,20 @@ trusty-common = { version = "0.3", features = ["axum-server", "mcp", "rpc", "emb
 | `embedder-cuda` | GPU-accelerated embedding via CUDA execution provider |
 | `embedder-load-dynamic` | Dynamic ORT loading for AL2023 / glibc < 2.38 builds |
 | `embedder-test-support` | Expose `MockEmbedder` outside `cfg(test)` for downstream tests |
+| `embedder-coreml` | CoreML execution provider on Apple Silicon (no-op alias on other platforms) |
+| `embedder-candle` | Candle Metal embedding backend |
+| `embedder-client` | UDS JSON-RPC client for the `trusty-embedderd` sidecar (formerly `trusty-embedder-client`) |
 | `symgraph` | Contracts surface only: `EntityType`, `RawEntity`, `EdgeKind` — no tree-sitter |
 | `symgraph-parser` | Full symbol graph: tree-sitter grammars, `SymbolGraph`, emitter, editor |
 | `symgraph-server` | HTTP server frontend for the symbol graph (implies `symgraph-parser`) |
+| `bm25` | Zero-dependency BM25 lexical index + code-aware tokenizer (issue #156) |
+| `bm25-client` | UDS JSON-RPC client for the per-palace `trusty-bm25-daemon` subprocess |
+| `memory-core` | Memory Palace storage engine — HNSW (usearch), SQLite metadata + KG, dream cycle (formerly `trusty-memory-core`) |
+| `memory-core-kuzu` | Read-only Kùzu graph-DB integration on top of `memory-core` |
+| `usearch-migrate` | One-shot usearch index migration helper (implies `memory-core`) |
+| `tickets` | Unified ticketing MCP server (GitHub / JIRA / Linear backends; formerly `trusty-tickets`) |
+| `monitor-tui` | ratatui + crossterm dashboard TUI for the trusty-search/trusty-memory daemons (formerly `trusty-monitor-tui`) |
+| `cli-help` | Declarative help-config parsing (serde_yaml + strsim + indexmap) |
 | `migrations` | Reusable schema-migration kernel: `SchemaVersion`, `Migration`, `MigrationRunner`, file-stamp helpers |
 
 By default the crate is dependency-light: `tokio`, `serde`, `reqwest`, and

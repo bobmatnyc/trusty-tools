@@ -146,7 +146,7 @@ trusty-search serve --http 127.0.0.1:7879
 
 Then add `http://127.0.0.1:7879/sse` as an SSE MCP endpoint in your Claude Code config.
 
-Once connected, Claude Code can call `search_code`, `index_file`, `list_indexes`, and 9 other tools directly. The daemon must be running independently (`trusty-search start`) before Claude Code connects.
+Once connected, Claude Code can call `search`, `index_file`, `list_indexes`, and 15 other tools directly (18 total). The daemon must be running independently (`trusty-search start`) before Claude Code connects.
 
 ## Features
 
@@ -178,7 +178,7 @@ Once connected, Claude Code can call `search_code`, `index_file`, `list_indexes`
   LRU embedding cache (256+ entries) skips re-embedding on repeat queries
 - **Native multi-request** — `Arc<SearchAppState>`, reader-priority `RwLock`,
   axum HTTP/2 — many concurrent searches against the same index never block
-- **MCP server** — stdio + HTTP/SSE transports, 11 tools, drop-in for Claude Code
+- **MCP server** — stdio + HTTP/SSE transports, 18 tools (per `src/mcp/tools.rs`), drop-in for Claude Code
 - **Embedded Svelte 5 admin UI** — Collections, Search, Chat, Admin panels
   compiled into the binary via `include_dir!`; open with `trusty-search ui`
 - **Migration path** — `trusty-search convert` reads `mcp-vector-search`
@@ -351,12 +351,16 @@ trusty-search reindex [path]                         # alias for index --force
 
 ## MCP tools
 
+The MCP server registers **18 tools** (authoritative source: `src/mcp/tools.rs`
+`tool_definitions`):
+
 | Tool            | Description                                          |
 |-----------------|------------------------------------------------------|
-| `search_code`   | Hybrid search (BM25 + HNSW + KG, RRF-fused)          |
+| `search`        | Hybrid search (BM25 + HNSW + KG, RRF-fused)          |
 | `search_kg`     | KG-first graph-walk search; accepts optional `refine_query` (see below) |
 | `search_semantic` | Vector-only semantic search lane                   |
 | `search_lexical`| BM25/token lexical search lane                       |
+| `search_all`    | Fan-out search across every registered index         |
 | `search_similar`| Code-to-code similarity from a seed file/function    |
 | `index_file`    | Add or replace a single file in the index            |
 | `remove_file`   | Remove a file and all its chunks                     |
@@ -366,6 +370,8 @@ trusty-search reindex [path]                         # alias for index --force
 | `reindex`       | Fire-and-forget full reindex (SSE progress)          |
 | `index_status`  | Per-index stats including walk diagnostics (see below) |
 | `list_chunks`   | Paginated enumeration of chunks `(file, start_line)` |
+| `get_call_chain`| KG caller/callee chain for a symbol                  |
+| `grep`          | Literal/regex grep fallback over the corpus          |
 | `search_health` | Daemon liveness probe                                |
 | `chat`          | OpenRouter Q&A with auto-injected search context     |
 

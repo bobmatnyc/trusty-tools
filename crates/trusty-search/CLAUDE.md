@@ -396,16 +396,26 @@ Serves the embedded Svelte admin UI. Not part of the integration contract.
 
 ### MCP Tools
 
-- `search_code` — hybrid search query
+The MCP server registers **18 tools** (authoritative source:
+`src/mcp/tools.rs` `tool_definitions`):
+
+- `search` — hybrid search (BM25 + vector + KG, RRF-fused)
+- `search_lexical` — BM25-only lexical search
+- `search_semantic` — vector-only semantic search
+- `search_kg` — knowledge-graph expansion search
+- `search_all` — fan-out across every registered index
+- `search_similar` — code-to-code similarity from a seed file/function
 - `index_file` — add/update one file
 - `remove_file` — remove one file
 - `list_indexes` — enumerate registered indexes
 - `create_index` — register a new index
-- `search_health` — daemon liveness
 - `delete_index` — delete an index
 - `reindex` — trigger full reindex
 - `index_status` — per-index stats
+- `search_health` — daemon liveness
 - `list_chunks` — paginated enumeration of an index's chunks
+- `get_call_chain` — KG caller/callee chain for a symbol
+- `grep` — literal/regex grep fallback over the corpus
 - `chat` — OpenRouter conversational Q&A
 
 ## Stack
@@ -599,17 +609,6 @@ trusty-search init [path]                            # alias for index
 trusty-search reindex [path]                         # alias for index --force
 ```
 
-## The ONE Seam from open-mpm
-
-When integrating into open-mpm, only one cut is needed:
-
-- `src/search/indexer.rs` imports `crate::context::bm25::Bm25Index` →
-  re-export from `trusty-search-core/src/bm25.rs`
-- `crate::context::indexer::tokenize` → re-export from
-  `trusty-search-core/src/bm25.rs` (lives in the same module)
-
-Everything else (the orchestrator, agent runners, REPL, ctrl) stays in open-mpm.
-
 ## Crate Layout
 
 As of v0.3.0, `trusty-search` is a **single crate** with both `[lib]` and
@@ -642,16 +641,19 @@ trusty-search/
     └── benchmark_harness.rs         MRR@5 / Recall@10 quality bench
 ```
 
-### Shared Crates (external, `../trusty-common`)
+### Shared Library (`trusty-common`, in-workspace path dep)
 
-Three crates extracted from this repo and published at
-`github.com/bobmatnyc/trusty-common` (pinned via git tags in `Cargo.toml`):
+`trusty-search` depends on the in-workspace `trusty-common` crate
+(`trusty-common = { workspace = true }`). The formerly separate
+`trusty-mcp-core` and `trusty-embedder` crates were consolidated into
+`trusty-common` modules behind feature flags (`mcp` and `embedder`); enable
+them via the crate's `Cargo.toml` features. Key surfaces consumed here:
 
-| Crate | Contents |
-|-------|----------|
-| `trusty-mcp-core` | `McpRequest`/`McpResponse`/`JsonRpcError`, `run_stdio_loop`, CORS/Trace axum helpers |
-| `trusty-embedder` | `Embedder` trait, `FastEmbedder` (LRU + persistent model cache), `MockEmbedder` |
-| `trusty-common` | `bind_with_auto_port`, `resolve_data_dir`/`cache_dir`, `ConcurrentRegistry`, `init_tracing`, `daemon_http_client` |
+| Feature / module | Contents |
+|------------------|----------|
+| `mcp` (`trusty_common::mcp`) | `McpRequest`/`McpResponse`/`JsonRpcError`, `run_stdio_loop`, CORS/Trace axum helpers (formerly `trusty-mcp-core`) |
+| `embedder` (`trusty_common::embedder`) | `Embedder` trait, `FastEmbedder` (LRU + persistent model cache), `MockEmbedder` (formerly `trusty-embedder`) |
+| core (always available) | `bind_with_auto_port`, `resolve_data_dir`/`cache_dir`, `ConcurrentRegistry`, `init_tracing`, `daemon_http_client` |
 
 ## Development
 
@@ -827,7 +829,7 @@ via `cargo install trusty-search`.
 - `EntityExtractor` Phase A structural entities (functions, classes, imports)
 - `SymbolGraph` KG expansion (callers_of / callees_of, 1–2 hop, EdgeKind multipliers)
 - `FileWatcher` with notify-debouncer-mini, 500ms debounce
-- MCP server: full JSON-RPC 2.0 stdio + HTTP/SSE transport, 10 tools
+- MCP server: full JSON-RPC 2.0 stdio + HTTP/SSE transport, 18 tools (per `src/mcp/tools.rs`)
 - Daemon: auto-port, fs4 PID lockfile, graceful shutdown, persistent model cache
 - Svelte 5 admin UI embedded in binary via `include_dir`
 - OpenRouter chat proxy with search context injection

@@ -40,7 +40,8 @@ certain design decisions were made.
 
 - Sidecar to trusty-search: fetches chunk corpus via `GET /indexes/:id/chunks`,
   runs analysis, serves results on port 7879
-- trusty-common shared type crate lives here and is path-depended on by both projects
+- Shared types come from the `trusty-common` sibling crate in the `trusty-tools`
+  workspace (path dep), which is also consumed by trusty-search
 - Planned Phase 2: dynamic analysis (runtime call graphs, test coverage,
   mutation testing scores)
 
@@ -262,20 +263,21 @@ C, C++
 
 ```
 trusty-search daemon (port 7878)          trusty-analyze daemon (port 7879)
-  GET /indexes/:id/chunks  ─────────────► trusty-analyze-core
+  GET /indexes/:id/chunks  ─────────────► src/core/  (analysis engines)
   (bulk corpus export)                      complexity.rs   — cyclomatic/cognitive
                                             blame.rs        — git temporal decay
                                             quality.rs      — grade aggregation
                                             facts.rs        — FactStore (redb)
                                             client.rs       — HTTP client to trusty-search
-                                          trusty-analyze-service (axum HTTP API)
-                                          trusty-analyze-mcp   (MCP stdio + SSE)
+                                          src/service/  (axum HTTP API)
+                                          src/mcp/      (MCP stdio + SSE)
 ```
 
 ### trusty-common — Shared Type Crate
 
-Lives at `crates/trusty-common`. Path-depended on by both trusty-analyze and
-trusty-search (once trusty-search migrates its internal types to the shared crate).
+Lives at `crates/trusty-common` (a sibling crate in the same `trusty-tools`
+workspace). Referenced as a path dep (`trusty-common = { workspace = true }`)
+by both trusty-analyze and trusty-search.
 
 Key types:
 
@@ -323,45 +325,41 @@ pub struct FactRecord { subject, predicate, object, provenance, ... }
 
 ---
 
-## Workspace Layout
+## Crate Layout
+
+`trusty-analyze` is a **single crate** (one `Cargo.toml`, lib + bin targets)
+within the `trusty-tools` workspace. There is no nested
+`crates/trusty-analyze/crates/*` workspace — the analysis engines, language
+adapters, embedder, MCP server, and service layer are all sibling modules under
+`src/`. Shared types come from the in-workspace `trusty-common` path dep.
 
 ```
-trusty-analyze/
-├── Cargo.toml                          workspace + bin manifest
+crates/trusty-analyze/
+├── Cargo.toml                          single-crate manifest (lib + bin)
 ├── CLAUDE.md                           this file
 ├── README.md
 ├── src/
-│   └── main.rs                         CLI: trusty-analyze serve/analyze/facts/health
-├── crates/
-│   ├── trusty-common/                  shared types (also used by trusty-search)
-│   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── chunk.rs                CodeChunk
-│   │       ├── complexity.rs           ComplexityMetrics, CodeSmell, ComplexityGrade
-│   │       ├── blame.rs                ChunkBlame
-│   │       ├── entity.rs               EntityType, EdgeKind, RawEntity
-│   │       └── facts.rs                FactRecord
-│   ├── trusty-analyze-core/           analysis engines
-│   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── complexity.rs           cyclomatic + cognitive analysis
-│   │       ├── blame.rs                git log parser + temporal decay
-│   │       ├── quality.rs              grade aggregation
-│   │       ├── facts.rs                FactStore (redb persistence)
-│   │       └── client.rs               HTTP client to trusty-search daemon
-│   ├── trusty-analyze-service/        axum HTTP sidecar (port 7879)
-│   │   └── src/
-│   │       └── lib.rs
-│   ├── trusty-embedder/                 FastEmbedder wrapper (dir name differs from
-│   │   └── src/                         package name: `trusty-analyze-embedder`)
-│   │       └── lib.rs
-│   └── trusty-analyze-mcp/            MCP stdio + SSE server
-│       └── src/
-│           └── lib.rs
+│   ├── lib.rs                          re-publishes modules below
+│   ├── main.rs                         CLI: serve / analyze / facts / health
+│   ├── types/                          CodeChunk, ComplexityMetrics, CodeSmell,
+│   │                                   ComplexityGrade, ChunkBlame, EntityType,
+│   │                                   EdgeKind, FactRecord, graph types
+│   ├── core/                           analysis engines — complexity(.rs/_ts.rs),
+│   │                                   blame, quality, facts (redb FactStore),
+│   │                                   client (HTTP → trusty-search), concept_cluster,
+│   │                                   explain, github, linker
+│   ├── lang/                           LanguageAnalyzer trait, detection, and
+│   │   └── adapters/                   tree-sitter adapters (15: rust, python, java,
+│   │                                   go, typescript, javascript, c, cpp, csharp,
+│   │                                   kotlin, php, ruby, scala, swift)
+│   ├── embedder/                       BoW + neural concept-clustering embedders
+│   ├── service/                        axum HTTP API (port 7879) + embedded UI
+│   ├── mcp/                            MCP server: stdio + HTTP/SSE transports
+│   └── commands/                       per-subcommand handlers (daemon/service/setup)
 ```
 
 Documentation lives at the workspace top level under
-`docs/trusty-analyze/` (research, sessions, regression-testing), not in-crate.
+`docs/trusty-analyze/`, not in-crate.
 
 ---
 
@@ -407,19 +405,14 @@ GET  /indexes/:id/clusters?k=N&method=bow|neural
 
 ## MCP Tools
 
-Parity rule: every HTTP endpoint has an MCP tool equivalent.
+Parity rule: every HTTP endpoint has an MCP tool equivalent. The MCP server
+registers **17 tools** (authoritative source: `src/mcp/mod.rs`
+`tool_definitions`):
 
-| Tool | Equivalent endpoint |
-|------|---------------------|
-| `analyzer_health` | `GET /health` |
-| `complexity_hotspots` | `GET /indexes/:id/complexity_hotspots` |
-| `find_smells` | `GET /indexes/:id/smells` |
-| `analyze_quality` | `GET /indexes/:id/quality` |
-| `list_facts` | `GET /facts` |
-| `upsert_fact` | `POST /facts` |
-| `delete_fact` | `DELETE /facts/:id` |
-| `ingest_scip` | `POST /indexes/:id/scip` |
-| `cluster_concepts` | `GET /indexes/:id/clusters` |
+`complexity_hotspots`, `find_smells`, `analyze_quality`, `run_diagnostics`,
+`list_facts`, `upsert_fact`, `delete_fact`, `analyzer_health`, `extract_graph`,
+`cluster_concepts`, `ingest_scip`, `extract_ner`, `suggest_refactors`,
+`review_diff`, `deep_analysis`, `review_github_pr`, `list_entities`.
 
 ### Transports
 
@@ -549,62 +542,23 @@ RUST_LOG=debug                             # enable debug tracing
 
 ## Publishing
 
-Publishing is **fully automated via CI/CD** — never run `cargo publish` manually.
-Trigger paths:
-
-1. **Tag push**: pushing a `v*` tag (e.g. `v0.1.1`) runs
-   `.github/workflows/publish.yml` and uploads to crates.io.
-2. **Manual dispatch**: GitHub Actions UI → *Publish* → *Run workflow*
-   (with optional `dry_run`).
-3. **Cross-repo dispatch**: trusty-common's publish workflow fires a
-   `repository_dispatch` of type `publish` after `trusty-contracts` is on
-   crates.io, ensuring downstream resolution succeeds.
-
-### Workspace publishability map
-
-| Crate | Published to crates.io? | Why |
-|-------|------------------------|-----|
-| `trusty-analyze-types` | ✅ Yes | Pure types, no internal deps |
-| `trusty-analyze-lang`  | ✅ Yes | Tree-sitter adapters; depends on `-types` |
-| `trusty-analyze-core`  | ✅ Yes | Analysis primitives; depends on `-types` + `-lang` |
-| `trusty-analyze-mcp`   | ✅ Yes | MCP server; depends on `-types` + `-core` |
-| `trusty-analyze-embedder` | ✅ Yes | Renamed from `trusty-embedder` (commit 0abfdaf); name free on crates.io |
-| `trusty-analyze-service`  | ✅ Yes | Depends on `trusty-analyze-embedder` |
-| `trusty-analyze` (bin)    | ✅ Yes | `cargo install trusty-analyze` works from crates.io |
-
-> **`trusty-analyze-embedder` rename:** the crate was originally named
-> `trusty-embedder`, which collided with an unrelated published crate. It was
-> renamed to `trusty-analyze-embedder` in commit `0abfdaf`, resolving the
-> collision. All seven workspace crates are now publishable to crates.io.
-
-### Pre-publish validation
-
-Before tagging a release, validate that publishable crates are still
-publish-clean:
+`trusty-analyze` is a single crate published independently with the workspace's
+per-crate tag convention `trusty-analyze-v<version>` (the version comes from
+this crate's `Cargo.toml`). There is no nested multi-crate workspace and no
+separate `trusty-analyze-types` / `-lang` / `-core` / `-mcp` / `-service` /
+`-embedder` packages — those were sibling modules under `src/`, not crates.
 
 ```bash
-# Dry-run each publishable crate (no upload). Run in dependency order.
-cargo publish -p trusty-analyze-types     --dry-run
-cargo publish -p trusty-analyze-lang      --dry-run
-cargo publish -p trusty-analyze-core      --dry-run
-cargo publish -p trusty-analyze-mcp       --dry-run
-cargo publish -p trusty-analyze-embedder  --dry-run
-cargo publish -p trusty-analyze-service   --dry-run
-cargo publish -p trusty-analyze           --dry-run
+# Dry-run before tagging (no upload)
+cargo publish -p trusty-analyze --dry-run
+
+# Then follow the workspace release workflow (see the root CLAUDE.md):
+#   bump version → cargo test -p trusty-analyze → tag trusty-analyze-v<version>
+#   → push tag → cargo publish -p trusty-analyze → cargo install --path .
 ```
 
-Note: dry-runs require dependencies to already be published on crates.io at
-the same version, otherwise the index lookup fails. For first-time publishing
-of a new crate, run the GitHub Actions workflow with `dry_run = true` so the
-local `[patch.crates-io]` overrides don't shadow the lookup.
-
-### Dependency-bump cadence
-
-`.github/dependabot.yml` opens grouped weekly PRs:
-
-- Minor/patch cargo bumps rolled into one PR per week
-- tree-sitter grammar crates grouped together (they version in lockstep)
-- GitHub Actions versions grouped weekly
+Dependency bumps follow the workspace `[workspace.dependencies]` table; do not
+pin tree-sitter or other shared crates locally if they already live there.
 
 ---
 
@@ -615,23 +569,26 @@ MCP server, SCIP ingest, neural/BoW concept clustering, and language-specific
 tree-sitter adapters are all functional.
 
 **Working:**
-- Workspace builds and all 107 tests pass (`cargo test --workspace`)
-- trusty-common type definitions (chunk, complexity, blame, entity, facts)
-- trusty-analyze-core fully wired: `client.rs`, `complexity.rs`, `blame.rs`,
-  `quality.rs`, `facts.rs`
-- axum HTTP sidecar (`trusty-analyze-service`) — 8 endpoints live on port 7879
-- MCP stdio server (`trusty-analyze-mcp`) — 9 tools (HTTP parity maintained)
+- Crate builds and tests pass (`cargo test -p trusty-analyze`)
+- `trusty-common` type definitions (chunk, complexity, blame, entity, facts)
+- `src/core/` fully wired: `client.rs`, `complexity.rs`, `complexity_ts.rs`,
+  `blame.rs`, `quality.rs`, `facts.rs`, `concept_cluster.rs`, `linker.rs`,
+  `explain.rs`, `github.rs`
+- axum HTTP sidecar (`src/service/`) on port 7879
+- MCP stdio + HTTP/SSE server (`src/mcp/`) — 17 tools (authoritative source:
+  `src/mcp/mod.rs` `tool_definitions`)
 - CLI subcommands: `serve`, `analyze`, `facts list/upsert`, `health`
 - Daemon PID lockfile (fs4), graceful shutdown, `--search-url` flag
-- `LanguageAnalyzer` trait + tree-sitter adapters for Python, Java, Go (complete);
-  Rust / TypeScript / C / C++ scaffolded
-- CALLS edges from Rust adapter + cross-chunk entity linker (`#47` complete)
+- `LanguageAnalyzer` trait + 15 tree-sitter adapters, all implemented:
+  rust, python, java, go, typescript, javascript, c, cpp, csharp, kotlin,
+  php, ruby, scala, swift (see `src/lang/adapters/`)
+- CALLS edges + cross-chunk entity linker (`#47` complete)
 - k-means concept clustering (BoW / neural) + `/indexes/:id/clusters` endpoint
 - SCIP protobuf ingest → knowledge graph (`#47` complete)
 - Integration self-analysis suite
 
 **Remaining / next steps:**
-- Phase 2 adapters: complete Rust, TypeScript, C, C++ tree-sitter adapters
+- Phase 2 semantic enrichment: deepen adapters beyond the tree-sitter baseline
 - Phase 3: Dockerized runtime execution (sandboxed profiler jobs)
 - Phase 4: Runtime-to-graph mapping (normalize profiler output → graph nodes)
 - Phase 5: Advanced unified scoring (text + embed + graph + runtime layers)

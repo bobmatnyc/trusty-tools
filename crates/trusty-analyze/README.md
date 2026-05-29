@@ -74,17 +74,28 @@ unreachable.
 
 ## MCP Tools
 
+The MCP server registers **17 tools** (authoritative source: `src/mcp/mod.rs`
+`tool_definitions`):
+
 | Tool | HTTP equivalent |
 |------|-----------------|
 | `analyzer_health` | `GET /health` |
 | `complexity_hotspots` | `GET /indexes/:id/complexity_hotspots` |
 | `find_smells` | `GET /indexes/:id/smells` |
 | `analyze_quality` | `GET /indexes/:id/quality` |
+| `run_diagnostics` | (composite diagnostics run) |
 | `list_facts` | `GET /facts` |
 | `upsert_fact` | `POST /facts` |
 | `delete_fact` | `DELETE /facts/:id` |
 | `ingest_scip` | `POST /indexes/:id/scip` |
 | `cluster_concepts` | `GET /indexes/:id/clusters` |
+| `extract_graph` | knowledge-graph extraction |
+| `extract_ner` | named-entity extraction (optional ONNX) |
+| `list_entities` | enumerate extracted entities |
+| `suggest_refactors` | refactor suggestions |
+| `review_diff` | review a unified diff |
+| `review_github_pr` | review a GitHub pull request |
+| `deep_analysis` | combined deep-analysis pass |
 
 ## HTTP API
 

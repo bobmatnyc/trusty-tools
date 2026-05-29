@@ -96,10 +96,16 @@ running (started either by `trusty-memory setup`'s LaunchAgent or by
 
 ## Available MCP Tools
 
-All 12 tools are exposed via both the MCP protocol (over the
-`trusty-memory-mcp-bridge` → UDS path) and the HTTP API (`/api/v1/`). The
-`palace` argument is required unless the server was started with
-`--palace <name>`.
+The MCP server registers **23 tools** (authoritative source:
+`src/tools.rs` `tool_definitions`, asserted by the
+`tool_definitions_lists_all_tools` test). All are exposed via both the MCP
+protocol (over the `trusty-memory-mcp-bridge` → UDS path) and the HTTP API
+(`/api/v1/`). The `palace` argument is required unless the server was started
+with `--palace <name>`. The tables below cover the primary surface; the full
+roster also includes `memory_note`, `memory_recall_all`, `palace_delete`,
+`palace_update`, `palace_compact`, `kg_gaps`, `kg_bootstrap`, `add_alias`,
+`discover_aliases`, `list_prompt_facts`, `remove_prompt_fact`, and
+`get_prompt_context`.
 
 ### Memory tools
 
@@ -406,17 +412,17 @@ Each palace directory contains:
 ## Architecture
 
 ```
-trusty-memory (this crate)          trusty-memory-core
+trusty-memory (this crate)          trusty-common `memory-core` feature
   axum HTTP/SSE server     ──────►  PalaceRegistry
   Unix domain socket       ──────►  usearch vector index
   embedded Svelte UI               SQLite metadata + KG
-  12 MCP tools                     fastembed (AllMiniLML6V2Q)
+  23 MCP tools                     fastembed (AllMiniLML6V2Q)
 
 trusty-memory-mcp-bridge (separate binary, PR #149)
   Claude Code stdio  ◄──pipe──►  trusty-memory UDS
 ```
 
-`trusty-memory-core` owns the storage engine: `usearch` for approximate
+The `memory-core` feature of `trusty-common` owns the storage engine: `usearch` for approximate
 nearest-neighbor search, SQLite for metadata and knowledge-graph triples, and
 `fastembed` for 384-dim text embeddings. The MCP server (`trusty-memory`) is a
 thin protocol layer on top.
@@ -502,7 +508,8 @@ cargo run -p trusty-memory -- serve --foreground --http 127.0.0.1:7880
 
 # Tests
 cargo test -p trusty-memory
-cargo test -p trusty-memory-core
+# Storage-engine tests live in trusty-common behind the memory-core feature:
+cargo test -p trusty-common --features memory-core
 
 # Check only (faster)
 cargo check -p trusty-memory

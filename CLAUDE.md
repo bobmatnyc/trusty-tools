@@ -25,7 +25,8 @@ dance for cross-crate development. The authoritative crate list is the
 Key consumers of the shared libraries:
 - **open-mpm** — MPM orchestration platform (lives in `crates/open-mpm`)
 - **trusty-search** — hybrid code search daemon + MCP server
-- **trusty-memory-core / trusty-memory** — memory palace storage + MCP frontend
+- **trusty-memory** — MCP frontend over the memory palace (storage lives in
+  `trusty-common`'s `memory-core` feature)
 - **trusty-analyze** — code analysis daemon (complexity, smells, quality metrics)
 
 Work touching a shared crate (e.g. `trusty-common`, `trusty-embedderd`) may
@@ -125,18 +126,16 @@ Always verify the `name` field in the crate's `Cargo.toml` if you get a "package
 trusty-tools/               # workspace root
 ├── Cargo.toml              # workspace manifest — glob members = ["crates/*"]
 ├── Cargo.lock
-├── crates/
-│   ├── trusty-common/       # shared utilities, tracing, OpenRouter chat, memory-core feature
+├── crates/                 # 16 members (matches `ls crates/`)
+│   ├── trusty-common/       # shared utilities, tracing, OpenRouter chat; hosts the
+│   │                        # consolidated mcp/rpc/embedder/symgraph/memory-core/
+│   │                        # tickets/monitor-tui modules behind feature flags
 │   ├── trusty-embedderd/    # fastembed wrapper — sidecar daemon for trusty-search
 │   ├── trusty-bm25-daemon/  # BM25 index daemon — sidecar for trusty-memory
-│   ├── trusty-symgraph/     # symbol graph engine (tree-sitter parser)
-│   ├── trusty-rpc/          # RPC helpers and service descriptors
-│   ├── trusty-tickets/      # GitHub Issues ticketing integration
 │   ├── trusty-gworkspace/   # Google Workspace client (Calendar, Tasks, Drive)
 │   ├── trusty-cto-db/       # SQLite CTO database (rusqlite-backed)
 │   ├── tc-services/         # service-layer adapters: CTO DB, Granola, GWorkspace
 │   ├── trusty-search/       # hybrid BM25 + vector + KG search daemon + MCP server
-│   ├── trusty-memory-core/  # re-export shim — absorbed into trusty-common's memory-core feature
 │   ├── trusty-memory/       # MCP server frontend for memory (includes Svelte UI)
 │   ├── trusty-analyze/      # code analysis daemon + MCP server
 │   ├── trusty-mpm/          # unified MPM platform: CLI (tm/trusty-mpm), daemon, MCP, TUI, Telegram
@@ -148,6 +147,13 @@ trusty-tools/               # workspace root
 │   └── open-mpm-local/      # open-mpm local execution (publish=false)
 └── .gitignore
 ```
+
+> **Consolidation note:** the formerly separate `trusty-symgraph`, `trusty-rpc`,
+> `trusty-tickets`, `trusty-mcp-core`, `trusty-embedder`, `trusty-memory-core`,
+> and `trusty-monitor-tui` crates no longer exist as standalone directories —
+> they were absorbed into `trusty-common` behind the `symgraph`, `rpc`,
+> `tickets`, `mcp`, `embedder`, `memory-core`, and `monitor-tui` feature flags
+> respectively. Enable the relevant feature to pull in the corresponding module.
 
 For the source layout of any crate, read its `README.md` or browse
 `crates/<name>/src/`. Each crate owns its own `README.md` covering purpose,
@@ -393,9 +399,9 @@ refs, never working trees.
 Detailed implementation information for each crate lives in its own documentation:
 
 - **trusty-common** — see `crates/trusty-common/README.md` and `docs/trusty-common/`
-- **trusty-embedderd** — see `crates/trusty-embedderd/README.md` (fastembed sidecar daemon)
-- **trusty-bm25-daemon** — see `crates/trusty-bm25-daemon/README.md` (BM25 index sidecar)
-- **trusty-memory / trusty-memory-core** — see `crates/trusty-memory/README.md` and `docs/trusty-memory/` (licensed MIT, not Elastic-2.0)
+- **trusty-embedderd** — see `crates/trusty-embedderd/README.md` and `docs/trusty-embedderd/` (fastembed sidecar daemon)
+- **trusty-bm25-daemon** — see `crates/trusty-bm25-daemon/README.md` and `docs/trusty-bm25-daemon/` (BM25 index sidecar)
+- **trusty-memory** — see `crates/trusty-memory/README.md` and `docs/trusty-memory/` (licensed MIT, not Elastic-2.0; storage engine lives in `trusty-common`'s `memory-core` feature)
 - **trusty-search** — see `crates/trusty-search/README.md` and **`docs/trusty-search/`** (primary worked example with regression testing, research, sessions)
 - **trusty-analyze** — see `crates/trusty-analyze/README.md` and `docs/trusty-analyze/` (licensed MIT, not Elastic-2.0)
 - **trusty-mpm** — see `crates/trusty-mpm/README.md` and `docs/trusty-mpm/` (unified platform: CLI binaries `tm`/`trusty-mpm`, daemon, MCP server, TUI, Telegram)
@@ -521,8 +527,8 @@ behind the `axum-server` feature flag, matching the pattern in `trusty-common`.
 Otherwise every library consumer pulls in the full axum + tower stack.
 
 🟡 **Editing a shared crate without propagating changes** — modifying
-`trusty-common`, `trusty-embedderd`, `trusty-bm25-daemon`, or `trusty-symgraph`
-can silently break dependents. Always run `cargo check` (workspace-wide) and
+`trusty-common` (or its consolidated `symgraph` / `embedder` / `mcp` modules),
+`trusty-embedderd`, or `trusty-bm25-daemon` can silently break dependents. Always run `cargo check` (workspace-wide) and
 `cargo test -p <consumer>` for every crate that imports the edited library.
 
 🟡 **Forgetting the Why/What/Test doc pattern on new public items** — clippy
@@ -560,7 +566,7 @@ PRs, issues, or commit messages that reference the former repo names.
 |---|---|
 | `bobmatnyc/trusty-common` | `crates/trusty-common` + 8 library crates |
 | `bobmatnyc/trusty-search` | `crates/trusty-search` |
-| `bobmatnyc/trusty-memory` | `crates/trusty-common` (`memory-core` feature) + `crates/trusty-memory-core` (shim) + `crates/trusty-memory` (MCP frontend) |
+| `bobmatnyc/trusty-memory` | `crates/trusty-common` (`memory-core` feature — storage engine) + `crates/trusty-memory` (MCP frontend) |
 | `bobmatnyc/trusty-analyze` | `crates/trusty-analyze` |
 | `bobmatnyc/trusty-git-analytics` | `crates/trusty-git-analytics` |
 | `bobmatnyc/trusty-mpm` | `crates/trusty-mpm/` (unified crate) + `crates/trusty-mpm-gui/` |
