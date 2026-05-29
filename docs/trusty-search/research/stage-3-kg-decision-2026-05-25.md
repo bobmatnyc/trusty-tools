@@ -25,8 +25,8 @@
 - **Two-stage pattern**: each KG query first issued a stage-1 `search_lexical` with `top_k=1` to anchor the seed chunk_id (logged for forensics), then stage-2 fired the chosen lane with `expand_graph` set per the lane semantics. The `seed_chunk_id` was included in the request body for forensic clarity even though the daemon's current `SearchQuery` struct ignores the field — KG expansion in production is intent-driven and seeded from top-K results, not from an explicit chunk_id.
 - **Daemon**: same persistent daemon instance used for all #5 / #128 / #138 measurements (continuous uptime); embedder running on CPU (provider reported as `CPU` in /health — CoreML EP was NOT active for this run, see Caveats).
 - **Index reuse**: harness checks `GET /indexes/open-mpm-benchmark/status` first and skips reindex when all three stages are `ready` with a matching root_path. This run was a fresh index (the prior #5 cleanup deleted it); subsequent #145 re-runs will skip reindex.
-- **Harness**: [`crates/trusty-search/tests/benchmark_open_mpm_kg.rs`](../../crates/trusty-search/tests/benchmark_open_mpm_kg.rs).
-- **Ground truth**: [`crates/trusty-search/tests/benchmark_open_mpm_kg_ground_truth.json`](../../crates/trusty-search/tests/benchmark_open_mpm_kg_ground_truth.json) — each query carries an explicit list of files that a graph-aware tool should be able to surface.
+- **Harness**: [`crates/trusty-search/tests/benchmark_open_mpm_kg.rs`](../../../crates/trusty-search/tests/benchmark_open_mpm_kg.rs).
+- **Ground truth**: [`crates/trusty-search/tests/benchmark_open_mpm_kg_ground_truth.json`](../../../crates/trusty-search/tests/benchmark_open_mpm_kg_ground_truth.json) — each query carries an explicit list of files that a graph-aware tool should be able to surface.
 
 ## Results — per-class breakdown
 
@@ -123,8 +123,8 @@ The #109 ticket itself should be rescoped from "async-split Stage 3" to "async-s
 - [#138](https://github.com/bobmatnyc/trusty-tools/issues/138) — per-lane MCP tool surface (stays as-is)
 - [#147](https://github.com/bobmatnyc/trusty-tools/issues/147) — search_kg refining query (re-evaluate after rescope)
 - [open-mpm-baseline-2026-05-25.md](../regression-testing/open-mpm-baseline-2026-05-25.md) — the mixed-intent peer baseline
-- [benchmark_open_mpm_kg.rs](../../crates/trusty-search/tests/benchmark_open_mpm_kg.rs) — harness source
-- [benchmark_open_mpm_kg_ground_truth.json](../../crates/trusty-search/tests/benchmark_open_mpm_kg_ground_truth.json) — 18-query KG-targeted ground truth
+- [benchmark_open_mpm_kg.rs](../../../crates/trusty-search/tests/benchmark_open_mpm_kg.rs) — harness source
+- [benchmark_open_mpm_kg_ground_truth.json](../../../crates/trusty-search/tests/benchmark_open_mpm_kg_ground_truth.json) — 18-query KG-targeted ground truth
 
 ## Re-run instructions
 

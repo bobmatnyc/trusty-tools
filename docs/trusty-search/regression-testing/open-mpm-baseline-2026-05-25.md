@@ -198,8 +198,8 @@ The absolute numbers are **reasonable**: 67% Hit@1 / 72% Hit@5 on naturally-phra
 - [#123](https://github.com/bobmatnyc/trusty-tools/issues/123) — _BM25 circular bias_ — this baseline complements the synthetic-corpus measurement on the organic axis
 - [synthetic-corpus-baseline-2026-05-25.md](synthetic-corpus-baseline-2026-05-25.md) — synthetic peer to this organic baseline
 - [v0.10.0-2026-05-25.md](v0.10.0-2026-05-25.md) — current.md target; the version snapshot this baseline is parallel to
-- [benchmark_open_mpm.rs](../../crates/trusty-search/tests/benchmark_open_mpm.rs) — harness source
-- [benchmark_open_mpm_ground_truth.json](../../crates/trusty-search/tests/benchmark_open_mpm_ground_truth.json) — 20-query ground truth
+- [benchmark_open_mpm.rs](../../../crates/trusty-search/tests/benchmark_open_mpm.rs) — harness source
+- [benchmark_open_mpm_ground_truth.json](../../../crates/trusty-search/tests/benchmark_open_mpm_ground_truth.json) — 20-query ground truth
 
 ## Raw measurements
 

@@ -354,5 +354,5 @@ The improvement over v1 on Q01–Q14 is entirely attributable to mode-hint forwa
 
 - [#123](https://github.com/bobmatnyc/trusty-tools/issues/123) — v2 of this work
 - [v1 of this doc](#three-mode-results-run-2026-05-25-daemon-v091) — same file, section above
-- [benchmark_synthetic.rs](../../crates/trusty-search/tests/benchmark_synthetic.rs) — harness source (v0.2.0)
-- [GROUND_TRUTH.json](../../crates/trusty-search/tests/benchmark_corpus/synthetic/GROUND_TRUTH.json) — v0.2.0, 19 queries
+- [benchmark_synthetic.rs](../../../crates/trusty-search/tests/benchmark_synthetic.rs) — harness source (v0.2.0)
+- [GROUND_TRUTH.json](../../../crates/trusty-search/tests/benchmark_corpus/synthetic/GROUND_TRUTH.json) — v0.2.0, 19 queries
