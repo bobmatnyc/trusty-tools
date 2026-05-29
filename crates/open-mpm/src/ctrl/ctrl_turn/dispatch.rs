@@ -18,10 +18,44 @@ use crate::llm;
 use crate::tools::ToolRegistry;
 
 use super::super::claude_cli::run_pm_task_via_claude_cli;
-use super::super::config::apply_credential_routing;
+use super::super::config::{
+    SessionOverrides, apply_credential_routing, resolve_overridden_credentials,
+};
 use super::super::state::{Ctrl, PmMsg};
 use super::super::util::drain_slot;
 use super::CtrlTurnSideEffects;
+
+/// Resolve and apply credential routing for a ctrl turn (#408).
+///
+/// Why: The legacy stdin REPL path (`ctrl_chat_turn`) historically called
+/// `llm::chat()` against a hardcoded `CTRL_MODEL` without consulting the
+/// credential layer, so it always routed through OpenRouter and silently
+/// ignored `ANTHROPIC_API_KEY` (AnthropicDirect) and
+/// `CLAUDE_CODE_OAUTH_TOKEN` (ClaudeCode). This helper mirrors the ratatui
+/// reference path (`run_pm_task_with_history`): it honors an optional
+/// session `/model` override, then resolves credentials through the canonical
+/// `resolve_overridden_credentials` (which honors a `/provider` override and
+/// otherwise falls back to `pick_credentials` priority ClaudeCode >
+/// AnthropicDirect > OpenRouter), then applies routing to `cfg`.
+/// What: Mutates `cfg` in place (model id, `use_anthropic_direct`,
+/// OpenRouter prefix qualification) and returns the resolved
+/// `LlmCredentials` plus the claude-CLI short-circuit flag. Pure aside from
+/// reading process env via `resolve_overridden_credentials`.
+/// Test: `dispatch::tests::ctrl_creds_prefers_anthropic_direct_over_openrouter`,
+/// `ctrl_creds_falls_back_to_openrouter`, and
+/// `ctrl_creds_model_override_applied`.
+fn resolve_ctrl_turn_credentials(
+    cfg: &mut AgentConfig,
+    overrides: &SessionOverrides,
+) -> Result<(llm::credentials::LlmCredentials, bool)> {
+    if let Some(ref m) = overrides.model {
+        tracing::debug!(model = %m, "ctrl_chat_turn: applying /model session override");
+        cfg.agent.model = m.clone();
+    }
+    let creds = resolve_overridden_credentials(cfg, overrides.provider.as_deref())?;
+    let claude_cli_short_circuit = apply_credential_routing(cfg, &creds);
+    Ok((creds, claude_cli_short_circuit))
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch_ctrl_turn_llm(
@@ -45,9 +79,15 @@ pub(crate) async fn dispatch_ctrl_turn_llm(
         "ctrl_chat_turn: stage1 config loaded"
     );
 
-    let creds = llm::credentials::pick_credentials(Some(routed_cfg.agent.runner))
-        .ok_or_else(|| anyhow::anyhow!("{}", llm::credentials::missing_credentials_error()))?;
-    let claude_cli_short_circuit = apply_credential_routing(&mut routed_cfg, &creds);
+    // TODO(#408): the ctrl stdin REPL does not yet expose `/model` and
+    // `/provider` slash commands (those live only in the ratatui `src/repl/`
+    // ReplState today). When session overrides are plumbed into `Ctrl`, pass
+    // them here instead of the default sentinel. Until then `Default` resolves
+    // to the env-driven `pick_credentials` priority, which is the fix for the
+    // original "always OpenRouter" bug.
+    let overrides = SessionOverrides::default();
+    let (creds, claude_cli_short_circuit) =
+        resolve_ctrl_turn_credentials(&mut routed_cfg, &overrides)?;
     tracing::info!(
         elapsed_ms = dispatch_t0.elapsed().as_millis() as u64,
         creds = creds.label(),
@@ -248,5 +288,122 @@ pub(crate) async fn drain_ctrl_turn_side_effects(
         } else {
             outputs.push(format!("stop_task: no PM named {target_name}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::AgentConfig;
+    use crate::llm::credentials::LlmCredentials;
+    use serial_test::serial;
+
+    /// Helper: clear all three credential env vars so each test starts from a
+    /// known-empty environment. SAFETY: every test below is `#[serial]` AND
+    /// holds `crate::test_env::ENV_LOCK` to serialize against the rest of the
+    /// crate's env-touching tests (#274 / #408).
+    fn clear_creds_env() {
+        unsafe {
+            std::env::remove_var("OPENROUTER_API_KEY");
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
+        }
+    }
+
+    /// Regression for #408: with both ANTHROPIC_API_KEY and OPENROUTER_API_KEY
+    /// set, the legacy ctrl stdin path must route AnthropicDirect (flipping
+    /// `use_anthropic_direct`), NOT silently downgrade to OpenRouter.
+    #[test]
+    #[serial]
+    fn ctrl_creds_prefers_anthropic_direct_over_openrouter() {
+        let _g = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_creds_env();
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-api03-test");
+            std::env::set_var("OPENROUTER_API_KEY", "sk-or-v1-test");
+        }
+        let mut cfg = AgentConfig::ctrl_default();
+        cfg.llm.use_anthropic_direct = false;
+        let (creds, short_circuit) =
+            resolve_ctrl_turn_credentials(&mut cfg, &SessionOverrides::default())
+                .expect("credentials must resolve when env vars are set");
+        assert_eq!(creds, LlmCredentials::AnthropicDirect);
+        assert!(!short_circuit);
+        assert!(
+            cfg.llm.use_anthropic_direct,
+            "AnthropicDirect must flip use_anthropic_direct"
+        );
+        clear_creds_env();
+    }
+
+    /// When only OPENROUTER_API_KEY is set the legacy path must still work
+    /// (preserve pre-#408 behavior) and route via OpenRouter.
+    #[test]
+    #[serial]
+    fn ctrl_creds_falls_back_to_openrouter() {
+        let _g = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_creds_env();
+        unsafe {
+            std::env::set_var("OPENROUTER_API_KEY", "sk-or-v1-test");
+        }
+        let mut cfg = AgentConfig::ctrl_default();
+        cfg.llm.use_anthropic_direct = false;
+        let (creds, short_circuit) =
+            resolve_ctrl_turn_credentials(&mut cfg, &SessionOverrides::default())
+                .expect("OpenRouter-only env must resolve");
+        assert_eq!(creds, LlmCredentials::OpenRouter);
+        assert!(!short_circuit);
+        assert!(
+            !cfg.llm.use_anthropic_direct,
+            "OpenRouter must not flip use_anthropic_direct"
+        );
+        clear_creds_env();
+    }
+
+    /// With no credentials configured the legacy path must surface an error
+    /// instead of defaulting to OpenRouter.
+    #[test]
+    #[serial]
+    fn ctrl_creds_errors_when_nothing_configured() {
+        let _g = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_creds_env();
+        let mut cfg = AgentConfig::ctrl_default();
+        let res = resolve_ctrl_turn_credentials(&mut cfg, &SessionOverrides::default());
+        assert!(
+            res.is_err(),
+            "no credentials must be an error, not a default"
+        );
+    }
+
+    /// A session `/model` override (when plumbed) must replace the agent model
+    /// before credential routing qualifies it for OpenRouter.
+    #[test]
+    #[serial]
+    fn ctrl_creds_model_override_applied() {
+        let _g = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_creds_env();
+        unsafe {
+            std::env::set_var("OPENROUTER_API_KEY", "sk-or-v1-test");
+        }
+        let mut cfg = AgentConfig::ctrl_default();
+        let overrides = SessionOverrides {
+            model: Some("claude-haiku-4-5".to_string()),
+            ..Default::default()
+        };
+        let (creds, _short_circuit) = resolve_ctrl_turn_credentials(&mut cfg, &overrides)
+            .expect("override path must resolve with OpenRouter set");
+        assert_eq!(creds, LlmCredentials::OpenRouter);
+        // OpenRouter routing qualifies the bare claude id with the provider
+        // prefix, proving the override flowed through credential routing.
+        assert_eq!(cfg.agent.model, "anthropic/claude-haiku-4-5");
+        clear_creds_env();
     }
 }
