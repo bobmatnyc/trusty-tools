@@ -15,8 +15,13 @@ published trusty-* crates:
 
 ## Status
 
-No `trusty-mpm` documentation has been authored yet in this layout. As work
-on trusty-mpm produces benchmarks, decisions, or session summaries, add files
+Foundational design docs live under [`research/`](research/):
+
+- [Product Requirements Document (reconstructed)](research/prd-2026-05-29.md)
+- [Architecture & technical specification (reconstructed)](research/architecture-spec-2026-05-29.md)
+- [`tm services` discovery spec](research/tm-services-discovery-spec-2026-05-28.md)
+
+As work on trusty-mpm produces benchmarks, decisions, or session summaries, add files
 under the appropriate subdir and update its README index.
 
 See [`docs/trusty-search/`](../trusty-search/) for a worked example of the
