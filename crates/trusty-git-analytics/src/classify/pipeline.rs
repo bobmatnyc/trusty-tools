@@ -193,13 +193,16 @@ impl ClassificationPipeline {
     /// and config-mapping logic in one place.
     /// What: loads/merges rules, maps `Config` → `ClassificationEngineConfig`,
     /// and constructs the engine (without the DB-backed override tier).
+    /// When the top-level `llm:` section is present it takes precedence over
+    /// legacy `classification.*` fields; legacy fields emit a deprecation
+    /// warning when `llm:` is absent but those fields are used.
     /// Test: exercised indirectly by the pipeline integration tests.
     ///
     /// # Errors
     ///
     /// Returns an error if rules fail to load/compile or the LLM provider
     /// fails to initialize.
-    fn build_engine(&self) -> Result<ClassificationEngine> {
+    async fn build_engine(&self) -> Result<ClassificationEngine> {
         let ruleset = match self
             .config
             .classification
@@ -224,6 +227,19 @@ impl ClassificationPipeline {
             }
             None => default_rules(),
         };
+
+        // Determine whether the LLM tier is requested and which source.
+        //
+        // Precedence (highest first):
+        // 1. Top-level `llm:` section (new, preferred).
+        // 2. Legacy `classification.llm_provider` / `classification.openrouter_api_key`
+        //    — accepted with a deprecation tracing::warn! pointing to `llm:`.
+        let use_llm = self
+            .config
+            .classification
+            .as_ref()
+            .map(|c| c.use_llm)
+            .unwrap_or(false);
 
         let engine_cfg = match self.config.classification.as_ref() {
             Some(c) => ClassificationEngineConfig {
@@ -257,9 +273,15 @@ impl ClassificationPipeline {
             .as_ref()
             .and_then(|j| j.jira_project_mapping_confidence);
 
-        ClassificationEngine::with_taxonomy_mappings_and_confidence(
+        // Build the engine without an injected LLM tier first, then attach
+        // the LLM tier (which may require async SDK init for Bedrock) below.
+        let engine_cfg_no_llm = ClassificationEngineConfig {
+            use_llm: false,
+            ..engine_cfg.clone()
+        };
+        let mut engine = ClassificationEngine::with_taxonomy_mappings_and_confidence(
             ruleset,
-            engine_cfg,
+            engine_cfg_no_llm,
             custom_taxonomy,
             jira_mappings,
             jira_confidence,
@@ -269,7 +291,75 @@ impl ClassificationPipeline {
             // still constructible via `with_taxonomy_and_mappings` for
             // single-threaded callers and tests.
             None,
-        )
+        )?;
+
+        // Wire the LLM tier when requested, preferring the `llm:` section.
+        if use_llm {
+            let llm_classifier = if let Some(llm_cfg) = self.config.llm.as_ref() {
+                // New path: `llm:` section present.
+                let model = llm_cfg
+                    .model
+                    .as_deref()
+                    .or(self
+                        .config
+                        .classification
+                        .as_ref()
+                        .and_then(|c| c.llm_model.as_deref()))
+                    .unwrap_or("gpt-4o-mini");
+                crate::classify::tiers::llm::LlmClassifier::from_llm_config(llm_cfg, model)
+                    .await
+                    .map_err(|e| {
+                        crate::classify::errors::ClassifyError::Config(format!(
+                            "LLM provider init failed (llm: section): {e}"
+                        ))
+                    })?
+            } else {
+                // Legacy path: `classification.llm_provider` etc.
+                // Emit a single deprecation warning so existing configs
+                // get a clear upgrade path.
+                if self
+                    .config
+                    .classification
+                    .as_ref()
+                    .map(|c| c.openrouter_api_key.is_some() || c.llm_provider != "auto")
+                    .unwrap_or(false)
+                {
+                    warn!(
+                        "classification.openrouter_api_key / classification.llm_provider \
+                             are deprecated. Migrate to the top-level `llm:` section: \
+                             'llm:\\n  source: openrouter\\n  api_key_env: OPENROUTER_API_KEY'"
+                    );
+                }
+                crate::classify::tiers::llm::LlmClassifier::from_provider_async(
+                    &engine_cfg.llm_provider,
+                    &engine_cfg.llm_model,
+                    engine_cfg.openrouter_api_key.clone(),
+                )
+                .await
+                .map_err(|e| {
+                    crate::classify::errors::ClassifyError::Config(format!(
+                        "LLM provider init failed: {e}"
+                    ))
+                })?
+            };
+
+            // Fail-loudly guard: when LLM is explicitly enabled but no
+            // credential resolves, error before writing any DB rows.
+            if !llm_classifier.has_api_key() {
+                return Err(crate::classify::errors::ClassifyError::Config(
+                    "LLM tier is enabled (use_llm: true) but no API key or credentials \
+                     could be resolved. Ensure the environment variable named by \
+                     llm.api_key_env is set and non-empty (for openrouter/anthropic-api), \
+                     or that valid AWS credentials are present in the credential chain \
+                     (for bedrock). No database writes will occur."
+                        .to_string(),
+                ));
+            }
+
+            engine.attach_llm(llm_classifier);
+        }
+
+        Ok(engine)
     }
 
     /// Build an [`ExternalSourceResolver`] from the pipeline's config, or
@@ -318,8 +408,8 @@ impl ClassificationPipeline {
     ///
     /// Returns an error if the DB queries, rule loading, or migrations fail.
     pub async fn run(&self, db: &mut Database) -> Result<ClassificationStats> {
-        // 1. Build engine.
-        let engine = self.build_engine()?;
+        // 1. Build engine (async to support Bedrock credential init).
+        let engine = self.build_engine().await?;
         // 2. Build optional external source resolver.
         let resolver = self.build_resolver();
         self.run_with_engine_and_resolver(db, engine, resolver)
@@ -588,7 +678,7 @@ impl ClassificationPipeline {
     ///
     /// Returns an error if engine construction or DB access fails.
     pub async fn backfill_complexity(&self, db: &mut Database) -> Result<usize> {
-        let engine = self.build_engine()?;
+        let engine = self.build_engine().await?;
         Self::backfill_complexity_with_engine(db, &engine).await
     }
 

@@ -16,6 +16,7 @@ use tracing::{debug, info, warn};
 
 use crate::classify::tiers::bedrock::BedrockClassifier;
 use crate::classify::tiers::ClassificationResult;
+use crate::core::config::{LlmConfig, LlmSource};
 use crate::core::models::ClassificationMethod;
 
 /// OpenAI-compatible chat completion endpoint.
@@ -31,7 +32,17 @@ const OPENROUTER_REFERER: &str = "https://github.com/bobmatnyc/trusty-git-analyt
 const OPENROUTER_TITLE: &str = "trusty-git-analytics";
 
 /// System prompt instructing the model to return strict JSON.
-const SYSTEM_PROMPT: &str = "You are a git commit classifier. Respond with ONLY a JSON \
+///
+/// Why: shared between the HTTP (OpenRouter/Anthropic-API) path and the
+/// Bedrock path so both send identical instructions and parse the same JSON
+/// shape — including the `complexity` field. This closes the P0 complexity
+/// gap where the Bedrock path was using its own trimmed prompt that omitted
+/// the complexity instruction.
+/// What: instructs the model to return a JSON object with `category`,
+/// `subcategory`, `confidence`, and `complexity` fields.
+/// Test: `system_prompt_requests_complexity` in this module; also used by
+/// `bedrock::tests::shared_system_prompt_contains_complexity_instruction`.
+pub const SYSTEM_PROMPT: &str = "You are a git commit classifier. Respond with ONLY a JSON \
 object: {\"category\": \"feature|bugfix|chore|documentation|refactor|test|ci|performance|style|build|revert|merge|breaking|uncategorized\", \
 \"subcategory\": \"optional string or null\", \"confidence\": 0.0-1.0, \
 \"complexity\": <integer 1-5>}. \
@@ -168,6 +179,71 @@ impl LlmClassifier {
             });
         }
         Self::from_provider(provider, model, openrouter_api_key)
+    }
+
+    /// Build an [`LlmClassifier`] from the top-level `llm:` config section.
+    ///
+    /// Why: the new `llm:` section cleanly separates transport config from
+    /// classification tuning; this constructor is the single entry point that
+    /// maps `LlmConfig` → a working classifier, handling key resolution,
+    /// missing-feature errors, and the not-yet-implemented `anthropic-api`
+    /// variant.
+    /// What: reads the API key from the env var named by `cfg.api_key_env` for
+    /// key-based sources; routes Bedrock through the async SDK constructor;
+    /// returns `Err` with an actionable message for `anthropic-api`.
+    /// Test: indirectly via the classify pipeline when `llm:` is set in the
+    /// YAML config; key-resolution errors are asserted by
+    /// `from_llm_config_missing_key_errors`.
+    ///
+    /// # Errors
+    ///
+    /// - `bedrock` source without the feature compiled in → error with
+    ///   "reinstall with --features bedrock" guidance.
+    /// - `anthropic-api` source → error with "not yet implemented" guidance.
+    /// - Key-based source with unset / empty env var → error naming the
+    ///   missing variable and how to set it.
+    pub async fn from_llm_config(cfg: &LlmConfig, model: &str) -> Result<Self, String> {
+        match &cfg.source {
+            LlmSource::Openrouter => {
+                // Read key from the named env var; fail loudly if unset.
+                let key = std::env::var(&cfg.api_key_env)
+                    .ok()
+                    .filter(|k| !k.is_empty());
+                if key.is_none() {
+                    return Err(format!(
+                        "LLM source 'openrouter' requires an API key but the environment \
+                         variable '{}' (set via llm.api_key_env) is not set or empty. \
+                         Export the variable with your OpenRouter API key before running tga.",
+                        cfg.api_key_env
+                    ));
+                }
+                info!(
+                    model,
+                    api_key_env = %cfg.api_key_env,
+                    "LLM provider: openrouter (from llm: config section)"
+                );
+                Ok(Self::build_openrouter(model, key))
+            }
+            LlmSource::Bedrock => {
+                info!(
+                    model,
+                    region = ?cfg.region,
+                    "LLM provider: bedrock (from llm: config section)"
+                );
+                let bedrock = BedrockClassifier::with_region(model, cfg.region.as_deref()).await?;
+                Ok(Self {
+                    client: Client::new(),
+                    model: model.to_string(),
+                    api_key: None,
+                    endpoint: String::new(),
+                    extra_headers: HeaderMap::new(),
+                    bedrock: Some(bedrock),
+                })
+            }
+            LlmSource::AnthropicApi => Err("LLM source 'anthropic-api' is not yet implemented. \
+                     Use 'openrouter' or 'bedrock' instead."
+                .to_string()),
+        }
     }
 
     /// Internal helper: build an OpenRouter-configured classifier with
@@ -326,20 +402,37 @@ struct ChatChoiceMessage {
     content: String,
 }
 
+/// JSON verdict shape returned by the LLM (both HTTP and Bedrock paths).
+///
+/// Why: sharing this struct between the HTTP path (`llm.rs`) and the Bedrock
+/// path (`bedrock.rs`) ensures both parse the same JSON keys. Before this was
+/// made public the Bedrock path defined its own `Verdict` struct that omitted
+/// the `complexity` field, producing no complexity scores (P0 gap).
+/// What: deserializes `category`, `subcategory`, `confidence`, and
+/// `complexity` from the model's JSON response.
+/// Test: `llm_verdict_deserializes_complexity` in this module; also used by
+/// `bedrock::classify_one` (integration path requires live AWS credentials).
 #[derive(Debug, Deserialize)]
-struct LlmVerdict {
-    category: String,
+pub struct LlmVerdict {
+    /// Classification category (e.g. `"bugfix"`, `"feature"`).
+    pub category: String,
+    /// Optional leaf label (e.g. `"null-check"`).
     #[serde(default)]
-    subcategory: Option<String>,
+    pub subcategory: Option<String>,
+    /// Confidence in this verdict (0.0–1.0).
     #[serde(default = "default_confidence")]
-    confidence: f64,
+    pub confidence: f64,
     /// Optional 1–5 complexity score. Missing or out-of-range values are
     /// handled by the caller (clamped to 1–5, or left `None`).
     #[serde(default)]
-    complexity: Option<u8>,
+    pub complexity: Option<u8>,
 }
 
-fn default_confidence() -> f64 {
+/// Why: when the model omits `confidence` (malformed response), use 0.5
+/// so the verdict is not silently discarded by the confidence guard.
+/// What: returns `0.5`.
+/// Test: covered by `LlmVerdict` deserialization tests.
+pub fn default_confidence() -> f64 {
     0.5
 }
 

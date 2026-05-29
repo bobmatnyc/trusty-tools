@@ -10,6 +10,13 @@
 //! default binary lean for users who don't need it.
 
 use crate::classify::tiers::ClassificationResult;
+// Shared prompt and verdict types live in `llm.rs` so both the HTTP and
+// Bedrock paths send identical instructions and parse identical JSON shapes.
+// Only referenced under the `bedrock` feature gate (classify_one), but the
+// test module also uses SYSTEM_PROMPT so we import unconditionally and allow
+// dead_code for the non-bedrock stub path.
+#[allow(unused_imports)]
+use crate::classify::tiers::llm::{LlmVerdict, SYSTEM_PROMPT};
 
 /// AWS Bedrock-backed LLM classifier targeting Anthropic Claude on Bedrock.
 ///
@@ -56,6 +63,30 @@ impl BedrockClassifier {
         })
     }
 
+    /// Construct a new Bedrock classifier with an explicit AWS region.
+    ///
+    /// Why: operators who specify a `region:` in the `llm:` config section
+    /// need a way to override the SDK's default region selection without
+    /// mutating environment variables.
+    /// What: loads AWS config with the supplied region pinned, then
+    /// constructs the SDK client. Falls back to `new(model)` semantics when
+    /// `region` is `None`.
+    /// Test: indirectly tested via config-driven construction when `region:`
+    /// is set in the `llm:` YAML block.
+    #[cfg(feature = "bedrock")]
+    pub async fn with_region(model: &str, region: Option<&str>) -> Result<Self, String> {
+        let mut builder = aws_config::defaults(aws_config::BehaviorVersion::latest());
+        if let Some(r) = region {
+            builder = builder.region(aws_config::Region::new(r.to_string()));
+        }
+        let config = builder.load().await;
+        let client = aws_sdk_bedrockruntime::Client::new(&config);
+        Ok(Self {
+            model: model.to_string(),
+            client,
+        })
+    }
+
     /// Stub constructor returned when the `bedrock` feature is disabled.
     ///
     /// Always errors so the caller can surface a build-time guidance
@@ -67,6 +98,12 @@ impl BedrockClassifier {
     /// Test: confirmed by `bedrock_stub_returns_error_without_feature`.
     #[cfg(not(feature = "bedrock"))]
     pub async fn new(_model: &str) -> Result<Self, String> {
+        Err("bedrock feature not compiled in — rebuild with --features bedrock".to_string())
+    }
+
+    /// Stub `with_region` when the `bedrock` feature is disabled.
+    #[cfg(not(feature = "bedrock"))]
+    pub async fn with_region(_model: &str, _region: Option<&str>) -> Result<Self, String> {
         Err("bedrock feature not compiled in — rebuild with --features bedrock".to_string())
     }
 
@@ -105,21 +142,27 @@ impl BedrockClassifier {
     }
 
     /// Classify a single commit message via Bedrock InvokeModel.
+    ///
+    /// Why: encapsulates the AWS SDK call and JSON parsing so
+    /// `classify_batch_bedrock` stays readable.
+    /// What: builds an Anthropic Messages API payload (Bedrock wire format),
+    /// invokes the model, parses the response into a shared [`LlmVerdict`],
+    /// and maps it to a [`ClassificationResult`].
+    /// Test: integration path requires live AWS credentials; the stub path
+    /// falls through to the `#[cfg(not(feature = "bedrock"))]` branch above.
     #[cfg(feature = "bedrock")]
     async fn classify_one(&self, message: &str) -> Option<ClassificationResult> {
         use crate::core::models::ClassificationMethod;
         use aws_sdk_bedrockruntime::primitives::Blob;
-        use serde::Deserialize;
         use tracing::warn;
 
+        // Use SYSTEM_PROMPT from llm.rs so both paths send identical
+        // instructions and return the same JSON shape (including complexity).
         let body = serde_json::json!({
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": 256,
             "temperature": 0.0,
-            "system": "You are a git commit classifier. Respond with ONLY a JSON \
-                object: {\"category\": \"feature|bugfix|chore|documentation|refactor|test|ci|performance|style|build|revert|merge|breaking|uncategorized\", \
-                \"subcategory\": \"optional string or null\", \"confidence\": 0.0-1.0}. \
-                No prose, no markdown.",
+            "system": SYSTEM_PROMPT,
             "messages": [
                 {"role": "user", "content": format!("Classify this commit message:\n\n{message}")}
             ]
@@ -151,11 +194,11 @@ impl BedrockClassifier {
 
         let raw = resp.body.into_inner();
 
-        #[derive(Deserialize)]
+        #[derive(serde::Deserialize)]
         struct BedrockResponse {
             content: Vec<ContentBlock>,
         }
-        #[derive(Deserialize)]
+        #[derive(serde::Deserialize)]
         struct ContentBlock {
             #[serde(default)]
             text: Option<String>,
@@ -173,18 +216,10 @@ impl BedrockClassifier {
             .find_map(|b| b.text)
             .unwrap_or_default();
 
-        #[derive(Deserialize)]
-        struct Verdict {
-            category: String,
-            #[serde(default)]
-            subcategory: Option<String>,
-            #[serde(default = "default_confidence")]
-            confidence: f64,
-        }
-        fn default_confidence() -> f64 {
-            0.5
-        }
-        let verdict: Verdict = match serde_json::from_str(text.trim()) {
+        // Parse using the shared LlmVerdict from llm.rs so the Bedrock
+        // path produces the same category/subcategory/confidence/complexity
+        // shape as the OpenRouter path (P0 complexity gap fix).
+        let verdict: LlmVerdict = match serde_json::from_str(text.trim()) {
             Ok(v) => v,
             Err(e) => {
                 warn!(error = %e, raw = %text, "bedrock verdict parse failed");
@@ -199,6 +234,8 @@ impl BedrockClassifier {
             confidence: verdict.confidence.clamp(0.0, 1.0),
             method: ClassificationMethod::LlmFallback,
             ticket_id: None,
+            // Clamp out-of-range LLM scores (same as HTTP path).
+            complexity: verdict.complexity.map(|v| v.clamp(1, 5)),
         })
     }
 }
@@ -223,5 +260,19 @@ mod tests {
             Ok(_) => panic!("must error without feature"),
         };
         assert!(err.contains("bedrock feature not compiled in"));
+    }
+
+    /// Why: `SYSTEM_PROMPT` is shared from llm.rs; if the import breaks the
+    /// stub path would fail to compile — this test ensures both features of
+    /// that sharing (accessible constant, mentions "complexity") hold without
+    /// the bedrock feature.
+    /// What: asserts the shared constant is visible and mentions complexity.
+    /// Test: pure compile + substring check.
+    #[test]
+    fn shared_system_prompt_contains_complexity_instruction() {
+        assert!(
+            SYSTEM_PROMPT.contains("complexity"),
+            "shared SYSTEM_PROMPT must instruct the model to return a complexity score"
+        );
     }
 }

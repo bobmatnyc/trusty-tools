@@ -278,6 +278,22 @@ impl ClassificationEngine {
         &self.taxonomy
     }
 
+    /// Attach a pre-built LLM classifier to this engine.
+    ///
+    /// Why: the pipeline's `build_engine` constructs the engine synchronously
+    /// (without an LLM tier) and then attaches the LLM classifier via this
+    /// method after the async SDK init (Bedrock credential resolution) has
+    /// completed. This keeps the engine constructor itself synchronous —
+    /// necessary for Rayon-batch callers — while allowing the async LLM init
+    /// to happen at the right time.
+    /// What: sets `self.llm = Some(classifier)` and updates `self.config.use_llm`.
+    /// Test: exercised indirectly by all pipeline integration tests that use
+    /// `use_llm: true`.
+    pub fn attach_llm(&mut self, classifier: LlmClassifier) {
+        self.config.use_llm = true;
+        self.llm = Some(classifier);
+    }
+
     /// Test-only seam: rebuild the LLM tier targeting an explicit endpoint
     /// with a fixed API key.
     ///

@@ -44,9 +44,16 @@ struct Cli {
     #[arg(short, long, default_value = "config.yaml", global = true)]
     config: PathBuf,
 
-    /// Path to SQLite database (default: ./tga.db).
-    #[arg(short, long, default_value = "tga.db", global = true)]
-    database: PathBuf,
+    /// Path to SQLite database.
+    ///
+    /// Precedence (highest first):
+    /// 1. This flag, when explicitly supplied.
+    /// 2. `database:` field in the YAML config file.
+    /// 3. Hardcoded default: `tga.db` in the current directory.
+    ///
+    /// Supports `~` home-directory expansion when set in the config file.
+    #[arg(short, long, global = true)]
+    database: Option<PathBuf>,
 
     /// Verbosity level (-v, -vv, -vvv). Shortcut for `--log`.
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
@@ -670,9 +677,18 @@ async fn run() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Resolve the effective database path (issue #406):
+    //   1. Explicit --database CLI flag wins.
+    //   2. `database:` field in the YAML config.
+    //   3. Hardcoded default `tga.db`.
+    let db_path = cli
+        .database
+        .or_else(|| config.resolved_database_path())
+        .unwrap_or_else(|| PathBuf::from("tga.db"));
+
     // Open SQLite database (runs migrations on open).
-    tracing::info!(path = %cli.database.display(), "opening database");
-    let mut db = Database::open(&cli.database)?;
+    tracing::info!(path = %db_path.display(), "opening database");
+    let mut db = Database::open(&db_path)?;
 
     match cli.command {
         Commands::Author(args) => commands::author::run(config, &db, args)?,

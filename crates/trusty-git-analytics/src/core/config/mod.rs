@@ -34,6 +34,108 @@ pub use aliases::{AliasFile, DeveloperAliasEntry};
 pub use azdo::AzureDevOpsConfig;
 pub use validator::{ConfigError, ConfigValidator};
 
+/// LLM provider selection for the classification LLM tier.
+///
+/// Why: operators need to switch between OpenRouter, AWS Bedrock, and the
+/// direct Anthropic API without changing binary flags. An enum keeps the set
+/// of valid values closed and type-safe.
+/// What: three variants — `Openrouter`, `Bedrock`, and `AnthropicApi`.
+/// Serde renames map to lowercase kebab-case strings matching the YAML schema.
+/// Test: deserialization is covered by `llm_config_*` unit tests in this
+/// module. Provider-specific behaviour is covered by `classify::tiers::llm`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LlmSource {
+    /// Route through the OpenRouter API (OpenAI-compatible schema).
+    ///
+    /// Requires a key stored in the environment variable named by
+    /// [`LlmConfig::api_key_env`] (default: `OPENROUTER_API_KEY`).
+    #[default]
+    Openrouter,
+    /// Route through AWS Bedrock (IAM credential-chain auth, no API key).
+    ///
+    /// Only available when the binary is compiled with `--features bedrock`.
+    /// Requires valid AWS credentials in the default chain (env vars, profile,
+    /// SSO, IMDS, etc.). No secret is stored in the config; region and model
+    /// are the only Bedrock-specific fields.
+    Bedrock,
+    /// Route through the Anthropic Messages API directly (scaffold only).
+    ///
+    /// Recognized enum value; returns a clear "not yet implemented" error at
+    /// construction time.
+    #[serde(rename = "anthropic-api")]
+    AnthropicApi,
+}
+
+/// Top-level LLM configuration section (`llm:` in YAML).
+///
+/// Why: the previous design placed LLM credentials inside
+/// `classification.openrouter_api_key` and `classification.llm_provider`,
+/// mixing transport concerns with classification tuning. The `llm:` section
+/// separates *how to reach an LLM* from *when to use it*, and enables
+/// first-class AWS Bedrock support (region + model, no stored secret).
+/// What: groups provider selection, the environment-variable name holding
+/// any required API key (never the key itself), an optional AWS region
+/// override (Bedrock only), and the model id. The section is optional;
+/// when absent the pipeline falls back to legacy `classification.*` fields.
+/// Test: `llm_config_parses_from_yaml` and `llm_source_defaults_to_openrouter`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmConfig {
+    /// LLM provider to use.
+    ///
+    /// Valid values (YAML): `openrouter`, `bedrock`, `anthropic-api`.
+    /// Defaults to `openrouter`.
+    #[serde(default)]
+    pub source: LlmSource,
+
+    /// Name of the environment variable holding the API key.
+    ///
+    /// For `openrouter` and `anthropic-api` this is required. The value
+    /// stored here is the **variable name** (e.g. `OPENROUTER_API_KEY`),
+    /// never the secret itself. At use time the pipeline reads the env var.
+    /// If the variable is unset or empty when a key-based source is in use,
+    /// the LLM tier fails loudly with an actionable error — no silent no-ops.
+    ///
+    /// For `bedrock` this field is ignored; AWS credentials are resolved via
+    /// the SDK's default credential chain.
+    #[serde(default = "default_api_key_env")]
+    pub api_key_env: String,
+
+    /// AWS region for Bedrock invocations (Bedrock only).
+    ///
+    /// Ignored for `openrouter` and `anthropic-api`. When absent, the AWS SDK
+    /// reads the region from the environment (`AWS_DEFAULT_REGION`,
+    /// `AWS_REGION`, or the active profile) as usual.
+    #[serde(default)]
+    pub region: Option<String>,
+
+    /// Model identifier (provider-specific).
+    ///
+    /// Examples:
+    /// - OpenRouter: `"gpt-4o-mini"`, `"anthropic/claude-3-5-sonnet"`
+    /// - Bedrock: `"anthropic.claude-3-5-sonnet-20241022-v2:0"`
+    /// - Anthropic API: `"claude-3-5-sonnet-20241022"`
+    ///
+    /// When absent, a provider-appropriate default is used.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+fn default_api_key_env() -> String {
+    "OPENROUTER_API_KEY".to_string()
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            source: LlmSource::default(),
+            api_key_env: default_api_key_env(),
+            region: None,
+            model: None,
+        }
+    }
+}
+
 /// Top-level configuration root.
 ///
 /// Mirrors the YAML schema from the Python predecessor. All top-level
@@ -137,6 +239,32 @@ pub struct Config {
     /// Cache directory and related settings.
     #[serde(default)]
     pub cache: Option<CacheConfig>,
+
+    /// SQLite database path override.
+    ///
+    /// Why: setting the database path in YAML lets teams commit a shared
+    /// config that points to a team-shared DB location without every operator
+    /// having to remember a `--database` flag.
+    /// What: when set, the pipeline uses this path as the DB location. The
+    /// `--database` CLI flag takes precedence over this value; the hardcoded
+    /// default (`tga.db`) is used only when neither is supplied.
+    /// Supports `~` home-directory expansion (same as other path fields).
+    /// Test: see `config_database_field_parsed` in the unit tests below.
+    #[serde(default)]
+    pub database: Option<PathBuf>,
+
+    /// Top-level LLM configuration section.
+    ///
+    /// Why: separates LLM transport concerns (provider, credentials,
+    /// region/model) from classification tuning (when to invoke the LLM,
+    /// thresholds). When present, this section takes precedence over the
+    /// legacy `classification.openrouter_api_key` / `classification.llm_provider`
+    /// fields. When absent the pipeline falls back to those fields with a
+    /// deprecation warning.
+    /// What: holds [`LlmConfig`] deserialized from the `llm:` YAML key.
+    /// Test: see `llm_config_parses_from_yaml` in the unit tests below.
+    #[serde(default)]
+    pub llm: Option<LlmConfig>,
 
     /// Filesystem path to the loaded config file, if any.
     ///
@@ -1053,6 +1181,18 @@ impl Config {
         self.pm.as_ref().and_then(|p| p.azure_devops.as_ref())
     }
 
+    /// Resolve the effective database path, applying `~` expansion.
+    ///
+    /// Why: callers (main.rs, command handlers) need a single resolved path
+    /// that honors the `database:` YAML field. This method encapsulates the
+    /// expansion so callers do not need to import `expand_path` directly.
+    /// What: returns the expanded form of `self.database` when set, or `None`
+    /// when the field is absent (callers apply the hardcoded default).
+    /// Test: see `config_database_field_parsed` in the module unit tests.
+    pub fn resolved_database_path(&self) -> Option<PathBuf> {
+        self.database.as_deref().map(expand_path)
+    }
+
     /// Validate cross-field invariants of the config.
     ///
     /// # Errors
@@ -1149,5 +1289,88 @@ mod tests {
             result.is_err(),
             "ClassificationConfig with unknown `rules_path:` must be rejected"
         );
+    }
+
+    /// Why: the `database:` field in YAML must deserialize into `Config.database`
+    /// so operators can set the DB path without a CLI flag.
+    /// What: parse a YAML snippet with `database:` set and assert the value.
+    /// Test: pure deserialization; path expansion is not asserted here (that
+    /// is tested by `resolved_database_path_expands_tilde`).
+    #[test]
+    fn config_database_field_parsed() {
+        let yaml = "database: /var/data/tga.db\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse config");
+        assert_eq!(
+            cfg.database.as_deref(),
+            Some(std::path::Path::new("/var/data/tga.db")),
+            "database: field must be deserialized"
+        );
+        // resolved_database_path returns the same value (no tilde to expand).
+        assert_eq!(
+            cfg.resolved_database_path().as_deref(),
+            Some(std::path::Path::new("/var/data/tga.db")),
+        );
+    }
+
+    /// Why: `resolved_database_path` must return `None` when the field is
+    /// absent so main.rs knows to fall back to the CLI flag or hardcoded default.
+    /// What: deserialize an empty config and assert `None`.
+    /// Test: pure deserialization.
+    #[test]
+    fn config_database_field_absent_returns_none() {
+        let cfg = Config::default();
+        assert!(
+            cfg.resolved_database_path().is_none(),
+            "absent database field must return None"
+        );
+    }
+
+    /// Why: the `llm:` YAML section must deserialize into `Config.llm` with
+    /// the correct provider, env-var name, and model.
+    /// What: parse a YAML snippet with all four `llm:` fields set.
+    /// Test: pure deserialization.
+    #[test]
+    fn llm_config_parses_from_yaml() {
+        let yaml = "llm:\n  source: openrouter\n  api_key_env: MY_KEY\n  model: gpt-4o-mini\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse config");
+        let llm = cfg.llm.expect("llm section");
+        assert_eq!(llm.source, LlmSource::Openrouter);
+        assert_eq!(llm.api_key_env, "MY_KEY");
+        assert_eq!(llm.model.as_deref(), Some("gpt-4o-mini"));
+        assert!(llm.region.is_none());
+    }
+
+    /// Why: `bedrock` must parse as `LlmSource::Bedrock` (not a variant of
+    /// another name); a typo in the serde rename would silently fall through.
+    /// What: parse `source: bedrock` and assert the variant.
+    /// Test: pure deserialization.
+    #[test]
+    fn llm_source_bedrock_parses() {
+        let yaml = "source: bedrock\napi_key_env: IGNORED\nregion: us-west-2\n";
+        let llm: LlmConfig = serde_yaml::from_str(yaml).expect("parse llm config");
+        assert_eq!(llm.source, LlmSource::Bedrock);
+        assert_eq!(llm.region.as_deref(), Some("us-west-2"));
+    }
+
+    /// Why: `LlmConfig::default()` must produce `source: openrouter` and the
+    /// canonical env-var name so the YAML-absent case works end-to-end.
+    /// What: call `LlmConfig::default()` and assert the two key fields.
+    /// Test: pure construction.
+    #[test]
+    fn llm_source_defaults_to_openrouter() {
+        let llm = LlmConfig::default();
+        assert_eq!(llm.source, LlmSource::Openrouter);
+        assert_eq!(llm.api_key_env, "OPENROUTER_API_KEY");
+    }
+
+    /// Why: `anthropic-api` uses a hyphen in the YAML value; a missing serde
+    /// rename would break parsing (serde would look for `anthropic_api`).
+    /// What: parse `source: anthropic-api` and assert the variant.
+    /// Test: pure deserialization.
+    #[test]
+    fn llm_source_anthropic_api_parses() {
+        let yaml = "source: anthropic-api\n";
+        let llm: LlmConfig = serde_yaml::from_str(yaml).expect("parse llm config");
+        assert_eq!(llm.source, LlmSource::AnthropicApi);
     }
 }

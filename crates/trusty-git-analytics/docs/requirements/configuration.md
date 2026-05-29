@@ -8,6 +8,8 @@ The configuration file is YAML, matching the schema used by the Python predecess
 
 ```yaml
 repositories: []          # list[RepositoryConfig], required
+database: ~               # path  — SQLite DB override (added v2.2.2, issue #406)
+llm: {}                   # LlmConfig — top-level LLM section (added v2.2.2, issue #407)
 github: {}                # GitHubConfig
 bitbucket: {}             # BitbucketConfig (Cloud only)
 analysis: {}              # AnalysisConfig
@@ -28,6 +30,98 @@ confluence: {}            # ConfluenceConfig
 ```
 
 ## Sections
+
+### `database` — SQLite database path (added v2.2.2, issue #406)
+
+The path to the SQLite database file. Supports `~` home-directory expansion.
+
+**Precedence** (highest first):
+
+1. `--database` CLI flag — always wins.
+2. `database:` field in this config file.
+3. Hardcoded default `tga.db` in the current working directory.
+
+```yaml
+# Example: use a team-shared path
+database: ~/data/team-analytics.db
+```
+
+This field is at the top level of `config.yaml` and is **not** inside any
+nested section. Adding it here eliminates the need to pass `--database` on
+every `tga` invocation.
+
+---
+
+### `llm` — Top-level LLM configuration (added v2.2.2, issue #407)
+
+The `llm:` section controls how the LLM fallback tier reaches an inference
+provider. It is separate from `classification:` (which controls *when* to call
+the LLM). When `llm:` is present it takes precedence over the legacy
+`classification.llm_provider` / `classification.openrouter_api_key` fields;
+using those legacy fields emits a `tracing::warn!` deprecation message.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `source` | enum | `openrouter` | LLM provider: `openrouter`, `bedrock`, or `anthropic-api` |
+| `api_key_env` | string | `OPENROUTER_API_KEY` | **Name** of the env var holding the API key (never the key itself). Ignored for `bedrock`. |
+| `region` | string | None | AWS region (Bedrock only). When absent, the AWS SDK resolves the region from the environment (`AWS_DEFAULT_REGION`, profile, etc.). |
+| `model` | string | provider-appropriate default | Provider-specific model id (see below). |
+
+#### Source variants
+
+**`openrouter`** (default)
+
+Uses the OpenRouter API (OpenAI-compatible schema). The API key is read from
+the environment variable named by `api_key_env` (default:
+`OPENROUTER_API_KEY`). The variable is never stored in the config. If the
+variable is unset or empty when LLM is enabled, `tga classify` exits
+non-zero with an actionable error before writing any DB rows.
+
+```yaml
+llm:
+  source: openrouter
+  api_key_env: OPENROUTER_API_KEY   # or any custom var name
+  model: gpt-4o-mini
+```
+
+**`bedrock`**
+
+Uses AWS Bedrock with IAM credential-chain auth — no secret is stored in
+the config file. Requires:
+
+- Binary compiled with `--features bedrock` (if not, `tga classify` exits
+  non-zero with "reinstall with --features bedrock").
+- Valid AWS credentials in the default chain: `AWS_ACCESS_KEY_ID` /
+  `AWS_SECRET_ACCESS_KEY` env vars, `~/.aws/credentials` profile, EC2
+  instance metadata, ECS task role, or AWS SSO.
+- `api_key_env` is ignored for this source.
+
+```yaml
+llm:
+  source: bedrock
+  region: us-east-1                  # optional; falls back to AWS SDK defaults
+  model: anthropic.claude-3-5-sonnet-20241022-v2:0
+```
+
+**`anthropic-api`**
+
+Recognized enum value; returns a clear "not yet implemented" error. Reserved
+for a future direct Anthropic Messages API integration.
+
+#### Default models by source
+
+| Source | Default model |
+|--------|---------------|
+| `openrouter` | `gpt-4o-mini` |
+| `bedrock` | `anthropic.claude-3-haiku-20240307-v1:0` |
+
+#### Security note
+
+`api_key_env` stores the **variable name** (e.g. `OPENROUTER_API_KEY`), never
+the key value. The actual secret is read from the environment at runtime. Never
+commit API keys to the config file.
+
+---
 
 ### `repositories[]` — RepositoryConfig
 
