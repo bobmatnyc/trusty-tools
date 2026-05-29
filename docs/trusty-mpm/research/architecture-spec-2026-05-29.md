@@ -147,6 +147,13 @@ don't generate hook traffic).
 5. Append a `HookEventRecord` to the ring buffer and broadcast a JSON copy to all SSE
    subscribers.
 
+> **INTENDED (daemon-enforced circuit breakers).** The current overseer consults the LLM
+> overseer policy for Block/Allow decisions. An intended future extension (FR-PM-2b) is for
+> `HookService::process` to also detect CB#1–#14 violations directly from the hook event
+> payload and return 403 as a **hard block** independent of the LLM overseer. The per-agent
+> `CircuitBreaker` in `core/circuit.rs` is the partial foundation. CURRENT: CB#1–#14 are
+> PM self-discipline enforced only through instructions. INTENDED: daemon-side hard enforcement.
+
 ### 2.5 Event streaming
 
 - `GET /events` / `GET /sessions/{id}/events` — live SSE streams (per-session filtering by
@@ -369,6 +376,7 @@ host-wide coordination from inside its own context.
 ```
 ~/.trusty-mpm/                              # framework root (FrameworkPaths::root)
 ├── daemon.lock                            # bound addr + PID (single-instance discovery)
+├── config.toml                            # CANONICAL config (models.agents.*, [agents] sources, …)
 ├── pairing.json                           # Telegram chat pairing
 ├── logs/                                  # rolling daemon log + overseer audit JSONL
 ├── registry/                              # INTENDED remote-agent cache (unused stub)
@@ -404,13 +412,23 @@ over the bundled framework directories when present (`paths.rs:181-208`).
 
 ## 10. Configuration
 
+**Canonical config file: `~/.trusty-mpm/config.toml`** (TOML, matching Rust/Cargo
+conventions). This is the single source of configuration truth for the Rust harness,
+covering `[agents]`, `[skills]`, `models.agents.*`, and any future `[registry]` sources.
+
+> **Stale artifact.** `PM_INSTRUCTIONS.md` references `~/.trusty-mpm/config.yaml` for
+> per-agent model overrides. That path is a documentation artifact from the Python-era
+> `claude-mpm` harness and has never been read by Rust code. It must be corrected to
+> `config.toml` in a future pass over `PM_INSTRUCTIONS.md`. All design and spec references
+> use `config.toml` as canonical.
+
 | File | Read by | Status |
 |---|---|---|
 | `~/.trusty-mpm/framework/hooks/optimizer.toml` | daemon (`OptimizerConfig`, hot-reloaded by the watcher) | Implemented |
 | `~/.trusty-mpm/framework/hooks/overseer.toml` | daemon (`OverseerConfig`; `[llm]` section gates LLM overseer) | Implemented |
 | `~/.claude-mpm/services.yaml` | `tm services` (`ServicesManifest`; embedded `assets/default-services.yaml` fallback) | Implemented |
-| `~/.trusty-mpm/config.yaml` `models.agents.*` | (intended) per-agent model overrides | **Partial** — referenced in `PM_INSTRUCTIONS.md`, not read by Rust |
-| `config.toml [agents] sources` | (intended) remote registry sources | **Stub** — never read |
+| `~/.trusty-mpm/config.toml` `models.agents.*` | (intended) per-agent model overrides | **Partial** — `config.toml` is canonical; the reference in `PM_INSTRUCTIONS.md` to `config.yaml` is a stale documentation artifact to be corrected; no Rust code currently reads model overrides from either path |
+| `~/.trusty-mpm/config.toml` `[agents] sources` | (intended) remote registry sources | **Stub** — never read |
 
 Environment: `TRUSTY_MPM_URL` (client base URL), `TRUSTY_MPM_ADDR` (daemon bind),
 `TRUSTY_MPM_TAILSCALE`, `OPENROUTER_API_KEY` (LLM overseer/chat), `RUST_LOG`,
@@ -448,10 +466,10 @@ Prioritized; each tagged with status + severity (impact on the product vision).
 | 3 | **Remote agent registry** (`Origin::Registry`, `registry/` path, `config.toml [agents]`, fetch/TTL/offline). | Stub | **Medium** | Forward-compat only. Blocks distributing agents without a source checkout/bundled assets. |
 | 4 | **`tm install` does not deploy skills** (only agents); skills deploy on session start. | Partial / Gap | **Medium** | A user who runs `install` then inspects `~/.claude/skills/` finds it empty until first launch. |
 | 5 | **Frontmatter parser truncates `:`-containing values; two divergent parser copies; no `model:`-injection workaround.** | Partial / Defect | **Medium** | Risks dropping/garbling agent metadata (esp. descriptions). Consolidate on one parser; round-trip test colon values. |
-| 6 | **Model-selection per-agent overrides** (`~/.trusty-mpm/config.yaml models.agents.*`) advertised, not read by Rust. | Partial | **Low–Medium** | Advisory-only today; instruction text implies enforcement. |
+| 6 | **Model-selection per-agent overrides** (`~/.trusty-mpm/config.toml models.agents.*`) intended but not read by Rust. The `PM_INSTRUCTIONS.md` reference to `config.yaml` is a stale artifact — `config.toml` is canonical. | Partial | **Low–Medium** | Advisory-only today; instruction text implies enforcement. Correct `PM_INSTRUCTIONS.md` to reference `config.toml`. |
 | 7 | **`PM_INSTRUCTIONS_VERSION` marker** present but inert (no upgrade gating). | Stub | **Low** | Needed if/when instruction-version migration is built. |
-| 8 | **Memory routing breadth**: kuzu-memory backend + static `.claude-mpm/memories` fallback described but only trusty-memory MCP/hook wiring exists. | Not-started | **Low** | trusty-memory path works; alternates unbuilt. |
-| 9 | **PM-behaviour circuit breakers (CB#1–#14)** are instruction-driven inside the session; the daemon tracks only a per-agent failure breaker. | Partial | **Low** | Matches claude-mpm (breakers are PM self-discipline), but daemon-side enforcement/audit of CB violations is not implemented. |
+| 8 | **kuzu-memory / static `.claude-mpm/memories`**: these were Python-era `claude-mpm` concepts. `trusty-memory` (MCP) is the sole intended memory backend. | **Out of scope** | N/A | Not a gap — explicitly excluded. trusty-memory MCP wiring is fully implemented. |
+| 9 | **PM-behaviour circuit breakers (CB#1–#14)** are currently instruction-driven inside the session; the daemon tracks only a per-agent failure breaker. Daemon-side hook-driven hard enforcement is an **intended future requirement** (FR-PM-2b). | Not-started | **Medium** | The per-agent `CircuitBreaker` in `core/circuit.rs` and the `POST /hooks` enforcement point are the partial foundation. Implementing CB#1–#14 detection + 403 return in `HookService::process` would close this gap. |
 | 10 | **Per-session file tracking** (issue #94) — no daemon endpoint. | Not-started / Planned | **Low** | Would let the daemon observe the PM's git-file-tracking protocol. |
 
 ---
