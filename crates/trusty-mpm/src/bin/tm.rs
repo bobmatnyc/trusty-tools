@@ -1902,26 +1902,26 @@ async fn launch(client: &reqwest::Client, url: &str, dir: Option<String>) -> any
         }
     };
 
-    // Build the `--append-system-prompt` text (read from the file installed
-    // above) and write it to a temp file so `claude` reads it at startup.
-    let (claude_cmd, prompt_path) = match trusty_mpm::core::session_launch::build_system_prompt() {
-        Some(prompt) => {
-            let file = std::env::temp_dir().join(format!(
-                "trusty-mpm-system-prompt-{}.txt",
-                trusty_mpm::core::session::SessionId::new().0
-            ));
-            match std::fs::write(&file, &prompt) {
-                Ok(()) => (
-                    format!("claude --append-system-prompt-file {}", file.display()),
-                    Some(file),
-                ),
-                Err(err) => {
-                    eprintln!("warning: failed to write system prompt file: {err}");
-                    ("claude".to_string(), None)
-                }
+    // Build the `--append-system-prompt` text and write it to a temp file so
+    // `claude` reads it at startup. The prompt is resolved *for this project
+    // directory* so any override files under `<project>/.trusty-mpm/` take
+    // effect (issue #381); `build_system_prompt_for` always yields a prompt.
+    let prompt = trusty_mpm::core::session_launch::build_system_prompt_for(&path);
+    let (claude_cmd, prompt_path) = {
+        let file = std::env::temp_dir().join(format!(
+            "trusty-mpm-system-prompt-{}.txt",
+            trusty_mpm::core::session::SessionId::new().0
+        ));
+        match std::fs::write(&file, &prompt) {
+            Ok(()) => (
+                format!("claude --append-system-prompt-file {}", file.display()),
+                Some(file),
+            ),
+            Err(err) => {
+                eprintln!("warning: failed to write system prompt file: {err}");
+                ("claude".to_string(), None)
             }
         }
-        None => ("claude".to_string(), None),
     };
 
     // 5. Print the summary banner. The "Prompt:" line shows the canonical
@@ -2655,10 +2655,16 @@ fn compose_session_instructions(
     };
     let output = build_instructions(&input)?;
 
+    // Stash the *override-resolved* PM prompt — the exact text the launch path
+    // passes to `claude` — so `tm session instructions` shows what is actually
+    // used, including any project-level overrides under
+    // `<project>/.trusty-mpm/` (issue #381). Resolving via the shared
+    // `resolve_pm_prompt` keeps this stash and the live prompt identical.
+    let resolved_prompt = trusty_mpm::core::instruction_overrides::resolve_pm_prompt(project_dir);
     let stash_dir = project_dir.join(".trusty-mpm");
     std::fs::create_dir_all(&stash_dir)?;
     let stash = stash_dir.join("last-instructions.md");
-    std::fs::write(&stash, &output.merged)?;
+    std::fs::write(&stash, &resolved_prompt)?;
 
     Ok((output, stash))
 }

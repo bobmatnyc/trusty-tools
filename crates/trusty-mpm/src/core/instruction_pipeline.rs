@@ -16,8 +16,14 @@ use std::path::PathBuf;
 
 use crate::core::delegation_authority::{generate_authority, scan_agents};
 
-/// Separator placed between the three merged instruction sections.
-const SECTION_SEPARATOR: &str = "\n\n---\n\n";
+/// Separator placed between merged instruction sections.
+///
+/// Why: the override resolver in [`crate::core::instruction_overrides`] must use
+/// the identical rule so the bundled and override-resolved prompts never
+/// visually diverge.
+/// What: the `\n\n---\n\n` Markdown horizontal rule used between every section.
+/// Test: `separators_are_consistent` in `instruction_overrides`.
+pub(crate) const SECTION_SEPARATOR: &str = "\n\n---\n\n";
 
 // ---------------------------------------------------------------------------
 // Bundled system-prompt assembly
@@ -29,14 +35,28 @@ const SECTION_SEPARATOR: &str = "\n\n---\n\n";
 // ---------------------------------------------------------------------------
 
 /// Token-optimized PM orchestration instructions (bundled at compile time).
-const PM_INSTRUCTIONS: &str = include_str!("../assets/instructions/PM_INSTRUCTIONS.md");
+///
+/// `pub(crate)` so the override resolver in
+/// [`crate::core::instruction_overrides`] can use it as the default when no
+/// `PM_INSTRUCTIONS_DEPLOYED.md` override is present.
+pub(crate) const PM_INSTRUCTIONS: &str = include_str!("../assets/instructions/PM_INSTRUCTIONS.md");
 /// 5-phase workflow execution details (bundled at compile time).
-const WORKFLOW: &str = include_str!("../assets/instructions/WORKFLOW.md");
+///
+/// `pub(crate)` so the override resolver can use it when no `WORKFLOW.md`
+/// override is present.
+pub(crate) const WORKFLOW: &str = include_str!("../assets/instructions/WORKFLOW.md");
 /// Agent delegation routing table (bundled at compile time).
-const AGENT_DELEGATION: &str = include_str!("../assets/instructions/AGENT_DELEGATION.md");
+///
+/// `pub(crate)` so the override resolver can use it when no
+/// `AGENT_DELEGATION.md` override is present.
+pub(crate) const AGENT_DELEGATION: &str =
+    include_str!("../assets/instructions/AGENT_DELEGATION.md");
 /// Non-overridable BASE_PM framework floor — includes the Trusty tool-priority
 /// block — bundled at compile time. Placed last so it cannot be overridden.
-const BASE_PM: &str = include_str!("../assets/instructions/BASE_PM.md");
+///
+/// `pub(crate)` so the override resolver can append it as the non-overridable
+/// floor even under full PM replacement.
+pub(crate) const BASE_PM: &str = include_str!("../assets/instructions/BASE_PM.md");
 
 /// Assemble the full system prompt from bundled source components.
 ///

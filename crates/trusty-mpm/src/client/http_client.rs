@@ -1035,28 +1035,28 @@ impl DaemonClient {
             .await?;
 
         // Build the combined `--append-system-prompt` text (claude-mpm PM
-        // instructions + trusty tool-priority block). When present, write it to
-        // a temp file and pass it via `--append-system-prompt-file` so every
-        // launched `claude` is a properly configured PM instance while
-        // preserving Claude Code's built-in tool use instructions. The temp
-        // file persists because `claude` reads it at startup; it lives in
-        // `/tmp` and is superseded by the next launch — no explicit cleanup is
-        // performed.
-        let claude_cmd = match crate::core::session_launch::build_system_prompt() {
-            Some(prompt) => {
-                let path = std::env::temp_dir().join(format!(
-                    "trusty-mpm-system-prompt-{}.txt",
-                    uuid::Uuid::new_v4()
-                ));
-                match std::fs::write(&path, &prompt) {
-                    Ok(()) => format!("claude --append-system-prompt-file {}", path.display()),
-                    Err(err) => {
-                        tracing::warn!(%err, "failed to write system prompt file; launching bare claude");
-                        "claude".to_string()
-                    }
+        // instructions + trusty tool-priority block), resolved *for this project
+        // directory* so override files under `<workdir>/.trusty-mpm/` take effect
+        // (issue #381). Write it to a temp file and pass it via
+        // `--append-system-prompt-file` so every launched `claude` is a properly
+        // configured PM instance while preserving Claude Code's built-in tool use
+        // instructions. The temp file persists because `claude` reads it at
+        // startup; it lives in `/tmp` and is superseded by the next launch — no
+        // explicit cleanup is performed.
+        let prompt =
+            crate::core::session_launch::build_system_prompt_for(std::path::Path::new(workdir));
+        let claude_cmd = {
+            let path = std::env::temp_dir().join(format!(
+                "trusty-mpm-system-prompt-{}.txt",
+                uuid::Uuid::new_v4()
+            ));
+            match std::fs::write(&path, &prompt) {
+                Ok(()) => format!("claude --append-system-prompt-file {}", path.display()),
+                Err(err) => {
+                    tracing::warn!(%err, "failed to write system prompt file; launching bare claude");
+                    "claude".to_string()
                 }
             }
-            None => "claude".to_string(),
         };
 
         let new_session = std::process::Command::new("tmux")
@@ -1124,24 +1124,25 @@ impl DaemonClient {
             .await?;
 
         // Build the `--append-system-prompt` text so a freshly-started `claude`
-        // is a configured PM. This is prompt composition from bundled assets,
-        // not deployment of agents/skills/hooks into the project — `connect`
-        // only skips the latter (`prepare_session`).
-        let claude_cmd = match crate::core::session_launch::build_system_prompt() {
-            Some(prompt) => {
-                let path = std::env::temp_dir().join(format!(
-                    "trusty-mpm-system-prompt-{}.txt",
-                    uuid::Uuid::new_v4()
-                ));
-                match std::fs::write(&path, &prompt) {
-                    Ok(()) => format!("claude --append-system-prompt-file {}", path.display()),
-                    Err(err) => {
-                        tracing::warn!(%err, "failed to write system prompt file; launching bare claude");
-                        "claude".to_string()
-                    }
+        // is a configured PM, resolved *for this project directory* so override
+        // files under `<workdir>/.trusty-mpm/` take effect (issue #381). This is
+        // prompt composition from bundled assets + project overrides, not
+        // deployment of agents/skills/hooks into the project — `connect` only
+        // skips the latter (`prepare_session`).
+        let prompt =
+            crate::core::session_launch::build_system_prompt_for(std::path::Path::new(workdir));
+        let claude_cmd = {
+            let path = std::env::temp_dir().join(format!(
+                "trusty-mpm-system-prompt-{}.txt",
+                uuid::Uuid::new_v4()
+            ));
+            match std::fs::write(&path, &prompt) {
+                Ok(()) => format!("claude --append-system-prompt-file {}", path.display()),
+                Err(err) => {
+                    tracing::warn!(%err, "failed to write system prompt file; launching bare claude");
+                    "claude".to_string()
                 }
             }
-            None => "claude".to_string(),
         };
 
         // `tmux new-session -A` is idempotent: it attaches to the session when

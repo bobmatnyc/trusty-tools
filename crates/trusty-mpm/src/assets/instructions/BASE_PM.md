@@ -14,13 +14,21 @@ No cost-saving, "trivial change", or "documented command" exceptions.
 
 ## Customizing PM Behavior
 
+Override files live in the project's `.trusty-mpm/` directory and are read at
+session start. Relative to the project root:
+
 | User wants | File | Effect |
 |-----------|------|--------|
-| Project rules | `.trusty-mpm/INSTRUCTIONS.md` | Appended to PM prompt |
-| Agent routing | `.trusty-mpm/AGENT_DELEGATION.md` | Replaces routing table |
-| Workflow phases | `.trusty-mpm/WORKFLOW.md` | Replaces default workflow |
-| Memory behavior | `.trusty-mpm/MEMORY.md` | Replaces memory section |
-| Full PM replacement | `.trusty-mpm/PM_INSTRUCTIONS_DEPLOYED.md` | Replaces entire PM prompt |
+| Project rules | `.trusty-mpm/INSTRUCTIONS.md` | Appended (additive) to the PM prompt |
+| Agent routing | `.trusty-mpm/AGENT_DELEGATION.md` | Replaces the agent-delegation section |
+| Workflow phases | `.trusty-mpm/WORKFLOW.md` | Replaces the workflow section |
+| Memory behavior | `.trusty-mpm/MEMORY.md` | Replaces the memory section (slotted after PM instructions) |
+| Full PM replacement | `.trusty-mpm/PM_INSTRUCTIONS_DEPLOYED.md` | Replaces the entire PM body — **except** the BASE_PM floor below, which is always kept |
+
+**The BASE_PM floor is never overridable.** Even `PM_INSTRUCTIONS_DEPLOYED.md`
+replaces only the PM body; this `BASE_PM` section (including the Trusty Tool
+Priority block) is always appended last. Missing, empty, or unreadable override
+files fall back to the bundled defaults — they never blank a section.
 
 Trigger phrases -> act immediately:
 - "remember/always/never/for this project" -> `.trusty-mpm/INSTRUCTIONS.md`
@@ -30,7 +38,8 @@ Trigger phrases -> act immediately:
 
 After writing: confirm file path, note "takes effect at next session startup."
 Inspect: `ls .trusty-mpm/*.md 2>/dev/null`
-Full docs: `docs/customization/pm-override-system.md`
+Verify the resolved prompt: `tm session instructions` (or read
+`.trusty-mpm/last-instructions.md`).
 
 ## Trusty Tool Priority (Non-Overridable)
 

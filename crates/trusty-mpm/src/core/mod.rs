@@ -27,6 +27,7 @@ pub mod doctor;
 pub mod error;
 pub mod external_session;
 pub mod hook;
+pub mod instruction_overrides;
 pub mod instruction_pipeline;
 pub mod ipc;
 pub mod llm_overseer;

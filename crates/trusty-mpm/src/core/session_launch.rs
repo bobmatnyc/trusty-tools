@@ -88,9 +88,12 @@ pub enum PrepError {
 /// call this before sending `claude` into the tmux pane.
 /// What: deploys composed agents from the framework agent source to
 /// `~/.claude/agents/`, runs [`build_instructions`] for `project_dir` (which
-/// loads or creates the project `CLAUDE.md`), writes the merged text to
-/// `<project_dir>/.trusty-mpm/last-instructions.md`, and returns a [`PrepReport`].
-/// Test: `prepare_session_writes_claude_md_and_stash`, `prepare_session_is_idempotent`.
+/// loads or creates the project `CLAUDE.md`), writes the *override-resolved* PM
+/// prompt (from [`crate::core::instruction_overrides::resolve_pm_prompt`]) to
+/// `<project_dir>/.trusty-mpm/last-instructions.md` so the inspectable stash
+/// matches the live launch prompt, and returns a [`PrepReport`].
+/// Test: `prepare_session_writes_claude_md_and_stash`, `prepare_session_is_idempotent`,
+/// `prepare_session_stash_reflects_override`.
 pub fn prepare_session(fw: &FrameworkPaths, project_dir: &Path) -> Result<PrepReport, PrepError> {
     // Deploy composed agents — Claude Code reads `~/.claude/agents/` at startup.
     let deploy = deploy_agents(&fw.agent_source_dir(), &fw.claude_agents_dir())
@@ -111,14 +114,20 @@ pub fn prepare_session(fw: &FrameworkPaths, project_dir: &Path) -> Result<PrepRe
     };
     let instructions = build_instructions(&input)?;
 
-    // Stash the merged instructions where an operator can inspect them.
+    // Stash the *override-resolved* PM prompt — the exact text the launch path
+    // passes to `claude --append-system-prompt-file` — so `tm session
+    // instructions` shows what was actually used, including any project-level
+    // overrides under `<project>/.trusty-mpm/`. Resolving via the single
+    // `resolve_pm_prompt` function keeps the stash and the live prompt from
+    // diverging (issue #381 / the #382 concern).
+    let resolved_prompt = crate::core::instruction_overrides::resolve_pm_prompt(project_dir);
     let stash_dir = project_dir.join(".trusty-mpm");
     std::fs::create_dir_all(&stash_dir).map_err(|source| PrepError::Io {
         path: stash_dir.clone(),
         source,
     })?;
     let stash = stash_dir.join("last-instructions.md");
-    std::fs::write(&stash, &instructions.merged).map_err(|source| PrepError::Io {
+    std::fs::write(&stash, &resolved_prompt).map_err(|source| PrepError::Io {
         path: stash.clone(),
         source,
     })?;
@@ -538,12 +547,14 @@ fn group_is_trusty_memory(group: &serde_json::Value) -> bool {
         })
 }
 
-/// Build the `--append-system-prompt` text for a launched session.
+/// Build the project-agnostic `--append-system-prompt` text (no overrides).
 ///
 /// Why: every `claude` session launched by trusty-mpm must be a configured PM
 /// instance. trusty-mpm owns its PM instructions: they are assembled from
 /// bundled assets into `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md`
-/// and passed to `claude --append-system-prompt-file`.
+/// and passed to `claude --append-system-prompt-file`. This variant is kept for
+/// callers that do not know the project directory (e.g. tests); prefer
+/// [`build_system_prompt_for`] at launch sites so project-level overrides apply.
 /// What: reads `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md`; if it is
 /// missing or empty (first run) it calls
 /// [`crate::core::instruction_pipeline::install_system_prompt`] to generate it from
@@ -578,6 +589,26 @@ pub fn build_system_prompt() -> Option<String> {
     }
 }
 
+/// Build the `--append-system-prompt` text for `project_dir`, applying any
+/// project-level instruction overrides.
+///
+/// Why: `BASE_PM.md` advertises project-level overrides under
+/// `<project>/.trusty-mpm/` (issue #381). The *live* prompt delivered to
+/// `claude` must reflect them, and it must be resolved with the same
+/// [`crate::core::instruction_overrides::resolve_pm_prompt`] function the
+/// inspectable stash uses so the two never diverge (the #382 concern). This is
+/// the launch-site entry point; it always returns a usable prompt — there is no
+/// home-directory dependency because the prompt is composed from compiled-in
+/// bundled assets plus the project's own override files.
+/// What: delegates to
+/// [`crate::core::instruction_overrides::resolve_pm_prompt`], which layers the
+/// override files onto the bundled PM prompt and always appends the
+/// non-overridable `BASE_PM` floor last.
+/// Test: `build_system_prompt_for_applies_project_override`.
+pub fn build_system_prompt_for(project_dir: &Path) -> String {
+    crate::core::instruction_overrides::resolve_pm_prompt(project_dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,6 +626,77 @@ mod tests {
         assert!(prompt.contains("mcp__trusty-search__search_code"));
         // The bundled PM instructions are also part of the assembled prompt.
         assert!(prompt.contains("# PM Agent -- Claude MPM"));
+    }
+
+    #[test]
+    fn build_system_prompt_for_applies_project_override() {
+        // Why: the live launch prompt must reflect a project-level override file
+        // under `<project>/.trusty-mpm/` (issue #381), while still appending the
+        // non-overridable BASE_PM floor.
+        let tmp = tempdir().unwrap();
+        let project = tmp.path();
+        let override_dir = project.join(".trusty-mpm");
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::write(
+            override_dir.join("INSTRUCTIONS.md"),
+            "PROJECT_OVERRIDE_MARKER\n",
+        )
+        .unwrap();
+
+        let prompt = build_system_prompt_for(project);
+        assert!(prompt.contains("PROJECT_OVERRIDE_MARKER"));
+        assert!(prompt.contains("# BASE_PM Framework Floor"));
+        // Bundled PM body is still present (INSTRUCTIONS.md is additive).
+        assert!(prompt.contains("# PM Agent -- Claude MPM"));
+    }
+
+    #[test]
+    fn build_system_prompt_for_no_override_matches_bundled_sections() {
+        // Why: with no override files the live prompt must still carry all
+        // bundled sections and the BASE_PM floor last.
+        let tmp = tempdir().unwrap();
+        let prompt = build_system_prompt_for(tmp.path());
+        assert!(prompt.contains("# PM Agent -- Claude MPM"));
+        assert!(prompt.contains("# Agent Delegation Routing"));
+        let base = prompt.find("# BASE_PM Framework Floor").expect("base");
+        let deleg = prompt.find("# Agent Delegation Routing").expect("deleg");
+        assert!(base > deleg, "BASE_PM floor must be last");
+    }
+
+    #[test]
+    fn prepare_session_stash_reflects_override() {
+        // Why: the inspectable stash (`last-instructions.md`) must reflect the
+        // SAME override-resolved prompt the launch path uses, so `tm session
+        // instructions` shows what was actually delivered (issue #381 / #382).
+        let tmp = tempdir().unwrap();
+        let project = tmp.path();
+        let fw = FrameworkPaths::default();
+
+        let override_dir = project.join(".trusty-mpm");
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::write(
+            override_dir.join("WORKFLOW.md"),
+            "# Custom Workflow\n\nSTASH_OVERRIDE_MARKER\n",
+        )
+        .unwrap();
+
+        let report = prepare_session(&fw, project).expect("prep succeeds");
+        let stash = std::fs::read_to_string(&report.stash).expect("stash readable");
+
+        assert!(
+            stash.contains("STASH_OVERRIDE_MARKER"),
+            "stash must reflect the WORKFLOW.md override"
+        );
+        assert!(
+            !stash.contains("# PM Workflow Configuration"),
+            "bundled workflow heading must be replaced in the stash"
+        );
+        assert!(
+            stash.contains("# BASE_PM Framework Floor"),
+            "stash must still carry the BASE_PM floor"
+        );
+        // The stash must equal the live prompt for this project.
+        assert_eq!(stash, build_system_prompt_for(project));
     }
 
     #[test]
