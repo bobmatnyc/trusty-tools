@@ -231,15 +231,23 @@ impl ClassificationPipeline {
         // Determine whether the LLM tier is requested and which source.
         //
         // Precedence (highest first):
-        // 1. Top-level `llm:` section (new, preferred).
-        // 2. Legacy `classification.llm_provider` / `classification.openrouter_api_key`
-        //    — accepted with a deprecation tracing::warn! pointing to `llm:`.
-        let use_llm = self
-            .config
-            .classification
-            .as_ref()
-            .map(|c| c.use_llm)
-            .unwrap_or(false);
+        // 1. Top-level `llm:` section (new, preferred): presence of the section
+        //    SELF-ENABLES the LLM tier — no `classification.use_llm: true` required.
+        //    The intent is: if you wrote `llm:` in config, you mean to use the LLM.
+        // 2. Legacy `classification.use_llm: true` — still honored when no `llm:`
+        //    section is present.
+        //
+        // Note: an explicit `use_llm: false` in `classification:` does NOT suppress
+        // the `llm:` section; the `llm:` section is always self-enabling. Users who
+        // need to temporarily disable the LLM tier while keeping the `llm:` config
+        // should remove or comment out the `llm:` block.
+        let use_llm = self.config.llm.is_some()
+            || self
+                .config
+                .classification
+                .as_ref()
+                .map(|c| c.use_llm)
+                .unwrap_or(false);
 
         let engine_cfg = match self.config.classification.as_ref() {
             Some(c) => ClassificationEngineConfig {
@@ -343,17 +351,24 @@ impl ClassificationPipeline {
                 })?
             };
 
-            // Fail-loudly guard: when LLM is explicitly enabled but no
-            // credential resolves, error before writing any DB rows.
+            // Fail-loudly guard: when LLM is enabled but no credential resolves,
+            // error before writing any DB rows. The error names the specific env
+            // var (when an `llm:` section is present) so the user knows exactly
+            // what to export. No DB writes occur.
             if !llm_classifier.has_api_key() {
-                return Err(crate::classify::errors::ClassifyError::Config(
-                    "LLM tier is enabled (use_llm: true) but no API key or credentials \
-                     could be resolved. Ensure the environment variable named by \
-                     llm.api_key_env is set and non-empty (for openrouter/anthropic-api), \
-                     or that valid AWS credentials are present in the credential chain \
-                     (for bedrock). No database writes will occur."
-                        .to_string(),
-                ));
+                let var_hint = self
+                    .config
+                    .llm
+                    .as_ref()
+                    .map(|l| format!(" ('{}')", l.api_key_env))
+                    .unwrap_or_default();
+                return Err(crate::classify::errors::ClassifyError::Config(format!(
+                    "LLM tier is enabled but no API key or credentials could be resolved. \
+                     Ensure the environment variable{var_hint} named by llm.api_key_env \
+                     is set and non-empty (for openrouter/anthropic-api), or that valid \
+                     AWS credentials are present in the credential chain (for bedrock). \
+                     No database writes will occur."
+                )));
             }
 
             engine.attach_llm(llm_classifier);

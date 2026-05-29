@@ -55,10 +55,11 @@ every `tga` invocation.
 ### `llm` — Top-level LLM configuration (added v2.2.2, issue #407)
 
 The `llm:` section controls how the LLM fallback tier reaches an inference
-provider. It is separate from `classification:` (which controls *when* to call
-the LLM). When `llm:` is present it takes precedence over the legacy
-`classification.llm_provider` / `classification.openrouter_api_key` fields;
-using those legacy fields emits a `tracing::warn!` deprecation message.
+provider. **When `llm:` is present, the LLM tier is automatically enabled** —
+no `classification.use_llm: true` is required (added v2.3.0). It takes
+precedence over the legacy `classification.llm_provider` /
+`classification.openrouter_api_key` fields; using those legacy fields without
+an `llm:` section emits a `tracing::warn!` deprecation message.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -105,8 +106,41 @@ llm:
 
 **`anthropic-api`**
 
-Recognized enum value; returns a clear "not yet implemented" error. Reserved
-for a future direct Anthropic Messages API integration.
+Calls the Anthropic Messages API directly (`POST https://api.anthropic.com/v1/messages`).
+No OpenRouter account or AWS credentials required — only a direct Anthropic API key.
+
+- The API key is read from the environment variable named by `api_key_env`. If the
+  variable is unset or empty, `tga classify` exits non-zero with an actionable error
+  naming the missing variable before writing any DB rows.
+- The request sends `x-api-key: <key>` and `anthropic-version: 2023-06-01` headers.
+- The same `SYSTEM_PROMPT` and `LlmVerdict` JSON shape is used as the other providers
+  (`category`, `subcategory`, `confidence`, `complexity`).
+- When `model` is absent (or the caller supplies the OpenRouter default `gpt-4o-mini`),
+  the default model is `claude-3-5-haiku-latest` — a cost-efficient model well-suited
+  to short classification tasks.
+
+```yaml
+llm:
+  source: anthropic-api
+  api_key_env: ANTHROPIC_ANALYTICS_API_KEY   # export ANTHROPIC_ANALYTICS_API_KEY=sk-ant-...
+  model: claude-3-5-haiku-latest             # optional; defaults to claude-3-5-haiku-latest
+```
+
+This source is available in the default `cargo install tga` build — no feature flags required.
+
+#### Self-enabling behavior (added v2.3.0)
+
+When a valid `llm:` section is present in the config, the LLM classification tier
+is **automatically enabled** — no `classification.use_llm: true` is required. The
+intent is: if you wrote `llm:`, you mean to use it.
+
+Precedence:
+1. `llm:` section present → LLM tier enabled automatically.
+2. `classification.use_llm: true` (legacy) → LLM tier enabled (when no `llm:` section).
+3. Neither → LLM tier disabled.
+
+To temporarily disable the LLM tier while keeping the `llm:` config for reference,
+comment out the `llm:` block.
 
 #### Default models by source
 
@@ -114,6 +148,7 @@ for a future direct Anthropic Messages API integration.
 |--------|---------------|
 | `openrouter` | `gpt-4o-mini` |
 | `bedrock` | `anthropic.claude-3-haiku-20240307-v1:0` |
+| `anthropic-api` | `claude-3-5-haiku-latest` |
 
 #### Security note
 
