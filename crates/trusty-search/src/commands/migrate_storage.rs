@@ -308,6 +308,7 @@ fn print_migrate_line(idx: usize, total: usize, r: &MigrateStorageResult, dry_ru
 mod tests {
     use super::*;
     use crate::service::persistence::{data_dir, save_index_registry, PersistedIndex};
+    use serial_test::serial;
     use tempfile::tempdir;
 
     /// Why: the migration must physically move files from the legacy dir to the
@@ -315,7 +316,14 @@ mod tests {
     /// What: create a fake legacy index dir with sentinel files, run the
     /// migration, assert files have moved and the colocated dir exists.
     /// Test: `migrate_storage_moves_files_and_updates_registry` (this test).
+    ///
+    /// `#[serial]` is required because the test mutates the `TRUSTY_DATA_DIR`
+    /// process-level environment variable, which is shared across all threads
+    /// in the test binary. Running these tests concurrently causes races where
+    /// one test's `set_var` clobbers another test's directory, producing
+    /// spurious "rename indexes.toml / No such file or directory" panics.
     #[test]
+    #[serial]
     fn migrate_storage_moves_files_and_updates_registry() {
         // Create an isolated data dir so we don't touch the real one.
         let data_dir_tmp = tempdir().unwrap();
@@ -406,7 +414,10 @@ mod tests {
     /// What: register a legacy index with a non-existent root; run the
     /// full CLI handler; assert the result is `RootMissing`.
     /// Test: `migrate_storage_skips_missing_root`.
+    ///
+    /// `#[serial]` — see `migrate_storage_moves_files_and_updates_registry`.
     #[test]
+    #[serial]
     fn migrate_storage_skips_missing_root() {
         let data_dir_tmp = tempdir().unwrap();
         unsafe {
@@ -440,7 +451,10 @@ mod tests {
 
     /// Why: running the command on an already-colocated index must be a
     /// no-op — the `AlreadyColocated` status must be returned.
+    ///
+    /// `#[serial]` — see `migrate_storage_moves_files_and_updates_registry`.
     #[test]
+    #[serial]
     fn migrate_storage_idempotent_for_colocated() {
         let data_dir_tmp = tempdir().unwrap();
         unsafe {

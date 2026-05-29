@@ -19,6 +19,7 @@
 
 pub mod m001;
 pub mod m002;
+pub mod m003;
 
 use std::sync::Arc;
 
@@ -30,6 +31,7 @@ use crate::core::registry::IndexHandle;
 
 pub use m001::M001PerPubConstRust;
 pub use m002::M002AbsoluteToRelativePaths;
+pub use m003::M003HnswKeyRelativization;
 
 // ── Schema version ────────────────────────────────────────────────────────────
 
@@ -42,8 +44,9 @@ pub use m002::M002AbsoluteToRelativePaths;
 /// are unreachable; such a registry would be a programming error.
 /// Test: `test_current_schema_version_matches_registry` asserts that
 /// `CURRENT_SCHEMA_VERSION == registry.current_version()`.
-/// Issue #402: bump to 2 for M002 (absolute → relative file paths).
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+/// Issue #402: bump to 2 for M002 (absolute → relative file paths in redb).
+/// Issue #402 phase 2: bump to 3 for M003 (absolute → relative HNSW key IDs).
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 // ── redb table for _meta ──────────────────────────────────────────────────────
 
@@ -176,8 +179,12 @@ impl MigrationRegistry {
     pub fn new() -> Self {
         let mut migrations: Vec<Arc<dyn Migration>> = vec![
             Arc::new(M001PerPubConstRust),
-            // Issue #402: rewrite absolute chunk file paths to root-relative.
+            // Issue #402: rewrite absolute chunk file paths to root-relative (redb).
             Arc::new(M002AbsoluteToRelativePaths),
+            // Issue #402 phase 2: rewrite absolute HNSW key IDs to root-relative.
+            // Also repairs indexes stuck at schema_version=2 whose hnsw.keys.json
+            // was left with absolute IDs by a prior binary that ran M002 but not M003.
+            Arc::new(M003HnswKeyRelativization),
         ];
         // Defensive sort: ensures chain_from returns migrations in ascending
         // version order even if a future contributor adds them out of order.

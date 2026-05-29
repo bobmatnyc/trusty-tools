@@ -882,7 +882,7 @@ async fn run() -> Result<()> {
             offset: _,
             budget: _,
         } => {
-            commands::search::handle_search(&cli.index, query, top_k, full).await?;
+            commands::search::handle_search(&cli.index, cli.json, query, top_k, full).await?;
         }
 
         Commands::Watch { path } => {

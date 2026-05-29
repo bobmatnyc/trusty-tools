@@ -139,6 +139,27 @@ pub trait VectorStore: Send + Sync {
     async fn save_to(&self, _path: &Path) -> Result<()> {
         Ok(())
     }
+
+    /// Rewrite the in-memory chunk-ID → u64 key mapping from absolute to
+    /// root-relative paths, returning the number of keys rewritten.
+    ///
+    /// Why (M003 — issue #402 phase 2): M002 rewrites the redb corpus to
+    /// relative paths but leaves `hnsw.keys.json` untouched. At query time
+    /// vector search returns absolute HNSW chunk IDs, which are no longer
+    /// present in redb (now relative), producing 0 vector results on every
+    /// migrated legacy index. This method rewrites the in-memory `id_to_key`
+    /// and `key_to_id` maps so subsequent searches emit relative IDs that
+    /// match the redb corpus. Callers are responsible for persisting the
+    /// updated sidecar via `save_to`. Default = no-op (mock / BM25-only stores).
+    /// What: for each absolute ID that shares `root_path` as a prefix, strips
+    /// the prefix to produce a relative ID, swaps the maps, and returns the
+    /// count of rewritten entries. Already-relative IDs are left unchanged
+    /// (idempotency). IDs that are absolute but outside `root_path` are left
+    /// unchanged and logged at warn.
+    /// Test: `test_rewrite_keys_to_relative` in `store::tests`.
+    async fn rewrite_keys_to_relative(&self, _root_path: &Path) -> Result<usize> {
+        Ok(0)
+    }
 }
 
 /// `UsearchStore`: usearch HNSW index wrapped in `Arc<RwLock<>>` for concurrent reads.
@@ -629,6 +650,78 @@ impl VectorStore for UsearchStore {
 
     async fn save_to(&self, path: &Path) -> Result<()> {
         self.save(path).await
+    }
+
+    /// Rewrite in-memory `id_to_key` / `key_to_id` maps from absolute to
+    /// root-relative chunk IDs. Returns the count of entries rewritten.
+    ///
+    /// Why: M003 needs to fix the HNSW key maps after M002 relativized redb.
+    /// See [`VectorStore::rewrite_keys_to_relative`] for the full rationale.
+    /// What: under a single write-lock pair on `id_to_key` and `key_to_id`,
+    /// iterates every entry whose string key is absolute and shares `root_path`
+    /// as a prefix, strips the prefix (mirrors M002's `strip_prefix` logic),
+    /// replaces the entry in both maps. Idempotent: already-relative IDs are
+    /// skipped. Outside-root absolute IDs are left unchanged and logged at warn.
+    /// Test: `tests::test_rewrite_keys_to_relative`.
+    async fn rewrite_keys_to_relative(&self, root_path: &Path) -> Result<usize> {
+        let mut id_map = self.id_to_key.write().await;
+        let mut key_map = self.key_to_id.write().await;
+
+        // Collect rewrites first to avoid mutating the map while iterating.
+        // Each entry: (old_absolute_id, new_relative_id, u64_key).
+        let mut rewrites: Vec<(String, String, u64)> = Vec::new();
+        // Compute root prefix string once, outside the loop.
+        let root_prefix = root_path.to_string_lossy();
+
+        for (id, &key) in id_map.iter() {
+            if !std::path::Path::new(id).is_absolute() {
+                // Already relative — idempotency: leave unchanged.
+                continue;
+            }
+            // Try to strip root_path from the absolute chunk ID. Chunk IDs
+            // have the format "{file_path}:{start}:{end}". On POSIX, ':'
+            // is a valid path character so `Path::strip_prefix` treats the
+            // entire ID string as a single path and strips the prefix
+            // correctly. We then do a raw string prefix-swap (instead of
+            // trusting the Path result's `to_string_lossy`) to preserve the
+            // exact ":{start}:{end}" suffix bytes without re-encoding.
+            match std::path::Path::new(id.as_str()).strip_prefix(root_path) {
+                Ok(_) => {
+                    // ID is under root_path. Compute the relative ID by
+                    // stripping the root prefix as a raw string and trimming
+                    // the leading separator.
+                    let new_id = id
+                        .strip_prefix(root_prefix.as_ref())
+                        .map(|s| s.trim_start_matches('/').to_string())
+                        .unwrap_or_else(|| id.clone());
+                    rewrites.push((id.clone(), new_id, key));
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        id = %id,
+                        root = %root_path.display(),
+                        "M003: HNSW key is absolute but not under root_path; skipping"
+                    );
+                }
+            }
+        }
+
+        let count = rewrites.len();
+        for (old_id, new_id, key) in rewrites {
+            id_map.remove(&old_id);
+            id_map.insert(new_id.clone(), key);
+            key_map.insert(key, new_id);
+        }
+
+        // The in-memory maps now differ from the on-disk sidecar: clear the
+        // view flag so `save()` does not treat the snapshot as clean and skip
+        // the flush. We use `Release` ordering to pair with the `Acquire` load
+        // in `save()` — the updated map state must be visible before save reads it.
+        if count > 0 {
+            self.is_view.store(false, Ordering::Release);
+        }
+
+        Ok(count)
     }
 
     /// Bulk-upsert override that minimises the time the HNSW write lock is held.

@@ -172,9 +172,26 @@ impl Migration for M002AbsoluteToRelativePaths {
             .context("M002: delete task panicked")?
             .context("M002: failed to delete old absolute-keyed chunk rows")?;
 
+        // ── Step 6: sync the live BM25 + in-memory chunks map ─────────────
+        // The in-memory BM25 index was populated at warm-boot from the OLD
+        // absolute-path chunk IDs. Now that redb holds relative-path IDs, any
+        // search that calls `fetch_chunks_for_ids` with an absolute ID will find
+        // nothing. Refresh both live structures from the updated corpus so
+        // searches use the correct (relative) IDs immediately.
+        {
+            let indexer = index.indexer.read().await;
+            if let Err(e) = indexer.refresh_live_indices_from_corpus().await {
+                tracing::warn!(
+                    index_id = %index.id,
+                    "M002: live-index refresh failed ({e}) — \
+                     BM25 may be stale until next daemon restart"
+                );
+            }
+        }
+
         tracing::info!(
             index_id = %index.id,
-            "M002: path rewrite complete"
+            "M002: path rewrite complete (redb + live BM25 + chunks map synced)"
         );
 
         Ok(())

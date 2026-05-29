@@ -261,6 +261,84 @@ impl CodeIndexer {
         }
     }
 
+    /// Rebuild the in-memory BM25 index and `chunks` HashMap from scratch using
+    /// the durable redb corpus as the authoritative source.
+    ///
+    /// Why (issue #402 / M002): after M002 rewrites chunk IDs and file paths in
+    /// redb from absolute to root-relative, the live BM25 index and in-memory
+    /// `chunks` map still hold the stale absolute-path keys. Any search that
+    /// runs after M002 completes calls `fetch_chunks_for_ids` with the old
+    /// absolute IDs, which are no longer present in redb — producing 0 results.
+    /// Calling this method immediately after M002's redb write resolves the
+    /// mismatch by atomically replacing both structures with the relative-path
+    /// corpus.
+    ///
+    /// What: clears BM25 and the in-memory `chunks` map under their write locks,
+    /// then replays every row from the durable corpus (same four-phase sequence
+    /// as `load_chunks_from_redb`). On an empty or absent corpus the method is a
+    /// safe no-op.
+    ///
+    /// Test: covered by `test_m002_refresh_live_indices_after_path_rewrite` in
+    /// `indexer::tests`.
+    pub async fn refresh_live_indices_from_corpus(&self) -> Result<usize> {
+        let Some(corpus) = self.corpus.clone() else {
+            return Ok(0);
+        };
+        // Load the updated corpus on a blocking worker.
+        let (chunks, entities) = tokio::task::spawn_blocking(move || -> Result<RestoredCorpus> {
+            let chunks = corpus.load_all_chunks()?;
+            let entities = corpus.load_all_entities()?;
+            Ok((chunks, entities))
+        })
+        .await
+        .context("refresh_live_indices: load task panicked")??;
+
+        let total = chunks.len();
+        if total == 0 {
+            return Ok(0);
+        }
+
+        // Phase 1: atomically replace BM25. Clear first so stale absolute-path
+        // postings cannot linger alongside the new relative-path ones.
+        {
+            let mut bm25 = self.bm25.write().await;
+            *bm25 = crate::core::bm25::Bm25Index::new();
+            for chunk in &chunks {
+                let text = Self::bm25_doc_text(chunk);
+                bm25.upsert_document(&chunk.id, &text);
+            }
+        }
+        // Phase 2: atomically replace the in-memory chunks map. Draining and
+        // re-inserting under a single write lock keeps concurrent readers from
+        // observing a half-replaced map.
+        {
+            let mut corpus_map = self.chunks.write().await;
+            corpus_map.clear();
+            for chunk in chunks {
+                corpus_map.insert(chunk.id.clone(), chunk);
+            }
+        }
+        // Phase 3: replace entities.
+        {
+            let mut emap = self.entities.write().await;
+            emap.clear();
+            for (file, ents) in entities {
+                emap.insert(file, ents);
+            }
+        }
+        // Phase 4: the chunk map was just repopulated (not evicted), so clear
+        // the eviction flag so ensure_chunks_loaded doesn't overwrite our work
+        // with a stale redb read on the next query.
+        self.chunks_evicted
+            .store(false, std::sync::atomic::Ordering::Release);
+        tracing::info!(
+            "index '{}': refreshed live BM25 + chunks from corpus ({total} chunks, \
+             post-M002 relative-path sync)",
+            self.index_id
+        );
+        Ok(total)
+    }
+
     /// One-time migration: copy a legacy `chunks.json` snapshot into the redb
     /// corpus store (issue #28).
     ///
@@ -355,6 +433,40 @@ impl CodeIndexer {
         };
         store.save_to(path).await?;
         Ok(true)
+    }
+
+    /// Rewrite the HNSW key map from absolute to root-relative chunk IDs, and
+    /// flush the updated sidecar to disk atomically.
+    ///
+    /// Why (M003 — issue #402 phase 2): M002 rewrites redb chunk IDs to
+    /// relative paths but leaves the HNSW `hnsw.keys.json` sidecar with
+    /// absolute keys. At query time vector search returns absolute chunk IDs
+    /// that `fetch_chunks_for_ids` looks up in redb — which is now relative —
+    /// producing 0 vector results. This method fixes both the in-memory maps
+    /// and the on-disk sidecar atomically so subsequent restarts stay correct.
+    /// What: calls `VectorStore::rewrite_keys_to_relative` to update the
+    /// in-memory maps, then calls `save_to(hnsw_path)` to flush the updated
+    /// sidecar alongside the (unchanged) `.usearch` binary. Returns the number
+    /// of entries rewritten; returns 0 when no store is wired (BM25-only) or
+    /// when all keys are already relative (idempotent no-op).
+    /// Test: `tests::test_rewrite_vector_store_keys_no_store_is_noop` and the
+    /// M003 migration tests in `core::migration::m003::tests`.
+    pub async fn rewrite_vector_store_keys(
+        &self,
+        hnsw_path: &std::path::Path,
+        root_path: &std::path::Path,
+    ) -> Result<usize> {
+        let Some(store) = &self.store else {
+            return Ok(0);
+        };
+        let count = store.rewrite_keys_to_relative(root_path).await?;
+        if count > 0 {
+            // Flush the updated sidecar. The `.usearch` binary is unchanged
+            // (vectors are keyed by u64 labels that don't encode file paths);
+            // only the JSON sidecar maps string IDs to those labels.
+            store.save_to(hnsw_path).await?;
+        }
+        Ok(count)
     }
 
     /// Install a pre-loaded `VectorStore` (typically a restored `UsearchStore`)
