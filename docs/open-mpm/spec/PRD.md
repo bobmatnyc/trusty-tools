@@ -113,10 +113,10 @@ an inline status tag. Source paths are cited where known.
 - *Current:* Implemented; a `PmHandle` map holds one tokio task per connected project.
 - *Gap:* None material; cancel semantics are weak (see FR-1.5).
 
-**FR-1.3 — Singleton controller via UNIX socket** 🟡
-- *Vision:* A second CLI invocation detects the running CTRL over its UNIX socket and routes the command to it instead of spawning a duplicate (`src/ctrl/socket.rs`, `socket_listener.rs`).
-- *Current:* Socket protocol exists; CLI probes `~/.open-mpm/sockets/<project>.ctrl.sock` (50 ms timeout) and can run as a client.
-- *Gap:* **No singleton enforcement** — two near-simultaneous invocations can race on the socket rather than the second reliably auto-routing.
+**FR-1.3 — Daemon process model: one daemon per agent identity, one PM per project** ✅ (socket enforcement) · 🔵 (full model) — *see [ADR-0003](../decisions/0003-daemon-process-model.md)*
+- *Vision:* open-mpm runs as a **daemon**. Each **user-facing agent identity** — e.g. CTRL (the multi-project dispatcher), Izzie, and CTO Assistant — runs as its **own** daemon process; multiple such daemons legitimately coexist (this is *not* one global singleton). Within a daemon, each project's PM is a singleton process. The singleton guarantee is scoped **per `(agent-identity, project)`**, not globally. A second CLI invocation for the same `(identity, project)` detects the running PM over its UNIX socket and routes to it instead of spawning a duplicate (`src/ctrl/socket.rs`, `socket_listener.rs`).
+- *Current:* Socket-level singleton **enforcement is implemented** (PR #411): probe-then-bind with anti-clobber socket handling, so two near-simultaneous invocations no longer race — the CLI probes `~/.open-mpm/sockets/<project>.ctrl.sock` (50 ms timeout) and the second reliably routes as a client. ✅
+- *Gap:* The full daemon/identity model is **designed-not-built** 🔵 — true daemonization (detach/supervise/attach), a per-identity process registry keyed on `(agent-identity, project)` (extending `~/.open-mpm/processes.json`), and per-user-facing-agent process separation are not yet implemented. Today's enforcement keys on `(project)` socket path only. See [ADR-0003](../decisions/0003-daemon-process-model.md).
 
 **FR-1.4 — Credential-correct PM turns** 🟡
 - *Vision:* Every PM/CTRL turn routes through `pick_credentials()` so the configured provider priority is honored.
@@ -127,6 +127,11 @@ an inline status tag. Source paths are cited where known.
 - *Vision:* A user can cancel an in-flight PM/agent task from any surface.
 - *Current:* `SessionCancelled` event exists in the bus.
 - *Gap:* Cancel is **unimplemented at the user level** — no surface reliably interrupts a running task.
+
+**FR-1.6 — Bounded coding-agent fan-out** 🔵 — *see [ADR-0003](../decisions/0003-daemon-process-model.md)*
+- *Vision:* A PM may spawn coding-agent subprocesses up to a concurrency cap (default **20**, configurable); requests beyond the cap **queue / apply backpressure** rather than spawning unbounded processes. Bounding fan-out caps memory, file-descriptor, and CPU pressure and gives the `~/.open-mpm/processes.json` tracker a predictable ceiling.
+- *Current:* No cap — a PM dispatches coding-agent subprocesses without a concurrency bound.
+- *Gap:* **Designed-not-built** — enforcing the cap requires a semaphore/queue in the dispatch path plus surfacing backpressure to the caller. See [ADR-0003](../decisions/0003-daemon-process-model.md).
 
 ### 4.2 Sub-Agent Subprocess Model (`src/subprocess/`, `src/ipc/`)
 
@@ -324,9 +329,7 @@ multi-provider, model-agnostic dispatch** and **OS-level sub-agent isolation**.
 
 ### Open questions
 
-- **Singleton vs. multi-controller:** should a second invocation always route to
-  the running CTRL (FR-1.3), or should explicit multi-controller setups be
-  supported? Current behavior races.
+- **Singleton vs. multi-controller:** ✅ **Resolved → see [ADR-0003](../decisions/0003-daemon-process-model.md).** open-mpm runs as a daemon, one daemon per user-facing agent identity (CTRL / Izzie / CTO Assistant), one PM per project; the singleton is scoped per `(agent-identity, project)`, so multiple controllers legitimately coexist. The socket-level enforcement that ends the race is implemented (PR #411, FR-1.3); the full daemon/identity/cap model is designed-not-built (FR-1.3, FR-1.6).
 - **Approval modes:** adopt Codex CLI-style tiered approval (suggest / auto-edit
   / full-auto)? Currently absent. ⚪
 - **Checkpoint/rollback:** adopt Cline-style shadow-Git checkpoints for safe

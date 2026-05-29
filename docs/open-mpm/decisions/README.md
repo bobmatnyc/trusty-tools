@@ -12,6 +12,7 @@ maintains its own independent numbering sequence.
 |---|---|---|
 | [0001](./0001-ndjson-subprocess-ipc.md) | NDJSON-over-stdin/stdout subprocess IPC for sub-agents | Accepted |
 | [0002](./0002-model-agnostic-credential-routing.md) | Model-agnostic credential routing | Accepted |
+| [0003](./0003-daemon-process-model.md) | Daemon process model — one daemon per agent identity, one PM per project, bounded coding-agent fan-out | Accepted |
 
 ---
 
