@@ -6,10 +6,12 @@
 //! chat turn dispatch. Keeping it isolated lets the rest of `ctrl/*` stay
 //! focused on dispatch primitives.
 //! What: `print_help`, `handle_command`, `run_ctrl`, `run_ctrl_headless`,
-//! `run_ctrl_inner`, plus the first-run profile helpers
-//! `load_or_create_user_profile` and `conduct_user_interview`.
+//! `run_ctrl_inner`; the first-run profile helpers live in the `profile`
+//! submodule.
 //! Test: `cmd_*` tests cover slash-command dispatch; the larger setup paths
 //! are smoke-tested via tmux REPL harness.
+
+mod profile;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,6 +30,8 @@ use super::socket::{CtrlSocket, ctrl_socket_path, cwd_project_id};
 use super::socket_listener::spawn_socket_listener;
 use super::state::{Ctrl, PmMsg};
 use super::util::{append_pm_message, detect_self_project};
+
+use profile::load_or_create_user_profile;
 
 // INTENT: Print the CTRL command reference.
 pub(crate) fn print_help() {
@@ -445,84 +449,3 @@ async fn run_ctrl_inner(with_stdin: bool, ready_tx: Option<oneshot::Sender<()>>)
     ctrl.shutdown_all().await;
     Ok(())
 }
-
-/// Load `~/.open-mpm/user.toml`, or run the first-run interview to create it. (#193)
-async fn load_or_create_user_profile() -> Result<Option<crate::identity::user_profile::UserProfile>>
-{
-    use crate::identity::user_profile::UserProfile;
-
-    if let Some(p) = UserProfile::load()
-        && p.is_complete()
-    {
-        return Ok(Some(p));
-    }
-
-    let noninteractive = std::env::var("OPEN_MPM_NONINTERACTIVE").is_ok()
-        || std::env::var("OPEN_MPM_API_TOKEN").is_ok();
-    if noninteractive {
-        let p = UserProfile {
-            name: "User".to_string(),
-            email: None,
-            preferred_model: None,
-            timezone: None,
-            created_at: chrono::Utc::now().to_rfc3339(),
-        };
-        return Ok(Some(p));
-    }
-
-    let profile = conduct_user_interview().await?;
-    if let Err(e) = profile.save() {
-        tracing::warn!(error = %e, "failed to save user profile (continuing in-memory)");
-    } else {
-        eprintln!(
-            "Welcome, {}! Your profile has been saved to ~/.open-mpm/user.toml",
-            profile.name
-        );
-    }
-    Ok(Some(profile))
-}
-
-/// Interactive first-run interview that captures the user profile. (#193)
-async fn conduct_user_interview() -> Result<crate::identity::user_profile::UserProfile> {
-    use crate::identity::user_profile::UserProfile;
-
-    eprintln!("[open-mpm] First-run setup — let's capture a quick profile.");
-    eprint!("What's your name? ");
-    let _ = std::io::Write::flush(&mut std::io::stderr());
-
-    let stdin = tokio::io::stdin();
-    let mut reader = BufReader::new(stdin);
-
-    let mut name = String::new();
-    reader.read_line(&mut name).await?;
-    let name = name.trim().to_string();
-    let name = if name.is_empty() {
-        "User".to_string()
-    } else {
-        name
-    };
-
-    eprint!("Email address (optional, press Enter to skip): ");
-    let _ = std::io::Write::flush(&mut std::io::stderr());
-    let mut email = String::new();
-    reader.read_line(&mut email).await?;
-    let email = email.trim().to_string();
-    let email = if email.is_empty() { None } else { Some(email) };
-
-    eprint!("Timezone (e.g. America/New_York, or Enter to skip): ");
-    let _ = std::io::Write::flush(&mut std::io::stderr());
-    let mut tz = String::new();
-    reader.read_line(&mut tz).await?;
-    let tz = tz.trim().to_string();
-    let timezone = if tz.is_empty() { None } else { Some(tz) };
-
-    Ok(UserProfile {
-        name,
-        email,
-        preferred_model: None,
-        timezone,
-        created_at: chrono::Utc::now().to_rfc3339(),
-    })
-}
-
-// Tests live in `ctrl::tests` — see `ctrl/tests.rs`.
