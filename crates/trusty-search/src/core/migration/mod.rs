@@ -18,6 +18,7 @@
 //! sequential application, crash-safe retry, and M001 idempotency and correctness.
 
 pub mod m001;
+pub mod m002;
 
 use std::sync::Arc;
 
@@ -28,6 +29,7 @@ use thiserror::Error;
 use crate::core::registry::IndexHandle;
 
 pub use m001::M001PerPubConstRust;
+pub use m002::M002AbsoluteToRelativePaths;
 
 // ── Schema version ────────────────────────────────────────────────────────────
 
@@ -40,7 +42,8 @@ pub use m001::M001PerPubConstRust;
 /// are unreachable; such a registry would be a programming error.
 /// Test: `test_current_schema_version_matches_registry` asserts that
 /// `CURRENT_SCHEMA_VERSION == registry.current_version()`.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+/// Issue #402: bump to 2 for M002 (absolute → relative file paths).
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 // ── redb table for _meta ──────────────────────────────────────────────────────
 
@@ -171,7 +174,11 @@ impl MigrationRegistry {
     /// Test: `test_migration_registry_chain_computation` constructs a registry
     /// with multi-step migrations and asserts correct chain extraction.
     pub fn new() -> Self {
-        let mut migrations: Vec<Arc<dyn Migration>> = vec![Arc::new(M001PerPubConstRust)];
+        let mut migrations: Vec<Arc<dyn Migration>> = vec![
+            Arc::new(M001PerPubConstRust),
+            // Issue #402: rewrite absolute chunk file paths to root-relative.
+            Arc::new(M002AbsoluteToRelativePaths),
+        ];
         // Defensive sort: ensures chain_from returns migrations in ascending
         // version order even if a future contributor adds them out of order.
         migrations.sort_by_key(|m| m.source_version());

@@ -512,6 +512,33 @@ pub(crate) fn build_compact_snippet(content: &str) -> String {
     lines[..7].join("\n")
 }
 
+/// Resolve a stored chunk `file` string to an absolute path string.
+///
+/// Why (issue #402 — relocation resilience): as of the relative-path storage
+/// change, newly indexed chunks store `file` as a path relative to
+/// `root_path` (e.g. `"src/lib.rs"` instead of `"/Users/me/proj/src/lib.rs"`).
+/// Older indexes still carry absolute paths. This helper normalises both
+/// representations to an absolute path so all read-side callers — search
+/// results, `list_chunks`, `get_call_chain`, MCP outputs — always return
+/// absolute paths to callers, regardless of when the index was created.
+///
+/// What: if `raw_file` starts with the OS path separator (i.e. is already
+/// absolute) it is returned as-is. Otherwise `root_path` is joined with
+/// `raw_file` to produce an absolute path string.
+///
+/// Test: `tests::resolve_chunk_file_relative_becomes_absolute` and
+///       `tests::resolve_chunk_file_absolute_passthrough` in `indexer::tests`.
+pub(crate) fn resolve_chunk_file(raw_file: &str, root_path: &std::path::Path) -> String {
+    // Detect an already-absolute path by checking the first byte. This avoids
+    // Path::is_absolute() which allocates on some platforms; a leading '/' is
+    // the only case we produce from the old write path on Unix/macOS.
+    if std::path::Path::new(raw_file).is_absolute() {
+        raw_file.to_string()
+    } else {
+        root_path.join(raw_file).to_string_lossy().into_owned()
+    }
+}
+
 /// Materialize a `RawChunk` into a `CodeChunk` with the given score, match
 /// reason, and optional compact snippet.
 ///
@@ -520,17 +547,21 @@ pub(crate) fn build_compact_snippet(content: &str) -> String {
 /// same 18-field struct literal. Consolidating them removes ~60 lines of
 /// duplication and the inevitable per-site drift when new fields are added.
 /// What: clones every metadata field and derives `chunk_depth` (clamped to u8).
+/// The `root_path` argument is used to resolve a relative `raw.file` to an
+/// absolute path via [`resolve_chunk_file`] (issue #402).
 /// Test: covered indirectly by every search/materialization test in this file.
 pub(crate) fn raw_to_code_chunk(
     raw: &RawChunk,
     score: f32,
     match_reason: &str,
     compact_snippet: Option<String>,
+    root_path: &std::path::Path,
 ) -> CodeChunk {
     let chunk_depth: u8 = raw.chunk_depth.min(u8::MAX as usize) as u8;
+    let file = resolve_chunk_file(&raw.file, root_path);
     CodeChunk {
         id: raw.id.clone(),
-        file: raw.file.clone(),
+        file,
         language: raw.language.clone(),
         start_line: raw.start_line,
         end_line: raw.end_line,

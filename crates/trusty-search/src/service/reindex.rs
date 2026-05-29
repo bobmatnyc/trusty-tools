@@ -901,7 +901,18 @@ async fn prepare_batch_payload(ctx: &BatchCtx, batch: &[PathBuf]) -> BatchPayloa
             emit_skip(ctx, &rel, None).await;
             continue;
         }
-        let path_str = path.to_string_lossy().to_string();
+        // Issue #402 — relocation resilience: store file paths RELATIVE to the
+        // index root so the corpus is portable when `root_path` is updated.
+        // `strip_prefix` always succeeds here because `walk_source_files` only
+        // returns canonicalised paths under the root; the `unwrap_or` is a
+        // defensive fallback that preserves the previous behaviour for any edge-
+        // case path that somehow escapes the root (e.g. a symlink target outside
+        // the tree).
+        let path_str = path
+            .strip_prefix(&ctx.root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
         to_index.push((path_str, content));
         to_index_paths.push(path.clone());
         new_hashes.push((path, h));

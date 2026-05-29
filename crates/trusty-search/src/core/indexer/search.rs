@@ -1098,7 +1098,7 @@ impl CodeIndexer {
             } else {
                 None
             };
-            let mut chunk = raw_to_code_chunk(raw, score, match_reason, snippet);
+            let mut chunk = raw_to_code_chunk(raw, score, match_reason, snippet, &self.root_path);
             if let Some(set) = branch_files {
                 chunk.on_branch = set.contains(normalize_path(&raw.file));
             }

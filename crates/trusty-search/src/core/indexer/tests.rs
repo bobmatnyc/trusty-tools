@@ -3,6 +3,27 @@ use crate::core::embed::MockEmbedder;
 use crate::core::store::UsearchStore;
 use std::sync::atomic::Ordering;
 
+/// Root path used by all test indexers whose constructor is `make_indexer()`
+/// or `CodeIndexer::new(_, "/tmp/test")`. `CodeChunk.file` values returned
+/// by search/enumerate are now **absolute** (issue #402 — relocation resilience),
+/// so assertions must compare against the fully-resolved form.
+const TEST_ROOT: &str = "/tmp/test";
+
+/// Build an absolute file path for a relative path under [`TEST_ROOT`].
+///
+/// Why: all `CodeChunk.file` values are now resolved to absolute paths at
+/// materialization time (issue #402). Tests that previously compared against
+/// relative paths (e.g. `"src/lib.rs"`) must now compare against
+/// `/tmp/test/src/lib.rs`.
+/// What: joins `TEST_ROOT` with `rel`, returning the platform path string.
+/// Test: used throughout this module wherever `CodeChunk.file` is asserted.
+fn abs(rel: &str) -> String {
+    std::path::Path::new(TEST_ROOT)
+        .join(rel)
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn raw(id: &str, file: &str, content: &str) -> RawChunk {
     RawChunk {
         id: id.to_string(),
@@ -733,7 +754,7 @@ async fn test_entity_exact_match_struct_ranks_first() {
     assert!(!results.is_empty(), "search must return at least one hit");
     assert_eq!(
         results[0].file,
-        "src/types.rs",
+        abs("src/types.rs"),
         "FooBar's defining file must rank first; got {:?}",
         results.iter().map(|r| &r.file).collect::<Vec<_>>(),
     );
@@ -853,7 +874,7 @@ async fn test_index_files_batch_indexes_all_chunks_once() {
         ..Default::default()
     };
     let r = idx.search(&q).await.unwrap();
-    assert!(r.iter().any(|c| c.file == "src/a.rs"));
+    assert!(r.iter().any(|c| c.file == abs("src/a.rs")));
 }
 
 #[tokio::test]
@@ -1096,9 +1117,10 @@ async fn test_struct_definition_boost_surfaces_struct_over_usage() {
     };
     let results = idx.search(&q).await.unwrap();
     assert!(!results.is_empty(), "search must return results");
-    let top3_files: Vec<&str> = results.iter().take(3).map(|c| c.file.as_str()).collect();
+    let top3_files: Vec<String> = results.iter().take(3).map(|c| c.file.clone()).collect();
+    let hnsw_abs = abs("src/hnsw_store.rs");
     assert!(
-        top3_files.contains(&"src/hnsw_store.rs"),
+        top3_files.contains(&hnsw_abs),
         "issue #117 acceptance: hnsw_store.rs must rank in top-3 for \
          the canonical acronym query; got top-3 files = {top3_files:?}, \
          full ranking = {:?}",
@@ -1193,7 +1215,7 @@ async fn test_function_definition_boost_surfaces_function_over_string_literal_us
     assert!(!results.is_empty(), "search must return results");
     let rank_of_fn = results
         .iter()
-        .position(|c| c.file == "src/call_chain.rs")
+        .position(|c| c.file == abs("src/call_chain.rs"))
         .expect("Function declaration must be in results");
     assert!(
         rank_of_fn < 2,
@@ -1248,11 +1270,11 @@ async fn test_method_definition_boost_fires() {
     let results = idx.search(&q).await.unwrap();
     let rank_of_method = results
         .iter()
-        .position(|c| c.file == "src/parser.rs")
+        .position(|c| c.file == abs("src/parser.rs"))
         .expect("Method declaration must be in results");
     let rank_of_usage = results
         .iter()
-        .position(|c| c.file == "src/driver.rs")
+        .position(|c| c.file == abs("src/driver.rs"))
         .expect("Usage chunk must be in results");
     assert!(
         rank_of_method < rank_of_usage,
@@ -1829,9 +1851,9 @@ async fn test_branch_boost_applied_to_matching_chunks() {
     assert!(!results.is_empty(), "branch-aware search must return hits");
     let on_branch = results
         .iter()
-        .find(|c| c.file == "src/on.rs")
+        .find(|c| c.file == abs("src/on.rs"))
         .expect("on-branch chunk in results");
-    let off_branch = results.iter().find(|c| c.file == "src/off.rs");
+    let off_branch = results.iter().find(|c| c.file == abs("src/off.rs"));
 
     assert!(on_branch.on_branch, "on_branch must be true for on.rs");
     if let Some(off) = off_branch {
@@ -1845,7 +1867,7 @@ async fn test_branch_boost_applied_to_matching_chunks() {
     }
     assert_eq!(
         results[0].file,
-        "src/on.rs",
+        abs("src/on.rs"),
         "on-branch chunk must rank first; got {:?}",
         results.iter().map(|c| &c.file).collect::<Vec<_>>()
     );
@@ -1906,10 +1928,12 @@ async fn test_on_branch_set_correctly() {
 
     let q = make_branch_query("fn authenticate", vec!["src/on.rs".to_string()], 1.5);
     let results = idx.search(&q).await.unwrap();
+    let on_abs = abs("src/on.rs");
+    let off_abs = abs("src/off.rs");
     for c in &results {
-        if c.file == "src/on.rs" {
+        if c.file == on_abs {
             assert!(c.on_branch, "on.rs must be flagged on_branch=true");
-        } else if c.file == "src/off.rs" {
+        } else if c.file == off_abs {
             assert!(!c.on_branch, "off.rs must be flagged on_branch=false");
         }
     }
@@ -1920,7 +1944,7 @@ async fn test_on_branch_set_correctly() {
     let results2 = idx.search(&q2).await.unwrap();
     let on2 = results2
         .iter()
-        .find(|c| c.file == "src/on.rs")
+        .find(|c| c.file == on_abs)
         .expect("on-branch chunk in results");
     assert!(on2.on_branch, "leading './' must be normalized away");
 }
@@ -2505,8 +2529,10 @@ async fn test_mode_filter_code_returns_only_source() {
     };
     let results = idx.search(&q).await.unwrap();
     let files: Vec<&str> = results.iter().map(|c| c.file.as_str()).collect();
+    let lib_abs = abs("src/lib.rs");
+    let license_abs = abs("LICENSE");
     assert!(
-        files.contains(&"src/lib.rs"),
+        files.contains(&lib_abs.as_str()),
         "code mode must include source: {files:?}"
     );
     assert!(
@@ -2514,7 +2540,7 @@ async fn test_mode_filter_code_returns_only_source() {
         "code mode must exclude .md: {files:?}"
     );
     assert!(
-        !files.contains(&"LICENSE"),
+        !files.contains(&license_abs.as_str()),
         "code mode must exclude named docs: {files:?}"
     );
     assert!(
@@ -2544,12 +2570,13 @@ async fn test_mode_filter_text_returns_only_prose_and_named_docs() {
     };
     let results = idx.search(&q).await.unwrap();
     let files: Vec<&str> = results.iter().map(|c| c.file.as_str()).collect();
+    let license_abs = abs("LICENSE");
     assert!(
         files.iter().any(|f| f.ends_with(".md")),
         "text mode must include prose: {files:?}"
     );
     assert!(
-        files.contains(&"LICENSE"),
+        files.contains(&license_abs.as_str()),
         "text mode must include named docs without extension: {files:?}"
     );
     assert!(
@@ -2599,7 +2626,7 @@ async fn test_mode_filter_data_returns_only_structured_data() {
         "data mode must exclude prose: {files:?}"
     );
     assert!(
-        !files.contains(&"LICENSE"),
+        !files.contains(&abs("LICENSE").as_str()),
         "data mode must exclude named docs: {files:?}"
     );
 }
@@ -2619,16 +2646,17 @@ async fn test_mode_filter_all_returns_everything() {
         ..Default::default()
     };
     let results = idx.search(&q).await.unwrap();
-    let files: Vec<&str> = results.iter().map(|c| c.file.as_str()).collect();
-    for expected in &[
+    let files: Vec<String> = results.iter().map(|c| c.file.clone()).collect();
+    for expected_rel in &[
         "src/lib.rs",
         "docs/intro.md",
         "LICENSE",
         "Cargo.toml",
         "fixtures/alpha.json",
     ] {
+        let expected = abs(expected_rel);
         assert!(
-            files.contains(expected),
+            files.contains(&expected),
             "all mode must include {expected}: {files:?}"
         );
     }
@@ -3081,4 +3109,171 @@ async fn test_kg_refine_threshold_boundary() {
         actual_cos >= threshold,
         "boundary: {actual_cos:.6} >= {threshold:.6} must hold"
     );
+}
+
+// ── Issue #402: relative path storage + query-time resolution ─────────────────
+
+/// Why: `resolve_chunk_file` must convert a stored relative path to an
+/// absolute path by joining with `root_path`. This is the read-side half of
+/// issue #402 — relocation resilience.
+/// What: `"src/lib.rs"` + `"/tmp/test"` → `"/tmp/test/src/lib.rs"`.
+/// Test: this test.
+#[test]
+fn resolve_chunk_file_relative_becomes_absolute() {
+    let root = std::path::Path::new("/tmp/test");
+    let result = resolve_chunk_file("src/lib.rs", root);
+    assert_eq!(result, "/tmp/test/src/lib.rs");
+}
+
+/// Why: `resolve_chunk_file` must pass through an already-absolute path
+/// unchanged. This supports the dual-read migration path for pre-M002 indexes
+/// that still carry absolute paths in their redb corpus.
+/// What: `"/Users/alice/proj/src/lib.rs"` → same string unchanged.
+/// Test: this test.
+#[test]
+fn resolve_chunk_file_absolute_passthrough() {
+    let root = std::path::Path::new("/tmp/test");
+    let abs_path = "/Users/alice/proj/src/lib.rs";
+    let result = resolve_chunk_file(abs_path, root);
+    assert_eq!(result, abs_path);
+}
+
+/// Why: `index_file` (and by extension `index_files_batch`) must store chunk
+/// `file` fields relative to the index `root_path` as of issue #402. This
+/// test verifies the storage side: the raw chunk held in the in-memory corpus
+/// has a relative `file`, while the materialized `CodeChunk.file` returned by
+/// `search` is absolute.
+/// What: index a file with a relative path, then assert that
+///   (a) the raw `RawChunk.file` in the in-memory corpus is relative, and
+///   (b) `CodeChunk.file` in search results is the resolved absolute path.
+/// Test: this test.
+#[tokio::test]
+async fn relative_storage_resolved_to_absolute_in_search_results() {
+    let idx = make_indexer(); // root_path = "/tmp/test"
+    idx.index_file("src/lib.rs", "pub fn hello() {}\n")
+        .await
+        .unwrap();
+
+    // (a) Raw storage is relative — inspect the in-memory map directly.
+    {
+        let chunks_guard = idx.chunks.read().await;
+        let stored: Vec<&str> = chunks_guard.values().map(|c| c.file.as_str()).collect();
+        assert!(
+            stored.contains(&"src/lib.rs"),
+            "raw chunk file must be stored relative; got {stored:?}"
+        );
+        assert!(
+            !stored.iter().any(|f| f.starts_with('/')),
+            "raw chunk file must NOT be absolute; got {stored:?}"
+        );
+    }
+
+    // (b) Search results expose absolute paths.
+    let q = SearchQuery {
+        text: "hello".to_string(),
+        top_k: 5,
+        expand_graph: false,
+        compact: false,
+        ..Default::default()
+    };
+    let results = idx.search(&q).await.unwrap();
+    assert!(!results.is_empty(), "search must return at least one hit");
+    let resolved_file = &results[0].file;
+    assert_eq!(
+        resolved_file,
+        &abs("src/lib.rs"),
+        "CodeChunk.file must be resolved to absolute path; got {resolved_file:?}"
+    );
+    assert!(
+        std::path::Path::new(resolved_file).is_absolute(),
+        "CodeChunk.file must be absolute; got {resolved_file:?}"
+    );
+}
+
+/// Why: moving a project (updating `root_path`) must yield correct result
+/// paths without a full re-index. This test simulates the relocation by
+/// indexing with one root, then querying via a second indexer with a different
+/// `root_path` that points to the same content (using a symlink or, in the
+/// test, by indexing the raw `file`/`content` and then resolving against a
+/// new root).
+///
+/// Since we can't easily move files in a unit test, we verify the invariant
+/// directly: two `CodeIndexer` instances with different `root_path` values
+/// but the same relative chunk data resolve to different absolute paths for
+/// the same stored relative `file`.
+/// What: insert the same relative chunk into two indexers with different
+/// roots; assert each resolves its `file` to its own root prefix.
+/// Test: this test.
+#[tokio::test]
+async fn relative_chunk_resolves_correctly_for_different_roots() {
+    let dim = 32;
+    let embedder_a: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(dim));
+    let store_a: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(dim).expect("usearch"));
+    let idx_a = CodeIndexer::new("proj-a", "/home/alice/proj").with_components(embedder_a, store_a);
+
+    let embedder_b: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(dim));
+    let store_b: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(dim).expect("usearch"));
+    let idx_b =
+        CodeIndexer::new("proj-b", "/home/bob/relocated").with_components(embedder_b, store_b);
+
+    // Index the same relative path in both.
+    idx_a
+        .index_file("src/main.rs", "fn main() {}\n")
+        .await
+        .unwrap();
+    idx_b
+        .index_file("src/main.rs", "fn main() {}\n")
+        .await
+        .unwrap();
+
+    let q = SearchQuery {
+        text: "main".to_string(),
+        top_k: 5,
+        expand_graph: false,
+        compact: false,
+        ..Default::default()
+    };
+
+    let res_a = idx_a.search(&q).await.unwrap();
+    let res_b = idx_b.search(&q).await.unwrap();
+
+    assert!(!res_a.is_empty());
+    assert!(!res_b.is_empty());
+
+    let file_a = &res_a[0].file;
+    let file_b = &res_b[0].file;
+
+    assert_eq!(
+        file_a, "/home/alice/proj/src/main.rs",
+        "proj-a must resolve to alice's root; got {file_a:?}"
+    );
+    assert_eq!(
+        file_b, "/home/bob/relocated/src/main.rs",
+        "proj-b must resolve to bob's root; got {file_b:?}"
+    );
+}
+
+/// Why: `enumerate_chunks` (used by `GET /indexes/:id/chunks`) must also
+/// return resolved absolute file paths, not raw relative ones.
+/// What: index a file, enumerate chunks, assert the `file` field is absolute.
+/// Test: this test.
+#[tokio::test]
+async fn enumerate_chunks_returns_resolved_absolute_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let redb_path = dir.path().join("index.redb");
+    let idx = make_indexer_with_corpus(&redb_path);
+
+    idx.index_file("docs/guide.md", "# Guide\n\nWelcome.\n")
+        .await
+        .unwrap();
+
+    let (total, page) = idx.enumerate_chunks(0, 100).await;
+    assert!(total > 0, "expected at least one chunk");
+    for chunk in &page {
+        assert!(
+            std::path::Path::new(&chunk.file).is_absolute(),
+            "enumerate_chunks must return absolute file paths; got {:?}",
+            chunk.file
+        );
+    }
 }

@@ -44,9 +44,10 @@ impl CodeIndexer {
     pub async fn all_chunks(&self) -> Vec<CodeChunk> {
         self.ensure_chunks_loaded().await;
         let chunks = self.chunks.read().await;
+        let root = self.root_path.clone();
         chunks
             .values()
-            .map(|raw| raw_to_code_chunk(raw, 0.0, "all", None))
+            .map(|raw| raw_to_code_chunk(raw, 0.0, "all", None, &root))
             .collect()
     }
 
@@ -95,9 +96,10 @@ impl CodeIndexer {
                 .then(a.end_line.cmp(&b.end_line))
         });
         let end = (offset + limit).min(total);
+        let root = self.root_path.clone();
         let page: Vec<CodeChunk> = ordered[offset..end]
             .iter()
-            .map(|raw| raw_to_code_chunk(raw, 0.0, "enumerate", None))
+            .map(|raw| raw_to_code_chunk(raw, 0.0, "enumerate", None, &root))
             .collect();
         (total, page)
     }
@@ -122,7 +124,13 @@ impl CodeIndexer {
             }
             let Some(raw) = chunks.get(&id) else { continue };
             let snippet = Some(build_compact_snippet(&raw.content));
-            out.push(raw_to_code_chunk(raw, score, "vector", snippet));
+            out.push(raw_to_code_chunk(
+                raw,
+                score,
+                "vector",
+                snippet,
+                &self.root_path,
+            ));
             if out.len() >= top_k {
                 break;
             }
