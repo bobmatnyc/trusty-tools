@@ -14,7 +14,8 @@ design, requirements, research, and user/developer documentation. The crate
 
 | Subdir | What's here |
 |--------|-------------|
-| [`requirements/`](requirements/) | Canonical specification set ported from the Python predecessor: overview, configuration schema, database schema, CLI commands, classification cascade, collection, reporting, and Rust architecture. Start at [`requirements/index.md`](requirements/index.md). |
+| [`spec/`](spec/) | **Canonical, authoritative specification set** — the *what / why / gap* layer reconciled against the live code and ticket backlog: [`PRD.md`](spec/PRD.md), [`ARCHITECTURE.md`](spec/ARCHITECTURE.md), [`COMPONENTS.md`](spec/COMPONENTS.md). **Start here.** It sits *above* `requirements/` and supersedes it where they disagree. |
+| [`requirements/`](requirements/) | Detailed source specification ported from the Python predecessor: overview, configuration schema, database schema, CLI commands, classification cascade, collection, reporting, and Rust architecture. The field-by-field reference the `spec/` set links into. Some sections have drifted from the code (taxonomy, DB migration list, CLI surface, DORA/effort/quality additions) — where `spec/` and `requirements/` disagree, **`spec/` is authoritative**. Start at [`requirements/index.md`](requirements/index.md). |
 | [`developer/`](developer/) | Contributor docs: [architecture](developer/architecture.md), [developer guide](developer/developer-guide.md), [configuration reference](developer/configuration-reference.md), [migration from Python](developer/migration-from-python.md), [publishing](developer/publishing.md). |
 | [`user/`](user/) | End-user docs: [user guide](user/user-guide.md). |
 | [`decisions/`](decisions/) | **Crate-specific ADRs** (Nygard format): SQLite tuning, performance hotspots, Bitbucket PR provider. Workspace-wide ADRs live in [`docs/adr/`](../adr/). |
@@ -24,7 +25,7 @@ design, requirements, research, and user/developer documentation. The crate
 
 ## Where to start
 
-- **Understanding the system?** [`requirements/overview.md`](requirements/overview.md) → [`requirements/index.md`](requirements/index.md).
+- **Understanding the system?** [`spec/README.md`](spec/README.md) → [`spec/PRD.md`](spec/PRD.md) → [`spec/ARCHITECTURE.md`](spec/ARCHITECTURE.md) (canonical), then [`requirements/`](requirements/) for field-level detail.
 - **Using the CLI?** [`user/user-guide.md`](user/user-guide.md).
 - **Contributing?** [`developer/developer-guide.md`](developer/developer-guide.md) and [`developer/architecture.md`](developer/architecture.md).
 - **Understanding a past decision?** [`decisions/`](decisions/) (crate-specific) or [`docs/adr/`](../adr/) (workspace-wide).
@@ -32,6 +33,9 @@ design, requirements, research, and user/developer documentation. The crate
 ## Conventions
 
 Subdirs follow the workspace documentation conventions described in the root
-[`CLAUDE.md`](../../CLAUDE.md). The `requirements/` set mirrors the API contract
-of the [gitflow-analytics](https://github.com/bobmatnyc/gitflow-analytics)
-Python predecessor; `research/` files are dated point-in-time investigations.
+[`CLAUDE.md`](../../CLAUDE.md). The `spec/` set is the canonical *what/why/gap*
+layer, reconciled against the live `crates/trusty-git-analytics/src/` tree; the
+`requirements/` set is the detailed field-level source that originally mirrored
+the API contract of the [gitflow-analytics](https://github.com/bobmatnyc/gitflow-analytics)
+Python predecessor and now serves as reference beneath `spec/`. `research/`
+files are dated point-in-time investigations.
