@@ -1,6 +1,6 @@
 [package]
 name = "trusty-memory"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 description = "MCP server (stdio + HTTP/SSE) for trusty-memory"
 license = "MIT"
@@ -98,6 +98,7 @@ reqwest = { workspace = true }
 futures = { workspace = true }
 tokio-stream = { workspace = true }
 toml = { workspace = true }
+serde_yaml = { workspace = true }
 dirs = { workspace = true }
 dashmap = { workspace = true }
 async-trait = { workspace = true }

@@ -20,6 +20,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use trusty_memory::commands::inbox_check::handle_inbox_check;
+use trusty_memory::commands::link::handle_link;
 use trusty_memory::commands::migrate::{handle_migrate, MigrateTarget};
 use trusty_memory::commands::note::handle_note;
 use trusty_memory::commands::prompt_context::handle_prompt_context;
@@ -307,6 +308,44 @@ enum Command {
         #[arg(long, value_name = "ID")]
         palace: Option<String>,
     },
+
+    /// Pin this project's palace slug in `.trusty-tools/trusty-memory.yaml`.
+    ///
+    /// Why: the lazy write in normal memory operations locks in the slug the
+    /// first time a memory is saved. `link` lets you do this explicitly
+    /// *before* a directory rename or drive reorg, so the slug is already
+    /// committed and the palace linkage never breaks.
+    ///
+    /// The generated file should be committed to version control; it travels
+    /// with the repository regardless of where the directory lives on disk.
+    ///
+    /// Examples:
+    ///   trusty-memory link                        # pin CWD's project
+    ///   trusty-memory link --path ~/projects/foo  # pin a specific project
+    ///   trusty-memory link --slug custom-slug     # override the derived slug
+    ///   trusty-memory link --force                # overwrite existing pin
+    Link {
+        /// Project directory to pin (default: current directory). The
+        /// command walks upward from here to find the project root.
+        #[arg(long, value_name = "DIR")]
+        path: Option<std::path::PathBuf>,
+
+        /// Override the derived palace slug. When omitted the slug is
+        /// derived from the project root's directory basename.
+        #[arg(long, value_name = "SLUG")]
+        slug: Option<String>,
+
+        /// Optional human note to embed in the pin file
+        /// (e.g. "pinned before GDrive reorganisation 2026-06").
+        #[arg(long, value_name = "TEXT")]
+        note: Option<String>,
+
+        /// Overwrite an existing pin file even when the slug differs.
+        /// Without this flag, `link` refuses to overwrite an existing pin
+        /// with a different slug to prevent accidental data loss.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// Target surface for the `monitor` subcommand.
@@ -434,6 +473,12 @@ async fn main() -> Result<()> {
         Command::KgRebuild { palace } => {
             trusty_memory::commands::kg_rebuild::handle_kg_rebuild(palace).await
         }
+        Command::Link {
+            path,
+            slug,
+            note,
+            force,
+        } => handle_link(path, slug, note, force),
     }
 }
 

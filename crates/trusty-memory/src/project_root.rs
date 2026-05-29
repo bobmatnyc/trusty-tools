@@ -1,4 +1,5 @@
-//! Project-root detection and palace-slug derivation (issue #88).
+//! Project-root detection, palace-slug derivation, and `.trusty-tools/` pin
+//! file management (issue #88 + Phase 1 of the `.trusty-tools/` convention).
 //!
 //! Why: unbounded palace creation leads to orphaned namespaces that no longer
 //! correspond to any project on disk. Anchoring palace names to a stable,
@@ -6,20 +7,85 @@
 //! makes "which palace am I in?" predictable from the working directory alone.
 //! The `personal` palace is the single sanctioned exception for non-project
 //! contexts (global notes, one-off sessions).
-//! What: `project_slug()` walks upward from CWD looking for canonical project
-//! markers (`.git`, `Cargo.toml`, `pyproject.toml`, `package.json`) and
-//! returns the slugified basename of the first ancestor that contains one.
-//! Returns `None` when no project root is found (all ancestors have been
-//! exhausted). The slug is deterministic, lowercase, filesystem-safe, and
-//! under 64 chars.
+//!
+//! Phase 1 adds a pin-file convention: a project may commit
+//! `.trusty-tools/trusty-memory.yaml` at its root to pin the palace slug.
+//! This survives directory renames and drive reorganisations because the slug
+//! no longer depends solely on the directory basename.
+//!
+//! Resolution order for `project_slug_at`:
+//!   a. Walk up to the project root. If `.trusty-tools/trusty-memory.yaml`
+//!      exists, read `palace` from it (authoritative — survives renames).
+//!   b. If absent, compute the slug from the directory basename (existing
+//!      logic), then lazily write `.trusty-tools/trusty-memory.yaml` so all
+//!      future resolutions are stable. The lazy write is best-effort and
+//!      non-fatal (read-only trees are tolerated; failures are logged to
+//!      stderr).
+//!
+//! What: `project_slug_at` implements the resolution order above. Helpers
+//! `read_project_pin`, `write_project_pin`, and `project_slug_from_basename`
+//! are split out so each can be tested independently and called by the
+//! `trusty-memory link` backfill command.
 //! Test: `project_slug_finds_git_root`, `project_slug_returns_none_without_markers`,
 //! `project_slug_uses_first_ancestor_marker`,
-//! `project_slug_personal_always_allowed`.
+//! `project_slug_personal_always_allowed`,
+//! `pin_file_read_when_present`, `absent_pin_writes_computed_slug`,
+//! `renamed_dir_with_pin_resolves_to_original_slug`,
+//! `trusty_tools_dir_is_project_marker`,
+//! `lazy_write_non_fatal_on_readonly_dir`.
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::messaging::slugify_string;
+
+/// Schema version for `.trusty-tools/trusty-memory.yaml`.
+///
+/// Why: forward-proofing — a future phase may need to distinguish older pin
+/// files that lack new fields. Hard-coding `1` now makes that migration
+/// straightforward: read `schema_version`, branch on the value.
+/// What: the `u32` constant `1`.
+/// Test: `write_project_pin` embeds this value; `read_project_pin` accepts it.
+pub const PIN_SCHEMA_VERSION: u32 = 1;
+
+/// Relative path of the pin file within a project root.
+///
+/// Why: defined as a constant so every call site (`read_project_pin`,
+/// `write_project_pin`, `find_project_root`) agrees on the same path and
+/// tests can compare against this value instead of a bare string literal.
+/// What: `".trusty-tools/trusty-memory.yaml"`.
+/// Test: used in every pin-file test in this module.
+pub const PIN_FILE_REL: &str = ".trusty-tools/trusty-memory.yaml";
+
+/// The `.trusty-tools/` directory name (used as a project marker).
+///
+/// Why: a project that already contains `.trusty-tools/trusty-memory.yaml`
+/// should be recognised as a project root even if it has no `.git` or
+/// `Cargo.toml`. Adding the directory itself to `PROJECT_MARKERS` (decision
+/// D5) lets `find_project_root` detect this case without special-casing.
+/// What: `".trusty-tools"`.
+/// Test: `trusty_tools_dir_is_project_marker`.
+pub const TRUSTY_TOOLS_DIR: &str = ".trusty-tools";
+
+/// Serialisable schema for `.trusty-tools/trusty-memory.yaml`.
+///
+/// Why: a typed struct with `serde` makes the YAML schema self-documenting
+/// and prevents future fields from silently deserialising to wrong types.
+/// What: holds `schema_version` (always 1 for Phase 1) and `palace` (the
+/// pinned slug string). An optional `note` field is supported for humans who
+/// want to document why the slug was pinned.
+/// Test: `write_project_pin` round-trips through `read_project_pin`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectPin {
+    /// Pin-file format version. Always `1` in Phase 1.
+    pub schema_version: u32,
+    /// The pinned palace slug — stored verbatim, no re-slugification.
+    pub palace: String,
+    /// Optional human note (e.g. "pinned before drive reorg 2026-06").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
 
 /// Sentinel palace name that is always valid regardless of project context.
 ///
@@ -38,9 +104,12 @@ pub const PERSONAL_PALACE: &str = "personal";
 /// we want a single, ordered list that every part of the codebase agrees on
 /// so project detection is consistent whether invoked from CLI, MCP, or
 /// tests. `.git` comes first because it is the most universal signal.
+/// `.trusty-tools` is included (decision D5) so a directory that already
+/// carries a pin file is recognised even without a `.git` or build manifest.
 /// What: an ordered slice of filenames checked by `find_project_root`. A
 /// directory is considered a project root when it contains *any* of these.
-/// Test: `project_slug_uses_first_ancestor_marker`.
+/// Test: `project_slug_uses_first_ancestor_marker`,
+///       `trusty_tools_dir_is_project_marker`.
 pub const PROJECT_MARKERS: &[&str] = &[
     ".git",
     "Cargo.toml",
@@ -48,6 +117,7 @@ pub const PROJECT_MARKERS: &[&str] = &[
     "package.json",
     "go.mod",
     ".project-root",
+    TRUSTY_TOOLS_DIR,
 ];
 
 /// Walk upward from `start` and return the first ancestor directory (inclusive)
@@ -82,18 +152,73 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Derive a palace slug from the project root found at or above `start`.
+/// Read the palace pin from `.trusty-tools/trusty-memory.yaml` at `root`.
 ///
-/// Why: the core of issue #88 — palace names must match the canonical slug
-/// of the project they belong to so a project's palace is unambiguously
-/// discoverable from any subdirectory of that project.
-/// What: calls `find_project_root`, then `slugify_string` on the basename.
-/// Returns `None` when no project root is found (the caller should then fall
-/// back to the `personal` palace or prompt the user to pass `--palace
-/// personal`).
-/// Test: `project_slug_finds_git_root`, `project_slug_returns_none_without_markers`.
-pub fn project_slug_at(start: &Path) -> Option<String> {
-    let root = find_project_root(start)?;
+/// Why: the pin file is the authoritative source for a project's palace slug
+/// when present. Reading it in a dedicated helper keeps the I/O concern
+/// separate from the slug-derivation logic and makes it easy to test the
+/// round-trip in isolation.
+/// What: constructs the path `root/.trusty-tools/trusty-memory.yaml`, reads
+/// it, and deserialises with `serde_yaml`. Returns `None` when the file does
+/// not exist. Returns `Err` only on I/O or parse failures.
+/// Test: `pin_file_read_when_present`, `read_project_pin_returns_none_when_absent`.
+pub fn read_project_pin(root: &Path) -> Result<Option<ProjectPin>> {
+    let pin_path = root.join(PIN_FILE_REL);
+    match std::fs::read_to_string(&pin_path) {
+        Ok(s) => {
+            let pin: ProjectPin = serde_yaml::from_str(&s)
+                .map_err(|e| anyhow::anyhow!("parse {}: {e}", pin_path.display()))?;
+            Ok(Some(pin))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("read {}: {e}", pin_path.display())),
+    }
+}
+
+/// Write a palace pin to `.trusty-tools/trusty-memory.yaml` at `root`.
+///
+/// Why: the lazy-write path in `project_slug_at` and the explicit
+/// `trusty-memory link` backfill command both need to emit the same YAML
+/// schema. A single writer keeps the format consistent and avoids duplicated
+/// YAML-construction logic.
+/// What: creates `.trusty-tools/` if missing, serialises `pin` with
+/// `serde_yaml`, and writes it atomically (write to `<file>.tmp`, then
+/// rename). Returns the path that was written.
+/// Test: `write_project_pin_creates_expected_yaml`,
+///       `write_project_pin_round_trips_through_read`.
+pub fn write_project_pin(root: &Path, pin: &ProjectPin) -> Result<PathBuf> {
+    let dir = root.join(TRUSTY_TOOLS_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| anyhow::anyhow!("create {}: {e}", dir.display()))?;
+    let pin_path = root.join(PIN_FILE_REL);
+    let tmp_path = pin_path.with_extension("yaml.tmp");
+    let yaml = serde_yaml::to_string(pin).map_err(|e| anyhow::anyhow!("serialise pin: {e}"))?;
+    let header = "# .trusty-tools/trusty-memory.yaml\n\
+                  # This file pins the trusty-memory palace slug for this project.\n\
+                  # Commit it so the linkage survives directory renames and drive reorgs.\n\
+                  # Schema: https://github.com/bobmatnyc/trusty-tools (trusty-tools convention)\n\n";
+    let content = format!("{header}{yaml}");
+    std::fs::write(&tmp_path, &content)
+        .map_err(|e| anyhow::anyhow!("write {}: {e}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, &pin_path).map_err(|e| {
+        anyhow::anyhow!(
+            "rename {} → {}: {e}",
+            tmp_path.display(),
+            pin_path.display()
+        )
+    })?;
+    Ok(pin_path)
+}
+
+/// Compute the palace slug purely from the directory basename (the pre-Phase-1
+/// logic, now extracted for composability).
+///
+/// Why: the resolution order in `project_slug_at` needs to call the basename
+/// derivation without triggering the pin-file read/write side effects. Exposing
+/// this as a separate function makes both paths testable in isolation.
+/// What: calls `slugify_string` on the last path component of `root`. Returns
+/// `None` when the basename is empty or slugifies to an empty string.
+/// Test: `project_slug_from_basename_basic`.
+pub fn project_slug_from_basename(root: &Path) -> Option<String> {
     let basename = root.file_name()?.to_str()?;
     let slug = slugify_string(basename);
     if slug.is_empty() {
@@ -101,6 +226,64 @@ pub fn project_slug_at(start: &Path) -> Option<String> {
     } else {
         Some(slug)
     }
+}
+
+/// Derive a palace slug from the project root found at or above `start`.
+///
+/// Why: the core of issue #88 with Phase-1 pin-file support. Palace names
+/// must match the canonical slug of the project they belong to, and that slug
+/// must survive directory renames. The pin file provides the stable anchor.
+/// What: implements the two-step resolution order:
+///   a. Walk up to the project root. If `.trusty-tools/trusty-memory.yaml`
+///      exists, return `pin.palace` (authoritative — survives renames).
+///   b. If absent, compute the slug via `project_slug_from_basename`, then
+///      lazily write the pin file (best-effort, non-fatal) so future calls
+///      always land on path (a).
+/// Returns `None` when no project root is found.
+/// Test: `pin_file_read_when_present`, `absent_pin_writes_computed_slug`,
+///       `renamed_dir_with_pin_resolves_to_original_slug`.
+pub fn project_slug_at(start: &Path) -> Option<String> {
+    let root = find_project_root(start)?;
+
+    // Step (a): check for a committed pin file.
+    match read_project_pin(&root) {
+        Ok(Some(pin)) => return Some(pin.palace),
+        Ok(None) => {} // absent — fall through to step (b)
+        Err(e) => {
+            // Corrupt or unreadable pin file: log to stderr and fall through
+            // to the basename derivation so memory operations are not blocked.
+            tracing::warn!(
+                path = %root.join(PIN_FILE_REL).display(),
+                "could not read palace pin file ({e:#}); falling back to basename slug"
+            );
+        }
+    }
+
+    // Step (b): compute from basename and lazily write the pin file.
+    let slug = project_slug_from_basename(&root)?;
+    let pin = ProjectPin {
+        schema_version: PIN_SCHEMA_VERSION,
+        palace: slug.clone(),
+        note: None,
+    };
+    match write_project_pin(&root, &pin) {
+        Ok(path) => {
+            tracing::debug!(
+                slug = %slug,
+                path = %path.display(),
+                "wrote palace pin file (lazy init)"
+            );
+        }
+        Err(e) => {
+            // Read-only tree, insufficient permissions, etc. — non-fatal.
+            tracing::warn!(
+                slug = %slug,
+                root = %root.display(),
+                "could not write palace pin file ({e:#}); slug will remain basename-derived"
+            );
+        }
+    }
+    Some(slug)
 }
 
 /// Derive a palace slug for the current working directory.
@@ -359,5 +542,205 @@ mod tests {
             msg.contains("personal"),
             "error must mention 'personal'; got: {msg}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Pin-file helpers: read_project_pin / write_project_pin
+    // -----------------------------------------------------------------------
+
+    /// Why: the round-trip must be lossless — what we write we must be able
+    /// to read back with the same slug value.
+    /// What: writes a pin, reads it back, asserts all fields match.
+    /// Test: itself.
+    #[test]
+    fn write_and_read_pin_round_trips() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pin = ProjectPin {
+            schema_version: PIN_SCHEMA_VERSION,
+            palace: "my-project".to_string(),
+            note: None,
+        };
+        write_project_pin(tmp.path(), &pin).expect("write ok");
+        let read_back = read_project_pin(tmp.path())
+            .expect("read ok")
+            .expect("Some(pin)");
+        assert_eq!(read_back, pin);
+    }
+
+    /// Why: the `note` field is optional; serialising without it must not emit
+    /// a `note: null` line in the YAML (which would confuse minimal parsers).
+    /// What: write a pin without `note`, read the raw YAML, assert it does not
+    /// contain the word `null`.
+    /// Test: itself.
+    #[test]
+    fn write_pin_omits_null_note() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pin = ProjectPin {
+            schema_version: PIN_SCHEMA_VERSION,
+            palace: "alpha".to_string(),
+            note: None,
+        };
+        let path = write_project_pin(tmp.path(), &pin).expect("write ok");
+        let raw = std::fs::read_to_string(&path).expect("read raw ok");
+        assert!(
+            !raw.contains("null"),
+            "null note must be omitted; got:\n{raw}"
+        );
+        assert!(raw.contains("palace: alpha"), "slug must be present");
+        assert!(
+            raw.contains("schema_version: 1"),
+            "schema_version must be present"
+        );
+    }
+
+    /// Why: `read_project_pin` must return `None` (not an error) when no pin
+    /// file has been written yet, so callers can fall through to basename
+    /// derivation without unwrapping an error.
+    /// Test: itself.
+    #[test]
+    fn read_project_pin_returns_none_when_absent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let result = read_project_pin(tmp.path()).expect("no error");
+        assert!(result.is_none(), "absent pin must yield None");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase-1 resolution order in project_slug_at
+    // -----------------------------------------------------------------------
+
+    /// Why: when a pin file is present it must override the directory basename,
+    /// which is the core goal of Phase 1.
+    /// What: create a root named `actual-dir`, write a pin file with
+    /// `palace: pinned-slug`, then assert `project_slug_at` from a sub-
+    /// directory returns `"pinned-slug"` (not `"actual-dir"`).
+    /// Test: itself.
+    #[test]
+    fn pin_file_read_when_present() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("actual-dir");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        let pin = ProjectPin {
+            schema_version: PIN_SCHEMA_VERSION,
+            palace: "pinned-slug".to_string(),
+            note: None,
+        };
+        write_project_pin(&root, &pin).expect("write pin");
+
+        let sub = root.join("src");
+        fs::create_dir_all(&sub).unwrap();
+        let slug = project_slug_at(&sub).expect("slug");
+        assert_eq!(
+            slug, "pinned-slug",
+            "pin file must override the directory basename"
+        );
+    }
+
+    /// Why: when no pin file exists, `project_slug_at` must lazily create one
+    /// so subsequent calls (or after a rename) use the file instead of the
+    /// basename.
+    /// What: create a project root with a `.git` marker but no pin file; call
+    /// `project_slug_at`; assert the pin file was created with the expected slug.
+    /// Test: itself.
+    #[test]
+    fn absent_pin_writes_computed_slug() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("my-cool-project");
+        fs::create_dir_all(root.join(".git")).unwrap();
+
+        // No pin file yet.
+        assert!(
+            read_project_pin(&root).expect("no err").is_none(),
+            "no pin before first call"
+        );
+
+        let slug = project_slug_at(&root).expect("slug");
+        assert_eq!(slug, "my-cool-project");
+
+        // Pin file must now exist.
+        let pin = read_project_pin(&root)
+            .expect("no err")
+            .expect("pin written");
+        assert_eq!(pin.palace, "my-cool-project");
+        assert_eq!(pin.schema_version, PIN_SCHEMA_VERSION);
+    }
+
+    /// Why: the central use-case for Phase 1 — a project with a pin file
+    /// returns the original slug even after the directory is renamed.
+    /// What: create `old-name/` with `.git` + a pin file set to
+    /// `"original-slug"`; rename the directory to `new-name/`; assert that
+    /// `project_slug_at` from inside `new-name/` returns `"original-slug"`.
+    /// Test: itself.
+    #[test]
+    fn renamed_dir_with_pin_resolves_to_original_slug() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let old_root = tmp.path().join("old-name");
+        fs::create_dir_all(old_root.join(".git")).unwrap();
+        let pin = ProjectPin {
+            schema_version: PIN_SCHEMA_VERSION,
+            palace: "original-slug".to_string(),
+            note: None,
+        };
+        write_project_pin(&old_root, &pin).expect("write pin");
+
+        // Simulate a directory rename.
+        let new_root = tmp.path().join("new-name");
+        fs::rename(&old_root, &new_root).expect("rename");
+
+        let sub = new_root.join("src");
+        fs::create_dir_all(&sub).unwrap();
+        let slug = project_slug_at(&sub).expect("slug after rename");
+        assert_eq!(
+            slug, "original-slug",
+            "pin file must survive the directory rename"
+        );
+    }
+
+    /// Why: decision D5 — a directory containing only `.trusty-tools/` must be
+    /// recognised as a project root so the pin file can be found without any
+    /// other ecosystem marker (`.git`, `Cargo.toml`, etc.).
+    /// What: create a bare tempdir, add only `.trusty-tools/`, assert that
+    /// `find_project_root` identifies it as the root.
+    /// Test: itself.
+    #[test]
+    fn trusty_tools_dir_is_project_marker() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir_all(tmp.path().join(TRUSTY_TOOLS_DIR)).unwrap();
+        let found = find_project_root(tmp.path());
+        assert!(
+            found.is_some(),
+            ".trusty-tools must trigger project-root detection"
+        );
+    }
+
+    /// Why: the lazy write in `project_slug_at` must be non-fatal when the
+    /// target directory is read-only. Otherwise, memory operations would panic
+    /// or return an error in environments where the project tree is immutable.
+    /// What: create a project root, make it read-only, call `project_slug_at`
+    /// from inside it, and assert we still get a slug (not None or an error).
+    /// Test: itself.
+    #[cfg(unix)]
+    #[test]
+    fn lazy_write_non_fatal_on_readonly_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("ro-project");
+        fs::create_dir_all(root.join(".git")).unwrap();
+
+        // Make the root read-only so the lazy write cannot create `.trusty-tools/`.
+        let mut perms = fs::metadata(&root).unwrap().permissions();
+        perms.set_mode(0o555);
+        fs::set_permissions(&root, perms).unwrap();
+
+        let slug = project_slug_at(&root);
+        // Restore permissions before the tempdir drops (so cleanup works).
+        let mut restore = fs::metadata(&root).unwrap().permissions();
+        restore.set_mode(0o755);
+        fs::set_permissions(&root, restore).unwrap();
+
+        assert!(
+            slug.is_some(),
+            "slug must be returned even when the pin write fails"
+        );
+        assert_eq!(slug.unwrap(), "ro-project");
     }
 }

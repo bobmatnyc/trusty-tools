@@ -10848,7 +10848,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10867,6 +10867,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2 0.10.9",
  "strsim 0.11.1",
  "sysinfo",
