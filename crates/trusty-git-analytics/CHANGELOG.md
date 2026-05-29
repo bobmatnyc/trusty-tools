@@ -5,6 +5,30 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-05-29
+
+### Added
+
+- **Developer Quality metric (#377)** — weekly reports now include a per-developer
+  Quality score (1–5 scale) alongside existing velocity metrics. New columns added
+  to weekly reporting output:
+
+  - `revert_count` — number of revert commits authored in the reporting window
+  - `bugfix_count` — number of commits classified as bugfix
+  - `ticketed_count` — number of commits that reference a ticket ID
+  - `quality_score` — composite numeric score (1–5) derived from the above signals
+  - `quality_tshirt` — human-readable t-shirt size label (`A`–`E` mapped from score)
+  - `abandoned_pr_count` — pull requests opened but never merged within the window
+
+- **Unified revert detection** — revert commits are now identified consistently
+  across all report types using a single shared regex-based detector. Previously
+  revert heuristics were duplicated across classify and report stages.
+
+- **Abandoned-PR tracking** — `tga collect` now records the opened-at timestamp
+  for pull requests. The weekly reporter counts PRs that have been open for more
+  than a configurable threshold (default: 14 days) without merging as
+  "abandoned," surfacing stale work in team quality snapshots.
+
 ## [2.1.1] - 2026-05-28
 
 ### Fixed
