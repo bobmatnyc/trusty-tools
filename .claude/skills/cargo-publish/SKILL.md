@@ -163,6 +163,19 @@ registry — the same view downstream consumers will see.
 5. **Build a publish order**: publish all missing versions first, wait for
    propagation, then downstream crates
 
+### Dependency Publish Order (trusty-tools)
+
+Publish library crates before the crates that depend on them. The ordering for this workspace:
+
+```
+trusty-common → trusty-mcp-core → trusty-embedder → trusty-symgraph
+  → trusty-search, trusty-memory-core, trusty-analyze
+  → trusty-mpm-core → trusty-mpm-client → trusty-mpm-daemon, trusty-mpm-mcp
+  → trusty-mpm-cli, trusty-mpm-tui
+```
+
+If only a subset of these crates changed, publish only the changed ones and their direct downstream dependents, in order.
+
 ### Worked Example From Today
 
 **Session publishes**: trusty-common 0.8.0, trusty-search 0.13.1, tga 1.4.2
@@ -266,6 +279,16 @@ cargo install trusty-search
 # Both trusty-search AND trusty-embedder land in ~/.cargo/bin/
 ```
 
+## publish=false Guard
+
+Before running `cargo publish` for any crate, verify it is not marked non-publishable:
+
+```bash
+grep "publish" crates/<dir>/Cargo.toml
+```
+
+If the output contains `publish = false`, **do not publish** that crate. Common non-published crates include binary/CLI crates and internal tooling crates. When in doubt, read the manifest.
+
 ## Sidecar Publish Rule (RED)
 
 **Sidecar lib crates whose lib is a dependency of a published main crate
@@ -291,19 +314,46 @@ fails with "dependency not found" because the sidecar lib can't be resolved.
 
 ## Versioning Conventions
 
-Bump versions according to semantic versioning:
+### Semver Bump Rules (by Conventional Commit Type)
+
+Always read the git log since the last tag to determine the correct bump before editing any version:
+
+```bash
+git log <crate-name>-v<last-version>..HEAD --oneline -- crates/<dir>/
+```
+
+Map commit types to semver components:
+
+| Commit type | Version component |
+|---|---|
+| `feat:` | MINOR (x.Y.0) |
+| `fix:`, `chore:`, `perf:`, `refactor:` | PATCH (x.y.Z) |
+| `BREAKING CHANGE` in footer, or `!` suffix on any type | MAJOR (X.0.0) |
+
+Examples by change type:
 
 | Change Type | Example | Bump Rule |
 |---|---|---|
-| New public function | `feat: add auth handler` | Minor (0.x → 0.x+1.0 pre-1.0; x.y → x.y+1.0 post-1.0) |
-| Bug fix | `fix: resolve race in async` | Patch (0.0.x → 0.0.x+1 pre-1.0; x.y.z → x.y.z+1 post-1.0) |
-| Chore | `chore: update deps` | Patch |
-| **BREAKING** public API | `BREAKING: remove deprecated fn` | Major post-1.0; Minor pre-1.0 |
+| New public function | `feat: add auth handler` | Minor (x.y → x.y+1.0) |
+| Bug fix | `fix: resolve race in async` | Patch (x.y.z → x.y.z+1) |
+| Chore / perf / refactor | `chore: update deps` | Patch |
+| **BREAKING** public API | `feat!: remove deprecated fn` | Major post-1.0; Minor pre-1.0 |
 
 **Workspace-pinned versions**:
 - Crates using `[workspace.package]` (trusty-mpm-* family) bump together
 - Edit version once in root `Cargo.toml`, all members inherit it
-- Tag each release as usual; they will share a version suffix
+- Tag each crate individually (`trusty-mpm-core-v<ver>`, `trusty-mpm-cli-v<ver>`, etc.)
+- Publish in dependency order: core first, then consumers
+
+### Checking the Last Released Version
+
+```bash
+# From git tags
+git tag --list '<crate-name>-v*' | sort -V | tail -1
+
+# From crates.io (if published)
+cargo search <crate-name> | head -3
+```
 
 ## Pre-Publish Sequence (Detailed)
 
