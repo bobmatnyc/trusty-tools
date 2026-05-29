@@ -1,7 +1,7 @@
 # trusty-tools — Claude Code Instructions
 
 Unified Rust workspace consolidating the entire trusty-* AI tooling ecosystem.
-22 crates — shared libraries, daemon/MCP servers, the MPM platform, and an
+16 crates — shared libraries, daemon/MCP servers, the MPM platform, and an
 orchestrator — all co-located under one Cargo workspace.
 
 ## Project Overview
@@ -28,7 +28,7 @@ Key consumers of the shared libraries:
 - **trusty-memory-core / trusty-memory** — memory palace storage + MCP frontend
 - **trusty-analyze** — code analysis daemon (complexity, smells, quality metrics)
 
-Work touching a shared crate (e.g. `trusty-common`, `trusty-mcp-core`) may
+Work touching a shared crate (e.g. `trusty-common`, `trusty-embedderd`) may
 require bumping the dependent crate's version and verifying its tests. Always
 run `cargo check` and `cargo test -p <crate>` after modifying a library crate,
 then propagate changes to all crates that depend on it before committing.
@@ -94,16 +94,16 @@ cargo test -p trusty-search -- my_test_name
 
 # Run a binary from a specific crate
 cargo run -p trusty-search -- start
-cargo run -p trusty-mpm-cli -- --help
+cargo run -p trusty-mpm -- --help
 
 # Build only the binary, not the whole workspace
-cargo build --release -p trusty-mpm-cli
+cargo build --release -p trusty-mpm
 
 # Lint a single crate
 cargo clippy -p trusty-search -- -D warnings
 
 # Test a single crate with ignored tests
-cargo test -p trusty-embedder -- --include-ignored
+cargo test -p trusty-embedderd -- --include-ignored
 
 # Run trusty-search performance regression suite (requires daemon + indexed trusty-tools)
 cargo test -p trusty-search --test baseline_trusty_tools -- --include-ignored --nocapture
@@ -126,29 +126,26 @@ trusty-tools/               # workspace root
 ├── Cargo.toml              # workspace manifest — glob members = ["crates/*"]
 ├── Cargo.lock
 ├── crates/
-│   ├── trusty-common/      # shared utilities, tracing, OpenRouter chat
-│   ├── trusty-embedder/    # fastembed wrapper (AllMiniLML6V2Q, 384-dim)
-│   ├── trusty-mcp-core/    # MCP primitives and JSON-RPC types
-│   ├── trusty-symgraph/    # symbol graph engine (tree-sitter parser)
-│   ├── trusty-rpc/         # RPC helpers and service descriptors
-│   ├── trusty-tickets/     # GitHub Issues ticketing integration
-│   ├── trusty-gworkspace/  # Google Workspace client (Calendar, Tasks, Drive)
-│   ├── trusty-cto-db/      # SQLite CTO database (rusqlite-backed)
-│   ├── tc-services/        # service-layer adapters: CTO DB, Granola, GWorkspace
-│   ├── trusty-search/      # hybrid BM25 + vector + KG search daemon + MCP server
-│   ├── trusty-memory-core/ # re-export shim — absorbed into trusty-common's memory-core feature
-│   ├── trusty-memory/      # MCP server frontend for memory (includes Svelte UI)
-│   ├── trusty-analyze/     # code analysis daemon + MCP server
-│   ├── trusty-mpm-core/    # MPM core domain types and traits
-│   ├── trusty-mpm-mcp/     # MCP server for MPM
-│   ├── trusty-mpm-daemon/  # MPM background daemon service
-│   ├── trusty-mpm-client/  # MPM API client library
-│   ├── trusty-mpm-cli/     # CLI binary (trusty-mpm / tm)
-│   ├── trusty-mpm-tui/     # MPM terminal UI
-│   ├── trusty-mpm-telegram/ # MPM Telegram bot integration
-│   ├── trusty-mpm-gui/     # MPM desktop GUI (Tauri)
+│   ├── trusty-common/       # shared utilities, tracing, OpenRouter chat, memory-core feature
+│   ├── trusty-embedderd/    # fastembed wrapper — sidecar daemon for trusty-search
+│   ├── trusty-bm25-daemon/  # BM25 index daemon — sidecar for trusty-memory
+│   ├── trusty-symgraph/     # symbol graph engine (tree-sitter parser)
+│   ├── trusty-rpc/          # RPC helpers and service descriptors
+│   ├── trusty-tickets/      # GitHub Issues ticketing integration
+│   ├── trusty-gworkspace/   # Google Workspace client (Calendar, Tasks, Drive)
+│   ├── trusty-cto-db/       # SQLite CTO database (rusqlite-backed)
+│   ├── tc-services/         # service-layer adapters: CTO DB, Granola, GWorkspace
+│   ├── trusty-search/       # hybrid BM25 + vector + KG search daemon + MCP server
+│   ├── trusty-memory-core/  # re-export shim — absorbed into trusty-common's memory-core feature
+│   ├── trusty-memory/       # MCP server frontend for memory (includes Svelte UI)
+│   ├── trusty-analyze/      # code analysis daemon + MCP server
+│   ├── trusty-mpm/          # unified MPM platform: CLI (tm/trusty-mpm), daemon, MCP, TUI, Telegram
+│   ├── trusty-mpm-gui/      # MPM desktop GUI (Tauri, publish=false)
+│   ├── cto-assistant/       # CTO assistant CLI (publish=false)
 │   ├── trusty-git-analytics/ # developer productivity analytics (tga)
-│   └── open-mpm/           # MPM orchestration platform
+│   ├── open-mpm/            # MPM orchestration platform (publish=false)
+│   ├── open-mpm-agent-api/  # open-mpm agent API types (publish=false)
+│   └── open-mpm-local/      # open-mpm local execution (publish=false)
 └── .gitignore
 ```
 
@@ -225,7 +222,7 @@ Current known violations (file refactor tickets open):
 - `crates/open-mpm/src/workflow/engine.rs` (~4,965 lines) → #172
 
 🔴 **`thiserror` for libraries, `anyhow` for binaries** — library crates
-(`trusty-common`, `trusty-mcp-core`, etc.) define structured error enums with
+(`trusty-common`, `trusty-embedderd`, `trusty-bm25-daemon`, etc.) define structured error enums with
 `#[derive(thiserror::Error)]`. Binary and daemon crates use `anyhow::Result`
 throughout.
 
@@ -233,7 +230,7 @@ throughout.
 `axum-server` feature flag. Do not add axum as an unconditional dependency in
 any library crate. Enable it explicitly in crates that serve HTTP.
 
-🟡 **Rust editions** — `edition = "2024"` for `trusty-mpm-*` and `open-mpm`
+🟡 **Rust editions** — `edition = "2024"` for `trusty-mpm`, `trusty-mpm-gui`, `open-mpm`, `open-mpm-agent-api`, and `open-mpm-local`
 (they use let-chains); `edition = "2021"` for all other crates. Check the crate
 `Cargo.toml` before assuming an edition.
 
@@ -278,7 +275,7 @@ Release workflow:
 7. Publish: `cargo publish -p <crate-name>`.
 8. Build the release binary (if not already fresh): `cargo build --release -p <crate-name>`.
 9. Install the binary locally with `cargo install --path crates/<dir> --locked`
-   (for crates with binaries, e.g. trusty-search, trusty-mpm-cli). This ensures the
+   (for crates with binaries, e.g. trusty-search, trusty-mpm). This ensures the
    binary on PATH is always the version that was just released.
 
    🔴 **Never `cp target/release/<binary> ~/.cargo/bin/<binary>` on macOS.**
@@ -396,11 +393,13 @@ refs, never working trees.
 Detailed implementation information for each crate lives in its own documentation:
 
 - **trusty-common** — see `crates/trusty-common/README.md` and `docs/trusty-common/`
-- **trusty-embedder** — see `crates/trusty-embedder/README.md`
+- **trusty-embedderd** — see `crates/trusty-embedderd/README.md` (fastembed sidecar daemon)
+- **trusty-bm25-daemon** — see `crates/trusty-bm25-daemon/README.md` (BM25 index sidecar)
 - **trusty-memory / trusty-memory-core** — see `crates/trusty-memory/README.md` and `docs/trusty-memory/` (licensed MIT, not Elastic-2.0)
 - **trusty-search** — see `crates/trusty-search/README.md` and **`docs/trusty-search/`** (primary worked example with regression testing, research, sessions)
 - **trusty-analyze** — see `crates/trusty-analyze/README.md` and `docs/trusty-analyze/` (licensed MIT, not Elastic-2.0)
-- **trusty-mpm-cli, trusty-mpm-daemon, trusty-mpm-tui, trusty-mpm-gui, trusty-mpm-telegram** — see `crates/trusty-mpm-{variant}/README.md` and `docs/trusty-mpm/`
+- **trusty-mpm** — see `crates/trusty-mpm/README.md` and `docs/trusty-mpm/` (unified platform: CLI binaries `tm`/`trusty-mpm`, daemon, MCP server, TUI, Telegram)
+- **trusty-mpm-gui** — see `crates/trusty-mpm-gui/README.md` (Tauri desktop GUI, publish=false)
 - **open-mpm** — see `crates/open-mpm/README.md` and `docs/open-mpm/`
 - **trusty-git-analytics** — see `crates/trusty-git-analytics/README.md` and `docs/trusty-git-analytics/`
 
@@ -417,7 +416,7 @@ When the user (or any agent) refers to a crate by abbreviation, resolve it using
 | `ts` | trusty-search | `-p trusty-search` | `crates/trusty-search/` |
 | `tc` | trusty-common | `-p trusty-common` | `crates/trusty-common/` |
 | `ta` | trusty-analyze | `-p trusty-analyze` | `crates/trusty-analyze/` |
-| `mpm` | trusty-mpm-cli | `-p trusty-mpm-cli` | `crates/trusty-mpm-cli/` |
+| `mpm` | trusty-mpm | `-p trusty-mpm` | `crates/trusty-mpm/` |
 | `open-mpm` | open-mpm | `-p open-mpm` | `crates/open-mpm/` |
 
 These abbreviations apply everywhere: ticket descriptions, build commands, references in conversation. Always expand before running `cargo` commands.
@@ -480,10 +479,10 @@ cargo run -p trusty-search -- query "fn authenticate" --index <id>
 cargo run -p trusty-search -- serve
 
 # MPM daemon
-RUST_LOG=info cargo run -p trusty-mpm-daemon --bin trusty-mpmd
+RUST_LOG=info cargo run -p trusty-mpm --bin trusty-mpmd
 
 # MPM CLI (tm / trusty-mpm)
-cargo run -p trusty-mpm-cli -- --help
+cargo run -p trusty-mpm -- --help
 
 # trusty-memory (MCP server + embedded Svelte UI)
 RUST_LOG=info cargo run -p trusty-memory
@@ -522,7 +521,7 @@ behind the `axum-server` feature flag, matching the pattern in `trusty-common`.
 Otherwise every library consumer pulls in the full axum + tower stack.
 
 🟡 **Editing a shared crate without propagating changes** — modifying
-`trusty-common`, `trusty-mcp-core`, `trusty-embedder`, or `trusty-symgraph`
+`trusty-common`, `trusty-embedderd`, `trusty-bm25-daemon`, or `trusty-symgraph`
 can silently break dependents. Always run `cargo check` (workspace-wide) and
 `cargo test -p <consumer>` for every crate that imports the edited library.
 
@@ -548,7 +547,7 @@ bad examples of what happens when this rule isn't enforced.
 `rustup update` and picking up a new nightly may introduce syntax that
 compiles locally but fails on CI. Prefer stable channel toolchains.
 
-🟢 **Edition mismatch** — `trusty-mpm-*` and `open-mpm` use edition 2024;
+🟢 **Edition mismatch** — `trusty-mpm`, `trusty-mpm-gui`, `open-mpm`, `open-mpm-agent-api`, and `open-mpm-local` use edition 2024;
 all other crates use edition 2021. Let-chains (`if let … && let …`) only
 work in edition 2024. Do not copy let-chain patterns into edition-2021 crates.
 
@@ -564,5 +563,5 @@ PRs, issues, or commit messages that reference the former repo names.
 | `bobmatnyc/trusty-memory` | `crates/trusty-common` (`memory-core` feature) + `crates/trusty-memory-core` (shim) + `crates/trusty-memory` (MCP frontend) |
 | `bobmatnyc/trusty-analyze` | `crates/trusty-analyze` |
 | `bobmatnyc/trusty-git-analytics` | `crates/trusty-git-analytics` |
-| `bobmatnyc/trusty-mpm` | `crates/trusty-mpm-{core,mcp,daemon,client,cli,tui,telegram,gui}` |
+| `bobmatnyc/trusty-mpm` | `crates/trusty-mpm/` (unified crate) + `crates/trusty-mpm-gui/` |
 | `bobmatnyc/open-mpm` | `crates/open-mpm` |
