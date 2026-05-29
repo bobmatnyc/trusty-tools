@@ -55,3 +55,6 @@ crates/trusty-memory/ui/node_modules/
 # Temp directories and analytics databases
 claude-mpm-patch/
 tga.db
+
+# mdBook build output
+/docs/book/

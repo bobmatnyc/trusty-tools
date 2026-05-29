@@ -1,0 +1,20 @@
+[book]
+title = "trusty-tools documentation"
+authors = ["Bob Matsuoka"]
+description = "Documentation for the trusty-tools Rust workspace — shared libraries, daemon/MCP servers, and the MPM orchestration platform."
+language = "en"
+src = "."
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/bobmatnyc/trusty-tools"
+edit-url-template = "https://github.com/bobmatnyc/trusty-tools/edit/main/docs/{path}"
+default-theme = "rust"
+git-repository-icon = "fa-github"
+
+[output.html.fold]
+enable = true
+level = 1

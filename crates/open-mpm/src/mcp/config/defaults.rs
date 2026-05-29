@@ -203,7 +203,7 @@ max_tokens = 2048
 # line, JSON array for batch). Endpoints below are DISABLED by default —
 # flip `enabled = true` once the corresponding binary supports an OpenRPC
 # stdio mode (e.g. via a `--rpc` flag). See
-# docs/research/openrpc-trusty-contract.md for the wire format.
+# docs/open-mpm/research/openrpc-trusty-contract.md for the wire format.
 [tool_registry]
 scope_enforcement = "deny"
 
@@ -246,7 +246,7 @@ timeout_ms = 5000
 # `rpc.discover` and advertises Google OAuth scopes per tool through the
 # `x-google-scopes` extension. Disabled by default — flip `enabled = true`
 # after authenticating (`gworkspace-mcp auth login`) on a machine with the
-# binary on $PATH. See docs/research/openrpc-trusty-contract.md.
+# binary on $PATH. See docs/open-mpm/research/openrpc-trusty-contract.md.
 [[tool_registry.endpoints]]
 name = "gworkspace"
 driver = "direct"

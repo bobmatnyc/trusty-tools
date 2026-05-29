@@ -232,8 +232,6 @@ open-mpm/
 │   └── state/              # Runtime state (gitignored): build.json, history/,
 │                           # initialized, project-index.md, processes.json,
 │                           # code/, sessions/, worktrees/
-├── docs/
-│   └── research/           # Research docs (see below)
 └── src/
     ├── main.rs             # Entry point + PM loop
     ├── agents/             # Agent loading + subprocess spawning
@@ -245,6 +243,10 @@ Note: The project previously used a separate `config/` directory for bundled
 config; it has been folded into `.open-mpm/` (v0.1.25) so the harness's own
 config follows the same layout users adopt in their projects. Runtime state
 lives under `.open-mpm/state/` (gitignored) to keep it out of commits.
+
+Note: Crate documentation (research, design, spec, user, developer docs) now
+lives in the repo-level tree at `docs/open-mpm/` rather than in-crate. See
+`docs/open-mpm/README.md` for the index.
 
 ## POC Status
 
@@ -280,15 +282,15 @@ Expected flow:
 6. Sub-agent returns result JSON on stdout
 7. PM reads result, returns to user
 
-Reference: `docs/research/bake-off-challenges.md`
+Reference: `docs/open-mpm/research/bake-off-challenges.md`
 
 ## Research
 
-All research docs are in `docs/research/`:
+All research docs live in the repo-level tree at `docs/open-mpm/research/`
+(indexed by `docs/open-mpm/research/README.md`). Highlights:
 
 | File | Topic |
 |---|---|
-| `README.md` | Research index and summary |
 | `rust-ai-frameworks.md` | Evaluated Rust LLM client libraries |
 | `subprocess-ipc-patterns.md` | NDJSON IPC design, deadlock prevention |
 | `agent-delegation-patterns.md` | PM orchestrator + sub-agent patterns |

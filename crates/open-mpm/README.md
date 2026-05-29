@@ -304,4 +304,16 @@ the CTRL banner and `--version` output.
 3. More format translators and content-aware write_file heuristics.
 4. Operational tooling: `/status` metrics, traceability across PM↔sub-agents.
 
-See `CLAUDE.md` for architectural detail and `docs/research/` for design notes.
+See `CLAUDE.md` for architectural detail.
+
+## 📚 Documentation
+
+Design, research, specification, user, and developer docs live in the
+repo-level `docs/open-mpm/` tree — not in this crate. Start at
+[`docs/open-mpm/README.md`](../../docs/open-mpm/README.md) (the master index),
+or jump straight to:
+
+- [`docs/open-mpm/spec/`](../../docs/open-mpm/spec/) — canonical PRD, ARCHITECTURE, COMPONENTS.
+- [`docs/open-mpm/research/`](../../docs/open-mpm/research/) — investigation & design notes.
+- [`docs/open-mpm/decisions/`](../../docs/open-mpm/decisions/) — crate-specific ADRs.
+- [`docs/adr/`](../../docs/adr/) — workspace-wide architecture decisions.
