@@ -91,8 +91,23 @@ pub(super) fn deduplicate_sections(text: &str) -> String {
 /// Negation terms we must never strip, even when they're stop words.
 static NEGATIONS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [
-        "not", "no", "never", "cannot", "can't", "don't", "won't", "isn't", "aren't", "doesn't",
-        "didn't", "wasn't", "weren't", "shouldn't", "wouldn't", "couldn't", "mustn't",
+        "not",
+        "no",
+        "never",
+        "cannot",
+        "can't",
+        "don't",
+        "won't",
+        "isn't",
+        "aren't",
+        "doesn't",
+        "didn't",
+        "wasn't",
+        "weren't",
+        "shouldn't",
+        "wouldn't",
+        "couldn't",
+        "mustn't",
     ]
     .into_iter()
     .collect()

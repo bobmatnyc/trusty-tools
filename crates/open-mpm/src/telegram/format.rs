@@ -25,12 +25,7 @@ use super::MAX_TELEGRAM_MESSAGE;
 /// HTML send is rejected.
 /// Test: Side-effect-only (network); the chunking is covered by `split_message`
 /// tests.
-pub(super) async fn send_long_html(
-    bot: &Bot,
-    chat_id: ChatId,
-    user_msg_id: MessageId,
-    text: &str,
-) {
+pub(super) async fn send_long_html(bot: &Bot, chat_id: ChatId, user_msg_id: MessageId, text: &str) {
     let chunks = split_message(text, MAX_TELEGRAM_MESSAGE);
     let total = chunks.len();
     for (i, chunk) in chunks.iter().enumerate() {

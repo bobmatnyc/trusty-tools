@@ -50,7 +50,9 @@ use pairing::{
 // Re-export the public REPL-facing API so callers continue to use
 // `crate::telegram::{PendingPairs, new_pending_pairs, issue_repl_pairing_code,
 // run_telegram_bot}` after the split.
-pub use pairing::{PendingPairs, SENTINEL_PAIRING_CHAT_ID, issue_repl_pairing_code, new_pending_pairs};
+pub use pairing::{
+    PendingPairs, SENTINEL_PAIRING_CHAT_ID, issue_repl_pairing_code, new_pending_pairs,
+};
 
 /// Maximum characters per Telegram message.
 ///

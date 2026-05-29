@@ -53,8 +53,7 @@ pub struct SlackRbacConfig {
 /// Why: Unknown users must NOT reach the LLM or any tool — the bot speaks as
 /// a general "Virtual CTO" with no internal-data access. Returned verbatim,
 /// bypassing `run_pm_task_with_persona` entirely.
-pub(super) const VIRTUAL_CTO_MESSAGE: &str =
-    ":lock: This assistant is for Duetto engineering team members. \
+pub(super) const VIRTUAL_CTO_MESSAGE: &str = ":lock: This assistant is for Duetto engineering team members. \
 I can discuss general technology strategy and software architecture, but I don't have access to \
 internal Duetto data. Feel free to ask general questions.";
 

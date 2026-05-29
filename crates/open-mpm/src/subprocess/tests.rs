@@ -12,7 +12,6 @@ use tokio::io::AsyncBufReadExt;
 
 use crate::ipc::{IpcMessage, parse_message};
 
-
 /// #147: A subprocess that writes a valid IpcMessage::Result to stdout and
 /// then exits with code 1 must be treated as success by the rescue logic in
 /// `spawn_subagent_and_run_with_full_env_ctx`. This mirrors the

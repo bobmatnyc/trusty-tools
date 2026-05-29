@@ -20,9 +20,7 @@ use super::pairing::{
     PAIRING_CODE_TTL, PairOutcome, SENTINEL_PAIRING_CHANNEL_ID, generate_pairing_code,
     issue_repl_pairing_code, new_pending_pairs, verify_pair_attempt,
 };
-use super::rbac::{
-    SlackRbacConfig, VIRTUAL_CTO_MESSAGE, default_rbac_users, parse_rbac_users,
-};
+use super::rbac::{SlackRbacConfig, VIRTUAL_CTO_MESSAGE, default_rbac_users, parse_rbac_users};
 use super::{ENVELOPE_DEDUP_CAP, dedup_check_and_record};
 
 #[test]

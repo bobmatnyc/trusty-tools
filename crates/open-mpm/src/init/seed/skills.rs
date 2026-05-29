@@ -14,7 +14,9 @@ use std::path::PathBuf;
 use anyhow::Result;
 use chrono::Utc;
 
-use super::{SKILL_SEED_MAX_PER_SOURCE, collect_md_files, file_mtime_secs, parse_skill_frontmatter};
+use super::{
+    SKILL_SEED_MAX_PER_SOURCE, collect_md_files, file_mtime_secs, parse_skill_frontmatter,
+};
 use crate::init::{ProjectInitializer, SKILLS_SEED_SESSION_ID};
 use crate::memory::{Embedder, MemoryStore, Segment};
 

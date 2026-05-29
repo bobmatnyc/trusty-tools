@@ -105,242 +105,6 @@ use tools::write_file::WriteFileTool;
 use tools::{ToolRegistry, delegate::DelegateToAgentTool, shell_exec::ShellExecTool};
 use workflow::WorkflowEngine;
 
-/// Handle `open-mpm agents <subcommand>` (#167).
-///
-/// Why: Exposes the discovery results to operators. Without this, there's
-/// no way to verify which agents were picked up from which directory.
-/// What: Currently supports `agents list`. Prints discovered agents with
-/// their source and capability tags in the format described in the issue.
-/// Test: Covered manually; unit-tested via `AgentRegistry::list`.
-pub(super) async fn run_agents_subcommand(args: &[String]) -> Result<()> {
-    let sub = args.first().map(String::as_str).unwrap_or("list");
-    match sub {
-        "list" => {
-            let reg = agents::registry::AgentRegistry::load(&agents::registry::agent_search_paths(
-                &default_bundled_config_dir(),
-            ));
-            let items = reg.list();
-            println!("Discovered agents ({}):", items.len());
-            let bundled = default_bundled_config_dir().join("agents");
-            let home = std::env::var_os("HOME").map(PathBuf::from);
-            let max_name = items.iter().map(|s| s.name.len()).max().unwrap_or(0).max(4);
-            for s in items {
-                let source_label = classify_source(&s.source, &bundled, home.as_deref());
-                let mut parts = Vec::new();
-                if !s.roles.is_empty() {
-                    parts.push(format!("roles: {}", s.roles.join(",")));
-                }
-                if !s.languages.is_empty() {
-                    parts.push(format!("languages: {}", s.languages.join(",")));
-                }
-                if !s.frameworks.is_empty() {
-                    parts.push(format!("frameworks: {}", s.frameworks.join(",")));
-                }
-                if !s.tags.is_empty() {
-                    parts.push(format!("tags: {}", s.tags.join(",")));
-                }
-                println!(
-                    "  {name:<width$}  [{src}]  {caps}",
-                    name = s.name,
-                    width = max_name,
-                    src = source_label,
-                    caps = parts.join("  ")
-                );
-            }
-            Ok(())
-        }
-        other => {
-            // #366: Surface a "did you mean?" hint for typos like
-            // `agents lst` -> `agents list`.
-            let known = &["list"];
-            if let Some(s) = cli::did_you_mean(other, known, 2) {
-                eprintln!("open-mpm agents: unknown subcommand '{other}'. Did you mean '{s}'?");
-            } else {
-                eprintln!("open-mpm agents: unknown subcommand '{other}'. Try: list");
-            }
-            bail!("unknown agents subcommand: {other}");
-        }
-    }
-}
-
-/// Handle `open-mpm plugins <subcommand>` (#414).
-///
-/// Why: Operators need a quick way to confirm which optional MCP plugins
-/// (trusty-search, trusty-memory) the harness is able to spawn. Without
-/// this surface, plugin misconfiguration is invisible until an agent tries
-/// to use a missing tool.
-/// What: Supports `list`, `status` (default), and `check`. All three
-/// currently render the same status table; we keep them as distinct verbs
-/// so future expansion (e.g. `check` returning non-zero on missing plugins)
-/// doesn't break existing scripts.
-/// Test: Manual — `om plugins status` on a machine without the trusty
-/// binaries reports both as UNAVAILABLE; with binaries on PATH and an MCP
-/// handshake, both report ACTIVE.
-pub(super) async fn run_plugins_subcommand(args: &[String]) -> Result<()> {
-    let sub = args.first().map(String::as_str).unwrap_or("status");
-    match sub {
-        "list" | "status" | "check" => {
-            print_plugins_status().await;
-            Ok(())
-        }
-        other => {
-            let known = &["list", "status", "check"];
-            if let Some(s) = cli::did_you_mean(other, known, 2) {
-                eprintln!("open-mpm plugins: unknown subcommand '{other}'. Did you mean '{s}'?");
-            } else {
-                eprintln!(
-                    "open-mpm plugins: unknown subcommand '{other}'. Try: list | status | check"
-                );
-            }
-            bail!("unknown plugins subcommand: {other}");
-        }
-    }
-}
-
-/// Why: Wire `om eval run --suite <path> [--agent <toml>] [--json]` (#449)
-/// into the CLI dispatch. Loads the suite, resolves the agent system prompt
-/// (defaults to a generic helpful-assistant prompt), drives the live
-/// OpenRouter client, and prints either a human-friendly report or a JSON
-/// array of `EvalResult`.
-/// What: Subcommands: `run`. Exit code 0 iff all cases pass.
-/// Test: Eval framework itself is unit-tested in `src/eval/mod.rs`; this
-/// function is integration-level (requires OPENROUTER_API_KEY).
-pub(super) async fn run_eval_subcommand(args: &[String]) -> Result<()> {
-    let sub = args.first().map(String::as_str).unwrap_or("run");
-    if sub != "run" {
-        eprintln!("open-mpm eval: unknown subcommand '{sub}'. Try: run");
-        bail!("unknown eval subcommand: {sub}");
-    }
-
-    // Parse flags: --suite <path> [--agent <toml>] [--json]
-    let rest = &args[1..];
-    let mut suite_path: Option<String> = None;
-    let mut agent_path: Option<String> = None;
-    let mut as_json = false;
-    let mut i = 0;
-    while i < rest.len() {
-        match rest[i].as_str() {
-            "--suite" => {
-                suite_path = rest.get(i + 1).cloned();
-                i += 2;
-            }
-            "--agent" => {
-                agent_path = rest.get(i + 1).cloned();
-                i += 2;
-            }
-            "--json" => {
-                as_json = true;
-                i += 1;
-            }
-            other => {
-                eprintln!("open-mpm eval run: unknown flag '{other}'");
-                bail!("unknown flag");
-            }
-        }
-    }
-
-    let suite_path = suite_path.ok_or_else(|| anyhow::anyhow!("--suite <path> is required"))?;
-    let suite = eval::EvalSuite::from_toml(std::path::Path::new(&suite_path))?;
-
-    // Resolve agent system prompt + model.
-    let (system_prompt, model) = if let Some(p) = agent_path.as_deref() {
-        let cfg = agents::AgentConfig::load(std::path::Path::new(p))?;
-        (cfg.system_prompt.content.clone(), cfg.agent.model.clone())
-    } else {
-        (
-            "You are a helpful assistant.".to_string(),
-            "anthropic/claude-sonnet-4-6".to_string(),
-        )
-    };
-
-    // Live LLM client adapter — uses the existing OpenRouter chat path.
-    let client = llm::create_client()?;
-    let live = LiveEvalClient {
-        client,
-        model: model.clone(),
-    };
-
-    println!("Running {} eval cases...\n", suite.cases.len());
-    let results = suite.run(&system_prompt, &live).await;
-
-    if as_json {
-        println!("{}", serde_json::to_string_pretty(&results)?);
-    } else {
-        print!("{}", eval::EvalSuite::report(&results));
-    }
-
-    let failed = results.iter().filter(|r| !r.passed).count();
-    if failed > 0 {
-        std::process::exit(1);
-    }
-    Ok(())
-}
-
-/// Live `EvalLlmClient` driven by the existing OpenRouter chat path.
-struct LiveEvalClient {
-    client: async_openai::Client<async_openai::config::OpenAIConfig>,
-    model: String,
-}
-
-#[async_trait::async_trait]
-impl eval::EvalLlmClient for LiveEvalClient {
-    async fn complete_with_tools(
-        &self,
-        system: &str,
-        user: &str,
-        _user_tier: Option<&str>,
-    ) -> Result<(String, Vec<String>)> {
-        let resp = llm::chat(&self.client, &self.model, system, user, 0.0, 1024, vec![]).await?;
-        let names = resp.tool_calls.iter().map(|t| t.name.clone()).collect();
-        Ok((resp.content.unwrap_or_default(), names))
-    }
-}
-
-/// Render the plugin status table to stdout.
-///
-/// Why: Shared by `list`, `status`, and `check` so output stays consistent.
-/// What: Initialises a `PluginManager`, prints one line per known plugin
-/// with state and either the discovered binary path or an install hint.
-async fn print_plugins_status() {
-    use plugins::PluginState;
-    // #424: Reuse the process-wide manager when one is already initialised
-    // (e.g. when this is reached via an in-REPL command in the future). At
-    // CLI top-level the OnceLock is empty, so we fall back to a fresh
-    // `init_global()` so the global is also populated for any subsequent
-    // operations in the same process.
-    let mgr = match plugins::plugin_manager() {
-        Some(existing) => existing,
-        None => plugins::init_global().await,
-    };
-    let s = mgr.status();
-    println!("Plugin Status:");
-    print_plugin_row("trusty-search", s.search, "cargo install trusty-search");
-    print_plugin_row("trusty-memory", s.memory, "cargo install trusty-memory");
-
-    fn print_plugin_row(name: &str, state: PluginState, install_hint: &str) {
-        let detail = match state {
-            PluginState::Active => match resolve_binary_path(name) {
-                Some(p) => format!("(path: {p})"),
-                None => String::new(),
-            },
-            PluginState::Unavailable => format!("(install: {install_hint})"),
-        };
-        println!("  {name:<14}  {:<11}  {detail}", state.label());
-    }
-
-    fn resolve_binary_path(name: &str) -> Option<String> {
-        let out = std::process::Command::new("which")
-            .arg(name)
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if path.is_empty() { None } else { Some(path) }
-    }
-}
-
 /// Handle `open-mpm start [--port <port>]` (#403).
 ///
 /// Why: Friendly subcommand alias for `--service start` so users get the
@@ -363,7 +127,7 @@ async fn print_plugins_status() {
 /// exits 1.
 /// Test: Manual — `om dashboard` should pop the GUI when built; the error
 /// path is exercised by deleting the binaries and re-running.
-pub(super) async fn run_dashboard_subcommand(args: &[String]) -> Result<()> {
+pub(crate) async fn run_dashboard_subcommand(args: &[String]) -> Result<()> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: open-mpm dashboard|dash");
         println!();
@@ -438,7 +202,7 @@ pub(super) async fn run_dashboard_subcommand(args: &[String]) -> Result<()> {
 /// discovered skill with source label + tags. With `--tag <tag>` (repeatable),
 /// filters + ranks by tag-overlap score.
 /// Test: Covered manually; unit-tested via `SkillRegistry::find_by_tags`.
-pub(super) async fn run_skills_subcommand(args: &[String]) -> Result<()> {
+pub(crate) async fn run_skills_subcommand(args: &[String]) -> Result<()> {
     let sub = args.first().map(String::as_str).unwrap_or("list");
     match sub {
         "list" => {
@@ -644,7 +408,7 @@ fn classify_skill_source(source: &Path, bundled: &Path, home: Option<&Path>) -> 
 /// the full absolute path. Mapping known dirs to labels keeps output tidy.
 /// What: Returns `bundled`, `.open-mpm/agents`, `.claude/agents`,
 /// `~/.open-mpm/agents`, `~/.claude/agents`, or the full path as fallback.
-fn classify_source(source: &Path, bundled: &Path, home: Option<&Path>) -> String {
+pub(super) fn classify_source(source: &Path, bundled: &Path, home: Option<&Path>) -> String {
     let parent = source.parent();
     if let Some(parent) = parent {
         if parent == bundled {

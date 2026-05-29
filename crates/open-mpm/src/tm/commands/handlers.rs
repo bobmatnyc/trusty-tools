@@ -1,18 +1,12 @@
-//! /tm REPL slash-command dispatcher.
+//! `/tm` subcommand handlers and their formatting helpers.
 //!
-//! Why: Issue #316 — give users a single `/tm <subcommand>` interface from
-//! the REPL to inspect, create, and control tmux-managed sessions without
-//! leaving the chat. Centralizing the dispatcher here keeps `repl/mod.rs`
-//! focused on UI plumbing and lets the same code be reused by tests / other
-//! frontends.
-//! What: `handle_tm_command` parses the first whitespace-delimited token as a
-//! subcommand name and routes to the corresponding `cmd_*` helper, each of
-//! which writes user-facing output into a shared `String` buffer. All
-//! subcommands return `Result<()>`; helper formatting errors are bubbled up
-//! via `?`.
-//! Test: `tests` module below covers help + unknown-command rendering and
-//! the parse paths that don't require a live tmux server. Live-tmux flows
-//! are exercised by the integration tests.
+//! Why: The per-subcommand `cmd_*` implementations are the bulk of the module;
+//! isolating them from the dispatcher in `mod.rs` keeps both files under the
+//! 500-line cap.
+//! What: One `cmd_*` per `/tm` verb, plus the `render_session_list` /
+//! `truncate` / `parse_new_args` / `require_name` helpers they share.
+//! Test: Covered by `tm::commands::tests` (the parse paths that don't need a
+//! live tmux server).
 
 use std::fmt::Write;
 use std::path::PathBuf;
@@ -21,82 +15,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::sync::Mutex;
 
+use super::{require_name, truncate};
 use crate::tm::manager::TmManager;
 use crate::tm::project::{AdapterType, SessionStatus, TmSession};
 
-/// Dispatch a `/tm <subcommand> [args]` invocation.
-///
-/// Why: Single entry point so the REPL only has to forward the raw arg
-/// string; this function owns the parse of the first token + delegation.
-/// What: Splits `args` on the first whitespace, matches the subcommand name,
-/// and calls the matching helper. Unknown subcommands produce a friendly
-/// hint pointing at `/tm help`.
-/// Test: `tests::dispatch_help` and `tests::dispatch_unknown` below.
-pub async fn handle_tm_command(
-    manager: &Arc<Mutex<TmManager>>,
-    args: &str,
-    out: &mut String,
-) -> Result<()> {
-    let args = args.trim();
-    let (sub, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
-    let rest = rest.trim();
-
-    match sub {
-        "list" | "ls" => cmd_list(manager, out).await,
-        "new" => cmd_new(manager, rest, out).await,
-        "attach" | "a" => cmd_attach(manager, rest, out).await,
-        "pause" => cmd_pause(manager, rest, out).await,
-        "resume" => cmd_resume(manager, rest, out).await,
-        "kill" => cmd_kill(manager, rest, out).await,
-        "send" => cmd_send(manager, rest, out).await,
-        "capture" | "cap" => cmd_capture(manager, rest, out).await,
-        "detect" => cmd_detect(manager, rest, out).await,
-        "reconcile" | "sync" => cmd_reconcile(manager, out).await,
-        "status" | "st" => cmd_status(manager, rest, out).await,
-        "projects" | "proj" => cmd_projects(manager, out).await,
-        "help" | "" => {
-            write_tm_help(out);
-            Ok(())
-        }
-        _ => {
-            writeln!(out, "Unknown /tm subcommand: '{sub}'. Try /tm help")?;
-            Ok(())
-        }
-    }
-}
-
-// ==================== /tm help ====================
-
-/// Write the static help text into `out`.
-///
-/// Why: Centralizing the help text avoids drift between `/help` summary and
-/// `/tm help`'s detail page.
-/// What: One usage line per subcommand.
-/// Test: `tests::dispatch_help` asserts the buffer is non-empty and lists
-/// all the verbs.
-pub fn write_tm_help(out: &mut String) {
-    let _ = writeln!(
-        out,
-        "/tm commands:
-  /tm list                                 List all TM sessions
-  /tm new [name] [-p path] [-a adapter]    Create new session
-  /tm attach <name>                        Show attach command
-  /tm pause <name>                         Pause session (adapter-dependent)
-  /tm resume <name>                        Resume session (adapter-dependent)
-  /tm kill <name>                          Kill tmux session
-  /tm send <name> <message>                Send message to session
-  /tm capture <name> [lines]               Show pane output (default 50)
-  /tm detect <name>                        Auto-detect adapter type
-  /tm reconcile                            Sync registry with live tmux
-  /tm status [name]                        Session detail or summary
-  /tm projects                             List projects with frameworks
-  /tm help                                 Show this help"
-    );
-}
-
 // ==================== /tm list ====================
 
-async fn cmd_list(manager: &Arc<Mutex<TmManager>>, out: &mut String) -> Result<()> {
+pub(super) async fn cmd_list(manager: &Arc<Mutex<TmManager>>, out: &mut String) -> Result<()> {
     let mgr = manager.lock().await;
     let sessions = mgr.list_sessions().await?;
     let projects = mgr.registry.list_projects()?;
@@ -105,7 +30,7 @@ async fn cmd_list(manager: &Arc<Mutex<TmManager>>, out: &mut String) -> Result<(
     render_session_list(&sessions, &projects, out)
 }
 
-fn render_session_list(
+pub(super) fn render_session_list(
     sessions: &[TmSession],
     projects: &[crate::tm::project::TmProject],
     out: &mut String,
@@ -189,16 +114,6 @@ fn render_session_list(
     Ok(())
 }
 
-fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(n.saturating_sub(1)).collect();
-        out.push('…');
-        out
-    }
-}
-
 // ==================== /tm new ====================
 
 /// Parse `/tm new [name] [-p <path>] [-a <adapter>]`.
@@ -207,7 +122,9 @@ fn truncate(s: &str, n: usize) -> String {
 /// optional flags without pulling in clap for a single command.
 /// What: Walks the tokens once, treating the first non-flag token as `name`;
 /// subsequent `-p`/`-a` flags consume the next token as their value.
-fn parse_new_args(rest: &str) -> Result<(Option<String>, Option<PathBuf>, Option<AdapterType>)> {
+pub(super) fn parse_new_args(
+    rest: &str,
+) -> Result<(Option<String>, Option<PathBuf>, Option<AdapterType>)> {
     let mut name: Option<String> = None;
     let mut path: Option<PathBuf> = None;
     let mut adapter: Option<AdapterType> = None;
@@ -236,7 +153,11 @@ fn parse_new_args(rest: &str) -> Result<(Option<String>, Option<PathBuf>, Option
     Ok((name, path, adapter))
 }
 
-async fn cmd_new(manager: &Arc<Mutex<TmManager>>, rest: &str, out: &mut String) -> Result<()> {
+pub(super) async fn cmd_new(
+    manager: &Arc<Mutex<TmManager>>,
+    rest: &str,
+    out: &mut String,
+) -> Result<()> {
     let (name_opt, path_opt, adapter_opt) = match parse_new_args(rest) {
         Ok(v) => v,
         Err(e) => {
@@ -271,7 +192,11 @@ async fn cmd_new(manager: &Arc<Mutex<TmManager>>, rest: &str, out: &mut String) 
 
 // ==================== /tm attach ====================
 
-async fn cmd_attach(manager: &Arc<Mutex<TmManager>>, rest: &str, out: &mut String) -> Result<()> {
+pub(super) async fn cmd_attach(
+    manager: &Arc<Mutex<TmManager>>,
+    rest: &str,
+    out: &mut String,
+) -> Result<()> {
     let name = match require_name(rest, "attach", out)? {
         Some(n) => n,
         None => return Ok(()),
@@ -291,7 +216,11 @@ async fn cmd_attach(manager: &Arc<Mutex<TmManager>>, rest: &str, out: &mut Strin
 
 // ==================== /tm pause / resume / kill ====================
 
-async fn cmd_pause(manager: &Arc<Mutex<TmManager>>, rest: &str, out: &mut String) -> Result<()> {
+pub(super) async fn cmd_pause(
+    manager: &Arc<Mutex<TmManager>>,
+    rest: &str,
+    out: &mut String,
+) -> Result<()> {
     let name = match require_name(rest, "pause", out)? {
         Some(n) => n,
         None => return Ok(()),
@@ -304,7 +233,11 @@ async fn cmd_pause(manager: &Arc<Mutex<TmManager>>, rest: &str, out: &mut String
     Ok(())
 }
 
-async fn cmd_resume(manager: &Arc<Mutex<TmManager>>, rest: &str, out: &mut String) -> Result<()> {
+pub(super) async fn cmd_resume(
+    manager: &Arc<Mutex<TmManager>>,
+    rest: &str,
+    out: &mut String,
+) -> Result<()> {
     let name = match require_name(rest, "resume", out)? {
         Some(n) => n,
         None => return Ok(()),
@@ -317,7 +250,11 @@ async fn cmd_resume(manager: &Arc<Mutex<TmManager>>, rest: &str, out: &mut Strin
     Ok(())
 }
 
-async fn cmd_kill(manager: &Arc<Mutex<TmManager>>, rest: &str, out: &mut String) -> Result<()> {
+pub(super) async fn cmd_kill(
+    manager: &Arc<Mutex<TmManager>>,
+    rest: &str,
+    out: &mut String,
+) -> Result<()> {
     let name = match require_name(rest, "kill", out)? {
         Some(n) => n,
         None => return Ok(()),
@@ -332,7 +269,11 @@ async fn cmd_kill(manager: &Arc<Mutex<TmManager>>, rest: &str, out: &mut String)
 
 // ==================== /tm send ====================
 
-async fn cmd_send(manager: &Arc<Mutex<TmManager>>, rest: &str, out: &mut String) -> Result<()> {
+pub(super) async fn cmd_send(
+    manager: &Arc<Mutex<TmManager>>,
+    rest: &str,
+    out: &mut String,
+) -> Result<()> {
     let (name, message) = match rest.split_once(char::is_whitespace) {
         Some((n, m)) if !m.trim().is_empty() => (n.trim().to_string(), m.trim().to_string()),
         _ => {
@@ -350,7 +291,11 @@ async fn cmd_send(manager: &Arc<Mutex<TmManager>>, rest: &str, out: &mut String)
 
 // ==================== /tm capture ====================
 
-async fn cmd_capture(manager: &Arc<Mutex<TmManager>>, rest: &str, out: &mut String) -> Result<()> {
+pub(super) async fn cmd_capture(
+    manager: &Arc<Mutex<TmManager>>,
+    rest: &str,
+    out: &mut String,
+) -> Result<()> {
     let mut iter = rest.split_whitespace();
     let name = match iter.next() {
         Some(n) => n.to_string(),
@@ -377,7 +322,11 @@ async fn cmd_capture(manager: &Arc<Mutex<TmManager>>, rest: &str, out: &mut Stri
 
 // ==================== /tm detect ====================
 
-async fn cmd_detect(manager: &Arc<Mutex<TmManager>>, rest: &str, out: &mut String) -> Result<()> {
+pub(super) async fn cmd_detect(
+    manager: &Arc<Mutex<TmManager>>,
+    rest: &str,
+    out: &mut String,
+) -> Result<()> {
     let name = match require_name(rest, "detect", out)? {
         Some(n) => n,
         None => return Ok(()),
@@ -394,7 +343,7 @@ async fn cmd_detect(manager: &Arc<Mutex<TmManager>>, rest: &str, out: &mut Strin
 
 // ==================== /tm reconcile ====================
 
-async fn cmd_reconcile(manager: &Arc<Mutex<TmManager>>, out: &mut String) -> Result<()> {
+pub(super) async fn cmd_reconcile(manager: &Arc<Mutex<TmManager>>, out: &mut String) -> Result<()> {
     let mgr = manager.lock().await;
     writeln!(out, "Reconciling with tmux...")?;
     match mgr.reconcile().await {
@@ -438,7 +387,11 @@ async fn cmd_reconcile(manager: &Arc<Mutex<TmManager>>, out: &mut String) -> Res
 
 // ==================== /tm status ====================
 
-async fn cmd_status(manager: &Arc<Mutex<TmManager>>, rest: &str, out: &mut String) -> Result<()> {
+pub(super) async fn cmd_status(
+    manager: &Arc<Mutex<TmManager>>,
+    rest: &str,
+    out: &mut String,
+) -> Result<()> {
     if rest.is_empty() {
         return cmd_list(manager, out).await;
     }
@@ -476,7 +429,7 @@ async fn cmd_status(manager: &Arc<Mutex<TmManager>>, rest: &str, out: &mut Strin
 
 // ==================== /tm projects ====================
 
-async fn cmd_projects(manager: &Arc<Mutex<TmManager>>, out: &mut String) -> Result<()> {
+pub(super) async fn cmd_projects(manager: &Arc<Mutex<TmManager>>, out: &mut String) -> Result<()> {
     let mgr = manager.lock().await;
     let projects = mgr.list_projects().await?;
     drop(mgr);
@@ -531,88 +484,4 @@ async fn cmd_projects(manager: &Arc<Mutex<TmManager>>, out: &mut String) -> Resu
         if projects.len() == 1 { "" } else { "s" }
     )?;
     Ok(())
-}
-
-// ==================== Helpers ====================
-
-/// Why: Most subcommands need a session name; centralize the "missing arg"
-/// message so the wording stays consistent.
-/// What: Returns `Ok(Some(name))` on success, writes a usage line and
-/// returns `Ok(None)` when `rest` is empty.
-fn require_name(rest: &str, sub: &str, out: &mut String) -> Result<Option<String>> {
-    let name = rest.split_whitespace().next().unwrap_or("").to_string();
-    if name.is_empty() {
-        writeln!(out, "usage: /tm {sub} <name>")?;
-        return Ok(None);
-    }
-    Ok(Some(name))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dispatch_help_writes_subcommand_list() {
-        let mut out = String::new();
-        write_tm_help(&mut out);
-        assert!(out.contains("/tm list"));
-        assert!(out.contains("/tm new"));
-        assert!(out.contains("/tm reconcile"));
-    }
-
-    #[test]
-    fn parse_new_positional_only() {
-        let (n, p, a) = parse_new_args("api-work").unwrap();
-        assert_eq!(n.as_deref(), Some("api-work"));
-        assert!(p.is_none());
-        assert!(a.is_none());
-    }
-
-    #[test]
-    fn parse_new_with_flags() {
-        let (n, p, a) = parse_new_args("ui-dev -p /tmp/foo -a claude-code").unwrap();
-        assert_eq!(n.as_deref(), Some("ui-dev"));
-        assert_eq!(p, Some(PathBuf::from("/tmp/foo")));
-        assert_eq!(a, Some(AdapterType::ClaudeCode));
-    }
-
-    #[test]
-    fn parse_new_flag_without_value_errors() {
-        assert!(parse_new_args("name -p").is_err());
-        assert!(parse_new_args("name -a").is_err());
-    }
-
-    #[test]
-    fn parse_new_unknown_flag_errors() {
-        assert!(parse_new_args("name --bogus value").is_err());
-    }
-
-    #[test]
-    fn truncate_short_unchanged() {
-        assert_eq!(truncate("abc", 10), "abc");
-    }
-
-    #[test]
-    fn truncate_long_appends_ellipsis() {
-        let t = truncate("abcdefghij", 5);
-        assert!(t.ends_with('…'));
-        assert_eq!(t.chars().count(), 5);
-    }
-
-    #[test]
-    fn require_name_empty_writes_usage() {
-        let mut out = String::new();
-        let r = require_name("", "pause", &mut out).unwrap();
-        assert!(r.is_none());
-        assert!(out.contains("usage: /tm pause <name>"));
-    }
-
-    #[test]
-    fn require_name_returns_first_word() {
-        let mut out = String::new();
-        let r = require_name("alpha extra", "kill", &mut out).unwrap();
-        assert_eq!(r.as_deref(), Some("alpha"));
-        assert!(out.is_empty());
-    }
 }
