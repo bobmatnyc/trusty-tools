@@ -1044,6 +1044,24 @@ fn install(force: bool) -> anyhow::Result<()> {
         println!("  {line}");
     }
 
+    // Deploy bundled skills into `~/.claude/skills/`. The bundle install above
+    // (`install_to`) already wrote the skill sources under the framework root,
+    // so the source dir is populated before this copy runs — mirroring the
+    // agent ordering. Without this step a fresh `tm install` left the skills
+    // directory empty and `tm doctor` reported `skills: Fail` (#386); skills
+    // only deployed lazily on `tm session start` (see `prepare_session`).
+    println!(
+        "Deploying skills into {}",
+        paths.claude_skills_dir().display()
+    );
+    let skill_deploy = trusty_mpm::core::skill_deployer::deploy_skills(
+        &paths.skill_source_dir(),
+        &paths.claude_skills_dir(),
+    )?;
+    for line in skill_report_lines(&skill_deploy) {
+        println!("  {line}");
+    }
+
     // Wire the MPM lifecycle hooks into every Claude settings file on the
     // machine. Per-file failures are non-fatal so one bad file does not sink
     // the whole install.
@@ -1224,6 +1242,32 @@ fn deploy_report_lines(
             .map(|c| c.join(" \u{2192} "))
             .unwrap_or_else(|_| name.to_string());
         lines.push(format!("\u{2713} {file} (composed: {chain})"));
+    }
+    for file in &deploy.skipped {
+        lines.push(format!("~ {file} (skipped \u{2014} user-modified)"));
+    }
+    for file in &deploy.unchanged {
+        lines.push(format!("= {file} (unchanged)"));
+    }
+    lines
+}
+
+/// Render a [`deploy_skills`] result into human-readable status lines.
+///
+/// Why: skills deploy alongside agents during `tm install`, and the operator
+/// needs the same per-file feedback (deployed / skipped / unchanged) so a
+/// fresh install visibly populates `~/.claude/skills/` instead of leaving the
+/// directory silently empty (#386). Unlike agents, skills carry no inheritance,
+/// so there is no composed-chain to show — a plain content copy is reported.
+/// What: maps each filename in the [`DeployStats`] vectors to a status line
+/// using the same glyph vocabulary as [`deploy_report_lines`] (`\u{2713}`
+/// deployed, `~` skipped, `=` unchanged).
+/// Test: `install_then_deploy_deploys_skills` asserts a deployed skill line
+/// is emitted.
+fn skill_report_lines(deploy: &trusty_mpm::core::skill_deployer::DeployStats) -> Vec<String> {
+    let mut lines = Vec::new();
+    for file in &deploy.deployed {
+        lines.push(format!("\u{2713} {file}"));
     }
     for file in &deploy.skipped {
         lines.push(format!("~ {file} (skipped \u{2014} user-modified)"));
@@ -3987,6 +4031,43 @@ mod tests {
             lines
                 .iter()
                 .any(|l| l.contains("engineer.md") && l.contains("composed:")),
+            "lines = {lines:?}"
+        );
+    }
+
+    #[test]
+    fn install_then_deploy_deploys_skills() {
+        // Regression for #386: a fresh install must populate `.claude/skills/`
+        // from the bundled skill sources, not leave it empty. Installing the
+        // bundle writes the skill source files; deploying them must land the
+        // bundled skill in the Claude skills dir and report a deployed line.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = trusty_mpm::core::paths::FrameworkPaths::under(dir.path());
+        install_to(&paths, false).unwrap();
+
+        let result = trusty_mpm::core::skill_deployer::deploy_skills(
+            &paths.skill_source_dir(),
+            &paths.claude_skills_dir(),
+        )
+        .unwrap();
+
+        // The single bundled skill deploys onto a fresh target.
+        assert_eq!(result.deployed, vec!["example-skill.md".to_string()]);
+        assert!(result.skipped.is_empty());
+        assert!(result.unchanged.is_empty());
+
+        // The skill file actually lands in `.claude/skills/`.
+        let deployed = paths.claude_skills_dir().join("example-skill.md");
+        assert!(
+            deployed.is_file(),
+            "expected deployed skill at {}",
+            deployed.display()
+        );
+
+        // The report formatter renders a deployed line for the skill.
+        let lines = skill_report_lines(&result);
+        assert!(
+            lines.iter().any(|l| l.contains("example-skill.md")),
             "lines = {lines:?}"
         );
     }
