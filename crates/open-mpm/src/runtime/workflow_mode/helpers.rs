@@ -416,20 +416,9 @@ pub(super) async fn load_skill_registry(
 pub(super) fn load_tag_skill_registry() -> Arc<crate::skills::registry::SkillRegistry> {
     use crate::default_bundled_config_dir;
     use crate::skills;
-    Arc::new({
-        let mut reg = skills::registry::SkillRegistry::load(&skills::registry::skill_search_paths(
-            &default_bundled_config_dir(),
-        ));
-        let index_path = skills::registry::skill_index_path();
-        if let Err(e) = reg.merge_index(&index_path) {
-            tracing::warn!(
-                error = %e,
-                path = %index_path.display(),
-                "tag skill registry: failed to merge persisted effectiveness index (continuing with defaults)"
-            );
-        }
-        reg
-    })
+    Arc::new(skills::registry::SkillRegistry::load_with_index(
+        &default_bundled_config_dir(),
+    ))
 }
 
 /// Open the user-scoped memory store and return its prompt suffix (#118).
@@ -466,15 +455,5 @@ pub(super) async fn load_user_memory_suffix() -> Option<String> {
 /// (but swallowing) any error.
 /// Test: Exercised via the workflow integration tests.
 pub(super) async fn refresh_global_skills_cache(cwd_for_skills: &Path) {
-    use crate::skills;
-    match skills::global_cache::GlobalSkillsCache::new() {
-        Ok(cache) => {
-            if let Err(e) = cache.refresh(cwd_for_skills).await {
-                tracing::warn!(error = %e, "global skills cache refresh failed (continuing)");
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "global skills cache init failed (continuing)");
-        }
-    }
+    crate::skills::global_cache::refresh_global_cache(cwd_for_skills).await;
 }

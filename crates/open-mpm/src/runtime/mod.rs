@@ -212,17 +212,8 @@ pub(super) fn update_skill_usage_after_run(
     if perf_record.skills_used.is_empty() {
         return;
     }
-    let mut reg = skills::registry::SkillRegistry::load(&skills::registry::skill_search_paths(
-        &default_bundled_config_dir(),
-    ));
+    let mut reg = skills::registry::SkillRegistry::load_with_index(&default_bundled_config_dir());
     let index_path = skills::registry::skill_index_path();
-    if let Err(e) = reg.merge_index(&index_path) {
-        tracing::warn!(
-            error = %e,
-            path = %index_path.display(),
-            "skill registry: failed to merge persisted index before update (continuing)"
-        );
-    }
 
     let now_iso = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     // Always record the usage counter / last_used timestamp for every skill

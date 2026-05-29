@@ -258,3 +258,50 @@ async fn test_refresh_skips_non_md_files() {
     assert_eq!(idx.len(), 1);
     assert!(idx.contains_key("real"));
 }
+
+// INTENT: Verify the `refresh_global_cache` startup helper builds the persistent
+// index under HOME and is a no-op (never panics / errors) when source dirs are
+// absent — this is the wiring called once at PM/interactive boot (#115). The
+// helper swallows all errors, so the observable contract is "the index file is
+// created and is valid JSON" after a refresh against an empty project.
+#[tokio::test]
+async fn refresh_global_cache_is_noop_on_missing_sources() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+
+    // SAFETY: tests run single-threaded by default; HOME restored before return.
+    let prev_home = std::env::var_os("HOME");
+    unsafe {
+        std::env::set_var("HOME", home.path());
+    }
+
+    // No `.open-mpm/skills` exists under `project` → refresh must still succeed
+    // (fire-and-forget contract) and leave a valid, empty index on disk.
+    refresh_global_cache(project.path()).await;
+
+    let index_path = home
+        .path()
+        .join(".open-mpm")
+        .join("skills")
+        .join("index.json");
+    let exists = index_path.exists();
+    let parsed_ok = if exists {
+        fs::read_to_string(&index_path)
+            .await
+            .ok()
+            .and_then(|t| serde_json::from_str::<HashMap<String, SkillMeta>>(&t).ok())
+            .is_some()
+    } else {
+        false
+    };
+
+    unsafe {
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    assert!(exists, "refresh_global_cache must create the index file");
+    assert!(parsed_ok, "the persisted index must be valid JSON");
+}

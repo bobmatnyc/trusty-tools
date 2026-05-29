@@ -288,12 +288,14 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
             }),
     );
 
-    // #170: Load the tag-indexed skill registry (#168) using the same
-    // hierarchical search paths as the PM process. This powers tag-ranked
-    // `list_skills(tags=[...])` from within this sub-agent. Missing source
-    // dirs are a graceful no-op — the registry simply returns empty results.
-    let tag_skill_registry = Arc::new(skills::registry::SkillRegistry::load(
-        &skills::registry::skill_search_paths(&default_bundled_config_dir()),
+    // #170/#173: Load the tag-indexed skill registry (#168) using the same
+    // hierarchical search paths as the PM process AND merge the persisted
+    // effectiveness/usage index, so sub-agents see the same learning-aware,
+    // cache-backed `list_skills(tags=[...])` as every other boot path. Missing
+    // source dirs / index are a graceful no-op — the registry simply returns
+    // empty results.
+    let tag_skill_registry = Arc::new(skills::registry::SkillRegistry::load_with_index(
+        &default_bundled_config_dir(),
     ));
 
     // Build the per-agent tool registry based on agent name.

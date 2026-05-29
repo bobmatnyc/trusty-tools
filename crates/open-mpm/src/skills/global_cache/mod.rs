@@ -246,6 +246,33 @@ impl GlobalSkillsCache {
     }
 }
 
+/// Build (or refresh) the global skills cache once, swallowing all errors.
+///
+/// Why (#115): The persistent skill index (`~/.open-mpm/skills/index.json`) and
+/// content cache must be built/loaded once at process boot rather than
+/// rebuilt in-memory on every run. Both the workflow path and the
+/// PM/interactive boot path need the same fire-and-forget refresh, but cache
+/// init or refresh failures (no `$HOME`, unreadable source dir, full disk)
+/// must never block startup. Centralizing the construct-refresh-swallow dance
+/// here keeps the two call sites honest and identical.
+/// What: Constructs a `GlobalSkillsCache`, calls `refresh(project_dir)`, and
+/// logs (but swallows) any error at WARN. No-op effect on the in-memory
+/// registries — it only primes the on-disk index/cache for this and future
+/// runs.
+/// Test: `refresh_global_cache_is_noop_on_missing_sources` in `global_cache/tests.rs`.
+pub async fn refresh_global_cache(project_dir: &Path) {
+    match GlobalSkillsCache::new() {
+        Ok(cache) => {
+            if let Err(e) = cache.refresh(project_dir).await {
+                tracing::warn!(error = %e, "global skills cache refresh failed (continuing)");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "global skills cache init failed (continuing)");
+        }
+    }
+}
+
 /// Return the SHA-256 hex digest of `content`.
 fn hex_sha256(content: &str) -> String {
     let mut hasher = Sha256::new();

@@ -41,6 +41,7 @@ use crate::agents::AgentConfig;
 use crate::agents::harness_protocol::{BASE_PROTOCOL, FINISH_TASK_PROTOCOL};
 use crate::agents::prompt_builder::SystemPromptBuilder;
 use crate::ipc::extract_summary;
+use crate::skills::registry::SkillRegistry as TagSkillRegistry;
 use crate::tools::ToolRegistry;
 use crate::tools::fs_reader::{GrepFilesTool, ListDirTool, ReadFileTool};
 use crate::tools::native_search::SearchCodeTool;
@@ -136,13 +137,20 @@ pub const SAFE_TOOL_NAMES: &[&str] = &[
 /// already-initialized `async_openai::Client`. Agent TOML still drives model,
 /// max_tokens, system prompt, and tool allowlist, so the contract observed by
 /// the model is identical to the subprocess path — only the transport changes.
-/// What: Holds an `Arc<Client>` (the shared LLM client) and an `Arc<dyn SkillResolver>`
-/// (so skill loading also avoids repeated filesystem scans). Constructed once
-/// per workflow run by `build_runner_for_workflow`.
-/// Test: `runner_construction_uses_shared_client`.
+/// What: Holds an `Arc<Client>` (the shared LLM client), an `Arc<dyn SkillResolver>`
+/// (so skill loading also avoids repeated filesystem scans), and a shared
+/// `Arc<TagSkillRegistry>` so in-process agents get the same tag-ranked,
+/// persisted-index-backed `list_skills(tags=[...])` as subprocess agents
+/// (#170/#173). Constructed once per workflow run by `build_runner_for_workflow`.
+/// Test: `runner_construction_uses_shared_client`, `in_process_list_skills_uses_tag_registry`.
 pub struct InProcessAgentRunner {
     client: Arc<Client<OpenAIConfig>>,
     skill_resolver: Arc<dyn SkillResolver>,
+    /// Tag-indexed catalog shared across every in-process agent run. Built once
+    /// at runner construction (scan + persisted-index merge) so per-call
+    /// registry assembly is allocation-free. Empty when no skills are found,
+    /// in which case `build_safe_registry` falls back to the flat lister.
+    tag_registry: Arc<TagSkillRegistry>,
 }
 
 impl InProcessAgentRunner {
@@ -153,12 +161,37 @@ impl InProcessAgentRunner {
     /// across in-process and subprocess paths means HTTP keepalive / TLS
     /// state is reused.
     /// What: Plain constructor; both args required so the runner cannot be
-    /// silently mis-configured with a fresh client.
+    /// silently mis-configured with a fresh client. The shared tag registry is
+    /// built once here via `load_with_index` (scan + persisted-index merge) so
+    /// in-process `list_skills(tags=[...])` is tag-ranked and learning-aware.
     /// Test: `runner_construction_uses_shared_client`.
     pub fn new(client: Arc<Client<OpenAIConfig>>, skill_resolver: Arc<dyn SkillResolver>) -> Self {
+        let tag_registry = Arc::new(TagSkillRegistry::load_with_index(
+            &crate::default_bundled_config_dir(),
+        ));
         Self {
             client,
             skill_resolver,
+            tag_registry,
+        }
+    }
+
+    /// Construct with an explicit, pre-built tag registry (tests / advanced callers).
+    ///
+    /// Why: `new` scans the filesystem to build the tag registry, which tests
+    /// that want to assert tag-ranked behaviour need to control. This seam lets
+    /// them inject a deterministic registry without touching the real config dir.
+    /// What: Plain constructor storing the supplied registry verbatim.
+    /// Test: `in_process_list_skills_uses_tag_registry`.
+    pub fn with_tag_registry(
+        client: Arc<Client<OpenAIConfig>>,
+        skill_resolver: Arc<dyn SkillResolver>,
+        tag_registry: Arc<TagSkillRegistry>,
+    ) -> Self {
+        Self {
+            client,
+            skill_resolver,
+            tag_registry,
         }
     }
 
@@ -186,11 +219,18 @@ impl InProcessAgentRunner {
     /// `new_auto` so it auto-detects the search daemon and only falls back
     /// to grep when neither a daemon nor a local indexer is available
     /// (#376 A1, was previously hardcoded to the grep-only `new()` path).
-    /// Test: `safe_registry_includes_expected_tools`.
+    /// #170/#173: When `tag_registry` is non-empty, `list_skills` is wired via
+    /// `SkillListTool::with_tag_registry` so `tags=[...]` returns tag-ranked,
+    /// persisted-index-aware results — identical to the subprocess path. An
+    /// empty registry falls back to the flat resolver lister so single-skill
+    /// projects (and tests with no skills) keep working.
+    /// Test: `safe_registry_includes_expected_tools`,
+    /// `in_process_list_skills_uses_tag_registry`.
     pub async fn build_safe_registry(
         skill_resolver: Arc<dyn SkillResolver>,
         working_dir: PathBuf,
         local_indexer: Option<Arc<crate::search::indexer::CodeIndexer>>,
+        tag_registry: Arc<TagSkillRegistry>,
     ) -> ToolRegistry {
         let mut reg = ToolRegistry::new();
         reg.register(Arc::new(ReadFileTool::new()));
@@ -204,7 +244,15 @@ impl InProcessAgentRunner {
         };
         reg.register(Arc::new(search_tool));
         reg.register(Arc::new(SkillLoaderTool::new(skill_resolver.clone())));
-        reg.register(Arc::new(SkillListTool::new(skill_resolver)));
+        if tag_registry.is_empty() {
+            reg.register(Arc::new(SkillListTool::new(skill_resolver)));
+        } else {
+            reg.register(Arc::new(SkillListTool::with_tag_registry(
+                skill_resolver,
+                None,
+                tag_registry,
+            )));
+        }
         // #373: non-destructive analysis tools available to every safe-mode
         // agent (analysis-agent, etc.). These are read-only AST analyzers
         // and don't mutate disk.
@@ -275,9 +323,15 @@ impl InProcessAgentRunner {
         builder = builder.with_output_style(cfg.compress.output_style);
         let system_prompt = builder.build();
 
-        // Build the safe tool registry, optionally appending finish_task.
-        let mut registry =
-            Self::build_safe_registry(self.skill_resolver.clone(), working_dir, None).await;
+        // Build the safe tool registry, optionally appending finish_task. The
+        // shared tag registry powers tag-ranked `list_skills` (#170/#173).
+        let mut registry = Self::build_safe_registry(
+            self.skill_resolver.clone(),
+            working_dir,
+            None,
+            self.tag_registry.clone(),
+        )
+        .await;
         if cfg.llm.use_finish_task {
             registry.register(Arc::new(crate::tools::finish_task::FinishTaskTool::new()));
         }
@@ -395,83 +449,5 @@ impl AgentRunner for InProcessAgentRunner {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Mock skill resolver that returns nothing — enough to construct a
-    /// runner and exercise registry/tool-surface assertions without touching
-    /// the filesystem.
-    struct EmptyResolver;
-    impl SkillResolver for EmptyResolver {
-        fn resolve(&self, _name: &str) -> Option<String> {
-            None
-        }
-        fn list(&self) -> Vec<String> {
-            Vec::new()
-        }
-    }
-
-    fn fake_client() -> Arc<Client<OpenAIConfig>> {
-        // We never actually issue requests in unit tests — just need a
-        // client to thread through the constructor. Bogus key + base URL
-        // are fine because `cargo test` never reaches the HTTP send.
-        let cfg = OpenAIConfig::new()
-            .with_api_key("test-key")
-            .with_api_base("http://localhost:0");
-        Arc::new(Client::with_config(cfg))
-    }
-
-    /// Verifies the constructor wires through both the shared client and the
-    /// injected skill resolver without panicking.
-    ///
-    /// Why: This is the seam that lets the workflow runner builder reuse a
-    /// single client across all in-process agents (Phase C goal).
-    /// What: Constructs the runner via `new` and asserts ownership semantics
-    /// (the Arcs are still alive after the runner is dropped).
-    /// Test: `cargo test --lib in_process_runner::tests::runner_construction_uses_shared_client`.
-    #[test]
-    fn runner_construction_uses_shared_client() {
-        let client = fake_client();
-        let resolver: Arc<dyn SkillResolver> = Arc::new(EmptyResolver);
-        let weak = Arc::downgrade(&client);
-        let runner = InProcessAgentRunner::new(client, resolver);
-        // Drop the runner; weak should still upgrade because we hold the
-        // returned Arc-equivalent through `weak`.
-        drop(runner);
-        // After drop, the only strong ref is gone (we moved `client` into the
-        // runner). Verify by attempting to upgrade — should fail.
-        assert!(
-            weak.upgrade().is_none(),
-            "runner should drop its client Arc on shutdown"
-        );
-    }
-
-    /// Verifies the safe-registry helper registers exactly the documented
-    /// tool surface — no shell, no web, no memory.
-    ///
-    /// Why: Regression guard for the in-process safety contract; if someone
-    /// adds a heavy tool to `build_safe_registry` they have to update this
-    /// test, which forces an explicit decision.
-    /// What: Builds the registry, lists names, asserts the set matches
-    /// `SAFE_TOOL_NAMES`.
-    /// Test: `cargo test --lib in_process_runner::tests::safe_registry_includes_expected_tools`.
-    #[tokio::test]
-    async fn safe_registry_includes_expected_tools() {
-        let resolver: Arc<dyn SkillResolver> = Arc::new(EmptyResolver);
-        let reg =
-            InProcessAgentRunner::build_safe_registry(resolver, PathBuf::from("."), None).await;
-        for name in SAFE_TOOL_NAMES {
-            assert!(
-                reg.contains(name),
-                "safe registry missing expected tool '{name}'"
-            );
-        }
-        // Heavy / unsafe tools must NOT be present.
-        for forbidden in ["shell_exec", "web_search", "fetch_url", "delegate_to_agent"] {
-            assert!(
-                !reg.contains(forbidden),
-                "safe registry leaked unsafe tool '{forbidden}'"
-            );
-        }
-    }
-}
+#[path = "in_process_runner_tests.rs"]
+mod tests;

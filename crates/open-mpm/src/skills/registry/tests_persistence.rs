@@ -389,3 +389,80 @@ fn merge_index_missing_file_is_noop() {
     let nonexistent = dir.path().join("does-not-exist.json");
     reg.merge_index(&nonexistent).expect("missing file ok");
 }
+
+/// Why: `load_with_index` is the single startup entry point that every boot
+/// path (PM `build_registries`, the workflow `load_tag_skill_registry`, the
+/// in-process runner, the post-run usage updater) now funnels through. The
+/// wiring is only useful if that one call actually CONSULTS the persisted
+/// `~/.open-mpm/skills/index.json` rather than returning fresh defaults — this
+/// test proves the persisted effectiveness/usage fields survive a simulated
+/// process restart through `load_with_index`.
+/// What: Points `$HOME` at a tempdir (so `skill_index_path()` resolves under
+/// it) and restricts discovery to the project-local + bundled paths via
+/// `OPEN_MPM_SKILLS_PROJECT_LOCAL_ONLY=1`, writes a skill into the bundled
+/// `<config_dir>/skills`, persists a trained index at the canonical path, then
+/// calls `load_with_index(config_dir)` and asserts the trained values were
+/// merged back. Restores env on exit.
+/// Test: `load_with_index_merges_persisted_effectiveness`.
+#[test]
+fn load_with_index_merges_persisted_effectiveness() {
+    let home = TempDir::new().unwrap();
+    let config = TempDir::new().unwrap();
+    let bundled_skills = config.path().join("skills");
+    fs::create_dir_all(&bundled_skills).unwrap();
+    write_skill(&bundled_skills, "x", "d", &["t"]);
+
+    // SAFETY: tests run single-threaded by default; env restored before return.
+    let prev_home = std::env::var_os("HOME");
+    let prev_local = std::env::var_os("OPEN_MPM_SKILLS_PROJECT_LOCAL_ONLY");
+    unsafe {
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("OPEN_MPM_SKILLS_PROJECT_LOCAL_ONLY", "1");
+    }
+
+    // Run 1: scan via load_with_index (index absent → defaults), train, persist
+    // to the canonical `skill_index_path()` under the temp HOME.
+    {
+        let mut reg = SkillRegistry::load_with_index(config.path());
+        assert!(reg.get("x").is_some(), "bundled skill must be discovered");
+        assert!(
+            (reg.get("x").unwrap().effectiveness_score - 0.5).abs() < 1e-6,
+            "first load (no index) must use the default score"
+        );
+        reg.update_effectiveness("x", 1.0); // -> 0.65
+        reg.record_use("x", "2026-05-29T00:00:00Z");
+        reg.save_index(&skill_index_path()).expect("save_index");
+    }
+
+    // Run 2: a fresh load_with_index must consult the persisted index and
+    // restore the trained values rather than reverting to defaults.
+    let reg = SkillRegistry::load_with_index(config.path());
+    let restored = reg.get("x").cloned();
+
+    unsafe {
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_local {
+            Some(v) => std::env::set_var("OPEN_MPM_SKILLS_PROJECT_LOCAL_ONLY", v),
+            None => std::env::remove_var("OPEN_MPM_SKILLS_PROJECT_LOCAL_ONLY"),
+        }
+    }
+
+    let restored = restored.expect("skill present after reload");
+    assert!(
+        (restored.effectiveness_score - 0.65).abs() < 1e-6,
+        "load_with_index must merge the persisted effectiveness score (got {})",
+        restored.effectiveness_score
+    );
+    assert_eq!(
+        restored.use_count, 1,
+        "persisted use_count must be restored"
+    );
+    assert_eq!(
+        restored.last_used.as_deref(),
+        Some("2026-05-29T00:00:00Z"),
+        "persisted last_used must be restored"
+    );
+}

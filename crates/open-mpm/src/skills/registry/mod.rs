@@ -170,6 +170,36 @@ impl SkillRegistry {
         Self::load(&paths)
     }
 
+    /// Scan the canonical search paths under `config_dir` AND merge the
+    /// persisted effectiveness/usage index in one call (#171/#173).
+    ///
+    /// Why: Four startup paths (PM `build_registries`, the post-run usage
+    /// updater, the workflow `load_tag_skill_registry`, and sub-agent dispatch)
+    /// all need "scan the bundled+local skills, then layer the persisted
+    /// `~/.open-mpm/skills/index.json` learning back on top." Duplicating the
+    /// load + `merge_index` + WARN-on-failure dance at each site invites drift
+    /// (sub-agents previously skipped the merge entirely, so they never saw the
+    /// persisted index). This constructor is the single wiring point so every
+    /// boot path consults the persistent index identically.
+    /// What: Calls `load(skill_search_paths(config_dir))`, then `merge_index`
+    /// against `skill_index_path()`. A merge failure is logged at WARN and
+    /// swallowed so a corrupt/stale index never aborts startup — the registry
+    /// continues with freshly-scanned defaults.
+    /// Test: `load_with_index_merges_persisted_effectiveness` in
+    /// `registry/tests_persistence.rs`.
+    pub fn load_with_index(config_dir: &Path) -> Self {
+        let mut reg = Self::load(&skill_search_paths(config_dir));
+        let index_path = skill_index_path();
+        if let Err(e) = reg.merge_index(&index_path) {
+            tracing::warn!(
+                error = %e,
+                path = %index_path.display(),
+                "tag skill registry: failed to merge persisted effectiveness index (continuing with defaults)"
+            );
+        }
+        reg
+    }
+
     /// Build an empty registry (useful for tests and graceful fallbacks).
     #[allow(dead_code)]
     pub fn empty() -> Self {

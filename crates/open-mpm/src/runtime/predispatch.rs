@@ -158,6 +158,20 @@ pub(super) async fn build_registries(cli: &Cli) {
     // hard-coded paths when no config file is present so existing installs
     // keep working unchanged.
     let project_root_for_skills = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    // #115: Build/load the persistent global skills cache+index once at boot
+    // (`~/.open-mpm/skills/index.json` + content cache). Previously this only
+    // ran on the workflow path, so interactive/PM startups rebuilt skill
+    // metadata in-memory every run and never primed the on-disk index. Spawned
+    // (not awaited) so a slow/cold cache scan never delays the first prompt;
+    // the on-disk index lands in time for subsequent lookups and runs.
+    {
+        let cwd_for_cache = project_root_for_skills.clone();
+        tokio::spawn(async move {
+            skills::global_cache::refresh_global_cache(&cwd_for_cache).await;
+        });
+    }
+
     // #477: For the interactive (ctrl) path, restrict the upcoming skill scan
     // to project-local sources. `run_ctrl_inner` used to set this, but that
     // fires *after* the registry below is already built — so the first scan
