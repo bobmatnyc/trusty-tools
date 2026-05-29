@@ -17,6 +17,7 @@
 //! - [`collector`] — end-to-end pipeline orchestrator
 //! - [`errors`] — module-level error type ([`CollectError`])
 
+pub mod ai_attribution;
 pub mod azdo;
 pub mod bitbucket;
 pub mod collector;

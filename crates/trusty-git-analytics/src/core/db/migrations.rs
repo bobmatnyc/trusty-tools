@@ -106,6 +106,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "fact_commit_effort",
         sql: include_str!("sql/0016_fact_commit_effort.sql"),
     },
+    Migration {
+        version: 17,
+        name: "pushdown_445",
+        sql: include_str!("sql/0017_pushdown_445.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.
@@ -168,6 +173,103 @@ pub fn run(conn: &mut Connection) -> Result<()> {
 mod tests {
     use crate::core::db::Database;
     use rusqlite::params;
+
+    /// Why: regression guard for issue #445. Migration v17 adds three additive
+    /// columns (`classifications.top_level_category`,
+    /// `fact_commit_effort.effort_tshirt`, `commits.is_ai_assisted`,
+    /// `commits.ai_tool`) plus three indexes. This test verifies the migration
+    /// applies without error and the new columns are writable/readable.
+    /// What: opens an in-memory DB (which runs all migrations), inserts rows
+    /// that exercise the new columns, and reads them back.
+    /// Test: this test itself.
+    #[test]
+    fn migration_v17_adds_pushdown_columns() {
+        let db = Database::open_in_memory().expect("open db");
+        let conn = db.connection();
+
+        // Verify commits accepts is_ai_assisted and ai_tool.
+        conn.execute(
+            "INSERT INTO commits \
+             (sha, author_name, author_email, timestamp, message, repository, \
+              is_ai_assisted, ai_tool) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                "sha_v17_test",
+                "Alice",
+                "alice@example.com",
+                "2026-01-01T00:00:00Z",
+                "feat: AI-assisted commit\n\nCo-Authored-By: Claude Opus <noreply@anthropic.com>",
+                "testrepo",
+                1_i64,
+                "claude",
+            ],
+        )
+        .expect("insert AI-assisted commit");
+
+        let (ai, tool): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT is_ai_assisted, ai_tool FROM commits WHERE sha = 'sha_v17_test'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("read back");
+        assert_eq!(ai, 1, "is_ai_assisted must be 1");
+        assert_eq!(tool, Some("claude".to_string()), "ai_tool must be 'claude'");
+
+        // Verify fact_commit_effort accepts effort_tshirt.
+        conn.execute(
+            "INSERT INTO fact_commit_effort \
+             (sha, repository, size, score, loc, files, test_loc, tests_factor, \
+              formula_version, computed_at, effort_tshirt) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                "sha_v17_test",
+                "testrepo",
+                "M",
+                9.5,
+                50_i64,
+                2_i64,
+                0_i64,
+                1.0_f64,
+                "v1",
+                1_000_000_i64,
+                3_i64, // M=3
+            ],
+        )
+        .expect("insert effort with tshirt");
+
+        let tshirt: i64 = conn
+            .query_row(
+                "SELECT effort_tshirt FROM fact_commit_effort WHERE sha = 'sha_v17_test'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read effort_tshirt");
+        assert_eq!(tshirt, 3, "effort_tshirt M must be 3");
+
+        // Verify classifications accepts top_level_category.
+        conn.execute(
+            "INSERT INTO classifications \
+             (category, subcategory, confidence, method, top_level_category) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params!["feature", "feature", 0.95_f64, "exact_rule", "feature"],
+        )
+        .expect("insert classification with top_level_category");
+
+        let top: Option<String> = conn
+            .query_row(
+                "SELECT top_level_category FROM classifications WHERE category = 'feature' \
+                 ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read top_level_category");
+        assert_eq!(
+            top,
+            Some("feature".to_string()),
+            "top_level_category must be 'feature'"
+        );
+    }
 
     /// Why: regression guard for issue #88. Before migration v12, the
     /// UNIQUE(provider, pr_number) index collapsed cross-repo PRs that

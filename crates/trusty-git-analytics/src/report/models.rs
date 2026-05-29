@@ -91,6 +91,12 @@ pub struct WeeklyActivity {
     /// the aggregator note on its limitations.
     #[serde(default)]
     pub abandoned_pr_count: usize,
+    /// Commits in this bucket where `is_ai_assisted = 1` (issue #445).
+    /// Counts commits with a recognised `Co-Authored-By:` AI tool trailer
+    /// (Claude, GitHub Copilot, Cursor). Additive — downstream can sum to
+    /// get an org-wide AI-adoption count.
+    #[serde(default)]
+    pub ai_assisted_count: usize,
 }
 
 /// Per-week aggregated metrics across all developers and repositories.

@@ -8,12 +8,15 @@
 //!   (`ENG-123`, `FE-456`) is a subset of this pattern.
 //! - **GitHub action-keyword refs**: `fixes #123`, `closes #45`,
 //!   `resolves #7` (case-insensitive, also matches `fix`/`close`/`resolve`).
-//! - **GitHub bare issue refs**: `#123` preceded by start-of-string or
-//!   whitespace, so we don't false-positive on things like a hex color
-//!   `#abc123` inside another token.
-//! - **Azure DevOps work-item refs**: `AB#123`. Bare `#N` is intentionally
-//!   excluded from the ADO pattern because it collides with GitHub PR/issue
-//!   numbers (the existing GitHub bare-`#N` rule above still applies).
+//! - **Azure DevOps work-item refs**: `AB#123`.
+//!
+//! **Note on bare `#N` refs (issue #445):** A bare `#N` preceded by
+//! whitespace (the `gh_bare` pattern) is explicitly *excluded* from
+//! [`is_ticketed`]. It fires on almost any multi-line commit body and was
+//! inflating the ticketed rate to ~100%. The `gh_bare` pattern is still
+//! used by [`extract_ticket_id`] to populate `commits.ticket_id` as a
+//! last-resort identifier, so the data is not lost — it just no longer
+//! counts as "ticketed" for quality-metric purposes.
 //!
 //! Patterns are compiled exactly once on first use via [`OnceLock`].
 
@@ -22,10 +25,14 @@ use std::sync::OnceLock;
 use regex::Regex;
 
 /// Compiled regexes used by [`is_ticketed`].
+///
+/// Note: `gh_bare` is intentionally excluded from this struct (issue #445).
+/// A bare `#N` reference no longer qualifies a commit as "ticketed" — only
+/// JIRA/Linear, GitHub action-keyword refs, and Azure DevOps refs do.
+/// The bare pattern still lives in [`ExtractPatterns`] for `ticket_id` population.
 struct TicketPatterns {
     jira: Regex,
     gh_action: Regex,
-    gh_bare: Regex,
     azdo: Regex,
 }
 
@@ -44,8 +51,6 @@ fn patterns() -> &'static TicketPatterns {
             // GitHub action keyword: fix(es|ed)?|close(s|d)?|resolve(s|d)?  #123
             gh_action: Regex::new(r"(?i)\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\s+#\d+\b")
                 .expect("gh_action pattern compiles"),
-            // Bare `#123` preceded by start-of-line or whitespace.
-            gh_bare: Regex::new(r"(?m)(?:^|\s)#\d+\b").expect("gh_bare pattern compiles"),
             // Azure DevOps work-item reference: AB#123.
             // Bare #N intentionally excluded — collides with GitHub PR/issue numbers.
             azdo: Regex::new(r"\bAB#\d+\b").expect("azdo pattern compiles"),
@@ -80,9 +85,20 @@ fn extract_patterns() -> &'static ExtractPatterns {
 
 /// Return `true` if `message` contains any recognized ticket reference.
 ///
-/// The check is performed against the full message (subject + body); a
-/// reference anywhere in the text — including later lines of a multi-line
-/// commit body — flags the commit as ticketed.
+/// Why: downstream metrics (ticketed-commit rate, quality score) must only
+/// count commits that are genuinely linked to a tracked work item. A bare
+/// `#N` reference (e.g. `#42` from a release note) is too noisy — it fires
+/// on nearly every multi-line commit body and inflates the ticketed rate to
+/// ~100% (issue #445). The `gh_bare` pattern is intentionally **excluded**
+/// from this OR-chain; it is still used by [`extract_ticket_id`] to populate
+/// `commits.ticket_id` as a last-resort identifier.
+/// What: returns `true` for JIRA/Linear identifiers (`PROJ-N`), GitHub
+/// action-keyword refs (`closes #N`, `fixes #N`), and Azure DevOps refs
+/// (`AB#N`). A bare `#N` with no action keyword does NOT make a commit
+/// ticketed.
+/// Test: `tests::ticketed_*` below; the critical regression cases are
+/// `bare_hash_alone_is_NOT_ticketed`, `closes_hash_IS_ticketed`,
+/// `jira_IS_ticketed`, and `azdo_IS_ticketed`.
 ///
 /// # Examples
 ///
@@ -92,13 +108,11 @@ fn extract_patterns() -> &'static ExtractPatterns {
 /// assert!(is_ticketed("ENG-123: add feature"));
 /// assert!(is_ticketed("Fix login (closes #42)"));
 /// assert!(!is_ticketed("misc cleanup"));
+/// assert!(!is_ticketed("some note about #42"));
 /// ```
 pub fn is_ticketed(message: &str) -> bool {
     let p = patterns();
-    p.jira.is_match(message)
-        || p.gh_action.is_match(message)
-        || p.gh_bare.is_match(message)
-        || p.azdo.is_match(message)
+    p.jira.is_match(message) || p.gh_action.is_match(message) || p.azdo.is_match(message)
 }
 
 /// Extract the first recognizable ticket identifier from a commit message.
@@ -262,10 +276,45 @@ mod tests {
         assert!(is_ticketed("CLOSED #99")); // case-insensitive
     }
 
+    /// Why: regression guard for issue #445. Bare `#N` refs no longer make a
+    /// commit "ticketed" — only JIRA/Linear, GitHub action keywords, and ADO
+    /// refs do. This test confirms bare refs are NOT ticketed while confirming
+    /// they still produce a `ticket_id` via `extract_ticket_id`.
+    /// What: asserts `is_ticketed` returns false for bare `#N`, and that
+    /// action keywords and JIRA refs still return true.
+    /// Test: this test itself.
     #[test]
-    fn github_bare_hash_ref_is_ticketed() {
-        assert!(is_ticketed("Bug from #123 still present"));
-        assert!(is_ticketed("#42 follow-up"));
+    fn bare_hash_alone_is_not_ticketed() {
+        // Bare #N with no action keyword is NOT ticketed (issue #445 fix).
+        assert!(!is_ticketed("Bug from #123 still present"));
+        assert!(!is_ticketed("#42 follow-up"));
+        assert!(!is_ticketed("some note about #42"));
+        // But the ticket_id is still extractable.
+        assert_eq!(extract_ticket_id("#42 follow-up"), Some("#42".to_string()));
+        assert_eq!(
+            extract_ticket_id("Bug from #123 still present"),
+            Some("#123".to_string())
+        );
+    }
+
+    #[test]
+    fn closes_hash_is_ticketed() {
+        // Action keyword + bare ref IS ticketed.
+        assert!(is_ticketed("closes #42"));
+        assert!(is_ticketed("fixes #123"));
+        assert!(is_ticketed("resolves #7"));
+    }
+
+    #[test]
+    fn jira_is_ticketed() {
+        assert!(is_ticketed("ENG-123: add feature"));
+        assert!(is_ticketed("PROJ-1 initial commit"));
+    }
+
+    #[test]
+    fn azdo_is_ticketed() {
+        assert!(is_ticketed("AB#1234 implement new feature"));
+        assert!(is_ticketed("Refactor module (AB#42)"));
     }
 
     #[test]
@@ -282,11 +331,16 @@ mod tests {
 
     #[test]
     fn multiline_body_with_ticket_is_ticketed() {
+        // JIRA ref anywhere in body → ticketed.
         let msg = "Refactor module structure\n\nMoves things around.\nRelates to PROJ-789.\n";
         assert!(is_ticketed(msg));
 
-        let msg2 = "First line no ticket\n\nSecond paragraph mentions #321 explicitly.";
-        assert!(is_ticketed(msg2));
+        // Bare #N in body is NOT ticketed (issue #445 fix); action keyword is.
+        let msg2 = "First line no ticket\n\nSee #321 for context.";
+        assert!(!is_ticketed(msg2));
+
+        let msg3 = "First line no ticket\n\nCloses #321.";
+        assert!(is_ticketed(msg3));
     }
 
     #[test]

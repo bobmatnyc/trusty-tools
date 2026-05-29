@@ -1153,8 +1153,9 @@ fn write_results_chunk(
         let mut insert_classification = tx
             .prepare(
                 "INSERT INTO classifications \
-                    (category, subcategory, ticket_id, confidence, method, complexity) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    (category, subcategory, ticket_id, confidence, method, complexity, \
+                     top_level_category) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )
             .map_err(crate::core::TgaError::from)?;
         // Issue #205: when `--force` reclassifies a commit that already
@@ -1165,8 +1166,9 @@ fn write_results_chunk(
             .prepare(
                 "UPDATE classifications \
                  SET category = ?1, subcategory = ?2, ticket_id = ?3, \
-                     confidence = ?4, method = ?5, complexity = ?6 \
-                 WHERE id = ?7",
+                     confidence = ?4, method = ?5, complexity = ?6, \
+                     top_level_category = ?7 \
+                 WHERE id = ?8",
             )
             .map_err(crate::core::TgaError::from)?;
         // The UPDATE also sets `is_revert` so the column stays in sync with
@@ -1183,6 +1185,11 @@ fn write_results_chunk(
             .map_err(crate::core::TgaError::from)?;
 
         for (commit, result) in commits.iter().zip(results.iter()) {
+            // Issue #445: derive top_level_category from the verdict's top_level
+            // field so the column is populated at classification write time
+            // without requiring a separate backfill pass.
+            let top_level_str = result.top_level.map(|t| t.as_str_snake());
+
             let classification_id = if let Some(existing) = commit.existing_classification_id {
                 update_existing_classification
                     .execute(params![
@@ -1192,6 +1199,7 @@ fn write_results_chunk(
                         result.confidence,
                         result.method.as_str(),
                         result.complexity.map(|v| v as i64),
+                        top_level_str,
                         existing,
                     ])
                     .map_err(crate::core::TgaError::from)?;
@@ -1205,6 +1213,7 @@ fn write_results_chunk(
                         result.confidence,
                         result.method.as_str(),
                         result.complexity.map(|v| v as i64),
+                        top_level_str,
                     ])
                     .map_err(crate::core::TgaError::from)?;
                 tx.last_insert_rowid()

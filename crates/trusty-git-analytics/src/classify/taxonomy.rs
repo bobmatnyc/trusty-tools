@@ -74,6 +74,41 @@ impl TopLevelCategory {
         }
     }
 
+    /// Stable snake_case string identifier for DB persistence.
+    ///
+    /// Why: `classifications.top_level_category` stores a stable ASCII string
+    /// so SQL GROUP BY and downstream BI tools work without decoding enum
+    /// integers or display names. Using snake_case keeps the value predictable
+    /// across language/locale boundaries and matches the serde `rename_all`
+    /// attribute.
+    /// What: returns a `&'static str` in snake_case for each variant. These
+    /// strings are stable — do not rename them once rows have been written to
+    /// the database.
+    /// Test: `taxonomy::tests::as_str_snake_stable_identifiers`.
+    ///
+    /// | Variant        | Returned string   |
+    /// |----------------|-------------------|
+    /// | Feature        | `"feature"`       |
+    /// | Bugfix         | `"bugfix"`        |
+    /// | Ktlo           | `"ktlo"`          |
+    /// | Integrations   | `"integrations"`  |
+    /// | PlatformWork   | `"platform_work"` |
+    /// | Content        | `"content"`       |
+    /// | Maintenance    | `"maintenance"`   |
+    /// | Unknown        | `"unknown"`       |
+    pub fn as_str_snake(&self) -> &'static str {
+        match self {
+            TopLevelCategory::Feature => "feature",
+            TopLevelCategory::Bugfix => "bugfix",
+            TopLevelCategory::Ktlo => "ktlo",
+            TopLevelCategory::Integrations => "integrations",
+            TopLevelCategory::PlatformWork => "platform_work",
+            TopLevelCategory::Content => "content",
+            TopLevelCategory::Maintenance => "maintenance",
+            TopLevelCategory::Unknown => "unknown",
+        }
+    }
+
     /// All canonical variants in the recommended display order.
     ///
     /// Why: report iteration order must be stable so output stays diffable
@@ -470,6 +505,28 @@ mod tests {
             assert_ne!(*top, TopLevelCategory::Unknown);
         }
         assert_eq!(TopLevelCategory::all().len(), 7);
+    }
+
+    /// Why: `top_level_category` is stored in SQLite as a snake_case string;
+    /// the mapping must be stable across releases (migration v17, issue #445).
+    /// What: asserts every variant returns its canonical snake_case identifier.
+    /// Test: this test itself.
+    #[test]
+    fn as_str_snake_stable_identifiers() {
+        assert_eq!(TopLevelCategory::Feature.as_str_snake(), "feature");
+        assert_eq!(TopLevelCategory::Bugfix.as_str_snake(), "bugfix");
+        assert_eq!(TopLevelCategory::Ktlo.as_str_snake(), "ktlo");
+        assert_eq!(
+            TopLevelCategory::Integrations.as_str_snake(),
+            "integrations"
+        );
+        assert_eq!(
+            TopLevelCategory::PlatformWork.as_str_snake(),
+            "platform_work"
+        );
+        assert_eq!(TopLevelCategory::Content.as_str_snake(), "content");
+        assert_eq!(TopLevelCategory::Maintenance.as_str_snake(), "maintenance");
+        assert_eq!(TopLevelCategory::Unknown.as_str_snake(), "unknown");
     }
 
     #[test]

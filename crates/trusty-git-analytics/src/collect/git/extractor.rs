@@ -12,6 +12,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rusqlite::params;
 use tracing::{debug, info, warn};
 
+use crate::collect::ai_attribution::detect_ai_tool;
 use crate::collect::collector::{FetchOutcome, PerRepoFetch};
 use crate::collect::errors::{CollectError, Result};
 use crate::collect::git::diff::{compute_commit_diff, CommitDiff};
@@ -512,12 +513,16 @@ impl GitCollector {
             // `commits.ticket_id` is populated without a separate
             // `tga backfill ticket-ids` run.
             let ticket_id = extract_ticket_id(&message);
+            // Issue #445: detect AI co-authorship from `Co-Authored-By:` trailers.
+            let ai_tool = detect_ai_tool(&message);
+            let is_ai_assisted = ai_tool.is_some();
 
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO commits \
                  (sha, author_name, author_email, timestamp, message, repository, \
-                  files_changed, insertions, deletions, is_merge, ticketed, ticket_id) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                  files_changed, insertions, deletions, is_merge, ticketed, ticket_id, \
+                  is_ai_assisted, ai_tool) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     sha_str,
                     author_name,
@@ -531,6 +536,8 @@ impl GitCollector {
                     is_merge as i64,
                     ticketed as i64,
                     ticket_id,
+                    is_ai_assisted as i64,
+                    ai_tool,
                 ],
             )?;
 

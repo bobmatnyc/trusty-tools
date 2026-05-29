@@ -124,6 +124,46 @@ impl EffortResult {
     }
 }
 
+/// Map a T-shirt size text label to its numeric integer (1–5).
+///
+/// Why: `fact_commit_effort.effort_tshirt` stores an integer alongside the
+/// `size` TEXT column so SQL range queries (`effort_tshirt <= 3`) and ORDER BY
+/// work without string comparisons (issue #445). The mapping is a static
+/// constant agreed on by all tooling.
+/// What: `"XS"` → 1, `"S"` → 2, `"M"` → 3, `"L"` → 4, `"XL"` → 5.
+/// Any unrecognised label falls back to 0 so callers can detect corrupt data.
+/// Test: `tests::effort_tshirt_mapping`.
+///
+/// | Label | Integer |
+/// |-------|---------|
+/// | `"XS"` | 1 |
+/// | `"S"`  | 2 |
+/// | `"M"`  | 3 |
+/// | `"L"`  | 4 |
+/// | `"XL"` | 5 |
+/// | other  | 0 |
+pub fn effort_tshirt_from_size(size: &str) -> i64 {
+    match size {
+        "XS" => 1,
+        "S" => 2,
+        "M" => 3,
+        "L" => 4,
+        "XL" => 5,
+        _ => 0,
+    }
+}
+
+/// Map an [`EffortSize`] enum variant to its numeric T-shirt integer (1–5).
+///
+/// Why: convenience wrapper over [`effort_tshirt_from_size`] for callers that
+/// already have an [`EffortSize`] value and want the integer without converting
+/// to a label string first.
+/// What: delegates to [`effort_tshirt_from_size`] via the label.
+/// Test: covered by `tests::effort_tshirt_mapping` via the text-label path.
+pub fn effort_tshirt(size: EffortSize) -> i64 {
+    effort_tshirt_from_size(size.label())
+}
+
 /// Classify a continuous score into a T-shirt size bucket.
 ///
 /// Why: the bash script uses the same thresholds; keeping them in one place
@@ -261,6 +301,26 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why: `effort_tshirt_from_size` drives the v17 migration backfill;
+    /// every label must map to the correct integer (issue #445).
+    /// What: asserts all five valid labels and one invalid label.
+    /// Test: this test itself.
+    #[test]
+    fn effort_tshirt_mapping() {
+        assert_eq!(effort_tshirt_from_size("XS"), 1);
+        assert_eq!(effort_tshirt_from_size("S"), 2);
+        assert_eq!(effort_tshirt_from_size("M"), 3);
+        assert_eq!(effort_tshirt_from_size("L"), 4);
+        assert_eq!(effort_tshirt_from_size("XL"), 5);
+        assert_eq!(
+            effort_tshirt_from_size("??"),
+            0,
+            "unknown label falls back to 0"
+        );
+        // Round-trip: EffortSize → label → tshirt
+        assert_eq!(effort_tshirt(EffortSize::M), 3);
+    }
 
     /// Why: guard that T-shirt labels match the spec and the bash script.
     /// What: asserts every variant returns the canonical string.

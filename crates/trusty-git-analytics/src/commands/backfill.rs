@@ -14,12 +14,14 @@
 use clap::{Args, Subcommand};
 use git2::{Repository, Sort};
 use rusqlite::{params, Connection};
+use tga::classify::taxonomy::TaxonomyRegistry;
 use tga::classify::ClassificationPipeline;
+use tga::collect::ai_attribution::detect_ai_tool;
 use tga::collect::git::scan_and_persist;
 use tga::collect::ticket::{extract_ticket_id, is_ticketed};
 use tga::core::config::{expand_path, Config};
 use tga::core::db::{CheckpointMode, Database};
-use tga::core::effort::{compute_effort, FORMULA_VERSION};
+use tga::core::effort::{compute_effort, effort_tshirt_from_size, FORMULA_VERSION};
 
 /// Arguments for `tga backfill`.
 #[derive(Args, Debug)]
@@ -132,6 +134,38 @@ pub enum BackfillSubcommand {
     /// --repos/--since/--until/--weeks do not scope this operation: all NULL
     /// rows are processed.
     Complexity(ComplexityBackfillArgs),
+    /// Recompute `commits.ticketed` using the fixed regex rules (issue #445).
+    ///
+    /// Bare `#N` refs no longer mark a commit as ticketed; only JIRA/Linear
+    /// (`PROJ-N`), GitHub action keywords (`closes/fixes/resolves #N`), and
+    /// Azure DevOps (`AB#N`) do. This subcommand re-evaluates every stored
+    /// `commits.message` with the corrected [`is_ticketed`] and updates rows
+    /// that differ from the stored value. No LLM required — pure regex.
+    ///
+    /// Use --repos/--since/--until to limit scope on large databases.
+    Ticketed,
+    /// Scan existing `commits.message` for AI co-authorship trailers (issue #445).
+    ///
+    /// Detects `Co-Authored-By:` trailers for Claude, GitHub Copilot, and
+    /// Cursor; sets `commits.is_ai_assisted` and `commits.ai_tool`.
+    /// No LLM required — pure string matching.
+    ///
+    /// Use --repos/--since/--until to limit scope.
+    AiDetectionCommits,
+    /// Fill in `classifications.top_level_category` from existing subcategory
+    /// values using the built-in taxonomy (issue #445).
+    ///
+    /// The top_level_category column was added in migration v17 and is
+    /// populated for new classifications at write time. This subcommand
+    /// retroactively fills existing rows by resolving each subcategory through
+    /// the taxonomy registry. No LLM required.
+    TopLevel,
+    /// Fill in `fact_commit_effort.effort_tshirt` from existing `size` values
+    /// (issue #445).
+    ///
+    /// Maps the text size label (XS/S/M/L/XL) to the numeric T-shirt integer
+    /// (1–5) for existing rows that pre-date migration v17.
+    EffortTshirt,
 }
 
 /// Arguments for `tga backfill complexity`.
@@ -236,6 +270,18 @@ pub async fn run(config: Config, db: &mut Database, args: BackfillArgs) -> anyho
         BackfillSubcommand::Complexity(complexity_args) => {
             backfill_complexity(config, db, complexity_args, args.dry_run).await
         }
+        BackfillSubcommand::Ticketed => {
+            backfill_ticketed(db, args.dry_run, &repos, since.as_deref(), until.as_deref())
+        }
+        BackfillSubcommand::AiDetectionCommits => backfill_ai_detection_commits(
+            db,
+            args.dry_run,
+            &repos,
+            since.as_deref(),
+            until.as_deref(),
+        ),
+        BackfillSubcommand::TopLevel => backfill_top_level(db, args.dry_run),
+        BackfillSubcommand::EffortTshirt => backfill_effort_tshirt(db, args.dry_run),
     }
 }
 
@@ -558,6 +604,7 @@ fn process_one_repo_db(
             tests_factor: effort.tests_factor,
             formula_version: FORMULA_VERSION.to_string(),
             computed_at,
+            effort_tshirt: effort_tshirt_from_size(effort.size_label()),
         });
         if records.len().is_multiple_of(1000) {
             tracing::info!(
@@ -842,6 +889,7 @@ fn process_one_repo_git(
             tests_factor: effort.tests_factor,
             formula_version: FORMULA_VERSION.to_string(),
             computed_at,
+            effort_tshirt: effort_tshirt_from_size(effort.size_label()),
         });
 
         // Log progress every 1000 commits.
@@ -890,6 +938,8 @@ struct EffortRow {
     tests_factor: f64,
     formula_version: String,
     computed_at: i64,
+    /// Numeric T-shirt size: XS=1, S=2, M=3, L=4, XL=5 (issue #445 migration v17).
+    effort_tshirt: i64,
 }
 
 /// Persist effort rows in batches of 1000 using UPSERT semantics.
@@ -908,8 +958,8 @@ fn persist_effort_rows(db: &mut Database, rows: &[EffortRow]) -> anyhow::Result<
             let mut stmt = tx.prepare(
                 "INSERT OR REPLACE INTO fact_commit_effort \
                  (sha, repository, size, score, loc, files, test_loc, tests_factor, \
-                  formula_version, computed_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                  formula_version, computed_at, effort_tshirt) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )?;
             for row in chunk {
                 stmt.execute(params![
@@ -923,6 +973,7 @@ fn persist_effort_rows(db: &mut Database, rows: &[EffortRow]) -> anyhow::Result<
                     row.tests_factor,
                     row.formula_version,
                     row.computed_at,
+                    row.effort_tshirt,
                 ])?;
             }
         }
@@ -1316,6 +1367,295 @@ fn is_revert(message: &str) -> bool {
     tga::core::revert::is_revert(message)
 }
 
+// ── backfill ticketed (issue #445) ───────────────────────────────────────────
+
+/// Recompute `commits.ticketed` using the corrected `is_ticketed` logic.
+///
+/// Why: before issue #445 the `gh_bare` pattern (`#N` preceded by whitespace)
+/// was included in [`is_ticketed`], inflating the ticketed rate to ~100%.
+/// After the fix, bare `#N` no longer marks a commit as ticketed. This
+/// backfill lets operators correct existing rows without re-collecting.
+/// What: loads every commit (filtered by repos/since/until), recomputes
+/// `ticketed` from `commits.message` using the fixed `is_ticketed`, and
+/// updates rows whose stored value differs. No LLM required — pure regex.
+/// Test: `tests::backfill_ticketed_corrects_bare_hash_rows`.
+///
+/// # Errors
+///
+/// Propagates database errors from the underlying queries.
+fn backfill_ticketed(
+    db: &mut Database,
+    dry_run: bool,
+    repos_filter: &[String],
+    since: Option<&str>,
+    until: Option<&str>,
+) -> anyhow::Result<()> {
+    let mut to_update: Vec<(i64, i64)> = Vec::new();
+    {
+        let conn = db.connection();
+        let (sql, params) = build_commits_filter_sql(
+            "SELECT id, message, ticketed FROM commits",
+            repos_filter,
+            since,
+            until,
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        for r in rows {
+            let (id, message, current) = r?;
+            let new_val = if is_ticketed(&message) { 1 } else { 0 };
+            if new_val != current {
+                to_update.push((id, new_val));
+            }
+        }
+    }
+
+    let now_ticketed = to_update.iter().filter(|(_, v)| *v == 1).count();
+    let now_unticketed = to_update.iter().filter(|(_, v)| *v == 0).count();
+
+    if dry_run {
+        println!(
+            "Dry run — would update {} commits \
+             ({} newly ticketed, {} newly unticketed). No changes written.",
+            to_update.len(),
+            now_ticketed,
+            now_unticketed,
+        );
+        return Ok(());
+    }
+
+    let conn = db.connection_mut();
+    let tx = conn.transaction()?;
+    {
+        let mut up = tx.prepare("UPDATE commits SET ticketed = ?1 WHERE id = ?2")?;
+        for (id, val) in &to_update {
+            up.execute(params![val, id])?;
+        }
+    }
+    tx.commit()?;
+    println!(
+        "Updated ticketed on {} commits \
+         ({} newly ticketed, {} newly unticketed).",
+        to_update.len(),
+        now_ticketed,
+        now_unticketed,
+    );
+    Ok(())
+}
+
+// ── backfill ai-detection-commits (issue #445) ────────────────────────────────
+
+/// Scan existing `commits.message` for AI co-authorship trailers.
+///
+/// Why: `is_ai_assisted` and `ai_tool` columns were added in migration v17;
+/// existing rows have `is_ai_assisted = 0` and `ai_tool = NULL` regardless of
+/// their actual history. This backfill retroactively detects Claude,
+/// GitHub Copilot, and Cursor via `Co-Authored-By:` trailers.
+/// What: loads every commit (filtered by repos/since/until), runs
+/// [`detect_ai_tool`] on the message, and updates rows where `ai_tool`
+/// differs from the stored value. No LLM required — pure string matching.
+/// Test: `tests::backfill_ai_detection_commits_detects_claude`.
+///
+/// # Errors
+///
+/// Propagates database errors from the underlying queries.
+fn backfill_ai_detection_commits(
+    db: &mut Database,
+    dry_run: bool,
+    repos_filter: &[String],
+    since: Option<&str>,
+    until: Option<&str>,
+) -> anyhow::Result<()> {
+    let mut to_update: Vec<(i64, i64, Option<&'static str>)> = Vec::new();
+    {
+        let conn = db.connection();
+        let (sql, params) = build_commits_filter_sql(
+            "SELECT id, message, ai_tool FROM commits",
+            repos_filter,
+            since,
+            until,
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows: Vec<(i64, String, Option<String>)> = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<Result<_, _>>()?;
+
+        for (id, message, current_tool) in rows {
+            let detected = detect_ai_tool(&message);
+            let current_str = current_tool.as_deref();
+            if detected != current_str {
+                let is_ai = if detected.is_some() { 1_i64 } else { 0_i64 };
+                to_update.push((id, is_ai, detected));
+            }
+        }
+    }
+
+    let with_tool = to_update.iter().filter(|(_, _, t)| t.is_some()).count();
+
+    if dry_run {
+        println!(
+            "Dry run — would update {} commits ({} with AI tool detected). No changes written.",
+            to_update.len(),
+            with_tool,
+        );
+        return Ok(());
+    }
+
+    let conn = db.connection_mut();
+    let tx = conn.transaction()?;
+    {
+        let mut up =
+            tx.prepare("UPDATE commits SET is_ai_assisted = ?1, ai_tool = ?2 WHERE id = ?3")?;
+        for (id, is_ai, tool) in &to_update {
+            up.execute(params![is_ai, tool, id])?;
+        }
+    }
+    tx.commit()?;
+    println!(
+        "Updated {} commits ({} AI-assisted, {} cleared).",
+        to_update.len(),
+        with_tool,
+        to_update.len() - with_tool,
+    );
+    Ok(())
+}
+
+// ── backfill top-level (issue #445) ──────────────────────────────────────────
+
+/// Fill in `classifications.top_level_category` for existing rows.
+///
+/// Why: `top_level_category` was added in migration v17. New classifications
+/// written by `write_results_chunk` will have it populated automatically;
+/// this backfill handles the pre-existing rows where the column is NULL.
+/// What: resolves each stored `subcategory` through the built-in
+/// [`TaxonomyRegistry`] and sets `top_level_category` to the snake_case
+/// string for the resolved variant. Rows with an unrecognized subcategory
+/// (or NULL subcategory) are left as NULL. No LLM required.
+/// Test: `tests::backfill_top_level_fills_known_subcategories`.
+///
+/// # Errors
+///
+/// Propagates database errors from the underlying queries.
+fn backfill_top_level(db: &mut Database, dry_run: bool) -> anyhow::Result<()> {
+    let registry = TaxonomyRegistry::with_builtins();
+
+    let mut to_update: Vec<(i64, String)> = Vec::new();
+    {
+        let conn = db.connection();
+        let mut stmt = conn.prepare(
+            "SELECT id, subcategory FROM classifications WHERE top_level_category IS NULL",
+        )?;
+        let rows: Vec<(i64, Option<String>)> = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<Result<_, _>>()?;
+
+        for (id, subcategory) in rows {
+            if let Some(sub) = subcategory {
+                if let Some(top) = registry.resolve(&sub) {
+                    to_update.push((id, top.as_str_snake().to_string()));
+                }
+            }
+        }
+    }
+
+    if dry_run {
+        println!(
+            "Dry run — would update top_level_category for {} classification(s). \
+             No changes written.",
+            to_update.len(),
+        );
+        return Ok(());
+    }
+
+    let conn = db.connection_mut();
+    let tx = conn.transaction()?;
+    {
+        let mut up =
+            tx.prepare("UPDATE classifications SET top_level_category = ?1 WHERE id = ?2")?;
+        for (id, top) in &to_update {
+            up.execute(params![top, id])?;
+        }
+    }
+    tx.commit()?;
+    println!(
+        "Updated top_level_category for {} classification(s).",
+        to_update.len()
+    );
+    Ok(())
+}
+
+// ── backfill effort-tshirt (issue #445) ──────────────────────────────────────
+
+/// Fill in `fact_commit_effort.effort_tshirt` from existing `size` text values.
+///
+/// Why: the `effort_tshirt` integer column (1=XS, 2=S, 3=M, 4=L, 5=XL) was
+/// added in migration v17. Existing rows retain a valid `size` TEXT value
+/// but have `effort_tshirt = NULL`. This backfill derives the integer from
+/// the existing text without re-computing the effort formula.
+/// What: selects all rows where `effort_tshirt IS NULL`, maps `size` to an
+/// integer via [`effort_tshirt_from_size`], and updates in place.
+/// Test: `tests::backfill_effort_tshirt_fills_from_size`.
+///
+/// # Errors
+///
+/// Propagates database errors from the underlying queries.
+fn backfill_effort_tshirt(db: &mut Database, dry_run: bool) -> anyhow::Result<()> {
+    let mut to_update: Vec<(i64, i64)> = Vec::new();
+    {
+        let conn = db.connection();
+        let mut stmt =
+            conn.prepare("SELECT rowid, size FROM fact_commit_effort WHERE effort_tshirt IS NULL")?;
+        let rows: Vec<(i64, String)> = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<_, _>>()?;
+
+        for (rowid, size) in rows {
+            let tshirt = effort_tshirt_from_size(&size);
+            to_update.push((rowid, tshirt));
+        }
+    }
+
+    if dry_run {
+        println!(
+            "Dry run — would update effort_tshirt for {} row(s). No changes written.",
+            to_update.len(),
+        );
+        return Ok(());
+    }
+
+    let conn = db.connection_mut();
+    let tx = conn.transaction()?;
+    {
+        let mut up =
+            tx.prepare("UPDATE fact_commit_effort SET effort_tshirt = ?1 WHERE rowid = ?2")?;
+        for (rowid, tshirt) in &to_update {
+            up.execute(params![tshirt, rowid])?;
+        }
+    }
+    tx.commit()?;
+    println!(
+        "Updated effort_tshirt for {} effort row(s).",
+        to_update.len()
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1475,6 +1815,7 @@ mod tests {
             tests_factor: 1.0,
             formula_version: FORMULA_VERSION.to_string(),
             computed_at: 1_000_000,
+            effort_tshirt: 3,
         }];
 
         persist_effort_rows(&mut db, &rows).expect("persist");
@@ -1516,6 +1857,7 @@ mod tests {
             tests_factor: 1.0,
             formula_version: FORMULA_VERSION.to_string(),
             computed_at: 1_000_000,
+            effort_tshirt: 1,
         }];
         persist_effort_rows(&mut db, &first).expect("first persist");
 
@@ -1531,6 +1873,7 @@ mod tests {
             tests_factor: 1.0,
             formula_version: FORMULA_VERSION.to_string(),
             computed_at: 2_000_000,
+            effort_tshirt: 5,
         }];
         persist_effort_rows(&mut db, &second).expect("second persist");
 
@@ -1580,6 +1923,7 @@ mod tests {
                 tests_factor: 1.0,
                 formula_version: FORMULA_VERSION.to_string(),
                 computed_at: 1_000_000,
+                effort_tshirt: 2, // S=2
             },
             EffortRow {
                 sha: "cafebabe".to_string(),
@@ -1592,6 +1936,7 @@ mod tests {
                 tests_factor: 1.0,
                 formula_version: FORMULA_VERSION.to_string(),
                 computed_at: 1_000_000,
+                effort_tshirt: 3, // M=3
             },
         ];
 
@@ -1759,6 +2104,7 @@ mod tests {
             tests_factor: 1.0,
             formula_version: FORMULA_VERSION.to_string(),
             computed_at: 0,
+            effort_tshirt: 1, // XS=1
         }];
         persist_effort_rows(&mut db, &pre).expect("pre-persist");
 
@@ -1807,6 +2153,7 @@ mod tests {
             tests_factor: 1.0,
             formula_version: "v0".to_string(),
             computed_at: 0,
+            effort_tshirt: 1, // XS=1
         }];
         persist_effort_rows(&mut db, &stale).expect("stale persist");
 
@@ -1981,5 +2328,178 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM fact_commit_effort", [], |r| r.get(0))
             .expect("count");
         assert_eq!(count, 0, "dry_run must not write to fact_commit_effort");
+    }
+
+    // ── issue #445 backfill tests ─────────────────────────────────────────────
+
+    /// Why: regression guard for issue #445. `backfill_ticketed` must correct
+    /// rows where a bare `#N` was (incorrectly) stored as `ticketed=1` under the
+    /// old logic, setting them to `ticketed=0`. Rows with JIRA refs must stay 1.
+    /// What: seeds two commits (one bare-hash, one JIRA), runs the ticketed
+    /// backfill with dry_run=false, asserts the bare-hash row is now 0 and the
+    /// JIRA row remains 1.
+    /// Test: this test itself.
+    #[test]
+    fn backfill_ticketed_corrects_bare_hash_rows() {
+        let mut db = Database::open_in_memory().expect("open");
+
+        // Force-insert with ticketed=1 to simulate the pre-#445 incorrect state.
+        db.connection()
+            .execute(
+                "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                 repository, ticketed) VALUES ('bare1', 'n', 'e', '2024-01-01T00:00:00Z', \
+                 'some note about #42', 'repo', 1)",
+                [],
+            )
+            .expect("insert bare-hash commit");
+        // JIRA ref — was and should remain ticketed.
+        db.connection()
+            .execute(
+                "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                 repository, ticketed) VALUES ('jira1', 'n', 'e', '2024-01-02T00:00:00Z', \
+                 'ENG-7: add feature', 'repo', 1)",
+                [],
+            )
+            .expect("insert JIRA commit");
+        // Plain message — was and should remain 0.
+        seed(&db, "plain1", "no ticket here");
+
+        backfill_ticketed(&mut db, false, &[], None, None).expect("backfill ticketed");
+
+        let bare_val: i64 = db
+            .connection()
+            .query_row(
+                "SELECT ticketed FROM commits WHERE sha = 'bare1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read bare");
+        assert_eq!(bare_val, 0, "bare #N must be unticketed after backfill");
+
+        let jira_val: i64 = db
+            .connection()
+            .query_row(
+                "SELECT ticketed FROM commits WHERE sha = 'jira1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read jira");
+        assert_eq!(jira_val, 1, "JIRA ref must remain ticketed");
+    }
+
+    /// Why: verify `backfill_ai_detection_commits` detects Claude in an existing
+    /// commit message and sets `is_ai_assisted=1` / `ai_tool='claude'`.
+    /// What: seeds one Claude-co-authored commit and one plain human commit;
+    /// runs the backfill; asserts is_ai_assisted and ai_tool are set correctly.
+    /// Test: this test itself.
+    #[test]
+    fn backfill_ai_detection_commits_detects_claude() {
+        let mut db = Database::open_in_memory().expect("open");
+
+        // AI-assisted commit (Claude trailer).
+        let ai_msg = "feat: add auth\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>";
+        db.connection()
+            .execute(
+                "INSERT INTO commits (sha, author_name, author_email, timestamp, message, \
+                 repository) VALUES ('ai1', 'n', 'e', '2024-01-01T00:00:00Z', ?1, 'repo')",
+                params![ai_msg],
+            )
+            .expect("insert AI commit");
+        // Human-only commit.
+        seed(&db, "human1", "fix: bug without AI help");
+
+        backfill_ai_detection_commits(&mut db, false, &[], None, None)
+            .expect("backfill ai-detection");
+
+        let (is_ai, tool): (i64, Option<String>) = db
+            .connection()
+            .query_row(
+                "SELECT is_ai_assisted, ai_tool FROM commits WHERE sha = 'ai1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("read ai1");
+        assert_eq!(is_ai, 1, "AI-assisted commit must have is_ai_assisted=1");
+        assert_eq!(tool, Some("claude".to_string()), "ai_tool must be 'claude'");
+
+        let (human_ai, human_tool): (i64, Option<String>) = db
+            .connection()
+            .query_row(
+                "SELECT is_ai_assisted, ai_tool FROM commits WHERE sha = 'human1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("read human1");
+        assert_eq!(human_ai, 0, "human commit must have is_ai_assisted=0");
+        assert!(human_tool.is_none(), "human commit must have ai_tool=NULL");
+    }
+
+    /// Why: `backfill_top_level` must fill `top_level_category` for existing
+    /// classifications where it is NULL, using the built-in taxonomy.
+    /// What: seeds a classification with subcategory='bugfix' and
+    /// top_level_category=NULL; runs the backfill; asserts top_level_category
+    /// is now 'bugfix'.
+    /// Test: this test itself.
+    #[test]
+    fn backfill_top_level_fills_known_subcategories() {
+        let mut db = Database::open_in_memory().expect("open");
+
+        db.connection()
+            .execute(
+                "INSERT INTO classifications (category, subcategory, confidence, method) \
+                 VALUES ('bugfix', 'bugfix', 0.9, 'exact_rule')",
+                [],
+            )
+            .expect("insert classification");
+
+        backfill_top_level(&mut db, false).expect("backfill top-level");
+
+        let top: Option<String> = db
+            .connection()
+            .query_row(
+                "SELECT top_level_category FROM classifications WHERE subcategory = 'bugfix' \
+                 ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read top");
+        assert_eq!(
+            top,
+            Some("bugfix".to_string()),
+            "bugfix subcategory must resolve to 'bugfix' top-level"
+        );
+    }
+
+    /// Why: `backfill_effort_tshirt` must populate `effort_tshirt` from the
+    /// existing `size` TEXT column for rows where the integer is NULL.
+    /// What: inserts an effort row with size='L' and effort_tshirt=NULL; runs
+    /// the backfill; asserts effort_tshirt is now 4 (L=4).
+    /// Test: this test itself.
+    #[test]
+    fn backfill_effort_tshirt_fills_from_size() {
+        let mut db = Database::open_in_memory().expect("open");
+
+        // Insert a row with size='L' but no effort_tshirt (simulating pre-v17 row).
+        db.connection()
+            .execute(
+                "INSERT INTO fact_commit_effort \
+                 (sha, repository, size, score, loc, files, test_loc, tests_factor, \
+                  formula_version, computed_at) \
+                 VALUES ('tshirt_test', 'repo', 'L', 15.5, 200, 5, 0, 1.0, 'v1', 1000000)",
+                [],
+            )
+            .expect("insert effort row without tshirt");
+
+        backfill_effort_tshirt(&mut db, false).expect("backfill effort-tshirt");
+
+        let tshirt: Option<i64> = db
+            .connection()
+            .query_row(
+                "SELECT effort_tshirt FROM fact_commit_effort WHERE sha = 'tshirt_test'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read effort_tshirt");
+        assert_eq!(tshirt, Some(4), "L size must map to effort_tshirt=4");
     }
 }

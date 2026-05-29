@@ -44,6 +44,9 @@ struct CommitRow {
     category: Option<String>,
     message: String,
     ticketed: bool,
+    /// True when the commit carries a recognised AI co-authorship trailer
+    /// (issue #445: `Co-Authored-By: Claude/Copilot/Cursor`).
+    is_ai_assisted: bool,
 }
 
 /// Minimal PR row used by velocity / DORA computations and (issue #377)
@@ -344,7 +347,7 @@ impl Aggregator {
                         COALESCE(NULLIF(a.canonical_email, ''), c.author_email) AS author_email, \
                         c.timestamp, c.repository, \
                         c.insertions, c.deletions, c.files_changed, cl.category, \
-                        c.message, c.ticketed \
+                        c.message, c.ticketed, c.is_ai_assisted \
                  FROM commits c \
                  LEFT JOIN authors a ON a.id = c.author_id \
                  LEFT JOIN classifications cl ON cl.id = c.classification_id";
@@ -355,6 +358,9 @@ impl Aggregator {
                 .map(|dt| dt.with_timezone(&Utc))
                 .unwrap_or_else(|_| Utc::now());
             let ticketed: i64 = row.get(10).unwrap_or(0);
+            // Issue #445: column added in migration v17; default 0 for rows
+            // that pre-date the migration (SQLite returns NULL as 0 via unwrap_or).
+            let is_ai_assisted: i64 = row.get(11).unwrap_or(0);
             Ok(CommitRow {
                 sha: row.get(0)?,
                 author_name: row.get(1)?,
@@ -367,6 +373,7 @@ impl Aggregator {
                 category: row.get(8)?,
                 message: row.get(9)?,
                 ticketed: ticketed != 0,
+                is_ai_assisted: is_ai_assisted != 0,
             })
         };
 
@@ -607,6 +614,8 @@ struct WeekAcc {
     bugfixes: usize,
     /// Ticketed commits in this bucket (issue #377).
     ticketed: usize,
+    /// AI-assisted commits in this bucket (issue #445: `is_ai_assisted=1`).
+    ai_assisted: usize,
 }
 
 /// Cross-developer per-week running totals during accumulation.
@@ -730,6 +739,7 @@ fn accumulate_rows(rows: &[CommitRow], flags: &RowFlags) -> Accumulators {
             reverts: 0,
             bugfixes: 0,
             ticketed: 0,
+            ai_assisted: 0,
         });
         w.commits += 1;
         w.insertions += row.insertions;
@@ -749,6 +759,11 @@ fn accumulate_rows(rows: &[CommitRow], flags: &RowFlags) -> Accumulators {
         }
         if row.ticketed {
             w.ticketed += 1;
+        }
+        // Issue #445: count AI-assisted commits per (week, engineer, repo) bucket
+        // so the weekly activity report can surface AI-adoption rates.
+        if row.is_ai_assisted {
+            w.ai_assisted += 1;
         }
 
         // Category totals.
@@ -909,6 +924,8 @@ fn materialize_weekly_activity(
                 quality_score,
                 quality_tshirt,
                 abandoned_pr_count,
+                // Issue #445: AI-assisted commits in this (week, engineer, repo) bucket.
+                ai_assisted_count: w.ai_assisted,
             }
         })
         .collect()
