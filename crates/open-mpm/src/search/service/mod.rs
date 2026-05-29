@@ -21,27 +21,30 @@
 //! plus the unix socket placeholder before exiting.
 //! Test: See `tests` module — pid-file round-trip, socket-path
 //! convention, and an end-to-end start/query/stop integration test.
+//!
+//! Module layout (split for the 500-line cap, #365):
+//! - `mod.rs` — daemon lifecycle: pid-file IO, liveness probing,
+//!   [`SearchState`], and [`run_search_service`].
+//! - [`query`] — the axum router + HTTP request handlers.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use axum::{
-    Json, Router,
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::{get, post},
-};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::memory::{CodeStore, FastEmbedder};
 use crate::search::indexer::CodeIndexer;
 use crate::search::watcher::FileWatcher;
+
+mod query;
+#[cfg(test)]
+mod tests;
+
+pub use query::build_router;
 
 /// Embedding dimension for FastEmbedder. Mirrors `build_file_watcher` in
 /// `src/main.rs` so the daemon and the in-process watcher see identical
@@ -50,7 +53,7 @@ const EMBED_DIM: usize = 384;
 
 /// Default extensions the embedded watcher tracks. Mirrors
 /// `default_extensions` in `src/main.rs`.
-fn default_extensions() -> Vec<String> {
+pub(crate) fn default_extensions() -> Vec<String> {
     ["rs", "py", "ts", "tsx", "js", "jsx", "go", "md"]
         .iter()
         .map(|s| s.to_string())
@@ -189,184 +192,6 @@ pub struct SearchState {
     pub indexer: Arc<CodeIndexer>,
     pub project_root: PathBuf,
     pub reindex_in_flight: Arc<Mutex<bool>>,
-}
-
-#[derive(Deserialize)]
-struct QueryBody {
-    query: String,
-    #[serde(default = "default_top_k")]
-    top_k: usize,
-    /// When true, run KG expansion on top-K results (#376 B1).
-    #[serde(default = "default_expand_graph")]
-    expand_graph: bool,
-    /// When true, truncate each chunk's `text` to 7 lines (compact mode).
-    ///
-    /// Why: Full chunk payloads can be 40-120 lines. Compact mode cuts
-    /// ~5-10x token cost for callers that only need to locate a function,
-    /// not read its entire body (#400).
-    #[serde(default)]
-    compact: bool,
-}
-
-fn default_top_k() -> usize {
-    5
-}
-
-fn default_expand_graph() -> bool {
-    true
-}
-
-#[derive(Deserialize)]
-struct PathBody {
-    path: String,
-}
-
-/// `GET /search/health` — liveness probe.
-async fn health_handler(State(s): State<SearchState>) -> impl IntoResponse {
-    // Best-effort: count of CodeIndex chunks isn't directly exposed by the
-    // store trait, so we report a sentinel `-1` when unavailable. The
-    // important contract is the 200 status + `status: ok`.
-    let chunks: i64 = -1;
-    let _ = &s; // silence unused for now; placeholder for future stats
-    Json(serde_json::json!({
-        "status": "ok",
-        "indexed_chunks": chunks,
-        "version": env!("CARGO_PKG_VERSION"),
-    }))
-}
-
-/// Number of lines to keep per chunk in compact mode (#400).
-const COMPACT_LINES: usize = 7;
-
-/// Truncate a chunk's text to `COMPACT_LINES` lines when compact mode is on.
-///
-/// Why: Full chunks can be 40-120 lines; callers that only need to locate a
-/// function can request compact mode for ~5-10x token savings (#400).
-fn apply_compact(
-    mut hits: Vec<crate::search::indexer::CodeChunk>,
-) -> Vec<crate::search::indexer::CodeChunk> {
-    for chunk in &mut hits {
-        let truncated: String = chunk
-            .text
-            .lines()
-            .take(COMPACT_LINES)
-            .collect::<Vec<_>>()
-            .join("\n");
-        chunk.text = truncated;
-    }
-    hits
-}
-
-/// `POST /search/query` — semantic + lexical hybrid search.
-async fn query_handler(
-    State(s): State<SearchState>,
-    Json(body): Json<QueryBody>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    if body.query.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "query must be non-empty".into()));
-    }
-    // Helper: serialize hits, return a 500 instead of swallowing the error
-    // into `Value::Null` like the previous version did (#376 A4).
-    let to_json = |hits: Vec<crate::search::indexer::CodeChunk>| {
-        let hits = if body.compact {
-            apply_compact(hits)
-        } else {
-            hits
-        };
-        serde_json::to_value(&hits).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("encoding hits to JSON failed: {e}"),
-            )
-        })
-    };
-    match s
-        .indexer
-        .search_hybrid(&body.query, body.top_k, body.expand_graph)
-        .await
-    {
-        Ok(hits) => Ok(Json(to_json(hits)?)),
-        Err(e) => {
-            tracing::warn!(error = %e, "search_hybrid failed; falling back to vector-only");
-            match s.indexer.search(&body.query, body.top_k).await {
-                Ok(hits) => Ok(Json(to_json(hits)?)),
-                Err(e2) => Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("search failed: hybrid={e}; vector={e2}"),
-                )),
-            }
-        }
-    }
-}
-
-/// `POST /search/index-file` — re-index a single file by absolute path.
-async fn index_file_handler(
-    State(s): State<SearchState>,
-    Json(body): Json<PathBody>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let path = PathBuf::from(&body.path);
-    match s.indexer.index_file(&path, Some(&s.project_root)).await {
-        Ok(n) => Ok(Json(serde_json::json!({ "chunks": n }))),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("index_file failed: {e}"),
-        )),
-    }
-}
-
-/// `POST /search/remove-file` — drop all chunks for a path.
-async fn remove_file_handler(
-    State(s): State<SearchState>,
-    Json(body): Json<PathBody>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    let path = PathBuf::from(&body.path);
-    match s.indexer.remove_file(&path).await {
-        Ok(n) => Ok(Json(serde_json::json!({ "removed": n }))),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("remove_file failed: {e}"),
-        )),
-    }
-}
-
-/// `POST /search/reindex` — fire-and-forget full directory reindex.
-async fn reindex_handler(State(s): State<SearchState>) -> Json<Value> {
-    {
-        let mut flag = s.reindex_in_flight.lock().await;
-        if *flag {
-            return Json(serde_json::json!({ "status": "already-running" }));
-        }
-        *flag = true;
-    }
-    let indexer = Arc::clone(&s.indexer);
-    let root = s.project_root.clone();
-    let flag = Arc::clone(&s.reindex_in_flight);
-    tokio::spawn(async move {
-        let exts = default_extensions();
-        let ext_refs: Vec<&str> = exts.iter().map(|s| s.as_str()).collect();
-        match indexer.index_directory(&root, &ext_refs).await {
-            Ok(n) => tracing::info!(chunks = n, "background reindex complete"),
-            Err(e) => tracing::warn!(error = %e, "background reindex failed"),
-        }
-        *flag.lock().await = false;
-    });
-    Json(serde_json::json!({ "status": "started" }))
-}
-
-/// Build the axum router with the shared state attached.
-///
-/// Why: Splitting the router from `run_search_service` keeps the
-/// integration test simple — it can construct a `SearchState` over a
-/// mock store and exercise all five handlers without going through
-/// `tokio::signal` or pid-file IO.
-pub fn build_router(state: SearchState) -> Router {
-    Router::new()
-        .route("/search/health", get(health_handler))
-        .route("/search/query", post(query_handler))
-        .route("/search/index-file", post(index_file_handler))
-        .route("/search/remove-file", post(remove_file_handler))
-        .route("/search/reindex", post(reindex_handler))
-        .with_state(state)
 }
 
 /// Run the search-as-a-service daemon to completion.
@@ -564,182 +389,5 @@ async fn wait_for_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    #[test]
-    fn pid_file_roundtrip() {
-        let dir = TempDir::new().unwrap();
-        let project = dir.path();
-        std::fs::create_dir_all(project.join(".open-mpm").join("state")).unwrap();
-
-        let state = SearchDaemonState {
-            pid: 12345,
-            started_at: Utc::now(),
-            port: 54321,
-            socket_path: PathBuf::from("/tmp/test.sock"),
-        };
-        write_pid_file(project, &state).expect("write");
-        let back = read_pid_file(project).expect("read");
-        assert_eq!(back.pid, 12345);
-        assert_eq!(back.port, 54321);
-        assert_eq!(back.socket_path, PathBuf::from("/tmp/test.sock"));
-    }
-
-    #[test]
-    fn read_missing_pid_file_is_none() {
-        let dir = TempDir::new().unwrap();
-        assert!(read_pid_file(dir.path()).is_none());
-    }
-
-    #[test]
-    fn pid_file_path_is_under_state_dir() {
-        let dir = TempDir::new().unwrap();
-        let p = pid_file_path(dir.path());
-        assert!(p.ends_with(".open-mpm/state/search.pid"));
-    }
-
-    #[test]
-    fn search_socket_path_uses_project_id() {
-        let p = PathBuf::from("/tmp/some-project");
-        let s = search_socket_path(&p);
-        let s_str = s.to_string_lossy().into_owned();
-        // Either uses HOME-based sockets dir or falls back to project state.
-        assert!(
-            s_str.contains("some-project.search.sock") || s_str.ends_with("search.sock"),
-            "unexpected socket path: {s_str}"
-        );
-    }
-
-    #[tokio::test]
-    async fn health_ok_returns_false_for_unbound_port() {
-        // Port 1 is privileged; nothing should be listening at user level.
-        assert!(!health_ok(1).await);
-    }
-
-    #[tokio::test]
-    async fn router_serves_health_with_mock_indexer() {
-        // Why: Exercises the axum router and the SearchState plumbing
-        // without spinning up a full daemon (which needs an embedder
-        // model + file watcher). Uses an in-memory MockStore + MockEmbedder
-        // mirrored from the indexer tests.
-        use crate::memory::{Embedder, MemoryResult, MemoryStore, Segment};
-        use async_trait::async_trait;
-        use std::collections::HashMap;
-        use std::sync::Mutex as StdMutex;
-
-        struct MockStore {
-            inner: StdMutex<HashMap<String, (Vec<f32>, Value)>>,
-        }
-        #[async_trait]
-        impl MemoryStore for MockStore {
-            async fn insert(
-                &self,
-                _: Segment,
-                id: &str,
-                v: &[f32],
-                p: Value,
-            ) -> anyhow::Result<()> {
-                self.inner
-                    .lock()
-                    .unwrap()
-                    .insert(id.into(), (v.to_vec(), p));
-                Ok(())
-            }
-            async fn search(
-                &self,
-                _: Segment,
-                _: &[f32],
-                _: usize,
-            ) -> anyhow::Result<Vec<MemoryResult>> {
-                Ok(vec![])
-            }
-            async fn get(&self, _: Segment, id: &str) -> anyhow::Result<Option<Value>> {
-                Ok(self.inner.lock().unwrap().get(id).map(|(_, p)| p.clone()))
-            }
-            async fn delete(&self, _: Segment, id: &str) -> anyhow::Result<()> {
-                self.inner.lock().unwrap().remove(id);
-                Ok(())
-            }
-        }
-        struct MockEmbedder;
-        impl Embedder for MockEmbedder {
-            fn embed(&self, t: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
-                Ok(t.iter().map(|s| vec![s.len() as f32; 8]).collect())
-            }
-            fn embed_single(&self, t: &str) -> anyhow::Result<Vec<f32>> {
-                Ok(vec![t.len() as f32; 8])
-            }
-            fn dimension(&self) -> usize {
-                8
-            }
-        }
-
-        let store: Arc<dyn MemoryStore> = Arc::new(MockStore {
-            inner: StdMutex::new(HashMap::new()),
-        });
-        let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder);
-        let indexer = Arc::new(CodeIndexer::new(store, embedder));
-
-        let dir = TempDir::new().unwrap();
-        let state = SearchState {
-            indexer,
-            project_root: dir.path().to_path_buf(),
-            reindex_in_flight: Arc::new(Mutex::new(false)),
-        };
-        let app = build_router(state);
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-
-        // Give the listener a moment to come up. 50ms is plenty on localhost.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let url = format!("http://127.0.0.1:{port}/search/health");
-        let resp = reqwest::get(&url).await.expect("GET /search/health");
-        assert!(resp.status().is_success());
-        let body: Value = resp.json().await.unwrap();
-        assert_eq!(body["status"], "ok");
-        assert!(body["version"].is_string());
-
-        // Empty-query is rejected.
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(format!("http://127.0.0.1:{port}/search/query"))
-            .json(&serde_json::json!({"query": "", "top_k": 5}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
-
-        // Valid query returns a JSON array (mock indexer returns []).
-        let resp = client
-            .post(format!("http://127.0.0.1:{port}/search/query"))
-            .json(&serde_json::json!({"query": "foo", "top_k": 3}))
-            .send()
-            .await
-            .unwrap();
-        assert!(resp.status().is_success());
-        let body: Value = resp.json().await.unwrap();
-        assert!(body.is_array(), "expected JSON array, got {body:?}");
-
-        // /search/reindex returns started.
-        let resp = client
-            .post(format!("http://127.0.0.1:{port}/search/reindex"))
-            .send()
-            .await
-            .unwrap();
-        assert!(resp.status().is_success());
-        let body: Value = resp.json().await.unwrap();
-        assert_eq!(body["status"], "started");
-
-        server.abort();
     }
 }
