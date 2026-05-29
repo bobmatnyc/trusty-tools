@@ -20,6 +20,7 @@
 - [Decisions](./open-mpm/decisions/README.md)
   - [0001 — NDJSON subprocess IPC](./open-mpm/decisions/0001-ndjson-subprocess-ipc.md)
   - [0002 — Model-agnostic credential routing](./open-mpm/decisions/0002-model-agnostic-credential-routing.md)
+  - [0003 — Daemon process model](./open-mpm/decisions/0003-daemon-process-model.md)
 - [Design](./open-mpm/design/README.md)
   - [Goals](./open-mpm/design/goals.md)
   - [Workflow Engine](./open-mpm/design/workflow-engine.md)
@@ -46,33 +47,120 @@
 - [Research](./open-mpm/research/README.md)
 - [Archive](./open-mpm/_archive/README.md)
 
+# trusty-mpm
+
+- [Overview](./trusty-mpm/README.md)
+- [Specification](./trusty-mpm/spec/README.md)
+  - [PRD](./trusty-mpm/spec/PRD.md)
+  - [Architecture](./trusty-mpm/spec/ARCHITECTURE.md)
+  - [Components](./trusty-mpm/spec/COMPONENTS.md)
+- [Decisions](./trusty-mpm/decisions/README.md)
+  - [0001 — Single-install multi-binary bundling](./trusty-mpm/decisions/0001-single-install-multi-binary-bundling.md)
+- [Research](./trusty-mpm/research/README.md)
+  - [PRD (2026-05-29)](./trusty-mpm/research/prd-2026-05-29.md)
+  - [Architecture Spec (2026-05-29)](./trusty-mpm/research/architecture-spec-2026-05-29.md)
+  - [tm Services Discovery Spec (2026-05-28)](./trusty-mpm/research/tm-services-discovery-spec-2026-05-28.md)
+- [Sessions](./trusty-mpm/sessions/README.md)
+  - [2026-05-26 — TUI Color Fix](./trusty-mpm/sessions/SESSION-2026-05-26-tui-color-fix.md)
+
 # trusty-search
 
 - [Overview](./trusty-search/README.md)
+- [Specification](./trusty-search/spec/README.md)
+  - [PRD](./trusty-search/spec/PRD.md)
+  - [Architecture](./trusty-search/spec/ARCHITECTURE.md)
+  - [Components](./trusty-search/spec/COMPONENTS.md)
+- [Decisions](./trusty-search/decisions/README.md)
+  - [0001 — Bundled embedder sidecar](./trusty-search/decisions/0001-bundled-embedder-sidecar.md)
 - [Research](./trusty-search/research/README.md)
 - [Regression Testing](./trusty-search/regression-testing/README.md)
 - [Sessions](./trusty-search/sessions/README.md)
 
-# trusty-git-analytics
-
-- [Overview](./trusty-git-analytics/README.md)
-- [Requirements](./trusty-git-analytics/requirements/index.md)
-- [Decisions](./trusty-git-analytics/decisions/README.md)
-- [Regression Testing](./trusty-git-analytics/regression-testing/README.md)
-
 # trusty-memory
 
 - [Overview](./trusty-memory/README.md)
-
-# trusty-common
-
-- [Overview](./trusty-common/README.md)
+- [Specification](./trusty-memory/spec/README.md)
+  - [PRD](./trusty-memory/spec/PRD.md)
+  - [Architecture](./trusty-memory/spec/ARCHITECTURE.md)
+  - [Components](./trusty-memory/spec/COMPONENTS.md)
+- [Decisions](./trusty-memory/decisions/README.md)
+  - [0001 — Frontend/Core Split](./trusty-memory/decisions/0001-frontend-core-split.md)
+- [Research](./trusty-memory/research/README.md)
+  - [axum Feature-Flag Decision (2026-05-26)](./trusty-memory/research/axum-feature-flag-decision-2026-05-26.md)
+- [Sessions](./trusty-memory/sessions/README.md)
+  - [2026-05-26 — Code Analysis & Fixes](./trusty-memory/sessions/SESSION-2026-05-26-code-analysis-and-fixes.md)
 
 # trusty-analyze
 
 - [Overview](./trusty-analyze/README.md)
+- [Specification](./trusty-analyze/spec/README.md)
+  - [PRD](./trusty-analyze/spec/PRD.md)
+  - [Architecture](./trusty-analyze/spec/ARCHITECTURE.md)
+  - [Components](./trusty-analyze/spec/COMPONENTS.md)
+- [Decisions](./trusty-analyze/decisions/README.md)
+  - [0001 — Gate axum Behind http-server Feature (2026-05-26)](./trusty-analyze/decisions/0001-gate-axum-behind-http-server-feature-2026-05-26.md)
+- [Research](./trusty-analyze/research/README.md)
+  - [Code Analysis Summary](./trusty-analyze/research/trustee_search_code_analysis_summary.md)
 
-# trusty-mpm
+# trusty-common
 
-- [Overview](./trusty-mpm/README.md)
-- [Research](./trusty-mpm/research/README.md)
+- [Overview](./trusty-common/README.md)
+- [Specification](./trusty-common/spec/README.md)
+  - [PRD](./trusty-common/spec/PRD.md)
+  - [Architecture](./trusty-common/spec/ARCHITECTURE.md)
+  - [Components](./trusty-common/spec/COMPONENTS.md)
+- [Decisions](./trusty-common/decisions/README.md)
+  - [0001 — Consolidate library micro-crates](./trusty-common/decisions/0001-consolidate-library-micro-crates.md)
+
+# trusty-git-analytics
+
+- [Overview](./trusty-git-analytics/README.md)
+- [Specification](./trusty-git-analytics/spec/README.md)
+  - [PRD](./trusty-git-analytics/spec/PRD.md)
+  - [Architecture](./trusty-git-analytics/spec/ARCHITECTURE.md)
+  - [Components](./trusty-git-analytics/spec/COMPONENTS.md)
+- [Decisions](./trusty-git-analytics/decisions/README.md)
+  - [0001 — SQLite Tuning](./trusty-git-analytics/decisions/0001-sqlite-tuning.md)
+  - [0002 — Performance Hotspots](./trusty-git-analytics/decisions/0002-performance-hotspots.md)
+  - [0003 — Bitbucket PR Provider](./trusty-git-analytics/decisions/0003-bitbucket-pr-provider.md)
+- [Requirements](./trusty-git-analytics/requirements/README.md)
+  - [Index](./trusty-git-analytics/requirements/index.md)
+  - [Overview](./trusty-git-analytics/requirements/overview.md)
+  - [CLI Commands](./trusty-git-analytics/requirements/cli-commands.md)
+  - [Collection](./trusty-git-analytics/requirements/collection.md)
+  - [Classification](./trusty-git-analytics/requirements/classification.md)
+  - [Reporting](./trusty-git-analytics/requirements/reporting.md)
+  - [Configuration](./trusty-git-analytics/requirements/configuration.md)
+  - [Database Schema](./trusty-git-analytics/requirements/database-schema.md)
+  - [Rust Architecture](./trusty-git-analytics/requirements/rust-architecture.md)
+- [User Guide](./trusty-git-analytics/user/README.md)
+  - [User Guide](./trusty-git-analytics/user/user-guide.md)
+- [Developer Guide](./trusty-git-analytics/developer/README.md)
+  - [Architecture](./trusty-git-analytics/developer/architecture.md)
+  - [Developer Guide](./trusty-git-analytics/developer/developer-guide.md)
+  - [Configuration Reference](./trusty-git-analytics/developer/configuration-reference.md)
+  - [Migration from Python](./trusty-git-analytics/developer/migration-from-python.md)
+  - [Publishing](./trusty-git-analytics/developer/publishing.md)
+- [Research](./trusty-git-analytics/research/README.md)
+  - [Commit Effort Spec (2026-05-27)](./trusty-git-analytics/research/commit-effort-spec-2026-05-27.md)
+  - [Per-Engineer Drill-down (2026-05-28)](./trusty-git-analytics/research/per-engineer-drilldown-2026-05-28.md)
+- [Regression Testing](./trusty-git-analytics/regression-testing/README.md)
+  - [Comparison](./trusty-git-analytics/regression-testing/comparison.md)
+  - [v1.3.0 (2026-05-27)](./trusty-git-analytics/regression-testing/v1.3.0-2026-05-27.md)
+
+# Libraries & Sidecars
+
+- [trusty-embedderd](./trusty-embedderd/README.md)
+  - [Spec](./trusty-embedderd/SPEC.md)
+- [trusty-bm25-daemon](./trusty-bm25-daemon/README.md)
+  - [Spec](./trusty-bm25-daemon/SPEC.md)
+- [trusty-gworkspace](./trusty-gworkspace/README.md)
+  - [Spec](./trusty-gworkspace/SPEC.md)
+- [trusty-cto-db](./trusty-cto-db/README.md)
+  - [Spec](./trusty-cto-db/SPEC.md)
+- [tc-services](./tc-services/README.md)
+  - [Spec](./tc-services/SPEC.md)
+- [open-mpm-agent-api](./open-mpm-agent-api/README.md)
+  - [Spec](./open-mpm-agent-api/SPEC.md)
+- [open-mpm-local](./open-mpm-local/README.md)
+  - [Spec](./open-mpm-local/SPEC.md)
