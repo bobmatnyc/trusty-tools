@@ -188,6 +188,45 @@ impl RuleSet {
         refs.sort_by_key(|r| std::cmp::Reverse(r.priority));
         refs
     }
+
+    /// Merge `other` into `self`, returning the combined ruleset.
+    ///
+    /// Why: multi-file rule loading (#445 batch C) requires composing a base
+    /// file with one or more overlay files. Rules from `other` override rules
+    /// in `self` when they share the same `id`; rules unique to either set
+    /// are kept as-is.
+    /// What: builds a HashMap keyed by `id`, inserts all rules from `self`,
+    /// then overwrites / adds rules from `other`. The `extend_defaults` flag
+    /// of `other` (the later file) wins. `version` is set to the last
+    /// non-None value seen.
+    /// Test: `classify::rules::multi_loader::tests::multiple_files_merge_in_order`.
+    pub fn merge(self, other: RuleSet) -> RuleSet {
+        use std::collections::HashMap;
+        let mut by_id: HashMap<String, Rule> = HashMap::with_capacity(self.rules.len());
+        let mut order: Vec<String> = Vec::with_capacity(self.rules.len());
+
+        for rule in self.rules {
+            order.push(rule.id.clone());
+            by_id.insert(rule.id.clone(), rule);
+        }
+        for rule in other.rules {
+            if !by_id.contains_key(&rule.id) {
+                order.push(rule.id.clone());
+            }
+            by_id.insert(rule.id.clone(), rule);
+        }
+
+        let rules: Vec<Rule> = order
+            .into_iter()
+            .filter_map(|id| by_id.remove(&id))
+            .collect();
+
+        RuleSet {
+            version: other.version.or(self.version),
+            extend_defaults: other.extend_defaults,
+            rules,
+        }
+    }
 }
 
 #[cfg(test)]

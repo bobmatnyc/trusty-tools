@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::classify::taxonomy::SubcategoryDef;
 use crate::core::errors::{Result, TgaError};
@@ -445,9 +445,64 @@ pub struct OutputConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClassificationConfig {
-    /// Path to user-supplied rules YAML/JSON.
+    /// Supplemental rule files to load and merge in order (#445 batch C).
+    ///
+    /// Why: operators often want to layer project-specific rules on top of a
+    /// shared base file without editing it. Listing multiple files here loads
+    /// them in order — later files extend or override earlier ones (same-id
+    /// rules from a later file win).
+    ///
+    /// Accepts either a single path string (backward-compatible alias
+    /// `rules_file`) or a YAML list of paths. An absent key yields an empty
+    /// vec, meaning no user rules are loaded and the built-in defaults are
+    /// used exclusively.
+    ///
+    /// Example (YAML):
+    /// ```yaml
+    /// classification:
+    ///   rules_files:
+    ///     - ~/shared/base-rules.yaml
+    ///     - ./project-overrides.yaml
+    /// ```
+    ///
+    /// Single-path back-compat (equivalent to the old `rules_file:`):
+    /// ```yaml
+    /// classification:
+    ///   rules_file: ~/my-rules.yaml
+    /// ```
+    #[serde(
+        default,
+        alias = "rules_file",
+        deserialize_with = "deserialize_rules_files"
+    )]
+    pub rules_files: Vec<PathBuf>,
+
+    /// Per-repo default subcategory fallback (#445 batch C).
+    ///
+    /// Why: reduces the 'uncategorized' rate for well-known repositories
+    /// without LLM cost. After the full classification cascade (including the
+    /// LLM tier), commits that are still uncategorized (or below the
+    /// confidence threshold) and whose repository matches an entry here are
+    /// assigned the configured default subcategory.
+    ///
+    /// Keys are repository names or simple glob patterns (single `*`
+    /// wildcard). Values are subcategory names (resolved through the taxonomy
+    /// to set `top_level_category`).
+    ///
+    /// **Precedence**: this is the last-resort fallback (Tier 5). A
+    /// confidently-classified commit is NEVER overridden. Literal key matches
+    /// take precedence over glob matches.
+    ///
+    /// Example (YAML):
+    /// ```yaml
+    /// classification:
+    ///   repo_categories:
+    ///     infra-api: platform_infrastructure
+    ///     "data-*": data_engineering
+    ///     legacy-monolith: maintenance
+    /// ```
     #[serde(default)]
-    pub rules_file: Option<PathBuf>,
+    pub repo_categories: HashMap<String, String>,
 
     /// Whether to engage the LLM fallback tier.
     #[serde(default)]
@@ -595,6 +650,33 @@ pub struct ClassificationConfig {
     pub sources: Vec<crate::classify::sources::SourceConfig>,
 }
 
+/// Deserialize `rules_files` from either a single path string or a list of paths.
+///
+/// Why: back-compat with the legacy `rules_file: Option<PathBuf>` field.
+/// The `#[serde(alias = "rules_file")]` attribute handles the rename; this
+/// deserializer handles the scalar-vs-list duality.
+/// What: accepts an absent key → `[]`, a single string → `[path]`, or a
+/// YAML list → `[path, …]`.
+/// Test: `tests::rules_files_single_string_back_compat` and
+/// `tests::rules_files_list_parses`.
+fn deserialize_rules_files<'de, D>(deserializer: D) -> std::result::Result<Vec<PathBuf>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(PathBuf),
+        Many(Vec<PathBuf>),
+        Null,
+    }
+    match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(p) => Ok(vec![p]),
+        OneOrMany::Many(v) => Ok(v),
+        OneOrMany::Null => Ok(vec![]),
+    }
+}
+
 fn default_confidence_threshold() -> f64 {
     0.7
 }
@@ -627,7 +709,8 @@ fn default_llm_fallback_threshold() -> f64 {
 impl Default for ClassificationConfig {
     fn default() -> Self {
         Self {
-            rules_file: None,
+            rules_files: Vec::new(),
+            repo_categories: HashMap::new(),
             use_llm: false,
             llm_model: None,
             llm_provider: default_llm_provider(),
@@ -1372,5 +1455,79 @@ mod tests {
         let yaml = "source: anthropic-api\n";
         let llm: LlmConfig = serde_yaml::from_str(yaml).expect("parse llm config");
         assert_eq!(llm.source, LlmSource::AnthropicApi);
+    }
+
+    /// Why: single-string `rules_file:` (old form) must still parse via the
+    /// alias and coerce to a single-element Vec<PathBuf> (#445 batch C).
+    /// What: parse `rules_file: ./my-rules.yaml` and assert one-element vec.
+    /// Test: back-compat regression guard.
+    #[test]
+    fn rules_files_single_string_back_compat() {
+        let yaml = "rules_file: ./my-rules.yaml\nuse_llm: false\n";
+        let cfg: ClassificationConfig =
+            serde_yaml::from_str(yaml).expect("parse classification config");
+        assert_eq!(cfg.rules_files.len(), 1);
+        assert_eq!(
+            cfg.rules_files[0],
+            std::path::PathBuf::from("./my-rules.yaml")
+        );
+    }
+
+    /// Why: `rules_files:` (list form) must parse into a Vec<PathBuf> with
+    /// all entries preserved in order (#445 batch C).
+    /// What: parse a two-element list and assert both paths and their order.
+    /// Test: pure deserialization.
+    #[test]
+    fn rules_files_list_parses() {
+        let yaml = "rules_files:\n  - ~/base-rules.yaml\n  - ./project.yaml\n";
+        let cfg: ClassificationConfig =
+            serde_yaml::from_str(yaml).expect("parse classification config");
+        assert_eq!(cfg.rules_files.len(), 2);
+        assert_eq!(
+            cfg.rules_files[0],
+            std::path::PathBuf::from("~/base-rules.yaml")
+        );
+        assert_eq!(
+            cfg.rules_files[1],
+            std::path::PathBuf::from("./project.yaml")
+        );
+    }
+
+    /// Why: `repo_categories:` must deserialize into a HashMap<String, String>
+    /// (#445 batch C).
+    /// What: parse a two-entry map and assert the values.
+    /// Test: pure deserialization.
+    #[test]
+    fn repo_categories_parses() {
+        let yaml =
+            "repo_categories:\n  infra-api: platform_infrastructure\n  data-pipeline: data_engineering\n";
+        let cfg: ClassificationConfig =
+            serde_yaml::from_str(yaml).expect("parse classification config");
+        assert_eq!(
+            cfg.repo_categories.get("infra-api").map(|s| s.as_str()),
+            Some("platform_infrastructure")
+        );
+        assert_eq!(
+            cfg.repo_categories.get("data-pipeline").map(|s| s.as_str()),
+            Some("data_engineering")
+        );
+    }
+
+    /// Why: `ClassificationConfig::default()` must initialize both new fields
+    /// to their empty states (#445 batch C).
+    /// What: construct default and assert rules_files.is_empty() and
+    /// repo_categories.is_empty().
+    /// Test: construction test.
+    #[test]
+    fn classification_config_default_has_empty_new_fields() {
+        let cfg = ClassificationConfig::default();
+        assert!(
+            cfg.rules_files.is_empty(),
+            "rules_files defaults to empty vec"
+        );
+        assert!(
+            cfg.repo_categories.is_empty(),
+            "repo_categories defaults to empty map"
+        );
     }
 }

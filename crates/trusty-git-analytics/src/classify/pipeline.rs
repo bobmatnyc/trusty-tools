@@ -9,7 +9,7 @@ use tracing::{info, warn};
 
 use crate::classify::classifier::{ClassificationEngine, ClassificationEngineConfig};
 use crate::classify::errors::Result;
-use crate::classify::rules::{default_rules, load_rules};
+use crate::classify::rules::default_rules;
 use crate::classify::sources::ExternalSourceResolver;
 use crate::classify::tiers::bedrock::DEFAULT_BEDROCK_MODEL;
 use crate::classify::tiers::llm::ANTHROPIC_DEFAULT_MODEL;
@@ -205,29 +205,35 @@ impl ClassificationPipeline {
     /// Returns an error if rules fail to load/compile or the LLM provider
     /// fails to initialize.
     async fn build_engine(&self) -> Result<ClassificationEngine> {
-        let ruleset = match self
-            .config
-            .classification
-            .as_ref()
-            .and_then(|c| c.rules_file.as_ref())
-        {
-            Some(path) => {
-                let custom = load_rules(path)?;
+        // Load user-supplied rule files (single or multiple, #445 batch C).
+        // When `rules_files` is non-empty, load and merge them in order via
+        // `RuleSet::merge`. The last file's `extend_defaults` flag wins.
+        // For back-compat the comment above still refers to "rules_file" but the
+        // implementation now drives off `rules_files`.
+        let ruleset = {
+            use crate::classify::rules::load_rules_multi;
+            let class_cfg = self.config.classification.as_ref();
+            let paths: Vec<&std::path::PathBuf> = class_cfg
+                .map(|c| c.rules_files.iter().collect())
+                .unwrap_or_default();
+
+            if paths.is_empty() {
+                default_rules()
+            } else {
+                let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_path()).collect();
+                let custom = load_rules_multi(&path_refs)?;
                 if custom.extend_defaults {
-                    // Merge: start with defaults, let custom rules override by id
+                    // Merge: start with defaults, let custom rules override by id.
                     let mut merged = default_rules();
                     let custom_ids: std::collections::HashSet<String> =
                         custom.rules.iter().map(|r| r.id.clone()).collect();
-                    // Remove any default rules whose id is overridden by custom
                     merged.rules.retain(|r| !custom_ids.contains(&r.id));
-                    // Append custom rules (they may have higher priority to win)
                     merged.rules.extend(custom.rules);
                     merged
                 } else {
                     custom
                 }
             }
-            None => default_rules(),
         };
 
         // Determine whether the LLM tier is requested and which source.

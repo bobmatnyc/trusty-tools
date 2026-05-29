@@ -15,6 +15,7 @@
 pub mod config;
 pub mod db;
 pub mod effort;
+pub mod effort_percentile;
 pub mod errors;
 pub mod models;
 pub mod quality;

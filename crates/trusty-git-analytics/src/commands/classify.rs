@@ -27,7 +27,9 @@ pub async fn run(config: Config, db: &mut Database, args: ClassifyArgs) -> anyho
     }
     if let Some(ref mut c) = cfg.classification {
         if let Some(rules) = args.rules {
-            c.rules_file = Some(rules);
+            // Prepend the CLI-supplied rules file to rules_files (back-compat
+            // with `--rules`: single file, treated as the primary rules source).
+            c.rules_files.insert(0, rules);
         }
         if args.use_llm {
             c.use_llm = true;

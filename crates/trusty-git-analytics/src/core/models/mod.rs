@@ -234,6 +234,17 @@ pub enum ClassificationMethod {
     /// bucket, merge indicator, and file-path signals into per-category scores.
     /// Added for issue #270.
     WeightedSum,
+    /// Derived from the catch-all rule (lowest-priority, confidence 0.3).
+    ///
+    /// Why: distinguishes the explicit catch-all from other fuzzy verdicts so
+    /// downstream consumers can filter "true unknowns" separately.
+    /// Added for issue #445 batch C.
+    CatchAll,
+    /// Applied by the `repo_categories` fallback tier (Tier 5, #445 batch C).
+    ///
+    /// Why: lets callers distinguish a confident classification from a
+    /// repo-default assignment, enabling metric-level filtering.
+    RepoCategoryFallback,
 }
 
 impl ClassificationMethod {
@@ -254,6 +265,8 @@ impl ClassificationMethod {
             ClassificationMethod::Manual => "manual",
             ClassificationMethod::ExternalSource => "external_source",
             ClassificationMethod::WeightedSum => "weighted_sum",
+            ClassificationMethod::CatchAll => "catch_all",
+            ClassificationMethod::RepoCategoryFallback => "repo_category_fallback",
         }
     }
 }

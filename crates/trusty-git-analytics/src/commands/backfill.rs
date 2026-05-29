@@ -952,7 +952,11 @@ struct EffortRow {
     tests_factor: f64,
     formula_version: String,
     computed_at: i64,
-    /// Numeric T-shirt size: XS=1, S=2, M=3, L=4, XL=5 (issue #445 migration v17).
+    /// Numeric T-shirt size (static label mapping): XS=1, S=2, M=3, L=4, XL=5.
+    ///
+    /// Note: `persist_effort_rows` recomputes this from stored percentile thresholds
+    /// when available. This field is used as a fallback when no thresholds are stored.
+    #[allow(dead_code)]
     effort_tshirt: i64,
 }
 
@@ -961,10 +965,17 @@ struct EffortRow {
 /// Why: batching avoids per-row transaction overhead on large corpora; UPSERT
 /// (`INSERT OR REPLACE`) ensures --force re-computation overwrites stale rows.
 /// What: splits `rows` into chunks of 1000 and wraps each chunk in a single
-/// transaction.
+/// transaction. Each row's `effort_tshirt` is recomputed using
+/// [`tshirt_for_score_incremental`] which bins against stored corpus percentile
+/// thresholds when available, falling back to the static size-label mapping
+/// when no thresholds have been stored yet (i.e., before the first
+/// `tga backfill effort-tshirt` run).
 /// Test: `tests::backfill_effort_persists_rows` and
 /// `tests::backfill_effort_force_recomputes`.
 fn persist_effort_rows(db: &mut Database, rows: &[EffortRow]) -> anyhow::Result<()> {
+    // Load stored percentile thresholds once per batch call (not per row).
+    let thresholds = tga::core::effort_percentile::load_thresholds(db.connection()).unwrap_or(None);
+
     for chunk in rows.chunks(1000) {
         let conn = db.connection_mut();
         let tx = conn.transaction()?;
@@ -976,6 +987,12 @@ fn persist_effort_rows(db: &mut Database, rows: &[EffortRow]) -> anyhow::Result<
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )?;
             for row in chunk {
+                // Use stored percentile thresholds when available for consistent
+                // incremental binning; fall back to static mapping otherwise.
+                let tshirt = match &thresholds {
+                    Some(t) => t.band_for_score(row.score),
+                    None => effort_tshirt_from_size(&row.size),
+                };
                 stmt.execute(params![
                     row.sha,
                     row.repository,
@@ -987,7 +1004,7 @@ fn persist_effort_rows(db: &mut Database, rows: &[EffortRow]) -> anyhow::Result<
                     row.tests_factor,
                     row.formula_version,
                     row.computed_at,
-                    row.effort_tshirt,
+                    tshirt,
                 ])?;
             }
         }
@@ -1612,61 +1629,80 @@ fn backfill_top_level(db: &mut Database, dry_run: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ── backfill effort-tshirt (issue #445) ──────────────────────────────────────
+// ── backfill effort-tshirt (issue #445 batch C) ──────────────────────────────
 
-/// Fill in `fact_commit_effort.effort_tshirt` from existing `size` text values.
+/// Recompute `fact_commit_effort.effort_tshirt` using corpus-percentile binning.
 ///
-/// Why: the `effort_tshirt` integer column (1=XS, 2=S, 3=M, 4=L, 5=XL) was
-/// added in migration v17. Existing rows retain a valid `size` TEXT value
-/// but have `effort_tshirt = NULL`. This backfill derives the integer from
-/// the existing text without re-computing the effort formula.
-/// What: selects all rows where `effort_tshirt IS NULL`, maps `size` to an
-/// integer via [`effort_tshirt_from_size`], and updates in place.
-/// Test: `tests::backfill_effort_tshirt_fills_from_size`.
+/// Why: batch A added `effort_tshirt` as a static size→integer map (XS=1…XL=5).
+/// Batch C replaces this with corpus-percentile binning so the integer encodes
+/// relative standing within the actual score distribution rather than an
+/// absolute threshold. This makes effort_tshirt useful for ranking even when
+/// the corpus skews heavily toward one size bucket.
+///
+/// What: delegates to [`tga::core::effort_percentile::rebin_all`], which:
+/// 1. Reads all (sha, repository, score, size) rows from `fact_commit_effort`.
+/// 2. Computes p20/p40/p60/p80 breakpoints from the score distribution.
+/// 3. Persists the thresholds to `effort_percentile_thresholds` (migration v19).
+/// 4. Updates every row's `effort_tshirt` to the corresponding quintile (1–5).
+///
+/// Tiny-corpus fallback: when fewer than 5 rows exist, percentile breakpoints
+/// cannot be computed reliably. The function falls back to the static
+/// size-label → integer mapping (XS=1…XL=5) and logs a WARN.
+///
+/// Incremental ingestion: after running this backfill, new commits inserted
+/// by subsequent `tga backfill effort` runs are binned against the stored
+/// thresholds via `tga::core::effort_percentile::tshirt_for_score_incremental`.
+/// Re-running this command after significantly growing the corpus is recommended
+/// to keep the thresholds current.
+///
+/// Note on label vs. percentile divergence: the `size` TEXT column (XS–XL)
+/// continues to use absolute score thresholds and is NOT touched by this
+/// command. The `effort_tshirt` integer is now percentile-based and is
+/// intentionally allowed to diverge from the label. A corpus where every
+/// commit is "XL" will still yield effort_tshirt 1–5 by relative standing.
+///
+/// Test: `tests::backfill_effort_tshirt_uses_percentile_binning` and
+/// `tests::backfill_effort_tshirt_tiny_corpus_fallback`.
 ///
 /// # Errors
 ///
-/// Propagates database errors from the underlying queries.
+/// Propagates database errors from the underlying queries or transaction.
 fn backfill_effort_tshirt(db: &mut Database, dry_run: bool) -> anyhow::Result<()> {
-    let mut to_update: Vec<(i64, i64)> = Vec::new();
-    {
-        let conn = db.connection();
-        let mut stmt =
-            conn.prepare("SELECT rowid, size FROM fact_commit_effort WHERE effort_tshirt IS NULL")?;
-        let rows: Vec<(i64, String)> = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<Result<_, _>>()?;
-
-        for (rowid, size) in rows {
-            let tshirt = effort_tshirt_from_size(&size);
-            to_update.push((rowid, tshirt));
-        }
-    }
-
     if dry_run {
+        // Count total rows that will be rebinned.
+        let count: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM fact_commit_effort", [], |r| r.get(0))
+            .unwrap_or(0);
         println!(
-            "Dry run — would update effort_tshirt for {} row(s). No changes written.",
-            to_update.len(),
+            "Dry run — would rebin effort_tshirt (percentile) for {count} row(s) \
+             and persist corpus thresholds to effort_percentile_thresholds. \
+             No changes written."
         );
         return Ok(());
     }
 
-    let conn = db.connection_mut();
-    let tx = conn.transaction()?;
-    {
-        let mut up =
-            tx.prepare("UPDATE fact_commit_effort SET effort_tshirt = ?1 WHERE rowid = ?2")?;
-        for (rowid, tshirt) in &to_update {
-            up.execute(params![tshirt, rowid])?;
+    let (rows_updated, thresholds) =
+        tga::core::effort_percentile::rebin_all(db.connection_mut())
+            .map_err(|e| anyhow::anyhow!("percentile rebin failed: {e}"))?;
+
+    match thresholds {
+        Some(ref t) => {
+            println!(
+                "Rebinned effort_tshirt (percentile) for {rows_updated} row(s). \
+                 Corpus thresholds persisted: p20={:.3} p40={:.3} p60={:.3} p80={:.3} \
+                 (sample_count={}).",
+                t.p20, t.p40, t.p60, t.p80, t.sample_count,
+            );
+        }
+        None => {
+            println!(
+                "Rebinned effort_tshirt for {rows_updated} row(s) using \
+                 static size-label mapping (corpus too small for percentile binning; \
+                 run again after collecting more commits)."
+            );
         }
     }
-    tx.commit()?;
-    println!(
-        "Updated effort_tshirt for {} effort row(s).",
-        to_update.len()
-    );
     Ok(())
 }
 
@@ -2688,6 +2724,109 @@ mod tests {
         assert_eq!(
             count, 0,
             "dry-run must not write any rows to fact_weekly_quality"
+        );
+    }
+
+    // ── effort-tshirt percentile tests (#445 batch C) ─────────────────────────
+
+    /// Helper: insert an effort row with a given score and size (0 for effort_tshirt).
+    fn seed_effort_row_for_tshirt(db: &Database, sha: &str, repo: &str, score: f64, size: &str) {
+        db.connection()
+            .execute(
+                "INSERT OR REPLACE INTO fact_commit_effort \
+                 (sha, repository, size, score, loc, files, test_loc, tests_factor, \
+                  formula_version, computed_at, effort_tshirt) \
+                 VALUES (?1, ?2, ?3, ?4, 10, 1, 0, 1.0, 'v1', 0, 0)",
+                params![sha, repo, size, score],
+            )
+            .expect("insert effort row");
+    }
+
+    /// Why: `backfill_effort_tshirt` must use corpus-percentile binning
+    /// (not static size→integer mapping) after batch C (#445).
+    /// What: seed 10 effort rows with scores 1–10; run backfill; assert that
+    /// effort_tshirt values reflect percentile quintiles and thresholds persist.
+    /// Test: this test itself.
+    #[test]
+    fn backfill_effort_tshirt_uses_percentile_binning() {
+        let mut db = Database::open_in_memory().expect("open");
+
+        // Seed 10 rows with scores 1.0 to 10.0 (all labeled "M" for simplicity).
+        for i in 1..=10u32 {
+            seed_effort_row_for_tshirt(&db, &format!("pct{i:03}"), "repo", i as f64, "M");
+        }
+
+        backfill_effort_tshirt(&mut db, false).expect("backfill");
+
+        // With nearest-rank on [1..10]:
+        //   p20=2, p40=4, p60=6, p80=8.
+        // band_for_score: score=1 < 2 → 1; score=10 ≥ 8 → 5.
+        let score1_band: i64 = db
+            .connection()
+            .query_row(
+                "SELECT effort_tshirt FROM fact_commit_effort WHERE sha = 'pct001'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("band for score=1");
+        assert_eq!(score1_band, 1, "score=1 (below p20=2) → band 1");
+
+        let score10_band: i64 = db
+            .connection()
+            .query_row(
+                "SELECT effort_tshirt FROM fact_commit_effort WHERE sha = 'pct010'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("band for score=10");
+        assert_eq!(score10_band, 5, "score=10 (above p80=8) → band 5");
+
+        // Verify thresholds were persisted.
+        let stored = tga::core::effort_percentile::load_thresholds(db.connection())
+            .expect("load thresholds")
+            .expect("must be Some after backfill of 10 rows");
+        assert!((stored.p20 - 2.0).abs() < 1e-9, "stored p20 must be 2.0");
+        assert!((stored.p80 - 8.0).abs() < 1e-9, "stored p80 must be 8.0");
+    }
+
+    /// Why: tiny corpus (< 5 rows) must not panic; falls back to static
+    /// mapping without persisting thresholds.
+    /// What: seed 3 rows (all "L"), run backfill, assert effort_tshirt=4 (L→4)
+    /// and no thresholds stored.
+    /// Test: this test itself.
+    #[test]
+    fn backfill_effort_tshirt_tiny_corpus_fallback() {
+        let mut db = Database::open_in_memory().expect("open");
+
+        // 3 rows — below MIN_CORPUS_SIZE=5.
+        for i in 1..=3u32 {
+            seed_effort_row_for_tshirt(&db, &format!("tiny{i}"), "repo", i as f64, "L");
+        }
+
+        // Must not panic.
+        backfill_effort_tshirt(&mut db, false).expect("backfill tiny corpus");
+
+        // All rows should get static L=4 mapping.
+        let tshirts: Vec<i64> = {
+            let conn = db.connection();
+            let mut stmt = conn
+                .prepare("SELECT effort_tshirt FROM fact_commit_effort")
+                .expect("prepare");
+            stmt.query_map([], |r| r.get(0))
+                .expect("query")
+                .map(|r| r.expect("row"))
+                .collect()
+        };
+        assert!(
+            tshirts.iter().all(|&v| v == 4),
+            "all rows must get L=4 (static fallback), got {tshirts:?}"
+        );
+
+        // No thresholds should be stored for a tiny corpus.
+        let stored = tga::core::effort_percentile::load_thresholds(db.connection()).expect("load");
+        assert!(
+            stored.is_none(),
+            "no thresholds should be stored for tiny corpus"
         );
     }
 }

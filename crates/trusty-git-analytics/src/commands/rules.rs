@@ -15,7 +15,7 @@
 use clap::{Args, Subcommand};
 
 use tga::classify::classifier::{ClassificationEngine, ClassificationEngineConfig};
-use tga::classify::rules::{default_rules, load_rules, Rule};
+use tga::classify::rules::{default_rules, Rule};
 use tga::core::config::Config;
 use tga::core::db::Database;
 
@@ -271,27 +271,34 @@ fn resolve_rules(
     config: &Config,
     cli_rules: Option<&std::path::Path>,
 ) -> anyhow::Result<tga::classify::rules::RuleSet> {
-    let path = cli_rules.map(|p| p.to_path_buf()).or_else(|| {
+    // Collect the effective list of rule file paths. CLI --rules overrides
+    // (or prepends) config rules_files for backward compat.
+    let paths: Vec<std::path::PathBuf> = if let Some(cli) = cli_rules {
+        vec![cli.to_path_buf()]
+    } else {
         config
             .classification
             .as_ref()
-            .and_then(|c| c.rules_file.clone())
-    });
-    let ruleset = match path {
-        Some(p) => {
-            let custom = load_rules(&p)?;
-            if custom.extend_defaults {
-                let mut merged = default_rules();
-                let custom_ids: std::collections::HashSet<String> =
-                    custom.rules.iter().map(|r: &Rule| r.id.clone()).collect();
-                merged.rules.retain(|r| !custom_ids.contains(&r.id));
-                merged.rules.extend(custom.rules);
-                merged
-            } else {
-                custom
-            }
+            .map(|c| c.rules_files.clone())
+            .unwrap_or_default()
+    };
+
+    let ruleset = if paths.is_empty() {
+        default_rules()
+    } else {
+        use tga::classify::rules::load_rules_multi;
+        let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_path()).collect();
+        let custom = load_rules_multi(&path_refs)?;
+        if custom.extend_defaults {
+            let mut merged = default_rules();
+            let custom_ids: std::collections::HashSet<String> =
+                custom.rules.iter().map(|r: &Rule| r.id.clone()).collect();
+            merged.rules.retain(|r| !custom_ids.contains(&r.id));
+            merged.rules.extend(custom.rules);
+            merged
+        } else {
+            custom
         }
-        None => default_rules(),
     };
     Ok(ruleset)
 }

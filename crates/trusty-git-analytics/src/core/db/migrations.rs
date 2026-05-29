@@ -116,6 +116,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "fact_weekly_quality",
         sql: include_str!("sql/0018_fact_weekly_quality.sql"),
     },
+    Migration {
+        version: 19,
+        name: "effort_percentile_stats",
+        sql: include_str!("sql/0019_effort_percentile_stats.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.
