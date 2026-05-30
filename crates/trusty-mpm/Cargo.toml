@@ -97,7 +97,8 @@ path = "tests/services_integration.rs"
 # ── Always-on dependencies ─────────────────────────────────────────────────────
 # Required by the `core` and `client` library modules (compiled unconditionally).
 [dependencies]
-trusty-common = { workspace = true, features = ["mcp", "cli-help"] }
+trusty-common = { workspace = true, features = ["mcp", "cli-help", "bug-capture"] }
+# `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

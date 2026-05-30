@@ -485,6 +485,19 @@ pub struct AppState {
     /// layer (tests, the stdio path).
     /// Test: `logs_tail_returns_recent_lines`.
     pub log_buffer: trusty_common::log_buffer::LogBuffer,
+    /// Bug-capture ERROR store (bug-reporting #478, Phase 1).
+    ///
+    /// Why: Phase 2 MCP / HTTP endpoints need to query captured errors; stashing
+    ///      the `ErrorStore` handle here lets any handler reach it cheaply without
+    ///      a second global or per-request construction.
+    /// What: populated by `run_serve` from the `init_tracing_with_buffer_and_capture`
+    ///      result; the layer writes to this store automatically so every
+    ///      `tracing::error!` call site contributes without any changes to call
+    ///      sites. `None` in states that do not install the layer (tests, the
+    ///      stdio path).
+    /// Test: compile-presence is verified by the `trusty-memory` build; Phase 2
+    ///      will add query tests in `web.rs`.
+    pub error_store: Option<trusty_common::error_capture::ErrorStore>,
     /// Most recent on-disk footprint of `data_root`, in bytes (issue #35).
     ///
     /// Why: `GET /health` reports `disk_bytes`. Walking the data directory on
@@ -716,6 +729,10 @@ impl AppState {
             log_buffer: trusty_common::log_buffer::LogBuffer::new(
                 trusty_common::log_buffer::DEFAULT_LOG_CAPACITY,
             ),
+            // Bug-reporting #478: `None` until `with_error_store` is called
+            // during daemon startup (HTTP mode). Tests keep `None` so no
+            // unexpected files are written to the OS data dir.
+            error_store: None,
             disk_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             sys_metrics: Arc::new(tokio::sync::Mutex::new(
                 trusty_common::sys_metrics::SysMetrics::new(),
@@ -919,6 +936,25 @@ impl AppState {
     #[must_use]
     pub fn with_log_buffer(mut self, buffer: trusty_common::log_buffer::LogBuffer) -> Self {
         self.log_buffer = buffer;
+        self
+    }
+
+    /// Builder-style: attach the bug-capture `ErrorStore` handle (bug-reporting #478).
+    ///
+    /// Why: Phase 2 MCP / HTTP endpoints need a handle to the in-memory error
+    ///      ring so they can serve `recent_errors` / `errors_by_fingerprint`
+    ///      without disk I/O on the hot path. Installing it here — rather than
+    ///      adding it as a separate global — keeps the state graph explicit and
+    ///      lets tests skip it by never calling this method.
+    /// What: stores `Some(store)` in `AppState::error_store`; the `BugCaptureLayer`
+    ///      that writes to this store is already installed in the tracing
+    ///      subscriber by `init_tracing_with_buffer_and_capture`. The store is
+    ///      `Clone` (cheap `Arc` clone internally) so both the layer and this
+    ///      field share the same underlying ring.
+    /// Test: Phase 2 will add `error_store_captures_and_queries` in `web.rs`.
+    #[must_use]
+    pub fn with_error_store(mut self, store: trusty_common::error_capture::ErrorStore) -> Self {
+        self.error_store = Some(store);
         self
     }
 

@@ -875,9 +875,16 @@ pub async fn handle_start(
     // in-memory `LogBuffer` that backs `GET /logs/tail`. `main.rs` skips its
     // usual `init_tracing` call for the `start` command precisely so this
     // `try_init` wins the race and the buffer captures every log line.
-    let log_buffer = trusty_common::init_tracing_with_buffer(
+    //
+    // Bug-reporting #478 (Phase 1 wire-up): compose the bug-capture layer into
+    // the same registry so all three layers are installed in one `try_init`.
+    // `_error_store` is prefixed to suppress the unused-variable lint; Phase 2
+    // will stash it in `SearchAppState` and expose it through HTTP / MCP tools.
+    let (log_buffer, _error_store) = trusty_common::init_tracing_with_buffer_and_capture(
         if verbose { 2 } else { 0 },
         trusty_common::log_buffer::DEFAULT_LOG_CAPACITY,
+        "trusty-search",
+        env!("CARGO_PKG_VERSION"),
     );
 
     // Translate the `--device` CLI flag into the `TRUSTY_DEVICE` env var that

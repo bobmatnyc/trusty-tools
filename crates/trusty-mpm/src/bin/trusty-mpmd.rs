@@ -58,6 +58,22 @@ async fn main() -> anyhow::Result<()> {
     let file_filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
 
+    // Bug-reporting #478 (Phase 1 wire-up): compose the bug-capture layer into
+    // the same registry so ERROR events are captured to
+    // <data_dir>/trusty-mpm/errors.jsonl and the in-memory ring without
+    // modifying any existing call sites. The `_error_store` handle is prefixed
+    // to mark it intentionally unused here; Phase 2 will stash it in
+    // `DaemonState` and surface it through HTTP / MCP tools.
+    //
+    // Capture writes ONLY to a JSONL file + in-memory ring — never stdout —
+    // so this is safe for both the HTTP daemon and the MCP stdio path. Opt-out
+    // via TRUSTY_NO_BUG_CAPTURE=1 is honoured by the layer on every event.
+    let (capture_layer, _error_store) = trusty_common::error_capture::bug_capture_layer(
+        "trusty-mpm",
+        trusty_common::error_capture::DEFAULT_CAPTURE_CAPACITY,
+        env!("CARGO_PKG_VERSION"),
+    );
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
@@ -71,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
                 .with_ansi(false)
                 .with_filter(file_filter),
         )
+        .with(capture_layer)
         .init();
 
     let args = Args::parse();

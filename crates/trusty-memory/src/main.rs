@@ -427,9 +427,16 @@ async fn main() -> Result<()> {
     // stderr, so non-HTTP subcommands (and the MCP stdio path, which must
     // keep stdout clean) are unaffected. The buffer is only wired into the
     // `AppState` on the HTTP serve path.
-    let log_buffer = trusty_common::init_tracing_with_buffer(
+    //
+    // Bug-reporting #478 (Phase 1 wire-up): compose the bug-capture layer in
+    // the same registry so all three layers are installed in one `try_init`.
+    // The `ErrorStore` is forwarded to `run_serve` which stashes it in
+    // `AppState` so Phase 2 can expose it via HTTP / MCP tools.
+    let (log_buffer, error_store) = trusty_common::init_tracing_with_buffer_and_capture(
         cli.verbose,
         trusty_common::log_buffer::DEFAULT_LOG_CAPACITY,
+        "trusty-memory",
+        env!("CARGO_PKG_VERSION"),
     );
 
     // Update check: emitted only for human-facing subcommands. `serve`
@@ -460,7 +467,7 @@ async fn main() -> Result<()> {
             http,
             foreground,
             palace,
-        } => run_serve(http, foreground, palace, log_buffer).await,
+        } => run_serve(http, foreground, palace, log_buffer, error_store).await,
         Command::Migrate {
             target,
             dry_run,
@@ -544,8 +551,9 @@ async fn run_monitor(target: MonitorTarget) -> Result<()> {
 /// What: resolves the palace registry directory (descending into the legacy
 /// `palaces/` subdirectory when present — see `resolve_palace_registry_dir`),
 /// builds an `AppState` rooted there, applies the `--palace` default if any,
-/// re-hydrates every persisted palace, and wires the issue-#35 `LogBuffer`
-/// so `GET /api/v1/logs/tail` serves captured logs.
+/// re-hydrates every persisted palace, wires the issue-#35 `LogBuffer` so
+/// `GET /api/v1/logs/tail` serves captured logs, and installs the Phase 1
+/// bug-capture `ErrorStore` (bug-reporting #478) so Phase 2 can query errors.
 /// Test: not unit-tested (process-level entry point); exercised manually via
 /// `cargo run -p trusty-memory -- serve` and the parent integration tests.
 async fn run_serve(
@@ -553,6 +561,7 @@ async fn run_serve(
     foreground: bool,
     palace: Option<String>,
     log_buffer: trusty_common::log_buffer::LogBuffer,
+    error_store: trusty_common::error_capture::ErrorStore,
 ) -> Result<()> {
     // Background self-spawn path: when invoked without `--http` or
     // `--foreground`, fork a detached copy of ourselves with `serve
@@ -619,6 +628,10 @@ async fn run_serve(
         let state = AppState::new(data_root)
             .with_default_palace(palace)
             .with_log_buffer(log_buffer)
+            // Bug-reporting #478: wire the bug-capture ErrorStore into AppState
+            // so Phase 2 HTTP / MCP endpoints can query it. The store is an
+            // Arc-backed clone of the same ring the BugCaptureLayer writes to.
+            .with_error_store(error_store)
             // Issue #156 + #193: opt in to the BM25 lexical lane (and its
             // spawn supervisor) when TRUSTY_BM25_DAEMON=1. The builder is
             // a no-op when the env var is unset so existing deployments
@@ -634,6 +647,9 @@ async fn run_serve(
         let state = AppState::new(data_root)
             .with_default_palace(palace)
             .with_log_buffer(log_buffer)
+            // Bug-reporting #478: wire the bug-capture ErrorStore into AppState
+            // so Phase 2 HTTP / MCP endpoints can query it.
+            .with_error_store(error_store)
             // Issue #156 + #193: opt in to the BM25 lexical lane (and its
             // spawn supervisor) when TRUSTY_BM25_DAEMON=1. The builder is
             // a no-op when the env var is unset so existing deployments

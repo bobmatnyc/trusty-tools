@@ -69,7 +69,8 @@ path = "src/bin/bm25_daemon.rs"
 #      build for the binary path keeps `axum-server` on (see [features]
 #      below), so existing `cargo install` / `cargo build` flows are
 #      unaffected.
-trusty-common = { path = "../trusty-common", version = "0.8.1", default-features = false, features = ["mcp", "memory-core", "monitor-tui", "bm25-client", "cli-help", "update-check"] }
+trusty-common = { path = "../trusty-common", version = "0.8.1", default-features = false, features = ["mcp", "memory-core", "monitor-tui", "bm25-client", "cli-help", "update-check", "bug-capture"] }
+# `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # Why: declaring trusty-bm25-daemon as a Cargo dependency causes `cargo install
 #      trusty-memory` to also build and install the daemon binary alongside
 #      trusty-memory — one install command, three binaries. The shim at

@@ -614,6 +614,68 @@ pub fn init_tracing_with_buffer(verbose_count: u8, capacity: usize) -> log_buffe
     buffer
 }
 
+/// Initialise the global tracing subscriber with a [`log_buffer::LogBuffer`]
+/// **and** a [`error_capture::BugCaptureLayer`] composed in one `try_init` call.
+///
+/// Why: `tracing_subscriber::registry().try_init()` can only succeed once per
+///      process. Callers that need both the HTTP log-tail buffer (issue #35)
+///      and Phase 1 bug capture must compose all three layers in a single call;
+///      two separate `try_init` calls would leave the second one silently ignored.
+///      This helper is the canonical entry-point for daemon binaries that want
+///      both features wired together at startup.
+/// What: builds an `EnvFilter`-gated stderr `fmt` layer, an info-level
+///      `LogBufferLayer`, and a `BugCaptureLayer` for `app_name`/`crate_version`;
+///      installs them together via `try_init`. Returns `(LogBuffer, ErrorStore)`
+///      so the caller can stash both handles in the daemon's `AppState`.
+///      All capture is to a JSONL file under `<dirs::data_dir()>/<app_name>/`
+///      and an in-memory ring — nothing is written to stdout, so this is
+///      MCP-safe. Honours `TRUSTY_NO_BUG_CAPTURE` for opt-out.
+/// Test: `cargo test -p trusty-common --features bug-capture -- init_tracing_with_capture`.
+#[cfg(feature = "bug-capture")]
+#[must_use]
+pub fn init_tracing_with_buffer_and_capture(
+    verbose_count: u8,
+    capacity: usize,
+    app_name: &str,
+    crate_version: impl Into<String>,
+) -> (log_buffer::LogBuffer, error_capture::ErrorStore) {
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let default_filter = match verbose_count {
+        0 => "warn",
+        1 => "info",
+        2 => "debug",
+        _ => "trace",
+    };
+    let stderr_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
+    let buffer_filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG_BUFFER")
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    let buffer = log_buffer::LogBuffer::new(capacity);
+    let (capture_layer, store) = error_capture::bug_capture_layer(
+        app_name,
+        error_capture::DEFAULT_CAPTURE_CAPACITY,
+        crate_version,
+    );
+
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_target(false)
+        .with_filter(stderr_filter);
+    let buf_layer = log_buffer::LogBufferLayer::new(buffer.clone()).with_filter(buffer_filter);
+    // All three layers are composed in one try_init so subsequent try_init
+    // calls from other code paths become no-ops and do not race with ours.
+    let _ = tracing_subscriber::registry()
+        .with(fmt_layer)
+        .with(buf_layer)
+        .with(capture_layer)
+        .try_init();
+    (buffer, store)
+}
+
 /// Disable coloured terminal output when requested or when stdout is not a TTY.
 ///
 /// Why: Pipe-friendly output is mandatory for scripting (`trusty-search list
