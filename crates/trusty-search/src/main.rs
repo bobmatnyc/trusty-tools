@@ -872,6 +872,26 @@ async fn run() -> Result<()> {
     }
     trusty_common::maybe_disable_color(false);
 
+    // Update check: run for human-facing commands only. MCP `serve` mode must
+    // never print to stderr (or stdout) — JSON-RPC framing owns both streams.
+    // The `start` daemon path also skips the check because it self-spawns a
+    // detached child; the human-facing side returns immediately before the
+    // daemon prints its banner, so there is no useful output window. The check
+    // is throttled to once per 24 h via an on-disk cache, so on typical runs
+    // this is a sub-millisecond cache read with zero network I/O.
+    let is_mcp_serve = matches!(cli.command, Commands::Serve { .. });
+    let is_daemon_start = matches!(cli.command, Commands::Start { .. });
+    if !is_mcp_serve && !is_daemon_start {
+        if let Some(info) = trusty_common::update::check_throttled(
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .await
+        {
+            eprintln!("{}", trusty_common::update::notice(&info));
+        }
+    }
+
     match cli.command {
         Commands::Search {
             query,

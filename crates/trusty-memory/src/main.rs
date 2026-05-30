@@ -432,6 +432,27 @@ async fn main() -> Result<()> {
         trusty_common::log_buffer::DEFAULT_LOG_CAPACITY,
     );
 
+    // Update check: emitted only for human-facing subcommands. `serve`
+    // (foreground) is the long-running HTTP/MCP daemon — stdout/stderr are
+    // owned by the supervisor or the JSON-RPC framing, so we must not print
+    // anything there. `start` self-spawns a detached `serve --foreground`
+    // child and exits immediately; the very brief window makes the notice
+    // useless. All other subcommands are short-lived interactive commands
+    // where the notice is visible and appropriate.
+    // The check is throttled to once per 24 h (on-disk cache), so on a
+    // typical run this is a sub-millisecond cache-hit with no network I/O.
+    let is_daemon_path = matches!(cli.command, Command::Serve { .. } | Command::Start);
+    if !is_daemon_path {
+        if let Some(info) = trusty_common::update::check_throttled(
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .await
+        {
+            eprintln!("{}", trusty_common::update::notice(&info));
+        }
+    }
+
     match cli.command {
         Command::Start => handle_start().await,
         Command::Stop => handle_stop().await,

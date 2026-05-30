@@ -30,7 +30,7 @@ path = "src/main.rs"
 # Shared CLI help system (issue #216): declarative `help.yaml` loader +
 # Jaro-Winkler "did you mean?" suggester. Only the `cli-help` feature is
 # enabled; tga is otherwise independent of trusty-common.
-trusty-common = { workspace = true, features = ["cli-help"] }
+trusty-common = { workspace = true, features = ["cli-help", "update-check"] }
 # Async runtime
 tokio = { workspace = true }
 # CLI

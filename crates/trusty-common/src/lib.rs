@@ -256,6 +256,24 @@ pub mod help;
 #[cfg(feature = "monitor-tui")]
 pub mod monitor;
 
+/// Throttled crates.io update-notification helper.
+///
+/// Why: User-facing CLIs should nudge operators when a newer release is
+/// available without adding perceptible latency. A shared implementation
+/// keeps the throttle, cache, opt-out, and User-Agent logic consistent across
+/// every consumer in the workspace.
+/// What: Gated behind the `update-check` feature. Exposes
+/// [`update::check_throttled`] (the main entry — reads a per-crate JSON cache
+/// under the OS cache dir, queries crates.io at most once per 24 h),
+/// [`update::check_crates_io`] (the raw network call), [`update::notice`]
+/// (formatted upgrade message), and [`update::UpdateInfo`] (the result type).
+/// All failures degrade to `None` — the check is best-effort and will not
+/// panic or stall a CLI.
+/// Opt-out: set `TRUSTY_NO_UPDATE_CHECK` or `CI` to any non-empty value.
+/// Test: `cargo test -p trusty-common --features update-check`.
+#[cfg(feature = "update-check")]
+pub mod update;
+
 pub use chat::{
     ChatEvent, ChatProvider, LocalModelConfig, OllamaProvider, OpenRouterProvider, ToolCall,
     ToolDef, auto_detect_local_provider,

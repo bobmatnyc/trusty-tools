@@ -645,6 +645,17 @@ async fn run() -> anyhow::Result<()> {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level.to_string()));
     tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
+    // Update check: tga has no MCP stdio transport — all subcommands are
+    // human-facing interactive CLI commands where a release notice is
+    // appropriate. The check is throttled to once per 24 h (on-disk cache) so
+    // on a typical run this costs only a sub-millisecond cache file read.
+    if let Some(info) =
+        trusty_common::update::check_throttled(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
+            .await
+    {
+        eprintln!("{}", trusty_common::update::notice(&info));
+    }
+
     // Load configuration (fall back to default if file is missing).
     let config = if cli.config.exists() {
         tracing::info!(path = %cli.config.display(), "loading config");

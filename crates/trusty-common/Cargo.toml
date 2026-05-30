@@ -345,3 +345,10 @@ tickets = ["mcp", "dep:chrono", "dep:uuid", "dep:base64", "dep:thiserror", "dep:
 # `serde_yaml`, `strsim`, `indexmap`, and `thiserror` (all otherwise optional).
 # Issue #216.
 cli-help = ["dep:serde_yaml", "dep:strsim", "dep:indexmap", "dep:thiserror"]
+# Enables the `update` module: throttled crates.io update-notification helper.
+# Checks once per 24 h via a JSON cache file in the OS cache directory. Opt-out
+# via `TRUSTY_NO_UPDATE_CHECK` or `CI` environment variables. Reuses the
+# unconditional `reqwest`, `serde`, `serde_json`, `dirs`, and `tracing` deps —
+# the feature flag controls module compilation only, adding zero new transitive
+# dependencies to builds that enable it.
+update-check = []

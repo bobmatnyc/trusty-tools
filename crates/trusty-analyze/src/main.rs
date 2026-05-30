@@ -366,6 +366,27 @@ async fn main() -> Result<()> {
     };
     let search = TrustySearchClient::new(&cli.search_url);
 
+    // Update check: run only for human-facing commands, never when serving MCP
+    // stdio. Two subcommands speak JSON-RPC 2.0 over stdio and must be excluded:
+    // - `serve --mcp`: HTTP daemon + inline MCP stdio loop
+    // - `mcp`: standalone MCP stdio server pointed at the analyzer daemon
+    // In both cases stderr noise may disrupt clients that relay stderr. For
+    // `serve` without `--mcp` (HTTP daemon only), the process is long-running
+    // with no interactive user to read a banner, so we skip it there too. The
+    // check is throttled to once per 24 h (on-disk cache) so it is a
+    // sub-millisecond cache read on typical invocations.
+    let is_mcp_path = matches!(cli.cmd, Cmd::Serve { .. } | Cmd::Mcp { .. });
+    if !is_mcp_path {
+        if let Some(info) = trusty_common::update::check_throttled(
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .await
+        {
+            eprintln!("{}", trusty_common::update::notice(&info));
+        }
+    }
+
     match cli.cmd {
         Cmd::Serve {
             foreground: _,
