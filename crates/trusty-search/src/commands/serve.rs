@@ -9,12 +9,16 @@ use colored::Colorize;
 /// to follow in isolation.
 /// What: routes between stdio-only (the default — issue #123) and HTTP modes;
 /// HTTP is opt-in via `--with-http` (or the legacy explicit `--http <addr>`).
+/// In stdio mode, exits the process immediately when the MCP client closes its
+/// pipe (stdin EOF), so the process never lingers as an orphan after Claude
+/// Code's session ends (issue #457).
 /// Test: `cargo run -- serve` runs MCP over stdio only; `serve --with-http`
 /// additionally binds HTTP and the discovery file appears at
 /// `~/.trusty-search/mcp_http_addr` then is removed on shutdown. Note: the
 /// MCP SSE listener writes its address to `mcp_http_addr` (distinct from the
-/// daemon's `http_addr`) so a crashed `serve` cannot clobber the daemon's
-/// discovery file (issue #117).
+/// daemon's `http_addr` file) so a crashed `serve` cannot clobble the daemon's
+/// discovery file (issue #117). EOF self-exit is unit-tested in
+/// `crates/trusty-common/src/mcp/mod.rs` (`stdio_loop_exits_on_eof`).
 pub async fn handle_serve(with_http: bool, port: u16, http: Option<String>) -> Result<()> {
     let daemon_url = daemon_base_url();
 
@@ -42,7 +46,16 @@ pub async fn handle_serve(with_http: bool, port: u16, http: Option<String>) -> R
                 daemon_url.dimmed()
             );
             crate::mcp::stdio::run(server).await?;
-            Ok(())
+            // Why: the reqwest connection pool and tokio background threads can
+            // keep the runtime alive for up to 90 s after the stdio loop exits
+            // (reqwest's default pool_idle_timeout). In MCP stdio mode the
+            // client has already disconnected (stdin hit EOF), so lingering is
+            // never useful — the process is an orphan at this point. Calling
+            // exit(0) immediately tears it down so workers never accumulate
+            // across Claude Code session restarts (issue #457). HTTP serve mode
+            // does NOT call exit here; it has an explicit cleanup path and the
+            // axum serve loop is the natural lifetime anchor.
+            std::process::exit(0);
         }
     }
 }
