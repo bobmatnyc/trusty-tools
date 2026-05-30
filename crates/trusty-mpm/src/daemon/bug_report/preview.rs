@@ -13,7 +13,7 @@
 //! Test: `tests::title_format`, `tests::body_contains_fingerprint_marker`,
 //!       `tests::crate_label_resolved`, `tests::unknown_crate_no_crate_label`.
 
-use super::scrubber::scrub;
+use super::scrubber::scrub_compat as scrub;
 use super::types::AggregatedError;
 
 /// The maximum title length (GitHub enforces 256 chars; we use 200 to leave

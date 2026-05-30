@@ -18,12 +18,11 @@
 //! `Err(GithubFilingError::NoToken)` — nothing is filed, and the caller
 //! surfaces an actionable error message to the user.
 //!
-//! ## GitHub App (future)
+//! ## GitHub App (Phase 4)
 //!
-//! The [`TokenProvider`] trait is the slot-in point for a GitHub App
-//! installation-token provider. The current `EnvFileTokenProvider` impl
-//! covers ENV + file resolution; a `GithubAppTokenProvider` can be added in
-//! Phase 4 without changing the filing logic.
+//! The [`TokenProvider`] trait (and `EnvFileTokenProvider`) are defined in
+//! [`super::token`]. Phase 4 adds `GithubAppTokenProvider` there. The filing
+//! logic here accepts any `dyn TokenProvider` without change.
 //!
 //! ## Deduplication
 //!
@@ -43,11 +42,10 @@
 //!       `tests::dedup_marker_*`, `tests::mock_create_path`,
 //!       `tests::mock_comment_path`.
 
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 
 use super::preview::IssuePreview;
+use super::token::TokenProvider;
 use super::types::FilingResult;
 
 /// Maximum issues created in a single `file_issue` call (anti-spam).
@@ -90,72 +88,6 @@ pub enum GithubFilingError {
     /// Response body could not be parsed.
     #[error("failed to parse GitHub API response: {0}")]
     Parse(String),
-}
-
-// ── Token provider trait ──────────────────────────────────────────────────────
-
-/// Provides a bearer token for GitHub API calls.
-///
-/// Why: the filing client should not be tightly coupled to a specific token
-///      source. The ENV+file implementation works for Phase 3; a GitHub App
-///      installation-token provider (short-lived, auto-rotating) can slot in
-///      for Phase 4 by implementing this trait.
-/// What: one method, `token`, returns the resolved token or `None` when no
-///       source is configured.
-/// Test: `EnvFileTokenProvider` is exercised by `tests::token_resolution_*`.
-pub trait TokenProvider: Send + Sync {
-    /// Resolve and return the bearer token, or `None` if unconfigured.
-    fn token(&self) -> Option<String>;
-}
-
-/// Token provider that reads from the environment variable
-/// `TRUSTY_BUGREPORT_GITHUB_TOKEN` or a local file.
-///
-/// Why: the simplest useful implementation for Phase 3 — zero runtime
-///      dependencies beyond env and fs reads.
-/// What: resolution order:
-///   1. `TRUSTY_BUGREPORT_GITHUB_TOKEN` env var (non-empty value).
-///   2. File at `TRUSTY_BUGREPORT_TOKEN_FILE` env var path (if set).
-///   3. File at `~/.config/trusty-mpm/bugreport-token` (fallback).
-///
-///      Token values are trimmed of leading/trailing whitespace and newlines.
-///
-/// Test: `tests::token_resolution_from_env`, `tests::token_resolution_from_file`,
-///       `tests::token_resolution_absent_uses_fixed_provider`.
-pub struct EnvFileTokenProvider;
-
-/// Primary environment variable name for the GitHub bearer token.
-pub const TOKEN_ENV_VAR: &str = "TRUSTY_BUGREPORT_GITHUB_TOKEN";
-/// Override env var for the token file path.
-pub const TOKEN_FILE_ENV_VAR: &str = "TRUSTY_BUGREPORT_TOKEN_FILE";
-/// Default token file path (relative to home dir).
-const TOKEN_FILE_RELATIVE: &str = ".config/trusty-mpm/bugreport-token";
-
-impl TokenProvider for EnvFileTokenProvider {
-    fn token(&self) -> Option<String> {
-        // 1. Check env var.
-        if let Ok(val) = std::env::var(TOKEN_ENV_VAR) {
-            let trimmed = val.trim().to_string();
-            if !trimmed.is_empty() {
-                return Some(trimmed);
-            }
-        }
-
-        // 2. Resolve file path (override or default).
-        let file_path: PathBuf = if let Ok(override_path) = std::env::var(TOKEN_FILE_ENV_VAR) {
-            PathBuf::from(override_path.trim())
-        } else if let Some(home) = dirs::home_dir() {
-            home.join(TOKEN_FILE_RELATIVE)
-        } else {
-            return None;
-        };
-
-        // 3. Read and trim the file.
-        std::fs::read_to_string(&file_path)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    }
 }
 
 // ── GithubApi trait ───────────────────────────────────────────────────────────
@@ -526,6 +458,9 @@ mod tests {
 
     use super::*;
     use crate::daemon::bug_report::preview::IssuePreview;
+    use crate::daemon::bug_report::token::{
+        EnvFileTokenProvider, TOKEN_ENV_VAR, TOKEN_FILE_ENV_VAR,
+    };
 
     // ── Mock token provider ───────────────────────────────────────────────────
 

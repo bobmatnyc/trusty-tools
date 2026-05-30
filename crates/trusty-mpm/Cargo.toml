@@ -112,6 +112,8 @@ gray_matter.workspace = true
 walkdir.workspace = true
 dirs.workspace = true
 sha2.workspace = true
+regex.workspace = true
+jsonwebtoken.workspace = true
 utoipa.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 tokio.workspace = true

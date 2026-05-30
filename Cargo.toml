@@ -72,6 +72,7 @@ tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"]
 thiserror = "1"
 chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
+jsonwebtoken = "9"
 uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
