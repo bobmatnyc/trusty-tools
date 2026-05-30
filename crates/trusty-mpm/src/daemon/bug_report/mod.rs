@@ -39,6 +39,7 @@
 //!       `cargo test -p trusty-mpm`.
 
 pub mod github;
+pub mod github_client;
 pub mod multi_store;
 pub mod preview;
 pub mod ratelimit;
