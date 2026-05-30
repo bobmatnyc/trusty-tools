@@ -131,6 +131,27 @@ pub const PROJECT_MARKERS: &[&str] = &[
 /// reached. Returns `None` when no project root is found.
 /// Test: `project_slug_finds_git_root`, `project_slug_uses_first_ancestor_marker`.
 pub fn find_project_root(start: &Path) -> Option<PathBuf> {
+    find_project_root_with_marker(start).map(|(root, _)| root)
+}
+
+/// Walk upward from `start` and return the first ancestor directory (inclusive)
+/// that contains at least one project marker, together with the name of the
+/// marker that was found.
+///
+/// Why: the lazy-write path in `project_slug_at` needs to know whether the
+/// detected root was anchored by a real marker (`.git`, `Cargo.toml`, etc.)
+/// or whether no marker was found at all (in which case `find_project_root`
+/// would already have returned `None` — this function's second return value
+/// is always `Some` when the `PathBuf` is `Some`). The guard in
+/// `project_slug_at` uses the marker name to distinguish a real project root
+/// from a directory that only became the root by coincidence (e.g. a stale
+/// pin file in `/tmp`).
+/// What: same walk as `find_project_root`; returns `Some((root, marker))` on
+/// success where `marker` is one of the strings from [`PROJECT_MARKERS`].
+/// Returns `None` when no project root is found.
+/// Test: indirectly via `find_project_root`, `project_slug_at`, and the
+/// guard tests `lazy_write_skipped_for_temp_dir_root`.
+fn find_project_root_with_marker(start: &Path) -> Option<(PathBuf, &'static str)> {
     let mut current = start.to_path_buf();
     // Canonicalize to resolve symlinks before walking (best-effort; fall back
     // to the original path if canonicalization fails, e.g. path does not exist
@@ -141,7 +162,7 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
     loop {
         for marker in PROJECT_MARKERS {
             if current.join(marker).exists() {
-                return Some(current);
+                return Some((current, marker));
             }
         }
         // Ascend one level; stop at the filesystem root.
@@ -150,6 +171,50 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
             _ => return None,
         }
     }
+}
+
+/// Return `true` when `root` is an unsafe location where we must not
+/// lazily write a palace pin file.
+///
+/// Why (product guard): when `find_project_root` walks up from a temp or
+/// scratch directory and finds no real project marker, it can fall through
+/// to a fallback root such as the system temp dir, the user's home
+/// directory, or the filesystem root. Writing a pin file there silently
+/// poisons every future invocation from any subdirectory of that path —
+/// including every `tempfile::tempdir()` in the test suite (which resolves
+/// to a child of `/tmp`). The guard intercepts this before the write so
+/// only genuine project roots ever receive a pin file.
+/// What: canonicalises `root` and compares it against `std::env::temp_dir()`
+/// (canonicalised), `dirs::home_dir()` (canonicalised, best-effort), and the
+/// filesystem root `/`. Returns `true` when any comparison matches.
+/// Test: `lazy_write_skipped_for_temp_dir_root`.
+fn is_unsafe_pin_location(root: &Path) -> bool {
+    let canonical = match std::fs::canonicalize(root) {
+        Ok(c) => c,
+        // If we can't canonicalise, treat as unsafe to be conservative.
+        Err(_) => return true,
+    };
+
+    // System temp dir (handles /tmp → /private/tmp on macOS).
+    let temp = std::fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+    if canonical == temp {
+        return true;
+    }
+
+    // User home directory.
+    if let Some(home) = dirs::home_dir() {
+        let home_canon = std::fs::canonicalize(&home).unwrap_or(home);
+        if canonical == home_canon {
+            return true;
+        }
+    }
+
+    // Filesystem root.
+    if canonical == std::path::Path::new("/") {
+        return true;
+    }
+
+    false
 }
 
 /// Read the palace pin from `.trusty-tools/trusty-memory.yaml` at `root`.
