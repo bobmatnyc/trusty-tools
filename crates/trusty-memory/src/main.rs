@@ -667,8 +667,9 @@ async fn run_serve(
 ///       single-pass pin scan and populates `AppState::pin_project_map`
 ///       (scan-only — NO palace opens). Returns immediately — the spawned
 ///       task runs concurrently with the HTTP listener bind.
-/// Test: indirectly covered by `run_serve` integration tests; no direct unit
-///       test (process-level entry point, fire-and-forget spawn).
+/// Test: `spawn_startup_tasks_populates_pin_map` verifies the scan path runs
+///       and populates the map; the log emission is confirmed by the throwaway
+///       daemon run documented in the session notes.
 fn spawn_startup_tasks(state: &AppState) {
     let bg_state = state.clone();
     tokio::spawn(async move {
@@ -693,11 +694,22 @@ fn spawn_startup_tasks(state: &AppState) {
                 bg_state.spawn_alias_discovery(palace, cwd);
             }
         }
-        // Issue #470: single-pass scan-only pin discovery — NO palace opens.
-        // Run on the blocking pool because readdir is blocking I/O; the scan
-        // is bounded (one level under each search root) so it completes
-        // quickly. We populate `pin_project_map` on the shared `AppState`
-        // arc so handlers can look up palace_id → project_path cheaply.
+        // Issue #470 / #474: single-pass scan-only pin discovery — NO palace
+        // opens. Run on the blocking pool because readdir is blocking I/O;
+        // the scan is bounded (one level under each search root) so it
+        // completes quickly. We populate `pin_project_map` on the shared
+        // `AppState` arc so handlers can look up palace_id → project_path
+        // cheaply.
+        //
+        // Fix #474: the completion log is emitted at `info!` level AND via
+        // `eprintln!` to stderr directly. The `info!` is visible under
+        // `RUST_LOG=info`; the `eprintln!` is visible regardless of the
+        // tracing filter and matches the pattern used by `run_http_on` for
+        // the bind-address announcement. This dual-emit guarantees the
+        // operator can always confirm the scan ran, even when the daemon is
+        // started via launchd (stderr → log file) or with the default
+        // `RUST_LOG=warn` level.
+        let pin_scan_started = std::time::Instant::now();
         let pin_map_ref = bg_state.pin_project_map.clone();
         let scan_result = tokio::task::spawn_blocking(move || {
             let search_dirs = trusty_memory::startup_scan::default_search_dirs();
@@ -707,18 +719,124 @@ fn spawn_startup_tasks(state: &AppState) {
         match scan_result {
             Ok(map) => {
                 let count = map.len();
+                let elapsed_ms = pin_scan_started.elapsed().as_millis() as u64;
                 for (palace_id, project_path) in map {
                     pin_map_ref.insert(palace_id, project_path);
                 }
+                // Dual-emit: tracing INFO (visible under RUST_LOG=info) +
+                // eprintln! to stderr (visible at any filter level, matching
+                // the `run_http_on` bind-address announcement pattern).
+                // Root cause of #474: when the daemon is started via
+                // `trusty-memory start`, the child's stderr is redirected to
+                // /dev/null and tracing output is silently lost; when started
+                // via launchd the default RUST_LOG=warn suppresses info!.
+                // eprintln! bypasses the tracing filter so the completion is
+                // always visible in launchd logs and on the operator's
+                // terminal when run in the foreground.
                 tracing::info!(
                     pins_found = count,
-                    "startup pin scan complete: {count} pin(s) discovered"
+                    elapsed_ms,
+                    "startup pin scan complete: {count} pin(s) discovered in {elapsed_ms}ms"
                 );
+                eprintln!("startup pin scan complete: {count} pin(s) discovered in {elapsed_ms}ms");
             }
             Err(e) => {
                 // spawn_blocking join error — should not happen in practice.
                 tracing::warn!("startup pin scan task panicked or was cancelled: {e}");
+                eprintln!("startup pin scan task panicked or was cancelled: {e}");
             }
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// Tests for spawn_startup_tasks (#474)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod startup_task_tests {
+    use super::*;
+    use std::fs;
+    use trusty_memory::project_root::{write_project_pin, ProjectPin, PIN_SCHEMA_VERSION};
+
+    /// Why: the pin scan inside `spawn_startup_tasks` must populate
+    /// `AppState::pin_project_map` so handlers can resolve a palace id to a
+    /// project path without a filesystem walk at request time (issue #470).
+    /// This test verifies the full wiring: a real `AppState` with a real temp
+    /// search root, a pinned project, and the async background task.
+    /// What: creates a project with a pin file under a temp search root; then
+    /// calls `spawn_startup_tasks` and yields to the tokio runtime until the
+    /// task completes; asserts the pin map contains the expected entry.
+    /// Test: itself (issue #474 regression guard).
+    #[tokio::test]
+    async fn spawn_startup_tasks_populates_pin_map() {
+        // Build a temp search root with one pinned project.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let search_root = tmp.path().join("Projects");
+        let project_dir = search_root.join("my-project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        write_project_pin(
+            &project_dir,
+            &ProjectPin {
+                schema_version: PIN_SCHEMA_VERSION,
+                palace: "my-palace".to_string(),
+                note: None,
+            },
+        )
+        .expect("write pin");
+
+        // Override HOME so `default_search_dirs()` points at our temp root.
+        // SAFETY: single-threaded test; env var only affects this process.
+        let prev_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+        }
+        // Also bypass palace-slug enforcement so AppState::new doesn't
+        // need a real project root.
+        unsafe {
+            std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
+        }
+
+        let state_root = tmp.path().join("data");
+        fs::create_dir_all(&state_root).expect("create data dir");
+        let state = AppState::new(state_root);
+
+        // Fire the background task.
+        spawn_startup_tasks(&state);
+
+        // Yield to the tokio runtime repeatedly until the task populates the
+        // pin map or a timeout is reached (50 × 10 ms = 500 ms ceiling).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            if state.pin_project_map.contains_key("my-palace") {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "pin_project_map was not populated within 500 ms; \
+                     spawn_startup_tasks may not be running the pin scan"
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // Restore HOME.
+        match prev_home {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+
+        let found = state.pin_project_map.get("my-palace").map(|e| e.clone());
+        assert!(
+            found.is_some(),
+            "pin_project_map must contain 'my-palace' after spawn_startup_tasks"
+        );
+        // Canonicalize to handle macOS /private symlinks.
+        let actual = fs::canonicalize(found.unwrap()).expect("canonicalize actual");
+        let expected = fs::canonicalize(&project_dir).expect("canonicalize expected");
+        assert_eq!(
+            actual, expected,
+            "pin_project_map entry must point to the project directory"
+        );
+    }
 }
