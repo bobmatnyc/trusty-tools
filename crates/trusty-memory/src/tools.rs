@@ -375,7 +375,8 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                     "type": "object",
                     "properties": {
                         "name":        {"type": "string"},
-                        "description": {"type": "string"}
+                        "description": {"type": "string"},
+                        "cwd":         {"type": "string", "description": "Optional caller working directory used for palace-name enforcement. Pass the project root (or any path inside it) so the pin file at `.trusty-tools/trusty-memory.yaml` is honoured. When omitted, the daemon's own cwd is used (rarely meaningful for remote calls)."}
                     },
                     "required": ["name"]
                 }
@@ -1126,10 +1127,16 @@ async fn handle_palace_create(state: &AppState, args: Value) -> Result<Value> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("palace_create: missing 'name'"))?;
 
-    // Issue #88: enforce palace = project mapping. New palaces must be named
-    // after the current project slug (derived by walking up from CWD) or the
-    // special `personal` sentinel. Existing palaces are unaffected — this gate
-    // only applies to NEW creation requests.
+    // Issue #88 / Change 2: enforce palace = project mapping. New palaces must
+    // be named after the current project slug (derived by walking up from CWD)
+    // or the special `personal` sentinel. Existing palaces are unaffected —
+    // this gate only applies to NEW creation requests.
+    //
+    // The validation cwd is, in order of preference:
+    //   a. `args["cwd"]` — the MCP caller's project path. When present and the
+    //      project has a `.trusty-tools/trusty-memory.yaml` pin file, the
+    //      pinned slug is used for validation (correct even after a drive reorg).
+    //   b. `std::env::current_dir()` — daemon's own cwd, pre-Change-2 fallback.
     //
     // Skip enforcement when invoked from a test context (tests use arbitrary
     // names against tempdir roots that are not real projects). The bypass is
@@ -1137,7 +1144,14 @@ async fn handle_palace_create(state: &AppState, args: Value) -> Result<Value> {
     // locally; production deployments never set it.
     let skip_enforcement = std::env::var("TRUSTY_SKIP_PALACE_ENFORCEMENT").as_deref() == Ok("1");
     if !skip_enforcement {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| state.data_root.clone());
+        let cwd = args
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(std::path::Path::new)
+            .map(|p| p.to_path_buf())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| state.data_root.clone());
         crate::project_root::validate_palace_name(palace_name, &cwd)?;
     }
 

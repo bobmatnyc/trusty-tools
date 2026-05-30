@@ -429,13 +429,42 @@ pub fn cwd_palace_slug() -> Result<String> {
 
 /// Variant of [`cwd_palace_slug`] that takes the working directory explicitly.
 ///
-/// Why: lets unit tests drive the function without mutating the process'
-/// real cwd (which races with concurrent tests).
-/// What: same logic as [`cwd_palace_slug`] but rooted at `start`.
+/// Why: lets unit tests drive the function without mutating the process' real
+/// cwd (which races with concurrent tests). Also used by the `prompt-context`
+/// hook, which must NOT trigger the lazy pin-file write (a read-only context
+/// may not have write permission and the hook's stdout must stay clean for the
+/// injection protocol). The pin-file read path therefore always uses the
+/// non-writing variant (`project_slug_at_readonly`).
+///
+/// Resolution order:
+///   1. If `.trusty-tools/trusty-memory.yaml` exists anywhere above `start`,
+///      return its `palace` field — the canonical, rename-stable slug.
+///   2. Otherwise, resolve the git toplevel via `git rev-parse --show-toplevel`
+///      and slugify its basename (pre-pin-file behaviour, preserved for repos
+///      that have not yet committed a pin file).
+///   3. If git is unavailable or not in a repo, slugify `start`'s basename.
+///
+/// Failures at steps 2 and 3 are best-effort (no network, short timeout);
+/// a corrupt pin file at step 1 is logged to stderr and falls through to
+/// step 2 — it never emits to stdout and never panics.
+/// What: returns `Ok(slug)` or an error when no slug can be derived (empty
+/// cwd basename in a non-git context).
 /// Test: `tests::cwd_palace_slug_uses_git_toplevel`,
-/// `tests::cwd_palace_slug_falls_back_to_basename`.
+/// `tests::cwd_palace_slug_falls_back_to_basename`,
+/// `tests::cwd_palace_slug_at_prefers_pin_file`,
+/// `tests::cwd_palace_slug_at_reads_pin_from_subdir`,
+/// `tests::cwd_palace_slug_at_pin_read_does_not_create_pin_file`.
 pub fn cwd_palace_slug_at(start: &Path) -> Result<String> {
-    // Best-effort git toplevel resolution: short timeout, no network.
+    // Step 1 (PRIMARY): check for a committed pin file.
+    // Use the non-writing variant so the hook path stays side-effect-free.
+    // A missing or unreadable pin file falls through to the git / basename path.
+    if let Some(slug) = crate::project_root::project_slug_at_readonly(start) {
+        if !slug.is_empty() {
+            return Ok(slug);
+        }
+    }
+
+    // Step 2: best-effort git toplevel resolution — short timeout, no network.
     let output = std::process::Command::new("git")
         .arg("rev-parse")
         .arg("--show-toplevel")
@@ -452,7 +481,7 @@ pub fn cwd_palace_slug_at(start: &Path) -> Result<String> {
             }
         }
     }
-    // Fallback: slugify cwd's basename.
+    // Step 3: slugify cwd's basename.
     let slug = slugify_for_palace(start)?;
     if slug.is_empty() {
         return Err(anyhow!(
@@ -606,6 +635,84 @@ mod tests {
         // Not a git repo — must fall back to the basename slug.
         let slug = cwd_palace_slug_at(&dir).expect("slug");
         assert_eq!(slug, "my-project");
+    }
+
+    /// Why: Change 1 — when a `.trusty-tools/trusty-memory.yaml` pin file is
+    /// present, `cwd_palace_slug_at` must return the pinned slug even when the
+    /// directory basename differs. This is the core rename-safety guarantee.
+    /// What: create a root dir named `actual-dir`, write a pin with
+    /// `palace: pinned-name`, call `cwd_palace_slug_at`, assert result is
+    /// `pinned-name` not `actual-dir`.
+    /// Test: itself.
+    #[test]
+    fn cwd_palace_slug_at_prefers_pin_file() {
+        use crate::project_root::{write_project_pin, ProjectPin, PIN_SCHEMA_VERSION};
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("actual-dir");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let pin = ProjectPin {
+            schema_version: PIN_SCHEMA_VERSION,
+            palace: "pinned-name".to_string(),
+            note: None,
+        };
+        write_project_pin(&root, &pin).expect("write pin");
+
+        let slug = cwd_palace_slug_at(&root).expect("slug");
+        assert_eq!(
+            slug, "pinned-name",
+            "pin file must override the directory basename in messaging slug resolution"
+        );
+    }
+
+    /// Why: `cwd_palace_slug_at` must walk upward to find the pin file, so
+    /// calling it from a subdirectory resolves to the same pinned slug as
+    /// calling it from the root — consistent with how `prompt-context` runs.
+    /// What: pin file at root, call from a nested subdirectory, assert pinned
+    /// slug is returned.
+    /// Test: itself.
+    #[test]
+    fn cwd_palace_slug_at_reads_pin_from_subdir() {
+        use crate::project_root::{write_project_pin, ProjectPin, PIN_SCHEMA_VERSION};
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("my-repo");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let pin = ProjectPin {
+            schema_version: PIN_SCHEMA_VERSION,
+            palace: "my-repo".to_string(),
+            note: None,
+        };
+        write_project_pin(&root, &pin).expect("write pin");
+
+        let sub = root.join("crates").join("foo");
+        std::fs::create_dir_all(&sub).unwrap();
+        let slug = cwd_palace_slug_at(&sub).expect("slug from subdir");
+        assert_eq!(slug, "my-repo");
+    }
+
+    /// Why: the hook path must not create a pin file as a side-effect of
+    /// resolving the slug — `cwd_palace_slug_at` delegates to the readonly
+    /// variant so no file write occurs even when no pin exists.
+    /// What: call `cwd_palace_slug_at` from a git repo with no pin file;
+    /// assert the pin file is absent after the call.
+    /// Test: itself.
+    #[test]
+    fn cwd_palace_slug_at_pin_read_does_not_create_pin_file() {
+        use crate::project_root::{read_project_pin, PIN_FILE_REL};
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("no-pin-project");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+
+        let pin_path = root.join(PIN_FILE_REL);
+        assert!(!pin_path.exists(), "no pin before call");
+
+        let _slug = cwd_palace_slug_at(&root).expect("slug");
+
+        assert!(
+            !pin_path.exists(),
+            "cwd_palace_slug_at must NOT create a pin file (uses readonly variant)"
+        );
+        // But a pin read on the root itself must still return None.
+        assert!(read_project_pin(&root).unwrap().is_none());
     }
 
     #[tokio::test]

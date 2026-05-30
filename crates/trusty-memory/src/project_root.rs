@@ -286,6 +286,44 @@ pub fn project_slug_at(start: &Path) -> Option<String> {
     Some(slug)
 }
 
+/// Derive a palace slug from the project root found at or above `start`,
+/// WITHOUT the lazy-write side-effect.
+///
+/// Why: the `prompt-context` hook runs in read-only or short-lived contexts
+/// where creating `.trusty-tools/trusty-memory.yaml` would be surprising and
+/// potentially disruptive. The slug is still resolved via the pin-file when
+/// one already exists (step a), and falls back to the basename slug (step b)
+/// without ever writing a new file. This makes `cwd_palace_slug_at` safe to
+/// call unconditionally from hooks. The writing variant (`project_slug_at`)
+/// remains the right choice for interactive commands (`trusty-memory link`,
+/// `trusty-memory remember`) that want to stabilise the slug.
+/// What: same two-step resolution as `project_slug_at` but step (b) only
+/// computes and returns the basename slug — it does NOT write the pin file.
+/// Returns `None` when no project root is found.
+/// Test: `project_slug_at_readonly_no_write_when_absent`,
+///       `project_slug_at_readonly_reads_existing_pin`,
+///       `project_slug_at_readonly_falls_back_to_basename`.
+pub fn project_slug_at_readonly(start: &Path) -> Option<String> {
+    let root = find_project_root(start)?;
+
+    // Step (a): if a pin file exists, use it authoritatively.
+    match read_project_pin(&root) {
+        Ok(Some(pin)) => return Some(pin.palace),
+        Ok(None) => {} // absent — fall through to step (b)
+        Err(e) => {
+            // Corrupt or unreadable pin file: log to stderr and fall through
+            // so the hook is not blocked.
+            tracing::warn!(
+                path = %root.join(PIN_FILE_REL).display(),
+                "could not read palace pin file ({e:#}); falling back to basename slug (read-only)"
+            );
+        }
+    }
+
+    // Step (b): compute from basename — but do NOT write a pin file.
+    project_slug_from_basename(&root)
+}
+
 /// Derive a palace slug for the current working directory.
 ///
 /// Why: convenience wrapper over `project_slug_at` for callers that want
@@ -712,12 +750,130 @@ mod tests {
         );
     }
 
-    /// Why: the lazy write in `project_slug_at` must be non-fatal when the
-    /// target directory is read-only. Otherwise, memory operations would panic
-    /// or return an error in environments where the project tree is immutable.
-    /// What: create a project root, make it read-only, call `project_slug_at`
-    /// from inside it, and assert we still get a slug (not None or an error).
+    // -----------------------------------------------------------------------
+    // project_slug_at_readonly
+    // -----------------------------------------------------------------------
+
+    /// Why: the hook read path must return the pinned slug without creating a
+    /// new pin file when one already exists — same authoritative result as the
+    /// writing variant but with no side-effects.
+    /// What: create a project root with a pin file, call `project_slug_at_readonly`
+    /// from a subdirectory, assert the pinned slug is returned and no new file
+    /// is written.
     /// Test: itself.
+    #[test]
+    fn project_slug_at_readonly_reads_existing_pin() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("some-dir");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        let pin = ProjectPin {
+            schema_version: PIN_SCHEMA_VERSION,
+            palace: "canonical-slug".to_string(),
+            note: None,
+        };
+        write_project_pin(&root, &pin).expect("write pin");
+
+        let sub = root.join("nested");
+        fs::create_dir_all(&sub).unwrap();
+        let slug = project_slug_at_readonly(&sub).expect("slug");
+        assert_eq!(
+            slug, "canonical-slug",
+            "readonly path must return the pinned slug"
+        );
+    }
+
+    /// Why: the hook read path must NOT create a pin file when none exists — the
+    /// lazy-write side-effect is only appropriate for interactive commands.
+    /// What: create a project root with no pin file, call `project_slug_at_readonly`,
+    /// assert the basename slug is returned but the pin file is NOT created.
+    /// Test: itself.
+    #[test]
+    fn project_slug_at_readonly_no_write_when_absent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("my-repo");
+        fs::create_dir_all(root.join(".git")).unwrap();
+
+        // No pin file before the call.
+        assert!(
+            read_project_pin(&root).expect("no err").is_none(),
+            "no pin before call"
+        );
+
+        let slug = project_slug_at_readonly(&root).expect("slug");
+        assert_eq!(slug, "my-repo", "should derive from basename");
+
+        // Pin file must NOT have been created.
+        assert!(
+            read_project_pin(&root).expect("no err").is_none(),
+            "pin file must NOT be written by the readonly variant"
+        );
+    }
+
+    /// Why: `project_slug_at_readonly` must walk upward just like the writing
+    /// variant so it works from any subdirectory, not just the project root.
+    /// What: create a project root with a pin, start from a deep subdirectory,
+    /// assert the pinned slug is returned.
+    /// Test: itself.
+    #[test]
+    fn project_slug_at_readonly_falls_back_to_basename() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("basename-project");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        // No pin file — readonly path must fall back to basename.
+        let slug = project_slug_at_readonly(&root).expect("slug");
+        assert_eq!(slug, "basename-project");
+        // Still no pin file.
+        assert!(read_project_pin(&root).unwrap().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Change 2: validate_palace_name with pin-file cwd
+    // -----------------------------------------------------------------------
+
+    /// Why: Change 2 — when the caller passes a `cwd` path that contains
+    /// (or is above) a `.trusty-tools/trusty-memory.yaml` pin file,
+    /// `validate_palace_name` must accept the pinned slug rather than the
+    /// basename of the CWD directory. This is the core correctness guarantee
+    /// for multi-checkout and drive-reorg scenarios.
+    /// What: create a project root named `new-name` with a `.git` marker and
+    /// a pin file for `original-slug`; assert `validate_palace_name(
+    /// "original-slug", new-name/src)` returns `Ok(())`.
+    /// Test: itself.
+    #[test]
+    fn validate_palace_name_accepts_pinned_slug_via_cwd() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("new-name");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        let pin = ProjectPin {
+            schema_version: PIN_SCHEMA_VERSION,
+            palace: "original-slug".to_string(),
+            note: None,
+        };
+        write_project_pin(&root, &pin).expect("write pin");
+
+        let sub = root.join("src");
+        fs::create_dir_all(&sub).unwrap();
+
+        // The pinned slug must be accepted even though the dir is "new-name".
+        let result = validate_palace_name("original-slug", &sub);
+        assert!(
+            result.is_ok(),
+            "pinned slug must be accepted when cwd resolves to pin: {result:?}"
+        );
+
+        // The basename slug must be rejected (it is not in the pin file).
+        let mismatch = validate_palace_name("new-name", &sub);
+        assert!(
+            mismatch.is_err(),
+            "non-pinned name must be rejected when pin file exists"
+        );
+    }
+
+    // Note: the bypass-env contract (TRUSTY_SKIP_PALACE_ENFORCEMENT=1 allows any
+    // name) is covered by `dispatch_palace_create_persists` in tools.rs, which
+    // sets the env var in the test harness. No unit test here — the env-var
+    // bypass is a test-only escape hatch and not part of the public API contract.
+
     #[cfg(unix)]
     #[test]
     fn lazy_write_non_fatal_on_readonly_dir() {

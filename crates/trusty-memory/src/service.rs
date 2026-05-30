@@ -97,11 +97,27 @@ impl From<PersistedDreamStats> for DreamStatusPayload {
 }
 
 /// `POST /api/v1/palaces` body — service-facing version.
+///
+/// Why: Change 2 — the optional `cwd` field lets HTTP callers pass the
+/// filesystem path of the project they are operating from. When present,
+/// `validate_palace_name` uses it as the `start` for pin-file-based
+/// validation instead of the daemon's own cwd (which is `~` or `/` and
+/// rarely meaningful). When absent the existing daemon-cwd fallback applies
+/// so older clients continue to work.
+/// What: `name` is required; `description` and `cwd` are optional.
+/// Test: `create_palace_accepts_pinned_slug_via_cwd`,
+///       `create_palace_rejects_mismatch_when_cwd_given`.
 #[derive(Deserialize, Clone, Debug)]
 pub struct CreatePalaceBody {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    /// Optional caller working directory used for palace-name enforcement.
+    /// When present, `validate_palace_name` uses this path instead of the
+    /// daemon's process cwd. Useful when the daemon is launched from `~/`
+    /// but the caller is inside a project tree.
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 /// `POST /api/v1/palaces/{id}/drawers` body — service-facing version.
@@ -379,12 +395,25 @@ impl MemoryService {
         if name.is_empty() {
             return Err(ServiceError::bad_request("name is required"));
         }
-        // Issue #88: enforce palace = project mapping for HTTP-originated
-        // palace creation, mirroring the MCP path in `tools::handle_palace_create`.
+        // Issue #88 / Change 2: enforce palace = project mapping for
+        // HTTP-originated palace creation. The validation cwd is, in order of
+        // preference:
+        //   a. `body.cwd` — the caller explicitly supplied their project path
+        //      (correct for any client that is not the daemon itself).
+        //   b. `std::env::current_dir()` — daemon's own cwd, the pre-Change-2
+        //      fallback (rarely meaningful when the daemon is launched from ~).
+        // This keeps older clients that omit `cwd` working without a breaking
+        // change, while letting pin-file-aware clients get accurate validation.
         let skip_enforcement =
             std::env::var("TRUSTY_SKIP_PALACE_ENFORCEMENT").as_deref() == Ok("1");
         if !skip_enforcement {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| self.state.data_root.clone());
+            let cwd = body
+                .cwd
+                .as_deref()
+                .map(std::path::Path::new)
+                .map(|p| p.to_path_buf())
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| self.state.data_root.clone());
             crate::project_root::validate_palace_name(&name, &cwd)
                 .map_err(|e| ServiceError::bad_request(e.to_string()))?;
         }

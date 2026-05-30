@@ -26,7 +26,7 @@ use colored::Colorize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::project_root::{project_slug_at, PERSONAL_PALACE};
+use crate::project_root::{project_slug_at, read_project_pin, PERSONAL_PALACE, PIN_FILE_REL};
 
 /// Outcome of a single doctor check.
 ///
@@ -105,17 +105,20 @@ impl CheckResult {
 /// (one row per palace) rather than the pass/warn/fail traffic-light model
 /// used by the daemon health checks.
 /// What: encodes whether a palace is `Ok` (name matches a detectable project
-/// slug or is the `personal` sentinel), `Orphaned` (name does not correspond
-/// to any project directory we can find on disk), or `Empty` (the palace
-/// directory exists but has no `palace.json`).
-/// Test: `find_orphaned_palaces_lists_non_matching_and_empty`.
+/// slug, is the `personal` sentinel, or is claimed by a pin file in any
+/// scanned project directory), `Orphaned` (name does not correspond to any
+/// project directory we can find on disk), or `Empty` (the palace directory
+/// exists but has no `palace.json`).
+/// Test: `find_orphaned_palaces_lists_non_matching_and_empty`,
+///       `audit_palaces_ok_when_pin_file_claims_it`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PalaceAuditStatus {
-    /// Palace name matches the current project slug or is `personal`.
+    /// Palace name matches the current project slug, is `personal`, or is
+    /// claimed by a `.trusty-tools/trusty-memory.yaml` pin file found in
+    /// any of the standard project search directories.
     Ok,
-    /// Palace name does not match any project directory found by walking
-    /// `find_project_root` upward from the palace data directory's parent.
-    /// Advisory: existing data is intact; no mutation is made.
+    /// Palace name does not match any project directory or pin file found by
+    /// the bounded scan. Advisory: existing data is intact; no mutation made.
     Orphaned,
     /// The palace directory exists under the data root but contains no
     /// `palace.json` (was never fully initialised, or was manually deleted).
@@ -142,22 +145,27 @@ pub struct PalaceAuditEntry {
 /// Why: the classification logic is factored out of the presenter so it can
 /// be unit-tested without touching the terminal.
 /// What: walks `registry_dir` one level deep; for each subdirectory, checks
-/// for a `palace.json` (marks `Empty` when absent), then checks whether the
-/// subdirectory name either equals `personal` or matches the slug derived
-/// from any parent directory that is a project root. A palace whose name
-/// equals its own parent directory slug is considered `Ok` (it was created
-/// when standing inside that project). Palaces whose names do not satisfy
-/// either condition are `Orphaned`.
+/// for a `palace.json` (marks `Empty` when absent), then applies the following
+/// resolution order:
 ///
-/// Note: the "matches a project root" check is advisory — we walk *up* from
-/// the palace's own data directory looking for project markers. For palaces
-/// created from within a project, the data directory lives under the data
-/// root (e.g. `~/Library/Application Support/trusty-memory/my-project/`),
-/// which is typically NOT inside any project directory. We therefore
-/// additionally look for a directory on disk whose basename slug equals the
-/// palace id — a heuristic that covers the common case (project at
-/// `~/Projects/my-project`) without requiring a registry of project paths.
-/// Test: `find_orphaned_palaces_lists_non_matching_and_empty`.
+///   1. `personal` is always `Ok`.
+///   2. Any ancestor of `registry_dir` is a project root whose slug matches
+///      the palace id → `Ok` (daemon running inside a project tree).
+///   3. A standard project search directory (`~/Projects/<id>`,
+///      `~/Developer/<id>`, etc.) exists on disk with a matching basename →
+///      `Ok` (heuristic, covers common single-project-dir layout).
+///   4. Change 3: a `.trusty-tools/trusty-memory.yaml` pin file is found in
+///      any immediate subdirectory of the standard search dirs whose `palace`
+///      field equals this palace id → `Ok`. This is the key improvement: a
+///      repo that has been moved or renamed but still has its pin file
+///      committed will NOT be flagged as orphaned even if its directory name
+///      no longer matches the palace id.
+///   5. None of the above → `Orphaned` (advisory, no mutation).
+///
+/// The scan is bounded: we only look one level deep inside the standard
+/// search dirs (no recursive filesystem walk).
+/// Test: `find_orphaned_palaces_lists_non_matching_and_empty`,
+///       `audit_palaces_ok_when_pin_file_claims_it`.
 pub fn audit_palaces(registry_dir: &Path) -> Vec<PalaceAuditEntry> {
     let Ok(entries) = std::fs::read_dir(registry_dir) else {
         return Vec::new();
@@ -205,13 +213,14 @@ pub fn audit_palaces(registry_dir: &Path) -> Vec<PalaceAuditEntry> {
             });
             continue;
         }
-        // Heuristic: look for a directory named after the slug in the user's
-        // common project locations. We check `$HOME/Projects/<id>`,
+        // Step 3: heuristic — look for a directory named after the slug in the
+        // user's common project locations. We check `$HOME/Projects/<id>`,
         // `$HOME/Developer/<id>`, `$HOME/Code/<id>`, and `$HOME/<id>` as
-        // plausible locations. This keeps the check lightweight (no
-        // recursive scan) while catching the most common single-project-dir
-        // layout.
-        let found_on_disk = dirs::home_dir()
+        // plausible locations. This keeps the check lightweight (no recursive
+        // scan) while catching the most common single-project-dir layout.
+        let home = dirs::home_dir();
+        let found_on_disk = home
+            .as_ref()
             .map(|home| {
                 let candidates = [
                     home.join("Projects").join(&id),
@@ -222,7 +231,34 @@ pub fn audit_palaces(registry_dir: &Path) -> Vec<PalaceAuditEntry> {
                 candidates.iter().any(|c| c.is_dir())
             })
             .unwrap_or(false);
-        let status = if found_on_disk {
+        if found_on_disk {
+            out.push(PalaceAuditEntry {
+                id,
+                data_dir: path,
+                status: PalaceAuditStatus::Ok,
+            });
+            continue;
+        }
+
+        // Step 4 (Change 3): scan one level inside the standard search dirs
+        // for a `.trusty-tools/trusty-memory.yaml` pin file that claims this
+        // palace id. This lets renamed/moved repos avoid the Orphaned
+        // classification as long as they committed their pin file.
+        let claimed_by_pin = home
+            .as_ref()
+            .map(|home| {
+                scan_project_dirs_for_pin(
+                    &[
+                        home.join("Projects"),
+                        home.join("Developer"),
+                        home.join("Code"),
+                        home.clone(),
+                    ],
+                    &id,
+                )
+            })
+            .unwrap_or(false);
+        let status = if claimed_by_pin {
             PalaceAuditStatus::Ok
         } else {
             PalaceAuditStatus::Orphaned
@@ -235,6 +271,46 @@ pub fn audit_palaces(registry_dir: &Path) -> Vec<PalaceAuditEntry> {
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out
+}
+
+/// Scan one level inside each of `search_dirs` for a committed pin file
+/// (`PIN_FILE_REL`) whose `palace` field equals `palace_id`.
+///
+/// Why: Change 3 — a palace created from a project that was later moved or
+/// renamed should not be flagged `Orphaned` as long as the project's pin file
+/// is still present somewhere on the standard project search path. A bounded
+/// one-level scan keeps the check cheap (no recursive walk) while catching the
+/// common case where projects live directly under `~/Projects/` or `~/Code/`.
+/// What: for each dir in `search_dirs` that exists, `read_dir` one level and
+/// for each entry attempt to read `<entry>/PIN_FILE_REL`; if the parse
+/// succeeds and `pin.palace == palace_id`, returns `true` immediately.
+/// Returns `false` if no match is found. All I/O errors are silently ignored
+/// (advisory check, read-only).
+/// Test: `audit_palaces_ok_when_pin_file_claims_it`.
+fn scan_project_dirs_for_pin(search_dirs: &[PathBuf], palace_id: &str) -> bool {
+    for search_dir in search_dirs {
+        let Ok(entries) = std::fs::read_dir(search_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let candidate = entry.path();
+            if !candidate.is_dir() {
+                continue;
+            }
+            // Read the pin file if present.
+            if let Ok(Some(pin)) = read_project_pin(&candidate) {
+                if pin.palace == palace_id {
+                    tracing::debug!(
+                        palace_id = %palace_id,
+                        pin_path = %candidate.join(PIN_FILE_REL).display(),
+                        "audit: palace claimed by pin file — classifying as Ok"
+                    );
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Entry point for `trusty-memory doctor --fix-palaces [--fix]`.
@@ -776,6 +852,68 @@ mod tests {
             empty_entry.unwrap().status,
             PalaceAuditStatus::Empty,
             "empty-palace must be Empty"
+        );
+    }
+
+    /// Why: Change 3 — a palace whose name is claimed by a pin file in a
+    /// scanned project directory must be classified `Ok`, not `Orphaned`, even
+    /// when the directory name no longer matches the palace id (e.g. after a
+    /// drive reorg / rename).
+    /// What: create a mock registry with a palace named `my-old-name`; create
+    /// a fake "Projects" search dir with a project that has a pin file claiming
+    /// `palace: my-old-name`; pass that search dir to `scan_project_dirs_for_pin`
+    /// and assert it returns `true`. Also assert that `audit_palaces` with the
+    /// scanned search dirs classifies the palace as `Ok`.
+    /// Test: pure filesystem.
+    #[test]
+    fn audit_palaces_ok_when_pin_file_claims_it() {
+        use crate::project_root::{write_project_pin, ProjectPin, PIN_SCHEMA_VERSION};
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        // Set up a fake "Projects" directory with a project that has a pin.
+        let projects_dir = tmp.path().join("Projects");
+        let project_dir = projects_dir.join("moved-project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let pin = ProjectPin {
+            schema_version: PIN_SCHEMA_VERSION,
+            palace: "my-old-name".to_string(),
+            note: None,
+        };
+        write_project_pin(&project_dir, &pin).expect("write pin");
+
+        // scan_project_dirs_for_pin must return true for the pinned id.
+        assert!(
+            scan_project_dirs_for_pin(std::slice::from_ref(&projects_dir), "my-old-name"),
+            "scan must find the pin file that claims my-old-name"
+        );
+        // Must return false for an unrelated id.
+        assert!(
+            !scan_project_dirs_for_pin(std::slice::from_ref(&projects_dir), "some-other-palace"),
+            "scan must not match a palace id not claimed by any pin"
+        );
+    }
+
+    /// Why: `scan_project_dirs_for_pin` must not falsely claim a match when
+    /// the pin file's `palace` field differs from the audit id.
+    /// What: create a project with a pin for `alpha`; assert scan for `beta`
+    /// returns false.
+    /// Test: pure filesystem.
+    #[test]
+    fn scan_project_dirs_returns_false_for_mismatch() {
+        use crate::project_root::{write_project_pin, ProjectPin, PIN_SCHEMA_VERSION};
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let projects_dir = tmp.path().join("Projects");
+        let project_dir = projects_dir.join("some-project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let pin = ProjectPin {
+            schema_version: PIN_SCHEMA_VERSION,
+            palace: "alpha".to_string(),
+            note: None,
+        };
+        write_project_pin(&project_dir, &pin).expect("write pin");
+        assert!(
+            !scan_project_dirs_for_pin(&[projects_dir], "beta"),
+            "mismatch must return false"
         );
     }
 
