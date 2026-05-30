@@ -218,6 +218,23 @@ impl ErrorStore {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Read records from an explicit JSONL file path without a live store handle.
+    ///
+    /// Why: Phase 2's multi-store reader needs to load records from several
+    ///      daemon JSONL files (trusty-search, trusty-memory, trusty-mpm, …)
+    ///      and merge them in-process without opening those files in append mode
+    ///      or holding locks across daemon boundaries — a snapshot read.
+    /// What: reads the JSONL at `path`, parses up to `limit` records (ring
+    ///      eviction keeps the last `limit` lines), skips corrupt lines.
+    ///      Returns an empty `Vec` when the file is absent — never an error.
+    /// Test: `read_records_loads_file`, `read_records_missing_file_is_empty`.
+    #[must_use]
+    pub fn read_records(path: &std::path::Path, limit: usize) -> Vec<CapturedError> {
+        load_ring_from_disk(&path.to_path_buf(), limit)
+            .into_iter()
+            .collect()
+    }
 }
 
 // ── Disk helpers ──────────────────────────────────────────────────────────────
@@ -421,5 +438,39 @@ mod tests {
         assert_eq!(by_fp[0].0.message, "err c");
         // fp2 has count 1.
         assert_eq!(by_fp[1].1, 1);
+    }
+
+    #[test]
+    fn read_records_loads_file() {
+        // Write a two-record JSONL file, then read it back via the static helper.
+        let tmp_dir = {
+            let pid = std::process::id();
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            std::env::temp_dir().join(format!("bugcap-readrec-{pid}-{nanos}"))
+        };
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let file_path = tmp_dir.join(ERRORS_FILENAME);
+
+        // Seed the file with two records via the store's append path.
+        let store = ErrorStore::with_path(Some(file_path.clone()), 10);
+        store.append(make_record("alpha error", "fp-a"));
+        store.append(make_record("beta error", "fp-b"));
+
+        // Static read-back must return both records.
+        let records = ErrorStore::read_records(&file_path, 10);
+        assert_eq!(records.len(), 2, "expected 2 records");
+        assert_eq!(records[0].message, "alpha error");
+        assert_eq!(records[1].message, "beta error");
+    }
+
+    #[test]
+    fn read_records_missing_file_is_empty() {
+        // A missing file must return an empty vec — not an error.
+        let nonexistent = std::env::temp_dir().join("bugcap-no-such-file-x99.jsonl");
+        let records = ErrorStore::read_records(&nonexistent, 50);
+        assert!(records.is_empty(), "missing file must yield empty vec");
     }
 }
