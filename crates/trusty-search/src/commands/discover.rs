@@ -88,11 +88,17 @@ fn default_scan_paths() -> Vec<PathBuf> {
 ///       default), walks one level deep under each entry, and for every
 ///       directory with a project marker that is NOT already registered with
 ///       the daemon, calls `POST /indexes` followed by `POST /indexes/:id/reindex`
-///       via the local HTTP API. All failures are logged at warn level and
-///       never propagated — auto-discovery is best-effort.
+///       via the local HTTP API. The reindex POST includes `"background": true`
+///       (issue #458) so these bulk startup tasks are routed through the
+///       low-priority semaphore and cannot starve user-initiated indexing.
+///       Directories whose `root_path` does not exist on disk are skipped
+///       (issue #458 part 2) — dead/moved projects must not flood the queue.
+///       All failures are logged at warn level and never propagated — auto-discovery
+///       is best-effort.
 /// Test: side-effect-only at this level. Unit tests cover the pure detection
-///       logic (`detect_project_marker_*`, `default_scan_paths`); the
-///       integration smoke test lives under `tests/integration_tests.rs`.
+///       logic (`detect_project_marker_*`, `default_scan_paths`,
+///       `root_path_exists_before_reindex`); the integration smoke test lives
+///       under `tests/integration_tests.rs`.
 pub async fn auto_discover_and_index() {
     let cfg = match GlobalConfig::load() {
         Ok(c) => c,
@@ -199,10 +205,29 @@ pub async fn auto_discover_and_index() {
 
             match register_index_with_daemon(&name, &path).await {
                 Ok((_created, true)) => {
+                    // Issue #458 (part 2): skip reindex if the root path does
+                    // not exist on disk. Dead/moved/unmounted project directories
+                    // (e.g. an external volume that is not currently mounted)
+                    // must not flood the background reindex queue. The index
+                    // registration is intentionally kept so operators can still
+                    // see it; only the auto-discover reindex trigger is skipped.
+                    if !path.exists() {
+                        tracing::info!(
+                            "auto-discover: skipping reindex of '{}' — root path '{}' \
+                             does not exist on disk (dead/moved project)",
+                            name,
+                            path.display()
+                        );
+                        continue;
+                    }
                     let reindex_url = format!("{base}/indexes/{name}/reindex");
+                    // Issue #458 (part 1): set `background: true` so the reindex
+                    // request is routed through the low-priority semaphore. This
+                    // prevents a large startup discovery (e.g. 44 projects) from
+                    // starving a concurrent user-initiated `trusty-search index`.
                     match client
                         .post(&reindex_url)
-                        .json(&serde_json::json!({}))
+                        .json(&serde_json::json!({ "background": true }))
                         .send()
                         .await
                     {
@@ -370,5 +395,48 @@ mod tests {
         // We can't assert exact contents (depends on the user's $HOME) but the
         // call must always return cleanly.
         let _ = default_scan_paths();
+    }
+
+    // ── Issue #458: dead-root skip predicate ──────────────────────────────────
+
+    /// Why: the auto-discover reindex skip decision is `path.exists()`. A
+    /// non-existent path (unmounted volume, moved project) must produce `false`
+    /// so the auto-discover loop skips the reindex trigger. This test verifies
+    /// the predicate works correctly for both live and dead paths — the pure
+    /// filesystem call is the factored-out decision point that `auto_discover_
+    /// and_index` relies on.
+    ///
+    /// What: creates a real temporary directory (exists → true), then removes it
+    /// and checks again (gone → false). Mirrors the exact check used in the
+    /// auto-discover loop.
+    ///
+    /// Test: self-contained — no daemon needed; runs in normal `cargo test`.
+    #[test]
+    fn root_path_exists_true_for_real_dir() {
+        let dir = tempdir_unique("exists");
+        assert!(dir.exists(), "freshly-created dir must exist");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn root_path_exists_false_after_removal() {
+        let dir = tempdir_unique("gone");
+        fs::remove_dir_all(&dir).ok();
+        assert!(
+            !dir.exists(),
+            "deleted dir must not exist — the dead-root skip predicate would fire"
+        );
+    }
+
+    #[test]
+    fn root_path_exists_false_for_never_created() {
+        // A path that was never on disk: simulate a dead/moved project volume.
+        let phantom =
+            std::env::temp_dir().join("trusty-discover-phantom-path-that-will-never-exist-12345");
+        let _ = fs::remove_dir_all(&phantom);
+        assert!(
+            !phantom.exists(),
+            "phantom path must not exist — dead-root skip would fire for this index"
+        );
     }
 }

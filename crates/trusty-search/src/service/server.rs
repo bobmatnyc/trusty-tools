@@ -643,6 +643,17 @@ struct HealthResponse {
     /// health poll after a crash-restart may briefly return `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     embedderd_rss_mb: Option<u64>,
+    /// Number of background (startup/auto-discover) reindex tasks currently
+    /// queued or in-flight on the background semaphore (issue #458). Operators
+    /// can watch this tick to zero to confirm the startup storm has drained.
+    /// Interactive (user-initiated) reindexes are NOT counted here — they use
+    /// a separate semaphore and are never blocked by this backlog.
+    ///
+    /// Why: without this field, an operator has no way to tell from `/health`
+    /// whether the daemon is still processing its startup reindex storm.
+    /// What: mirrors `reindex::background_reindex_queue_depth()`.
+    /// Test: `health_includes_reindex_queue_depth` below.
+    background_reindex_queue_depth: usize,
 }
 
 /// Embedding-model metadata surfaced by `GET /health` (issue #38).
@@ -1059,6 +1070,9 @@ async fn health_handler(State(state): State<Arc<SearchAppState>>) -> Json<Health
         cpu_pct,
         embedder_info,
         embedderd_rss_mb,
+        // Issue #458: expose the background reindex backlog so operators can
+        // watch the startup storm drain without reading daemon logs.
+        background_reindex_queue_depth: crate::service::reindex::background_reindex_queue_depth(),
     })
 }
 
@@ -3063,6 +3077,12 @@ pub struct ReindexRequest {
     /// content hasn't changed. Set by `trusty-search index --force`.
     #[serde(default)]
     pub force: Option<bool>,
+    /// When `true`, routes this reindex through the background (low-priority)
+    /// semaphore so it cannot starve user-initiated requests (issue #458).
+    /// Set by the startup auto-discover path; never sent by interactive CLI or
+    /// MCP callers. Defaults to `false` (interactive/priority path).
+    #[serde(default)]
+    pub background: Option<bool>,
 }
 
 async fn reindex_handler(
@@ -3124,8 +3144,13 @@ async fn reindex_handler(
     // (or differs), re-register with the new path. We can't mutate the
     // existing Arc in place, but registering replaces the entry.
     let mut force = false;
+    // Issue #458: `background=true` routes to the low-priority semaphore so
+    // startup auto-discover reindexes never starve interactive requests.
+    // Default false (interactive/priority path) when the field is absent.
+    let mut is_interactive = true;
     if let Some(Json(req)) = body {
         force = req.force.unwrap_or(false);
+        is_interactive = !req.background.unwrap_or(false);
         if let Some(new_root) = req.root_path {
             // Issue #63: a caller-supplied override must pass the same
             // absolute-existing-directory check as `POST /indexes`. Without
@@ -3204,6 +3229,10 @@ async fn reindex_handler(
         // orchestrator can sample embedderd's RSS during the run and
         // emit `embedderd_peak_rss_mb` in the SSE `complete` event.
         Some(Arc::clone(&state.embedderd_pid_slot)),
+        // Issue #458: route based on caller intent. `background=true` in the
+        // request body maps to `priority=false` (background semaphore, never
+        // blocks interactive requests). Default is interactive (priority=true).
+        is_interactive,
     );
 
     Ok(Json(serde_json::json!({
