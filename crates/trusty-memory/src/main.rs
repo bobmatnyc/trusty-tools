@@ -644,13 +644,13 @@ async fn run_serve(
     }
 }
 
-/// Why: startup tasks (palace hydration, alias discovery) are the same
-///      regardless of whether HTTP binds to a fixed or dynamic port; keeping
-///      the logic in a single helper means a new startup task only has to be
-///      added in one place. Previously, `load_palaces_from_disk` was awaited
-///      synchronously before binding the HTTP listener — a single broken
-///      `kg.db` (stale WAL sidecar, corrupt file, permissions) could stall
-///      hydration for seconds per palace, deferring `/health` becoming
+/// Why: startup tasks (palace hydration, alias discovery, pin scan) are the
+///      same regardless of whether HTTP binds to a fixed or dynamic port;
+///      keeping the logic in a single helper means a new startup task only has
+///      to be added in one place. Previously, `load_palaces_from_disk` was
+///      awaited synchronously before binding the HTTP listener — a single
+///      broken `kg.db` (stale WAL sidecar, corrupt file, permissions) could
+///      stall hydration for seconds per palace, deferring `/health` becoming
 ///      reachable until every palace had been visited. The dashboard, MCP
 ///      clients, and `launchctl` health-probes all interpret that as "the
 ///      daemon is dead", so the launchd job thrashes and operators see no
@@ -661,10 +661,12 @@ async fn run_serve(
 ///      single bad `kg.db` can never abort the daemon.
 /// What: clones `state` (cheap — `AppState` derives `Clone` with `Arc`-wrapped
 ///       internals) and spawns a background task that (1) hydrates persisted
-///       palaces from disk with timing logs, and (2) once palaces are live,
+///       palaces from disk with timing logs, (2) once palaces are live,
 ///       kicks off issue-#42 alias auto-discovery against the cwd targeting
-///       the default palace (if configured). Returns immediately — the
-///       spawned task runs concurrently with the HTTP listener bind.
+///       the default palace (if configured), and (3) runs the issue-#470
+///       single-pass pin scan and populates `AppState::pin_project_map`
+///       (scan-only — NO palace opens). Returns immediately — the spawned
+///       task runs concurrently with the HTTP listener bind.
 /// Test: indirectly covered by `run_serve` integration tests; no direct unit
 ///       test (process-level entry point, fire-and-forget spawn).
 fn spawn_startup_tasks(state: &AppState) {
@@ -689,6 +691,33 @@ fn spawn_startup_tasks(state: &AppState) {
         if let Some(palace) = bg_state.default_palace.clone() {
             if let Ok(cwd) = std::env::current_dir() {
                 bg_state.spawn_alias_discovery(palace, cwd);
+            }
+        }
+        // Issue #470: single-pass scan-only pin discovery — NO palace opens.
+        // Run on the blocking pool because readdir is blocking I/O; the scan
+        // is bounded (one level under each search root) so it completes
+        // quickly. We populate `pin_project_map` on the shared `AppState`
+        // arc so handlers can look up palace_id → project_path cheaply.
+        let pin_map_ref = bg_state.pin_project_map.clone();
+        let scan_result = tokio::task::spawn_blocking(move || {
+            let search_dirs = trusty_memory::startup_scan::default_search_dirs();
+            trusty_memory::startup_scan::scan_pin_map(&search_dirs)
+        })
+        .await;
+        match scan_result {
+            Ok(map) => {
+                let count = map.len();
+                for (palace_id, project_path) in map {
+                    pin_map_ref.insert(palace_id, project_path);
+                }
+                tracing::info!(
+                    pins_found = count,
+                    "startup pin scan complete: {count} pin(s) discovered"
+                );
+            }
+            Err(e) => {
+                // spawn_blocking join error — should not happen in practice.
+                tracing::warn!("startup pin scan task panicked or was cancelled: {e}");
             }
         }
     });

@@ -74,6 +74,15 @@ pub mod project_root;
 pub mod prompt_facts;
 pub mod prompt_log;
 pub mod service;
+/// Single-pass startup pin-file scanner (issue #470).
+///
+/// Why: builds the `palace_id → project_path` map at daemon startup without
+/// eager palace opens. One readdir sweep over the standard search roots is
+/// cheaper than the O(#palaces) per-id loop used by the doctor path and runs
+/// before the first HTTP request arrives.
+/// What: exports `scan_pin_map` and `default_search_dirs`.
+/// Test: see `startup_scan::tests`.
+pub mod startup_scan;
 pub mod tools;
 pub mod transport;
 #[cfg(feature = "axum-server")]
@@ -623,6 +632,27 @@ pub struct AppState {
     /// Test: `palace_name_cache_populated_after_hydration` and
     /// `palace_name_cache_updates_on_create`.
     pub palace_names: Arc<dashmap::DashMap<String, String>>,
+    /// Single-pass startup pin-file map: palace id → project root path (issue #470).
+    ///
+    /// Why: after daemon startup we have no record of which on-disk project
+    /// directories correspond to which palace ids — that information only
+    /// existed inside the pin files on disk. Eager-opening every palace on
+    /// startup is too expensive. This field captures the scan-only result of
+    /// `startup_scan::scan_pin_map` so handlers that want to locate a project
+    /// by its palace id (e.g. future cwd-inference, project-health checks)
+    /// can do a single `DashMap::get` instead of a filesystem walk.
+    /// Populated once, shortly after `load_palaces_from_disk` returns, by
+    /// `spawn_startup_tasks`. Never mutated after population — it is a
+    /// snapshot of what the filesystem looked like at startup.
+    /// What: `DashMap<String (palace_id), PathBuf (project root)>`.
+    /// The outer `Arc` lets `spawn_startup_tasks` (which holds only a clone
+    /// of `AppState`) write to the same backing map that request handlers
+    /// read. Population is asynchronous so callers must treat an absent entry
+    /// as "not yet scanned" (or "no pin found"), never as "palace unknown".
+    /// Test: `startup_scan::tests::scan_pin_map_*` validate the underlying
+    /// scanner function; the wiring in `spawn_startup_tasks` is covered by
+    /// the integration-test daemon start path.
+    pub pin_project_map: Arc<dashmap::DashMap<String, PathBuf>>,
     /// Bounded sender for the BM25 index worker (issue #231).
     ///
     /// Why: the previous fire-and-forget design `tokio::spawn`ed one task per
@@ -698,6 +728,7 @@ impl AppState {
             palace_write_locks: Arc::new(dashmap::DashMap::new()),
             pending_activity_writes: Arc::new(AtomicUsize::new(0)),
             palace_names: Arc::new(dashmap::DashMap::new()),
+            pin_project_map: Arc::new(dashmap::DashMap::new()),
             bm25_index_tx,
         }
     }
@@ -728,6 +759,21 @@ impl AppState {
             .entry(palace_id.to_string())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
+    }
+
+    /// Look up a project root path by palace id in the startup pin-scan map.
+    ///
+    /// Why: provides a stable, cheap accessor so handlers do not reach directly
+    /// into the `DashMap` field and so the accessor can be mocked in future
+    /// tests without touching `AppState` internals. The map is populated
+    /// asynchronously by `spawn_startup_tasks` — an absent entry means either
+    /// the scan has not completed yet or no pin file claimed that id.
+    /// What: returns `Some(project_path)` when the palace id was found during
+    /// startup scan; `None` otherwise.
+    /// Test: covered indirectly via the startup-scan integration path; the
+    /// underlying map data is validated by `startup_scan::tests`.
+    pub fn pinned_project_path(&self, palace_id: &str) -> Option<PathBuf> {
+        self.pin_project_map.get(palace_id).map(|e| e.clone())
     }
 
     /// Builder-style: opt-in to the BM25 lexical lane (issue #156).
