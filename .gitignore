@@ -58,3 +58,6 @@ tga.db
 
 # mdBook build output
 /docs/book/
+
+# Obsidian editor config (personal)
+.obsidian/

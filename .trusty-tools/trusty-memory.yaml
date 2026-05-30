@@ -5,4 +5,4 @@
 
 schema_version: 1
 palace: trusty-tools
-note: pinned before drive reorg
+note: 'Pinned 2026-05-30: canonical checkout /Volumes/SSD1/Projects/trusty-tools (moved off /Volumes/Kemono)'
