@@ -274,6 +274,25 @@ pub mod monitor;
 #[cfg(feature = "update-check")]
 pub mod update;
 
+/// Error-capture layer for the trusty-* consent-gated bug-reporting system
+/// (bug-reporting Phase 1, issue #479).
+///
+/// Why: Every trusty-* daemon encounters runtime errors that developers need
+///      to see but that must be captured locally and only filed to GitHub after
+///      explicit user consent. A shared capture layer in `trusty-common` means
+///      all daemons gain error capture without per-binary changes.
+/// What: Gated behind the `bug-capture` feature. Exposes:
+///      - [`error_capture::CapturedError`] — structured error record.
+///      - [`error_capture::ErrorStore`] — ring buffer + JSONL store.
+///      - [`error_capture::BugCaptureLayer`] — the tracing Layer.
+///      - [`error_capture::bug_capture_layer`] — convenience constructor.
+///      - [`error_capture::TRUSTY_NO_BUG_CAPTURE_ENV`] — opt-out env name.
+///      Additive: does not alter stderr logging. Opt-out via
+///      `TRUSTY_NO_BUG_CAPTURE=1`. New dep: `sha2` (already workspace-optional).
+/// Test: `cargo test -p trusty-common --features bug-capture`.
+#[cfg(feature = "bug-capture")]
+pub mod error_capture;
+
 pub use chat::{
     ChatEvent, ChatProvider, LocalModelConfig, OllamaProvider, OpenRouterProvider, ToolCall,
     ToolDef, auto_detect_local_provider,

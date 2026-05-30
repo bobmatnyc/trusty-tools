@@ -352,3 +352,12 @@ cli-help = ["dep:serde_yaml", "dep:strsim", "dep:indexmap", "dep:thiserror"]
 # the feature flag controls module compilation only, adding zero new transitive
 # dependencies to builds that enable it.
 update-check = []
+# Enables the `error_capture` module: tracing Layer that taps ERROR-level
+# events into a bounded ring buffer + local JSONL store for consent-gated
+# bug reporting (Phase 1 of #479). Captures fingerprinted error records with
+# crate attribution, code location, OS/arch, and a dedup SHA-256 fingerprint.
+# Opt-out via `TRUSTY_NO_BUG_CAPTURE` env var. Additive — does not change
+# stderr logging behaviour. Requires `sha2` (already an optional workspace
+# dep via `symgraph`); enables it unconditionally for this feature.
+# Default builds that do NOT enable `bug-capture` pull in zero new deps.
+bug-capture = ["dep:sha2"]
