@@ -116,6 +116,7 @@ fn build_launchd_config(
         keep_alive: KeepAlive::OnSuccess,
         throttle_interval: 30,
         env_vars: launchd_env_vars(),
+        fd_limit: None,
     }
 }
 

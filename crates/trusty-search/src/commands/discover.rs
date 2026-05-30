@@ -1,19 +1,24 @@
-//! Auto-discovery of Claude Code and git projects at daemon startup.
+//! Auto-discovery of Claude Code, git, and trusty-tools projects at daemon startup.
 //!
 //! Why: agents and users shouldn't need to manually index every project — the
 //!      daemon should find and index Claude Code projects automatically on
 //!      startup. Users with hundreds of repos under `~/Projects` get a working
-//!      index registry without typing a single command.
+//!      index registry without typing a single command. Projects that follow the
+//!      trusty-tools convention (`.trusty-tools/` directory at the root) are
+//!      now also discoverable (#470), making the broader trusty-tools ecosystem
+//!      visible to trusty-search without any extra configuration.
 //! What: scans configured `scan_paths` (from `GlobalConfig`) plus sensible
-//!       defaults for projects with `.claude/`, `CLAUDE.md`, or `.git/` markers,
-//!       then registers + reindexes any not already known to the daemon. The
-//!       function is intentionally best-effort: errors talking to the daemon
-//!       or filesystem are logged at warn and never propagated, because
-//!       auto-discovery must never crash the daemon startup path.
+//!       defaults for projects with `.claude/`, `CLAUDE.md`, `.git/`, or
+//!       `.trusty-tools/` markers, then registers + reindexes any not already
+//!       known to the daemon. The function is intentionally best-effort: errors
+//!       talking to the daemon or filesystem are logged at warn and never
+//!       propagated, because auto-discovery must never crash the daemon startup
+//!       path.
 //! Test: unit tests cover project detection signals
 //!       (`detects_claude_dir`, `detects_claude_md`, `detects_git`,
-//!       `skips_when_no_markers`); the end-to-end pipeline is exercised by the
-//!       existing daemon integration tests once auto-discovery is wired in.
+//!       `detects_trusty_tools_dir`, `skips_when_no_markers`); the end-to-end
+//!       pipeline is exercised by the existing daemon integration tests once
+//!       auto-discovery is wired in.
 
 use super::daemon_utils::daemon_base_url;
 use super::reindex_engine::register_index_with_daemon;
@@ -21,18 +26,36 @@ use crate::config::GlobalConfig;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// The `.trusty-tools/` directory name used as a project-discovery signal.
+///
+/// Why: defines the constant in one place so the detection logic and tests
+///      agree on the exact spelling. Matches the convention established by
+///      `trusty-memory`'s `project_root::TRUSTY_TOOLS_DIR`.
+/// What: `".trusty-tools"` — a directory at a project root indicates the
+///       project participates in the trusty-tools ecosystem.
+/// Test: `detect_project_marker_trusty_tools_dir` in the tests module below.
+const TRUSTY_TOOLS_DIR: &str = ".trusty-tools";
+
 /// Signal that identifies a directory as worth indexing.
 ///
 /// Why: priority matters — a `.claude/` directory is the strongest signal that
 ///      this project is being worked on with Claude Code and should be indexed
-///      first. `.git/` is a weaker but still useful hint.
-/// What: ordered by strength; `Claude` > `ClaudeMd` > `Git`. `None` means skip.
+///      first. `.git/` and `.trusty-tools/` are weaker but still useful hints.
+///      `.trusty-tools/` is added here (#470) so projects following the
+///      trusty-tools convention are discovered at startup alongside Claude Code
+///      and git projects, with a single marginal `path.exists()` stat per
+///      iterated subdirectory — no additional tree walk.
+/// What: ordered by strength; `Claude` > `ClaudeMd` > `Git` > `TrustyTools`.
+///       `None` means skip.
 /// Test: `detect_project_marker_*` unit tests below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectMarker {
     Claude,
     ClaudeMd,
     Git,
+    /// A `.trusty-tools/` directory is present — the project follows the
+    /// trusty-tools ecosystem convention (#470).
+    TrustyTools,
     None,
 }
 
@@ -40,9 +63,11 @@ enum ProjectMarker {
 ///
 /// Why: keeps the detection rules in one place so the priority order stays
 ///      consistent between the scanner and any future caller (doctor, MCP,
-///      tests).
-/// What: probes `.claude/` first, then `CLAUDE.md`, then `.git/`, returning the
-///       first match.
+///      tests). Each probe is a single `is_dir`/`is_file`/`exists` call —
+///      O(1) stat, no recursion — so the marginal cost per subdirectory in
+///      `auto_discover_and_index` is negligible.
+/// What: probes `.claude/` first, then `CLAUDE.md`, then `.git/`, then
+///       `.trusty-tools/`, returning the first match.
 /// Test: see `detect_project_marker_*` below.
 fn detect_project_marker(dir: &Path) -> ProjectMarker {
     if dir.join(".claude").is_dir() {
@@ -53,6 +78,9 @@ fn detect_project_marker(dir: &Path) -> ProjectMarker {
     }
     if dir.join(".git").exists() {
         return ProjectMarker::Git;
+    }
+    if dir.join(TRUSTY_TOOLS_DIR).is_dir() {
+        return ProjectMarker::TrustyTools;
     }
     ProjectMarker::None
 }
@@ -78,17 +106,21 @@ fn default_scan_paths() -> Vec<PathBuf> {
         .collect()
 }
 
-/// Discover and index Claude Code / git projects on daemon startup.
+/// Discover and index Claude Code, git, and trusty-tools projects on daemon startup.
 ///
 /// Why: closes the "manual `trusty-search index` per repo" loop so the daemon
 ///      hydrates itself from the user's actual workspace. Runs once at
 ///      startup, after `restore_indexes()` has rehydrated the registry from
-///      `indexes.toml`.
+///      `indexes.toml`. Projects following the trusty-tools convention
+///      (`.trusty-tools/` directory at the root — #470) are now included
+///      alongside Claude Code and git projects; discovery cost is marginal
+///      (one extra `is_dir` stat per subdirectory already being iterated).
 /// What: loads `GlobalConfig`, resolves the scan list (config-supplied or
 ///       default), walks one level deep under each entry, and for every
-///       directory with a project marker that is NOT already registered with
-///       the daemon, calls `POST /indexes` followed by `POST /indexes/:id/reindex`
-///       via the local HTTP API. The reindex POST includes `"background": true`
+///       directory with a project marker (`.claude/`, `CLAUDE.md`, `.git/`, or
+///       `.trusty-tools/`) that is NOT already registered with the daemon,
+///       calls `POST /indexes` followed by `POST /indexes/:id/reindex` via
+///       the local HTTP API. The reindex POST includes `"background": true`
 ///       (issue #458) so these bulk startup tasks are routed through the
 ///       low-priority semaphore and cannot starve user-initiated indexing.
 ///       Directories whose `root_path` does not exist on disk are skipped
@@ -387,6 +419,91 @@ mod tests {
         let dir = tempdir_unique("claudedir");
         fs::create_dir_all(dir.join("CLAUDE.md")).unwrap();
         assert_eq!(detect_project_marker(&dir), ProjectMarker::None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── Issue #470: .trusty-tools/ marker detection ──────────────────────────
+
+    /// Why: a directory containing only `.trusty-tools/` (and none of the
+    /// pre-existing markers) must be recognised as a project by
+    /// `detect_project_marker` so `auto_discover_and_index` queues it for
+    /// indexing. This is the primary acceptance criterion for #470.
+    ///
+    /// What: creates a temp dir with only a `.trusty-tools/` subdirectory,
+    /// then asserts the marker variant is `TrustyTools`. Confirms the signal
+    /// fires from a single `is_dir` stat — the function is pure/bounded and
+    /// contains no recursion.
+    ///
+    /// Test: this test itself; bounded by structural inspection (the function
+    /// has exactly four probe calls — see `detect_project_marker` source).
+    #[test]
+    fn detect_project_marker_trusty_tools_dir() {
+        let dir = tempdir_unique("trustytools");
+        fs::create_dir_all(dir.join(TRUSTY_TOOLS_DIR)).unwrap();
+        assert_eq!(
+            detect_project_marker(&dir),
+            ProjectMarker::TrustyTools,
+            ".trusty-tools/ dir must yield TrustyTools marker"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Why: priority ordering must be preserved — `.claude/` must still win
+    /// over `.trusty-tools/` when both are present (a Claude Code workspace
+    /// may also follow the trusty-tools convention).
+    ///
+    /// What: creates a temp dir with both `.claude/` and `.trusty-tools/`,
+    /// asserts `Claude` is returned.
+    ///
+    /// Test: this test itself.
+    #[test]
+    fn detect_project_marker_claude_wins_over_trusty_tools() {
+        let dir = tempdir_unique("claude-plus-trusty");
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::create_dir_all(dir.join(TRUSTY_TOOLS_DIR)).unwrap();
+        assert_eq!(
+            detect_project_marker(&dir),
+            ProjectMarker::Claude,
+            ".claude/ must take priority over .trusty-tools/"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Why: `.trusty-tools` as a file (not a directory) must not trigger the
+    /// marker — the convention requires a directory, matching the `is_dir`
+    /// probe in `detect_project_marker`.
+    ///
+    /// What: writes a regular file named `.trusty-tools` and asserts `None`.
+    ///
+    /// Test: this test itself.
+    #[test]
+    fn detect_project_marker_trusty_tools_file_not_dir_is_none() {
+        let dir = tempdir_unique("trustytools-file");
+        fs::write(dir.join(TRUSTY_TOOLS_DIR), "not a dir").unwrap();
+        assert_eq!(
+            detect_project_marker(&dir),
+            ProjectMarker::None,
+            ".trusty-tools as a file must not trigger TrustyTools marker"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Why: a directory with none of the four markers must still return `None`
+    /// after the `.trusty-tools/` probe was added — regression guard ensuring
+    /// we didn't accidentally widen detection.
+    ///
+    /// What: creates an empty temp dir and asserts `None`.
+    ///
+    /// Test: this test itself.
+    #[test]
+    fn detect_project_marker_none_when_no_markers_after_trusty_tools_added() {
+        let dir = tempdir_unique("no-markers");
+        // No .claude/, no CLAUDE.md, no .git, no .trusty-tools/
+        assert_eq!(
+            detect_project_marker(&dir),
+            ProjectMarker::None,
+            "directory with no markers must still return None"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
