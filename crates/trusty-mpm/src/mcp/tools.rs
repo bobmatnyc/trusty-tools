@@ -3,9 +3,11 @@
 //! Why: `tools/list` must advertise a JSON Schema for every tool so Claude Code
 //! knows how to call it. Keeping the catalog in one module — separate from the
 //! dispatch logic — makes the tool surface easy to audit and version.
-//! What: [`tool_catalog`] builds the six MCP tool descriptors (name, human
+//! What: [`tool_catalog`] builds the nine MCP tool descriptors (name, human
 //! description, `inputSchema`); [`TOOL_CATALOG`] lists their names for tests.
-//! Test: `cargo test -p trusty-mpm-mcp` asserts the catalog has six well-formed
+//! The three bug-reporting tools (`list_recent_errors`, `preview_bug_report`,
+//! `report_bug`) are added in Phase 3.
+//! Test: `cargo test -p trusty-mpm` asserts the catalog has nine well-formed
 //! entries whose names match [`TOOL_CATALOG`].
 
 use serde_json::{Value, json};
@@ -14,23 +16,27 @@ use serde_json::{Value, json};
 ///
 /// Why: tests and the daemon's startup log both want the authoritative list
 /// without re-parsing the JSON schema.
-/// What: a static slice of the six tool names.
+/// What: a static slice of the nine tool names (six orchestration + three
+///       bug-reporting added in Phase 3).
 /// Test: `catalog_names_match_constant`.
-pub const TOOL_CATALOG: [&str; 6] = [
+pub const TOOL_CATALOG: [&str; 9] = [
     "session_list",
     "session_status",
     "agent_delegate",
     "memory_protect",
     "circuit_breaker_status",
     "hook_event",
+    "list_recent_errors",
+    "preview_bug_report",
+    "report_bug",
 ];
 
 /// Build the MCP tool descriptor list returned by `tools/list`.
 ///
 /// Why: Claude Code reads `inputSchema` to validate calls; a single builder
 /// keeps the schemas and the dispatch argument-parsing in lockstep.
-/// What: returns six JSON objects, each `{ name, description, inputSchema }`.
-/// Test: `catalog_has_six_tools` and `every_tool_has_input_schema`.
+/// What: returns nine JSON objects, each `{ name, description, inputSchema }`.
+/// Test: `catalog_has_nine_tools` and `every_tool_has_input_schema`.
 pub fn tool_catalog() -> Vec<Value> {
     vec![
         tool(
@@ -132,6 +138,71 @@ pub fn tool_catalog() -> Vec<Value> {
                 "additionalProperties": false
             }),
         ),
+        // ── Bug-reporting tools (Phase 2 surface + Phase 3 filing) ───────────
+        tool(
+            "list_recent_errors",
+            "List recently captured ERROR-level events across all trusty-* daemons \
+             (trusty-search, trusty-memory, trusty-analyze, trusty-mpm). Each entry \
+             includes a fingerprint for deduplication, an occurrence count, the \
+             originating crate, and a one-line summary. Use `preview_bug_report` to \
+             see the full scrubbed body before filing.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "description": "Maximum number of errors to return (default 20)."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "preview_bug_report",
+            "Preview the exact scrubbed GitHub issue body that would be filed for \
+             a specific error fingerprint. Shows what data is included, what was \
+             redacted (paths, tokens, secrets), and the proposed labels. Nothing \
+             is filed — call `report_bug` with `confirm: true` to actually file.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "fingerprint": {
+                        "type": "string",
+                        "description": "64-char hex SHA-256 fingerprint from list_recent_errors."
+                    }
+                },
+                "required": ["fingerprint"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "report_bug",
+            "File a GitHub issue in bobmatnyc/trusty-tools for the error identified \
+             by `fingerprint`. Requires explicit user consent: `confirm` must be true \
+             or nothing is filed. If an open issue with the same fingerprint already \
+             exists, posts a '+1 occurrence' comment instead of creating a duplicate. \
+             Returns `{ filed, deduped, issue_url, issue_number }` on success, or an \
+             actionable error message if no token is configured \
+             (set TRUSTY_BUGREPORT_GITHUB_TOKEN). Always call `preview_bug_report` \
+             first so the user can review the scrubbed content.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "fingerprint": {
+                        "type": "string",
+                        "description": "64-char hex SHA-256 fingerprint from list_recent_errors."
+                    },
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "Must be true to actually file; false or absent → preview only."
+                    }
+                },
+                "required": ["fingerprint", "confirm"],
+                "additionalProperties": false
+            }),
+        ),
     ]
 }
 
@@ -149,8 +220,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_six_tools() {
-        assert_eq!(tool_catalog().len(), 6);
+    fn catalog_has_nine_tools() {
+        assert_eq!(tool_catalog().len(), 9);
     }
 
     #[test]
@@ -169,5 +240,14 @@ mod tests {
             assert!(t["description"].is_string());
             assert_eq!(t["inputSchema"]["type"], "object");
         }
+    }
+
+    #[test]
+    fn bug_reporting_tools_present() {
+        let catalog = tool_catalog();
+        let names: Vec<&str> = catalog.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"list_recent_errors"), "{names:?}");
+        assert!(names.contains(&"preview_bug_report"), "{names:?}");
+        assert!(names.contains(&"report_bug"), "{names:?}");
     }
 }

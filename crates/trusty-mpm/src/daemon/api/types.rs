@@ -361,3 +361,61 @@ pub struct PairConfirmResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
+
+// ── Bug-reporting types (Phase 2 surface + Phase 3 filing) ───────────────────
+
+/// Response of `GET /api/v1/errors`.
+///
+/// Why: the HTTP fallback for `list_recent_errors` lets sub-agents without
+///      MCP connections read captured errors via plain HTTP.
+/// What: a JSON array of error summaries with dedup fingerprints.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ErrorsResponse {
+    /// Deduplicated error summaries, most-recent first.
+    pub errors: Vec<ErrorSummary>,
+    /// Total count in the response (after limit).
+    pub total: usize,
+    /// The limit applied to the query.
+    pub limit: usize,
+}
+
+/// One entry in an [`ErrorsResponse`].
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ErrorSummary {
+    /// SHA-256 hex fingerprint (64 chars) for dedup.
+    pub fingerprint: String,
+    /// Crate target (tracing event target).
+    pub crate_target: String,
+    /// Version of the daemon that captured the error.
+    pub crate_version: String,
+    /// One-line human-readable summary.
+    pub summary: String,
+    /// Occurrence count across all daemon stores.
+    pub occurrences: usize,
+    /// Unix timestamp (secs) of the most-recent occurrence.
+    pub timestamp_secs: u64,
+}
+
+/// Response of `POST /api/v1/report-bug`.
+///
+/// Why: mirrors the MCP `report_bug` result so HTTP-based sub-agents get the
+///      same structure as MCP callers.
+/// What: `filed` is `true` on a successful filing. `note` carries an
+///       actionable string when `filed` is `false`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReportBugHttpResponse {
+    /// `true` when a GitHub issue was created or incremented.
+    pub filed: bool,
+    /// `true` when an existing open issue was incremented instead of creating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deduped: Option<bool>,
+    /// HTML URL of the issue that was created or incremented.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_url: Option<String>,
+    /// Issue number in `bobmatnyc/trusty-tools`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_number: Option<u64>,
+    /// Actionable message when `filed` is `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}

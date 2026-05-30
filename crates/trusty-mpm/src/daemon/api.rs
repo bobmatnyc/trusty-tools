@@ -119,6 +119,8 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .route("/pair/status", get(pair_status))
         .route("/pair/reset", post(pair_reset))
         .route("/api/v1/doctor", get(doctor))
+        .route("/api/v1/errors", get(list_errors))
+        .route("/api/v1/report-bug", post(report_bug_http))
         .merge(
             SwaggerUi::new("/api-docs")
                 .url("/api-docs/openapi.json", super::openapi::ApiDoc::openapi()),
@@ -1390,6 +1392,169 @@ pub async fn doctor(
     Query(query): Query<DoctorQuery>,
 ) -> Json<crate::core::doctor::DoctorReport> {
     Json(super::doctor::run_doctor(query.project.as_deref()).await)
+}
+
+// ── Bug-reporting HTTP endpoints (Phase 2 surface + Phase 3 filing) ──────────
+
+/// Query parameters for `GET /api/v1/errors`.
+///
+/// Why: the caller controls how many errors to return; the daemon caps it at
+///      100 to prevent oversized responses.
+/// What: optional `limit` field; defaults to 20 when absent.
+/// Test: `list_errors_returns_array` in `api_tests.rs`.
+#[derive(serde::Deserialize, Default)]
+pub struct ErrorsQuery {
+    /// Maximum number of errors to return (default 20, max 100).
+    #[serde(default)]
+    pub limit: Option<u64>,
+}
+
+/// `GET /api/v1/errors` — list recently captured errors from all daemon stores.
+///
+/// Why: sub-agents that cannot use MCP tools directly can still browse captured
+///      errors over plain HTTP before deciding to file a bug report.
+/// What: aggregates and deduplicates errors from all known daemon JSONL stores,
+///       returns them sorted by most-recent occurrence. Always returns `200`.
+/// Test: `list_errors_returns_array` in `api_tests.rs`.
+#[utoipa::path(
+    get,
+    path = "/api/v1/errors",
+    tag = "bug-reporting",
+    params(("limit" = Option<u64>, Query, description = "Max errors to return (default 20, max 100)")),
+    responses((status = 200, description = "Deduplicated error list"))
+)]
+pub async fn list_errors(
+    State(_state): State<Arc<DaemonState>>,
+    Query(query): Query<ErrorsQuery>,
+) -> Json<ErrorsResponse> {
+    let limit = query.limit.unwrap_or(20).min(100) as usize;
+    let errors = super::bug_report::aggregate_errors(limit);
+    let summaries: Vec<ErrorSummary> = errors
+        .iter()
+        .map(|e| ErrorSummary {
+            fingerprint: e.record.fingerprint.clone(),
+            crate_target: e.record.crate_target.clone(),
+            crate_version: e.record.crate_version.clone(),
+            summary: e.record.summary(),
+            occurrences: e.occurrences,
+            timestamp_secs: e.record.timestamp_secs,
+        })
+        .collect();
+    let total = summaries.len();
+    Json(ErrorsResponse {
+        errors: summaries,
+        total,
+        limit,
+    })
+}
+
+/// JSON body for `POST /api/v1/report-bug`.
+///
+/// Why: a local request struct with `utoipa::ToSchema` lets the handler slot
+///      into the utoipa-axum dispatch without special traits on the shared type.
+/// What: the fingerprint and confirm flag; mirrors `bug_report::types::ReportBugRequest`.
+/// Test: `report_bug_no_confirm_returns_preview` in `api_tests.rs`.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct ReportBugApiRequest {
+    /// SHA-256 hex fingerprint (64 chars) from `GET /api/v1/errors`.
+    pub fingerprint: String,
+    /// Must be `true` to actually file; `false` or absent → preview only.
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+/// `POST /api/v1/report-bug` — file or preview a bug report via HTTP.
+///
+/// Why: sub-agents spawned by Claude Code's Agent tool do not inherit MCP
+///      connections; they need an HTTP fallback to file bug reports. This
+///      endpoint mirrors the `report_bug` MCP tool's consent gate.
+/// What: when `confirm:false` (or absent), returns a preview-only response
+///       (`filed:false`). When `confirm:true`, resolves the token via the
+///       standard provider chain and calls the GitHub filing client. A missing
+///       token returns `filed:false` with an actionable note, not an HTTP error.
+///       A missing fingerprint returns `filed:false` with a "not found" note.
+/// Test: `report_bug_no_confirm_returns_preview` in `api_tests.rs`.
+#[utoipa::path(
+    post,
+    path = "/api/v1/report-bug",
+    tag = "bug-reporting",
+    request_body = ReportBugApiRequest,
+    responses(
+        (status = 200, description = "Filing result or graceful failure; always 200"),
+    )
+)]
+pub async fn report_bug_http(
+    State(_state): State<Arc<DaemonState>>,
+    Json(body): Json<ReportBugApiRequest>,
+) -> Json<ReportBugHttpResponse> {
+    // Load errors and find the requested fingerprint.
+    let errors = super::bug_report::aggregate_errors(500);
+    let found = errors
+        .into_iter()
+        .find(|e| e.record.fingerprint == body.fingerprint);
+
+    let Some(agg) = found else {
+        return Json(ReportBugHttpResponse {
+            filed: false,
+            deduped: None,
+            issue_url: None,
+            issue_number: None,
+            note: Some(format!(
+                "fingerprint `{}` not found in local error stores; \
+                 run GET /api/v1/errors to see available fingerprints",
+                body.fingerprint
+            )),
+        });
+    };
+
+    let preview = super::bug_report::build_preview(&agg);
+
+    if !body.confirm {
+        return Json(ReportBugHttpResponse {
+            filed: false,
+            deduped: None,
+            issue_url: None,
+            issue_number: None,
+            note: Some("confirm:false — preview only. POST with confirm:true to file.".to_string()),
+        });
+    }
+
+    // Attempt filing via GitHub.
+    let provider = super::bug_report::EnvFileTokenProvider;
+    let result =
+        tokio::task::spawn_blocking(move || super::bug_report::file_issue(&preview, &provider))
+            .await;
+
+    match result {
+        Ok(Ok(filing)) => Json(ReportBugHttpResponse {
+            filed: true,
+            deduped: Some(filing.deduped),
+            issue_url: Some(filing.issue_url),
+            issue_number: Some(filing.issue_number),
+            note: None,
+        }),
+        Ok(Err(super::bug_report::GithubFilingError::NoToken)) => Json(ReportBugHttpResponse {
+            filed: false,
+            deduped: None,
+            issue_url: None,
+            issue_number: None,
+            note: Some(super::bug_report::GithubFilingError::NoToken.to_string()),
+        }),
+        Ok(Err(e)) => Json(ReportBugHttpResponse {
+            filed: false,
+            deduped: None,
+            issue_url: None,
+            issue_number: None,
+            note: Some(format!("GitHub filing failed: {e}")),
+        }),
+        Err(e) => Json(ReportBugHttpResponse {
+            filed: false,
+            deduped: None,
+            issue_url: None,
+            issue_number: None,
+            note: Some(format!("internal error: {e}")),
+        }),
+    }
 }
 
 /// Parse a UUID string into a `SessionId`, mapping failure to a `400`-mapped

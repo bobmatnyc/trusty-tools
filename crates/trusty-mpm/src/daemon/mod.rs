@@ -11,6 +11,7 @@
 
 pub mod api;
 pub mod audit;
+pub mod bug_report;
 pub mod claude_config;
 pub mod coordinator;
 pub mod discover;

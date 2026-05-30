@@ -2,17 +2,18 @@
 //!
 //! Why: Claude Code sessions (and their subagents) need to talk to the
 //! trusty-mpm daemon directly — to enumerate sibling sessions, request agent
-//! delegations, protect their own context window, and inspect circuit-breaker
-//! state. MCP is the protocol Claude Code already speaks, so trusty-mpm exposes
+//! delegations, protect their own context window, inspect circuit-breaker
+//! state, and (Phase 3) surface / preview / file captured bug reports.
+//! MCP is the protocol Claude Code already speaks, so trusty-mpm exposes
 //! an MCP server rather than inventing a bespoke channel.
 //!
-//! What: defines the six orchestration tools (`session_list`, `session_status`,
-//! `agent_delegate`, `memory_protect`, `circuit_breaker_status`, `hook_event`),
-//! the [`OrchestratorBackend`] trait the daemon implements to service them, and
+//! What: defines the nine orchestration tools (six core + three bug-reporting:
+//! `list_recent_errors`, `preview_bug_report`, `report_bug`), the
+//! [`OrchestratorBackend`] trait the daemon implements to service them, and
 //! [`dispatch`], which routes a JSON-RPC [`Request`] to the backend. The daemon
 //! wires [`dispatch`] into `trusty_mcp_core::run_stdio_loop`.
 //!
-//! Test: `cargo test -p trusty-mpm-mcp` exercises the tool catalog, argument
+//! Test: `cargo test -p trusty-mpm` exercises the tool catalog, argument
 //! parsing, and dispatch against an in-memory mock backend.
 
 use async_trait::async_trait;
@@ -35,7 +36,9 @@ pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// tmux, sockets) so it is unit-testable; the daemon supplies a concrete impl.
 /// This is the Dependency Inversion seam between protocol and orchestration.
 /// What: one async method per MCP tool. Each takes already-parsed arguments
-/// and returns a JSON result or an error message.
+/// and returns a JSON result or an error message. Phase 3 adds three
+/// bug-reporting methods (`list_recent_errors`, `preview_bug_report`,
+/// `report_bug`).
 /// Test: `tests` module provides a `MockBackend` impl driven by `dispatch`.
 #[async_trait]
 pub trait OrchestratorBackend: Send + Sync {
@@ -76,6 +79,37 @@ pub trait OrchestratorBackend: Send + Sync {
         event: &str,
         payload: Value,
     ) -> Result<Value, String>;
+
+    // ── Phase 3: bug-reporting tools ─────────────────────────────────────────
+
+    /// Back `list_recent_errors`: return a JSON array of recently captured
+    /// errors across all trusty-* daemon stores, deduplicated by fingerprint.
+    ///
+    /// Why: the user must be able to browse what errors have been captured
+    ///      before deciding which ones to file.
+    /// What: aggregates up to `limit` (default 20) errors from all known
+    ///       daemon stores, returns them as a JSON array with summary info.
+    /// Test: `dispatch_list_recent_errors_tool` in the `tests` module.
+    async fn list_recent_errors(&self, limit: u64) -> Result<Value, String>;
+
+    /// Back `preview_bug_report`: build and return the scrubbed issue preview
+    /// for the given fingerprint without filing anything.
+    ///
+    /// Why: the user must review the exact scrubbed body before consenting.
+    /// What: finds the error by fingerprint, runs the scrubber+preview builder,
+    ///       returns the title, body, labels, and scrub-change log.
+    /// Test: `dispatch_preview_bug_report_tool` in the `tests` module.
+    async fn preview_bug_report(&self, fingerprint: &str) -> Result<Value, String>;
+
+    /// Back `report_bug`: file or increment a GitHub issue.
+    ///
+    /// Why: the consent gate — nothing is filed without `confirm: true`.
+    /// What: when `confirm` is `false`, returns a preview-only result (same as
+    ///       `preview_bug_report`). When `true`, resolves the token, calls the
+    ///       GitHub client, and returns `{ filed, deduped, issue_url,
+    ///       issue_number }` or a graceful "no token" message.
+    /// Test: `dispatch_report_bug_no_confirm_is_preview` in the `tests` module.
+    async fn report_bug(&self, fingerprint: &str, confirm: bool) -> Result<Value, String>;
 }
 
 /// Route a JSON-RPC request to the backend, returning the MCP response.
@@ -175,6 +209,25 @@ async fn dispatch_tool_call<B: OrchestratorBackend>(
                 (Err(e), _) | (_, Err(e)) => Err(e),
             }
         }
+        // ── Phase 3: bug-reporting tools ─────────────────────────────────────
+        "list_recent_errors" => {
+            let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20);
+            backend.list_recent_errors(limit).await
+        }
+        "preview_bug_report" => match required_str(&args, "fingerprint") {
+            Ok(fp) => backend.preview_bug_report(&fp).await,
+            Err(e) => Err(e),
+        },
+        "report_bug" => match required_str(&args, "fingerprint") {
+            Ok(fp) => {
+                let confirm = args
+                    .get("confirm")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                backend.report_bug(&fp, confirm).await
+            }
+            Err(e) => Err(e),
+        },
         other => Err(format!("unknown tool: {other}")),
     };
 
@@ -255,6 +308,21 @@ mod tests {
         ) -> Result<Value, String> {
             Ok(json!({ "received": event }))
         }
+        async fn list_recent_errors(&self, limit: u64) -> Result<Value, String> {
+            Ok(json!({ "errors": [], "limit": limit, "total": 0 }))
+        }
+        async fn preview_bug_report(&self, fingerprint: &str) -> Result<Value, String> {
+            Ok(json!({ "fingerprint": fingerprint, "title": "mock title", "body": "mock body" }))
+        }
+        async fn report_bug(&self, fingerprint: &str, confirm: bool) -> Result<Value, String> {
+            if confirm {
+                Ok(json!({ "filed": false, "note": "mock: no token in test" }))
+            } else {
+                Ok(
+                    json!({ "filed": false, "note": "confirm:false — preview only", "fingerprint": fingerprint }),
+                )
+            }
+        }
     }
 
     fn call(name: &str, args: Value) -> Request {
@@ -280,7 +348,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_tools_list_returns_six_tools() {
+    async fn dispatch_tools_list_returns_nine_tools() {
         let req = Request {
             jsonrpc: Some("2.0".into()),
             id: Some(json!(1)),
@@ -289,7 +357,7 @@ mod tests {
         };
         let resp = dispatch(&MockBackend, req).await;
         let tools = resp.result.unwrap()["tools"].clone();
-        assert_eq!(tools.as_array().unwrap().len(), 6);
+        assert_eq!(tools.as_array().unwrap().len(), 9);
     }
 
     #[tokio::test]
@@ -367,5 +435,80 @@ mod tests {
         };
         let resp = dispatch(&MockBackend, req).await;
         assert!(resp.suppress);
+    }
+
+    // ── Phase 3: bug-reporting dispatch tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_list_recent_errors_tool() {
+        let resp = dispatch(
+            &MockBackend,
+            call("list_recent_errors", json!({ "limit": 10 })),
+        )
+        .await;
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], false);
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("errors")
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_list_recent_errors_default_limit() {
+        // No limit specified — should default to 20 without error.
+        let resp = dispatch(&MockBackend, call("list_recent_errors", json!({}))).await;
+        assert_eq!(resp.result.unwrap()["isError"], false);
+    }
+
+    #[tokio::test]
+    async fn dispatch_preview_bug_report_tool() {
+        let fp = "a".repeat(64);
+        let resp = dispatch(
+            &MockBackend,
+            call("preview_bug_report", json!({ "fingerprint": fp })),
+        )
+        .await;
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], false);
+        assert!(result["content"][0]["text"].as_str().unwrap().contains(&fp));
+    }
+
+    #[tokio::test]
+    async fn dispatch_preview_bug_report_requires_fingerprint() {
+        let resp = dispatch(&MockBackend, call("preview_bug_report", json!({}))).await;
+        assert_eq!(resp.result.unwrap()["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn dispatch_report_bug_no_confirm_is_preview_only() {
+        let fp = "b".repeat(64);
+        let resp = dispatch(
+            &MockBackend,
+            call("report_bug", json!({ "fingerprint": fp, "confirm": false })),
+        )
+        .await;
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], false);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        // The mock returns `filed: false` with the preview-only note.
+        assert!(text.contains("false"), "expected filed:false: {text}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_report_bug_confirm_true_calls_backend() {
+        let fp = "c".repeat(64);
+        let resp = dispatch(
+            &MockBackend,
+            call("report_bug", json!({ "fingerprint": fp, "confirm": true })),
+        )
+        .await;
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], false);
+        // Mock returns filed:false + no-token note (still a valid response shape).
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("filed"), "expected 'filed' key: {text}");
     }
 }
