@@ -1432,12 +1432,29 @@ async fn create_index_handler(
     //
     // Issue #85: if a previously-saved HNSW snapshot + chunks file exist for
     // this id, restore them so the daemon warm-boots without re-indexing.
-    let mut indexer = crate::service::persistence_loader::build_indexer_with_persisted_state(
-        &req.id,
-        req.root_path.clone(),
-        &embedder,
-    )
-    .await;
+    //
+    // Fix #483/#485: use `build_indexer_from_entry` with `colocated: true`
+    // instead of `build_indexer_with_persisted_state` (which hard-codes
+    // `colocated: false`).  The entry-aware builder routes the corpus store
+    // to `<root>/.trusty-search/index.redb` via `corpus_redb_path_for_entry`,
+    // and crucially `colocated_redb_path` → `colocated_storage_dir` calls
+    // `create_dir_all` — so the `.trusty-search/` directory exists on-disk
+    // BEFORE the first reindex.  Every write-path probe
+    // (`has_colocated_storage` in persist.rs / reindex.rs) then sees the dir
+    // and routes HNSW + corpus writes to the colocated path too.  Without this
+    // fix the writer used the app-data path while the loader used the colocated
+    // path (because `indexes.toml` recorded `colocated = true`), producing 0
+    // chunks and no corpus store after the first restart.  A missing corpus
+    // store also causes `write_schema_version` to return
+    // "cannot write schema_version: no durable corpus" (#485).
+    let init_entry = crate::service::persistence::PersistedIndex {
+        id: req.id.clone(),
+        root_path: req.root_path.clone(),
+        colocated: true,
+        ..Default::default()
+    };
+    let mut indexer =
+        crate::service::persistence_loader::build_indexer_from_entry(&init_entry, &embedder).await;
 
     // Resolve repo-config filters (issue: trusty-search.yaml wiring). The
     // CLI sends `paths:` as relative strings; resolve them against `root_path`

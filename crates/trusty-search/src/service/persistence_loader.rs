@@ -290,3 +290,206 @@ fn fresh_store(dim: usize) -> Arc<dyn VectorStore> {
     });
     Arc::new(s) as Arc<dyn VectorStore>
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::chunker::{ChunkType, RawChunk};
+    use crate::service::colocated_storage;
+    use crate::service::persistence::PersistedIndex;
+    use tempfile::tempdir;
+    use trusty_common::embedder::MockEmbedder;
+
+    // ── Helper ────────────────────────────────────────────────────────────────
+
+    fn mock_embedder() -> Arc<dyn crate::core::embed::Embedder> {
+        Arc::new(MockEmbedder::new(8))
+    }
+
+    fn minimal_raw_chunk(id: &str) -> RawChunk {
+        RawChunk {
+            id: id.to_string(),
+            file: "src/lib.rs".to_string(),
+            start_line: 1,
+            end_line: 5,
+            content: "fn hello() {}".to_string(),
+            function_name: None,
+            language: Some("rust".to_string()),
+            chunk_type: ChunkType::Code,
+            calls: Vec::new(),
+            inherits_from: Vec::new(),
+            chunk_depth: 0,
+            parent_chunk_id: None,
+            child_chunk_ids: Vec::new(),
+            nlp_keywords: Vec::new(),
+            nlp_code_refs: Vec::new(),
+            virtual_terms: Vec::new(),
+        }
+    }
+
+    // ── Issue #483 regression ─────────────────────────────────────────────────
+
+    /// Why: guards the writer/loader path divergence described in #483.  Before
+    /// the fix, `build_indexer_with_persisted_state` (called by
+    /// `create_index_handler`) used `colocated: false`, so the corpus store
+    /// opened at the app-data path.  On restart `build_indexer_from_entry` used
+    /// `colocated: true` (from `indexes.toml`), `colocated_storage_dir` created
+    /// an empty `.trusty-search/` dir, and the loader found 0 chunks there —
+    /// even though chunks had been committed to app-data on the first run.
+    ///
+    /// The fix makes `create_index_handler` call `build_indexer_from_entry` with
+    /// `colocated: true`, which calls `colocated_storage_dir` (→ `create_dir_all`)
+    /// during construction, so:
+    ///   1. The corpus store is routed to the colocated redb path from the start.
+    ///   2. `.trusty-search/` exists before the first reindex, so
+    ///      `has_colocated_storage` returns `true` on the write-path probes.
+    ///   3. A simulated reload from the entry finds the populated store (n > 0).
+    ///
+    /// What: creates a colocated entry, builds an indexer, writes a chunk to
+    /// the corpus, then simulates a reload via a second `build_indexer_from_entry`
+    /// call with the same entry and asserts the chunk count is non-zero.
+    ///
+    /// Test: this IS the test; it exercises the exact call path used by the fixed
+    /// `create_index_handler`.
+    #[tokio::test]
+    async fn colocated_create_handler_path_survives_simulated_reload() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let embedder = mock_embedder();
+
+        // --- Phase 1: simulate what the fixed create_index_handler does ---
+        let entry = PersistedIndex {
+            id: "test-idx-483".to_string(),
+            root_path: root.clone(),
+            colocated: true,
+            ..Default::default()
+        };
+        // build_indexer_from_entry (the fixed call path): colocated_storage_dir
+        // is invoked via corpus_redb_path_for_entry → colocated_redb_path →
+        // colocated_storage_dir, creating `.trusty-search/` on disk.
+        let indexer = build_indexer_from_entry(&entry, &embedder).await;
+
+        // The corpus store must be wired and pointing into `.trusty-search/`.
+        assert!(
+            indexer.has_corpus_store(),
+            "#483: indexer must have a corpus store after build_indexer_from_entry with colocated=true"
+        );
+        // `.trusty-search/` must exist so the write-path probes see it.
+        assert!(
+            colocated_storage::has_colocated_storage(&root),
+            "#483: .trusty-search/ must exist after build_indexer_from_entry with colocated=true"
+        );
+
+        // Write a chunk to the wired corpus so the reload can verify it.
+        // Scope the write so the corpus Arc is dropped before we re-open
+        // the same redb file for the simulated restart (redb uses file locking
+        // and rejects a second concurrent open of the same database file).
+        {
+            let corpus = indexer.corpus_store().expect("corpus store must be set");
+            corpus
+                .upsert_chunks(&[minimal_raw_chunk("src/lib.rs:1:5")])
+                .expect("upsert must succeed");
+            // corpus Arc dropped here.
+        }
+        // Drop the whole indexer (and its internal corpus Arc) before reopening.
+        drop(indexer);
+
+        // --- Phase 2: simulate daemon restart — reload from the same entry ---
+        // This is what `restore_indexes` does on startup.
+        let reloaded = build_indexer_from_entry(&entry, &embedder).await;
+        assert!(
+            reloaded.has_corpus_store(),
+            "#483: reloaded indexer must have a corpus store"
+        );
+        let chunk_count = reloaded
+            .corpus_store()
+            .expect("corpus store must be set")
+            .chunk_count()
+            .expect("chunk_count must succeed");
+        assert!(
+            chunk_count > 0,
+            "#483: reloaded index must contain the written chunk (got {chunk_count}); \
+             writer/loader paths must agree on the colocated location"
+        );
+    }
+
+    // ── Issue #485 regression ─────────────────────────────────────────────────
+
+    /// Why: guards the "cannot write schema_version: no durable corpus" error
+    /// in #485.  When the corpus store was not wired (because `colocated: false`
+    /// routed it to the wrong path and `CorpusStore::open` found no redb there),
+    /// `IndexHandle::write_schema_version` returned an error.  With the fix the
+    /// corpus store is always wired for a colocated entry, so schema_version
+    /// writes succeed.
+    ///
+    /// What: builds an indexer via the fixed colocated entry path, then asserts
+    /// `has_corpus_store` is true (a prerequisite for write_schema_version).
+    /// The actual `write_schema_version` call is async and requires
+    /// `IndexHandle`; this test proves the corpus store presence guarantee that
+    /// makes it succeed.
+    ///
+    /// Test: this IS the test; it verifies the corpus store invariant that
+    /// eliminates the #485 "no durable corpus" failure.
+    #[tokio::test]
+    async fn colocated_create_path_wires_corpus_store_for_schema_version() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let embedder = mock_embedder();
+
+        let entry = PersistedIndex {
+            id: "test-idx-485".to_string(),
+            root_path: root.clone(),
+            colocated: true,
+            ..Default::default()
+        };
+        let indexer = build_indexer_from_entry(&entry, &embedder).await;
+
+        // Corpus store must be present — this is the prerequisite that prevents
+        // the "cannot write schema_version: no durable corpus" error (#485).
+        assert!(
+            indexer.has_corpus_store(),
+            "#485: indexer built via colocated create path must have corpus store; \
+             without it write_schema_version returns 'no durable corpus'"
+        );
+
+        // Also confirm the store is backed by the colocated path, not app-data.
+        if let Some(corpus) = indexer.corpus_store() {
+            let corpus_path = corpus.path().to_path_buf();
+            assert!(
+                corpus_path.starts_with(&root),
+                "#485: corpus store must be inside the project root (colocated); \
+                 got {corpus_path:?}"
+            );
+        }
+    }
+
+    // ── Guard: legacy colocated=false path is unchanged ───────────────────────
+
+    /// Why: the fix must not break the legacy (`colocated: false`) code path
+    /// used by existing indexes restored from `indexes.toml` with `colocated:
+    /// false`.  Those indexes should still build without a corpus store wired
+    /// (they use the app-data path which may not exist in tests).
+    ///
+    /// What: builds an indexer with `colocated: false` and asserts it succeeds
+    /// (the corpus open failure is graceful, logged at WARN, and the indexer is
+    /// returned without a store rather than panicking).
+    ///
+    /// Test: this IS the test; it protects against regressions on the legacy path.
+    #[tokio::test]
+    async fn legacy_non_colocated_path_does_not_panic() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let embedder = mock_embedder();
+
+        let entry = PersistedIndex {
+            id: "test-idx-legacy".to_string(),
+            root_path: root.clone(),
+            colocated: false,
+            ..Default::default()
+        };
+        // Must not panic even when no app-data corpus exists.
+        let _indexer = build_indexer_from_entry(&entry, &embedder).await;
+        // Not asserting has_corpus_store here: app-data path may or may not
+        // resolve in a test environment. The key invariant is no panic.
+    }
+}
