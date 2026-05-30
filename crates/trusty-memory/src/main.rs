@@ -566,6 +566,38 @@ async fn run_serve(
         return trusty_memory::commands::start::handle_start().await;
     }
 
+    // Single-instance guard (Fix B): if another healthy daemon is already
+    // running (detected via the http_addr discovery file + /health probe),
+    // exit 0. launchd's `KeepAlive { SuccessfulExit: false }` only respawns
+    // on *non-zero* exits, so exit 0 stops the respawn storm cleanly.
+    // This check runs on every `serve --foreground` invocation — both those
+    // spawned by launchd and those spawned manually — so the guard is always
+    // active regardless of how the daemon was launched.
+    {
+        use trusty_memory::commands::single_instance::{single_instance_check, StartupAction};
+        let addr_file = trusty_memory::http_addr_path();
+        let action = single_instance_check(addr_file.as_deref()).await;
+        match action {
+            StartupAction::Proceed => {
+                // Normal path: no live daemon detected, continue to bind.
+            }
+            StartupAction::ExitAlreadyRunning => {
+                tracing::info!(
+                    "single-instance guard: another trusty-memory instance is \
+                     already running; exiting 0 to stop launchd respawn storm"
+                );
+                eprintln!(
+                    "trusty-memory: another instance is already running; \
+                     exiting cleanly (exit 0 stops launchd KeepAlive respawn)"
+                );
+                std::process::exit(0);
+            }
+            StartupAction::Fail(msg) => {
+                anyhow::bail!("single-instance check failed unexpectedly: {msg}");
+            }
+        }
+    }
+
     // Resolve the standard data dir, then descend into `palaces/` if that
     // legacy-layout subdirectory exists. Using the resolved directory as
     // `data_root` keeps every call site (status, palace_list, open_palace,

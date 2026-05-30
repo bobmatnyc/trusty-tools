@@ -43,6 +43,12 @@ pub mod activity;
 pub mod attribution;
 pub mod bm25_supervisor;
 pub mod bootstrap;
+/// File-descriptor usage and limit reporting for `/health`.
+///
+/// Why: expose `open_fds` / `fd_soft_limit` so operators can see the fd
+/// ceiling and current consumption without needing lsof or shell access.
+/// Test: `fd_metrics::tests::fd_metrics_returns_sane_values`.
+pub mod fd_metrics;
 // Why (issue #226): `chat` and `web` are pure axum HTTP/SSE handler
 //      surfaces. Gating them behind the `axum-server` feature is what lets
 //      library consumers (e.g. `open-mpm` linking only `MemoryMcpService`)

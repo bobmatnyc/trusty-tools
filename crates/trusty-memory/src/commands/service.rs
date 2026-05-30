@@ -112,6 +112,15 @@ pub(crate) fn launchd_log_dir() -> Result<std::path::PathBuf> {
 /// process so launchd supervises the actual daemon PID and `KeepAlive`
 /// works correctly.
 ///
+/// 🔴 fd limits: macOS launchd's default soft fd ceiling for user agents is
+/// 256. trusty-memory opens ~3 redb files per palace (data, KG, vector
+/// index) plus sockets and log descriptors, so at ~85 palaces the process
+/// hits EMFILE and every palace open call fails. The generated plist always
+/// sets both `SoftResourceLimits` and `HardResourceLimits` to
+/// [`trusty_common::launchd::LAUNCHD_FD_LIMIT`] (8192) so the limit is
+/// permanent and survives `service start` regeneration. `ThrottleInterval`
+/// (10 s) ensures KeepAlive cannot hot-loop respawn into a zombie herd.
+///
 /// What: assembles a [`trusty_common::launchd::LaunchdConfig`] pointing at
 /// the current binary with `serve --foreground` so launchd supervises the
 /// daemon process directly; uses `KeepAlive::OnSuccess` so a clean shutdown
@@ -119,7 +128,8 @@ pub(crate) fn launchd_log_dir() -> Result<std::path::PathBuf> {
 /// so the embedder model download does not try to write into launchd's
 /// read-only sandbox `TMPDIR` (GH #58).
 /// Test: `build_launchd_config_uses_canonical_shape` asserts the
-/// `--foreground` flag is present (issue #132 regression guard);
+/// `--foreground` flag, fd limits, and throttle interval are all present
+/// (issue #132 regression guard + fd-exhaustion fix);
 /// `build_launchd_config_sets_fastembed_cache_dir` asserts the env var is
 /// wired in. End-to-end exercised via `service install` / `service start`.
 #[cfg(target_os = "macos")]
@@ -127,15 +137,22 @@ pub(crate) fn build_launchd_config(
     exe: std::path::PathBuf,
     log_dir: std::path::PathBuf,
 ) -> trusty_common::launchd::LaunchdConfig {
-    use trusty_common::launchd::{KeepAlive, LaunchdConfig};
+    use trusty_common::launchd::{KeepAlive, LaunchdConfig, LAUNCHD_FD_LIMIT};
     LaunchdConfig {
         label: LAUNCHD_LABEL.to_string(),
         exe_path: exe,
         args: vec!["serve".to_string(), "--foreground".to_string()],
         log_dir,
         keep_alive: KeepAlive::OnSuccess,
+        // 10 s throttle prevents KeepAlive from hot-loop respawning when
+        // the daemon exits quickly (e.g. single-instance guard exit 0).
         throttle_interval: 10,
         env_vars: fastembed_env_vars(),
+        // Fix the fd-exhaustion bug: raise both soft and hard limits to
+        // 8192 so the daemon can open ~2730 palaces before hitting EMFILE.
+        // This is written into the plist on every install/start so a
+        // hand-patched plist is never silently reverted.
+        fd_limit: Some(LAUNCHD_FD_LIMIT),
     }
 }
 
@@ -364,19 +381,22 @@ mod tests {
 
     /// Why: the LaunchdConfig we hand to `trusty_common::launchd` must always
     /// describe the canonical trusty-memory agent (label, args, restart
-    /// policy). Drift here corrupts every plist that the binary writes.
+    /// policy, fd limits, throttle). Drift here corrupts every plist that
+    /// the binary writes.
     /// Issue #132 specifically required that the args invoke
     /// `serve --foreground` — plain `serve` self-spawns and exits 0, which
     /// launchd interprets as "service stopped" and re-launches in a tight
-    /// loop. This assertion is the regression guard.
+    /// loop. The fd-limit and throttle assertions guard against the
+    /// fd-exhaustion / zombie-herd regression (fix A).
     /// What: builds the config with dummy paths and asserts the
-    /// load-bearing fields, including the `--foreground` flag.
+    /// load-bearing fields, including the `--foreground` flag, fd limit,
+    /// and throttle interval.
     /// Test: pure construction, no fs side effects.
     #[cfg(target_os = "macos")]
     #[test]
     fn build_launchd_config_uses_canonical_shape() {
         use std::path::PathBuf;
-        use trusty_common::launchd::KeepAlive;
+        use trusty_common::launchd::{KeepAlive, LAUNCHD_FD_LIMIT};
 
         let cfg = build_launchd_config(
             PathBuf::from("/usr/local/bin/trusty-memory"),
@@ -391,7 +411,18 @@ mod tests {
              re-launching the self-spawning parent on every exit"
         );
         assert_eq!(cfg.keep_alive, KeepAlive::OnSuccess);
-        assert_eq!(cfg.throttle_interval, 10);
+        assert_eq!(
+            cfg.throttle_interval, 10,
+            "ThrottleInterval must be 10 s to prevent KeepAlive hot-loop respawn"
+        );
+        // fd_limit must be the canonical ceiling so the generated plist always
+        // includes SoftResourceLimits and HardResourceLimits (fd-exhaustion fix).
+        assert_eq!(
+            cfg.fd_limit,
+            Some(LAUNCHD_FD_LIMIT),
+            "fd_limit must be Some(LAUNCHD_FD_LIMIT) so generated plist raises \
+             both soft and hard limits to {LAUNCHD_FD_LIMIT} (fd-exhaustion fix)"
+        );
         // env_vars is allowed to be empty only on hosts without a HOME
         // (extremely rare); on developer/CI machines HOME is always set
         // and FASTEMBED_CACHE_DIR must be wired in.
@@ -401,6 +432,49 @@ mod tests {
                 "FASTEMBED_CACHE_DIR must be present in the LaunchAgent plist (GH #58)"
             );
         }
+    }
+
+    /// Why: the generated plist XML (what launchd actually reads from disk)
+    /// must contain both resource-limit dicts with the canonical fd value.
+    /// Asserting on `render_plist()` output catches regressions where the
+    /// config struct is correct but the renderer drops the dicts.
+    /// What: renders the plist with a dummy exe/log dir and checks that the
+    /// SoftResourceLimits, HardResourceLimits, and NumberOfFiles keys appear
+    /// with the right integer value. Also asserts ThrottleInterval is present.
+    /// Test: pure string generation, no fs side effects.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn build_launchd_config_plist_includes_fd_limits_and_throttle() {
+        use std::path::PathBuf;
+        use trusty_common::launchd::LAUNCHD_FD_LIMIT;
+
+        let cfg = build_launchd_config(
+            PathBuf::from("/usr/local/bin/trusty-memory"),
+            PathBuf::from("/tmp/trusty-memory/logs"),
+        );
+        let xml = cfg.render_plist().expect("render_plist must succeed");
+
+        assert!(
+            xml.contains("<key>SoftResourceLimits</key>"),
+            "plist must contain SoftResourceLimits to raise fd ceiling"
+        );
+        assert!(
+            xml.contains("<key>HardResourceLimits</key>"),
+            "plist must contain HardResourceLimits so soft limit is not clamped below it"
+        );
+        let fd_str = format!("<integer>{LAUNCHD_FD_LIMIT}</integer>");
+        assert!(
+            xml.contains(&fd_str),
+            "plist NumberOfFiles must equal {LAUNCHD_FD_LIMIT}, got xml: {xml}"
+        );
+        assert!(
+            xml.contains("<key>ThrottleInterval</key>"),
+            "plist must contain ThrottleInterval"
+        );
+        assert!(
+            xml.contains("<integer>10</integer>"),
+            "ThrottleInterval must be 10 s"
+        );
     }
 
     /// Why: GH #58 — launchd's read-only `TMPDIR` breaks fastembed's first

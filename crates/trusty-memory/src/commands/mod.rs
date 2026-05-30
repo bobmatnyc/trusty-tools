@@ -25,6 +25,7 @@ pub mod prompt_context;
 pub mod send_message;
 pub mod service;
 pub mod setup;
+pub mod single_instance;
 pub mod start;
 pub mod stop;
 

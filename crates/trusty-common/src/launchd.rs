@@ -39,6 +39,25 @@ pub enum KeepAlive {
     OnSuccess,
 }
 
+/// File-descriptor ceiling emitted into every generated LaunchAgent plist.
+///
+/// Why: macOS launchd's default soft fd limit for user agents is 256. The
+/// trusty-memory daemon opens ~3 redb files per palace (data, KG, vector
+/// index) plus sockets, log descriptors, and reqwest connection pools.
+/// At 82 palaces that is ~246 fds — right at the ceiling. When the limit is
+/// exhausted, `open()` returns EMFILE, palace handles become non-functional,
+/// and launchd's `KeepAlive` respawns each crashing instance into a zombie
+/// herd (69 observed in the wild) because each new instance fails to bind
+/// on the already-occupied port and exits non-zero. 8192 provides headroom
+/// for thousands of palaces and matches the `ulimit -n 8192` hand-patch that
+/// mitigated the live incident; setting both soft and hard to the same value
+/// avoids any unexpected launchd-imposed ceiling below the hard limit.
+/// What: the integer rendered into both `SoftResourceLimits` and
+/// `HardResourceLimits` dictionaries' `NumberOfFiles` key.
+/// Test: `render_plist_includes_resource_limits` asserts both dicts are present
+/// with this value.
+pub const LAUNCHD_FD_LIMIT: u32 = 8192;
+
 /// Declarative description of a launchd LaunchAgent.
 ///
 /// Why: assembling a plist by hand is error-prone (XML escaping, key ordering,
@@ -46,8 +65,9 @@ pub enum KeepAlive {
 /// definition data, not code, so every trusty-* setup command produces an
 /// identical, correct plist.
 /// What: holds the agent label, executable path and args, log directory,
-/// restart policy, throttle interval, and environment variables. Methods turn
-/// it into XML and drive `launchctl`.
+/// restart policy, throttle interval, environment variables, and the optional
+/// fd-limit override (defaults to [`LAUNCHD_FD_LIMIT`] for new agents).
+/// Methods turn it into XML and drive `launchctl`.
 /// Test: `render_plist` output asserted in unit tests; `plist_path` checked
 /// against the expected `~/Library/LaunchAgents/<label>.plist` layout.
 #[derive(Debug, Clone)]
@@ -68,6 +88,12 @@ pub struct LaunchdConfig {
     pub throttle_interval: u32,
     /// Extra environment variables for the daemon process.
     pub env_vars: Vec<(String, String)>,
+    /// `NumberOfFiles` written into both `SoftResourceLimits` and
+    /// `HardResourceLimits` plist dicts. `None` suppresses both dicts
+    /// (useful for agents that do not open many files). New agents should
+    /// leave this as [`Some(LAUNCHD_FD_LIMIT)`] (the default via
+    /// [`LaunchdConfig::new`]).
+    pub fd_limit: Option<u32>,
 }
 
 impl LaunchdConfig {
@@ -78,11 +104,12 @@ impl LaunchdConfig {
     /// three sibling implementations.
     /// What: returns a complete plist `String` with `Label`, `ProgramArguments`
     /// (exe + args), `KeepAlive` (per [`KeepAlive`]), `ThrottleInterval`,
-    /// `RunAtLoad`, `StandardOutPath`/`StandardErrorPath` under `log_dir`, and
-    /// an `EnvironmentVariables` dictionary when `env_vars` is non-empty. All
-    /// string values are XML-escaped.
+    /// `RunAtLoad`, `StandardOutPath`/`StandardErrorPath` under `log_dir`,
+    /// `SoftResourceLimits` + `HardResourceLimits` dicts (when `fd_limit` is
+    /// `Some`), and an `EnvironmentVariables` dictionary when `env_vars` is
+    /// non-empty. All string values are XML-escaped.
     /// Test: `render_plist_contains_core_keys`, `render_plist_keepalive_*`,
-    /// `render_plist_escapes_xml`.
+    /// `render_plist_escapes_xml`, `render_plist_includes_resource_limits`.
     pub fn render_plist(&self) -> Result<String> {
         let exe = self
             .exe_path
@@ -141,6 +168,19 @@ impl LaunchdConfig {
         s.push_str(&format!("  <string>{}</string>\n", xml_escape(stdout)));
         s.push_str("  <key>StandardErrorPath</key>\n");
         s.push_str(&format!("  <string>{}</string>\n", xml_escape(stderr)));
+
+        // Soft + hard fd limits — both dicts must be present so the hard
+        // ceiling matches the soft request and launchd cannot silently clamp
+        // the soft limit below what we asked for.
+        if let Some(fd) = self.fd_limit {
+            for key in &["SoftResourceLimits", "HardResourceLimits"] {
+                s.push_str(&format!("  <key>{key}</key>\n"));
+                s.push_str("  <dict>\n");
+                s.push_str("    <key>NumberOfFiles</key>\n");
+                s.push_str(&format!("    <integer>{fd}</integer>\n"));
+                s.push_str("  </dict>\n");
+            }
+        }
 
         if !self.env_vars.is_empty() {
             s.push_str("  <key>EnvironmentVariables</key>\n");
@@ -312,6 +352,7 @@ mod tests {
             keep_alive,
             throttle_interval: 10,
             env_vars: vec![],
+            fd_limit: Some(LAUNCHD_FD_LIMIT),
         }
     }
 
@@ -358,6 +399,45 @@ mod tests {
     fn render_plist_omits_env_block_when_empty() {
         let xml = sample(KeepAlive::Always).render_plist().unwrap();
         assert!(!xml.contains("EnvironmentVariables"));
+    }
+
+    /// Why: The fd-exhaustion bug (246 open fds for 82 palaces against a 256
+    /// soft limit) required a manual plist hand-patch to survive. This test
+    /// asserts that every generated plist carries both `SoftResourceLimits`
+    /// and `HardResourceLimits` with the canonical value so the fix survives
+    /// refactors and `service start` / `service install` regenerations.
+    /// What: renders a plist with `fd_limit = Some(LAUNCHD_FD_LIMIT)` and
+    /// asserts both resource-limit dicts and the integer value appear. Also
+    /// asserts that `fd_limit = None` suppresses both dicts.
+    /// Test: itself.
+    #[test]
+    fn render_plist_includes_resource_limits() {
+        let xml = sample(KeepAlive::OnSuccess).render_plist().unwrap();
+        assert!(
+            xml.contains("<key>SoftResourceLimits</key>"),
+            "SoftResourceLimits must be present"
+        );
+        assert!(
+            xml.contains("<key>HardResourceLimits</key>"),
+            "HardResourceLimits must be present"
+        );
+        assert!(
+            xml.contains(&format!("<integer>{LAUNCHD_FD_LIMIT}</integer>")),
+            "NumberOfFiles must equal LAUNCHD_FD_LIMIT ({LAUNCHD_FD_LIMIT})"
+        );
+
+        // When fd_limit is None, neither dict should appear.
+        let mut cfg = sample(KeepAlive::Always);
+        cfg.fd_limit = None;
+        let xml_no_limits = cfg.render_plist().unwrap();
+        assert!(
+            !xml_no_limits.contains("SoftResourceLimits"),
+            "fd_limit=None must suppress SoftResourceLimits"
+        );
+        assert!(
+            !xml_no_limits.contains("HardResourceLimits"),
+            "fd_limit=None must suppress HardResourceLimits"
+        );
     }
 
     #[test]

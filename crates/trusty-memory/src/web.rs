@@ -185,11 +185,13 @@ pub fn router() -> Router<AppState> {
 /// port is owned by this daemon (and not a stale or foreign process). Issue
 /// #35 enriches it with process resource metrics so operators (and the admin
 /// UI) can see RSS, disk footprint, CPU, and uptime in one cheap call.
-/// What: Carries a fixed `status` string, the compile-time crate version, and
-/// the issue-#35 resource block (`rss_mb`, `disk_bytes`, `cpu_pct`,
-/// `uptime_secs`).
-/// Test: Asserted by `health_endpoint_returns_ok` and
-/// `health_endpoint_includes_resource_fields` in this module's tests.
+/// The fd-exhaustion fix adds `open_fds` and `fd_soft_limit` so operators can
+/// see "244 / 256" before EMFILE hits.
+/// What: Carries a fixed `status` string, the compile-time crate version,
+/// the issue-#35 resource block, and `open_fds` / `fd_soft_limit`.
+/// Test: Asserted by `health_endpoint_returns_ok`,
+/// `health_endpoint_includes_resource_fields`, and
+/// `health_endpoint_includes_fd_gauge` in this module's tests.
 #[derive(serde::Serialize)]
 struct HealthResponse {
     /// `"ok"` when the round-trip smoke test succeeds (or no palace exists
@@ -223,6 +225,16 @@ struct HealthResponse {
     /// without ever binding (tests that drive the router with `TestServer`).
     #[serde(skip_serializing_if = "Option::is_none")]
     addr: Option<String>,
+    /// Number of file descriptors currently open by this process (fd-exhaustion
+    /// gauge). `None` when the platform does not expose this cheaply (rare).
+    /// Sampled on every `/health` call via [`crate::fd_metrics::count_open_fds`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    open_fds: Option<u64>,
+    /// Soft `RLIMIT_NOFILE` ceiling for this process (fd-exhaustion gauge).
+    /// `None` when `getrlimit` fails or returns `RLIM_INFINITY` (unlimited).
+    /// Together with `open_fds`, lets operators see "244 / 256" before EMFILE.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fd_soft_limit: Option<u64>,
 }
 
 /// `GET /health` — unauthenticated liveness probe with store/recall smoke test.
@@ -235,17 +247,21 @@ struct HealthResponse {
 /// instead of after a real request fails. Issue #185 routes the round-trip
 /// to a dedicated `__health_probe__` palace (hidden from user listings) so
 /// the probe never leaks drawers into a real user palace even on recall
-/// failures.
+/// failures. The fd-exhaustion fix adds `open_fds` and `fd_soft_limit` so
+/// operators can catch "approaching ceiling" before EMFILE hits.
 /// What: Returns HTTP 200 with `{status, version, rss_mb, disk_bytes,
-/// cpu_pct, uptime_secs, detail?}`. RSS + CPU are sampled live; `disk_bytes`
-/// is read from the background ticker; `uptime_secs` is elapsed since
-/// `state.started_at`. The handler provisions the dedicated probe palace if
+/// cpu_pct, uptime_secs, open_fds?, fd_soft_limit?, detail?}`. RSS + CPU are
+/// sampled live; `disk_bytes` is read from the background ticker;
+/// `uptime_secs` is elapsed since `state.started_at`; `open_fds` and
+/// `fd_soft_limit` are sampled best-effort (absent when the platform does not
+/// expose them cheaply). The handler provisions the dedicated probe palace if
 /// missing and then attempts a full remember/recall/forget cycle — `status`
 /// is `"ok"` on success, `"degraded"` with a `detail` string explaining the
 /// failing stage otherwise. The probe never returns non-200 so monitors
 /// keyed on HTTP status still see the daemon as up.
 /// Test: `health_endpoint_returns_ok`,
 /// `health_endpoint_includes_resource_fields`,
+/// `health_endpoint_includes_fd_gauge`,
 /// `health_endpoint_round_trip_on_fresh_install_is_ok`,
 /// `health_endpoint_round_trip_with_palace_is_ok`,
 /// `health_probe_palace_is_invisible`,
@@ -259,6 +275,12 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let disk_bytes = state.disk_bytes.load(std::sync::atomic::Ordering::Relaxed);
     let uptime_secs = state.started_at.elapsed().as_secs();
     let addr = state.bound_addr.get().map(|a| a.to_string());
+
+    // fd-exhaustion gauge: sample best-effort; failures return None (not an
+    // error so we do not have to import the fd_metrics crate in every test
+    // that drives this handler via in-process TestServer).
+    let open_fds = crate::fd_metrics::count_open_fds();
+    let fd_soft_limit = crate::fd_metrics::fd_soft_limit();
 
     let (status, detail) = match run_health_round_trip(&state).await {
         Ok(()) => ("ok".to_string(), None),
@@ -277,6 +299,8 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         cpu_pct,
         uptime_secs,
         addr,
+        open_fds,
+        fd_soft_limit,
     })
 }
 
@@ -1961,6 +1985,55 @@ mod tests {
         assert_eq!(v["disk_bytes"].as_u64(), Some(0));
         // uptime_secs is present and a u64.
         assert!(v["uptime_secs"].is_u64(), "uptime_secs must be present");
+    }
+
+    /// Why: the fd-exhaustion gauge must appear in the `/health` response on
+    /// Unix platforms so operators can monitor fd consumption vs. the ceiling.
+    /// What: drives `/health` through the router and asserts that `open_fds`
+    /// and `fd_soft_limit` are present and are non-zero unsigned integers.
+    /// On non-Unix platforms the fields may be absent (the helpers return None
+    /// and are skipped in serialisation) — that is acceptable and tested here
+    /// by not asserting presence, only asserting that when present they are sane.
+    /// Test: this test.
+    #[tokio::test]
+    async fn health_endpoint_includes_fd_gauge() {
+        let state = test_state();
+        let app = router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 1024).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+
+        // On Unix, both fields must be present and sane.
+        #[cfg(unix)]
+        {
+            let open_fds = v["open_fds"]
+                .as_u64()
+                .expect("open_fds must be present on Unix");
+            assert!(
+                open_fds > 0,
+                "open_fds must be > 0 (at least stdin/stdout/stderr)"
+            );
+
+            let limit = v["fd_soft_limit"]
+                .as_u64()
+                .expect("fd_soft_limit must be present on Unix");
+            assert!(limit > 0, "fd_soft_limit must be > 0");
+
+            // Sanity: open_fds should be well below the ceiling on test machines.
+            assert!(
+                open_fds < limit,
+                "open_fds ({open_fds}) must be below fd_soft_limit ({limit}) in tests"
+            );
+        }
     }
 
     /// Issue #71 + #185 — `GET /health` reports `status: "ok"` on a fresh
