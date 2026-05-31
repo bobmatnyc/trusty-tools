@@ -164,3 +164,6 @@ nix = { version = "0.29", features = ["signal"] }
 tempfile.workspace = true
 axum.workspace = true
 http-body-util.workspace = true
+# serial_test: run env-mutating tests serially to prevent env-var races across
+# parallel Rust test threads (used by bug-report token resolution tests).
+serial_test.workspace = true

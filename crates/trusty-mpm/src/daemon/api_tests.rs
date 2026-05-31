@@ -1,6 +1,7 @@
 use super::*;
 use crate::core::session::{ControlModel, Session, SessionStatus};
 use axum::http::StatusCode;
+use serial_test::serial;
 
 fn state_with_session() -> (Arc<DaemonState>, SessionId) {
     let state = DaemonState::shared();
@@ -1257,6 +1258,7 @@ async fn report_bug_rate_limit_guard_blocks_correctly() {
 ///       absent → graceful None; verifies nothing set → None.
 /// Test: this function.
 #[test]
+#[serial]
 fn resolve_token_full_chain_coverage() {
     use crate::daemon::bug_report::token::{
         APP_ID_ENV_VAR, APP_INSTALL_ID_ENV_VAR, APP_KEY_FILE_ENV_VAR, TOKEN_ENV_VAR,

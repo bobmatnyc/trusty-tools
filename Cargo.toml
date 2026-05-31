@@ -119,6 +119,9 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 # Testing
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
+# serial_test: run env-mutating tests serially to prevent env-var races across
+# parallel test threads. Used by bug-report token tests.
+serial_test = "3"
 
 # ── trusty-analyze additional deps ────────────────────────────────────────
 clap_complete = "4"
