@@ -603,6 +603,32 @@ enum Commands {
         dry_run: bool,
     },
 
+    /// Remove orphaned index registrations whose root_path no longer exists (issue #489)
+    ///
+    /// Works OFFLINE — no daemon required. Reads indexes.toml, identifies
+    /// entries whose `root_path` does not exist on disk (deleted projects,
+    /// wiped volumes, /tmp test indexes), and removes them from the registry
+    /// after displaying the list and asking for confirmation.
+    ///
+    /// Only the registry entry is removed — no index data directories are
+    /// deleted. If the project comes back (e.g. volume remounted), you can
+    /// re-register with `trusty-search index <path>`.
+    ///
+    /// Examples:
+    ///   trusty-search prune-orphans --dry-run   # preview without any changes
+    ///   trusty-search prune-orphans             # interactive confirmation
+    ///   trusty-search prune-orphans --yes       # non-interactive (scripted)
+    #[command(display_order = 27, name = "prune-orphans")]
+    PruneOrphans {
+        /// Preview the list of orphaned registrations without removing anything
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Skip the confirmation prompt and remove immediately
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// Wire trusty-search into Claude Code's settings.json files
     ///
     /// Scans `$HOME` for every `.claude/settings*.json` and idempotently
@@ -613,7 +639,7 @@ enum Commands {
     ///
     /// Examples:
     ///   trusty-search setup
-    #[command(display_order = 27)]
+    #[command(display_order = 28)]
     Setup,
 
     /// Wire trusty-search into an IDE (Cursor, etc.)
@@ -1043,6 +1069,10 @@ async fn run() -> Result<()> {
 
         Commands::MigrateStorage { dry_run } => {
             commands::migrate_storage::handle_migrate_storage(dry_run)?;
+        }
+
+        Commands::PruneOrphans { dry_run, yes } => {
+            commands::prune_orphans::handle_prune_orphans(dry_run, yes)?;
         }
 
         Commands::Setup => {

@@ -393,7 +393,7 @@ pub fn load_index_registry() -> Result<Vec<PersistedIndex>> {
 /// Path-injectable variant of [`load_index_registry`]. Exists so the
 /// roundtrip / delete-persistence tests can drive the load/save/upsert/remove
 /// pipeline against a tempfile without monkey-patching `dirs::data_local_dir`.
-pub(crate) fn load_index_registry_at(path: &Path) -> Result<Vec<PersistedIndex>> {
+pub fn load_index_registry_at(path: &Path) -> Result<Vec<PersistedIndex>> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -418,7 +418,7 @@ pub fn save_index_registry(entries: &[PersistedIndex]) -> Result<()> {
 }
 
 /// Path-injectable variant of [`save_index_registry`].
-pub(crate) fn save_index_registry_at(path: &Path, entries: &[PersistedIndex]) -> Result<()> {
+pub fn save_index_registry_at(path: &Path, entries: &[PersistedIndex]) -> Result<()> {
     let file = IndexRegistryFile {
         indexes: entries.to_vec(),
     };
@@ -443,7 +443,7 @@ pub fn upsert_index_registry_entry(entry: PersistedIndex) -> Result<()> {
 /// Path-injectable variant. Same upsert semantics, but reads/writes the
 /// supplied TOML path. Used by the persistence tests (issue #118) to assert
 /// that re-registering the same id never produces a duplicate `[[index]]`.
-pub(crate) fn upsert_index_registry_entry_at(path: &Path, entry: PersistedIndex) -> Result<()> {
+pub fn upsert_index_registry_entry_at(path: &Path, entry: PersistedIndex) -> Result<()> {
     let mut entries = load_index_registry_at(path)?;
     if let Some(existing) = entries.iter_mut().find(|e| e.id == entry.id) {
         // Overwrite the whole record (not just root_path) so updated
@@ -473,7 +473,7 @@ pub fn remove_index_registry_entry(id: &str) -> Result<()> {
 }
 
 /// Path-injectable variant of [`remove_index_registry_entry`].
-pub(crate) fn remove_index_registry_entry_at(path: &Path, id: &str) -> Result<()> {
+pub fn remove_index_registry_entry_at(path: &Path, id: &str) -> Result<()> {
     let mut entries = load_index_registry_at(path)?;
     let before = entries.len();
     entries.retain(|e| e.id != id);

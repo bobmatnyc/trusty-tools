@@ -44,6 +44,7 @@ pub mod list;
 pub mod migrate;
 pub mod migrate_storage;
 pub mod monitor;
+pub mod prune_orphans;
 pub mod query;
 pub mod reindex;
 pub mod remove;
