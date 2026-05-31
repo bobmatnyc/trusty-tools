@@ -684,6 +684,21 @@ struct IndexListResponse {
     indexes: Vec<String>,
 }
 
+/// Per-index entry returned by `GET /indexes?details=true` (issue #312).
+///
+/// Why: the flat list (`GET /indexes`) returns bare id strings for backward
+/// compatibility; adding `?details=true` returns richer objects so the MCP
+/// `list_indexes` tool and UI can display per-index disk usage without a
+/// separate round-trip.
+/// What: `id` + `size_bytes` (sum of all file sizes under the index data
+/// directory; `null` when the directory has not been created yet).
+/// Test: `list_indexes_details_includes_size_bytes`.
+#[derive(serde::Serialize)]
+struct IndexDetailEntry {
+    id: String,
+    size_bytes: Option<u64>,
+}
+
 #[derive(Deserialize)]
 pub struct CreateIndexRequest {
     pub id: String,
@@ -1335,23 +1350,31 @@ async fn status_stream_handler(State(state): State<Arc<SearchAppState>>) -> impl
 /// the default flat-string response that existing callers depend on.
 /// What: `format = "tree"` → object-array response; any other value (or
 /// absent) → the existing `{ "indexes": ["id1", "id2"] }` flat response.
-/// Test: `list_indexes_tree_format_shape` and `list_indexes_flat_default_unchanged`.
+/// Test: `list_indexes_tree_format_shape`, `list_indexes_flat_default_unchanged`,
+/// and `list_indexes_details_includes_size_bytes`.
 #[derive(Deserialize, Default)]
 struct ListIndexesParams {
     #[serde(default)]
     format: Option<String>,
+    /// Issue #312: when `true`, return `[{id, size_bytes}]` objects instead of
+    /// bare strings so callers can display per-index disk usage.
+    #[serde(default)]
+    details: bool,
 }
 
-/// `GET /indexes[?format=tree]` — list registered indexes.
+/// `GET /indexes[?format=tree][?details=true]` — list registered indexes.
 ///
 /// Why: the default flat format is byte-compatible with today's response so
 /// existing callers (CLI, MCP, integrators) see no breaking change.  The
 /// optional `?format=tree` variant exposes the index hierarchy derived from
-/// `root_path` prefix containment (#404 MVP).
-/// What: without `?format=tree`, returns `{ "indexes": ["id1", …] }`.
-/// With `?format=tree`, returns `{ "indexes": [{ "id": …, "root_path": …,
-/// "parent_id": …, "children": […], "priority_boost": … }, …] }`.
-/// Test: `list_indexes_flat_default_unchanged`, `list_indexes_tree_format_shape`.
+/// `root_path` prefix containment (#404 MVP).  The optional `?details=true`
+/// variant returns `[{id, size_bytes}]` objects so callers can show per-index
+/// disk usage without a separate status round-trip (#312).
+/// What: without query params, returns `{ "indexes": ["id1", …] }`.
+/// With `?format=tree`, returns object array with hierarchy fields.
+/// With `?details=true`, returns `{ "indexes": [{"id": …, "size_bytes": …}] }`.
+/// Test: `list_indexes_flat_default_unchanged`, `list_indexes_tree_format_shape`,
+/// `list_indexes_details_includes_size_bytes`.
 async fn list_indexes_handler(
     State(state): State<Arc<SearchAppState>>,
     Query(params): Query<ListIndexesParams>,
@@ -1365,6 +1388,21 @@ async fn list_indexes_handler(
     if want_tree {
         let handles = state.registry.list_handles();
         let entries = crate::core::search::hierarchy::build_tree_entries(&state.registry, &handles);
+        Json(serde_json::json!({ "indexes": entries })).into_response()
+    } else if params.details {
+        // Issue #312: return per-index disk usage alongside each id.
+        let entries: Vec<IndexDetailEntry> = state
+            .registry
+            .list()
+            .into_iter()
+            .map(|id| {
+                let (size_bytes, _) = index_disk_and_mtime(&id.0);
+                IndexDetailEntry {
+                    id: id.0,
+                    size_bytes,
+                }
+            })
+            .collect();
         Json(serde_json::json!({ "indexes": entries })).into_response()
     } else {
         Json(IndexListResponse {
@@ -2345,6 +2383,19 @@ fn default_similar_top_k() -> usize {
     10
 }
 
+/// Handle `POST /indexes/:id/search_similar`.
+///
+/// Why (issue #484): the original implementation returned 404 whenever the
+/// embedding-LRU cache missed, which always happens for `skip_kg=true` indexes
+/// (the cache is populated only at commit time; entries age out and are never
+/// restored). Re-embedding the seed chunk's text via `embed_text` when the
+/// cache misses lets `search_similar` work on any index regardless of KG mode.
+/// What: looks up the seed chunk's embedding from the LRU cache; on miss,
+/// fetches the chunk's raw content and re-embeds it; falls through to 404 only
+/// when neither path can produce an embedding (BM25-only index or unknown
+/// chunk).
+/// Test: `search_similar_fallback_reembeds_when_cache_misses` in the server
+/// integration tests.
 async fn search_similar_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
@@ -2358,9 +2409,23 @@ async fn search_similar_handler(
         .find_chunk_id(&req.file, req.function.as_deref())
         .await
         .ok_or(StatusCode::NOT_FOUND)?;
-    let embedding = indexer
-        .get_embedding(&chunk_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
+    // Issue #484: the LRU embedding cache misses for skip_kg=true indexes
+    // (entries are only written at reindex time and are evicted under memory
+    // pressure).  When the cache misses, fetch the chunk's text and re-embed
+    // it so search_similar works on any index regardless of KG mode.
+    let embedding = if let Some(cached) = indexer.get_embedding(&chunk_id) {
+        cached
+    } else {
+        let content = indexer
+            .chunk_content_by_id(&chunk_id)
+            .await
+            .ok_or(StatusCode::NOT_FOUND)?;
+        indexer
+            .embed_text(&content)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)? // BM25-only: no embedder wired
+    };
     let results = indexer
         .similar_by_embedding(&embedding, req.top_k, Some(&chunk_id))
         .await
@@ -4646,8 +4711,14 @@ mod tests {
         let state = std::sync::Arc::new(SearchAppState::new(registry));
 
         // No format param → flat list
-        let resp =
-            list_indexes_handler(State(state), Query(ListIndexesParams { format: None })).await;
+        let resp = list_indexes_handler(
+            State(state),
+            Query(ListIndexesParams {
+                format: None,
+                details: false,
+            }),
+        )
+        .await;
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -4709,6 +4780,7 @@ mod tests {
             State(state),
             Query(ListIndexesParams {
                 format: Some("tree".to_string()),
+                details: false,
             }),
         )
         .await;
@@ -4753,6 +4825,61 @@ mod tests {
             Some(false),
             "tree-parent must not be a sub-index"
         );
+    }
+
+    /// `GET /indexes?details=true` returns objects with `id` and `size_bytes`
+    /// fields (issue #312).  When the index data dir has never been created
+    /// `size_bytes` must be `null` rather than missing or erroring.
+    ///
+    /// Why: MCP `list_indexes` and the admin UI need per-index disk usage in a
+    /// single call; the `?details=true` variant is the additive/backward-compat
+    /// way to expose it without breaking the bare flat format.
+    /// Test: this function.
+    #[tokio::test]
+    async fn list_indexes_details_includes_size_bytes() {
+        use crate::core::{
+            indexer::CodeIndexer,
+            registry::{IndexHandle, IndexId, IndexRegistry},
+        };
+
+        let registry = IndexRegistry::new();
+        for name in ["detail-alpha", "detail-beta"] {
+            let id = IndexId::new(name);
+            let indexer = CodeIndexer::new(name, format!("/tmp/{name}"));
+            registry.register(IndexHandle::bare(
+                id.clone(),
+                std::sync::Arc::new(tokio::sync::RwLock::new(indexer)),
+                format!("/tmp/{name}").into(),
+            ));
+        }
+        let state = std::sync::Arc::new(SearchAppState::new(registry));
+
+        let resp = list_indexes_handler(
+            State(state),
+            Query(ListIndexesParams {
+                format: None,
+                details: true,
+            }),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = value["indexes"].as_array().expect("indexes array");
+        assert_eq!(arr.len(), 2);
+        for entry in arr {
+            assert!(
+                entry["id"].is_string(),
+                "each detail entry must have a string id: {entry:?}"
+            );
+            // size_bytes must be present: either a number or null (dir not
+            // created yet), never missing entirely.
+            assert!(
+                entry.get("size_bytes").is_some(),
+                "each detail entry must have a size_bytes field: {entry:?}"
+            );
+        }
     }
 
     /// `POST /search` with nested indexes: the response must include

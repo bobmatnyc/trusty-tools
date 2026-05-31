@@ -825,6 +825,35 @@ async fn test_get_embedding_returns_some_after_indexing() {
     assert!(idx.get_embedding("nope").is_none());
 }
 
+/// Issue #484 — `chunk_content_by_id` is the escape hatch used by
+/// `search_similar_handler` when the embedding LRU cache misses.
+///
+/// Why: the handler falls back from `get_embedding` (LRU cache) to
+/// `chunk_content_by_id` + `embed_text` so it can produce results for
+/// `skip_kg=true` indexes where the cache is cold.
+/// What: asserts that known IDs return content and unknown IDs return `None`.
+/// Test: this function.
+#[tokio::test]
+async fn test_chunk_content_by_id_returns_none_for_unknown() {
+    let idx = make_indexer();
+    idx.add_chunk(raw("a:1:1", "a.rs", "fn alpha() {}"))
+        .await
+        .unwrap();
+    // Known id → returns the content.
+    let content = idx.chunk_content_by_id("a:1:1").await;
+    assert_eq!(
+        content.as_deref(),
+        Some("fn alpha() {}"),
+        "chunk_content_by_id must return the raw content for a known id"
+    );
+    // Unknown id → None.
+    let missing = idx.chunk_content_by_id("not_a_real_id").await;
+    assert!(
+        missing.is_none(),
+        "chunk_content_by_id must return None for an unknown id"
+    );
+}
+
 #[tokio::test]
 async fn test_similar_by_embedding_excludes_seed() {
     let idx = make_indexer();

@@ -188,6 +188,26 @@ impl CodeIndexer {
         None
     }
 
+    /// Return the raw text content of a chunk by its ID, or `None` if the
+    /// chunk is not in the corpus.
+    ///
+    /// Why (issue #484): `search_similar` falls back to re-embedding a chunk's
+    /// text when the LRU embedding cache misses — which always happens for
+    /// `skip_kg=true` indexes because the cache is only populated on commit
+    /// (i.e. during reindex) and evicted entries are never restored.  This
+    /// O(1) lookup lets the handler obtain the seed text without loading the
+    /// full corpus snapshot.
+    /// What: acquires a brief read lock on the in-memory `chunks` map (lazily
+    /// rehydrating from redb if it was evicted) and returns a clone of the
+    /// matching `RawChunk::content`.
+    /// Test: `test_chunk_content_by_id_returns_none_for_unknown` in
+    /// `indexer::tests`.
+    pub async fn chunk_content_by_id(&self, chunk_id: &str) -> Option<String> {
+        self.ensure_chunks_loaded().await;
+        let chunks = self.chunks.read().await;
+        chunks.get(chunk_id).map(|c| c.content.clone())
+    }
+
     /// Remove every chunk belonging to a file, plus its entity list.
     ///
     /// Why: `index-file` re-indexes a file in place, but file deletion (and

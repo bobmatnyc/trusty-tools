@@ -338,7 +338,9 @@ impl McpServer {
                 )
                 .await
             }
-            "list_indexes" => self.get("/indexes").await,
+            // Issue #312: request details=true so the response includes
+            // per-index size_bytes in addition to the id list.
+            "list_indexes" => self.get("/indexes?details=true").await,
             "create_index" => {
                 let id = require_str(args, "id")?;
                 let root_path = require_str(args, "root_path")?;
@@ -483,7 +485,13 @@ impl McpServer {
                 if let Some(v) = args.get("word_regexp").and_then(Value::as_bool) {
                     body["word_regexp"] = Value::Bool(v);
                 }
-                if let Some(v) = args.get("max_results").and_then(Value::as_u64) {
+                // Issue #447: accept `max_count` as a ripgrep-parity alias for
+                // `max_results`. `max_results` wins when both are supplied.
+                if let Some(v) = args
+                    .get("max_results")
+                    .or_else(|| args.get("max_count"))
+                    .and_then(Value::as_u64)
+                {
                     body["max_results"] = Value::from(v);
                 }
                 match args.get("index_id").and_then(Value::as_str) {
@@ -1243,7 +1251,8 @@ pub fn tool_descriptors() -> Value {
                     "files_with_matches": { "type": "boolean", "default": false, "description": "-l: return one path per matching file" },
                     "invert_match":       { "type": "boolean", "default": false, "description": "-v: return lines that do NOT match" },
                     "word_regexp":        { "type": "boolean", "default": false, "description": "-w: require word boundaries" },
-                    "max_results":        { "type": "integer", "default": 100, "description": "Hard cap on returned matches" }
+                    "max_results":        { "type": "integer", "default": 100, "description": "Hard cap on returned matches (alias: max_count)" },
+                    "max_count":          { "type": "integer", "description": "Alias for max_results (ripgrep --max-count parity)" }
                 }
             }
         },
@@ -1504,6 +1513,63 @@ mod tests {
         let resp = server.dispatch(req("grep", serde_json::json!({}))).await;
         let err = resp.error.expect("expected error");
         assert_eq!(err.code, error_codes::INVALID_PARAMS);
+    }
+
+    /// Issue #447 — `max_count` is forwarded as `max_results` to the daemon.
+    ///
+    /// Why: when the MCP client passes `max_count` (ripgrep's `--max-count`
+    /// flag name) the dispatcher must translate it to `max_results` before
+    /// POSTing to the daemon. Without the alias the parameter was silently
+    /// dropped and the daemon applied its default cap of 100 regardless.
+    /// What: asserts that a `grep` call with `max_count=5` (and no
+    /// `max_results`) forwards `max_results: 5` in the daemon request body.
+    /// Test: spins up a tiny mock daemon that echoes back the request body,
+    /// then asserts the forwarded body contains `max_results == 5`.
+    #[tokio::test]
+    async fn grep_max_count_alias_forwarded_as_max_results() {
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let captured: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+        let captured_clone = Arc::clone(&captured);
+
+        async fn grep_handler(
+            axum::extract::State(captured): axum::extract::State<Arc<Mutex<Option<Value>>>>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            *captured.lock().await = Some(body);
+            Json(serde_json::json!({ "matches": [], "total": 0, "truncated": false }))
+        }
+
+        let app = Router::new()
+            .route("/indexes/idx/grep", post(grep_handler))
+            .with_state(captured_clone);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let server = McpServer::new(format!("http://{addr}"));
+        let resp = server
+            .dispatch(req(
+                "grep",
+                serde_json::json!({
+                    "pattern": "fn foo",
+                    "index_id": "idx",
+                    "max_count": 5_u64,
+                }),
+            ))
+            .await;
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let body = captured.lock().await.clone().expect("no request captured");
+        assert_eq!(
+            body.get("max_results").and_then(Value::as_u64),
+            Some(5),
+            "max_count must be forwarded as max_results; got body: {body:?}"
+        );
     }
 
     /// `grep` appears in `tools/list` with a `pattern`-required schema.
