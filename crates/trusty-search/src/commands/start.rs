@@ -250,24 +250,174 @@ fn collect_all_index_entries() -> Vec<PersistedIndex> {
     all
 }
 
+/// Attempt to locate a moved project root for a colocated index (issue #484).
+///
+/// Why: when a project is moved (e.g. `mv projA projA-moved`), the daemon
+/// restarts with a stale `root_path` in `indexes.toml`. Without relocation
+/// detection, `build_indexer_from_entry` calls `colocated_storage_dir` which
+/// calls `create_dir_all` on the non-existent old path, silently producing an
+/// empty ghost directory and a 0-chunk index. This function intercepts that
+/// case before any disk mutation.
+///
+/// What: scans all tracked roots for `.trusty-search/` directories containing
+/// a populated `index.redb`. Filters out roots already claimed by another live
+/// entry in `indexes.toml`. Returns the new root path ONLY when exactly one
+/// candidate exists (ambiguous = skip, zero = skip). If a unique candidate is
+/// found, updates `indexes.toml` atomically so subsequent restarts are instant.
+///
+/// Test: `restore_moved_colocated_index_relinks_unique_candidate`,
+/// `restore_missing_root_with_no_candidate_skips`,
+/// `restore_missing_root_with_ambiguous_candidates_skips`.
+pub(crate) fn try_locate_moved_root(
+    entry: &PersistedIndex,
+    all_entries: &[PersistedIndex],
+) -> Option<std::path::PathBuf> {
+    use crate::service::colocated_storage::COLOCATED_DIR_NAME;
+    use crate::service::fs_discovery::{scan_roots_for_colocated_indexes, DEFAULT_SCAN_DEPTH};
+    use crate::service::roots_registry::load_roots;
+
+    // Only attempt relocation for colocated indexes with a missing root.
+    if !entry.colocated || entry.root_path.exists() {
+        return None;
+    }
+
+    // Collect root paths that are already claimed by other live entries so
+    // we don't accidentally steal their `.trusty-search/` directory.
+    let claimed: std::collections::HashSet<std::path::PathBuf> = all_entries
+        .iter()
+        .filter(|e| e.id != entry.id && e.root_path.exists())
+        .map(|e| e.root_path.clone())
+        .collect();
+
+    // Scan tracked roots for colocated index directories.
+    let tracked_roots: Vec<std::path::PathBuf> = match load_roots() {
+        Ok(r) => r.into_iter().map(|r| r.path).collect(),
+        Err(_) => return None,
+    };
+    if tracked_roots.is_empty() {
+        return None;
+    }
+
+    let discovered = scan_roots_for_colocated_indexes(&tracked_roots, DEFAULT_SCAN_DEPTH);
+
+    // A candidate must:
+    //   1. Have a populated index.redb (not just an empty .trusty-search/ dir).
+    //   2. Not be already claimed by another entry.
+    let candidates: Vec<std::path::PathBuf> = discovered
+        .into_iter()
+        .filter(|c| {
+            if claimed.contains(&c.root_path) {
+                return false;
+            }
+            let redb = c.root_path.join(COLOCATED_DIR_NAME).join("index.redb");
+            // Require a non-empty redb file so we don't relink to a ghost dir.
+            std::fs::metadata(&redb)
+                .map(|m| m.is_file() && m.len() > 0)
+                .unwrap_or(false)
+        })
+        .map(|c| c.root_path)
+        .collect();
+
+    match candidates.len() {
+        1 => {
+            let new_root = candidates.into_iter().next().expect("len==1");
+            tracing::info!(
+                "warm-boot: index '{}' root_path moved: {} → {} (auto-relink, issue #484)",
+                entry.id,
+                entry.root_path.display(),
+                new_root.display(),
+            );
+            // Persist the new root_path so subsequent restarts skip the scan.
+            let updated = PersistedIndex {
+                root_path: new_root.clone(),
+                ..entry.clone()
+            };
+            if let Err(e) = crate::service::persistence::upsert_index_registry_entry(updated) {
+                tracing::warn!(
+                    "warm-boot: could not persist relocated root_path for '{}': {e}",
+                    entry.id
+                );
+            }
+            Some(new_root)
+        }
+        0 => {
+            tracing::warn!(
+                "warm-boot: skipping index '{}' — root_path {} no longer exists and no \
+                 unique candidate found in tracked roots",
+                entry.id,
+                entry.root_path.display(),
+            );
+            None
+        }
+        n => {
+            tracing::warn!(
+                "warm-boot: skipping index '{}' — root_path {} no longer exists and {} \
+                 ambiguous candidates found (manual `trusty-search index <path>` required)",
+                entry.id,
+                entry.root_path.display(),
+                n,
+            );
+            None
+        }
+    }
+}
+
 /// Register one index entry into the in-memory registry, restoring HNSW + corpus.
 ///
 /// Why: extracted so the loop in `restore_indexes` remains readable and so
 /// colocated-index integration tests can drive this path directly.
-/// What: skips entries already in the in-memory registry (idempotent), builds
-/// the indexer via `build_indexer_from_entry` (which routes to colocated or
-/// legacy storage), and registers the resulting `IndexHandle`.
-/// Test: covered by the warm-boot integration tests.
+/// What: checks `root_path.exists()` before building — when the path is missing
+/// for a colocated index, attempts relocation via `try_locate_moved_root` (issue
+/// #484); for non-colocated or unresolvable entries, logs WARN and skips.
+/// Skips entries already in the in-memory registry (idempotent), builds the
+/// indexer via `build_indexer_from_entry`, and registers the resulting
+/// `IndexHandle`.
+/// Test: covered by the warm-boot integration tests and the
+/// `restore_moved_colocated_index_*` unit tests in this module.
 async fn restore_one_index(
     state: &SearchAppState,
     embedder: &Arc<dyn crate::core::Embedder>,
-    entry: PersistedIndex,
+    mut entry: PersistedIndex,
 ) {
     let id = IndexId::new(entry.id.clone());
     if state.registry.get(&id).is_some() {
         // A live create_index handler beat us to it — skip.
         return;
     }
+
+    // Issue #484: guard against missing root_path before any disk mutation.
+    // `build_indexer_from_entry` → `corpus_redb_path_for_entry` → `colocated_storage_dir`
+    // calls `create_dir_all` on the (now-dead) path, silently creating an empty
+    // ghost dir and loading 0 chunks. Block that here.
+    if !entry.root_path.exists() {
+        // For colocated indexes: attempt relocation scan.
+        if entry.colocated {
+            // Collect all current registry entries so the scan can exclude
+            // already-claimed roots.  Best-effort: an empty vec is safe —
+            // it just disables the claimed-root filter.
+            let all_entries =
+                crate::service::persistence::load_index_registry().unwrap_or_default();
+            match try_locate_moved_root(&entry, &all_entries) {
+                Some(new_root) => {
+                    entry.root_path = new_root;
+                }
+                None => {
+                    // Warn already emitted by try_locate_moved_root.
+                    return;
+                }
+            }
+        } else {
+            tracing::warn!(
+                "warm-boot: skipping index '{}' — root_path {} no longer exists \
+                 (run `trusty-search prune-orphans` to clean up or \
+                 `trusty-search index <path>` to re-register at the new location)",
+                entry.id,
+                entry.root_path.display(),
+            );
+            return;
+        }
+    }
+
     let mut indexer = build_indexer_from_entry(&entry, embedder).await;
     // Restore per-index filters and domain vocabulary from indexes.toml.
     // Resolve `include_paths` to absolute under `root_path` so the reindex
@@ -1585,6 +1735,135 @@ mod tests {
         assert!(
             !should_skip_discovery(false, Some("")),
             "empty env value must not suppress scan"
+        );
+    }
+
+    // ── Issue #484: moved-project relocation tests ─────────────────────────────
+
+    use crate::service::colocated_storage::COLOCATED_DIR_NAME;
+    use crate::service::persistence::PersistedIndex;
+    use serial_test::serial;
+    use tempfile::tempdir;
+
+    /// Create a populated `.trusty-search/index.redb` under `root`.
+    fn make_populated_ts(root: &std::path::Path) {
+        let ts_dir = root.join(COLOCATED_DIR_NAME);
+        std::fs::create_dir_all(&ts_dir).unwrap();
+        std::fs::write(ts_dir.join("index.redb"), b"notempty").unwrap();
+    }
+
+    /// Why: the core relocation contract — a colocated index with a dead root_path
+    /// and exactly one candidate tracked root containing a populated .trusty-search/
+    /// must be relinked to that candidate.
+    /// What: set up a dead root entry and one candidate tracked root with a
+    /// populated redb; call `try_locate_moved_root` and assert it returns the
+    /// candidate path.
+    /// Test: this test.
+    #[test]
+    #[serial]
+    fn restore_moved_colocated_index_relinks_unique_candidate() {
+        let data_tmp = tempdir().unwrap();
+        let new_root = tempdir().unwrap();
+        make_populated_ts(new_root.path());
+
+        // Point TRUSTY_DATA_DIR at our tempdir so roots.toml is isolated.
+        unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_tmp.path()) };
+
+        // Register new_root as a tracked root.
+        crate::service::roots_registry::upsert_root(new_root.path().to_path_buf()).unwrap();
+
+        // Entry whose root_path no longer exists.
+        let dead_root = std::path::PathBuf::from("/tmp/trusty-484-dead-root-xyz9999");
+        let entry = PersistedIndex {
+            id: "moved-project".to_string(),
+            root_path: dead_root.clone(),
+            colocated: true,
+            ..Default::default()
+        };
+
+        let result = try_locate_moved_root(&entry, &[]);
+        unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+
+        let new_path = result.expect("must find the unique candidate");
+        assert_eq!(
+            new_path.canonicalize().unwrap(),
+            new_root.path().canonicalize().unwrap(),
+            "must relink to the tracked root containing .trusty-search/"
+        );
+    }
+
+    /// Why: when the root_path is missing and NO tracked root has a populated
+    /// .trusty-search/, `try_locate_moved_root` must return None and must NOT
+    /// create any ghost directory.
+    /// What: register a tracked root with NO .trusty-search/, call the function,
+    /// assert None is returned and no ghost dir was created.
+    /// Test: this test.
+    #[test]
+    #[serial]
+    fn restore_missing_root_with_no_candidate_returns_none() {
+        let data_tmp = tempdir().unwrap();
+        let empty_root = tempdir().unwrap();
+        // No .trusty-search/ here.
+
+        unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_tmp.path()) };
+        crate::service::roots_registry::upsert_root(empty_root.path().to_path_buf()).unwrap();
+
+        let dead_root = std::path::PathBuf::from("/tmp/trusty-484-no-candidate-xyz9999");
+        let entry = PersistedIndex {
+            id: "no-candidate".to_string(),
+            root_path: dead_root.clone(),
+            colocated: true,
+            ..Default::default()
+        };
+
+        let result = try_locate_moved_root(&entry, &[]);
+        unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+
+        assert!(
+            result.is_none(),
+            "must return None when no candidate has a populated .trusty-search/"
+        );
+        // Verify no ghost directory was created under the dead root.
+        let ghost = dead_root.join(COLOCATED_DIR_NAME);
+        assert!(
+            !ghost.exists(),
+            "must not create a ghost .trusty-search/ under the missing root"
+        );
+    }
+
+    /// Why: when multiple tracked roots have a populated .trusty-search/ and none
+    /// is claimed by another entry, `try_locate_moved_root` must return None
+    /// (ambiguous — cannot auto-pick).
+    /// What: register two tracked roots both with populated .trusty-search/; call
+    /// the function and assert it returns None.
+    /// Test: this test.
+    #[test]
+    #[serial]
+    fn restore_missing_root_with_ambiguous_candidates_returns_none() {
+        let data_tmp = tempdir().unwrap();
+        let root_a = tempdir().unwrap();
+        let root_b = tempdir().unwrap();
+        make_populated_ts(root_a.path());
+        make_populated_ts(root_b.path());
+
+        unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_tmp.path()) };
+        crate::service::roots_registry::upsert_root(root_a.path().to_path_buf()).unwrap();
+        crate::service::roots_registry::upsert_root(root_b.path().to_path_buf()).unwrap();
+
+        let dead_root = std::path::PathBuf::from("/tmp/trusty-484-ambiguous-xyz9999");
+        let entry = PersistedIndex {
+            id: "ambiguous".to_string(),
+            root_path: dead_root,
+            colocated: true,
+            ..Default::default()
+        };
+
+        let result = try_locate_moved_root(&entry, &[]);
+        unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+
+        assert!(
+            result.is_none(),
+            "must return None when multiple candidates exist (ambiguous)"
         );
     }
 }
