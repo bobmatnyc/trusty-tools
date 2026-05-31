@@ -56,6 +56,7 @@ pub use preview::{IssuePreview, build_preview};
 pub use ratelimit::{FilingDecision, RateLimitGuard};
 pub use scrubber::{ScrubChange, ScrubResult, scrub, scrub_compat};
 pub use token::{
-    EnvFileTokenProvider, GithubAppConfig, GithubAppTokenProvider, TokenProvider, resolve_token,
+    EnvFileTokenProvider, GithubAppConfig, GithubAppTokenProvider, ResolvedProvider, TokenProvider,
+    resolve_token,
 };
 pub use types::{AggregatedError, FilingResult, ReportBugRequest, ReportBugResponse};

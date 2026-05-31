@@ -396,12 +396,54 @@ pub struct ErrorSummary {
     pub timestamp_secs: u64,
 }
 
+/// Scrubbed-change entry embedded in bug-report HTTP responses.
+///
+/// Why: HTTP clients need the same scrub-summary the MCP preview tool returns
+///      so they can surface the "what was redacted" summary before consenting.
+/// What: carries the pattern name and human-readable hint from the scrubber.
+/// Test: embedded in `ReportBugHttpResponse` and verified in
+///       `report_bug_no_confirm_includes_preview`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ScrubChangeSummary {
+    /// Pattern name (e.g. `"env-secret"`, `"path"`, `"jwt"`).
+    pub pattern: String,
+    /// Human-readable hint describing what was redacted.
+    pub hint: String,
+}
+
+/// Scrubbed issue preview embedded in HTTP `confirm:false` responses.
+///
+/// Why: Fix 2 (#P1) — the HTTP `POST /api/v1/report-bug` `confirm:false` path
+///      was returning only a "gate note" and discarding the preview. Including
+///      the full preview lets HTTP clients inspect the exact title/body/labels
+///      and scrub summary before consenting.
+/// What: the preview title, Markdown body, labels, and list of scrub changes
+///       — identical shape to the MCP `preview_bug_report` response.
+/// Test: `report_bug_no_confirm_includes_preview` in `api_tests.rs`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BugReportPreview {
+    /// Issue title (already scrubbed).
+    pub title: String,
+    /// Issue body in GitHub Markdown (already scrubbed).
+    pub body: String,
+    /// Labels that will be applied to the issue.
+    pub labels: Vec<String>,
+    /// List of redactions performed by the scrubber.
+    pub scrub_changes: Vec<ScrubChangeSummary>,
+}
+
 /// Response of `POST /api/v1/report-bug`.
 ///
 /// Why: mirrors the MCP `report_bug` result so HTTP-based sub-agents get the
-///      same structure as MCP callers.
+///      same structure as MCP callers. Fixes 1–3 add `preview` (always present
+///      on `confirm:false`) and `rate_limited` (set when the rate-limit guard
+///      blocked the filing).
 /// What: `filed` is `true` on a successful filing. `note` carries an
-///       actionable string when `filed` is `false`.
+///       actionable string when `filed` is `false`. `preview` carries the
+///       scrubbed preview on the `confirm:false` path. `rate_limited` is `true`
+///       when the per-fingerprint or hourly cap blocked the call.
+/// Test: `report_bug_no_confirm_includes_preview`,
+///       `report_bug_rate_limited_returns_not_filed` in `api_tests.rs`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReportBugHttpResponse {
     /// `true` when a GitHub issue was created or incremented.
@@ -418,4 +460,13 @@ pub struct ReportBugHttpResponse {
     /// Actionable message when `filed` is `false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Scrubbed preview returned on `confirm:false` calls so callers can
+    /// inspect title/body/labels/scrub-summary before consenting. Absent on
+    /// `confirm:true` responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<BugReportPreview>,
+    /// `true` when the rate-limit guard (per-fingerprint 24h window or hourly
+    /// cap) blocked the filing. Only set to `true` when the guard fires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limited: Option<bool>,
 }

@@ -1463,17 +1463,56 @@ pub struct ReportBugApiRequest {
     pub confirm: bool,
 }
 
+/// Build a [`BugReportPreview`] from a scrubbed [`IssuePreview`].
+///
+/// Why: both the `confirm:false` path and the rate-limited path must return the
+///      same preview shape so HTTP clients can inspect before (or after a blocked)
+///      filing.
+/// What: maps `IssuePreview` fields to [`BugReportPreview`] (the wire type).
+/// Test: exercised transitively by `report_bug_no_confirm_includes_preview`.
+fn to_wire_preview(p: &super::bug_report::IssuePreview) -> BugReportPreview {
+    BugReportPreview {
+        title: p.title.clone(),
+        body: p.body.clone(),
+        labels: p.labels.clone(),
+        scrub_changes: p
+            .scrub_changes
+            .iter()
+            .map(|c| ScrubChangeSummary {
+                pattern: c.pattern.to_string(),
+                hint: c.hint.to_string(),
+            })
+            .collect(),
+    }
+}
+
 /// `POST /api/v1/report-bug` — file or preview a bug report via HTTP.
 ///
 /// Why: sub-agents spawned by Claude Code's Agent tool do not inherit MCP
 ///      connections; they need an HTTP fallback to file bug reports. This
 ///      endpoint mirrors the `report_bug` MCP tool's consent gate.
+///
+/// Fixes implemented here:
+///   - Fix 1 (#498, P0): token resolved via the full chain (`ResolvedProvider`
+///     — PAT env → token file → GitHub App → NoToken) instead of the narrower
+///     `EnvFileTokenProvider`, so the GitHub App path is now reachable.
+///   - Fix 2 (P1): `confirm:false` now includes the scrubbed preview
+///     (title/body/labels/scrub_changes) in the response so HTTP clients can
+///     inspect before consenting.
+///   - Fix 3 (P2): the `RateLimitGuard` is checked before filing; a blocked
+///     call returns `{ filed:false, rate_limited:true, note:… }` without
+///     hitting the GitHub API.  After a successful filing `record_filed` is
+///     called.  Rate-limit state-file failures are non-fatal (logged only).
+///
 /// What: when `confirm:false` (or absent), returns a preview-only response
-///       (`filed:false`). When `confirm:true`, resolves the token via the
-///       standard provider chain and calls the GitHub filing client. A missing
-///       token returns `filed:false` with an actionable note, not an HTTP error.
-///       A missing fingerprint returns `filed:false` with a "not found" note.
-/// Test: `report_bug_no_confirm_returns_preview` in `api_tests.rs`.
+///       (`filed:false`, `preview:{…}`). When `confirm:true`, resolves the
+///       token via the full provider chain, checks the rate-limit guard, then
+///       calls the GitHub filing client. A missing token returns
+///       `filed:false` with an actionable note; a blocked rate-limit returns
+///       `filed:false, rate_limited:true`; a missing fingerprint returns
+///       `filed:false` with a "not found" note.
+/// Test: `report_bug_no_confirm_includes_preview`,
+///       `report_bug_rate_limited_returns_not_filed` in `api_tests.rs`.
 #[utoipa::path(
     post,
     path = "/api/v1/report-bug",
@@ -1504,11 +1543,14 @@ pub async fn report_bug_http(
                  run GET /api/v1/errors to see available fingerprints",
                 body.fingerprint
             )),
+            preview: None,
+            rate_limited: None,
         });
     };
 
     let preview = super::bug_report::build_preview(&agg);
 
+    // Fix 2 (P1): include scrubbed preview in confirm:false response.
     if !body.confirm {
         return Json(ReportBugHttpResponse {
             filed: false,
@@ -1516,29 +1558,60 @@ pub async fn report_bug_http(
             issue_url: None,
             issue_number: None,
             note: Some("confirm:false — preview only. POST with confirm:true to file.".to_string()),
+            preview: Some(to_wire_preview(&preview)),
+            rate_limited: None,
         });
     }
 
-    // Attempt filing via GitHub.
-    let provider = super::bug_report::EnvFileTokenProvider;
+    // Fix 3 (P2): check the rate-limit guard before calling GitHub.
+    let guard = super::bug_report::RateLimitGuard::production();
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let rl_decision = guard.check(&body.fingerprint, now_secs);
+    if !rl_decision.is_allowed() {
+        return Json(ReportBugHttpResponse {
+            filed: false,
+            deduped: None,
+            issue_url: None,
+            issue_number: None,
+            note: Some(rl_decision.block_reason()),
+            preview: None,
+            rate_limited: Some(true),
+        });
+    }
+
+    // Fix 1 (P0): use the full resolution chain — PAT → file → GitHub App → NoToken.
+    let fingerprint = body.fingerprint.clone();
+    let provider = super::bug_report::ResolvedProvider;
     let result =
         tokio::task::spawn_blocking(move || super::bug_report::file_issue(&preview, &provider))
             .await;
 
     match result {
-        Ok(Ok(filing)) => Json(ReportBugHttpResponse {
-            filed: true,
-            deduped: Some(filing.deduped),
-            issue_url: Some(filing.issue_url),
-            issue_number: Some(filing.issue_number),
-            note: None,
-        }),
+        Ok(Ok(filing)) => {
+            // Fix 3 (P2): record the successful filing in the rate-limit store.
+            // State-file failures are non-fatal — log and allow.
+            guard.record_filed(&fingerprint, now_secs);
+            Json(ReportBugHttpResponse {
+                filed: true,
+                deduped: Some(filing.deduped),
+                issue_url: Some(filing.issue_url),
+                issue_number: Some(filing.issue_number),
+                note: None,
+                preview: None,
+                rate_limited: None,
+            })
+        }
         Ok(Err(super::bug_report::GithubFilingError::NoToken)) => Json(ReportBugHttpResponse {
             filed: false,
             deduped: None,
             issue_url: None,
             issue_number: None,
             note: Some(super::bug_report::GithubFilingError::NoToken.to_string()),
+            preview: None,
+            rate_limited: None,
         }),
         Ok(Err(e)) => Json(ReportBugHttpResponse {
             filed: false,
@@ -1546,6 +1619,8 @@ pub async fn report_bug_http(
             issue_url: None,
             issue_number: None,
             note: Some(format!("GitHub filing failed: {e}")),
+            preview: None,
+            rate_limited: None,
         }),
         Err(e) => Json(ReportBugHttpResponse {
             filed: false,
@@ -1553,6 +1628,8 @@ pub async fn report_bug_http(
             issue_url: None,
             issue_number: None,
             note: Some(format!("internal error: {e}")),
+            preview: None,
+            rate_limited: None,
         }),
     }
 }

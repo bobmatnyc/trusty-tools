@@ -495,6 +495,27 @@ pub fn resolve_token() -> Option<String> {
     None
 }
 
+// ── ResolvedProvider — full-chain adapter ─────────────────────────────────────
+
+/// A [`TokenProvider`] adapter that delegates to the full `resolve_token()`
+/// chain: PAT env → token file → GitHub App → `None`.
+///
+/// Why: `api.rs` and `mcp_backend.rs` originally hard-coded `EnvFileTokenProvider`
+///      so the GitHub App path (Fix 1 / #498) was unreachable. `ResolvedProvider`
+///      wraps `resolve_token()` behind the `TokenProvider` trait so both call
+///      sites can use a single DRY adapter without duplicating resolution logic.
+/// What: calls `resolve_token()` on every `token()` invocation; returns `None`
+///       when all sources are absent (graceful NoToken degradation is preserved).
+/// Test: `tests::resolved_provider_uses_pat_env`,
+///       `tests::resolved_provider_returns_none_without_sources`.
+pub struct ResolvedProvider;
+
+impl TokenProvider for ResolvedProvider {
+    fn token(&self) -> Option<String> {
+        resolve_token()
+    }
+}
+
 // ── jsonwebtoken dep check ────────────────────────────────────────────────────
 // `jsonwebtoken` must be in the crate's Cargo.toml dependencies for this module
 // to compile. It is not in the workspace table yet because it was first needed
@@ -653,6 +674,78 @@ mod tests {
         assert!(
             just_past.is_valid(now_secs),
             "token at 301s margin should be valid"
+        );
+    }
+
+    // ── ResolvedProvider tests ────────────────────────────────────────────────
+
+    #[test]
+    fn resolved_provider_uses_pat_env() {
+        // When TOKEN_ENV_VAR is set, ResolvedProvider should return that PAT.
+        let sentinel = "ghp_resolved_provider_pat_test"; // pragma: allowlist secret
+        unsafe { std::env::set_var(TOKEN_ENV_VAR, sentinel) };
+        let tok = ResolvedProvider.token();
+        unsafe { std::env::remove_var(TOKEN_ENV_VAR) };
+        assert_eq!(
+            tok.as_deref(),
+            Some(sentinel),
+            "ResolvedProvider must return the PAT env value"
+        );
+    }
+
+    #[test]
+    fn resolved_provider_returns_none_without_sources() {
+        // When neither TOKEN_ENV_VAR nor App vars are set, should return None.
+        // We cannot guarantee a clean env in all CI scenarios; the test removes
+        // the PAT var and uses a non-existent token file path so the chain
+        // falls through gracefully.
+        unsafe {
+            std::env::remove_var(TOKEN_ENV_VAR);
+            std::env::remove_var(APP_ID_ENV_VAR);
+            std::env::remove_var(APP_INSTALL_ID_ENV_VAR);
+            std::env::remove_var(APP_KEY_FILE_ENV_VAR);
+            // Point the file fallback at a non-existent path.
+            std::env::set_var(
+                TOKEN_FILE_ENV_VAR,
+                "/tmp/trusty-test-nonexistent-token-file-abc123",
+            );
+        }
+        let tok = ResolvedProvider.token();
+        unsafe { std::env::remove_var(TOKEN_FILE_ENV_VAR) };
+        assert!(
+            tok.is_none(),
+            "ResolvedProvider must return None when all sources absent"
+        );
+    }
+
+    #[test]
+    fn resolve_token_selects_app_when_only_app_env_set() {
+        // Verify the resolution order: App provider is tried when PAT env is
+        // absent. We cannot perform a real App exchange in unit tests, but we
+        // can confirm the *selection* path: when App vars are set but the PEM
+        // file does not exist, `resolve_token()` logs a warning and returns
+        // None (App provider failed gracefully), not an error/panic.
+        unsafe {
+            std::env::remove_var(TOKEN_ENV_VAR);
+            std::env::remove_var(TOKEN_FILE_ENV_VAR);
+            std::env::set_var(APP_ID_ENV_VAR, "12345");
+            std::env::set_var(APP_INSTALL_ID_ENV_VAR, "67890");
+            std::env::set_var(
+                APP_KEY_FILE_ENV_VAR,
+                "/tmp/trusty-test-nonexistent-pem-abc123.pem",
+            );
+        }
+        // The App provider attempts to read the PEM, fails gracefully → None.
+        let tok = resolve_token();
+        unsafe {
+            std::env::remove_var(APP_ID_ENV_VAR);
+            std::env::remove_var(APP_INSTALL_ID_ENV_VAR);
+            std::env::remove_var(APP_KEY_FILE_ENV_VAR);
+        }
+        // None is the expected graceful-failure result: no panic, no unwrap.
+        assert!(
+            tok.is_none(),
+            "resolve_token with missing PEM must return None gracefully"
         );
     }
 

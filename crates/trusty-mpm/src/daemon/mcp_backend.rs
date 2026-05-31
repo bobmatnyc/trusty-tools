@@ -270,14 +270,26 @@ impl OrchestratorBackend for StateBackend {
     ///
     /// Why: the consent gate — nothing is filed unless `confirm` is `true`.
     ///      When `confirm` is false, returns the same preview as
-    ///      `preview_bug_report`. When `true`, resolves the token via
-    ///      [`super::bug_report::EnvFileTokenProvider`] and calls
+    ///      `preview_bug_report`. When `true`, resolves the token via the full
+    ///      provider chain (Fix 1 / #498) and calls
     ///      [`super::bug_report::file_issue`].
+    ///
+    /// Fixes implemented here:
+    ///   - Fix 1 (#498, P0): uses `ResolvedProvider` (PAT → file → GitHub App
+    ///     → NoToken) instead of the narrower `EnvFileTokenProvider`, so the
+    ///     GitHub App path is now reachable.
+    ///   - Fix 3 (P2): the `RateLimitGuard` is checked before any GitHub call;
+    ///     a blocked call returns `{ filed:false, rate_limited:true }`.  After a
+    ///     successful filing `record_filed` is called.  State-file failures are
+    ///     non-fatal (logged via `record_filed`'s own warning).
+    ///
     /// What: a `confirm:false` call is pure-preview (no network call). A
     ///       `confirm:true` call with no token returns a graceful failure with
-    ///       an actionable message. A successful filing returns
-    ///       `{ filed, deduped, issue_url, issue_number }`.
-    /// Test: `report_bug_no_confirm_is_preview_only` in the `tests` module.
+    ///       an actionable message. A rate-limited call returns
+    ///       `{ filed:false, rate_limited:true, note:… }`. A successful filing
+    ///       returns `{ filed, deduped, issue_url, issue_number }`.
+    /// Test: `report_bug_no_confirm_returns_preview_only`,
+    ///       `report_bug_confirm_no_token_graceful_failure` in the `tests` module.
     async fn report_bug(&self, fingerprint: &str, confirm: bool) -> Result<Value, String> {
         // Step 1: load the error regardless of confirm — preview is always built.
         let errors = super::bug_report::aggregate_errors(500);
@@ -309,21 +321,43 @@ impl OrchestratorBackend for StateBackend {
             }));
         }
 
+        // Fix 3 (P2): check the rate-limit guard before any GitHub call.
+        let guard = super::bug_report::RateLimitGuard::production();
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let rl_decision = guard.check(fingerprint, now_secs);
+        if !rl_decision.is_allowed() {
+            return Ok(json!({
+                "filed": false,
+                "rate_limited": true,
+                "note": rl_decision.block_reason(),
+            }));
+        }
+
         // Step 2: attempt to file via GitHub.
+        // Fix 1 (P0): use the full resolution chain — PAT → file → GitHub App → NoToken.
         // Use spawn_blocking because the real reqwest client is blocking.
-        let provider = super::bug_report::EnvFileTokenProvider;
+        let fp_owned = fingerprint.to_string();
+        let provider = super::bug_report::ResolvedProvider;
         let result =
             tokio::task::spawn_blocking(move || super::bug_report::file_issue(&preview, &provider))
                 .await
                 .map_err(|e| format!("internal error: spawn_blocking failed: {e}"))?;
 
         match result {
-            Ok(filing) => Ok(json!({
-                "filed": filing.filed,
-                "deduped": filing.deduped,
-                "issue_url": filing.issue_url,
-                "issue_number": filing.issue_number,
-            })),
+            Ok(filing) => {
+                // Fix 3 (P2): record the successful filing; write failures are
+                // non-fatal — record_filed logs warnings internally.
+                guard.record_filed(&fp_owned, now_secs);
+                Ok(json!({
+                    "filed": filing.filed,
+                    "deduped": filing.deduped,
+                    "issue_url": filing.issue_url,
+                    "issue_number": filing.issue_number,
+                }))
+            }
             Err(super::bug_report::GithubFilingError::NoToken) => Ok(json!({
                 "filed": false,
                 "note": super::bug_report::GithubFilingError::NoToken.to_string(),
