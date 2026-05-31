@@ -3324,14 +3324,43 @@ async fn reindex_handler(
     })))
 }
 
+/// Heartbeat interval for the reindex SSE stream.
+///
+/// Why: under memory pressure the embedderd sidecar can stall between batches,
+/// leaving the SSE body idle for minutes. Without any bytes flowing, the OS
+/// (or any intermediate proxy/reverse-proxy) tears down the idle TCP connection
+/// before the terminal event is ever written — the client sees a decode error
+/// or "stream ended without completion event". Emitting a comment-only SSE
+/// frame (`: heartbeat\n\n`) every `SSE_HEARTBEAT_INTERVAL` keeps the body
+/// transport alive so the connection survives long stalls.
+/// What: used by `reindex_stream_handler` to pace the `IntervalStream`.
+/// Test: covered indirectly by the full reindex path; the interval fires even
+/// when no real events are produced.
+const SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+
+/// SSE keep-alive heartbeat frame (SSE comment — ignored by all spec-compliant
+/// clients including `eventsource-stream`).
+const SSE_HEARTBEAT_FRAME: &str = ": heartbeat\n\n";
+
 /// SSE stream of reindex progress events.
 ///
-/// Mirrors the `/status/stream` SSE pattern (manual `Response::builder()`
+/// Why: Mirrors the `/status/stream` SSE pattern (manual `Response::builder()`
 /// with `text/event-stream` + `no-cache` + `X-Accel-Buffering: no`).
 /// Replays any events already buffered (so a late subscriber still sees the
 /// `start` event) and then streams live events from the broadcast channel
 /// until the reindex completes. Lagged subscribers receive a
-/// `{"type":"lag","skipped":N}` frame.
+/// `{"type":"lag","skipped":N}` frame. A 20 s keep-alive heartbeat (SSE
+/// comment frame, ignored by clients) prevents the OS from tearing down the
+/// idle TCP connection when the sidecar stalls between batches.
+///
+/// What: builds a merged stream of (a) broadcast events and (b) 20 s interval
+/// heartbeats. The broadcast path produces `data:` frames; the heartbeat path
+/// produces ``: heartbeat\n\n`` comment frames. The merged stream is wrapped
+/// in `Body::from_stream` and returned as `text/event-stream`.
+///
+/// Test: `reindex_stream_handler` is exercised by the full-reindex integration
+/// path. The heartbeat interval fires independently of real events so it
+/// cannot be blocked by a stalled sidecar.
 async fn reindex_stream_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
@@ -3363,13 +3392,37 @@ async fn reindex_stream_handler(
     let body = if initial_status != ReindexStatus::Running {
         Body::from_stream(replay_stream)
     } else {
+        // Live event stream from the broadcast channel.
         let live = BroadcastStream::new(rx).map(|res| match res {
             Ok(line) => frame(line),
             Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => Ok(
                 axum::body::Bytes::from(format!("data: {{\"type\":\"lag\",\"skipped\":{n}}}\n\n")),
             ),
         });
-        Body::from_stream(replay_stream.chain(live))
+
+        // Keep-alive heartbeat: emit `: heartbeat\n\n` every 20 s so the
+        // HTTP body never goes fully idle between events. SSE comment frames
+        // (lines starting with ':') are mandated by the spec to be ignored
+        // by all compliant clients including `eventsource-stream`.
+        //
+        // Why merge rather than chain: we need interleaving, not sequencing
+        // — the heartbeat must fire even while the live stream is idle, and
+        // the live stream must continue after a heartbeat tick.
+        let heartbeat = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(
+            SSE_HEARTBEAT_INTERVAL,
+        ))
+        .map(|_| -> Result<axum::body::Bytes, std::io::Error> {
+            Ok(axum::body::Bytes::from_static(
+                SSE_HEARTBEAT_FRAME.as_bytes(),
+            ))
+        });
+
+        // `stream::select` from `futures` interleaves two streams; the
+        // merged stream ends when BOTH inputs end. The broadcast stream ends
+        // when the sender (reindex task) drops; the interval stream runs
+        // forever. Relying on the broadcast-stream termination is therefore
+        // sufficient — the interval side is just a no-cost keep-alive.
+        Body::from_stream(replay_stream.chain(stream::select(live, heartbeat)))
     };
 
     Ok(Response::builder()

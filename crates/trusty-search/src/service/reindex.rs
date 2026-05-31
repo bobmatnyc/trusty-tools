@@ -1478,6 +1478,69 @@ async fn abort_force_corpus_swap(handle: &IndexHandle, index_id: &IndexId, tmp_p
     }
 }
 
+/// RAII guard that emits a terminal SSE error event if the reindex task exits
+/// without having emitted one via the normal path.
+///
+/// Why: a Rust panic inside a `tokio::spawn` task unwinds that task silently
+/// — the `broadcast::Sender` in `ReindexProgress` drops, live SSE subscribers
+/// never receive a terminal frame, and the CLI reports "stream ended without
+/// completion event" indefinitely. Placing this guard at the start of the
+/// spawned future and calling `disarm()` only after `emit_complete_event`
+/// completes ensures that ANY early exit (panic, early return, or `.await`
+/// cancellation) emits `{"event":"error","message":"…"}` before the sender
+/// drops.
+///
+/// What: holds `Arc<ReindexProgress>` and an `armed: bool` flag. `Drop`
+/// checks the flag — if still armed, it pushes a blocking-channel send of
+/// the error event directly onto the broadcast sender (no `.await` in `Drop`;
+/// use `try_send`) and marks the progress status as `Failed`.
+///
+/// Test: `reindex_guard_fires_on_early_return` (below).
+struct ReindexTerminationGuard {
+    progress: Arc<ReindexProgress>,
+    armed: bool,
+}
+
+impl ReindexTerminationGuard {
+    fn new(progress: Arc<ReindexProgress>) -> Self {
+        Self {
+            progress,
+            armed: true,
+        }
+    }
+
+    /// Disarm the guard — call this after successfully emitting the terminal
+    /// `complete` or `aborted_memory` event so `Drop` does not double-emit.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ReindexTerminationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // The task is exiting without having emitted a terminal event.
+        // Set the status to Failed and push an error event synchronously
+        // (broadcast::Sender::send is non-blocking).
+        self.progress.status.store(ReindexStatus::Failed);
+        let msg = serde_json::json!({
+            "event": "error",
+            "message": "reindex task exited unexpectedly — check daemon logs for details"
+        })
+        .to_string();
+        // `send` returns Err when there are no receivers; ignore — the replay
+        // buffer is updated async by `push`, but Drop cannot be async. The
+        // broadcast path alone is sufficient for live subscribers; replay is
+        // not updated here because we cannot `.await` in Drop. Live
+        // subscribers connected at the time of the crash will see the frame;
+        // late subscribers reading the replay buffer will see the status as
+        // `Failed` and can surface that to the user via the /status endpoint.
+        let _ = self.progress.sender.send(msg);
+    }
+}
+
 /// Variant of `spawn_reindex` that GC's the progress map after completion.
 /// See `spawn_reindex` for the rationale.
 ///
@@ -1536,6 +1599,14 @@ pub fn spawn_reindex_with_cleanup(
         if !priority {
             BACKGROUND_QUEUE_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
+
+        // Arm the termination guard. Any early exit from this point — whether
+        // via an explicit `return`, a panic unwinding through the task, or an
+        // `.await` cancellation — will fire `ReindexTerminationGuard::drop`,
+        // which broadcasts an error event and marks the status `Failed`. The
+        // guard is disarmed (and thus silenced) just after `emit_complete_event`
+        // confirms the normal terminal event has been sent.
+        let mut term_guard = ReindexTerminationGuard::new(Arc::clone(&progress));
 
         let started = Instant::now();
         let root = handle.root_path.clone();
@@ -2060,6 +2131,10 @@ pub fn spawn_reindex_with_cleanup(
             &kg,
         )
         .await;
+
+        // The terminal event has been emitted — disarm the guard so its
+        // `Drop` impl does not emit a spurious second error frame.
+        term_guard.disarm();
 
         // Issue #112: refresh the per-index context embedding from the
         // root-level metadata files. Best-effort — failure here is logged
@@ -3088,6 +3163,72 @@ mod tests {
         assert_eq!(
             after_sub, initial,
             "queue depth must return to initial after 3 decrements"
+        );
+    }
+
+    /// The `ReindexTerminationGuard` must emit an error event and set the
+    /// status to `Failed` when it is dropped while still armed.
+    ///
+    /// Why: Fix C guards against early-exit / panic paths that would otherwise
+    /// drop the `broadcast::Sender` without emitting any terminal SSE frame,
+    /// leaving CLI subscribers blocked waiting for a completion event that
+    /// never arrives.
+    ///
+    /// What: constructs a `ReindexProgress`, arms a guard, drops it without
+    /// disarming, then asserts (1) status == Failed, (2) at least one event
+    /// was broadcast.
+    ///
+    /// Test: this test.
+    #[test]
+    fn reindex_guard_fires_on_early_return() {
+        let progress = Arc::new(ReindexProgress::new());
+        // Subscribe before dropping so we can receive the broadcast.
+        let mut rx = progress.sender.subscribe();
+
+        {
+            let _guard = ReindexTerminationGuard::new(Arc::clone(&progress));
+            // Drop without calling `disarm()`.
+        }
+
+        assert_eq!(
+            progress.status.load(),
+            ReindexStatus::Failed,
+            "status must be Failed after guard drops while armed"
+        );
+        let msg = rx
+            .try_recv()
+            .expect("guard must have broadcast an error event");
+        assert!(
+            msg.contains("\"error\""),
+            "broadcast message must contain event:error; got: {msg}"
+        );
+    }
+
+    /// A disarmed `ReindexTerminationGuard` must NOT emit an error event on drop.
+    ///
+    /// Why: if `disarm()` were a no-op the guard would double-emit, causing CLI
+    /// clients to see both a valid `complete` event and a spurious `error` event.
+    ///
+    /// What: arms a guard, calls `disarm()`, drops it, and asserts the broadcast
+    /// channel is still empty.
+    ///
+    /// Test: this test.
+    #[test]
+    fn reindex_guard_does_not_fire_after_disarm() {
+        let progress = Arc::new(ReindexProgress::new());
+        let mut rx = progress.sender.subscribe();
+
+        {
+            let mut guard = ReindexTerminationGuard::new(Arc::clone(&progress));
+            guard.disarm();
+        }
+
+        assert_eq!(
+            rx.try_recv()
+                .err()
+                .map(|e| matches!(e, tokio::sync::broadcast::error::TryRecvError::Empty)),
+            Some(true),
+            "no event should be broadcast after disarm"
         );
     }
 }

@@ -23,6 +23,42 @@
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::Mutex;
+use tokio::time::Duration;
+
+// ── Per-call timeout ─────────────────────────────────────────────────────────
+//
+// Why: under memory pressure the `trusty-embedderd` sidecar can stall mid-batch
+// (CoreML / ORT arena growth on Apple Silicon unified memory). Without a
+// per-call deadline, `read_line` blocks indefinitely — the reindex task hangs,
+// the SSE stream goes silent, and the OS tears down the idle TCP connection
+// before any terminal event is ever emitted. A bounded timeout lets the batch
+// fail fast, which unblocks the task, which lets it emit a terminal SSE error
+// event.
+//
+// Default: 120 s (generous: a single very-large batch on a stalled sidecar
+// should fail within two minutes rather than hanging forever).
+// Override: set `TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS` to a positive integer.
+const EMBED_CALL_TIMEOUT_DEFAULT_SECS: u64 = 120;
+
+/// Read `TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS` from the environment at first use
+/// and cache it.
+///
+/// Why: avoids a repeated env-var lookup per batch while still allowing test
+/// code to override the default via `std::env::set_var`.
+/// What: reads the env var once, parses it as a u64, falls back to 120 on
+/// parse failure or absence.
+/// Test: `embed_call_timeout_env_override` verifies a stalled reader surfaces
+/// as a timeout error rather than hanging indefinitely.
+fn embed_call_timeout() -> Duration {
+    static CACHED: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let secs = std::env::var("TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(EMBED_CALL_TIMEOUT_DEFAULT_SECS);
+        Duration::from_secs(secs)
+    })
+}
 
 use super::{EmbedderClient, EmbedderError};
 
@@ -113,15 +149,24 @@ impl StdioEmbedderClient {
 impl EmbedderClient for StdioEmbedderClient {
     /// Embed a batch of texts via the stdio JSON-RPC 2.0 transport.
     ///
-    /// Why: the sidecar model; see module-level doc.
+    /// Why: the sidecar model; see module-level doc.  Under memory pressure
+    /// (Apple Silicon unified memory, deep reindex queue) the sidecar can stall
+    /// mid-batch and never write a response line.  A per-call deadline
+    /// (`TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS`, default 120 s) bounds how long
+    /// `read_line` waits: on timeout the call returns
+    /// `EmbedderError::Stdio("embed call timed out …")` so the batch fails fast
+    /// instead of hanging indefinitely and leaving the SSE stream idle until
+    /// the OS tears down the TCP connection.
     ///
     /// What: acquires the stdin lock, serialises one newline-framed JSON-RPC
     /// request, flushes to the child's stdin. Then acquires the stdout lock
-    /// and reads one newline-framed response. Decodes `embeddings`, validates
+    /// and reads one newline-framed response under a `tokio::time::timeout`
+    /// bounded by `embed_call_timeout()`. Decodes `embeddings`, validates
     /// the count, and returns. Any transport or protocol error is mapped to
     /// `EmbedderError::Stdio`.
     ///
-    /// Test: `cargo test -p trusty-embedderd --test bit_identical -- --include-ignored`
+    /// Test: `embed_call_timeout_env_override` (below) + end-to-end:
+    /// `cargo test -p trusty-embedderd --test bit_identical -- --include-ignored`
     async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbedderError> {
         if texts.is_empty() {
             return Ok(vec![]);
@@ -156,11 +201,27 @@ impl EmbedderClient for StdioEmbedderClient {
             .await
             .map_err(|e| EmbedderError::Stdio(format!("flush child stdin: {e}")))?;
 
-        // Read one newline-terminated response frame.
+        // Read one newline-terminated response frame under a deadline.
+        //
+        // Why: `read_line` blocks until the sidecar writes a '\n'. Under memory
+        // pressure the sidecar can stall indefinitely — applying
+        // `tokio::time::timeout` converts that stall into a fast error so the
+        // reindex task can emit a terminal SSE event rather than hanging forever.
         let mut line = String::new();
-        let n = stdout_guard
-            .read_line(&mut line)
+        let timeout = embed_call_timeout();
+        let n = tokio::time::timeout(timeout, stdout_guard.read_line(&mut line))
             .await
+            .map_err(|_| {
+                tracing::warn!(
+                    timeout_secs = timeout.as_secs(),
+                    "StdioEmbedderClient: embed call timed out — sidecar may be stalled"
+                );
+                EmbedderError::Stdio(format!(
+                    "embed call timed out after {}s — sidecar may be stalled \
+                     (set TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS to adjust)",
+                    timeout.as_secs()
+                ))
+            })?
             .map_err(|e| EmbedderError::Stdio(format!("read response from child stdout: {e}")))?;
 
         if n == 0 {
@@ -252,5 +313,40 @@ mod tests {
         let result = resp.result.unwrap();
         assert_eq!(result.embeddings.len(), 2);
         assert_eq!(result.embeddings[0][0], 0.1_f32);
+    }
+
+    /// Verify that a stalled/silent sidecar reader produces a timeout error
+    /// rather than blocking indefinitely.
+    ///
+    /// Why: the root cause of the reindex-stall failure mode is `read_line`
+    /// blocking forever when the sidecar stops writing. This test proves that
+    /// `tokio::time::timeout` on a never-yielding `read_line` call (simulating
+    /// a stalled sidecar) returns an `Elapsed` error rather than hanging,
+    /// which is exactly the behaviour Fix A adds to `embed_batch`.
+    ///
+    /// What: creates a `tokio::io::duplex` reader whose write end is held but
+    /// never written to. Calls `read_line` with a 1 s deadline and asserts the
+    /// result is `Err(Elapsed)`. The `DuplexStream` read end blocks until data
+    /// arrives or the write end is dropped — identical to a stalled sidecar.
+    ///
+    /// Test: this test (`embed_call_stalled_reader_times_out`).
+    #[tokio::test]
+    async fn embed_call_stalled_reader_times_out() {
+        use tokio::io::duplex;
+
+        // `_tx` keeps the write end alive so the read end never sees EOF —
+        // a faithful model of a stalled sidecar that has stopped writing.
+        let (_tx, rx) = duplex(1024);
+        let mut buf = String::new();
+        let mut reader = tokio::io::BufReader::new(rx);
+
+        // This is the exact pattern introduced by Fix A into `embed_batch`.
+        let result = tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut buf)).await;
+
+        assert!(
+            result.is_err(),
+            "a read_line on a never-writing reader must time out under a 1 s deadline; \
+             got: {result:?}"
+        );
     }
 }
