@@ -40,7 +40,7 @@ repos:
     hooks:
       - id: mypy
         additional_dependencies: [types-PyYAML, types-requests]
-        args: ['--config-file=mypy.ini']
+        args: ['--config-file=crates/open-mpm/mypy.ini']
         exclude: ^(venv/|\.venv/|env/|\.env/|build/|dist/|\.git/|tests/.*\.py|scripts/.*\.py)
 
   # Security scanning with bandit
