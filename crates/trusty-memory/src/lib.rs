@@ -900,15 +900,22 @@ impl AppState {
                         loaded += 1;
                     }
                     Err(e) => {
-                        // Why: a single bad palace (corrupt kg.db, stale WAL,
-                        // permissions) must never abort startup or block the
-                        // HTTP server from binding. Log per-palace and keep
-                        // going; the summary below tells operators how many
-                        // were skipped without trawling the log.
+                        // Why (issue #467): a single bad palace (corrupt kg.db,
+                        // stale WAL, EMFILE — "Too many open files", permissions)
+                        // must never abort startup or block the HTTP server from
+                        // binding. Log per-palace and keep going; the summary
+                        // below tells operators how many were skipped without
+                        // trawling the log.
+                        // The palace is NOT registered in the in-memory registry,
+                        // so the next `open_palace` call for this id will attempt
+                        // a fresh open from disk — the lazy-reopen path. If the
+                        // root cause was EMFILE and the fd-limit fix (#462) raised
+                        // the soft limit to 8192, that first request will succeed.
                         tracing::warn!(
                             palace = %palace.id,
                             data_dir = %palace.data_dir.display(),
-                            "skipping palace during startup hydration: {e:#}"
+                            "skipping palace during startup hydration: {e:#}; \
+                             will retry lazily on first access"
                         );
                         skipped += 1;
                     }
@@ -1354,7 +1361,7 @@ pub async fn bind_dynamic_port() -> Result<tokio::net::TcpListener> {
 /// Why: clients must read the file mid-write without observing a partial
 /// value. Writing to a `.tmp` sibling and renaming over the target gives
 /// POSIX atomicity, matching the trusty-search implementation.
-/// What: creates `~/.trusty-memory/` if missing; writes `addr` followed by a
+/// What: creates the parent directory if missing; writes `addr` followed by a
 /// trailing newline (avoids the "no newline at end of file" warnings from
 /// `cat`); renames `.tmp` → `http_addr`. Best-effort: I/O errors are
 /// returned to the caller so `run_http_on` can log without panicking.
@@ -1373,6 +1380,23 @@ fn write_http_addr_file(path: &Path, addr: &SocketAddr) -> std::io::Result<()> {
     }
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Resolve the dotfile discovery path `~/.trusty-memory/http_addr`.
+///
+/// Why (issue #498): external tooling such as claude-mpm's `migrate_trusty_autodetect`
+/// reads `~/.trusty-memory/http_addr` to find the running daemon's port. On
+/// macOS, `resolve_data_dir("trusty-memory")` returns
+/// `~/Library/Application Support/trusty-memory/`, not `~/.trusty-memory/`,
+/// so the daemon was writing to the OS-standard location while readers expected
+/// the dotfile location. Writing to both locations keeps every reader happy
+/// regardless of which convention they follow.
+/// What: returns `$HOME/.trusty-memory/http_addr`, or `None` when
+/// `dirs::home_dir()` is unavailable.
+/// Test: `dotfile_http_addr_path_uses_home_dir`.
+#[cfg(feature = "axum-server")]
+fn dotfile_http_addr_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".trusty-memory").join("http_addr"))
 }
 
 /// Run the optional HTTP/SSE + web admin server.
@@ -1411,15 +1435,16 @@ pub async fn run_http_on(state: AppState, listener: tokio::net::TcpListener) -> 
     // request handler — and the http_addr discovery file — see the real port
     // even if `local_addr()` would otherwise be racy.
     let local = listener.local_addr().ok();
-    let written_path = if let Some(a) = local {
+    let (written_path, written_dotfile_path) = if let Some(a) = local {
         // Stash on state for handlers (e.g. /health) to surface.
         let _ = state.bound_addr.set(a);
         info!("HTTP server listening on http://{a}");
         eprintln!("HTTP server listening on http://{a}");
-        // Best-effort: a missing $HOME or read-only fs is non-fatal — the
-        // /health endpoint still advertises `addr`. Logging the failure
-        // helps operators diagnose discovery problems.
-        match http_addr_path() {
+        // Primary: write to the OS-standard data dir (`~/Library/Application
+        // Support/trusty-memory/http_addr` on macOS, `~/.local/share/…` on
+        // Linux). This is what `trusty_common::read_daemon_addr` reads.
+        // Best-effort: a missing $HOME or read-only fs is non-fatal.
+        let primary = match http_addr_path() {
             Some(p) => match write_http_addr_file(&p, &a) {
                 Ok(()) => {
                     info!("wrote daemon address to {}", p.display());
@@ -1434,9 +1459,29 @@ pub async fn run_http_on(state: AppState, listener: tokio::net::TcpListener) -> 
                 tracing::warn!("no $HOME — skipping http_addr discovery file");
                 None
             }
-        }
+        };
+        // Issue #498: also write to `~/.trusty-memory/http_addr` so external
+        // tools (e.g. claude-mpm's `migrate_trusty_autodetect`) that read the
+        // dotfile path can discover the daemon's port. On macOS the OS-standard
+        // path differs from the dotfile path; writing both ensures consumers
+        // using either convention find the file. Best-effort: failures are
+        // logged but do not block startup.
+        let dotfile = match dotfile_http_addr_path() {
+            Some(p) => match write_http_addr_file(&p, &a) {
+                Ok(()) => {
+                    info!("wrote daemon address to dotfile {}", p.display());
+                    Some(p)
+                }
+                Err(e) => {
+                    tracing::warn!("could not write dotfile {}: {e}", p.display());
+                    None
+                }
+            },
+            None => None,
+        };
+        (primary, dotfile)
     } else {
-        None
+        (None, None)
     };
 
     // Multi-transport refactor: bind the Unix domain socket alongside
@@ -1459,9 +1504,13 @@ pub async fn run_http_on(state: AppState, listener: tokio::net::TcpListener) -> 
 
     let serve_result = axum::serve(listener, app).await;
 
-    // Best-effort cleanup: remove `http_addr` so stale clients fail fast
-    // instead of timing out against a dead port.
+    // Best-effort cleanup: remove `http_addr` files so stale clients fail fast
+    // instead of timing out against a dead port. Remove both the OS-standard
+    // path and the dotfile path (#498).
     if let Some(p) = written_path.as_ref() {
+        let _ = std::fs::remove_file(p);
+    }
+    if let Some(p) = written_dotfile_path.as_ref() {
         let _ = std::fs::remove_file(p);
     }
     if let Some(p) = uds_sock_path.as_ref() {
@@ -2581,5 +2630,110 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("TRUSTY_BM25_DAEMON", v) },
             None => unsafe { std::env::remove_var("TRUSTY_BM25_DAEMON") },
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #467 — palaces skipped at startup hydration are lazily re-opened
+    // -------------------------------------------------------------------------
+
+    /// Why (issue #467): when `load_palaces_from_disk` fails to open a palace
+    /// (e.g. EMFILE — "Too many open files"), it logs a warning and does NOT
+    /// register the palace in the in-memory registry. A subsequent call to
+    /// `open_palace` for that id must attempt a fresh open from disk, not
+    /// permanently return "not found". This test verifies the lazy-reopen
+    /// path: create a palace on disk, remove it from the registry (simulating a
+    /// startup-hydration skip), then open it via `open_palace` and assert success.
+    /// What: builds an `AppState` with an on-disk palace that is subsequently
+    /// removed from the in-memory registry (simulating what happens when
+    /// `PalaceHandle::open` fails during `load_palaces_from_disk`), calls
+    /// `registry.open_palace`, and asserts the palace handle is returned.
+    /// Test: this test.
+    #[tokio::test]
+    async fn open_palace_lazy_reopens_hydration_skipped_palace() {
+        let (state, _tmp) = test_state();
+        // Create a palace on disk.
+        let pid = trusty_common::memory_core::palace::PalaceId::new("hydration-skip");
+        let palace = trusty_common::memory_core::Palace {
+            id: pid.clone(),
+            name: "hydration-skip".to_string(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: state.data_root.join("hydration-skip"),
+        };
+        state
+            .registry
+            .create_palace(&state.data_root, palace)
+            .expect("create_palace");
+
+        // Simulate a startup-hydration skip by removing the just-registered handle.
+        // In production, the palace is simply never registered because
+        // PalaceHandle::open failed during load_palaces_from_disk (EMFILE etc.).
+        state.registry.remove(&pid);
+
+        // The registry must now report no in-memory handle for this palace.
+        assert!(
+            state.registry.get(&pid).is_none(),
+            "palace must appear absent (simulating hydration skip) before the lazy-reopen"
+        );
+
+        // Calling open_palace should attempt a fresh open from disk and succeed.
+        let handle = state
+            .registry
+            .open_palace(&state.data_root, &pid)
+            .expect("open_palace must lazily reopen a hydration-skipped palace");
+        assert_eq!(handle.id.as_str(), "hydration-skip");
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #498 — dotfile http_addr path uses $HOME/.trusty-memory/http_addr
+    // -------------------------------------------------------------------------
+
+    /// Why (issue #498): claude-mpm's `migrate_trusty_autodetect` reads
+    /// `~/.trusty-memory/http_addr` to discover the daemon's port. On macOS
+    /// the OS-standard data dir differs from the dotfile path, so the daemon
+    /// was writing to the wrong location and claude-mpm always fell back to the
+    /// hardcoded port `7070`. This test confirms `dotfile_http_addr_path()`
+    /// returns a path rooted at `$HOME/.trusty-memory/http_addr`.
+    /// What: under a known HOME, calls `dotfile_http_addr_path` and asserts the
+    /// returned path ends in `.trusty-memory/http_addr`.
+    /// Test: this test.
+    #[cfg(feature = "axum-server")]
+    #[test]
+    fn dotfile_http_addr_path_uses_home_dir() {
+        // `dirs::home_dir()` is not redirectable via env on macOS, but we can
+        // at least assert that when it returns Some, the suffix is correct.
+        if let Some(p) = dotfile_http_addr_path() {
+            assert!(
+                p.ends_with(".trusty-memory/http_addr"),
+                "dotfile path must end in .trusty-memory/http_addr; got {}",
+                p.display()
+            );
+        }
+        // If home_dir() returns None (locked-down env), the function returns None —
+        // that's acceptable; we just skip the assertion.
+    }
+
+    /// Why (issue #498): the daemon must write to the dotfile path so that
+    /// claude-mpm's `_resolve_base_url` finds the running port. This round-trip
+    /// test exercises `write_http_addr_file` at a dotfile-shaped path and
+    /// confirms the content is readable after the atomic rename.
+    /// What: picks a tempdir as a stand-in for $HOME, writes an addr to
+    /// `.trusty-memory/http_addr`, and reads it back.
+    /// Test: this test.
+    #[cfg(feature = "axum-server")]
+    #[test]
+    fn dotfile_http_addr_write_read_round_trip() {
+        let home = tempfile::tempdir().unwrap();
+        let dotfile_dir = home.path().join(".trusty-memory");
+        let path = dotfile_dir.join("http_addr");
+        let addr: SocketAddr = "127.0.0.1:7099".parse().unwrap();
+        write_http_addr_file(&path, &addr).expect("write_http_addr_file to dotfile path");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            raw.trim(),
+            "127.0.0.1:7099",
+            "dotfile round-trip content mismatch"
+        );
+        assert!(raw.ends_with('\n'), "dotfile must end with a newline");
     }
 }

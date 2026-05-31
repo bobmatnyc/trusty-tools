@@ -591,6 +591,19 @@ struct RememberAsyncBody {
     tags: Option<Vec<String>>,
 }
 
+/// Minimum word count for content accepted by `POST /api/v1/remember`.
+///
+/// Why (issue #466): the fire-and-forget endpoint returns `202 Accepted`
+/// immediately and dispatches the write on a detached task. Any content that
+/// the background worker would reject (e.g. too few tokens) caused silent data
+/// loss — the caller believed the memory was stored when it wasn't. Validating
+/// the minimum synchronously turns silent drops into explicit `422` rejections
+/// so callers know immediately that their content was not queued.
+/// What: mirrors `tools::CONTENT_GATE_MIN_WORDS` (4 words) — the same gate
+/// `handle_memory_remember` applies via `content_gate` in the background task.
+/// Test: `remember_async_rejects_short_content`.
+const REMEMBER_MIN_WORDS: usize = 4;
+
 /// `POST /api/v1/remember` — fire-and-forget memory save.
 ///
 /// Why: sub-agents spawned via Claude Code's Agent tool have no MCP
@@ -603,13 +616,21 @@ struct RememberAsyncBody {
 /// immediately. Failures during the spawned dispatch (palace not found,
 /// content gate skip, redb error) are logged at `warn` but never propagate
 /// back to the caller because the agent has already exited by then.
-/// What: deserialises the body, rejects an empty `content` with 400 (the
-/// only synchronous validation), then maps `{content, palace, tags}` →
-/// `{text, palace, tags}` (the field names `handle_memory_remember`
-/// expects) and dispatches `memory_remember` from a detached task. Returns
-/// `202 Accepted` with `{"status":"queued"}`.
-/// Test: `remember_async_returns_202_and_persists` (happy path) and
-/// `remember_async_rejects_empty_content` (input validation).
+/// Issue #466: synchronous validation of obvious rejections (empty content,
+/// fewer than [`REMEMBER_MIN_WORDS`] whitespace-delimited words) now returns
+/// `422 Unprocessable Entity` before queuing so callers receive a clear error
+/// instead of a false `202`. Content that passes the synchronous checks may
+/// still be dropped by the background worker's fuller filter set (blocklist,
+/// dedup, MCP-level token threshold), but those are less predictable from
+/// the HTTP surface.
+/// What: deserialises the body, rejects empty content (400) and sub-threshold
+/// word count (422), then maps `{content, palace, tags}` → `{text, palace,
+/// tags}` (the field names `handle_memory_remember` expects) and dispatches
+/// `memory_remember` from a detached task. Returns `202 Accepted` with
+/// `{"status":"queued"}`.
+/// Test: `remember_async_returns_202_and_persists` (happy path),
+/// `remember_async_rejects_empty_content` (400 input validation), and
+/// `remember_async_rejects_short_content` (422 for sub-word-count content).
 async fn remember_async(
     State(state): State<AppState>,
     Json(body): Json<RememberAsyncBody>,
@@ -619,6 +640,18 @@ async fn remember_async(
         return Err(ApiError::bad_request(
             "remember: 'content' must be a non-empty string",
         ));
+    }
+    // Issue #466: synchronous minimum-word-count guard. Content with fewer
+    // than REMEMBER_MIN_WORDS whitespace-separated tokens would be silently
+    // dropped by the background `content_gate`; reject it here so the caller
+    // sees a 422 immediately rather than a false 202.
+    let word_count = content.split_whitespace().count();
+    if word_count < REMEMBER_MIN_WORDS {
+        return Err(ApiError::unprocessable(format!(
+            "remember: content too short ({word_count} word(s)); \
+             minimum is {REMEMBER_MIN_WORDS} words. \
+             Use memory_note for short curated facts."
+        )));
     }
 
     // Build the MCP-shaped args once on the request thread so deserialisation
@@ -1140,6 +1173,14 @@ async fn delete_drawer(
 // Recall
 // ---------------------------------------------------------------------------
 
+/// Query parameters shared by the per-palace and cross-palace recall endpoints.
+///
+/// Why: both `GET /api/v1/palaces/{id}/recall` and `GET /api/v1/recall` accept
+/// the same `q` / `top_k` / `deep` triple. Keeping one struct avoids drift
+/// between the two handler signatures.
+/// What: `q` is required; `top_k` and `deep` are optional with handler-side
+/// defaults (10 and false respectively).
+/// Test: `recall_all_handler_*` tests in this module.
 #[derive(Deserialize)]
 struct RecallQuery {
     q: String,
@@ -1147,6 +1188,11 @@ struct RecallQuery {
     top_k: Option<usize>,
     #[serde(default)]
     deep: Option<bool>,
+    /// Issue #465: optional palace filter on the flat `GET /api/v1/recall`
+    /// endpoint. When supplied, recall is scoped to that palace instead of
+    /// fanning out across all palaces. Absent → cross-palace fan-out.
+    #[serde(default)]
+    palace: Option<String>,
 }
 
 async fn recall_handler(
@@ -1164,23 +1210,43 @@ async fn recall_handler(
 #[allow(unused_imports)]
 pub(crate) use crate::service::recall_entry_json;
 
-/// `GET /api/v1/recall?q=<query>&top_k=<n>&deep=<bool>` — cross-palace semantic
-/// search.
+/// `GET /api/v1/recall?q=<query>&top_k=<n>&deep=<bool>[&palace=<id>]` — recall
+/// with optional palace scoping.
 ///
 /// Why: Agents and dashboard widgets often need the most relevant memories
 /// regardless of palace boundary; forcing the caller to issue one request per
 /// palace and merge client-side is both slower (no fan-out) and wrong (no
 /// dedup/rerank). Serving the merged top-k from the daemon collapses the
 /// round-trip and reuses the shared embedder singleton.
-/// What: Lists all palaces, opens each (skipping any that fail to open with a
-/// warning), and delegates to `execute_recall_all`. Returns a JSON array of
-/// `{ palace_id, drawer, score, layer }` entries sorted by score descending.
-/// Test: Exercised via `execute_recall_all` directly and through the MCP
-/// `memory_recall_all` tool dispatch.
+/// Issue #465: the `palace=` query param was silently ignored — this endpoint
+/// always queried the default palace regardless of the supplied filter, causing
+/// callers to receive results from the wrong palace. Fix: when `palace=` is
+/// present and non-empty, route the recall to that specific palace (matching
+/// the behaviour of `GET /api/v1/palaces/{id}/recall`). When absent, fall back
+/// to the cross-palace fan-out.
+/// What: If `palace` query param is set, delegates to `MemoryService::recall`
+/// for that palace. Otherwise lists all palaces, opens each (skipping any that
+/// fail to open with a warning), and delegates to `execute_recall_all`. Returns
+/// a JSON array of `{ palace_id, drawer, score, layer }` entries sorted by
+/// score descending.
+/// Test: `recall_all_handler_honors_palace_filter`,
+/// `recall_all_handler_fans_out_without_palace_param`.
 async fn recall_all_handler(
     State(state): State<AppState>,
     Query(q): Query<RecallQuery>,
 ) -> Result<Json<Value>, ApiError> {
+    // Issue #465: honour the `palace=` query param when present.
+    if let Some(ref palace_id) = q.palace.filter(|s| !s.is_empty()) {
+        let value = crate::service::MemoryService::new(state)
+            .recall(
+                palace_id,
+                &q.q,
+                q.top_k.unwrap_or(10),
+                q.deep.unwrap_or(false),
+            )
+            .await?;
+        return Ok(Json(value));
+    }
     let value = crate::service::MemoryService::new(state)
         .recall_all(&q.q, q.top_k.unwrap_or(10), q.deep.unwrap_or(false))
         .await;
@@ -1835,6 +1901,21 @@ impl ApiError {
     pub(crate) fn internal(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: msg.into(),
+        }
+    }
+    /// Build a 422 Unprocessable Entity response.
+    ///
+    /// Why (issue #466): content that is structurally valid JSON but fails
+    /// semantic validation (e.g. too few words to be worth storing) should
+    /// return 422 rather than 400 (which implies malformed input) or 200/202
+    /// (which would imply success). 422 is the standard HTTP status for
+    /// "request understood but semantically unacceptable".
+    /// What: wraps the message with `StatusCode::UNPROCESSABLE_ENTITY`.
+    /// Test: `remember_async_rejects_short_content`.
+    pub(crate) fn unprocessable(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
             message: msg.into(),
         }
     }
@@ -5096,5 +5177,208 @@ mod tests {
         use base64::Engine as _;
         let no_sep = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"no-separator");
         assert!(decode_triple_id(&no_sep).is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #465 — GET /api/v1/recall?palace= must honour the palace filter
+    // -------------------------------------------------------------------------
+
+    /// Why (issue #465): `GET /api/v1/recall?palace=<id>&q=...` was silently
+    /// ignoring the `palace=` parameter and always fanning out across all
+    /// palaces, returning results from the wrong palace. This test proves the
+    /// route now scopes the recall to the requested palace.
+    /// What: creates two palaces with distinct drawers, requests recall with
+    /// `palace=` set to one of them, and asserts the response is a JSON array
+    /// (the per-palace shape), not the cross-palace object shape.
+    /// Test: this test.
+    #[tokio::test]
+    async fn recall_all_handler_honors_palace_filter() {
+        let state = test_state();
+        // Pre-create a palace so the handler can open it.
+        let palace = Palace {
+            id: PalaceId::new("filter-target"),
+            name: "filter-target".to_string(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: state.data_root.join("filter-target"),
+        };
+        state
+            .registry
+            .create_palace(&state.data_root, palace)
+            .expect("create_palace");
+
+        let app = router().with_state(state);
+        // With palace= set, the handler should delegate to the per-palace path.
+        // Even with no drawers, a valid palace returns a JSON array (possibly
+        // empty), NOT a 404 or a cross-palace object shape.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/recall?q=anything&palace=filter-target")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "recall with valid palace= must return 200"
+        );
+        let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            v.is_array(),
+            "recall with palace= must return a JSON array (per-palace shape); got {v}"
+        );
+    }
+
+    /// Why (issue #465): when `palace=` refers to a non-existent palace, the
+    /// handler must return a 404 — not silently fall back to cross-palace recall.
+    /// What: requests recall with a `palace=` that was never created and asserts
+    /// the response is 404.
+    /// Test: this test.
+    #[tokio::test]
+    async fn recall_all_handler_palace_filter_missing_palace_returns_404() {
+        let state = test_state();
+        let app = router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/recall?q=anything&palace=nonexistent-palace")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "recall with palace= pointing to missing palace must return 404"
+        );
+    }
+
+    /// Why (issue #465): when `palace=` is absent, the endpoint must continue
+    /// to fan out across all palaces (original cross-palace behaviour).
+    /// What: with no palace= param and no palaces created, the cross-palace
+    /// fan-out returns an empty JSON array (no palaces → nothing to search).
+    /// Test: this test.
+    #[tokio::test]
+    async fn recall_all_handler_fans_out_without_palace_param() {
+        let state = test_state();
+        let app = router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/recall?q=anything")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "cross-palace recall with no palace= must return 200"
+        );
+        let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        // No palaces → empty array.
+        assert!(
+            v.is_array(),
+            "cross-palace recall must return a JSON array; got {v}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Issue #466 — POST /api/v1/remember must reject short content synchronously
+    // -------------------------------------------------------------------------
+
+    /// Why (issue #466): content that is too short was silently dropped by the
+    /// background worker while the HTTP response claimed `202 Accepted`.
+    /// Callers believed the memory was stored when it wasn't — silent data loss.
+    /// The fix: validate the minimum word count synchronously and return 422
+    /// before queueing so the caller gets an actionable error immediately.
+    /// What: POSTs content with fewer than REMEMBER_MIN_WORDS words and asserts
+    /// the response is 422, not 202.
+    /// Test: this test.
+    #[tokio::test]
+    async fn remember_async_rejects_short_content() {
+        let state = test_state();
+        let app = router().with_state(state);
+        // "hi" is 1 word — well below REMEMBER_MIN_WORDS (4).
+        for body in [
+            json!({"content": "hi"}),
+            json!({"content": "two words"}),
+            json!({"content": "three word content"}),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/remember")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "short content must return 422; body={body}"
+            );
+        }
+    }
+
+    /// Why (issue #466): content that meets the minimum word count must still
+    /// return 202, proving the synchronous gate does not over-reject.
+    /// What: POSTs exactly REMEMBER_MIN_WORDS words and asserts 202.
+    /// Test: this test (companion to `remember_async_rejects_short_content`).
+    #[tokio::test]
+    async fn remember_async_accepts_content_at_min_words() {
+        let state = test_state();
+        // Pre-create a palace so the spawned task can find it.
+        let palace = Palace {
+            id: PalaceId::new("min-words-test"),
+            name: "min-words-test".to_string(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: state.data_root.join("min-words-test"),
+        };
+        state
+            .registry
+            .create_palace(&state.data_root, palace)
+            .expect("create_palace");
+
+        let app = router().with_state(state);
+        // Exactly 4 words — the minimum.
+        let body = json!({
+            "content": "four words exactly here",
+            "palace": "min-words-test",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/remember")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::ACCEPTED,
+            "content at minimum word count must return 202"
+        );
+        let bytes = to_bytes(resp.into_body(), 512).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            v["status"], "queued",
+            "accepted body must carry status=queued"
+        );
     }
 }

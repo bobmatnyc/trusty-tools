@@ -325,7 +325,20 @@ pub fn project_slug_at(start: &Path) -> Option<String> {
     }
 
     // Step (b): compute from basename and lazily write the pin file.
+    // Guard: never write into a system temp dir, home dir, or filesystem root —
+    // those are unsafe pin locations that would poison every subdirectory.
+    // `is_unsafe_pin_location` was introduced in PR #492 for exactly this
+    // case; if the resolved root is unsafe we still return the derived slug
+    // (so memory operations work) but skip the write.
     let slug = project_slug_from_basename(&root)?;
+    if is_unsafe_pin_location(&root) {
+        tracing::debug!(
+            slug = %slug,
+            root = %root.display(),
+            "skipping lazy pin write: root is a system/home/temp dir"
+        );
+        return Some(slug);
+    }
     let pin = ProjectPin {
         schema_version: PIN_SCHEMA_VERSION,
         palace: slug.clone(),
