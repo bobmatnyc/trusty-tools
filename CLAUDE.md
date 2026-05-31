@@ -222,10 +222,20 @@ concept, a thin `mod.rs` that re-exports, and sibling files with clear single
 responsibilities. File a refactor ticket for any existing file that already exceeds
 500 lines rather than continuing to grow it.
 
-Current known violations (file refactor tickets open):
-- `crates/open-mpm/src/ctrl/mod.rs` (~5,730 lines) → #170
-- `crates/open-mpm/src/runtime.rs` (~5,148 lines) → #171
-- `crates/open-mpm/src/workflow/engine.rs` (~4,965 lines) → #172
+Past violations (refactor tickets #170/#171/#172 are CLOSED and the splits have
+landed — all three former monoliths are now under the 500-line cap):
+- `crates/open-mpm/src/ctrl/mod.rs` — RESOLVED (#170). Split into focused
+  submodules under `crates/open-mpm/src/ctrl/` (`state`, `config`, `repl`,
+  `handlers`, `pm_task`, …); `mod.rs` is now a ~50-line re-export facade.
+- `crates/open-mpm/src/runtime/` — RESOLVED (#171). The original `runtime.rs`
+  was split into a `runtime/` module; every submodule is now under the cap.
+- `crates/open-mpm/src/workflow/engine/` — RESOLVED (#172). The original
+  `engine.rs` was split into an `engine/` module; every submodule is now under
+  the cap (largest is `engine/executor/run.rs` at ~485 lines).
+
+The largest remaining files in `open-mpm` (none tied to an open ticket) are
+`tools/memory/tests.rs` (~605) and `tm/manager.rs` (~570) — file a fresh refactor
+ticket before growing those further.
 
 🔴 **`thiserror` for libraries, `anyhow` for binaries** — library crates
 (`trusty-common`, `trusty-embedderd`, `trusty-bm25-daemon`, etc.) define structured error enums with
@@ -546,8 +556,9 @@ them. All patches must live in the root `Cargo.toml`.
 🔴 **Growing a file past 500 lines instead of splitting** — the compiler does not
 stop you, but continued feature additions to a 1,000+ line file make the module
 harder to review, reason about, and test. Split proactively. The open-mpm `ctrl/`,
-`runtime.rs`, and `workflow/engine.rs` files (#170, #171, #172) are the canonical
-bad examples of what happens when this rule isn't enforced.
+`runtime/`, and `workflow/engine/` modules (#170, #171, #172) were the canonical
+examples of files that grew past the cap; all three have since been split into
+focused submodules and now serve as the worked examples of a clean split.
 
 🟢 **MSRV drift** — the workspace pins `rust-version = "1.88"`. Running
 `rustup update` and picking up a new nightly may introduce syntax that

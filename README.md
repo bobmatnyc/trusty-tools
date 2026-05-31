@@ -47,18 +47,18 @@ Long-term memory storage with semantic search, persistent embedding index, and e
 
 **Quick start:**
 ```bash
-cargo run -p trusty-memory-mcp -- serve
+cargo run -p trusty-memory -- serve
 # Or via MCP stdio:
 # Add to ~/.claude/claude_desktop_config.json:
 # "trusty-memory": {
 #   "command": "cargo",
-#   "args": ["run", "-p", "trusty-memory-mcp", "--", "serve"]
+#   "args": ["run", "-p", "trusty-memory", "--", "serve"]
 # }
 ```
 
 **MCP tools:** `store_memory`, `search_memories`, `update_memory`, `list_collections`, `create_collection`, `get_memory`, `delete_memory`
 
-See [crates/trusty-memory-mcp/README.md](crates/trusty-memory-mcp/README.md) for full documentation.
+See [crates/trusty-memory/README.md](crates/trusty-memory/README.md) for full documentation.
 
 ---
 
@@ -111,8 +111,7 @@ documentation.
 | Crate | Description | License |
 |---|---|---|
 | `trusty-search` | Hybrid code search (BM25 + vector + KG) + MCP server | Elastic-2.0 |
-| `trusty-memory-core` | Memory storage engine (usearch + SQLite + embeddings) | MIT |
-| `trusty-memory-mcp` | Memory palace UI + MCP frontend | MIT |
+| `trusty-memory` | Memory palace UI + MCP frontend (storage engine lives in `trusty-common`'s `memory-core` feature) | MIT |
 | `trusty-analyze` | Code-analysis sidecar daemon (complexity, smells, facts) + MCP server | MIT |
 
 ### Shared Libraries
@@ -212,10 +211,10 @@ cargo fmt
 
 **MSRV:** Rust 1.88+ (required for `let-chains` used by `trusty-mpm-*` and `open-mpm` in edition 2024)
 
-**License:** Elastic License 2.0 (most crates), MIT (trusty-memory-core, trusty-memory-mcp, trusty-gworkspace). See each crate's `Cargo.toml` for the authoritative license field.
+**License:** Elastic License 2.0 (most crates), MIT (trusty-memory, trusty-analyze). See each crate's `Cargo.toml` for the authoritative license field.
 
 **Where to start:**
 - **I want to search code:** Read [crates/trusty-search/README.md](crates/trusty-search/README.md)
-- **I want persistent memory:** Read [crates/trusty-memory-mcp/README.md](crates/trusty-memory-mcp/README.md)
+- **I want persistent memory:** Read [crates/trusty-memory/README.md](crates/trusty-memory/README.md)
 - **I want the full platform:** Read [crates/open-mpm/README.md](crates/open-mpm/README.md)
 
