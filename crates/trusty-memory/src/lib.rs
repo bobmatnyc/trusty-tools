@@ -1502,7 +1502,15 @@ pub async fn run_http_on(state: AppState, listener: tokio::net::TcpListener) -> 
         .route("/sse", get(sse_handler))
         .with_state(state);
 
-    let serve_result = axum::serve(listener, app).await;
+    // Why (issue #534): bare axum::serve exits only on an internal error; SIGTERM
+    // (launchctl bootout) would kill the process before the cleanup below had a
+    // chance to run, leaving stale addr/socket files behind and dropping any
+    // in-flight request without draining. `with_graceful_shutdown` installs a
+    // SIGTERM + SIGINT watcher; when either fires axum stops accepting new
+    // connections, drains active requests, then returns here so cleanup runs.
+    let serve_result = axum::serve(listener, app)
+        .with_graceful_shutdown(trusty_common::shutdown_signal())
+        .await;
 
     // Best-effort cleanup: remove `http_addr` files so stale clients fail fast
     // instead of timing out against a dead port. Remove both the OS-standard

@@ -313,6 +313,25 @@ The `[workspace.package]` table no longer carries a `version` field (see #343).
 When publishing, bump only the crates that actually changed — do not cascade
 version bumps to siblings with no functional changes.
 
+### Connection-safe daemon restart convention (issue #534)
+
+As of trusty-common 0.10.0, all three HTTP daemons (trusty-memory, trusty-search,
+trusty-analyze) implement graceful shutdown: they drain in-flight requests before
+exiting when they receive SIGTERM. The `mcp_bridge` binary reconnects automatically
+with exponential backoff when the daemon restarts.
+
+**Use `launchctl bootout` (SIGTERM), not `launchctl kickstart -k` (SIGKILL):**
+
+```bash
+# Graceful stop → install → restart
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
+cargo install --path crates/<dir> --locked
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
+```
+
+Prefer restarting between Claude Code sessions. See the cargo-publish skill
+(`.claude/skills/cargo-publish/SKILL.md`) for the full restart convention.
+
 ## Cross-Crate Development Workflow
 
 Because all crates are in the same workspace, the `[patch.crates-io]` dance

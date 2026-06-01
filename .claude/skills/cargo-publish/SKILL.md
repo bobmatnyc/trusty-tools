@@ -532,6 +532,53 @@ Before declaring a publish complete:
 - [ ] Worktree cleaned up (`git worktree remove`)
 - [ ] Local and remote branches cleaned up
 
+## Connection-Safe Daemon Restart (issue #534)
+
+When upgrading a launchd-managed trusty-* daemon (trusty-memory, trusty-search,
+trusty-analyze), use SIGTERM via `launchctl bootout` — **never**
+`launchctl kickstart -k` which sends SIGKILL and drops live connections.
+
+### Why SIGTERM instead of SIGKILL
+
+As of issue #534, all three daemons implement graceful shutdown via
+`axum::serve(...).with_graceful_shutdown(trusty_common::shutdown_signal())`.
+When SIGTERM arrives:
+
+1. The daemon stops accepting new connections.
+2. All in-flight requests are drained (allowed to complete normally).
+3. Cleanup code runs (addr files removed, BM25 supervisor reaped, etc.).
+4. The process exits cleanly.
+
+SIGKILL bypasses all of this: active requests die mid-stream, cleanup is
+skipped, and the `mcp_bridge` in the Claude Code session receives an abrupt
+socket close.
+
+### Safe upgrade sequence (macOS launchd)
+
+```bash
+# 1. Stop the daemon gracefully (SIGTERM → drain → exit)
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
+
+# 2. Rebuild and install the new binary
+cargo install --path crates/<crate-dir> --locked
+
+# 3. Restart the daemon
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
+```
+
+**Do NOT use `launchctl kickstart -k <label>`** — the `-k` flag sends SIGKILL
+to the running instance before starting a new one, which kills in-flight
+requests without draining.
+
+### When to restart
+
+Prefer restarting **between Claude Code sessions** (i.e., when no `.mcp.json`
+MCP bridge process is actively connected). Even with graceful shutdown, the
+`mcp_bridge` will need to reconnect after a restart — it does so automatically
+with exponential backoff (200ms → 30s cap), so brief mid-session restarts are
+now transparent to Claude Code for requests that were between calls. Restarts
+during an active in-flight request will still lose that one request.
+
 ## References
 
 - **CLAUDE.md**: "Build and Test Commands", "Git Tag / Release Convention", "Parallel Worktree Discipline"

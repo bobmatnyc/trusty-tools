@@ -397,7 +397,15 @@ pub async fn serve(state: AnalyzerAppState, start_port: u16) -> Result<()> {
     trusty_common::write_daemon_addr("trusty-analyze", &actual.to_string())?;
     tracing::info!("trusty-analyze listening on http://{actual}");
     let app = build_router(state);
-    axum::serve(listener, app).await?;
+    // Why (issue #534): without `with_graceful_shutdown`, SIGTERM from
+    // `launchctl bootout` kills the process before any cleanup code in the
+    // caller (PID file removal, supervisor shutdown) can run, and in-flight
+    // analysis requests are dropped mid-stream. The shared `shutdown_signal()`
+    // helper waits for SIGTERM or SIGINT; when it resolves, axum drains active
+    // connections before returning control here so cleanup runs normally.
+    axum::serve(listener, app)
+        .with_graceful_shutdown(trusty_common::shutdown_signal())
+        .await?;
     Ok(())
 }
 

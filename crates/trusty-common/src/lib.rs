@@ -34,6 +34,18 @@ pub mod chat;
 pub mod claude_config;
 pub mod project_discovery;
 
+/// Shared graceful-shutdown signal helper for trusty-* daemons (issue #534).
+///
+/// Why: trusty-search, trusty-memory, and trusty-analyze all need the same
+/// SIGTERM + SIGINT shutdown future to pass to axum's `with_graceful_shutdown`.
+/// Centralising it here eliminates three-way duplication and guarantees every
+/// daemon responds identically to `launchctl bootout`.
+/// What: exposes [`shutdown_signal`] — an async fn that resolves on SIGTERM
+/// (unix) or SIGINT/Ctrl-C (all platforms), whichever fires first.
+/// Test: `cargo test -p trusty-common -- shutdown`.
+pub mod shutdown;
+pub use shutdown::shutdown_signal;
+
 /// Bounded in-memory ring buffer of recent tracing log lines.
 ///
 /// Why: trusty-* daemons expose a `/logs/tail` endpoint so operators can read

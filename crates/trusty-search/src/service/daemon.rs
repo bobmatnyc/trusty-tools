@@ -405,29 +405,13 @@ fn acquire_lock(lock_path: &PathBuf) -> Result<File, DaemonError> {
     Err(DaemonError::AlreadyRunning(lock_path.clone()))
 }
 
-/// Future that resolves on SIGTERM or SIGINT.
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut term = match signal(SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("install SIGTERM handler failed: {e}");
-                let _ = tokio::signal::ctrl_c().await;
-                return;
-            }
-        };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-    }
-}
+// Why: the shared `shutdown_signal` helper in trusty-common provides identical
+// SIGTERM + SIGINT handling for all trusty-* daemons (issue #534). Delegating
+// to it removes local duplication while keeping behaviour identical.
+// What: re-export as a module-private alias so call sites below are unchanged.
+// Test: trusty-common's own unit test confirms compilation; the integration
+// tests here exercise the full `with_graceful_shutdown` path.
+use trusty_common::shutdown_signal;
 
 /// Start the daemon: acquire the lock, bind a port, write the port file,
 /// serve the axum router until SIGTERM/SIGINT, then clean up the port file.

@@ -43,8 +43,8 @@ trusty-common = { workspace = true, features = ["mcp", "symgraph-parser", "memor
 #      `default-features = false` drops the `axum-server` feature so we don't
 #      compile the trusty-memory HTTP daemon code paths just to pick up a
 #      zero-sized service descriptor.
-trusty-memory = { path = "../trusty-memory", version = "0.12.0", default-features = false }
-trusty-search = { path = "../trusty-search", version = "0.21.0" }
+trusty-memory = { path = "../trusty-memory", version = "0.13.0", default-features = false }
+trusty-search = { path = "../trusty-search", version = "0.21.1" }
 tokio = { version = "1", features = ["full"] }
 async-openai = "0.30"
 serde = { version = "1", features = ["derive"] }
