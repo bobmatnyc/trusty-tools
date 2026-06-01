@@ -102,6 +102,19 @@ impl Response {
     }
 }
 
+/// Per-request timeout for the MCP→daemon HTTP client (in seconds).
+///
+/// Why: the `deep_analysis` tool calls `POST /analyze/deep`, which in turn
+/// calls OpenRouter with up to 120 s allowed (matching `OPENROUTER_REQUEST_TIMEOUT_SECS`
+/// in `trusty-common/src/chat.rs`). Adding 30 s of headroom for report synthesis
+/// and network round-trips gives 150 s total — safely above the 120 s
+/// OpenRouter ceiling so slow or large-context models are not systematically
+/// killed at the MCP transport layer before the daemon's own timeout fires.
+/// What: sets the per-request timeout passed to `reqwest::ClientBuilder`.
+/// Test: `mcp_client_timeout_exceeds_openrouter_ceiling` asserts this value
+/// is strictly greater than 120 (the OpenRouter maximum).
+const DEEP_ANALYSIS_MCP_TIMEOUT_SECS: u64 = 150;
+
 /// MCP dispatcher backed by an HTTP client targeting the analyzer daemon.
 #[derive(Clone)]
 pub struct AnalyzerMcpServer {
@@ -111,15 +124,22 @@ pub struct AnalyzerMcpServer {
 
 impl AnalyzerMcpServer {
     /// Why: without timeouts MCP tool calls hang forever if the analyze daemon
-    /// is slow or unresponsive, blocking the entire stdio dispatch loop.
-    /// What: builds a `reqwest::Client` with a 30 s per-request timeout and a
-    /// 5 s TCP connect timeout — mirroring the pattern in
-    /// `crates/trusty-analyze/src/core/client.rs`.
+    /// is slow or unresponsive, blocking the entire stdio dispatch loop. The
+    /// per-request timeout is set to [`DEEP_ANALYSIS_MCP_TIMEOUT_SECS`] (150 s)
+    /// so LLM-backed tools like `deep_analysis` — which can take up to the
+    /// OpenRouter 120 s ceiling plus synthesis headroom — complete without
+    /// being aborted at the transport layer.
+    /// What: builds a `reqwest::Client` with a 150 s per-request timeout and a
+    /// 5 s TCP connect timeout. The connect timeout is kept short because the
+    /// daemon is always local; the long request timeout is required only for
+    /// the LLM call path.
     /// Test: `cargo test -p trusty-analyze -- mcp` exercises dispatch paths;
-    /// the timeout prevents indefinite hangs in production usage.
+    /// `mcp_client_timeout_exceeds_openrouter_ceiling` asserts the const value.
     pub fn new(base_url: impl Into<String>) -> Self {
         let http = reqwest::ClientBuilder::new()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(
+                DEEP_ANALYSIS_MCP_TIMEOUT_SECS,
+            ))
             .connect_timeout(std::time::Duration::from_secs(5))
             .build()
             .expect("reqwest ClientBuilder is infallible with valid config");
@@ -1194,6 +1214,26 @@ mod tests {
         assert!(q.contains("subject=fn%20auth"), "got {q}");
         assert!(q.contains("object=JWT"), "got {q}");
         assert!(!q.contains("predicate"), "got {q}");
+    }
+
+    /// Verify at compile time that the MCP client timeout is strictly greater
+    /// than OpenRouter's 120 s maximum so deep_analysis calls are never aborted
+    /// at the MCP transport layer before the daemon's own timeout fires.
+    ///
+    /// Why: issue #528 — a 30 s MCP timeout silently killed any LLM response
+    /// taking more than 30 s, even when the daemon and API key were correct.
+    /// What: compile-time assertion that `DEEP_ANALYSIS_MCP_TIMEOUT_SECS > 120`.
+    /// Test: this is the test — it fails to compile if the const regresses.
+    #[test]
+    fn mcp_client_timeout_exceeds_openrouter_ceiling() {
+        // The OpenRouter request timeout in trusty-common/src/chat.rs is 120 s.
+        // Our MCP client must allow more than that. Use const assertion so
+        // clippy does not flag `assertions_on_constants`.
+        const OPENROUTER_CEILING_SECS: u64 = 120;
+        const _: () = assert!(
+            DEEP_ANALYSIS_MCP_TIMEOUT_SECS > OPENROUTER_CEILING_SECS,
+            "DEEP_ANALYSIS_MCP_TIMEOUT_SECS must be > OpenRouter ceiling (120 s)"
+        );
     }
 
     #[tokio::test]

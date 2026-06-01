@@ -1148,7 +1148,9 @@ async fn deep_analyze_handler(
     let api_key = state.api_key.as_deref().filter(|s| !s.is_empty());
     if api_key.is_none() {
         return Err(ApiError::bad_request(
-            "OPENROUTER_API_KEY is not configured on the daemon; cannot run deep analysis",
+            "OPENROUTER_API_KEY is not configured on the daemon; \
+             set OPENROUTER_API_KEY in the environment and restart the daemon, \
+             then retry deep analysis",
         ));
     }
 

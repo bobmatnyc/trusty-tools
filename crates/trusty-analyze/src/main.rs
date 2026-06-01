@@ -432,6 +432,22 @@ async fn main() -> Result<()> {
             };
             let state = AnalyzerAppState::new(search, facts).with_embedder(embedder);
 
+            // Warn at startup when OPENROUTER_API_KEY is absent so operators
+            // notice the gap before any deep-analysis call returns a 400.
+            // Why: the key is read once at startup (stored in state.api_key);
+            // setting it after the daemon is running has no effect until the
+            // next restart. A clear startup warning surfaces this constraint
+            // early (issue #528).
+            // What: logs a WARN to stderr when the resolved api_key is None.
+            // Test: side-effect-only — verified by running the daemon without
+            // the env var and observing the log line.
+            if state.api_key.is_none() {
+                tracing::warn!(
+                    "OPENROUTER_API_KEY is not set; deep (LLM) analysis will be \
+                     unavailable until the daemon is restarted with it set"
+                );
+            }
+
             // Optionally start the MCP HTTP/SSE server on a separate port.
             // Why: some MCP clients (and remote integrations) prefer HTTP/SSE
             // over stdio. Spawned independently of the analyzer's own HTTP
