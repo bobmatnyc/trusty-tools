@@ -121,7 +121,7 @@ pub fn query_effort_histogram(
 /// What: total/merged counts plus optional cycle-time statistics (omitted
 /// when no merged PRs are present, or when the sample is too small for p95).
 /// Test: see `tests::pr_metrics_basic` and `tests::pr_metrics_no_prs`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrMetrics {
     /// Total PRs authored (all states).
     pub total: u64,

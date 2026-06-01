@@ -8,7 +8,7 @@ pub mod extractor;
 pub mod fetch;
 pub mod reachability;
 
-pub use diff::{compute_commit_diff, CommitDiff, FileDiff};
+pub use diff::{compute_commit_diff, diff_for_commit, CommitDiff, FileDiff, DIFF_BYTE_CAP};
 pub use extractor::GitCollector;
 pub use fetch::fetch_remote;
 pub use reachability::{
