@@ -31,7 +31,9 @@ futures-util = { workspace = true }
 # ── HTTP (library code only — no axum in lib unconditionally) ──────────────
 reqwest      = { workspace = true }
 axum         = { workspace = true, optional = true }
+tower        = { workspace = true, optional = true }
 tower-http   = { workspace = true, optional = true }
+tempfile     = { workspace = true, optional = true }
 
 # ── Serialisation ──────────────────────────────────────────────────────────
 serde        = { workspace = true }
@@ -82,8 +84,10 @@ chrono       = { workspace = true }
 #   trusty-review = { features = ["http-server"] }
 # without a manifest change in a later stage.
 default     = ["http-server"]
-http-server = ["dep:axum", "dep:tower-http", "trusty-common/axum-server"]
+http-server = ["dep:axum", "dep:tower", "dep:tower-http", "dep:tempfile", "trusty-common/axum-server"]
 
 [dev-dependencies]
 tokio        = { workspace = true }
 tempfile     = { workspace = true }
+tower        = { workspace = true }
+axum         = { workspace = true }
