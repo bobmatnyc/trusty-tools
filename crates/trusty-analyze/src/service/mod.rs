@@ -1145,14 +1145,32 @@ async fn deep_analyze_handler(
     if req.index_id.trim().is_empty() {
         return Err(ApiError::bad_request("missing required 'index_id' field"));
     }
-    let api_key = state.api_key.as_deref().filter(|s| !s.is_empty());
-    if api_key.is_none() {
-        return Err(ApiError::bad_request(
-            "OPENROUTER_API_KEY is not configured on the daemon; \
-             set OPENROUTER_API_KEY in the environment and restart the daemon, \
-             then retry deep analysis",
-        ));
-    }
+
+    // Determine the effective model id so we can decide whether an API key is
+    // required. Bedrock models (prefixed with "bedrock/") use AWS credential
+    // chain auth — no OPENROUTER_API_KEY needed.
+    let effective_model = req
+        .model
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&state.llm_model);
+
+    let uses_bedrock = effective_model.starts_with(crate::core::explain::BEDROCK_MODEL_PREFIX);
+
+    let api_key = if uses_bedrock {
+        // Bedrock path: no OpenRouter key needed.
+        None
+    } else {
+        let key = state.api_key.as_deref().filter(|s| !s.is_empty());
+        if key.is_none() {
+            return Err(ApiError::bad_request(
+                "OPENROUTER_API_KEY is not configured on the daemon; \
+                 set OPENROUTER_API_KEY in the environment and restart the daemon, \
+                 or use a bedrock/<model-id> model instead",
+            ));
+        }
+        key
+    };
 
     // Either use the caller-supplied report, or synthesise one from the index
     // corpus. Synthesis: treat the whole indexed corpus as one big "no-diff"
@@ -1178,6 +1196,7 @@ async fn deep_analyze_handler(
     .await
     .map_err(|e| match e {
         crate::core::DeepAnalysisError::MissingApiKey => ApiError::bad_request(format!("{e}")),
+        crate::core::DeepAnalysisError::BedrockAuth => ApiError::bad_request(format!("{e}")),
         crate::core::DeepAnalysisError::Chat(_) => ApiError::bad_gateway(format!("{e}")),
     })?;
     Ok(Json(report))

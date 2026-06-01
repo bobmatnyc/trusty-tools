@@ -113,6 +113,52 @@ DELETE /facts/:id
 POST /indexes/:id/scip
 ```
 
+## Deep-Analysis LLM Pass
+
+`POST /analyze/deep` (and the `deep_analysis` MCP tool) generate a prose
+narrative for an analyzed index using an LLM. The provider is selected by
+the `TRUSTY_LLM_MODEL` environment variable.
+
+### Using OpenRouter (default)
+
+```bash
+export OPENROUTER_API_KEY=sk-or-v1-...
+export TRUSTY_LLM_MODEL=openai/gpt-4o-mini   # default; override as needed
+trusty-analyze serve --search-url http://127.0.0.1:7878
+```
+
+### Using AWS Bedrock
+
+Set the model id with the `bedrock/` prefix. No OpenRouter key is required —
+auth uses the standard AWS credential chain (env vars, `~/.aws/credentials`,
+IAM role, SSO).
+
+```bash
+# Claude Sonnet 4.6 via cross-region inference profile (recommended):
+export TRUSTY_LLM_MODEL=bedrock/us.anthropic.claude-sonnet-4-6-20250514-v1:0
+
+# AWS credentials (any supported form):
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_REGION=us-east-1           # or: export TRUSTY_AWS_REGION=eu-west-1
+
+trusty-analyze serve --search-url http://127.0.0.1:7878
+```
+
+When the model id starts with `bedrock/`, the daemon routes the LLM call
+through `aws-sdk-bedrockruntime`'s `Converse` endpoint rather than OpenRouter.
+The rest of the deep-analysis pipeline (prompt construction, narrative
+accumulation, recommendations extraction) is identical.
+
+#### Bedrock environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `TRUSTY_LLM_MODEL` | `openai/gpt-4o-mini` | Model id. Prefix with `bedrock/` to select AWS Bedrock. |
+| `TRUSTY_AWS_REGION` | — | AWS region for Bedrock calls (takes priority over `AWS_REGION`). |
+| `AWS_REGION` | `us-east-1` | Fallback AWS region (standard env var). |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | — | Static AWS credentials. Alternatives: `AWS_PROFILE`, IAM role, SSO. |
+
 ## Configuration
 
 | Variable | Default | Description |

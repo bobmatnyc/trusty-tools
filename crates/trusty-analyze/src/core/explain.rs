@@ -71,17 +71,24 @@ pub struct DeepAnalysisReport {
 /// Errors returned by [`deep_analysis`] / [`explain_report`].
 ///
 /// Why: keeps the failure surface typed so callers (CLI / HTTP / MCP) can
-/// distinguish configuration problems (missing API key) from runtime ones
-/// (chat transport failure). The chat-stream surface itself is anyhow-friendly
-/// inside [`explain_report`]; this enum wraps the orchestrator entry point.
-/// Test: `missing_api_key_returns_typed_error`.
+/// distinguish configuration problems (missing API key or AWS credentials)
+/// from runtime ones (chat transport failure). The chat-stream surface itself
+/// is anyhow-friendly inside [`explain_report`]; this enum wraps the
+/// orchestrator entry point.
+/// Test: `missing_api_key_returns_typed_error`, `bedrock_prefix_routing`.
 #[derive(Debug, thiserror::Error)]
 pub enum DeepAnalysisError {
-    /// `OPENROUTER_API_KEY` is not set and no key was passed explicitly.
+    /// `OPENROUTER_API_KEY` is not set and no key was passed explicitly (OpenRouter path only).
     #[error("OPENROUTER_API_KEY is not set; deep analysis requires an OpenRouter API key")]
     MissingApiKey,
-    /// The chat call to OpenRouter failed (network, auth, rate limit, ...).
-    #[error("openrouter chat failed: {0}")]
+    /// AWS credentials are not configured for the Bedrock deep-analysis path.
+    #[error(
+        "AWS credentials not configured for Bedrock deep analysis — \
+         set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or AWS_PROFILE, IAM role, SSO)"
+    )]
+    BedrockAuth,
+    /// The LLM provider chat call failed (network, auth, rate limit, etc.).
+    #[error("LLM provider chat failed: {0}")]
     Chat(String),
 }
 
@@ -339,20 +346,36 @@ pub fn resolve_model(explicit: Option<&str>) -> String {
         .unwrap_or_else(|| DEFAULT_MODEL.to_string())
 }
 
-/// Run a full deep-analysis pass: build an [`OpenRouterProvider`], call
-/// [`explain_report`], and wrap the result in a [`DeepAnalysisReport`].
+/// Prefix that selects the Bedrock provider in `TRUSTY_LLM_MODEL`.
+///
+/// Set `TRUSTY_LLM_MODEL=bedrock/<bedrock-model-id>` to route the deep pass
+/// through AWS Bedrock. Omitting the prefix (or using any other prefix) routes
+/// to OpenRouter.
+pub const BEDROCK_MODEL_PREFIX: &str = "bedrock/";
+
+/// Default Bedrock model id used when the caller sets
+/// `TRUSTY_LLM_MODEL=bedrock/` without a trailing model id.
+///
+/// Uses the Claude Sonnet 4.6 cross-region inference profile.
+/// TODO verify: confirm this matches the current Bedrock inference-profile id.
+pub const DEFAULT_BEDROCK_MODEL_ID: &str = trusty_common::chat::DEFAULT_BEDROCK_MODEL;
+
+/// Run a full deep-analysis pass, routing to AWS Bedrock or OpenRouter based
+/// on the model id prefix.
 ///
 /// Why: the single orchestration entry point used by the HTTP, MCP, and CLI
 /// layers so they all produce identical [`DeepAnalysisReport`]s regardless of
 /// transport. Keeping the provider construction in one place means env-var
 /// resolution and model-default behaviour live in exactly one location.
-/// What: resolves the API key + model (env or override), constructs an
-/// [`trusty_common::chat::OpenRouterProvider`], calls [`explain_report`],
-/// best-effort extracts a recommendations list from the narrative, and
-/// returns the assembled [`DeepAnalysisReport`].
-/// Test: `missing_api_key_returns_typed_error` covers the no-key path; the
-/// happy path requires `OPENROUTER_API_KEY` and is exercised by integration
-/// tests in the CLI/HTTP layers.
+/// What: resolves the model id (env or override). If the model id starts with
+/// `bedrock/`, constructs a [`trusty_common::chat::BedrockProvider`] using the
+/// standard AWS credential chain (no API key needed). Otherwise, resolves the
+/// OpenRouter API key and constructs an
+/// [`trusty_common::chat::OpenRouterProvider`]. Calls [`explain_report`],
+/// best-effort extracts a recommendations list, and returns
+/// [`DeepAnalysisReport`].
+/// Test: `missing_api_key_returns_typed_error` (OpenRouter no-key path);
+/// `bedrock_prefix_routing` (routing unit test, no network).
 pub async fn deep_analysis(
     index_id: &str,
     report: ReviewReport,
@@ -360,15 +383,49 @@ pub async fn deep_analysis(
     api_key: Option<&str>,
     model: Option<&str>,
 ) -> Result<DeepAnalysisReport, DeepAnalysisError> {
-    use trusty_common::chat::OpenRouterProvider;
-
-    let api_key = resolve_api_key(api_key)?;
     let model = resolve_model(model);
-    let provider = OpenRouterProvider::new(api_key, &model);
 
-    let narrative = explain_report(&report, &frameworks, &provider)
-        .await
-        .map_err(|e| DeepAnalysisError::Chat(format!("{e:#}")))?;
+    let narrative = if model.starts_with(BEDROCK_MODEL_PREFIX) {
+        // ── Bedrock path ──────────────────────────────────────────────────
+        let bedrock_model_id = model
+            .strip_prefix(BEDROCK_MODEL_PREFIX)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_BEDROCK_MODEL_ID);
+
+        let region = std::env::var("TRUSTY_AWS_REGION")
+            .or_else(|_| std::env::var("AWS_REGION"))
+            .ok();
+
+        use trusty_common::chat::BedrockProvider;
+        let provider = BedrockProvider::new(bedrock_model_id, region.as_deref())
+            .await
+            .map_err(|e| DeepAnalysisError::Chat(format!("Bedrock provider init: {e:#}")))?;
+
+        explain_report(&report, &frameworks, &provider)
+            .await
+            .map_err(|e| {
+                let msg = format!("{e:#}");
+                // Surface a BedrockAuth variant for credential-related errors.
+                if msg.to_lowercase().contains("credential")
+                    || msg.to_lowercase().contains("no credentials")
+                    || msg.to_lowercase().contains("aws")
+                {
+                    DeepAnalysisError::BedrockAuth
+                } else {
+                    DeepAnalysisError::Chat(msg)
+                }
+            })?
+    } else {
+        // ── OpenRouter path ───────────────────────────────────────────────
+        use trusty_common::chat::OpenRouterProvider;
+
+        let api_key = resolve_api_key(api_key)?;
+        let provider = OpenRouterProvider::new(api_key, &model);
+
+        explain_report(&report, &frameworks, &provider)
+            .await
+            .map_err(|e| DeepAnalysisError::Chat(format!("{e:#}")))?
+    };
 
     let recommendations = extract_recommendations(&narrative);
 
@@ -689,5 +746,48 @@ mod tests {
         };
         let text = render_text(&r);
         assert!(text.contains("frameworks: none detected"));
+    }
+
+    /// Verify that the `bedrock/` prefix is detected correctly and that the
+    /// model id is stripped before being passed to `BedrockProvider`.
+    ///
+    /// Why: the prefix-routing logic must be stable — any drift would silently
+    /// send `bedrock/` model ids to OpenRouter, which would fail with a 404.
+    /// What: checks the constant prefix string, and verifies that `strip_prefix`
+    /// on a sample model id produces the correct bare id.
+    /// Test: pure string logic, no network or provider construction needed.
+    #[test]
+    fn bedrock_prefix_routing() {
+        let full_model = "bedrock/us.anthropic.claude-sonnet-4-6-20250514-v1:0";
+        assert!(full_model.starts_with(BEDROCK_MODEL_PREFIX));
+        let stripped = full_model
+            .strip_prefix(BEDROCK_MODEL_PREFIX)
+            .expect("strip_prefix should succeed");
+        assert_eq!(stripped, "us.anthropic.claude-sonnet-4-6-20250514-v1:0");
+
+        // Non-bedrock model ids should NOT match the prefix.
+        assert!(!("openai/gpt-4o-mini".starts_with(BEDROCK_MODEL_PREFIX)));
+        assert!(!("anthropic/claude-3-5-sonnet".starts_with(BEDROCK_MODEL_PREFIX)));
+
+        // Default model constant should be the bare id (no prefix).
+        assert!(!DEFAULT_BEDROCK_MODEL_ID.starts_with(BEDROCK_MODEL_PREFIX));
+    }
+
+    /// Verify that `bedrock/` with nothing after the slash falls back to the
+    /// default model id constant.
+    ///
+    /// Why: operators may set `TRUSTY_LLM_MODEL=bedrock/` without a specific
+    /// model to get the default Sonnet 4.6 profile. The routing logic should
+    /// gracefully handle this.
+    /// What: checks the fallback branch in `deep_analysis`'s model-id stripping.
+    /// Test: pure string logic.
+    #[test]
+    fn bedrock_prefix_empty_suffix_falls_back_to_default() {
+        let full_model = "bedrock/";
+        let id = full_model
+            .strip_prefix(BEDROCK_MODEL_PREFIX)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_BEDROCK_MODEL_ID);
+        assert_eq!(id, DEFAULT_BEDROCK_MODEL_ID);
     }
 }

@@ -1,28 +1,21 @@
-//! Provider-agnostic streaming chat abstraction with tool-use support.
+//! OpenAI-compatible SSE streaming providers: OpenRouter and Ollama.
 //!
-//! Why: trusty-memory and trusty-search both want to support more than one
-//! upstream LLM (OpenRouter for cloud, Ollama / LM Studio for local). Rather
-//! than each crate re-implementing the dispatch, we expose a small
-//! [`ChatProvider`] trait plus two concrete implementations and an
-//! auto-detector for a running local model server. The trait also surfaces
-//! OpenAI-style tool/function calling so downstream agents can let the model
-//! invoke tools (search, memory recall, shell, etc.).
-//!
-//! What: defines the [`ChatProvider`] trait, [`ToolDef`] / [`ToolCall`] /
-//! [`ChatEvent`] tool-use types, an [`OpenRouterProvider`] and an
-//! [`OllamaProvider`] that both speak OpenAI-compatible
-//! `/v1/chat/completions` with SSE streaming (including the streamed
-//! `tool_calls` shape), and [`auto_detect_local_provider`] which probes
-//! `{base_url}/v1/models` with a 1-second timeout.
-//!
-//! Test: `cargo test -p trusty-common` covers default config values, the
-//! unreachable-server path of `auto_detect_local_provider`, SSE delta
-//! streaming, and accumulation of streamed tool-call fragments.
+//! Why: OpenRouter and Ollama both speak the same OpenAI-compatible
+//! `/v1/chat/completions` wire format with SSE streaming. Keeping the shared
+//! SSE pump and both providers in one file avoids duplication while keeping
+//! the Bedrock provider isolated in its own module.
+//! What: [`OpenRouterProvider`], [`OllamaProvider`], the shared SSE pump
+//! (`pump_openai_sse`), and [`auto_detect_local_provider`] which probes a
+//! running local server.
+//! Test: `ollama_provider_streams_sse_deltas`, `auto_detect_returns_none_on_unreachable`,
+//! `accumulates_streamed_tool_call_fragments`, etc. in the parent module's
+//! test suite.
 
+use super::{ChatEvent, ChatProvider, ToolCall, ToolDef};
 use crate::ChatMessage;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::sync::mpsc::Sender;
 
 const LOCAL_PROBE_TIMEOUT_SECS: u64 = 1;
@@ -33,117 +26,7 @@ const OPENROUTER_REQUEST_TIMEOUT_SECS: u64 = 120;
 const HTTP_REFERER: &str = "https://github.com/bobmatnyc/trusty-common";
 const X_TITLE: &str = "trusty-common";
 
-/// Configuration for a local OpenAI-compatible model server (Ollama, LM
-/// Studio, llama.cpp's server, etc.).
-///
-/// Why: callers want a single struct they can deserialize from config files
-/// and pass to [`auto_detect_local_provider`] without juggling defaults.
-/// What: holds an enable flag, the server's base URL (no trailing slash),
-/// and the default model to request. Defaults target Ollama's standard
-/// localhost binding.
-/// Test: `local_model_config_defaults` asserts the default values.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LocalModelConfig {
-    pub enabled: bool,
-    pub base_url: String,
-    pub model: String,
-}
-
-impl Default for LocalModelConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            base_url: "http://localhost:11434".to_string(),
-            model: "qwen3:30b".to_string(),
-        }
-    }
-}
-
-// ─── Tool-use types ───────────────────────────────────────────────────────
-
-/// JSON-Schema description of a callable tool, in OpenAI function-calling
-/// shape.
-///
-/// Why: downstream agents (trusty-memory, trusty-search) expose tools like
-/// `memory_recall` or `web_search` to the LLM. The OpenAI tool format is the
-/// de-facto common denominator across OpenRouter, Ollama, LM Studio, and
-/// most cloud providers.
-/// What: `name` and `description` are passed verbatim; `parameters` is a
-/// JSON Schema object (typically `{"type":"object","properties":{...}}`).
-/// Test: `tool_def_serializes_as_function` checks the wire shape.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolDef {
-    pub name: String,
-    pub description: String,
-    pub parameters: serde_json::Value,
-}
-
-/// A tool invocation the model wants the host to perform.
-///
-/// Why: the streaming chat API emits `tool_calls` in fragments — first an
-/// `id` + `function.name`, then a string of `function.arguments` deltas.
-/// We accumulate fragments and surface one fully-formed [`ToolCall`] per
-/// invocation to the caller.
-/// What: `id` is the upstream's call id (echoed back in subsequent
-/// `role:"tool"` messages); `name` is the function name; `arguments` is a
-/// JSON string (NOT a parsed value — many models emit malformed JSON and
-/// callers want the raw text for error reporting / repair).
-/// Test: `accumulates_streamed_tool_call_fragments`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ToolCall {
-    pub id: String,
-    pub name: String,
-    pub arguments: String,
-}
-
-/// Streaming chat event.
-///
-/// Why: replaces the previous "string-only" channel so callers can
-/// distinguish text deltas from tool invocations and from terminal
-/// success/error without parsing magic markers out of the text stream.
-/// What: `Delta` is a content chunk; `ToolCall` is a fully-accumulated tool
-/// invocation; `Done` signals the upstream stream terminated normally;
-/// `Error` carries a human-readable message for stream-mid failures (the
-/// provider also returns `Err` from `chat_stream`, but `Error` lets the
-/// caller display partial-stream failures inline).
-/// Test: `ollama_provider_streams_sse_deltas`.
-#[derive(Debug, Clone)]
-pub enum ChatEvent {
-    Delta(String),
-    ToolCall(ToolCall),
-    Done,
-    Error(String),
-}
-
-/// Streaming chat provider abstraction.
-///
-/// Why: downstream crates (trusty-memory, trusty-search) want to support
-/// multiple LLM backends without hard-coding which one to call. Providers
-/// expose a uniform streaming interface so the caller can swap them at
-/// runtime based on configuration / availability.
-/// What: implementors stream [`ChatEvent`]s into `tx`. Pass an empty
-/// `tools` vec to disable tool use entirely (the provider MUST then omit
-/// the `tools` field from the upstream request — some models error on an
-/// empty array). Returning `Ok(())` means the stream completed normally;
-/// the caller should also expect a final [`ChatEvent::Done`].
-/// Test: implementations are covered by their own unit tests in this
-/// module plus integration tests in downstream crates.
-#[async_trait]
-pub trait ChatProvider: Send + Sync {
-    /// Human-readable provider name (e.g. `"openrouter"`, `"ollama"`).
-    fn name(&self) -> &str;
-    /// Model identifier sent on every request.
-    fn model(&self) -> &str;
-    /// Stream chat events into `tx`. `tools` empty disables tool use.
-    async fn chat_stream(
-        &self,
-        messages: Vec<ChatMessage>,
-        tools: Vec<ToolDef>,
-        tx: Sender<ChatEvent>,
-    ) -> Result<()>;
-}
-
-// ─── Shared SSE / request types ────────────────────────────────────────────
+// ─── Shared SSE / request types ──────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
 struct OpenAiToolWire<'a> {
@@ -217,14 +100,18 @@ impl ToolCallAccumulator {
             }
             let slot = self.slots[idx]
                 .get_or_insert_with(|| (String::new(), String::new(), String::new()));
-            if let Some(id) = tc.get("id").and_then(|v| v.as_str())
-                && !id.is_empty()
+            if let Some(id) = tc
+                .get("id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
             {
                 slot.0 = id.to_string();
             }
             if let Some(func) = tc.get("function") {
-                if let Some(name) = func.get("name").and_then(|v| v.as_str())
-                    && !name.is_empty()
+                if let Some(name) = func
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
                 {
                     slot.1 = name.to_string();
                 }
@@ -292,7 +179,6 @@ async fn pump_openai_sse(resp: reqwest::Response, tx: Sender<ChatEvent>) -> Resu
                 continue;
             }
             if payload == "[DONE]" {
-                // Flush accumulated tool calls and finish.
                 for call in std::mem::take(&mut acc).finalize() {
                     if tx.send(ChatEvent::ToolCall(call)).await.is_err() {
                         return Ok(());
@@ -310,13 +196,17 @@ async fn pump_openai_sse(resp: reqwest::Response, tx: Sender<ChatEvent>) -> Resu
                 .and_then(|c| c.get(0))
                 .and_then(|c| c.get("delta"));
             if let Some(delta) = delta {
-                if let Some(content) = delta.get("content").and_then(|c| c.as_str())
-                    && !content.is_empty()
-                    && tx
-                        .send(ChatEvent::Delta(content.to_string()))
-                        .await
-                        .is_err()
-                {
+                // Forward any non-empty text content as a Delta event.
+                let content_opt = delta
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+                let send_err = match content_opt {
+                    Some(content) => tx.send(ChatEvent::Delta(content)).await.is_err(),
+                    None => false,
+                };
+                if send_err {
                     return Ok(());
                 }
                 if let Some(tc) = delta.get("tool_calls") {
@@ -336,7 +226,7 @@ async fn pump_openai_sse(resp: reqwest::Response, tx: Sender<ChatEvent>) -> Resu
     Ok(())
 }
 
-// ─── OpenRouter ───────────────────────────────────────────────────────────
+// ─── OpenRouter ───────────────────────────────────────────────────────────────
 
 /// Cloud chat provider backed by OpenRouter.
 ///
@@ -423,7 +313,7 @@ impl ChatProvider for OpenRouterProvider {
     }
 }
 
-// ─── Ollama / OpenAI-compatible local ─────────────────────────────────────
+// ─── Ollama / OpenAI-compatible local ────────────────────────────────────────
 
 /// Local chat provider for OpenAI-compatible servers (Ollama, LM Studio,
 /// llama.cpp's `server`, vLLM, etc.).
@@ -519,7 +409,7 @@ impl ChatProvider for OllamaProvider {
 /// Returns `None` on network errors, timeouts, or non-2xx status. Never
 /// returns an error — the caller treats absence as "no local provider
 /// available" and is responsible for setting the model id afterwards (e.g.
-/// from [`LocalModelConfig::model`]).
+/// from [`super::LocalModelConfig::model`]).
 /// Test: `auto_detect_returns_none_on_unreachable` points at a closed port
 /// and asserts `None` within the 1-second budget;
 /// `auto_detect_returns_some_on_200` spins up an in-process server and
@@ -543,14 +433,7 @@ pub async fn auto_detect_local_provider(base_url: &str) -> Option<OllamaProvider
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn local_model_config_defaults() {
-        let cfg = LocalModelConfig::default();
-        assert!(cfg.enabled);
-        assert_eq!(cfg.base_url, "http://localhost:11434");
-        assert_eq!(cfg.model, "qwen3:30b");
-    }
+    use crate::chat::{ChatEvent, ToolDef};
 
     #[test]
     fn openrouter_provider_reports_metadata() {
@@ -568,8 +451,6 @@ mod tests {
 
     #[test]
     fn tool_def_serializes_as_function() {
-        // When passed through `tools_wire`, a ToolDef should produce a JSON
-        // object that matches the OpenAI function-calling shape.
         let tools = vec![ToolDef {
             name: "search".into(),
             description: "Search the web".into(),
@@ -588,16 +469,11 @@ mod tests {
 
     #[test]
     fn empty_tools_serializes_to_none() {
-        // Empty tools must omit the field entirely so models that error on
-        // empty arrays still work.
         assert!(tools_wire(&[]).is_none());
     }
 
     #[test]
     fn accumulates_streamed_tool_call_fragments() {
-        // Simulate three SSE deltas for a single tool call: id+name, then
-        // two args fragments. After finalize, we should see one fully-formed
-        // ToolCall with concatenated arguments.
         let mut acc = ToolCallAccumulator::default();
         acc.apply_delta(&serde_json::json!([{
             "index": 0,
@@ -665,23 +541,8 @@ mod tests {
         assert_eq!(p.base_url, base);
     }
 
-    #[test]
-    fn local_model_config_deserializes_from_toml() {
-        let toml_src = r#"
-            enabled = true
-            base_url = "http://localhost:1234"
-            model = "qwen2.5-coder"
-        "#;
-        let cfg: LocalModelConfig = toml::from_str(toml_src).expect("parse TOML");
-        assert!(cfg.enabled);
-        assert_eq!(cfg.base_url, "http://localhost:1234");
-        assert_eq!(cfg.model, "qwen2.5-coder");
-    }
-
     #[tokio::test]
     async fn ollama_provider_streams_sse_deltas() {
-        // Inline server replies with two content deltas plus [DONE]. We
-        // expect two Delta events followed by Done.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let base = format!("http://{addr}");
@@ -712,7 +573,7 @@ mod tests {
         let handle = tokio::spawn(async move {
             provider
                 .chat_stream(
-                    vec![ChatMessage {
+                    vec![crate::ChatMessage {
                         role: "user".into(),
                         content: "hi".into(),
                         tool_call_id: None,
@@ -742,7 +603,6 @@ mod tests {
 
     #[tokio::test]
     async fn ollama_provider_emits_tool_call() {
-        // SSE stream that delivers one tool call across two fragments.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let base = format!("http://{addr}");
@@ -773,7 +633,7 @@ mod tests {
         let handle = tokio::spawn(async move {
             provider
                 .chat_stream(
-                    vec![ChatMessage {
+                    vec![crate::ChatMessage {
                         role: "user".into(),
                         content: "search rust".into(),
                         tool_call_id: None,
@@ -793,7 +653,7 @@ mod tests {
         let mut saw_done = false;
         while let Some(ev) = rx.recv().await {
             match ev {
-                ChatEvent::ToolCall(tc) => tool_calls.push(tc),
+                crate::chat::ChatEvent::ToolCall(tc) => tool_calls.push(tc),
                 ChatEvent::Done => saw_done = true,
                 ChatEvent::Delta(_) => {}
                 ChatEvent::Error(e) => panic!("stream error: {e}"),

@@ -1,6 +1,6 @@
 [package]
 name = "trusty-common"
-version = "0.8.4"
+version = "0.9.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -132,6 +132,12 @@ toml = { version = "0.8", optional = true }
 # chat / mcp / symgraph surfaces don't pay the parse cost.
 serde_yaml = { workspace = true, optional = true }
 strsim = { workspace = true, optional = true }
+
+# Optional: enabled by the `bedrock` feature. AWS Bedrock Converse API
+# client — provides `BedrockProvider` implementing `ChatProvider`.
+aws-config = { workspace = true, optional = true }
+aws-sdk-bedrockruntime = { workspace = true, optional = true }
+aws-types = { workspace = true, optional = true }
 
 # launchd module is macOS-only and needs getuid(2) for the gui/<uid> domain.
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -361,3 +367,10 @@ update-check = []
 # dep via `symgraph`); enables it unconditionally for this feature.
 # Default builds that do NOT enable `bug-capture` pull in zero new deps.
 bug-capture = ["dep:sha2"]
+# Enables the `chat::BedrockProvider`: AWS Bedrock `Converse` API backend
+# for the `ChatProvider` trait. Pulls in `aws-config` (credential chain) and
+# `aws-sdk-bedrockruntime` (Converse SDK). Auth via the standard AWS credential
+# chain (env vars, ~/.aws/credentials, IAM roles, SSO) — no API key required.
+# Without this feature, `BedrockProvider::new` returns a clear error message
+# instructing the operator to rebuild with `--features bedrock`.
+bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-types"]

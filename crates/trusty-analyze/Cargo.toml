@@ -1,6 +1,6 @@
 [package]
 name        = "trusty-analyze"
-version     = "0.2.2"
+version     = "0.3.0"
 edition     = "2021"
 license     = "MIT"
 authors.workspace    = true
@@ -58,7 +58,7 @@ redb               = { workspace = true }
 dashmap            = { workspace = true }
 rust-embed         = { workspace = true }
 mime_guess         = { workspace = true }
-trusty-common      = { workspace = true, features = ["symgraph", "cli-help", "update-check"] }
+trusty-common      = { workspace = true, features = ["symgraph", "cli-help", "update-check", "bedrock"] }
 tree-sitter            = { workspace = true }
 tree-sitter-rust       = { workspace = true }
 tree-sitter-typescript = { workspace = true }

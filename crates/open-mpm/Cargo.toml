@@ -103,9 +103,9 @@ crossterm = "0.28"
 ratatui = "0.29"
 strip-ansi-escapes = "0.2"
 nu-ansi-term = "0.50"
-aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-bedrockruntime = "1"
-aws-types = "1"
+aws-config = { workspace = true }
+aws-sdk-bedrockruntime = { workspace = true }
+aws-types = { workspace = true }
 aws-smithy-types = "1"
 git2 = { version = "0.20", features = ["vendored-libgit2"] }
 teloxide = { version = "0.17", features = ["macros"] }

@@ -294,8 +294,8 @@ pub mod update;
 pub mod error_capture;
 
 pub use chat::{
-    ChatEvent, ChatProvider, LocalModelConfig, OllamaProvider, OpenRouterProvider, ToolCall,
-    ToolDef, auto_detect_local_provider,
+    BedrockProvider, ChatEvent, ChatProvider, DEFAULT_BEDROCK_MODEL, LocalModelConfig,
+    OllamaProvider, OpenRouterProvider, ToolCall, ToolDef, auto_detect_local_provider,
 };
 
 use anyhow::{Context, Result, anyhow};

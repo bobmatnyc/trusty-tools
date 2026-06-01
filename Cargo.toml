@@ -28,7 +28,7 @@ authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 
 [workspace.dependencies]
 # ── Internal crates (path deps so the monorepo builds without publish cycles) ──
-trusty-common = { path = "crates/trusty-common", version = "0.8.4" }
+trusty-common = { path = "crates/trusty-common", version = "0.9.0" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
 trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.1" }
@@ -124,6 +124,13 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # serial_test: run env-mutating tests serially to prevent env-var races across
 # parallel test threads. Used by bug-report token tests.
 serial_test = "3"
+
+# ── AWS Bedrock (optional; used by trusty-common `bedrock` feature + open-mpm + tga) ──
+# Versions pinned to what is already resolved in Cargo.lock (1.8.17 / 1.131.0).
+# `behavior-version-latest` silences the deprecation warning on aws_config::load_from_env().
+aws-config             = { version = "1.8", features = ["behavior-version-latest"] }
+aws-sdk-bedrockruntime = { version = "1.131" }
+aws-types              = { version = "1" }
 
 # ── trusty-analyze additional deps ────────────────────────────────────────
 clap_complete = "4"

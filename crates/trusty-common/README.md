@@ -53,6 +53,7 @@ trusty-common = { version = "0.8", features = ["axum-server", "mcp", "rpc", "emb
 | `monitor-tui` | ratatui + crossterm dashboard TUI for the trusty-search/trusty-memory daemons (formerly `trusty-monitor-tui`) |
 | `cli-help` | Declarative help-config parsing (serde_yaml + strsim + indexmap) |
 | `migrations` | Reusable schema-migration kernel: `SchemaVersion`, `Migration`, `MigrationRunner`, file-stamp helpers |
+| `bedrock` | AWS Bedrock `Converse` API provider: `BedrockProvider` implementing `ChatProvider`. Adds `aws-config` + `aws-sdk-bedrockruntime`. Auth via the standard AWS credential chain (env vars, `~/.aws/credentials`, IAM roles, SSO) — no API key required. Without this feature, `BedrockProvider::new` returns a clear error with build instructions. |
 
 By default the crate is dependency-light: `tokio`, `serde`, `reqwest`, and
 `tracing`. Pull in only the features you need.
