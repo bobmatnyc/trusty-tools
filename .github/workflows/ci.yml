@@ -131,6 +131,13 @@ jobs:
         with:
           fetch-depth: 0
 
+      # open-mpm's git tests (list_branches_includes_current) assert that the
+      # local branch list includes "main". GitHub Actions PR checkouts only create
+      # a local branch for the PR head; "main" is only a remote ref unless we
+      # explicitly create a local tracking branch for it.
+      - name: Create local main branch for git tests
+        run: git fetch origin main:main || true
+
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
 
