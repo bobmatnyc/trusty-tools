@@ -155,6 +155,13 @@ jobs:
           key: test
 
       - name: cargo test --workspace
+        # Unset CI so trusty-common's update::check_throttled runs the
+        # cache-freshness code path. The function returns None immediately
+        # when CI is non-empty; tests like cache_fresh_returns_some_when_newer
+        # expect the cache path (is_some), which requires CI to be unset.
+        # We set CI="" here to shadow the global CI=true injected by the runner.
+        env:
+          CI: ""
         run: cargo test --workspace --exclude trusty-mpm-gui
 
   # --------------------------------------------------------------------------
