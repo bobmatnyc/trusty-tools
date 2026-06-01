@@ -3,8 +3,8 @@
 # Jobs:
 #   fmt    – cargo fmt --all --check (stable)
 #   clippy – cargo clippy --workspace --all-targets -D warnings (stable, SKIP_UI_BUILD=1)
-#   test   – cargo test --workspace (stable, SKIP_UI_BUILD=1)
-#   msrv   – cargo check --workspace (toolchain 1.88, SKIP_UI_BUILD=1)
+#   test   – cargo test --workspace (stable, SKIP_UI_BUILD=1, full clone for git tests)
+#   msrv   – cargo check --workspace (toolchain 1.91, SKIP_UI_BUILD=1)
 #
 # trusty-mpm-gui is excluded from all jobs: it is a Tauri desktop GUI
 # (publish = false) that requires WebKit2GTK on Linux (~100 MB apt chain).
@@ -26,6 +26,17 @@
 # non-None value. On the CI runner /tmp is a clean filesystem with no git ancestor, so
 # these tests are expected to pass. They are NOT excluded here; if they go red in CI
 # that is a real bug and should block the PR.
+#
+# open-mpm git tests (git::branch::tests::list_branches_includes_current,
+# git::log::tests::search_commits_finds_known_keyword) require a full git clone
+# with local branch refs and commit history. The test job uses fetch-depth: 0
+# to ensure a full (non-shallow) clone is present.
+#
+# MSRV NOTE: [workspace.package] rust-version = "1.88" in Cargo.toml is STALE.
+# The current Cargo.lock pulls aws-sdk-* / aws-smithy-* crates at versions that
+# declare rust-version = "1.91.1". The effective MSRV is therefore 1.91, not 1.88.
+# The msrv job below is pinned to 1.91 to reflect reality. The Cargo.toml
+# rust-version field should be updated to "1.91" in a follow-up commit.
 
 name: CI
 
@@ -108,6 +119,8 @@ jobs:
   # ONNX-backed tests are #[ignore]-tagged; they are intentionally skipped here
   # because they require model downloads and a running embedderd daemon.
   # trusty-mpm-gui excluded: see clippy note above.
+  # fetch-depth: 0 (full clone) required for open-mpm git tests that inspect
+  # local branch refs and search commit history.
   # --------------------------------------------------------------------------
   test:
     name: Test
@@ -115,6 +128,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -136,20 +151,27 @@ jobs:
         run: cargo test --workspace --exclude trusty-mpm-gui
 
   # --------------------------------------------------------------------------
-  # msrv: verify the workspace compiles on the pinned MSRV (1.88).
+  # msrv: verify the workspace compiles on the effective MSRV.
   # cargo check is used (not test) to keep this job fast: the MSRV guarantee
-  # is that the code *compiles* on 1.88, not that tests pass on it.
+  # is that the code *compiles* on the minimum toolchain, not that tests pass.
   # trusty-mpm-gui excluded: see clippy note above.
+  #
+  # Toolchain is 1.91 — NOT the 1.88 declared in [workspace.package].rust-version.
+  # The current Cargo.lock pulls aws-sdk-*/aws-smithy-* at versions that require
+  # rustc >= 1.91.1. [workspace.package].rust-version = "1.88" in the root
+  # Cargo.toml is therefore stale and should be updated to "1.91". This CI job
+  # enforces the real minimum; the Cargo.toml value is a known inconsistency
+  # tracked as a follow-up: bump rust-version to 1.91 in Cargo.toml.
   # --------------------------------------------------------------------------
   msrv:
-    name: MSRV check (1.88)
+    name: MSRV check (1.91)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.88 toolchain
-        uses: dtolnay/rust-toolchain@1.88
+      - name: Install Rust 1.91 toolchain
+        uses: dtolnay/rust-toolchain@1.91
 
       - name: Install system dependencies
         run: |
@@ -162,7 +184,7 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          key: msrv-1-88
+          key: msrv-1-91
 
       - name: cargo check --workspace
         run: cargo check --workspace --exclude trusty-mpm-gui
