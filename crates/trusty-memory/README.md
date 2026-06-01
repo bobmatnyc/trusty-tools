@@ -49,6 +49,20 @@ range (with OS fallback) and writes the resolved address to its
 discovery file. Pass `--foreground` to keep the daemon inline (used by
 launchd / systemd / Docker), or `--http <ADDR>` to pin a specific address.
 
+### Check the listening port
+
+```bash
+trusty-memory port               # bare port: 7070
+trusty-memory port --addr        # host:port: 127.0.0.1:7070
+trusty-memory port --json        # {"addr":"127.0.0.1","port":7070}
+
+# Shell substitution — stdout is clean (logs go to stderr):
+curl http://127.0.0.1:$(trusty-memory port)/api/v1/health
+```
+
+Exits non-zero with a message on stderr when no daemon is running, so shell
+substitution fails cleanly.
+
 ### Browser dashboard + REST API
 
 The same `trusty-memory serve` daemon serves the embedded Svelte admin UI

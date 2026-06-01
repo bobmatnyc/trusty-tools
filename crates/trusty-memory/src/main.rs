@@ -346,6 +346,29 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+
+    /// Print the daemon's listening port (or address) to stdout.
+    ///
+    /// Reads the address the running daemon persisted to its `http_addr`
+    /// discovery file. Useful for shell substitution:
+    ///   curl http://127.0.0.1:$(trusty-memory port)/api/v1/health
+    ///
+    /// Exits non-zero (with a message on stderr) when no daemon is running
+    /// or the address file is missing, so substitution fails cleanly.
+    ///
+    /// Examples:
+    ///   trusty-memory port               # bare port: 7070
+    ///   trusty-memory port --addr        # host:port: 127.0.0.1:7070
+    ///   trusty-memory port --json        # {"addr":"127.0.0.1","port":7070}
+    Port {
+        /// Emit full `host:port` instead of the bare port number.
+        #[arg(long, conflicts_with = "json")]
+        addr: bool,
+
+        /// Emit a JSON object: `{"addr":"…","port":…}`.
+        #[arg(long, conflicts_with = "addr")]
+        json: bool,
+    },
 }
 
 /// Target surface for the `monitor` subcommand.
@@ -507,6 +530,16 @@ async fn main() -> Result<()> {
             note,
             force,
         } => handle_link(path, slug, note, force),
+        Command::Port { addr, json } => {
+            let format = if json {
+                trusty_memory::commands::port::PortFormat::Json
+            } else if addr {
+                trusty_memory::commands::port::PortFormat::Addr
+            } else {
+                trusty_memory::commands::port::PortFormat::Port
+            };
+            trusty_memory::commands::port::handle_port(format)
+        }
     }
 }
 

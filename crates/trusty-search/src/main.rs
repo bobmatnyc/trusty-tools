@@ -725,12 +725,36 @@ enum Commands {
         target: MonitorTarget,
     },
 
+    /// Print the daemon's listening port (or address) to stdout.
+    ///
+    /// Reads the address the running daemon persisted to its `http_addr`
+    /// discovery file. Useful for shell substitution:
+    ///   curl http://127.0.0.1:$(trusty-search port)/health
+    ///
+    /// Exits non-zero (with a message on stderr) when no daemon is running
+    /// or the address file is missing, so substitution fails cleanly.
+    ///
+    /// Examples:
+    ///   trusty-search port               # bare port: 7879
+    ///   trusty-search port --addr        # host:port: 127.0.0.1:7879
+    ///   trusty-search port --json        # {"addr":"127.0.0.1","port":7879}
+    #[command(display_order = 33)]
+    Port {
+        /// Emit full `host:port` instead of the bare port number.
+        #[arg(long, conflicts_with = "json")]
+        addr: bool,
+
+        /// Emit a JSON object: `{"addr":"…","port":…}`.
+        #[arg(long, conflicts_with = "addr")]
+        json: bool,
+    },
+
     /// Generate shell completion script
     ///
     /// Examples:
     ///   trusty-search completions zsh > ~/.zsh/completions/_trusty-search
     ///   trusty-search completions bash >> ~/.bashrc
-    #[command(display_order = 32)]
+    #[command(display_order = 34)]
     Completions {
         /// Shell to generate completions for
         #[arg(value_enum)]
@@ -1129,6 +1153,17 @@ async fn run() -> Result<()> {
                 commands::monitor::handle_indexes(id, json).await?;
             }
         },
+
+        Commands::Port { addr, json } => {
+            let format = if json {
+                commands::port::PortFormat::Json
+            } else if addr {
+                commands::port::PortFormat::Addr
+            } else {
+                commands::port::PortFormat::Port
+            };
+            commands::port::handle_port(format)?;
+        }
 
         Commands::Completions { shell } => {
             let mut cmd = Cli::command();
