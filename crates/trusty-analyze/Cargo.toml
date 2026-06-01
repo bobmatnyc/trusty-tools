@@ -11,6 +11,7 @@ description = "Sidecar code-analysis daemon for trusty-search: complexity, smell
 keywords    = ["code-analysis", "complexity", "code-smells", "mcp", "daemon"]
 categories  = ["development-tools", "command-line-utilities"]
 build       = "build.rs"
+exclude     = ["ui/node_modules"]
 
 [[bin]]
 name = "trusty-analyze"
