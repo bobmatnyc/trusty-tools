@@ -18,6 +18,11 @@ pub mod integrations;
 pub mod llm;
 pub mod models;
 pub mod pipeline;
+// Why: longitudinal contributor profiling (epic #558) requires a dedicated
+// module for data models, identity resolution, period assembly, and diff
+// sampling.  It is always compiled (no feature gate) because these types are
+// pure data structures and read-only DB queries with no HTTP / axum dep.
+pub mod profile;
 
 // Why: the service module is gated behind `http-server` so library consumers
 // that only need the pipeline (CLI one-shot, unit tests) do not pull in the

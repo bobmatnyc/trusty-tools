@@ -78,6 +78,14 @@ aws-sdk-bedrockruntime = { workspace = true }
 aws-config             = { workspace = true }
 aws-types              = { workspace = true }
 
+# ── Contributor profile pipeline (epic #558) ──────────────────────────────
+# tga: provides Database, IdentityResolver, AuthorPeriodSummary, diff_for_commit,
+# and query_author_period_trends — the data foundation for longitudinal profiling.
+tga = { workspace = true }
+# rusqlite: needed for direct SQL queries in selector.rs (lookup_by_email etc.)
+# and diff_sampler.rs query helpers; uses the same bundled version as tga.
+rusqlite = { workspace = true }
+
 # ── Time (Instant for latency measurement) ─────────────────────────────────
 # std::time::Instant is sufficient; chrono is used for JWT iat/exp claims.
 
@@ -100,3 +108,9 @@ tokio        = { workspace = true }
 tempfile     = { workspace = true }
 tower        = { workspace = true }
 axum         = { workspace = true }
+# git2: needed for profile tests that create temp git repos to exercise diff_for_commit.
+# rusqlite is in [dependencies] already (needed for selector.rs at runtime).
+git2         = { version = "0.20", default-features = false, features = ["vendored-libgit2", "https", "vendored-openssl"] }
+# serial_test: run env-mutating tests serially to prevent env-var races across
+# parallel test threads (used by selector resolve_db_path tests).
+serial_test  = { workspace = true }
