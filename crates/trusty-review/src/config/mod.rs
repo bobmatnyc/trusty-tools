@@ -315,13 +315,13 @@ mod tests {
     #[test]
     fn role_models_precedence_env_wins() {
         let env = RoleEnv {
-            reviewer_model: Some("openai/gpt-5-mini".to_string()),
+            reviewer_model: Some("openai/gpt-5.4-mini-20260317".to_string()),
             verifier_model: None,
             summarizer_model: None,
             provider: None,
         };
         let roles = RoleModels::from_env(&env);
-        assert_eq!(roles.reviewer.model, "openai/gpt-5-mini");
+        assert_eq!(roles.reviewer.model, "openai/gpt-5.4-mini-20260317");
         // verifier and summarizer fall back to defaults.
         assert_eq!(
             roles.verifier.model,
@@ -332,23 +332,23 @@ mod tests {
     #[test]
     fn role_models_precedence_cli_wins_over_env() {
         let cli = RoleCliOverrides {
-            reviewer_model: Some("openai/gpt-5".to_string()),
+            reviewer_model: Some("openai/gpt-5.4-20260305".to_string()),
             ..Default::default()
         };
         let env = RoleEnv {
-            reviewer_model: Some("openai/gpt-5-mini".to_string()),
+            reviewer_model: Some("openai/gpt-5.4-mini-20260317".to_string()),
             ..Default::default()
         };
         let roles = RoleModels::resolve(Some(&cli), &env, None);
         // CLI flag beats env var.
-        assert_eq!(roles.reviewer.model, "openai/gpt-5");
+        assert_eq!(roles.reviewer.model, "openai/gpt-5.4-20260305");
     }
 
     #[test]
     fn role_models_precedence_config_file_wins_over_defaults() {
         let file = FileModels {
             reviewer: Some(RoleConfigOverride {
-                model: Some("openai/gpt-5-nano".to_string()),
+                model: Some("openai/gpt-5.4-nano-20260317".to_string()),
                 temperature: Some(0.5),
                 ..Default::default()
             }),
@@ -356,7 +356,7 @@ mod tests {
         };
         let env = RoleEnv::default();
         let roles = RoleModels::resolve(None, &env, Some(&file));
-        assert_eq!(roles.reviewer.model, "openai/gpt-5-nano");
+        assert_eq!(roles.reviewer.model, "openai/gpt-5.4-nano-20260317");
         assert!((roles.reviewer.temperature - 0.5_f32).abs() < f32::EPSILON);
         // Verifier falls back to built-in.
         assert_eq!(

@@ -127,7 +127,7 @@ mod tests {
     fn llm_response_serde_roundtrip() {
         let resp = LlmResponse {
             text: "LGTM".to_string(),
-            model: "openai/gpt-5-mini".to_string(),
+            model: "openai/gpt-5.4-mini-20260317".to_string(),
             input_tokens: 512,
             output_tokens: 64,
             latency_ms: 1234,
@@ -136,7 +136,7 @@ mod tests {
         let json = serde_json::to_string(&resp).expect("serialise");
         let back: LlmResponse = serde_json::from_str(&json).expect("deserialise");
         assert_eq!(back.text, "LGTM");
-        assert_eq!(back.model, "openai/gpt-5-mini");
+        assert_eq!(back.model, "openai/gpt-5.4-mini-20260317");
         assert_eq!(back.input_tokens, 512);
         assert_eq!(back.output_tokens, 64);
         assert_eq!(back.latency_ms, 1234);
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn llm_request_serde_roundtrip() {
         let req = LlmRequest {
-            model: "openai/gpt-5".to_string(),
+            model: "openai/gpt-5.4-20260305".to_string(),
             system: "You are a reviewer.".to_string(),
             messages: vec![ChatMessage {
                 role: "user".to_string(),
@@ -157,7 +157,7 @@ mod tests {
         };
         let json = serde_json::to_string(&req).expect("serialise");
         let back: LlmRequest = serde_json::from_str(&json).expect("deserialise");
-        assert_eq!(back.model, "openai/gpt-5");
+        assert_eq!(back.model, "openai/gpt-5.4-20260305");
         assert_eq!(back.messages.len(), 1);
         assert!((back.temperature - 0.3_f32).abs() < f32::EPSILON);
     }

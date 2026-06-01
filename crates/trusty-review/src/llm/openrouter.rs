@@ -84,20 +84,27 @@ struct OrcUsage {
 
 /// Approximate cost per million tokens for known GPT-5-class models.
 ///
-/// Why: enables cost estimation in `LlmResponse` for the Stage-3 `compare`
-/// mode that ranks models by speed/cost/effectiveness.
-/// What: `(input_cost_per_m, output_cost_per_m)` in USD.  Values are
-/// approximate and should be updated as OpenRouter pricing changes.  Unknown
-/// model ids fall back to zero (no estimate).
+/// Why: enables cost estimation in `LlmResponse` for the `compare` mode that
+/// ranks models by speed/cost/effectiveness.
+/// What: `(input_cost_per_m, output_cost_per_m)` in USD.  Values are per the
+/// OpenRouter model pricing page (June 2026) for the version-stamped slugs.
+/// Unknown model ids fall back to zero (no estimate).
 ///
-/// Source: OpenRouter model pricing page as of June 2026.
-/// IMPORTANT: update these when OpenRouter changes pricing.
+/// Source: OpenRouter model pricing page, June 2026.
+/// IMPORTANT: OpenRouter slugs are version-stamped; update this table when
+/// new model versions replace old ones or pricing changes.
 fn cost_per_million(model: &str) -> (f64, f64) {
     match model {
-        // GPT-5 — pricing TBD; using placeholder values.
-        "openai/gpt-5" => (5.00, 15.00),
-        "openai/gpt-5-mini" => (0.50, 1.50),
-        "openai/gpt-5-nano" => (0.10, 0.30),
+        // GPT-5.5 Pro — top-tier, high cost.
+        "openai/gpt-5.5-pro-20260423" => (30.00, 180.00),
+        // GPT-5.5 — high quality, mid-premium cost.
+        "openai/gpt-5.5-20260423" => (5.00, 30.00),
+        // GPT-5.4 — standard quality.
+        "openai/gpt-5.4-20260305" => (2.50, 15.00),
+        // GPT-5.4 Mini — cost-effective default reviewer.
+        "openai/gpt-5.4-mini-20260317" => (0.75, 4.50),
+        // GPT-5.4 Nano — cheapest; default verifier and summarizer.
+        "openai/gpt-5.4-nano-20260317" => (0.20, 1.25),
         // Unknown model — no cost estimate.
         _ => (0.0, 0.0),
     }
@@ -289,7 +296,7 @@ mod tests {
 
     #[test]
     fn new_returns_error_on_empty_key() {
-        let result = OpenRouterProvider::new("", "openai/gpt-5-mini");
+        let result = OpenRouterProvider::new("", "openai/gpt-5.4-mini-20260317");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, LlmError::AccessDenied(_)));
@@ -298,17 +305,45 @@ mod tests {
 
     #[test]
     fn new_succeeds_with_valid_key() {
-        let p = OpenRouterProvider::new("sk-test-key", "openai/gpt-5-mini")
+        let p = OpenRouterProvider::new("sk-test-key", "openai/gpt-5.4-mini-20260317")
             .expect("should succeed with non-empty key");
         assert_eq!(p.name(), "openrouter");
     }
 
     #[test]
-    fn cost_estimate_for_known_model() {
-        // 1 million input + 1 million output tokens with gpt-5-mini pricing.
-        let cost = estimate_cost_usd("openai/gpt-5-mini", 1_000_000, 1_000_000);
-        // $0.50 input + $1.50 output = $2.00.
-        assert!((cost - 2.0_f64).abs() < 1e-9, "expected $2.00, got {cost}");
+    fn cost_estimate_for_nano_model() {
+        // 1 million input + 1 million output tokens with gpt-5.4-nano pricing.
+        let cost = estimate_cost_usd("openai/gpt-5.4-nano-20260317", 1_000_000, 1_000_000);
+        // $0.20 input + $1.25 output = $1.45.
+        assert!((cost - 1.45_f64).abs() < 1e-9, "expected $1.45, got {cost}");
+    }
+
+    #[test]
+    fn cost_estimate_for_mini_model() {
+        // 1 million input + 1 million output tokens with gpt-5.4-mini pricing.
+        let cost = estimate_cost_usd("openai/gpt-5.4-mini-20260317", 1_000_000, 1_000_000);
+        // $0.75 input + $4.50 output = $5.25.
+        assert!((cost - 5.25_f64).abs() < 1e-9, "expected $5.25, got {cost}");
+    }
+
+    #[test]
+    fn cost_estimate_for_full_model() {
+        // gpt-5.4-20260305: $2.50/M input + $15.00/M output.
+        let cost = estimate_cost_usd("openai/gpt-5.4-20260305", 1_000_000, 1_000_000);
+        assert!(
+            (cost - 17.50_f64).abs() < 1e-9,
+            "expected $17.50, got {cost}"
+        );
+    }
+
+    #[test]
+    fn cost_estimate_for_pro_model() {
+        // gpt-5.5-pro-20260423: $30.00/M input + $180.00/M output.
+        let cost = estimate_cost_usd("openai/gpt-5.5-pro-20260423", 1_000_000, 1_000_000);
+        assert!(
+            (cost - 210.0_f64).abs() < 1e-9,
+            "expected $210.00, got {cost}"
+        );
     }
 
     #[test]
@@ -352,7 +387,7 @@ mod tests {
             let resp_body = serde_json::json!({
                 "choices": [{"message": {"content": "LGTM"}}],
                 "usage": {"prompt_tokens": 100, "completion_tokens": 10},
-                "model": "openai/gpt-5-mini"
+                "model": "openai/gpt-5.4-mini-20260317"
             })
             .to_string();
             let http_resp = format!(
@@ -374,7 +409,7 @@ mod tests {
 
         // Verify the core logic: LlmRequest maps correctly to wire fields.
         let req = LlmRequest {
-            model: "openai/gpt-5-mini".to_string(),
+            model: "openai/gpt-5.4-mini-20260317".to_string(),
             system: "You are a code reviewer.".to_string(),
             messages: vec![ChatMessage {
                 role: "user".to_string(),
@@ -383,7 +418,7 @@ mod tests {
             temperature: 0.3,
             max_tokens: 1024,
         };
-        assert_eq!(req.model, "openai/gpt-5-mini");
+        assert_eq!(req.model, "openai/gpt-5.4-mini-20260317");
         assert_eq!(req.messages.len(), 1);
         assert!((req.temperature - 0.3_f32).abs() < f32::EPSILON);
     }

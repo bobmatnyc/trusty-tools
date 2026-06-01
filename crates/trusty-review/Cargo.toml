@@ -50,6 +50,9 @@ tracing-subscriber  = { workspace = true }
 # ── Config / paths ─────────────────────────────────────────────────────────
 dirs         = { workspace = true }
 
+# ── CLI (Stage 3) ──────────────────────────────────────────────────────────
+clap         = { workspace = true }
+
 # ── Shared workspace utilities ─────────────────────────────────────────────
 # The `chat` module of trusty-common exposes the streaming ChatProvider trait
 # and OpenRouterProvider.  We drain the stream internally (no feature
@@ -82,4 +85,5 @@ default     = ["http-server"]
 http-server = ["dep:axum", "dep:tower-http", "trusty-common/axum-server"]
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio        = { workspace = true }
+tempfile     = { workspace = true }
