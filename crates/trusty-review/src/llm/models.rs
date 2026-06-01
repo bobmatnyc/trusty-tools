@@ -1,77 +1,102 @@
-//! GPT-5-family model identifier constants.
+//! Model identifier constants for trusty-review.
 //!
 //! Why: having model ids in one place makes it trivial to audit and update
 //! the model set without grepping across the codebase; it also documents the
-//! intent of the MVP (test GPT-5-class models, not earlier generations).
+//! intent of the default configuration and the compare-set candidates.
 //!
-//! What: defines the built-in default model ids for all three roles, plus a
-//! compare-set of GPT-5 candidate ids the `compare` subcommand uses.
+//! What: defines the built-in default model ids for all three roles (now
+//! Bedrock-first), plus a compare-set that mixes Bedrock tiers and includes
+//! an OpenRouter example to show the mixed-provider capability.
 //!
-//! IMPORTANT — model id accuracy: OpenRouter slugs are **version-stamped**
-//! (e.g. `openai/gpt-5.4-mini-20260317`) and may need updating as new model
-//! versions are released or old ones are retired.  If a model is unavailable,
-//! set the override via:
+//! DEFAULT PROVIDER: Bedrock (effective as of this file's introduction).
+//!   - Reviewer: `us.anthropic.claude-sonnet-4-6` (Bedrock cross-region profile)
+//!   - Verifier: `us.anthropic.claude-haiku-4-5` (Bedrock, cheaper tier)
+//!   - Summarizer: `us.anthropic.claude-haiku-4-5` (Bedrock, cheaper tier)
 //!
-//!   - `TRUSTY_REVIEW_REVIEWER_MODEL`, `TRUSTY_REVIEW_VERIFIER_MODEL`,
-//!     `TRUSTY_REVIEW_SUMMARIZER_MODEL` environment variables, OR
-//!   - the `[models]` table in `~/.config/trusty-review/config.toml`.
+//! FLAG — Bedrock model-id accuracy:
+//!   The `us.anthropic.claude-sonnet-4-6` id is verified in CLAUDE.md.
+//!   `us.anthropic.claude-haiku-4-5` is a plausible current Haiku-tier id
+//!   but SHOULD be confirmed against the caller's Bedrock model catalog:
+//!     aws bedrock list-foundation-models --query 'modelSummaries[*].modelId'
+//!   Override via `TRUSTY_REVIEW_VERIFIER_MODEL` / `TRUSTY_REVIEW_SUMMARIZER_MODEL`
+//!   env vars or the `[models]` table in `~/.config/trusty-review/config.toml`
+//!   if the Haiku id is wrong for your account.
 //!
-//! Run `trusty-review compare` to validate quality vs cost after any update.
+//! OpenRouter remains fully available for all roles; select it with:
+//!   - `--provider openrouter` CLI flag, or
+//!   - `TRUSTY_REVIEW_PROVIDER=openrouter` env var, or
+//!   - `provider = "openrouter"` in the config file, or
+//!   - an `openrouter/<model-id>` prefix on the model slug.
 //!
-//! Test: `model_ids_are_openrouter_slugs` checks that the default ids contain
-//! a `/` (the OpenRouter `provider/model-name` format) and start with `openai/`.
+//! Test: `bedrock_defaults_have_inference_profile_prefix`,
+//! `compare_set_includes_bedrock_and_openrouter_examples`.
 
-// ─── Default model ids ────────────────────────────────────────────────────────
+// ─── Default Bedrock model ids ────────────────────────────────────────────────
 
-/// Default model for the reviewer role (main review pass).
+/// Default model for the reviewer role (main review pass) — Bedrock Sonnet 4.6.
 ///
-/// Why: reviewer calls are the most expensive in the pipeline; we want the
-/// best cheap-tier GPT-5.4 variant for good quality at moderate cost.
-/// What: `openai/gpt-5.4-mini-20260317` is the cost-effective GPT-5-class
-/// choice on OpenRouter ($0.75/M input, $4.50/M output).
+/// Why: the reviewer role makes the highest-quality call in the pipeline; Claude
+/// Sonnet 4.6 is the recommended balanced choice on Bedrock.  Bedrock is the
+/// default because it uses IAM auth (no API key), integrates with AWS secrets
+/// management, and keeps data within the operator's VPC.
+/// What: `us.anthropic.claude-sonnet-4-6` is the Claude Sonnet 4.6 cross-region
+/// inference profile for the US geography.  No date stamp or `-v1:0` suffix
+/// (verified against AWS docs as of May 2026).
 /// Override via `TRUSTY_REVIEW_REVIEWER_MODEL`.
-///
-/// NOTE: OpenRouter slugs are version-stamped; if this slug is unavailable,
-/// update here and in your config.toml.
-pub const DEFAULT_REVIEWER_MODEL: &str = "openai/gpt-5.4-mini-20260317";
+pub const DEFAULT_REVIEWER_MODEL: &str = "us.anthropic.claude-sonnet-4-6";
 
-/// Default model for the verifier role (per-finding verification round).
+/// Default model for the verifier role (per-finding verification round) — Bedrock Haiku.
 ///
 /// Why: verifier calls are short (single-word output) and high-volume; the
-/// cheapest GPT-5 nano variant keeps latency and cost low.
-/// What: `openai/gpt-5.4-nano-20260317` on OpenRouter ($0.20/M input, $1.25/M output).
+/// cheapest Haiku-tier Bedrock model keeps latency and cost low.
+/// What: `us.anthropic.claude-haiku-4-5` is the expected Haiku 4.5 cross-region
+/// inference profile id.
 /// Override via `TRUSTY_REVIEW_VERIFIER_MODEL`.
+///
+/// FLAG: Confirm `us.anthropic.claude-haiku-4-5` against your Bedrock model
+/// catalog — the exact id may differ in your account or region.  Check with:
+///   aws bedrock list-foundation-models --query 'modelSummaries[*].modelId'
 ///
 /// CRITICAL: the verifier model MUST be a foundation-lifecycle ACTIVE model
 /// (spec REV-340).  If this slug is inactive, every finding will be silently
-/// refuted and every review will APPROVE — the same failure mode that broke
-/// production (source-analysis §12.1).
-pub const DEFAULT_VERIFIER_MODEL: &str = "openai/gpt-5.4-nano-20260317";
+/// refuted and every review will APPROVE.
+pub const DEFAULT_VERIFIER_MODEL: &str = "us.anthropic.claude-haiku-4-5";
 
-/// Default model for the summarizer role (diff Stage-C classification).
+/// Default model for the summarizer role (diff Stage-C classification) — Bedrock Haiku.
 ///
 /// Why: summarizer calls are deterministic (temperature 0) and low-stakes;
-/// the cheapest GPT-5 nano variant is appropriate.
-/// What: `openai/gpt-5.4-nano-20260317` on OpenRouter ($0.20/M input, $1.25/M output).
+/// the cheapest Haiku-tier Bedrock model is appropriate.
+/// What: same as `DEFAULT_VERIFIER_MODEL` — `us.anthropic.claude-haiku-4-5`.
 /// Override via `TRUSTY_REVIEW_SUMMARIZER_MODEL`.
-pub const DEFAULT_SUMMARIZER_MODEL: &str = "openai/gpt-5.4-nano-20260317";
+///
+/// FLAG: Same caveat as DEFAULT_VERIFIER_MODEL — confirm the Haiku id.
+pub const DEFAULT_SUMMARIZER_MODEL: &str = "us.anthropic.claude-haiku-4-5";
 
 // ─── Compare-set ─────────────────────────────────────────────────────────────
 
-/// Candidate GPT-5-class model ids for the `compare` subcommand.
+/// Candidate model ids for the `compare` subcommand.
 ///
 /// Why: the `compare` mode runs the same PR through multiple reviewer models
 /// and ranks them by quality/speed/cost.  This set seeds the default candidate
-/// list so operators don't have to look up OpenRouter slugs.
-/// What: a static slice of OpenRouter GPT-5-family slugs, ordered cheap → premium.
+/// list and demonstrates the mixed-provider capability (Bedrock tiers + an
+/// OpenRouter example).
+/// What: a static slice of model ids ordered cheapest → most capable.
+/// Each entry is either a `bedrock/`-prefixed or `openrouter/`-prefixed id.
+/// The `compare` subcommand resolves the provider per-entry via
+/// `resolve_provider_and_model`.
 ///
-/// IMPORTANT: OpenRouter slugs are version-stamped; update these when
-/// OpenRouter's catalog evolves or old versions are retired.
+/// FLAG: Confirm the Haiku and Opus ids against your Bedrock catalog.  The
+/// Sonnet 4.6 id is verified; Haiku 4.5 and Opus 4.8 are plausible ids.
 pub const COMPARE_CANDIDATE_MODELS: &[&str] = &[
-    "openai/gpt-5.4-nano-20260317",
-    "openai/gpt-5.4-mini-20260317",
-    "openai/gpt-5.4-20260305",
-    "openai/gpt-5.5-20260423",
+    // Bedrock Haiku — cheapest tier (verifier/summarizer default).
+    "bedrock/us.anthropic.claude-haiku-4-5",
+    // Bedrock Sonnet 4.6 — balanced (reviewer default).
+    "bedrock/us.anthropic.claude-sonnet-4-6",
+    // Bedrock Opus — premium (if enabled in your Bedrock account).
+    // FLAG: confirm us.anthropic.claude-opus-4-8 is available in your account.
+    "bedrock/us.anthropic.claude-opus-4-8",
+    // OpenRouter GPT-5.4-mini — shows mixed-provider capability.
+    "openrouter/openai/gpt-5.4-mini-20260317",
 ];
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
@@ -81,94 +106,87 @@ mod tests {
     use super::*;
 
     #[test]
-    fn model_ids_are_openrouter_slugs() {
+    fn bedrock_defaults_have_inference_profile_prefix() {
+        // All default Bedrock ids must carry an inference-profile prefix.
+        let prefixes = ["us.", "eu.", "ap.", "jp.", "global."];
         for id in [
             DEFAULT_REVIEWER_MODEL,
             DEFAULT_VERIFIER_MODEL,
             DEFAULT_SUMMARIZER_MODEL,
         ] {
+            let has_prefix = prefixes.iter().any(|p| id.starts_with(p));
             assert!(
-                id.contains('/'),
-                "model id {id:?} must contain '/' (OpenRouter provider/name format)"
-            );
-            assert!(
-                id.starts_with("openai/"),
-                "default model {id:?} must be an openai/ GPT-5-class slug"
+                has_prefix,
+                "default model {id:?} must start with a cross-region inference-profile prefix"
             );
         }
     }
 
     #[test]
-    fn model_slugs_are_version_stamped() {
-        // OpenRouter uses version-stamped slugs (e.g. gpt-5.4-mini-20260317).
-        // All production slugs should carry a date stamp for reproducibility.
-        for id in [
-            DEFAULT_REVIEWER_MODEL,
-            DEFAULT_VERIFIER_MODEL,
-            DEFAULT_SUMMARIZER_MODEL,
+    fn default_reviewer_is_sonnet() {
+        assert!(
+            DEFAULT_REVIEWER_MODEL.contains("sonnet"),
+            "reviewer default should be Sonnet-tier: {DEFAULT_REVIEWER_MODEL}"
+        );
+    }
+
+    #[test]
+    fn default_verifier_and_summarizer_are_haiku() {
+        for (name, id) in [
+            ("verifier", DEFAULT_VERIFIER_MODEL),
+            ("summarizer", DEFAULT_SUMMARIZER_MODEL),
         ] {
-            // Date stamps follow the pattern YYYYMMDD — 8 consecutive digits.
-            let has_date = id
-                .chars()
-                .collect::<Vec<_>>()
-                .windows(8)
-                .any(|w| w.iter().all(|c| c.is_ascii_digit()));
             assert!(
-                has_date,
-                "model id {id:?} should contain a version date stamp (YYYYMMDD)"
+                id.contains("haiku"),
+                "{name} default should be Haiku-tier: {id}"
             );
         }
     }
 
     #[test]
-    fn compare_set_is_gpt5_family() {
-        for id in COMPARE_CANDIDATE_MODELS {
-            assert!(
-                id.contains("gpt-5"),
-                "compare candidate {id:?} must be a gpt-5 model"
-            );
-        }
+    fn compare_set_includes_bedrock_and_openrouter_examples() {
+        let has_bedrock = COMPARE_CANDIDATE_MODELS
+            .iter()
+            .any(|m| m.starts_with("bedrock/"));
+        let has_openrouter = COMPARE_CANDIDATE_MODELS
+            .iter()
+            .any(|m| m.starts_with("openrouter/"));
+        assert!(
+            has_bedrock,
+            "compare set must include at least one bedrock/ entry"
+        );
+        assert!(
+            has_openrouter,
+            "compare set must include at least one openrouter/ entry as example"
+        );
     }
 
     #[test]
-    fn compare_set_ordered_cheap_to_premium() {
-        // The compare set must be ordered cheap → premium (nano first, pro last).
-        // We validate that the nano model comes before mini, and mini before the
-        // full model, using index position in the slice.
-        let pos = |needle: &str| {
+    fn compare_set_is_ordered_cheap_to_premium() {
+        // Haiku must come before Sonnet, Sonnet before Opus.
+        let pos = |needle: &str| -> usize {
             COMPARE_CANDIDATE_MODELS
                 .iter()
-                .position(|&m| m == needle)
+                .position(|m| m.contains(needle))
                 .unwrap_or(usize::MAX)
         };
         assert!(
-            pos("openai/gpt-5.4-nano-20260317") < pos("openai/gpt-5.4-mini-20260317"),
-            "nano must come before mini in compare set"
+            pos("haiku") < pos("sonnet"),
+            "haiku must come before sonnet in compare set"
         );
         assert!(
-            pos("openai/gpt-5.4-mini-20260317") < pos("openai/gpt-5.4-20260305"),
-            "mini must come before full model in compare set"
+            pos("sonnet") < pos("opus"),
+            "sonnet must come before opus in compare set"
         );
     }
 
     #[test]
-    fn defaults_are_in_compare_set_or_documented() {
-        // The reviewer default should be in the compare set so the operator
-        // can see how it stacks up against other GPT-5 models.
+    fn compare_set_reviewer_default_is_present() {
+        // The reviewer default (bedrock/ prefixed) must appear in the compare set.
+        let expected = format!("bedrock/{DEFAULT_REVIEWER_MODEL}");
         assert!(
-            COMPARE_CANDIDATE_MODELS.contains(&DEFAULT_REVIEWER_MODEL),
-            "DEFAULT_REVIEWER_MODEL {DEFAULT_REVIEWER_MODEL:?} should be in COMPARE_CANDIDATE_MODELS"
+            COMPARE_CANDIDATE_MODELS.contains(&expected.as_str()),
+            "compare set must include {expected:?} (bedrock/-prefixed reviewer default)"
         );
-    }
-
-    #[test]
-    fn known_model_slugs_match_spec() {
-        // Verify exact slug strings match the OpenRouter catalog (June 2026).
-        // If these fail, OpenRouter has renamed or retired the model.
-        assert_eq!(DEFAULT_REVIEWER_MODEL, "openai/gpt-5.4-mini-20260317");
-        assert_eq!(DEFAULT_VERIFIER_MODEL, "openai/gpt-5.4-nano-20260317");
-        assert_eq!(DEFAULT_SUMMARIZER_MODEL, "openai/gpt-5.4-nano-20260317");
-        assert!(COMPARE_CANDIDATE_MODELS.contains(&"openai/gpt-5.5-20260423"));
-        assert!(COMPARE_CANDIDATE_MODELS.contains(&"openai/gpt-5.4-20260305"));
     }
 }

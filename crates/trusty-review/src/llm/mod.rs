@@ -4,22 +4,28 @@
 //! so the provider (OpenRouter vs Bedrock) is an implementation detail
 //! invisible to the caller, and so tests can inject mocks.
 //! What: defines the `LlmProvider` trait (single non-streaming `complete`
-//! call), `LlmRequest` / `LlmResponse` data shapes, and re-exports the
-//! `LlmError` enum, the `OpenRouterProvider` implementation, and the
-//! `models` constants.
+//! call), `LlmRequest` / `LlmResponse` data shapes, the `build_provider`
+//! factory, and re-exports the `LlmError` enum, `OpenRouterProvider`,
+//! `BedrockProvider`, and `models` constants.
 //! Test: each submodule carries its own unit tests; this module's
 //! `provider_trait_object_compiles` smoke-tests that the trait is
-//! object-safe.
+//! object-safe; `provider_factory_*` tests cover the routing logic.
 
+pub mod bedrock;
 pub mod error;
 pub mod models;
 pub mod openrouter;
 
+pub use bedrock::BedrockProvider;
 pub use error::LlmError;
 pub use openrouter::OpenRouterProvider;
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+
+use crate::config::Provider;
 
 // ─── Chat message (simplified, no tool-use for review calls) ─────────────────
 
@@ -117,6 +123,69 @@ pub trait LlmProvider: Send + Sync {
     async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError>;
 }
 
+// ─── Provider factory ─────────────────────────────────────────────────────────
+
+/// Routing prefixes for model-id based provider selection.
+///
+/// Why: mirrors the `bedrock/` prefix convention from trusty-analyze so
+/// operators can paste model ids from the CLAUDE.md examples without needing
+/// to know which provider a model belongs to.
+/// What: the model id is stripped of this prefix before being passed to the
+/// provider constructor.
+pub const BEDROCK_MODEL_PREFIX: &str = "bedrock/";
+/// OpenRouter model-id prefix for explicit routing.
+pub const OPENROUTER_MODEL_PREFIX: &str = "openrouter/";
+
+/// Resolve the effective provider and bare model id from a potentially-prefixed
+/// model id string and an explicit provider hint.
+///
+/// Why: `--reviewer-model bedrock/us.anthropic.claude-sonnet-4-6` must route to
+/// Bedrock regardless of the default provider; a bare `us.anthropic.*` id should
+/// use the default provider; `openrouter/openai/gpt-5.4-mini` must route to
+/// OpenRouter.  This function is the single source of truth for that logic.
+/// What: strips known prefixes and returns `(Provider, bare_model_id)`.
+/// Precedence: explicit prefix in model id > `default_provider` argument.
+/// Test: `provider_factory_prefix_routing`.
+pub fn resolve_provider_and_model(model: &str, default_provider: &Provider) -> (Provider, String) {
+    if let Some(bare) = model.strip_prefix(BEDROCK_MODEL_PREFIX) {
+        return (Provider::Bedrock, bare.to_string());
+    }
+    if let Some(bare) = model.strip_prefix(OPENROUTER_MODEL_PREFIX) {
+        return (Provider::OpenRouter, bare.to_string());
+    }
+    (default_provider.clone(), model.to_string())
+}
+
+/// Build an `Arc<dyn LlmProvider>` from the resolved role config.
+///
+/// Why: the CLI, HTTP server, and pipeline all need to construct a provider
+/// from the same config fields (provider, model, API key); centralising this
+/// avoids duplicating the `bedrock/` prefix check in every call site.
+/// What: resolves the effective provider via `resolve_provider_and_model`,
+/// constructs the appropriate concrete type, and returns it as a trait object.
+/// Returns `LlmError::AccessDenied` if OpenRouter is selected but `api_key`
+/// is empty.  Returns `LlmError::Validation` if Bedrock is selected but the
+/// model id is missing an inference-profile prefix.
+/// Test: `provider_factory_builds_bedrock`, `provider_factory_builds_openrouter`,
+/// `provider_factory_prefix_routing`.
+pub async fn build_provider(
+    model: &str,
+    default_provider: &Provider,
+    openrouter_api_key: &str,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let (provider, bare_model) = resolve_provider_and_model(model, default_provider);
+    match provider {
+        Provider::Bedrock => {
+            let p = BedrockProvider::new(bare_model, None).await?;
+            Ok(Arc::new(p))
+        }
+        Provider::OpenRouter => {
+            let p = OpenRouterProvider::new(openrouter_api_key, bare_model)?;
+            Ok(Arc::new(p))
+        }
+    }
+}
+
 // ─── Unit tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -169,5 +238,66 @@ mod tests {
         // This test just needs to compile; the type coercion proves
         // LlmProvider is object-safe.
         fn _accepts_dyn(_p: &dyn LlmProvider) {}
+    }
+
+    // ── Provider factory routing tests ────────────────────────────────────
+
+    #[test]
+    fn provider_factory_prefix_routing() {
+        // bedrock/ prefix forces Bedrock.
+        let (prov, model) = resolve_provider_and_model(
+            "bedrock/us.anthropic.claude-sonnet-4-6",
+            &Provider::OpenRouter,
+        );
+        assert_eq!(prov, Provider::Bedrock);
+        assert_eq!(model, "us.anthropic.claude-sonnet-4-6");
+
+        // openrouter/ prefix forces OpenRouter.
+        let (prov, model) = resolve_provider_and_model(
+            "openrouter/openai/gpt-5.4-mini-20260317",
+            &Provider::Bedrock,
+        );
+        assert_eq!(prov, Provider::OpenRouter);
+        assert_eq!(model, "openai/gpt-5.4-mini-20260317");
+
+        // Bare id uses the default provider.
+        let (prov, model) =
+            resolve_provider_and_model("us.anthropic.claude-sonnet-4-6", &Provider::Bedrock);
+        assert_eq!(prov, Provider::Bedrock);
+        assert_eq!(model, "us.anthropic.claude-sonnet-4-6");
+
+        // Bare OpenRouter id with Bedrock default stays on Bedrock.
+        let (prov, model) =
+            resolve_provider_and_model("openai/gpt-5.4-mini-20260317", &Provider::Bedrock);
+        assert_eq!(prov, Provider::Bedrock);
+        assert_eq!(model, "openai/gpt-5.4-mini-20260317");
+    }
+
+    #[test]
+    fn provider_factory_empty_bedrock_prefix_uses_bare_empty_string() {
+        // Edge case: "bedrock/" with nothing after the slash.
+        let (prov, model) = resolve_provider_and_model("bedrock/", &Provider::OpenRouter);
+        assert_eq!(prov, Provider::Bedrock);
+        assert_eq!(model, "");
+    }
+
+    #[test]
+    fn provider_factory_mixed_providers_in_compare_set() {
+        // Simulate the mixed-provider compare set.
+        let candidates = [
+            "bedrock/us.anthropic.claude-haiku-4-5",
+            "bedrock/us.anthropic.claude-sonnet-4-6",
+            "openrouter/openai/gpt-5.4-mini-20260317",
+        ];
+        let expected = [
+            (Provider::Bedrock, "us.anthropic.claude-haiku-4-5"),
+            (Provider::Bedrock, "us.anthropic.claude-sonnet-4-6"),
+            (Provider::OpenRouter, "openai/gpt-5.4-mini-20260317"),
+        ];
+        for (candidate, (exp_prov, exp_model)) in candidates.iter().zip(expected.iter()) {
+            let (prov, model) = resolve_provider_and_model(candidate, &Provider::Bedrock);
+            assert_eq!(prov, *exp_prov, "provider mismatch for {candidate}");
+            assert_eq!(model, *exp_model, "model mismatch for {candidate}");
+        }
     }
 }

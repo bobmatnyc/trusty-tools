@@ -293,23 +293,39 @@ mod tests {
 
     #[test]
     fn role_models_precedence_defaults() {
-        // No CLI, no env, no file → built-in defaults.
+        // No CLI, no env, no file → built-in defaults (Bedrock as of #548).
         let env = RoleEnv::default();
         let roles = RoleModels::from_env(&env);
         assert_eq!(
             roles.reviewer.model,
             crate::llm::models::DEFAULT_REVIEWER_MODEL
         );
-        assert_eq!(roles.reviewer.provider, Provider::OpenRouter);
+        // Default provider is now Bedrock (changed from OpenRouter in #548).
+        assert_eq!(roles.reviewer.provider, Provider::Bedrock);
         assert!((roles.reviewer.temperature - 0.3_f32).abs() < f32::EPSILON);
         assert_eq!(
             roles.verifier.model,
             crate::llm::models::DEFAULT_VERIFIER_MODEL
         );
+        assert_eq!(roles.verifier.provider, Provider::Bedrock);
         assert_eq!(
             roles.summarizer.model,
             crate::llm::models::DEFAULT_SUMMARIZER_MODEL
         );
+        assert_eq!(roles.summarizer.provider, Provider::Bedrock);
+    }
+
+    #[test]
+    fn role_models_openrouter_still_selectable_via_env() {
+        // OpenRouter is co-equal: selecting it via env var must work.
+        let env = RoleEnv {
+            provider: Some("openrouter".to_string()),
+            reviewer_model: Some("openai/gpt-5.4-mini-20260317".to_string()),
+            ..Default::default()
+        };
+        let roles = RoleModels::from_env(&env);
+        assert_eq!(roles.reviewer.provider, Provider::OpenRouter);
+        assert_eq!(roles.reviewer.model, "openai/gpt-5.4-mini-20260317");
     }
 
     #[test]
@@ -366,16 +382,16 @@ mod tests {
     }
 
     #[test]
-    fn role_models_all_defaults_are_gpt5_family() {
-        // Spec intent: all defaults should be GPT-5-class models.
+    fn role_models_all_defaults_are_bedrock_claude() {
+        // As of #548 all defaults are Bedrock Claude models (Sonnet/Haiku).
         for model in [
             crate::llm::models::DEFAULT_REVIEWER_MODEL,
             crate::llm::models::DEFAULT_VERIFIER_MODEL,
             crate::llm::models::DEFAULT_SUMMARIZER_MODEL,
         ] {
             assert!(
-                model.contains("gpt-5"),
-                "default model {model} must be a GPT-5-class id"
+                model.contains("anthropic") || model.starts_with("us."),
+                "default model {model} must be a Bedrock Claude inference-profile id"
             );
         }
     }

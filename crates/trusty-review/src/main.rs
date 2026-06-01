@@ -25,7 +25,7 @@ use trusty_review::{
         github::{GithubClient, auth::resolve_token},
         search_client::HttpSearchClient,
     },
-    llm::OpenRouterProvider,
+    llm::build_provider,
     llm::models::COMPARE_CANDIDATE_MODELS,
     models::ReviewResult,
     pipeline::{DiffSource, ReviewDeps, ReviewInput, log_json_path, run_review},
@@ -112,11 +112,23 @@ pub struct RunArgs {
     #[arg(value_name = "PR")]
     pr: Option<u64>,
 
-    /// Override the reviewer model slug (OpenRouter format, e.g.
-    /// openai/gpt-5.4-mini-20260317).
-    /// Default: from config or TRUSTY_REVIEW_REVIEWER_MODEL env var.
+    /// Override the reviewer model slug.
+    /// Accepts bare ids (uses default/selected provider), a `bedrock/<id>`
+    /// prefix to force AWS Bedrock, or an `openrouter/<id>` prefix to force
+    /// OpenRouter.  Examples:
+    ///   us.anthropic.claude-sonnet-4-6        (uses --provider or config default)
+    ///   bedrock/us.anthropic.claude-sonnet-4-6 (forces Bedrock)
+    ///   openrouter/openai/gpt-5.4-mini-20260317 (forces OpenRouter)
+    /// Default: us.anthropic.claude-sonnet-4-6 on Bedrock (config/env override).
     #[arg(long, value_name = "SLUG")]
     reviewer_model: Option<String>,
+
+    /// Provider backend: `bedrock` (default) or `openrouter`.
+    /// Bedrock uses the standard AWS credential chain (no API key needed).
+    /// OpenRouter requires OPENROUTER_API_KEY.
+    /// A `bedrock/` or `openrouter/` prefix on --reviewer-model overrides this.
+    #[arg(long, value_name = "PROVIDER")]
+    provider: Option<String>,
 
     /// Read a local unified diff file instead of fetching from GitHub.
     /// No GitHub credentials are required in this mode; always dry-run.
@@ -152,14 +164,21 @@ pub struct CompareArgs {
     pr: Option<u64>,
 
     /// Comma-separated list of model slugs to compare.
+    /// Supports mixed providers:
+    ///   bedrock/us.anthropic.claude-haiku-4-5,bedrock/us.anthropic.claude-sonnet-4-6,openrouter/openai/gpt-5.4-mini-20260317
     /// Default: the built-in COMPARE_CANDIDATE_MODELS set
-    /// (nano, mini, full, 5.5 — ordered cheap → premium).
+    /// (Bedrock Haiku → Sonnet → Opus → OpenRouter GPT-5.4-mini example).
     #[arg(long, value_name = "SLUG,...", value_delimiter = ',')]
     models: Option<Vec<String>>,
 
     /// Read a local unified diff file instead of fetching from GitHub.
     #[arg(long, value_name = "PATH")]
     local_diff: Option<std::path::PathBuf>,
+
+    /// Provider backend for bare model ids: `bedrock` (default) or `openrouter`.
+    /// Entries with an explicit `bedrock/` or `openrouter/` prefix override this.
+    #[arg(long, value_name = "PROVIDER")]
+    provider: Option<String>,
 }
 
 // ─── `serve` args ────────────────────────────────────────────────────────────
@@ -220,21 +239,24 @@ async fn async_main(cli: Cli) -> Result<()> {
 /// Execute the `run` subcommand.
 ///
 /// Why: one-shot review of a PR or local diff with the selected reviewer model.
-/// What: resolves the diff source, builds deps, runs the pipeline, prints the
+/// What: resolves the diff source, builds deps (using the provider factory so
+/// both Bedrock and OpenRouter are supported), runs the pipeline, prints the
 /// result to STDOUT, and optionally writes the log file.
 /// Test: CLI integration via `cargo run -p trusty-review -- run --help`.
 async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
     let diff_source = resolve_diff_source_run(&config, &args).await?;
 
-    // Resolve the reviewer model (CLI flag → config → default).
+    // Resolve the reviewer model and provider (CLI flag → config → default).
     let overrides = RoleCliOverrides {
         reviewer_model: args.reviewer_model.clone(),
+        provider: args.provider.clone(),
         ..Default::default()
     };
     let config_with_overrides = ReviewConfig::from_env_and_file(None, Some(&overrides));
     let reviewer_model = config_with_overrides.role_models.reviewer.model.clone();
+    let default_provider = &config_with_overrides.role_models.reviewer.provider;
 
-    let deps = build_deps(&config)?;
+    let deps = build_deps_async(&config_with_overrides, &reviewer_model, default_provider).await?;
 
     let input = ReviewInput {
         diff_source,
@@ -258,10 +280,13 @@ async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
 /// Execute the `compare` subcommand.
 ///
 /// Why: side-by-side model comparison lets operators pick the best model for
-/// their repo's cost/quality trade-off.
+/// their repo's cost/quality trade-off.  Supports mixed providers via the
+/// `bedrock/` and `openrouter/` prefix convention.
 /// What: runs the same review for each model in the compare set (sequentially
-/// to avoid overwhelming OpenRouter rate limits), collects the results, and
-/// prints a comparison table to STDOUT.  Always dry-run; logs are not written.
+/// to avoid rate-limit collisions), collects the results, and prints a
+/// comparison table to STDOUT.  Always dry-run; logs are not written.
+/// The model column shows the full provider-qualified id (e.g.
+/// `bedrock/us.anthropic.claude-sonnet-4-6`) so the table is unambiguous.
 /// Test: integration via `cargo run -p trusty-review -- compare --help`.
 async fn cmd_compare(config: ReviewConfig, args: CompareArgs) -> Result<()> {
     let models: Vec<String> = args.models.clone().unwrap_or_else(|| {
@@ -280,9 +305,19 @@ async fn cmd_compare(config: ReviewConfig, args: CompareArgs) -> Result<()> {
     let mut results: Vec<(String, ReviewResult)> = Vec::new();
     let wall_start = std::time::Instant::now();
 
+    // Determine the default provider for bare model ids from the CLI flag or config.
+    let compare_provider_override = args.provider.as_deref().and_then(|s| {
+        s.parse::<trusty_review::config::Provider>()
+            .map_err(|e| warn!("unrecognised --provider {s:?}: {e} — using config default"))
+            .ok()
+    });
+    let default_provider = compare_provider_override
+        .as_ref()
+        .unwrap_or(&config.role_models.reviewer.provider);
+
     for model in &models {
         let diff_source = resolve_diff_source_compare(&config, &args).await?;
-        let deps = build_deps(&config)?;
+        let deps = build_deps_async(&config, model, default_provider).await?;
         let input = ReviewInput {
             diff_source,
             reviewer_model: model.clone(),
@@ -323,16 +358,22 @@ async fn cmd_serve(config: ReviewConfig, args: ServeArgs) -> Result<()> {
     use std::net::SocketAddr;
     use tracing::info;
 
-    let reviewer_model = &config.role_models.reviewer.model;
-    let llm = OpenRouterProvider::new(config.openrouter_api_key.clone(), reviewer_model)
-        .map_err(|e| anyhow::anyhow!("failed to build LLM provider: {e}"))?;
+    let reviewer_model = config.role_models.reviewer.model.clone();
+    let default_provider = config.role_models.reviewer.provider.clone();
+    let llm = build_provider(
+        &reviewer_model,
+        &default_provider,
+        &config.openrouter_api_key,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to build LLM provider: {e}"))?;
 
     let search = HttpSearchClient::from_config(&config);
     let analyze = HttpAnalyzeClient::from_config(&config);
 
     let state = AppState::new(
         config.clone(),
-        Arc::new(llm),
+        llm,
         Arc::new(search),
         Some(Arc::new(analyze)),
     );
@@ -485,25 +526,29 @@ async fn resolve_diff_source_compare(
     })
 }
 
-/// Build the injected service dependencies from `ReviewConfig`.
+/// Build the injected service dependencies from `ReviewConfig` and a model id.
 ///
 /// Why: both `run` and `compare` need the same set of deps; building them from
-/// config in one place avoids repetition.
-/// What: constructs `OpenRouterProvider`, `HttpSearchClient`, and
-/// `HttpAnalyzeClient`; wraps them in `Arc<dyn Trait>`.
-/// Test: covered transitively.
-fn build_deps(config: &ReviewConfig) -> Result<ReviewDeps> {
-    // Build the LLM provider with the reviewer model as default; the actual
-    // model id is overridden per-run via `LlmRequest::model`.
-    let reviewer_model = &config.role_models.reviewer.model;
-    let llm = OpenRouterProvider::new(config.openrouter_api_key.clone(), reviewer_model)
+/// config in one place avoids repetition.  Async because `BedrockProvider::new`
+/// loads AWS credentials asynchronously.
+/// What: uses `build_provider` (which resolves the `bedrock/`/`openrouter/`
+/// prefix and constructs the right concrete type), constructs `HttpSearchClient`
+/// and `HttpAnalyzeClient`, and wraps them in `Arc<dyn Trait>`.
+/// Test: covered transitively by runner tests that inject a FakeLlm.
+async fn build_deps_async(
+    config: &ReviewConfig,
+    model: &str,
+    default_provider: &trusty_review::config::Provider,
+) -> Result<ReviewDeps> {
+    let llm = build_provider(model, default_provider, &config.openrouter_api_key)
+        .await
         .map_err(|e| anyhow::anyhow!("failed to build LLM provider: {e}"))?;
 
     let search = HttpSearchClient::from_config(config);
     let analyze = HttpAnalyzeClient::from_config(config);
 
     Ok(ReviewDeps {
-        llm: Arc::new(llm),
+        llm,
         search: Arc::new(search),
         analyze: Some(Arc::new(analyze)),
     })

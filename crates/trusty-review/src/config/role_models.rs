@@ -94,7 +94,7 @@ impl RoleModels {
             env.provider.as_deref(),
             file_models.and_then(|f| f.reviewer.as_ref()),
             crate::llm::models::DEFAULT_REVIEWER_MODEL,
-            Provider::OpenRouter,
+            Provider::Bedrock,
             0.3,
             4096,
         );
@@ -105,7 +105,7 @@ impl RoleModels {
             env.provider.as_deref(),
             file_models.and_then(|f| f.verifier.as_ref()),
             crate::llm::models::DEFAULT_VERIFIER_MODEL,
-            Provider::OpenRouter,
+            Provider::Bedrock,
             1.0,
             16,
         );
@@ -116,7 +116,7 @@ impl RoleModels {
             env.provider.as_deref(),
             file_models.and_then(|f| f.summarizer.as_ref()),
             crate::llm::models::DEFAULT_SUMMARIZER_MODEL,
-            Provider::OpenRouter,
+            Provider::Bedrock,
             0.0,
             4096,
         );
