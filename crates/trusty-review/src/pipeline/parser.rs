@@ -13,7 +13,8 @@
 //!  2. JSON-block extraction — looks for a ```json ... ``` fenced block at the
 //!     end of the response and deserialises it (legacy free-text path).
 //!  3. Verdict-keyword scan — scans the last 20% of the body for one of the
-//!     known verdict tokens (APPROVE, REQUEST_CHANGES, BLOCK) per spec REV-112.
+//!     known board grade tokens (BLOCK, REQUEST_CHANGES, APPROVE*, APPROVE,
+//!     UNKNOWN) per spec REV-112.
 //!
 //! If ALL THREE strategies fail (e.g. a genuine LLM/transport error produced
 //! empty or unparseable output), the function returns a fail-safe `ParsedReview`
@@ -279,14 +280,15 @@ fn convert_llm_finding(f: LlmFinding) -> Finding {
 /// Why: when the LLM ignores the JSON output format, the verdict is often still
 /// present as a plain token at or near the end of the response.
 /// What: searches the last 20% of `body` (minimum 200 chars) for the verdict
-/// tokens in priority order (BLOCK > REQUEST_CHANGES > APPROVE* > APPROVE).
+/// tokens in priority order (BLOCK > REQUEST_CHANGES > APPROVE* > APPROVE > UNKNOWN).
 /// Returns `None` if no token is found.
-/// Test: `parse_verdict_keyword_fallback`.
+/// Test: `parse_verdict_keyword_fallback`, `scan_verdict_keyword_detects_unknown`.
 fn scan_verdict_keyword(body: &str) -> Option<Verdict> {
     let scan_start = body.len().saturating_sub((body.len() / 5).max(200));
     let tail = &body[scan_start..];
 
     // Priority order: most severe first so "BLOCK" beats "APPROVE" if both appear.
+    // APPROVE* must be checked before APPROVE so the star variant wins.
     if tail.contains("BLOCK") {
         return Some(Verdict::Block);
     }
@@ -294,13 +296,13 @@ fn scan_verdict_keyword(body: &str) -> Option<Verdict> {
         return Some(Verdict::RequestChanges);
     }
     if tail.contains("APPROVE*") {
-        return Some(Verdict::ApproveStar);
+        return Some(Verdict::ApproveWithReservations);
     }
     if tail.contains("APPROVE") {
         return Some(Verdict::Approve);
     }
-    if tail.contains("N/A") {
-        return Some(Verdict::NotApplicable);
+    if tail.contains("UNKNOWN") {
+        return Some(Verdict::Unknown);
     }
     None
 }
@@ -310,16 +312,16 @@ fn scan_verdict_keyword(body: &str) -> Option<Verdict> {
 /// Parse a verdict string from the JSON block into a `Verdict`.
 ///
 /// Why: the LLM may emit slightly varied case or include extra whitespace.
-/// What: normalises to uppercase and matches against the known tokens; returns
-/// `None` for unrecognised strings (caller applies fail-safe).
+/// What: normalises to uppercase and matches against the five board grade
+/// tokens; returns `None` for unrecognised strings (caller applies fail-safe).
 /// Test: `parse_verdict_string_normalization`.
 fn parse_verdict_string(s: &str) -> Option<Verdict> {
     match s.trim().to_uppercase().as_str() {
         "APPROVE" => Some(Verdict::Approve),
-        "APPROVE*" => Some(Verdict::ApproveStar),
+        "APPROVE*" => Some(Verdict::ApproveWithReservations),
         "REQUEST_CHANGES" | "REQUEST CHANGES" => Some(Verdict::RequestChanges),
         "BLOCK" => Some(Verdict::Block),
-        "N/A" | "NA" => Some(Verdict::NotApplicable),
+        "UNKNOWN" => Some(Verdict::Unknown),
         _ => None,
     }
 }

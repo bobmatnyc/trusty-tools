@@ -263,3 +263,61 @@ fn prompt_local_diff_mode_no_pr_metadata() {
     let content = &req.messages[0].content;
     assert!(content.contains("local_fn"));
 }
+
+/// Verify the schema enum contains exactly the five board grades with UNKNOWN.
+///
+/// Why: if UNKNOWN is missing from the schema the model cannot emit it and
+/// will fall back to guessing; if N/A is present the board calibration breaks
+/// because N/A is not a board grade.
+/// What: inspects the `verdict.enum` array in `review_response_schema` and
+/// asserts all five board grades are present and N/A is absent.
+/// Test: no network.
+#[test]
+fn review_output_schema_enum_matches_board_grades() {
+    let schema = review_response_schema();
+    let verdict_enum = &schema.schema["properties"]["verdict"]["enum"];
+    let values: Vec<&str> = verdict_enum
+        .as_array()
+        .expect("verdict enum must be an array")
+        .iter()
+        .map(|v| v.as_str().expect("enum value must be a string"))
+        .collect();
+
+    assert!(values.contains(&"APPROVE"), "schema must have APPROVE");
+    assert!(values.contains(&"APPROVE*"), "schema must have APPROVE*");
+    assert!(
+        values.contains(&"REQUEST_CHANGES"),
+        "schema must have REQUEST_CHANGES"
+    );
+    assert!(values.contains(&"BLOCK"), "schema must have BLOCK");
+    assert!(
+        values.contains(&"UNKNOWN"),
+        "schema must have UNKNOWN (not N/A)"
+    );
+    assert!(
+        !values.contains(&"N/A"),
+        "schema must NOT have N/A (not a board grade)"
+    );
+    assert_eq!(values.len(), 5, "schema must have exactly 5 board grades");
+}
+
+/// Verify the system prompt describes UNKNOWN.
+///
+/// Why: the model must know what UNKNOWN means and when to use it; if it is
+/// absent from the prompt the model may invent usage semantics.
+/// What: asserts the system prompt contains "UNKNOWN" and does not contain "N/A"
+/// as a verdict grade.
+/// Test: no network.
+#[test]
+fn system_prompt_describes_unknown_grade() {
+    let prompt = reviewer_system_prompt();
+    assert!(
+        prompt.contains("UNKNOWN"),
+        "system prompt must describe the UNKNOWN grade"
+    );
+    // N/A is no longer a board grade — it must not appear as a verdict option.
+    assert!(
+        !prompt.contains("N/A"),
+        "system prompt must not list N/A as a verdict option"
+    );
+}

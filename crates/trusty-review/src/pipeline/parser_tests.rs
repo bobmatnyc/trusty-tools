@@ -162,7 +162,7 @@ fn parse_json_block_happy_path_request_changes() {
 fn parse_verdict_keyword_fallback_approve_star() {
     let result = parse_review_response(BODY_KEYWORD_ONLY);
     assert!(!result.is_fail_safe);
-    assert_eq!(result.verdict, Verdict::ApproveStar);
+    assert_eq!(result.verdict, Verdict::ApproveWithReservations);
     assert!(result.findings.is_empty());
 }
 
@@ -222,8 +222,9 @@ fn parse_verdict_string_normalization() {
         Some(Verdict::RequestChanges)
     );
     assert_eq!(parse_verdict_string("block"), Some(Verdict::Block));
-    assert_eq!(parse_verdict_string("n/a"), Some(Verdict::NotApplicable));
-    assert_eq!(parse_verdict_string("UNKNOWN"), None);
+    assert_eq!(parse_verdict_string("UNKNOWN"), Some(Verdict::Unknown));
+    assert_eq!(parse_verdict_string("unknown"), Some(Verdict::Unknown));
+    assert_eq!(parse_verdict_string("N/A"), None);
 }
 
 #[test]
@@ -284,4 +285,56 @@ fn scan_verdict_keyword_priority_block_beats_approve() {
     let body = "This APPROVE-worthy PR unfortunately has a BLOCK issue.";
     let verdict = scan_verdict_keyword(body);
     assert_eq!(verdict, Some(Verdict::Block));
+}
+
+/// Verify the parser extracts UNKNOWN when the model emits it in a JSON block.
+///
+/// Why: UNKNOWN is the correct grade when the diff is truncated; the parser
+/// must pass it through rather than collapsing it to the fail-safe APPROVE.
+/// What: passes a direct JSON body with `"verdict":"UNKNOWN"`, asserts the
+/// result carries `Verdict::Unknown` and is not fail-safe.
+/// Test: no network.
+#[test]
+fn parse_direct_json_unknown_verdict() {
+    let body = r#"{"verdict":"UNKNOWN","summary":"Diff too truncated to assess.","findings":[]}"#;
+    let result = parse_review_response(body);
+    assert!(
+        !result.is_fail_safe,
+        "UNKNOWN from model must not trigger fail-safe"
+    );
+    assert_eq!(
+        result.verdict,
+        Verdict::Unknown,
+        "parser must preserve UNKNOWN from model output"
+    );
+}
+
+/// Verify the keyword scanner detects UNKNOWN.
+///
+/// Why: fall-back keyword scan must also pick up UNKNOWN so truncated-diff
+/// responses are correctly graded even when forced structured output is not
+/// active.
+/// What: passes a free-text body ending with "UNKNOWN", asserts the scanner
+/// returns `Verdict::Unknown`.
+/// Test: no network.
+#[test]
+fn scan_verdict_keyword_detects_unknown() {
+    let body = "The diff is too short to assess. UNKNOWN";
+    let verdict = scan_verdict_keyword(body);
+    assert_eq!(verdict, Some(Verdict::Unknown));
+}
+
+/// Verify APPROVE* round-trips through a direct JSON parse.
+///
+/// Why: the asterisk in APPROVE* is unusual in JSON enum values; this guards
+/// against any serde regression that would corrupt the board grade.
+/// What: serialises a direct JSON with `"verdict":"APPROVE*"`, asserts the
+/// result carries `Verdict::ApproveWithReservations`.
+/// Test: no network.
+#[test]
+fn parse_direct_json_approve_star() {
+    let body = r#"{"verdict":"APPROVE*","summary":"Minor concern noted.","findings":[]}"#;
+    let result = parse_review_response(body);
+    assert!(!result.is_fail_safe);
+    assert_eq!(result.verdict, Verdict::ApproveWithReservations);
 }

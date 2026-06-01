@@ -673,8 +673,8 @@ mod tests {
             result.error.is_some(),
             "missing diff file must set error field"
         );
-        // Still an APPROVE (fail-safe).
-        // Note: the verdict stays at the default NotApplicable when the diff
-        // fails to load (no LLM call was made), which is also a safe outcome.
+        // Still a safe outcome — the verdict stays at the default Unknown when
+        // the diff fails to load (no LLM call was made).  The error field is
+        // set; Unknown signals "could not assess" rather than a clean APPROVE.
     }
 }

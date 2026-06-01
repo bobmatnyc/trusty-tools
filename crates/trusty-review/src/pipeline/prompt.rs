@@ -16,7 +16,7 @@
 //!     "findings": [ { "title": "...", "body": "...", "severity": "...",
 //!                     "confidence": 0.0, "file": "...", "line": null } ] }
 //!   ```
-//!   Where `<VERDICT>` ∈ {"APPROVE","APPROVE*","REQUEST_CHANGES","BLOCK","N/A"}.
+//!   Where `<VERDICT>` ∈ {"APPROVE","APPROVE*","REQUEST_CHANGES","BLOCK","UNKNOWN"}.
 //!
 //! Test: `build_review_prompt_includes_diff`, `system_prompt_contains_policy`,
 //! `prompt_includes_context_blocks`.
@@ -62,8 +62,8 @@ pub fn review_response_schema() -> ResponseSchema {
             "properties": {
                 "verdict": {
                     "type": "string",
-                    "enum": ["APPROVE", "APPROVE*", "REQUEST_CHANGES", "BLOCK", "N/A"],
-                    "description": "Review verdict"
+                    "enum": ["APPROVE", "APPROVE*", "REQUEST_CHANGES", "BLOCK", "UNKNOWN"],
+                    "description": "Review verdict — one of the five board grades"
                 },
                 "summary": {
                     "type": "string",
@@ -130,23 +130,27 @@ pub struct ReviewContext {
 pub fn reviewer_system_prompt() -> &'static str {
     r#"You are a senior software engineer performing a pull-request code review.
 
-## Verdict policy (MANDATORY)
+## Verdict grades (MANDATORY — pick exactly one)
+
+| Grade           | When to use |
+|-----------------|-------------|
+| APPROVE         | No significant concerns; the change is clean and correct. |
+| APPROVE*        | Approve, but a non-blocking concern is worth noting (style debt, minor risk). |
+| REQUEST_CHANGES | Real correctness or logic issues. REQUEST_CHANGES requires ALL THREE: (a) a specific wrong line cited verbatim, (b) a traceable failure path, (c) a concrete fix proposed. |
+| BLOCK           | Build-breaking, data-corrupting, or auth-bypassing defect introduced by this PR. Reserved for undisputed, irreversible production breakage. |
+| UNKNOWN         | The diff was too truncated, context-free, or otherwise insufficient for you to assess. Use this instead of guessing. |
+
 - Your default verdict is APPROVE. You bear the burden of proof to escalate.
-- REQUEST_CHANGES requires ALL THREE from the visible diff:
-    (a) a specific wrong line cited verbatim,
-    (b) a traceable failure path,
-    (c) a concrete fix proposed.
-- BLOCK is reserved for undisputed evidence of data loss, auth bypass, or
-  irreversible production breakage introduced by this PR.
-- When in doubt, APPROVE or APPROVE*.
+- When in doubt between APPROVE and APPROVE*, prefer APPROVE*.
+- Do NOT emit UNKNOWN just because the PR is large; use it only when you
+  genuinely cannot tell if the change is correct.
 
 ## What to review
 Focus on: correctness bugs, security issues, data-loss risks, logic errors.
 Note but do not block on: style, minor naming, documentation gaps, test coverage.
 
-## Output (REQUIRED)
-Populate the structured response with:
-- `verdict`: one of APPROVE, APPROVE*, REQUEST_CHANGES, BLOCK, N/A.
+## Output (REQUIRED — populate the structured response fields)
+- `verdict`: one of APPROVE, APPROVE*, REQUEST_CHANGES, BLOCK, UNKNOWN.
 - `summary`: one sentence summary of the review.
 - `findings`: array of issues found (empty array if none).
   Each finding has: title, body (detailed description), severity (low/medium/high/critical),

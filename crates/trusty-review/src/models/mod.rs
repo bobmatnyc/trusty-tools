@@ -6,8 +6,8 @@
 //! pipeline, the LLM provider layer, and the store.
 //! What: exposes `Verdict`, `Effort`, `VerifyOutcome`, `Finding`
 //! (FixSuggestion), and `ReviewResult` — all serde-serialisable.
-//! Test: `review_result_serde_roundtrip` and `finding_confidence_clamping`
-//! in this module.
+//! Test: `verdict_serde_roundtrip`, `review_result_serde_roundtrip`,
+//! and `finding_confidence_clamping` in this module.
 
 use serde::{Deserialize, Serialize};
 
@@ -15,39 +15,54 @@ use crate::config::constants::REVIEW_VERSION;
 
 // ─── Verdict ──────────────────────────────────────────────────────────────────
 
-/// Review verdict tier.
+/// Review verdict tier aligned to the duetto-code-intelligence board grades.
 ///
 /// Why: the pipeline maps LLM output to one of these tiers to drive the
 /// GitHub review action (approve vs request-changes vs block) and the
-/// notification payload.
-/// What: serialised as uppercase strings matching spec §07 REV-604 and
-/// the Python predecessor's `Verdict` enum.
-/// Test: `verdict_serde_roundtrip`.
+/// notification payload.  Using the same string tokens as the calibration
+/// board enables clean round-trips through JSON without any conversion.
+/// What: serialises to EXACT board strings — `"APPROVE"`, `"APPROVE*"`,
+/// `"REQUEST_CHANGES"`, `"BLOCK"`, `"UNKNOWN"`.  Deserialises the same.
+/// Display prints the same strings.
+///
+/// # Fail-safe policy
+/// When the pipeline encounters a genuine parse/transport error, the
+/// fail-safe default is `Approve` (spec REV-130 — never block a merge due
+/// to a pipeline failure).  When the model *itself* reports the diff was
+/// too truncated or insufficient to assess, emit `Unknown` instead (not
+/// `Approve`) so the board can distinguish "clean review" from "could not
+/// assess".
+///
+/// Test: `verdict_serde_roundtrip`, `verdict_display`,
+/// `verdict_unknown_round_trip`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Verdict {
     /// No significant concerns; the reviewer is satisfied.
     Approve,
-    /// Approve with advisory notes (no blocking issues but worth noting).
+    /// Approve with non-blocking advisory notes (a concern worth noting, but
+    /// not blocking). Board grade: `APPROVE*`.
     #[serde(rename = "APPROVE*")]
-    ApproveStar,
-    /// Reviewer requests at least one change before merge.
+    ApproveWithReservations,
+    /// Reviewer requests at least one real correctness/logic change before merge.
     RequestChanges,
-    /// Critical issue; must not merge without explicit bypass.
+    /// Critical issue — build-breaking, data-corrupting, or auth-bypassing.
+    /// Must not merge without explicit bypass.
     Block,
-    /// The review was skipped or the diff was not applicable.
-    #[serde(rename = "N/A")]
-    NotApplicable,
+    /// The diff was too truncated or contained insufficient context for the
+    /// model to assess.  Not a clean APPROVE — the reviewer could not form an
+    /// opinion.  Board grade: `UNKNOWN`.
+    Unknown,
 }
 
 impl std::fmt::Display for Verdict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Verdict::Approve => write!(f, "APPROVE"),
-            Verdict::ApproveStar => write!(f, "APPROVE*"),
+            Verdict::ApproveWithReservations => write!(f, "APPROVE*"),
             Verdict::RequestChanges => write!(f, "REQUEST_CHANGES"),
             Verdict::Block => write!(f, "BLOCK"),
-            Verdict::NotApplicable => write!(f, "N/A"),
+            Verdict::Unknown => write!(f, "UNKNOWN"),
         }
     }
 }
@@ -277,7 +292,7 @@ impl ReviewResult {
             pr_title: pr_title.into(),
             pr_url: pr_url.into(),
             review_body: String::new(),
-            verdict: Verdict::NotApplicable,
+            verdict: Verdict::Unknown,
             findings: Vec::new(),
             model: String::new(),
             input_tokens: 0,
@@ -356,30 +371,58 @@ fn epoch_days_to_ymd(days: u64) -> (u64, u64, u64) {
 mod tests {
     use super::*;
 
+    /// Verify serde round-trip for all five board grades including APPROVE*.
+    ///
+    /// Why: `APPROVE*` contains an asterisk which is unusual for JSON enum
+    /// values; a regression would silently produce the wrong board grade.
+    /// What: serialises each variant, asserts the exact board string, then
+    /// deserialises and asserts equality.
+    /// Test: this test itself; no network.
     #[test]
     fn verdict_serde_roundtrip() {
         let cases = [
             (Verdict::Approve, "\"APPROVE\""),
-            (Verdict::ApproveStar, "\"APPROVE*\""),
+            (Verdict::ApproveWithReservations, "\"APPROVE*\""),
             (Verdict::RequestChanges, "\"REQUEST_CHANGES\""),
             (Verdict::Block, "\"BLOCK\""),
-            (Verdict::NotApplicable, "\"N/A\""),
+            (Verdict::Unknown, "\"UNKNOWN\""),
         ];
         for (v, expected_json) in cases {
             let json = serde_json::to_string(&v).unwrap();
             assert_eq!(json, expected_json, "serialise mismatch for {v:?}");
             let back: Verdict = serde_json::from_str(&json).unwrap();
-            assert_eq!(back, v);
+            assert_eq!(back, v, "deserialise mismatch for {expected_json}");
         }
     }
 
+    /// Verify Display prints the exact board strings.
+    ///
+    /// Why: the compare table and Markdown log use `verdict.to_string()`;
+    /// any mismatch would show the wrong grade to users.
+    /// What: asserts Display output for all five variants matches board strings.
+    /// Test: this test itself.
     #[test]
     fn verdict_display() {
         assert_eq!(Verdict::Approve.to_string(), "APPROVE");
-        assert_eq!(Verdict::ApproveStar.to_string(), "APPROVE*");
+        assert_eq!(Verdict::ApproveWithReservations.to_string(), "APPROVE*");
         assert_eq!(Verdict::RequestChanges.to_string(), "REQUEST_CHANGES");
         assert_eq!(Verdict::Block.to_string(), "BLOCK");
-        assert_eq!(Verdict::NotApplicable.to_string(), "N/A");
+        assert_eq!(Verdict::Unknown.to_string(), "UNKNOWN");
+    }
+
+    /// Verify UNKNOWN round-trips correctly (board-grade special case).
+    ///
+    /// Why: UNKNOWN is emitted when the diff is too truncated to assess; it
+    /// must survive a serde round-trip so the calibration board sees the
+    /// correct grade.
+    /// What: serialises `Unknown`, asserts `"UNKNOWN"`, deserialises back.
+    /// Test: this test itself.
+    #[test]
+    fn verdict_unknown_round_trip() {
+        let json = serde_json::to_string(&Verdict::Unknown).unwrap();
+        assert_eq!(json, "\"UNKNOWN\"");
+        let back: Verdict = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, Verdict::Unknown);
     }
 
     #[test]
