@@ -10988,6 +10988,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-review"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "dirs 5.0.1",
+ "futures-util",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml 0.8.23",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "trusty-common",
+]
+
+[[package]]
 name = "trusty-search"
 version = "0.22.1"
 dependencies = [
