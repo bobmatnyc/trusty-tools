@@ -92,7 +92,8 @@ impl UsageRecord {
 /// flow, and a full disk should not break a real LLM dispatch.
 /// What: Best-effort `mkdir -p` of `.open-mpm/state`, then opens the file
 /// in `create + append` mode and writes one `serde_json::to_string(&record)`
-/// line followed by `\n`. Any I/O failure logs at debug level and returns.
+/// line followed by `\n`, then flushes to guarantee the bytes are visible
+/// to subsequent readers. Any I/O failure logs at debug level and returns.
 /// Test: `append_usage_creates_file`, `append_usage_appends`.
 pub async fn append_usage(project_dir: &Path, record: &UsageRecord) {
     let state_dir = project_dir.join(".open-mpm").join("state");
@@ -114,6 +115,14 @@ pub async fn append_usage(project_dir: &Path, record: &UsageRecord) {
         Ok(mut f) => {
             if let Err(e) = f.write_all(line.as_bytes()).await {
                 tracing::debug!(error = %e, path = %path.display(), "usage: write failed");
+                return;
+            }
+            // Flush ensures the write is visible to subsequent reads within
+            // the same process. Tokio's File uses spawn_blocking internally;
+            // without an explicit flush the OS buffer may not be committed
+            // before the future resolves, causing test races.
+            if let Err(e) = f.flush().await {
+                tracing::debug!(error = %e, path = %path.display(), "usage: flush failed");
             }
         }
         Err(e) => {
