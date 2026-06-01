@@ -320,7 +320,10 @@ pub(crate) fn try_locate_moved_root(
 
     match candidates.len() {
         1 => {
-            let new_root = candidates.into_iter().next().expect("len==1");
+            let raw_root = candidates.into_iter().next().expect("len==1");
+            // Issue #541: canonicalize the new root so the persisted path
+            // matches the absolute chunk paths already in the index's redb.
+            let new_root = canonicalize_best_effort(&raw_root);
             tracing::info!(
                 "warm-boot: index '{}' root_path moved: {} → {} (auto-relink, issue #484)",
                 entry.id,
@@ -362,6 +365,30 @@ pub(crate) fn try_locate_moved_root(
     }
 }
 
+/// Attempt to canonicalize `path` (resolving symlinks), returning the canonical
+/// form on success or the original path on failure.
+///
+/// Why (issue #541): `indexes.toml` may store a symlink-alias or pre-rename
+/// path from a previous registration. Re-canonicalizing at warm-boot makes
+/// `handle.root_path` match the absolute paths that the indexer stored in
+/// chunk records, preventing `file_is_within_root` from dropping valid results.
+/// What: calls `std::fs::canonicalize`; on `Err` logs at `debug` level and
+/// returns the original path unchanged so warm-boot is never blocked.
+/// Test: `warm_boot_canonicalize_best_effort_*` unit tests in this module.
+pub(crate) fn canonicalize_best_effort(path: &std::path::Path) -> std::path::PathBuf {
+    match std::fs::canonicalize(path) {
+        Ok(canonical) => canonical,
+        Err(e) => {
+            tracing::debug!(
+                "warm-boot: could not canonicalize root_path {}: {} (using stored path)",
+                path.display(),
+                e,
+            );
+            path.to_path_buf()
+        }
+    }
+}
+
 /// Register one index entry into the in-memory registry, restoring HNSW + corpus.
 ///
 /// Why: extracted so the loop in `restore_indexes` remains readable and so
@@ -372,6 +399,10 @@ pub(crate) fn try_locate_moved_root(
 /// Skips entries already in the in-memory registry (idempotent), builds the
 /// indexer via `build_indexer_from_entry`, and registers the resulting
 /// `IndexHandle`.
+/// Issue #541: after the existence guard, re-canonicalizes the stored root_path
+/// to match the absolute paths the indexer stored in chunk records. If
+/// canonicalization yields a different path, persists the canonical form back to
+/// indexes.toml so subsequent restarts are stable.
 /// Test: covered by the warm-boot integration tests and the
 /// `restore_moved_colocated_index_*` unit tests in this module.
 async fn restore_one_index(
@@ -415,6 +446,36 @@ async fn restore_one_index(
                 entry.root_path.display(),
             );
             return;
+        }
+    }
+
+    // Issue #541: re-canonicalize the stored root_path so handle.root_path
+    // matches the absolute paths the indexer stored in chunk records. Symlink
+    // aliases, volume-mount renames, and macOS /private/var ↔ /var aliases all
+    // cause `file_is_within_root` to drop valid search results if the handle
+    // holds the non-canonical form. Canonicalization is best-effort: if it
+    // fails (e.g. path disappeared between the exists() check and now) we fall
+    // back to the stored path rather than aborting the whole warm-boot.
+    let canonical_root = canonicalize_best_effort(&entry.root_path);
+    if canonical_root != entry.root_path {
+        tracing::info!(
+            "warm-boot: index '{}' root_path canonicalized: {} → {} (issue #541, persisting)",
+            entry.id,
+            entry.root_path.display(),
+            canonical_root.display(),
+        );
+        entry.root_path = canonical_root;
+        // Persist so subsequent restarts see the canonical path immediately,
+        // avoiding repeated canonicalization and keeping indexes.toml accurate.
+        let updated = PersistedIndex {
+            root_path: entry.root_path.clone(),
+            ..entry.clone()
+        };
+        if let Err(e) = crate::service::persistence::upsert_index_registry_entry(updated) {
+            tracing::warn!(
+                "warm-boot: could not persist canonicalized root_path for '{}': {e}",
+                entry.id,
+            );
         }
     }
 
@@ -1886,6 +1947,70 @@ mod tests {
         assert!(
             result.is_none(),
             "must return None when multiple candidates exist (ambiguous)"
+        );
+    }
+
+    // ── Issue #541: warm-boot canonicalization tests ───────────────────────────
+
+    /// Why (issue #541): `canonicalize_best_effort` must return the canonical
+    /// form for a path that exists on disk.
+    /// What: create a real tempdir (which may have a symlink-alias prefix on
+    /// macOS, e.g. /var → /private/var), call the helper, and assert the result
+    /// equals `std::fs::canonicalize`.
+    /// Test: this test.
+    #[test]
+    fn canonicalize_best_effort_resolves_existing_path() {
+        let tmp = tempdir().unwrap();
+        let expected = std::fs::canonicalize(tmp.path()).unwrap();
+        let got = canonicalize_best_effort(tmp.path());
+        assert_eq!(
+            got, expected,
+            "canonicalize_best_effort must return the canonical form for an existing path"
+        );
+    }
+
+    /// Why (issue #541): `canonicalize_best_effort` must fall back to the
+    /// original path without panicking when the path does not exist.
+    /// What: pass a definitely-nonexistent path; assert the returned value equals
+    /// the input.
+    /// Test: this test.
+    #[test]
+    fn canonicalize_best_effort_falls_back_for_missing_path() {
+        let missing = std::path::PathBuf::from("/tmp/trusty-541-definitely-does-not-exist-xyz");
+        let got = canonicalize_best_effort(&missing);
+        assert_eq!(
+            got, missing,
+            "canonicalize_best_effort must fall back to the input for a missing path"
+        );
+    }
+
+    /// Why (issue #541): `canonicalize_best_effort` on a symlink must return
+    /// the target, not the link path — this is the core guarantee the warm-boot
+    /// fix relies on.
+    /// What: create a real tempdir, symlink to it, call the helper on the symlink,
+    /// and assert the result equals the canonical target.
+    /// Test: this test.
+    #[cfg(unix)]
+    #[test]
+    fn canonicalize_best_effort_resolves_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let real_dir = tempdir().unwrap();
+        let real_canonical = std::fs::canonicalize(real_dir.path()).unwrap();
+
+        let link = real_canonical
+            .parent()
+            .unwrap()
+            .join(format!("trusty-541-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_file(&link);
+        symlink(&real_canonical, &link).expect("create symlink");
+
+        let got = canonicalize_best_effort(&link);
+        let _ = std::fs::remove_file(&link);
+
+        assert_eq!(
+            got, real_canonical,
+            "canonicalize_best_effort must resolve symlinks to their target"
         );
     }
 }

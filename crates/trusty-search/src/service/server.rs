@@ -1867,17 +1867,43 @@ fn validate_root_path(path: &std::path::Path) -> Result<std::path::PathBuf, Resp
 /// can have persisted chunks whose `file` paths point at a different
 /// project. The search handler post-filters with this predicate so cross-
 /// index bleed cannot leak through to clients.
+/// Why (issue #541 update): the warm-boot canonicalization in `restore_one_index`
+/// prevents the stale-root problem going forward; this predicate adds a
+/// canonicalize fallback for absolute paths so that any residual mismatch
+/// (e.g. chunks indexed before the fix, volume mount alias, macOS /private/var
+/// ↔ /var) also never causes a valid result to be dropped.
 /// What: returns `true` when `file` is either (a) a clean relative path
 /// (no leading `/`, no `..` segments) — the normal case, since the reindex
 /// walker stores chunk paths relative to the index root — or (b) an
-/// absolute path that starts with `root`. Everything else (relative path
-/// with `..`, absolute path pointing elsewhere) returns `false`. The check
-/// is purely lexical so it adds no syscalls to the hot search path.
-/// Test: `file_is_within_root_*` unit tests below.
+/// absolute path that starts with `root` (cheap lexical check). If (b) fails
+/// and the file path exists on disk, falls back to a canonicalized comparison
+/// so symlink aliases never cause a false drop (approach (b) from issue #541
+/// — only results that fail the cheap check pay the `canonicalize` syscall
+/// cost). Everything else (relative path with `..`, absolute path pointing
+/// genuinely elsewhere) returns `false`.
+/// Test: `file_is_within_root_*` unit tests below; `file_is_within_root_symlinked_root`
+/// covers the symlink-alias case added for #541.
 fn file_is_within_root(file: &str, root: &std::path::Path) -> bool {
     let p = std::path::Path::new(file);
     if p.is_absolute() {
-        return p.starts_with(root);
+        // Fast path: lexical prefix check — no syscalls.
+        if p.starts_with(root) {
+            return true;
+        }
+        // Slow-path fallback for symlink / alias mismatches (issue #541): only
+        // pay the `canonicalize` cost for absolute-path results that failed the
+        // cheap check (so the hot path for relative-path chunks is unaffected).
+        //
+        // Strategy: canonicalize the index root (resolves symlink aliases, macOS
+        // /var ↔ /private/var, etc.), then check whether the stored file path
+        // starts with that canonical root. We do NOT canonicalize the file path
+        // itself because the file may have been deleted since indexing; we only
+        // need the root to resolve correctly.
+        let canonical_root = match std::fs::canonicalize(root) {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        return p.starts_with(&canonical_root);
     }
     // Relative path: must not climb out via `..`. We accept `.` and any
     // forward-only sequence of components. Empty paths are rejected
@@ -2003,20 +2029,31 @@ async fn search_handler(
     // that's also absolute and outside `root_path`) is a sign of stale data
     // from a previously-misregistered index (see #63) or a bug elsewhere in
     // the pipeline. Drop those rows rather than returning cross-project
-    // results to the caller. `file_is_within_root` is intentionally cheap —
-    // it does not touch the filesystem.
+    // results to the caller. `file_is_within_root` uses a cheap lexical
+    // check first; only absolute-path results that fail the fast path pay the
+    // `canonicalize` syscall cost (issue #541 approach b).
     let root = handle.root_path.clone();
     let before = results.len();
     results.retain(|r| file_is_within_root(&r.file, &root));
     let filtered_out = before.saturating_sub(results.len());
     if filtered_out > 0 {
+        // Issue #541: increment the process-wide Prometheus counter so operators
+        // can alert on a rising drop rate without log scraping.
+        metrics::counter!(
+            "trusty_search_dropped_out_of_root_total",
+            "index_id" => index_id.0.clone(),
+        )
+        .increment(filtered_out as u64);
         tracing::warn!(
             index_id = %index_id,
             root = %root.display(),
             dropped = filtered_out,
-            "search_handler: dropped {} result(s) whose file path falls outside the \
-             index root (likely stale data from a misregistered index — see #63/#64)",
+            "search_handler: dropped {} result(s) whose file path falls outside index root {} \
+             — index root is stale (symlink rename or daemon restart without \
+             re-canonicalization). Re-register to fix: `trusty-search index {}`",
             filtered_out,
+            root.display(),
+            root.display(),
         );
     }
     drop(indexer);
@@ -2061,6 +2098,12 @@ async fn search_handler(
             // result set. Lets clients display "lexical-only" badges or
             // retry once the semantic lane is ready.
             "search_capabilities": caps,
+            // Issue #541: machine-readable signal that results were dropped
+            // because the index root is stale. Clients (Claude Code, UI) can
+            // show a remediation banner without log scraping. `false` is the
+            // normal case (no drops); `true` means the operator should run
+            // `trusty-search index <path>` to re-register with a fresh root.
+            "stale_index_root": filtered_out > 0,
         },
     })))
 }
@@ -4703,6 +4746,140 @@ mod tests {
     fn file_is_within_root_rejects_empty() {
         let root = std::path::Path::new("/Users/me/proj");
         assert!(!file_is_within_root("", root));
+    }
+
+    /// Issue #541: when the index root is a symlink alias pointing at a real
+    /// directory, an absolute file path stored under the real (canonical) root
+    /// must NOT be dropped — `file_is_within_root` must fall back to
+    /// canonicalized comparison and return `true`.
+    ///
+    /// This exercises the slow-path fallback added for #541: the lexical check
+    /// `/real/dir/src/auth.rs`.starts_with(`/link`) fails, so the predicate
+    /// canonicalizes both sides and retries.
+    #[cfg(unix)]
+    #[test]
+    fn file_is_within_root_symlinked_root_does_not_drop_valid_result() {
+        use std::os::unix::fs::symlink;
+        use tempfile::tempdir;
+
+        // Create a real directory that will be the "canonical" root.
+        let real_dir = tempdir().unwrap();
+        let canonical_root = std::fs::canonicalize(real_dir.path()).unwrap();
+
+        // Symlink → real_dir (the handle holds the symlink path as its root_path).
+        let link = canonical_root
+            .parent()
+            .unwrap()
+            .join(format!("trusty-541-root-link-{}", std::process::id()));
+        let _ = std::fs::remove_file(&link);
+        symlink(&canonical_root, &link).expect("create symlink");
+
+        // A file stored with its canonical (non-symlink) absolute path — this
+        // is exactly what the indexer produces after walking the real directory.
+        let file_path = canonical_root.join("src/auth.rs");
+        let file_str = file_path.to_str().unwrap();
+
+        // With the link as `root`, the lexical check fails but the canonical
+        // fallback must pass — the file IS within the root.
+        let result = file_is_within_root(file_str, &link);
+        let _ = std::fs::remove_file(&link);
+
+        assert!(
+            result,
+            "file under canonical root must pass even when index root is a symlink alias; \
+             file={file_str}, root={link}",
+            link = link.display(),
+        );
+    }
+
+    /// Issue #541: a file genuinely outside the root must still be rejected
+    /// even after the canonicalize fallback runs.
+    #[test]
+    fn file_is_within_root_outside_root_still_rejected_after_canonicalize() {
+        use tempfile::tempdir;
+
+        let root_dir = tempdir().unwrap();
+        let canonical_root = std::fs::canonicalize(root_dir.path()).unwrap();
+
+        // A path that is definitely outside the root.
+        let outside = "/etc/passwd";
+        assert!(
+            !file_is_within_root(outside, &canonical_root),
+            "path genuinely outside root must still be rejected"
+        );
+    }
+
+    /// Issue #541: `search_handler` must always include `stale_index_root` in
+    /// the response `meta` block (as a boolean). When no results are dropped by
+    /// the out-of-root filter the field is `false`; we verify its presence and
+    /// type because the BM25 / MockEmbedder may return 0 results on a minimal
+    /// test index, making it hard to guarantee `true` without complex setup.
+    /// What: builds a minimal bare index, calls `search_handler`, and asserts the
+    /// `stale_index_root` field is present and boolean in the `meta` block.
+    /// Test: this test.
+    #[tokio::test]
+    async fn search_handler_meta_includes_stale_index_root_field() {
+        use crate::core::embed::{Embedder, MockEmbedder};
+        use crate::core::indexer::CodeIndexer;
+        use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
+        use crate::core::store::{UsearchStore, VectorStore};
+        use tempfile::tempdir;
+
+        let tmp = tempdir().unwrap();
+        let dim = 16;
+        let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(dim));
+        let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(dim).expect("usearch"));
+        let indexer = CodeIndexer::new("stale-meta-test", tmp.path())
+            .with_components(Arc::clone(&embedder), Arc::clone(&store));
+
+        let registry = IndexRegistry::new();
+        let handle = IndexHandle::bare(
+            IndexId::new("stale-meta-idx"),
+            Arc::new(tokio::sync::RwLock::new(indexer)),
+            tmp.path().to_path_buf(),
+        );
+        registry.register(handle);
+
+        let state = Arc::new(SearchAppState::new(registry));
+        state.install_embedder(embedder).await;
+
+        let resp = search_handler(
+            axum::extract::State(Arc::clone(&state)),
+            axum::extract::Path("stale-meta-idx".to_string()),
+            axum::extract::Json(crate::core::indexer::SearchQuery {
+                text: "hello".to_string(),
+                top_k: 5,
+                expand_graph: false,
+                compact: false,
+                branch_files: None,
+                branch_boost: 1.5,
+                branch: None,
+                stage: Some(crate::core::indexer::SearchStage::Lexical),
+                mode: crate::core::indexer::SearchMode::Code,
+                exclude_archived: false,
+                refine_query: None,
+            }),
+        )
+        .await;
+
+        let Json(body) = resp.expect("handler must succeed");
+        let meta = body.get("meta").expect("meta block present");
+
+        assert!(
+            meta.get("stale_index_root").is_some(),
+            "meta block must contain stale_index_root field; meta={meta:?}"
+        );
+        assert!(
+            meta["stale_index_root"].is_boolean(),
+            "stale_index_root must be a boolean; got={:?}",
+            meta["stale_index_root"]
+        );
+        // For an empty index (no chunks were added), no results can be dropped,
+        // so stale_index_root must be false.
+        assert_eq!(
+            meta["stale_index_root"], false,
+            "stale_index_root must be false when no results were dropped"
+        );
     }
 
     // ── /grep endpoint ──────────────────────────────────────────────────────
