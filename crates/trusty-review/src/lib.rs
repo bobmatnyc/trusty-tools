@@ -4,12 +4,14 @@
 //! trusty-tools workspace, consuming trusty-search (context retrieval) and an
 //! LLM provider (OpenRouter or Bedrock) to produce structured review verdicts.
 //!
-//! What: exposes the `config`, `llm`, and `models` modules that form the
-//! Stage-1 foundation. Later stages add `pipeline`, `diff`, `integrations`,
-//! `store`, `service`, and `cli` modules.
+//! What: exposes the `config`, `llm`, `models`, and `integrations` modules.
+//! Stage-1 delivered config + LLM provider abstraction; Stage-2 adds the
+//! integration clients (GitHub App auth, trusty-search/analyze HTTP clients).
+//! Later stages add `pipeline`, `diff`, `store`, `service`, and `cli` modules.
 //!
 //! Test: each public module carries its own unit tests; see each submodule.
 
 pub mod config;
+pub mod integrations;
 pub mod llm;
 pub mod models;

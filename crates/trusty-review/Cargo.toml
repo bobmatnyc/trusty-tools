@@ -56,9 +56,16 @@ dirs         = { workspace = true }
 # flag needed for the chat module itself, which is compiled unconditionally).
 trusty-common = { workspace = true }
 
+# ── JWT / HMAC / crypto (GitHub App auth) ─────────────────────────────────
+jsonwebtoken = { workspace = true }
+hmac         = { workspace = true }
+sha2         = { workspace = true }
+hex          = { workspace = true }
+base64       = { workspace = true }
+chrono       = { workspace = true }
+
 # ── Time (Instant for latency measurement) ─────────────────────────────────
-# std::time::Instant is sufficient; chrono is only needed if we add
-# human-readable timestamps on ReviewResult — deferred to a later stage.
+# std::time::Instant is sufficient; chrono is used for JWT iat/exp claims.
 
 [features]
 # Why: mirrors trusty-analyze / trusty-common convention — axum + tower-http

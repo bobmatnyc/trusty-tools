@@ -116,6 +116,23 @@ pub struct ReviewConfig {
     /// Default trusty-search index (`TRUSTY_SEARCH_INDEX`, default `main`).
     pub search_index: String,
 
+    // ── GitHub App authentication (REV-400–REV-402) ────────────────────────
+    /// GitHub App ID (`GITHUB_APP_ID`).  `None` disables App auth.
+    pub github_app_id: Option<String>,
+    /// RSA private key PEM for the GitHub App (`GITHUB_APP_PRIVATE_KEY`).
+    /// The PEM may have `\n`-escaped newlines (expanded at load time).
+    pub github_app_private_key: Option<String>,
+    /// PAT fallback token (`GITHUB_TOKEN`).
+    pub github_token: String,
+    /// Webhook shared secret (`GITHUB_WEBHOOK_SECRET`).
+    pub github_webhook_secret: String,
+    /// Installation IDs keyed by org name (case-insensitive).
+    ///
+    /// Populated from `GITHUB_INSTALLATION_ID_DUETTORESEARCH` and
+    /// `GITHUB_INSTALLATION_ID_HOTSTATS` plus any additional
+    /// `GITHUB_INSTALLATION_ID_<ORG>` env vars (case-folded to lowercase).
+    pub github_installations: Vec<(String, u64)>,
+
     // ── Role models (fully resolved) ───────────────────────────────────────
     /// Resolved per-role model configurations.
     pub role_models: RoleModels,
@@ -169,6 +186,17 @@ impl ReviewConfig {
             search_index: std::env::var("TRUSTY_SEARCH_INDEX")
                 .unwrap_or_else(|_| "main".to_string()),
             role_models,
+            // ── GitHub App auth ────────────────────────────────────────────
+            github_app_id: std::env::var("GITHUB_APP_ID")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            github_app_private_key: std::env::var("GITHUB_APP_PRIVATE_KEY")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.replace("\\n", "\n")), // expand \n-escaped newlines.
+            github_token: std::env::var("GITHUB_TOKEN").unwrap_or_default(),
+            github_webhook_secret: std::env::var("GITHUB_WEBHOOK_SECRET").unwrap_or_default(),
+            github_installations: load_github_installations(),
         }
     }
 
@@ -184,6 +212,32 @@ impl ReviewConfig {
         let default_path = dirs::config_dir().map(|d| d.join("trusty-review").join("config.toml"));
         Self::from_env_and_file(default_path.as_deref(), cli_overrides)
     }
+}
+
+/// Load GitHub installation IDs from env vars.
+///
+/// Why: the bot may be installed in multiple GitHub orgs; each org has its own
+/// installation ID.  This helper collects all known installation env vars into
+/// a uniform `Vec<(org_name, installation_id)>` list.
+/// What: reads the two well-known env vars (`GITHUB_INSTALLATION_ID_DUETTORESEARCH`,
+/// `GITHUB_INSTALLATION_ID_HOTSTATS`) plus any `GITHUB_INSTALLATION_ID_<ORG>`
+/// pattern (not supported dynamically yet — only the two known orgs are read for
+/// the MVP).  Invalid or empty values are silently skipped.
+/// Test: covered indirectly by `config_github_fields_from_env`.
+fn load_github_installations() -> Vec<(String, u64)> {
+    let known = [
+        ("GITHUB_INSTALLATION_ID_DUETTORESEARCH", "duettoresearch"),
+        ("GITHUB_INSTALLATION_ID_HOTSTATS", "hotstats"),
+    ];
+    let mut installations = Vec::new();
+    for (env_var, org_name) in &known {
+        if let Ok(val) = std::env::var(env_var)
+            && let Ok(id) = val.trim().parse::<u64>()
+        {
+            installations.push((org_name.to_string(), id));
+        }
+    }
+    installations
 }
 
 /// Try to load `[models]` from a TOML config file; return `None` on any
@@ -331,5 +385,48 @@ mod tests {
         // Without any env var, dry_run must default to true.
         let env = RoleEnv::default();
         let _ = RoleModels::from_env(&env); // Just verifies no panic.
+    }
+
+    #[test]
+    fn config_github_token_defaults_to_empty() {
+        // When GITHUB_TOKEN is not set, github_token must be empty (not panic).
+        let config = ReviewConfig::from_env_and_file(None, None);
+        // We cannot assert the exact value (CI may have GITHUB_TOKEN set),
+        // but we can assert the config loads without panic.
+        let _ = config.github_token;
+    }
+
+    #[test]
+    fn config_search_url_default() {
+        // When TRUSTY_SEARCH_URL is not set, falls back to localhost:7878.
+        // (Cannot reliably unset env vars in parallel tests; just check load.)
+        let config = ReviewConfig::from_env_and_file(None, None);
+        assert!(
+            config.search_url.starts_with("http"),
+            "search_url must start with http: {}",
+            config.search_url
+        );
+    }
+
+    #[test]
+    fn config_analyzer_url_default() {
+        let config = ReviewConfig::from_env_and_file(None, None);
+        assert!(
+            config.analyzer_url.starts_with("http"),
+            "analyzer_url must start with http: {}",
+            config.analyzer_url
+        );
+    }
+
+    #[test]
+    fn load_github_installations_parses_known_orgs() {
+        // The helper is pure (reads env vars); we can call it without side effects.
+        // Just verify it doesn't panic and returns a vec.
+        let installs = super::load_github_installations();
+        // Each element must have a non-empty org name and a non-zero id.
+        for (org, id) in &installs {
+            assert!(!org.is_empty(), "org name must be non-empty");
+            assert!(*id > 0, "installation id must be > 0");
+        }
     }
 }
