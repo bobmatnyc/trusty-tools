@@ -1,15 +1,16 @@
 //! `trusty-review` CLI entry point.
 //!
 //! Why: provides the user-facing interface for running, comparing, and
-//! inspecting PR reviews.  Stage-3 delivers the `run` and `compare`
-//! subcommands; the `serve` subcommand is deferred to a later stage.
+//! inspecting PR reviews.  Stage-4 adds the `serve` subcommand (HTTP daemon).
 //!
 //! What: parses flags via clap-derive, resolves config, builds injected
-//! service dependencies, and dispatches to the pipeline runner.
+//! service dependencies, and dispatches to the pipeline runner or HTTP server.
 //! STDOUT stays clean (only review output); all tracing goes to stderr.
 //!
 //! Test: `cargo run -p trusty-review -- --help` must succeed; the `run`
-//! and `compare` subcommands are tested in the library's `runner` tests.
+//! and `compare` subcommands are tested in the library's `runner` tests;
+//! the `serve` subcommand is tested in `service::handlers` and
+//! `service::webhook`.
 
 use std::sync::Arc;
 
@@ -29,6 +30,9 @@ use trusty_review::{
     models::ReviewResult,
     pipeline::{DiffSource, ReviewDeps, ReviewInput, log_json_path, run_review},
 };
+
+#[cfg(feature = "http-server")]
+use trusty_review::service::{AppState, DEFAULT_PORT, serve as serve_http};
 
 // ─── CLI top-level ────────────────────────────────────────────────────────────
 
@@ -72,6 +76,19 @@ enum Commands {
     /// Runs the review pipeline once per model in the compare set (or --models
     /// override) and prints a comparison table.  Always dry-run.
     Compare(CompareArgs),
+
+    /// Start the long-lived HTTP webhook server (port 7880 by default).
+    ///
+    /// Exposes:
+    ///   GET  /health                  — liveness + dep status
+    ///   GET  /status                  — in-flight count + last error
+    ///   POST /review                  — synchronous on-demand review (dry-run)
+    ///   POST /pr/github/webhook       — GitHub PR webhook (HMAC-validated)
+    ///
+    /// All reviews are dry-run (no comments posted to GitHub).
+    /// Graceful shutdown on SIGTERM/SIGINT (in-flight requests are drained).
+    #[cfg(feature = "http-server")]
+    Serve(ServeArgs),
 }
 
 // ─── `run` args ───────────────────────────────────────────────────────────────
@@ -145,6 +162,28 @@ pub struct CompareArgs {
     local_diff: Option<std::path::PathBuf>,
 }
 
+// ─── `serve` args ────────────────────────────────────────────────────────────
+
+/// Arguments for the `serve` subcommand.
+///
+/// Why: collects the port and optional config path so the server can be
+/// configured purely from CLI flags without requiring env-var wrangling.
+/// What: `--port` sets the listen port (default 7880 per spec REV-803);
+/// `--config` overrides the default XDG config file path.
+/// Test: `cargo run -p trusty-review --features http-server -- serve --help`.
+#[cfg(feature = "http-server")]
+#[derive(Debug, Parser)]
+pub struct ServeArgs {
+    /// HTTP listen port.
+    /// Default: 7880 (distinct from trusty-search :7878 and trusty-analyze :7879).
+    #[arg(long, default_value_t = DEFAULT_PORT, value_name = "PORT")]
+    port: u16,
+
+    /// Bind address (default: 127.0.0.1).
+    #[arg(long, default_value = "127.0.0.1", value_name = "ADDR")]
+    bind: String,
+}
+
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
@@ -171,6 +210,8 @@ async fn async_main(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Run(args) => cmd_run(config, args).await,
         Commands::Compare(args) => cmd_compare(config, args).await,
+        #[cfg(feature = "http-server")]
+        Commands::Serve(args) => cmd_serve(config, args).await,
     }
 }
 
@@ -263,6 +304,52 @@ async fn cmd_compare(config: ReviewConfig, args: CompareArgs) -> Result<()> {
     println!("\nTotal wall-clock: {wall_elapsed:.1?}");
 
     Ok(())
+}
+
+// ─── `serve` handler ─────────────────────────────────────────────────────────
+
+/// Execute the `serve` subcommand: build AppState, bind axum, run until signal.
+///
+/// Why: the HTTP daemon mode requires building all deps once and sharing them
+/// across many concurrent requests, so they live in `AppState` rather than
+/// being rebuilt per review.
+/// What: constructs the LLM provider, search/analyze clients, wraps them in
+/// `AppState`, and calls `serve_http` which binds the socket and runs the
+/// graceful-shutdown loop.  All logs go to stderr; stdout stays clean.
+/// Test: `cargo run -p trusty-review --features http-server -- serve --help`
+/// must exit 0; endpoint tests live in `service::handlers` and `service::webhook`.
+#[cfg(feature = "http-server")]
+async fn cmd_serve(config: ReviewConfig, args: ServeArgs) -> Result<()> {
+    use std::net::SocketAddr;
+    use tracing::info;
+
+    let reviewer_model = &config.role_models.reviewer.model;
+    let llm = OpenRouterProvider::new(config.openrouter_api_key.clone(), reviewer_model)
+        .map_err(|e| anyhow::anyhow!("failed to build LLM provider: {e}"))?;
+
+    let search = HttpSearchClient::from_config(&config);
+    let analyze = HttpAnalyzeClient::from_config(&config);
+
+    let state = AppState::new(
+        config.clone(),
+        Arc::new(llm),
+        Arc::new(search),
+        Some(Arc::new(analyze)),
+    );
+
+    let addr: SocketAddr = format!("{}:{}", args.bind, args.port)
+        .parse()
+        .with_context(|| format!("invalid bind address {}:{}", args.bind, args.port))?;
+
+    info!(
+        port = args.port,
+        bind = %args.bind,
+        reviewer_model = %config.role_models.reviewer.model,
+        dry_run = config.dry_run,
+        "trusty-review serve starting"
+    );
+
+    serve_http(state, addr).await
 }
 
 // ─── Table printer ────────────────────────────────────────────────────────────
