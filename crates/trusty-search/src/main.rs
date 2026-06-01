@@ -182,9 +182,15 @@ enum Commands {
         #[arg(long)]
         exclude: Vec<String>,
 
-        /// SSE stream timeout in seconds (default: 600). Increase for very large repos.
-        #[arg(long, default_value_t = 600)]
-        timeout: u64,
+        /// Hard wall-clock cap on the foreground wait (seconds).
+        ///
+        /// When omitted (the default) the CLI uses progress-aware stall
+        /// detection: it keeps displaying progress as long as files are being
+        /// indexed and only detaches after no progress for 120 s.  Pass an
+        /// explicit value (e.g. `--timeout 1200`) to impose a hard cap instead.
+        /// Use `--timeout 0` to wait forever.
+        #[arg(long)]
+        timeout: Option<u64>,
 
         /// Create a Stage-1-only ("daemonized ripgrep") index (issue #109, Phase 1).
         ///
@@ -294,9 +300,15 @@ enum Commands {
         /// Directory to reindex (default: auto-detected project root)
         path: Option<std::path::PathBuf>,
 
-        /// SSE stream timeout in seconds (default: 600). Increase for very large repos.
-        #[arg(long, default_value_t = 600)]
-        timeout: u64,
+        /// Hard wall-clock cap on the foreground wait (seconds).
+        ///
+        /// When omitted (the default) the CLI uses progress-aware stall
+        /// detection: it keeps displaying progress as long as files are being
+        /// indexed and only detaches after no progress for 120 s.  Pass an
+        /// explicit value (e.g. `--timeout 1200`) to impose a hard cap instead.
+        /// Use `--timeout 0` to wait forever.
+        #[arg(long)]
+        timeout: Option<u64>,
     },
 
     // ── Global / multi-index commands ─────────────────────────────────────

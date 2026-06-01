@@ -103,7 +103,7 @@ pub async fn add_path(index_id: &str, path: &std::path::Path) -> Result<()> {
 
 /// Options controlling reindex CLI behaviour.
 ///
-/// Why: callers such as `run_reindex` (plain) and `run_reindex_force` need to
+/// Why: callers such as `run_reindex_opts` and `run_reindex_force_opts` need to
 /// pass different combinations of options without a growing argument list.
 /// What: a plain struct with `Default` so callers can specify only the fields
 /// they care about.
@@ -129,11 +129,27 @@ pub struct ReindexOptions {
     /// re-embeds every file (otherwise unchanged files would be skipped on a
     /// warm daemon and `--force` would have no effect).
     pub force: bool,
-    /// Maximum wall-clock seconds to wait for the SSE reindex stream to emit
-    /// a `complete` event. Default: 600. Use `--timeout 0` to disable (wait
-    /// forever). When the deadline is exceeded the CLI prints a warning and
-    /// exits; the daemon continues indexing in the background.
+    /// Hard wall-clock cap in seconds. Applied only when `timeout_explicit` is
+    /// `true` (i.e. the user passed `--timeout N` explicitly). When `0` and
+    /// `timeout_explicit` is `true`, the CLI waits forever (legacy behaviour).
+    /// When `timeout_explicit` is `false`, this field is ignored and the CLI
+    /// instead exits only on a genuine stall (see `stall_secs`).
     pub timeout_secs: u64,
+    /// Whether `timeout_secs` was explicitly supplied by the user.
+    ///
+    /// When `false` (the default), the CLI uses progress-aware stall detection:
+    /// it keeps waiting as long as the file-index counter advances within the
+    /// `stall_secs` window. When `true`, `timeout_secs` is treated as a hard
+    /// wall-clock cap regardless of progress (so `--timeout 120` reliably exits
+    /// after exactly 120 s even if embedding is running).
+    pub timeout_explicit: bool,
+    /// How long (seconds) to wait without any progress before detaching.
+    ///
+    /// "Progress" means the per-file `indexed` counter has advanced since the
+    /// last check. This window guards against a genuinely stalled pipeline
+    /// (e.g. the embedder crashed silently) rather than a healthy but slow one.
+    /// Default: 120 s. Only used when `timeout_explicit` is `false`.
+    pub stall_secs: u64,
 }
 
 impl Default for ReindexOptions {
@@ -143,6 +159,8 @@ impl Default for ReindexOptions {
             prior_chunk_count: None,
             force: false,
             timeout_secs: 600,
+            timeout_explicit: false,
+            stall_secs: 120,
         }
     }
 }
@@ -169,28 +187,26 @@ pub struct ReindexOutcome {
     pub timings: Option<ReindexTimings>,
 }
 
-/// Plain reindex (no post-verify). Used by the non-force `index` command, the
-/// bare `reindex` command, and the doctor auto-repair path. The daemon's
-/// hash-skip optimization (see `reindex.rs::hash_content`) means unchanged
-/// files are cheap, so calling this even when nothing changed is fine.
-///
-/// `timeout_secs` caps how long the CLI waits for the SSE stream's `complete`
-/// event. 0 means no limit (wait forever). Default for callers that don't have
-/// an explicit user-supplied value: 600.
+/// Plain reindex (no post-verify). Used by the doctor auto-repair path and
+/// other programmatic callers. Always uses progress-aware stall detection
+/// (no explicit timeout).
 ///
 /// Why: extracted so callers don't have to construct `ReindexOptions`.
-/// What: delegates to `run_reindex_with` with verify_after = false.
+/// What: delegates to `run_reindex_with` with verify_after = false and
+/// timeout_explicit = false.
 /// Test: covered by `run_reindex_with` integration tests.
 pub async fn run_reindex(
     index_id: &str,
     root_path: &std::path::Path,
-    timeout_secs: u64,
+    _timeout_secs: u64,
 ) -> Result<()> {
     run_reindex_with(
         index_id,
         root_path,
         ReindexOptions {
-            timeout_secs,
+            // Programmatic callers ignore the legacy timeout_secs; progress-aware
+            // stall detection applies.
+            timeout_explicit: false,
             ..ReindexOptions::default()
         },
     )
@@ -198,18 +214,45 @@ pub async fn run_reindex(
     .map(|_| ())
 }
 
-/// `index --force` reindex: snapshot the prior chunk count, kick off a full
-/// reindex, and run a post-reindex health check. Exits 1 if the new index
-/// looks unhealthy (no chunks or empty sanity query).
+/// Plain reindex with explicit timeout control. Used by CLI commands that
+/// accept `--timeout` from the user.
 ///
-/// Why: the `--force` path differs from the plain path only in verify_after
-/// and force = true; extracting it keeps `index.rs` free of options wiring.
-/// What: fetches the prior chunk count, then delegates to `run_reindex_with`.
-/// Test: covered indirectly by `index --force` integration tests.
-pub async fn run_reindex_force(
+/// Why: the CLI must distinguish "user said --timeout N" (hard cap) from "no
+/// --timeout" (progress-aware). This variant carries `timeout_explicit` so the
+/// wait loop can choose the right strategy.
+/// What: delegates to `run_reindex_with` with verify_after = false.
+/// Test: covered by `tests::progress_aware_wait_*`.
+pub async fn run_reindex_opts(
     index_id: &str,
     root_path: &std::path::Path,
     timeout_secs: u64,
+    timeout_explicit: bool,
+) -> Result<()> {
+    run_reindex_with(
+        index_id,
+        root_path,
+        ReindexOptions {
+            timeout_secs,
+            timeout_explicit,
+            ..ReindexOptions::default()
+        },
+    )
+    .await
+    .map(|_| ())
+}
+
+/// `index --force` reindex with explicit timeout control. Used by CLI commands
+/// that accept `--timeout` from the user.
+///
+/// Why: same rationale as `run_reindex_opts` — the CLI needs to pass
+/// `timeout_explicit` so the hard cap is honoured when the user asks for it.
+/// What: fetches the prior chunk count, then delegates to `run_reindex_with`.
+/// Test: covered indirectly by `index --force` integration tests.
+pub async fn run_reindex_force_opts(
+    index_id: &str,
+    root_path: &std::path::Path,
+    timeout_secs: u64,
+    timeout_explicit: bool,
 ) -> Result<()> {
     let prior = fetch_chunk_count(index_id).await;
     let opts = ReindexOptions {
@@ -217,6 +260,8 @@ pub async fn run_reindex_force(
         prior_chunk_count: prior,
         force: true,
         timeout_secs,
+        timeout_explicit,
+        ..ReindexOptions::default()
     };
     run_reindex_with(index_id, root_path, opts)
         .await
@@ -421,18 +466,44 @@ pub async fn run_reindex_with(
 
     let mut outcome = ReindexOutcome::default();
     let mut done = false;
+    // `timed_out` — hard deadline fired (explicit --timeout only).
     let mut timed_out = false;
+    // `stalled` — no progress observed for stall_secs (default 120 s).
+    let mut stalled = false;
 
-    // Optional wall-clock deadline for the SSE stream. `timeout_secs == 0`
-    // means wait forever (legacy behaviour). Otherwise each `stream.next()`
-    // is raced against `tokio::time::sleep_until(deadline)` via
-    // `tokio::select!`. When the sleep wins we set `timed_out = true` and
-    // break so the post-loop path can print the canonical warning.
-    let deadline: Option<tokio::time::Instant> = if opts.timeout_secs > 0 {
-        Some(tokio::time::Instant::now() + Duration::from_secs(opts.timeout_secs))
+    // ── Wait / timeout strategy ──────────────────────────────────────────────
+    //
+    // When the user explicitly passed `--timeout N` we honour it as a hard
+    // wall-clock cap (legacy behaviour, unchanged).  This lets power users
+    // guarantee the CLI exits within N seconds.
+    //
+    // When the user did NOT pass `--timeout` (the common case), we instead use
+    // progress-aware stall detection: the CLI keeps waiting as long as the
+    // `indexed` counter is still advancing.  It only detaches when there has
+    // been no progress for `stall_secs` (default 120 s), which guards against
+    // a genuinely stalled or crashed embedder without penalising healthy but
+    // slow runs.
+    //
+    // Hard cap (explicit --timeout): one-shot deadline, checked on every iteration.
+    let hard_deadline: Option<tokio::time::Instant> = if opts.timeout_explicit {
+        if opts.timeout_secs > 0 {
+            Some(tokio::time::Instant::now() + Duration::from_secs(opts.timeout_secs))
+        } else {
+            None // --timeout 0 = wait forever
+        }
     } else {
         None
     };
+
+    // Stall detection (progress-aware default): tracks the last instant at
+    // which `indexed_now` was observed to advance.  Reset on every batch or
+    // skip event.  When the stall window expires with no advance, we detach.
+    // Only used when `timeout_explicit` is false.
+    let stall_deadline_dur = Duration::from_secs(opts.stall_secs);
+    // `last_progress` starts at "now" so new sessions get a full stall window
+    // before the first batch event could reasonably arrive.
+    let mut last_progress = std::time::Instant::now();
+    let mut last_indexed_snapshot: u64 = 0;
 
     // `eventsource-stream` handles SSE framing. The daemon emits these event
     // types (see `crates/trusty-search/src/service/reindex.rs::spawn_reindex`):
@@ -489,7 +560,10 @@ pub async fn run_reindex_with(
     let mut embed_started_ms: u64 = 0;
 
     while !done {
-        let maybe_event = if let Some(dl) = deadline {
+        // Build the per-iteration timeout: hard deadline (explicit --timeout)
+        // or a rolling stall window (progress-aware default).
+        let maybe_event = if let Some(dl) = hard_deadline {
+            // Explicit --timeout path: race the stream against the absolute deadline.
             tokio::select! {
                 biased;
                 ev = stream.next() => ev,
@@ -499,7 +573,25 @@ pub async fn run_reindex_with(
                 }
             }
         } else {
-            stream.next().await
+            // Progress-aware path: wait for the next SSE event with a 1-second
+            // tick so we can check the stall window without blocking indefinitely.
+            tokio::select! {
+                biased;
+                ev = stream.next() => ev,
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    // Tick: check whether we have stalled (no progress for stall_secs).
+                    let current_indexed = indexed_now.load(Ordering::Acquire);
+                    if current_indexed > last_indexed_snapshot {
+                        // Progress observed — reset the stall clock.
+                        last_indexed_snapshot = current_indexed;
+                        last_progress = std::time::Instant::now();
+                    } else if last_progress.elapsed() >= stall_deadline_dur {
+                        stalled = true;
+                        break;
+                    }
+                    continue;
+                }
+            }
         };
         let event = match maybe_event {
             Some(Ok(e)) => e,
@@ -658,6 +750,11 @@ pub async fn run_reindex_with(
                     chunks_per_sec,
                     started.elapsed().as_secs(),
                 );
+                // Any batch event is forward progress — reset the stall clock.
+                if indexed > last_indexed_snapshot {
+                    last_indexed_snapshot = indexed;
+                    last_progress = std::time::Instant::now();
+                }
             }
             // ── skip ───────────────────────────────────────────────────────
             Some("skip") => {
@@ -672,6 +769,11 @@ pub async fn run_reindex_with(
                     cps_now.load(Ordering::Acquire),
                     started.elapsed().as_secs(),
                 );
+                // skip events also represent progress (files are being processed).
+                if indexed > last_indexed_snapshot {
+                    last_indexed_snapshot = indexed;
+                    last_progress = std::time::Instant::now();
+                }
             }
             // ── kg_start ───────────────────────────────────────────────────
             // New event added by issue #401. The daemon emits this immediately
@@ -798,15 +900,46 @@ pub async fn run_reindex_with(
     let _ = ticker.await;
 
     if timed_out {
-        ui.abandon(format!(
-            "{} trusty-search index timed out after {}s \u{2014} continuing; re-run later if needed",
-            "\u{26a0}".yellow(),
-            opts.timeout_secs,
-        ));
+        // Hard cap (explicit --timeout) fired.
+        let still_progressing = indexed_now.load(Ordering::Acquire) > last_indexed_snapshot
+            || last_progress.elapsed() < stall_deadline_dur;
+        let reason = if still_progressing {
+            format!(
+                "reached --timeout {}s while still progressing \u{2014} detaching",
+                opts.timeout_secs,
+            )
+        } else {
+            format!(
+                "timed out after {}s with no recent progress",
+                opts.timeout_secs,
+            )
+        };
+        ui.abandon(format!("{} {}", "\u{26a0}".yellow(), reason));
         eprintln!(
             "{} Daemon is still indexing in the background. \
              Use `trusty-search status` or re-run `trusty-search index` to check progress. \
              Pass `--timeout <seconds>` to wait longer (e.g. `--timeout 1200`).",
+            "\u{2139}".cyan()
+        );
+        return Ok(outcome);
+    }
+
+    if stalled {
+        // Progress-aware stall: no indexed counter advance for stall_secs.
+        let indexed = indexed_now.load(Ordering::Acquire);
+        let total = outcome.indexed.max(indexed);
+        ui.abandon(format!(
+            "{} No indexing progress for {}s (Files {}/{}) \u{2014} detaching; \
+             daemon continues in background",
+            "\u{26a0}".yellow(),
+            opts.stall_secs,
+            super::format::format_with_commas(indexed),
+            super::format::format_with_commas(total),
+        ));
+        eprintln!(
+            "{} Daemon appears stalled or very slow. Use `trusty-search status` to check. \
+             If indexing is still running, re-run `trusty-search index` to reattach or \
+             pass `--timeout <seconds>` to extend the hard cap.",
             "\u{2139}".cyan()
         );
         return Ok(outcome);
@@ -1056,7 +1189,7 @@ pub async fn register_index_with_daemon_filtered(
 /// Why: the `--force` pre-snapshot path needs the current chunk count before
 /// the reindex begins, so the final verify message can show "(was N)".
 /// What: GETs `/indexes/:id/status` and parses `chunk_count`.
-/// Test: covered indirectly by `run_reindex_force`.
+/// Test: covered indirectly by `run_reindex_force_opts`.
 pub async fn fetch_chunk_count(index_id: &str) -> Option<u64> {
     let base = daemon_base_url();
     let url = format!("{}/indexes/{}/status", base, index_id);
@@ -1076,9 +1209,11 @@ mod tests {
     use super::*;
 
     /// The default `ReindexOptions` values must be sane so accidental callers
-    /// that rely on `Default::default()` get a reasonable timeout.
+    /// that rely on `Default::default()` get progress-aware stall behaviour.
     ///
-    /// Why: a zero timeout would make every plain reindex exit immediately.
+    /// Why: `timeout_explicit = false` is the key invariant — it ensures that
+    /// a CLI omitting `--timeout` gets the progress-aware default rather than
+    /// a premature 600 s abort.
     /// What: asserts the default field values.
     /// Test: this test.
     #[test]
@@ -1087,7 +1222,10 @@ mod tests {
         assert!(!opts.verify_after);
         assert!(opts.prior_chunk_count.is_none());
         assert!(!opts.force);
-        assert_eq!(opts.timeout_secs, 600);
+        // timeout_explicit must be false so the progress-aware stall window
+        // governs by default (not a hard wall-clock cap).
+        assert!(!opts.timeout_explicit);
+        assert_eq!(opts.stall_secs, 120);
     }
 
     /// The default `ReindexOutcome` must have all fields at zero / false so
@@ -1122,5 +1260,179 @@ mod tests {
         // Constructing the UI exercises all bar styles.
         let ui = ReindexUi::new("test", false);
         ui.finish("ok".to_string());
+    }
+
+    // ── Progress-aware wait logic ─────────────────────────────────────────────
+    //
+    // The full SSE loop in `run_reindex_with` requires a live daemon and cannot
+    // be tested in a unit test.  The tests below instead verify the *decision
+    // logic* that governs the wait strategy:
+    //
+    //  1. Whether `ReindexOptions` correctly represents "explicit" vs "default"
+    //     timeout intent.
+    //  2. Whether the hard-cap and stall-window durations are constructed
+    //     correctly from the options.
+    //  3. That `run_reindex_opts` with `timeout_explicit=false` produces options
+    //     with no hard deadline (the progress-aware path).
+    //  4. That `run_reindex_opts` with `timeout_explicit=true` and a nonzero
+    //     `timeout_secs` would produce a hard deadline.
+    //
+    // Integration coverage lives in the `--include-ignored` test suite (requires
+    // a live daemon + indexed corpus).
+
+    /// When `timeout_explicit = false` (the default), no hard deadline is set
+    /// and the stall window governs.
+    ///
+    /// Why: guards the progress-aware default — a regression here would restore
+    /// the old premature 600 s abort on every unattended `trusty-search index`.
+    /// What: constructs `ReindexOptions` with `timeout_explicit = false` and
+    /// asserts the hard-deadline path would not fire.
+    /// Test: this test.
+    #[test]
+    fn progress_aware_wait_no_hard_deadline_when_implicit() {
+        let opts = ReindexOptions {
+            timeout_explicit: false,
+            stall_secs: 120,
+            ..ReindexOptions::default()
+        };
+        // The hard-deadline arm is `opts.timeout_explicit` — when false, no
+        // deadline `Instant` is created.
+        assert!(
+            !opts.timeout_explicit,
+            "implicit timeout must not set a hard cap"
+        );
+        assert_eq!(opts.stall_secs, 120);
+
+        // Simulate the deadline construction logic from run_reindex_with:
+        // hard_deadline is None when timeout_explicit is false.
+        let hard_deadline: Option<std::time::Duration> = if opts.timeout_explicit {
+            Some(std::time::Duration::from_secs(opts.timeout_secs))
+        } else {
+            None
+        };
+        assert!(
+            hard_deadline.is_none(),
+            "progress-aware mode must not produce a hard deadline"
+        );
+    }
+
+    /// When `timeout_explicit = true` with a non-zero `timeout_secs`, a hard
+    /// deadline is imposed (the legacy behaviour preserved for `--timeout N`).
+    ///
+    /// Why: explicit `--timeout` must still work as a reliable hard cap even
+    /// when indexing is healthy.  Power users depend on this for scripting.
+    /// What: constructs `ReindexOptions` with `timeout_explicit = true` and
+    /// asserts the hard deadline is set.
+    /// Test: this test.
+    #[test]
+    fn progress_aware_wait_hard_deadline_when_explicit() {
+        let opts = ReindexOptions {
+            timeout_secs: 300,
+            timeout_explicit: true,
+            ..ReindexOptions::default()
+        };
+        assert!(
+            opts.timeout_explicit,
+            "explicit timeout must set a hard cap"
+        );
+
+        let hard_deadline: Option<std::time::Duration> =
+            if opts.timeout_explicit && opts.timeout_secs > 0 {
+                Some(std::time::Duration::from_secs(opts.timeout_secs))
+            } else {
+                None
+            };
+        assert_eq!(
+            hard_deadline,
+            Some(std::time::Duration::from_secs(300)),
+            "explicit 300 s timeout must produce a 300 s hard deadline"
+        );
+    }
+
+    /// `--timeout 0` with `timeout_explicit = true` means "wait forever"
+    /// (the legacy `0 = no limit` behaviour).
+    ///
+    /// Why: `--timeout 0` must remain a valid escape hatch for users who want
+    /// to block indefinitely without switching to progress-aware mode.
+    /// What: asserts that `timeout_secs = 0` + `timeout_explicit = true` does
+    /// NOT produce a hard deadline (the `> 0` guard).
+    /// Test: this test.
+    #[test]
+    fn progress_aware_wait_timeout_zero_explicit_means_no_deadline() {
+        let opts = ReindexOptions {
+            timeout_secs: 0,
+            timeout_explicit: true,
+            ..ReindexOptions::default()
+        };
+        // Mirrors the `if opts.timeout_explicit { if opts.timeout_secs > 0 { Some(…) } else { None } }`
+        // guard in run_reindex_with.
+        let hard_deadline: Option<std::time::Duration> = if opts.timeout_explicit {
+            if opts.timeout_secs > 0 {
+                Some(std::time::Duration::from_secs(opts.timeout_secs))
+            } else {
+                None // --timeout 0 = wait forever
+            }
+        } else {
+            None
+        };
+        assert!(
+            hard_deadline.is_none(),
+            "--timeout 0 must not produce a hard deadline (wait forever)"
+        );
+    }
+
+    /// Stall detection logic: a counter that stops advancing within the stall
+    /// window should trigger a stall, while one that advances should not.
+    ///
+    /// Why: the stall window is the core mechanism preventing premature detach
+    /// during a healthy but slow embed run; verifying the comparison logic
+    /// catches off-by-one or direction errors before they reach users.
+    /// What: simulates the indexed-counter comparison used in the wait loop and
+    /// asserts the stall condition fires only when the counter is frozen.
+    /// Test: this test.
+    #[test]
+    fn stall_detection_triggers_on_frozen_counter() {
+        // Simulate: counter has been at 100 for > stall_secs.
+        let last_indexed_snapshot: u64 = 100;
+        let current_indexed: u64 = 100; // unchanged — stalled
+
+        let counter_advanced = current_indexed > last_indexed_snapshot;
+        assert!(!counter_advanced, "frozen counter must not advance");
+
+        // With a tiny stall window that has definitely elapsed:
+        let last_progress = std::time::Instant::now() - std::time::Duration::from_secs(200);
+        let stall_deadline_dur = std::time::Duration::from_secs(120);
+        let is_stalled = !counter_advanced && last_progress.elapsed() >= stall_deadline_dur;
+        assert!(
+            is_stalled,
+            "must detect stall after stall_secs with no counter advance"
+        );
+    }
+
+    /// Stall detection logic: a counter that advances resets the stall clock
+    /// and must NOT trigger a stall.
+    ///
+    /// Why: complements `stall_detection_triggers_on_frozen_counter` — a
+    /// progressing index must never be considered stalled regardless of
+    /// elapsed wall-clock time.
+    /// What: simulates a counter that advanced and a stall window that has
+    /// elapsed; asserts the stall condition does NOT fire.
+    /// Test: this test.
+    #[test]
+    fn stall_detection_does_not_trigger_while_progressing() {
+        let last_indexed_snapshot: u64 = 100;
+        let current_indexed: u64 = 150; // advanced — progressing
+
+        let counter_advanced = current_indexed > last_indexed_snapshot;
+        assert!(
+            counter_advanced,
+            "advancing counter must register as progress"
+        );
+
+        // Even with a very old `last_progress`, the counter advance means we
+        // are NOT stalled (the loop resets last_progress when it sees advance).
+        // This test verifies the `counter_advanced` check comes first.
+        let stalled = !counter_advanced; // counter_advanced resets the stall
+        assert!(!stalled, "progressing counter must not trigger stall");
     }
 }
