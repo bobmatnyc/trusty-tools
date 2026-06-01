@@ -1654,8 +1654,11 @@ async fn session(client: &reqwest::Client, url: &str, action: SessionAction) -> 
             // Pure local computation — no daemon round-trip needed.
             let path = resolve_dir(dir)?;
             let fw = trusty_mpm::core::paths::FrameworkPaths::default();
-            let (output, _stash) = compose_session_instructions(&fw, &path)?;
-            print!("{}", output.merged);
+            // `resolved_prompt` is the same text written to the stash and
+            // passed to `claude --append-system-prompt-file` — the single
+            // source of truth for what Claude received (issue #382).
+            let (resolved_prompt, _output, _stash) = compose_session_instructions(&fw, &path)?;
+            print!("{resolved_prompt}");
         }
         SessionAction::Events { id_or_name } => {
             let id = match resolve_session_id(client, url, &id_or_name).await? {
@@ -2628,26 +2631,35 @@ async fn overseer(
     Ok(())
 }
 
-/// Run the instruction merge pipeline and stash the merged result on disk.
+/// Run the instruction merge pipeline and stash the override-resolved PM prompt.
 ///
-/// Why: both `session start` and `session instructions` need to compose the
-/// effective launch instructions; centralizing the pipeline call plus the
-/// inspectable-stash write keeps the two call sites consistent.
-/// What: builds a [`PipelineInput`] from `fw` and `project_dir`, runs
-/// [`build_instructions`], writes the merged text to
-/// `<project>/.trusty-mpm/last-instructions.md`, and returns the output along
-/// with the stash path.
-/// Test: covered indirectly by `cli_parses_session_instructions` and the
-/// `instruction_pipeline` unit tests in trusty-mpm-core.
+/// Why: `session start` and `session instructions` both need the effective PM
+/// prompt — the text actually delivered to `claude --append-system-prompt-file`.
+/// The old code returned `output.merged` (the legacy pipeline: INSTRUCTIONS.md +
+/// delegation authority + CLAUDE.md) for display, while stashing `resolve_pm_prompt`
+/// separately. That caused `tm session instructions` to print content that differed
+/// from what Claude received, which is exactly the divergence issue #382 describes.
+/// The single source of truth for "what claude receives" is `resolve_pm_prompt`;
+/// the display and the stash must both come from it.
+/// What: builds a [`PipelineInput`] and runs [`build_instructions`] to ensure
+/// `CLAUDE.md` is seeded (the side-effect we still need); resolves the PM prompt
+/// via [`crate::core::instruction_overrides::resolve_pm_prompt`]; writes it to
+/// `<project>/.trusty-mpm/last-instructions.md`; returns the resolved prompt text,
+/// the `PipelineOutput` metadata flags, and the stash path.
+/// Test: `compose_session_instructions_display_matches_stash`,
+/// `compose_session_instructions_display_matches_live_prompt`.
 fn compose_session_instructions(
     fw: &trusty_mpm::core::paths::FrameworkPaths,
     project_dir: &std::path::Path,
 ) -> anyhow::Result<(
+    String,
     trusty_mpm::core::instruction_pipeline::PipelineOutput,
     std::path::PathBuf,
 )> {
     use trusty_mpm::core::instruction_pipeline::{PipelineInput, build_instructions};
 
+    // Run the legacy pipeline for its side-effects: seed CLAUDE.md if absent
+    // and populate the metadata flags (agent_count, claude_md_created, …).
     let input = PipelineInput {
         framework_instructions_path: fw.framework_instructions_path(),
         agents_dir: fw.claude_agents_dir(),
@@ -2655,18 +2667,19 @@ fn compose_session_instructions(
     };
     let output = build_instructions(&input)?;
 
-    // Stash the *override-resolved* PM prompt — the exact text the launch path
-    // passes to `claude` — so `tm session instructions` shows what is actually
-    // used, including any project-level overrides under
-    // `<project>/.trusty-mpm/` (issue #381). Resolving via the shared
-    // `resolve_pm_prompt` keeps this stash and the live prompt identical.
+    // The single source of truth for the live PM prompt is `resolve_pm_prompt`.
+    // Writing it to the stash AND returning it as the display string ensures that
+    // `tm session instructions` always shows exactly what `claude` received (the
+    // #382 fix). Previously this function returned `output.merged` for display,
+    // which came from the old pipeline (INSTRUCTIONS.md + delegation + CLAUDE.md)
+    // and differed from the stash, causing the visible divergence.
     let resolved_prompt = trusty_mpm::core::instruction_overrides::resolve_pm_prompt(project_dir);
     let stash_dir = project_dir.join(".trusty-mpm");
     std::fs::create_dir_all(&stash_dir)?;
     let stash = stash_dir.join("last-instructions.md");
     std::fs::write(&stash, &resolved_prompt)?;
 
-    Ok((output, stash))
+    Ok((resolved_prompt, output, stash))
 }
 
 /// Inspect or configure the token-use optimizer.
@@ -4525,5 +4538,102 @@ mod tests {
             } => assert_eq!(name, "trusty-search"),
             other => panic!("expected services restart, got {other:?}"),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Regression tests for issue #382: compose_session_instructions must
+    // display exactly what it stashes and what the live launch prompt is.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn compose_session_instructions_display_matches_stash() {
+        // Why: the #382 bug was that `tm session instructions` printed
+        // `output.merged` (old pipeline text) while the stash held the
+        // override-resolved PM prompt — a visible divergence. After the fix
+        // both come from `resolve_pm_prompt`, so they must be identical.
+        // What: calls `compose_session_instructions` and reads the written
+        // stash file; asserts the returned display string equals it.
+        // Test: the return value is compared byte-for-byte against the
+        // on-disk stash to detect any future divergence.
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        let fw = trusty_mpm::core::paths::FrameworkPaths::default();
+
+        let (display, _output, stash_path) =
+            compose_session_instructions(&fw, project).expect("compose succeeds");
+
+        let on_disk = std::fs::read_to_string(&stash_path)
+            .expect("stash file must be readable after compose");
+
+        assert_eq!(
+            display, on_disk,
+            "tm session instructions display must equal the stash file (issue #382)"
+        );
+    }
+
+    #[test]
+    fn compose_session_instructions_display_matches_live_prompt() {
+        // Why: `tm session instructions` must show exactly what `claude` receives
+        // via `--append-system-prompt-file`; the live prompt is produced by
+        // `build_system_prompt_for`, which calls `resolve_pm_prompt`. If
+        // `compose_session_instructions` ever returns something different from
+        // `build_system_prompt_for`, the stash would again diverge from reality.
+        // What: runs `compose_session_instructions` and `build_system_prompt_for`
+        // on the same empty project directory and asserts the outputs match.
+        // Test: any future change that re-introduces the #382 divergence will
+        // break this test immediately.
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        let fw = trusty_mpm::core::paths::FrameworkPaths::default();
+
+        let (display, _output, _stash) =
+            compose_session_instructions(&fw, project).expect("compose succeeds");
+
+        let live_prompt = trusty_mpm::core::session_launch::build_system_prompt_for(project);
+
+        assert_eq!(
+            display, live_prompt,
+            "tm session instructions output must match the live launch prompt (issue #382)"
+        );
+    }
+
+    #[test]
+    fn compose_session_instructions_display_matches_live_prompt_with_override() {
+        // Why: the same convergence guarantee must hold when project-level override
+        // files are present — the stash and the display must reflect the override,
+        // not the bundled defaults.
+        // What: writes a `WORKFLOW.md` override, then asserts the display and the
+        // live prompt both include it (and don't include the bundled heading).
+        // Test: if `compose_session_instructions` stops reading overrides for the
+        // display path, this test fails.
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        let fw = trusty_mpm::core::paths::FrameworkPaths::default();
+
+        let override_dir = project.join(".trusty-mpm");
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::write(
+            override_dir.join("WORKFLOW.md"),
+            "# Custom Workflow\n\nCOMPOSE_OVERRIDE_MARKER\n",
+        )
+        .unwrap();
+
+        let (display, _output, _stash) =
+            compose_session_instructions(&fw, project).expect("compose succeeds");
+
+        let live_prompt = trusty_mpm::core::session_launch::build_system_prompt_for(project);
+
+        assert_eq!(
+            display, live_prompt,
+            "display and live prompt must match with overrides present (issue #382)"
+        );
+        assert!(
+            display.contains("COMPOSE_OVERRIDE_MARKER"),
+            "override must be reflected in display"
+        );
+        assert!(
+            !display.contains("# PM Workflow Configuration"),
+            "bundled workflow must be replaced in display"
+        );
     }
 }
