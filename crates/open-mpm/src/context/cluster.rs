@@ -42,8 +42,13 @@ impl ClusterStore {
     /// Why: The synthesized text is what we want surfaced; storing its
     /// embedding alongside allows future retrieval without re-embedding.
     /// What: Wraps `summary + embedding` in an `IndexedEntry` with a synthetic
-    /// `TurnRecord` (agent = "consolidator"). Appends one JSONL line.
-    /// Test: `cluster_save_and_load_roundtrip`.
+    /// `TurnRecord` (agent = "consolidator"). Appends one JSONL line, then
+    /// flushes to ensure bytes are visible to subsequent `load_all` calls in
+    /// the same process. Tokio's `File` uses `spawn_blocking` internally so
+    /// `write_all` can resolve before the kernel has committed the buffer;
+    /// without `flush`, a read-back in the same task (or a different one) can
+    /// observe an empty file — the same race fixed in PR #532 for `append_usage`.
+    /// Test: `cluster_save_and_load_roundtrip` (verified stable across ≥5 runs).
     pub async fn save(&self, summary: String, embedding: Vec<f32>) -> anyhow::Result<()> {
         let entry = IndexedEntry {
             id: uuid::Uuid::new_v4().to_string(),
@@ -69,7 +74,10 @@ impl ClusterStore {
             .append(true)
             .open(&self.path)
             .await?;
-        f.write_all(format!("{line}\n").as_bytes()).await?;
+        if let Err(e) = f.write_all(format!("{line}\n").as_bytes()).await {
+            return Err(e.into());
+        }
+        f.flush().await?;
         Ok(())
     }
 

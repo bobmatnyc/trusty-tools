@@ -139,7 +139,14 @@ pub async fn clean_once(store_dir: &Path, _api_key: &str, batch_size: usize) -> 
         .append(true)
         .open(&log_path)
         .await?;
-    f.write_all(log_line.as_bytes()).await?;
+    // Error-first: return before flushing a failed write.
+    if let Err(e) = f.write_all(log_line.as_bytes()).await {
+        return Err(e.into());
+    }
+    // Flush so the log line is visible to any reader (e.g. `clean_once_rewrites_file`
+    // asserts the log file exists, and a timing-dependent read might see an empty
+    // file without this flush on a loaded test runner).
+    f.flush().await?;
 
     Ok(())
 }

@@ -161,6 +161,15 @@ pub fn truncate(s: &str, max: usize) -> String {
 }
 
 /// Append one record as a JSON line.
+///
+/// Why: Mistake records must be visible to the synchronous `read_session` /
+/// `read_recent_global` readers that follow immediately in tests and
+/// postmortem flows. Without `flush`, Tokio's `File` (which uses
+/// `spawn_blocking` internally) may not have committed the buffer by the time
+/// the caller reads the file back. Fix mirrors the pattern from PR #532.
+/// What: Opens the file in create+append mode, writes `line + "\n"` — bailing
+/// out on write failure before flushing — then flushes to guarantee visibility.
+/// Test: `mistake_log_records_nonzero_exit` reads back what `record` wrote.
 async fn append_line(path: &Path, record: &MistakeRecord) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await?;
@@ -171,8 +180,15 @@ async fn append_line(path: &Path, record: &MistakeRecord) -> Result<()> {
         .append(true)
         .open(path)
         .await?;
-    file.write_all(line.as_bytes()).await?;
-    file.write_all(b"\n").await?;
+    // Write first; short-circuit before flush on failure so we don't flush a
+    // partial write.
+    if let Err(e) = file.write_all(line.as_bytes()).await {
+        return Err(e.into());
+    }
+    if let Err(e) = file.write_all(b"\n").await {
+        return Err(e.into());
+    }
+    file.flush().await?;
     Ok(())
 }
 

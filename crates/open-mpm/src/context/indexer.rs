@@ -103,8 +103,16 @@ async fn run_indexer(mut rx: mpsc::Receiver<TurnRecord>, store_dir: PathBuf, api
                         .await
                     {
                         Ok(mut f) => {
+                            // Write the line first; return early on failure so we
+                            // do not flush a partial write. Then flush to ensure
+                            // the bytes are visible to the retriever's read-back
+                            // in the same process (Tokio's File uses spawn_blocking
+                            // internally — write_all resolving does NOT guarantee
+                            // the OS buffer is committed).
                             if let Err(e) = f.write_all(format!("{line}\n").as_bytes()).await {
                                 tracing::warn!(error = %e, "history indexer: write failed");
+                            } else if let Err(e) = f.flush().await {
+                                tracing::warn!(error = %e, "history indexer: flush failed");
                             }
                         }
                         Err(e) => {
