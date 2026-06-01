@@ -1,0 +1,89 @@
+[package]
+name        = "trusty-review"
+version     = "0.1.0"
+edition     = "2024"
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+homepage               = "https://github.com/bobmatnyc/trusty-tools"
+readme                 = "README.md"
+description            = "Fast local PR-review service for trusty-tools — orchestrates LLM-backed code review"
+keywords    = ["code-review", "pr-review", "llm", "openrouter", "github"]
+categories  = ["development-tools", "command-line-utilities"]
+publish     = false
+
+[[bin]]
+name               = "trusty-review"
+path               = "src/main.rs"
+required-features  = []
+
+[lib]
+name = "trusty_review"
+path = "src/lib.rs"
+
+[dependencies]
+# ── async runtime ──────────────────────────────────────────────────────────
+tokio        = { workspace = true }
+async-trait  = { workspace = true }
+futures-util = { workspace = true }
+
+# ── HTTP (library code only — no axum in lib unconditionally) ──────────────
+reqwest      = { workspace = true }
+axum         = { workspace = true, optional = true }
+tower-http   = { workspace = true, optional = true }
+
+# ── Serialisation ──────────────────────────────────────────────────────────
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+toml         = { workspace = true }
+
+# ── Error handling ─────────────────────────────────────────────────────────
+# thiserror for library error enums; anyhow used in main.rs binary only.
+thiserror    = { workspace = true }
+anyhow       = { workspace = true }
+
+# ── Observability ──────────────────────────────────────────────────────────
+tracing             = { workspace = true }
+tracing-subscriber  = { workspace = true }
+
+# ── Config / paths ─────────────────────────────────────────────────────────
+dirs         = { workspace = true }
+
+# ── CLI (Stage 3) ──────────────────────────────────────────────────────────
+clap         = { workspace = true }
+
+# ── Shared workspace utilities ─────────────────────────────────────────────
+# The `chat` module of trusty-common exposes the streaming ChatProvider trait
+# and OpenRouterProvider.  We drain the stream internally (no feature
+# flag needed for the chat module itself, which is compiled unconditionally).
+trusty-common = { workspace = true }
+
+# ── JWT / HMAC / crypto (GitHub App auth) ─────────────────────────────────
+jsonwebtoken = { workspace = true }
+hmac         = { workspace = true }
+sha2         = { workspace = true }
+hex          = { workspace = true }
+base64       = { workspace = true }
+chrono       = { workspace = true }
+
+# ── Time (Instant for latency measurement) ─────────────────────────────────
+# std::time::Instant is sufficient; chrono is used for JWT iat/exp claims.
+
+[features]
+# Why: mirrors trusty-analyze / trusty-common convention — axum + tower-http
+#      are gated behind `http-server` so `--no-default-features` library
+#      consumers (e.g. CLI one-shot, unit tests) do not pull the full HTTP
+#      stack.  The webhook server and axum router live in the future `service`
+#      module and will be compiled only under this feature.
+#
+# The feature is defined now even though Stage 1 does not yet implement the
+# service module, so downstream consumers can safely write:
+#   trusty-review = { features = ["http-server"] }
+# without a manifest change in a later stage.
+default     = ["http-server"]
+http-server = ["dep:axum", "dep:tower-http", "trusty-common/axum-server"]
+
+[dev-dependencies]
+tokio        = { workspace = true }
+tempfile     = { workspace = true }
