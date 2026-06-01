@@ -10995,6 +10995,7 @@ dependencies = [
  "async-trait",
  "aws-config",
  "aws-sdk-bedrockruntime",
+ "aws-smithy-types",
  "aws-types",
  "axum",
  "base64 0.22.1",

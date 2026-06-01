@@ -38,6 +38,30 @@ const X_TITLE: &str = "trusty-review";
 
 // ─── Wire types (non-streaming) ───────────────────────────────────────────────
 
+/// OpenRouter `response_format` field for structured JSON output.
+///
+/// Why: when `response_schema` is set in `LlmRequest`, we send this field
+/// to force the model to emit a JSON object conforming to the schema.
+/// OpenRouter passes the `json_schema` type through to providers that support
+/// it (e.g. Anthropic via the structured outputs API).
+/// What: `type_` is always `"json_schema"`; `json_schema` holds the name,
+/// `strict` flag, and the schema value.
+/// Test: `complete_with_schema_sends_response_format` in tests module.
+#[derive(Debug, Serialize)]
+struct OrcResponseFormat<'a> {
+    #[serde(rename = "type")]
+    type_: &'static str,
+    json_schema: OrcJsonSchema<'a>,
+}
+
+/// The `json_schema` sub-object in `response_format`.
+#[derive(Debug, Serialize)]
+struct OrcJsonSchema<'a> {
+    name: &'a str,
+    strict: bool,
+    schema: &'a serde_json::Value,
+}
+
 /// OpenRouter non-streaming request body.
 #[derive(Debug, Serialize)]
 struct OrcRequest<'a> {
@@ -46,6 +70,8 @@ struct OrcRequest<'a> {
     stream: bool,
     temperature: f32,
     max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<OrcResponseFormat<'a>>,
 }
 
 /// Single message in the OpenRouter request.
@@ -194,10 +220,18 @@ impl LlmProvider for OpenRouterProvider {
     /// findings and compute token usage.
     /// What: POSTs to `/v1/chat/completions` with `stream: false`, maps HTTP
     /// errors to `LlmError` variants, extracts text + token counts, measures
-    /// wall-clock latency, and computes cost.
-    /// Test: `complete_builds_correct_request` (mock server in tests).
+    /// wall-clock latency, and computes cost.  When `req.response_schema` is
+    /// set, sends `response_format: { type: "json_schema", json_schema: { name,
+    /// strict: true, schema } }` to force the model to emit structured JSON;
+    /// the assistant message content will be the clean JSON object.
+    /// Test: `complete_builds_correct_request`,
+    /// `complete_with_schema_sends_response_format` (mock server in tests).
     async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
-        debug!(model = %self.model, "openrouter complete request");
+        debug!(
+            model = %self.model,
+            structured = req.response_schema.is_some(),
+            "openrouter complete request"
+        );
 
         // Build message list: optional system message followed by user turns.
         let mut messages = Vec::new();
@@ -214,12 +248,23 @@ impl LlmProvider for OpenRouterProvider {
             });
         }
 
+        // Build response_format when structured output is requested.
+        let response_format = req.response_schema.as_ref().map(|s| OrcResponseFormat {
+            type_: "json_schema",
+            json_schema: OrcJsonSchema {
+                name: &s.name,
+                strict: true,
+                schema: &s.schema,
+            },
+        });
+
         let body = OrcRequest {
             model: &self.model,
             messages: &messages,
             stream: false,
             temperature: req.temperature,
             max_tokens: req.max_tokens,
+            response_format,
         };
 
         let start = Instant::now();
@@ -289,137 +334,9 @@ impl LlmProvider for OpenRouterProvider {
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
 
+// ─── Unit tests ─────────────────────────────────────────────────────────────
+// Tests extracted to openrouter_tests.rs to keep this file under the 500-line cap.
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::llm::ChatMessage;
-
-    #[test]
-    fn new_returns_error_on_empty_key() {
-        let result = OpenRouterProvider::new("", "openai/gpt-5.4-mini-20260317");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, LlmError::AccessDenied(_)));
-        assert!(err.is_alarm());
-    }
-
-    #[test]
-    fn new_succeeds_with_valid_key() {
-        let p = OpenRouterProvider::new("sk-test-key", "openai/gpt-5.4-mini-20260317")
-            .expect("should succeed with non-empty key");
-        assert_eq!(p.name(), "openrouter");
-    }
-
-    #[test]
-    fn cost_estimate_for_nano_model() {
-        // 1 million input + 1 million output tokens with gpt-5.4-nano pricing.
-        let cost = estimate_cost_usd("openai/gpt-5.4-nano-20260317", 1_000_000, 1_000_000);
-        // $0.20 input + $1.25 output = $1.45.
-        assert!((cost - 1.45_f64).abs() < 1e-9, "expected $1.45, got {cost}");
-    }
-
-    #[test]
-    fn cost_estimate_for_mini_model() {
-        // 1 million input + 1 million output tokens with gpt-5.4-mini pricing.
-        let cost = estimate_cost_usd("openai/gpt-5.4-mini-20260317", 1_000_000, 1_000_000);
-        // $0.75 input + $4.50 output = $5.25.
-        assert!((cost - 5.25_f64).abs() < 1e-9, "expected $5.25, got {cost}");
-    }
-
-    #[test]
-    fn cost_estimate_for_full_model() {
-        // gpt-5.4-20260305: $2.50/M input + $15.00/M output.
-        let cost = estimate_cost_usd("openai/gpt-5.4-20260305", 1_000_000, 1_000_000);
-        assert!(
-            (cost - 17.50_f64).abs() < 1e-9,
-            "expected $17.50, got {cost}"
-        );
-    }
-
-    #[test]
-    fn cost_estimate_for_pro_model() {
-        // gpt-5.5-pro-20260423: $30.00/M input + $180.00/M output.
-        let cost = estimate_cost_usd("openai/gpt-5.5-pro-20260423", 1_000_000, 1_000_000);
-        assert!(
-            (cost - 210.0_f64).abs() < 1e-9,
-            "expected $210.00, got {cost}"
-        );
-    }
-
-    #[test]
-    fn cost_estimate_for_unknown_model() {
-        let cost = estimate_cost_usd("unknown/model", 100_000, 50_000);
-        assert_eq!(cost, 0.0);
-    }
-
-    #[tokio::test]
-    async fn complete_builds_correct_request() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        // Spin up a mock HTTP server that records the request body and
-        // returns a minimal OpenRouter-shaped response.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let base_url = format!("http://{addr}");
-
-        // We need to rewrite OPENROUTER_URL to our mock — we can't do that
-        // from a const, so this test constructs the request manually.
-        // Instead, we verify the client is built correctly and simulate
-        // the request/response at the HTTP level by having the provider
-        // call our mock server.  We achieve this by building the client
-        // directly and calling its internal POST logic.
-
-        // Since OPENROUTER_URL is const and points to openrouter.ai, we
-        // test the request-building logic through a mock HTTP server that
-        // accepts a connection, reads the body, and returns a valid response.
-        let mock_handle = tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 8192];
-            let n = sock.read(&mut buf).await.unwrap();
-            let raw = std::str::from_utf8(&buf[..n]).unwrap().to_string();
-
-            // Extract the JSON body from the HTTP request.
-            let body_start = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
-            let json_body: serde_json::Value =
-                serde_json::from_str(&raw[body_start..]).unwrap_or_default();
-
-            // Respond with a minimal OpenRouter response.
-            let resp_body = serde_json::json!({
-                "choices": [{"message": {"content": "LGTM"}}],
-                "usage": {"prompt_tokens": 100, "completion_tokens": 10},
-                "model": "openai/gpt-5.4-mini-20260317"
-            })
-            .to_string();
-            let http_resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                resp_body.len(),
-                resp_body
-            );
-            sock.write_all(http_resp.as_bytes()).await.unwrap();
-            sock.shutdown().await.unwrap();
-
-            json_body
-        });
-
-        // Build a provider with a custom client pointing to our mock server.
-        // We can't set OPENROUTER_URL dynamically, so we exercise the URL-building
-        // and auth logic by directly testing the body structure.
-        let _ = base_url; // Used conceptually above.
-        drop(mock_handle); // Drop the task handle — this is a unit test, not a network test.
-
-        // Verify the core logic: LlmRequest maps correctly to wire fields.
-        let req = LlmRequest {
-            model: "openai/gpt-5.4-mini-20260317".to_string(),
-            system: "You are a code reviewer.".to_string(),
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: "Review this diff.".to_string(),
-            }],
-            temperature: 0.3,
-            max_tokens: 1024,
-        };
-        assert_eq!(req.model, "openai/gpt-5.4-mini-20260317");
-        assert_eq!(req.messages.len(), 1);
-        assert!((req.temperature - 0.3_f32).abs() < f32::EPSILON);
-    }
-}
+#[path = "openrouter_tests.rs"]
+mod tests;

@@ -8,22 +8,62 @@
 
 use std::cmp::Reverse;
 
-use crate::llm::{ChatMessage, LlmRequest, strip_provider_prefix};
+use crate::llm::{ChatMessage, LlmRequest, ResponseSchema, strip_provider_prefix};
 use crate::profile::types::ContributorProfile;
 
 // Constants imported from parent.
 use super::{SYNTHESIZER_MAX_TOKENS, SYNTHESIZER_TEMPERATURE};
+
+/// Build the JSON Schema for the synthesizer output structure.
+///
+/// Why: forced structured output eliminates JSON parse failures in the
+/// synthesizer; with a schema the model MUST emit a valid `SynthesisBlock`.
+/// What: returns a `ResponseSchema` with name `"synthesis_output"` and a
+/// JSON Schema matching the `SynthesisBlock` struct in `synthesizer.rs`.
+/// Test: `synthesizer::tests::build_synthesizer_prompt_includes_schema`.
+fn synthesis_output_schema() -> ResponseSchema {
+    ResponseSchema {
+        name: "synthesis_output".to_string(),
+        schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "strengths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "2-4 specific strengths observed across the periods"
+                },
+                "recurring_weaknesses": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "2-4 specific recurring weaknesses or improvement areas"
+                },
+                "improvement_trajectory": {
+                    "type": "string",
+                    "enum": ["improving", "stable", "declining"]
+                },
+                "narrative": {
+                    "type": "string",
+                    "description": "2-4 paragraph engineering assessment"
+                }
+            },
+            "required": ["strengths", "recurring_weaknesses", "improvement_trajectory", "narrative"]
+        }),
+    }
+}
 
 /// Build the LLM request for the synthesiser (narrative + strengths/weaknesses).
 ///
 /// Why: the narrative pass needs the full deduped finding list, frequency counts,
 /// and quality score series to produce a coherent longitudinal summary.
 /// What: assembles a system prompt (profiler role + JSON schema) and a user
-/// message with the finding summary table and quality trend series.  `model`
-/// may carry a `bedrock/` or `openrouter/` routing prefix; this function strips
-/// it so the bare id reaches the provider API.
+/// message with the finding summary table and quality trend series.  Includes
+/// `response_schema` so the provider forces structured output — eliminating
+/// JSON parse failures in the synthesizer.  `model` may carry a `bedrock/`
+/// or `openrouter/` routing prefix; this function strips it so the bare id
+/// reaches the provider API.
 /// Test: `synthesizer::tests::synthesizer_applies_llm_result`,
-/// `synthesizer::tests::synthesizer_prompt_strips_bedrock_prefix`.
+/// `synthesizer::tests::synthesizer_prompt_strips_bedrock_prefix`,
+/// `synthesizer::tests::build_synthesizer_prompt_includes_schema`.
 pub fn build_synthesizer_prompt(profile: &ContributorProfile, model: &str) -> LlmRequest {
     let system = synthesizer_system_prompt();
     let user = build_synthesizer_user_message(profile);
@@ -36,6 +76,7 @@ pub fn build_synthesizer_prompt(profile: &ContributorProfile, model: &str) -> Ll
         }],
         temperature: SYNTHESIZER_TEMPERATURE,
         max_tokens: SYNTHESIZER_MAX_TOKENS,
+        response_schema: Some(synthesis_output_schema()),
     }
 }
 
@@ -46,21 +87,12 @@ pub(super) fn synthesizer_system_prompt() -> &'static str {
 Given a list of recurring code-quality findings across multiple time periods and a quality score trend,
 write a concise, actionable engineering profile. Be direct and specific.
 
-## Output format (REQUIRED)
-End your response with EXACTLY ONE JSON block in this schema.
-Do NOT include any text after the JSON block.
-
-```json
-{
-  "strengths": ["List of 2–4 specific strengths observed across the periods"],
-  "recurring_weaknesses": ["List of 2–4 specific recurring weaknesses or areas for improvement"],
-  "improvement_trajectory": "improving|stable|declining",
-  "narrative": "2–4 paragraph engineering assessment suitable for a manager review."
-}
-```
-
-`improvement_trajectory` must be one of: improving, stable, declining.
-Emit the raw JSON block with no additional prose after it."#
+## Output (REQUIRED)
+Populate the structured response with:
+- `strengths`: array of 2-4 specific strengths observed across the periods.
+- `recurring_weaknesses`: array of 2-4 specific recurring weaknesses or improvement areas.
+- `improvement_trajectory`: one of "improving", "stable", or "declining".
+- `narrative`: 2-4 paragraph engineering assessment suitable for a manager review."#
 }
 
 pub(super) fn build_synthesizer_user_message(profile: &ContributorProfile) -> String {
@@ -132,7 +164,7 @@ pub(super) fn build_synthesizer_user_message(profile: &ContributorProfile) -> St
 
     msg.push_str(
         "Please synthesise the above data into a longitudinal engineering profile \
-         and end your response with the structured JSON block.\n",
+         and populate the structured response fields.\n",
     );
 
     msg

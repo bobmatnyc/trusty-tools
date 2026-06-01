@@ -219,9 +219,12 @@ fn batch_reviewer_prompt_contains_period_label() {
 #[test]
 fn batch_reviewer_system_prompt_contains_schema() {
     let prompt = period_reviewer_system_prompt();
+    // With forced structured output, the schema is passed as response_schema
+    // rather than as a JSON fence in the system prompt.  The system prompt
+    // still references the key fields in its output instruction section.
     assert!(
-        prompt.contains("\"findings\""),
-        "system prompt must include findings schema"
+        prompt.contains("findings"),
+        "system prompt must reference the findings field"
     );
     assert!(
         prompt.contains("confidence"),
@@ -280,4 +283,55 @@ fn batch_period_prompt_strips_openrouter_prefix() {
         req.model, "openai/gpt-5.4-mini-20260317",
         "openrouter/ prefix must be stripped from LlmRequest.model in build_period_prompt"
     );
+}
+
+/// Verify that `build_period_prompt` sets `response_schema` for structured output.
+///
+/// Why: if `response_schema` is absent, the provider uses free text and the
+/// batch reviewer may silently return empty findings on parse failure.
+/// What: asserts `LlmRequest.response_schema` is `Some` with name `period_findings`.
+/// Test: no network.
+#[test]
+fn build_period_prompt_includes_schema() {
+    let batch = make_batch();
+    let req = build_period_prompt(&batch, "us.anthropic.claude-haiku-4-5-20251001-v1:0");
+    let schema = req
+        .response_schema
+        .expect("response_schema must be set on every period review prompt");
+    assert_eq!(
+        schema.name, "period_findings",
+        "schema name must be period_findings"
+    );
+    assert!(schema.schema.is_object(), "schema must be a JSON object");
+    assert!(
+        schema.schema["properties"]["findings"].is_object(),
+        "schema must have findings property"
+    );
+}
+
+/// Verify that the batch reviewer parses a direct JSON response (structured output).
+///
+/// Why: with forced structured output the LLM returns a bare JSON object;
+/// the parser must handle it without requiring a fenced block.
+/// What: uses FakeLlm returning a direct JSON object (no fences), asserts findings parsed.
+/// Test: no network.
+#[tokio::test]
+async fn batch_reviewer_parses_direct_json() {
+    const DIRECT_JSON: &str = r#"{"findings":[{"kind":"error_handling","description":"Missing error propagation.","suggestion":"Use ? operator.","confidence":0.85,"file":"src/lib.rs","severity":"medium"}]}"#;
+
+    let llm: Arc<dyn LlmProvider> = Arc::new(FakeLlm {
+        response: DIRECT_JSON.to_string(),
+    });
+    let reviewer = BatchReviewer::new(llm, "fake/model");
+    let batch = make_batch();
+    let mut cost = TokenCostSummary::default();
+
+    let findings = reviewer.review_period(&batch, &mut cost).await;
+    assert_eq!(
+        findings.len(),
+        1,
+        "direct JSON response must parse 1 finding"
+    );
+    assert_eq!(findings[0].finding.kind, "error_handling");
+    assert_eq!(findings[0].period_label, "2026-Q1");
 }

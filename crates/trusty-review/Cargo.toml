@@ -77,6 +77,7 @@ chrono       = { workspace = true }
 aws-sdk-bedrockruntime = { workspace = true }
 aws-config             = { workspace = true }
 aws-types              = { workspace = true }
+aws-smithy-types       = { workspace = true }
 
 # ── Contributor profile pipeline (epic #558) ──────────────────────────────
 # tga: provides Database, IdentityResolver, AuthorPeriodSummary, diff_for_commit,

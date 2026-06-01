@@ -320,8 +320,9 @@ pub fn derive_trajectory(quality_trend: &[(String, f64)]) -> Trajectory {
 ///
 /// Why: the LLM response provides human-readable strengths, weaknesses,
 /// trajectory, and narrative that cannot be derived deterministically.
-/// What: parses the JSON block; if parsing fails, falls through to the
-/// fail-safe fallback so the profile is never incomplete.
+/// What: tries direct JSON parse first (structured output path where the body
+/// IS the JSON object), then falls back to fence-based extraction (legacy
+/// free-text path).  If both fail, the deterministic fallback is used.
 /// Test: covered transitively by synthesizer integration tests.
 fn apply_llm_synthesis(profile: &mut ContributorProfile, resp: &LlmResponse) {
     #[derive(Deserialize)]
@@ -337,24 +338,33 @@ fn apply_llm_synthesis(profile: &mut ContributorProfile, resp: &LlmResponse) {
     }
 
     let body = resp.text.trim();
-    let Some(fence_start) = body.rfind("```json") else {
-        warn!("synthesizer: no JSON block in LLM response — applying fallback narrative");
-        apply_fallback_narrative(profile);
-        return;
+
+    // Strategy 1: direct JSON parse (structured output path).
+    let block_opt: Option<SynthesisBlock> = if body.starts_with('{') {
+        serde_json::from_str(body).ok()
+    } else {
+        None
     };
 
-    let after = &body[fence_start + 7..];
-    let Some(fence_end) = after.find("```") else {
-        warn!("synthesizer: unclosed JSON block — applying fallback narrative");
-        apply_fallback_narrative(profile);
-        return;
-    };
+    // Strategy 2: fence-based extraction (legacy free-text path).
+    let block_opt = block_opt.or_else(|| {
+        let fence_start = body.rfind("```json")?;
+        let after = &body[fence_start + 7..];
+        let fence_end = after.find("```")?;
+        let json_text = after[..fence_end].trim();
+        match serde_json::from_str::<SynthesisBlock>(json_text) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                warn!(error = %e, "synthesizer: JSON parse error (fence path)");
+                None
+            }
+        }
+    });
 
-    let json_text = after[..fence_end].trim();
-    let block: SynthesisBlock = match serde_json::from_str(json_text) {
-        Ok(b) => b,
-        Err(e) => {
-            warn!(error = %e, "synthesizer: JSON parse error — applying fallback narrative");
+    let block = match block_opt {
+        Some(b) => b,
+        None => {
+            warn!("synthesizer: no parseable JSON in LLM response — applying fallback narrative");
             apply_fallback_narrative(profile);
             return;
         }

@@ -337,3 +337,63 @@ async fn synthesizer_applies_llm_result() {
     assert_eq!(result.token_cost.input_tokens, 200);
     assert_eq!(result.token_cost.output_tokens, 100);
 }
+
+/// Verify that `build_synthesizer_prompt` sets `response_schema` for structured output.
+///
+/// Why: if `response_schema` is absent, the synthesizer falls back to free-text
+/// parsing which may fail silently and apply the fallback narrative.
+/// What: asserts `LlmRequest.response_schema` is `Some` with name `synthesis_output`.
+/// Test: no network.
+#[test]
+fn build_synthesizer_prompt_includes_schema() {
+    let profile = make_profile();
+    let req = build_synthesizer_prompt(&profile, "us.anthropic.claude-sonnet-4-6");
+    let schema = req
+        .response_schema
+        .expect("response_schema must be set on every synthesizer prompt");
+    assert_eq!(
+        schema.name, "synthesis_output",
+        "schema name must be synthesis_output"
+    );
+    assert!(schema.schema.is_object(), "schema must be a JSON object");
+    let props = &schema.schema["properties"];
+    assert!(
+        props["strengths"].is_object(),
+        "schema must have strengths property"
+    );
+    assert!(
+        props["narrative"].is_object(),
+        "schema must have narrative property"
+    );
+}
+
+/// Verify that the synthesizer applies a direct JSON response (structured output path).
+///
+/// Why: with forced structured output the LLM returns a bare JSON object;
+/// `apply_llm_synthesis` must handle it without requiring a fenced block.
+/// What: uses FakeLlm returning a bare JSON object (no fences), asserts
+/// strengths and narrative are applied correctly.
+/// Test: no network.
+#[tokio::test]
+async fn synthesizer_applies_direct_json_result() {
+    let direct_json = r#"{"strengths":["Good test coverage"],"recurring_weaknesses":["Error handling gaps"],"improvement_trajectory":"improving","narrative":"Bob demonstrates steady improvement."}"#;
+    let llm: Arc<dyn LlmProvider> = Arc::new(FakeLlm {
+        response: direct_json.to_string(),
+    });
+    let synthesizer = Synthesizer::new(llm, "fake/model");
+    let profile = make_profile();
+    let periods = vec![make_period("2026-Q1", 3.0)];
+    let result = synthesizer.synthesize(profile, vec![], &periods).await;
+
+    assert_eq!(
+        result.strengths.len(),
+        1,
+        "strengths must be parsed from direct JSON"
+    );
+    assert_eq!(result.strengths[0], "Good test coverage");
+    assert_eq!(result.improvement_trajectory, Trajectory::Improving);
+    assert!(
+        result.narrative.contains("Bob"),
+        "narrative must be applied from direct JSON"
+    );
+}

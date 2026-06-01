@@ -20,7 +20,9 @@ use std::time::Instant;
 use serde::Deserialize;
 use tracing::{debug, warn};
 
-use crate::llm::{ChatMessage, LlmProvider, LlmRequest, LlmResponse, strip_provider_prefix};
+use crate::llm::{
+    ChatMessage, LlmProvider, LlmRequest, LlmResponse, ResponseSchema, strip_provider_prefix,
+};
 use crate::models::{Effort, Finding};
 use crate::profile::types::{LongitudinalFinding, PeriodBatch, TokenCostSummary};
 
@@ -119,17 +121,58 @@ impl BatchReviewer {
 
 // ─── Prompt builder ───────────────────────────────────────────────────────────
 
+/// Build the JSON Schema for the period findings output structure.
+///
+/// Why: forced structured output eliminates parse failures in the period
+/// reviewer (batch_reviewer); with a schema, the model MUST emit valid JSON
+/// conforming to the `PeriodFindingsBlock` shape.
+/// What: returns a `ResponseSchema` with name `"period_findings"` and a
+/// JSON Schema matching `PeriodFindingsBlock` / `PeriodFindingWire`.
+/// Test: `tests::build_period_prompt_includes_schema`.
+fn period_findings_schema() -> ResponseSchema {
+    ResponseSchema {
+        name: "period_findings".to_string(),
+        schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "findings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {"type": "string"},
+                            "description": {"type": "string"},
+                            "suggestion": {"type": "string"},
+                            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                            "file": {"type": "string"},
+                            "severity": {
+                                "type": "string",
+                                "enum": ["low", "medium", "high", "critical"]
+                            }
+                        },
+                        "required": ["kind", "description"]
+                    }
+                }
+            },
+            "required": ["findings"]
+        }),
+    }
+}
+
 /// Build the LLM request for reviewing a single period batch.
 ///
 /// Why: centralises prompt assembly so the wording can be iterated without
 /// touching reviewer logic.
 /// What: assembles a system prompt (reviewer role instructions + JSON output
 /// schema) and a user message containing the period stats summary + sampled
-/// diff snippets.  `model` may carry a `bedrock/` or `openrouter/` routing
-/// prefix; this function strips it before setting `LlmRequest.model` so the
-/// bare id reaches the provider API.
+/// diff snippets.  Includes `response_schema` so the provider forces structured
+/// output — eliminating parse failures in the profile pipeline.
+/// `model` may carry a `bedrock/` or `openrouter/` routing prefix; this
+/// function strips it before setting `LlmRequest.model` so the bare id reaches
+/// the provider API.
 /// Test: `tests::batch_reviewer_prompt_contains_period_label`,
-/// `tests::batch_period_prompt_strips_bedrock_prefix`.
+/// `tests::batch_period_prompt_strips_bedrock_prefix`,
+/// `tests::build_period_prompt_includes_schema`.
 pub fn build_period_prompt(batch: &PeriodBatch, model: &str) -> LlmRequest {
     let system = period_reviewer_system_prompt();
     let user = build_period_user_message(batch);
@@ -142,18 +185,20 @@ pub fn build_period_prompt(batch: &PeriodBatch, model: &str) -> LlmRequest {
         }],
         temperature: PERIOD_REVIEWER_TEMPERATURE,
         max_tokens: PERIOD_REVIEWER_MAX_TOKENS,
+        response_schema: Some(period_findings_schema()),
     }
 }
 
 /// System prompt for the period-batch reviewer role.
 ///
-/// Why: the system prompt defines the review criteria and the required JSON
-/// output schema that the parser depends on.
+/// Why: the system prompt defines the review criteria and the structured
+/// output shape the parser depends on.  With forced structured output active,
+/// the model populates the response fields directly rather than emitting a
+/// fenced JSON block.
 /// What: instructs the LLM to act as a senior engineer reviewing a sample of
-/// one engineer's commits, output a JSON findings array, and nothing else after
-/// the JSON block.
+/// one engineer's commits and populate the `findings` array.
 /// Test: asserted in `tests::batch_reviewer_system_prompt_contains_schema`.
-fn period_reviewer_system_prompt() -> &'static str {
+pub(super) fn period_reviewer_system_prompt() -> &'static str {
     r#"You are a senior software engineer reviewing a sample of one engineer's commits
 over a specific time window as part of a longitudinal quality analysis.
 
@@ -165,29 +210,17 @@ Identify code-quality findings present in the sampled diffs. Focus on:
 - Missing tests or test-quality issues
 - Recurring anti-patterns visible across multiple commits in this window
 
-## Output format (REQUIRED)
-End your response with EXACTLY ONE JSON block in this schema.
-Do NOT include any text after the JSON block.
+## Output (REQUIRED)
+Populate the structured response with a `findings` array.
+Each finding must include:
+- `kind`: short category label (e.g. error_handling, security, logic)
+- `description`: concise description of the issue observed
+- `suggestion`: concrete improvement suggestion
+- `confidence`: float in [0.0, 1.0]
+- `file`: most relevant file path; use "multiple" if the issue spans files
+- `severity`: one of low, medium, high, critical
 
-```json
-{
-  "findings": [
-    {
-      "kind": "Short category label (e.g. error_handling, security, logic)",
-      "description": "Concise description of the issue observed.",
-      "suggestion": "Concrete improvement suggestion.",
-      "confidence": 0.85,
-      "file": "src/path/to/file.rs",
-      "severity": "low|medium|high|critical"
-    }
-  ]
-}
-```
-
-`findings` may be an empty array if the sample looks clean.
-`confidence` is a float in [0.0, 1.0].
-`file` is the most relevant file; use "multiple" if the issue spans files.
-Emit the raw JSON block with no additional prose after it."#
+`findings` may be an empty array if the sample looks clean."#
 }
 
 /// Build the user-turn message for a period review.
@@ -253,8 +286,8 @@ fn build_period_user_message(batch: &PeriodBatch) -> String {
     }
 
     msg.push_str(
-        "Please review the diffs above and end your response with the structured \
-         JSON findings block exactly as specified in the system prompt.\n",
+        "Please review the diffs above and populate the structured `findings` \
+         array as specified in the system prompt.\n",
     );
 
     msg
@@ -291,10 +324,13 @@ struct PeriodFindingWire {
 /// Why: the MVP parser (`pipeline::parser`) targets `ReviewResult` verdict +
 /// findings; the period parser targets just findings with slightly different
 /// field names.  A separate function keeps the schemas independent.
-/// What: finds the last ```json...``` block, deserialises it, converts wire
-/// findings to `LongitudinalFinding` (with `trend_tag = None` and the given
-/// `period_label`).  Fail-safe: any parse error logs and returns empty.
-/// Test: `tests::batch_reviewer_parses_findings_from_json`.
+/// What: tries direct JSON parse first (structured output path where the body
+/// IS the JSON object), then falls back to the legacy fence-based extraction.
+/// Converts wire findings to `LongitudinalFinding` (with `trend_tag = None`
+/// and the given `period_label`).  Fail-safe: any parse error logs and returns
+/// empty — never panics.
+/// Test: `tests::batch_reviewer_parses_findings_from_json`,
+/// `tests::batch_reviewer_parses_direct_json`.
 fn parse_period_findings(resp: &LlmResponse, period_label: &str) -> Vec<LongitudinalFinding> {
     let body = resp.text.trim();
     if body.is_empty() {
@@ -302,6 +338,19 @@ fn parse_period_findings(resp: &LlmResponse, period_label: &str) -> Vec<Longitud
         return Vec::new();
     }
 
+    // Strategy 1: direct JSON (structured output path).
+    if body.starts_with('{')
+        && let Ok(block) = serde_json::from_str::<PeriodFindingsBlock>(body)
+    {
+        debug!(
+            period = %period_label,
+            findings = block.findings.len(),
+            "batch_reviewer: parsed via direct JSON (structured output)"
+        );
+        return convert_period_block(block, period_label);
+    }
+
+    // Strategy 2: legacy fence-based extraction.
     let Some(fence_start) = body.rfind("```json") else {
         warn!(
             period = %period_label,
@@ -329,6 +378,18 @@ fn parse_period_findings(resp: &LlmResponse, period_label: &str) -> Vec<Longitud
         }
     };
 
+    convert_period_block(block, period_label)
+}
+
+/// Convert a `PeriodFindingsBlock` into `LongitudinalFinding` values.
+///
+/// Why: extracted to eliminate duplication between the two parse strategies.
+/// What: maps each wire finding to `LongitudinalFinding` with `trend_tag = None`.
+/// Test: covered by all parse-path tests in the test module.
+fn convert_period_block(
+    block: PeriodFindingsBlock,
+    period_label: &str,
+) -> Vec<LongitudinalFinding> {
     block
         .findings
         .into_iter()

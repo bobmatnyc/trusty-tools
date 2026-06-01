@@ -1,21 +1,28 @@
 //! Verdict and findings parser for LLM review responses.
 //!
-//! Why: the LLM response is free-form text; parsing it correctly is the most
-//! brittle step in the pipeline.  A dedicated module keeps the parsing logic
-//! isolated and testable independently of the pipeline runner.
+//! Why: structured output (via `response_schema` forced output) makes the
+//! LLM return a clean JSON object directly, eliminating the fail-safe APPROVE
+//! problem.  Free-text parsing is retained as a fallback for transport errors
+//! and for callers that do not use forced structured output.
 //!
-//! What: exposes `parse_review_response` which tries two strategies in order:
+//! What: exposes `parse_review_response` which tries three strategies in order:
 //!
-//!  1. JSON-block extraction — looks for a ```json ... ``` fenced block at the
-//!     end of the response and deserialises it.
-//!  2. Verdict-keyword scan — scans the last 20% of the body for one of the
+//!  1. Direct JSON parse — tries `serde_json::from_str` on the full body.
+//!     This succeeds when forced structured output is active (Bedrock tool-use
+//!     or OpenRouter json_schema) and the response IS the JSON object.
+//!  2. JSON-block extraction — looks for a ```json ... ``` fenced block at the
+//!     end of the response and deserialises it (legacy free-text path).
+//!  3. Verdict-keyword scan — scans the last 20% of the body for one of the
 //!     known verdict tokens (APPROVE, REQUEST_CHANGES, BLOCK) per spec REV-112.
 //!
-//! If both strategies fail, the function returns a fail-safe `ParsedReview`
+//! If ALL THREE strategies fail (e.g. a genuine LLM/transport error produced
+//! empty or unparseable output), the function returns a fail-safe `ParsedReview`
 //! with `verdict = APPROVE` and an empty findings list (spec REV-130).
+//! The fail-safe is now reserved for genuine errors only — parse failures are
+//! no longer expected in normal operation because the schema forces valid JSON.
 //!
-//! Test: `parse_json_block_happy_path`, `parse_verdict_keyword_fallback`,
-//! `parse_fail_safe_approve_on_empty_response`,
+//! Test: `parse_direct_json_happy_path`, `parse_json_block_happy_path`,
+//! `parse_verdict_keyword_fallback`, `parse_fail_safe_approve_on_empty_response`,
 //! `parse_fail_safe_approve_on_malformed_json`.
 
 use serde::Deserialize;
@@ -110,27 +117,42 @@ impl ParsedReview {
 ///
 /// Why: the pipeline cannot use the raw text directly; structured data is needed
 /// to drive the verdict, findings post-processing, and telemetry.
-/// What: tries JSON-block extraction first; falls back to verdict-keyword scan
-/// (spec REV-112); if both fail, returns the fail-safe APPROVE default.
-/// Test: `parse_json_block_happy_path`, `parse_verdict_keyword_fallback`,
-/// `parse_fail_safe_approve_on_empty_response`.
+///
+/// What: tries three strategies in priority order:
+///   1. Direct JSON parse — succeeds when forced structured output (Bedrock
+///      tool-use / OpenRouter json_schema) is active; body IS the clean JSON.
+///   2. JSON-block extraction — legacy free-text path with fenced JSON block.
+///   3. Verdict-keyword scan — last-resort spec REV-112 fallback.
+///
+/// If ALL THREE fail, returns fail-safe APPROVE (genuine error path only;
+/// not expected in normal operation with structured output enforced).
+///
+/// Test: `parse_direct_json_happy_path`, `parse_json_block_happy_path`,
+/// `parse_verdict_keyword_fallback`, `parse_fail_safe_approve_on_empty_response`.
 pub fn parse_review_response(body: &str) -> ParsedReview {
     if body.trim().is_empty() {
         warn!("LLM returned empty response — applying fail-safe APPROVE");
         return ParsedReview::fail_safe("empty LLM response");
     }
 
-    // Strategy 1: JSON block.
+    // Strategy 1: direct JSON parse (structured output path).
+    // When response_schema is used, the provider returns only the JSON object.
+    if let Some(parsed) = try_parse_direct_json(body) {
+        debug!(verdict = ?parsed.verdict, findings = parsed.findings.len(), "parsed via direct JSON (structured output)");
+        return parsed;
+    }
+
+    // Strategy 2: JSON block (legacy free-text path).
     if let Some(parsed) = try_parse_json_block(body) {
         debug!(verdict = ?parsed.verdict, findings = parsed.findings.len(), "parsed via JSON block");
         return parsed;
     }
 
-    // Strategy 2: Verdict keyword scan in the last 20% of the body.
+    // Strategy 3: Verdict keyword scan in the last 20% of the body.
     if let Some(verdict) = scan_verdict_keyword(body) {
         warn!(
             ?verdict,
-            "JSON block parse failed — fell back to verdict keyword scan (spec REV-112)"
+            "JSON parse failed — fell back to verdict keyword scan (spec REV-112)"
         );
         return ParsedReview {
             verdict,
@@ -141,7 +163,7 @@ pub fn parse_review_response(body: &str) -> ParsedReview {
         };
     }
 
-    // Both strategies failed.
+    // All three strategies failed — genuine error, not a parse failure.
     warn!(
         body_len = body.len(),
         "failed to parse verdict from LLM response — applying fail-safe APPROVE (spec REV-130)"
@@ -149,7 +171,42 @@ pub fn parse_review_response(body: &str) -> ParsedReview {
     ParsedReview::fail_safe("no parseable verdict in LLM response")
 }
 
-// ─── Strategy 1: JSON block ───────────────────────────────────────────────────
+// ─── Strategy 1: Direct JSON parse (structured output) ───────────────────────
+
+/// Try to deserialize the entire response body as a `LlmOutputBlock`.
+///
+/// Why: when forced structured output is active (Bedrock tool-use / OpenRouter
+/// json_schema), the provider guarantees `LlmResponse.text` contains only the
+/// clean JSON object — no fence, no surrounding prose.  Parsing it directly
+/// avoids the fragile fence-stripping logic entirely.
+/// What: trims whitespace and calls `serde_json::from_str` on the full body.
+/// Returns `None` if the body is not a valid `LlmOutputBlock` JSON object
+/// (falls through to the fence-based strategy).
+/// Test: `parse_direct_json_happy_path`,
+/// `parse_direct_json_request_changes_with_findings`.
+fn try_parse_direct_json(body: &str) -> Option<ParsedReview> {
+    let trimmed = body.trim();
+    // Only attempt if it looks like a JSON object (starts with '{').
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    let block: LlmOutputBlock = serde_json::from_str(trimmed).ok()?;
+    let verdict = parse_verdict_string(&block.verdict).unwrap_or(Verdict::Approve);
+    let findings = block
+        .findings
+        .into_iter()
+        .map(convert_llm_finding)
+        .collect();
+    Some(ParsedReview {
+        verdict,
+        summary: block.summary,
+        findings,
+        is_fail_safe: false,
+        fail_safe_reason: None,
+    })
+}
+
+// ─── Strategy 2: JSON block (legacy free-text) ────────────────────────────────
 
 /// Try to extract and deserialize the trailing ```json ... ``` block.
 ///
@@ -215,7 +272,7 @@ fn convert_llm_finding(f: LlmFinding) -> Finding {
     finding
 }
 
-// ─── Strategy 2: Verdict keyword scan ────────────────────────────────────────
+// ─── Strategy 3: Verdict keyword scan ────────────────────────────────────────
 
 /// Scan the last 20% of the body for a verdict keyword (spec REV-112).
 ///
@@ -269,211 +326,9 @@ fn parse_verdict_string(s: &str) -> Option<Verdict> {
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
 
+// ─── Unit tests ─────────────────────────────────────────────────────────────
+// Tests extracted to parser_tests.rs to keep this file under the 500-line cap.
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const BODY_WITH_JSON_APPROVE: &str = r#"
-This PR looks good overall. The authentication logic is straightforward.
-
-```json
-{
-  "verdict": "APPROVE",
-  "summary": "Clean authentication refactor with no issues.",
-  "findings": []
-}
-```
-"#;
-
-    const BODY_WITH_JSON_REQUEST_CHANGES: &str = r#"
-I found a security issue in this PR.
-
-```json
-{
-  "verdict": "REQUEST_CHANGES",
-  "summary": "SQL injection risk in login handler.",
-  "findings": [
-    {
-      "title": "SQL injection",
-      "body": "Line 42 uses string interpolation in a SQL query.",
-      "severity": "critical",
-      "confidence": 0.95,
-      "file": "src/login.rs",
-      "line": 42
-    }
-  ]
-}
-```
-"#;
-
-    const BODY_KEYWORD_ONLY: &str = r#"
-After reviewing this PR, I believe the changes look reasonable.
-There are some minor style issues but nothing blocking.
-
-The verdict is APPROVE*.
-"#;
-
-    const BODY_BLOCK_VERDICT: &str = r#"
-This PR introduces a critical auth bypass.
-
-BLOCK — this must not merge.
-"#;
-
-    #[test]
-    fn parse_json_block_happy_path_approve() {
-        let result = parse_review_response(BODY_WITH_JSON_APPROVE);
-        assert!(
-            !result.is_fail_safe,
-            "should not be fail-safe: {:?}",
-            result.fail_safe_reason
-        );
-        assert_eq!(result.verdict, Verdict::Approve);
-        assert_eq!(
-            result.summary,
-            "Clean authentication refactor with no issues."
-        );
-        assert!(result.findings.is_empty());
-    }
-
-    #[test]
-    fn parse_json_block_happy_path_request_changes() {
-        let result = parse_review_response(BODY_WITH_JSON_REQUEST_CHANGES);
-        assert!(!result.is_fail_safe);
-        assert_eq!(result.verdict, Verdict::RequestChanges);
-        assert_eq!(result.findings.len(), 1);
-        let f = &result.findings[0];
-        assert_eq!(f.kind, "SQL injection");
-        assert_eq!(f.file, "src/login.rs");
-        assert_eq!(f.line, Some(42));
-        assert!((f.confidence - 0.95_f32).abs() < 1e-5);
-    }
-
-    #[test]
-    fn parse_verdict_keyword_fallback_approve_star() {
-        let result = parse_review_response(BODY_KEYWORD_ONLY);
-        assert!(!result.is_fail_safe);
-        assert_eq!(result.verdict, Verdict::ApproveStar);
-        assert!(result.findings.is_empty());
-    }
-
-    #[test]
-    fn parse_verdict_keyword_fallback_block() {
-        let result = parse_review_response(BODY_BLOCK_VERDICT);
-        assert!(!result.is_fail_safe);
-        assert_eq!(result.verdict, Verdict::Block);
-    }
-
-    #[test]
-    fn parse_fail_safe_approve_on_empty_response() {
-        let result = parse_review_response("");
-        assert!(result.is_fail_safe, "empty response must trigger fail-safe");
-        assert_eq!(
-            result.verdict,
-            Verdict::Approve,
-            "fail-safe must default to APPROVE"
-        );
-        assert!(result.fail_safe_reason.is_some());
-    }
-
-    #[test]
-    fn parse_fail_safe_approve_on_malformed_json() {
-        let body = r#"This is a review response with no verdict.
-
-```json
-{ "verdict": "definitely yes", "this_is": broken json
-"#;
-        let result = parse_review_response(body);
-        // No valid JSON block, no keyword → fail-safe APPROVE.
-        assert_eq!(result.verdict, Verdict::Approve);
-        // (may or may not be fail-safe depending on keyword scan — APPROVE is
-        //  not present in the body, so it should be fail-safe)
-        assert!(
-            result.is_fail_safe,
-            "malformed JSON with no keyword must be fail-safe"
-        );
-    }
-
-    #[test]
-    fn parse_fail_safe_approve_on_unparseable_verdict() {
-        // JSON block present but verdict string is unrecognized; we fall back to APPROVE.
-        let body = r#"```json
-{"verdict": "LOOKS_OK", "summary": "fine", "findings": []}
-```"#;
-        let result = parse_review_response(body);
-        // `parse_verdict_string` returns None → defaults to Approve.
-        assert_eq!(result.verdict, Verdict::Approve);
-    }
-
-    #[test]
-    fn parse_verdict_string_normalization() {
-        assert_eq!(parse_verdict_string("approve"), Some(Verdict::Approve));
-        assert_eq!(parse_verdict_string("APPROVE"), Some(Verdict::Approve));
-        assert_eq!(
-            parse_verdict_string(" REQUEST_CHANGES "),
-            Some(Verdict::RequestChanges)
-        );
-        assert_eq!(parse_verdict_string("block"), Some(Verdict::Block));
-        assert_eq!(parse_verdict_string("n/a"), Some(Verdict::NotApplicable));
-        assert_eq!(parse_verdict_string("UNKNOWN"), None);
-    }
-
-    #[test]
-    fn parse_json_block_handles_fence_variants() {
-        // Verify the parser finds the last ```json block, not a middle one.
-        let body = r#"
-First example:
-```json
-{"verdict": "BLOCK", "summary": "not the last one", "findings": []}
-```
-
-Second example:
-```json
-{"verdict": "APPROVE", "summary": "this is the last one", "findings": []}
-```
-"#;
-        let result = parse_review_response(body);
-        assert_eq!(result.verdict, Verdict::Approve);
-        assert_eq!(result.summary, "this is the last one");
-    }
-
-    #[test]
-    fn parse_findings_confidence_clamped() {
-        let body = r#"```json
-{
-  "verdict": "REQUEST_CHANGES",
-  "summary": "test",
-  "findings": [
-    {"title": "t", "body": "b", "severity": "low", "confidence": 2.5, "file": "a.rs"}
-  ]
-}
-```"#;
-        let result = parse_review_response(body);
-        assert_eq!(result.findings.len(), 1);
-        assert!(
-            result.findings[0].confidence <= 1.0,
-            "confidence must be clamped: {}",
-            result.findings[0].confidence
-        );
-    }
-
-    #[test]
-    fn parse_finding_missing_file_defaults_to_unknown() {
-        let body = r#"```json
-{
-  "verdict": "APPROVE",
-  "summary": "ok",
-  "findings": [{"title": "t", "body": "b"}]
-}
-```"#;
-        let result = parse_review_response(body);
-        assert_eq!(result.findings[0].file, "unknown");
-    }
-
-    #[test]
-    fn scan_verdict_keyword_priority_block_beats_approve() {
-        // Body contains both BLOCK and APPROVE — BLOCK wins.
-        let body = "This APPROVE-worthy PR unfortunately has a BLOCK issue.";
-        let verdict = scan_verdict_keyword(body);
-        assert_eq!(verdict, Some(Verdict::Block));
-    }
-}
+#[path = "parser_tests.rs"]
+mod tests;

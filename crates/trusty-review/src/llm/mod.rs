@@ -43,6 +43,32 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+// ─── Structured output spec ───────────────────────────────────────────────────
+
+/// Specification for forced structured output from an LLM provider.
+///
+/// Why: eliminates the "silent fail-safe APPROVE" problem caused by models
+/// not reliably emitting the required JSON verdict block in free-text
+/// responses (confirmed in live Bedrock testing: Haiku always fail-safes,
+/// Sonnet sometimes does).  When this spec is present the provider MUST
+/// force the model to produce JSON conforming to the schema, and
+/// `LlmResponse.text` will contain ONLY the clean JSON object —
+/// directly deserializable without any fence-stripping.
+/// What: holds a `name` (used as the Bedrock tool name and the
+/// OpenRouter `json_schema.name`) and a `schema` JSON Schema object
+/// describing the expected response shape.
+/// When absent, provider behavior is unchanged (free text).
+/// Test: `structured_output_spec_roundtrip` in this module;
+/// provider-level tests in `bedrock` and `openrouter` modules.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResponseSchema {
+    /// Name for this schema (used as the Bedrock tool name and the
+    /// OpenRouter `json_schema.name` field; must be a valid identifier).
+    pub name: String,
+    /// JSON Schema object describing the expected response structure.
+    pub schema: serde_json::Value,
+}
+
 // ─── Request / response types ─────────────────────────────────────────────────
 
 /// Input to `LlmProvider::complete`.
@@ -51,7 +77,8 @@ pub struct ChatMessage {
 /// summarizer) can vary temperature and max_tokens independently.
 /// What: `model` is the fully-resolved model id for this call (set by
 /// `RoleModels`); `system` is the system prompt; `messages` are the user
-/// turns.
+/// turns.  When `response_schema` is set, the provider MUST force
+/// structured output (Bedrock tool-use / OpenRouter json_schema).
 /// Test: constructed in `LlmProvider` implementation tests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmRequest {
@@ -65,6 +92,11 @@ pub struct LlmRequest {
     pub temperature: f32,
     /// Maximum tokens to generate.
     pub max_tokens: u32,
+    /// Optional structured-output spec.  When present, the provider forces
+    /// the model to emit JSON conforming to this schema; `LlmResponse.text`
+    /// will contain only the clean JSON object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_schema: Option<ResponseSchema>,
 }
 
 /// Output from `LlmProvider::complete`.
@@ -244,12 +276,68 @@ mod tests {
             }],
             temperature: 0.3,
             max_tokens: 2048,
+            response_schema: None,
         };
         let json = serde_json::to_string(&req).expect("serialise");
         let back: LlmRequest = serde_json::from_str(&json).expect("deserialise");
         assert_eq!(back.model, "openai/gpt-5.4-20260305");
         assert_eq!(back.messages.len(), 1);
         assert!((back.temperature - 0.3_f32).abs() < f32::EPSILON);
+        assert!(back.response_schema.is_none(), "no schema in roundtrip");
+    }
+
+    /// Verify that `ResponseSchema` serialises and deserialises correctly.
+    ///
+    /// Why: the schema is passed through serde_json::Value; ensuring roundtrip
+    /// fidelity prevents silent schema corruption at the provider boundary.
+    /// What: constructs a `ResponseSchema`, serialises to JSON, deserialises,
+    /// asserts field equality.
+    /// Test: this test itself.
+    #[test]
+    fn structured_output_spec_roundtrip() {
+        let schema = ResponseSchema {
+            name: "review_output".to_string(),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "verdict": { "type": "string" }
+                },
+                "required": ["verdict"]
+            }),
+        };
+        let json = serde_json::to_string(&schema).expect("serialise");
+        let back: ResponseSchema = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(back.name, "review_output");
+        assert_eq!(back.schema["properties"]["verdict"]["type"], "string");
+    }
+
+    /// Verify that `LlmRequest` with a `response_schema` roundtrips correctly.
+    ///
+    /// Why: the optional field must survive serde serialization; providers
+    /// read it from the request to decide whether to use structured output.
+    /// What: constructs a request with a schema, serialises, deserialises,
+    /// asserts the schema name is preserved.
+    /// Test: this test itself.
+    #[test]
+    fn llm_request_with_schema_roundtrip() {
+        let req = LlmRequest {
+            model: "us.anthropic.claude-sonnet-4-6".to_string(),
+            system: "reviewer".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "review".to_string(),
+            }],
+            temperature: 0.3,
+            max_tokens: 1024,
+            response_schema: Some(ResponseSchema {
+                name: "review_output".to_string(),
+                schema: serde_json::json!({"type": "object"}),
+            }),
+        };
+        let json = serde_json::to_string(&req).expect("serialise");
+        let back: LlmRequest = serde_json::from_str(&json).expect("deserialise");
+        let schema = back.response_schema.expect("schema must survive roundtrip");
+        assert_eq!(schema.name, "review_output");
     }
 
     /// Object-safety smoke-test: ensures `LlmProvider` can be used as a

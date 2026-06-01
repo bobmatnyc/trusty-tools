@@ -134,6 +134,7 @@ serial_test = "3"
 aws-config             = { version = "1.8", features = ["behavior-version-latest"] }
 aws-sdk-bedrockruntime = { version = "1.131" }
 aws-types              = { version = "1" }
+aws-smithy-types       = { version = "1.4" }
 
 # ── trusty-analyze additional deps ────────────────────────────────────────
 clap_complete = "4"
