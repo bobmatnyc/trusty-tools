@@ -52,6 +52,9 @@ crates/trusty-search/ui/node_modules/
 # trusty-memory runtime artifacts
 crates/trusty-memory/ui/node_modules/
 
+# trusty-analyze runtime artifacts
+crates/trusty-analyze/ui/node_modules/
+
 # Temp directories and analytics databases
 claude-mpm-patch/
 tga.db
