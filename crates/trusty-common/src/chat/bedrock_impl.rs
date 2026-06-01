@@ -31,16 +31,19 @@ use tokio::sync::mpsc::Sender;
 /// Default Bedrock model id when `TRUSTY_LLM_MODEL=bedrock/` is used without
 /// a specific model suffix.
 ///
-/// Uses the Claude Sonnet 4.6 cross-region inference profile for us-east-1.
-/// Cross-region inference profiles (the `us.` prefix) automatically route
-/// to the best-available region within the US geography, which avoids on-demand
-/// capacity errors that can occur with the bare foundation model id.
+/// Uses the Claude Sonnet 4.6 cross-region inference profile. As of Claude
+/// Sonnet 4.6, Anthropic dropped the date stamp and `-v1:0` suffix from the
+/// Bedrock inference-profile id — the id is just
+/// `<geography>.anthropic.claude-sonnet-4-6` (verified against AWS docs).
 ///
-/// TODO verify: confirm this exact string matches the current Bedrock
-/// inference-profile id. As of the knowledge cutoff (2025-05), the convention
-/// is `us.anthropic.claude-sonnet-4-6-20250514-v1:0`. Operators can override
-/// via `TRUSTY_LLM_MODEL=bedrock/<id>` without touching this constant.
-pub const DEFAULT_BEDROCK_MODEL: &str = "us.anthropic.claude-sonnet-4-6-20250514-v1:0";
+/// Cross-region inference profiles (`us.`/`eu.`/`jp.`/`global.` prefixes)
+/// automatically route to the best-available region within the geography,
+/// which avoids on-demand capacity errors that can occur with the bare
+/// foundation model id.
+///
+/// Operators can override via `TRUSTY_LLM_MODEL=bedrock/<id>` without
+/// touching this constant.
+pub const DEFAULT_BEDROCK_MODEL: &str = "us.anthropic.claude-sonnet-4-6";
 
 /// Env var from which a Bedrock region is read when not set explicitly.
 /// `TRUSTY_AWS_REGION` takes priority over `AWS_REGION`.
@@ -280,16 +283,9 @@ mod tests {
             .load()
             .await;
         let client = BedrockClient::new(&config);
-        let provider = BedrockProvider::from_client(
-            client,
-            "us.anthropic.claude-sonnet-4-6-20250514-v1:0",
-            "us-east-1",
-        );
+        let provider = BedrockProvider::from_client(client, DEFAULT_BEDROCK_MODEL, "us-east-1");
         assert_eq!(provider.name(), "bedrock");
-        assert_eq!(
-            provider.model(),
-            "us.anthropic.claude-sonnet-4-6-20250514-v1:0"
-        );
+        assert_eq!(provider.model(), DEFAULT_BEDROCK_MODEL);
         assert_eq!(provider.region(), "us-east-1");
     }
 
@@ -337,11 +333,7 @@ mod tests {
             .load()
             .await;
         let client = BedrockClient::new(&config);
-        let provider = BedrockProvider::from_client(
-            client,
-            "us.anthropic.claude-sonnet-4-6-20250514-v1:0",
-            "us-east-1",
-        );
+        let provider = BedrockProvider::from_client(client, DEFAULT_BEDROCK_MODEL, "us-east-1");
         let (tx, _rx) = tokio::sync::mpsc::channel::<ChatEvent>(8);
         let result = provider
             .chat_stream(

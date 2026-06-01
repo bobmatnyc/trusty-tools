@@ -356,8 +356,9 @@ pub const BEDROCK_MODEL_PREFIX: &str = "bedrock/";
 /// Default Bedrock model id used when the caller sets
 /// `TRUSTY_LLM_MODEL=bedrock/` without a trailing model id.
 ///
-/// Uses the Claude Sonnet 4.6 cross-region inference profile.
-/// TODO verify: confirm this matches the current Bedrock inference-profile id.
+/// Resolves to `us.anthropic.claude-sonnet-4-6` — the Claude Sonnet 4.6
+/// cross-region inference profile (no date stamp or `-v1:0` suffix; verified
+/// against AWS docs). Delegates to [`trusty_common::chat::DEFAULT_BEDROCK_MODEL`].
 pub const DEFAULT_BEDROCK_MODEL_ID: &str = trusty_common::chat::DEFAULT_BEDROCK_MODEL;
 
 /// Run a full deep-analysis pass, routing to AWS Bedrock or OpenRouter based
@@ -758,12 +759,12 @@ mod tests {
     /// Test: pure string logic, no network or provider construction needed.
     #[test]
     fn bedrock_prefix_routing() {
-        let full_model = "bedrock/us.anthropic.claude-sonnet-4-6-20250514-v1:0";
+        let full_model = "bedrock/us.anthropic.claude-sonnet-4-6";
         assert!(full_model.starts_with(BEDROCK_MODEL_PREFIX));
         let stripped = full_model
             .strip_prefix(BEDROCK_MODEL_PREFIX)
             .expect("strip_prefix should succeed");
-        assert_eq!(stripped, "us.anthropic.claude-sonnet-4-6-20250514-v1:0");
+        assert_eq!(stripped, "us.anthropic.claude-sonnet-4-6");
 
         // Non-bedrock model ids should NOT match the prefix.
         assert!(!("openai/gpt-4o-mini".starts_with(BEDROCK_MODEL_PREFIX)));

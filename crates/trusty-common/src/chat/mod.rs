@@ -48,9 +48,10 @@ pub mod bedrock_provider {
 pub use bedrock_stub::BedrockProvider;
 
 // Stub constant so code that references DEFAULT_BEDROCK_MODEL compiles without
-// the bedrock feature. This is the same value as the real one.
+// the bedrock feature. Must stay in sync with bedrock_impl::DEFAULT_BEDROCK_MODEL.
+// Claude Sonnet 4.6 drops the date stamp and -v1:0 suffix (verified vs AWS docs).
 #[cfg(not(feature = "bedrock"))]
-pub const DEFAULT_BEDROCK_MODEL: &str = "us.anthropic.claude-sonnet-4-6-20250514-v1:0";
+pub const DEFAULT_BEDROCK_MODEL: &str = "us.anthropic.claude-sonnet-4-6";
 
 use crate::ChatMessage;
 use anyhow::Result;

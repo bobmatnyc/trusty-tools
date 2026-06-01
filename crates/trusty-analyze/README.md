@@ -135,7 +135,8 @@ IAM role, SSO).
 
 ```bash
 # Claude Sonnet 4.6 via cross-region inference profile (recommended):
-export TRUSTY_LLM_MODEL=bedrock/us.anthropic.claude-sonnet-4-6-20250514-v1:0
+# Note: Sonnet 4.6 drops the date stamp and -v1:0 suffix from the profile id.
+export TRUSTY_LLM_MODEL=bedrock/us.anthropic.claude-sonnet-4-6
 
 # AWS credentials (any supported form):
 export AWS_ACCESS_KEY_ID=...
