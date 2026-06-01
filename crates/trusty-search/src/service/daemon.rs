@@ -649,6 +649,7 @@ fn write_port_file(path: &PathBuf, port: u16) -> Result<(), DaemonError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::net::TcpListener as StdTcpListener;
 
     #[test]
@@ -727,7 +728,13 @@ mod tests {
     /// can run alongside the production daemon without lockfile conflicts (#281).
     /// What: set env var to a tempdir path; assert `daemon_dir()` returns it.
     /// Test: `daemon_dir_respects_trusty_data_dir_env_var` (this test).
+    ///
+    /// `#[serial]` is required because this test mutates the `TRUSTY_DATA_DIR`
+    /// process env var; running it concurrently with other `TRUSTY_DATA_DIR`
+    /// mutations in `daemon_paths_under_data_dir_override` or the `start.rs`
+    /// auto-discover tests causes a flaky race condition.
     #[test]
+    #[serial]
     fn daemon_dir_respects_trusty_data_dir_env_var() {
         let tmp = tempfile::tempdir().unwrap();
         let override_path = tmp.path().to_path_buf();
@@ -750,7 +757,14 @@ mod tests {
     /// What: set env var, call both path functions, confirm they start with the
     /// override root rather than the default data-local dir.
     /// Test: `daemon_paths_under_data_dir_override` (this test).
+    ///
+    /// `#[serial]` is required because this test mutates the `TRUSTY_DATA_DIR`
+    /// process env var; running it concurrently with other `TRUSTY_DATA_DIR`
+    /// mutations (e.g. `daemon_dir_respects_trusty_data_dir_env_var` or the
+    /// `start.rs` auto-discover tests) causes a flaky race on the env-var read
+    /// inside `daemon_dir()`.
     #[test]
+    #[serial]
     fn daemon_paths_under_data_dir_override() {
         let tmp = tempfile::tempdir().unwrap();
         let override_path = tmp.path().to_path_buf();
