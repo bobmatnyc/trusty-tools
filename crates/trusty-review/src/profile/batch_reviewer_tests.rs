@@ -244,3 +244,40 @@ fn severity_to_effort_mapping() {
     assert_eq!(severity_to_effort("low"), Effort::Low);
     assert_eq!(severity_to_effort("unknown"), Effort::Low);
 }
+
+/// Regression test: `build_period_prompt` must strip the `bedrock/` provider
+/// prefix from the model id before setting `LlmRequest.model`.
+///
+/// Why: guards against Bug 1 regression in the profile pipeline — if the
+/// prefixed slug reaches the Bedrock Converse API as the model parameter it
+/// produces HTTP 400 ValidationException.
+/// What: passes `bedrock/<id>` to `build_period_prompt` and asserts
+/// `LlmRequest.model` is the bare `<id>`.
+/// Test: this test itself; no network calls.
+#[test]
+fn batch_period_prompt_strips_bedrock_prefix() {
+    let batch = make_batch();
+    let req = build_period_prompt(
+        &batch,
+        "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    );
+    assert_eq!(
+        req.model, "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "bedrock/ prefix must be stripped from LlmRequest.model in build_period_prompt"
+    );
+}
+
+/// Regression test: `build_period_prompt` must strip the `openrouter/` prefix.
+///
+/// Why: same Bug 1 pattern as the bedrock/ prefix.
+/// What: passes `openrouter/<id>` and asserts the bare id is used.
+/// Test: this test itself; no network calls.
+#[test]
+fn batch_period_prompt_strips_openrouter_prefix() {
+    let batch = make_batch();
+    let req = build_period_prompt(&batch, "openrouter/openai/gpt-5.4-mini-20260317");
+    assert_eq!(
+        req.model, "openai/gpt-5.4-mini-20260317",
+        "openrouter/ prefix must be stripped from LlmRequest.model in build_period_prompt"
+    );
+}

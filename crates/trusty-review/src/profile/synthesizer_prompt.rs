@@ -8,7 +8,7 @@
 
 use std::cmp::Reverse;
 
-use crate::llm::{ChatMessage, LlmRequest};
+use crate::llm::{ChatMessage, LlmRequest, strip_provider_prefix};
 use crate::profile::types::ContributorProfile;
 
 // Constants imported from parent.
@@ -19,13 +19,16 @@ use super::{SYNTHESIZER_MAX_TOKENS, SYNTHESIZER_TEMPERATURE};
 /// Why: the narrative pass needs the full deduped finding list, frequency counts,
 /// and quality score series to produce a coherent longitudinal summary.
 /// What: assembles a system prompt (profiler role + JSON schema) and a user
-/// message with the finding summary table and quality trend series.
-/// Test: `synthesizer::tests::synthesizer_applies_llm_result`.
+/// message with the finding summary table and quality trend series.  `model`
+/// may carry a `bedrock/` or `openrouter/` routing prefix; this function strips
+/// it so the bare id reaches the provider API.
+/// Test: `synthesizer::tests::synthesizer_applies_llm_result`,
+/// `synthesizer::tests::synthesizer_prompt_strips_bedrock_prefix`.
 pub fn build_synthesizer_prompt(profile: &ContributorProfile, model: &str) -> LlmRequest {
     let system = synthesizer_system_prompt();
     let user = build_synthesizer_user_message(profile);
     LlmRequest {
-        model: model.to_string(),
+        model: strip_provider_prefix(model).to_string(),
         system: system.to_string(),
         messages: vec![ChatMessage {
             role: "user".to_string(),

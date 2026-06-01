@@ -26,7 +26,7 @@ use crate::{
         analyze_client::{ComplexityHotspot, Smell},
         search_client::SearchResult,
     },
-    llm::{ChatMessage, LlmRequest},
+    llm::{ChatMessage, LlmRequest, strip_provider_prefix},
     models::ReviewResult,
 };
 
@@ -121,7 +121,11 @@ Emit the raw JSON block with no additional prose after it."#
 /// What: assembles a system prompt + user message containing the PR metadata,
 /// truncated diff, code search context (if any), and static-analysis annotations
 /// (if any).  The user message ends with the structured-output reminder.
-/// Test: `build_review_prompt_includes_diff`, `prompt_includes_context_blocks`.
+/// `reviewer_model` may carry a `bedrock/` or `openrouter/` routing prefix;
+/// this function strips it before setting `LlmRequest.model` so the bare id is
+/// what reaches the provider's API (the prefix is used only for routing).
+/// Test: `build_review_prompt_includes_diff`, `prompt_includes_context_blocks`,
+/// `build_review_prompt_strips_bedrock_prefix`.
 pub fn build_review_prompt(
     owner: &str,
     repo: &str,
@@ -132,7 +136,7 @@ pub fn build_review_prompt(
 ) -> LlmRequest {
     let user_message = build_user_message(owner, repo, pr_meta, diff, context);
     LlmRequest {
-        model: reviewer_model.to_string(),
+        model: strip_provider_prefix(reviewer_model).to_string(),
         system: reviewer_system_prompt().to_string(),
         messages: vec![ChatMessage {
             role: "user".to_string(),
@@ -307,6 +311,51 @@ mod tests {
         assert!(
             prompt.contains("\"verdict\""),
             "system prompt must include the JSON output schema"
+        );
+    }
+
+    /// Regression test: a `bedrock/`-prefixed reviewer_model must be stripped
+    /// before being set on `LlmRequest.model`.
+    ///
+    /// Why: guards against Bug 1 regression — BedrockProvider receives the
+    /// prefixed id as the Converse model parameter, causing HTTP 400.
+    /// What: passes `bedrock/<id>` to `build_review_prompt` and asserts
+    /// `LlmRequest.model` is the bare `<id>`.
+    /// Test: this test itself; no network calls.
+    #[test]
+    fn build_review_prompt_strips_bedrock_prefix() {
+        let req = build_review_prompt(
+            "acme",
+            "backend",
+            &sample_meta(),
+            "+fn x() {}",
+            &empty_context(),
+            "bedrock/us.anthropic.claude-sonnet-4-6",
+        );
+        assert_eq!(
+            req.model, "us.anthropic.claude-sonnet-4-6",
+            "bedrock/ prefix must be stripped from LlmRequest.model"
+        );
+    }
+
+    /// Regression test: an `openrouter/`-prefixed model must also be stripped.
+    ///
+    /// Why: same Bug 1 pattern; OpenRouter API does not accept the routing prefix.
+    /// What: passes `openrouter/<id>` and asserts the bare id is used.
+    /// Test: this test itself; no network calls.
+    #[test]
+    fn build_review_prompt_strips_openrouter_prefix() {
+        let req = build_review_prompt(
+            "acme",
+            "backend",
+            &sample_meta(),
+            "+fn x() {}",
+            &empty_context(),
+            "openrouter/openai/gpt-5.4-mini-20260317",
+        );
+        assert_eq!(
+            req.model, "openai/gpt-5.4-mini-20260317",
+            "openrouter/ prefix must be stripped from LlmRequest.model"
         );
     }
 

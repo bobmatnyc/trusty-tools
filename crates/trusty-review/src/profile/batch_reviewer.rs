@@ -20,7 +20,7 @@ use std::time::Instant;
 use serde::Deserialize;
 use tracing::{debug, warn};
 
-use crate::llm::{ChatMessage, LlmProvider, LlmRequest, LlmResponse};
+use crate::llm::{ChatMessage, LlmProvider, LlmRequest, LlmResponse, strip_provider_prefix};
 use crate::models::{Effort, Finding};
 use crate::profile::types::{LongitudinalFinding, PeriodBatch, TokenCostSummary};
 
@@ -125,13 +125,16 @@ impl BatchReviewer {
 /// touching reviewer logic.
 /// What: assembles a system prompt (reviewer role instructions + JSON output
 /// schema) and a user message containing the period stats summary + sampled
-/// diff snippets.
-/// Test: `tests::batch_reviewer_prompt_contains_period_label`.
+/// diff snippets.  `model` may carry a `bedrock/` or `openrouter/` routing
+/// prefix; this function strips it before setting `LlmRequest.model` so the
+/// bare id reaches the provider API.
+/// Test: `tests::batch_reviewer_prompt_contains_period_label`,
+/// `tests::batch_period_prompt_strips_bedrock_prefix`.
 pub fn build_period_prompt(batch: &PeriodBatch, model: &str) -> LlmRequest {
     let system = period_reviewer_system_prompt();
     let user = build_period_user_message(batch);
     LlmRequest {
-        model: model.to_string(),
+        model: strip_provider_prefix(model).to_string(),
         system: system.to_string(),
         messages: vec![ChatMessage {
             role: "user".to_string(),

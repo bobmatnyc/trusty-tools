@@ -136,6 +136,27 @@ pub const BEDROCK_MODEL_PREFIX: &str = "bedrock/";
 /// OpenRouter model-id prefix for explicit routing.
 pub const OPENROUTER_MODEL_PREFIX: &str = "openrouter/";
 
+/// Strip the provider routing prefix from a model id, returning the bare id.
+///
+/// Why: `LlmRequest.model` must be the bare id sent to the upstream API — the
+/// `bedrock/` and `openrouter/` prefixes are routing hints only and are never
+/// valid API model ids.  Using the prefixed string causes Bedrock to receive
+/// `bedrock/us.anthropic.claude-sonnet-4-6` as the Converse model id, which
+/// produces `POST /model/bedrock%2F.../converse` → HTTP 400 ValidationException.
+/// What: strips `bedrock/` or `openrouter/` prefix if present; returns the
+/// remaining string.  Bare ids (no prefix) are returned unchanged.
+/// Test: `prefix_stripped_model_id_bedrock`, `prefix_stripped_model_id_openrouter`,
+/// `prefix_stripped_model_id_bare`.
+pub fn strip_provider_prefix(model: &str) -> &str {
+    if let Some(bare) = model.strip_prefix(BEDROCK_MODEL_PREFIX) {
+        return bare;
+    }
+    if let Some(bare) = model.strip_prefix(OPENROUTER_MODEL_PREFIX) {
+        return bare;
+    }
+    model
+}
+
 /// Resolve the effective provider and bare model id from a potentially-prefixed
 /// model id string and an explicit provider hint.
 ///
@@ -285,12 +306,15 @@ mod tests {
     fn provider_factory_mixed_providers_in_compare_set() {
         // Simulate the mixed-provider compare set.
         let candidates = [
-            "bedrock/us.anthropic.claude-haiku-4-5",
+            "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
             "bedrock/us.anthropic.claude-sonnet-4-6",
             "openrouter/openai/gpt-5.4-mini-20260317",
         ];
         let expected = [
-            (Provider::Bedrock, "us.anthropic.claude-haiku-4-5"),
+            (
+                Provider::Bedrock,
+                "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            ),
             (Provider::Bedrock, "us.anthropic.claude-sonnet-4-6"),
             (Provider::OpenRouter, "openai/gpt-5.4-mini-20260317"),
         ];
@@ -299,5 +323,66 @@ mod tests {
             assert_eq!(prov, *exp_prov, "provider mismatch for {candidate}");
             assert_eq!(model, *exp_model, "model mismatch for {candidate}");
         }
+    }
+
+    // ── strip_provider_prefix regression tests ────────────────────────────
+
+    /// Regression test: `bedrock/<id>` must strip to bare `<id>`.
+    ///
+    /// Why: guards against the Bug 1 regression where a prefixed model id
+    /// reaches the Bedrock Converse API as the model parameter, causing HTTP 400.
+    /// What: asserts `strip_provider_prefix("bedrock/X") == "X"` for real ids.
+    /// Test: this test itself.
+    #[test]
+    fn prefix_stripped_model_id_bedrock() {
+        assert_eq!(
+            strip_provider_prefix("bedrock/us.anthropic.claude-sonnet-4-6"),
+            "us.anthropic.claude-sonnet-4-6",
+            "bedrock/ prefix must be stripped"
+        );
+        assert_eq!(
+            strip_provider_prefix("bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"),
+            "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            "bedrock/ prefix must be stripped from date-versioned haiku id"
+        );
+        assert_eq!(
+            strip_provider_prefix("bedrock/us.anthropic.claude-opus-4-8"),
+            "us.anthropic.claude-opus-4-8",
+            "bedrock/ prefix must be stripped from opus id"
+        );
+    }
+
+    /// Regression test: `openrouter/<id>` must strip to bare `<id>`.
+    ///
+    /// Why: same Bug 1 pattern applies to OpenRouter provider routing prefix.
+    /// What: asserts `strip_provider_prefix("openrouter/X") == "X"`.
+    /// Test: this test itself.
+    #[test]
+    fn prefix_stripped_model_id_openrouter() {
+        assert_eq!(
+            strip_provider_prefix("openrouter/openai/gpt-5.4-mini-20260317"),
+            "openai/gpt-5.4-mini-20260317",
+            "openrouter/ prefix must be stripped"
+        );
+    }
+
+    /// Regression test: bare ids (no prefix) must be returned unchanged.
+    ///
+    /// Why: operators may pass bare ids when the provider is set separately;
+    /// stripping must not mangle them.
+    /// What: asserts `strip_provider_prefix("us.X") == "us.X"`.
+    /// Test: this test itself.
+    #[test]
+    fn prefix_stripped_model_id_bare() {
+        assert_eq!(
+            strip_provider_prefix("us.anthropic.claude-sonnet-4-6"),
+            "us.anthropic.claude-sonnet-4-6",
+            "bare id must be returned unchanged"
+        );
+        assert_eq!(
+            strip_provider_prefix("openai/gpt-5.4-mini-20260317"),
+            "openai/gpt-5.4-mini-20260317",
+            "bare OpenRouter id must not be stripped"
+        );
     }
 }

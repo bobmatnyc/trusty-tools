@@ -64,36 +64,42 @@ const MAX_RETRIES: u32 = 3;
 /// Why: surfaces cost estimates in [`LlmResponse`] for the `compare` mode.
 /// What: keyed by model id (inference-profile id without the `us.`/`eu.` prefix
 /// since the per-token cost is the same across regions for the same model).
+/// After stripping the geo-prefix the lookup also normalises date/version
+/// suffixes (e.g. `-20251001-v1:0`) via [`normalize_model_family`] so that
+/// date-stamped ids like `anthropic.claude-haiku-4-5-20251001-v1:0` match the
+/// same table entry as the family prefix `anthropic.claude-haiku-4-5`.
 /// Unknown ids → cost 0.0 with a debug log.
 ///
-/// FLAG: These are best-effort estimates (May 2026). Confirm against the
-/// AWS Bedrock pricing page for your region before relying on cost figures
-/// for financial decisions. Pricing may differ by region and commitment tier.
-///
-/// Sources: AWS Bedrock On-Demand pricing page (us-east-1, May 2026).
+/// Sources: AWS Bedrock On-Demand pricing page (us-east-1, June 2026).
 fn bedrock_cost_per_million(model: &str) -> (f64, f64) {
-    // Normalise: strip the geography prefix (us., eu., ap., jp., global.) so
+    // Step 1: strip the geography prefix (us., eu., ap., jp., global.) so
     // the pricing table works for all cross-region inference profiles.
-    let normalized = INFERENCE_PROFILE_PREFIXES
+    let after_geo = INFERENCE_PROFILE_PREFIXES
         .iter()
         .find_map(|pfx| model.strip_prefix(pfx))
         .unwrap_or(model);
 
+    // Step 2: normalise by stripping any date/version suffix of the form
+    // `-YYYYMMDD-vN:N` so that date-stamped ids (e.g. the verified Haiku 4.5
+    // id `anthropic.claude-haiku-4-5-20251001-v1:0`) match the same table
+    // entry as the short family prefix (`anthropic.claude-haiku-4-5`).
+    let normalized = normalize_model_family(after_geo);
+
     match normalized {
         // Claude Sonnet 4.6 — default reviewer model.
-        // FLAG: Confirm exact pricing; these are estimates based on Claude 3.5 Sonnet pricing.
         "anthropic.claude-sonnet-4-6" => (3.00, 15.00),
         // Claude Haiku 4.5 — default verifier/summarizer model.
-        // FLAG: Haiku 4.5 inference-profile id should be confirmed against AWS Bedrock catalog.
-        // As of May 2026 the Haiku-tier inference-profile id may differ — override via env.
+        // Matches both `anthropic.claude-haiku-4-5` and the date-versioned
+        // `anthropic.claude-haiku-4-5-20251001-v1:0` after normalization.
         "anthropic.claude-haiku-4-5" => (0.80, 4.00),
         // Claude Opus 4.8 — premium option.
-        // FLAG: Confirm Opus 4.8 availability and pricing in your AWS account.
         "anthropic.claude-opus-4-8" => (15.00, 75.00),
-        // Legacy Claude 3.5 Sonnet (cross-region profile).
-        "anthropic.claude-3-5-sonnet-20241022-v2:0" => (3.00, 15.00),
-        // Legacy Claude 3 Haiku (cross-region profile).
-        "anthropic.claude-3-haiku-20240307-v1:0" => (0.25, 1.25),
+        // Legacy Claude 3.5 Sonnet (cross-region profile, date-versioned).
+        "anthropic.claude-3-5-sonnet-20241022-v2:0" | "anthropic.claude-3-5-sonnet" => {
+            (3.00, 15.00)
+        }
+        // Legacy Claude 3 Haiku (cross-region profile, date-versioned).
+        "anthropic.claude-3-haiku-20240307-v1:0" | "anthropic.claude-3-haiku" => (0.25, 1.25),
         // Unknown model — no cost estimate.
         _ => {
             debug!(
@@ -103,6 +109,49 @@ fn bedrock_cost_per_million(model: &str) -> (f64, f64) {
             (0.0, 0.0)
         }
     }
+}
+
+/// Normalise a model id by stripping date/version suffixes of the form
+/// `-YYYYMMDD-vN:N` (e.g. `-20251001-v1:0`) so date-stamped Bedrock ids
+/// match the short family-prefix entry in the pricing table.
+///
+/// Why: Bedrock uses date-versioned inference-profile ids (e.g.
+/// `anthropic.claude-haiku-4-5-20251001-v1:0`) that would not match a
+/// short key like `anthropic.claude-haiku-4-5` without normalization,
+/// causing the pricing lookup to return (0.0, 0.0).
+/// What: scans from the end of the string for a `-vN:N` version tag
+/// (optionally preceded by `-YYYYMMDD`) and strips everything from the
+/// first date segment onwards.  Returns the input unchanged if no suffix
+/// is found.
+/// Test: `bedrock_normalize_model_family_strips_suffix`,
+/// `bedrock_cost_estimate_haiku_date_versioned`.
+fn normalize_model_family(model: &str) -> &str {
+    // Look for a `-vN:N` or `-vN` suffix, optionally preceded by a date segment
+    // `-YYYYMMDD`.  Walk backwards through '-'-delimited segments.
+    // Strategy: find the first '-'-separated segment that looks like a date
+    // (8 digits) and strip from there.  If no date segment, look for a version
+    // segment (`v` followed by digits/colons) and strip from there.
+    let mut end = model.len();
+
+    // Walk segments from the right.
+    while let Some(dash_pos) = model[..end].rfind('-') {
+        let segment = &model[dash_pos + 1..end];
+
+        let is_date_segment = segment.len() == 8 && segment.bytes().all(|b| b.is_ascii_digit());
+        let is_version_segment = segment.starts_with('v')
+            && segment[1..]
+                .bytes()
+                .all(|b| b.is_ascii_digit() || b == b':');
+
+        if is_date_segment || is_version_segment {
+            end = dash_pos;
+            // Keep stripping — a date segment may be followed by a version segment.
+        } else {
+            break;
+        }
+    }
+
+    &model[..end]
 }
 
 /// Compute USD cost estimate from token counts and model id.
@@ -548,11 +597,73 @@ mod tests {
 
     #[test]
     fn bedrock_cost_estimate_haiku() {
-        // 1M input + 1M output at Haiku pricing ($0.80/M + $4.00/M = $4.80/M).
+        // Short-form id (no date suffix) must still price correctly.
         let cost = estimate_bedrock_cost_usd("us.anthropic.claude-haiku-4-5", 1_000_000, 1_000_000);
         assert!(
             (cost - 4.8_f64).abs() < 1e-9,
-            "expected $4.80 for 1M+1M Haiku tokens, got {cost}"
+            "expected $4.80 for 1M+1M Haiku tokens (short id), got {cost}"
+        );
+    }
+
+    /// Regression test: the verified Haiku 4.5 date-versioned id must resolve
+    /// to non-zero pricing (Bug 3 fix).
+    ///
+    /// Why: `anthropic.claude-haiku-4-5-20251001-v1:0` (after geo-prefix strip)
+    /// did not match the pricing table's `anthropic.claude-haiku-4-5` entry,
+    /// causing cost_usd to be $0.00 in all Haiku compare runs.
+    /// What: asserts the real date-versioned id prices at $4.80 for 1M+1M tokens.
+    /// Test: this test itself; no network calls.
+    #[test]
+    fn bedrock_cost_estimate_haiku_date_versioned() {
+        // The verified production Haiku 4.5 inference-profile id.
+        let cost = estimate_bedrock_cost_usd(
+            "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            1_000_000,
+            1_000_000,
+        );
+        assert!(
+            (cost - 4.8_f64).abs() < 1e-9,
+            "expected $4.80 for 1M+1M Haiku tokens (date-versioned id), got {cost}. \
+             The normalize_model_family() function must strip -20251001-v1:0 to match \
+             the pricing table entry."
+        );
+    }
+
+    /// Test that `normalize_model_family` correctly strips date and version suffixes.
+    ///
+    /// Why: directly verifies the normalization logic that underpins Bug 3 fix.
+    /// What: checks several real and synthetic id forms.
+    /// Test: this test itself; no network calls.
+    #[test]
+    fn bedrock_normalize_model_family_strips_suffix() {
+        // Date + version suffix.
+        assert_eq!(
+            normalize_model_family("anthropic.claude-haiku-4-5-20251001-v1:0"),
+            "anthropic.claude-haiku-4-5",
+            "date+version suffix must be stripped"
+        );
+        // Date suffix only (no version).
+        assert_eq!(
+            normalize_model_family("anthropic.claude-3-5-sonnet-20241022"),
+            "anthropic.claude-3-5-sonnet",
+            "date-only suffix must be stripped"
+        );
+        // Version suffix only (no date).
+        assert_eq!(
+            normalize_model_family("anthropic.claude-3-haiku-20240307-v1:0"),
+            "anthropic.claude-3-haiku",
+            "date+version suffix must be stripped from legacy Haiku"
+        );
+        // No suffix — returned unchanged.
+        assert_eq!(
+            normalize_model_family("anthropic.claude-sonnet-4-6"),
+            "anthropic.claude-sonnet-4-6",
+            "id without date/version suffix must be unchanged"
+        );
+        assert_eq!(
+            normalize_model_family("anthropic.claude-haiku-4-5"),
+            "anthropic.claude-haiku-4-5",
+            "short haiku id must be unchanged"
         );
     }
 

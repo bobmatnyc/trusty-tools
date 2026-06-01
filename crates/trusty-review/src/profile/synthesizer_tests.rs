@@ -17,7 +17,9 @@ use crate::llm::{LlmError, LlmProvider, LlmRequest, LlmResponse};
 use crate::models::{Effort, Finding};
 use crate::profile::types::{ContributorProfile, LongitudinalFinding, PeriodBatch};
 
-use super::{Synthesizer, assign_trend_tags, derive_trajectory, jaccard_similarity};
+use super::{
+    Synthesizer, assign_trend_tags, build_synthesizer_prompt, derive_trajectory, jaccard_similarity,
+};
 use crate::profile::types::{Trajectory, TrendTag};
 
 // ── Fake providers ────────────────────────────────────────────────────────────
@@ -271,6 +273,38 @@ async fn synthesizer_fail_safe_narrative() {
     assert!(
         result.narrative.contains("LLM call failed"),
         "fail-safe narrative must indicate the failure"
+    );
+}
+
+/// Regression test: `build_synthesizer_prompt` must strip the `bedrock/` prefix.
+///
+/// Why: guards against Bug 1 regression in the synthesizer path — the prefixed
+/// model id must not reach the Bedrock Converse API parameter.
+/// What: calls `build_synthesizer_prompt` with a `bedrock/`-prefixed id and
+/// asserts `LlmRequest.model` is the bare id.
+/// Test: this test itself; no network calls.
+#[test]
+fn synthesizer_prompt_strips_bedrock_prefix() {
+    let profile = make_profile();
+    let req = build_synthesizer_prompt(&profile, "bedrock/us.anthropic.claude-sonnet-4-6");
+    assert_eq!(
+        req.model, "us.anthropic.claude-sonnet-4-6",
+        "bedrock/ prefix must be stripped from LlmRequest.model in build_synthesizer_prompt"
+    );
+}
+
+/// Regression test: `build_synthesizer_prompt` must strip the `openrouter/` prefix.
+///
+/// Why: same Bug 1 pattern as the bedrock/ prefix.
+/// What: passes `openrouter/<id>` and asserts the bare id is used.
+/// Test: this test itself; no network calls.
+#[test]
+fn synthesizer_prompt_strips_openrouter_prefix() {
+    let profile = make_profile();
+    let req = build_synthesizer_prompt(&profile, "openrouter/openai/gpt-5.4-mini-20260317");
+    assert_eq!(
+        req.model, "openai/gpt-5.4-mini-20260317",
+        "openrouter/ prefix must be stripped from LlmRequest.model in build_synthesizer_prompt"
     );
 }
 
