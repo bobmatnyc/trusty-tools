@@ -3,10 +3,10 @@ name = "tga"
 version = "2.5.0"
 publish = true
 edition = "2021"
-# Aligned with the workspace MSRV (1.88) per #254. Required for
-# `std::sync::LazyLock` (CLI help wiring, issue #216). tga does not use
-# let-chains, but aligning with the workspace pin prevents MSRV drift.
-rust-version = "1.88"
+# Aligned with the workspace MSRV (1.91) per #254. Required for
+# `std::sync::LazyLock` (CLI help wiring, issue #216). The effective workspace
+# floor is now 1.91 (aws-smithy-* indirect deps); aligning prevents MSRV drift.
+rust-version = "1.91"
 authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 license = "Elastic-2.0"
 repository = "https://github.com/bobmatnyc/trusty-tools"

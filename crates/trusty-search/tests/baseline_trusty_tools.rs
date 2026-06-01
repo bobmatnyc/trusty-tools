@@ -6,9 +6,10 @@
 //! Community-detection quality (Louvain) was removed in v0.11.0 per the
 //! PROVENANCE-ONLY decision in issue #145 / #152.
 //!
-//! What: Each test hits the live HTTP daemon at `http://127.0.0.1:7878` (the
-//! default daemon port), exercises a known scenario, and asserts that measured
-//! values stay within the thresholds documented in `docs/trusty-search/regression-testing/baseline-performance-2026-05-22.md`.
+//! What: Each test hits the live HTTP daemon, whose address is discovered at
+//! runtime via `daemon_url()` (see that function's doc comment for the
+//! three-step resolution order). Thresholds are documented in
+//! `docs/trusty-search/regression-testing/baseline-performance-2026-05-22.md`.
 //!
 //! Test: All tests are marked `#[ignore]` so the normal `cargo test` run stays
 //! fast. Run with:
@@ -34,8 +35,42 @@ use serde_json::{json, Value};
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const DAEMON_URL: &str = "http://127.0.0.1:7878";
 const INDEX_NAME: &str = "trusty-tools";
+
+/// Resolve the daemon's base URL at test runtime.
+///
+/// Why: The daemon uses `bind_with_auto_port` and may not listen on the
+/// compiled-in default 7878 — for example 0.20.4+ shifts to 7879 when 7878 is
+/// occupied. Hardcoding the port causes "connection refused" failures that look
+/// like daemon-down errors but are really just a stale constant.
+///
+/// What: Checks three sources in priority order:
+///   1. `~/.trusty-search/http_addr` — written by the daemon on every start;
+///      contains the actual `host:port` string.
+///   2. `TRUSTY_SEARCH_TEST_PORT` env var — lets CI/test harnesses override the
+///      port without touching the discovery file (e.g. `TRUSTY_SEARCH_TEST_PORT=7879`).
+///   3. `trusty_search::service::DEFAULT_PORT` (7878) — compile-time fallback so
+///      the constant is still meaningful on machines where neither source is set.
+///
+/// Test: called by every `#[ignore]` test at the top of its body.
+fn daemon_url() -> String {
+    // 1. Canonical discovery file written by the daemon on startup.
+    if let Some(addr) = trusty_search::service::daemon::http_addr_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return format!("http://{addr}");
+    }
+    // 2. Explicit override for CI / test harnesses.
+    if let Ok(port_str) = std::env::var("TRUSTY_SEARCH_TEST_PORT") {
+        if let Ok(port) = port_str.trim().parse::<u16>() {
+            return format!("http://127.0.0.1:{port}");
+        }
+    }
+    // 3. Compiled-in default — correct when no auto-shift has occurred.
+    format!("http://127.0.0.1:{}", trusty_search::service::DEFAULT_PORT)
+}
 
 /// Maximum acceptable p50 query latency.
 const LATENCY_P50_THRESHOLD_MS: u128 = 500;
@@ -146,8 +181,8 @@ fn make_client() -> Client {
 /// What: Sends `{text, top_k: 10, expand_graph: true}`, measures wall-clock
 /// latency, and deserialises the JSON body.
 /// Test: called by `test_query_latency_p50_under_threshold` and friends.
-async fn search(client: &Client, query: &str) -> (u128, Value) {
-    let url = format!("{DAEMON_URL}/indexes/{INDEX_NAME}/search");
+async fn search(client: &Client, base: &str, query: &str) -> (u128, Value) {
+    let url = format!("{base}/indexes/{INDEX_NAME}/search");
     let body = json!({
         "text": query,
         "top_k": 10,
@@ -200,9 +235,11 @@ fn percentile(sorted: &[u128], p: usize) -> u128 {
 #[tokio::test]
 #[ignore]
 async fn test_daemon_health() {
+    let base = daemon_url();
+    println!("daemon url: {base}");
     let client = make_client();
     let resp = client
-        .get(format!("{DAEMON_URL}/health"))
+        .get(format!("{base}/health"))
         .send()
         .await
         .expect("health check should reach the daemon — is it running?");
@@ -225,11 +262,12 @@ async fn test_daemon_health() {
 #[tokio::test]
 #[ignore]
 async fn test_index_exists_and_has_content() {
+    let base = daemon_url();
     let client = make_client();
 
     // Confirm the index is registered.
     let resp = client
-        .get(format!("{DAEMON_URL}/indexes"))
+        .get(format!("{base}/indexes"))
         .send()
         .await
         .expect("GET /indexes should succeed");
@@ -247,7 +285,7 @@ async fn test_index_exists_and_has_content() {
 
     // Confirm the graph has been populated.
     let resp = client
-        .get(format!("{DAEMON_URL}/indexes/{INDEX_NAME}/graph/stats"))
+        .get(format!("{base}/indexes/{INDEX_NAME}/graph/stats"))
         .send()
         .await
         .expect("GET /indexes/{INDEX_NAME}/graph/stats should succeed");
@@ -276,6 +314,7 @@ async fn test_index_exists_and_has_content() {
 #[tokio::test]
 #[ignore]
 async fn test_query_latency_p50_under_threshold() {
+    let base = daemon_url();
     let client = make_client();
     let mut latencies: Vec<u128> = Vec::with_capacity(REGRESSION_QUERIES.len());
 
@@ -283,7 +322,7 @@ async fn test_query_latency_p50_under_threshold() {
     println!("{}", "-".repeat(90));
 
     for (query, _expected_file, _intent) in REGRESSION_QUERIES {
-        let (ms, body) = search(&client, query).await;
+        let (ms, body) = search(&client, &base, query).await;
         let top_file = body["results"][0]["file"]
             .as_str()
             .unwrap_or("<no results>");
@@ -313,12 +352,13 @@ async fn test_query_latency_p50_under_threshold() {
 #[tokio::test]
 #[ignore]
 async fn test_query_latency_p99_under_threshold() {
+    let base = daemon_url();
     let client = make_client();
     let mut latencies: Vec<u128> = Vec::with_capacity(REGRESSION_QUERIES.len() * 3);
 
     for _ in 0..3 {
         for (query, _, _) in REGRESSION_QUERIES {
-            let (ms, _) = search(&client, query).await;
+            let (ms, _) = search(&client, &base, query).await;
             latencies.push(ms);
         }
     }
@@ -349,6 +389,7 @@ async fn test_query_latency_p99_under_threshold() {
 #[tokio::test]
 #[ignore]
 async fn test_result_relevance() {
+    let base = daemon_url();
     let client = make_client();
     let mut failures = 0usize;
 
@@ -359,7 +400,7 @@ async fn test_result_relevance() {
     println!("{}", "-".repeat(100));
 
     for (query, expected_frag, intent) in REGRESSION_QUERIES {
-        let (ms, body) = search(&client, query).await;
+        let (ms, body) = search(&client, &base, query).await;
 
         let results = body["results"].as_array().cloned().unwrap_or_default();
         // Accept a match anywhere in the top-3 to allow minor reranking variance.
@@ -412,6 +453,8 @@ async fn test_result_relevance() {
 async fn test_concurrent_queries_no_errors() {
     use tokio::task::JoinSet;
 
+    let base = daemon_url();
+
     // 8 queries drawn from the regression set (cycled if shorter).
     let queries: Vec<&str> = REGRESSION_QUERIES
         .iter()
@@ -425,9 +468,10 @@ async fn test_concurrent_queries_no_errors() {
 
     for query in queries {
         let query = query.to_string();
+        let base = base.clone();
         join_set.spawn(async move {
             let client = make_client();
-            let url = format!("{DAEMON_URL}/indexes/{INDEX_NAME}/search");
+            let url = format!("{base}/indexes/{INDEX_NAME}/search");
             let body = json!({
                 "text": query,
                 "top_k": 10,
@@ -549,11 +593,12 @@ fn ripgrep_count(root: &Path, pattern: &str) -> (usize, u128) {
 #[tokio::test]
 #[ignore]
 async fn test_grep_endpoint_latency_vs_ripgrep() {
+    let base = daemon_url();
     let client = make_client();
 
     // 1. Pick the first registered index.
     let resp = client
-        .get(format!("{DAEMON_URL}/indexes"))
+        .get(format!("{base}/indexes"))
         .send()
         .await
         .expect("GET /indexes must reach the daemon — is it running?");
@@ -572,7 +617,7 @@ async fn test_grep_endpoint_latency_vs_ripgrep() {
 
     // 2. Resolve the on-disk root for that index.
     let resp = client
-        .get(format!("{DAEMON_URL}/indexes/{index_id}/status"))
+        .get(format!("{base}/indexes/{index_id}/status"))
         .send()
         .await
         .expect("status request");
@@ -585,7 +630,7 @@ async fn test_grep_endpoint_latency_vs_ripgrep() {
     let root = Path::new(&root_path);
 
     println!("\n=== /grep endpoint vs ripgrep ===");
-    println!("daemon: {DAEMON_URL}   index: {index_id}   root: {root_path}");
+    println!("daemon: {base}   index: {index_id}   root: {root_path}");
     println!(
         "| {:<28} | {:>9} | {:>9} | {:>9} | {:>9} | {:>6} |",
         "pattern", "ep hits", "rg hits", "ep ms", "rg ms", "ratio"
@@ -604,7 +649,7 @@ async fn test_grep_endpoint_latency_vs_ripgrep() {
         let req_body = json!({ "pattern": pattern, "max_results": 1000 });
         let t0 = Instant::now();
         let resp = client
-            .post(format!("{DAEMON_URL}/indexes/{index_id}/grep"))
+            .post(format!("{base}/indexes/{index_id}/grep"))
             .json(&req_body)
             .send()
             .await

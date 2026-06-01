@@ -2,7 +2,7 @@
 name = "trusty-mpm-gui"
 version = "0.2.12"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.91"
 description = "Tauri + web dashboard for trusty-mpm fleet management"
 publish = false
 

@@ -12,7 +12,9 @@ see each `Cargo.toml`). Every crate manages its own `version` field independentl
 `[workspace.package]` shares `rust-version`, `edition`, `license`, `repository`,
 and `authors` but no longer carries a version field (see #343).
 
-**MSRV**: `1.88` — required for stabilised let-chains used by edition-2024 crates.
+**MSRV**: `1.91` — driven by indirect `aws-smithy-*` dependencies that declare
+`rust-version = "1.91.1"`; the let-chain stabilisation floor (1.88) is lower.
+CI enforces this with `dtolnay/rust-toolchain@1.91`.
 
 ## Role & Scope
 
@@ -443,7 +445,7 @@ These abbreviations apply everywhere: ticket descriptions, build commands, refer
 
 ### Required Tools
 
-- **Rust**: `rustup` with the toolchain pinned to MSRV `1.88` or later.
+- **Rust**: `rustup` with the toolchain pinned to MSRV `1.91` or later.
   Install: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
 - **Node / pnpm**: only needed if working on the Svelte UIs embedded in
   `trusty-search` or `trusty-memory`. Install pnpm via `npm i -g pnpm`.
@@ -560,7 +562,7 @@ harder to review, reason about, and test. Split proactively. The open-mpm `ctrl/
 examples of files that grew past the cap; all three have since been split into
 focused submodules and now serve as the worked examples of a clean split.
 
-🟢 **MSRV drift** — the workspace pins `rust-version = "1.88"`. Running
+🟢 **MSRV drift** — the workspace pins `rust-version = "1.91"`. Running
 `rustup update` and picking up a new nightly may introduce syntax that
 compiles locally but fails on CI. Prefer stable channel toolchains.
 

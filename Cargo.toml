@@ -10,8 +10,10 @@ exclude = []
 
 [workspace.package]
 edition = "2024"
-# Required for let-chains used by trusty-mpm crates (stabilized in 1.88).
-rust-version = "1.88"
+# The effective MSRV is 1.91: aws-smithy-* indirect deps declare rust-version
+# = "1.91.1", which sets the real floor above the 1.88 let-chain minimum.
+# CI verifies this with dtolnay/rust-toolchain@1.91 (see .github/workflows/ci.yml).
+rust-version = "1.91"
 # version = "0.4.0" — REMOVED. Every crate manages its own version independently
 # in its own Cargo.toml. See issue #343 and CLAUDE.md "Git Tag / Release Convention".
 # When publishing, bump only the crates that actually changed.
