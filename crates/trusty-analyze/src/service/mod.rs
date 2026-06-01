@@ -862,23 +862,65 @@ async fn clusters_for_index(
     // when the user explicitly asked for BOW.
     let neural_embedder: Arc<dyn Embedder> = state.embedder.clone();
     let bow_embedder = BowEmbedder::with_dim(BOW_DIM);
-    let (chosen, effective_kind): (&dyn Embedder, EmbedderKind) = match method {
-        EmbedderKind::Neural => (neural_embedder.as_ref(), neural_embedder.kind()),
-        EmbedderKind::Bow => (&bow_embedder, EmbedderKind::Bow),
+    let effective_kind_initial: EmbedderKind = match method {
+        EmbedderKind::Neural => neural_embedder.kind(),
+        EmbedderKind::Bow => EmbedderKind::Bow,
     };
 
-    let texts: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
-    let (vecs, effective_kind, dim) = match chosen.embed_batch(&texts) {
-        Ok(v) => (v, effective_kind, chosen.dim()),
+    // Why: `NeuralEmbedder::embed_batch` holds a `std::sync::Mutex` over ONNX
+    // inference, which can block for tens-to-hundreds of milliseconds. Running
+    // it directly on a tokio executor thread starves other async tasks queued
+    // on that thread. `spawn_blocking` moves the call onto a dedicated blocking
+    // thread pool so the executor stays responsive.
+    // What: converts the chunk contents to owned `String`s (required to cross
+    // the `'static` closure boundary), clones the `Arc<dyn Embedder>`, then
+    // awaits the blocking join handle. Join-error is mapped to a warn + BOW
+    // fallback so the endpoint never 500s on a temporary model hiccup.
+    // Test: the existing cluster endpoint tests (e.g. `cluster_endpoint_bow`)
+    // exercise this path; the spawn_blocking wrapping does not change observable
+    // outputs, only prevents executor starvation.
+
+    // Owned strings are needed both for the Neural spawn_blocking closure
+    // (which requires 'static) and for the BOW fallback path.
+    let owned_texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+
+    let embed_result: anyhow::Result<(Vec<Vec<f32>>, EmbedderKind, usize)> = match method {
+        EmbedderKind::Neural => {
+            let embedder_arc = Arc::clone(&neural_embedder);
+            let dim = embedder_arc.dim();
+            let texts_for_task = owned_texts.clone();
+            tokio::task::spawn_blocking(move || {
+                let refs: Vec<&str> = texts_for_task.iter().map(String::as_str).collect();
+                embedder_arc.embed_batch(&refs)
+            })
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("embed_batch task panicked: {e}")))
+            .map(|v| (v, EmbedderKind::Neural, dim))
+        }
+        EmbedderKind::Bow => {
+            let vecs: Vec<Vec<f32>> = owned_texts
+                .iter()
+                .map(|t| bow_embedding(t, BOW_DIM))
+                .collect();
+            Ok((vecs, EmbedderKind::Bow, BOW_DIM))
+        }
+    };
+    let (vecs, effective_kind, dim) = match embed_result {
+        Ok(triple) => triple,
         Err(e) => {
             tracing::warn!(
                 "embedder ({:?}) failed ({e:#}); falling back to BOW",
-                effective_kind
+                effective_kind_initial
             );
-            let fallback: Vec<Vec<f32>> = texts.iter().map(|t| bow_embedding(t, BOW_DIM)).collect();
+            let fallback: Vec<Vec<f32>> = owned_texts
+                .iter()
+                .map(|t| bow_embedding(t, BOW_DIM))
+                .collect();
             (fallback, EmbedderKind::Bow, BOW_DIM)
         }
     };
+    // Suppress unused-variable warning if bow_embedder was not directly used
+    let _ = &bow_embedder;
 
     let embeddings: Vec<(String, Vec<f32>)> = chunks
         .iter()
@@ -1033,7 +1075,17 @@ async fn review_github_pr_handler(
     let token = std::env::var("GITHUB_TOKEN").map_err(|_| {
         ApiError::bad_request("GITHUB_TOKEN environment variable is not set on the daemon")
     })?;
-    let client = reqwest::Client::new();
+    // Why: GitHub API calls can take several seconds on large diffs; without
+    // timeouts the handler thread hangs indefinitely, exhausting the axum
+    // worker pool under concurrent PR review requests.
+    // What: 30 s per-request + 5 s connect timeout, matching the pattern used
+    // by `TrustySearchClient` in `src/core/client.rs`.
+    // Test: `github_pr_endpoint_requires_token` exercises this code path.
+    let client = reqwest::ClientBuilder::new()
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("reqwest ClientBuilder is infallible with valid config");
     let diff = crate::core::fetch_pr_diff(&client, &req.owner, &req.repo, req.pr, &token)
         .await
         .map_err(|e| ApiError::bad_gateway(format!("fetch PR diff: {e}")))?;
@@ -1399,7 +1451,16 @@ async fn process_pr_webhook(
     let token = std::env::var("GITHUB_TOKEN")
         .map_err(|_| anyhow::anyhow!("GITHUB_TOKEN not set; cannot process webhook PR"))?;
     tracing::info!("processing webhook PR {owner}/{repo}#{pr} (head {head_sha})");
-    let client = reqwest::Client::new();
+    // Why: this background task fetches a potentially large diff and posts a
+    // comment — without timeouts it hangs indefinitely on a slow GitHub API,
+    // leaking the spawned task for the lifetime of the process.
+    // What: 30 s per-request + 5 s connect timeout, matching the pattern in
+    // `review_github_pr_handler` and `TrustySearchClient`.
+    let client = reqwest::ClientBuilder::new()
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("reqwest ClientBuilder is infallible with valid config");
     let diff = crate::core::fetch_pr_diff(&client, owner, repo, pr, &token).await?;
     let report = crate::core::analyze_diff_with_client(&diff, &search, repo).await?;
     let markdown = crate::core::format_review_as_markdown(&report);

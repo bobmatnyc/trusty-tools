@@ -110,10 +110,22 @@ pub struct AnalyzerMcpServer {
 }
 
 impl AnalyzerMcpServer {
+    /// Why: without timeouts MCP tool calls hang forever if the analyze daemon
+    /// is slow or unresponsive, blocking the entire stdio dispatch loop.
+    /// What: builds a `reqwest::Client` with a 30 s per-request timeout and a
+    /// 5 s TCP connect timeout — mirroring the pattern in
+    /// `crates/trusty-analyze/src/core/client.rs`.
+    /// Test: `cargo test -p trusty-analyze -- mcp` exercises dispatch paths;
+    /// the timeout prevents indefinite hangs in production usage.
     pub fn new(base_url: impl Into<String>) -> Self {
+        let http = reqwest::ClientBuilder::new()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("reqwest ClientBuilder is infallible with valid config");
         Self {
             base_url: base_url.into(),
-            http: reqwest::Client::new(),
+            http,
         }
     }
 

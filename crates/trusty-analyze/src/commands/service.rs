@@ -103,6 +103,10 @@ fn launchd_config() -> Result<trusty_common::launchd::LaunchdConfig> {
         keep_alive: KeepAlive::Always,
         throttle_interval: 10,
         env_vars: Vec::new(),
+        // Why: the analyze daemon opens one redb file + per-index chunk
+        // caches but does not need elevated fd limits; None delegates to the
+        // OS default, matching the trusty-search pattern.
+        fd_limit: None,
     })
 }
 
