@@ -35,6 +35,7 @@ use crate::{
     models::{ReviewResult, Verdict},
     pipeline::{
         diff::{DiffSource, extract_changed_files, extract_identifiers, load_diff, truncate_diff},
+        grade::derive_verdict,
         output::{print_review_result, write_review_log},
         parser::parse_review_response,
         prompt::{ReviewContext, ReviewPrMeta, build_review_prompt},
@@ -200,7 +201,26 @@ pub async fn run_review(
             "verdict parsing fell back to fail-safe APPROVE"
         );
     }
-    result.verdict = parsed.verdict;
+
+    // ── Step 7b: apply severity-anchored floor (grading calibration) ───────
+    // Derive the final verdict from (model-proposed, findings).  The floor
+    // prevents the model from silently softening Critical/High issues to APPROVE*.
+    // UNKNOWN is always preserved as-is (diff unassessable — no floor applies).
+    let final_verdict = if parsed.is_fail_safe {
+        // Fail-safe path: the parser couldn't extract findings, so we cannot
+        // apply the severity floor.  Preserve the fail-safe APPROVE.
+        parsed.verdict
+    } else {
+        derive_verdict(parsed.verdict, &parsed.findings)
+    };
+
+    info!(
+        verdict = %final_verdict,
+        findings_count = parsed.findings.len(),
+        "final verdict after severity-anchored floor"
+    );
+
+    result.verdict = final_verdict;
     result.findings = parsed.findings;
 
     finalize(result, config, &input)
@@ -377,11 +397,15 @@ mod tests {
         }
 
         fn request_changes() -> Self {
+            // Severity is "high" which maps to Effort::High → BLOCK floor.
+            // Use "medium" here so the severity floor produces REQUEST_CHANGES,
+            // letting this test verify REQUEST_CHANGES-verdict round-trip parsing.
+            // The critical/high → BLOCK escalation path is covered in grade.rs tests.
             Self {
                 response: r#"There is a bug.
 
 ```json
-{"verdict":"REQUEST_CHANGES","summary":"SQL injection","findings":[{"title":"SQL injection","body":"line 42","severity":"critical","confidence":0.9,"file":"src/a.rs","line":42}]}
+{"verdict":"REQUEST_CHANGES","summary":"SQL injection","findings":[{"title":"SQL injection","body":"line 42","severity":"medium","confidence":0.9,"file":"src/a.rs","line":42}]}
 ```"#
                     .to_string(),
                 error: None,

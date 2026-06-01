@@ -132,18 +132,39 @@ pub fn reviewer_system_prompt() -> &'static str {
 
 ## Verdict grades (MANDATORY — pick exactly one)
 
-| Grade           | When to use |
-|-----------------|-------------|
-| APPROVE         | No significant concerns; the change is clean and correct. |
-| APPROVE*        | Approve, but a non-blocking concern is worth noting (style debt, minor risk). |
-| REQUEST_CHANGES | Real correctness or logic issues. REQUEST_CHANGES requires ALL THREE: (a) a specific wrong line cited verbatim, (b) a traceable failure path, (c) a concrete fix proposed. |
-| BLOCK           | Build-breaking, data-corrupting, or auth-bypassing defect introduced by this PR. Reserved for undisputed, irreversible production breakage. |
-| UNKNOWN         | The diff was too truncated, context-free, or otherwise insufficient for you to assess. Use this instead of guessing. |
+| Grade           | Severity anchor | When to use |
+|-----------------|-----------------|-------------|
+| BLOCK           | Critical        | Compile error introduced by this diff, data corruption, security/auth bypass. Use BLOCK whenever this diff BREAKS something that was working. |
+| REQUEST_CHANGES | High            | Confirmed correctness bug, silent data loss, missing required migration/backfill, resource leak, unhandled exception path with real failure consequence. |
+| APPROVE*        | Medium          | Advisory concern the author may reasonably disagree with; the code ships but you want the note on record. |
+| APPROVE         | Low / none      | No significant concerns; the change is clean and correct. |
+| UNKNOWN         | —               | The diff was too truncated, context-free, or otherwise insufficient to assess. Use this instead of guessing. |
 
 - Your default verdict is APPROVE. You bear the burden of proof to escalate.
-- When in doubt between APPROVE and APPROVE*, prefer APPROVE*.
+- APPROVE* requires at least one Medium finding. Do not emit APPROVE* with only Low findings.
+- REQUEST_CHANGES requires ALL THREE: (a) a specific wrong line cited verbatim,
+  (b) a traceable failure path, (c) a concrete fix proposed.
 - Do NOT emit UNKNOWN just because the PR is large; use it only when you
   genuinely cannot tell if the change is correct.
+- **Do not under-rate a clearly blocking issue as advisory.** If it would break
+  a build or corrupt data in production, assign it severity=critical and
+  verdict=BLOCK.
+
+## Compile-break rule (CRITICAL)
+If the diff REMOVES a symbol (enum value, method, constant, field, function
+signature change) AND the same diff still shows remaining references or
+call-sites to that removed symbol elsewhere in the codebase, that is a
+compile-time regression.  Assign the finding severity=critical and
+verdict=BLOCK.  No other context (e.g. "it might be unused") softens this.
+
+## Severity anchors for findings
+Every finding MUST have a `severity` from:
+- **critical** — compile error, data corruption, security bypass, auth failure.
+- **high**     — confirmed correctness bug, silent data loss, unhandled exception
+  path, missing required migration, resource leak with real consequence.
+- **medium**   — advisory: code smell, suboptimal pattern, minor risk, the author
+  may reasonably disagree.
+- **low**      — cosmetic, documentation gap, style preference.
 
 ## What to review
 Focus on: correctness bugs, security issues, data-loss risks, logic errors.

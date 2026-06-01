@@ -130,16 +130,20 @@ pub struct SearchResult {
 
 /// Request body for `POST /indexes/{id}/search`.
 ///
-/// Why: the trusty-search search endpoint accepts a JSON body with the query
-/// and optional parameters.
-/// What: minimal shape matching the trusty-search API (verified in
-/// `crates/trusty-search/src/service/server.rs`).
-/// Test: `search_request_serialises`.
+/// Why: the trusty-search search endpoint uses `SearchQuery` (defined in
+/// `crates/trusty-search/src/core/indexer/mod.rs`), whose required field is
+/// named `text` — not `query`.  Sending `query` causes a 422 "missing field
+/// `text`" response, disabling context retrieval for every review.
+/// What: minimal shape matching the trusty-search `SearchQuery` wire type.
+/// The `text` field is required; `top_k` is optional (server default: 10).
+/// Test: `search_request_body_uses_text_field`, `search_request_omits_none_top_k`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchRequest {
-    /// The search query string.
-    pub query: String,
-    /// Maximum number of results to return (default: 20).
+    /// The search query string — MUST be named `text` to match trusty-search's
+    /// `SearchQuery` struct (field `pub text: String`).  A `query` field is
+    /// silently ignored and the server returns 422 for the missing `text`.
+    pub text: String,
+    /// Maximum number of results to return (server default: 10).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_k: Option<u32>,
 }
@@ -315,7 +319,7 @@ impl SearchClient for HttpSearchClient {
     ) -> Result<Vec<SearchResult>, SearchClientError> {
         let url = format!("{}/indexes/{index_id}/search", self.base_url);
         let request_body = SearchRequest {
-            query: query.to_string(),
+            text: query.to_string(),
             top_k,
         };
 
@@ -441,13 +445,30 @@ mod tests {
         assert!((result.score - 0.0_f32).abs() < 1e-10);
     }
 
+    /// Verify `SearchRequest` serialises with the correct `text` field name.
+    ///
+    /// Why: trusty-search's `SearchQuery` expects `text` (not `query`); the
+    /// wrong field name causes a 422 "missing field `text`" and disables context
+    /// retrieval for every review.  This regression test pins the wire name.
+    /// What: serialises a `SearchRequest` and asserts the JSON key is `"text"`,
+    /// not `"query"`.
+    /// Test: this test itself; no network.
     #[test]
-    fn search_request_serialises() {
+    fn search_request_body_uses_text_field() {
         let req = SearchRequest {
-            query: "fn authenticate".to_string(),
+            text: "fn authenticate".to_string(),
             top_k: Some(10),
         };
         let json = serde_json::to_string(&req).unwrap();
+        // The wire field MUST be "text" — trusty-search rejects "query" with 422.
+        assert!(
+            json.contains("\"text\""),
+            "SearchRequest must use 'text' field name, got: {json}"
+        );
+        assert!(
+            !json.contains("\"query\""),
+            "SearchRequest must NOT use 'query' field name, got: {json}"
+        );
         assert!(json.contains("fn authenticate"));
         assert!(json.contains("10"));
     }
@@ -455,7 +476,7 @@ mod tests {
     #[test]
     fn search_request_omits_none_top_k() {
         let req = SearchRequest {
-            query: "async fn".to_string(),
+            text: "async fn".to_string(),
             top_k: None,
         };
         let json = serde_json::to_string(&req).unwrap();

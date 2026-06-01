@@ -43,6 +43,52 @@ fn system_prompt_contains_policy() {
     );
 }
 
+/// Verify the system prompt contains the severity anchors added in grading calibration.
+///
+/// Why: Fix 5 — explicit severity anchors guide the model to escalate correctly.
+/// Without them the model tends to under-rate Critical/High findings as Medium/Low.
+/// What: asserts key severity anchor phrases are present in the system prompt.
+/// Test: no network.
+#[test]
+fn system_prompt_contains_severity_anchors() {
+    let prompt = reviewer_system_prompt();
+    assert!(
+        prompt.contains("critical"),
+        "system prompt must define the 'critical' severity anchor"
+    );
+    assert!(
+        prompt.contains("severity=critical"),
+        "system prompt must instruct model to assign severity=critical for BLOCK issues"
+    );
+    assert!(
+        prompt.contains("Compile-break rule"),
+        "system prompt must contain the compile-break BLOCK rule"
+    );
+    assert!(
+        prompt.contains("under-rate"),
+        "system prompt must warn against under-rating blocking issues"
+    );
+}
+
+/// Verify the compile-break BLOCK rule is present in the system prompt.
+///
+/// Why: Fix 3 — the model must know that removing a symbol while leaving
+/// call-sites is a compile-time regression warranting BLOCK.
+/// What: asserts the specific compile-break rule text is in the prompt.
+/// Test: no network.
+#[test]
+fn system_prompt_contains_compile_break_rule() {
+    let prompt = reviewer_system_prompt();
+    assert!(
+        prompt.contains("REMOVES a symbol"),
+        "system prompt must describe the removed-symbol compile-break pattern"
+    );
+    assert!(
+        prompt.contains("compile-time regression"),
+        "system prompt must name it a compile-time regression"
+    );
+}
+
 /// Regression test: a `bedrock/`-prefixed reviewer_model must be stripped
 /// before being set on `LlmRequest.model`.
 ///
