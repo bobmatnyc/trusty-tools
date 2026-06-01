@@ -1,16 +1,19 @@
 //! `trusty-review` CLI entry point.
 //!
-//! Why: provides the user-facing interface for running, comparing, and
-//! inspecting PR reviews.  Stage-4 adds the `serve` subcommand (HTTP daemon).
+//! Why: provides the user-facing interface for running, comparing, inspecting
+//! PR reviews, and generating longitudinal contributor profiles.
 //!
 //! What: parses flags via clap-derive, resolves config, builds injected
-//! service dependencies, and dispatches to the pipeline runner or HTTP server.
-//! STDOUT stays clean (only review output); all tracing goes to stderr.
+//! service dependencies, and dispatches to the pipeline runner, HTTP server,
+//! or the profile pipeline.  STDOUT stays clean (only review output); all
+//! tracing goes to stderr.
 //!
 //! Test: `cargo run -p trusty-review -- --help` must succeed; the `run`
 //! and `compare` subcommands are tested in the library's `runner` tests;
 //! the `serve` subcommand is tested in `service::handlers` and
-//! `service::webhook`.
+//! `service::webhook`; the `profile` subcommand is tested in `cli_profile`.
+
+mod cli_profile;
 
 use std::sync::Arc;
 
@@ -89,6 +92,16 @@ enum Commands {
     /// Graceful shutdown on SIGTERM/SIGINT (in-flight requests are drained).
     #[cfg(feature = "http-server")]
     Serve(ServeArgs),
+
+    /// Generate a longitudinal contributor-quality profile.
+    ///
+    /// Aggregates commit history from a tga SQLite DB into period batches,
+    /// samples representative diffs, and uses an LLM to identify recurring
+    /// findings and write a narrative.  Output: profile.json + profile.md.
+    ///
+    /// Always dry-run safe: never posts PR comments.  Use --github-issue to
+    /// opt-in to creating/updating a per-contributor GitHub issue thread.
+    Profile(cli_profile::ProfileArgs),
 }
 
 // ─── `run` args ───────────────────────────────────────────────────────────────
@@ -231,6 +244,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         Commands::Compare(args) => cmd_compare(config, args).await,
         #[cfg(feature = "http-server")]
         Commands::Serve(args) => cmd_serve(config, args).await,
+        Commands::Profile(args) => cli_profile::cmd_profile(config, args).await,
     }
 }
 
