@@ -81,8 +81,8 @@ mod tests {
         let tools = SearchMcpService.tools();
         assert_eq!(
             tools.len(),
-            18,
-            "expected 18 MCP tools, got {}: {:?}",
+            19,
+            "expected 19 MCP tools (including upgrade), got {}: {:?}",
             tools.len(),
             tools
                 .iter()
@@ -130,6 +130,6 @@ mod tests {
         // tools.
         let svc: Box<dyn ServiceDescriptor> = Box::new(SearchMcpService);
         assert_eq!(svc.name(), "trusty-search");
-        assert_eq!(svc.tools().len(), 18);
+        assert_eq!(svc.tools().len(), 19);
     }
 }

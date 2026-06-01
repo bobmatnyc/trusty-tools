@@ -499,6 +499,17 @@ impl McpServer {
                     None => self.post("/grep", &body).await,
                 }
             }
+            "upgrade" => {
+                // Route to the daemon's /upgrade HTTP endpoint. The body mirrors
+                // the MCP schema: check (default true) and confirm (default false).
+                let check = args.get("check").and_then(Value::as_bool).unwrap_or(true);
+                let confirm = args
+                    .get("confirm")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let body = serde_json::json!({ "check": check, "confirm": confirm });
+                self.post("/upgrade", &body).await
+            }
             _ => Err(DispatchError::UnknownTool),
         }
     }
@@ -1276,6 +1287,22 @@ pub fn tool_descriptors() -> Value {
                     "top_k":    { "type": "integer", "description": "Number of context chunks (default: 5)", "default": 5 },
                     "api_key":  { "type": "string", "description": "Fallback OpenRouter API key when OPENROUTER_API_KEY env is unset" }
                 }
+            }
+        },
+        {
+            "name": "upgrade",
+            "description": "Check for or install a new version of trusty-search (issue #537). \
+                            With check=true (or without confirm): report current vs. available version — NEVER installs. \
+                            With confirm=true: install via `cargo install trusty-search --locked`, run a binary \
+                            health gate, then restart the daemon under launchd (or print a restart hint when \
+                            not supervised). The MCP response is returned BEFORE the daemon exits.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "check":   { "type": "boolean", "description": "Report versions only, no install (default when confirm absent)", "default": true },
+                    "confirm": { "type": "boolean", "description": "Set to true to install the new version. Must be explicit — never assumed.", "default": false }
+                },
+                "required": []
             }
         }
     ])

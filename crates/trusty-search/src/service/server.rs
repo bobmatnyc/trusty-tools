@@ -269,6 +269,15 @@ pub struct SearchAppState {
     /// Test: `health_includes_embedderd_rss_field` in `server.rs#tests` verifies
     /// the field is present in the health response.
     pub embedderd_pid_slot: Arc<std::sync::atomic::AtomicU32>,
+    /// Cached result of the startup update check (issue #537).
+    ///
+    /// Why: `/health` should report `update_available` without hitting crates.io
+    /// on every probe. A single background check at daemon startup stores the
+    /// result here; the health handler reads it without a network call.
+    /// What: `None` = up-to-date or check not yet done; `Some("x.y.z")` = newer
+    /// version available. Populated by a `tokio::spawn` in `start.rs`.
+    /// Test: indirectly by the `/health` endpoint tests in this module.
+    pub update_available: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl SearchAppState {
@@ -314,6 +323,7 @@ impl SearchAppState {
             embed_pool: Arc::new(RwLock::new(None)),
             metrics: None,
             embedderd_pid_slot: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            update_available: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -654,6 +664,15 @@ struct HealthResponse {
     /// What: mirrors `reindex::background_reindex_queue_depth()`.
     /// Test: `health_includes_reindex_queue_depth` below.
     background_reindex_queue_depth: usize,
+    /// Newer crates.io version available, if any (issue #537).
+    ///
+    /// Why: surfaces update availability without polling crates.io on every
+    /// health call — a single background check at startup stores the result
+    /// here for the health handler to read cheaply.
+    /// What: `null`/absent = up to date or check not completed; `"x.y.z"` =
+    /// the available newer version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update_available: Option<String>,
 }
 
 /// Embedding-model metadata surfaced by `GET /health` (issue #38).
@@ -856,6 +875,7 @@ pub fn build_router(state: SearchAppState) -> Router {
             "/config",
             get(get_config_handler).patch(patch_config_handler),
         )
+        .route("/upgrade", post(upgrade_handler))
         .with_state(Arc::clone(&state_arc));
 
     let mut router = free.merge(limited);
@@ -1072,6 +1092,8 @@ async fn health_handler(State(state): State<Arc<SearchAppState>>) -> Json<Health
     let embedderd_rss_mb = state
         .current_embedderd_pid()
         .and_then(crate::core::memguard::current_rss_mb_for_pid);
+    let update_available = state.update_available.lock().ok().and_then(|g| g.clone());
+
     Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
@@ -1088,7 +1110,119 @@ async fn health_handler(State(state): State<Arc<SearchAppState>>) -> Json<Health
         // Issue #458: expose the background reindex backlog so operators can
         // watch the startup storm drain without reading daemon logs.
         background_reindex_queue_depth: crate::service::reindex::background_reindex_queue_depth(),
+        update_available,
     })
+}
+
+/// Request body for `POST /upgrade` (issue #537).
+///
+/// Why: typed body avoids raw JSON field extraction in the handler, and serde
+/// provides friendly error messages for malformed requests.
+/// What: mirrors the MCP tool schema: `check` (default true) and `confirm`.
+/// Test: the MCP `upgrade` tool calls this endpoint.
+#[derive(Deserialize)]
+struct UpgradeRequest {
+    #[serde(default = "bool_true")]
+    check: bool,
+    #[serde(default)]
+    confirm: bool,
+}
+
+/// `POST /upgrade` — check for or install a new trusty-search version (issue #537).
+///
+/// Why: Exposes the upgrade workflow over HTTP so the MCP dispatcher (which
+/// calls the daemon's REST API) can trigger an upgrade and receive the response
+/// before the daemon self-exits. Never silently auto-installs.
+///
+/// What:
+/// - `check=true` or `confirm=false`: query crates.io and return version info.
+/// - `confirm=true`: install via `cargo install --locked`, health-gate, then
+///   schedule a 500 ms delayed exit (to flush this response) and return the
+///   result. When launchd-supervised the daemon exits non-zero so launchd
+///   respawns with the new binary. When unsupervised a restart hint is returned.
+///
+/// Test: manual via `curl -X POST http://127.0.0.1:$(trusty-search port)/upgrade \
+///  -H 'Content-Type: application/json' -d '{"check":true}'`.
+async fn upgrade_handler(
+    State(state): State<Arc<SearchAppState>>,
+    Json(body): Json<UpgradeRequest>,
+) -> Json<serde_json::Value> {
+    let crate_name = env!("CARGO_PKG_NAME");
+    let current = env!("CARGO_PKG_VERSION");
+
+    let info = trusty_common::update::check_crates_io(crate_name, current).await;
+
+    let (latest, is_update) = match &info {
+        Some(u) => (u.latest.as_str(), true),
+        None => (current, false),
+    };
+
+    if body.check || !body.confirm {
+        let msg = if is_update {
+            format!(
+                "Update available: {crate_name} {latest} (you have {current}). \
+                 POST with confirm=true to install."
+            )
+        } else {
+            format!("{crate_name} {current} is already up to date.")
+        };
+        return Json(serde_json::json!({
+            "status": "checked",
+            "current": current,
+            "latest": latest,
+            "update_available": is_update,
+            "message": msg
+        }));
+    }
+
+    if !is_update {
+        return Json(serde_json::json!({
+            "status": "up_to_date",
+            "current": current,
+            "message": format!("{crate_name} {current} is already up to date.")
+        }));
+    }
+
+    let latest_owned = latest.to_string();
+    let crate_name_owned = crate_name.to_string();
+    let update_slot = state.update_available.clone();
+    let response = serde_json::json!({
+        "status": "installing",
+        "current": current,
+        "latest": latest_owned,
+        "message": format!(
+            "Installing {crate_name} {latest_owned} — daemon will restart \
+             under launchd (or print a restart hint if not supervised)."
+        )
+    });
+
+    // Spawn the install on a delayed task so this handler can return the
+    // response to the HTTP client (and thus to the MCP caller) before the
+    // process might exit. 500 ms gives the TCP stack time to flush.
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        match trusty_common::update::upgrade_and_restart(&crate_name_owned, &crate_name_owned).await
+        {
+            Ok(Some(hint)) => {
+                tracing::info!("{hint}");
+                eprintln!("{hint}");
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::error!("upgrade_and_restart failed: {e:#}");
+                eprintln!("[trusty-search] upgrade failed: {e:#}");
+                if let Ok(mut g) = update_slot.lock() {
+                    *g = None;
+                }
+            }
+        }
+    });
+
+    Json(response)
+}
+
+fn bool_true() -> bool {
+    true
 }
 
 /// Query parameters for `GET /logs/tail`.

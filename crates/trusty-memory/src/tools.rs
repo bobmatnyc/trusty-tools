@@ -586,6 +586,18 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                     },
                     "required": ["to_palace", "purpose", "content"],
                 }
+            },
+            {
+                "name": "upgrade",
+                "description": "Check for or install a new version of trusty-memory (issue #537). With check=true (or without confirm): report current vs. available version only — NEVER installs. With confirm=true: install via `cargo install trusty-memory --locked`, run a binary health gate, then restart the daemon under launchd (or print a restart hint when not supervised). The MCP response is returned BEFORE the daemon exits so the client sees the result before reconnecting.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "check":   {"type": "boolean", "description": "Report current and available versions only. No install. Default: true when confirm is absent.", "default": true},
+                        "confirm": {"type": "boolean", "description": "Set to true to install the new version. NEVER set automatically — the operator must explicitly pass confirm=true.", "default": false}
+                    },
+                    "required": []
+                }
             }
         ]
     })
@@ -1870,8 +1882,113 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
         "discover_aliases" => handle_discover_aliases(state, args).await,
         "kg_bootstrap" => handle_kg_bootstrap(state, args).await,
         "memory_send_message" => handle_memory_send_message(state, args).await,
+        "upgrade" => handle_upgrade_tool(state, args).await,
         other => anyhow::bail!("unknown tool: {other}"),
     }
+}
+
+/// MCP `upgrade` tool handler — check for or install a new trusty-memory version.
+///
+/// Why: Exposes the upgrade workflow to MCP clients (e.g. Claude Code) so
+/// operators can trigger a version check or install from within an AI session
+/// without leaving the assistant. Never auto-installs silently — the `confirm`
+/// parameter must be explicitly set to `true` by the operator.
+///
+/// What:
+/// - `check=true` or `confirm` absent/false: call `check_crates_io` (fresh,
+///   bypassing the 24h cache) and return current vs. available. No install.
+/// - `confirm=true`: call `upgrade_and_restart`. The MCP response is returned
+///   BEFORE the process exits so the client receives the result, then the
+///   daemon restarts (under launchd) or prints a hint (unsupervised). To
+///   guarantee the response is flushed before exit, the actual exit is
+///   dispatched on a short-delayed `tokio::spawn(sleep(500ms))` task.
+///
+/// Test: `cargo test -p trusty-memory` — the schema is included in the
+/// `tool_definitions_lists_all_tools` test; the confirm=false path can be
+/// validated via `cargo run -p trusty-memory -- serve` + an MCP client.
+async fn handle_upgrade_tool(state: &AppState, args: Value) -> Result<Value> {
+    let check = args.get("check").and_then(Value::as_bool).unwrap_or(true);
+    let confirm = args
+        .get("confirm")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let crate_name = env!("CARGO_PKG_NAME");
+    let current = env!("CARGO_PKG_VERSION");
+
+    // Check-only path: report versions, no install.
+    let info = trusty_common::update::check_crates_io(crate_name, current).await;
+
+    let (latest, is_update) = match &info {
+        Some(u) => (u.latest.as_str(), true),
+        None => (current, false),
+    };
+
+    if check || !confirm {
+        let msg = if is_update {
+            format!(
+                "Update available: {crate_name} {latest} (you have {current}). \
+                 Call with confirm=true to install."
+            )
+        } else {
+            format!("{crate_name} {current} is already up to date.")
+        };
+        return Ok(
+            serde_json::json!({ "status": "checked", "current": current, "latest": latest, "update_available": is_update, "message": msg }),
+        );
+    }
+
+    // confirm=true path: install, health-gate, restart/hint.
+    // Return the response first, then trigger the restart on a short delay so
+    // the MCP transport has time to flush the JSON-RPC response to the client
+    // before the process exits. 500 ms is conservative but safe; the bridge
+    // reconnect (issue #535) resumes the session after the daemon comes back up.
+    if !is_update {
+        return Ok(serde_json::json!({
+            "status": "up_to_date",
+            "current": current,
+            "message": format!("{crate_name} {current} is already up to date — nothing to install.")
+        }));
+    }
+
+    let upgrade_state = state.update_available.clone();
+    let latest_owned = latest.to_string();
+    let crate_name_owned = crate_name.to_string();
+    let response = serde_json::json!({
+        "status": "installing",
+        "current": current,
+        "latest": latest_owned,
+        "message": format!(
+            "Installing {crate_name} {latest_owned} — daemon will restart automatically \
+             under launchd, or you will be prompted to restart manually."
+        )
+    });
+
+    // Spawn the actual install + restart on a delayed task so this handler
+    // returns the response to the client before the process exits.
+    tokio::spawn(async move {
+        // 500 ms gives the MCP transport time to flush the response.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        match trusty_common::update::upgrade_and_restart(&crate_name_owned, &crate_name_owned).await
+        {
+            Ok(Some(hint)) => {
+                tracing::info!("{hint}");
+                eprintln!("{hint}");
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::error!("upgrade_and_restart failed: {e:#}");
+                eprintln!("[trusty-memory] upgrade failed: {e:#}");
+                // Update the state to clear any stale update_available so
+                // the next /health call does not report a broken state.
+                if let Ok(mut g) = upgrade_state.lock() {
+                    *g = None;
+                }
+            }
+        }
+    });
+
+    Ok(response)
 }
 
 /// Per-palace BM25 data directory derived from the daemon's data root.
@@ -2265,7 +2382,7 @@ mod tests {
             .get("tools")
             .and_then(|t| t.as_array())
             .expect("tools array");
-        assert_eq!(tools.len(), 23);
+        assert_eq!(tools.len(), 24);
         let names: Vec<&str> = tools
             .iter()
             .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
@@ -2294,6 +2411,7 @@ mod tests {
             "discover_aliases",
             "kg_bootstrap",
             "memory_send_message",
+            "upgrade",
         ] {
             assert!(names.contains(&expected), "missing tool: {expected}");
         }

@@ -1,6 +1,6 @@
 [package]
 name = "trusty-search"
-version = "0.21.1"
+version = "0.22.0"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"
@@ -48,7 +48,7 @@ path = "src/bin/trusty-embedderd.rs"
 
 [dependencies]
 # ── Shared trusty-common crates ────────────────────────────────────────────
-trusty-common = { version = "0.10.0", default-features = false, features = ["axum-server", "mcp", "embedder", "embedder-test-support", "symgraph", "monitor-tui", "embedder-client", "bm25", "migrations", "cli-help", "update-check", "bug-capture"] }  # `symgraph` enables only the contracts surface — no tree-sitter, no `links` conflict; `monitor-tui` powers `trusty-search monitor tui`; `embedder-client` provides EmbedderClient/RemoteEmbedderClient/UdsEmbedderClient (issue #164); `bm25` is the canonical lexical index (issue #156); `migrations` provides the shared schema-migration kernel (issue #179); `cli-help` provides the shared declarative CLI help + "did you mean?" suggester (issue #216); `update-check` provides throttled crates.io update notification; `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
+trusty-common = { version = "0.11.0", default-features = false, features = ["axum-server", "mcp", "embedder", "embedder-test-support", "symgraph", "monitor-tui", "embedder-client", "bm25", "migrations", "cli-help", "update-check", "bug-capture"] }  # `symgraph` enables only the contracts surface — no tree-sitter, no `links` conflict; `monitor-tui` powers `trusty-search monitor tui`; `embedder-client` provides EmbedderClient/RemoteEmbedderClient/UdsEmbedderClient (issue #164); `bm25` is the canonical lexical index (issue #156); `migrations` provides the shared schema-migration kernel (issue #179); `cli-help` provides the shared declarative CLI help + "did you mean?" suggester (issue #216); `update-check` provides throttled crates.io update notification; `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 
 # ── Bundled sidecar ─────────────────────────────────────────────────────────
 # Why: the trusty-embedderd binary is a required runtime dependency (issue

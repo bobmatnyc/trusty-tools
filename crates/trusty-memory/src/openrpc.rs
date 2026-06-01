@@ -75,6 +75,10 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         // in the dedicated knowledge.write scope (issue #60).
         "kg_bootstrap" => &[KNOWLEDGE_WRITE],
 
+        // Upgrade: requires admin-level write access because it modifies the
+        // installed binary and may restart the daemon.
+        "upgrade" => &[MEMORY_WRITE],
+
         _ => &[],
     };
     s.iter().map(|x| (*x).to_string()).collect()

@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-// ─── Opt-out env vars ────────────────────────────────────────────────────────
+// --- Opt-out env vars ---
 
 /// Set to any non-empty value to disable update checks entirely.
 pub const NO_UPDATE_CHECK_ENV: &str = "TRUSTY_NO_UPDATE_CHECK";
@@ -35,7 +35,7 @@ const CHECK_INTERVAL_SECS: u64 = 60 * 60 * 24;
 /// Network timeout for each crates.io request.
 const NETWORK_TIMEOUT_SECS: u64 = 4;
 
-// ─── Public types ────────────────────────────────────────────────────────────
+// --- Public types ---
 
 /// Metadata about an available update.
 ///
@@ -58,16 +58,16 @@ pub struct UpdateInfo {
 /// Why: A single formatting function keeps the message consistent and
 /// testable without coupling consumers to the wording.
 /// What: Returns a string like:
-/// `"⬆ Update available: trusty-search 0.20.0 (you have 0.19.0) — run: cargo install trusty-search --locked"`.
+/// `"Update available: trusty-search 0.20.0 (you have 0.19.0) — run: cargo install trusty-search --locked"`.
 /// Test: `notice_formats_correctly` in the `tests` module.
 pub fn notice(info: &UpdateInfo) -> String {
     format!(
-        "⬆  Update available: {} {} (you have {}) — run: cargo install {} --locked",
+        "Update available: {} {} (you have {}) — run: cargo install {} --locked",
         info.crate_name, info.latest, info.current, info.crate_name
     )
 }
 
-// ─── Cache types ─────────────────────────────────────────────────────────────
+// --- Cache types ---
 
 /// On-disk cache record stored under the OS cache directory.
 ///
@@ -85,7 +85,7 @@ struct CacheEntry {
     latest_version: String,
 }
 
-// ─── Cache path resolution ───────────────────────────────────────────────────
+// --- Cache path resolution ---
 
 /// Resolve the path to the per-crate cache file.
 ///
@@ -103,7 +103,7 @@ fn cache_path(crate_name: &str) -> PathBuf {
         .join(format!("{crate_name}.json"))
 }
 
-// ─── Cache I/O ───────────────────────────────────────────────────────────────
+// --- Cache I/O ---
 
 /// Read the cache file for `crate_name`, returning `None` on any failure.
 ///
@@ -136,7 +136,7 @@ fn write_cache(crate_name: &str, entry: &CacheEntry) {
     }
 }
 
-// ─── Semver comparison ───────────────────────────────────────────────────────
+// --- Semver comparison ---
 
 /// Parse `MAJOR.MINOR.PATCH` from a version string, stripping pre-release /
 /// build-metadata suffixes and ignoring non-numeric segments.
@@ -172,7 +172,7 @@ fn is_newer(latest_str: &str, current_str: &str) -> bool {
     }
 }
 
-// ─── crates.io API types ─────────────────────────────────────────────────────
+// --- crates.io API types ---
 
 /// Minimal subset of the crates.io `GET /api/v1/crates/{name}` response.
 ///
@@ -196,7 +196,7 @@ struct CrateInfo {
     max_version: Option<String>,
 }
 
-// ─── Network check ───────────────────────────────────────────────────────────
+// --- Network check ---
 
 /// Query crates.io for the latest stable version of `crate_name`.
 ///
@@ -252,7 +252,7 @@ pub async fn check_crates_io(crate_name: &str, current_version: &str) -> Option<
     })
 }
 
-// ─── Current Unix timestamp ───────────────────────────────────────────────────
+// --- Current Unix timestamp ---
 
 /// Return seconds since UNIX_EPOCH, or 0 on error.
 ///
@@ -268,7 +268,7 @@ fn now_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
-// ─── Throttled public entry point ────────────────────────────────────────────
+// --- Throttled public entry point ---
 
 /// Check crates.io for an update, throttled to at most once per 24 hours.
 ///
@@ -276,6 +276,7 @@ fn now_unix_secs() -> u64 {
 /// adding latency or hammering crates.io on every invocation.
 ///
 /// Behaviour:
+///
 /// 1. Returns `None` immediately when `TRUSTY_NO_UPDATE_CHECK` or `CI` is set
 ///    (no network call, no cache I/O).
 /// 2. Reads the per-crate cache file. If `last_check_unix` is less than 24 h
@@ -350,14 +351,29 @@ pub async fn check_throttled(crate_name: &str, current_version: &str) -> Option<
     result
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────────
+// --- Upgrade primitives (in sub-module to stay under 500-line cap) ---
+
+/// Upgrade primitives: cargo-install, health-gate, launchd detection, and
+/// safe self-restart. Re-exported from the parent `update` module so callers
+/// use `trusty_common::update::perform_upgrade` etc. without path changes.
+///
+/// Why: Extracted to keep `update/mod.rs` under the 500-line cap.
+/// What: See each function's own doc comment in `upgrade.rs`.
+/// Test: `cargo test -p trusty-common --features update-check`.
+pub mod upgrade;
+
+pub use upgrade::{
+    is_launchd_supervised, perform_upgrade, upgrade_and_restart, verify_installed_binary,
+};
+
+// --- Tests ---
 
 /// Test suite for semver comparison, notice formatting, env-var opt-out,
-/// cache freshness, and cache I/O resilience.
+/// cache freshness, cache I/O resilience, and the upgrade primitives.
 ///
 /// Why: Split into a sibling file so `mod.rs` stays under the 500-line cap.
 /// What: All tests are `#[cfg(test)]`-gated and run with
 /// `cargo test -p trusty-common --features update-check`.
-/// Test: run the above command to verify all 15 cases pass.
+/// Test: run the above command to verify all cases pass.
 #[cfg(test)]
 mod tests;

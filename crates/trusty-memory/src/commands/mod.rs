@@ -29,6 +29,7 @@ pub mod setup;
 pub mod single_instance;
 pub mod start;
 pub mod stop;
+pub mod upgrade;
 
 /// Process-wide lock for tests that mutate `TRUSTY_DATA_DIR_OVERRIDE` and
 /// related env vars.

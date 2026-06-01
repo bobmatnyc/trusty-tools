@@ -62,6 +62,10 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
             &[SEARCH_WRITE]
         }
 
+        // Upgrade: requires admin write access — installs a new binary and
+        // may restart the daemon (issue #537).
+        "upgrade" => &[SEARCH_WRITE],
+
         _ => &[],
     };
     s.iter().map(|x| (*x).to_string()).collect()

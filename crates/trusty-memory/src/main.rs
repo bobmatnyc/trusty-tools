@@ -29,6 +29,7 @@ use trusty_memory::commands::service::{handle_service, ServiceAction};
 use trusty_memory::commands::setup::handle_setup;
 use trusty_memory::commands::start::handle_start;
 use trusty_memory::commands::stop::handle_stop;
+use trusty_memory::commands::upgrade::handle_upgrade;
 use trusty_memory::{resolve_palace_registry_dir, run_http, run_http_dynamic, AppState};
 
 /// Top-level CLI for `trusty-memory`.
@@ -369,6 +370,35 @@ enum Command {
         #[arg(long, conflicts_with = "addr")]
         json: bool,
     },
+
+    /// Check for or install a new version of trusty-memory.
+    ///
+    /// Why: Gives operators a single command to go from "I wonder if I'm up
+    /// to date" through `cargo install` and daemon restart — without having
+    /// to remember the exact `cargo install` invocation.
+    ///
+    /// Without flags: checks crates.io, shows current → available, prompts
+    /// for confirmation, then installs + restarts (if newer exists).
+    /// With `--check`: report versions only, no install.
+    /// With `--yes`: skip the confirmation prompt.
+    ///
+    /// After a successful install the daemon restarts automatically when
+    /// running under launchd (`KeepAlive::OnSuccess`). When not supervised,
+    /// a restart hint is printed instead.
+    ///
+    /// Examples:
+    ///   trusty-memory upgrade               # interactive
+    ///   trusty-memory upgrade --check       # report only
+    ///   trusty-memory upgrade --yes         # non-interactive
+    Upgrade {
+        /// Report current and available versions without installing anything.
+        #[arg(long)]
+        check: bool,
+
+        /// Skip the confirmation prompt and install immediately.
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
 }
 
 /// Target surface for the `monitor` subcommand.
@@ -467,12 +497,13 @@ async fn main() -> Result<()> {
     // owned by the supervisor or the JSON-RPC framing, so we must not print
     // anything there. `start` self-spawns a detached `serve --foreground`
     // child and exits immediately; the very brief window makes the notice
-    // useless. All other subcommands are short-lived interactive commands
-    // where the notice is visible and appropriate.
+    // useless. `upgrade` does its own fresh check, so we skip the throttled
+    // notice to avoid a redundant second check on the same run.
     // The check is throttled to once per 24 h (on-disk cache), so on a
     // typical run this is a sub-millisecond cache-hit with no network I/O.
     let is_daemon_path = matches!(cli.command, Command::Serve { .. } | Command::Start);
-    if !is_daemon_path {
+    let is_upgrade = matches!(cli.command, Command::Upgrade { .. });
+    if !is_daemon_path && !is_upgrade {
         if let Some(info) = trusty_common::update::check_throttled(
             env!("CARGO_PKG_NAME"),
             env!("CARGO_PKG_VERSION"),
@@ -540,6 +571,7 @@ async fn main() -> Result<()> {
             };
             trusty_memory::commands::port::handle_port(format)
         }
+        Command::Upgrade { check, yes } => handle_upgrade(check, yes).await,
     }
 }
 
@@ -764,6 +796,30 @@ fn spawn_startup_tasks(state: &AppState) {
                 bg_state.spawn_alias_discovery(palace, cwd);
             }
         }
+        // Issue #537: throttled startup update check. Runs once per 24h (on-disk
+        // cache). Result stored in AppState::update_available for /health.
+        // Non-blocking: failure degrades to "no update info" — never aborts startup.
+        {
+            let update_available = bg_state.update_available.clone();
+            tokio::spawn(async move {
+                let crate_name = env!("CARGO_PKG_NAME");
+                let current = env!("CARGO_PKG_VERSION");
+                if let Some(info) =
+                    trusty_common::update::check_throttled(crate_name, current).await
+                {
+                    tracing::info!(
+                        latest = %info.latest,
+                        "update available: {}",
+                        trusty_common::update::notice(&info)
+                    );
+                    eprintln!("{}", trusty_common::update::notice(&info));
+                    if let Ok(mut guard) = update_available.lock() {
+                        *guard = Some(info.latest);
+                    }
+                }
+            });
+        }
+
         // Issue #470 / #474: single-pass scan-only pin discovery — NO palace
         // opens. Run on the blocking pool because readdir is blocking I/O;
         // the scan is bounded (one level under each search root) so it

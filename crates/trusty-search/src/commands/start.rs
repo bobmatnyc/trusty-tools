@@ -1369,6 +1369,28 @@ pub async fn handle_start(
         }
     });
 
+    // Issue #537: throttled startup update check. Runs once per 24h (on-disk
+    // cache). Result stored in SearchAppState::update_available for /health.
+    // Non-blocking: failure degrades to "no update info" — never aborts startup.
+    {
+        let update_available = state.update_available.clone();
+        tokio::spawn(async move {
+            let crate_name = env!("CARGO_PKG_NAME");
+            let current = env!("CARGO_PKG_VERSION");
+            if let Some(info) = trusty_common::update::check_throttled(crate_name, current).await {
+                tracing::info!(
+                    latest = %info.latest,
+                    "update available: {}",
+                    trusty_common::update::notice(&info)
+                );
+                eprintln!("{}", trusty_common::update::notice(&info));
+                if let Ok(mut guard) = update_available.lock() {
+                    *guard = Some(info.latest);
+                }
+            }
+        });
+    }
+
     // The auto-spawned trusty-embedderd subprocess uses `kill_on_drop(true)`,
     // so it is terminated automatically when the supervisor task (and its
     // `Child` handle) is dropped on daemon exit. No explicit shutdown hook

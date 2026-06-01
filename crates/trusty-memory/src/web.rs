@@ -235,6 +235,15 @@ struct HealthResponse {
     /// Together with `open_fds`, lets operators see "244 / 256" before EMFILE.
     #[serde(skip_serializing_if = "Option::is_none")]
     fd_soft_limit: Option<u64>,
+    /// Newer crates.io version available, if any (issue #537).
+    ///
+    /// Why: surfaces update availability without polling crates.io on every
+    /// health call — a single background check at startup stores the result
+    /// here for the health handler to read cheaply.
+    /// What: `null`/absent = up to date or check not completed; `"x.y.z"` =
+    /// the available newer version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update_available: Option<String>,
 }
 
 /// `GET /health` — unauthenticated liveness probe with store/recall smoke test.
@@ -290,6 +299,8 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         }
     };
 
+    let update_available = state.update_available.lock().ok().and_then(|g| g.clone());
+
     Json(HealthResponse {
         status,
         detail,
@@ -301,6 +312,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         addr,
         open_fds,
         fd_soft_limit,
+        update_available,
     })
 }
 

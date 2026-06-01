@@ -206,6 +206,94 @@ fn cache_round_trip() {
     assert_eq!(back.latest_version, "9.9.9");
 }
 
+// ── upgrade primitive tests ────────────────────────────────────────────────
+
+/// Verify the command constructed by `perform_upgrade` uses the right args.
+///
+/// Why: We can't actually run `cargo install` in a unit test without touching
+/// the network and the filesystem. This test validates the command construction
+/// logic by inspecting that `perform_upgrade` calls cargo with `install` and
+/// `--locked` — validated by running it against a non-existent crate name and
+/// checking that it fails with the right kind of error (cargo not found is
+/// acceptable too, meaning the command was built).
+/// Test: tagged #[ignore] because it shells out; run manually with
+/// `cargo test -p trusty-common --features update-check -- --include-ignored`.
+#[tokio::test]
+#[ignore]
+async fn perform_upgrade_fails_cleanly_on_nonexistent_crate() {
+    let result = super::perform_upgrade("___trusty_test_crate_does_not_exist___").await;
+    // Should be Err because cargo install would fail for a nonexistent crate.
+    assert!(
+        result.is_err(),
+        "expected Err for nonexistent crate, got Ok"
+    );
+    let msg = result.unwrap_err().to_string();
+    // The error message should mention cargo or the status.
+    assert!(
+        msg.contains("cargo install") || msg.contains("status") || msg.contains("exited"),
+        "unexpected error message: {msg}"
+    );
+}
+
+/// Verify that `verify_installed_binary` passes for `cargo`, which is always
+/// on PATH for any developer machine.
+///
+/// Why: We need a real binary that is always present to test the happy path
+/// without installing anything. `cargo --version` is a safe no-side-effect probe.
+/// Test: tagged #[ignore] (shells out); run manually with `--include-ignored`.
+#[tokio::test]
+#[ignore]
+async fn verify_installed_binary_passes_for_cargo() {
+    let result = super::verify_installed_binary("cargo").await;
+    assert!(
+        result.is_ok(),
+        "expected Ok for `cargo --version`, got: {:?}",
+        result
+    );
+}
+
+/// Verify that `verify_installed_binary` returns Err for a non-existent binary.
+///
+/// Why: Confirms the health gate catches missing binaries before a self-exit.
+/// Test: sync test — no shell-out needed because `which` will quickly fail.
+#[tokio::test]
+async fn verify_installed_binary_fails_for_missing_binary() {
+    let result = super::verify_installed_binary("___no_such_binary_xyz_999___").await;
+    assert!(
+        result.is_err(),
+        "expected Err for non-existent binary, got Ok"
+    );
+}
+
+/// Verify that `is_launchd_supervised` returns `false` in a normal test env.
+///
+/// Why: Unit tests run in a developer terminal / CI, neither of which is a
+/// launchd-managed job. This catches regressions where the heuristic fires
+/// too eagerly.
+/// Test: the test sets `TERM_PROGRAM` to a non-empty value (mimicking an
+/// interactive terminal session) and clears `XPC_SERVICE_NAME` to ensure the
+/// fast path returns false.
+#[test]
+fn is_launchd_supervised_returns_false_in_test_env() {
+    // Env mutations must be serialised with the same lock used by the other
+    // env-mutating tests.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        std::env::set_var("TERM_PROGRAM", "TestRunner");
+        std::env::remove_var("XPC_SERVICE_NAME");
+    }
+    let result = super::is_launchd_supervised();
+    unsafe {
+        std::env::remove_var("TERM_PROGRAM");
+    }
+    // In a terminal (TERM_PROGRAM set) the function must return false even
+    // if XPC_SERVICE_NAME were somehow present.
+    assert!(
+        !result,
+        "is_launchd_supervised returned true inside a test terminal env"
+    );
+}
+
 // ── live crates.io integration test (requires network) ───────────────────────
 // Tagged #[ignore] so it is skipped in normal CI runs.
 

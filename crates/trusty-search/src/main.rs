@@ -760,6 +760,36 @@ enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
+
+    /// Check for or install a new version of trusty-search.
+    ///
+    /// Why: Gives operators a single command to go from "I wonder if I'm up
+    /// to date" through `cargo install` and daemon restart — without having
+    /// to remember the exact `cargo install` invocation.
+    ///
+    /// Without flags: checks crates.io, shows current → available, prompts
+    /// for confirmation, then installs + restarts (if newer exists).
+    /// With `--check`: report versions only, no install.
+    /// With `--yes`: skip the confirmation prompt.
+    ///
+    /// After a successful install the daemon restarts automatically when
+    /// running under launchd (`KeepAlive::OnSuccess`). When not supervised,
+    /// a restart hint is printed instead.
+    ///
+    /// Examples:
+    ///   trusty-search upgrade               # interactive
+    ///   trusty-search upgrade --check       # report only
+    ///   trusty-search upgrade --yes         # non-interactive
+    #[command(display_order = 35)]
+    Upgrade {
+        /// Report current and available versions without installing anything.
+        #[arg(long)]
+        check: bool,
+
+        /// Skip the confirmation prompt and install immediately.
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
 }
 
 /// Subcommands attached to the `index` command.
@@ -926,12 +956,15 @@ async fn run() -> Result<()> {
     // never print to stderr (or stdout) — JSON-RPC framing owns both streams.
     // The `start` daemon path also skips the check because it self-spawns a
     // detached child; the human-facing side returns immediately before the
-    // daemon prints its banner, so there is no useful output window. The check
-    // is throttled to once per 24 h via an on-disk cache, so on typical runs
-    // this is a sub-millisecond cache read with zero network I/O.
+    // daemon prints its banner, so there is no useful output window.
+    // `upgrade` does its own fresh check, so we skip the throttled notice to
+    // avoid a redundant second check on the same run.
+    // The check is throttled to once per 24 h via an on-disk cache, so on typical
+    // runs this is a sub-millisecond cache read with zero network I/O.
     let is_mcp_serve = matches!(cli.command, Commands::Serve { .. });
     let is_daemon_start = matches!(cli.command, Commands::Start { .. });
-    if !is_mcp_serve && !is_daemon_start {
+    let is_upgrade = matches!(cli.command, Commands::Upgrade { .. });
+    if !is_mcp_serve && !is_daemon_start && !is_upgrade {
         if let Some(info) = trusty_common::update::check_throttled(
             env!("CARGO_PKG_NAME"),
             env!("CARGO_PKG_VERSION"),
@@ -1169,6 +1202,10 @@ async fn run() -> Result<()> {
             let mut cmd = Cli::command();
             let name = cmd.get_name().to_string();
             generate(shell, &mut cmd, name, &mut io::stdout());
+        }
+
+        Commands::Upgrade { check, yes } => {
+            commands::upgrade::handle_upgrade(check, yes).await?;
         }
     }
 

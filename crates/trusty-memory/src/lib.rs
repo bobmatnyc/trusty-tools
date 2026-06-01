@@ -682,6 +682,17 @@ pub struct AppState {
     /// Test: `bm25_index_queue_drops_when_full` exercises the full-queue
     /// branch via `bm25_index_enqueue`.
     pub bm25_index_tx: tokio::sync::mpsc::Sender<tools::Bm25IndexRequest>,
+    /// Cached result of the startup update check (issue #537).
+    ///
+    /// Why: `/health` should report `update_available` without hitting crates.io
+    /// on every probe. A single background check at daemon startup stores the
+    /// result here; the health handler reads it lock-free (well, a brief mutex
+    /// lock) without a network call.
+    /// What: `None` = up-to-date or check not yet done; `Some("x.y.z")` = newer
+    /// version available. The field is populated by a `tokio::spawn` in
+    /// `spawn_startup_tasks` (main.rs) after the daemon binds.
+    /// Test: indirectly by the `/health` endpoint tests in `web.rs`.
+    pub update_available: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl AppState {
@@ -747,6 +758,7 @@ impl AppState {
             palace_names: Arc::new(dashmap::DashMap::new()),
             pin_project_map: Arc::new(dashmap::DashMap::new()),
             bm25_index_tx,
+            update_available: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -1804,8 +1816,8 @@ mod tests {
         let tools = resp["result"]["tools"].as_array().expect("tools array");
         // Issue #99 added `memory_send_message`; issue #180 added
         // `palace_delete`; the #180 follow-up adds `palace_update` on top
-        // of the 22-tool baseline.
-        assert_eq!(tools.len(), 23);
+        // of the 22-tool baseline; issue #537 adds `upgrade`.
+        assert_eq!(tools.len(), 24);
     }
 
     #[tokio::test]
