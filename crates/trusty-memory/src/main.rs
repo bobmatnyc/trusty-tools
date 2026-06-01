@@ -612,6 +612,27 @@ async fn run_serve(
     // `data_root` keeps every call site (status, palace_list, open_palace,
     // palace_create, load_palaces_from_disk) pointed at the same place.
     let data_dir = trusty_common::resolve_data_dir("trusty-memory")?;
+    // Defense-in-depth (belt-and-suspenders, #503): assert the resolved data
+    // root is absolute and not the filesystem root before binding. This guards
+    // against any future resolver path that could produce a bad dir — even if
+    // trusty_common::resolve_data_dir's own guards fire first, a second check
+    // here means a misconfigured deployment fails loudly at startup rather than
+    // silently scattering palaces across `/`.
+    if !data_dir.is_absolute() {
+        anyhow::bail!(
+            "resolved trusty-memory data directory {:?} is not absolute; \
+             refusing to start to prevent palace directories from being created \
+             under the daemon working directory",
+            data_dir
+        );
+    }
+    if data_dir == std::path::Path::new("/") {
+        anyhow::bail!(
+            "resolved trusty-memory data directory is the filesystem root (/); \
+             refusing to start to prevent palace directories from being created \
+             directly under /",
+        );
+    }
     let data_root = resolve_palace_registry_dir(data_dir);
 
     // Apply one-shot, idempotent on-disk migrations before any in-memory

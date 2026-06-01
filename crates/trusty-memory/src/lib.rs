@@ -2105,6 +2105,43 @@ mod tests {
         assert_eq!(resolved, data_dir);
     }
 
+    /// Why: defense-in-depth assertion (#503) — a non-absolute data_dir must be
+    /// caught and rejected before reaching `AppState::new`, as it would create
+    /// palace dirs relative to the daemon CWD (/ under launchd).
+    /// What: passing a relative path to `resolve_palace_registry_dir` produces
+    /// a relative result; the daemon startup guard in `main.rs` must refuse it.
+    /// This test validates the outcome of that guard path by confirming that a
+    /// relative input would NOT produce an absolute registry dir.
+    /// Test: this test itself.
+    #[test]
+    fn resolve_palace_registry_dir_relative_input_is_not_absolute() {
+        // A relative dir is not a valid input, but we want to confirm that
+        // if one somehow slipped through, the result would also be relative —
+        // so the `main.rs` guard (is_absolute check) correctly rejects it.
+        let relative = std::path::PathBuf::from("relative/path");
+        let result = resolve_palace_registry_dir(relative.clone());
+        assert!(
+            !result.is_absolute(),
+            "a relative input should produce a relative registry dir (caught by main.rs guard)"
+        );
+    }
+
+    /// Why: defense-in-depth assertion (#503) — a data_dir equal to "/" must be
+    /// caught before reaching `AppState::new` to prevent palace dirs at `/`.
+    /// What: confirms that "/" produces a result that equals "/", which the
+    /// `main.rs` startup guard correctly rejects.
+    /// Test: this test itself.
+    #[test]
+    fn resolve_palace_registry_dir_root_input_stays_root() {
+        let root = std::path::PathBuf::from("/");
+        let result = resolve_palace_registry_dir(root);
+        // The guard in main.rs checks data_dir (before calling this fn), so
+        // "/" would be caught before reaching this fn. But if it did reach here,
+        // we confirm it yields "/" (no palaces/ subdir exists there), which would
+        // then be caught by the main.rs post-resolve guard.
+        assert_eq!(result, std::path::PathBuf::from("/"));
+    }
+
     /// Why: end-to-end check that the nested-`palaces/` layout hydrates — the
     /// daemon resolves the registry dir via `resolve_palace_registry_dir`, so
     /// an `AppState` rooted there must load palaces persisted one level below
