@@ -13,7 +13,9 @@ use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use trusty_analyze::core::{facts::new_fact, AnalyzerRegistry, FactStore, TrustySearchClient};
-use trusty_analyze::embedder::{BowEmbedder, Embedder, NeuralEmbedder};
+#[cfg(any(feature = "bundled-ort", feature = "load-dynamic", feature = "cuda"))]
+use trusty_analyze::embedder::NeuralEmbedder;
+use trusty_analyze::embedder::{BowEmbedder, Embedder};
 use trusty_analyze::mcp::AnalyzerMcpServer;
 use trusty_analyze::service::{serve, AnalyzerAppState, DEFAULT_PORT};
 
@@ -417,6 +419,13 @@ async fn main() -> Result<()> {
             // Why: keeping the daemon resilient when the ONNX model is
             // missing (CI, fresh machines, offline) is more valuable than
             // hard-failing on startup.
+            //
+            // Why (issue #536): when no ORT backend feature is compiled in
+            // (e.g. --no-default-features --features http-server with no
+            // bundled-ort / load-dynamic / cuda), NeuralEmbedder is not
+            // available at all. The cfg block below falls through to BOW
+            // without requiring any runtime check.
+            #[cfg(any(feature = "bundled-ort", feature = "load-dynamic", feature = "cuda"))]
             let embedder: Arc<dyn Embedder> = match NeuralEmbedder::new(Some(&fastembed_cache)) {
                 Ok(e) => {
                     tracing::info!("neural embedder loaded from {}", fastembed_cache.display());
@@ -429,6 +438,20 @@ async fn main() -> Result<()> {
                     );
                     Arc::new(BowEmbedder::default())
                 }
+            };
+            // When no ORT backend feature is compiled in, always use BOW.
+            // The fastembed_cache path is unused in this build variant; the
+            // let _ suppresses the dead-variable lint without removing the
+            // CLI argument (operators still pass --fastembed-cache even if it
+            // has no effect, so we keep the option for forward compatibility).
+            #[cfg(not(any(feature = "bundled-ort", feature = "load-dynamic", feature = "cuda")))]
+            let embedder: Arc<dyn Embedder> = {
+                let _ = &fastembed_cache;
+                tracing::info!(
+                    "no ORT backend compiled in; using BOW embedder \
+                     (build with bundled-ort, load-dynamic, or cuda for neural embeddings)"
+                );
+                Arc::new(BowEmbedder::default())
             };
             let state = AnalyzerAppState::new(search, facts).with_embedder(embedder);
 

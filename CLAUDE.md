@@ -485,7 +485,7 @@ These abbreviations apply everywhere: ticket descriptions, build commands, refer
 | `TRUSTY_MAX_BATCH_SIZE` | `trusty-search` | ONNX embedding batch size. Auto-tuned; set if OOM during reindex. |
 | `TRUSTY_EMBEDDING_CACHE` | `trusty-search` | LRU embedding cache capacity (entries). |
 | `TRUSTY_COREML_TRIPWIRE_MB` | `trusty-search` (Apple Silicon) | RSS-delta ceiling per CoreML batch (default 4 GB). If exceeded, batch size is halved automatically. Override for hosts with different memory pressure characteristics. |
-| `ORT_DYLIB_PATH` | `trusty-search` (CUDA, glibc < 2.38) | Path to `libonnxruntime.so` on hosts with glibc < 2.38 and CUDA builds. |
+| `ORT_DYLIB_PATH` | `trusty-search` (CUDA, glibc < 2.38); `trusty-analyze` (`load-dynamic`, `cuda` features) | Path to `libonnxruntime.so` on hosts with glibc < 2.38 and CUDA builds. For trusty-analyze, install with `--no-default-features --features http-server,load-dynamic` and set this var to the system libonnxruntime path. |
 | `SKIP_UI_BUILD` | `trusty-search` `build.rs` | Set to `1` to skip the Svelte UI build step (CI publish flows). |
 | `TRUSTY_NO_KG` | `trusty-search` daemon | Machine-wide default for `skip_kg`. When set to `1`, `true`, or `yes`, every new index created via `POST /indexes` (or `trusty-search index`) has `skip_kg=true` applied automatically unless the caller explicitly sets `skip_kg: false`. Useful for CI machines or resource-constrained hosts where KG is never needed. |
 

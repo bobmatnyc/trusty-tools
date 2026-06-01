@@ -6,14 +6,19 @@
 //!
 //! What: `Embedder` trait with two implementations — `BowEmbedder` (wraps
 //! `crate::core::bow_embedding`) and `NeuralEmbedder` (fastembed
-//! `all-MiniLM-L6-v2`). `EmbedderKind` selects which to use.
+//! `all-MiniLM-L6-v2`, only compiled when an ORT backend feature is active).
+//! `EmbedderKind` selects which to use.
 //!
 //! Test: both embedders produce normalized vectors of the correct dimension.
+//! `NeuralEmbedder` tests are skipped at compile time when no ORT backend
+//! feature is enabled.
 
 pub mod bow;
+#[cfg(any(feature = "bundled-ort", feature = "load-dynamic", feature = "cuda"))]
 pub mod neural;
 
 pub use bow::BowEmbedder;
+#[cfg(any(feature = "bundled-ort", feature = "load-dynamic", feature = "cuda"))]
 pub use neural::NeuralEmbedder;
 
 /// Which embedding backend to use.

@@ -18,8 +18,38 @@ This README and the rustdoc stay in-crate; everything else lives under `docs/`.
 
 ## Installation
 
+### Standard install (macOS / modern Linux, glibc ≥ 2.38)
+
 ```bash
 cargo install trusty-analyze
+```
+
+The default build bundles a prebuilt ONNX Runtime (via `fastembed/ort-download-binaries`)
+for the neural concept-clustering embedder. This is the correct choice for macOS and
+any Linux host with glibc 2.38 or later.
+
+### Amazon Linux 2023 / glibc < 2.38 (system ORT)
+
+The bundled ORT static library requires glibc 2.38+. On AL2023 (glibc 2.34) or any
+other host with an older glibc, install with the `load-dynamic` feature and point the
+binary at the system ONNX Runtime at runtime:
+
+```bash
+cargo install trusty-analyze --no-default-features --features http-server,load-dynamic
+```
+
+Then set `ORT_DYLIB_PATH` to the system `libonnxruntime.so` before starting the daemon:
+
+```bash
+export ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so.1.24.2
+trusty-analyze serve --search-url http://127.0.0.1:7878
+```
+
+If no system ORT is available, install without any ORT backend. The daemon will still
+run with the deterministic BoW embedder (no semantic clustering):
+
+```bash
+cargo install trusty-analyze --no-default-features --features http-server
 ```
 
 The installed binary is named `trusty-analyze`. The crate name on crates.io is
@@ -168,11 +198,24 @@ accumulation, recommendations extraction) is identical.
 | `TRUSTY_ANALYZER_PORT` | `7879` | Analyzer listen port |
 | `RUST_LOG` | `warn` | Tracing filter |
 
-## Features Flag
+## Feature Flags
 
 | Flag | Description |
 |---|---|
-| `ner` | Optional ONNX-backed named entity recognition |
+| `http-server` | Axum HTTP daemon (enabled by default). Required for the `trusty-analyze` binary. |
+| `bundled-ort` | **Default.** Bundle the static ONNX Runtime libs via fastembed. Requires glibc ≥ 2.38. |
+| `load-dynamic` | Load ONNX Runtime dynamically from `ORT_DYLIB_PATH`. Use on glibc < 2.38 (AL2023). Mutually exclusive with `bundled-ort`. |
+| `cuda` | GPU-accelerated embedding via ONNX Runtime CUDA EP. Always pair with `--no-default-features`. |
+| `ner` | Optional ONNX-backed named entity recognition (separate model file required). |
+
+### ORT backend selection summary
+
+| Host | Recommended install command |
+|---|---|
+| macOS, Linux glibc ≥ 2.38 | `cargo install trusty-analyze` (default, bundled ORT) |
+| Amazon Linux 2023 / glibc 2.34 | `cargo install trusty-analyze --no-default-features --features http-server,load-dynamic` + `ORT_DYLIB_PATH` |
+| No ONNX Runtime available | `cargo install trusty-analyze --no-default-features --features http-server` (BoW fallback) |
+| CUDA GPU | `cargo install trusty-analyze --no-default-features --features http-server,cuda` + `ORT_DYLIB_PATH` |
 
 ## Architecture
 
