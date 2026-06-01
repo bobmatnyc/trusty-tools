@@ -24,33 +24,6 @@ repos:
       - id: mixed-line-ending
         args: ['--fix=lf']
 
-  # Ruff - replaces black, isort, flake8, pyupgrade (10-200x faster)
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.4  # Use latest version
-    hooks:
-      # Run the linter
-      - id: ruff
-        args: [--fix]
-      # Run the formatter
-      - id: ruff-format
-
-  # Type checking with mypy
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.8.0
-    hooks:
-      - id: mypy
-        additional_dependencies: [types-PyYAML, types-requests]
-        args: ['--config-file=crates/open-mpm/mypy.ini']
-        exclude: ^(venv/|\.venv/|env/|\.env/|build/|dist/|\.git/|tests/.*\.py|scripts/.*\.py)
-
-  # Security scanning with bandit
-  - repo: https://github.com/pycqa/bandit
-    rev: 1.7.5
-    hooks:
-      - id: bandit
-        args: ['-r', '-f', 'json']
-        exclude: ^(venv/|\.venv/|env/|\.env/|build/|dist/|\.git/|tests/.*\.py)
-
   # Secret detection with detect-secrets
   - repo: https://github.com/Yelp/detect-secrets
     rev: v1.5.0
@@ -70,14 +43,6 @@ repos:
             .*Cargo\.lock|
             .*\.pyc
           )$
-
-  # Documentation linting
-  - repo: https://github.com/pycqa/doc8
-    rev: v1.1.1
-    hooks:
-      - id: doc8
-        args: ['--max-line-length=88']
-        files: \.rst$
 
   # Commitizen for conventional commits
   - repo: https://github.com/commitizen-tools/commitizen
