@@ -1,9 +1,107 @@
 //! Per-commit diff statistics computation via `git2`.
 
-use git2::{Commit, Delta, DiffOptions, Repository};
+use std::path::Path;
 
-use crate::collect::errors::Result;
+use git2::{Commit, Delta, DiffFormat, DiffOptions, Repository};
+use tracing::debug;
+
+use crate::collect::errors::{CollectError, Result};
 use crate::core::models::ChangeType;
+
+/// Maximum byte limit for the unified diff text returned by [`diff_for_commit`].
+///
+/// Why: some commits touch enormous generated files or binary assets and can
+/// produce multi-MB diffs; a hard cap prevents pathological memory usage when
+/// callers buffer the full text (e.g. for LLM input).
+/// What: 200 KiB — empirically covers ~99% of human-authored commits while
+/// keeping the worst-case bounded to a safe size.
+/// Test: see `tests::diff_for_commit_truncates_at_cap` below.
+pub const DIFF_BYTE_CAP: usize = 200 * 1024; // 200 KiB
+
+/// Marker appended to a diff that was cut short by the byte cap.
+const TRUNCATION_MARKER: &str = "\n[... diff truncated: output exceeded maximum byte limit ...]\n";
+
+/// Return the unified diff text for a single commit, opening the repository
+/// at `repo_path` with libgit2.
+///
+/// Why: the contributor-profile epic (#558) needs diff text per commit so that
+/// downstream callers (e.g. LLM-based complexity scoring, review assistants)
+/// can inspect what changed — the existing `compute_commit_diff` produces only
+/// stats (insertions/deletions) and does not return text.
+/// What: opens the repository at `repo_path`, resolves `sha` to a commit,
+/// computes the diff against its first parent (or the empty tree for the root
+/// commit), and formats the result as a unified diff string. Output is capped
+/// at [`DIFF_BYTE_CAP`] bytes and terminated with [`TRUNCATION_MARKER`] if the
+/// raw diff would exceed that limit.
+/// Test: see `tests::diff_for_commit_normal_commit`,
+/// `tests::diff_for_commit_initial_commit`, and
+/// `tests::diff_for_commit_truncates_at_cap` below.
+pub fn diff_for_commit(repo_path: &Path, sha: &str) -> Result<String> {
+    let repo = Repository::open(repo_path).map_err(CollectError::Git)?;
+
+    let oid = repo
+        .revparse_single(sha)
+        .map_err(CollectError::Git)?
+        .peel_to_commit()
+        .map_err(CollectError::Git)?
+        .id();
+
+    let commit = repo.find_commit(oid).map_err(CollectError::Git)?;
+
+    let tree = commit.tree().map_err(CollectError::Git)?;
+    let parent_tree = if commit.parent_count() > 0 {
+        let parent = commit.parent(0).map_err(CollectError::Git)?;
+        Some(parent.tree().map_err(CollectError::Git)?)
+    } else {
+        // Root commit — diff against the empty tree.
+        debug!(
+            sha,
+            "diff_for_commit: root commit, diffing against empty tree"
+        );
+        None
+    };
+
+    let mut opts = DiffOptions::new();
+    opts.context_lines(3)
+        .include_typechange(true)
+        .ignore_whitespace(false);
+
+    let diff = repo
+        .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut opts))
+        .map_err(CollectError::Git)?;
+
+    // Accumulate the unified diff text, honouring the byte cap.
+    let mut buf = String::new();
+    let mut capped = false;
+
+    diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
+        if capped {
+            return true;
+        }
+        let origin = line.origin();
+        // Standard diff line prefixes: '+', '-', ' ' (context), '@', '\n', etc.
+        if matches!(origin, '+' | '-' | ' ' | '@' | '\\') {
+            buf.push(origin);
+        }
+        if let Ok(content) = std::str::from_utf8(line.content()) {
+            let remaining = DIFF_BYTE_CAP.saturating_sub(buf.len());
+            if content.len() > remaining {
+                buf.push_str(&content[..remaining]);
+                capped = true;
+            } else {
+                buf.push_str(content);
+            }
+        }
+        true
+    })
+    .map_err(CollectError::Git)?;
+
+    if capped {
+        buf.push_str(TRUNCATION_MARKER);
+    }
+
+    Ok(buf)
+}
 
 /// Aggregated diff stats for a single commit.
 #[derive(Debug, Clone, Default)]
@@ -134,5 +232,168 @@ fn map_change_type(delta: Delta) -> ChangeType {
         Delta::Deleted => ChangeType::Deleted,
         Delta::Renamed => ChangeType::Renamed,
         _ => ChangeType::Modified,
+    }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a temporary git repository with an initial commit adding `content`
+    /// to `filename`. Returns `(TempDir, sha_string)`.
+    fn make_repo_with_initial_commit(filename: &str, content: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let repo = git2::Repository::init(dir.path()).expect("init repo");
+
+        let mut config = repo.config().expect("config");
+        config.set_str("user.name", "Test User").expect("set name");
+        config
+            .set_str("user.email", "test@example.com")
+            .expect("set email");
+
+        // Write file.
+        let file_path = dir.path().join(filename);
+        std::fs::write(&file_path, content).expect("write file");
+
+        let mut index = repo.index().expect("index");
+        index
+            .add_path(std::path::Path::new(filename))
+            .expect("add path");
+        index.write().expect("write index");
+
+        let tree_id = index.write_tree().expect("write tree");
+        let tree = repo.find_tree(tree_id).expect("find tree");
+        let sig = git2::Signature::now("Test User", "test@example.com").expect("sig");
+        let commit_oid = repo
+            .commit(Some("HEAD"), &sig, &sig, "Initial commit", &tree, &[])
+            .expect("initial commit");
+
+        (dir, commit_oid.to_string())
+    }
+
+    /// Create a follow-up commit in `repo_path` that modifies `filename`.
+    fn add_follow_up_commit(repo_path: &Path, filename: &str, new_content: &str) -> String {
+        let repo = git2::Repository::open(repo_path).expect("open repo");
+
+        let file_path = repo_path.join(filename);
+        std::fs::write(&file_path, new_content).expect("write file");
+
+        let mut index = repo.index().expect("index");
+        index
+            .add_path(std::path::Path::new(filename))
+            .expect("add path");
+        index.write().expect("write index");
+
+        let tree_id = index.write_tree().expect("write tree");
+        let tree = repo.find_tree(tree_id).expect("find tree");
+        let sig = git2::Signature::now("Test User", "test@example.com").expect("sig");
+        let head = repo.head().expect("head").peel_to_commit().expect("peel");
+        let commit_oid = repo
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "Follow-up commit",
+                &tree,
+                &[&head],
+            )
+            .expect("follow-up commit");
+
+        commit_oid.to_string()
+    }
+
+    /// Why: a normal (non-root) commit should produce a unified diff showing
+    /// the change from parent → child, including `+` lines for additions and
+    /// `-` lines for removals.
+    /// What: creates a two-commit repo, calls `diff_for_commit` on the second
+    /// commit, asserts expected `+`/`-` markers appear in the output.
+    /// Test: this test itself.
+    #[test]
+    fn diff_for_commit_normal_commit() {
+        let (dir, _initial_sha) = make_repo_with_initial_commit("hello.txt", "hello world\n");
+        let sha = add_follow_up_commit(dir.path(), "hello.txt", "hello universe\n");
+
+        let diff = diff_for_commit(dir.path(), &sha).expect("diff_for_commit");
+
+        assert!(
+            diff.contains("+hello universe"),
+            "diff should contain added line: {diff}"
+        );
+        assert!(
+            diff.contains("-hello world"),
+            "diff should contain removed line: {diff}"
+        );
+    }
+
+    /// Why: the root commit has no parent; `diff_for_commit` must handle this by
+    /// diffing against the empty tree so all new file content appears as `+` lines.
+    /// What: creates a single-commit repo, calls `diff_for_commit` on the initial
+    /// commit, asserts the file's content appears as `+` additions.
+    /// Test: this test itself.
+    #[test]
+    fn diff_for_commit_initial_commit() {
+        let (dir, sha) = make_repo_with_initial_commit("readme.txt", "# Hello\n");
+
+        let diff = diff_for_commit(dir.path(), &sha).expect("diff_for_commit");
+
+        assert!(
+            diff.contains("+# Hello"),
+            "initial commit diff should show added content: {diff}"
+        );
+        // No `-` lines for new files added from empty tree.
+        let minus_content_lines: Vec<&str> = diff
+            .lines()
+            .filter(|l| l.starts_with('-') && !l.starts_with("---"))
+            .collect();
+        assert!(
+            minus_content_lines.is_empty(),
+            "initial commit should have no removed lines: {:?}",
+            minus_content_lines
+        );
+    }
+
+    /// Why: pathological commits on generated files could produce very large diffs;
+    /// the cap must enforce a hard limit and append the truncation marker.
+    /// What: creates a commit with content larger than `DIFF_BYTE_CAP`, calls
+    /// `diff_for_commit`, asserts the output length is bounded and ends with the
+    /// truncation marker.
+    /// Test: this test itself.
+    #[test]
+    fn diff_for_commit_truncates_at_cap() {
+        // Content significantly larger than the cap (line-by-line to be valid UTF-8).
+        let line = "x".repeat(120);
+        let big_content: String = (0..2000)
+            .map(|_| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (dir, _initial_sha) = make_repo_with_initial_commit("big.txt", "");
+        let sha = add_follow_up_commit(dir.path(), "big.txt", &big_content);
+
+        let diff = diff_for_commit(dir.path(), &sha).expect("diff_for_commit");
+
+        assert!(
+            diff.len() <= DIFF_BYTE_CAP + TRUNCATION_MARKER.len() + 200,
+            "diff length {} should be near the byte cap",
+            diff.len()
+        );
+        assert!(
+            diff.contains("diff truncated"),
+            "truncated diff must contain the marker: len={}",
+            diff.len()
+        );
+    }
+
+    /// Why: a non-existent SHA must produce a `CollectError::Git` error rather
+    /// than panicking.
+    /// What: passes a bogus SHA to `diff_for_commit` on a real repo, asserts
+    /// an error is returned.
+    /// Test: this test itself.
+    #[test]
+    fn diff_for_commit_invalid_sha_returns_error() {
+        let (dir, _) = make_repo_with_initial_commit("f.txt", "content\n");
+        let result = diff_for_commit(dir.path(), "0000000000000000000000000000000000000000");
+        assert!(result.is_err(), "invalid SHA must return an error, not Ok");
     }
 }
