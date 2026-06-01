@@ -327,6 +327,46 @@ pub async fn run_reindex_with(
     let skipped_now = StdArc::new(AtomicU64::new(0));
     let cps_now = StdArc::new(AtomicU64::new(0));
     let tick_done = StdArc::new(AtomicBool::new(false));
+    // Tracks the current phase label for the ticker. Stored as a static string
+    // pointer so the ticker can read it without locking `ReindexUi`. Updated
+    // from the SSE event loop (single writer) whenever the phase changes; the
+    // ticker only reads it. Using a raw AtomicPtr would require unsafe; instead
+    // we use an index into a fixed label table (same idea as a discriminant).
+    // We store the `ReindexPhase` discriminant as a u8 via AtomicU64.
+    //
+    // Why: before this fix the ticker always showed "Embedding…" even when the
+    // active phase was Chunking or InitializingEmbedder, causing the header and
+    // footer labels to disagree (header "Chunking…" vs. footer "Embedding…").
+    // Sharing the phase discriminant lets the ticker call `phase.label()` and
+    // produce a footer that always matches the header.
+    //
+    // Encoding: we (ab)use AtomicU64 to carry a discriminant.  The mapping is:
+    //   0 = Connecting, 1 = Walking, 2 = Chunking, 3 = InitializingEmbedder,
+    //   4 = Embedding, 5 = KnowledgeGraph  (other variants map to 4 as default)
+    fn phase_to_u64(p: super::reindex_ui::ReindexPhase) -> u64 {
+        use super::reindex_ui::ReindexPhase as P;
+        match p {
+            P::Connecting => 0,
+            P::Walking => 1,
+            P::Chunking => 2,
+            P::InitializingEmbedder => 3,
+            P::Embedding | P::ParseEmbed => 4,
+            P::KnowledgeGraph => 5,
+            _ => 4,
+        }
+    }
+    fn u64_to_label(v: u64) -> &'static str {
+        use super::reindex_ui::ReindexPhase as P;
+        match v {
+            0 => P::Connecting.label(),
+            1 => P::Walking.label(),
+            2 => P::Chunking.label(),
+            3 => P::InitializingEmbedder.label(),
+            5 => P::KnowledgeGraph.label(),
+            _ => P::Embedding.label(),
+        }
+    }
+    let phase_disc = StdArc::new(AtomicU64::new(phase_to_u64(ReindexPhase::Connecting)));
 
     // Clone the bars the ticker needs — `ProgressBar` is Arc-wrapped so clones
     // are cheap and the ticker can write to them independently.
@@ -339,6 +379,7 @@ pub async fn run_reindex_with(
         let skipped_now = skipped_now.clone();
         let cps_now = cps_now.clone();
         let tick_done = tick_done.clone();
+        let phase_disc = phase_disc.clone();
         let stats_bar = ticker_stats_bar;
         let embed_bar = ticker_embed_bar;
         tokio::spawn(async move {
@@ -361,8 +402,10 @@ pub async fn run_reindex_with(
                 } else {
                     "?".to_string()
                 };
+                // Use the active phase label so footer matches header (Problem 1 fix).
+                let phase_label = u64_to_label(phase_disc.load(Ordering::Acquire));
                 stats_bar.set_message(format!(
-                    "Embedding\u{2026} {chunks} chunks \u{2014} {cps} cps \u{2014} \
+                    "{phase_label} {chunks} chunks \u{2014} {cps} cps \u{2014} \
                      Files {indexed}/{total}  Skipped {skipped}  Elapsed {elapsed}s  ETA {eta}",
                     chunks = format_with_commas(chunks),
                     cps = cps,
@@ -409,6 +452,22 @@ pub async fn run_reindex_with(
     //   - kg_start:    emitted just before KG rebuild; activates the KG bar
     //   - kg_complete: emitted after KG rebuild; carries kg_ms, symbol_count,
     //                  edge_count; marks the KG bar as done
+    //
+    // New events added to surface the model-init stall (Problem 1 fix):
+    //   - embedder_init:  emitted by the daemon just before spawning
+    //                     trusty-embedderd on the first embed request.
+    //                     CLI transitions header to "Loading model…".
+    //   - embedder_ready: emitted after the sidecar reports readiness.
+    //                     CLI transitions header back to "Embedding chunks…" and
+    //                     activates the Embed bar.
+    //
+    // New events for finer-grained embed progress (Problem 2 fix):
+    //   - chunk_progress: emitted after each ONNX sub-batch completes inside
+    //                     `embed_chunks_in_batches`.  Carries `chunks_done`
+    //                     (cumulative chunks embedded so far in this file-batch)
+    //                     and `chunks_per_sec`. Lets the ticker show responsive
+    //                     cps/ETA before the full per-128-file `batch` event
+    //                     fires.
     //
     // Issue #317 three-phase flow (walk_complete → start → first batch):
     //   walk_complete → Walking  (fills 0→100% instantly; walk is sync)
@@ -466,6 +525,7 @@ pub async fn run_reindex_with(
                 received_walk_complete = true;
                 let total = evt.get("total_files").and_then(|v| v.as_u64()).unwrap_or(0);
                 ui.set_phase(ReindexPhase::Walking, index_id);
+                phase_disc.store(phase_to_u64(ReindexPhase::Walking), Ordering::Release);
                 ui.set_total(total);
                 // Walk is already done by the time this event arrives (sync on
                 // daemon). Fill the bar to 100% and freeze it with a near-zero
@@ -485,6 +545,7 @@ pub async fn run_reindex_with(
                     // Three-phase flow: Walk bar is already done; enter Chunking.
                     chunk_started_ms = started.elapsed().as_millis() as u64;
                     ui.set_phase(ReindexPhase::Chunking, index_id);
+                    phase_disc.store(phase_to_u64(ReindexPhase::Chunking), Ordering::Release);
                     ui.set_total(total);
                 } else {
                     // Legacy two-phase flow (old daemon, no walk_complete):
@@ -493,23 +554,82 @@ pub async fn run_reindex_with(
                     if lexical_only {
                         chunk_started_ms = started.elapsed().as_millis() as u64;
                         ui.set_phase(ReindexPhase::Chunking, index_id);
+                        phase_disc.store(phase_to_u64(ReindexPhase::Chunking), Ordering::Release);
                     } else {
                         embed_started_ms = started.elapsed().as_millis() as u64;
                         ui.set_phase(ReindexPhase::Embedding, index_id);
+                        phase_disc.store(phase_to_u64(ReindexPhase::Embedding), Ordering::Release);
                         entered_embedding = true;
                     }
                 }
             }
+            // ── embedder_init ──────────────────────────────────────────────
+            // New event (Problem 1 fix): emitted by the daemon just before
+            // spawning trusty-embedderd on the first embed request.  This is
+            // the 30-60s "stall" that previously showed as a frozen Chunk bar
+            // at 0/N with no feedback.  Transitioning the header to
+            // "Loading model…" (InitializingEmbedder) makes the wait visible.
+            Some("embedder_init") => {
+                ui.set_phase(ReindexPhase::InitializingEmbedder, index_id);
+                phase_disc.store(
+                    phase_to_u64(ReindexPhase::InitializingEmbedder),
+                    Ordering::Release,
+                );
+            }
+            // ── embedder_ready ─────────────────────────────────────────────
+            // New event (Problem 1 fix): emitted after the sidecar is ready.
+            // Transitions the header back to "Embedding chunks…" so the UI
+            // reflects the actual active work.
+            Some("embedder_ready") if !entered_embedding => {
+                embed_started_ms = started.elapsed().as_millis() as u64;
+                ui.set_phase(ReindexPhase::Embedding, index_id);
+                phase_disc.store(phase_to_u64(ReindexPhase::Embedding), Ordering::Release);
+                entered_embedding = true;
+            }
+            Some("embedder_ready") => {
+                // Already in embedding phase; ignore duplicate event.
+            }
+            // ── chunk_progress ─────────────────────────────────────────────
+            // New event (Problem 2 fix): emitted after each ONNX sub-batch
+            // completes inside `embed_chunks_in_batches`.  Updates the per-
+            // second throughput (cps) and the chunk counter so the ticker
+            // shows responsive progress between the coarser per-file `batch`
+            // events.  Does NOT advance the Embed bar position (that's driven
+            // by the `batch` event's `indexed` count) — it only refreshes the
+            // throughput atomics for the 1-second ticker.
+            Some("chunk_progress") => {
+                let partial_chunks = evt.get("chunks_done").and_then(|v| v.as_u64()).unwrap_or(0);
+                let partial_cps = evt
+                    .get("chunks_per_sec")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                // Overwrite the running totals so the ticker sees the latest
+                // sub-batch CPS even before the per-file `batch` event fires.
+                // `chunks_now` is additive (counts cumulative chunks across all
+                // batches); `partial_chunks` is only the sub-batch count so we
+                // use `cps_now` for responsiveness but keep `chunks_now` for
+                // the total display.  Adding partial_chunks here would
+                // double-count (the `batch` event adds them again).  We only
+                // update `cps_now` so the ticker shows live throughput.
+                if partial_cps > 0 {
+                    cps_now.store(partial_cps, Ordering::Release);
+                }
+                // Update the chunk total preview so the ticker can show
+                // "N chunks so far" even before the batch event.
+                let _ = partial_chunks; // used for cps update path only for now
+            }
             // ── batch ──────────────────────────────────────────────────────
             Some("batch") => {
-                // Flip Chunking → Embedding on the first batch event (three-phase
-                // flow only). Skip when lexical_only (no embed batches).
+                // Flip Chunking/InitializingEmbedder → Embedding on the first
+                // batch event (three-phase flow only). Skip when lexical_only
+                // (no embed batches).
                 if received_walk_complete && !entered_embedding && !lexical_only {
                     // Mark Chunk bar done before activating Embed.
                     let chunk_ms = started.elapsed().as_millis() as u64 - chunk_started_ms;
                     ui.mark_stage_done(1, chunk_ms);
                     embed_started_ms = started.elapsed().as_millis() as u64;
                     ui.set_phase(ReindexPhase::Embedding, index_id);
+                    phase_disc.store(phase_to_u64(ReindexPhase::Embedding), Ordering::Release);
                     entered_embedding = true;
                 }
 
@@ -566,6 +686,10 @@ pub async fn run_reindex_with(
                 }
                 ui.clear_stats();
                 ui.set_phase(ReindexPhase::KnowledgeGraph, index_id);
+                phase_disc.store(
+                    phase_to_u64(ReindexPhase::KnowledgeGraph),
+                    Ordering::Release,
+                );
                 // KG total is unknown until completion; use 1 so the bar renders.
                 ui.set_total(1);
                 ui.set_position(0);
