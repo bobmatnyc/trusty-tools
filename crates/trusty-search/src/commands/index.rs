@@ -11,8 +11,8 @@
 
 use super::daemon_utils::daemon_base_url;
 use super::reindex_engine::{
-    register_index_with_daemon, register_index_with_daemon_filtered, run_reindex,
-    run_reindex_force, RegisterFilters,
+    register_index_with_daemon, register_index_with_daemon_filtered, run_reindex_force_opts,
+    run_reindex_opts, RegisterFilters,
 };
 use crate::config::{CollectionConfig, GlobalConfig};
 use crate::core::project_config::{ProjectConfig, PROJECT_CONFIG_FILENAME};
@@ -44,13 +44,15 @@ use colored::Colorize;
 ///
 /// `cli_path` is the optional positional `PATH` argument; `cli_name` /
 /// `cli_exclude` are the optional `--name` / `--exclude` flags.
-/// `timeout_secs` is forwarded to the SSE stream reader; 0 = no limit.
+/// `timeout` is the user-supplied `--timeout` value: `None` means "use the
+/// progress-aware stall default"; `Some(n)` means "hard cap at n seconds"
+/// (with n=0 meaning wait forever).
 pub async fn handle_index(
     cli_path: Option<std::path::PathBuf>,
     cli_name: Option<String>,
     force: bool,
     cli_exclude: Vec<String>,
-    timeout_secs: u64,
+    timeout: Option<u64>,
     lexical_only: bool,
     no_kg: bool,
 ) -> Result<()> {
@@ -123,8 +125,7 @@ pub async fn handle_index(
                 // `skip_kg` field so the CLI can always escalate to
                 // skip-kg even when the YAML file doesn't set it.
                 filters.skip_kg = filters.skip_kg || no_kg;
-                index_one_with_filters(&idx.name, &project_path, force, timeout_secs, &filters)
-                    .await?;
+                index_one_with_filters(&idx.name, &project_path, force, timeout, &filters).await?;
             }
             return Ok(());
         }
@@ -147,7 +148,7 @@ pub async fn handle_index(
     // other filter fields are populated.
     // Issue #313: `--no-kg` likewise forces the filtered path.
     if exclude_globs.is_empty() && !lexical_only && !no_kg {
-        index_one(&index_name, &project_path, force, timeout_secs).await
+        index_one(&index_name, &project_path, force, timeout).await
     } else {
         let filters = RegisterFilters {
             exclude_globs,
@@ -155,7 +156,7 @@ pub async fn handle_index(
             skip_kg: no_kg,
             ..RegisterFilters::default()
         };
-        index_one_with_filters(&index_name, &project_path, force, timeout_secs, &filters).await
+        index_one_with_filters(&index_name, &project_path, force, timeout, &filters).await
     }
 }
 
@@ -272,13 +273,13 @@ async fn index_one(
     index_name: &str,
     project_path: &std::path::Path,
     force: bool,
-    timeout_secs: u64,
+    timeout: Option<u64>,
 ) -> Result<()> {
     index_one_with_filters(
         index_name,
         project_path,
         force,
-        timeout_secs,
+        timeout,
         &RegisterFilters::default(),
     )
     .await
@@ -291,7 +292,7 @@ async fn index_one_with_filters(
     index_name: &str,
     project_path: &std::path::Path,
     force: bool,
-    timeout_secs: u64,
+    timeout: Option<u64>,
     filters: &RegisterFilters,
 ) -> Result<()> {
     // Issue #109, Phase 1: `lexical_only` must always go through the
@@ -331,10 +332,17 @@ async fn index_one_with_filters(
     // registration, so we only warn and continue.
     persist_collection_to_global_config(index_name, project_path, filters);
 
+    // Unpack the user's optional timeout into (timeout_secs, timeout_explicit).
+    // None → progress-aware stall default (120 s stall window, no hard cap).
+    // Some(n) → hard cap at n seconds (0 = wait forever).
+    let (timeout_secs, timeout_explicit) = match timeout {
+        Some(n) => (n, true),
+        None => (0, false),
+    };
     if force {
-        run_reindex_force(index_name, project_path, timeout_secs).await?;
+        run_reindex_force_opts(index_name, project_path, timeout_secs, timeout_explicit).await?;
     } else {
-        run_reindex(index_name, project_path, timeout_secs).await?;
+        run_reindex_opts(index_name, project_path, timeout_secs, timeout_explicit).await?;
     }
     Ok(())
 }

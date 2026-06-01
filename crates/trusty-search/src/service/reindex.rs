@@ -747,6 +747,28 @@ struct BatchCtx {
     /// was created with `lexical_only: true`. Producer task consults this
     /// in `prepare_and_parse_batch` so the embedder is never invoked.
     lexical_only: bool,
+    /// PID slot for the trusty-embedderd sidecar (issue #315 lazy-spawn).
+    ///
+    /// Why: `LazyEmbedderHandle` defers spawning `trusty-embedderd` until
+    /// the first embed request.  The subprocess spawn + ONNX model load
+    /// takes 30–60 s; during this time the progress UI was completely
+    /// frozen with no feedback ("Chunking…" header, 0/N Chunk bar,
+    /// "Embedding… 0 chunks" stats line).
+    ///
+    /// Emitting `embedder_init` just before the first embed call and
+    /// `embedder_ready` when the sidecar responds allows the CLI to
+    /// transition the header to "Loading model…" so the operator sees
+    /// why nothing appears to be moving.
+    ///
+    /// Detection: the PID slot holds `0` before the first spawn.  When we
+    /// see a `0` PID on the first non-lexical-only batch, we emit
+    /// `embedder_init` before calling `parse_and_embed_files` and
+    /// `embedder_ready` after it returns successfully.
+    ///
+    /// `None` when no PID slot is available (non-sidecar embed mode — in
+    /// that case model loading happens synchronously at daemon startup so
+    /// there is no cold-start stall to surface).
+    embedder_pid_slot: Option<Arc<AtomicU32>>,
 }
 
 /// What a single batch contributed to the run-level totals. The orchestrator
@@ -826,6 +848,37 @@ async fn prepare_and_parse_batch(ctx: &BatchCtx, batch: &[PathBuf]) -> Option<Pa
     }
     let batch_files = payload.to_index.len();
     let to_index = payload.to_index;
+
+    // Problem 1 UX fix: detect whether the trusty-embedderd sidecar is about
+    // to be spawned for the first time (cold-start model load, 30-60 s).
+    //
+    // The PID slot reads `0` before the first lazy spawn. If we see `0` on a
+    // non-lexical-only batch we know the upcoming `parse_and_embed_files` call
+    // will block for model initialization before any progress event fires.
+    // Emitting `embedder_init` beforehand lets the CLI show "Loading model…"
+    // instead of a frozen "Chunking… 0/N" bar.
+    //
+    // We only emit once: the `needs_init` flag stays `true` exactly until the
+    // first embedding call returns successfully, at which point we emit
+    // `embedder_ready`. On subsequent batches the PID is non-zero so we skip
+    // this branch entirely. `lexical_only` indexes never embed, so they never
+    // stall here.
+    let needs_embedder_init = !ctx.lexical_only
+        && ctx
+            .embedder_pid_slot
+            .as_ref()
+            .map(|slot| slot.load(AtomicOrdering::Acquire) == 0)
+            .unwrap_or(false);
+
+    if needs_embedder_init {
+        ctx.progress
+            .push(serde_json::json!({
+                "event": "embedder_init",
+                "index_id": ctx.index_id.0,
+            }))
+            .await;
+    }
+
     // Issue #109, Phase 1: `lexical_only` indexes skip the embedder
     // entirely. `parse_files_only` returns a `ParsedBatch` whose
     // `embeddings` slot is all `None`, which `commit_parsed_batch`
@@ -846,6 +899,59 @@ async fn prepare_and_parse_batch(ctx: &BatchCtx, batch: &[PathBuf]) -> Option<Pa
             }
         }
     };
+
+    // If we emitted `embedder_init` above, follow up with `embedder_ready` now
+    // that the sidecar has initialised and the first batch's embeddings are
+    // available. The CLI uses this to transition back from "Loading model…" to
+    // "Embedding chunks…".
+    if needs_embedder_init {
+        ctx.progress
+            .push(serde_json::json!({
+                "event": "embedder_ready",
+                "index_id": ctx.index_id.0,
+            }))
+            .await;
+    }
+
+    // Problem 2 UX fix: emit a lightweight `chunk_progress` event immediately
+    // after the ONNX embedding step (inside `parse_and_embed_files`) finishes
+    // but before the commit write-lock is acquired.
+    //
+    // Why: the commit (BM25 + HNSW + redb write) can take several seconds for
+    // a large batch.  During that window the `batch` SSE event has not yet
+    // fired, so the CLI ticker shows 0 cps and ETA "?" even though embedding
+    // just completed successfully.  Emitting `chunk_progress` here — which
+    // carries the per-batch chunk count and CPS — lets the ticker update
+    // throughput numbers and ETA within seconds of the embedding completing,
+    // not after the commit completes.
+    //
+    // The `batch` event still fires after the commit and carries the
+    // authoritative `indexed` (file-level position) count used to advance the
+    // Embed bar.  `chunk_progress` only updates the CPS / chunk-total
+    // displayed in the stats line.
+    if !ctx.lexical_only && parsed.vector_count > 0 {
+        use std::sync::atomic::Ordering;
+        // Use the running chunk total plus this batch's new chunks as the
+        // cumulative denominator for CPS.  The authoritative total lives in
+        // `ctx.progress.total_chunks` but it hasn't been updated yet (that
+        // happens in `apply_successful_commit`).  We report the batch-local
+        // count so the CLI can display live throughput.
+        let batch_chunks = parsed.chunks.len() as u64;
+        let chunks_per_sec = (batch_chunks * 1000)
+            .checked_div(parsed.embed_ms.max(1))
+            .unwrap_or(0);
+        ctx.progress
+            .push(serde_json::json!({
+                "event": "chunk_progress",
+                "chunks_done": batch_chunks,
+                "chunks_per_sec": chunks_per_sec,
+                "embed_ms": parsed.embed_ms,
+                "indexed": ctx.progress.indexed.load(Ordering::Acquire),
+                "total_files": ctx.total,
+            }))
+            .await;
+    }
+
     Some(ParsedReadyBatch {
         parsed,
         new_hashes: payload.new_hashes,
@@ -1809,6 +1915,9 @@ pub fn spawn_reindex_with_cleanup(
             started,
             total,
             lexical_only: handle.lexical_only,
+            // Thread the embedderd PID slot for lazy-spawn detection
+            // (Problem 1 UX fix — surfaces the model-init stall).
+            embedder_pid_slot: embedderd_pid_slot.clone(),
         };
 
         // Snapshot the batch list into owned `Vec<PathBuf>`s so the producer

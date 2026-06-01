@@ -45,6 +45,17 @@ pub(crate) enum ReindexPhase {
     Walking,
     /// Stage 2 — parse sub-step that runs before the first batch event.
     Chunking,
+    /// Embedder sidecar is spawning / ONNX model is loading (→ Chunk bar shows
+    /// "Loading model…" instead of a frozen 0/N count during the ~30-45s stall).
+    ///
+    /// Why: the `trusty-embedderd` sidecar is spawned on the first embed request
+    /// (lazy-spawn, issue #315).  This cold-start includes subprocess fork +
+    /// ONNX model load + CoreML/CUDA provider init, which can take 30–60 s with
+    /// no user-visible progress.  The `embedder_init` SSE event (emitted by the
+    /// daemon before the first embed call) transitions the header to this phase
+    /// so the operator sees "Loading model…" instead of a frozen Chunk bar at
+    /// 0/N for nearly a minute.
+    InitializingEmbedder,
     /// Stage 3 — parse + embed per batch (→ Embed bar).
     Embedding,
     /// Legacy alias for `Embedding`; retained for backward compatibility.
@@ -71,6 +82,7 @@ impl ReindexPhase {
             ReindexPhase::Connecting => "Connecting to daemon\u{2026}",
             ReindexPhase::Walking => "Walking files\u{2026}",
             ReindexPhase::Chunking => "Chunking\u{2026}",
+            ReindexPhase::InitializingEmbedder => "Loading model\u{2026}",
             ReindexPhase::Embedding => "Embedding chunks\u{2026}",
             ReindexPhase::ParseEmbed => "Embedding chunks\u{2026}",
             ReindexPhase::Bm25 => "Building BM25 index\u{2026}",
@@ -95,7 +107,11 @@ impl ReindexPhase {
 fn phase_to_bar_slot(phase: ReindexPhase) -> Option<usize> {
     match phase {
         ReindexPhase::Walking => Some(0),
-        ReindexPhase::Chunking => Some(1),
+        // InitializingEmbedder shares the Chunk bar slot: the Chunk bar is
+        // already active at 0/N when the embedder spawn begins, so keeping the
+        // focus on slot 1 avoids a visual jump.  The header spinner transitions
+        // to "Loading model…" so the operator knows exactly why the bar is stuck.
+        ReindexPhase::Chunking | ReindexPhase::InitializingEmbedder => Some(1),
         ReindexPhase::Embedding | ReindexPhase::ParseEmbed => Some(2),
         ReindexPhase::KnowledgeGraph => Some(3),
         _ => None,
@@ -334,13 +350,18 @@ impl ReindexUi {
         self.stage_bars[slot].set_style(bar_style(slot, BarState::Done, Some(elapsed_ms)));
     }
 
-    /// Refresh the stats line with embedding progress details.
+    /// Refresh the stats line with current phase progress details.
     ///
     /// Why: the stats line carries per-second throughput and ETA that don't fit
-    /// in the bar template's fixed slots.
-    /// What: formats a "Embedding… N chunks — M cps — Files X/Y  Skipped Z
+    /// in the bar template's fixed slots.  The label prefix is taken from the
+    /// active `phase` so the footer matches the header exactly — previously it
+    /// was hard-coded to "Embedding…" and therefore disagreed with the header
+    /// during the Chunking and InitializingEmbedder phases (the 46-second stall
+    /// visible as "Chunking…" header / "Embedding…" footer).
+    /// What: formats a "{phase_label} N chunks — M cps — Files X/Y  Skipped Z
     /// Elapsed Ns  ETA ?s" string and sets it on the stats bar.
-    /// Test: `tests::update_stats_formats_message`.
+    /// Test: `tests::update_stats_formats_message` and
+    /// `tests::update_stats_label_matches_phase`.
     pub(crate) fn update_stats(
         &self,
         indexed: u64,
@@ -360,8 +381,12 @@ impl ReindexUi {
         } else {
             "?".to_string()
         };
+        // Use the active phase label so the footer agrees with the header.
+        // During Chunking / InitializingEmbedder the header says "Chunking…" or
+        // "Loading model…"; the stats line must reflect the same active step.
+        let phase_label = self.phase.label();
         self.stats.set_message(format!(
-            "Embedding\u{2026} {chunks} chunks \u{2014} {cps} cps \u{2014} Files {indexed}/{total}  Skipped {skipped}  Elapsed {elapsed}  ETA {eta}",
+            "{phase_label} {chunks} chunks \u{2014} {cps} cps \u{2014} Files {indexed}/{total}  Skipped {skipped}  Elapsed {elapsed}  ETA {eta}",
             chunks = format_with_commas(total_chunks),
             cps = chunks_per_sec,
             indexed = format_with_commas(indexed),
@@ -540,6 +565,10 @@ mod tests {
         );
         assert_eq!(ReindexPhase::Walking.label(), "Walking files\u{2026}");
         assert_eq!(ReindexPhase::Chunking.label(), "Chunking\u{2026}");
+        assert_eq!(
+            ReindexPhase::InitializingEmbedder.label(),
+            "Loading model\u{2026}"
+        );
         assert_eq!(ReindexPhase::Embedding.label(), "Embedding chunks\u{2026}");
         assert_eq!(ReindexPhase::ParseEmbed.label(), "Embedding chunks\u{2026}");
         assert_eq!(ReindexPhase::Bm25.label(), "Building BM25 index\u{2026}");
@@ -562,6 +591,12 @@ mod tests {
         assert_eq!(phase_to_bar_slot(ReindexPhase::Connecting), None);
         assert_eq!(phase_to_bar_slot(ReindexPhase::Walking), Some(0));
         assert_eq!(phase_to_bar_slot(ReindexPhase::Chunking), Some(1));
+        // InitializingEmbedder shares the Chunk bar (slot 1) so the bar stays
+        // focused while the header changes to "Loading model…".
+        assert_eq!(
+            phase_to_bar_slot(ReindexPhase::InitializingEmbedder),
+            Some(1)
+        );
         assert_eq!(phase_to_bar_slot(ReindexPhase::Embedding), Some(2));
         assert_eq!(phase_to_bar_slot(ReindexPhase::ParseEmbed), Some(2));
         assert_eq!(phase_to_bar_slot(ReindexPhase::KnowledgeGraph), Some(3));
@@ -711,6 +746,53 @@ mod tests {
         ui.update_stats(0, 0, 0, 0, 0);
         // Normal path.
         ui.update_stats(500, 4_096, 3, 128, 10);
+        ui.finish("done".to_string());
+    }
+
+    /// The stats-bar message must use the active phase label, not a hard-coded
+    /// "Embedding…" string. This was the header/footer inconsistency that showed
+    /// "Chunking…" in the header while the footer said "Embedding…" during the
+    /// model-init stall.
+    ///
+    /// Why: ensures the fix for the header/footer label mismatch (Problem 1) is
+    /// regression-tested. The stats line prefix must always match the phase label
+    /// returned by `ReindexPhase::label()`.
+    /// What: calls `update_stats` in Chunking and InitializingEmbedder phases;
+    /// asserts the stats bar message starts with the correct prefix.
+    /// Test: this test.
+    #[test]
+    fn update_stats_label_matches_phase() {
+        let mut ui = ReindexUi::new("idx", false);
+
+        // During Chunking the stats line must say "Chunking…", not "Embedding…".
+        ui.set_phase(ReindexPhase::Chunking, "idx");
+        ui.set_total(3_263);
+        ui.update_stats(0, 0, 0, 0, 1);
+        let msg = ui.stats.message();
+        assert!(
+            msg.starts_with("Chunking\u{2026}"),
+            "expected stats to start with 'Chunking…', got: {msg:?}"
+        );
+
+        // During InitializingEmbedder the stats line must say "Loading model…".
+        ui.set_phase(ReindexPhase::InitializingEmbedder, "idx");
+        ui.update_stats(0, 0, 0, 0, 10);
+        let msg = ui.stats.message();
+        assert!(
+            msg.starts_with("Loading model\u{2026}"),
+            "expected stats to start with 'Loading model…', got: {msg:?}"
+        );
+
+        // During Embedding the stats line must say "Embedding chunks…".
+        ui.set_phase(ReindexPhase::Embedding, "idx");
+        ui.set_total(3_263);
+        ui.update_stats(128, 1_024, 0, 22, 46);
+        let msg = ui.stats.message();
+        assert!(
+            msg.starts_with("Embedding chunks\u{2026}"),
+            "expected stats to start with 'Embedding chunks…', got: {msg:?}"
+        );
+
         ui.finish("done".to_string());
     }
 
