@@ -101,9 +101,14 @@ pub const DEDUP_STALE_SECS: u64 = 7200; // 2 hours.
 
 /// Maximum length of the full diff text (characters) fed to the LLM.
 ///
-/// Why: very large diffs cause token budget overruns and poor review quality.
-/// What: the diff summarizer truncates after this many characters.
-pub const MAX_DIFF_CHARS: usize = 60_000;
+/// Why: the reviewer model (Bedrock Claude Sonnet 4.6) has a 200 K-token context
+/// window; the old 60 K-char cap (~15 K tokens) was overly conservative and
+/// caused real PRs with large fixture churn to drop substantive code changes.
+/// Raised to 160 K chars (≈40 K tokens) — still ~5× under the 200 K window —
+/// to give the DiffAnalyzer noise filter enough headroom to work.
+/// What: `truncate_diff` and `DiffAnalyzer::render_for_prompt` both use this cap
+/// as their final safety net.  Closes: #624.
+pub const MAX_DIFF_CHARS: usize = 160_000;
 
 /// Maximum number of context files retrieved from trusty-search per review.
 pub const MAX_CONTEXT_FILES: usize = 20;
@@ -222,6 +227,52 @@ mod tests {
         assert!(
             REVIEW_VERSION.starts_with("tr-"),
             "REVIEW_VERSION must start with 'tr-'"
+        );
+    }
+
+    /// Regression guard: `MAX_DIFF_CHARS` must be 160_000 (the cap raised from
+    /// 60_000 in #624 to give the DiffAnalyzer noise filter enough headroom).
+    ///
+    /// Why: a silent regression to the old 60 K cap would make the DiffAnalyzer
+    /// pointless — noise-filtered diffs would still be truncated at ~15 K tokens.
+    /// What: asserts the exact numeric value; changing it must fail this test so
+    /// the change is explicit and intentional.
+    /// Test: this test itself.
+    #[test]
+    fn max_diff_chars_is_160k() {
+        assert_eq!(
+            MAX_DIFF_CHARS,
+            160_000,
+            "MAX_DIFF_CHARS must be 160_000 (raised from 60_000 in #624)"
+        );
+        // Also assert it comfortably fits below the reviewer model's context window.
+        // 200 K tokens × ~4 chars/token ≈ 800 K chars → 160 K is well within range.
+        assert!(
+            MAX_DIFF_CHARS < 400_000,
+            "MAX_DIFF_CHARS must remain well below the 200 K-token context window"
+        );
+    }
+
+    /// Regression guard: `truncate_diff` must cut at a hunk boundary and not
+    /// exceed the cap significantly (covers the new 160 K value end-to-end).
+    ///
+    /// Why: ensures the `truncate_diff` implementation respects the updated cap.
+    /// What: builds a diff longer than MAX_DIFF_CHARS, asserts the truncation
+    /// marker appears and the result does not greatly exceed MAX_DIFF_CHARS.
+    /// Test: this test itself.
+    #[test]
+    fn max_diff_chars_truncation_consistent() {
+        use crate::pipeline::diff::truncate_diff;
+        let over = "a".repeat(MAX_DIFF_CHARS + 5_000);
+        let result = truncate_diff(&over);
+        assert!(
+            result.contains("[DIFF TRUNCATED"),
+            "truncated diff must contain the marker"
+        );
+        assert!(
+            result.len() <= MAX_DIFF_CHARS + 300,
+            "truncated result must not greatly exceed the cap: len={}",
+            result.len()
         );
     }
 }

@@ -83,7 +83,7 @@ pub async fn load_diff(source: &DiffSource) -> Result<String, GithubError> {
 /// Truncate a diff to at most `MAX_DIFF_CHARS` characters.
 ///
 /// Why: very large diffs cause LLM token budget overruns and degraded review
-/// quality.  The cap is defined in `constants::MAX_DIFF_CHARS` (60 000 chars).
+/// quality.  The cap is defined in `constants::MAX_DIFF_CHARS` (160 000 chars).
 /// What: if the diff exceeds the cap, it is cut at the nearest hunk boundary
 /// before the cap, or at the raw char limit if no hunk boundary is found.  A
 /// `[DIFF TRUNCATED — ...]` marker is appended so the LLM can see the diff is
