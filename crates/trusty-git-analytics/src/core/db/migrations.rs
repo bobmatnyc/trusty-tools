@@ -147,6 +147,87 @@ fn current_version(conn: &Connection) -> Result<i64> {
     Ok(v.unwrap_or(0))
 }
 
+/// Return the set of column names for `table` by querying `PRAGMA table_info`.
+///
+/// Used by migration pre-flight checks to guard ADD COLUMN statements that
+/// may already have been applied by a pre-release build (SQLite has no
+/// `ALTER TABLE … ADD COLUMN IF NOT EXISTS`).
+fn column_names(conn: &Connection, table: &str) -> Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(TgaError::from)?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(TgaError::from)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(TgaError::from)?;
+    Ok(names)
+}
+
+/// Apply migration 17 (`pushdown_445`) with a guard for the `effort_tshirt`
+/// ADD COLUMN that some pre-release v16 builds already included inline.
+///
+/// Background: the `effort_tshirt` column was occasionally added directly
+/// inside the v16 `fact_commit_effort` CREATE TABLE statement during
+/// development, before migration 17 was written. SQLite has no
+/// `ALTER TABLE … ADD COLUMN IF NOT EXISTS`, so we query `PRAGMA table_info`
+/// before the ALTER and skip it when the column already exists.
+///
+/// The remainder of the migration SQL (classifications, commits, indexes) is
+/// executed as normal; none of those columns were subject to the same
+/// pre-release contamination.
+fn apply_v17_pushdown_445(conn: &Connection) -> Result<()> {
+    // Part 1 (classification top-level): unconditional — classifications was
+    // never modified by any pre-release v16 build.
+    conn.execute_batch(
+        "ALTER TABLE classifications ADD COLUMN top_level_category TEXT;\n\
+         CREATE INDEX IF NOT EXISTS idx_classifications_top_level ON classifications(top_level_category);",
+    )
+    .map_err(|e| {
+        TgaError::MigrationError(format!("migration 17 (pushdown_445) classifications step failed: {e}"))
+    })?;
+
+    // Part 2 (effort_tshirt): guarded — check if the column is already present
+    // before issuing ALTER TABLE (SQLite has no ADD COLUMN IF NOT EXISTS).
+    let fce_cols = column_names(conn, "fact_commit_effort")?;
+    if !fce_cols.iter().any(|c| c == "effort_tshirt") {
+        conn.execute_batch(
+            "ALTER TABLE fact_commit_effort ADD COLUMN effort_tshirt INTEGER;",
+        )
+        .map_err(|e| {
+            TgaError::MigrationError(format!(
+                "migration 17 (pushdown_445) effort_tshirt ALTER failed: {e}"
+            ))
+        })?;
+    } else {
+        debug!(
+            "migration v17: effort_tshirt already present in fact_commit_effort \
+             (pre-release v16 build detected), skipping ADD COLUMN"
+        );
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_fact_commit_effort_tshirt ON fact_commit_effort(effort_tshirt);",
+    )
+    .map_err(|e| {
+        TgaError::MigrationError(format!(
+            "migration 17 (pushdown_445) effort_tshirt index failed: {e}"
+        ))
+    })?;
+
+    // Part 3 (commits AI attribution): unconditional — commits columns were
+    // not part of any pre-release v16 modification.
+    conn.execute_batch(
+        "ALTER TABLE commits ADD COLUMN is_ai_assisted INTEGER NOT NULL DEFAULT 0;\n\
+         ALTER TABLE commits ADD COLUMN ai_tool TEXT;\n\
+         CREATE INDEX IF NOT EXISTS idx_commits_is_ai_assisted ON commits(is_ai_assisted);",
+    )
+    .map_err(|e| {
+        TgaError::MigrationError(format!("migration 17 (pushdown_445) commits step failed: {e}"))
+    })?;
+
+    Ok(())
+}
+
 /// Apply all migrations whose version is greater than the current schema version.
 ///
 /// Idempotent: running it twice in a row is a no-op the second time.
@@ -166,9 +247,21 @@ pub fn run(conn: &mut Connection) -> Result<()> {
         }
         info!(version = m.version, name = m.name, "applying migration");
         let tx = conn.transaction().map_err(TgaError::from)?;
-        tx.execute_batch(m.sql).map_err(|e| {
-            TgaError::MigrationError(format!("migration {} ({}) failed: {e}", m.version, m.name))
-        })?;
+
+        if m.version == 17 {
+            // Migration 17 requires a pre-flight column check because some
+            // pre-release builds added `effort_tshirt` directly in v16's
+            // CREATE TABLE; see `apply_v17_pushdown_445` for details.
+            apply_v17_pushdown_445(&tx)?;
+        } else {
+            tx.execute_batch(m.sql).map_err(|e| {
+                TgaError::MigrationError(format!(
+                    "migration {} ({}) failed: {e}",
+                    m.version, m.name
+                ))
+            })?;
+        }
+
         tx.execute(
             "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?1, ?2, ?3)",
             rusqlite::params![m.version, m.name, chrono::Utc::now().to_rfc3339()],
@@ -183,6 +276,96 @@ pub fn run(conn: &mut Connection) -> Result<()> {
 mod tests {
     use crate::core::db::Database;
     use rusqlite::params;
+
+    /// Why: regression guard for the duplicate-column bug (issue #445 / tga
+    /// 2.5.0). Some pre-release builds modified migration v16 in-place to
+    /// include `effort_tshirt` directly in the CREATE TABLE, so production
+    /// databases at schema_version=16 already have the column. Migration v17
+    /// then does ADD COLUMN IF NOT EXISTS, which must succeed (not raise
+    /// "duplicate column name: effort_tshirt") on such databases.
+    /// What: manually apply migrations 1-16, then ALTER the table to add
+    /// effort_tshirt (simulating a pre-release v16), then run the remaining
+    /// migrations (17+). Assert no error and the final schema is correct.
+    /// Test: this test itself.
+    #[test]
+    fn migration_v17_is_idempotent_when_effort_tshirt_already_exists() {
+        use rusqlite::Connection;
+
+        // Open a raw in-memory connection so we can control migration application
+        // manually without using Database::open_in_memory (which runs all migrations).
+        let mut conn = Connection::open_in_memory().expect("open raw connection");
+
+        // Apply only migrations 1–16 by calling the migration runner after
+        // temporarily truncating the MIGRATIONS slice is not straightforward, so
+        // we use the migration runner's SQL layer directly: first apply all
+        // migrations normally (which will include 17+), but we need the
+        // pre-release state.  Instead: create a fresh DB, run up to v16 manually,
+        // insert effort_tshirt via ALTER TABLE (pre-release simulation), mark
+        // schema_migrations at 16, then run migrations::run to apply 17+.
+        super::ensure_migrations_table(&conn).expect("ensure table");
+
+        // Apply migrations 1 through 16 only.
+        for m in super::MIGRATIONS {
+            if m.version > 16 {
+                break;
+            }
+            let tx = conn.transaction().expect("begin tx");
+            tx.execute_batch(m.sql)
+                .unwrap_or_else(|e| panic!("migration {} failed: {e}", m.version));
+            tx.execute(
+                "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params![m.version, m.name, "2026-01-01T00:00:00Z"],
+            )
+            .expect("record migration");
+            tx.commit().expect("commit");
+        }
+
+        // Simulate a pre-release v16 build that added effort_tshirt directly
+        // to fact_commit_effort before migration 17 existed.
+        conn.execute_batch(
+            "ALTER TABLE fact_commit_effort ADD COLUMN effort_tshirt SMALLINT;",
+        )
+        .expect("pre-release ALTER TABLE (simulating old dev build)");
+
+        // Now apply migration 17 and beyond using the official runner.
+        // This must NOT fail with "duplicate column name: effort_tshirt".
+        super::run(&mut conn).expect(
+            "migration v17 must succeed even when effort_tshirt already exists \
+             (ADD COLUMN IF NOT EXISTS guard must fire)",
+        );
+
+        // Verify the column is present and writable after migration.
+        conn.execute(
+            "INSERT INTO fact_commit_effort \
+             (sha, repository, size, score, loc, files, test_loc, tests_factor, \
+              formula_version, computed_at, effort_tshirt) \
+             VALUES ('sha_idem', 'repo', 'S', 5.0, 10, 1, 0, 1.0, 'v1', 1000000, 2)",
+            [],
+        )
+        .expect("insert with effort_tshirt must succeed post-migration");
+
+        let tshirt: Option<i64> = conn
+            .query_row(
+                "SELECT effort_tshirt FROM fact_commit_effort WHERE sha = 'sha_idem'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read effort_tshirt");
+        assert_eq!(tshirt, Some(2), "effort_tshirt must be readable after idempotent migration");
+
+        // Confirm the schema version advanced past 16.
+        let version: i64 = conn
+            .query_row(
+                "SELECT MAX(version) FROM schema_migrations",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read version");
+        assert!(
+            version >= 17,
+            "schema_migrations must record at least v17 after run(), got {version}"
+        );
+    }
 
     /// Why: regression guard for issue #445. Migration v17 adds three additive
     /// columns (`classifications.top_level_category`,
