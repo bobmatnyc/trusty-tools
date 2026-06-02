@@ -91,6 +91,11 @@ hex                = { workspace = true }
 fastembed  = { workspace = true, features = ["hf-hub-rustls-tls"], optional = true }
 ort        = { workspace = true, optional = true }
 tokenizers = { workspace = true, optional = true }
+# Why (#630): trusty-review provides the reusable LLM review pipeline + MCP tool
+#      surface. Optional and OFF by default so `cargo install trusty-analyze`
+#      and the crates.io publish are unaffected (trusty-review need not be
+#      published). The `review` feature pulls it in with its `mcp` feature.
+trusty-review = { workspace = true, optional = true }
 
 [features]
 # Why (issue #249): mirrors the `trusty-common` / `trusty-memory` rule that
@@ -126,6 +131,13 @@ load-dynamic = ["dep:fastembed", "fastembed/ort-load-dynamic"]
 # Always pair with --no-default-features so bundled-ort is dropped.
 cuda         = ["dep:fastembed", "fastembed/cuda", "fastembed/ort-load-dynamic"]
 ner     = ["dep:ort", "dep:tokenizers"]
+# Why (#630): exposes the trusty-review LLM review pipeline as MCP tools
+#      (`tr_review_pr`, `tr_review_diff`, `tr_review_health`). OFF by default so
+#      the standard `cargo install` / crates.io publish do not require
+#      trusty-review to be published. Pulls in trusty-review with its `mcp`
+#      feature so the reusable tool surface (`tools::call_tool`, `AppState`,
+#      `build_review_state`) is reachable.
+review  = ["dep:trusty-review", "trusty-review/mcp"]
 
 [dev-dependencies]
 tempfile       = { workspace = true }

@@ -10741,6 +10741,7 @@ dependencies = [
  "tree-sitter-swift",
  "tree-sitter-typescript",
  "trusty-common",
+ "trusty-review",
  "which 6.0.3",
  "xxhash-rust",
 ]

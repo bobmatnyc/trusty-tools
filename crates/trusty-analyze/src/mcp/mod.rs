@@ -27,6 +27,19 @@
 pub mod sse;
 pub mod stdio;
 
+// Why (#610): the `tools/list` JSON-Schema payload was extracted into its own
+// module to keep this file under its frozen line-cap budget while the `review`
+// feature (#630) adds new tools. `descriptors::base_tool_descriptors()` is the
+// always-compiled base set.
+pub mod descriptors;
+
+// Why (#630): the `tr_review_*` LLM tools that embed the trusty-review pipeline
+// live behind the optional `review` feature so the default build / crates.io
+// publish are unaffected. When off, the module is not compiled and the names
+// fall through to `UnknownTool`.
+#[cfg(feature = "review")]
+pub mod review;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -321,6 +334,13 @@ impl AnalyzerMcpServer {
             "review_diff" => self.handle_review_diff(args).await,
             "review_github_pr" => self.handle_review_github_pr(args).await,
             "deep_analysis" => self.handle_deep_analysis(args).await,
+            // Why (#630): the `tr_review_*` LLM tools delegate into the embedded
+            // trusty-review pipeline. Gated behind the `review` feature; when
+            // off these names fall through to the `_ => UnknownTool` arm.
+            #[cfg(feature = "review")]
+            "tr_review_pr" | "tr_review_diff" | "tr_review_health" => {
+                review::handle_tr_review(tool, args).await
+            }
             _ => Err(DispatchError::UnknownTool),
         }
     }
@@ -720,214 +740,27 @@ fn wrap_tool_error(msg: &str) -> Value {
     })
 }
 
+/// Assemble the full `tools/list` descriptor array.
+///
+/// Why: the base descriptor set lives in `descriptors.rs` to keep this file
+/// within its line-cap budget (#610). When the optional `review` feature is on
+/// (#630), the three `tr_review_*` descriptors are appended so `tools/list`
+/// advertises exactly the tools the dispatcher can route.
+/// What: starts from `descriptors::base_tool_descriptors()` and, under
+/// `feature = "review"`, pushes `review::review_tool_descriptors()` onto the
+/// array. Returns a `serde_json::Value` array.
+/// Test: `tools_list_contains_full_surface` (base names) and, feature-gated,
+/// `tools_list_includes_tr_review_tools` (the three `tr_` names).
 pub fn tool_descriptors() -> Value {
-    serde_json::json!([
-        {
-            "name": "complexity_hotspots",
-            "description": "Top-N chunks ranked by cyclomatic complexity",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "index": { "type": "string" },
-                    "index_id": { "type": "string" },
-                    "top_n": { "type": "number" }
-                }
-            }
-        },
-        {
-            "name": "find_smells",
-            "description": "Chunks with at least one detected code smell",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "index": { "type": "string" },
-                    "index_id": { "type": "string" }
-                }
-            }
-        },
-        {
-            "name": "analyze_quality",
-            "description": "Aggregate quality stats: avg cyclomatic, %A, smell count",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "index": { "type": "string" },
-                    "index_id": { "type": "string" }
-                }
-            }
-        },
-        {
-            "name": "run_diagnostics",
-            "description": "Run available external static-analysis tools (clippy, ruff, biome, staticcheck, pmd, rubocop, phpstan, swiftlint, detekt, clang-tidy) across the index corpus on demand. Tools are auto-discovered: only installed binaries run. Returns normalized diagnostics with file, line, severity, rule code, and message.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "index":    { "type": "string" },
-                    "index_id": { "type": "string" },
-                    "language": { "type": "string", "description": "Optional: restrict to one language tag (rust, python, typescript, go, java, ruby, php, swift, kotlin, cpp)" },
-                    "tools":    { "type": "string", "description": "Optional: comma-separated list of tool names to run; defaults to all available" }
-                }
-            }
-        },
-        {
-            "name": "list_facts",
-            "description": "List canonical facts, optionally filtered by subject/predicate/object",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "subject":   { "type": "string" },
-                    "predicate": { "type": "string" },
-                    "object":    { "type": "string" }
-                }
-            }
-        },
-        {
-            "name": "upsert_fact",
-            "description": "Insert or update a canonical fact triple",
-            "inputSchema": {
-                "type": "object",
-                "required": ["subject", "predicate", "object", "index_id"],
-                "properties": {
-                    "subject":    { "type": "string" },
-                    "predicate":  { "type": "string" },
-                    "object":     { "type": "string" },
-                    "index_id":   { "type": "string" },
-                    "confidence": { "type": "number" },
-                    "provenance": { "type": "array", "items": { "type": "string" } }
-                }
-            }
-        },
-        {
-            "name": "delete_fact",
-            "description": "Delete a fact by its u64 id",
-            "inputSchema": {
-                "type": "object",
-                "required": ["id"],
-                "properties": { "id": { "type": "number" } }
-            }
-        },
-        {
-            "name": "analyzer_health",
-            "description": "Probe analyzer daemon liveness and version",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "extract_graph",
-            "description": "Build the multi-language knowledge graph (nodes + edges) for an index",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "index":    { "type": "string" },
-                    "index_id": { "type": "string" },
-                    "language": { "type": "string" }
-                }
-            }
-        },
-        {
-            "name": "cluster_concepts",
-            "description": "Group chunks into concept clusters using k-means over embeddings (BOW or neural)",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "index":    { "type": "string" },
-                    "index_id": { "type": "string" },
-                    "k":        { "type": "number" },
-                    "method":   { "type": "string", "description": "Embedding method: 'bow' (default, fast) or 'neural' (semantic, requires fastembed model)" }
-                }
-            }
-        },
-        {
-            "name": "ingest_scip",
-            "description": "Ingest a SCIP (Scalable and Precise Index for Code) protobuf index for a given index_id, enriching the knowledge graph with fully-resolved symbols and cross-file relationships. The SCIP bytes must be base64-encoded.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["scip_base64"],
-                "properties": {
-                    "index":        { "type": "string" },
-                    "index_id":     { "type": "string" },
-                    "scip_base64":  { "type": "string", "description": "Base64-encoded SCIP Index protobuf payload" }
-                }
-            }
-        },
-        {
-            "name": "extract_ner",
-            "description": "Extract named entities from doc comments for a code index using NER",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "index":    { "type": "string" },
-                    "index_id": { "type": "string", "description": "Index ID" },
-                    "top_k":    { "type": "integer", "description": "Max entities to return", "default": 50 }
-                }
-            }
-        },
-        {
-            "name": "suggest_refactors",
-            "description": "Suggest concrete refactoring actions (extract method, reduce nesting, ...) ranked by severity, derived from complexity metrics and code smells",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "index":        { "type": "string" },
-                    "index_id":     { "type": "string" },
-                    "file":         { "type": "string", "description": "Optional path filter — restrict suggestions to one file" },
-                    "min_severity": { "type": "string", "description": "Minimum severity: 'low' (default), 'medium', 'high', 'critical'" },
-                    "top_k":        { "type": "number", "description": "Cap on suggestions returned (default 20)" }
-                }
-            }
-        },
-        {
-            "name": "review_diff",
-            "description": "Review a unified git diff and return a structured quality report (per-file complexity, code smells, grade A-F, recommendations). Cross-references the diff against the trusty-search index corpus, so trusty-search must be running. Deterministic and LLM-free — use the deep_analysis tool for LLM-augmented narrative.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["diff", "index_id"],
-                "properties": {
-                    "diff":     { "type": "string", "description": "Unified git diff text to review" },
-                    "index_id": { "type": "string", "description": "Index ID to cross-reference the diff against in trusty-search" }
-                }
-            }
-        },
-        {
-            "name": "deep_analysis",
-            "description": "Run an LLM-augmented deep analysis pass over an index: synthesises a deterministic review report from the indexed corpus, looks up detected frameworks, and asks an OpenRouter model for a prose narrative plus framework-aware recommendations. Requires OPENROUTER_API_KEY configured on the daemon.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["index_id"],
-                "properties": {
-                    "index_id": { "type": "string", "description": "trusty-search index ID to analyse" },
-                    "model":    { "type": "string", "description": "Optional OpenRouter model id (e.g. 'openai/gpt-4o-mini'); falls back to TRUSTY_LLM_MODEL on the daemon" }
-                }
-            }
-        },
-        {
-            "name": "review_github_pr",
-            "description": "Fetch a GitHub pull request's unified diff and run a structured quality review against a trusty-search index. Requires GITHUB_TOKEN set on the daemon. Optionally posts the review back as a PR comment.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["owner", "repo", "pr", "index_id"],
-                "properties": {
-                    "owner":        { "type": "string", "description": "Repository owner (user or org)" },
-                    "repo":         { "type": "string", "description": "Repository name" },
-                    "pr":           { "type": "integer", "description": "Pull request number" },
-                    "index_id":     { "type": "string", "description": "trusty-search index ID to cross-reference" },
-                    "post_comment": { "type": "boolean", "description": "Post the review back as a PR comment (default false)", "default": false }
-                }
-            }
-        },
-        {
-            "name": "list_entities",
-            "description": "List symbol-level entities (functions, classes, ...) for an index",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "index":    { "type": "string" },
-                    "index_id": { "type": "string" },
-                    "kind":     { "type": "string" },
-                    "language": { "type": "string" }
-                }
-            }
-        }
-    ])
+    // `mut` is only needed when the `review` feature appends descriptors; the
+    // attribute keeps the feature-off build free of an `unused_mut` warning.
+    #[cfg_attr(not(feature = "review"), allow(unused_mut))]
+    let mut tools = descriptors::base_tool_descriptors();
+    #[cfg(feature = "review")]
+    if let Some(arr) = tools.as_array_mut() {
+        arr.extend(review::review_tool_descriptors());
+    }
+    tools
 }
 
 #[cfg(test)]
@@ -1248,5 +1081,98 @@ mod tests {
         let resp = server.dispatch(r).await;
         let err = resp.error.expect("expected error");
         assert_eq!(err.code, error_codes::INVALID_REQUEST);
+    }
+
+    // ── #630: trusty-review LLM tools (feature `review`) ─────────────────────
+
+    /// With the `review` feature ON, `tools/list` advertises all three
+    /// `tr_review_*` tools alongside the base analyzer tools.
+    #[cfg(feature = "review")]
+    #[tokio::test]
+    async fn tools_list_includes_tr_review_tools() {
+        let server = AnalyzerMcpServer::new("http://127.0.0.1:1");
+        let resp = server.dispatch(req("tools/list", Value::Null)).await;
+        let result = resp.result.expect("expected result");
+        let tools = result
+            .get("tools")
+            .and_then(Value::as_array)
+            .expect("array");
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| t.get("name").and_then(Value::as_str))
+            .collect();
+        for required in ["tr_review_pr", "tr_review_diff", "tr_review_health"] {
+            assert!(names.contains(&required), "missing {required} in {names:?}");
+        }
+        // The base surface must still be present (no descriptors lost in the
+        // extract-to-descriptors.rs refactor).
+        assert!(names.contains(&"complexity_hotspots"), "got {names:?}");
+        assert!(names.contains(&"deep_analysis"), "got {names:?}");
+    }
+
+    /// With the `review` feature ON, the `tr_review_*` names route into the
+    /// embedded pipeline rather than falling through to `UnknownTool`. We do not
+    /// assert success (the credential-bound build path needs live AWS /
+    /// OpenRouter config); we only assert the dispatcher did NOT return
+    /// METHOD_NOT_FOUND, i.e. the name was recognised and routed.
+    #[cfg(feature = "review")]
+    #[tokio::test]
+    async fn tr_review_health_routes_not_unknown_tool() {
+        let server = AnalyzerMcpServer::new("http://127.0.0.1:1");
+        let resp = server
+            .dispatch(req(
+                "tools/call",
+                serde_json::json!({ "name": "tr_review_health", "arguments": {} }),
+            ))
+            .await;
+        // tools/call form: routed tools return a result (possibly an in-band
+        // isError envelope on build failure); an *unrecognised* name returns a
+        // JSON-RPC METHOD_NOT_FOUND error. Assert we are not in the latter case.
+        if let Some(err) = resp.error {
+            assert_ne!(
+                err.code,
+                error_codes::METHOD_NOT_FOUND,
+                "tr_review_health must route, not be unknown: {err:?}"
+            );
+        }
+    }
+
+    /// With the `review` feature OFF, the `tr_review_*` names are neither
+    /// advertised in `tools/list` nor routable — they return METHOD_NOT_FOUND.
+    #[cfg(not(feature = "review"))]
+    #[tokio::test]
+    async fn tr_review_tools_absent_when_feature_off() {
+        let server = AnalyzerMcpServer::new("http://127.0.0.1:1");
+
+        // Not advertised.
+        let resp = server.dispatch(req("tools/list", Value::Null)).await;
+        let tools = resp
+            .result
+            .expect("result")
+            .get("tools")
+            .and_then(Value::as_array)
+            .expect("array")
+            .clone();
+        let names: Vec<String> = tools
+            .iter()
+            .filter_map(|t| t.get("name").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect();
+        for absent in ["tr_review_pr", "tr_review_diff", "tr_review_health"] {
+            assert!(
+                !names.iter().any(|n| n == absent),
+                "{absent} must be absent when feature off; got {names:?}"
+            );
+        }
+
+        // Not routable.
+        let resp = server
+            .dispatch(req(
+                "tools/call",
+                serde_json::json!({ "name": "tr_review_health", "arguments": {} }),
+            ))
+            .await;
+        let err = resp.error.expect("expected METHOD_NOT_FOUND error");
+        assert_eq!(err.code, error_codes::METHOD_NOT_FOUND);
     }
 }
