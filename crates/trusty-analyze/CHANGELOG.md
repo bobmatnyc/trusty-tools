@@ -9,7 +9,15 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ## [Unreleased]
 
-_(no unreleased changes)_
+### Fixed
+- **Amazon Linux 2023 / glibc < 2.38 build failure** (closes #605): the
+  prebuilt ONNX Runtime bundled via `fastembed/ort-download-binaries` (ORT
+  1.24.2, compiled against glibc 2.38) caused a link-time `__isoc23_strtol`
+  unresolved-symbol error on AL2023 (glibc 2.34). The `load-dynamic` Cargo
+  feature — introduced in #536 — bypasses the static bundle entirely and lets
+  `ort` dlopen a system-installed `libonnxruntime.so` at runtime. README now
+  documents the full three-step AL2023 installation procedure including the
+  exact ORT version to download and how to set `ORT_DYLIB_PATH`.
 
 ---
 

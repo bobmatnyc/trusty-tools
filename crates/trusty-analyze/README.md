@@ -30,20 +30,41 @@ any Linux host with glibc 2.38 or later.
 
 ### Amazon Linux 2023 / glibc < 2.38 (system ORT)
 
-The bundled ORT static library requires glibc 2.38+. On AL2023 (glibc 2.34) or any
-other host with an older glibc, install with the `load-dynamic` feature and point the
-binary at the system ONNX Runtime at runtime:
+The bundled ONNX Runtime static library (included by the default `bundled-ort` feature)
+is built against glibc 2.38. Linking it on AL2023 (glibc 2.34) or any other host with
+an older glibc fails at link time with an unresolved `__isoc23_strtol` symbol (glibc
+2.38-only). The `load-dynamic` feature bypasses the static bundle entirely: `ort` loads
+`libonnxruntime.so` via `libloading` at runtime instead of linking it at build time.
+
+Step 1 — install a glibc-compatible ONNX Runtime. The official Microsoft CPU release
+is built against glibc 2.17 and runs on AL2023 without issues:
+
+```bash
+# ORT 1.24.2 CPU (matches the version used by ort-sys 2.0.0-rc.12 / fastembed 5.x)
+ORT_VERSION=1.24.2
+curl -fsSL \
+  "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
+  | sudo tar xz -C /opt
+sudo ln -sf "/opt/onnxruntime-linux-x64-${ORT_VERSION}" /opt/onnxruntime
+```
+
+Step 2 — build without the bundled ORT:
 
 ```bash
 cargo install trusty-analyze --no-default-features --features http-server,load-dynamic
 ```
 
-Then set `ORT_DYLIB_PATH` to the system `libonnxruntime.so` before starting the daemon:
+Step 3 — export `ORT_DYLIB_PATH` and start the daemon:
 
 ```bash
-export ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so.1.24.2
+export ORT_DYLIB_PATH=/opt/onnxruntime/lib/libonnxruntime.so
 trusty-analyze serve --search-url http://127.0.0.1:7878
 ```
+
+Add `ORT_DYLIB_PATH` to your shell profile or systemd/launchd service unit so it
+persists across restarts. The exact ORT version (`1.24.2`) must match what
+`ort-sys`/`fastembed` expects; see the `ort-sys` version in `Cargo.lock` to
+confirm the version before upgrading ORT.
 
 If no system ORT is available, install without any ORT backend. The daemon will still
 run with the deterministic BoW embedder (no semantic clustering):
