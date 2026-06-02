@@ -37,8 +37,8 @@ use crate::{
 /// context).  APEX is disabled when `config.apex_index` is empty.
 /// The `pr_description` parameter is used as part of the APEX cross-query
 /// (title + description gives the richest product-spec signal).
-/// Test: `gather_context_degrades_gracefully_on_search_failure`,
-/// `gather_context_apex_failure_does_not_block_review` in runner_tests.rs.
+/// Test: `gather_context_degrades_gracefully_on_search_failure` in runner_tests.rs;
+/// `gather_context_apex_failure_is_fail_open` in this module.
 pub(crate) async fn gather_context(
     config: &ReviewConfig,
     deps: &ReviewDeps,

@@ -223,7 +223,10 @@ fn apex_index_defaults_to_empty() {
     // (We cannot guarantee the var is absent in all CI contexts, but we can
     // assert the *shape* of whatever value is present is a string.)
     let config = ReviewConfig::from_env_and_file(None, None);
-    let _ = config.apex_index; // must be a String, never panic
+    assert!(
+        config.apex_index.is_empty(),
+        "apex_index must default to empty"
+    );
 }
 
 /// Verify `apex_path_prefixes` parses a comma-separated env var correctly.

@@ -365,6 +365,7 @@ fn build_user_message(
     // matches the PR content.  Cite format: [apex: `path:line` — "excerpt"].
     if !context.apex_results.is_empty() {
         msg.push_str("## Related APEX product specs\n\n");
+        // defensive: apex_results already capped in fetch_apex_context; guard against future refactors
         for (i, apex) in context
             .apex_results
             .iter()
