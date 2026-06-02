@@ -32,8 +32,10 @@
 pub mod atlassian;
 pub mod config;
 pub mod confluence;
+pub mod confluence_parse;
 pub mod github_issues;
 pub mod jira;
+pub mod jira_parse;
 pub mod orchestrator;
 
 pub use config::{ContextSourcesConfig, ContextSourcesFileConfig, SourceConfig, SourceFileConfig};
@@ -97,6 +99,15 @@ pub struct ReviewSubject {
     pub repo: String,
     /// PR title (empty in local-diff mode — sources should skip on empty query).
     pub title: String,
+    /// PR description / body (empty in local-diff mode).
+    ///
+    /// Why: the incumbent (`pr_review_service.py:4068`, `:3800`) regex-scans the
+    /// PR title **and** description for JIRA ticket keys and folds the first 500
+    /// chars of the body into the semantic query — the PR body is where authors
+    /// name the ticket they implement and describe intent in prose that matches
+    /// docs far better than bare code identifiers do.  Carrying it on the subject
+    /// lets the JIRA ticket-ID path and `keyword_query` reach parity.
+    pub body: String,
     /// Changed file paths from the diff.
     pub changed_files: Vec<String>,
     /// Identifiers extracted from the diff (function/type/symbol names).
@@ -106,19 +117,30 @@ pub struct ReviewSubject {
 impl ReviewSubject {
     /// Build the free-text keyword query a live source should search by.
     ///
-    /// Why: every live source searches by the same signal — PR-title words plus
-    /// a bounded set of diff identifiers — so the query construction lives here
-    /// once instead of being duplicated (and drifting) across three sources.
-    /// What: joins the PR title and up to `max_identifiers` identifiers into a
-    /// single space-separated string, de-duplicating and dropping empties.
-    /// Returns an empty string when there is no usable signal (caller skips).
+    /// Why: every live source searches by the same signal — PR-title words, the
+    /// PR description prose, plus a bounded set of diff identifiers — so the query
+    /// construction lives here once instead of being duplicated (and drifting)
+    /// across three sources.  The PR body is included to match the incumbent,
+    /// which builds its query from `title + "\n" + description[:500]`
+    /// (`pr_review_service.py:3797-3800`); the body is the strongest signal for
+    /// Confluence + GitHub-Issues matches, where prose beats code identifiers.
+    /// What: joins the PR title, the first `BODY_QUERY_CHARS` chars of the body,
+    /// and up to `max_identifiers` identifiers into a single space-separated
+    /// string, de-duplicating exact-token repeats and dropping empties.  Returns
+    /// an empty string when there is no usable signal (caller skips).
     /// Test: `keyword_query_combines_title_and_identifiers`,
-    /// `keyword_query_empty_when_no_signal` in this module.
+    /// `keyword_query_includes_body`, `keyword_query_empty_when_no_signal`.
     pub fn keyword_query(&self, max_identifiers: usize) -> String {
         let mut parts: Vec<&str> = Vec::new();
         let title = self.title.trim();
         if !title.is_empty() {
             parts.push(title);
+        }
+        // Fold the PR description in after the title (bounded), matching the
+        // incumbent's `title + "\n" + body[:500]` query construction.
+        let body = truncate_on_char_boundary(self.body.trim(), BODY_QUERY_CHARS).trim();
+        if !body.is_empty() && !parts.contains(&body) {
+            parts.push(body);
         }
         for id in self.identifiers.iter().take(max_identifiers) {
             let id = id.trim();
@@ -127,6 +149,42 @@ impl ReviewSubject {
             }
         }
         parts.join(" ")
+    }
+}
+
+/// Max chars of the PR body folded into `keyword_query` (incumbent parity).
+///
+/// Why: the incumbent caps the body it adds to the query at 500 chars
+/// (`pr_review_service.py:3800`) so a long PR description does not swamp the
+/// query; we match that bound.
+/// What: a `usize` constant used by `ReviewSubject::keyword_query`.
+/// Test: exercised by `keyword_query_includes_body`.
+const BODY_QUERY_CHARS: usize = 500;
+
+/// Max chars of a snippet body embedded under a `## Related …` bullet.
+///
+/// Why: each source embeds a description/excerpt so the model sees the ticket /
+/// page / issue prose, not just a one-line label (`pr_review_service.py:4249`
+/// JIRA at 800, `:4848` aux at 400); we standardise on 500 chars across the
+/// three live sources — long enough to convey intent, short enough to keep the
+/// prompt bounded.
+/// What: a `usize` constant used by every source's body extraction.
+/// Test: exercised by each source's body-population test.
+pub const SNIPPET_BODY_CHARS: usize = 500;
+
+/// Truncate `s` to at most `max` chars, respecting UTF-8 char boundaries.
+///
+/// Why: every source truncates a body excerpt to a bounded length before
+/// embedding it; slicing a `String` by byte index can panic mid-codepoint, so
+/// the truncation must walk char boundaries.  Centralising it keeps all three
+/// sources consistent and panic-free (no `unwrap`/byte-slice in library code).
+/// What: returns the input unchanged when it is already within `max` chars;
+/// otherwise returns the first `max` chars (by `char` count) as a `&str` slice.
+/// Test: `truncate_on_char_boundary_*` in this module.
+pub fn truncate_on_char_boundary(s: &str, max: usize) -> &str {
+    match s.char_indices().nth(max) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
     }
 }
 
@@ -328,6 +386,60 @@ mod tests {
         // leaving just "a". ("b"/"c" are past the cap.)
         let q = subj.keyword_query(2);
         assert_eq!(q, "fix a");
+    }
+
+    #[test]
+    fn keyword_query_includes_body() {
+        // The PR body is folded in after the title and before identifiers,
+        // matching the incumbent's `title + "\n" + body[:500]` construction.
+        let subj = ReviewSubject {
+            title: "Add auth flow".to_string(),
+            body: "Implements PROJ-123: refresh tokens before expiry.".to_string(),
+            identifiers: vec!["TokenStore".to_string()],
+            ..Default::default()
+        };
+        let q = subj.keyword_query(8);
+        assert_eq!(
+            q,
+            "Add auth flow Implements PROJ-123: refresh tokens before expiry. TokenStore"
+        );
+    }
+
+    #[test]
+    fn keyword_query_truncates_long_body() {
+        // A body longer than BODY_QUERY_CHARS is bounded; only the first 500
+        // chars participate in the query so a long description cannot swamp it.
+        let long = "x".repeat(BODY_QUERY_CHARS + 200);
+        let subj = ReviewSubject {
+            title: "t".to_string(),
+            body: long,
+            ..Default::default()
+        };
+        let q = subj.keyword_query(0);
+        // "t" + " " + 500 x's
+        assert_eq!(q.len(), 1 + 1 + BODY_QUERY_CHARS);
+    }
+
+    #[test]
+    fn truncate_on_char_boundary_short_input_unchanged() {
+        assert_eq!(truncate_on_char_boundary("hello", 10), "hello");
+        assert_eq!(truncate_on_char_boundary("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_on_char_boundary_long_input_clipped() {
+        assert_eq!(truncate_on_char_boundary("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_on_char_boundary_respects_multibyte() {
+        // A multibyte string must not panic and must clip on a char boundary.
+        let s = "héllo wörld"; // 'é' and 'ö' are 2 bytes each
+        let out = truncate_on_char_boundary(s, 5);
+        assert_eq!(out, "héllo");
+        // No panic on a cut that would land mid-codepoint if done by byte.
+        let out2 = truncate_on_char_boundary(s, 2);
+        assert_eq!(out2, "hé");
     }
 
     #[test]

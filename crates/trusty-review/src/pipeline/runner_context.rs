@@ -126,12 +126,15 @@ pub(crate) async fn gather_context(
 /// gate (#590): a source outage logs and contributes nothing, it never blocks
 /// or skips the review (#550).
 /// What: constructs the enabled context sources from `config.context_sources`
-/// (each auto-disabled when its credentials are absent), runs them concurrently
-/// and fail-open via the orchestrator, and renders the surviving sections to a
+/// (each auto-disabled when its credentials are absent), builds a `ReviewSubject`
+/// carrying the PR title + body (#599 Fix 3 — the body is scanned for JIRA ticket
+/// keys and folded into each source's query), runs the sources concurrently and
+/// fail-open via the orchestrator, and renders the surviving sections to a
 /// markdown block.  Returns an empty string when no source contributes.
 /// Test: source construction is covered by each source's `from_config` tests;
 /// the orchestrator fail-open + ordering + rendering is covered in
 /// `integrations::context::orchestrator` tests.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn gather_external_context_md(
     config: &ReviewConfig,
     owner: &str,
@@ -139,6 +142,7 @@ pub(crate) async fn gather_external_context_md(
     identifiers: &[String],
     changed_files: &[String],
     pr_title: &str,
+    pr_body: &str,
     run_mode: RunMode,
 ) -> String {
     let cs = &config.context_sources;
@@ -162,6 +166,7 @@ pub(crate) async fn gather_external_context_md(
         owner: owner.to_string(),
         repo: repo.to_string(),
         title: pr_title.to_string(),
+        body: pr_body.to_string(),
         changed_files: changed_files.to_vec(),
         identifiers: identifiers.to_vec(),
     };

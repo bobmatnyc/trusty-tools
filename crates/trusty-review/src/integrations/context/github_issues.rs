@@ -30,7 +30,7 @@ use serde::Deserialize;
 
 use super::{
     ContextSection, ContextSnippet, ContextSource, ContextSourceError, RetrievalMode,
-    ReviewSubject, TransportErr,
+    ReviewSubject, SNIPPET_BODY_CHARS, TransportErr, truncate_on_char_boundary,
 };
 use crate::config::ReviewConfig;
 use crate::integrations::github::{AuthStrategy, GithubClient, RunMode};
@@ -164,11 +164,11 @@ impl IssueSearchTransport for ReqwestIssueSearch {
         let resp = self
             .http
             .get(url)
-            .query(&[
-                ("q", query),
-                ("per_page", &per_page.to_string()),
-                ("sort", "updated"),
-            ])
+            // Fix 4 (#599): omit `sort` so the Search API ranks by its default
+            // best-match relevance (the incumbent ranks by semantic similarity;
+            // best-match is the closest live-API equivalent and beats pure
+            // recency for surfacing the issue a PR actually addresses).
+            .query(&[("q", query), ("per_page", &per_page.to_string())])
             .header("Authorization", format!("Bearer {token}"))
             .header("Accept", "application/vnd.github+json")
             .header("User-Agent", "trusty-review")
@@ -216,6 +216,9 @@ struct IssueItem {
     state: String,
     #[serde(default)]
     html_url: String,
+    /// Issue body / description (Fix 2: embedded as the snippet body excerpt).
+    #[serde(default)]
+    body: Option<String>,
     /// Present on PRs (not plain issues); used to filter PRs out.
     #[serde(default)]
     pull_request: Option<serde_json::Value>,
@@ -308,9 +311,12 @@ impl GithubIssuesSource {
     /// Why: separate parsing from the network call for unit-testability, and
     /// filter out PR hits (the search API returns PRs as issues).
     /// What: drops any item with a `pull_request` field, then maps each issue to
-    /// a `ContextSnippet` (`#N — title`, subtitle = state, link = html_url),
-    /// wrapped in a `Related GitHub issues` section.
-    /// Test: `parse_issues_to_section`, `parse_filters_pull_requests`.
+    /// a `ContextSnippet` (`#N — title`, subtitle = state, body = truncated issue
+    /// body, link = html_url), wrapped in a `Related GitHub issues` section.
+    /// The body excerpt (Fix 2, #599) gives the model the issue's description, not
+    /// just its title (incumbent `pr_review_service.py:4848`).
+    /// Test: `parse_issues_to_section`, `parse_embeds_body`,
+    /// `parse_filters_pull_requests`.
     fn parse_section(body: &str) -> Result<ContextSection, ContextSourceError> {
         let resp: IssueSearchResponse =
             serde_json::from_str(body).map_err(|e| ContextSourceError::Parse {
@@ -327,10 +333,14 @@ impl GithubIssuesSource {
                 } else {
                     format!("#{} — {}", i.number, i.title)
                 };
+                let body_excerpt = i.body.as_deref().map(str::trim).and_then(|b| {
+                    (!b.is_empty())
+                        .then(|| truncate_on_char_boundary(b, SNIPPET_BODY_CHARS).to_string())
+                });
                 ContextSnippet {
                     title,
                     subtitle: (!i.state.is_empty()).then(|| i.state.clone()),
-                    body: None,
+                    body: body_excerpt,
                     link: (!i.html_url.is_empty()).then(|| i.html_url.clone()),
                 }
             })

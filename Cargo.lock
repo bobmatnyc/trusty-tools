@@ -11009,6 +11009,7 @@ dependencies = [
  "hmac 0.12.1",
  "jsonwebtoken",
  "redb",
+ "regex",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",

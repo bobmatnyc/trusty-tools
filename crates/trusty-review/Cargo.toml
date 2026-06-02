@@ -40,6 +40,11 @@ serde        = { workspace = true }
 serde_json   = { workspace = true }
 toml         = { workspace = true }
 
+# ── Regex (JIRA ticket-key extraction, #599) ───────────────────────────────
+# Scans PR title + body for `[A-Z][A-Z0-9]+-\d+` ticket keys so the JIRA source
+# can do an exact issueKey lookup (parity with code-intelligence's primary path).
+regex        = { workspace = true }
+
 # ── Error handling ─────────────────────────────────────────────────────────
 # thiserror for library error enums; anyhow used in main.rs binary only.
 thiserror    = { workspace = true }

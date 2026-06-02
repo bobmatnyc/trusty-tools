@@ -176,6 +176,7 @@ pub async fn run_review(
                 (
                     ReviewPrMeta {
                         title: format!("PR #{pr_number}"),
+                        body: String::new(),
                         author: String::new(),
                         url: pr_url.clone(),
                     },
@@ -286,6 +287,7 @@ pub async fn run_review(
             &identifiers,
             &changed_files,
             &pr_meta.title,
+            &pr_meta.body,
             input.run_mode,
         ),
     );
@@ -409,6 +411,9 @@ async fn fetch_github_pr_meta(
     Ok((
         ReviewPrMeta {
             title: meta.title,
+            // Fix 3 (#599): thread the PR description through so the external
+            // context sources can scan it for ticket keys + fold it into queries.
+            body: meta.body.unwrap_or_default(),
             author: meta.user.login,
             url: meta.html_url,
         },

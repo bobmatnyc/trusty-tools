@@ -11,6 +11,7 @@ use super::*;
 fn sample_meta() -> ReviewPrMeta {
     ReviewPrMeta {
         title: "Add authentication".to_string(),
+        body: String::new(),
         author: "alice".to_string(),
         url: "https://github.com/acme/backend/pull/42".to_string(),
     }

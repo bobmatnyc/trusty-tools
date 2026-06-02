@@ -233,6 +233,12 @@ pub fn build_review_prompt(
 pub struct ReviewPrMeta {
     /// PR title (empty string for local-diff mode).
     pub title: String,
+    /// PR description / body (empty string for local-diff mode or when null).
+    ///
+    /// Why: the external context sources (#599 Fix 3) regex-scan the body for
+    /// JIRA ticket keys and fold its prose into their keyword query, matching the
+    /// incumbent's `title + "\n" + description` signal.
+    pub body: String,
     /// Author login (empty string for local-diff mode).
     pub author: String,
     /// PR URL (empty string for local-diff mode).
@@ -249,6 +255,7 @@ impl ReviewPrMeta {
     pub fn from_result(result: &ReviewResult) -> Self {
         Self {
             title: result.pr_title.clone(),
+            body: String::new(),
             author: String::new(),
             url: result.pr_url.clone(),
         }

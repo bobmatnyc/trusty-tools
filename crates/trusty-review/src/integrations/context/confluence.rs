@@ -21,12 +21,11 @@
 //! `semantic_mode_errors`, `gather_with_fake_transport` in this module.
 
 use async_trait::async_trait;
-use serde::Deserialize;
 
 use super::atlassian::{AtlassianCreds, AtlassianProduct};
+use super::confluence_parse::parse_section;
 use super::{
-    ContextSection, ContextSnippet, ContextSource, ContextSourceError, RetrievalMode,
-    ReviewSubject, TransportErr,
+    ContextSection, ContextSource, ContextSourceError, RetrievalMode, ReviewSubject, TransportErr,
 };
 
 /// Source identifier used in logs, config keys, and error messages.
@@ -101,7 +100,13 @@ impl ConfluenceTransport for ReqwestConfluenceTransport {
         let resp = self
             .http
             .get(&url)
-            .query(&[("cql", cql), ("limit", &limit.to_string())])
+            // `expand=body.view` (Fix 2, #599) returns the rendered page HTML so
+            // we can embed a stripped excerpt as the snippet body.
+            .query(&[
+                ("cql", cql),
+                ("limit", &limit.to_string()),
+                ("expand", "body.view"),
+            ])
             .header("Authorization", creds.basic_auth_header())
             .header("Accept", "application/json")
             .send()
@@ -127,42 +132,6 @@ impl ConfluenceTransport for ReqwestConfluenceTransport {
         }
         Ok(text)
     }
-}
-
-// ─── JSON shapes ────────────────────────────────────────────────────────────
-
-/// Top-level Confluence content-search response.
-#[derive(Debug, Deserialize)]
-struct ConfluenceSearchResponse {
-    #[serde(default)]
-    results: Vec<ConfluencePage>,
-}
-
-/// One Confluence page (content) result.
-#[derive(Debug, Deserialize)]
-struct ConfluencePage {
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    space: Option<ConfluenceSpace>,
-    #[serde(default, rename = "_links")]
-    links: Option<ConfluenceLinks>,
-}
-
-/// The page's space (we render its name/key).
-#[derive(Debug, Deserialize)]
-struct ConfluenceSpace {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    key: Option<String>,
-}
-
-/// The page's `_links` block (we use `webui` to build the canonical URL).
-#[derive(Debug, Deserialize)]
-struct ConfluenceLinks {
-    #[serde(default)]
-    webui: Option<String>,
 }
 
 // ─── The source ─────────────────────────────────────────────────────────────
@@ -224,6 +193,12 @@ impl ConfluenceSource {
     /// quoting consistent and testable, and scopes results to pages.
     /// What: returns `type=page AND text ~ "<keywords>" ORDER BY lastmodified DESC`
     /// (double-quotes stripped from keywords).  `None` when no keyword signal.
+    ///
+    /// Relevance note: the live REST path orders by recency
+    /// (`lastmodified DESC`) only as a tiebreaker; Confluence's CQL has no native
+    /// relevance score for `text ~`.  True semantic relevance ranking for
+    /// Confluence arrives via the indexed/semantic mode in PR-B (the APEX /
+    /// atlassian vector index), which is the incumbent's primary Confluence path.
     /// Test: `query_builds_cql`.
     fn build_cql(subject: &ReviewSubject) -> Option<String> {
         let keywords = subject.keyword_query(MAX_QUERY_IDENTIFIERS);
@@ -235,45 +210,6 @@ impl ConfluenceSource {
         Some(format!(
             "type=page AND text ~ \"{keywords}\" ORDER BY lastmodified DESC"
         ))
-    }
-
-    /// Parse a Confluence search body into a `ContextSection`.
-    ///
-    /// Why: separate parsing from the network call for unit-testability.
-    /// What: maps each page to a `ContextSnippet` (title, subtitle = space name
-    /// or key, link = `{base}/wiki{webui}`), wrapped in a `Related Confluence
-    /// docs` section.
-    /// Test: `parse_pages_to_section`.
-    fn parse_section(body: &str, base_url: &str) -> Result<ContextSection, ContextSourceError> {
-        let resp: ConfluenceSearchResponse =
-            serde_json::from_str(body).map_err(|e| ContextSourceError::Parse {
-                src: SOURCE_NAME,
-                detail: e.to_string(),
-            })?;
-        let snippets = resp
-            .results
-            .into_iter()
-            .map(|page| {
-                let subtitle = page
-                    .space
-                    .and_then(|s| s.name.or(s.key))
-                    .map(|s| format!("space: {s}"));
-                let link = page
-                    .links
-                    .and_then(|l| l.webui)
-                    .map(|webui| format!("{base_url}/wiki{webui}"));
-                ContextSnippet {
-                    title: page.title,
-                    subtitle,
-                    body: None,
-                    link,
-                }
-            })
-            .collect();
-        Ok(ContextSection {
-            heading: "Related Confluence docs".to_string(),
-            snippets,
-        })
     }
 }
 
@@ -309,7 +245,7 @@ impl ContextSource for ConfluenceSource {
             });
         };
         let body = self.transport.search_cql(creds, &cql, MAX_RESULTS).await?;
-        Self::parse_section(&body, &creds.base_url)
+        parse_section(&body, &creds.base_url)
     }
 }
 
@@ -368,38 +304,6 @@ mod tests {
     #[test]
     fn query_none_without_signal() {
         assert!(ConfluenceSource::build_cql(&ReviewSubject::default()).is_none());
-    }
-
-    #[test]
-    fn parse_pages_to_section() {
-        let body = r#"{
-            "results": [
-                {"title": "Auth Architecture", "space": {"name": "Engineering"},
-                 "_links": {"webui": "/spaces/ENG/pages/123/Auth"}},
-                {"title": "Sessions", "space": {"key": "ENG"}}
-            ]
-        }"#;
-        let section = ConfluenceSource::parse_section(body, "https://acme.atlassian.net").unwrap();
-        assert_eq!(section.heading, "Related Confluence docs");
-        assert_eq!(section.snippets.len(), 2);
-        assert_eq!(section.snippets[0].title, "Auth Architecture");
-        assert_eq!(
-            section.snippets[0].subtitle.as_deref(),
-            Some("space: Engineering")
-        );
-        assert_eq!(
-            section.snippets[0].link.as_deref(),
-            Some("https://acme.atlassian.net/wiki/spaces/ENG/pages/123/Auth")
-        );
-        // Second page has only a space key and no link.
-        assert_eq!(section.snippets[1].subtitle.as_deref(), Some("space: ENG"));
-        assert!(section.snippets[1].link.is_none());
-    }
-
-    #[test]
-    fn parse_error_on_garbage() {
-        let r = ConfluenceSource::parse_section("xx", "https://acme.atlassian.net");
-        assert!(matches!(r, Err(ContextSourceError::Parse { .. })));
     }
 
     #[tokio::test]

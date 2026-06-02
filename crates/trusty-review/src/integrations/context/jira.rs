@@ -5,27 +5,31 @@
 //! — turning "is this code correct?" into "does this code do what the ticket
 //! asked?".  This is the same Stage-5 retrieval code-intelligence performs.
 //!
-//! What: `JiraSource` implements `ContextSource` in `Live` mode by issuing a JQL
-//! `text ~ "<keywords>"` search against `{base}/rest/api/3/search/jql` using the
-//! shared `AtlassianCreds` basic-auth header, then mapping each issue to a
-//! `## Related JIRA tickets` bullet (key, summary, status, browse link).  The
-//! HTTP call goes through an injectable `JiraTransport` trait so the query +
-//! parse logic is unit-tested against canned JSON with no network.
+//! What: `JiraSource` implements `ContextSource` in `Live` mode.  It first scans
+//! the PR title + body for JIRA ticket keys (`PROJ-123`); when any are found it
+//! does an EXACT `issueKey in (...)` lookup (parity with the incumbent's primary
+//! path, `pr_review_service.py:4068`), otherwise it falls back to a JQL
+//! `text ~ "<keywords>"` search.  Either way it queries `{base}/rest/api/3/search/jql`
+//! using the shared `AtlassianCreds` basic-auth header, then maps each issue to a
+//! `## Related JIRA tickets` bullet (key, summary, status, description excerpt,
+//! browse link).  The HTTP call goes through an injectable `JiraTransport` trait
+//! so the query + parse logic is unit-tested against canned JSON with no network;
+//! the ticket-ID + ADF/parse helpers live in the sibling `jira_parse` module.
 //!
 //! Fail-open: missing creds → `NotConfigured` (skip, logged once); any transport
 //! / API / parse error → the orchestrator logs and drops the section.  A JIRA
 //! outage NEVER blocks the review (#550 supplementary-vs-required distinction).
 //!
-//! Test: `query_builds_jql`, `parse_issues_to_section`, `disabled_when_no_creds`,
-//! `semantic_mode_errors`, `gather_with_fake_transport` in this module.
+//! Test: `query_builds_jql_keyword`, `query_builds_jql_ticket_ids`,
+//! `disabled_when_no_creds`, `semantic_mode_errors`, `gather_with_fake_transport`
+//! in this module; parsing in `jira_parse`.
 
 use async_trait::async_trait;
-use serde::Deserialize;
 
 use super::atlassian::{AtlassianCreds, AtlassianProduct};
+use super::jira_parse::{extract_ticket_ids, parse_section};
 use super::{
-    ContextSection, ContextSnippet, ContextSource, ContextSourceError, RetrievalMode,
-    ReviewSubject, TransportErr,
+    ContextSection, ContextSource, ContextSourceError, RetrievalMode, ReviewSubject, TransportErr,
 };
 
 /// Source identifier used in logs, config keys, and error messages.
@@ -106,7 +110,9 @@ impl JiraTransport for ReqwestJiraTransport {
         let body = serde_json::json!({
             "jql": jql,
             "maxResults": max_results,
-            "fields": ["summary", "status"],
+            // `description` (Fix 2, #599) is embedded as the snippet body so the
+            // reviewer sees the ticket's intent, not just its one-line summary.
+            "fields": ["summary", "status", "description"],
         });
         let resp = self
             .http
@@ -137,38 +143,6 @@ impl JiraTransport for ReqwestJiraTransport {
         }
         Ok(text)
     }
-}
-
-// ─── JSON shapes ────────────────────────────────────────────────────────────
-
-/// Top-level JIRA `search/jql` response (only the fields we render).
-#[derive(Debug, Deserialize)]
-struct JiraSearchResponse {
-    #[serde(default)]
-    issues: Vec<JiraIssue>,
-}
-
-/// One JIRA issue from the search response.
-#[derive(Debug, Deserialize)]
-struct JiraIssue {
-    key: String,
-    #[serde(default)]
-    fields: JiraFields,
-}
-
-/// The subset of issue fields we requested.
-#[derive(Debug, Default, Deserialize)]
-struct JiraFields {
-    #[serde(default)]
-    summary: Option<String>,
-    #[serde(default)]
-    status: Option<JiraStatus>,
-}
-
-/// Issue status object (we only need its display name).
-#[derive(Debug, Deserialize)]
-struct JiraStatus {
-    name: String,
 }
 
 // ─── The source ─────────────────────────────────────────────────────────────
@@ -228,15 +202,40 @@ impl JiraSource {
         }
     }
 
-    /// Build the JQL string from the review subject's keyword query.
+    /// Build the JQL string for the subject, preferring exact ticket-ID lookup.
     ///
-    /// Why: JIRA's full-text search uses `text ~ "..."`; building the JQL in one
-    /// place keeps quoting/escaping consistent and testable.
-    /// What: returns `text ~ "<keywords>" ORDER BY updated DESC`, with embedded
-    /// double-quotes stripped from the keyword string to avoid breaking the JQL.
-    /// Returns `None` when there is no keyword signal (caller skips the call).
-    /// Test: `query_builds_jql`.
+    /// Why: Duetto PR titles/descriptions conventionally name the ticket key, so
+    /// an exact `issueKey in (...)` lookup is both more precise and cheaper than
+    /// full-text guessing — this is the incumbent's PRIMARY JIRA path
+    /// (`pr_review_service.py:4068`, `:4076`).  Only when no key is present do we
+    /// fall back to the keyword `text ~ "..."` search.
+    /// What: scans `title + "\n" + body` for ticket keys (deduped, first-seen);
+    /// if any, returns `issueKey in (PROJ-1, PROJ-2) ORDER BY updated DESC`
+    /// (capped at `MAX_RESULTS` keys); otherwise builds the keyword JQL
+    /// `text ~ "<keywords>" ORDER BY updated DESC` (double-quotes stripped).
+    /// Returns `None` only when there is neither a ticket key nor a keyword
+    /// signal (caller skips the call).
+    ///
+    /// Relevance note: the live REST path orders by recency (`updated DESC`) as a
+    /// tiebreaker; true semantic relevance ranking for JIRA arrives via the
+    /// indexed/semantic mode in PR-B (the APEX/atlassian vector index).
+    /// Test: `query_builds_jql_keyword`, `query_builds_jql_ticket_ids`,
+    /// `query_ticket_ids_beat_keywords`, `query_none_without_signal`.
     fn build_jql(subject: &ReviewSubject) -> Option<String> {
+        // Fix 1: ticket-ID priority path. Scan title AND body for keys.
+        let scan = format!("{}\n{}", subject.title, subject.body);
+        let ids = extract_ticket_ids(&scan);
+        if !ids.is_empty() {
+            let keys = ids
+                .iter()
+                .take(MAX_RESULTS as usize)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Some(format!("issueKey in ({keys}) ORDER BY updated DESC"));
+        }
+
+        // Keyword fallback.
         let keywords = subject.keyword_query(MAX_QUERY_IDENTIFIERS);
         let keywords = keywords.replace('"', " ");
         let keywords = keywords.trim();
@@ -244,44 +243,6 @@ impl JiraSource {
             return None;
         }
         Some(format!("text ~ \"{keywords}\" ORDER BY updated DESC"))
-    }
-
-    /// Parse a JIRA search response body into a `ContextSection`.
-    ///
-    /// Why: separating parsing from the network call makes the mapping
-    /// (issue → bullet) unit-testable against canned JSON.
-    /// What: deserialises the body, maps each issue to a `ContextSnippet`
-    /// (`KEY — summary`, subtitle = status, link = `{base}/browse/KEY`), and
-    /// wraps them in a `Related JIRA tickets` section.
-    /// Test: `parse_issues_to_section`.
-    fn parse_section(body: &str, base_url: &str) -> Result<ContextSection, ContextSourceError> {
-        let resp: JiraSearchResponse =
-            serde_json::from_str(body).map_err(|e| ContextSourceError::Parse {
-                src: SOURCE_NAME,
-                detail: e.to_string(),
-            })?;
-        let snippets = resp
-            .issues
-            .into_iter()
-            .map(|issue| {
-                let summary = issue.fields.summary.unwrap_or_default();
-                let title = if summary.is_empty() {
-                    issue.key.clone()
-                } else {
-                    format!("{} — {summary}", issue.key)
-                };
-                ContextSnippet {
-                    title,
-                    subtitle: issue.fields.status.map(|s| s.name),
-                    body: None,
-                    link: Some(format!("{base_url}/browse/{}", issue.key)),
-                }
-            })
-            .collect();
-        Ok(ContextSection {
-            heading: "Related JIRA tickets".to_string(),
-            snippets,
-        })
     }
 }
 
@@ -320,7 +281,7 @@ impl ContextSource for JiraSource {
             });
         };
         let body = self.transport.search_jql(creds, &jql, MAX_RESULTS).await?;
-        Self::parse_section(&body, &creds.base_url)
+        parse_section(&body, &creds.base_url)
     }
 }
 
@@ -370,10 +331,54 @@ mod tests {
     }
 
     #[test]
-    fn query_builds_jql() {
+    fn query_builds_jql_keyword() {
+        // No ticket key in title/body → keyword fallback path.
         let jql = JiraSource::build_jql(&subject()).expect("has signal");
         assert!(jql.contains("text ~ \"Add token refresh TokenStore\""));
         assert!(jql.contains("ORDER BY updated DESC"));
+    }
+
+    #[test]
+    fn query_builds_jql_ticket_ids() {
+        // Fix 1: a ticket key in the title → exact issueKey lookup, NOT keyword.
+        let subj = ReviewSubject {
+            title: "PROJ-42 add token refresh".to_string(),
+            identifiers: vec!["TokenStore".to_string()],
+            ..Default::default()
+        };
+        let jql = JiraSource::build_jql(&subj).expect("has signal");
+        assert_eq!(jql, "issueKey in (PROJ-42) ORDER BY updated DESC");
+        assert!(!jql.contains("text ~"));
+    }
+
+    #[test]
+    fn query_ticket_ids_scan_body_too() {
+        // A key only in the PR body is still found (title has no key).
+        let subj = ReviewSubject {
+            title: "Add token refresh".to_string(),
+            body: "Implements PROJ-7 and PROJ-8.".to_string(),
+            ..Default::default()
+        };
+        let jql = JiraSource::build_jql(&subj).expect("has signal");
+        assert_eq!(jql, "issueKey in (PROJ-7, PROJ-8) ORDER BY updated DESC");
+    }
+
+    #[test]
+    fn query_ticket_ids_dedup_and_capped() {
+        // Duplicates collapse; the list is capped at MAX_RESULTS keys.
+        let ids: Vec<String> = (1..=10).map(|n| format!("PROJ-{n}")).collect();
+        let subj = ReviewSubject {
+            title: format!("{} PROJ-1", ids.join(" ")),
+            ..Default::default()
+        };
+        let jql = JiraSource::build_jql(&subj).expect("has signal");
+        // Exactly MAX_RESULTS (5) keys, comma-separated.
+        let inner = jql
+            .trim_start_matches("issueKey in (")
+            .split(')')
+            .next()
+            .unwrap();
+        assert_eq!(inner.split(", ").count(), MAX_RESULTS as usize);
     }
 
     #[test]
@@ -391,39 +396,6 @@ mod tests {
     fn query_none_without_signal() {
         let subj = ReviewSubject::default();
         assert!(JiraSource::build_jql(&subj).is_none());
-    }
-
-    #[test]
-    fn parse_issues_to_section() {
-        let body = r#"{
-            "issues": [
-                {"key": "PROJ-1", "fields": {"summary": "Add auth", "status": {"name": "In Progress"}}},
-                {"key": "PROJ-2", "fields": {"summary": "Refresh tokens", "status": {"name": "Done"}}}
-            ]
-        }"#;
-        let section = JiraSource::parse_section(body, "https://acme.atlassian.net").unwrap();
-        assert_eq!(section.heading, "Related JIRA tickets");
-        assert_eq!(section.snippets.len(), 2);
-        assert_eq!(section.snippets[0].title, "PROJ-1 — Add auth");
-        assert_eq!(section.snippets[0].subtitle.as_deref(), Some("In Progress"));
-        assert_eq!(
-            section.snippets[0].link.as_deref(),
-            Some("https://acme.atlassian.net/browse/PROJ-1")
-        );
-    }
-
-    #[test]
-    fn parse_handles_missing_fields() {
-        let body = r#"{"issues":[{"key":"X-9","fields":{}}]}"#;
-        let section = JiraSource::parse_section(body, "https://acme.atlassian.net").unwrap();
-        assert_eq!(section.snippets[0].title, "X-9");
-        assert!(section.snippets[0].subtitle.is_none());
-    }
-
-    #[test]
-    fn parse_error_on_garbage() {
-        let r = JiraSource::parse_section("not json", "https://acme.atlassian.net");
-        assert!(matches!(r, Err(ContextSourceError::Parse { .. })));
     }
 
     #[tokio::test]

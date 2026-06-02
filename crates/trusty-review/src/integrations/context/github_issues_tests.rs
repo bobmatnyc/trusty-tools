@@ -81,6 +81,43 @@ fn parse_issues_to_section() {
 }
 
 #[test]
+fn parse_embeds_body() {
+    // Fix 2 (#599): the issue body is trimmed, truncated, and embedded.
+    let body = r#"{
+        "items": [
+            {"number": 5, "title": "Login bug", "state": "open", "html_url": "u",
+             "body": "  The login form rejects valid passwords.  "}
+        ]
+    }"#;
+    let section = GithubIssuesSource::parse_section(body).unwrap();
+    assert_eq!(
+        section.snippets[0].body.as_deref(),
+        Some("The login form rejects valid passwords.")
+    );
+}
+
+#[test]
+fn parse_truncates_long_body() {
+    let long = "x".repeat(SNIPPET_BODY_CHARS + 100);
+    let body = format!(
+        r#"{{"items":[{{"number":1,"title":"t","state":"open","html_url":"u","body":"{long}"}}]}}"#
+    );
+    let section = GithubIssuesSource::parse_section(&body).unwrap();
+    assert_eq!(
+        section.snippets[0].body.as_deref().unwrap().chars().count(),
+        SNIPPET_BODY_CHARS
+    );
+}
+
+#[test]
+fn parse_no_body_when_empty() {
+    // An empty / whitespace-only body yields no snippet body.
+    let body = r#"{"items":[{"number":1,"title":"t","state":"open","html_url":"u","body":"   "}]}"#;
+    let section = GithubIssuesSource::parse_section(body).unwrap();
+    assert!(section.snippets[0].body.is_none());
+}
+
+#[test]
 fn parse_filters_pull_requests() {
     let body = r#"{
         "items": [
