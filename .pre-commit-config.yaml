@@ -51,6 +51,20 @@ repos:
       - id: commitizen
         stages: [commit-msg]
 
+  # Ratcheted 500-line file-size cap (issue #610). Fails the commit when a new
+  # tracked .rs file exceeds 500 lines, or an allowlisted file grows past its
+  # frozen budget, or an allowlisted file dropped <= 500 (remove its entry).
+  # Runs against the whole tracked tree (pass_filenames: false) so the
+  # allowlist ratchet is evaluated holistically, not just on staged paths.
+  - repo: local
+    hooks:
+      - id: line-cap
+        name: 500-line file-size cap (ratcheted allowlist)
+        entry: scripts/check_line_cap.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+
   # Empirical commit-effort scoring — appends Effort/Effort-Score/
   # Effort-Breakdown trailers to commit messages. Non-destructive: never
   # blocks a commit; computation failures log a warning and exit 0.

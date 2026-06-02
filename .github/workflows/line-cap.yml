@@ -1,0 +1,32 @@
+# Line-cap gate for the trusty-tools workspace (issue #610).
+#
+# Enforces the 500-line file-size cap mechanically via a ratcheted allowlist:
+#   - a NEW tracked .rs file over 500 lines fails the job (cannot merge);
+#   - an allowlisted (grandfathered) file may not grow past its frozen budget;
+#   - when an allowlisted file drops to <= 500 lines its entry must be removed.
+#
+# Pure line counting — no Rust toolchain or build needed, so this is fast and
+# runs as its own lightweight job (matches ci.yml's checkout style/auth).
+name: Line cap
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs for the same ref to save CI minutes (matches ci.yml).
+concurrency:
+  group: line-cap-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  line-cap:
+    name: 500-line file-size cap
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enforce 500-line file cap (ratcheted allowlist)
+        run: bash scripts/check_line_cap.sh

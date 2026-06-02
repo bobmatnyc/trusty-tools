@@ -217,12 +217,38 @@ application/binary code and `thiserror` for library error types. Reserve
 `expect()` only for cases that are genuinely programmer errors (invariants that
 can never occur at runtime).
 
-🔴 **500-line file size hard cap** — no source file (`.rs`) should exceed 500 lines.
-Files approaching this limit are a signal to split into focused submodules before the
-next feature lands on them. When splitting, prefer: one public module per logical
-concept, a thin `mod.rs` that re-exports, and sibling files with clear single
-responsibilities. File a refactor ticket for any existing file that already exceeds
-500 lines rather than continuing to grow it.
+🔴 **500-line file size hard cap (MECHANICALLY ENFORCED)** — no source file
+(`.rs`) should exceed 500 lines. As of issue #610 this is no longer advice: it
+is gated by `scripts/check_line_cap.sh`, wired into CI
+(`.github/workflows/line-cap.yml`) and the local pre-commit hook (`line-cap`).
+A new tracked `.rs` file over 500 lines **cannot merge**. Files approaching this
+limit are a signal to split into focused submodules before the next feature
+lands on them. When splitting, prefer: one public module per logical concept, a
+thin `mod.rs` that re-exports, and sibling files with clear single
+responsibilities.
+
+**The ratchet (allowlist that can only shrink):** the 175 files that already
+exceeded the cap when the gate landed are grandfathered in
+`.line-cap-allowlist.tsv` (one `relative/path<TAB>budget` line each, where
+`budget` is that file's frozen max line count). The gate enforces:
+
+- a file ≤ 500 lines and **not** allowlisted → OK;
+- a file > 500 lines and **not** allowlisted → **FAIL** (new oversized file — split it);
+- an allowlisted file whose current count **exceeds its budget** → **FAIL** (it grew — split it);
+- an allowlisted file now **≤ 500 lines** → **FAIL** (it dropped under cap — remove its allowlist entry; this is the ratchet-down forcing function);
+- an allowlisted file with `500 < lines ≤ budget` → OK (grandfathered, not growing).
+
+So allowlisted files may only shrink, and no new oversized file may be added.
+As the #607 sweep and per-crate refactors land, the allowlist ratchets down
+toward empty.
+
+**Run it locally:** `bash scripts/check_line_cap.sh` (exit 0 = clean). After you
+intentionally split a file (or a file otherwise drops below its budget), refresh
+the frozen budgets with `scripts/check_line_cap.sh --update` — this only *lowers*
+budgets or *removes* entries that fell ≤ 500; it **refuses** to add a new
+oversized file or raise a budget unless you pass `--seed` (initial bootstrap) or
+`--force-add` (rare, intentional bump). Commit the regenerated
+`.line-cap-allowlist.tsv` alongside your split.
 
 Past violations (refactor tickets #170/#171/#172 are CLOSED and the splits have
 landed — all three former monoliths are now under the 500-line cap):
