@@ -92,6 +92,19 @@ jobs:
 
     steps:
       # ------------------------------------------------------------------
+      # 0. Install tar/gzip BEFORE actions/checkout.
+      #
+      #    Why: amazonlinux:2023 ships without tar and gzip.  GitHub's
+      #    actions/checkout action uses tar to extract the repo archive from
+      #    the runner's local cache — it fails immediately with
+      #    "Unable to locate executable file: tar" if tar is absent.
+      #    This step must run before ANY action that touches the workspace.
+      #    It intentionally does not depend on repo contents.
+      # ------------------------------------------------------------------
+      - name: Install tar/gzip (required by actions/checkout)
+        run: dnf install -y tar gzip
+
+      # ------------------------------------------------------------------
       # 1. Checkout the repo inside the container.
       # ------------------------------------------------------------------
       - name: Checkout repository
@@ -105,6 +118,9 @@ jobs:
       #    - openssl-devel / perl for the openssl-sys crate's build.rs
       #    - curl / tar for the ORT tarball download below
       #    - pkg-config for pkg-config-using crates
+      #    Note: tar and gzip are already installed in step 0 above;
+      #    listing them here again is harmless (dnf is idempotent) and
+      #    keeps this step self-documenting.
       # ------------------------------------------------------------------
       - name: Install build prerequisites (dnf)
         run: |
@@ -116,6 +132,7 @@ jobs:
             perl \
             curl \
             tar \
+            gzip \
             pkg-config \
             findutils
 
