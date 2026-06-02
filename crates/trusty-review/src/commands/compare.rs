@@ -12,7 +12,10 @@ use tracing::warn;
 
 use trusty_review::{
     config::ReviewConfig,
-    integrations::github::{AuthStrategy, GithubClient, RunMode},
+    integrations::{
+        github::{AuthStrategy, GithubClient, RunMode},
+        search_client::HttpSearchClient,
+    },
     llm::models::COMPARE_CANDIDATE_MODELS,
     models::ReviewResult,
     pipeline::{DiffSource, ReviewInput, TriggerDecision, run_review},
@@ -60,11 +63,18 @@ pub struct CompareArgs {
 /// Execute the `compare` subcommand.
 ///
 /// Why: side-by-side model comparison lets operators pick the best model for
-/// their repo's cost/quality trade-off.
+/// their repo's cost/quality trade-off.  Also resolves the search index before
+/// the per-model loop so all model runs share the correct index (issue #670 /
+/// auto-derive #661).
 /// What: runs the same review for each model in the compare set (sequentially),
 /// collects the results, and prints a comparison table to STDOUT.
 /// Test: integration via `cargo run -p trusty-review -- compare --help`.
-pub async fn cmd_compare(config: ReviewConfig, args: CompareArgs) -> Result<()> {
+pub async fn cmd_compare(mut config: ReviewConfig, args: CompareArgs) -> Result<()> {
+    // Resolve the search index from the daemon once before the per-model loop.
+    // When TRUSTY_SEARCH_INDEX is explicitly set, resolve_index is a no-op.
+    let search_for_resolve = HttpSearchClient::from_config(&config);
+    config.resolve_index(&search_for_resolve).await;
+
     let models: Vec<String> = args.models.clone().unwrap_or_else(|| {
         COMPARE_CANDIDATE_MODELS
             .iter()

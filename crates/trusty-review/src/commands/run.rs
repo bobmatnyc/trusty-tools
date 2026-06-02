@@ -73,8 +73,12 @@ pub struct RunArgs {
 ///
 /// Why: one-shot review of a PR or local diff with the selected reviewer model.
 /// What: resolves the diff source, builds deps, runs the pipeline, prints the
-/// result to STDOUT, and optionally writes the log file.
-/// Test: CLI integration via `cargo run -p trusty-review -- run --help`.
+/// result to STDOUT, and optionally writes the log file.  Calls `resolve_index`
+/// before the pipeline so the correct trusty-search index is used even when
+/// `TRUSTY_SEARCH_INDEX` is unset (issue #670 / auto-derive #661).
+/// Test: CLI integration via `cargo run -p trusty-review -- run --help`;
+/// `resolve_index` wiring covered by `cmd_run_resolve_index_called` in
+/// `commands/run_tests.rs`.
 pub async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
     let diff_source = resolve_diff_source_run(&config, &args).await?;
 
@@ -83,11 +87,22 @@ pub async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
         provider: args.provider.clone(),
         ..Default::default()
     };
-    let config_with_overrides = ReviewConfig::from_env_and_file(None, Some(&overrides));
+    let mut config_with_overrides = ReviewConfig::from_env_and_file(None, Some(&overrides));
+    // Clone both to avoid holding a borrow across the mutable resolve_index call.
     let reviewer_model = config_with_overrides.role_models.reviewer.model.clone();
-    let default_provider = &config_with_overrides.role_models.reviewer.provider;
+    let default_provider = config_with_overrides.role_models.reviewer.provider.clone();
 
-    let deps = build_deps_async(&config_with_overrides, &reviewer_model, default_provider).await?;
+    // Resolve the search index from the daemon before building deps so the
+    // correct index is used even when TRUSTY_SEARCH_INDEX is not set.
+    // When the operator set TRUSTY_SEARCH_INDEX explicitly, resolve_index is
+    // a no-op.  On any failure (daemon unreachable, no match) it logs a
+    // warning and leaves search_index at its current value.
+    let search_for_resolve = HttpSearchClient::from_config(&config_with_overrides);
+    config_with_overrides
+        .resolve_index(&search_for_resolve)
+        .await;
+
+    let deps = build_deps_async(&config_with_overrides, &reviewer_model, &default_provider).await?;
 
     let input = ReviewInput {
         diff_source,

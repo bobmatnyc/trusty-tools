@@ -103,11 +103,16 @@ pub async fn cmd_serve(config: ReviewConfig, args: ServeArgs) -> Result<()> {
 ///
 /// Why: both modes need the same set of deps; building them once avoids
 /// repetition.  Async because `BedrockProvider::new` loads AWS credentials
-/// asynchronously.
-/// What: builds the reviewer and verifier LLM providers, HTTP search/analyze
-/// clients, opens the durable dedup store, and wraps everything in `AppState`.
-/// Test: covered transitively by handler unit tests that inject fakes.
-async fn build_app_state(config: ReviewConfig) -> Result<AppState> {
+/// asynchronously.  Also calls `resolve_index` so the correct trusty-search
+/// index is selected when `TRUSTY_SEARCH_INDEX` is unset (issue #670 /
+/// auto-derive #661).
+/// What: builds the reviewer and verifier LLM providers, resolves the search
+/// index from the daemon, constructs HTTP search/analyze clients, opens the
+/// durable dedup store, and wraps everything in `AppState`.
+/// Test: covered transitively by handler unit tests that inject fakes;
+/// `resolve_index` wiring covered by `build_app_state_resolve_index_called`
+/// in `commands/serve_tests.rs`.
+async fn build_app_state(mut config: ReviewConfig) -> Result<AppState> {
     let reviewer_model = config.role_models.reviewer.model.clone();
     let default_provider = config.role_models.reviewer.provider.clone();
     let llm = build_provider(
@@ -123,7 +128,12 @@ async fn build_app_state(config: ReviewConfig) -> Result<AppState> {
         .await
         .map_err(|reason| anyhow::anyhow!(reason))?;
 
+    // Resolve the search index before constructing AppState so the daemon's
+    // registered root_path is matched against the current repo and the correct
+    // index id is used even when TRUSTY_SEARCH_INDEX is not set.  The call is
+    // a no-op when search_index_explicit is true (operator overrode it).
     let search = HttpSearchClient::from_config(&config);
+    config.resolve_index(&search).await;
     // Use the on-demand subprocess client instead of the HTTP daemon client.
     // Rationale: #632 — trusty-analyze is invoked on demand as a subprocess
     // (trusty-analyze review --index-id <id> -) rather than requiring a

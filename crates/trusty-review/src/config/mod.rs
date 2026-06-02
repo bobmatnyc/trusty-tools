@@ -445,6 +445,11 @@ fn load_toml_file(path: Option<&std::path::Path>) -> Option<TomlFile> {
 // ─── Unit tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[cfg(test)]
 #[path = "config_tests.rs"]
 mod tests;
+
+/// resolve_index and wiring-path tests — split to keep config_tests.rs under
+/// the 500-line cap (#610).
+#[cfg(test)]
+#[path = "config_resolve_index_tests.rs"]
+mod resolve_index_tests;
