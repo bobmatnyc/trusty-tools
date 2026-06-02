@@ -708,13 +708,27 @@ struct IndexListResponse {
 /// Why: the flat list (`GET /indexes`) returns bare id strings for backward
 /// compatibility; adding `?details=true` returns richer objects so the MCP
 /// `list_indexes` tool and UI can display per-index disk usage without a
-/// separate round-trip.
-/// What: `id` + `size_bytes` (sum of all file sizes under the index data
-/// directory; `null` when the directory has not been created yet).
-/// Test: `list_indexes_details_includes_size_bytes`.
+/// separate round-trip.  `root_path` is also exposed here so callers (e.g.
+/// trusty-review's auto-derive logic, issue #661) can match an index to the
+/// current project directory without a separate per-index status round-trip.
+/// What: `id` + `root_path` (canonical absolute path stored on the handle) +
+/// `size_bytes` (sum of all file sizes under the index data directory; `null`
+/// when the directory has not been created yet).
+/// Test: `list_indexes_details_includes_size_bytes`,
+/// `list_indexes_details_includes_root_path`.
 #[derive(serde::Serialize)]
 struct IndexDetailEntry {
     id: String,
+    /// Canonical absolute path of the indexed directory.
+    ///
+    /// Why: trusty-review and other callers need to map the current project
+    /// root to an index without issuing N status requests (issue #661).
+    /// What: the `root_path` stored on the `IndexHandle` at registration time,
+    /// serialised as a UTF-8 string (lossless on all supported platforms).
+    /// Absent (null) only when the handle's path cannot be converted to UTF-8
+    /// (a practically impossible edge case on macOS / Linux).
+    /// Test: `list_indexes_details_includes_root_path`.
+    root_path: Option<String>,
     size_bytes: Option<u64>,
 }
 
@@ -1525,14 +1539,18 @@ async fn list_indexes_handler(
         Json(serde_json::json!({ "indexes": entries })).into_response()
     } else if params.details {
         // Issue #312: return per-index disk usage alongside each id.
+        // Issue #661: also include root_path so callers can derive the index
+        // from the current project directory without N status round-trips.
         let entries: Vec<IndexDetailEntry> = state
             .registry
-            .list()
+            .list_handles()
             .into_iter()
-            .map(|id| {
-                let (size_bytes, _) = index_disk_and_mtime(&id.0);
+            .map(|handle| {
+                let (size_bytes, _) = index_disk_and_mtime(&handle.id.0);
+                let root_path = handle.root_path.to_str().map(|s| s.to_string());
                 IndexDetailEntry {
-                    id: id.0,
+                    id: handle.id.0.clone(),
+                    root_path,
                     size_bytes,
                 }
             })
@@ -5243,7 +5261,67 @@ mod tests {
                 entry.get("size_bytes").is_some(),
                 "each detail entry must have a size_bytes field: {entry:?}"
             );
+            // root_path must be present (issue #661 — auto-derive support).
+            assert!(
+                entry.get("root_path").is_some(),
+                "each detail entry must have a root_path field (issue #661): {entry:?}"
+            );
         }
+    }
+
+    /// `GET /indexes?details=true` exposes the registered `root_path` per index
+    /// so trusty-review can auto-derive the correct index from the project cwd.
+    ///
+    /// Why: issue #661 — user-level MCP wiring omits TRUSTY_SEARCH_INDEX;
+    /// trusty-review must match the current repo root to a registered index
+    /// without issuing N individual status requests.
+    /// What: registers one index with a known root path, issues the details
+    /// request, and asserts the returned `root_path` matches what was registered.
+    /// Test: this function.
+    #[tokio::test]
+    async fn list_indexes_details_includes_root_path() {
+        use crate::core::{
+            indexer::CodeIndexer,
+            registry::{IndexHandle, IndexId, IndexRegistry},
+        };
+
+        let registry = IndexRegistry::new();
+        let id = IndexId::new("rp-test");
+        let indexer = CodeIndexer::new("rp-test", "/tmp/rp-test");
+        registry.register(IndexHandle::bare(
+            id.clone(),
+            std::sync::Arc::new(tokio::sync::RwLock::new(indexer)),
+            std::path::PathBuf::from("/tmp/rp-test"),
+        ));
+        let state = std::sync::Arc::new(SearchAppState::new(registry));
+
+        let resp = list_indexes_handler(
+            State(state),
+            Query(ListIndexesParams {
+                format: None,
+                details: true,
+            }),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = value["indexes"].as_array().expect("indexes array");
+        assert_eq!(arr.len(), 1, "expected exactly one index entry");
+        let entry = &arr[0];
+        assert_eq!(
+            entry["id"].as_str(),
+            Some("rp-test"),
+            "id must match registered index id"
+        );
+        let rp = entry["root_path"]
+            .as_str()
+            .expect("root_path must be a non-null string");
+        assert_eq!(
+            rp, "/tmp/rp-test",
+            "root_path must match what was registered"
+        );
     }
 
     /// `POST /search` with nested indexes: the response must include

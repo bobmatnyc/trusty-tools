@@ -15,8 +15,11 @@
 
 pub mod constants;
 pub mod context;
+pub mod index_resolver;
 pub mod role_models;
 pub mod verification;
+
+pub use index_resolver::{find_git_root, repo_root_from_cwd, resolve_index_from_list};
 
 pub use context::{ContextConfig, ContextFileConfig};
 pub use role_models::{
@@ -122,7 +125,19 @@ pub struct ReviewConfig {
     /// `http://localhost:7879`).
     pub analyzer_url: String,
     /// Default trusty-search index (`TRUSTY_SEARCH_INDEX`, default `main`).
+    ///
+    /// When `TRUSTY_SEARCH_INDEX` is not set, this starts as `"main"` and is
+    /// overwritten by `ReviewConfig::resolve_index` at startup (issue #661).
     pub search_index: String,
+
+    /// True when `TRUSTY_SEARCH_INDEX` was explicitly set by the operator.
+    ///
+    /// Why: auto-derivation must respect explicit configuration; checking
+    /// whether the env var was present is cheaper than re-reading it later.
+    /// What: set to `true` only when `std::env::var("TRUSTY_SEARCH_INDEX")` is
+    /// `Ok(_)` at config-load time.  Used by `resolve_index` to skip derivation.
+    /// Test: covered by the `resolve_index` unit tests in `config_tests.rs`.
+    pub search_index_explicit: bool,
 
     // ── GitHub App authentication (REV-400–REV-402) ────────────────────────
     /// GitHub App ID (`GITHUB_APP_ID`).  `None` disables App auth.
@@ -250,6 +265,7 @@ impl ReviewConfig {
                 .unwrap_or_else(|_| "http://localhost:7879".to_string()),
             search_index: std::env::var("TRUSTY_SEARCH_INDEX")
                 .unwrap_or_else(|_| "main".to_string()),
+            search_index_explicit: std::env::var("TRUSTY_SEARCH_INDEX").is_ok(),
             role_models,
             // ── GitHub App auth ────────────────────────────────────────────
             github_app_id: std::env::var("GITHUB_APP_ID")
@@ -286,6 +302,53 @@ impl ReviewConfig {
     pub fn load(cli_overrides: Option<&RoleCliOverrides>) -> Self {
         let default_path = dirs::config_dir().map(|d| d.join("trusty-review").join("config.toml"));
         Self::from_env_and_file(default_path.as_deref(), cli_overrides)
+    }
+
+    /// Resolve and cache the best trusty-search index for the current project.
+    ///
+    /// Why: user-level MCP wiring omits `TRUSTY_SEARCH_INDEX`; the default
+    /// `"main"` is wrong for most projects.  This method queries the daemon and
+    /// picks the index whose `root_path` best matches the current repo root
+    /// (issue #661).  When `TRUSTY_SEARCH_INDEX` is explicitly set, this is a
+    /// no-op so explicit configuration always wins.
+    /// What: calls `SearchClient::list_indexes` on the configured daemon, runs
+    /// `index_resolver::resolve_index_from_list`, and writes the result into
+    /// `self.search_index`.  Failures degrade to a stderr warning; `search_index`
+    /// is left unchanged (keeps the `"main"` default or the explicit value).
+    /// Test: `resolve_index_noop_when_explicit`, `resolve_index_updates_when_unset`.
+    pub async fn resolve_index(
+        &mut self,
+        client: &dyn crate::integrations::search_client::SearchClient,
+    ) {
+        if self.search_index_explicit {
+            // Operator set TRUSTY_SEARCH_INDEX explicitly — honour it verbatim.
+            return;
+        }
+        let repo_root = index_resolver::repo_root_from_cwd();
+        match client.list_indexes().await {
+            Ok(indexes) => {
+                if let Some(id) = index_resolver::resolve_index_from_list(&indexes, &repo_root) {
+                    tracing::info!(
+                        index = %id,
+                        repo_root = %repo_root.display(),
+                        "trusty-review: auto-derived search index from repo root"
+                    );
+                    self.search_index = id;
+                } else {
+                    warn!(
+                        repo_root = %repo_root.display(),
+                        "trusty-review: could not auto-derive search index; \
+                         using fallback \"main\". Set TRUSTY_SEARCH_INDEX to suppress."
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "trusty-review: index auto-derive failed (daemon unreachable?): {e}; \
+                     using fallback \"main\""
+                );
+            }
+        }
     }
 }
 

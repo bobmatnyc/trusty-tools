@@ -273,3 +273,170 @@ fn apex_path_prefixes_defaults_to_empty() {
         "empty input must produce empty prefix list"
     );
 }
+
+// ─── resolve_index tests ──────────────────────────────────────────────────────
+
+use crate::integrations::{
+    health::{EmbedderState, HealthResponse},
+    search_client::{IndexInfo, SearchClient, SearchClientError, SearchResult},
+};
+use async_trait::async_trait;
+
+/// Mock SearchClient that returns a fixed index list.
+struct FixedIndexSearch(Vec<IndexInfo>);
+
+#[async_trait]
+impl SearchClient for FixedIndexSearch {
+    async fn health(&self) -> Result<HealthResponse, SearchClientError> {
+        Ok(HealthResponse {
+            status: "ok".to_string(),
+            embedder: EmbedderState::Bool(true),
+        })
+    }
+    async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+        Ok(self.0.clone())
+    }
+    async fn search(
+        &self,
+        _index_id: &str,
+        _query: &str,
+        _top_k: Option<u32>,
+    ) -> Result<Vec<SearchResult>, SearchClientError> {
+        Ok(vec![])
+    }
+}
+
+/// Mock SearchClient that always fails list_indexes.
+struct FailListSearch;
+
+#[async_trait]
+impl SearchClient for FailListSearch {
+    async fn health(&self) -> Result<HealthResponse, SearchClientError> {
+        Err(SearchClientError::Unavailable("down".to_string()))
+    }
+    async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+        Err(SearchClientError::Unavailable("daemon down".to_string()))
+    }
+    async fn search(
+        &self,
+        _index_id: &str,
+        _query: &str,
+        _top_k: Option<u32>,
+    ) -> Result<Vec<SearchResult>, SearchClientError> {
+        Err(SearchClientError::Unavailable("down".to_string()))
+    }
+}
+
+fn make_index_info(id: &str, root_path: Option<&str>) -> IndexInfo {
+    IndexInfo {
+        id: id.to_string(),
+        name: None,
+        root_path: root_path.map(|s| s.to_string()),
+    }
+}
+
+/// When `TRUSTY_SEARCH_INDEX` is set, `resolve_index` must not change it.
+///
+/// Why: explicit operator config always wins; the auto-derive logic must not
+/// stomp on a deliberately-set index name (issue #661).
+/// What: sets `search_index_explicit = true`, calls `resolve_index` with a
+/// daemon that would return a different index, asserts value unchanged.
+/// Test: this test.
+#[tokio::test]
+async fn resolve_index_noop_when_explicit() {
+    let mut config = ReviewConfig::load(None);
+    config.search_index = "explicit-index".to_string();
+    config.search_index_explicit = true;
+
+    let indexes = vec![make_index_info("auto-index", Some("/tmp/some-project"))];
+    let client = FixedIndexSearch(indexes);
+    config.resolve_index(&client).await;
+
+    assert_eq!(
+        config.search_index, "explicit-index",
+        "explicit index must not be overwritten by auto-derive"
+    );
+}
+
+/// When `TRUSTY_SEARCH_INDEX` is unset and the daemon returns a matching index,
+/// `resolve_index` must update `search_index` to the matched id.
+///
+/// Why: the core auto-derive feature (issue #661).
+/// What: creates a temp dir with a `.git` subdirectory, sets it as cwd,
+/// provides a daemon that returns an index with that path, and asserts the
+/// resolved value.
+/// Test: this test.
+#[tokio::test]
+async fn resolve_index_updates_when_match_found() {
+    let root = tempfile::tempdir().unwrap();
+    // Create .git so find_git_root stops here.
+    std::fs::create_dir(root.path().join(".git")).unwrap();
+    // Make the canonical path (symlinks resolved).
+    let canonical = root.path().canonicalize().unwrap();
+    let root_path_str = canonical.to_str().unwrap().to_string();
+
+    let mut config = ReviewConfig::load(None);
+    config.search_index = "main".to_string();
+    config.search_index_explicit = false;
+
+    let indexes = vec![make_index_info("my-project", Some(&root_path_str))];
+    let client = FixedIndexSearch(indexes);
+
+    // Temporarily change cwd to the temp dir so repo_root_from_cwd picks it up.
+    let original_dir = std::env::current_dir().unwrap();
+    std::env::set_current_dir(root.path()).unwrap();
+    config.resolve_index(&client).await;
+    std::env::set_current_dir(original_dir).unwrap();
+
+    assert_eq!(
+        config.search_index, "my-project",
+        "auto-derive must update search_index to the matched index"
+    );
+}
+
+/// When the daemon is unreachable, `resolve_index` must keep `search_index`
+/// unchanged and not panic.
+///
+/// Why: the auto-derive is best-effort; daemon downtime must degrade gracefully
+/// to the default `"main"` rather than failing the review startup (issue #661).
+/// What: provides a FailListSearch, asserts `search_index` stays at `"main"`.
+/// Test: this test.
+#[tokio::test]
+async fn resolve_index_falls_back_on_daemon_error() {
+    let mut config = ReviewConfig::load(None);
+    config.search_index = "main".to_string();
+    config.search_index_explicit = false;
+
+    let client = FailListSearch;
+    config.resolve_index(&client).await;
+
+    assert_eq!(
+        config.search_index, "main",
+        "daemon error must leave search_index at fallback 'main'"
+    );
+}
+
+/// When no registered index root_path matches the repo root, keep the default.
+///
+/// Why: a fresh machine with no indexed projects should not crash or produce an
+/// incorrect index name (issue #661).
+/// What: provides an index with an unrelated root_path, asserts `"main"` kept.
+/// Test: this test.
+#[tokio::test]
+async fn resolve_index_keeps_default_when_no_match() {
+    let mut config = ReviewConfig::load(None);
+    config.search_index = "main".to_string();
+    config.search_index_explicit = false;
+
+    let indexes = vec![make_index_info(
+        "other-project",
+        Some("/srv/totally-different"),
+    )];
+    let client = FixedIndexSearch(indexes);
+    config.resolve_index(&client).await;
+
+    assert_eq!(
+        config.search_index, "main",
+        "no-match must leave search_index at fallback 'main'"
+    );
+}
