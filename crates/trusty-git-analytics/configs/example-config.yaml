@@ -1,5 +1,25 @@
 version: "1.0"
 
+# Optional: override the SQLite database path.
+#
+# Default: `tga.db` in the same directory as this config file.
+# Set this to an absolute path (recommended for production / cron/launchd)
+# or to a path relative to this config file's directory.
+#
+# Relative paths and the bare default "tga.db" are anchored to the config
+# file's directory, NOT to the process working directory — so cron/launchd
+# jobs running from / or another arbitrary cwd always open the correct db.
+#
+# Supports `~` home-directory expansion.
+#
+# The --database CLI flag takes precedence over this value.
+#
+# Examples:
+#   database: /var/data/tga.db      # absolute path — safest for automation
+#   database: ~/data/tga.db         # tilde-expanded to absolute path
+#   database: data/tga.db           # relative to this config file's directory
+# database: /var/data/tga.db
+
 repositories:
   - name: "my-app"
     path: "/path/to/my-app"

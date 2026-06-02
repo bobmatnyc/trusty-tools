@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
-use tga::core::config::{Config, ConfigValidator};
+use tga::core::config::{database_path, Config, ConfigValidator};
 use tga::core::db::Database;
 
 use crate::commands::aliases::AliasesArgs;
@@ -51,9 +51,13 @@ struct Cli {
     /// Precedence (highest first):
     /// 1. This flag, when explicitly supplied.
     /// 2. `database:` field in the YAML config file.
-    /// 3. Hardcoded default: `tga.db` in the current directory.
+    /// 3. Default `tga.db`, resolved relative to the config file's directory
+    ///    (or the current directory when no config file is loaded).
     ///
-    /// Supports `~` home-directory expansion when set in the config file.
+    /// Relative paths in options 2 and 3 are anchored to the config file's
+    /// directory, not to cwd — this ensures cron/launchd jobs running from an
+    /// arbitrary working directory still open the correct database.
+    /// Absolute paths and `~`-prefixed paths are never modified.
     #[arg(short, long, global = true)]
     database: Option<PathBuf>,
 
@@ -297,14 +301,19 @@ async fn run() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Resolve the effective database path (issue #406):
-    //   1. Explicit --database CLI flag wins.
-    //   2. `database:` field in the YAML config.
-    //   3. Hardcoded default `tga.db`.
+    // Resolve the effective database path (issues #406, #620):
+    //   1. Explicit --database CLI flag wins (absolute path from user).
+    //   2. `database:` field in the YAML config, anchored to config dir.
+    //   3. Default `tga.db`, anchored to config dir when known; falls back to
+    //      cwd-relative only when no config file was loaded.
+    //
+    // Anchoring to config dir (not cwd) is critical for cron/launchd jobs
+    // that run with cwd=/ or some unrelated directory — without anchoring
+    // the binary silently opens/creates a ghost db at the wrong path.
     let db_path = cli
         .database
         .or_else(|| config.resolved_database_path())
-        .unwrap_or_else(|| PathBuf::from("tga.db"));
+        .unwrap_or_else(|| database_path::default_path(config.config_dir()));
 
     // Open SQLite database (runs migrations on open).
     tracing::info!(path = %db_path.display(), "opening database");

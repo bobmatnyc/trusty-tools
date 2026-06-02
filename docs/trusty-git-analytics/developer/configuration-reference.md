@@ -12,6 +12,7 @@ and reporting behave.
 2. [Environment Variable Fallbacks](#2-environment-variable-fallbacks)
 3. [Annotated Example Config](#3-annotated-example-config)
 4. [Section Reference](#4-section-reference)
+   - [database](#database)
    - [repositories](#repositories)
    - [output](#output)
    - [classification](#classification)
@@ -42,6 +43,32 @@ tga analyze --config /etc/tga/production.yaml
 Unknown YAML keys are silently ignored. This means a config file written for a newer
 version of `tga` (or for the Python `gitflow-analytics` predecessor) loads without error
 in older binaries.
+
+### Database path resolution
+
+`tga` uses a SQLite database (default: `tga.db`). Database path precedence:
+
+1. `--database` CLI flag (highest priority).
+2. `database:` key in the YAML config file.
+3. Default `tga.db` (lowest priority).
+
+**Important — relative path anchoring:** relative paths in options 2 and 3 are always
+resolved relative to the **config file's directory**, not to the process working
+directory. This is intentional: cron jobs and launchd services often run with cwd
+set to `/` or some unrelated directory, so cwd-relative resolution would silently
+open or create a ghost database at the wrong path.
+
+Absolute paths (starting with `/`) and tilde-prefixed paths (`~/…`) are passed
+through unchanged.
+
+For production cron/launchd deployments, using an absolute path is the safest option:
+
+```yaml
+database: /var/data/tga.db
+```
+
+The `--database` CLI flag is resolved as-is (the shell expands `~` and relative paths
+before passing them to `tga`).
 
 ---
 
@@ -177,6 +204,15 @@ cache:
 ---
 
 ## 4. Section Reference
+
+### database
+
+| Key | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `database` | PathBuf | no | `tga.db` (config dir) | Path to the SQLite database. Supports `~`. Relative paths anchor to the config file's directory. |
+
+See [Database path resolution](#database-path-resolution) above for the full
+precedence rules and anchoring behaviour.
 
 ### repositories
 

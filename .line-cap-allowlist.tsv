@@ -82,7 +82,7 @@ crates/trusty-git-analytics/src/commands/aliases/suggest.rs	723
 crates/trusty-git-analytics/src/commands/backfill.rs	2832
 crates/trusty-git-analytics/src/commands/deployments.rs	1003
 crates/trusty-git-analytics/src/commands/incidents.rs	828
-crates/trusty-git-analytics/src/core/config/mod.rs	1533
+crates/trusty-git-analytics/src/core/config/mod.rs	1504
 crates/trusty-git-analytics/src/core/config/validator.rs	810
 crates/trusty-git-analytics/src/core/effort_percentile.rs	531
 crates/trusty-git-analytics/src/report/aggregator.rs	1707

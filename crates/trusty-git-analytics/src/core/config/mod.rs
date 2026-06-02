@@ -28,6 +28,7 @@ use crate::core::errors::{Result, TgaError};
 
 pub mod aliases;
 pub mod azdo;
+pub mod database_path;
 pub mod validator;
 
 pub use aliases::{AliasFile, DeveloperAliasEntry};
@@ -1264,16 +1265,20 @@ impl Config {
         self.pm.as_ref().and_then(|p| p.azure_devops.as_ref())
     }
 
-    /// Resolve the effective database path, applying `~` expansion.
+    /// Resolve the effective database path, anchoring relative values to the
+    /// config file's directory.
     ///
-    /// Why: callers (main.rs, command handlers) need a single resolved path
-    /// that honors the `database:` YAML field. This method encapsulates the
-    /// expansion so callers do not need to import `expand_path` directly.
-    /// What: returns the expanded form of `self.database` when set, or `None`
-    /// when the field is absent (callers apply the hardcoded default).
-    /// Test: see `config_database_field_parsed` in the module unit tests.
+    /// Why: a bare `database: tga.db` or relative `database: data/tga.db` in the
+    /// YAML must resolve against the config file's directory, not the process cwd.
+    /// When `tga` runs under launchd/cron the cwd is often `/` or some unrelated
+    /// directory, which would silently create a ghost database instead of opening
+    /// the real one. Absolute and `~`-prefixed paths are unchanged.
+    /// What: delegates to [`database_path::resolve`], passing the config-file
+    /// directory from [`Config::config_dir`]. Returns `None` when `database:` is
+    /// absent (caller applies the default via [`database_path::default_path`]).
+    /// Test: see `database_path_*` tests in `config::database_path`.
     pub fn resolved_database_path(&self) -> Option<PathBuf> {
-        self.database.as_deref().map(expand_path)
+        database_path::resolve(self.database.as_deref(), self.config_dir())
     }
 
     /// Validate cross-field invariants of the config.
@@ -1371,40 +1376,6 @@ mod tests {
         assert!(
             result.is_err(),
             "ClassificationConfig with unknown `rules_path:` must be rejected"
-        );
-    }
-
-    /// Why: the `database:` field in YAML must deserialize into `Config.database`
-    /// so operators can set the DB path without a CLI flag.
-    /// What: parse a YAML snippet with `database:` set and assert the value.
-    /// Test: pure deserialization; path expansion is not asserted here (that
-    /// is tested by `resolved_database_path_expands_tilde`).
-    #[test]
-    fn config_database_field_parsed() {
-        let yaml = "database: /var/data/tga.db\n";
-        let cfg: Config = serde_yaml::from_str(yaml).expect("parse config");
-        assert_eq!(
-            cfg.database.as_deref(),
-            Some(std::path::Path::new("/var/data/tga.db")),
-            "database: field must be deserialized"
-        );
-        // resolved_database_path returns the same value (no tilde to expand).
-        assert_eq!(
-            cfg.resolved_database_path().as_deref(),
-            Some(std::path::Path::new("/var/data/tga.db")),
-        );
-    }
-
-    /// Why: `resolved_database_path` must return `None` when the field is
-    /// absent so main.rs knows to fall back to the CLI flag or hardcoded default.
-    /// What: deserialize an empty config and assert `None`.
-    /// Test: pure deserialization.
-    #[test]
-    fn config_database_field_absent_returns_none() {
-        let cfg = Config::default();
-        assert!(
-            cfg.resolved_database_path().is_none(),
-            "absent database field must return None"
         );
     }
 
