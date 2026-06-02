@@ -107,7 +107,7 @@ crates/trusty-memory/src/messaging.rs	843
 crates/trusty-memory/src/project_root.rs	980
 crates/trusty-memory/src/prompt_log.rs	851
 crates/trusty-memory/src/service.rs	1704
-crates/trusty-memory/src/tools.rs	3575
+crates/trusty-memory/src/tools.rs	3629
 crates/trusty-memory/src/transport/rpc.rs	571
 crates/trusty-memory/src/web.rs	5396
 crates/trusty-memory/tests/concurrent_perf.rs	1163

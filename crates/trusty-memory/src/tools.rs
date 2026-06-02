@@ -309,6 +309,15 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     } else {
         vec!["palace", "content"]
     };
+    // Issue #664: add_alias and discover_aliases both call resolve_palace() but
+    // previously omitted `palace` from their schemas, making them uncallable
+    // without a server-side default. Now follow the memory_remember pattern.
+    let add_alias_required: Vec<&str> = if has_default {
+        vec!["short", "full"]
+    } else {
+        vec!["palace", "short", "full"]
+    };
+    let discover_aliases_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
 
     json!({
         "tools": [
@@ -492,11 +501,12 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
+                        "palace": {"type": "string", "description": "Palace ID (optional if server started with --palace)"},
                         "short": {"type": "string", "description": "Short name / alias (subject)"},
                         "full":  {"type": "string", "description": "Full / canonical name (object)"},
                         "extra": {"type": "string", "description": "Optional extra context appended to the full name"}
                     },
-                    "required": ["short", "full"],
+                    "required": add_alias_required,
                 }
             },
             {
@@ -535,8 +545,10 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
+                        "palace": {"type": "string", "description": "Palace ID (optional if server started with --palace)"},
                         "project_root": {"type": "string", "description": "Optional filesystem path to scan. Defaults to the process cwd."}
-                    }
+                    },
+                    "required": discover_aliases_required,
                 }
             },
             {
@@ -2355,6 +2367,10 @@ mod tests {
             ("palace_compact", true),
             ("kg_assert", true),
             ("kg_query", true),
+            // Issue #664: add_alias and discover_aliases now include `palace`
+            // in their schema and follow the same conditional-required pattern.
+            ("add_alias", true),
+            ("discover_aliases", true),
         ] {
             for (defs, has_default) in [(&with_default, true), (&without_default, false)] {
                 let tools = defs["tools"].as_array().unwrap();
@@ -2752,6 +2768,43 @@ mod tests {
         .await
         .expect("remove_prompt_fact missing");
         assert_eq!(missing["removed"], false);
+    }
+
+    /// Why (issue #664): `add_alias` must accept an explicit `palace` arg when
+    /// the server has no `--palace` default, and reject with a clear error when
+    /// both are absent.
+    /// What: (a) explicit palace succeeds and refreshes the cache; (b) no
+    /// palace + no default returns an error mentioning both `palace` and
+    /// `add_alias`.
+    /// Test: this function.
+    #[tokio::test]
+    async fn add_alias_palace_arg_required_without_server_default() {
+        // (a) explicit palace succeeds — use test_state() so palace-name
+        // enforcement is bypassed (sets TRUSTY_SKIP_PALACE_ENFORCEMENT=1).
+        let (state, _tmp) = test_state();
+        dispatch_tool(&state, "palace_create", json!({"name": "p"}))
+            .await
+            .expect("palace_create");
+        let added = dispatch_tool(
+            &state,
+            "add_alias",
+            json!({"palace": "p", "short": "tga", "full": "trusty-git-analytics"}),
+        )
+        .await
+        .expect("add_alias with explicit palace");
+        assert_eq!(added["asserted"], true);
+        let guard = state.prompt_context_cache.read().await;
+        assert!(guard.formatted.contains("tga → trusty-git-analytics"));
+
+        // (b) no palace + no default → clear error (state2 has no default_palace).
+        drop(guard);
+        let (state2, _tmp2) = test_state();
+        let err = dispatch_tool(&state2, "add_alias", json!({"short": "x", "full": "y"}))
+            .await
+            .expect_err("should fail without palace");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("palace"), "error must mention 'palace': {msg}");
+        assert!(msg.contains("add_alias"), "error must name tool: {msg}");
     }
 
     /// Why (issue #42): `get_prompt_context` is the per-message replacement
