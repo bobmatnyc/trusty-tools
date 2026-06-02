@@ -53,13 +53,10 @@ struct Cli {
     )]
     search_url: String,
 
-    /// Path to the redb file backing the analyzer's facts store.
-    #[arg(
-        long,
-        default_value = "trusty-analyze.facts.redb",
-        env = "TRUSTY_ANALYZER_FACTS"
-    )]
-    facts_path: PathBuf,
+    /// Path to the redb facts store (default: `~/.trusty-tools/analyze/facts.redb`).
+    /// Override via `TRUSTY_ANALYZER_FACTS`. (#632: home-anchored to fix launchd cwd crash)
+    #[arg(long, env = "TRUSTY_ANALYZER_FACTS")]
+    facts_path: Option<PathBuf>,
 
     #[command(subcommand)]
     cmd: Cmd,
@@ -367,6 +364,8 @@ async fn main() -> Result<()> {
         }
     };
     let search = TrustySearchClient::new(&cli.search_url);
+    // Home-anchored default; see daemon_cmds::resolve_facts_path (#632).
+    let facts_path = daemon_cmds::resolve_facts_path(cli.facts_path)?;
 
     // Update check: run only for human-facing commands, never when serving MCP
     // stdio. Two subcommands speak JSON-RPC 2.0 over stdio and must be excluded:
@@ -411,8 +410,8 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
 
-            let facts = FactStore::open(&cli.facts_path)
-                .with_context(|| format!("open facts store at {}", cli.facts_path.display()))?;
+            let facts = FactStore::open(&facts_path)
+                .with_context(|| format!("open facts store at {}", facts_path.display()))?;
 
             // Try to load the neural embedder. Failure is non-fatal: we fall
             // back to BOW so the daemon still serves clustering requests.
@@ -612,7 +611,7 @@ async fn main() -> Result<()> {
             port,
         } => run_deep(index_id, model, format, port).await,
         Cmd::Facts { op } => {
-            let facts = FactStore::open(&cli.facts_path)?;
+            let facts = FactStore::open(&facts_path)?;
             match op {
                 FactsCmd::List {
                     subject,
@@ -701,7 +700,7 @@ async fn main() -> Result<()> {
         Cmd::Start { port } => daemon_cmds::handle_start(port),
         Cmd::Stop { port } => daemon_cmds::handle_stop(port),
         Cmd::Status { port } => daemon_cmds::handle_status(port).await,
-        Cmd::Doctor { port } => daemon_cmds::handle_doctor(port, &cli.facts_path).await,
+        Cmd::Doctor { port } => daemon_cmds::handle_doctor(port, &facts_path).await,
         Cmd::Completions { shell } => {
             // Why: clap_complete renders a script for the requested shell from
             // our derived `Cli` definition — keeps completion in sync with the

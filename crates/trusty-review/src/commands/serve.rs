@@ -18,7 +18,9 @@ use tracing::{info, warn};
 
 use trusty_review::{
     config::ReviewConfig,
-    integrations::{analyze_client::HttpAnalyzeClient, search_client::HttpSearchClient},
+    integrations::{
+        search_client::HttpSearchClient, subprocess_analyze_client::SubprocessAnalyzeClient,
+    },
     llm::build_provider,
     pipeline::enforce_verifier_liveness,
     service::{AppState, DEFAULT_PORT, serve as serve_http},
@@ -122,7 +124,11 @@ async fn build_app_state(config: ReviewConfig) -> Result<AppState> {
         .map_err(|reason| anyhow::anyhow!(reason))?;
 
     let search = HttpSearchClient::from_config(&config);
-    let analyze = HttpAnalyzeClient::from_config(&config);
+    // Use the on-demand subprocess client instead of the HTTP daemon client.
+    // Rationale: #632 — trusty-analyze is invoked on demand as a subprocess
+    // (trusty-analyze review --index-id <id> -) rather than requiring a
+    // long-running trusty-analyze serve daemon.
+    let analyze = SubprocessAnalyzeClient::from_config(&config);
 
     let dedup_path = config.log_dir.join("dedup.redb");
     let dedup = match trusty_review::store::DedupStore::open(&dedup_path) {

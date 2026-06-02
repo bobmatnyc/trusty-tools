@@ -15,6 +15,9 @@
 //!   - `context` — pluggable external context sources (JIRA / Confluence /
 //!     GitHub Issues today; APEX/knowledgebase in PR-B).  Best-effort / fail-open
 //!     enrichment, distinct from the REQUIRED search/analyze gate (#550, #590).
+//!   - `subprocess_analyze_client` — on-demand `AnalyzeClient` that spawns
+//!     `trusty-analyze` as a subprocess instead of calling a running daemon.
+//!     (closes #632)
 //!
 //! Deferred to later stages: `slack`.
 //!
@@ -26,6 +29,7 @@ pub mod context;
 pub mod github;
 pub mod health;
 pub mod search_client;
+pub mod subprocess_analyze_client;
 
 pub use analyze_client::{
     AnalyzeClient, AnalyzeClientError, AnalyzeHealthResponse, AnalyzeIndexInfo, ComplexityHotspot,
@@ -46,3 +50,4 @@ pub use search_client::{
     EmbedderState, HealthResponse, HttpSearchClient, IndexInfo, SearchClient, SearchClientError,
     SearchRequest, SearchResponse, SearchResult,
 };
+pub use subprocess_analyze_client::SubprocessAnalyzeClient;

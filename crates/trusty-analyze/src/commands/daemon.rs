@@ -32,6 +32,32 @@ pub fn data_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Resolve the facts-store path, creating the parent directory if needed.
+///
+/// Why: the old default (`trusty-analyze.facts.redb`) is a CWD-relative path
+/// that crashes under launchd (which sets cwd to `/`, a read-only root on
+/// macOS).  The new default anchors to `~/.trusty-tools/analyze/facts.redb`
+/// so the daemon always has a writable location regardless of cwd.  The
+/// `TRUSTY_ANALYZER_FACTS` env var (or `--facts-path` CLI flag) still wins
+/// as an absolute-path override.  (closes #632 os-error-30 crash)
+/// What: if `cli_path` is `Some`, use it directly.  Otherwise resolve
+/// `$HOME/.trusty-tools/analyze/facts.redb` via the `dirs` crate.  Creates
+/// the parent directory (but not the file) when it does not exist.
+/// Test: `test_default_facts_path_is_home_anchored` in daemon tests.
+pub fn resolve_facts_path(cli_path: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(p) = cli_path {
+        return Ok(p);
+    }
+    let home = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory for facts store path"))?;
+    let dir = home.join(".trusty-tools").join("analyze");
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("create facts store directory {}", dir.display()))?;
+    }
+    Ok(dir.join("facts.redb"))
+}
+
 /// Path to the PID file used by `start` / `stop` / `status`.
 ///
 /// Why: a single well-known location keeps the lifecycle commands trivial to

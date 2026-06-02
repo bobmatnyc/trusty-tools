@@ -16,9 +16,9 @@ use tracing::warn;
 use trusty_review::{
     config::{ReviewConfig, RoleCliOverrides},
     integrations::{
-        analyze_client::HttpAnalyzeClient,
         github::{AuthStrategy, GithubClient, RunMode},
         search_client::HttpSearchClient,
+        subprocess_analyze_client::SubprocessAnalyzeClient,
     },
     llm::build_provider,
     pipeline::{DiffSource, ReviewDeps, ReviewInput, TriggerDecision, log_json_path, run_review},
@@ -185,7 +185,11 @@ pub async fn build_deps_async(
     let verifier = cli_verify::build_verifier_opt(config).await;
 
     let search = HttpSearchClient::from_config(config);
-    let analyze = HttpAnalyzeClient::from_config(config);
+    // Use the on-demand subprocess client instead of the HTTP daemon client.
+    // Rationale: #632 — trusty-analyze is invoked on demand as a subprocess
+    // (trusty-analyze review --index-id <id> -) rather than requiring a
+    // long-running trusty-analyze serve daemon.
+    let analyze = SubprocessAnalyzeClient::from_config(config);
 
     Ok(ReviewDeps {
         llm,
