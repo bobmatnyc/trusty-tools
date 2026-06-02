@@ -13,6 +13,7 @@
 //!
 //! Test: see `crates/trusty-search-service/src/reindex.rs#tests`.
 
+mod hash_cache;
 mod staging;
 mod validate;
 
@@ -1183,12 +1184,25 @@ async fn apply_successful_commit(
     let chunks_per_sec = (ctx.progress.total_chunks.load(Ordering::Acquire) as u64 * 1000)
         .checked_div(elapsed_ms)
         .unwrap_or(0);
-    for (path, h) in new_hashes {
-        ctx.hashes.insert(path, h);
+    for (path, h) in &new_hashes {
+        ctx.hashes.insert(path.clone(), h.clone());
     }
     // Issue #75: cap per-index hash-cache size. Pure speed cache, so arbitrary
     // eviction is always safe.
     shrink_hashes_if_needed(&ctx.hashes);
+    // Issue #662: mirror the newly-committed hashes to the redb corpus store
+    // (staging or live — whichever is current) so they survive daemon restarts.
+    // `persist_batch` is a no-op when the map is over-cap or there is no
+    // durable corpus (BM25-only / test indexes).  Hashes are written to the
+    // SAME redb file as the batch's chunks, preserving atomicity: the #603
+    // staging rename promotes hashes and chunks together.
+    hash_cache::persist_batch(
+        &ctx.handle,
+        &new_hashes,
+        MAX_FILE_HASHES_PER_INDEX,
+        ctx.hashes.len(),
+    )
+    .await;
     ctx.progress
         .push(serde_json::json!({
             "event": "batch",
@@ -1842,6 +1856,9 @@ pub fn spawn_reindex_with_cleanup(
             validate::needs_path_relativization(prior_indexed_root.as_deref(), &canonical_root);
         if force {
             hashes.clear();
+            // Issue #662: clear the redb-persisted hashes too so a restart
+            // after a force-reindex doesn't reload stale hashes.
+            hash_cache::clear_persisted(&handle).await;
         } else if root_moved {
             tracing::warn!(
                 "reindex[{}]: index root moved from {:?} to {} — clearing hash \
@@ -1851,6 +1868,13 @@ pub fn spawn_reindex_with_cleanup(
                 canonical_root.display(),
             );
             hashes.clear();
+            // Issue #662: clear persisted hashes on root move for the same
+            // reason — old root-relative paths would produce wrong skip decisions.
+            hash_cache::clear_persisted(&handle).await;
+        } else {
+            // Issue #662: warm the in-process cache from the redb store so
+            // unchanged files are skipped immediately after a daemon restart.
+            hash_cache::load_into_cache(&handle, &hashes).await;
         }
 
         // Issue #28, Phase 4 + #603: stage the rebuilt corpus in a sibling

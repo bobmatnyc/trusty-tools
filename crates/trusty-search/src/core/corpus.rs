@@ -127,6 +127,27 @@ pub(crate) const KG_EDGES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition:
 pub(crate) const KG_EDGES_REV_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("kg_edges_rev");
 
+/// redb table persisting per-file SHA-256 content hashes for the skip-unchanged
+/// optimisation (issue #662).
+///
+/// Why: the in-process `file_hashes()` DashMap survives across multiple
+/// `POST /reindex` calls but not daemon restarts — a cold-start re-embeds
+/// every file even when nothing changed. Storing the same map in redb means
+/// a warm daemon restart loads the hashes from the previous run's successful
+/// commit and can skip unchanged files immediately.
+///
+/// Atomicity: this table lives in the SAME redb file as the chunk corpus.
+/// When staging is active (#603) it is written to `index.redb.tmp`
+/// alongside every batch's chunks.  The atomic rename on commit promotes
+/// hashes and chunks together; a rollback discards them together.  Hashes
+/// therefore never get out of sync with the committed chunks.
+///
+/// What: `relative_path (str) → sha256_hex (str as bytes)`.  Paths are
+/// relative to the index root (consistent with the #602 portable-path
+/// work) so a moved project doesn't false-skip.
+pub(crate) const FILE_HASHES_TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("file_hashes");
+
 /// redb table holding persisted Louvain community records (migration tolerance).
 ///
 /// Why: kept for backward-compat with on-disk indexes created before v0.10.0
@@ -222,6 +243,10 @@ impl CorpusStore {
                     .context("init kg_communities table")?;
                 txn.open_table(KG_SYMBOL_COMMUNITY_TABLE)
                     .context("init kg_symbol_community table")?;
+                // Issue #662: materialize the file-hash persistence table so
+                // warm-start reads never race a missing-table error.
+                txn.open_table(FILE_HASHES_TABLE)
+                    .context("init file_hashes table")?;
                 // Migration framework: materialize `_meta` so the schema-version
                 // read never races a missing-table error on fresh databases.
                 txn.open_table(crate::core::migration::META_TABLE)
@@ -725,6 +750,96 @@ impl CorpusStore {
         Ok(out)
     }
 
+    /// Upsert a batch of relative-path → SHA-256-hex entries into the
+    /// persistent file-hash table (issue #662).
+    ///
+    /// Why: called after every successful batch commit so the in-process
+    /// content-hash cache is mirrored to redb.  Together with
+    /// [`Self::load_file_hashes`] this means a daemon restart loads the last
+    /// run's hashes and can skip unchanged files without re-embedding them.
+    /// The caller enforces the eviction cap BEFORE calling this method.
+    /// What: opens a single write transaction, upserts every entry, and
+    /// commits.  Empty input is a no-op (no transaction opened).
+    /// Test: `hash_cache_roundtrip` in `corpus::tests`.
+    pub(crate) fn upsert_file_hashes(&self, entries: &[(&str, &str)]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let txn = self
+            .db
+            .begin_write()
+            .context("begin file_hashes upsert txn")?;
+        {
+            let mut tbl = txn
+                .open_table(FILE_HASHES_TABLE)
+                .context("open file_hashes table")?;
+            for (path, hash) in entries {
+                tbl.insert(*path, hash.as_bytes())
+                    .with_context(|| format!("insert file hash for {path}"))?;
+            }
+        }
+        txn.commit().context("commit file_hashes upsert txn")?;
+        Ok(())
+    }
+
+    /// Load all persisted relative-path → SHA-256-hex entries from redb
+    /// (issue #662).
+    ///
+    /// Why: called at reindex start to warm the in-process cache from the
+    /// previous run's committed hashes.  After loading, unchanged files are
+    /// skipped immediately — no cold-start re-embed.
+    /// What: opens a read transaction, walks `FILE_HASHES_TABLE`, and returns
+    /// every entry as `(path_string, hash_string)` pairs.  Corrupt rows are
+    /// skipped with a `warn`.  Returns empty when the table is absent (first
+    /// run / legacy database).
+    /// Test: `hash_cache_roundtrip` in `corpus::tests`.
+    pub(crate) fn load_file_hashes(&self) -> Result<Vec<(String, String)>> {
+        let txn = self.db.begin_read().context("begin file_hashes read txn")?;
+        let table = match txn.open_table(FILE_HASHES_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(anyhow::anyhow!("open file_hashes table: {e}")),
+        };
+        let mut out = Vec::new();
+        for entry in table.iter().context("iterate file_hashes table")? {
+            let (k, v) = entry.context("read file_hashes row")?;
+            let path = k.value().to_string();
+            match std::str::from_utf8(v.value()) {
+                Ok(hash) => out.push((path, hash.to_string())),
+                Err(_) => {
+                    tracing::warn!("corpus: skipping corrupt file_hashes row '{path}'")
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Atomically clear the entire file-hash table (issue #662).
+    ///
+    /// Why: called when `force=true` or a root move is detected so the
+    /// persisted hashes are cleared alongside the in-process cache.  Without
+    /// this, a force-reindex that clears the in-process map but not the redb
+    /// table would reload stale hashes on next daemon restart and false-skip
+    /// force-reindexed files.
+    /// What: opens one write transaction, drains `FILE_HASHES_TABLE` via
+    /// `retain(|_,_| false)`, and commits.
+    /// Test: `hash_cache_clear` in `corpus::tests`.
+    pub(crate) fn clear_file_hashes(&self) -> Result<()> {
+        let txn = self
+            .db
+            .begin_write()
+            .context("begin file_hashes clear txn")?;
+        {
+            let mut tbl = txn
+                .open_table(FILE_HASHES_TABLE)
+                .context("open file_hashes table for clear")?;
+            tbl.retain(|_, _| false)
+                .context("drain file_hashes table")?;
+        }
+        txn.commit().context("commit file_hashes clear txn")?;
+        Ok(())
+    }
+
     /// Look up the community id for a single symbol (migration tolerance, not
     /// called by the active search path as of v0.10.0).
     ///
@@ -1162,6 +1277,64 @@ mod tests {
         let p = dir.path().join("index.redb");
         let store = CorpusStore::open(&p).unwrap();
         assert_eq!(store.path(), p.as_path());
+    }
+
+    /// Why: verifies that `upsert_file_hashes` + `load_file_hashes` round-trip
+    /// correctly across a store reopen (simulates daemon restart).
+    /// Test: this test.
+    #[test]
+    fn hash_cache_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.redb");
+        {
+            let store = CorpusStore::open(&path).unwrap();
+            // Empty table before any writes.
+            assert!(store.load_file_hashes().unwrap().is_empty());
+            // Upsert two entries.
+            store
+                .upsert_file_hashes(&[("src/a.rs", "aabbcc"), ("src/b.rs", "ddeeff")])
+                .unwrap();
+            let mut loaded = store.load_file_hashes().unwrap();
+            loaded.sort_by(|x, y| x.0.cmp(&y.0));
+            assert_eq!(loaded.len(), 2);
+            assert_eq!(loaded[0], ("src/a.rs".to_string(), "aabbcc".to_string()));
+            assert_eq!(loaded[1], ("src/b.rs".to_string(), "ddeeff".to_string()));
+            // Upsert is idempotent (overwrite with same value).
+            store.upsert_file_hashes(&[("src/a.rs", "aabbcc")]).unwrap();
+            assert_eq!(store.load_file_hashes().unwrap().len(), 2);
+            // Upsert overwrites with new value.
+            store.upsert_file_hashes(&[("src/a.rs", "112233")]).unwrap();
+            let mut loaded2 = store.load_file_hashes().unwrap();
+            loaded2.sort_by(|x, y| x.0.cmp(&y.0));
+            assert_eq!(loaded2[0].1, "112233");
+        }
+        // Reopen simulates daemon restart — hashes must survive.
+        let store = CorpusStore::open(&path).unwrap();
+        let mut loaded = store.load_file_hashes().unwrap();
+        loaded.sort_by(|x, y| x.0.cmp(&y.0));
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].0, "src/a.rs");
+        assert_eq!(loaded[0].1, "112233");
+    }
+
+    /// Why: verifies that `clear_file_hashes` removes all entries and an
+    /// empty input to `upsert_file_hashes` is a no-op.
+    /// Test: this test.
+    #[test]
+    fn hash_cache_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CorpusStore::open(&dir.path().join("index.redb")).unwrap();
+        store
+            .upsert_file_hashes(&[("src/a.rs", "aa"), ("src/b.rs", "bb")])
+            .unwrap();
+        assert_eq!(store.load_file_hashes().unwrap().len(), 2);
+        store.clear_file_hashes().unwrap();
+        assert!(store.load_file_hashes().unwrap().is_empty());
+        // Double-clear is a no-op, not an error.
+        store.clear_file_hashes().unwrap();
+        // Empty upsert is also a no-op.
+        store.upsert_file_hashes(&[]).unwrap();
+        assert!(store.load_file_hashes().unwrap().is_empty());
     }
 
     #[test]
