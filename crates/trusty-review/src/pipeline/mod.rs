@@ -7,21 +7,23 @@
 //! `ReviewInput`, `ReviewDeps`, `DiffSource`) and the compare aggregator.
 //!
 //! Submodules:
-//!  - `diff`         — diff source, loading, truncation, identifier extraction.
-//!  - `grade`        — severity-anchored deterministic grade derivation (floor logic).
-//!  - `prompt`       — prompt construction for the reviewer role.
-//!  - `parser`       — verdict + findings parsing from LLM responses.
-//!  - `output`       — log file writing and STDOUT rendering.
-//!  - `post`         — post-or-log finalisation decision (Phase 1, #582).
-//!  - `verify_prompt`— verifier-pass prompt + forced-output schema (Phase 2, #583).
-//!  - `verify`       — per-finding verification round + liveness gate (Phase 2, #583).
-//!  - `runner`       — top-level orchestration loop (`run_review`).
-//!  - `trigger`      — live vs dry-run trigger classification (REV-703).
+//!  - `diff`          — diff source, loading, truncation, identifier extraction.
+//!  - `diff_analyzer` — DiffAnalyzer noise filter: Stages A/B/C (spec REV-200–262).
+//!  - `grade`         — severity-anchored deterministic grade derivation (floor logic).
+//!  - `prompt`        — prompt construction for the reviewer role.
+//!  - `parser`        — verdict + findings parsing from LLM responses.
+//!  - `output`        — log file writing and STDOUT rendering.
+//!  - `post`          — post-or-log finalisation decision (Phase 1, #582).
+//!  - `verify_prompt` — verifier-pass prompt + forced-output schema (Phase 2, #583).
+//!  - `verify`        — per-finding verification round + liveness gate (Phase 2, #583).
+//!  - `runner`        — top-level orchestration loop (`run_review`).
+//!  - `trigger`       — live vs dry-run trigger classification (REV-703).
 //!
 //! Test: each submodule carries its own unit tests.
 
 pub mod context_gate;
 pub mod diff;
+pub mod diff_analyzer;
 pub mod grade;
 pub mod output;
 pub mod parser;

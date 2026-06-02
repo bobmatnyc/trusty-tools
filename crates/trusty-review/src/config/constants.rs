@@ -241,16 +241,17 @@ mod tests {
     #[test]
     fn max_diff_chars_is_160k() {
         assert_eq!(
-            MAX_DIFF_CHARS,
-            160_000,
+            MAX_DIFF_CHARS, 160_000,
             "MAX_DIFF_CHARS must be 160_000 (raised from 60_000 in #624)"
         );
         // Also assert it comfortably fits below the reviewer model's context window.
         // 200 K tokens × ~4 chars/token ≈ 800 K chars → 160 K is well within range.
-        assert!(
-            MAX_DIFF_CHARS < 400_000,
-            "MAX_DIFF_CHARS must remain well below the 200 K-token context window"
-        );
+        const {
+            assert!(
+                MAX_DIFF_CHARS < 400_000,
+                "MAX_DIFF_CHARS must remain well below the 200 K-token context window"
+            )
+        };
     }
 
     /// Regression guard: `truncate_diff` must cut at a hunk boundary and not

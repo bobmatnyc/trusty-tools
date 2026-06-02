@@ -50,6 +50,7 @@ use crate::{
     pipeline::{
         context_gate::{GateOutcome, degraded_banner, preflight_context},
         diff::{DiffSource, extract_changed_files, extract_identifiers, load_diff, truncate_diff},
+        diff_analyzer::DiffAnalyzer, // noise filter (Stages A+B); #624
         grade::derive_verdict,
         output::{print_review_result, write_review_log},
         parser::parse_review_response,
@@ -227,7 +228,8 @@ pub async fn run_review(
         }
     }
 
-    // ── Step 3: load and truncate diff ────────────────────────────────────
+    // ── Step 3: load, filter (DiffAnalyzer Stages A+B), and truncate diff ─
+    // truncate_diff is the final safety net after noise filtering (REV-209).
     let raw_diff = match load_diff(&input.diff_source).await {
         Ok(d) => d,
         Err(e) => {
@@ -236,17 +238,15 @@ pub async fn run_review(
             return abort_dry(result, config, &input, &deps);
         }
     };
-    let diff = truncate_diff(&raw_diff);
-    debug!(diff_chars = diff.len(), "diff loaded and truncated");
+    let filtered = DiffAnalyzer::default().analyze(&raw_diff).await;
+    let max = crate::config::constants::MAX_DIFF_CHARS;
+    let diff = truncate_diff(&filtered.render_for_prompt(max));
+    debug!(orig = raw_diff.len(), filt = diff.len(), "diff filtered");
 
     // ── Step 4: extract identifiers for context retrieval ─────────────────
     let identifiers = extract_identifiers(&diff, 8);
     let changed_files = extract_changed_files(&diff);
-    debug!(
-        identifiers = ?identifiers,
-        changed_files_count = changed_files.len(),
-        "extracted identifiers from diff"
-    );
+    debug!(ids = ?identifiers, files = changed_files.len(), "extracted identifiers from diff");
 
     // ── Step 4b: required-context gate (#590) ─────────────────────────────
     // trusty-search AND trusty-analyze are REQUIRED by default.  If either is
