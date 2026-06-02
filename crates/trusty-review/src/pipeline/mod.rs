@@ -20,6 +20,7 @@
 //!
 //! Test: each submodule carries its own unit tests.
 
+pub mod context_gate;
 pub mod diff;
 pub mod grade;
 pub mod output;
@@ -33,6 +34,7 @@ pub mod verify;
 pub mod verify_liveness;
 pub mod verify_prompt;
 
+pub use context_gate::{GateOutcome, degraded_banner, preflight_context};
 pub use diff::DiffSource;
 pub use grade::derive_verdict;
 pub use output::{log_json_path, print_review_result, write_review_log};

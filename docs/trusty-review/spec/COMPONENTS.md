@@ -20,16 +20,38 @@
 | `prompt.rs` | `reviewer_system_prompt()`, `build_review_prompt()`, `ReviewContext`, `ReviewPrMeta` |
 | `parser.rs` | `parse_review_response() -> ParsedReview` — verdict token extraction + `Finding` JSON block parsing from LLM response body |
 | `output.rs` | `write_review_log()` (filesystem JSON + Markdown), `print_review_result()` (stdout), `log_json_path()` |
+| `context_gate.rs` | `preflight_context()`, `GateOutcome`, `degraded_banner()` — required-context gate (#590); see §1.1 |
 | `runner.rs` | `ReviewDeps`, `ReviewInput`, `run_review()` — top-level orchestration loop |
 
 **Pipeline stages (implemented):**
 
 1. Diff fetch or local-file read → truncation to `MAX_DIFF_CHARS`
-2. Prompt assembly (PR meta + diff + context)
-3. Reviewer LLM call (forced structured JSON output via Bedrock tool-use / OpenRouter)
-4. `parse_review_response()` → `ParsedReview` (verdict token + findings)
-5. `derive_verdict()` — severity floor + low-confidence override
-6. Log write + stdout print
+2. **Required-context gate** (`preflight_context()`, §1.1) — skip/degrade decision
+3. Prompt assembly (PR meta + diff + context)
+4. Reviewer LLM call (forced structured JSON output via Bedrock tool-use / OpenRouter)
+5. `parse_review_response()` → `ParsedReview` (verdict token + findings)
+6. `derive_verdict()` — severity floor + low-confidence override
+7. Log write + stdout print
+
+### 1.1 Required-context gate (`context_gate.rs`, #590)
+
+trusty-review's value IS the context it injects from trusty-search (code context)
+and trusty-analyze (static analysis); a context-free review gives false
+confidence and is actively harmful. Both daemons are therefore **REQUIRED by
+default**. Before context is gathered, `preflight_context(config, deps)` probes
+both concurrently and returns a `GateOutcome`:
+
+| `GateOutcome` | Trigger | Effect on `run_review` |
+|---------------|---------|------------------------|
+| `Proceed` | both reachable | normal authoritative review (`status = Completed`) |
+| `Skip(reason)` | a REQUIRED dep is unavailable | `ReviewResult { status: Skipped, verdict: Unknown, error: Some(reason), dry_run: true }`, returned **before** the LLM call and **without** finalize/post. The CLI/`run` path turns this into a non-zero exit (`anyhow::Err`); `serve`/`POST /review`/webhook return it as a structured skip result and never post. |
+| `Degraded(reason)` | a dep is unavailable but opted-out (`require_*=false`) | review proceeds but `status = Degraded`, a `⚠️ DEGRADED REVIEW — NOT AUTHORITATIVE` banner is prepended to `review_body`, and `error` records the reason |
+
+The gate lives in the shared pipeline, so it applies uniformly to PR review,
+local-diff review, and the forward-compatible commit-review (#589). Config knobs:
+`require_search` / `require_analyze` (default `true`), layered
+env (`TRUSTY_REVIEW_REQUIRE_SEARCH` / `TRUSTY_REVIEW_REQUIRE_ANALYZE`) over TOML
+`[context]` over default — see §7.1.
 
 **Pipeline stages (designed, not yet built in v0.1):**
 
@@ -184,11 +206,17 @@ Opus is intentionally excluded (not access-granted in the target account).
 - `confidence: f32` (clamped to [0.0, 1.0] at construction; defensive against malformed LLM JSON)
 - `effort: Effort`, `verified: Option<VerifyOutcome>`, `issue_eligible: bool`
 
+**`ReviewStatus`** (`src/models/status.rs`, #590) — review-run outcome class:
+- `Completed` (default) — ran with full required context; verdict is **authoritative**
+- `Skipped` — a REQUIRED context dep (trusty-search/trusty-analyze) was unavailable; **no real verdict** was produced (CLI exits non-zero; service never posts)
+- `Degraded` — opted-in context-free run; the verdict is present but explicitly **non-authoritative** (loudly labelled in `review_body`)
+- helpers: `is_authoritative()` (only `Completed`), `is_skipped()`
+
 **`ReviewResult`** — complete output of a PR review pass:
 - PR identity: `owner`, `repo`, `pr_number`, `pr_title`, `pr_url`
 - Review output: `review_body`, `verdict`, `findings: Vec<Finding>`
 - Telemetry: `model`, `input_tokens`, `output_tokens`, `cost_estimate_usd`, `latency_ms`
-- Pipeline flags: `dry_run` (default true), `posted` (default false), `timestamp`
+- Pipeline flags: `status: ReviewStatus` (default `Completed`, #590), `dry_run` (default true), `posted` (default false), `timestamp`
 - Dedup: `head_sha`
 - Versioning: `review_version` (currently `"tr-0.1"`)
 
@@ -256,7 +284,12 @@ JSON schema is additively versioned via `review_version`. Existing field names a
 | `/indexes/{id}/status` | GET | Chunk count + root path |
 | `/indexes/{id}/search` | POST | Hybrid BM25 + vector search |
 
-If unreachable, review is skipped (not silently approved) and a Slack service-failure notice is sent.
+**REQUIRED dependency (#590).** trusty-search is gated by the required-context
+preflight (`pipeline::context_gate`, §1.1): if `/health` is unreachable/unhealthy
+and `require_search=true` (default), the review is **skipped** (not silently
+approved) — `ReviewResult.status = Skipped`, an actionable error is set, no LLM
+call is made, and the review is never posted. With `require_search=false` the run
+proceeds **DEGRADED** and is loudly labelled non-authoritative.
 
 ### 6.3 trusty-analyze client (`integrations/analyze_client.rs`)
 
@@ -270,7 +303,17 @@ If unreachable, review is skipped (not silently approved) and a Slack service-fa
 | `complexity_hotspots()` | `GET /indexes/{id}/complexity_hotspots` | 180s | |
 | `smells()` | `GET /indexes/{id}/smells` | 180s | |
 
-All methods fail-open: connect/timeout/HTTP errors return empty defaults. trusty-analyze unavailability does not raise the service-unavailable path.
+**REQUIRED dependency (#590).** As of #590 trusty-analyze is no longer optional:
+the required-context preflight (`pipeline::context_gate`, §1.1) treats a failed
+`has_analysis()` two-step probe (or an absent analyze client) as "analyze
+unavailable". When `require_analyze=true` (default) that **skips** the review
+(`status = Skipped`, actionable error, never posted); when `require_analyze=false`
+the run proceeds **DEGRADED** and is loudly labelled non-authoritative.
+
+*Within* a review that has already passed the gate, the per-call enrichment
+fetches (`complexity_hotspots()`, `smells()`) still fail-soft to empty results so
+a transient per-query error degrades the context partially rather than re-deciding
+the hard require/skip policy.
 
 ### 6.4 JIRA client (designed, not in v0.1)
 
@@ -325,6 +368,16 @@ Config file location: `--config <path>` flag or `$XDG_CONFIG_HOME/trusty-review/
 | `TRUSTY_SEARCH_URL` | `http://localhost:7878` | trusty-search endpoint |
 | `TRUSTY_SEARCH_INDEX` | `main` | Index name |
 
+**Required-context settings (#590):**
+
+| Env var | Default | Effect |
+|---------|---------|--------|
+| `TRUSTY_REVIEW_REQUIRE_SEARCH` | `true` | When `true`, an unreachable trusty-search **skips** the review; `false` opts into a DEGRADED (non-authoritative) run |
+| `TRUSTY_REVIEW_REQUIRE_ANALYZE` | `true` | When `true`, an unreachable/not-ready trusty-analyze **skips** the review; `false` opts into a DEGRADED run |
+
+Truthiness: `false`/`0`/`no`/`off` relax; `true`/`1`/`yes`/`on` require;
+unrecognised values are ignored (fail-closed — keep the stricter value).
+
 **TOML config file model tables:**
 
 ```toml
@@ -345,6 +398,12 @@ temperature = 1.0
 provider = "openrouter"   # roles may mix providers
 model = "anthropic/claude-haiku-4.5"
 temperature = 0.0
+
+# Required-context gate (#590). Both default to true; set to false ONLY to opt
+# into an explicitly-labelled, non-authoritative DEGRADED review.
+[context]
+require_search = true
+require_analyze = true
 ```
 
 Bedrock model IDs in config are validated for the `us.` prefix at config-resolution time. Failure is surfaced at startup, not mid-review.

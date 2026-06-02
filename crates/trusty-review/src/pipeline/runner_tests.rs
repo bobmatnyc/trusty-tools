@@ -12,7 +12,8 @@ use crate::{
         analyze_client::{AnalyzeClientError, AnalyzeHealthResponse, ComplexityHotspot, Smell},
         search_client::{HealthResponse, IndexInfo, SearchClientError, SearchResult},
     },
-    llm::{LlmError, LlmRequest, LlmResponse},
+    llm::{LlmError, LlmProvider, LlmRequest, LlmResponse},
+    models::ReviewStatus,
 };
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -166,9 +167,12 @@ impl SearchClient for FailingSearch {
     }
 }
 
-// ── Fake analyze client ───────────────────────────────────────────────
+// ── Fake analyze clients ──────────────────────────────────────────────
+// `FakeAnalyze` reports NOT ready (the daemon is down); `ReadyAnalyze` reports
+// ready with empty enrichment.  The required-context gate (#590) treats a
+// not-ready / absent analyze client as "analyze unavailable", so positive tests
+// must inject `ReadyAnalyze` for the gate to pass.
 
-#[allow(dead_code)]
 struct FakeAnalyze;
 
 #[async_trait]
@@ -191,6 +195,46 @@ impl AnalyzeClient for FakeAnalyze {
 
     async fn smells(&self, _: &str) -> Result<Vec<Smell>, AnalyzeClientError> {
         Ok(vec![])
+    }
+}
+
+struct ReadyAnalyze;
+
+#[async_trait]
+impl AnalyzeClient for ReadyAnalyze {
+    async fn health(&self) -> Result<AnalyzeHealthResponse, AnalyzeClientError> {
+        Ok(AnalyzeHealthResponse {
+            status: "ok".to_string(),
+            search_reachable: true,
+        })
+    }
+
+    async fn has_analysis(&self, _: &str) -> bool {
+        true
+    }
+
+    async fn complexity_hotspots(
+        &self,
+        _: &str,
+        _: Option<u32>,
+    ) -> Result<Vec<ComplexityHotspot>, AnalyzeClientError> {
+        Ok(vec![])
+    }
+
+    async fn smells(&self, _: &str) -> Result<Vec<Smell>, AnalyzeClientError> {
+        Ok(vec![])
+    }
+}
+
+/// Build deps with healthy search + ready analyze so the required-context gate
+/// (#590) passes.  Positive tests use this to exercise the post-gate pipeline.
+fn ready_deps(llm: Arc<dyn LlmProvider>, verifier: Option<Arc<dyn LlmProvider>>) -> ReviewDeps {
+    ReviewDeps {
+        llm,
+        verifier,
+        search: Arc::new(FakeSearch),
+        analyze: Some(Arc::new(ReadyAnalyze)),
+        dedup: None,
     }
 }
 
@@ -225,13 +269,7 @@ async fn run_review_with_fake_provider_approves() {
         run_mode: RunMode::Cli,
         allow_posting: false,
     };
-    let deps = ReviewDeps {
-        llm: Arc::new(FakeLlm::approves()),
-        verifier: None,
-        search: Arc::new(FakeSearch),
-        analyze: None,
-        dedup: None,
-    };
+    let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
 
     let result = run_review(&config, input, deps).await;
     assert_eq!(result.verdict, Verdict::Approve);
@@ -239,6 +277,11 @@ async fn run_review_with_fake_provider_approves() {
         result.error.is_none(),
         "no error expected: {:?}",
         result.error
+    );
+    assert_eq!(
+        result.status,
+        ReviewStatus::Completed,
+        "both deps healthy → authoritative Completed status"
     );
     assert!(result.dry_run, "MVP must always be dry-run");
     assert_eq!(result.findings.len(), 0);
@@ -259,13 +302,7 @@ async fn run_review_request_changes_parsed_correctly() {
         run_mode: RunMode::Cli,
         allow_posting: false,
     };
-    let deps = ReviewDeps {
-        llm: Arc::new(FakeLlm::request_changes()),
-        verifier: None,
-        search: Arc::new(FakeSearch),
-        analyze: None,
-        dedup: None,
-    };
+    let deps = ready_deps(Arc::new(FakeLlm::request_changes()), None);
 
     let result = run_review(&config, input, deps).await;
     assert_eq!(result.verdict, Verdict::RequestChanges);
@@ -286,13 +323,7 @@ async fn run_review_fail_safe_on_llm_error() {
         run_mode: RunMode::Cli,
         allow_posting: false,
     };
-    let deps = ReviewDeps {
-        llm: Arc::new(FakeLlm::errors("simulated transport error")),
-        verifier: None,
-        search: Arc::new(FakeSearch),
-        analyze: None,
-        dedup: None,
-    };
+    let deps = ready_deps(Arc::new(FakeLlm::errors("simulated transport error")), None);
 
     let result = run_review(&config, input, deps).await;
     // Fail-safe: verdict must be APPROVE on LLM error (spec REV-130).
@@ -307,10 +338,64 @@ async fn run_review_fail_safe_on_llm_error() {
     );
 }
 
+/// REQUIRED-CONTEXT GATE (#590): when trusty-search is unreachable and required
+/// (the default), the review is SKIPPED loudly — NOT a silent APPROVE.
+///
+/// Why: a review without code context gives false confidence; the old
+/// graceful-degrade behaviour (which this test replaces) was actively harmful.
+/// What: a failing search + default `require_search=true` must yield
+/// `status = Skipped`, an actionable error, and NO LLM-derived APPROVE.
 #[tokio::test]
-async fn run_review_search_failure_does_not_block() {
+async fn run_review_search_down_skips_when_required() {
     let (source, _tmp) = local_diff_source("+fn x() {}\n");
-    let config = default_config();
+    let config = default_config(); // require_search defaults true
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+    };
+    let deps = ReviewDeps {
+        llm: Arc::new(FakeLlm::approves()), // would APPROVE if ever consulted
+        verifier: None,
+        search: Arc::new(FailingSearch), // search is down
+        analyze: Some(Arc::new(ReadyAnalyze)),
+        dedup: None,
+    };
+
+    let result = run_review(&config, input, deps).await;
+    assert_eq!(
+        result.status,
+        ReviewStatus::Skipped,
+        "search down + required must SKIP, not silently APPROVE"
+    );
+    assert!(!result.posted, "a skipped review must never be posted live");
+    assert!(result.dry_run, "a skipped review is dry-run");
+    let err = result.error.expect("skip must set an actionable error");
+    assert!(
+        err.contains("trusty-search"),
+        "error must name the dep: {err}"
+    );
+    assert!(
+        err.contains("start"),
+        "error must be actionable (how to fix): {err}"
+    );
+    assert_ne!(
+        result.verdict,
+        Verdict::Approve,
+        "a skip must not masquerade as APPROVE"
+    );
+}
+
+/// REQUIRED-CONTEXT GATE (#590): trusty-analyze unreachable + required (default)
+/// also SKIPS the review.
+#[tokio::test]
+async fn run_review_analyze_down_skips_when_required() {
+    let (source, _tmp) = local_diff_source("+fn x() {}\n");
+    let config = default_config(); // require_analyze defaults true
     let input = ReviewInput {
         diff_source: source,
         reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
@@ -323,17 +408,98 @@ async fn run_review_search_failure_does_not_block() {
     let deps = ReviewDeps {
         llm: Arc::new(FakeLlm::approves()),
         verifier: None,
-        search: Arc::new(FailingSearch), // search is down
-        analyze: None,
+        search: Arc::new(FakeSearch),         // search healthy
+        analyze: Some(Arc::new(FakeAnalyze)), // analyze not ready
         dedup: None,
     };
 
     let result = run_review(&config, input, deps).await;
-    // Review must still complete even if search is unavailable.
+    assert_eq!(
+        result.status,
+        ReviewStatus::Skipped,
+        "analyze down + required must SKIP"
+    );
+    let err = result.error.expect("skip must set an actionable error");
+    assert!(
+        err.contains("trusty-analyze"),
+        "error must name the dep: {err}"
+    );
+}
+
+/// OPT-IN DEGRADED MODE (#590): with `require_search=false`, a down search no
+/// longer skips — the review proceeds but is tagged DEGRADED / non-authoritative
+/// and the rendered body carries a loud warning banner.
+#[tokio::test]
+async fn run_review_search_down_degraded_when_optout() {
+    let (source, _tmp) = local_diff_source("+fn x() {}\n");
+    let mut config = default_config();
+    config.context.require_search = false; // explicit opt-out
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+    };
+    let deps = ReviewDeps {
+        llm: Arc::new(FakeLlm::approves()),
+        verifier: None,
+        search: Arc::new(FailingSearch), // search down, but opted out
+        analyze: Some(Arc::new(ReadyAnalyze)),
+        dedup: None,
+    };
+
+    let result = run_review(&config, input, deps).await;
+    assert_eq!(
+        result.status,
+        ReviewStatus::Degraded,
+        "opted-out + search down must PROCEED but be tagged Degraded"
+    );
+    assert!(
+        !result.status.is_authoritative(),
+        "a degraded review must not be authoritative"
+    );
+    assert!(
+        result.review_body.contains("NOT AUTHORITATIVE"),
+        "degraded body must carry a loud banner: {:?}",
+        result.review_body
+    );
+    let err = result
+        .error
+        .expect("degraded run must record a non-authoritative reason");
+    assert!(err.contains("degraded"), "reason must say degraded: {err}");
+}
+
+/// REGRESSION GUARD (#590): both deps healthy → a normal, authoritative review.
+#[tokio::test]
+async fn run_review_both_healthy_completes_authoritative() {
+    let (source, _tmp) = local_diff_source("+fn x() {}\n");
+    let config = default_config();
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+    };
+    let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
+
+    let result = run_review(&config, input, deps).await;
+    assert_eq!(result.status, ReviewStatus::Completed);
+    assert!(result.status.is_authoritative());
     assert_eq!(result.verdict, Verdict::Approve);
     assert!(
         result.error.is_none(),
-        "search failure must not set error field"
+        "healthy run sets no error: {:?}",
+        result.error
+    );
+    assert!(
+        !result.review_body.contains("NOT AUTHORITATIVE"),
+        "authoritative review must not carry the degraded banner"
     );
 }
 
@@ -353,13 +519,7 @@ async fn run_review_local_diff_skips_github() {
         run_mode: RunMode::Cli,
         allow_posting: false,
     };
-    let deps = ReviewDeps {
-        llm: Arc::new(FakeLlm::approves()),
-        verifier: None,
-        search: Arc::new(FakeSearch),
-        analyze: None,
-        dedup: None,
-    };
+    let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
 
     let result = run_review(&config, input, deps).await;
     assert_eq!(result.owner, "local");
@@ -414,13 +574,7 @@ async fn run_review_local_diff_is_dry_run_and_not_posted() {
         run_mode: RunMode::Serve,
         allow_posting: true,
     };
-    let deps = ReviewDeps {
-        llm: Arc::new(FakeLlm::approves()),
-        verifier: None,
-        search: Arc::new(FakeSearch),
-        analyze: None,
-        dedup: None,
-    };
+    let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
 
     let result = run_review(&config, input, deps).await;
     assert!(
@@ -447,13 +601,7 @@ async fn run_review_writes_dry_run_log_on_log_only_path() {
         run_mode: RunMode::Cli,
         allow_posting: false,
     };
-    let deps = ReviewDeps {
-        llm: Arc::new(FakeLlm::approves()),
-        verifier: None,
-        search: Arc::new(FakeSearch),
-        analyze: None,
-        dedup: None,
-    };
+    let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
 
     let _result = run_review(&config, input, deps).await;
     let json_count = std::fs::read_dir(dir.path())
@@ -483,15 +631,12 @@ async fn run_review_verification_refutes_and_relaxes_verdict() {
         run_mode: RunMode::Cli,
         allow_posting: false,
     };
-    let deps = ReviewDeps {
-        llm: Arc::new(FakeLlm::request_changes()), // 1 medium finding → REQUEST_CHANGES
-        verifier: Some(Arc::new(FakeVerifier {
+    let deps = ready_deps(
+        Arc::new(FakeLlm::request_changes()), // 1 medium finding → REQUEST_CHANGES
+        Some(Arc::new(FakeVerifier {
             judgment: "REFUTED",
         })),
-        search: Arc::new(FakeSearch),
-        analyze: None,
-        dedup: None,
-    };
+    );
 
     let result = run_review(&config, input, deps).await;
     assert_eq!(
@@ -521,15 +666,12 @@ async fn run_review_verification_confirms_and_preserves_verdict() {
         run_mode: RunMode::Cli,
         allow_posting: false,
     };
-    let deps = ReviewDeps {
-        llm: Arc::new(FakeLlm::request_changes()),
-        verifier: Some(Arc::new(FakeVerifier {
+    let deps = ready_deps(
+        Arc::new(FakeLlm::request_changes()),
+        Some(Arc::new(FakeVerifier {
             judgment: "CONFIRMED",
         })),
-        search: Arc::new(FakeSearch),
-        analyze: None,
-        dedup: None,
-    };
+    );
 
     let result = run_review(&config, input, deps).await;
     assert_eq!(
@@ -555,16 +697,13 @@ async fn run_review_verification_disabled_skips_round() {
         run_mode: RunMode::Cli,
         allow_posting: false,
     };
-    let deps = ReviewDeps {
-        llm: Arc::new(FakeLlm::request_changes()),
-        // A REFUTED verifier is wired in but must NOT be consulted when disabled.
-        verifier: Some(Arc::new(FakeVerifier {
+    // A REFUTED verifier is wired in but must NOT be consulted when disabled.
+    let deps = ready_deps(
+        Arc::new(FakeLlm::request_changes()),
+        Some(Arc::new(FakeVerifier {
             judgment: "REFUTED",
         })),
-        search: Arc::new(FakeSearch),
-        analyze: None,
-        dedup: None,
-    };
+    );
 
     let result = run_review(&config, input, deps).await;
     assert_eq!(

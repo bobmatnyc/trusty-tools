@@ -14,9 +14,11 @@
 //! module; `ReviewConfig` env-loading is covered by `test_config_from_env`.
 
 pub mod constants;
+pub mod context;
 pub mod role_models;
 pub mod verification;
 
+pub use context::{ContextConfig, ContextFileConfig};
 pub use role_models::{
     FileModels, RoleCliOverrides, RoleConfig, RoleConfigOverride, RoleEnv, RoleModels,
 };
@@ -79,6 +81,8 @@ struct TomlFile {
     models: FileModels,
     #[serde(default)]
     verification: VerificationFileConfig,
+    #[serde(default)]
+    context: ContextFileConfig,
 }
 
 /// Global service configuration for trusty-review.
@@ -157,6 +161,12 @@ pub struct ReviewConfig {
     // ── Verification round (Phase 2, #583) ─────────────────────────────────
     /// Resolved verification-round settings (`enabled`, `liveness_check`).
     pub verification: VerificationConfig,
+
+    // ── Required-context gate (#590) ───────────────────────────────────────
+    /// Resolved required-context settings (`require_search`, `require_analyze`).
+    /// Both default to `true`: a missing dependency skips the review rather than
+    /// degrading to a context-free verdict.
+    pub context: ContextConfig,
 }
 
 impl ReviewConfig {
@@ -179,10 +189,12 @@ impl ReviewConfig {
         let toml_file = load_toml_file(config_path);
         let file_models = toml_file.as_ref().map(|f| f.models.clone());
         let file_verification = toml_file.as_ref().map(|f| f.verification.clone());
+        let file_context = toml_file.as_ref().map(|f| f.context.clone());
 
         let env = RoleEnv::from_env();
         let role_models = RoleModels::resolve(cli_overrides, &env, file_models.as_ref());
         let verification = VerificationConfig::from_env_and_file(file_verification.as_ref());
+        let context = ContextConfig::from_env_and_file(file_context.as_ref());
 
         let dry_run = std::env::var("PR_INTELLIGENCE_DRY_RUN")
             .map(|v| v.to_lowercase() != "false")
@@ -229,6 +241,7 @@ impl ReviewConfig {
                 .unwrap_or_else(|| "trusty-review[bot]".to_string()),
             live_review_requesters: load_live_review_requesters(),
             verification,
+            context,
         }
     }
 

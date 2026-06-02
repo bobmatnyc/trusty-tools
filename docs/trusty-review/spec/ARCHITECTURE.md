@@ -26,9 +26,10 @@ trusty-review (crates/trusty-review/)
   ├── Profile pipeline      — profile:: (longitudinal contributor profiling)
   └── Integrations          — GitHub client, search/analyze HTTP clients
 
-Workspace dependencies (HTTP, required for full reviews)
+Workspace dependencies (HTTP, REQUIRED for a real review — #590)
   ├── trusty-search :7878   — REQUIRED (code context retrieval)
-  └── trusty-analyze :7879  — OPTIONAL (static analysis; graceful degradation)
+  └── trusty-analyze :7879  — REQUIRED (static analysis context)
+      (either unreachable ⇒ review SKIPPED loudly; opt-out ⇒ DEGRADED, labelled)
 
 External services
   ├── AWS Bedrock           — Converse API (default provider)
@@ -120,14 +121,59 @@ crates/trusty-review/
 
 | Dependency | Status | Behavior when absent |
 |------------|--------|----------------------|
-| **trusty-search** (:7878) | **REQUIRED** | Review is skipped; Slack service-failure notice sent |
-| **AWS Bedrock** or **OpenRouter** | **REQUIRED** (one active) | Review is skipped; Slack service-failure notice sent |
-| **trusty-analyze** (:7879) | **OPTIONAL** | Pipeline proceeds with empty static-analysis context |
+| **trusty-search** (:7878) | **REQUIRED** (#590) | Review **SKIPPED** loudly (`status = Skipped`, actionable error, never posted) unless `require_search=false` → **DEGRADED** |
+| **trusty-analyze** (:7879) | **REQUIRED** (#590) | Review **SKIPPED** loudly unless `require_analyze=false` → **DEGRADED** |
+| **AWS Bedrock** or **OpenRouter** | **REQUIRED** (one active) | Fail-safe verdict; review not posted live |
 | **JIRA REST** | optional; fail-open | Empty ticket context |
 | **Slack** | optional; fail-open | Notifications silently dropped |
 | **GitHub App auth** | optional; PAT fallback | PAT used if App not configured |
 
-All optional dependency failures are fail-open and never block a review.
+Optional dependency failures (JIRA, Slack, GitHub App auth) are fail-open and
+never block a review. The two **context** dependencies are the exception: they
+are fail-**closed** by default (see §3.1.1).
+
+#### 3.1.1 Required-context gate (#590)
+
+trusty-review's value proposition IS the context it injects from trusty-search
+(code context) and trusty-analyze (static analysis). A review produced WITHOUT
+that context is actively harmful — it gives false confidence from a verdict that
+never saw the project. **A lower-quality / context-free review is NOT acceptable.**
+
+Therefore, before any review subject (PR review, local-diff review, and the
+forward-compatible commit-review of #589) gathers context, the shared pipeline
+runs a **required-context preflight gate** (`pipeline::context_gate`):
+
+1. It probes `trusty-search` health and `trusty-analyze` readiness concurrently.
+2. If **either** REQUIRED dependency is unreachable/unhealthy:
+   - **CLI/`run` path** → `run_review` returns a `ReviewResult` tagged
+     `status = Skipped` with an **actionable** error
+     (e.g. *"trusty-search unreachable at <url> — start it (`trusty-search
+     start`); refusing to review without code context"*). The CLI then exits
+     **non-zero**. No LLM call is made; the review is **never posted**.
+   - **`serve` / `POST /review` / webhook path** → the same skip `ReviewResult`
+     is returned as the structured response. A skipped review is **never posted**
+     to the PR (it is not an APPROVE).
+3. A skip is a **distinct outcome**, never an APPROVE.
+
+**Opt-in degraded mode.** An operator may explicitly set `require_search=false`
+and/or `require_analyze=false` (config layering below). When a dependency that has
+been opted-out is unavailable, the run **proceeds** but is **loudly labelled
+non-authoritative**: `status = Degraded`, a `> ⚠️ DEGRADED REVIEW — NOT
+AUTHORITATIVE` banner is prepended to the rendered review body, and the `error`
+field records the degraded reason. A degraded review must never silently
+masquerade as an authoritative verdict.
+
+**Configuration layering** (env over TOML over default, matching the rest of the
+config module):
+
+| Knob | Default | CLI/env | TOML |
+|------|---------|---------|------|
+| `require_search` | `true` | `TRUSTY_REVIEW_REQUIRE_SEARCH` | `[context] require_search` |
+| `require_analyze` | `true` | `TRUSTY_REVIEW_REQUIRE_ANALYZE` | `[context] require_analyze` |
+
+For the daemonless CI commit-review case (#589), this means CI must have
+trusty-search **and** trusty-analyze reachable, or the run fails — which is the
+intended contract: the context is the point.
 
 ### 3.2 trusty-search and trusty-analyze: HTTP only
 
@@ -209,8 +255,8 @@ The one alarm that breaks the "always proceed" posture: a `verification_model_er
 ```
 [GitHub] --webhook--> [trusty-review serve :7880]
                              |
-                    [trusty-search :7878]  (REQUIRED)
-                    [trusty-analyze :7879] (OPTIONAL)
+                    [trusty-search :7878]  (REQUIRED — #590)
+                    [trusty-analyze :7879] (REQUIRED — #590)
                     [AWS Bedrock / OpenRouter]
                     [redb dedup claim]
                     [filesystem review log]
@@ -265,7 +311,8 @@ The `review_requested`-only webhook gate holds throughout, independent of dry-ru
 | `dedup_skip` | counter | Review skipped due to dedup (in-flight/claim/head-SHA). |
 | `verdict_distribution` | counter by verdict | Every completed review. A spike to ~100% APPROVE is the symptom of an inactive verifier model (L1). |
 | `LLMInputTokens` / `LLMOutputTokens` | gauge/counter | Per LLM call, tagged by role. |
-| `analyze_degraded` | counter | trusty-analyze unavailable → empty static analysis. |
+| `context_gate_skip` | counter + WARN | A REQUIRED context dep (trusty-search/trusty-analyze) was unavailable → review skipped (#590). |
+| `context_gate_degraded` | counter + WARN | A context dep was unavailable but opted-out → review proceeded DEGRADED (non-authoritative). |
 
 Metric backend is deployment-specific (CloudWatch in production; structured stderr logs locally). The crate emits through a thin abstraction so the backend is swappable.
 
@@ -284,7 +331,7 @@ Metric backend is deployment-specific (CloudWatch in production; structured stde
 | **L7** Calibration tracker created duplicates | Upsert-per-PR: one tracker issue per PR, updated in place |
 | **L8** Premature live posting | Dry-run default ON; staged rollout discipline |
 | **L9** Suppression blocked a review | All suppression and config lookups fail-open |
-| **L10** trusty-analyze down blocked reviews | Optional dependency; degrades silently to empty context |
+| **L10** Context-free reviews give false confidence | **trusty-search AND trusty-analyze are REQUIRED (#590)**; either down ⇒ review skipped loudly (`status = Skipped`, never posted); opt-out ⇒ DEGRADED, loudly labelled non-authoritative. (Supersedes the earlier "analyze is optional; degrade silently" stance.) |
 | **L11** Bot force-pushed to infra repo | Hard-coded non-configurable push firewall (`GH_ALLOW_PUSH = false`) |
 | **L12** Fixture/i18n churn buried real changes | Noisy-file collapse + diff Stage A/B/C filtering |
 | **L13** PR deleted a permission check; orphaned producer missed | Cross-reference blast-radius search in parallel context retrieval |

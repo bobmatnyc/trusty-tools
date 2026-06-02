@@ -5,10 +5,19 @@
 //! into a single `run_review` function that the CLI `run`/`compare` commands and
 //! the webhook service all call.
 //!
-//! What: `run_review` runs the pipeline (diff → context → LLM → parse → grade)
-//! then either posts a GitHub PR review comment (live) or writes a dry-run log,
-//! gated by the trigger decision and the SHA-keyed dedup store.  Returns a
-//! `ReviewResult` even on pipeline errors (fail-safe APPROVE/UNKNOWN).
+//! What: `run_review` runs the pipeline (diff → required-context gate → context
+//! → LLM → parse → grade) then either posts a GitHub PR review comment (live) or
+//! writes a dry-run log, gated by the trigger decision and the SHA-keyed dedup
+//! store.  Returns a `ReviewResult` even on pipeline errors (fail-safe
+//! APPROVE/UNKNOWN).
+//!
+//! Required-context contract (#590): trusty-search AND trusty-analyze are
+//! REQUIRED by default.  Before gathering context, `preflight_context` probes
+//! both; if either is unreachable the review is SKIPPED loudly
+//! (`status = Skipped`, no LLM call, never posted) rather than degrading to a
+//! context-free, false-confidence verdict.  An operator may opt a dependency out
+//! (`config.context.require_*`), in which case the run proceeds but is tagged
+//! `Degraded` and loudly labelled non-authoritative.
 //!
 //! Phase 2 (#583) adds the per-finding verification round between verdict parse
 //! and finalisation: candidate findings are confirmed/refuted by the verifier
@@ -37,8 +46,9 @@ use crate::{
         search_client::SearchClient,
     },
     llm::LlmProvider,
-    models::{ReviewResult, Verdict},
+    models::{ReviewResult, ReviewStatus, Verdict},
     pipeline::{
+        context_gate::{GateOutcome, degraded_banner, preflight_context},
         diff::{DiffSource, extract_changed_files, extract_identifiers, load_diff, truncate_diff},
         grade::derive_verdict,
         output::{print_review_result, write_review_log},
@@ -104,9 +114,14 @@ pub struct ReviewDeps {
     /// verification round (e.g. tests that don't exercise it, or when
     /// `config.verification.enabled` is false the caller passes `None`).
     pub verifier: Option<Arc<dyn LlmProvider>>,
-    /// Code search client (required; gracefully degrades on error).
+    /// Code search client.  REQUIRED by default (#590): the required-context
+    /// gate (`preflight_context`) skips the review when search is unreachable
+    /// unless the operator opted out via `config.context.require_search = false`.
     pub search: Arc<dyn SearchClient>,
-    /// Static analysis client (optional; None skips the analyze step).
+    /// Static analysis client.  REQUIRED by default (#590): the gate skips the
+    /// review when analyze is unreachable/absent unless the operator opted out
+    /// via `config.context.require_analyze = false`.  `None` is treated as
+    /// "analyze unavailable" by the gate (a hard skip when required).
     pub analyze: Option<Arc<dyn AnalyzeClient>>,
     /// SHA-keyed dedup store (Phase 1, #582).  `None` disables dedup (e.g.
     /// `compare`, `--local-diff`, or tests that don't exercise it).  Store
@@ -120,10 +135,14 @@ pub struct ReviewDeps {
 ///
 /// Why: the single entry point used by both the CLI `run` and `compare`
 /// subcommands; ensures both take the same code path.
-/// What: loads the diff, gathers context, builds the prompt, calls the LLM,
-/// parses the response, and writes the log.  Returns a `ReviewResult` even
-/// on pipeline errors (fail-safe: verdict = APPROVE with an `error` field set).
-/// Test: `run_review_with_fake_provider_approves`, `run_review_fail_safe_on_llm_error`.
+/// What: loads the diff, runs the required-context gate (#590), gathers context,
+/// builds the prompt, calls the LLM, parses the response, and writes the log.
+/// When a required context dependency is unavailable the review is SKIPPED (no
+/// LLM call, `status = Skipped`).  Returns a `ReviewResult` even on pipeline
+/// errors (fail-safe: verdict = APPROVE with an `error` field set).
+/// Test: `run_review_with_fake_provider_approves`, `run_review_fail_safe_on_llm_error`,
+/// `run_review_search_down_skips_when_required`,
+/// `run_review_search_down_degraded_when_optout`.
 pub async fn run_review(
     config: &ReviewConfig,
     input: ReviewInput,
@@ -228,6 +247,30 @@ pub async fn run_review(
         "extracted identifiers from diff"
     );
 
+    // ── Step 4b: required-context gate (#590) ─────────────────────────────
+    // trusty-search AND trusty-analyze are REQUIRED by default.  If either is
+    // unreachable, SKIP the review loudly (no LLM call, no post) instead of
+    // producing a context-free, false-confidence verdict.  An operator who
+    // explicitly opted a dependency out gets a DEGRADED, non-authoritative run.
+    let degraded_reason: Option<String> = match preflight_context(config, &deps).await {
+        GateOutcome::Proceed => None,
+        GateOutcome::Skip(reason) => {
+            warn!("required-context gate: skipping review — {reason}");
+            result.status = ReviewStatus::Skipped;
+            result.verdict = Verdict::Unknown;
+            result.error = Some(reason);
+            result.dry_run = true;
+            // Return WITHOUT finalize_review so a skipped review is never posted.
+            // Release any dedup claim so a retry (once the dep recovers) can re-run.
+            return abort_dry(result, config, &input, &deps);
+        }
+        GateOutcome::Degraded(reason) => {
+            warn!("required-context gate: proceeding DEGRADED (non-authoritative) — {reason}");
+            result.status = ReviewStatus::Degraded;
+            Some(reason)
+        }
+    };
+
     // ── Step 5: gather context in parallel ────────────────────────────────
     let context = gather_context(config, &deps, &identifiers, &changed_files, &pr_meta.title).await;
 
@@ -261,6 +304,18 @@ pub async fn run_review(
         "LLM reviewer call complete"
     );
     result.apply_llm_response(&llm_resp);
+
+    // ── Degraded labelling (#590) ─────────────────────────────────────────
+    // When an operator opted out of a required dependency, the review still ran
+    // but MUST be loudly labelled non-authoritative: prepend a banner to the
+    // rendered body and set the `error` reason so no consumer mistakes it for an
+    // authoritative verdict.  `status` was already set to Degraded by the gate.
+    if let Some(reason) = degraded_reason.as_ref() {
+        result.review_body = format!("{}{}", degraded_banner(reason), result.review_body);
+        if result.error.is_none() {
+            result.error = Some(format!("degraded (non-authoritative): {reason}"));
+        }
+    }
 
     // ── Step 7: parse verdict + findings ──────────────────────────────────
     let parsed = parse_review_response(&llm_resp.text);

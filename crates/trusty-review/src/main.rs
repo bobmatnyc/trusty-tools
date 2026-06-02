@@ -292,6 +292,19 @@ async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
         eprintln!("\nLog written to: {}", log_path.display());
     }
 
+    // Required-context gate (#590): a skipped review produced NO real verdict
+    // because trusty-search / trusty-analyze was unavailable.  Exit non-zero with
+    // the actionable reason so callers (and CI) never mistake a skip for a pass.
+    if result.status.is_skipped() {
+        anyhow::bail!(
+            "review skipped — {}",
+            result
+                .error
+                .as_deref()
+                .unwrap_or("required code-context dependency unavailable")
+        );
+    }
+
     Ok(())
 }
 

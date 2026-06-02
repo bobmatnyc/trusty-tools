@@ -11,6 +11,9 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod status;
+pub use status::ReviewStatus;
+
 use crate::config::constants::REVIEW_VERSION;
 
 // ─── Verdict ──────────────────────────────────────────────────────────────────
@@ -250,6 +253,10 @@ pub struct ReviewResult {
     pub latency_ms: u64,
 
     // ── Pipeline flags ────────────────────────────────────────────────────
+    /// Run status — `Completed` (authoritative), `Skipped` (required context
+    /// dep down; no verdict), or `Degraded` (opted-in context-free, #590).
+    #[serde(default)]
+    pub status: ReviewStatus,
     /// True if this is a dry run (no GitHub comment posted).
     pub dry_run: bool,
     /// True if the review comment was posted to GitHub.
@@ -299,6 +306,7 @@ impl ReviewResult {
             output_tokens: 0,
             cost_estimate_usd: 0.0,
             latency_ms: 0,
+            status: ReviewStatus::Completed,
             dry_run: true,
             posted: false,
             // Simple ISO-8601 without the chrono dep for Stage 1.

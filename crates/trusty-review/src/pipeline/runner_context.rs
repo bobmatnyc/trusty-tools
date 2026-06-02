@@ -5,9 +5,12 @@
 //! keeps that file under the 500-line cap and lets the retrieval logic be read
 //! and tested in isolation.
 //! What: exposes `gather_context`, which runs the search query and the analyze
-//! probe concurrently and folds both (each degrading gracefully on error) into a
-//! `ReviewContext`.
-//! Test: `gather_context_degrades_gracefully_on_search_failure` (runner tests).
+//! probe concurrently and folds both into a `ReviewContext`.  This runs only
+//! AFTER the required-context gate (`pipeline::context_gate`, #590) has confirmed
+//! the dependencies are reachable (or the operator opted into a degraded run), so
+//! a transient per-query error here degrades gracefully to a partial context
+//! rather than re-deciding the hard require/skip policy.
+//! Test: covered transitively by `runner_tests` (gate + gather paths).
 
 use tracing::{debug, warn};
 
