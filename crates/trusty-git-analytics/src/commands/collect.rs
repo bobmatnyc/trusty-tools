@@ -12,10 +12,12 @@ use crate::CollectArgs;
 ///
 /// Why: centralises all Stage 1 orchestration: config overrides, pipeline
 /// construction, dry-run shadow DB, fetch summary printing, and exit-code
-/// signalling for `--strict-fetch`.
+/// signalling for fetch failures.
 /// What: applies CLI overrides (repository filter, since/until dates) on top
 /// of the loaded YAML config, runs [`CollectionPipeline::run`], then prints
-/// the fetch summary and collection totals to stderr/stdout.
+/// the fetch summary and collection totals to stderr/stdout.  Since tga
+/// 2.6.0, fetch failures are fatal by default (exit non-zero) unless
+/// `--allow-stale` or `--no-fetch` is passed.
 /// Test: integration test in `tests/integration_test.rs`; fetch summary paths
 /// are unit-tested in `commands::collect::tests`.
 pub async fn run(config: Config, db: &mut Database, args: CollectArgs) -> anyhow::Result<()> {
@@ -60,14 +62,28 @@ pub async fn run(config: Config, db: &mut Database, args: CollectArgs) -> anyhow
         }
     }
 
-    // Issue #334: emit a visible warning when --no-fetch suppresses the
-    // pre-walk fetch so users know the data may be stale.
+    // Emit a visible warning when --no-fetch or --allow-stale suppresses
+    // error-on-failure so users know the data may be stale.
     if args.no_fetch {
         eprintln!(
             "WARNING: --no-fetch active. Local clones may be stale. \
              tga collect will walk only what's already in your local object store."
         );
+    } else if args.allow_stale {
+        eprintln!(
+            "WARNING: --allow-stale active. If any remote is unreachable, \
+             tga collect will continue on stale local refs without erroring. \
+             Data may be out of date."
+        );
     }
+
+    // Since tga 2.6.0 fetch failures are fatal by default (strict_fetch=true).
+    // --allow-stale reverts to the old best-effort behaviour.
+    // --no-fetch skips the fetch entirely (also disables strict checking since
+    // there is nothing to check).
+    // The legacy --strict-fetch flag is kept for backwards compatibility with
+    // CI scripts that set it explicitly; when present it reinforces the default.
+    let effective_strict = !args.allow_stale && !args.no_fetch;
 
     let pipeline = CollectionPipeline::new(cfg)
         .with_force(args.force)
@@ -76,7 +92,7 @@ pub async fn run(config: Config, db: &mut Database, args: CollectArgs) -> anyhow
         .with_skip_tag_reachability(args.skip_tag_reachability)
         .with_head_only(args.head_only)
         .with_branches(args.branch)
-        .with_strict_fetch(args.strict_fetch)
+        .with_strict_fetch(effective_strict)
         .with_verbose_fetch(args.verbose_fetch);
 
     // In dry-run mode, redirect all writes to an ephemeral in-memory
@@ -123,18 +139,35 @@ pub async fn run(config: Config, db: &mut Database, args: CollectArgs) -> anyhow
     // Issue #334: print per-repo fetch summary to stderr.
     print_fetch_summary(&stats.fetch_outcomes, args.verbose_fetch);
 
-    // Issue #334: honour --strict-fetch — exit non-zero if any fetch failed.
-    if args.strict_fetch {
+    // Since tga 2.6.0, fetch failures are fatal by default (strict_fetch=true
+    // unless --allow-stale or --no-fetch was passed).  Collect all failures
+    // and report them together so one bad repo does not mask others.
+    if pipeline.strict_fetch() {
         let failures: Vec<_> = stats
             .fetch_outcomes
             .iter()
             .filter(|f| matches!(f.outcome, FetchOutcome::Failed { .. }))
             .collect();
         if !failures.is_empty() {
-            anyhow::bail!(
-                "--strict-fetch: {} repo(s) had fetch failures (see fetch summary above)",
+            let mut msg = format!(
+                "{} repo(s) could not be fetched from their remotes — \
+                 refusing to analyze stale data (use --allow-stale to override):\n",
                 failures.len()
             );
+            for f in &failures {
+                if let FetchOutcome::Failed { error, remote } = &f.outcome {
+                    msg.push_str(&format!(
+                        "  - {} (remote: {}): {}\n",
+                        f.repo, remote, error
+                    ));
+                }
+            }
+            msg.push_str(
+                "\nFix: ensure SSH agent has a loaded key, or set GITHUB_TOKEN/GH_TOKEN, \
+                 or configure your git credential helper. \
+                 Run `git fetch origin` in the failing repo to diagnose."
+            );
+            anyhow::bail!("{}", msg.trim_end());
         }
     }
 
@@ -149,6 +182,16 @@ pub async fn run(config: Config, db: &mut Database, args: CollectArgs) -> anyhow
 /// header; prints a failure detail line per failed repo; prints success lines
 /// only when `verbose` is true.
 /// Test: unit tests below cover the table construction logic.
+///
+/// Public alias so `commands::analyze` can call it without duplicating the
+/// formatting logic.
+pub fn print_fetch_summary_pub(
+    outcomes: &[tga::collect::collector::PerRepoFetch],
+    verbose: bool,
+) {
+    print_fetch_summary(outcomes, verbose);
+}
+
 fn print_fetch_summary(outcomes: &[tga::collect::collector::PerRepoFetch], verbose: bool) {
     if outcomes.is_empty() {
         return;

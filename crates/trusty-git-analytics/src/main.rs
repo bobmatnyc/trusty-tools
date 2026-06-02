@@ -207,6 +207,11 @@ pub struct AnalyzeArgs {
     /// Skip the pre-walk `git fetch` step (use only local refs).
     #[arg(long, default_value_t = false)]
     pub no_fetch: bool,
+    /// Allow collection to continue on stale local refs when a fetch fails.
+    ///
+    /// See `tga collect --help` for the full description.
+    #[arg(long, default_value_t = false)]
+    pub allow_stale: bool,
     /// Perform all steps except writing to the database (log intent only).
     #[arg(long, default_value_t = false)]
     pub dry_run: bool,
@@ -308,9 +313,26 @@ pub struct CollectArgs {
     /// fetch will be silently absent from the results.
     #[arg(long, default_value_t = false)]
     pub no_fetch: bool,
-    /// Exit non-zero if any repository's fetch failed (default: failures are
-    /// visible in the summary but collection still exits 0). Useful for CI.
+    /// Allow collection to continue on stale local refs when a fetch fails.
+    ///
+    /// By default (since tga 2.6.0) a fetch failure for any repository is a
+    /// hard error: tga collect exits non-zero and reports which repos could
+    /// not be updated. This prevents silent stale-data analytics (e.g. the
+    /// duetto monolith mirror was 2.5 weeks behind before this was caught).
+    ///
+    /// Pass --allow-stale to revert to the old behaviour: fetch failures are
+    /// printed in the summary but collection proceeds on whatever local refs
+    /// are already present and the command exits 0. Useful for offline
+    /// development, air-gapped CI, or repos intentionally without remotes.
+    ///
+    /// Note: --no-fetch skips the fetch entirely (implies --allow-stale).
     #[arg(long, default_value_t = false)]
+    pub allow_stale: bool,
+    /// Exit non-zero if any repository's fetch failed.
+    ///
+    /// This is the default behaviour since tga 2.6.0. The flag is retained
+    /// for scripts that set it explicitly; use --allow-stale to opt out.
+    #[arg(long, default_value_t = false, hide = true)]
     pub strict_fetch: bool,
     /// Print a success line for every fetched repo in the fetch summary
     /// (default: only failures are printed). [default: false]

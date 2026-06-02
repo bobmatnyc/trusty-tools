@@ -1,6 +1,7 @@
 //! `tga analyze` — run the full pipeline (collect → classify → report).
 
 use tga::classify::ClassificationPipeline;
+use tga::collect::collector::FetchOutcome;
 use tga::collect::CollectionPipeline;
 use tga::core::config::Config;
 use tga::core::db::Database;
@@ -62,11 +63,61 @@ pub async fn run(config: Config, db: &mut Database, args: AnalyzeArgs) -> anyhow
 
     if !args.skip_collect {
         tracing::info!("stage 1: collect");
+        // Since tga 2.6.0 fetch failures are fatal by default; --allow-stale
+        // or --no-fetch reverts to the old best-effort behaviour.
+        let effective_strict = !args.allow_stale && !args.no_fetch;
+        if args.no_fetch {
+            eprintln!(
+                "WARNING: --no-fetch active. Local clones may be stale. \
+                 tga analyze will walk only what's already in your local object store."
+            );
+        } else if args.allow_stale {
+            eprintln!(
+                "WARNING: --allow-stale active. Fetch failures will not abort the run."
+            );
+        }
         let collect_stats = CollectionPipeline::new(cfg.clone())
             .with_force(args.force)
             .with_no_fetch(args.no_fetch)
+            .with_strict_fetch(effective_strict)
             .run(db)
             .await?;
+        // Print fetch summary to stderr before the commit count so fetch
+        // failures are visible even when the counts look normal.
+        crate::commands::collect::print_fetch_summary_pub(
+            &collect_stats.fetch_outcomes,
+            false,
+        );
+
+        // Since tga 2.6.0, fetch failures abort the pipeline by default.
+        if effective_strict {
+            let failures: Vec<_> = collect_stats
+                .fetch_outcomes
+                .iter()
+                .filter(|f| matches!(f.outcome, FetchOutcome::Failed { .. }))
+                .collect();
+            if !failures.is_empty() {
+                let mut msg = format!(
+                    "{} repo(s) could not be fetched — refusing to analyze stale data \
+                     (use --allow-stale to override):\n",
+                    failures.len()
+                );
+                for f in &failures {
+                    if let FetchOutcome::Failed { error, remote } = &f.outcome {
+                        msg.push_str(&format!(
+                            "  - {} (remote: {}): {}\n",
+                            f.repo, remote, error
+                        ));
+                    }
+                }
+                msg.push_str(
+                    "\nFix: ensure SSH agent has a loaded key, or set GITHUB_TOKEN/GH_TOKEN, \
+                     or configure your git credential helper."
+                );
+                anyhow::bail!("{}", msg.trim_end());
+            }
+        }
+
         println!(
             "Collected {} commits from {} authors ({} weeks collected, {} weeks skipped)",
             collect_stats.commits_collected,

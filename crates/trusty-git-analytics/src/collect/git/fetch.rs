@@ -2,17 +2,24 @@
 //!
 //! Performs a non-interactive `git fetch` against a configured remote so
 //! the local clone has the latest commits before [`super::GitCollector`]
-//! walks history. The fetch is best-effort: authentication or network
-//! failures are logged and downgraded to `Ok(())` so collection can
-//! proceed on whatever the local clone already has.
+//! walks history.  Since tga 2.6.0 the fetch is **required** by default:
+//! if the remote cannot be reached, `tga collect` errors rather than
+//! silently walking stale local refs.  Pass `--allow-stale` to revert to
+//! the old best-effort behaviour.
 //!
-//! ## Authentication strategy
+//! ## Authentication strategy (tried in order)
 //!
-//! - SSH agent (if running and has a usable key)
-//! - SSH key files at `~/.ssh/id_ed25519` then `~/.ssh/id_rsa`
-//! - **No interactive prompts** — SSH BatchMode-equivalent. We never ask
-//!   for a password or passphrase, because the binary is typically run
-//!   in CI / background tasks where stdin is unavailable.
+//! 1. SSH agent (if running and has a usable key)
+//! 2. SSH key files at `~/.ssh/id_ed25519` then `~/.ssh/id_rsa`
+//! 3. HTTPS token from `GITHUB_TOKEN` or `GH_TOKEN` environment variable
+//!    (used as the password with username `x-access-token` — the standard
+//!    GitHub Personal-Access-Token / GitHub App token form)
+//! 4. Git credential helper (falls through to the platform keychain, e.g.
+//!    `osxkeychain`, `store`, or `manager-core`)
+//!
+//! **No interactive prompts** — SSH BatchMode-equivalent. We never ask
+//! for a password or passphrase, because the binary is typically run
+//! in CI / background tasks where stdin is unavailable.
 
 use std::path::PathBuf;
 
@@ -133,12 +140,15 @@ pub fn fetch_and_record(repo: &Repository, repo_name: &str, remote_name: &str) -
 ///
 /// Tries, in order:
 /// 1. SSH agent (if `allowed_types` permits)
-/// 2. `~/.ssh/id_ed25519`
-/// 3. `~/.ssh/id_rsa`
-/// 4. Default credential helper (HTTPS)
+/// 2. `~/.ssh/id_ed25519` then `~/.ssh/id_rsa`
+/// 3. `GITHUB_TOKEN` / `GH_TOKEN` env var as an HTTPS PAT
+///    (username `x-access-token`, password = token value)
+/// 4. Default credential helper (falls through to platform keychain:
+///    `osxkeychain`, `store`, `manager-core`, etc.)
 ///
-/// Returns a git2 error if none of these succeed — the caller will turn
-/// that into a logged warning and continue.
+/// Returns a git2 error if none of these succeed — the caller records it
+/// as a `FetchOutcome::Failed` and (by default since 2.6.0) exits
+/// non-zero so stale data is never silently served.
 fn non_interactive_credentials(
     _url: &str,
     username_from_url: Option<&str>,
@@ -167,6 +177,26 @@ fn non_interactive_credentials(
         }
     }
 
+    // 3. HTTPS token from GITHUB_TOKEN / GH_TOKEN env var.
+    //    These are the standard names used by GitHub Actions, gh CLI,
+    //    and most CI systems.  The token is used as the password with
+    //    the canonical `x-access-token` username that GitHub expects for
+    //    PAT / GitHub App token authentication over HTTPS.
+    if allowed_types.contains(CredentialType::USER_PASS_PLAINTEXT) {
+        let token = std::env::var("GITHUB_TOKEN")
+            .or_else(|_| std::env::var("GH_TOKEN"))
+            .ok();
+        if let Some(tok) = token {
+            if let Ok(cred) = Cred::userpass_plaintext("x-access-token", &tok) {
+                return Ok(cred);
+            }
+        }
+    }
+
+    // 4. Default credential helper (platform keychain, credential store,
+    //    etc.).  This covers the common macOS / Windows / Linux cases where
+    //    the user has already authenticated via `gh auth login` or
+    //    `git credential approve`.
     if allowed_types.contains(CredentialType::DEFAULT) {
         if let Ok(cred) = Cred::default() {
             return Ok(cred);
@@ -174,7 +204,9 @@ fn non_interactive_credentials(
     }
 
     Err(git2::Error::from_str(
-        "no non-interactive credentials available (tried SSH agent, ~/.ssh/id_ed25519, ~/.ssh/id_rsa)",
+        "no non-interactive credentials available \
+         (tried SSH agent, ~/.ssh/id_ed25519, ~/.ssh/id_rsa, \
+         GITHUB_TOKEN/GH_TOKEN env, platform credential helper)",
     ))
 }
 
