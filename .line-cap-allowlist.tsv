@@ -36,7 +36,8 @@ crates/trusty-common/src/lib.rs	1467
 crates/trusty-common/src/memory_core/analytics.rs	860
 crates/trusty-common/src/memory_core/dream.rs	1817
 crates/trusty-common/src/memory_core/git.rs	568
-crates/trusty-common/src/memory_core/retrieval.rs	2201
+crates/trusty-common/src/memory_core/retrieval/mod.rs	1446
+crates/trusty-common/src/memory_core/retrieval/tests.rs	1038
 crates/trusty-common/src/memory_core/semantic_consolidation.rs	968
 crates/trusty-common/src/memory_core/store/chat_sessions.rs	930
 crates/trusty-common/src/memory_core/store/hnsw_store.rs	766
