@@ -146,7 +146,8 @@ trusty-tools/               # workspace root
 │   ├── trusty-git-analytics/ # developer productivity analytics (tga)
 │   ├── open-mpm/            # MPM orchestration platform (publish=false)
 │   ├── open-mpm-agent-api/  # open-mpm agent API types (publish=false)
-│   └── open-mpm-local/      # open-mpm local execution (publish=false)
+│   ├── open-mpm-local/      # open-mpm local execution (publish=false)
+│   └── trusty-code/         # per-project Claude-Code-compatible MPM orchestration harness (bin: tcode); Phase 0 scaffold; extraction tracked in #587
 └── .gitignore
 ```
 
@@ -481,6 +482,7 @@ When the user (or any agent) refers to a crate by abbreviation, resolve it using
 | `ta` | trusty-analyze | `-p trusty-analyze` | `crates/trusty-analyze/` |
 | `mpm` | trusty-mpm | `-p trusty-mpm` | `crates/trusty-mpm/` |
 | `open-mpm` | open-mpm | `-p open-mpm` | `crates/open-mpm/` |
+| `tcode` | trusty-code | `-p trusty-code` | `crates/trusty-code/` |
 
 These abbreviations apply everywhere: ticket descriptions, build commands, references in conversation. Always expand before running `cargo` commands.
 
