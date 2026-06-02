@@ -22,9 +22,10 @@ use tracing::{debug, info};
 
 use crate::{
     config::ReviewConfig,
-    integrations::{analyze_client::AnalyzeClient, search_client::SearchClient},
+    integrations::{analyze_client::AnalyzeClient, github::RunMode, search_client::SearchClient},
     llm::LlmProvider,
-    pipeline::{DiffSource, ReviewDeps, ReviewInput, run_review},
+    pipeline::{DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review},
+    store::{DedupStore, InFlightRegistry},
 };
 
 // ─── AppState ─────────────────────────────────────────────────────────────────
@@ -50,19 +51,44 @@ pub struct AppState {
     pub in_flight: Arc<AtomicU64>,
     /// Last pipeline error, if any (populated by webhook background tasks).
     pub last_error: Arc<std::sync::Mutex<Option<String>>>,
+    /// SHA-keyed durable dedup store (Phase 1, #582).  `None` disables dedup.
+    pub dedup: Option<Arc<DedupStore>>,
+    /// In-process in-flight guard registry (Phase 1, #582) — drops duplicate
+    /// concurrent webhook deliveries for the same PR / head SHA.
+    pub in_flight_registry: InFlightRegistry,
 }
 
 impl AppState {
-    /// Construct `AppState` with all injected dependencies.
+    /// Construct `AppState` with the core deps and no dedup store.
     ///
-    /// Why: the primary constructor used by the `serve` CLI subcommand.
-    /// What: wraps the provided deps in `Arc` counters and an empty error cell.
-    /// Test: used by integration tests that provide fake deps.
+    /// Why: the common constructor for tests and single-process deployments that
+    /// do not need cross-process dedup; the in-flight registry is always created
+    /// so concurrent webhook deliveries are still de-duplicated in-process.
+    /// What: wraps the provided deps in `Arc` counters, an empty error cell, a
+    /// `None` dedup store, and a fresh `InFlightRegistry`.
+    /// Test: used by handler/webhook unit tests that provide fake deps.
     pub fn new(
         config: ReviewConfig,
         llm: Arc<dyn LlmProvider>,
         search: Arc<dyn SearchClient>,
         analyze: Option<Arc<dyn AnalyzeClient>>,
+    ) -> Self {
+        Self::with_dedup(config, llm, search, analyze, None)
+    }
+
+    /// Construct `AppState` including an optional durable dedup store.
+    ///
+    /// Why: the deployed `serve` daemon opens a redb-backed dedup store under the
+    /// log dir so retries / restarts do not re-review the same head SHA; this
+    /// constructor threads it into the shared state.
+    /// What: like `new`, but takes the dedup store explicitly.
+    /// Test: exercised by the `serve` path; unit tests use `new` (dedup `None`).
+    pub fn with_dedup(
+        config: ReviewConfig,
+        llm: Arc<dyn LlmProvider>,
+        search: Arc<dyn SearchClient>,
+        analyze: Option<Arc<dyn AnalyzeClient>>,
+        dedup: Option<Arc<DedupStore>>,
     ) -> Self {
         Self {
             config,
@@ -71,6 +97,8 @@ impl AppState {
             analyze,
             in_flight: Arc::new(AtomicU64::new(0)),
             last_error: Arc::new(std::sync::Mutex::new(None)),
+            dedup,
+            in_flight_registry: InFlightRegistry::new(),
         }
     }
 }
@@ -260,6 +288,8 @@ pub async fn handle_review(
         llm: Arc::clone(&state.llm),
         search: Arc::clone(&state.search),
         analyze: state.analyze.clone(),
+        // POST /review is a synchronous inspection endpoint — no dedup needed.
+        dedup: None,
     };
 
     let input = ReviewInput {
@@ -267,6 +297,11 @@ pub async fn handle_review(
         reviewer_model,
         write_log: false, // HTTP callers don't write logs by default.
         print_result: false,
+        // POST /review never posts to GitHub — it always returns the result to
+        // the caller (push firewall + dry-run remain in force).
+        trigger: TriggerDecision::ForceDryRun,
+        run_mode: RunMode::Serve,
+        allow_posting: false,
     };
 
     state.in_flight.fetch_add(1, Ordering::Relaxed);

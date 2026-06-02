@@ -12,7 +12,9 @@
 //!  - `prompt`  — prompt construction for the reviewer role.
 //!  - `parser`  — verdict + findings parsing from LLM responses.
 //!  - `output`  — log file writing and STDOUT rendering.
+//!  - `post`    — post-or-log finalisation decision (Phase 1, #582).
 //!  - `runner`  — top-level orchestration loop (`run_review`).
+//!  - `trigger` — live vs dry-run trigger classification (REV-703).
 //!
 //! Test: each submodule carries its own unit tests.
 
@@ -20,12 +22,16 @@ pub mod diff;
 pub mod grade;
 pub mod output;
 pub mod parser;
+pub mod post;
 pub mod prompt;
 pub mod runner;
+pub mod trigger;
 
 pub use diff::DiffSource;
 pub use grade::derive_verdict;
 pub use output::{log_json_path, print_review_result, write_review_log};
 pub use parser::{ParsedReview, parse_review_response};
+pub use post::{FinalizeAction, PostContext, decide_action, finalize_review};
 pub use prompt::{ReviewContext, ReviewPrMeta, build_review_prompt, reviewer_system_prompt};
 pub use runner::{ReviewDeps, ReviewInput, run_review};
+pub use trigger::{TriggerDecision, classify_review_request, effective_dry_run};

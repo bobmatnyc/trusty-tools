@@ -10,13 +10,17 @@
 //! as a detached `tokio::task` only for `review_requested` actions.
 //! All other event types receive 200 with no dispatch (spec REV-702).
 //!
-//! Deferred (MVP scope):
-//!  - Author exclusion (spec REV-704 / `PR_INTELLIGENCE_EXCLUDED_AUTHORS`)
-//!  - In-process dedup guard (spec REV-705 / REV-101a)
-//!  - GitHub comment posting (still dry-run only)
+//! Phase 1 (#582) wires in:
+//!  - Trigger classification (REV-703): the requested reviewer decides
+//!    force-live vs force-dry-run, threaded into the runner.
+//!  - In-process in-flight guard (REV-705): a PR-level guard at dispatch and a
+//!    SHA-level guard inside the spawned task drop duplicate concurrent runs.
+//!  - Durable dedup store + live posting: handled inside the runner.
 //!
-//! Test: `webhook_rejects_bad_hmac`, `webhook_ignores_non_review_requested`,
-//! `webhook_dispatches_review_requested`.
+//! Deferred to later phases:
+//!  - Author exclusion (Phase 3 / #584; `PR_INTELLIGENCE_EXCLUDED_AUTHORS`)
+//!
+//! Test: see `webhook_tests.rs` (split out to keep this file under the cap).
 
 use std::sync::Arc;
 
@@ -31,8 +35,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::{
-    integrations::github::webhook::verify_webhook_signature,
-    pipeline::{DiffSource, ReviewDeps, ReviewInput, run_review},
+    integrations::github::{RunMode, webhook::verify_webhook_signature},
+    pipeline::{DiffSource, ReviewDeps, ReviewInput, classify_review_request, run_review},
     service::handlers::AppState,
 };
 
@@ -181,22 +185,73 @@ pub async fn handle_github_webhook(
     let pr_number = event.pull_request.number;
     let owner = event.repository.owner.login.clone();
     let repo = event.repository.name.clone();
+    let head_sha = event
+        .pull_request
+        .head
+        .as_ref()
+        .map(|h| h.sha.clone())
+        .unwrap_or_default();
+
+    // ── Step 5: trigger classification (REV-703) ──────────────────────────
+    // The requested reviewer decides force-live vs force-dry-run.
+    let requested_login = event.requested_reviewer.as_ref().map(|r| r.login.as_str());
+    let trigger = classify_review_request(&state.config, requested_login);
 
     info!(
         pr = pr_number,
         owner = %owner,
         repo = %repo,
-        reviewer = ?event.requested_reviewer.as_ref().map(|r| &r.login),
+        reviewer = ?requested_login,
+        trigger = ?trigger,
         "webhook dispatching review for review_requested"
     );
 
-    // MVP deferred: author exclusion (spec REV-704) and in-process dedup
-    // (spec REV-705 / REV-101a) are not implemented.  These will be added
-    // in Stage 5 along with comment posting.
+    // ── Step 6: PR-level in-flight guard (REV-705) ────────────────────────
+    // Claim the PR slot before spawning so two near-simultaneous deliveries for
+    // the same PR do not both run.  The guard is moved into the spawned task so
+    // it is held for the lifetime of the review and released (RAII) on completion.
+    let pr_guard = match state
+        .in_flight_registry
+        .try_acquire_pr(&owner, &repo, pr_number)
+    {
+        Some(g) => g,
+        None => {
+            debug!(
+                pr = pr_number,
+                "a review for this PR is already in flight — dropping duplicate delivery"
+            );
+            return (StatusCode::OK, "already in flight").into_response();
+        }
+    };
 
-    // ── Step 5: spawn background review task ─────────────────────────────
+    // Author exclusion (Phase 3 / #584) is intentionally not implemented here.
+
+    // ── Step 7: spawn background review task ─────────────────────────────
     let state_clone = state.clone();
     tokio::spawn(async move {
+        // Hold the PR guard for the whole task; it releases on drop.
+        let _pr_guard = pr_guard;
+
+        // SHA-level guard: drop a duplicate run for the exact same head commit.
+        let _sha_guard = if head_sha.is_empty() {
+            None
+        } else {
+            match state_clone
+                .in_flight_registry
+                .try_acquire_sha(&owner, &repo, pr_number, &head_sha)
+            {
+                Some(g) => Some(g),
+                None => {
+                    debug!(
+                        pr = pr_number,
+                        head_sha = %head_sha,
+                        "a review for this head SHA is already in flight — skipping"
+                    );
+                    return;
+                }
+            }
+        };
+
         state_clone
             .in_flight
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -205,6 +260,7 @@ pub async fn handle_github_webhook(
             llm: Arc::clone(&state_clone.llm),
             search: Arc::clone(&state_clone.search),
             analyze: state_clone.analyze.clone(),
+            dedup: state_clone.dedup.clone(),
         };
 
         let reviewer_model = state_clone.config.role_models.reviewer.model.clone();
@@ -218,6 +274,11 @@ pub async fn handle_github_webhook(
             reviewer_model,
             write_log: true, // background webhook tasks write the log
             print_result: false,
+            // Service mode: App auth; the trigger decides live vs dry; posting is
+            // permitted (the trigger / config still gate whether it actually posts).
+            trigger,
+            run_mode: RunMode::Serve,
+            allow_posting: true,
         };
 
         let result = run_review(&state_clone.config, input, deps).await;
@@ -234,6 +295,7 @@ pub async fn handle_github_webhook(
             info!(
                 pr = pr_number,
                 verdict = %result.verdict,
+                posted = result.posted,
                 findings = result.findings.len(),
                 "webhook pipeline complete"
             );
@@ -254,228 +316,5 @@ pub async fn handle_github_webhook(
 // ─── Unit tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        integrations::search_client::{
-            HealthResponse as SearchHealth, IndexInfo, SearchClient, SearchClientError,
-            SearchResult,
-        },
-        llm::{LlmError, LlmProvider, LlmRequest, LlmResponse},
-        service::handlers::AppState,
-    };
-    use async_trait::async_trait;
-    use axum::{
-        body::Body,
-        http::{Method, Request},
-    };
-    use tower::ServiceExt as _;
-
-    // ── Fake LLM ─────────────────────────────────────────────────────────────
-
-    struct FakeLlm;
-
-    #[async_trait]
-    impl LlmProvider for FakeLlm {
-        fn name(&self) -> &str {
-            "fake"
-        }
-
-        async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
-            Ok(LlmResponse {
-                text: r#"LGTM.
-```json
-{"verdict":"APPROVE","summary":"ok","findings":[]}
-```"#
-                    .to_string(),
-                model: req.model.clone(),
-                input_tokens: 10,
-                output_tokens: 5,
-                latency_ms: 1,
-                cost_usd: 0.0,
-            })
-        }
-    }
-
-    // ── Fake search ───────────────────────────────────────────────────────────
-
-    struct FakeSearch;
-
-    #[async_trait]
-    impl SearchClient for FakeSearch {
-        async fn health(&self) -> Result<SearchHealth, SearchClientError> {
-            Ok(SearchHealth {
-                status: "ok".to_string(),
-                embedder: true,
-            })
-        }
-
-        async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
-            Ok(vec![])
-        }
-
-        async fn search(
-            &self,
-            _: &str,
-            _: &str,
-            _: Option<u32>,
-        ) -> Result<Vec<SearchResult>, SearchClientError> {
-            Ok(vec![])
-        }
-    }
-
-    // ── HMAC helper ───────────────────────────────────────────────────────────
-
-    fn make_sig(secret: &str, body: &[u8]) -> String {
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(body);
-        format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
-    }
-
-    fn test_state_with_secret(secret: &str) -> AppState {
-        let mut config = crate::config::ReviewConfig::load(None);
-        config.github_webhook_secret = secret.to_string();
-        AppState::new(config, Arc::new(FakeLlm), Arc::new(FakeSearch), None)
-    }
-
-    // ── Payload helper ────────────────────────────────────────────────────────
-
-    fn review_requested_payload(action: &str) -> Vec<u8> {
-        serde_json::json!({
-            "action": action,
-            "pull_request": {
-                "number": 42,
-                "user": { "login": "alice" },
-                "head": { "sha": "abc123" }
-            },
-            "repository": {
-                "name": "backend",
-                "owner": { "login": "acme" }
-            },
-            "requested_reviewer": { "login": "trusty-review[bot]" }
-        })
-        .to_string()
-        .into_bytes()
-    }
-
-    // ── Tests ─────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn webhook_payload_deserialises() {
-        let payload = review_requested_payload("review_requested");
-        let event: PullRequestEvent = serde_json::from_slice(&payload).unwrap();
-        assert_eq!(event.action, "review_requested");
-        assert_eq!(event.pull_request.number, 42);
-        assert_eq!(event.repository.name, "backend");
-        assert_eq!(event.repository.owner.login, "acme");
-    }
-
-    #[tokio::test]
-    async fn webhook_rejects_bad_hmac() {
-        let secret = "test-secret"; // pragma: allowlist secret
-        let state = test_state_with_secret(secret);
-        let router = crate::service::build_router(state);
-        let payload = review_requested_payload("review_requested");
-
-        let request = Request::builder()
-            .method(Method::POST)
-            .uri("/pr/github/webhook")
-            .header("x-github-event", "pull_request")
-            .header("x-hub-signature-256", "sha256=badhex0000")
-            .header("content-type", "application/json")
-            .body(Body::from(payload))
-            .unwrap();
-
-        let response = router.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn webhook_rejects_missing_secret_config() {
-        // When GITHUB_WEBHOOK_SECRET is empty in config, all webhooks → 401.
-        let state = test_state_with_secret("");
-        let router = crate::service::build_router(state);
-        let payload = review_requested_payload("review_requested");
-
-        let request = Request::builder()
-            .method(Method::POST)
-            .uri("/pr/github/webhook")
-            .header("x-github-event", "pull_request")
-            .header("x-hub-signature-256", "sha256=anything")
-            .header("content-type", "application/json")
-            .body(Body::from(payload))
-            .unwrap();
-
-        let response = router.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn webhook_ignores_non_pull_request_event() {
-        let secret = "test-secret"; // pragma: allowlist secret
-        let state = test_state_with_secret(secret);
-        let router = crate::service::build_router(state);
-
-        let payload = br#"{"zen":"design for failure"}"#;
-        let sig = make_sig(secret, payload);
-
-        let request = Request::builder()
-            .method(Method::POST)
-            .uri("/pr/github/webhook")
-            .header("x-github-event", "ping") // not pull_request
-            .header("x-hub-signature-256", sig)
-            .header("content-type", "application/json")
-            .body(Body::from(payload.as_slice()))
-            .unwrap();
-
-        let response = router.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn webhook_ignores_non_review_requested_action() {
-        let secret = "test-secret"; // pragma: allowlist secret
-        let state = test_state_with_secret(secret);
-        let router = crate::service::build_router(state);
-
-        let payload = review_requested_payload("opened"); // not review_requested
-        let sig = make_sig(secret, &payload);
-
-        let request = Request::builder()
-            .method(Method::POST)
-            .uri("/pr/github/webhook")
-            .header("x-github-event", "pull_request")
-            .header("x-hub-signature-256", sig)
-            .header("content-type", "application/json")
-            .body(Body::from(payload))
-            .unwrap();
-
-        let response = router.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn webhook_accepts_review_requested_returns_202() {
-        let secret = "test-secret"; // pragma: allowlist secret
-        let state = test_state_with_secret(secret);
-        let router = crate::service::build_router(state);
-
-        let payload = review_requested_payload("review_requested");
-        let sig = make_sig(secret, &payload);
-
-        let request = Request::builder()
-            .method(Method::POST)
-            .uri("/pr/github/webhook")
-            .header("x-github-event", "pull_request")
-            .header("x-hub-signature-256", sig)
-            .header("content-type", "application/json")
-            .body(Body::from(payload))
-            .unwrap();
-
-        let response = router.oneshot(request).await.unwrap();
-        // 202 Accepted — pipeline spawned in background.
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-    }
-}
+#[path = "webhook_tests.rs"]
+mod tests;

@@ -52,6 +52,13 @@ tracing-subscriber  = { workspace = true }
 # ── Config / paths ─────────────────────────────────────────────────────────
 dirs         = { workspace = true }
 
+# ── Dedup + in-flight guards (Phase 1, #582) ───────────────────────────────
+# redb: embedded key-value store for the cross-process SHA-keyed dedup claim
+#       store (atomic insert-or-fail on (owner,repo,pr,head_sha)).
+# dashmap: lock-free concurrent map backing the in-process in-flight guards.
+redb         = { workspace = true }
+dashmap      = { workspace = true }
+
 # ── CLI (Stage 3) ──────────────────────────────────────────────────────────
 clap         = { workspace = true }
 

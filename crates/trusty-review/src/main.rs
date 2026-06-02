@@ -25,13 +25,13 @@ use trusty_review::{
     config::{ReviewConfig, RoleCliOverrides},
     integrations::{
         analyze_client::HttpAnalyzeClient,
-        github::{GithubClient, auth::resolve_token},
+        github::{AuthStrategy, GithubClient, RunMode},
         search_client::HttpSearchClient,
     },
     llm::build_provider,
     llm::models::COMPARE_CANDIDATE_MODELS,
     models::ReviewResult,
-    pipeline::{DiffSource, ReviewDeps, ReviewInput, log_json_path, run_review},
+    pipeline::{DiffSource, ReviewDeps, ReviewInput, TriggerDecision, log_json_path, run_review},
 };
 
 #[cfg(feature = "http-server")]
@@ -277,6 +277,11 @@ async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
         reviewer_model: reviewer_model.clone(),
         write_log: args.write_log,
         print_result: true,
+        // CLI `run` defers to the global dry_run flag (no trigger override);
+        // posting is permitted, so a non-dry config posts live via PAT/`gh` auth.
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: true,
     };
 
     let result = run_review(&config_with_overrides, input, deps).await;
@@ -337,6 +342,10 @@ async fn cmd_compare(config: ReviewConfig, args: CompareArgs) -> Result<()> {
             reviewer_model: model.clone(),
             write_log: false,    // compare mode never writes logs
             print_result: false, // we print the table ourselves
+            // compare is always dry-run and never posts (spec REV-714).
+            trigger: TriggerDecision::ForceDryRun,
+            run_mode: RunMode::Cli,
+            allow_posting: false,
         };
         eprint!("  Running {} ...", model);
         let start = std::time::Instant::now();
@@ -385,11 +394,27 @@ async fn cmd_serve(config: ReviewConfig, args: ServeArgs) -> Result<()> {
     let search = HttpSearchClient::from_config(&config);
     let analyze = HttpAnalyzeClient::from_config(&config);
 
-    let state = AppState::new(
+    // Open the durable SHA-keyed dedup store under the log dir (Phase 1, #582).
+    // A store-open failure is non-fatal: we log and run without cross-process
+    // dedup (the in-process in-flight guard still applies).
+    let dedup_path = config.log_dir.join("dedup.redb");
+    let dedup = match trusty_review::store::DedupStore::open(&dedup_path) {
+        Ok(store) => {
+            info!(path = %dedup_path.display(), "dedup store opened");
+            Some(Arc::new(store))
+        }
+        Err(e) => {
+            warn!(path = %dedup_path.display(), "failed to open dedup store (continuing without it): {e}");
+            None
+        }
+    };
+
+    let state = AppState::with_dedup(
         config.clone(),
         llm,
         Arc::new(search),
         Some(Arc::new(analyze)),
+        dedup,
     );
 
     let addr: SocketAddr = format!("{}:{}", args.bind, args.port)
@@ -486,10 +511,15 @@ async fn resolve_diff_source_run(config: &ReviewConfig, args: &RunArgs) -> Resul
         .context("PR number is required (or use --local-diff)")?;
 
     let client = GithubClient::new();
-    let token = resolve_token(&client, config, &owner).await.map_err(|e| {
-        warn!("GitHub token resolution failed: {e} — set GITHUB_TOKEN or GitHub App credentials");
-        anyhow::anyhow!("GitHub authentication failed: {e}")
-    })?;
+    let token = AuthStrategy::select(RunMode::Cli, None)
+        .resolve_token(&client, config, &owner)
+        .await
+        .map_err(|e| {
+            warn!(
+                "GitHub token resolution failed: {e} — set GITHUB_TOKEN/GH_TOKEN or run `gh auth login`"
+            );
+            anyhow::anyhow!("GitHub authentication failed: {e}")
+        })?;
 
     Ok(DiffSource::Github {
         owner,
@@ -528,7 +558,8 @@ async fn resolve_diff_source_compare(
         .context("PR number is required (or use --local-diff)")?;
 
     let client = GithubClient::new();
-    let token = resolve_token(&client, config, &owner)
+    let token = AuthStrategy::select(RunMode::Cli, None)
+        .resolve_token(&client, config, &owner)
         .await
         .map_err(|e| anyhow::anyhow!("GitHub authentication failed: {e}"))?;
 
@@ -565,6 +596,8 @@ async fn build_deps_async(
         llm,
         search: Arc::new(search),
         analyze: Some(Arc::new(analyze)),
+        // CLI runs do not use the durable dedup store (one-shot, no retries).
+        dedup: None,
     })
 }
 

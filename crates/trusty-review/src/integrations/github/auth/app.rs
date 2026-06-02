@@ -8,11 +8,14 @@
 //!
 //! What: `mint_app_jwt` signs a JWT with RS256 (iss=App ID, iat, exp=iat+600s);
 //! `exchange_installation_token` POSTs to GitHub's installation-token endpoint
-//! and returns the short-lived token string; `resolve_token` selects the
-//! correct installation by org-name (case-insensitive) or falls back to a PAT.
+//! and returns the short-lived token string; `resolve_app_token` selects the
+//! correct installation by org-name (case-insensitive) and exchanges a token.
+//! The run-mode strategy selection (App vs PAT/`gh`) lives in the parent
+//! `auth` module's `strategy` submodule — this file is App-only mechanics.
 //!
 //! Test: `jwt_claims_correctness` verifies iss/iat/exp without a network call;
-//! `resolve_token_pat_fallback` verifies PAT fallback when no App config is set.
+//! `resolve_app_token_no_installation_errors` covers the missing-installation
+//! path without a network call.
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
@@ -137,59 +140,52 @@ pub async fn exchange_installation_token(
     Ok(token_resp.token)
 }
 
-// ─── Multi-org token resolution ───────────────────────────────────────────────
+// ─── Multi-org App-token resolution ───────────────────────────────────────────
 
-/// Resolve the correct access token for a GitHub org owner.
+/// Resolve a GitHub App installation token for a specific org owner.
 ///
 /// Why: the bot may be installed in multiple orgs (e.g. `duettoresearch`,
 /// `hotstats`); the correct installation token is selected by org name.
-/// (spec REV-402)
-/// What: if App auth is configured (app_id + private_key + at least one
-/// installation), mints an App JWT and exchanges it for the installation token
-/// matching `owner` (case-insensitive).  Falls back to the PAT if no
-/// installation matches or if App auth is not configured.  Returns
-/// `Err(GithubError::MissingToken)` only if neither App auth nor PAT is
-/// available.
-/// Test: `resolve_token_pat_fallback` verifies the PAT path.
-pub async fn resolve_token(
+/// (spec REV-402).  This is the App-mode mechanism only — the run-mode
+/// strategy (App vs PAT/`gh`) is decided one layer up in `strategy.rs`.
+/// What: requires App credentials (`app_id` + `private_key`) and a matching
+/// installation for `owner` (case-insensitive); mints an App JWT and exchanges
+/// it for the installation token.  Returns `GithubError::Auth` when App
+/// credentials are absent and `GithubError::MissingToken` when no installation
+/// matches the owner (so the caller can surface a precise diagnostic).
+/// Test: `resolve_app_token_no_credentials_errors`,
+/// `resolve_app_token_no_installation_errors` (both network-free).
+pub async fn resolve_app_token(
     client: &GithubClient,
-    config: &crate::config::ReviewConfig,
+    app_id: Option<&str>,
+    private_key: Option<&str>,
+    installations: &[(String, u64)],
     owner: &str,
 ) -> Result<String, GithubError> {
-    // Try App auth if configured.
-    if let (Some(app_id), Some(private_key)) = (
-        config.github_app_id.as_deref(),
-        config.github_app_private_key.as_deref(),
-    ) {
-        // Find a matching installation by case-insensitive owner name.
-        let matching_id = config
-            .github_installations
-            .iter()
-            .find_map(|(inst_owner, inst_id)| {
-                if inst_owner.to_lowercase() == owner.to_lowercase() {
-                    Some(*inst_id)
-                } else {
-                    None
-                }
-            });
+    let (Some(app_id), Some(private_key)) = (app_id, private_key) else {
+        return Err(GithubError::Auth(
+            "GitHub App credentials (GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY) are required \
+             in service mode"
+                .to_string(),
+        ));
+    };
 
-        if let Some(installation_id) = matching_id {
-            let jwt = mint_app_jwt(app_id, private_key)?;
-            return exchange_installation_token(client, &jwt, installation_id).await;
+    // Find a matching installation by case-insensitive owner name.
+    let matching_id = installations.iter().find_map(|(inst_owner, inst_id)| {
+        if inst_owner.eq_ignore_ascii_case(owner) {
+            Some(*inst_id)
+        } else {
+            None
         }
+    });
 
-        // No installation matched — fall through to PAT.
-        tracing::debug!(
-            owner,
-            "no GitHub App installation found for owner; falling back to PAT"
-        );
-    }
-
-    // PAT fallback.
-    if config.github_token.is_empty() {
+    let Some(installation_id) = matching_id else {
+        tracing::warn!(owner, "no GitHub App installation configured for owner");
         return Err(GithubError::MissingToken);
-    }
-    Ok(config.github_token.clone())
+    };
+
+    let jwt = mint_app_jwt(app_id, private_key)?;
+    exchange_installation_token(client, &jwt, installation_id).await
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
@@ -289,33 +285,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_token_pat_fallback() {
-        // When no App config is provided, resolve_token falls back to the PAT.
-        use crate::config::ReviewConfig;
-        let mut config = ReviewConfig::load(None);
-        config.github_token = "ghp_test_token".to_string();
-        config.github_app_id = None;
-
+    async fn resolve_app_token_no_credentials_errors() {
+        // App mode without app_id/private_key must yield an Auth error
+        // (no network call is made).
         let client = GithubClient::new();
-        let token = resolve_token(&client, &config, "any-owner").await;
-        assert!(token.is_ok(), "PAT fallback should succeed: {token:?}");
-        assert_eq!(token.unwrap(), "ghp_test_token");
+        let result = resolve_app_token(&client, None, None, &[], "any-owner").await;
+        match result {
+            Err(GithubError::Auth(_)) => {}
+            other => panic!("expected Auth error when App creds missing, got {other:?}"),
+        }
     }
 
     #[tokio::test]
-    async fn resolve_token_missing_token_errors() {
-        // When neither App auth nor PAT is configured, expect MissingToken.
-        use crate::config::ReviewConfig;
-        let mut config = ReviewConfig::load(None);
-        config.github_token = String::new();
-        config.github_app_id = None;
-
+    async fn resolve_app_token_no_installation_errors() {
+        // App creds present but no installation matches the owner → MissingToken.
+        // mint_app_jwt runs but exchange is never reached (no match), so this is
+        // network-free.
         let client = GithubClient::new();
-        let result = resolve_token(&client, &config, "any-owner").await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            GithubError::MissingToken => {}
-            other => panic!("expected MissingToken, got {other:?}"),
+        let installs = vec![("otherorg".to_string(), 123_u64)];
+        let result = resolve_app_token(
+            &client,
+            Some("99999"),
+            Some(TEST_RSA_PEM),
+            &installs,
+            "acme",
+        )
+        .await;
+        match result {
+            Err(GithubError::MissingToken) => {}
+            other => panic!("expected MissingToken when no installation matches, got {other:?}"),
         }
     }
 }

@@ -23,8 +23,9 @@ pub use analyze_client::{
     HttpAnalyzeClient, Smell,
 };
 pub use github::{
-    GH_ALLOW_PUSH, GithubClient, GithubError, PrMetadata, PrRef, PrUser, assert_no_push_operation,
-    fetch_pr_diff, fetch_pr_metadata, mint_app_jwt, resolve_token, verify_webhook_signature,
+    AuthStrategy, GH_ALLOW_PUSH, GithubClient, GithubError, PostedReview, PrMetadata, PrRef,
+    PrUser, RunMode, assert_no_push_operation, fetch_pr_diff, fetch_pr_metadata, mint_app_jwt,
+    post_pr_review, resolve_token_for_mode, verify_webhook_signature,
 };
 pub use search_client::{
     HealthResponse, HttpSearchClient, IndexInfo, SearchClient, SearchClientError, SearchRequest,

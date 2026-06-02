@@ -14,11 +14,13 @@
 
 pub mod auth;
 pub mod firewall;
+pub mod posting;
 pub mod pr;
 pub mod webhook;
 
-pub use auth::{mint_app_jwt, resolve_token};
+pub use auth::{AuthStrategy, RunMode, mint_app_jwt, resolve_token_for_mode};
 pub use firewall::{GH_ALLOW_PUSH, assert_no_push_operation};
+pub use posting::{PostedReview, post_pr_review};
 pub use pr::{PrMetadata, PrRef, PrUser, fetch_pr_diff, fetch_pr_metadata};
 pub use webhook::verify_webhook_signature;
 

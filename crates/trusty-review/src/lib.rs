@@ -18,6 +18,11 @@ pub mod integrations;
 pub mod llm;
 pub mod models;
 pub mod pipeline;
+// Why: Phase 1 (#582) adds live posting, which needs a durable cross-process
+// dedup claim store (redb) and an in-process in-flight guard.  These storage
+// and concurrency concerns live in their own module, separate from the
+// pipeline.  Always compiled — no feature gate (no axum/HTTP dependency).
+pub mod store;
 // Why: longitudinal contributor profiling (epic #558) requires a dedicated
 // module for data models, identity resolution, period assembly, and diff
 // sampling.  It is always compiled (no feature gate) because these types are

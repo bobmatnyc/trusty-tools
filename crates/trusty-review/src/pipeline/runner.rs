@@ -1,23 +1,26 @@
 //! Review pipeline runner — the top-level orchestration loop.
 //!
 //! Why: wires together diff loading, context retrieval, prompt construction,
-//! LLM call, parsing, and output writing into a single `run_review` function
-//! that both the CLI `run` and `compare` commands can call.
+//! LLM call, parsing, and (Phase 1, #582) the live-post-or-dry-run-log decision
+//! into a single `run_review` function that the CLI `run`/`compare` commands and
+//! the webhook service all call.
 //!
-//! What: `run_review` runs the MVP pipeline (steps 1-7 of the spec, deferred
-//! sections are noted inline); returns a `ReviewResult`.
+//! What: `run_review` runs the pipeline (diff → context → LLM → parse → grade)
+//! then either posts a GitHub PR review comment (live) or writes a dry-run log,
+//! gated by the trigger decision and the SHA-keyed dedup store.  Returns a
+//! `ReviewResult` even on pipeline errors (fail-safe APPROVE/UNKNOWN).
 //!
-//! Deferred for later stages (not in MVP):
-//!  - Verification round (spec REV-114)
-//!  - Dedup store (spec REV-101)
-//!  - Suppression filtering (spec REV-115)
-//!  - GitHub comment posting (spec REV-117)
-//!  - Tracker issue upsert
+//! Deferred to later phases (stubs/comments intact):
+//!  - Verification round (Phase 2 / #583)
+//!  - Suppression filtering + per-repo `.github/code-intelligence.yml` (Phase 3 / #584)
+//!  - Tracker-issue upsert (Phase 4 / #585)
+//!  - JIRA/Confluence/APEX/GH-Issues context (Phase 6 / #550)
 //!  - Multi-pass / enrichment rounds
 //!
 //! Test: `run_review_with_fake_provider_approves`,
 //! `run_review_fail_safe_on_llm_error`,
-//! `run_review_local_diff_skips_github`.
+//! `run_review_local_diff_skips_github`,
+//! `run_review_dedup_skips_completed`.
 
 use std::sync::Arc;
 
@@ -27,8 +30,7 @@ use crate::{
     config::ReviewConfig,
     integrations::{
         analyze_client::AnalyzeClient,
-        github::{GithubClient, GithubError},
-        github::{auth::resolve_token, fetch_pr_metadata},
+        github::{AuthStrategy, GithubClient, GithubError, RunMode, fetch_pr_metadata},
         search_client::SearchClient,
     },
     llm::LlmProvider,
@@ -38,8 +40,11 @@ use crate::{
         grade::derive_verdict,
         output::{print_review_result, write_review_log},
         parser::parse_review_response,
+        post::{PostContext, finalize_review},
         prompt::{ReviewContext, ReviewPrMeta, build_review_prompt},
+        trigger::TriggerDecision,
     },
+    store::{ClaimOutcome, DedupStore},
 };
 
 // ─── Pipeline input ───────────────────────────────────────────────────────────
@@ -62,6 +67,23 @@ pub struct ReviewInput {
     pub write_log: bool,
     /// Print the result to STDOUT after the run.
     pub print_result: bool,
+    /// Trigger override deciding live-post vs dry-run (Phase 1, #582 / REV-703).
+    ///
+    /// `None` (the default) means "defer to the global `config.dry_run` flag";
+    /// the webhook handler sets `ForceLive`/`ForceDryRun` from the requested
+    /// reviewer.  CLI `run`/`compare` leave this `None` (and `compare` stays
+    /// dry-run because it never enables posting).
+    pub trigger: TriggerDecision,
+    /// Run mode that selects the GitHub auth strategy (CLI=PAT/`gh`, Serve=App).
+    ///
+    /// Determines how the runner resolves a token for posting / metadata fetch.
+    pub run_mode: RunMode,
+    /// Whether the runner is allowed to post live at all.
+    ///
+    /// Why: a safety belt independent of the trigger — `compare` and
+    /// `--local-diff` set this `false` so they can never post even if a trigger
+    /// or config somehow forces live.  `run`/`serve` set it `true`.
+    pub allow_posting: bool,
 }
 
 /// Injected service dependencies (trait objects for testability).
@@ -77,6 +99,10 @@ pub struct ReviewDeps {
     pub search: Arc<dyn SearchClient>,
     /// Static analysis client (optional; None skips the analyze step).
     pub analyze: Option<Arc<dyn AnalyzeClient>>,
+    /// SHA-keyed dedup store (Phase 1, #582).  `None` disables dedup (e.g.
+    /// `compare`, `--local-diff`, or tests that don't exercise it).  Store
+    /// errors are fail-safe: logged, never fatal.
+    pub dedup: Option<Arc<DedupStore>>,
 }
 
 // ─── Main runner ──────────────────────────────────────────────────────────────
@@ -112,18 +138,21 @@ pub async fn run_review(
     };
 
     // ── Step 2: fetch PR metadata (skip for local-diff mode) ──────────────
-    let pr_meta: ReviewPrMeta = if is_local {
-        ReviewPrMeta::default()
+    let (pr_meta, head_sha): (ReviewPrMeta, String) = if is_local {
+        (ReviewPrMeta::default(), String::new())
     } else {
-        match fetch_github_pr_meta(config, &owner, &repo, pr_number).await {
-            Ok(m) => m,
+        match fetch_github_pr_meta(config, &owner, &repo, pr_number, input.run_mode).await {
+            Ok((m, sha)) => (m, sha),
             Err(e) => {
                 warn!("failed to fetch PR metadata: {e} — using empty metadata");
-                ReviewPrMeta {
-                    title: format!("PR #{pr_number}"),
-                    author: String::new(),
-                    url: pr_url.clone(),
-                }
+                (
+                    ReviewPrMeta {
+                        title: format!("PR #{pr_number}"),
+                        author: String::new(),
+                        url: pr_url.clone(),
+                    },
+                    String::new(),
+                )
             }
         }
     };
@@ -136,7 +165,38 @@ pub async fn run_review(
         pr_meta.title.clone(),
         pr_url,
     );
-    result.dry_run = true; // MVP: always dry-run.
+    result.head_sha = head_sha.clone();
+
+    // ── Step 2b: dedup claim (Phase 1, #582) ──────────────────────────────
+    // Claim the (owner,repo,pr,head_sha) slot before doing expensive work.  A
+    // completed claim for the same head SHA short-circuits the whole pipeline.
+    // Store errors are fail-safe: we log and proceed (never block a review).
+    if !is_local
+        && !head_sha.is_empty()
+        && let Some(store) = deps.dedup.as_ref()
+    {
+        match store.claim(&owner, &repo, pr_number, &head_sha) {
+            Ok(ClaimOutcome::Skipped) => {
+                info!(
+                    owner = %owner,
+                    repo = %repo,
+                    pr = pr_number,
+                    head_sha = %head_sha,
+                    "dedup: a completed review already exists for this head SHA — skipping"
+                );
+                result.verdict = Verdict::Approve;
+                result.error = Some("skipped: duplicate of a completed review".to_string());
+                result.dry_run = true;
+                return result;
+            }
+            Ok(ClaimOutcome::Claimed) => {
+                debug!(head_sha = %head_sha, "dedup: claimed review slot");
+            }
+            Err(e) => {
+                warn!("dedup claim failed (proceeding without dedup): {e}");
+            }
+        }
+    }
 
     // ── Step 3: load and truncate diff ────────────────────────────────────
     let raw_diff = match load_diff(&input.diff_source).await {
@@ -144,7 +204,7 @@ pub async fn run_review(
         Err(e) => {
             warn!("failed to load diff: {e}");
             result.error = Some(format!("diff load failed: {e}"));
-            return finalize(result, config, &input);
+            return abort_dry(result, config, &input, &deps);
         }
     };
     let diff = truncate_diff(&raw_diff);
@@ -179,7 +239,7 @@ pub async fn run_review(
             warn!("LLM call failed: {e} — applying fail-safe APPROVE (spec REV-130)");
             result.verdict = Verdict::Approve;
             result.error = Some(format!("LLM error: {e}"));
-            return finalize(result, config, &input);
+            return abort_dry(result, config, &input, &deps);
         }
     };
 
@@ -223,32 +283,41 @@ pub async fn run_review(
     result.verdict = final_verdict;
     result.findings = parsed.findings;
 
-    finalize(result, config, &input)
+    finalize_run(result, config, &input, deps.dedup.as_ref()).await
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Fetch PR metadata from GitHub and build a `ReviewPrMeta`.
+/// Fetch PR metadata from GitHub and build a `ReviewPrMeta` plus the head SHA.
 ///
 /// Why: centralises the GitHub API call and mapping from `PrMetadata` to the
-/// lighter-weight `ReviewPrMeta` the prompt needs.
-/// What: calls `fetch_pr_metadata` with a resolved token; on any error, the
-/// caller falls back to empty metadata.
+/// lighter-weight `ReviewPrMeta` the prompt needs, and surfaces the head SHA so
+/// the runner can key the dedup store.  The token is resolved through the
+/// dual-mode auth abstraction (#582) so it works in both CLI and service modes.
+/// What: selects the auth strategy from `run_mode`, resolves a token, and calls
+/// `fetch_pr_metadata`; on any error the caller falls back to empty metadata.
 /// Test: no real-network test; tested indirectly via mock in integration tests.
 async fn fetch_github_pr_meta(
     config: &ReviewConfig,
     owner: &str,
     repo: &str,
     pr: u64,
-) -> Result<ReviewPrMeta, GithubError> {
+    run_mode: RunMode,
+) -> Result<(ReviewPrMeta, String), GithubError> {
     let client = GithubClient::new();
-    let token = resolve_token(&client, config, owner).await?;
+    let token = AuthStrategy::select(run_mode, None)
+        .resolve_token(&client, config, owner)
+        .await?;
     let meta = fetch_pr_metadata(&client, owner, repo, pr, &token).await?;
-    Ok(ReviewPrMeta {
-        title: meta.title,
-        author: meta.user.login,
-        url: meta.html_url,
-    })
+    let head_sha = meta.head.sha.clone();
+    Ok((
+        ReviewPrMeta {
+            title: meta.title,
+            author: meta.user.login,
+            url: meta.html_url,
+        },
+        head_sha,
+    ))
 }
 
 /// Gather code context from trusty-search and (optionally) trusty-analyze.
@@ -341,364 +410,89 @@ async fn gather_context(
     }
 }
 
-/// Apply final pipeline flags and optionally write the log + print the result.
+/// Finalise an *aborted* review as dry-run only, releasing the dedup claim.
 ///
-/// Why: centralises the dry-run output step so all code paths go through it.
-/// What: writes the log (if `input.write_log`) and prints to STDOUT (if
-/// `input.print_result`).
-/// Test: covered by runner tests that verify side-effects.
-fn finalize(mut result: ReviewResult, config: &ReviewConfig, input: &ReviewInput) -> ReviewResult {
-    result.dry_run = true; // MVP: always dry-run; posting is deferred.
-
+/// Why: a review that aborts before producing a real verdict (diff-load failure
+/// or LLM transport error) must never be posted live — it carries only a
+/// fail-safe APPROVE/UNKNOWN.  It must also *release* its dedup claim so a later
+/// retry (e.g. once the LLM recovers) can re-run instead of being suppressed.
+/// What: releases the in-progress dedup claim (fail-safe on error), writes the
+/// dry-run log so the failure is inspectable, prints when requested, and returns
+/// the result flagged `dry_run = true`.
+/// Test: `run_review_fail_safe_on_llm_error`, `run_review_missing_diff_file_sets_error`.
+fn abort_dry(
+    mut result: ReviewResult,
+    config: &ReviewConfig,
+    input: &ReviewInput,
+    deps: &ReviewDeps,
+) -> ReviewResult {
+    result.dry_run = true;
+    // Release the in-progress claim so a retry can re-run this head SHA.
+    if !result.head_sha.is_empty()
+        && let Some(store) = deps.dedup.as_ref()
+        && let Err(e) = store.release(
+            &result.owner,
+            &result.repo,
+            result.pr_number,
+            &result.head_sha,
+        )
+    {
+        warn!("dedup release() after abort failed (non-fatal): {e}");
+    }
     if input.write_log {
         write_review_log(&result, &config.log_dir);
     }
-
     if input.print_result {
         print_review_result(&result);
     }
-
     result
+}
+
+/// Apply the post-or-log finalisation for a completed review.
+///
+/// Why: the success exit path of `run_review` must go through the same
+/// post-or-log decision (Phase 1, #582) so the live/dry policy and fail-safe
+/// error handling are applied exactly once and consistently.
+/// What: reads the PR coordinates + head SHA off the result, builds a
+/// `PostContext`, and delegates to `pipeline::post::finalize_review`, threading
+/// the trigger decision, the `allow_posting` belt, the run mode, and the
+/// optional dedup store.
+/// Test: branch selection is covered by `post::tests`; runner tests assert the
+/// dry-run side effects.
+async fn finalize_run(
+    result: ReviewResult,
+    config: &ReviewConfig,
+    input: &ReviewInput,
+    dedup: Option<&Arc<DedupStore>>,
+) -> ReviewResult {
+    // Clone the dedup-key fields up front so `result` can be moved into
+    // `finalize_review` while `PostContext` borrows the owned copies.
+    let owner = result.owner.clone();
+    let repo = result.repo.clone();
+    let pr = result.pr_number;
+    let head_sha = result.head_sha.clone();
+    let post_ctx = PostContext {
+        owner: &owner,
+        repo: &repo,
+        pr,
+        head_sha: &head_sha,
+        run_mode: input.run_mode,
+        dedup,
+    };
+    finalize_review(
+        result,
+        config,
+        input.trigger,
+        input.allow_posting,
+        input.write_log,
+        input.print_result,
+        post_ctx,
+    )
+    .await
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        integrations::{
-            analyze_client::{AnalyzeClientError, AnalyzeHealthResponse, ComplexityHotspot, Smell},
-            search_client::{HealthResponse, IndexInfo, SearchClientError, SearchResult},
-        },
-        llm::{LlmError, LlmRequest, LlmResponse},
-    };
-    use async_trait::async_trait;
-    use std::path::PathBuf;
-
-    // ── Fake LLM provider ─────────────────────────────────────────────────
-
-    struct FakeLlm {
-        response: String,
-        error: Option<String>,
-    }
-
-    impl FakeLlm {
-        fn approves() -> Self {
-            Self {
-                response: r#"Looks good.
-
-```json
-{"verdict":"APPROVE","summary":"LGTM","findings":[]}
-```"#
-                    .to_string(),
-                error: None,
-            }
-        }
-
-        fn request_changes() -> Self {
-            // Severity is "high" which maps to Effort::High → BLOCK floor.
-            // Use "medium" here so the severity floor produces REQUEST_CHANGES,
-            // letting this test verify REQUEST_CHANGES-verdict round-trip parsing.
-            // The critical/high → BLOCK escalation path is covered in grade.rs tests.
-            Self {
-                response: r#"There is a bug.
-
-```json
-{"verdict":"REQUEST_CHANGES","summary":"SQL injection","findings":[{"title":"SQL injection","body":"line 42","severity":"medium","confidence":0.9,"file":"src/a.rs","line":42}]}
-```"#
-                    .to_string(),
-                error: None,
-            }
-        }
-
-        fn errors(msg: impl Into<String>) -> Self {
-            Self {
-                response: String::new(),
-                error: Some(msg.into()),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl LlmProvider for FakeLlm {
-        fn name(&self) -> &str {
-            "fake"
-        }
-
-        async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
-            if let Some(ref err) = self.error {
-                return Err(LlmError::Transport(err.clone()));
-            }
-            Ok(LlmResponse {
-                text: self.response.clone(),
-                model: req.model.clone(),
-                input_tokens: 100,
-                output_tokens: 50,
-                latency_ms: 42,
-                cost_usd: 0.000042,
-            })
-        }
-    }
-
-    // ── Fake search client ────────────────────────────────────────────────
-
-    struct FakeSearch;
-
-    #[async_trait]
-    impl SearchClient for FakeSearch {
-        async fn health(&self) -> Result<HealthResponse, SearchClientError> {
-            Ok(HealthResponse {
-                status: "ok".to_string(),
-                embedder: true,
-            })
-        }
-
-        async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
-            Ok(vec![IndexInfo {
-                id: "main".to_string(),
-                name: None,
-                root_path: None,
-            }])
-        }
-
-        async fn search(
-            &self,
-            _index_id: &str,
-            _query: &str,
-            _top_k: Option<u32>,
-        ) -> Result<Vec<SearchResult>, SearchClientError> {
-            Ok(vec![SearchResult {
-                file: "src/auth.rs".to_string(),
-                snippet: Some("pub fn authenticate() {}".to_string()),
-                score: 0.9,
-                start_line: None,
-                end_line: None,
-            }])
-        }
-    }
-
-    struct FailingSearch;
-
-    #[async_trait]
-    impl SearchClient for FailingSearch {
-        async fn health(&self) -> Result<HealthResponse, SearchClientError> {
-            Err(SearchClientError::Unavailable("down".to_string()))
-        }
-
-        async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
-            Err(SearchClientError::Unavailable("down".to_string()))
-        }
-
-        async fn search(
-            &self,
-            _: &str,
-            _: &str,
-            _: Option<u32>,
-        ) -> Result<Vec<SearchResult>, SearchClientError> {
-            Err(SearchClientError::Transport("refused".to_string()))
-        }
-    }
-
-    // ── Fake analyze client ───────────────────────────────────────────────
-
-    #[allow(dead_code)]
-    struct FakeAnalyze;
-
-    #[async_trait]
-    impl AnalyzeClient for FakeAnalyze {
-        async fn health(&self) -> Result<AnalyzeHealthResponse, AnalyzeClientError> {
-            Err(AnalyzeClientError::Unavailable("not running".to_string()))
-        }
-
-        async fn has_analysis(&self, _: &str) -> bool {
-            false
-        }
-
-        async fn complexity_hotspots(
-            &self,
-            _: &str,
-            _: Option<u32>,
-        ) -> Result<Vec<ComplexityHotspot>, AnalyzeClientError> {
-            Ok(vec![])
-        }
-
-        async fn smells(&self, _: &str) -> Result<Vec<Smell>, AnalyzeClientError> {
-            Ok(vec![])
-        }
-    }
-
-    // ── Helper to build a local-diff source with a temp file ──────────────
-
-    fn local_diff_source(diff: &str) -> (DiffSource, tempfile::NamedTempFile) {
-        use std::io::Write as _;
-        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
-        tmp.write_all(diff.as_bytes()).expect("write");
-        let path = tmp.path().to_path_buf();
-        (DiffSource::LocalFile { path }, tmp)
-    }
-
-    fn default_config() -> ReviewConfig {
-        ReviewConfig::load(None)
-    }
-
-    // ── Tests ─────────────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn run_review_with_fake_provider_approves() {
-        let diff = "+fn hello() { println!(\"hi\"); }\n";
-        let (source, _tmp) = local_diff_source(diff);
-
-        let config = default_config();
-        let input = ReviewInput {
-            diff_source: source,
-            reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
-            write_log: false,
-            print_result: false,
-        };
-        let deps = ReviewDeps {
-            llm: Arc::new(FakeLlm::approves()),
-            search: Arc::new(FakeSearch),
-            analyze: None,
-        };
-
-        let result = run_review(&config, input, deps).await;
-        assert_eq!(result.verdict, Verdict::Approve);
-        assert!(
-            result.error.is_none(),
-            "no error expected: {:?}",
-            result.error
-        );
-        assert!(result.dry_run, "MVP must always be dry-run");
-        assert_eq!(result.findings.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn run_review_request_changes_parsed_correctly() {
-        let (source, _tmp) = local_diff_source(
-            "+fn bad_query(id: &str) { db.exec(format!(\"SELECT * FROM users WHERE id={id}\")) }\n",
-        );
-        let config = default_config();
-        let input = ReviewInput {
-            diff_source: source,
-            reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
-            write_log: false,
-            print_result: false,
-        };
-        let deps = ReviewDeps {
-            llm: Arc::new(FakeLlm::request_changes()),
-            search: Arc::new(FakeSearch),
-            analyze: None,
-        };
-
-        let result = run_review(&config, input, deps).await;
-        assert_eq!(result.verdict, Verdict::RequestChanges);
-        assert_eq!(result.findings.len(), 1);
-        assert_eq!(result.findings[0].kind, "SQL injection");
-    }
-
-    #[tokio::test]
-    async fn run_review_fail_safe_on_llm_error() {
-        let (source, _tmp) = local_diff_source("+fn x() {}\n");
-        let config = default_config();
-        let input = ReviewInput {
-            diff_source: source,
-            reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
-            write_log: false,
-            print_result: false,
-        };
-        let deps = ReviewDeps {
-            llm: Arc::new(FakeLlm::errors("simulated transport error")),
-            search: Arc::new(FakeSearch),
-            analyze: None,
-        };
-
-        let result = run_review(&config, input, deps).await;
-        // Fail-safe: verdict must be APPROVE on LLM error (spec REV-130).
-        assert_eq!(
-            result.verdict,
-            Verdict::Approve,
-            "LLM error must fall back to APPROVE"
-        );
-        assert!(
-            result.error.is_some(),
-            "error field must be set when LLM fails"
-        );
-    }
-
-    #[tokio::test]
-    async fn run_review_search_failure_does_not_block() {
-        let (source, _tmp) = local_diff_source("+fn x() {}\n");
-        let config = default_config();
-        let input = ReviewInput {
-            diff_source: source,
-            reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
-            write_log: false,
-            print_result: false,
-        };
-        let deps = ReviewDeps {
-            llm: Arc::new(FakeLlm::approves()),
-            search: Arc::new(FailingSearch), // search is down
-            analyze: None,
-        };
-
-        let result = run_review(&config, input, deps).await;
-        // Review must still complete even if search is unavailable.
-        assert_eq!(result.verdict, Verdict::Approve);
-        assert!(
-            result.error.is_none(),
-            "search failure must not set error field"
-        );
-    }
-
-    #[tokio::test]
-    async fn run_review_local_diff_skips_github() {
-        // Local-diff mode: no GitHub credentials needed, owner/repo = local/<stem>.
-        let diff = "+fn local_fn() {}\n";
-        let (source, _tmp) = local_diff_source(diff);
-
-        let config = default_config();
-        let input = ReviewInput {
-            diff_source: source,
-            reviewer_model: "openai/gpt-5.4-nano-20260317".to_string(),
-            write_log: false,
-            print_result: false,
-        };
-        let deps = ReviewDeps {
-            llm: Arc::new(FakeLlm::approves()),
-            search: Arc::new(FakeSearch),
-            analyze: None,
-        };
-
-        let result = run_review(&config, input, deps).await;
-        assert_eq!(result.owner, "local");
-        assert_eq!(result.verdict, Verdict::Approve);
-    }
-
-    #[tokio::test]
-    async fn run_review_missing_diff_file_sets_error() {
-        let config = default_config();
-        let input = ReviewInput {
-            diff_source: DiffSource::LocalFile {
-                path: PathBuf::from("/nonexistent/path/nope.diff"),
-            },
-            reviewer_model: "openai/gpt-5.4-nano-20260317".to_string(),
-            write_log: false,
-            print_result: false,
-        };
-        let deps = ReviewDeps {
-            llm: Arc::new(FakeLlm::approves()),
-            search: Arc::new(FakeSearch),
-            analyze: None,
-        };
-
-        let result = run_review(&config, input, deps).await;
-        assert!(
-            result.error.is_some(),
-            "missing diff file must set error field"
-        );
-        // Still a safe outcome — the verdict stays at the default Unknown when
-        // the diff fails to load (no LLM call was made).  The error field is
-        // set; Unknown signals "could not assess" rather than a clean APPROVE.
-    }
-}
+#[path = "runner_tests.rs"]
+mod tests;
