@@ -550,24 +550,40 @@ mod tests {
         assert_eq!(hit.unwrap().source, DiscoverySource::CargoPackageName);
     }
 
-    /// Why: First-letter abbreviation is the most subtle source — confirm
-    /// it fires for at least one crate in the live workspace and pins the
-    /// canonical example (`tc → trusty-common`, the longest-lived shared
-    /// library crate, has a guaranteed-unique two-letter abbreviation).
+    /// Why: Ambiguous auto-abbrevs must be dropped; unique ones must fire.
+    /// trusty-code (#639) made `tc` collide with trusty-common — must suppress.
+    /// `tc→trusty-common` stays via explicit alias table, not auto-generation.
+    /// `ta→trusty-analyze` is the stable unambiguous example. All shorts unique.
     /// Test: this test itself.
     #[test]
     fn first_letter_abbrev_emits_unique_workspace_initials() {
         let root = workspace_root();
-        let discoveries = discover_blocking(&root).expect("discover");
-        let hit = discoveries.iter().find(|d| {
-            d.short == "tc"
-                && d.full == "trusty-common"
-                && d.source == DiscoverySource::FirstLetterAbbrev
-        });
+        let d = discover_blocking(&root).expect("discover");
+        // Ambiguous `tc` (trusty-common vs trusty-code) must be suppressed.
         assert!(
-            hit.is_some(),
-            "expected tc→trusty-common first-letter abbrev; got: {discoveries:?}"
+            d.iter()
+                .all(|x| !(x.short == "tc" && x.source == DiscoverySource::FirstLetterAbbrev)),
+            "ambiguous `tc` must not appear; got: {d:?}"
         );
+        // An unambiguous abbrev must still fire — happy-path guard.
+        assert!(
+            d.iter().any(|x| x.short == "ta"
+                && x.full == "trusty-analyze"
+                && x.source == DiscoverySource::FirstLetterAbbrev),
+            "expected ta→trusty-analyze; got: {d:?}"
+        );
+        // Uniqueness: no two auto-abbrevs share the same short key.
+        let mut seen = HashSet::new();
+        for x in d
+            .iter()
+            .filter(|x| x.source == DiscoverySource::FirstLetterAbbrev)
+        {
+            assert!(
+                seen.insert(x.short.as_str()),
+                "duplicate `{}`: {d:?}",
+                x.short
+            );
+        }
     }
 
     /// Why: A synthetic fixture pins the abbreviation algorithm against the

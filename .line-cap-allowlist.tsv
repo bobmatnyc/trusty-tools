@@ -21,7 +21,7 @@ crates/trusty-analyze/src/lang/adapters/scala.rs	583
 crates/trusty-analyze/src/lang/adapters/swift.rs	531
 crates/trusty-analyze/src/lang/adapters/typescript.rs	680
 crates/trusty-analyze/src/lang/detection.rs	616
-crates/trusty-analyze/src/main.rs	846
+crates/trusty-analyze/src/main.rs	845
 crates/trusty-analyze/src/mcp/mod.rs	1178
 crates/trusty-analyze/src/service/mod.rs	2163
 crates/trusty-analyze/tests/stdio_harness.rs	639
@@ -99,7 +99,7 @@ crates/trusty-memory/src/commands/kuzu_migrate.rs	664
 crates/trusty-memory/src/commands/prompt_context.rs	1614
 crates/trusty-memory/src/commands/service.rs	525
 crates/trusty-memory/src/commands/setup.rs	783
-crates/trusty-memory/src/discovery.rs	861
+crates/trusty-memory/src/discovery.rs	877
 crates/trusty-memory/src/kg_extract.rs	608
 crates/trusty-memory/src/lib.rs	2796
 crates/trusty-memory/src/main.rs	968
