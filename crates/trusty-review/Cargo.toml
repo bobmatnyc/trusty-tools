@@ -3,7 +3,7 @@ name        = "trusty-review"
 version     = "0.1.0"
 edition     = "2024"
 rust-version.workspace = true
-license.workspace      = true
+license-file           = "LICENSE"
 authors.workspace      = true
 repository.workspace   = true
 homepage               = "https://github.com/bobmatnyc/trusty-tools"
@@ -11,7 +11,7 @@ readme                 = "README.md"
 description            = "Fast local PR-review service for trusty-tools — orchestrates LLM-backed code review"
 keywords    = ["code-review", "pr-review", "llm", "openrouter", "github"]
 categories  = ["development-tools", "command-line-utilities"]
-publish     = false
+publish     = true
 
 [[bin]]
 name               = "trusty-review"
@@ -33,7 +33,7 @@ reqwest      = { workspace = true }
 axum         = { workspace = true, optional = true }
 tower        = { workspace = true, optional = true }
 tower-http   = { workspace = true, optional = true }
-tempfile     = { workspace = true, optional = true }
+tempfile     = { workspace = true }
 
 # ── Serialisation ──────────────────────────────────────────────────────────
 serde        = { workspace = true }
@@ -71,6 +71,8 @@ clap         = { workspace = true }
 # The `chat` module of trusty-common exposes the streaming ChatProvider trait
 # and OpenRouterProvider.  We drain the stream internally (no feature
 # flag needed for the chat module itself, which is compiled unconditionally).
+# The `mcp` feature is enabled only under the `mcp` cargo feature of this crate
+# (which is on by default) to pull in the JSON-RPC 2.0 stdio loop primitives.
 trusty-common = { workspace = true }
 
 # ── JWT / HMAC / crypto (GitHub App auth) ─────────────────────────────────
@@ -113,8 +115,16 @@ rusqlite = { workspace = true }
 # service module, so downstream consumers can safely write:
 #   trusty-review = { features = ["http-server"] }
 # without a manifest change in a later stage.
-default     = ["http-server"]
-http-server = ["dep:axum", "dep:tower", "dep:tower-http", "dep:tempfile", "trusty-common/axum-server"]
+default     = ["http-server", "mcp"]
+http-server = ["dep:axum", "dep:tower", "dep:tower-http", "trusty-common/axum-server"]
+# Why: gates the MCP stdio JSON-RPC service + the trusty-common MCP primitives
+#      behind an opt-in feature so library-only consumers do not pull in the
+#      stdio loop.  Enabled by default so `cargo install` and the default binary
+#      include it out of the box.
+# What: enables `trusty-common/mcp` (Request, Response, run_stdio_loop, etc.)
+#       and compiles the `src/mcp/` module.
+# Test: `cargo test -p trusty-review --features mcp` covers dispatch/tools tests.
+mcp         = ["trusty-common/mcp", "http-server"]
 
 [dev-dependencies]
 # test-util enables tokio's paused-clock (`tokio::time::pause`) used by the
