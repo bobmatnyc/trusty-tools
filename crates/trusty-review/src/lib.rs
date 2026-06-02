@@ -34,3 +34,10 @@ pub mod profile;
 // full axum + tower-http stack.
 #[cfg(feature = "http-server")]
 pub mod service;
+
+// Why: the MCP module is gated behind the `mcp` feature so library consumers
+// that do not need the stdio JSON-RPC loop do not pull in trusty-common's MCP
+// primitives.  Enabled by default in the binary so `serve --stdio` is always
+// available.  The `mcp` feature implies `http-server` (AppState is defined there).
+#[cfg(feature = "mcp")]
+pub mod mcp;

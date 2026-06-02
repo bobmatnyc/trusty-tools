@@ -1,0 +1,328 @@
+//! JSON-RPC 2.0 / MCP stdio service for trusty-review.
+//!
+//! Why: Claude Code speaks MCP over stdio; this module lets operators wire
+//! trusty-review into Claude Code via `.mcp.json` without running the HTTP
+//! daemon.  The stdio path reuses the same `AppState` and pipeline as the HTTP
+//! daemon, so behaviour is identical.
+//!
+//! What: `run(state)` builds the shared state once and calls
+//! `trusty_common::mcp::run_stdio_loop`, which reads JSON-RPC requests
+//! line-by-line from stdin and writes responses to stdout.  `dispatch` handles
+//! `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, and
+//! bare method names.  All tracing goes to stderr; stdout is the transport.
+//!
+//! Test: `dispatch_initialize_returns_server_info`,
+//! `dispatch_tools_list_returns_three_tools`,
+//! `dispatch_unknown_tool_returns_method_not_found`,
+//! `dispatch_notification_is_suppressed`.
+
+pub mod tools;
+
+use std::sync::Arc;
+
+use anyhow::Result;
+use serde_json::Value;
+use tracing::debug;
+
+use trusty_common::mcp::{Request, Response, error_codes, initialize_response, run_stdio_loop};
+
+use crate::mcp::tools::{ToolError, call_tool, tool_descriptors, wrap_tool_error};
+use crate::service::AppState;
+
+// ─── Entry point ─────────────────────────────────────────────────────────────
+
+/// Start the MCP stdio JSON-RPC loop using the provided `AppState`.
+///
+/// Why: the `serve --stdio` CLI path needs a single async entry-point that
+/// accepts requests on stdin and writes responses to stdout until EOF.
+/// What: wraps `AppState` in an `Arc` (so it can be shared across the async
+/// closure without lifetime issues), then calls `run_stdio_loop` from
+/// `trusty-common` which owns the parse/dispatch/flush cycle.
+/// Test: `run` is side-effectful (reads stdin); coverage comes from unit tests
+/// on `dispatch` with synthetic requests.
+pub async fn run(state: AppState) -> Result<()> {
+    let state = Arc::new(state);
+    run_stdio_loop(move |req| {
+        let state = Arc::clone(&state);
+        async move { dispatch(req, &state).await }
+    })
+    .await
+}
+
+// ─── Dispatcher ──────────────────────────────────────────────────────────────
+
+/// Translate a JSON-RPC 2.0 request into a trusty-review MCP response.
+///
+/// Why: decouples the dispatch logic from the I/O loop so it can be unit-tested
+/// with synthetic `Request` values.
+/// What: handles `initialize`, `notifications/initialized`, `tools/list`,
+/// `tools/call`, and bare tool names.  Always returns a `Response`; never
+/// panics.
+/// Test: `dispatch_initialize_returns_server_info`,
+/// `dispatch_tools_list_returns_three_tools`,
+/// `dispatch_unknown_tool_returns_method_not_found`.
+pub async fn dispatch(req: Request, state: &AppState) -> Response {
+    let is_notification = req.id.is_none();
+    let id = req.id.clone();
+
+    if req.jsonrpc.as_deref() != Some("2.0") {
+        if is_notification {
+            return Response::suppressed();
+        }
+        return Response::err(id, error_codes::INVALID_REQUEST, "jsonrpc must be \"2.0\"");
+    }
+
+    match req.method.as_str() {
+        "initialize" => {
+            return Response::ok(
+                id,
+                initialize_response("trusty-review", env!("CARGO_PKG_VERSION"), None),
+            );
+        }
+        "notifications/initialized" | "initialized" => {
+            return Response::suppressed();
+        }
+        _ => {}
+    }
+
+    let params = req.params.clone().unwrap_or(Value::Null);
+
+    // Route `tools/list` and `tools/call`; also accept bare method names for
+    // ergonomics (e.g. `review_health` directly).
+    let (tool, arguments, via_tools_call) = match req.method.as_str() {
+        "tools/call" => {
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or(Value::Object(Default::default()));
+            match name {
+                Some(n) => (n, args, true),
+                None => {
+                    return Response::err(
+                        id,
+                        error_codes::INVALID_PARAMS,
+                        "tools/call requires a 'name' field",
+                    );
+                }
+            }
+        }
+        "tools/list" => {
+            return Response::ok(id, serde_json::json!({ "tools": tool_descriptors() }));
+        }
+        other => (other.to_string(), params, false),
+    };
+
+    debug!(tool, via_tools_call, "mcp dispatch");
+    let outcome = call_tool(&tool, &arguments, state).await;
+
+    if via_tools_call {
+        // Per MCP spec: tool execution failures are `{content, isError:true}`
+        // rather than JSON-RPC errors.
+        match outcome {
+            Ok(value) => Response::ok(id, value),
+            Err(ToolError::UnknownTool) => Response::err(
+                id,
+                error_codes::METHOD_NOT_FOUND,
+                format!("unknown tool: {tool}"),
+            ),
+            Err(ToolError::InvalidParams(msg)) => Response::ok(id, wrap_tool_error(&msg)),
+        }
+    } else {
+        // Bare-method form: return JSON-RPC errors for protocol-level failures.
+        match outcome {
+            Ok(value) => Response::ok(id, value),
+            Err(ToolError::UnknownTool) => Response::err(
+                id,
+                error_codes::METHOD_NOT_FOUND,
+                format!("unknown tool: {tool}"),
+            ),
+            Err(ToolError::InvalidParams(msg)) => {
+                Response::err(id, error_codes::INVALID_PARAMS, msg)
+            }
+        }
+    }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::Arc;
+    use trusty_common::mcp::error_codes;
+
+    use crate::{
+        config::ReviewConfig,
+        integrations::search_client::{
+            HealthResponse as SearchHealth, IndexInfo, SearchClient, SearchClientError,
+            SearchResult,
+        },
+        llm::{LlmError, LlmProvider, LlmRequest, LlmResponse},
+        service::AppState,
+    };
+    use async_trait::async_trait;
+
+    // ── Fake LLM ──────────────────────────────────────────────────────────────
+
+    struct FakeLlm;
+
+    #[async_trait]
+    impl LlmProvider for FakeLlm {
+        fn name(&self) -> &str {
+            "fake-mcp-test"
+        }
+
+        async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+            Ok(LlmResponse {
+                text: r#"{"verdict":"APPROVE","summary":"ok","findings":[]}"#.into(),
+                model: req.model.clone(),
+                input_tokens: 1,
+                output_tokens: 1,
+                latency_ms: 0,
+                cost_usd: 0.0,
+            })
+        }
+    }
+
+    // ── Fake search ───────────────────────────────────────────────────────────
+
+    struct FakeSearch;
+
+    #[async_trait]
+    impl SearchClient for FakeSearch {
+        async fn health(&self) -> Result<SearchHealth, SearchClientError> {
+            Ok(SearchHealth {
+                status: "ok".into(),
+                embedder: true,
+            })
+        }
+
+        async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+            Ok(vec![])
+        }
+
+        async fn search(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<u32>,
+        ) -> Result<Vec<SearchResult>, SearchClientError> {
+            Ok(vec![])
+        }
+    }
+
+    /// Build a minimal `AppState` suitable for unit tests.  Only `review_health`
+    /// and protocol-level dispatch are exercised here; the FakeLlm is present to
+    /// satisfy the constructor but is never called.
+    fn test_state() -> AppState {
+        let config = ReviewConfig::load(None);
+        AppState::new(config, Arc::new(FakeLlm), Arc::new(FakeSearch), None)
+    }
+
+    fn make_req(method: &str, params: Value) -> Request {
+        Request {
+            jsonrpc: Some("2.0".into()),
+            id: Some(json!(1)),
+            method: method.into(),
+            params: Some(params),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_initialize_returns_server_info() {
+        let state = test_state();
+        let req = make_req("initialize", json!({}));
+        let resp = dispatch(req, &state).await;
+        let result = resp.result.expect("expected result");
+        assert_eq!(result["serverInfo"]["name"], "trusty-review");
+        assert!(result["serverInfo"]["version"].is_string());
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+    }
+
+    #[tokio::test]
+    async fn dispatch_tools_list_returns_three_tools() {
+        let state = test_state();
+        let req = make_req("tools/list", json!({}));
+        let resp = dispatch(req, &state).await;
+        let result = resp.result.expect("expected result");
+        let tools = result["tools"].as_array().expect("tools must be array");
+        assert_eq!(tools.len(), 3, "expected 3 tools");
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_tool_returns_method_not_found() {
+        let state = test_state();
+        let req = make_req("not_a_tool", json!({}));
+        let resp = dispatch(req, &state).await;
+        let err = resp.error.expect("expected error");
+        assert_eq!(err.code, error_codes::METHOD_NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn dispatch_notification_is_suppressed() {
+        let state = test_state();
+        let req = Request {
+            jsonrpc: Some("2.0".into()),
+            id: None, // notification — no id
+            method: "notifications/initialized".into(),
+            params: None,
+        };
+        let resp = dispatch(req, &state).await;
+        assert!(resp.suppress, "notification must be suppressed");
+    }
+
+    #[tokio::test]
+    async fn dispatch_review_health_via_bare_method() {
+        let state = test_state();
+        let req = make_req("review_health", json!({}));
+        let resp = dispatch(req, &state).await;
+        let result = resp.result.expect("expected result");
+        // review_health wraps the payload in {content:[{type:text,text:...}]}
+        let text = result["content"][0]["text"].as_str().expect("text field");
+        let health: Value = serde_json::from_str(text).expect("valid JSON in text");
+        assert_eq!(health["status"], "ok");
+        assert!(health["version"].is_string());
+    }
+
+    #[tokio::test]
+    async fn dispatch_review_health_via_tools_call() {
+        let state = test_state();
+        let req = make_req(
+            "tools/call",
+            json!({ "name": "review_health", "arguments": {} }),
+        );
+        let resp = dispatch(req, &state).await;
+        let result = resp.result.expect("expected result");
+        let text = result["content"][0]["text"].as_str().expect("text field");
+        let health: Value = serde_json::from_str(text).expect("valid JSON in text");
+        assert_eq!(health["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn dispatch_rejects_wrong_jsonrpc_version() {
+        let state = test_state();
+        let req = Request {
+            jsonrpc: Some("1.0".into()),
+            id: Some(json!(7)),
+            method: "review_health".into(),
+            params: None,
+        };
+        let resp = dispatch(req, &state).await;
+        let err = resp.error.expect("expected error");
+        assert_eq!(err.code, error_codes::INVALID_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn dispatch_tools_call_missing_name_returns_invalid_params() {
+        let state = test_state();
+        let req = make_req("tools/call", json!({ "arguments": {} }));
+        let resp = dispatch(req, &state).await;
+        let err = resp.error.expect("expected error");
+        assert_eq!(err.code, error_codes::INVALID_PARAMS);
+    }
+}
