@@ -33,8 +33,11 @@ pub const BLOCK_VERDICT_MIN_CONFIDENCE: f32 = 0.90;
 /// PR comment.
 ///
 /// Why: the PR comment can distinguish "FYI" from "definitely fix this".
-/// What: corresponds to `pr_threshold` in per-repo config.
-pub const VERIFY_CANDIDATE_MIN_CONFIDENCE: f32 = 0.95;
+/// What: corresponds to `pr_threshold` in per-repo config.  Renamed from the
+/// former `VERIFY_CANDIDATE_MIN_CONFIDENCE` (Phase 2, #583) — that name is now
+/// the verification candidate-selection floor (0.50); this constant always
+/// meant the PR high-confidence flag (`pr_threshold`), never the verify gate.
+pub const PR_HIGH_CONFIDENCE_THRESHOLD: f32 = 0.95;
 
 /// Minimum confidence to include a finding in the verification round.
 ///
@@ -43,6 +46,34 @@ pub const VERIFY_CANDIDATE_MIN_CONFIDENCE: f32 = 0.95;
 /// What: findings below this are skipped by the verifier and treated as
 /// unverified.
 pub const VERIFICATION_MIN_CONFIDENCE: f32 = 0.65;
+
+/// Minimum confidence for a finding to be a verification *candidate* when the
+/// primary verdict is REQUEST_CHANGES / BLOCK (Phase 2, #583).
+///
+/// Why: when the reviewer already wants to block the merge, the verification
+/// round must cast a wide net — even moderate-confidence findings can be the
+/// sole reason the verdict escalated, so they must be confirmed or refuted
+/// before they are allowed to drive a blocking verdict.  This is distinct from
+/// (and deliberately lower than) `VERIFICATION_MIN_CONFIDENCE`, which gates the
+/// *advisory* path; on a blocking verdict we widen the candidate set down to
+/// this floor so a false-positive blocking finding cannot slip past unverified.
+/// What: on a REQUEST_CHANGES / BLOCK primary verdict, every finding with
+/// `confidence >= VERIFY_CANDIDATE_MIN_CONFIDENCE` is sent to the verifier.
+/// Default 0.50 (matches the Phase 2 ticket #583 work item (b)).
+pub const VERIFY_CANDIDATE_MIN_CONFIDENCE: f32 = 0.50;
+
+/// Demoted confidence assigned to a finding the verifier REFUTED (Phase 2, #583).
+///
+/// Why: a refuted finding must not surface or drive a verdict, but the spec
+/// (REV-606) requires we keep it on the result for transparency rather than
+/// silently dropping it.  Demoting its confidence below every advisory / block
+/// gate makes `derive_verdict` treat it as noise while the `verified` field
+/// records *why* it was demoted.
+/// What: set below `FIX_ISSUE_MIN_CONFIDENCE` (0.60), `VERIFICATION_MIN_CONFIDENCE`
+/// (0.65), and `LOW_CONFIDENCE_THRESHOLD` (0.65 in grade.rs) so a refuted
+/// finding is always treated as advisory-only noise and collapses the floor.
+/// Test: `refuted_finding_is_demoted_below_advisory_tier` in `verify_tests.rs`.
+pub const VERIFY_REFUTED_CONFIDENCE: f32 = 0.10;
 
 // ─── Suppression (spec §06 REV-530) ──────────────────────────────────────────
 
@@ -114,10 +145,12 @@ mod tests {
             ("FIX_ISSUE_MIN_CONFIDENCE", FIX_ISSUE_MIN_CONFIDENCE),
             ("BLOCK_ISSUE_MIN_CONFIDENCE", BLOCK_ISSUE_MIN_CONFIDENCE),
             ("BLOCK_VERDICT_MIN_CONFIDENCE", BLOCK_VERDICT_MIN_CONFIDENCE),
+            ("PR_HIGH_CONFIDENCE_THRESHOLD", PR_HIGH_CONFIDENCE_THRESHOLD),
             (
                 "VERIFY_CANDIDATE_MIN_CONFIDENCE",
                 VERIFY_CANDIDATE_MIN_CONFIDENCE,
             ),
+            ("VERIFY_REFUTED_CONFIDENCE", VERIFY_REFUTED_CONFIDENCE),
             ("VERIFICATION_MIN_CONFIDENCE", VERIFICATION_MIN_CONFIDENCE),
             ("SUPPRESS_OVERLAP_THRESHOLD", SUPPRESS_OVERLAP_THRESHOLD),
             ("FINDING_SIMILARITY_THRESHOLD", FINDING_SIMILARITY_THRESHOLD),
@@ -138,8 +171,20 @@ mod tests {
         );
         // Block threshold must be <= pr_threshold.
         const _: () = assert!(
-            BLOCK_VERDICT_MIN_CONFIDENCE <= VERIFY_CANDIDATE_MIN_CONFIDENCE,
-            "block_verdict must be <= verify_candidate"
+            BLOCK_VERDICT_MIN_CONFIDENCE <= PR_HIGH_CONFIDENCE_THRESHOLD,
+            "block_verdict must be <= pr_high_confidence_threshold"
+        );
+        // The verification candidate floor (REQUEST_CHANGES/BLOCK path) must sit
+        // below the advisory verification gate — it deliberately widens the net.
+        const _: () = assert!(
+            VERIFY_CANDIDATE_MIN_CONFIDENCE <= VERIFICATION_MIN_CONFIDENCE,
+            "verify_candidate floor must be <= advisory verification gate"
+        );
+        // A refuted finding must be demoted strictly below the include-in-review
+        // gate so it can never resurface or drive a verdict.
+        const _: () = assert!(
+            VERIFY_REFUTED_CONFIDENCE < FIX_ISSUE_MIN_CONFIDENCE,
+            "refuted confidence must be below the review-include gate"
         );
     }
 

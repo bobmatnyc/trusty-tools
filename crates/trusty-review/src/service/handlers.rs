@@ -43,6 +43,9 @@ pub struct AppState {
     pub config: ReviewConfig,
     /// LLM provider (reviewer role).
     pub llm: Arc<dyn LlmProvider>,
+    /// LLM provider (verifier role, Phase 2 #583).  `None` disables the
+    /// verification round for service-path reviews.
+    pub verifier: Option<Arc<dyn LlmProvider>>,
     /// Code search client.
     pub search: Arc<dyn SearchClient>,
     /// Static analysis client (optional — `None` skips the analyze step).
@@ -90,9 +93,30 @@ impl AppState {
         analyze: Option<Arc<dyn AnalyzeClient>>,
         dedup: Option<Arc<DedupStore>>,
     ) -> Self {
+        Self::with_verifier_and_dedup(config, llm, None, search, analyze, dedup)
+    }
+
+    /// Construct `AppState` with an explicit verifier provider and dedup store.
+    ///
+    /// Why: the deployed `serve` daemon builds a verifier provider (Phase 2,
+    /// #583) so the verification round runs on webhook-driven reviews; this
+    /// constructor threads it in alongside the dedup store.  The simpler `new` /
+    /// `with_dedup` constructors keep `verifier = None` for tests and callers
+    /// that do not exercise verification.
+    /// What: like `with_dedup`, but takes the verifier provider explicitly.
+    /// Test: exercised by the `serve` path; unit tests use `new` (verifier None).
+    pub fn with_verifier_and_dedup(
+        config: ReviewConfig,
+        llm: Arc<dyn LlmProvider>,
+        verifier: Option<Arc<dyn LlmProvider>>,
+        search: Arc<dyn SearchClient>,
+        analyze: Option<Arc<dyn AnalyzeClient>>,
+        dedup: Option<Arc<DedupStore>>,
+    ) -> Self {
         Self {
             config,
             llm,
+            verifier,
             search,
             analyze,
             in_flight: Arc::new(AtomicU64::new(0)),
@@ -286,6 +310,7 @@ pub async fn handle_review(
 
     let deps = ReviewDeps {
         llm: Arc::clone(&state.llm),
+        verifier: state.verifier.clone(),
         search: Arc::clone(&state.search),
         analyze: state.analyze.clone(),
         // POST /review is a synchronous inspection endpoint — no dedup needed.

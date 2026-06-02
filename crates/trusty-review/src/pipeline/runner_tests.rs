@@ -82,6 +82,31 @@ impl LlmProvider for FakeLlm {
     }
 }
 
+// ── Fake verifier provider (Phase 2, #583) ────────────────────────────────
+// Returns a fixed CONFIRMED / REFUTED judgment so the runner-level wiring of
+// the verification round can be asserted deterministically.
+
+struct FakeVerifier {
+    judgment: &'static str,
+}
+
+#[async_trait]
+impl LlmProvider for FakeVerifier {
+    fn name(&self) -> &str {
+        "fake-verifier"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        Ok(LlmResponse {
+            text: format!(r#"{{"judgment":"{}","reason":"test"}}"#, self.judgment),
+            model: req.model.clone(),
+            input_tokens: 5,
+            output_tokens: 3,
+            latency_ms: 1,
+            cost_usd: 0.0,
+        })
+    }
+}
+
 // ── Fake search client ────────────────────────────────────────────────
 
 struct FakeSearch;
@@ -202,6 +227,7 @@ async fn run_review_with_fake_provider_approves() {
     };
     let deps = ReviewDeps {
         llm: Arc::new(FakeLlm::approves()),
+        verifier: None,
         search: Arc::new(FakeSearch),
         analyze: None,
         dedup: None,
@@ -235,6 +261,7 @@ async fn run_review_request_changes_parsed_correctly() {
     };
     let deps = ReviewDeps {
         llm: Arc::new(FakeLlm::request_changes()),
+        verifier: None,
         search: Arc::new(FakeSearch),
         analyze: None,
         dedup: None,
@@ -261,6 +288,7 @@ async fn run_review_fail_safe_on_llm_error() {
     };
     let deps = ReviewDeps {
         llm: Arc::new(FakeLlm::errors("simulated transport error")),
+        verifier: None,
         search: Arc::new(FakeSearch),
         analyze: None,
         dedup: None,
@@ -294,6 +322,7 @@ async fn run_review_search_failure_does_not_block() {
     };
     let deps = ReviewDeps {
         llm: Arc::new(FakeLlm::approves()),
+        verifier: None,
         search: Arc::new(FailingSearch), // search is down
         analyze: None,
         dedup: None,
@@ -326,6 +355,7 @@ async fn run_review_local_diff_skips_github() {
     };
     let deps = ReviewDeps {
         llm: Arc::new(FakeLlm::approves()),
+        verifier: None,
         search: Arc::new(FakeSearch),
         analyze: None,
         dedup: None,
@@ -352,6 +382,7 @@ async fn run_review_missing_diff_file_sets_error() {
     };
     let deps = ReviewDeps {
         llm: Arc::new(FakeLlm::approves()),
+        verifier: None,
         search: Arc::new(FakeSearch),
         analyze: None,
         dedup: None,
@@ -385,6 +416,7 @@ async fn run_review_local_diff_is_dry_run_and_not_posted() {
     };
     let deps = ReviewDeps {
         llm: Arc::new(FakeLlm::approves()),
+        verifier: None,
         search: Arc::new(FakeSearch),
         analyze: None,
         dedup: None,
@@ -417,6 +449,7 @@ async fn run_review_writes_dry_run_log_on_log_only_path() {
     };
     let deps = ReviewDeps {
         llm: Arc::new(FakeLlm::approves()),
+        verifier: None,
         search: Arc::new(FakeSearch),
         analyze: None,
         dedup: None,
@@ -429,6 +462,120 @@ async fn run_review_writes_dry_run_log_on_log_only_path() {
         .filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false))
         .count();
     assert_eq!(json_count, 1, "a dry-run JSON log must be written");
+}
+
+/// The verification round, when wired in, REFUTES the only blocking finding and
+/// the runner's final verdict relaxes from REQUEST_CHANGES to APPROVE.
+///
+/// Why: end-to-end proof that the runner threads the verification round between
+/// parse/grade and finalisation and that a refuted finding correctly relaxes the
+/// verdict (Phase 2, #583 deliverable 2/3).
+#[tokio::test]
+async fn run_review_verification_refutes_and_relaxes_verdict() {
+    let (source, _tmp) = local_diff_source("+fn bad() {}\n");
+    let config = default_config();
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+    };
+    let deps = ReviewDeps {
+        llm: Arc::new(FakeLlm::request_changes()), // 1 medium finding → REQUEST_CHANGES
+        verifier: Some(Arc::new(FakeVerifier {
+            judgment: "REFUTED",
+        })),
+        search: Arc::new(FakeSearch),
+        analyze: None,
+        dedup: None,
+    };
+
+    let result = run_review(&config, input, deps).await;
+    assert_eq!(
+        result.verdict,
+        Verdict::Approve,
+        "refuting the sole finding must relax REQUEST_CHANGES to APPROVE"
+    );
+    assert_eq!(
+        result.findings.len(),
+        1,
+        "the finding is demoted, not dropped"
+    );
+}
+
+/// The verification round, when wired in, CONFIRMS the finding and the verdict
+/// is preserved.
+#[tokio::test]
+async fn run_review_verification_confirms_and_preserves_verdict() {
+    let (source, _tmp) = local_diff_source("+fn bad() {}\n");
+    let config = default_config();
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+    };
+    let deps = ReviewDeps {
+        llm: Arc::new(FakeLlm::request_changes()),
+        verifier: Some(Arc::new(FakeVerifier {
+            judgment: "CONFIRMED",
+        })),
+        search: Arc::new(FakeSearch),
+        analyze: None,
+        dedup: None,
+    };
+
+    let result = run_review(&config, input, deps).await;
+    assert_eq!(
+        result.verdict,
+        Verdict::RequestChanges,
+        "a confirmed finding must preserve the REQUEST_CHANGES verdict"
+    );
+}
+
+/// When verification is disabled by config, the verifier is never consulted and
+/// the verdict is the un-verified grade.
+#[tokio::test]
+async fn run_review_verification_disabled_skips_round() {
+    let (source, _tmp) = local_diff_source("+fn bad() {}\n");
+    let mut config = default_config();
+    config.verification.enabled = false; // disable the round
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+    };
+    let deps = ReviewDeps {
+        llm: Arc::new(FakeLlm::request_changes()),
+        // A REFUTED verifier is wired in but must NOT be consulted when disabled.
+        verifier: Some(Arc::new(FakeVerifier {
+            judgment: "REFUTED",
+        })),
+        search: Arc::new(FakeSearch),
+        analyze: None,
+        dedup: None,
+    };
+
+    let result = run_review(&config, input, deps).await;
+    assert_eq!(
+        result.verdict,
+        Verdict::RequestChanges,
+        "with verification disabled the verdict must remain REQUEST_CHANGES"
+    );
+    assert!(
+        result.findings[0].verified.is_none(),
+        "disabled verification must not mark any finding"
+    );
 }
 
 /// Live post + dedup-skip end-to-end requires a real PR + GitHub creds, so

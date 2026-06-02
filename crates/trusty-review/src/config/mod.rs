@@ -15,10 +15,12 @@
 
 pub mod constants;
 pub mod role_models;
+pub mod verification;
 
 pub use role_models::{
     FileModels, RoleCliOverrides, RoleConfig, RoleConfigOverride, RoleEnv, RoleModels,
 };
+pub use verification::{VerificationConfig, VerificationFileConfig};
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -75,6 +77,8 @@ impl std::str::FromStr for Provider {
 struct TomlFile {
     #[serde(default)]
     models: FileModels,
+    #[serde(default)]
+    verification: VerificationFileConfig,
 }
 
 /// Global service configuration for trusty-review.
@@ -149,6 +153,10 @@ pub struct ReviewConfig {
     // ── Role models (fully resolved) ───────────────────────────────────────
     /// Resolved per-role model configurations.
     pub role_models: RoleModels,
+
+    // ── Verification round (Phase 2, #583) ─────────────────────────────────
+    /// Resolved verification-round settings (`enabled`, `liveness_check`).
+    pub verification: VerificationConfig,
 }
 
 impl ReviewConfig {
@@ -165,11 +173,16 @@ impl ReviewConfig {
         config_path: Option<&std::path::Path>,
         cli_overrides: Option<&RoleCliOverrides>,
     ) -> Self {
-        // Try to load the config file; silently fall back to defaults.
-        let file_models = load_file_models(config_path);
+        // Try to load the config file; silently fall back to defaults.  Parse
+        // it once so both the `[models]` and `[verification]` tables come from
+        // the same read.
+        let toml_file = load_toml_file(config_path);
+        let file_models = toml_file.as_ref().map(|f| f.models.clone());
+        let file_verification = toml_file.as_ref().map(|f| f.verification.clone());
 
         let env = RoleEnv::from_env();
         let role_models = RoleModels::resolve(cli_overrides, &env, file_models.as_ref());
+        let verification = VerificationConfig::from_env_and_file(file_verification.as_ref());
 
         let dry_run = std::env::var("PR_INTELLIGENCE_DRY_RUN")
             .map(|v| v.to_lowercase() != "false")
@@ -215,6 +228,7 @@ impl ReviewConfig {
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| "trusty-review[bot]".to_string()),
             live_review_requesters: load_live_review_requesters(),
+            verification,
         }
     }
 
@@ -278,20 +292,22 @@ fn load_live_review_requesters() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Try to load `[models]` from a TOML config file; return `None` on any
-/// error (fail-open per spec REV-511).
+/// Try to parse the whole TOML config file; return `None` on any error
+/// (fail-open per spec REV-511).
 ///
-/// Why: config file absence or parse errors must never block a review.
-/// What: reads the file as a string, deserialises as `TomlFile`, returns
-/// the `models` table.  Any I/O or TOML error logs a warning and returns
-/// `None`.
+/// Why: config-file absence or parse errors must never block a review.  Parsing
+/// once and returning the whole `TomlFile` lets the caller pull both the
+/// `[models]` and `[verification]` tables from a single read instead of opening
+/// the file twice.
+/// What: reads the file as a string and deserialises as `TomlFile`.  Any I/O or
+/// TOML error logs a warning and returns `None`.
 /// Test: covered indirectly by `ReviewConfig` unit tests.
-fn load_file_models(path: Option<&std::path::Path>) -> Option<FileModels> {
+fn load_toml_file(path: Option<&std::path::Path>) -> Option<TomlFile> {
     let path = path?;
     match std::fs::read_to_string(path) {
         Err(_) => None,
         Ok(s) => match toml::from_str::<TomlFile>(&s) {
-            Ok(f) => Some(f.models),
+            Ok(f) => Some(f),
             Err(e) => {
                 warn!(?path, "failed to parse config file: {e}");
                 None

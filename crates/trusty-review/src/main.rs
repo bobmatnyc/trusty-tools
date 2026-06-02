@@ -14,6 +14,7 @@
 //! `service::webhook`; the `profile` subcommand is tested in `cli_profile`.
 
 mod cli_profile;
+mod cli_verify;
 
 use std::sync::Arc;
 
@@ -391,6 +392,17 @@ async fn cmd_serve(config: ReviewConfig, args: ServeArgs) -> Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!("failed to build LLM provider: {e}"))?;
 
+    // ── Verifier provider + startup liveness gate (Phase 2, #583) ──────────
+    // In LIVE mode (not dry-run) a dead verifier model would silently neuter
+    // every review (the code-intelligence incident), so we probe the verifier
+    // model and REFUSE to start when it is unavailable.  In dry-run mode the
+    // probe is informational only.  The gate itself is independently skippable
+    // via TRUSTY_REVIEW_VERIFIER_LIVENESS_CHECK=false.
+    let verifier = cli_verify::build_verifier_for_serve(&config).await?;
+    trusty_review::pipeline::enforce_verifier_liveness(&config, verifier.as_ref())
+        .await
+        .map_err(|reason| anyhow::anyhow!(reason))?;
+
     let search = HttpSearchClient::from_config(&config);
     let analyze = HttpAnalyzeClient::from_config(&config);
 
@@ -409,9 +421,10 @@ async fn cmd_serve(config: ReviewConfig, args: ServeArgs) -> Result<()> {
         }
     };
 
-    let state = AppState::with_dedup(
+    let state = AppState::with_verifier_and_dedup(
         config.clone(),
         llm,
+        verifier,
         Arc::new(search),
         Some(Arc::new(analyze)),
         dedup,
@@ -589,11 +602,18 @@ async fn build_deps_async(
         .await
         .map_err(|e| anyhow::anyhow!("failed to build LLM provider: {e}"))?;
 
+    // Build the verifier provider only when the verification round is enabled
+    // (Phase 2, #583).  A verifier-build failure is non-fatal for the CLI path:
+    // we log and fall back to running without verification rather than aborting
+    // a one-shot review.
+    let verifier = cli_verify::build_verifier_opt(config).await;
+
     let search = HttpSearchClient::from_config(config);
     let analyze = HttpAnalyzeClient::from_config(config);
 
     Ok(ReviewDeps {
         llm,
+        verifier,
         search: Arc::new(search),
         analyze: Some(Arc::new(analyze)),
         // CLI runs do not use the durable dedup store (one-shot, no retries).

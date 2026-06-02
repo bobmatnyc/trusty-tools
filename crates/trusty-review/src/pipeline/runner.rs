@@ -10,8 +10,11 @@
 //! gated by the trigger decision and the SHA-keyed dedup store.  Returns a
 //! `ReviewResult` even on pipeline errors (fail-safe APPROVE/UNKNOWN).
 //!
+//! Phase 2 (#583) adds the per-finding verification round between verdict parse
+//! and finalisation: candidate findings are confirmed/refuted by the verifier
+//! model and the verdict is re-derived so refuted blocking findings relax it.
+//!
 //! Deferred to later phases (stubs/comments intact):
-//!  - Verification round (Phase 2 / #583)
 //!  - Suppression filtering + per-repo `.github/code-intelligence.yml` (Phase 3 / #584)
 //!  - Tracker-issue upsert (Phase 4 / #585)
 //!  - JIRA/Confluence/APEX/GH-Issues context (Phase 6 / #550)
@@ -41,8 +44,10 @@ use crate::{
         output::{print_review_result, write_review_log},
         parser::parse_review_response,
         post::{PostContext, finalize_review},
-        prompt::{ReviewContext, ReviewPrMeta, build_review_prompt},
+        prompt::{ReviewPrMeta, build_review_prompt},
+        runner_context::gather_context,
         trigger::TriggerDecision,
+        verify::maybe_verify,
     },
     store::{ClaimOutcome, DedupStore},
 };
@@ -95,6 +100,10 @@ pub struct ReviewInput {
 pub struct ReviewDeps {
     /// LLM provider for the reviewer role.
     pub llm: Arc<dyn LlmProvider>,
+    /// LLM provider for the verifier role (Phase 2, #583).  `None` disables the
+    /// verification round (e.g. tests that don't exercise it, or when
+    /// `config.verification.enabled` is false the caller passes `None`).
+    pub verifier: Option<Arc<dyn LlmProvider>>,
     /// Code search client (required; gracefully degrades on error).
     pub search: Arc<dyn SearchClient>,
     /// Static analysis client (optional; None skips the analyze step).
@@ -280,8 +289,23 @@ pub async fn run_review(
         "final verdict after severity-anchored floor"
     );
 
-    result.verdict = final_verdict;
-    result.findings = parsed.findings;
+    let mut findings = parsed.findings;
+
+    // ── Step 7c: per-finding verification round (Phase 2, #583) ────────────
+    // Confirm or refute candidate findings with the verifier model; refuted
+    // findings are demoted below the advisory tier and the verdict is re-derived
+    // so a BLOCK whose only blocking finding was refuted relaxes.  `maybe_verify`
+    // applies the enabled / verifier-wired gating and returns the verdict
+    // unchanged when the round is skipped.
+    result.verdict = maybe_verify(
+        config,
+        deps.verifier.as_ref(),
+        &diff,
+        final_verdict,
+        &mut findings,
+    )
+    .await;
+    result.findings = findings;
 
     finalize_run(result, config, &input, deps.dedup.as_ref()).await
 }
@@ -318,96 +342,6 @@ async fn fetch_github_pr_meta(
         },
         head_sha,
     ))
-}
-
-/// Gather code context from trusty-search and (optionally) trusty-analyze.
-///
-/// Why: context retrieval is the most latency-sensitive step; running search
-/// and analyze in parallel reduces wall-clock time.
-/// What: runs the search query (identifier names + PR title) and the analyze
-/// probe concurrently; both degrade gracefully on error (empty context).
-/// Test: `gather_context_degrades_gracefully_on_search_failure`.
-async fn gather_context(
-    config: &ReviewConfig,
-    deps: &ReviewDeps,
-    identifiers: &[String],
-    changed_files: &[String],
-    pr_title: &str,
-) -> ReviewContext {
-    // Build a search query from identifiers + changed files.
-    let query_parts: Vec<&str> = {
-        let mut parts: Vec<&str> = identifiers.iter().map(|s| s.as_str()).collect();
-        if !pr_title.is_empty() {
-            parts.push(pr_title);
-        }
-        // Limit to 5 terms to avoid query bloat.
-        parts.truncate(5);
-        parts
-    };
-    let query = query_parts.join(" ");
-
-    let search_fut = async {
-        if query.is_empty() {
-            return Vec::new();
-        }
-        match deps
-            .search
-            .search(&config.search_index, &query, Some(8))
-            .await
-        {
-            Ok(results) => {
-                debug!(count = results.len(), "search context retrieved");
-                results
-            }
-            Err(e) => {
-                warn!("trusty-search unavailable (proceeding with no context): {e}");
-                Vec::new()
-            }
-        }
-    };
-
-    let analyze_fut = async {
-        let Some(ref analyze) = deps.analyze else {
-            return (Vec::new(), Vec::new());
-        };
-        if !analyze.has_analysis(&config.search_index).await {
-            debug!("trusty-analyze not available or has no index — skipping");
-            return (Vec::new(), Vec::new());
-        }
-        // Filter hotspots to changed files only.
-        let hotspots = match analyze
-            .complexity_hotspots(&config.search_index, Some(10))
-            .await
-        {
-            Ok(h) => h
-                .into_iter()
-                .filter(|h| changed_files.iter().any(|f| f == &h.file))
-                .collect(),
-            Err(e) => {
-                debug!("complexity_hotspots failed (optional): {e}");
-                Vec::new()
-            }
-        };
-        let smells = match analyze.smells(&config.search_index).await {
-            Ok(s) => s
-                .into_iter()
-                .filter(|s| changed_files.iter().any(|f| f == &s.file))
-                .collect(),
-            Err(e) => {
-                debug!("smells failed (optional): {e}");
-                Vec::new()
-            }
-        };
-        (hotspots, smells)
-    };
-
-    let (search_results, (complexity_hotspots, smells)) = tokio::join!(search_fut, analyze_fut);
-
-    ReviewContext {
-        search_results,
-        complexity_hotspots,
-        smells,
-    }
 }
 
 /// Finalise an *aborted* review as dry-run only, releasing the dedup claim.

@@ -258,6 +258,7 @@ pub async fn handle_github_webhook(
 
         let deps = ReviewDeps {
             llm: Arc::clone(&state_clone.llm),
+            verifier: state_clone.verifier.clone(),
             search: Arc::clone(&state_clone.search),
             analyze: state_clone.analyze.clone(),
             dedup: state_clone.dedup.clone(),
