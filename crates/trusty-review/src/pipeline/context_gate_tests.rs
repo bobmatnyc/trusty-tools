@@ -13,7 +13,9 @@ use crate::{
         analyze_client::{
             AnalyzeClient, AnalyzeClientError, AnalyzeHealthResponse, ComplexityHotspot, Smell,
         },
-        search_client::{HealthResponse, IndexInfo, SearchClient, SearchClientError, SearchResult},
+        search_client::{
+            EmbedderState, HealthResponse, IndexInfo, SearchClient, SearchClientError, SearchResult,
+        },
     },
     llm::{LlmError, LlmProvider, LlmRequest, LlmResponse},
     pipeline::runner::ReviewDeps,
@@ -48,7 +50,7 @@ impl SearchClient for StubSearch {
         match self.health {
             Some(ok) => Ok(HealthResponse {
                 status: if ok { "ok" } else { "starting" }.to_string(),
-                embedder: ok,
+                embedder: EmbedderState::Bool(ok),
             }),
             None => Err(SearchClientError::Unavailable("down".to_string())),
         }

@@ -7,6 +7,9 @@
 //! What: sub-modules:
 //!   - `github` — GitHub App auth, PR diff/metadata fetch, push firewall,
 //!     webhook HMAC verification.
+//!   - `health` — tolerant `HealthResponse` / `EmbedderState` types for the
+//!     trusty-search `/health` wire format (accepts both bool and string forms;
+//!     closes #628).
 //!   - `search_client` — HTTP client over trusty-search `:7878` (REQUIRED).
 //!   - `analyze_client` — HTTP client over trusty-analyze `:7879` (OPTIONAL).
 //!   - `context` — pluggable external context sources (JIRA / Confluence /
@@ -21,6 +24,7 @@ pub mod analyze_client;
 pub mod apex_context;
 pub mod context;
 pub mod github;
+pub mod health;
 pub mod search_client;
 
 pub use analyze_client::{
@@ -39,6 +43,6 @@ pub use github::{
     post_pr_review, resolve_token_for_mode, verify_webhook_signature,
 };
 pub use search_client::{
-    HealthResponse, HttpSearchClient, IndexInfo, SearchClient, SearchClientError, SearchRequest,
-    SearchResponse, SearchResult,
+    EmbedderState, HealthResponse, HttpSearchClient, IndexInfo, SearchClient, SearchClientError,
+    SearchRequest, SearchResponse, SearchResult,
 };

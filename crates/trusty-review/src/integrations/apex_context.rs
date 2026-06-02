@@ -137,7 +137,7 @@ pub async fn fetch_apex_context(
 mod tests {
     use super::*;
     use crate::integrations::search_client::{
-        HealthResponse, IndexInfo, SearchClientError, SearchResult,
+        EmbedderState, HealthResponse, IndexInfo, SearchClientError, SearchResult,
     };
     use async_trait::async_trait;
 
@@ -177,7 +177,7 @@ mod tests {
         async fn health(&self) -> Result<HealthResponse, SearchClientError> {
             Ok(HealthResponse {
                 status: "ok".to_string(),
-                embedder: true,
+                embedder: EmbedderState::Bool(true),
             })
         }
 

@@ -13,9 +13,14 @@
 //! return typed results; transport errors surface as `SearchClientError`
 //! variants.
 //!
+//! `HealthResponse` and the tolerant `EmbedderState` deserialiser live in the
+//! `health` submodule (see `health.rs`).
+//!
 //! Test: `search_client_base_url_construction` and
 //! `http_search_client_url_is_configurable` verify URL building;
 //! `search_result_deserialises` tests response parsing without a real daemon.
+
+pub use super::health::{EmbedderState, HealthResponse};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -56,33 +61,6 @@ pub enum SearchClientError {
 }
 
 // ─── Response types ───────────────────────────────────────────────────────────
-
-/// Response from `GET /health` on trusty-search.
-///
-/// Why: the pipeline checks health before issuing a search to give a clear
-/// "service unavailable" error rather than a confusing transport failure.
-/// What: `status` is `"ok"` when healthy; `embedder` is true when the
-/// embedding model is loaded and ready.
-/// Test: `health_response_deserialises`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct HealthResponse {
-    /// `"ok"` when healthy.
-    pub status: String,
-    /// True when the embedding model is loaded and ready.
-    #[serde(default)]
-    pub embedder: bool,
-}
-
-impl HealthResponse {
-    /// Returns `true` when the daemon is healthy and the embedder is loaded.
-    ///
-    /// Why: the pipeline needs a single boolean to decide whether to proceed.
-    /// What: checks `status == "ok"`.  The `embedder` flag is informational.
-    /// Test: `health_response_is_healthy`.
-    pub fn is_healthy(&self) -> bool {
-        self.status == "ok"
-    }
-}
 
 /// A single registered index from `GET /indexes`.
 ///
@@ -383,32 +361,6 @@ mod tests {
         config.search_url = "http://localhost:9999".to_string();
         let client = HttpSearchClient::from_config(&config);
         assert_eq!(client.base_url(), "http://localhost:9999");
-    }
-
-    #[test]
-    fn health_response_is_healthy() {
-        let resp = HealthResponse {
-            status: "ok".to_string(),
-            embedder: true,
-        };
-        assert!(resp.is_healthy());
-    }
-
-    #[test]
-    fn health_response_not_ok_is_unhealthy() {
-        let resp = HealthResponse {
-            status: "starting".to_string(),
-            embedder: false,
-        };
-        assert!(!resp.is_healthy());
-    }
-
-    #[test]
-    fn health_response_deserialises() {
-        let json = r#"{"status":"ok","embedder":true}"#;
-        let resp: HealthResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.is_healthy());
-        assert!(resp.embedder);
     }
 
     #[test]

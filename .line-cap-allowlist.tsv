@@ -134,9 +134,8 @@ crates/trusty-mpm/src/tui/dashboard.rs	1040
 crates/trusty-mpm/src/tui/health.rs	3330
 crates/trusty-mpm/src/tui/mod.rs	763
 crates/trusty-review/src/integrations/analyze_client.rs	622
-crates/trusty-review/src/integrations/search_client.rs	533
 crates/trusty-review/src/models/mod.rs	532
-crates/trusty-review/src/pipeline/runner_tests.rs	728
+crates/trusty-review/src/pipeline/runner_tests.rs	730
 crates/trusty-review/src/pipeline/runner.rs	509
 crates/trusty-search/src/commands/doctor_checks.rs	612
 crates/trusty-search/src/commands/integrate.rs	688

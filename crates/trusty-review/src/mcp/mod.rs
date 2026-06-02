@@ -159,8 +159,8 @@ mod tests {
     use crate::{
         config::ReviewConfig,
         integrations::search_client::{
-            HealthResponse as SearchHealth, IndexInfo, SearchClient, SearchClientError,
-            SearchResult,
+            EmbedderState, HealthResponse as SearchHealth, IndexInfo, SearchClient,
+            SearchClientError, SearchResult,
         },
         llm::{LlmError, LlmProvider, LlmRequest, LlmResponse},
         service::AppState,
@@ -198,7 +198,7 @@ mod tests {
         async fn health(&self) -> Result<SearchHealth, SearchClientError> {
             Ok(SearchHealth {
                 status: "ok".into(),
-                embedder: true,
+                embedder: EmbedderState::Bool(true),
             })
         }
 

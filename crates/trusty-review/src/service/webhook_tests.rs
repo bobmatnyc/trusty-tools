@@ -10,7 +10,8 @@
 use super::*;
 use crate::{
     integrations::search_client::{
-        HealthResponse as SearchHealth, IndexInfo, SearchClient, SearchClientError, SearchResult,
+        EmbedderState, HealthResponse as SearchHealth, IndexInfo, SearchClient, SearchClientError,
+        SearchResult,
     },
     llm::{LlmError, LlmProvider, LlmRequest, LlmResponse},
     service::handlers::AppState,
@@ -57,7 +58,7 @@ impl SearchClient for FakeSearch {
     async fn health(&self) -> Result<SearchHealth, SearchClientError> {
         Ok(SearchHealth {
             status: "ok".to_string(),
-            embedder: true,
+            embedder: EmbedderState::Bool(true),
         })
     }
 
