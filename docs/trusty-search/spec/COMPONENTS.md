@@ -1,8 +1,8 @@
 # trusty-search — Component Specifications
 
 > **Status:** Canonical · Living Document
-> **Last reviewed:** 2026-05-29
-> **Derived from:** code/docs/tickets audit
+> **Last reviewed:** 2026-06-01
+> **Derived from:** code/docs/tickets audit (v0.22.2)
 
 **Status legend:** ✅ Implemented · 🟡 Partial · 🔵 Designed-not-built · ⚪ Aspirational
 
@@ -38,11 +38,16 @@ so any stage can be skipped, incrementally and crash-safely.
 
 **Current state.** ✅ Full staged pipeline with split-lock concurrency, sha2
 incremental skip, atomic redb per-batch commits, gitignore-honouring walk (#100),
-walk diagnostics (#280), and memory-bounded reindex with a soft RSS ceiling.
+walk diagnostics (#280), memory-bounded reindex with a soft RSS ceiling, and
+sidecar-stall hardening via per-call timeout (`TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS`).
+The CLI renders a 4-phase MultiProgress UI (Crawl / Chunk / Loading model… /
+Embed / KG) with progress-aware foreground wait — the `--timeout` flag is now
+optional, and the stall detector resets on each forward-progress SSE event.
 
 **Known gaps.**
 - 🟡 Build-file grammars (`.gradle`, `.groovy`) fall back to sliding-window.
 - 🔵 SCIP-quality cross-file entities (FR-KG-5 / #105).
+- 🔵 `reindex_engine.rs` exceeds the 500-line cap (1 438 lines, #571 open).
 
 ---
 
@@ -153,14 +158,15 @@ over stdio and HTTP/SSE so an LLM client (Claude Code) can drive code search.
 - `sse` (`src/mcp/sse.rs`) — axum `POST /mcp` + `GET /mcp/sse`.
 - `openrpc` (`src/mcp/openrpc.rs`) — OpenRPC descriptor.
 
-**Current state.** ✅ 17 tools: `search_code`, `search_kg`, `search_semantic`,
-`search_lexical`, `search_similar`, `grep`, `get_call_chain`, `index_file`,
-`remove_file`, `list_indexes`, `create_index`, `delete_index`, `reindex`,
-`index_status`, `list_chunks`, `search_health`, `chat`. stdout reserved for
-JSON-RPC; logs to stderr.
+**Current state.** ✅ 19 tools: `search_code`, `search_kg`, `search_semantic`,
+`search_lexical`, `search_all`, `search_similar`, `grep`, `get_call_chain`,
+`index_file`, `remove_file`, `list_indexes`, `create_index`, `delete_index`,
+`reindex`, `index_status`, `list_chunks`, `search_health`, `chat`, `upgrade`.
+The `grep` tool now accepts `max_count` as a ripgrep-parity alias for
+`max_results` (#447). stdout reserved for JSON-RPC; logs to stderr.
 
 **Known gaps.**
-- 🟡 The crate `README.md` advertises an older 11–15-tool subset; `src/mcp/tools.rs`
+- 🟡 The crate `README.md` advertises an older tool subset; `src/mcp/tools.rs`
   is authoritative.
 
 ---
@@ -183,9 +189,14 @@ fan-out and observability.
 
 **Current state.** ✅ Full per-index API + global fan-out; HTTP/2; CORS/trace/gzip;
 `{ "error": … }` error envelope with standard codes; Prometheus `/metrics` (#41).
+New since v0.18: `POST /upgrade` (self-update via crates.io + cargo-install, #537);
+`GET /indexes?format=tree` (hierarchy-annotated list, #404); `GET /indexes?details=true`
+(returns `{id, size_bytes}`, #312). `/health` now includes `update_available`,
+`embedder_error`, and `embedder_ready` fields. `POST /admin/stop` added.
 
 **Known gaps.**
-- 🟡 Cross-index fan-out has no dedup of overlapping indexes (FR-NEST-1, #404).
+- 🟡 Cross-index overlap dedup is exact (file, start, end) match only — partial
+  overlap not handled.
 - Facts store (`/facts`) optional — 503 when unconfigured.
 
 ---
@@ -208,7 +219,18 @@ is a 6-check diagnostic with auto-repair; `convert` migrates from
 `mcp-vector-search`; `--data-dir` enables isolated daemon instances;
 `--no-auto-discover` skips the startup scan.
 
-**Known gaps.** None material.
+New subcommands since v0.18: `port` (daemon port in 3 formats, #526);
+`prune-orphans [--dry-run] [--yes]` (offline orphan cleanup, #489);
+`upgrade [--check] [--yes]` (self-update + daemon restart, #537);
+`migrate storage` (colocated-storage migration, #403/#491);
+`service install|uninstall|status|logs` (macOS launchd integration).
+
+Auto-discovery (startup scan) now also recognises `.trusty-tools/` directory
+presence as a project marker (#470). The `discover/` submodule was split into
+`marker.rs` / `http.rs` / `mod.rs` to stay under the 500-line cap (#473).
+
+**Known gaps.**
+- 🟡 `reindex_engine.rs` exceeds the 500-line cap (#571, open).
 
 ---
 
@@ -232,9 +254,10 @@ persistence (HNSW + redb survive restarts, #85), background schema migrations,
 device-flag persistence.
 
 **Known gaps.**
-- 🔵 Co-located `.trusty-search/` storage + filesystem discovery
-  ([#403](https://github.com/bobmatnyc/trusty-tools/issues/403)) — today data
-  lives under a central daemon data dir.
+- 🟡 Worktree-aware indexing (shared base + per-worktree delta overlay, #447)
+  still open — colocated storage gives independent per-worktree `.trusty-search/`
+  dirs (since two worktrees have different paths), but there is no delta overlay
+  or dedup between them.
 
 ---
 
@@ -305,3 +328,35 @@ batch on > 4 GB RSS jumps; idle chunk-map eviction (300 s).
 **Known gaps.**
 - 🟡 README/CLAUDE.md describe the Tiny/Small tiers inconsistently vs. the 16 GB
   hard check at `start` (PRD Q8); the policy code still defines all five tiers.
+
+---
+
+## 13. Co-located Storage & Filesystem Discovery — `src/service/colocated_storage.rs`, `src/service/fs_discovery.rs`, `src/service/roots_registry.rs`
+
+**Responsibility.** Store each project's index data inside the project tree at
+`<root>/.trusty-search/` and discover those directories without crawling the
+entire filesystem; provide a migration path from the legacy central data dir.
+
+**Key types/modules.**
+- `colocated_storage.rs` — `COLOCATED_DIR_NAME` (`.trusty-search`), path-resolver
+  helpers, `.gitignore` entry management (idempotent upsert).
+- `fs_discovery.rs` — `scan_roots_for_colocated_indexes`: given a list of tracked
+  project roots, recursively finds all `.trusty-search/` directories and returns
+  `ColocatedIndexEntry` values (root path + stable id derived from canonical path).
+- `roots_registry.rs` — atomic TOML `roots.toml` (`[[root]]` array) storing the
+  set of project roots to scan; survives crashes via write-tmp + rename.
+- `src/commands/migrate_storage/` (`mod.rs`, `migrate.rs`, `classify.rs`) —
+  classifies each registry entry by actual filesystem state (AlreadyColocated /
+  NeedsMigration / LegacyPointerFile / SkipDeadRoot / SkipNoData) and migrates
+  data files accordingly. Handles the legacy pointer-file edge case (#491).
+
+**Current state.** ✅ Colocated storage implemented (#403, v0.20.0). Per-worktree
+independence is implicit: two worktrees at different paths have different
+`.trusty-search/` dirs. `migrate storage` subcommand provides the offline upgrade
+path. `prune-orphans` separately handles orphaned entries in the legacy registry.
+
+**Known gaps.**
+- 🟡 Worktree-aware delta overlay (#447) — two worktrees still produce independent
+  full indexes with no shared base.
+- 🔵 Relative chunk paths (#402) — chunk ids embed absolute file paths, which
+  break if the project root is relocated (workaround: run `migrate storage`).

@@ -1,8 +1,8 @@
 # trusty-git-analytics (`tga`) — Architecture
 
 > **Status:** Canonical · Living Document
-> **Last reviewed:** 2026-05-29
-> **Derived from:** existing `requirements/` docs + code/tickets reconciliation
+> **Last reviewed:** 2026-06-01
+> **Derived from:** existing `requirements/` docs + code/tickets reconciliation, updated through v2.5.0
 
 **Status legend:** ✅ Implemented · 🟡 Partial · 🔵 Designed-not-built · ⚪ Aspirational
 
@@ -74,9 +74,14 @@ read while an earlier one is still writing.
 ### 2.1 Stage 1 — collect (`src/collect/`)
 
 - **Git walk** (`collect/git/`): `git2` revwalk over each repo, in-process diff
-  (`diff.rs`), branch selection (`extractor.rs`), HTTPS fetch (`fetch.rs`,
-  vendored-TLS libgit2 #337), tag/release-branch reachability (`reachability.rs`,
-  #279). Parallel across repos/branches with rayon.
+  stats (`diff.rs`), unified diff text for contributor-profile callers
+  (`diff.rs::diff_for_commit`, 200 KiB cap, #559), branch selection
+  (`extractor.rs`), HTTPS fetch (`fetch.rs`, vendored-TLS libgit2 #337),
+  tag/release-branch reachability (`reachability.rs`, #279). Parallel across
+  repos/branches with rayon.
+- **AI attribution** (`collect/ai_attribution.rs`): `detect_ai_tool(message)` scans
+  `Co-Authored-By:` trailers at insert time; sets `commits.is_ai_assisted` /
+  `commits.ai_tool` (#445 batch A).
 - **External fetch**: GitHub (`collect/github/`), Bitbucket Cloud
   (`collect/bitbucket/`, ADR-0003), Azure DevOps (`collect/azdo/`, WIQL +
   `workitemsbatch`), JIRA (`collect/jira/`), Linear (`collect/linear/`) — all
@@ -110,15 +115,23 @@ confidence, method, ticket_id, complexity }`. WAL is checkpointed at exit (#298)
 ### 2.3 Stage 3 — score, aggregate, report (`src/report/`, `src/core/`)
 
 - **Score**: `core/effort.rs` (deterministic v1 formula → `fact_commit_effort`,
-  via `tga backfill effort`); `core/quality.rs` (per-engineer-per-week 1–5);
-  `core/revert.rs` (shared revert detector — single source of truth for
+  via `tga backfill effort`); `core/effort_percentile.rs` (corpus-percentile
+  binning → `effort_tshirt` integer 1–5 in `fact_commit_effort`, via `tga backfill
+  effort-tshirt`, #445 batch C); `core/quality.rs` (per-engineer-per-week 1–5,
+  now also persisted to `fact_weekly_quality` via `Aggregator::persist_weekly_quality`,
+  #445 batch B); `core/revert.rs` (shared revert detector — single source of truth for
   `is_revert` and report-time revert rate).
 - **Aggregate**: `report/aggregator.rs` does a **single** scan of `commits`
   left-joined to `classifications`, grouping in memory into `ReportData`
-  (`report/models.rs`). DORA arithmetic reads the SQL views.
+  (`report/models.rs`). DORA arithmetic reads the SQL views. After aggregation
+  `Aggregator::persist_weekly_quality` UPSERTs per-(author, year, week, repo)
+  quality rows into `fact_weekly_quality` (#445 batch B).
 - **Report**: `report/formatters/{csv,json,markdown}.rs` + Tera templates
   (`report/templates/`); `report/drilldown.rs` powers `tga author`;
-  `report/ticketed_stats.rs` computes ticket-linkage stats.
+  `report/ticketed_stats.rs` computes ticket-linkage stats;
+  `report/period_trends/` (`mod.rs`, `model.rs`, `query.rs`) provides
+  `query_author_period_trends` + `AuthorPeriodSummary` for the contributor-profile
+  pipeline (#558, closes #559/#560).
 
 ---
 
@@ -126,7 +139,7 @@ confidence, method, ticket_id, complexity }`. WAL is checkpointed at exit (#298)
 
 Detailed table-by-table source: [`../requirements/database-schema.md`](../requirements/database-schema.md)
 (note: that doc lists migrations `0001`–`0013`; the **on-disk** migration set
-runs to `0016`). Every `Database::open()` applies:
+runs to `0019`). Every `Database::open()` applies:
 
 ```sql
 PRAGMA journal_mode = WAL;
@@ -134,7 +147,7 @@ PRAGMA synchronous  = NORMAL;
 PRAGMA foreign_keys = ON;
 ```
 
-Migrations live in `src/core/db/sql/0001_*.sql … 0016_*.sql`, tracked in
+Migrations live in `src/core/db/sql/0001_*.sql … 0019_*.sql`, tracked in
 `schema_migrations` and applied idempotently by `src/core/db/migrations.rs`.
 
 ### 3.1 Table families
@@ -148,6 +161,9 @@ Migrations live in `src/core/db/sql/0001_*.sql … 0016_*.sql`, tracked in
 | **DORA facts** (#207/#208/#212/#213) | `fact_deployments`, `fact_incidents`, `deployment_failures` + views `v_deployment_frequency`, `v_lead_time`, `v_mttr`, `v_change_failure_rate` | `0014` |
 | **Reachability** (#279) | `fact_commit_reachability` (default-branch / tag / release-branch) | `0015` |
 | **Effort** (PR #308) | `fact_commit_effort` (XS–XL size, score, LoC, files, test_loc, `formula_version`) | `0016` |
+| **Push-down columns** (#445 batch A) | `classifications.top_level_category` TEXT; `fact_commit_effort.effort_tshirt` INTEGER (1–5); `commits.is_ai_assisted` INTEGER (0/1) + `commits.ai_tool` TEXT | `0017` |
+| **Quality persistence** (#445 batch B) | `fact_weekly_quality` (grain: author × iso_year × iso_week × repository; `quality_score`, `quality_tshirt`, raw counts, `formula_version`, `computed_at`) | `0018` |
+| **Effort percentile store** (#445 batch C) | `effort_percentile_thresholds` (p20/p40/p60/p80 breakpoints per dataset, `sample_count`, `computed_at`) | `0019` |
 
 The `fact_*` convention: each row is an immutable observation keyed by a stable
 upstream id (e.g. `deploy_id`, `(sha, repository)`), so re-ingest is idempotent
@@ -157,7 +173,8 @@ before or independently of the collection walk.
 
 > **Reconciliation note.** The requirements DB schema uses the predecessor names
 > `cached_commits` / `weekly_fetch_status`; the live schema uses `commits` /
-> `collection_runs`. The five `fact_*` tables and the DORA views do not appear in
+> `collection_runs`. The nine `fact_*` tables, DORA views, push-down columns,
+> `fact_weekly_quality`, and `effort_percentile_thresholds` do not appear in
 > the requirements doc at all. Treat the on-disk SQL under `src/core/db/sql/` as
 > authoritative.
 
@@ -219,7 +236,7 @@ targeting via mutually-exclusive `--weeks` / `--week` / `--from`+`--to`.
 | `author` | Per-engineer drill-down (effort + PRs + commits, #325). | `commands/author.rs` |
 | `pr-metrics` | Weekly PR-metrics aggregation. | `commands/pr_metrics.rs` |
 | `aliases` | Identity CRUD + LLM-assisted `suggest` (#347/#348). | `commands/aliases/` |
-| `backfill` | Retroactive `ticket-id` / `effort` / `reachability` re-runs (`--dry-run`). | `commands/backfill.rs` |
+| `backfill` | Retroactive maintenance ops: `ticket-id` / `revert-flags` / `effort` / `reachability` / `complexity` / `ticketed` / `ai-detection` / `ai-detection-commits` / `top-level` / `effort-tshirt` / `quality` (`--dry-run`, `--repos`, `--weeks`, `--since`, `--until`). | `commands/backfill.rs` |
 | `override` | Manual Tier-0 classification overrides. | `commands/override_cmd.rs` |
 | `rules` | Inspect/validate the active rule set (#209/#259). | `commands/rules.rs` |
 | `install` | Interactive config wizard. | `commands/install.rs` |
@@ -268,4 +285,7 @@ and [`../decisions/`](../decisions/).
 - **Determinism**: effort scores carry a `formula_version`; identical output is
   guaranteed between the Rust path and `scripts/compute-effort.sh`.
 - **Idempotent ingest**: `fact_*` tables keyed by stable upstream ids; migrations
-  idempotent and never edited after release (additive `0014`–`0016` only).
+  idempotent and never edited after release (additive `0014`–`0019` only).
+- **Library-stable APIs for downstream consumers**: `diff_for_commit` and
+  `query_author_period_trends` are stable public library functions callable from
+  trusty-review without any tga CLI involvement.

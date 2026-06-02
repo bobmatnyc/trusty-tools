@@ -1,8 +1,8 @@
 # trusty-memory — System Architecture
 
 > **Status:** Canonical · Living Document
-> **Last reviewed:** 2026-05-29
-> **Derived from:** code/docs/tickets audit
+> **Last reviewed:** 2026-06-01
+> **Derived from:** code/docs/tickets audit (v0.14.0)
 
 **Status legend:** ✅ Implemented · 🟡 Partial · 🔵 Designed-not-built · ⚪ Aspirational
 
@@ -123,6 +123,22 @@ trusty-memory-mcp-bridge          ┌──────────── HTTP/S
 - **Dynamic port discovery.** `serve` self-spawns a detached `serve --foreground`,
   binds HTTP on `7070..=7079` (OS fallback), and writes the resolved address to a
   discovery file read by `trusty_common::read_daemon_addr` (`commands/start.rs`). ✅
+- **Port query command.** `trusty-memory port` reads the discovery file and prints
+  the daemon's live address as a bare port, `host:port`, or JSON — enabling safe
+  shell substitution (`curl http://127.0.0.1:$(trusty-memory port)/...`) without
+  hard-coding the dynamic port (#526, `commands/port.rs`). ✅
+- **Single-instance guard.** Before binding, the daemon probes the discovery files
+  and exits `0` (success) if a healthy daemon is already responding to `/health`.
+  This prevents launchd `KeepAlive { SuccessfulExit: false }` from spawning a zombie
+  herd when `EADDRINUSE` would otherwise cause a non-zero exit and a cascade of
+  respawns (#464, `commands/single_instance.rs`). ✅
+- **Graceful shutdown + bridge reconnect.** The daemon uses
+  `trusty_common::shutdown_signal()` with axum's `with_graceful_shutdown` to drain
+  in-flight requests before exiting on SIGTERM (`trusty-common::shutdown.rs`, #534,
+  `trusty-common` ≥ 0.10.0). The `mcp_bridge` detects socket-close after the pipe
+  drains and reconnects with exponential backoff (200 ms → 30 s ceiling), so
+  `launchctl bootout` + launchd respawn of a new binary is connection-safe from
+  Claude Code's perspective. ✅
 - **Multi-process concurrent reads.** redb takes an exclusive `flock` per file. To
   let a second process *read* a palace the daemon owns, `concurrent_open.rs` (#59)
   copies the database to a process-local snapshot when an exclusive open hits
@@ -145,10 +161,33 @@ Palace data persists under the OS-standard data dir
 - **macOS:** `~/Library/Application Support/trusty-memory/<palace-id>/`
 - **Linux:** `~/.local/share/trusty-memory/<palace-id>/`
 
+`resolve_data_dir` now guards against empty, relative, and root-level path
+overrides (#503/#520 — `TRUSTY_DATA_DIR_OVERRIDE` must be an absolute,
+non-root path; any other value falls back to the OS default with a warning
+rather than scattering files in unexpected locations).
+
 Per-palace files: `drawers.db` / payload sidecar, `vectors` HNSW redb,
 `kg.redb` (or legacy `kg.db`), `chat_sessions` redb, `l1_cache.json`,
 `palace.json` (metadata + `identity.txt`). `TRUSTY_DATA_DIR_OVERRIDE` redirects
-the root (intended for tests).
+the root (intended for tests; must be an absolute, non-root path — guarded since
+#503/#520).
+
+**Palace slug pinning** (`.trusty-tools/` convention, #446): `project_slug_at()`
+now implements a two-step resolution order — first read
+`.trusty-tools/trusty-memory.yaml` if present (the *pin file*), then fall back to
+deriving the slug from the directory basename and lazily writing the pin file.
+The pin file travels with the repo via git so a directory rename no longer
+orphans the project from its palace. `trusty-memory link` (`commands/link.rs`)
+explicitly writes or refreshes the pin file from the CLI. Constants live in
+`project_root.rs`: `PIN_FILE_REL` (`".trusty-tools/trusty-memory.yaml"`),
+`TRUSTY_TOOLS_DIR`, `PIN_SCHEMA_VERSION`. `write_project_pin` is guarded against
+writing into a temp dir, home dir, or root directory (#492). ✅
+
+**Startup pin-map scan** (`startup_scan.rs`): at daemon startup, a single
+pass over `~/Projects`, `~/Developer`, `~/Code`, and `~/` builds a
+`DashMap<palace_id → PathBuf>` (`AppState::pin_project_map`) so handlers can
+look up a project's filesystem location by palace id without further I/O.
+This also feeds `doctor` to avoid N-pass scans over the same directories. ✅
 
 ---
 
@@ -275,7 +314,7 @@ browser. ✅
 |---|---|
 | `lib.rs` | Crate root: `run_http*` (axum HTTP/SSE/REST/UI), `AppState`, re-exports. |
 | `main.rs` | `clap` CLI shim; dispatches to `commands::*`. |
-| `tools.rs` | MCP tool surface: `MemoryMcpServer`, `tool_definitions[_with]` (the **23-tool** `tools/list` payload), in-process dispatcher. |
+| `tools.rs` | MCP tool surface: `MemoryMcpServer`, `tool_definitions[_with]` (the **24-tool** `tools/list` payload), in-process dispatcher. |
 | `mcp_service.rs` | `MemoryMcpService` — `trusty_mcp_core::ServiceDescriptor` impl for in-process hosts (open-mpm). |
 | `openrpc.rs` | OpenRPC 1.3.2 `rpc.discover` builder + `scopes_for_tool` (read/write/knowledge.write). |
 | `web.rs` | All `/api/v1/*` handlers, `/sse`, `/rpc`, `/health`, embedded-UI fallback. |
@@ -292,9 +331,11 @@ browser. ✅
 | `prompt_log.rs` | Enriched-prompt JSONL logger with rotation/retention (#105). |
 | `attribution.rs` | `creator:*` tag namespace attached to every write (#202). |
 | `hook_emit.rs` | Cross-process hook activity emit (`POST /api/v1/activity/hook`). |
-| `project_root.rs` | Project-root detection + palace-slug derivation (#88). |
-| `commands/` | Subcommand handlers: `serve`/`start`/`stop`, `setup`, `service` (launchd), `migrate`/`kuzu_migrate`/`migrations`, `monitor`, `note`, `send_message`, `inbox_check`, `doctor`, `kg_rebuild`, `prompt_context`. |
-| `bin/mcp_bridge.rs` | `trusty-memory-mcp-bridge` — stdio↔UDS byte pipe (PR #149). |
+| `project_root.rs` | Project-root detection, palace-slug derivation, and `.trusty-tools/trusty-memory.yaml` pin-file management (#88, #446). `ProjectPin`, `PIN_FILE_REL`, `TRUSTY_TOOLS_DIR`, `PIN_SCHEMA_VERSION`, `read_project_pin`, `write_project_pin`, `project_slug_from_basename`. |
+| `startup_scan.rs` | Single-pass pin-file scanner at daemon start → `AppState::pin_project_map` (`DashMap<palace_id, PathBuf>`). `default_search_dirs()` returns the four standard roots (#470). |
+| `fd_metrics.rs` | Best-effort open-fd count (`count_open_fds`) and soft RLIMIT_NOFILE (`fd_soft_limit`) for the `/health` fd gauge (#464). |
+| `commands/` | Subcommand handlers: `serve`/`start`/`stop`, `setup`, `service` (launchd), `migrate`/`kuzu_migrate`/`migrations`, `monitor`, `note`, `send_message`, `inbox_check`, `doctor`, `kg_rebuild`, `prompt_context`, `port`, `upgrade`, `link`, `single_instance`. |
+| `bin/mcp_bridge.rs` | `trusty-memory-mcp-bridge` — stdio↔UDS byte pipe with idle-safe exponential-backoff reconnect (PR #149, #535). |
 | `bin/bm25_daemon.rs` | Bundled `trusty-bm25-daemon` binary shim. |
 
 ### 8.2 Core — `crates/trusty-common/src/memory_core/`
@@ -327,7 +368,52 @@ methods over both UDS and `POST /rpc`:
   enumerated in PRD §4.3 — e.g. `memory_remember`, `memory_recall`,
   `memory_recall_deep`, `memory_recall_all`, `memory_list`, `memory_forget`,
   `palace_create/list/info/compact`, plus helper resolvers `palace_id` /
-  `palace_name`, and `memory_note` / `memory_send_message`.
+  `palace_name`, `memory_note` / `memory_send_message`, and `upgrade`.
 - **Scopes** are advertised per method via OpenRPC `x-scopes` (`openrpc.rs`):
   `memory.read` for queries, `memory.write` for mutations, `knowledge.write` for
   `kg_bootstrap`. Advertised, not locally enforced (PRD §2 Non-Goals).
+
+---
+
+## 10. Operational Reliability Layer
+
+Several features added since v0.10.0 (current: v0.14.0) harden the daemon for production use.
+
+### 10.1 Bug-Capture Error Layer (`trusty-common` `error_capture/`, #478/#490)
+
+`trusty-common`'s `error_capture` module (enabled via the `bug-capture` feature
+flag) provides a `tower` middleware layer (`BugCaptureLayer`) that intercepts
+500-level responses, fingerprints them with a SHA-256-keyed dedup scheme, and
+appends them to a JSONL ring store (`ErrorStore`). The MCP `upgrade` tool and
+the HTTP surface expose these captures so operators can report bugs without
+manually tailing logs. trusty-memory enables `bug-capture` in its feature list
+(`Cargo.toml`). The `error_store: Option<ErrorStore>` field is attached to
+`AppState` via `AppState::with_error_store(...)`.
+
+### 10.2 Update-Check & Upgrade (`trusty-common` `update/`, #455/#537/#539)
+
+`trusty-common`'s `update` module polls crates.io for new versions (throttled;
+24-hour cache). The result is stored in `AppState::update_available:
+Arc<Mutex<Option<String>>>` so `/health` always reports it lock-free with no
+per-request I/O. Three upgrade surfaces:
+
+- **`/health` `update_available` field** — background throttled check at startup.
+- **`trusty-memory upgrade [--check] [--yes]`** — interactive CLI (`commands/upgrade.rs`).
+- **`upgrade` MCP tool** — `check=true` (report only) / `confirm=true` (install +
+  restart). The daemon calls `std::process::exit(1)` after a successful install so
+  launchd's `KeepAlive { SuccessfulExit: false }` respawns the new binary; the MCP
+  response is flushed first (500 ms delay). Delegates to
+  `trusty_common::update::upgrade_and_restart` from `update/upgrade.rs`.
+
+### 10.3 File-Descriptor Observability & LaunchAgent Limits (#464)
+
+The fd-exhaustion bug (EMFILE at 256 fds with ~82 palaces × 3 redb files each)
+is now observable and mitigated:
+
+- `fd_metrics.rs` — `count_open_fds()` (reads `/dev/fd` or `/proc/self/fd`)
+  and `fd_soft_limit()` (via `libc::getrlimit`). Exposed as `open_fds` and
+  `fd_soft_limit` fields in the `/health` JSON response.
+- The macOS LaunchAgent plist generated by `service install` now includes
+  `SoftResourceLimits` / `HardResourceLimits` = 8192 so the daemon can handle
+  large palace collections.
+- Open ticket #463 tracks a future lazy/LRU redb-handle cache for bounded fd usage.

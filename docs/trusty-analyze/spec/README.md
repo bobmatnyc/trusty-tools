@@ -1,8 +1,8 @@
 # trusty-analyze — Specification Set
 
 > **Status:** Canonical · Living Document
-> **Last reviewed:** 2026-05-29
-> **Derived from:** code/docs/tickets audit
+> **Last reviewed:** 2026-06-01
+> **Derived from:** code/docs/tickets audit (drift audit v0.4.1)
 
 This directory holds the canonical product and engineering specification for the
 `trusty-analyze` crate (`crates/trusty-analyze/`). It is the single authoritative
@@ -72,7 +72,7 @@ docs live alongside it:
 
 These documents are derived from an audit of the `crates/trusty-analyze/src/`
 tree (the single-crate `commands` / `core` / `embedder` / `lang` / `mcp` /
-`service` / `types` module layout as of v0.1.10), the crate `README.md` /
+`service` / `types` module layout as of v0.4.1), the crate `README.md` /
 `CLAUDE.md`, and the open/closed issue backlog (notably the axum feature-gate
 [#249](https://github.com/bobmatnyc/trusty-tools/issues/249), the MCP
 stdout-framing fix [#66](https://github.com/bobmatnyc/trusty-tools/issues/66),
@@ -80,10 +80,19 @@ the `list_facts` read-lock contention fix
 [#67](https://github.com/bobmatnyc/trusty-tools/issues/67), the LLM-narrative /
 framework analysis feature [#4](https://github.com/bobmatnyc/trusty-tools/issues/4),
 the micro-crate consolidation [#5](https://github.com/bobmatnyc/trusty-tools/issues/5),
-and the crate-inventory reconciliation
-[#430](https://github.com/bobmatnyc/trusty-tools/issues/430)). When the code
-changes materially, update the relevant document and bump the *Last reviewed*
-date. Source-path citations reflect the layout at the time of review.
+the crate-inventory reconciliation
+[#430](https://github.com/bobmatnyc/trusty-tools/issues/430), the reqwest
+timeouts + spawn_blocking fix [#521](https://github.com/bobmatnyc/trusty-tools/issues/521),
+the MCP deep_analysis timeout raise
+[#528](https://github.com/bobmatnyc/trusty-tools/issues/528)/[#529](https://github.com/bobmatnyc/trusty-tools/issues/529),
+the AWS Bedrock deep-pass
+[#530](https://github.com/bobmatnyc/trusty-tools/issues/530)/[#531](https://github.com/bobmatnyc/trusty-tools/issues/531),
+the connection-safe graceful-shutdown upgrade
+[#534](https://github.com/bobmatnyc/trusty-tools/issues/534)/[#535](https://github.com/bobmatnyc/trusty-tools/issues/535),
+and the ORT backend feature-select
+[#536](https://github.com/bobmatnyc/trusty-tools/issues/536)/[#538](https://github.com/bobmatnyc/trusty-tools/issues/538)).
+When the code changes materially, update the relevant document and bump the
+*Last reviewed* date. Source-path citations reflect the layout at the time of review.
 
 > **Note on in-crate `CLAUDE.md` drift:** the crate-local
 > `crates/trusty-analyze/CLAUDE.md` predates the workspace consolidation and

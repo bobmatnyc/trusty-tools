@@ -1,8 +1,8 @@
 # trusty-search — Specification Set
 
 > **Status:** Canonical · Living Document
-> **Last reviewed:** 2026-05-29
-> **Derived from:** code/docs/tickets audit
+> **Last reviewed:** 2026-06-01
+> **Derived from:** code/docs/tickets audit (v0.22.2)
 
 This directory holds the canonical product and engineering specification for the
 `trusty-search` crate (`crates/trusty-search/`). It is the single authoritative
@@ -77,11 +77,12 @@ docs live alongside it:
 ## Provenance & maintenance
 
 These documents are derived from an audit of the `crates/trusty-search/src/`
-tree (the single-crate `core` / `service` / `mcp` module layout as of v0.18.0),
+tree (the single-crate `core` / `service` / `mcp` module layout as of v0.22.2),
 the crate `README.md` / `CLAUDE.md`, and the open/closed issue backlog (notably
 the cross-release performance tracker [#129](https://github.com/bobmatnyc/trusty-tools/issues/129),
 the `.trusty-search/` co-located-storage work [#403](https://github.com/bobmatnyc/trusty-tools/issues/403),
-and the nested-index fan-out RFC [#404](https://github.com/bobmatnyc/trusty-tools/issues/404)).
+the nested-index fan-out implementation [#404](https://github.com/bobmatnyc/trusty-tools/issues/404),
+and the indexing-UX improvements [#572](https://github.com/bobmatnyc/trusty-tools/issues/572)).
 When the code changes materially, update the relevant document and bump the
 *Last reviewed* date. Source-path citations reflect the layout at the time of
 review.

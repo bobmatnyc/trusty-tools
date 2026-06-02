@@ -1,12 +1,12 @@
 # trusty-git-analytics (`tga`) — Specification Set
 
 > **Status:** Canonical · Living Document
-> **Last reviewed:** 2026-05-29
-> **Derived from:** existing `requirements/` docs + code/tickets reconciliation
+> **Last reviewed:** 2026-06-01
+> **Derived from:** existing `requirements/` docs + code/tickets reconciliation, updated through v2.5.0
 
 This directory holds the canonical product and engineering specification for the
 `tga` crate (package name `tga`, directory `crates/trusty-git-analytics/`,
-version `2.3.0`). It is the single authoritative reference for *what tga is meant
+version `2.5.0`). It is the single authoritative reference for *what tga is meant
 to be*, *what it is today*, and *what gaps remain*.
 
 ## What is trusty-git-analytics?
@@ -75,7 +75,10 @@ backlog as of the review date. The most material reconciliations:
   / `tga dora` commands (migration `0014`, issues #207/#208/#212/#213).
 - **Effort & quality scoring.** Neither appears in the requirements. The code has
   `core/effort.rs` + `fact_commit_effort` (`tga backfill effort`, PR #308) and
-  `core/quality.rs` (#377).
+  `core/quality.rs` (#377); quality is now persisted to `fact_weekly_quality`
+  (migration `0018`, #445 batch B) and the effort T-shirt is a corpus-percentile
+  integer (1–5) stored in `fact_commit_effort.effort_tshirt` (migrations `0017`/`0019`,
+  `core/effort_percentile.rs`, #445 batches A/C).
 - **Reachability.** `fact_commit_reachability` (migration `0015`, #279) tracks
   tag/release-branch reachability — absent from the requirements.
 - **Tier naming.** The classify cascade modules are named `exact / regex / fuzzy
@@ -84,7 +87,19 @@ backlog as of the review date. The most material reconciliations:
   `requirements/classification.md`.
 - **DB table names.** Live tables are `commits` / `collection_runs`, not the
   predecessor's `cached_commits` / `weekly_fetch_status`. Migrations run to
-  `0016`, past the `0013` ceiling documented in `requirements/database-schema.md`.
+  `0019`, past the `0013` ceiling documented in `requirements/database-schema.md`.
+- **Contributor-profile data pipeline.** Two new public library functions added
+  for the longitudinal contributor-profile epic (#558): `collect::git::diff::diff_for_commit`
+  (unified diff text with 200 KiB cap, closes #559) and
+  `report::query_author_period_trends` (N-week period roll-ups for one canonical
+  author, closes #560). These are the primary tga data-supply layer for trusty-review.
+- **AI co-authorship attribution.** `collect/ai_attribution.rs` detects
+  Claude/Copilot/Cursor from `Co-Authored-By:` trailers at collection time,
+  persisting `commits.is_ai_assisted` + `commits.ai_tool` (migration `0017`, #445 batch A).
+- **Push-down columns (#445).** `classifications.top_level_category` (migration
+  `0017`) is now populated at classify-write time; `fact_commit_effort.effort_tshirt`
+  (integer 1–5, corpus-percentile, migrations `0017`/`0019`) replaces the static
+  XS/S/M/L/XL-only bucketing for downstream warehouse consumers.
 
 ## Related documentation
 
@@ -107,11 +122,12 @@ docs live alongside it:
 
 ## Provenance & maintenance
 
-These documents were derived by reconciling the existing `requirements/` set
-against an audit of the `crates/trusty-git-analytics/src/` tree (the single `tga`
-crate with `core` / `collect` / `classify` / `report` / `commands` modules as of
-v2.3.0), the crate `Cargo.toml`, and the open/closed issue backlog (notably the
-DORA work #207/#208/#212/#213, the effort spec PR #308, the quality metric #377,
-the reachability work #279, and the LLM-config trio #405/#406/#407). When the
-code changes materially, update the relevant document and bump the *Last
-reviewed* date. Source-path citations reflect the layout at the time of review.
+These documents were initially derived by reconciling the existing `requirements/`
+set against an audit of the `crates/trusty-git-analytics/src/` tree as of v2.3.0.
+The spec was updated at v2.5.0 (2026-06-01) to cover: the #445 push-down batch
+(migrations 0017–0019, `top_level_category`, `effort_tshirt`, `fact_weekly_quality`,
+`effort_percentile_thresholds`, AI co-authorship flags, supplemental rule files,
+complexity surfacing) and the contributor-profile data pipeline (#558/#559/#560 —
+`diff_for_commit`, `query_author_period_trends`, `AuthorPeriodSummary`). When the
+code changes materially, update the relevant document and bump the *Last reviewed*
+date. Source-path citations reflect the layout at the time of the most recent review.

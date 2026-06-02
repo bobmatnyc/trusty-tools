@@ -1,8 +1,8 @@
 # trusty-search — Product Requirements Document
 
 > **Status:** Canonical · Living Document
-> **Last reviewed:** 2026-05-29
-> **Derived from:** code/docs/tickets audit
+> **Last reviewed:** 2026-06-01
+> **Derived from:** code/docs/tickets audit (v0.22.2)
 
 **Status legend:** ✅ Implemented · 🟡 Partial · 🔵 Designed-not-built · ⚪ Aspirational
 Each requirement is framed **Vision / Current / Gap**.
@@ -69,8 +69,8 @@ ONNX, no GPU, no model download (issue [#111](https://github.com/bobmatnyc/trust
 | G10 | **Embedded admin UI** — Svelte 5 UI compiled into the binary via `include_dir!`. | ✅ |
 | G11 | **Lexical-only / skip-KG modes** — `daemonized ripgrep` (BM25, no embedder) and KG-suppressed indexes for resource-constrained or generated-code subtrees. | ✅ |
 | G12 | **Cross-index fan-out search** — one query across all registered indexes (`POST /search`, `POST /grep`). | 🟡 |
-| G13 | **Nested-index hierarchy & sub-index prioritization** — parent/child index graph with dedup and subtree-first fan-out ranking. | 🔵 |
-| G14 | **Co-located per-project storage + filesystem discovery** — index data in `.trusty-search/` next to the project, auto-discovered on walk. | 🔵 |
+| G13 | **Nested-index hierarchy & sub-index prioritization** — parent/child index graph with dedup and subtree-first fan-out ranking. | 🟡 (MVP ✅; full dedup of partial overlap 🔵) |
+| G14 | **Co-located per-project storage + filesystem discovery** — index data in `.trusty-search/` next to the project, auto-discovered on walk. | ✅ (#403, v0.20.0) |
 | G15 | **Cross-release performance regression CI gate** — MRR@5 / Recall@10 tracked across versions. | 🟡 |
 
 ### Non-Goals
@@ -137,7 +137,11 @@ an inline status tag. Source paths are cited where known.
   `--force` clears the per-index hash cache. The redb `CorpusStore` commits each
   batch atomically (O(batch), not O(corpus)) (`src/core/corpus.rs`, #28). Parse +
   embed run outside the write lock; only the redb+HNSW commit holds it. SSE
-  progress with a 500-event replay buffer (`src/service/reindex.rs`).
+  progress with a 500-event replay buffer; new `embedder_init` / `embedder_ready`
+  SSE events make the ONNX cold-start visible (#572). The CLI renders a 4-phase
+  MultiProgress bar (Crawl / Chunk / Loading model / Embed) and uses a
+  stall-detection loop (120 s without progress) rather than a hard wall-clock
+  timeout, fixing spurious "timed out" failures on large repos (#572).
 - *Gap:* None material.
 
 **FR-IDX-4 — File watching** ✅
@@ -285,10 +289,13 @@ an inline status tag. Source paths are cited where known.
 
 **FR-MCP-2 — Tool catalogue** ✅
 - *Vision:* Expose every search lane + index management as MCP tools.
-- *Current:* `search_code`, `search_kg`, `search_semantic`, `search_lexical`,
-  `search_similar`, `grep`, `get_call_chain`, `index_file`, `remove_file`,
-  `list_indexes`, `create_index`, `delete_index`, `reindex`, `index_status`,
-  `list_chunks`, `search_health`, `chat` (`src/mcp/tools.rs`).
+- *Current:* 19 tools — `search_code`, `search_kg`, `search_semantic`,
+  `search_lexical`, `search_all`, `search_similar`, `grep`, `get_call_chain`,
+  `index_file`, `remove_file`, `list_indexes`, `create_index`, `delete_index`,
+  `reindex`, `index_status`, `list_chunks`, `search_health`, `chat`, `upgrade`
+  (`src/mcp/tools.rs`). `grep` now accepts `max_count` as a ripgrep-parity
+  alias for `max_results` (#447). `search_similar` re-embeds seed content on
+  LRU miss for `skip_kg` indexes (#484).
 - *Gap:* The crate README lists an older subset; the code is authoritative.
 
 ### 4.7 HTTP API (`src/service/server.rs`)
@@ -298,20 +305,26 @@ an inline status tag. Source paths are cited where known.
   auth.
 - *Current:* axum 0.8 + tower-http (CORS, trace, gzip), HTTP/2; per-index search,
   search_similar, index-file, remove-file, reindex (+ SSE stream), chunks,
-  status, call_chain, graph (+ stats), grep; plus global `/health`, `/indexes`,
-  `/search`, `/grep`, `/metrics`, `/status/stream`, `/logs/tail`,
-  `/api/chat/providers`, `/chat`, `/ui/*` (`src/service/server.rs`).
+  status, call_chain, graph (+ stats), grep; plus global `/health`, `/indexes`
+  (with `?format=tree` hierarchy view and `?details=true` size reporting, #404/#312),
+  `/search`, `/grep`, `/metrics`, `/status/stream`, `/logs/tail`, `/admin/stop`,
+  `/api/chat/providers`, `/chat`, `/upgrade` (#537), `/ui/*` (`src/service/server.rs`).
+  `/health` response now includes `update_available`, `embedder_error`, and
+  `embedder_ready` fields.
 - *Gap:* Facts store endpoints (`/facts`) are optional/may return 503 when
   unconfigured.
 
-**FR-HTTP-2 — Cross-index fan-out** 🟡
+**FR-HTTP-2 — Cross-index fan-out** ✅
 - *Vision:* One query across all indexes, weighted/skipped by per-project
   relevance.
 - *Current:* `POST /search` and `POST /grep` fan out across the registry;
   `context_inference` scrapes project metadata (README/CLAUDE.md/manifests) to
   build a per-index relevance summary (`src/service/context_inference.rs`, #112).
-- *Gap:* No dedup of overlapping indexes; no subtree prioritization — see
-  FR-NEST-1.
+  When a nested hierarchy is present (root_path prefix containment), sub-index
+  hits are boosted (×1.5 lane weight) and exact-duplicate (file, start, end)
+  results from parent+child overlap are deduplicated post-RRF (#404 MVP).
+- *Gap:* Partial-overlap dedup is heuristic only. Worktree-aware delta overlay
+  (#447) not yet implemented.
 
 **FR-HTTP-3 — Prometheus metrics** ✅
 - *Vision:* Production observability for multi-user deployments.
@@ -327,6 +340,10 @@ an inline status tag. Source paths are cited where known.
   `serve` + aliases (`init`, `reindex`). `index` auto-detects
   `./trusty-search.yaml`. `doctor --fix` runs a 6-check diagnostic with
   auto-repair. `convert` migrates from `mcp-vector-search` (`src/commands/`).
+  New since v0.18: `port [--addr|--json]` (#526), `prune-orphans [--dry-run]`
+  (#489), `upgrade [--check|--yes]` (#537), `migrate storage` (#403/#491),
+  `service install|uninstall|status|logs` (macOS launchd). Auto-discovery
+  now recognises `.trusty-tools/` project marker (#470).
 - *Gap:* None material.
 
 ### 4.9 Daemon lifecycle (`src/service/daemon.rs`, `src/commands/start.rs`)
@@ -335,7 +352,10 @@ an inline status tag. Source paths are cited where known.
 - *Vision:* One daemon per machine, discoverable port, clean SIGTERM/SIGINT exit.
 - *Current:* OS advisory lock on a PID lockfile enforces singleton; binds from a
   requested port walking forward to a free one and writes `port.lock`; graceful
-  shutdown via axum `with_graceful_shutdown` (`src/service/daemon.rs`).
+  shutdown via axum `with_graceful_shutdown(shutdown_signal())` drains in-flight
+  requests on SIGTERM (#534). The `mcp_bridge` reconnects with exponential backoff
+  so daemon upgrades are transparent to running LLM sessions. `port` CLI subcommand
+  exposes the live port in three machine-parsable formats (#526).
 - *Gap:* None material.
 
 **FR-DMN-2 — Warm-boot persistence** ✅
@@ -443,24 +463,56 @@ an inline status tag. Source paths are cited where known.
   search-context injection; requires `OPENROUTER_API_KEY` (503 otherwise).
 - *Gap:* None material.
 
-### 4.13 Multi-index topology & storage (roadmap)
+### 4.13 Self-update & daemon lifecycle
 
-**FR-NEST-1 — Nested-index hierarchy & sub-index prioritization** 🔵
+**FR-UPD-1 — In-place self-update with safe daemon restart** ✅
+- *Vision:* An operator or LLM agent can update the daemon to the latest version
+  with a single command, without manual `cargo install` or launchd plumbing.
+- *Current:* `trusty-search upgrade [--check] [--yes]` checks crates.io for a
+  newer version and, with confirmation (or `--yes`), installs it via
+  `cargo install` and restarts the daemon (SIGTERM + launchd respawn). `POST
+  /upgrade` exposes the same workflow over HTTP so the `upgrade` MCP tool can
+  trigger it. `GET /health` includes `update_available` when a newer version is
+  detected in the background (#537).
+- *Gap:* None material.
+
+### 4.14 Co-located storage & filesystem discovery
+
+**FR-STORE-2 — Storage hygiene** ✅
+- *Vision:* Dead registry entries and orphaned data directories don't accumulate
+  silently.
+- *Current:* `trusty-search prune-orphans [--dry-run] [--yes]` loads `indexes.toml`,
+  identifies entries whose `root_path` doesn't exist on disk, and removes them
+  after confirmation. Works offline (no daemon required) (#489, v0.20.3).
+- *Gap:* Orphaned `.trusty-search/` data directories inside moved/deleted project
+  trees are not automatically detected; operators must find and remove them manually.
+
+### 4.16 Multi-index topology & storage (remaining roadmap)
+
+**FR-NEST-1 — Nested-index hierarchy & sub-index prioritization** 🟡
 - *Vision:* A DAG of indexes where sub-indexes are children of a parent; fan-out
   returns subtree results first, dedups overlapping coverage, and uses the parent
   as a backstop.
-- *Current:* All indexes are flat `DashMap` peers; overlapping indexes return
-  duplicates in fan-out. RFC drafted
-  ([nested-index-fanout-rfc](../research/nested-index-fanout-rfc-2026-05-29.md),
-  [#404](https://github.com/bobmatnyc/trusty-tools/issues/404)).
-- *Gap:* Entire feature designed-not-built; depends on FR-STORE-1 and #402
-  (relative chunk paths).
+- *Current:* MVP implemented in v0.20.0 (#404 / PR #437). `IndexHierarchy`
+  (`src/core/search/hierarchy.rs`) derives parent/child relationships from
+  canonical `root_path` prefix containment. Fan-out via `POST /search` boosts
+  sub-index hits (×1.5, clamped [1.0, 4.0]), includes threshold-safety-net
+  children, and deduplicates exact (file, start, end) matches post-RRF.
+  `GET /indexes?format=tree` returns the hierarchy-annotated registry.
+- *Gap:* Partial-overlap dedup is heuristic. Relative chunk paths (#402) and
+  explicit `parent_id` fields not implemented. Worktree-aware delta overlay (#447)
+  still open.
 
-**FR-STORE-1 — Co-located `.trusty-search/` storage + filesystem discovery** 🔵
+**FR-STORE-1 — Co-located `.trusty-search/` storage + filesystem discovery** ✅
 - *Vision:* Index data lives in a `.trusty-search/` dir next to the project;
   the walker discovers existing indexes on the filesystem.
-- *Current:* Index data lives under the central daemon data dir.
-- *Gap:* Designed-not-built ([#403](https://github.com/bobmatnyc/trusty-tools/issues/403)).
+- *Current:* Implemented in v0.20.0 (#403 / PR #440). Per-project data lives at
+  `<root>/.trusty-search/`; tracked roots stored in `roots.toml`; `fs_discovery`
+  scans recursively on startup. `migrate storage` provides the offline opt-in
+  migration from the legacy central dir (#491). `prune-orphans` cleans up dead
+  root entries (#489).
+- *Gap:* Relative chunk paths (#402) not yet addressed — chunk ids embed absolute
+  file paths, which break if the project root moves (workaround: re-index).
 
 ---
 
@@ -486,17 +538,18 @@ mode that is a daemonized ripgrep with MCP/HTTP integration.
 
 ## 6. Open Questions & Roadmap
 
-| # | Question / item | Tracking |
-|---|---|---|
-| Q1 | Should fan-out dedup overlapping indexes before or after RRF? | RFC #404 |
-| Q2 | Co-located `.trusty-search/` storage layout & relative chunk paths | #403, #402 |
-| Q3 | Nested parent/child index graph + subtree-first ranking | #404 |
-| Q4 | Wire a benchmark regression CI gate (MRR@5 / Recall@10) | #129 |
-| Q5 | SCIP protobuf decode for LSP-quality entities | #105 |
-| Q6 | KG Phase B: cross-file IMPORTS/INHERITS edge propagation | — |
-| Q7 | Further BM25 / redb in-memory footprint reductions | #340 |
-| Q8 | Reconcile the README/CLAUDE.md memory-tier description (Tiny/Small retained vs removed) | docs |
-| Q9 | Windows daemon path support (via `trusty-common`) | — |
+| # | Question / item | Status | Tracking |
+|---|---|---|---|
+| Q1 | Fan-out dedup: exact (file, start, end) match implemented; partial-overlap merge pending | 🟡 | #404 |
+| Q2 | Relative chunk paths so project moves don't break chunk ids | 🔵 | #402 |
+| Q3 | Worktree-aware indexing: shared base + per-worktree delta overlay | 🔵 | #447 |
+| Q4 | Wire a benchmark regression CI gate (MRR@5 / Recall@10) | 🟡 | #129 |
+| Q5 | SCIP protobuf decode for LSP-quality entities | 🔵 | #105 |
+| Q6 | KG Phase B: cross-file IMPORTS/INHERITS edge propagation | 🔵 | — |
+| Q7 | Further BM25 / redb in-memory footprint reductions | 🟡 | #340 |
+| Q8 | Reconcile the README/CLAUDE.md memory-tier description (Tiny/Small retained vs removed) | 🟡 | docs |
+| Q9 | Windows daemon path support (via `trusty-common`) | ⚪ | — |
+| Q10 | Split `reindex_engine.rs` (1 438 lines, over 500-line cap) | 🟡 | #571 |
 
 For **cross-release performance tracking**, see
 [#129](https://github.com/bobmatnyc/trusty-tools/issues/129), which accumulates

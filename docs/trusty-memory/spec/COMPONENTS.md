@@ -1,8 +1,8 @@
 # trusty-memory — Component Specifications
 
 > **Status:** Canonical · Living Document
-> **Last reviewed:** 2026-05-29
-> **Derived from:** code/docs/tickets audit
+> **Last reviewed:** 2026-06-01
+> **Derived from:** code/docs/tickets audit (v0.14.0)
 
 **Status legend:** ✅ Implemented · 🟡 Partial · 🔵 Designed-not-built · ⚪ Aspirational
 
@@ -24,21 +24,21 @@ and the OpenRPC `rpc.discover` manifest; let in-process hosts (open-mpm) registe
 the same tools without spawning a child.
 
 **Key types/modules.**
-- `tools.rs` — `MemoryMcpServer`, `tool_definitions()` / `tool_definitions_with(has_default)` (the **23-tool** payload), in-process dispatcher wired to the real `PalaceRegistry` + retrieval/KG APIs.
+- `tools.rs` — `MemoryMcpServer`, `tool_definitions()` / `tool_definitions_with(has_default)` (the **24-tool** payload), in-process dispatcher wired to the real `PalaceRegistry` + retrieval/KG APIs.
 - `mcp_service.rs` — `MemoryMcpService`, a zero-sized `trusty_mcp_core::ServiceDescriptor` impl delegating to `tool_definitions_with` + `scopes_for_tool`.
 - `openrpc.rs` — `scopes_for_tool` (read/write/knowledge.write split) + `build_discover_response` (OpenRPC 1.3.2 with `x-scopes`).
 
-**Current state.** ✅ 23 tools: the five memory ops, six palace ops, four KG/alias
-ops, three prompt-facts ops, `memory_note`, `memory_send_message`, and
-`memory_recall_all`. `--palace <name>` makes the `palace` argument optional in
-every tool (`tool_definitions_with(has_default)`). `MemoryMcpService` lets open-mpm
-merge these into a unified `rpc.discover` with no glue code.
+**Current state.** ✅ **24 tools**: the five memory ops, six palace ops, four
+KG/alias ops, three prompt-facts ops, `memory_note`, `memory_send_message`,
+`memory_recall_all`, and the new `upgrade` tool (#537). `--palace <name>` makes
+the `palace` argument optional in every tool (`tool_definitions_with(has_default)`).
+`MemoryMcpService` lets open-mpm merge these into a unified `rpc.discover` with no
+glue code.
 
 **Known gaps.**
-- 🟡 **Tool-count doc drift:** the wire surface is **23** (per the
-  `tool_definitions_lists_all_tools` test), but the crate `README.md` shows a
-  12-tool curated table and `mcp_service.rs` comments cite 23/11 inconsistently.
-  The authoritative source is `tool_definitions()`.
+- 🟡 **Tool-count doc drift:** the wire surface is **24** (per the
+  `tool_definitions_lists_all_tools` test), but the crate `README.md` may still
+  show an older curated table. The authoritative source is `tool_definitions()`.
 - 🔗 Broken README link to `trusty-memory-mcp` path (#398).
 
 ---
@@ -67,7 +67,12 @@ top of one `AppState`, with HTTP handlers staying thin.
 **Current state.** ✅ One daemon, three transports converging on `AppState`. axum
 is gated behind the `axum-server` feature (default on; off for open-mpm rlib use,
 #226). Dynamic port `7070..=7079` with discovery file. Multi-process concurrent
-reads via snapshot copy (#59).
+reads via snapshot copy (#59). `/health` now reports `open_fds`, `fd_soft_limit`
+(fd-exhaustion observability, #464), and `update_available` (background version
+check, #455). Graceful SIGTERM drain via `trusty_common::shutdown_signal()` (#534).
+`mcp_bridge` reconnects with exponential backoff on socket-close (#535).
+`port` CLI command for safe shell-substitution address lookup (#526).
+Single-instance guard prevents launchd zombie herds (#464).
 
 **Known gaps.** None material.
 
@@ -85,17 +90,27 @@ and the project-anchored naming rules.
 - `memory_core/store/palace_store.rs` — `palace.json` + `identity.txt` atomic persistence.
 - `memory_core/store/l1_cache.rs` — L1 essential-drawer snapshot.
 - `memory_core/store/payload_store.rs`, `chat_sessions.rs` — redb sidecars (#46/#52/#56).
-- `project_root.rs` — `project_slug()` + `personal` sentinel (#88).
+- `project_root.rs` — `project_slug()` + `personal` sentinel, plus `.trusty-tools/trusty-memory.yaml` pin-file management (#88, #446). `ProjectPin`, `PIN_FILE_REL`, `write_project_pin`, `read_project_pin`.
+- `startup_scan.rs` — `scan_pin_map` builds `AppState::pin_project_map` at startup from a single directory-tree pass (#470).
 - `attribution.rs` — `creator:*` tag namespace on every write (#202).
 
 **Current state.** ✅ Full CRUD (`palace_create/list/info/update/delete/compact`);
 `palace_delete` backs `DELETE /api/v1/palaces/{id}` (#180). Palace-as-project
 enforcement on **new** palace creation; existing palaces grandfathered.
+Palace slugs are now durably pinned in `.trusty-tools/trusty-memory.yaml` (#446),
+surviving directory renames. The `trusty-memory link` CLI explicitly writes/refreshes
+the pin file. The daemon startup scan (`startup_scan.rs`) builds the complete
+`palace_id → project_path` map in one pass. `write_project_pin` is guarded against
+writing into temp/home/root directories (#492).
 
 **Known gaps.**
 - 🔵 **Orphaned-palace remediation is advisory only** — `doctor --fix-palaces` /
   `doctor --fix` print rename suggestions but never mutate the filesystem; actual
   merge of orphans into `personal` is unbuilt (PRD FR-2.2/FR-10.4).
+- 🟡 **LRU redb-handle cache unbuilt** — each palace holds ~3 open redb files;
+  with many palaces this can exhaust file descriptors (EMFILE). Lazy/LRU caching
+  of palace handles is tracked in #463; mitigated by the LaunchAgent fd-limit
+  increase but not yet eliminated architecturally.
 
 ---
 
@@ -277,17 +292,28 @@ legacy kuzu-memory server, and operational diagnostics.
 **Key types/modules.**
 - `commands/setup.rs` — launchd LaunchAgent install (macOS), embedder pre-warm,
   Claude settings patch (MCP entry + `prompt-context`/`inbox-check` hooks) (#86).
-- `commands/service.rs` — macOS launchd lifecycle.
+- `commands/service.rs` — macOS launchd lifecycle; plist now includes
+  `SoftResourceLimits` / `HardResourceLimits` = 8192 (#464).
 - `commands/migrate.rs` — `migrate kuzu-memory` (rewrite Claude MCP config, #278).
 - `commands/kuzu_migrate.rs` — `migrate kuzu-data` (import `store.redb`; idempotent
   via SHA-256-derived UUIDs, #277).
 - `commands/migrations.rs` — startup data migrations.
-- `commands/doctor.rs` — palace/orphan audit + `--fix-palaces`.
+- `commands/doctor.rs` — palace/orphan audit + `--fix-palaces`; enhanced with
+  startup-pin-map integration for faster orphan discovery (#470/#474/#475).
 - `commands/kg_rebuild.rs` — rebuild the KG from drawers.
 - `commands/{start,stop,monitor}.rs` — unified start/serve/stop (#83), monitor TUI.
+- `commands/port.rs` — `trusty-memory port [--addr|--json]` — report daemon's live
+  listening address without guessing the dynamic port (#526).
+- `commands/upgrade.rs` — `trusty-memory upgrade [--check] [--yes]` — interactive
+  version check + `cargo install` + daemon self-restart via launchd (#537/#539).
+- `commands/link.rs` — `trusty-memory link [--path] [--slug] [--force]` —
+  explicit palace-slug pin in `.trusty-tools/trusty-memory.yaml` (#446).
+- `commands/single_instance.rs` — probe existing daemon at startup; exit 0 if
+  healthy (prevents launchd zombie respawn loop, #464).
 
 **Current state.** ✅ Idempotent setup with service-owned hooks; unified
-start/serve/stop matching trusty-search; kuzu config + data migration; diagnostics.
+start/serve/stop matching trusty-search; kuzu config + data migration; diagnostics;
+`port` / `upgrade` / `link` operational CLI additions.
 
 **Known gaps.**
 - 🔵 `doctor --fix` is advisory only — no actual orphan remediation (see §3).
@@ -316,3 +342,34 @@ Async ops run on `spawn_blocking` so the reactor isn't stalled.
 
 **Known gaps.**
 - 🟡 SQLite KG code retained behind `sqlite-kg` pending #47 removal.
+
+---
+
+## 13. Bug-Capture & Update-Check — `trusty-common` `error_capture/`, `update/`
+
+**Responsibility.** Surface runtime errors to operators for bug reporting, and
+notify users when a new release is available — enabling self-service upgrades.
+
+**Key types/modules.**
+- `trusty-common/src/error_capture/` — `BugCaptureLayer` (tower middleware),
+  `ErrorStore` (in-memory ring + JSONL file, fingerprint-deduped, SHA-256 keyed),
+  `types.rs` (`CapturedError`). Enabled via `bug-capture` feature flag in
+  `trusty-common`; trusty-memory pulls it in via its Cargo.toml feature list. The
+  `AppState::error_store: Option<ErrorStore>` field is populated by
+  `AppState::with_error_store(...)` at daemon startup (#478/#490).
+- `trusty-common/src/update/mod.rs` — `check_crates_io`, `UpdateInfo`; 24-h
+  throttled crates.io poller; wired into daemon startup to populate
+  `AppState::update_available` (#455).
+- `trusty-common/src/update/upgrade.rs` — `upgrade_and_restart`,
+  `perform_upgrade`, `verify_installed_binary`, `is_launchd_supervised`; called by
+  both the CLI `upgrade` command and the `upgrade` MCP tool (#537/#539).
+
+**Current state.** ✅ Bug-capture layer active in the trusty-memory daemon.
+`/health` exposes `update_available`. `upgrade` CLI and MCP tool drive the full
+check → install → launchd-self-restart pipeline. Background version check at
+startup (throttled) keeps the health payload fresh without per-request crates.io
+calls.
+
+**Known gaps.**
+- `BugCaptureLayer` captures 500-level HTTP errors but not panics from
+  `tokio::spawn` tasks that are not connected to an HTTP handler.

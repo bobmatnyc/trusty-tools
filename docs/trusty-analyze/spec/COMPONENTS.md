@@ -1,8 +1,8 @@
 # trusty-analyze — Components
 
 > **Status:** Canonical · Living Document
-> **Last reviewed:** 2026-05-29
-> **Derived from:** code/docs/tickets audit
+> **Last reviewed:** 2026-06-01
+> **Derived from:** code/docs/tickets audit (drift audit v0.4.1)
 
 Per-subsystem specs. Each states **responsibility**, **key types/modules** (with
 `src/` paths), **current state**, and **gaps**, tagged ✅ / 🟡 / 🔵 / ⚪ (see
@@ -113,9 +113,15 @@ Per-subsystem specs. Each states **responsibility**, **key types/modules** (with
   (`EmbedderKind::{Bow,Neural}`).
 - **Current (✅):** BoW is deterministic and dependency-free; neural is fastembed
   all-MiniLM-L6-v2 (384-dim). Neural load failure at `serve` startup degrades
-  gracefully to BoW (`main.rs`).
+  gracefully to BoW (`main.rs`). The neural embedder path now runs under
+  `tokio::task::spawn_blocking` in the service layer (#521) so the async
+  runtime is not blocked by ONNX inference.
+  The ORT backend is feature-selectable (#536/#538): `bundled-ort` (default,
+  static libs bundled via fastembed, glibc ≥ 2.38); `load-dynamic` (system
+  `libonnxruntime.so`, glibc < 2.38); `cuda` (load-dynamic + CUDA). The `ner`
+  feature composes with whichever ORT variant is active.
 - **Gaps:** `k` is caller-supplied (no auto-k); neural requires a pre-cached
-  model (shares trusty-search's cache).
+  model (shares trusty-search's cache path by default).
 
 ---
 
@@ -128,15 +134,29 @@ Per-subsystem specs. Each states **responsibility**, **key types/modules** (with
   recommendations, model_used }` / `explain_report` / `deep_analysis`;
   `fetch_pr_diff` / `post_pr_comment` / `format_review_as_markdown` /
   `verify_webhook_signature`.
-- **Current (✅/🟡):** refactor + review are deterministic pure pipelines —
+- **Key constants (explain.rs):** `DEFAULT_MODEL = "openai/gpt-4o-mini"`;
+  `ENV_ROUTER_KEY = "OPENROUTER_API_KEY"` (environment variable name, not a secret); `ENV_MODEL = "TRUSTY_LLM_MODEL"`;
+  `BEDROCK_MODEL_PREFIX = "bedrock/"`.
+- **Current (✅):** refactor + review are deterministic pure pipelines —
   review cross-references the index corpus (stored complexity for indexed files,
   local tree-sitter for new files). Deep analysis layers an LLM narrative via a
   `trusty_common::chat::ChatProvider`, kept *out* of the deterministic
-  `ReviewReport` so reproducibility is preserved; needs `OPENROUTER_API_KEY`
-  (returns 400 otherwise). GitHub helpers fetch a PR diff, run review, post a
-  comment, and verify webhook HMAC (SHA-256).
+  `ReviewReport` so reproducibility is preserved. Two routing paths:
+  - **OpenRouter** (default): `OPENROUTER_API_KEY` required; returns
+    `DeepAnalysisError::MissingApiKey` (400) if absent.
+  - **AWS Bedrock** (opt-in): set `TRUSTY_LLM_MODEL=bedrock/<model-id>` (e.g.
+    `bedrock/us.anthropic.claude-sonnet-4-6`). Constructs a
+    `trusty_common::chat::BedrockProvider` using the AWS Converse API.  Region:
+    `TRUSTY_AWS_REGION` → `AWS_REGION` → `"us-east-1"`. Full AWS credential
+    chain (env, `~/.aws/credentials`, IAM roles, SSO). No API key required.
+    A bare `bedrock/` with no trailing model id silently falls back to the
+    default OpenRouter model (OQ-7 — considered a minor UX gap).
+  GitHub helpers use explicit 30 s/5 s timeouts on their `reqwest::Client`
+  and run blocking work via `spawn_blocking`. GitHub helpers fetch a PR diff,
+  run review, post a comment, and verify webhook HMAC (SHA-256).
 - **Gaps:** deep analysis is non-deterministic and model-dependent (🟡); GitHub
-  integration relies on `GITHUB_TOKEN` being present in the daemon env.
+  integration relies on `GITHUB_TOKEN` being present in the daemon env;
+  `reqwest::Client` for deep/GitHub handlers is constructed per-request (OQ-8).
 
 ---
 
@@ -192,13 +212,19 @@ Per-subsystem specs. Each states **responsibility**, **key types/modules** (with
 - **Key types:** `AnalyzerMcpServer::dispatch` (JSON-RPC→HTTP translator),
   `Request`/`Response`/`JsonRpcError`, `error_codes`; `stdio::run`;
   `sse::router`.
+- **Key constant:** `DEEP_ANALYSIS_MCP_TIMEOUT_SECS = 150` — per-request
+  timeout for the MCP→daemon `reqwest::Client`. Set above the OpenRouter 120 s
+  ceiling to accommodate streaming overhead without hanging forever. The
+  connect timeout is a separate 5 s value for the loopback TCP handshake.
 - **Current (✅):** 18 tools — `complexity_hotspots`, `find_smells`,
   `analyze_quality`, `run_diagnostics`, `list_facts`, `upsert_fact`,
   `delete_fact`, `extract_graph`, `list_entities`, `cluster_concepts`,
   `analyzer_health`, `ingest_scip`, `extract_ner`, `suggest_refactors`,
   `review_diff`, `review_github_pr`, `deep_analysis` (plus the resource/index
   listing in `tools/list`). Two transports share one dispatcher; the dispatcher
-  owns only a `reqwest::Client` + base URL.
+  owns only a `reqwest::Client` (with 150 s/5 s timeouts) + base URL. The
+  150 s timeout was introduced in #528/#529 after the old default caused MCP
+  `deep_analysis` calls to be killed before OpenRouter responded.
 - **Gaps:** the README/CLAUDE.md still list 9 tools (OQ-2). The dispatcher is
   stateless — it cannot serve when the analyzer daemon it points at is down.
 
@@ -215,8 +241,14 @@ Per-subsystem specs. Each states **responsibility**, **key types/modules** (with
   github webhook, facts CRUD, `/ui` SPA (with index.html fallback for client-side
   routing). Gated behind the `http-server` feature (#249); `serve` can also fork
   an MCP stdio loop (`--mcp`) and/or an MCP HTTP/SSE server (`--mcp-port`).
+  Graceful shutdown via `with_graceful_shutdown(trusty_common::shutdown_signal())`
+  (#534/#535): drains in-flight requests on SIGTERM or SIGINT before process
+  exit. All external-service handlers use explicit 30 s / 5 s `reqwest`
+  timeouts; blocking work (linter execution, neural embedding) is dispatched
+  via `tokio::task::spawn_blocking` (#521).
 - **Gaps:** UI assets come from `ui/dist/` built by `build.rs` via pnpm; the
   build warns (non-fatal) when pnpm is unavailable, shipping an empty dashboard.
+  `ui/node_modules` is excluded from `cargo package` (added in #532).
 
 ---
 

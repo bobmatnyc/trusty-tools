@@ -1,8 +1,8 @@
 # trusty-analyze — Architecture
 
 > **Status:** Canonical · Living Document
-> **Last reviewed:** 2026-05-29
-> **Derived from:** code/docs/tickets audit
+> **Last reviewed:** 2026-06-01
+> **Derived from:** code/docs/tickets audit (drift audit v0.4.1)
 
 This document describes *how trusty-analyze fits together*. Components are framed
 **Vision / Current / Gap** and tagged ✅ / 🟡 / 🔵 / ⚪ (see
@@ -107,6 +107,32 @@ top-level module re-exporting its old public API.
 10. Serve     axum HTTP + MCP (stdio/SSE) → JSON              (service/, mcp/)
 ```
 
+### LLM provider routing for deep analysis (✅) — issue #530 / #531
+
+`core/explain.rs` exports a `deep_analysis` function that resolves the active
+LLM provider at call time:
+
+```
+TRUSTY_LLM_MODEL (or --model flag)
+  ├─ starts with "bedrock/" → strip prefix → BedrockProvider (AWS Converse)
+  │     TRUSTY_AWS_REGION (or AWS_REGION, default "us-east-1")
+  │     Full AWS credential chain (env, ~/.aws, IAM roles, SSO)
+  └─ anything else (or unset) → OpenRouterProvider
+        OPENROUTER_API_KEY required; returns DeepAnalysisError::MissingApiKey if absent
+```
+
+`BEDROCK_MODEL_PREFIX = "bedrock/"` and `DEFAULT_MODEL = "openai/gpt-4o-mini"`
+are exported constants. A bare `bedrock/` with nothing after the slash silently
+falls back to `DEFAULT_MODEL` on the OpenRouter path (OpenRouter path because
+the stripped model id is empty, causing the Bedrock branch to early-exit).
+
+The `BedrockProvider` is provided by `trusty_common::chat::BedrockProvider`
+(enabled via the `bedrock` feature flag on `trusty-common`). The region
+resolution order is: `TRUSTY_AWS_REGION` → `AWS_REGION` → `"us-east-1"`.
+
+**Gap:** none — the routing is fully covered by unit tests
+(`bedrock_prefix_routing`, `bedrock_prefix_empty_suffix_falls_back_to_default`).
+
 ### AST substrate + fallback (✅)
 
 **Vision:** accurate, line-anchored complexity, not substring counting.
@@ -166,6 +192,40 @@ the dispatcher or CLI types.
 MCP stays unconditional. `--no-default-features` drops the HTTP stack.
 **Gap:** none — mirrors the `trusty-common` / `trusty-memory` rule.
 
+### Graceful shutdown (✅) — issue #534 / #535
+
+**Vision:** in-flight analysis requests must not be dropped when the daemon is
+upgraded or restarted.
+**Current:** `service/mod.rs` attaches `with_graceful_shutdown(trusty_common::shutdown_signal())`
+to the axum server. `shutdown_signal()` resolves on SIGTERM or SIGINT; axum
+drains active connections before the process exits. Use
+`launchctl bootout` (SIGTERM) rather than `launchctl kickstart -k` (SIGKILL)
+to get the graceful drain window. The `mcp_bridge` binary reconnects
+automatically with exponential backoff when the daemon restarts.
+**Gap:** none — parity with trusty-search and trusty-memory (all three adopted
+graceful shutdown in the same commit).
+
+### MCP deep_analysis timeout (✅) — issue #528 / #529
+
+**Vision:** the MCP client must not time out before OpenRouter returns.
+**Current:** `mcp/mod.rs` uses a dedicated `reqwest::Client` with a
+150 s per-request timeout (`DEEP_ANALYSIS_MCP_TIMEOUT_SECS = 150`) for all
+MCP→daemon HTTP calls. This is intentionally above the OpenRouter 120 s
+ceiling to allow for streaming overhead and network jitter, while still
+providing a finite bound. The 5 s connect timeout applies to the loopback
+TCP handshake only.
+**Gap:** none.
+
+### reqwest timeouts + spawn_blocking (✅) — issue #521
+
+**Vision:** no handler thread should block the async runtime indefinitely.
+**Current:** all service handlers that call external services use explicit
+per-request (30 s) and connect (5 s) timeouts on their `reqwest::Client`
+instances. The `run_diagnostics` handler (external linters) and the neural
+embedding path wrap blocking work in `tokio::task::spawn_blocking`, freeing
+the async worker threads.
+**Gap:** none.
+
 ---
 
 ## 5. Persistence & State
@@ -196,13 +256,32 @@ MCP stays unconditional. `--no-default-features` drops the HTTP stack.
 | `--fastembed-cache` / `TRUSTY_FASTEMBED_CACHE` | `.fastembed_cache` | Neural model cache dir |
 | `--mcp` | off | Run MCP stdio loop in the `serve` process |
 | `--mcp-port` | off | Run MCP HTTP/SSE on a separate port |
-| `OPENROUTER_API_KEY` | — | Deep-analysis LLM key (daemon-side; 400 without) |
-| `TRUSTY_LLM_MODEL` / `--model` | — | OpenRouter model for `deep` |
+| `OPENROUTER_API_KEY` | — | Deep-analysis LLM key (OpenRouter path); returns 400 if absent and a non-Bedrock model is selected |
+| `TRUSTY_LLM_MODEL` / `--model` | `openai/gpt-4o-mini` | LLM model for `deep`. Prefix `bedrock/<model-id>` (e.g. `bedrock/us.anthropic.claude-sonnet-4-6`) routes through AWS Bedrock Converse instead of OpenRouter; anything else routes to OpenRouter. A bare `bedrock/` with no trailing model id falls back to the default. |
+| `TRUSTY_AWS_REGION` | `us-east-1` | AWS region for Bedrock Converse calls. Takes priority over `AWS_REGION`. |
+| `AWS_REGION` | — | Fallback AWS region for Bedrock (overridden by `TRUSTY_AWS_REGION`). |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | — | Standard AWS credential chain for Bedrock. Env vars, `~/.aws/credentials`, IAM roles, and SSO are all supported. No API key is required when a `bedrock/` model is selected. |
 | `GITHUB_TOKEN` | — | PR diff fetch + comment post for `review-pr` |
+| `ORT_DYLIB_PATH` | — | Path to `libonnxruntime.so` on glibc < 2.38 hosts (requires `--no-default-features --features http-server,load-dynamic`; see #536). |
 | `RUST_LOG` | `info` (via `init_tracing(1)`) | Tracing filter (stderr only) |
 
-Cargo features: `default = ["http-server"]`; `http-server` (axum stack);
-`ner` (`dep:ort` + `dep:tokenizers`).
+Cargo features: `default = ["http-server", "bundled-ort"]`; `http-server` (axum
+stack); `bundled-ort` (static ORT libs via fastembed, glibc ≥ 2.38);
+`load-dynamic` (system `libonnxruntime.so`, glibc < 2.38; requires
+`--no-default-features`); `cuda` (CUDA acceleration; requires
+`--no-default-features`); `ner` (`dep:ort` + `dep:tokenizers`).
+
+> **Bedrock note (#531):** `trusty-common` must be built with the `bedrock`
+> feature (already included in `trusty-analyze`'s dependency declaration:
+> `trusty-common = { workspace = true, features = [..., "bedrock"] }`). No
+> additional crate flag is needed by callers.
+
+> **ORT backend note (#536 / #538):** prior to v0.4.0 the ORT backend was
+> hard-coded to `ort-download-binaries` (bundled static libs). It is now
+> feature-selectable: `bundled-ort` (default, glibc ≥ 2.38), `load-dynamic`
+> (system ORT, glibc < 2.38 / Amazon Linux 2023), `cuda`
+> (load-dynamic + CUDA). The `ner` feature no longer carries its own ORT
+> backend; it composes with whichever ORT feature is active.
 
 ---
 
@@ -229,7 +308,7 @@ path (`analyze_chunks`); the runtime methods are design-only.
 
 ---
 
-## 9. Stale-Doc Reconciliation Notes
+## 10. Stale-Doc Reconciliation Notes
 
 The audited tree differs materially from the in-crate `CLAUDE.md` / `README.md`:
 
@@ -239,6 +318,11 @@ The audited tree differs materially from the in-crate `CLAUDE.md` / `README.md`:
 - **HTTP routes:** ~20 (incl. diagnostics/graph/entities/ner/review/deep/webhook),
   not 8.
 - **Adapters:** 14 fully implemented, not "Python/Java/Go stubbed".
+- **Cargo features:** `default = ["http-server", "bundled-ort"]` (not just
+  `http-server`); `load-dynamic` and `cuda` features added in #536.
+- **LLM routing:** deep analysis now supports both OpenRouter and AWS Bedrock
+  via the `TRUSTY_LLM_MODEL` `bedrock/` prefix (#531).
+- **Version:** v0.4.1 (was v0.1.10 at original spec authoring).
 
 Tracked in [#430](https://github.com/bobmatnyc/trusty-tools/issues/430). This
 spec reflects the code, not the stale prose.

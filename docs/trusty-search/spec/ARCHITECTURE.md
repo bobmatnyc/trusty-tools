@@ -1,8 +1,8 @@
 # trusty-search — System Architecture
 
 > **Status:** Canonical · Living Document
-> **Last reviewed:** 2026-05-29
-> **Derived from:** code/docs/tickets audit
+> **Last reviewed:** 2026-06-01
+> **Derived from:** code/docs/tickets audit (v0.22.2)
 
 **Status legend:** ✅ Implemented · 🟡 Partial · 🔵 Designed-not-built · ⚪ Aspirational
 
@@ -60,7 +60,8 @@ trusty-search start  ──►  HTTP daemon (singleton, loopback)
   forward to the first free one, then writes `port.lock`
   (`~/Library/Application Support/trusty-search/port.lock` on macOS,
   `$XDG_DATA_HOME/trusty-search/port.lock` on Linux). The CLI and MCP server
-  resolve the live port from that file. ✅
+  resolve the live port from that file. The `port` subcommand reports the live
+  port in three machine-parsable formats (`--addr`, `--json`, default bare). ✅
 - **Loopback-only, no auth.** The daemon binds `127.0.0.1` and trusts every
   caller by design — **never** bind a non-loopback interface (PRD non-goal). ✅
 - **Concurrent multi-index reads.** `DashMap` shard-locks per index (different
@@ -70,6 +71,10 @@ trusty-search start  ──►  HTTP daemon (singleton, loopback)
 - **MCP is a thin proxy.** `serve` does **not** re-implement search; the
   `McpServer` dispatcher proxies each tool call to the running daemon over HTTP
   (`src/mcp/`). The daemon must already be running. ✅
+- **Graceful shutdown.** SIGTERM (e.g. from `launchctl bootout`) drains in-flight
+  requests via `axum::serve(…).with_graceful_shutdown(shutdown_signal())` before
+  the process exits. The `mcp_bridge` reconnects automatically with exponential
+  backoff, making upgrades transparent to running LLM sessions. ✅
 
 ---
 
@@ -106,9 +111,20 @@ Stage 3 — knowledge graph          # SymbolGraph rebuilt from corpus (CALLS/IM
 - **Memory-bounded.** The reindex orchestrator polls RSS via `memguard`; on a
   `TRUSTY_MEMORY_LIMIT_MB` breach it skips remaining batches (already-committed
   chunks stay searchable) and reports `memory_limit_hit: true`. ✅
-- **Progress.** SSE events (`start`/`progress`/`complete`/`error`) on a
-  `tokio::broadcast` channel with a 500-event replay buffer so late subscribers
-  still see `start` (`src/service/reindex.rs`). ✅
+- **Sidecar stall hardening.** `StdioEmbedderClient::embed_batch` applies a
+  per-call timeout (`TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS`, default 120 s) around
+  the sidecar `read_line` call. On a stall the supervisor respawns the sidecar
+  and the reindex continues rather than hanging the SSE stream. ✅
+- **Progress.** SSE events (`start`/`progress`/`complete`/`error`,
+  plus `embedder_init`/`embedder_ready` when the sidecar cold-starts, and
+  per-file chunking-progress events during Stage 1) on a `tokio::broadcast`
+  channel with a 500-event replay buffer so late subscribers still see `start`
+  (`src/service/reindex.rs`). ✅
+- **Progress-aware foreground wait.** The `reindex_engine` CLI event loop treats
+  any forward-progress SSE event as a stall-timer reset; `--timeout` is now an
+  optional flag (`Option<u64>`) — when omitted the wait is open-ended and only
+  the absence of SSE events for `stall_secs` (default 120) triggers a timeout.
+  `ReindexOptions` gains `timeout_explicit: bool` and `stall_secs: u64`. ✅
 - **Walk diagnostics.** `last_walk_started_at`/`files_seen`/`files_skipped`/
   `error` are recorded per reindex so a zero-chunk outcome is explainable (#280). ✅
 
@@ -157,7 +173,8 @@ trusty-search daemon
 - **Supervisor tuning.** `TRUSTY_EMBEDDERD_BIN`,
   `*_STARTUP_TIMEOUT_SECS` (30), `*_RESTART_BACKOFF_MAX_SECS` (60),
   `*_MAX_RESTARTS` (5), `*_IDLE_SHUTDOWN_SECS` (0 = off),
-  `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` (60). ✅
+  `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` (60),
+  `TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS` (120 — per-batch stdio read deadline). ✅
 - **Sidecar internals.** `crates/trusty-embedderd/src/`: `protocol.rs`
   (JSON-RPC embed protocol), `batch_queue.rs` (request batching),
   `stdio_server.rs`, `uds_server.rs`, and an optional `http-server` feature
@@ -257,7 +274,7 @@ project rule.
   tool to the daemon over HTTP, returns a `Response`.
 - `stdio` — line-delimited JSON-RPC loop on stdin/stdout (default `serve`).
 - `sse` — axum router exposing `POST /mcp` and `GET /mcp/sse` (`serve --http`).
-- `tools` — the 17-tool catalogue + JSON-RPC error codes (`src/mcp/tools.rs`).
+- `tools` — the 19-tool catalogue + JSON-RPC error codes (`src/mcp/tools.rs`).
 - `openrpc` — an OpenRPC service descriptor.
 
 ### HTTP API (`src/service/server.rs`)
@@ -269,20 +286,22 @@ disabled, 500 internal).
 
 | Route | Purpose |
 |---|---|
-| `GET /health` | liveness/readiness (`{status, version, indexes}`) |
-| `GET /indexes`, `POST /indexes`, `DELETE /indexes/{id}` | registry management |
+| `GET /health` | liveness/readiness (`{status, version, indexes, update_available?, embedder_error?}`) |
+| `GET /indexes[?format=tree][?details=true]`, `POST /indexes`, `DELETE /indexes/{id}` | registry management; `?details=true` returns `{id, size_bytes}` objects; `?format=tree` reflects the nested hierarchy (#404) |
 | `GET /indexes/{id}/status` | chunk count + walk diagnostics (#280) |
 | `POST /indexes/{id}/search` | hybrid search (+ branch boost) |
-| `POST /indexes/{id}/search_similar` | code-to-code similarity |
+| `POST /indexes/{id}/search_similar` | code-to-code similarity (re-embeds seed on LRU miss for skip_kg indexes, #484) |
 | `POST /indexes/{id}/index-file`, `/remove-file` | single-file add/remove |
 | `POST /indexes/{id}/reindex`, `GET …/reindex/stream` | fire-and-forget + SSE |
 | `GET /indexes/{id}/chunks` | paginated chunk enumeration |
 | `GET /indexes/{id}/call_chain` | annotated call tree (503 if skip_kg, #313) |
 | `GET /indexes/{id}/graph`, `…/graph/stats` | symbol-graph export |
 | `POST /indexes/{id}/grep`, `POST /grep` | per-index / cross-index grep |
-| `POST /search` | cross-index fan-out (context-inference weighted, #112) |
+| `POST /search` | cross-index fan-out (context-inference weighted + nested hierarchy boost #404) |
+| `POST /upgrade` | check/install a new version via crates.io + cargo-install (#537) |
 | `GET /metrics` | Prometheus text (#41) |
 | `GET /status/stream`, `GET /logs/tail` | live status / log tail |
+| `POST /admin/stop` | graceful daemon stop |
 | `POST /chat`, `GET /api/chat/providers` | OpenRouter chat proxy |
 | `GET /ui`, `/ui/`, `/ui/{*path}` | embedded Svelte admin UI |
 
@@ -360,6 +379,7 @@ Single crate; three module trees (`core`, `service`, `mcp`) plus `commands`,
 | `core/chunker/` | tree-sitter AST chunker (`mod.rs`), `classify.rs`, `inherits.rs`, `walk.rs`. |
 | `core/indexer/` | `CodeIndexer` orchestrator: `mod.rs`, `ingest.rs`, `persist.rs`, `files.rs`, `search.rs`, `docs_penalty.rs`, `archive.rs`, `migrations.rs`, `tests.rs`. |
 | `core/search/rrf.rs` | Reciprocal Rank Fusion (k = 60). |
+| `core/search/hierarchy.rs` | `IndexHierarchy` — parent/child maps from root_path prefix containment; sub-index lane-weight boost + post-RRF dedup (#404 MVP). |
 | `core/classifier.rs` | `QueryClassifier` / `QueryIntent` + lane weights. |
 | `core/bm25.rs` | Re-export of `trusty_common::bm25` (`Bm25Index`, `tokenize`, #156). |
 | `core/store.rs` | `VectorStore` / usearch HNSW wrapper + key sidecar. |
@@ -385,12 +405,15 @@ Single crate; three module trees (`core`, `service`, `mcp`) plus `commands`,
 | `service/grep.rs` | grep-parity regex matcher (#111). |
 | `service/call_chain.rs` | Annotated call-tree renderer (#76). |
 | `service/persistence.rs`, `persistence_loader.rs` | Registry/index (de)serialization + restore. |
+| `service/colocated_storage.rs` | `.trusty-search/` per-project layout helpers + `.gitignore` management (#403). |
+| `service/fs_discovery.rs` | `scan_roots_for_colocated_indexes` — recursive discovery of `.trusty-search/` dirs from tracked roots (#403/#404). |
+| `service/roots_registry.rs` | `roots.toml` — lightweight TOML list of tracked project roots for colocated-storage scanning. |
 | `service/watcher.rs`, `watch_loop.rs` | File watching (notify, 500 ms debounce). |
 | `service/metrics.rs` | Prometheus `/metrics` (#41). |
 | `service/candle_embedder.rs` | Candle/Metal embedder (`candle` feature). |
 | `service/concurrency.rs`, `config.rs`, `constants.rs`, `client.rs`, `indexed_files.rs`, `mcp_descriptor.rs`, `ui.rs` | Concurrency limits, user config, defaults, daemon HTTP client, indexed-file set, `SearchMcpService`, embedded UI serving. |
-| **`src/mcp/`** | MCP server: `mod.rs`, `tools.rs` (17 tools), `stdio.rs`, `sse.rs`, `openrpc.rs`. |
-| **`src/commands/`** | One handler per CLI subcommand + shared helpers (`daemon_utils`, `format`, `index_resolve`, `reindex_engine`, `doctor_*`, …). |
+| **`src/mcp/`** | MCP server: `mod.rs`, `tools.rs` (19 tools), `stdio.rs`, `sse.rs`, `openrpc.rs`. |
+| **`src/commands/`** | One handler per CLI subcommand + shared helpers. Key new additions: `port.rs` (daemon port reporting), `prune_orphans.rs` (offline orphan cleanup), `upgrade.rs` (self-update + restart), `reindex_ui.rs` (4-phase MultiProgress UI, #401), `migrate_storage/` (colocated-storage migration), `discover/` (submodule split: `mod.rs`, `http.rs`, `marker.rs`, #473). |
 
 Supporting trees: `ui/` (Svelte 5 sources), `ui-dist/` (compiled bundle embedded
 via `include_dir!`), `build.rs` (UI build wrapper, `SKIP_UI_BUILD=1` to skip),
@@ -398,19 +421,27 @@ via `include_dir!`), `build.rs` (UI build wrapper, `SKIP_UI_BUILD=1` to skip),
 
 ---
 
-## 10. Multi-Index Topology (current vs. designed)
+## 10. Multi-Index Topology (current vs. remaining roadmap)
 
-**Current (✅/🟡).** Every index is a **flat peer** in the `DashMap`. Cross-index
-fan-out exists (`POST /search`, `POST /grep`) and `context_inference` scrapes
-each project's metadata to weight relevance — but there is no parent/child
-relationship and no dedup, so a file covered by two overlapping indexes appears
-twice with different chunk ids.
+**Current (✅).** The nested-index fan-out MVP landed in v0.20.0 (#404 / PR #437).
+`IndexHierarchy` (`src/core/search/hierarchy.rs`) derives parent/child
+relationships from canonical `root_path` prefix containment — no explicit
+`parent_id` field required. Fan-out via `POST /search` now:
+- **Boosts sub-index hits** (×1.5 lane-weight, clamped [1.0, 4.0]) so higher-
+  fidelity subtree results rank above the parent.
+- **Includes threshold safety-net children** even when the threshold router would
+  otherwise exclude them.
+- **Deduplicates overlapping chunks** post-RRF using (file, start, end) identity.
 
-**Designed-not-built (🔵).** The
-[nested-index fan-out RFC](../research/nested-index-fanout-rfc-2026-05-29.md)
-([#404](https://github.com/bobmatnyc/trusty-tools/issues/404)) proposes a
-directed-acyclic **nested-index graph**: sub-indexes declared as children of a
-parent, fan-out prioritising subtree results with the parent as a backstop, and
-dedup of overlapping coverage. It depends on co-located `.trusty-search/` storage
-+ filesystem discovery ([#403](https://github.com/bobmatnyc/trusty-tools/issues/403))
-and relative chunk paths (#402).
+`GET /indexes?format=tree` returns the registry with hierarchy annotations.
+Co-located `.trusty-search/` storage (#403) is also implemented: per-project
+data lives under `<root>/.trusty-search/` (managed by `service/colocated_storage.rs`),
+with tracked roots in `roots.toml` and recursive discovery via `service/fs_discovery.rs`.
+`trusty-search migrate storage` provides the opt-in path from the legacy central
+data dir.
+
+**Remaining gaps (🟡/🔵).** Full dedup across all possible overlap patterns is a
+best-effort heuristic (exact (file, start, end) match) rather than a proper
+merge of partially-overlapping chunks. Relative chunk paths (#402) and cross-file
+IMPORTS/INHERITS KG edges remain designed-not-built. Worktree-aware indexing
+(shared base + per-worktree delta overlay, #447) is still open.

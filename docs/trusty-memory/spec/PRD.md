@@ -1,8 +1,8 @@
 # trusty-memory — Product Requirements Document
 
 > **Status:** Canonical · Living Document
-> **Last reviewed:** 2026-05-29
-> **Derived from:** code/docs/tickets audit
+> **Last reviewed:** 2026-06-01
+> **Derived from:** code/docs/tickets audit (v0.14.0)
 
 **Status legend:** ✅ Implemented · 🟡 Partial · 🔵 Designed-not-built · ⚪ Aspirational
 Each requirement is framed **Vision / Current / Gap**.
@@ -70,6 +70,8 @@ served as a standalone daemon, with no code change.
 | G10 | **Import / migration** — migrate from kuzu-memory (MCP config + data) into palaces. | ✅ |
 | G11 | **Pure-Rust, service-free storage** — redb + in-process HNSW + fastembed ONNX; no rusqlite/usearch native chain on the default path. | ✅ |
 | G12 | **In-process embeddability** — open-mpm links `MemoryMcpService` as an rlib without the axum/HTTP surface. | ✅ |
+| G13 | **Self-upgrade** — `upgrade` CLI and MCP tool let operators and agents check for and install new releases, with launchd self-restart. | ✅ |
+| G14 | **Operational observability** — `/health` exposes fd usage, `update_available`, and uptime; bug-capture layer fingerprints errors for operator reporting. | ✅ |
 
 ### Non-Goals
 
@@ -153,10 +155,10 @@ to `crates/trusty-memory/src/`.
 
 ### 4.3 MCP Tool Surface (`tools.rs`, `mcp_service.rs`, `openrpc.rs`)
 
-**FR-3.1 — Full MCP tool set (23 tools)** ✅
+**FR-3.1 — Full MCP tool set (24 tools)** ✅
 - *Vision:* One auditable file defines every tool the server exposes, kept in sync with the MCP `tools/list` payload and the OpenRPC `rpc.discover` manifest.
-- *Current:* **23 tools** in `tool_definitions()` (`tools.rs`): `memory_remember`, `memory_note`, `memory_recall`, `memory_recall_deep`, `memory_recall_all`, `memory_list`, `memory_forget`, `palace_create`, `palace_delete`, `palace_update`, `palace_list`, `palace_info`, `palace_compact`, `kg_assert`, `kg_query`, `kg_gaps`, `kg_bootstrap`, `add_alias`, `discover_aliases`, `list_prompt_facts`, `remove_prompt_fact`, `get_prompt_context`, `memory_send_message`. (The README's "12 tools" table is a curated subset; the wire surface is 23.)
-- *Gap:* Doc drift — the crate `README.md` and `mcp_service.rs` comments cite varying counts (11/12/23). The authoritative count is the `tool_definitions_lists_all_tools` test: **23**.
+- *Current:* **24 tools** in `tool_definitions()` (`tools.rs`): `memory_remember`, `memory_note`, `memory_recall`, `memory_recall_deep`, `memory_recall_all`, `memory_list`, `memory_forget`, `palace_create`, `palace_delete`, `palace_update`, `palace_list`, `palace_info`, `palace_compact`, `kg_assert`, `kg_query`, `kg_gaps`, `kg_bootstrap`, `add_alias`, `discover_aliases`, `list_prompt_facts`, `remove_prompt_fact`, `get_prompt_context`, `memory_send_message`, `upgrade`. (The README's "12 tools" table is a curated subset; the wire surface is 24.)
+- *Gap:* Doc drift — the crate `README.md` may still cite an older count. The authoritative count is the `tool_definitions_lists_all_tools` test: **24**.
 
 **FR-3.2 — Per-tool scopes via OpenRPC** ✅
 - *Vision:* Each tool advertises a logical scope (`memory.read` / `memory.write` / `knowledge.write`) so orchestrators can authorize without bespoke adapters.
@@ -289,8 +291,47 @@ to `crates/trusty-memory/src/`.
 
 **FR-10.4 — Diagnostics & KG rebuild (`doctor`, `kg_rebuild`)** ✅
 - *Vision:* Audit palaces/orphans and rebuild the KG from drawers.
-- *Current:* `commands/doctor.rs` and `kg_rebuild.rs`.
+- *Current:* `commands/doctor.rs` and `kg_rebuild.rs`; startup-pin-map (`AppState::pin_project_map`) feeds doctor to avoid redundant directory traversals.
 - *Gap:* `doctor --fix` is advisory only (see FR-2.2). 🔵
+
+**FR-10.5 — Port query (`port`)** ✅
+- *Vision:* Operators and shell scripts need the daemon's live port without guessing the dynamically-selected value (7070–7079).
+- *Current:* `trusty-memory port [--addr|--json]` reads the discovery file and prints bare port, `host:port`, or JSON (#526, `commands/port.rs`). Exits non-zero when no daemon is running so shell substitution fails cleanly.
+- *Gap:* None material.
+
+**FR-10.6 — Explicit palace-slug pinning (`link`)** ✅
+- *Vision:* Lock in a palace slug before a directory rename so the project never becomes orphaned from its palace.
+- *Current:* `trusty-memory link [--path] [--slug] [--force]` writes/refreshes `.trusty-tools/trusty-memory.yaml`. Project slug resolution (`project_slug_at`) reads the pin file first, deriving from basename only as a fallback (#446, `commands/link.rs`, `project_root.rs`).
+- *Gap:* None material.
+
+### 4.11 Self-Upgrade (`commands/upgrade.rs`, `tools.rs`, `trusty-common` `update/`)
+
+**FR-11.1 — Version check and self-upgrade** ✅
+- *Vision:* Operators and MCP agents can check whether a newer release is available and, with explicit confirmation, install it and restart the daemon from a single command.
+- *Current:* Three surfaces: (a) `trusty-memory upgrade [--check] [--yes]` CLI; (b) `upgrade` MCP tool (`check=true` / `confirm=true`); (c) `/health` `update_available` field populated by a background throttled crates.io poll at startup. The MCP tool flushes its response before the 500 ms delayed `exit(1)` so the client sees the result before launchd respawns the new binary (#537/#539). Delegates to `trusty_common::update::upgrade_and_restart`.
+- *Gap:* None material.
+
+### 4.12 Operational Reliability (`fd_metrics.rs`, `commands/single_instance.rs`, `trusty-common` `error_capture/`, `shutdown.rs`)
+
+**FR-12.1 — Single-instance guard** ✅
+- *Vision:* The daemon must not spawn zombie copies when launchd `KeepAlive { SuccessfulExit: false }` triggers on `EADDRINUSE`.
+- *Current:* At startup the daemon probes existing discovery files and exits `0` if a healthy daemon is already responding. launchd treats exit-0 as clean shutdown and does not respawn (#464, `commands/single_instance.rs`).
+- *Gap:* None material.
+
+**FR-12.2 — File-descriptor observability** ✅
+- *Vision:* Operators must be able to see "N fds open vs. M limit" before EMFILE exhaustion makes the daemon non-functional.
+- *Current:* `fd_metrics.rs` provides `count_open_fds()` and `fd_soft_limit()`; both are exposed in the `/health` JSON response as `open_fds` and `fd_soft_limit` (#464). LaunchAgent plist raised to 8192 via `SoftResourceLimits`/`HardResourceLimits`.
+- *Gap:* 🟡 Architectural bound — each open palace holds ~3 redb files; LRU caching of palace handles (#463) would permanently bound fd usage regardless of palace count.
+
+**FR-12.3 — Bug-capture error layer** ✅
+- *Vision:* 500-level daemon errors should be fingerprintable and reportable without requiring operators to tail logs.
+- *Current:* `trusty-common` `error_capture` module (`bug-capture` feature, #478/#490): `BugCaptureLayer` intercepts 500 responses, deduplicates by SHA-256 fingerprint, and stores them in an `ErrorStore` ring. `AppState::error_store` holds the handle. The `upgrade` MCP tool and HTTP surfaces can expose capture counts.
+- *Gap:* Does not capture errors from `tokio::spawn` tasks outside HTTP handler context.
+
+**FR-12.4 — Graceful shutdown** ✅
+- *Vision:* `launchctl bootout` (SIGTERM) must drain in-flight requests before the process exits, so a connection-safe upgrade never drops an MCP call mid-flight.
+- *Current:* `trusty_common::shutdown_signal()` (`shutdown.rs`) watches SIGTERM+SIGINT; passed to `axum::serve(...).with_graceful_shutdown(...)` (#534, `trusty-common` ≥ 0.10.0). The `mcp_bridge` reconnects with exponential backoff after the socket closes.
+- *Gap:* None material.
 
 ---
 
@@ -315,6 +356,9 @@ A release meets the bar when:
 6. **Memory stays healthy over time** — the dream cycle dedups, prunes, and
    (optionally) semantically consolidates so recall quality does not degrade as a
    palace grows. ✅
+7. **Operationally self-sufficient** — operators can check for updates, upgrade,
+   and observe health (fd usage, version) without consulting external docs or
+   tailing logs. ✅
 
 **Core differentiator (restated):** trusty-memory is a single embedded MIT-licensed
 Rust binary that unifies vector recall, a temporal knowledge graph, an
@@ -328,13 +372,16 @@ daemon *or* an in-process library.
 
 ### Open questions
 
-- **Tool-count doc drift:** the wire surface is 23 tools, but the README table
-  shows 12 and `mcp_service.rs` comments say 23/11 inconsistently. Should the
-  README be regenerated from `tool_definitions()` to stay authoritative? 🟡
+- **Tool-count doc drift:** the wire surface is now **24 tools** (per
+  `tool_definitions_lists_all_tools`). The crate README should be updated to
+  reflect this. The authoritative source remains `tool_definitions()`. 🟡
 - **Orphaned-palace remediation:** `doctor --fix-palaces` is advisory only.
   Should it actually merge orphans into `personal` (FR-2.2)? 🔵
 - **SQLite KG retirement (#47):** the legacy `sqlite-kg` path lingers for
   migration. When can it be removed entirely? 🟡
+- **LRU palace-handle cache (#463):** each open palace holds ~3 redb files;
+  with many palaces this can exhaust file descriptors even with the 8192 fd
+  limit. Should handle lifetime be bounded by an LRU cache? 🔵
 - **Leiden refinement:** community detection is Louvain-only; is phase-2
   refinement worth adding to reduce false-positive knowledge gaps (FR-6.6)? 🔵
 - **Scope enforcement:** scopes are advertised, not enforced. Should the daemon
@@ -342,12 +389,15 @@ daemon *or* an in-process library.
   orchestrator's job (§2 Non-Goals)? ⚪
 - **Cross-machine sync:** explicitly a non-goal today — revisit if multi-host
   agent fleets need shared memory. ⚪
+- **Broken README link (#398):** `trusty-memory-mcp` path in README.md still
+  points to the wrong location. 🟡
 
 ### Roadmap (phased, from current gaps)
 
 | Phase | Theme | Highlights |
 |---|---|---|
-| **Now** | Doc hygiene | Reconcile the tool-count drift (README ↔ `tool_definitions()` ↔ `mcp_service.rs`); fix the broken README link (#398). |
+| **Now** | Doc hygiene | Update README tool table to 24; fix the broken README link (#398). |
 | **Phase 2** | Storage cleanup | Retire the legacy `sqlite-kg` path (#47) once migration tooling is no longer needed. |
 | **Phase 3** | Palace lifecycle | Implement actual orphaned-palace merge into `personal` behind `doctor --fix` (FR-2.2/FR-10.4). |
+| **Phase 3** | fd robustness | Implement lazy/LRU redb-handle cache (#463) to bound fd usage regardless of palace count. |
 | **Later** | Retrieval/graph depth | Leiden phase-2 refinement for knowledge gaps (FR-6.6); richer KG auto-extraction beyond the heuristic table (FR-6.2). |

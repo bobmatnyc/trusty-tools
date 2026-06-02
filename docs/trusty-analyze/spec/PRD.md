@@ -1,8 +1,8 @@
 # trusty-analyze — Product Requirements Document (PRD)
 
 > **Status:** Canonical · Living Document
-> **Last reviewed:** 2026-05-29
-> **Derived from:** code/docs/tickets audit
+> **Last reviewed:** 2026-06-01
+> **Derived from:** code/docs/tickets audit (drift audit v0.4.1)
 
 This PRD defines *what trusty-analyze is meant to be*, *what it is today*, and
 *what gaps remain*. Every requirement is framed **Vision / Current / Gap** and
@@ -62,8 +62,9 @@ shipped code.
 - **G5 (✅)** Ship a single self-contained binary (CLI + daemon + MCP + embedded
   UI), installable with `cargo install trusty-analyze`.
 - **G6 (✅)** Keep stdout clean for MCP JSON-RPC framing; all logs to stderr.
-- **G7 (🟡)** Provide LLM-augmented deep analysis on top of deterministic
-  metrics, opt-in and isolated from the reproducible path.
+- **G7 (✅)** Provide LLM-augmented deep analysis on top of deterministic
+  metrics, opt-in and isolated from the reproducible path, via either OpenRouter
+  or AWS Bedrock (Converse API).
 - **G8 (🔵)** Add sandboxed runtime execution + runtime-to-graph mapping
   (Phases 3–4).
 
@@ -189,12 +190,19 @@ shipped code.
   review pipeline, optionally post the report back as a comment; HMAC webhook
   signature verification. *(`core/github.rs`, CLI `review-pr`, `/review/github-pr`,
   `/webhooks/github`, MCP `review_github_pr`)*
-- **FR-7.4 (🟡)** LLM-augmented deep analysis: a `DeepAnalysisReport`
+- **FR-7.4 (✅)** LLM-augmented deep analysis: a `DeepAnalysisReport`
   (narrative + frameworks + recommendations + model) layered on top of the
-  deterministic `ReviewReport` via a `ChatProvider`. Requires an
-  `OPENROUTER_API_KEY` on the daemon side; returns 400 without one. Working but
-  non-deterministic and opt-in. *(`core/explain.rs`, CLI `deep`, `/analyze/deep`,
-  MCP `deep_analysis`)*
+  deterministic `ReviewReport` via a `ChatProvider`. Two routing paths:
+  - **OpenRouter path** (default): requires `OPENROUTER_API_KEY`; returns 400
+    with `DeepAnalysisError::MissingApiKey` if absent. Default model:
+    `openai/gpt-4o-mini` (overridable via `TRUSTY_LLM_MODEL` or `--model`).
+  - **AWS Bedrock path** (opt-in): set `TRUSTY_LLM_MODEL=bedrock/<model-id>`
+    (e.g. `bedrock/us.anthropic.claude-sonnet-4-6`). Uses AWS Converse API via
+    `trusty_common::chat::BedrockProvider`. No API key required. Region:
+    `TRUSTY_AWS_REGION` → `AWS_REGION` → `"us-east-1"`. Credential chain: env
+    vars, `~/.aws/credentials`, IAM roles, SSO.
+  Working, non-deterministic, and opt-in. *(`core/explain.rs`, CLI `deep`,
+  `/analyze/deep`, MCP `deep_analysis`; issues #530/#531)*
 
 ### 4.8 External Static-Tool Integration
 
@@ -255,6 +263,15 @@ shipped code.
 - **FR-12.5 (✅)** Embedded Svelte dashboard served from `/ui` (rust-embed),
   `dashboard`/`dash` opens it; `completions` emits shell scripts.
   *(`service/ui.rs`, `main.rs`)*
+- **FR-12.6 (✅)** Graceful shutdown on SIGTERM/SIGINT: the axum server drains
+  in-flight requests before exiting (`with_graceful_shutdown`). Use
+  `launchctl bootout` (SIGTERM) rather than `launchctl kickstart -k` (SIGKILL).
+  *(`service/mod.rs`; issue #534/#535)*
+- **FR-12.7 (✅)** ORT backend is feature-selectable: `bundled-ort` (default,
+  static libs, glibc ≥ 2.38), `load-dynamic` (system `libonnxruntime.so`, glibc
+  < 2.38), `cuda` (load-dynamic + CUDA acceleration). Install on glibc < 2.38
+  with `--no-default-features --features http-server,load-dynamic` and set
+  `ORT_DYLIB_PATH`. *(`Cargo.toml`; issue #536/#538)*
 
 ### 4.13 Output & Reporting
 
@@ -280,6 +297,9 @@ shipped code.
 | SC-7 | Diff/PR review usable as a CI quality gate. | ✅ |
 | SC-8 | Workspace test suite green (`cargo test -p trusty-analyze`). | ✅ |
 | SC-9 | Runtime execution (Phase 3) maps profiler data onto graph nodes. | 🔵 |
+| SC-10 | Deep analysis routes through AWS Bedrock when `TRUSTY_LLM_MODEL=bedrock/<id>` is set, with no API key required. | ✅ (#531) |
+| SC-11 | Daemon drains in-flight requests before exiting on SIGTERM. | ✅ (#535) |
+| SC-12 | Binary installs successfully on glibc < 2.38 hosts via `load-dynamic` feature. | ✅ (#538) |
 
 ---
 
@@ -298,3 +318,10 @@ shipped code.
   centrality + static complexity + runtime cost + error/coverage/dependency-risk.
 - **OQ-6 (⚪)** Performance/quality regression baselines (the
   `regression-testing/` subdir is empty).
+- **OQ-7 (🟡)** Bedrock model id validation: a bare `bedrock/` with no trailing
+  id currently falls back silently to `openai/gpt-4o-mini` on the OpenRouter
+  path rather than returning a clear error. Consider returning
+  `DeepAnalysisError::InvalidModel` in that case.
+- **OQ-8 (🟡)** `reqwest::Client` instances in service handlers are constructed
+  per-request on the deep/GitHub handlers; consider promoting them to
+  `AnalyzerAppState` for connection-pool reuse.

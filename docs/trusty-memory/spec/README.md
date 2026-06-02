@@ -1,8 +1,8 @@
 # trusty-memory — Specification Set
 
 > **Status:** Canonical · Living Document
-> **Last reviewed:** 2026-05-29
-> **Derived from:** code/docs/tickets audit
+> **Last reviewed:** 2026-06-01
+> **Derived from:** code/docs/tickets audit (v0.14.0)
 
 This directory holds the canonical product and engineering specification for the
 `trusty-memory` crate (`crates/trusty-memory/`) and the storage core it sits on
@@ -64,10 +64,13 @@ These documents are derived from a direct audit of the `crates/trusty-memory/src
 tree, the `trusty-common/src/memory_core/` storage core, the crate `README.md`,
 the existing `docs/trusty-memory/` research/sessions, and the closed-issue backlog
 (notably the redb migration sweep #43–#56, the BM25/embed sidecar work #155/#156/
-#193, the multi-transport refactor #149/#150, inter-project messaging #99, and the
-palace-as-project enforcement #88). When the code changes materially, update the
-relevant document and bump the *Last reviewed* date. Source-path citations reflect
-the layout at the time of review.
+#193, the multi-transport refactor #149/#150, inter-project messaging #99, the
+palace-as-project enforcement #88, the `.trusty-tools/` pin-file convention #446,
+the single-instance guard / fd-exhaustion fix #464, the `port` command #526,
+the bug-capture error layer #478/#490, graceful shutdown + bridge reconnect #534,
+and the `upgrade` CLI/MCP tool #537/#539). When the code changes materially,
+update the relevant document and bump the *Last reviewed* date. Source-path
+citations reflect the layout at the time of review.
 
 ## Related decisions
 

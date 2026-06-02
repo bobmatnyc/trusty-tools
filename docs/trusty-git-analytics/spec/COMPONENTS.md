@@ -1,8 +1,8 @@
 # trusty-git-analytics (`tga`) — Components
 
 > **Status:** Canonical · Living Document
-> **Last reviewed:** 2026-05-29
-> **Derived from:** existing `requirements/` docs + code/tickets reconciliation
+> **Last reviewed:** 2026-06-01
+> **Derived from:** existing `requirements/` docs + code/tickets reconciliation, updated through v2.5.0
 
 **Status legend:** ✅ Implemented · 🟡 Partial · 🔵 Designed-not-built · ⚪ Aspirational
 
@@ -23,7 +23,11 @@ them with PR / ticket / identity data, persisting to SQLite.
   `collection_runs` bookkeeping; per-repo error isolation (#334).
 - `collect/git/{extractor,diff,fetch,reachability}.rs` — `git2` revwalk, in-process
   diff stats, HTTPS fetch (vendored TLS, #337), tag/release-branch reachability
-  (`reachability.rs`, #279/#290/#303).
+  (`reachability.rs`, #279/#290/#303). `diff.rs` also exposes `diff_for_commit`
+  (unified diff text, 200 KiB cap) for the contributor-profile pipeline (#559).
+- `collect/ai_attribution.rs` (`detect_ai_tool`) — `Co-Authored-By:` trailer
+  detection for Claude/Copilot/Cursor, called at INSERT time by `extractor.rs`;
+  sets `commits.is_ai_assisted` / `commits.ai_tool` (#445 batch A).
 - `collect/pr_provider.rs` (`PrProvider` trait) + `collect/{github,bitbucket,azdo}/`
   — concurrent PR collection (GitHub, Bitbucket Cloud, Azure DevOps).
 - `collect/pm_adapter.rs` (`PmAdapter`/`PmTicket`/`PmSource`) — normalized ticket
@@ -36,8 +40,9 @@ them with PR / ticket / identity data, persisting to SQLite.
 - `collect/weeks.rs` — ISO-week range resolution.
 
 **Current state.** ✅ All four PR providers, all PM adapters, identity cascade,
-reachability, and per-repo error isolation are implemented. Branch coverage bug
-(#331, -56% on multi-repo orgs) and always-fetch-before-collect (#334) are fixed.
+reachability, per-repo error isolation, AI co-authorship attribution, and
+`diff_for_commit` are implemented. Branch coverage bug (#331, -56% on multi-repo
+orgs) and always-fetch-before-collect (#334) are fixed.
 
 **Gaps.** GitLab PR collection 🔵 (parity gap, `collection.md` §PR). Bitbucket
 `merged_at` is approximated by `updated_on` (one-directional bias, ADR-0003 §6)
@@ -121,26 +126,42 @@ adapters; Shortcut / Confluence / Datadog are code-only additions 🟡 (doc drif
 
 ---
 
-## 5. Effort scorer (`src/core/effort.rs`)
+## 5. Effort scorer (`src/core/effort.rs`, `src/core/effort_percentile.rs`)
 
 **Responsibility.** Assign each commit a deterministic empirical effort T-shirt
-size, persisted for per-engineer effort histograms.
+size (absolute text label) and a corpus-relative integer band (1–5), both
+persisted for per-engineer effort histograms and downstream warehouse joins.
 
 **Key types.**
 - `FORMULA_VERSION` (`"v1"`), `compute_effort(...)` → `EffortRecord` (size, score,
-  loc, files, test_loc, tests_factor).
+  loc, files, test_loc, tests_factor). (`core/effort.rs`)
 - Formula: `score = α·log₂(LoC+1) + β·log₂(files+1) + δ·tests_factor`, with
   α=1.0, β=1.5, γ=0.0 (deferred), δ=1.0; `tests_factor = 1 − 0.3·min(test_LoC/LoC, 1)`.
-- T-shirt bands (calibrated against 99 trusty-tools commits, PR #308):
+- Static T-shirt bands (calibrated against 99 trusty-tools commits, PR #308):
   XS ≤ 6, S (6,10], M (10,14], L (14,18], XL > 18.
 - Persisted to `fact_commit_effort` (`PRIMARY KEY (sha, repository)`,
-  `formula_version`, unix `computed_at`).
+  `formula_version`, unix `computed_at`, `effort_tshirt` INTEGER).
+- `effort_tshirt_from_size(label) → i64` — static fallback mapping (XS=1…XL=5)
+  used when the corpus is too small for percentile computation.
+- `EffortPercentileThresholds` { p20, p40, p60, p80, sample_count } —
+  corpus-level breakpoints; `band_for_score(score) → i64` (1–5). (`core/effort_percentile.rs`)
+- `compute_percentiles(scores) → Option<EffortPercentileThresholds>` — nearest-rank
+  method; returns `None` for corpora < 5 rows.
+- `rebin_all(conn) → (rows_updated, Option<thresholds>)` — batch-updates
+  `effort_tshirt` in `fact_commit_effort`; persists thresholds in
+  `effort_percentile_thresholds`; falls back to static mapping on tiny corpora.
+- `tshirt_for_score_incremental(conn, score, size_label)` — bins a single new
+  commit against stored thresholds or falls back to static mapping.
 
-**Current state.** ✅ v1 implemented; output identical between Rust
-(`tga backfill effort`) and `scripts/compute-effort.sh`.
+**Current state.** ✅ v1 formula implemented; corpus-percentile binning implemented
+(`tga backfill effort-tshirt`); static `size` TEXT and percentile `effort_tshirt`
+INTEGER coexist in the table (intentional divergence by design); output identical
+between Rust path and `scripts/compute-effort.sh`.
 
 **Gaps.** 🔵 v2 formula with cyclomatic-complexity γ term (re-run inserts new rows
 alongside v1 for score-evolution tracking). Not in `requirements/` — code-only.
+🔵 Per-repo or per-team percentile datasets (the table supports it via `dataset`
+PK but only `"default"` is used currently).
 
 ---
 
@@ -159,10 +180,17 @@ report-time revert rate.
   source of truth both the backfill and aggregator paths now call (resolves the
   ~87% disagreement that motivated #210/#377).
 
-**Current state.** ✅ Both implemented and unified.
+**Current state.** ✅ Both implemented and unified. Quality is now also persisted:
+`Aggregator::persist_weekly_quality` UPSERTs each per-(author, year, week, repo)
+row into `fact_weekly_quality` after every report run (#445 batch B, migration
+`0018`). The grain table includes raw input counts (`revert_count`, `bugfix_count`,
+`ticketed_count`, `commit_count`) and `formula_version` for downstream auditability.
+`tga backfill quality` retroactively populates `fact_weekly_quality` for historical
+data.
 
-**Gaps.** Not in `requirements/` — code-only additions (doc drift). No persisted
-`fact_quality` table; quality is computed at report time.
+**Gaps.** Not in `requirements/` — code-only additions (doc drift now partially
+addressed: quality is documented in this spec). The predecessor `fact_quality`
+name never existed; `fact_weekly_quality` is the authoritative table name.
 
 ---
 
@@ -207,13 +235,29 @@ Markdown artifacts and per-engineer drill-downs.
   `unresolved_authors`, `unresolved_author_commits` (#67/#68).
 - `report/formatters/{csv,json,markdown}.rs` + `report/templates/` (Tera).
 - `report/drilldown.rs` (`AuthorDrilldownData`, `EffortHistogram`,
-  `format_markdown`/`format_json`) — powers `tga author` (#325).
+  `format_markdown`/`format_json`, `PrMetrics`) — powers `tga author` (#325).
+  `PrMetrics` now derives `Serialize + Deserialize` so it embeds in
+  `AuthorPeriodSummary`.
 - `report/ticketed_stats.rs` (`compute_ticketed_stats`, `TicketedStats`).
 - `report/pipeline.rs` (`ReportPipeline`, `ReportStats`) — orchestrator.
+- `report/period_trends/` — contributor-profile data pipeline (#558/#560):
+  - `model.rs` — `AuthorPeriodSummary` (Serialize + Deserialize struct with
+    `period_label`, `since`/`until`, `commit_count`, `categories`,
+    `effort_histogram`, `quality_score`, `ticketed_pct`, `pr_metrics`,
+    `repositories`).
+  - `query.rs` — `query_author_period_trends(db, email, window_weeks, since, until)`
+    partitions the author's ISO-week history into N-week buckets and aggregates
+    existing WeeklyActivity / effort / quality / PR data into
+    `Vec<AuthorPeriodSummary>`; reads existing schema, no migration needed.
+  - `tests.rs` — 9 unit tests (basic windowing, label format, ticketed_pct,
+    empty/unknown author, category aggregation, date filter, week-range helper).
+  - Exported from `tga::report` as `pub use period_trends::{query_author_period_trends, AuthorPeriodSummary}`.
 
 **Current state.** ✅ All CSV/JSON/Markdown outputs, velocity, weighted activity
-scoring, boilerplate filter, anonymization, `--author` filter (#324), and the
-`tga author` drill-down (#325) are implemented.
+scoring, boilerplate filter, anonymization, `--author` filter (#324), `tga author`
+drill-down (#325), `fact_weekly_quality` UPSERT (#445 batch B), and the
+contributor-profile data pipeline (`diff_for_commit` + `query_author_period_trends`,
+#559/#560) are implemented.
 
 **Gaps.** Activity-scoring weights, boilerplate thresholds match
 `requirements/reporting.md` ✅. Markdown narrative templates documented as
@@ -230,17 +274,23 @@ wrappers, and the versioned migration runner.
 **Key types & modules.**
 - `core/db/mod.rs` (`Database`, `Database::open`/`open_in_memory`,
   `CheckpointMode`) — WAL + `synchronous=NORMAL` + `foreign_keys=ON`.
-- `core/db/migrations.rs` — idempotent runner over `sql/0001_*.sql … 0016_*.sql`,
+- `core/db/migrations.rs` — idempotent runner over `sql/0001_*.sql … 0019_*.sql`,
   tracked in `schema_migrations`.
 - Per-table wrappers: `collection_runs.rs`, `work_items.rs`,
   `azdo_iterations.rs` (no raw SQL at call sites).
 
-**Current state.** ✅ Migrations `0001`–`0016`; WAL checkpointing on exit (#298);
-rusqlite version aligned to workspace (#257).
+**Current state.** ✅ Migrations `0001`–`0019`; WAL checkpointing on exit (#298);
+rusqlite version aligned to workspace (#257). New tables since v2.3.0:
+- `fact_weekly_quality` (migration `0018`) — persisted per-author-per-week quality.
+- `effort_percentile_thresholds` (migration `0019`) — corpus p20/p40/p60/p80
+  breakpoints for `effort_tshirt` assignment.
+- Push-down columns (migration `0017`) — `classifications.top_level_category`,
+  `fact_commit_effort.effort_tshirt`, `commits.is_ai_assisted` / `ai_tool`.
 
 **Gaps.** 🟡 `requirements/database-schema.md` is stale: it lists migrations only
 through `0013`, uses predecessor table names (`cached_commits`,
-`weekly_fetch_status`), and omits the `fact_*` family and DORA views. The on-disk
+`weekly_fetch_status`), and omits the `fact_*` family, DORA views, push-down
+columns, `fact_weekly_quality`, and `effort_percentile_thresholds`. The on-disk
 `src/core/db/sql/` set is authoritative.
 
 ---
@@ -257,9 +307,15 @@ function per subcommand.
   `author.rs`, `pr_metrics.rs`, `aliases/` (crud + suggest), `backfill.rs`,
   `override_cmd.rs`, `rules.rs`, `install.rs`, `deployments.rs`, `incidents.rs`,
   `dora.rs`, plus shared `date_range.rs`.
+- `backfill.rs` `BackfillSubcommand` enum: `TicketIds`, `RevertFlags`, `Effort`,
+  `Reachability`, `Complexity`, `AiDetection`, `AiDetectionCommits`, `Ticketed`,
+  `TopLevel`, `EffortTshirt`, `Quality`. All share global `--dry-run`, `--repos`,
+  `--weeks`, `--since`/`--until` filters. (`--branch` not applicable: post-collect
+  commits carry no branch attribution.)
 
-**Current state.** ✅ Fifteen subcommands; uniform `--repo`/`--branch`/`--week`
-filters (#332); per-subcommand `--help` audit (#333).
+**Current state.** ✅ Fifteen subcommands; eleven `tga backfill` sub-subcommands
+(five pre-existing + six from #445); uniform `--repo`/`--branch`/`--week` filters
+(#332); per-subcommand `--help` audit (#333).
 
 **Gaps.** 🟡 `requirements/cli-commands.md` documents `fetch` and `identities
 list/merge` as standalone subcommands (folded into `collect` / `aliases`) and
@@ -288,6 +344,38 @@ three #405/#406/#407 additions implemented; secret values never persisted.
 
 **Gaps.** None material; `requirements/configuration.md` was already updated for
 `database:` and `llm:` and is the authoritative field reference. ✅
+
+---
+
+## 13. Contributor-profile data pipeline (`src/collect/git/diff.rs`, `src/report/period_trends/`)
+
+**Responsibility.** Provide the tga data-supply layer for the longitudinal
+per-contributor profiling epic (#558) so `trusty-review` can build LLM-backed
+review profiles without duplicating git/DB logic.
+
+**Key types & modules.**
+- `collect::git::diff::diff_for_commit(repo_path, sha) → Result<String>` —
+  opens the repo at `repo_path` with libgit2, resolves `sha`, computes the
+  unified diff against the first parent (or empty tree for root commits), and
+  returns the diff text capped at `DIFF_BYTE_CAP` (200 KiB) with a
+  `[... diff truncated …]` marker when cut. 4 unit tests.
+- `report::period_trends::AuthorPeriodSummary` — the per-period roll-up struct
+  (serde Serialize+Deserialize). Fields: `period_label`, `since`, `until`,
+  `commit_count`, `categories` (HashMap), `effort_histogram` (HashMap),
+  `quality_score`, `ticketed_pct`, `pr_metrics` (`PrMetrics`), `repositories`.
+- `report::query_author_period_trends(db, email, window_weeks, since, until) → Result<Vec<AuthorPeriodSummary>>` — resolves the author's canonical logins,
+  enumerates their ISO weeks in `[since, until]`, partitions into `window_weeks`-
+  wide buckets, and builds one `AuthorPeriodSummary` per bucket by querying
+  existing `commits`, `fact_commit_effort`, `fact_weekly_quality`, and
+  `pull_requests` rows. No schema change required.
+
+**Current state.** ✅ Both functions implemented and tested; `period_trends`
+module split into `mod.rs`/`model.rs`/`query.rs`/`tests.rs` to stay within the
+500-line file cap. Public APIs exported from `tga::report`.
+
+**Gaps.** The LLM-backed profiling logic (batch_reviewer, synthesizer, profile
+CLI) lives in `trusty-review`, not tga. tga's responsibility ends at data supply.
+trusty-review issues #561–#568 are BLOCKED-ON-MVP.
 
 ---
 

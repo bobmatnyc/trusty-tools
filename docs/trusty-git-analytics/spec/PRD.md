@@ -1,8 +1,8 @@
 # trusty-git-analytics (`tga`) — Product Requirements Document
 
 > **Status:** Canonical · Living Document
-> **Last reviewed:** 2026-05-29
-> **Derived from:** existing `requirements/` docs + code/tickets reconciliation
+> **Last reviewed:** 2026-06-01
+> **Derived from:** existing `requirements/` docs + code/tickets reconciliation, updated through v2.5.0
 
 **Status legend:** ✅ Implemented · 🟡 Partial · 🔵 Designed-not-built · ⚪ Aspirational
 Each requirement is framed **Vision / Current / Gap**.
@@ -72,6 +72,10 @@ the predecessor, the code wins.
 | G17 | **Performance regression tracking** — Rust-vs-Python and version-over-version snapshots in `regression-testing/`. | 🟡 |
 | G18 | **In-process LLM** — feature-flag `candle`/`llama.cpp` to classify without HTTP. | ⚪ |
 | G19 | **Parquet / DuckDB export** — first-class columnar export for analytics pipelines. | ⚪ |
+| G20 | **Push-down columns for warehouse consumers** — `classifications.top_level_category`, `fact_commit_effort.effort_tshirt` (corpus-percentile integer 1–5), `fact_weekly_quality` table, `commits.is_ai_assisted` + `commits.ai_tool` emitted natively (#445). | ✅ |
+| G21 | **Contributor-profile data pipeline** — `diff_for_commit()` (unified diff text with 200 KiB cap) and `query_author_period_trends()` (N-week period roll-ups) as public library functions for the longitudinal per-contributor profiling epic (#558). | ✅ |
+| G22 | **AI co-authorship attribution** — detect Claude/Copilot/Cursor from `Co-Authored-By:` trailers at collection time; exposed in reports and filterable in queries. | ✅ |
+| G23 | **Corpus-percentile effort binning** — `effort_tshirt` (1–5) assigned relative to corpus p20/p40/p60/p80 breakpoints, persisted in `effort_percentile_thresholds` for incremental ingest (#445 batch C). | ✅ |
 
 ### Non-Goals
 
@@ -94,7 +98,8 @@ the predecessor, the code wins.
 | **Engineering manager** | Weekly per-engineer breakdown of work type, velocity, and effort without nagging the team for status. | `tga analyze --weeks 4` → weekly CSVs + per-author summary + effort histogram. |
 | **Individual contributor / tech lead** | A defensible picture of their own contribution mix (feature vs. KTLO vs. maintenance) for reviews. | `tga author <email>` drill-down: effort histogram + PR metrics + commit summary. |
 | **CTO / director** | Org-level DORA posture and quality trend to report upward; portfolio coverage confidence. | `tga dora` + `repository_coverage` / `unresolved_authors` fields guard against undercounting. |
-| **Platform / data engineer** | A clean, reproducible SQLite/CSV feed into a warehouse (e.g. CTO analytics DuckDB). | Single `tga.db` file + `comprehensive_export_{date}.json`; deterministic effort scores. |
+| **Platform / data engineer** | A clean, reproducible SQLite/CSV feed into a warehouse (e.g. CTO analytics DuckDB). | Single `tga.db` file + `comprehensive_export_{date}.json`; deterministic effort scores; push-down columns (`top_level_category`, `effort_tshirt`, `fact_weekly_quality`) so no re-derivation is needed downstream. |
+| **Code-review system (trusty-review)** | Per-contributor diff text, period roll-up stats, and quality/effort history for LLM-backed longitudinal review profiles (#558). | `diff_for_commit()` + `query_author_period_trends()` as stable library APIs; `fact_weekly_quality` for cross-period quality trends. |
 
 ---
 
@@ -151,6 +156,7 @@ Detailed source: [`../research/commit-effort-spec-2026-05-27.md`](../research/co
 | E4 | Persisted to `fact_commit_effort` with `formula_version` for score-evolution tracking. | ✅ |
 | E5 | Identical output between the Rust path and the parallel `scripts/compute-effort.sh`. | ✅ |
 | E6 | v2 formula adding cyclomatic complexity (γ term). | 🔵 |
+| E7 | Corpus-percentile T-shirt integer (`effort_tshirt` 1–5) stored alongside `size` TEXT; computed via `core/effort_percentile.rs` (`tga backfill effort-tshirt`), persisted in `effort_percentile_thresholds` (#445 batch C, migrations `0017`/`0019`). | ✅ |
 
 ### 4.4 Quality scoring — `tga` report path (#377)
 
@@ -160,6 +166,7 @@ Detailed source: [`../research/commit-effort-spec-2026-05-27.md`](../research/co
 | Q2 | Negative signals inverted so higher = better, matching the effort scale. | ✅ |
 | Q3 | Even 0.20-wide bucketing into integer 1–5. | ✅ |
 | Q4 | Shared revert detector (`core/revert.rs`) is the single source of truth for `is_revert` and report-time revert rate (#210/#377). | ✅ |
+| Q5 | Persisted to `fact_weekly_quality` (grain: author × iso_year × iso_week × repository) via UPSERT after each report run; includes raw input counts and `formula_version` for auditing (#445 batch B, migration `0018`). | ✅ |
 
 ### 4.5 DORA metrics — `tga deployments` / `tga incidents` / `tga dora`
 
@@ -204,6 +211,7 @@ Detailed source: [`../requirements/cli-commands.md`](../requirements/cli-command
 | CLI6 | Global `--config`, `--database`, `-v/--log`; `RUST_LOG` precedence. | ✅ |
 | CLI7 | Per-subcommand `--help` / examples audit (#333). | ✅ |
 | CLI8 | `fetch` and `identities list/merge` standalone subcommands as drafted in `requirements/cli-commands.md`. | 🟡 (folded into `collect` / `aliases`) |
+| CLI9 | `tga backfill` extended with push-down subcommands: `ai-detection`, `ai-detection-commits`, `top-level`, `effort-tshirt`, `quality`, `ticketed` (#445). | ✅ |
 
 ### 4.8 Configuration
 
@@ -227,8 +235,39 @@ Detailed source: [`../requirements/database-schema.md`](../requirements/database
 | DB1 | Single SQLite file, WAL + `synchronous=NORMAL` + `foreign_keys=ON`; versioned, idempotent migrations (`schema_migrations`). | ✅ |
 | DB2 | Core tables: `authors`, `commits`, `classifications`, `files`, `pull_requests`, `pr_reviewers`, `work_items`, `commit_work_items`, `linear_issues`, `classification_overrides`, `collection_runs`, `repository_analysis_status`, `azdo_iterations`. | ✅ |
 | DB3 | `fact_*` family: `fact_deployments`, `fact_incidents`, `deployment_failures`, `fact_commit_reachability`, `fact_commit_effort` + DORA views. | ✅ |
-| DB4 | Migrations `0001`–`0016` (requirements doc stops at `0013`). | ✅ |
-| DB5 | `requirements/database-schema.md` migration list (`0001`–`0013`) is stale vs. on-disk SQL (`0001`–`0016`). | 🟡 (doc drift — see COMPONENTS §Database) |
+| DB4 | `fact_weekly_quality` table (grain: author × year × week × repo; includes raw input counts, `quality_tshirt`, `formula_version`; migration `0018`, #445 batch B). | ✅ |
+| DB5 | `effort_percentile_thresholds` table (corpus p20/p40/p60/p80 breakpoints for `effort_tshirt` binning; migration `0019`, #445 batch C). | ✅ |
+| DB6 | `classifications.top_level_category` column + `commits.is_ai_assisted` / `commits.ai_tool` columns (migration `0017`, #445 batch A). | ✅ |
+| DB7 | Migrations `0001`–`0019` (requirements doc stops at `0013`). | ✅ |
+| DB8 | `requirements/database-schema.md` migration list (`0001`–`0013`) is stale vs. on-disk SQL (`0001`–`0019`). | 🟡 (doc drift — see COMPONENTS §Database) |
+
+### 4.10 Contributor-profile data pipeline — library API (#558)
+
+The longitudinal per-contributor profiling epic (#558) required two new public
+library functions in the `tga` crate so `trusty-review` can assemble
+LLM-backed review profiles without duplicating git/DB logic.
+
+| # | Requirement | Status |
+|---|---|---|
+| CP1 | `collect::git::diff_for_commit(repo_path, sha) → Result<String>` — unified diff text for one commit via libgit2; handles root-commit (empty-tree) case; 200 KiB byte cap with clear truncation marker (closes #559). | ✅ |
+| CP2 | `report::query_author_period_trends(db, email, window_weeks, since, until) → Result<Vec<AuthorPeriodSummary>>` — N-week period roll-ups of per-week commit/effort/quality/PR data for one canonical author; reads existing schema only, no migration required (closes #560). | ✅ |
+| CP3 | `AuthorPeriodSummary` — `serde::Serialize + Deserialize` struct carrying `period_label`, `since/until`, `commit_count`, `categories`, `effort_histogram`, `quality_score`, `ticketed_pct`, `pr_metrics`, `repositories`; exported from `tga::report`. | ✅ |
+| CP4 | `PrMetrics` adds `Serialize + Deserialize` derives so it embeds in `AuthorPeriodSummary` without serde errors. | ✅ |
+| CP5 | `period_trends` submodule split into `model.rs` / `query.rs` / `tests.rs` under `report/period_trends/` to stay within the 500-line file cap. | ✅ |
+
+> **Note.** tga's role in the contributor-profile epic is data supply only. The
+> LLM-backed profiling logic (batch_reviewer, synthesizer, reporter, `profile`
+> CLI subcommand) lives in `trusty-review` (#561–#568, currently BLOCKED-ON-MVP).
+> tga has no `profile` subcommand; trusty-review calls `diff_for_commit` and
+> `query_author_period_trends` directly as library functions.
+
+### 4.11 AI co-authorship attribution — `collect/ai_attribution.rs` (#445 batch A)
+
+| # | Requirement | Status |
+|---|---|---|
+| AI1 | `detect_ai_tool(message) → Option<&'static str>` — pure function scanning `Co-Authored-By:` trailers for Claude/Copilot/Cursor; returns a stable identifier (`"claude"`, `"copilot"`, `"cursor"`) or `None`. | ✅ |
+| AI2 | Called at collection write time (`collect::git::extractor`) for every new commit; stores result in `commits.is_ai_assisted` (0/1) + `commits.ai_tool` (TEXT / NULL). | ✅ |
+| AI3 | `tga backfill ai-detection` retroactively detects patterns in stored commit messages; `tga backfill ai-detection-commits` re-walks git history for accurate trailer extraction. | ✅ |
 
 ---
 
@@ -259,5 +298,7 @@ Detailed source: [`../requirements/database-schema.md`](../requirements/database
 | OQ3 | GitLab PR collection for full predecessor parity. | C15 |
 | OQ4 | In-process LLM via `candle`/`llama.cpp` (no HTTP). | `rust-architecture.md` Future Improvements |
 | OQ5 | Parquet / DuckDB columnar export. | `rust-architecture.md` Future Improvements |
-| OQ6 | Reconcile / refresh the `requirements/` docs (taxonomy, DB migration list, tier naming) to match the spec, or formally demote them to "predecessor parity" reference. | DB5 / this PRD |
+| OQ6 | Reconcile / refresh the `requirements/` docs (taxonomy, DB migration list, tier naming) to match the spec, or formally demote them to "predecessor parity" reference. | DB8 / this PRD |
 | OQ7 | gitoxide migration once its diff API stabilizes. | ADR backlog |
+| OQ8 | trusty-review contributor-profile LLM pipeline (#561–#568) — tga data-supply layer (CP1–CP5) is complete; blocked on trusty-review MVP. | #558 |
+| OQ9 | Per-repo effort percentile datasets — `effort_percentile_thresholds` currently stores a single `"default"` dataset; per-repo or per-team percentile breakpoints are possible without schema changes but not yet implemented. | `core/effort_percentile.rs` §Design |
