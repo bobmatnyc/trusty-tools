@@ -9,6 +9,10 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ## [Unreleased]
 
+---
+
+## [0.4.2] — 2026-06-02
+
 ### Fixed
 - **Amazon Linux 2023 / glibc < 2.38 build failure** (closes #605): the
   prebuilt ONNX Runtime bundled via `fastembed/ort-download-binaries` (ORT
