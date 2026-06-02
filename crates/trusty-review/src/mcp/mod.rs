@@ -22,12 +22,22 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use serde_json::Value;
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 use trusty_common::mcp::{Request, Response, error_codes, initialize_response, run_stdio_loop};
 
+use crate::config::ReviewConfig;
+use crate::integrations::{analyze_client::HttpAnalyzeClient, search_client::HttpSearchClient};
+use crate::llm::build_provider;
 use crate::mcp::tools::{ToolError, call_tool, tool_descriptors, wrap_tool_error};
 use crate::service::AppState;
+
+// Re-export the reusable surface an embedding host (e.g. trusty-analyze, #630)
+// needs to delegate into the trusty-review pipeline without depending on the
+// binary's serve assembly: the tool descriptors, the `tools/call` router, the
+// router's error type, and the shared `AppState`.
+pub use crate::mcp::tools::{ToolError as ReviewToolError, call_tool as call_review_tool};
+pub use crate::service::AppState as ReviewAppState;
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
@@ -47,6 +57,76 @@ pub async fn run(state: AppState) -> Result<()> {
         async move { dispatch(req, &state).await }
     })
     .await
+}
+
+/// Build a fully-wired trusty-review [`AppState`] from environment + config file.
+///
+/// Why: an embedding host (e.g. trusty-analyze's MCP server, #630) needs to run
+/// the trusty-review pipeline without copying the binary's `serve` assembly,
+/// which lives behind `crate::cli_verify` in the binary target and is therefore
+/// not reachable from a library consumer. This entry point reproduces that
+/// assembly using only library-public builders so the host can obtain an
+/// `AppState` and delegate `tools/call` to [`tools::call_tool`].
+/// What: loads [`ReviewConfig`] from env + the default XDG config file, builds
+/// the reviewer LLM provider (Bedrock or OpenRouter, per config), optionally
+/// builds the verifier provider (degrading to `None` on failure — embedded use
+/// must not hard-fail a host daemon over a missing verifier model), builds the
+/// HTTP search + analyze clients from config (the analyze client defaults to
+/// `http://localhost:7879`, i.e. loopback to the hosting analyze daemon, so
+/// embedded reviews get authoritative static-analysis context), and returns the
+/// assembled `AppState`. No dedup store is opened — embedded callers do not post
+/// comments (`allow_posting=false` in every tool handler), so cross-process
+/// dedup is unnecessary.
+/// Test: the build path is network/credential-bound (AWS / OpenRouter) and is
+/// therefore exercised by the live smoke test rather than a unit test; the
+/// dispatch/tools surface it feeds is covered by `mcp::tests` and
+/// `tools::tests`.
+pub async fn build_review_state() -> Result<AppState> {
+    let config = ReviewConfig::load(None);
+
+    let reviewer_model = config.role_models.reviewer.model.clone();
+    let default_provider = config.role_models.reviewer.provider.clone();
+    let llm = build_provider(
+        &reviewer_model,
+        &default_provider,
+        &config.openrouter_api_key,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to build reviewer LLM provider: {e}"))?;
+
+    // Verifier is optional in the embedded path: degrade to no-verification
+    // rather than abort the host daemon if the verifier model cannot be built.
+    let verifier = if config.verification.enabled {
+        let role = &config.role_models.verifier;
+        match build_provider(&role.model, &role.provider, &config.openrouter_api_key).await {
+            Ok(p) => Some(p),
+            Err(e) => {
+                warn!("failed to build verifier provider (continuing without verification): {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let search = HttpSearchClient::from_config(&config);
+    let analyze = HttpAnalyzeClient::from_config(&config);
+
+    info!(
+        reviewer_model = %config.role_models.reviewer.model,
+        analyzer_url = %config.analyzer_url,
+        search_url = %config.search_url,
+        "trusty-review embedded AppState built"
+    );
+
+    Ok(AppState::with_verifier_and_dedup(
+        config,
+        llm,
+        verifier,
+        Arc::new(search),
+        Some(Arc::new(analyze)),
+        None,
+    ))
 }
 
 // ─── Dispatcher ──────────────────────────────────────────────────────────────
