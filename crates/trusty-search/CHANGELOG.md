@@ -7,6 +7,36 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.22.3] - 2026-06-02
+
+### Fixed
+
+- **CUDA arena VRAM OOM prevention (issue #600)** — via trusty-common 0.11.1:
+  ORT's BFCArena is now configured with `arena_extend_strategy = kSameAsRequested`
+  and an explicit `gpu_mem_limit` (default 12 GiB, tunable via
+  `TRUSTY_GPU_MEM_LIMIT_BYTES` / `TRUSTY_GPU_MEM_LIMIT_MB`). Eliminates VRAM OOM
+  on 16 GB Tesla T4 GPUs without requiring the `TRUSTY_MAX_BATCH_SIZE=32` workaround.
+
+- **Accurate `/health` provider reporting (issue #604)** — the `provider` field in
+  `/health` responses now reports the actual ORT execution provider in use (CUDA,
+  CoreML, CPU) rather than always reporting CPU.
+
+- **Non-destructive reindex with atomic swap (issue #603)** — `POST
+  /indexes/:id/reindex` now builds a new corpus in a temporary database and swaps
+  it atomically on completion, so the existing index stays fully searchable while
+  the rebuild runs. Partial or failed reindex jobs no longer corrupt the live index.
+
+- **Portable data paths and migration (issue #602)** — data-directory paths stored
+  in persisted index metadata are now normalised at restore time so indexes survive
+  machine renames, home-directory changes, and cross-machine copy. A forward
+  migration updates stale absolute paths automatically.
+
+- **Non-empty index validation (issue #601)** — the daemon now rejects a reindex
+  swap if the freshly built corpus contains zero chunks, preventing an accidental
+  wipe of a healthy index caused by a transient file-system or embedder failure.
+
+---
+
 ## [0.18.0] - 2026-05-28
 
 ### Changed

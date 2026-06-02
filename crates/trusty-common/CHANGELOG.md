@@ -1,5 +1,20 @@
 # Changelog — trusty-common
 
+## [0.11.1] — 2026-06-02
+
+### Fixed
+
+- **CUDA arena VRAM OOM prevention (issue #600)** — `embedder-cuda` builds now
+  configure ORT's BFCArena with `arena_extend_strategy = kSameAsRequested` and an
+  explicit `gpu_mem_limit` (default 12 GiB, tunable via `TRUSTY_GPU_MEM_LIMIT_BYTES`
+  / `TRUSTY_GPU_MEM_LIMIT_MB`) so the arena no longer grows by `kNextPowerOfTwo`
+  and over-reserves device VRAM. Eliminates the OOM failure on 16 GB Tesla T4 GPUs
+  without requiring the `TRUSTY_MAX_BATCH_SIZE=32` workaround.
+
+- **Accurate `/health` provider reporting (issue #604)** — the `provider` field in
+  `/health` responses now reflects the actual ORT execution provider in use (e.g.
+  `CUDA`, `CoreML`, `CPU`) rather than always reporting `CPU`.
+
 ## [0.5.0] — 2026-05-26
 
 ### Added
