@@ -5,8 +5,8 @@ use tga::collect::CollectionPipeline;
 use tga::core::config::Config;
 use tga::core::db::Database;
 
+use crate::commands::args::CollectArgs;
 use crate::commands::date_range::resolve_date_range;
-use crate::CollectArgs;
 
 /// Run the collection stage against the provided database.
 ///
@@ -156,16 +156,13 @@ pub async fn run(config: Config, db: &mut Database, args: CollectArgs) -> anyhow
             );
             for f in &failures {
                 if let FetchOutcome::Failed { error, remote } = &f.outcome {
-                    msg.push_str(&format!(
-                        "  - {} (remote: {}): {}\n",
-                        f.repo, remote, error
-                    ));
+                    msg.push_str(&format!("  - {} (remote: {}): {}\n", f.repo, remote, error));
                 }
             }
             msg.push_str(
                 "\nFix: ensure SSH agent has a loaded key, or set GITHUB_TOKEN/GH_TOKEN, \
                  or configure your git credential helper. \
-                 Run `git fetch origin` in the failing repo to diagnose."
+                 Run `git fetch origin` in the failing repo to diagnose.",
             );
             anyhow::bail!("{}", msg.trim_end());
         }
@@ -185,10 +182,7 @@ pub async fn run(config: Config, db: &mut Database, args: CollectArgs) -> anyhow
 ///
 /// Public alias so `commands::analyze` can call it without duplicating the
 /// formatting logic.
-pub fn print_fetch_summary_pub(
-    outcomes: &[tga::collect::collector::PerRepoFetch],
-    verbose: bool,
-) {
+pub fn print_fetch_summary_pub(outcomes: &[tga::collect::collector::PerRepoFetch], verbose: bool) {
     print_fetch_summary(outcomes, verbose);
 }
 

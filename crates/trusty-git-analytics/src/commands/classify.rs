@@ -4,8 +4,8 @@ use tga::classify::ClassificationPipeline;
 use tga::core::config::{ClassificationConfig, Config};
 use tga::core::db::{CheckpointMode, Database};
 
+use crate::commands::args::ClassifyArgs;
 use crate::commands::date_range::resolve_date_range;
-use crate::ClassifyArgs;
 
 /// Run the classification stage over previously-collected commits.
 ///

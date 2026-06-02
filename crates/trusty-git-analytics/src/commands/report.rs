@@ -4,7 +4,7 @@ use tga::core::config::{Config, OutputConfig};
 use tga::core::db::Database;
 use tga::report::ReportPipeline;
 
-use crate::ReportArgs;
+use crate::commands::args::ReportArgs;
 
 /// Generate reports from the classified commits stored in `db`.
 ///

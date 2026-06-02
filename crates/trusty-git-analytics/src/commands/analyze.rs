@@ -7,8 +7,8 @@ use tga::core::config::Config;
 use tga::core::db::Database;
 use tga::report::ReportPipeline;
 
+use crate::commands::args::AnalyzeArgs;
 use crate::commands::date_range::resolve_date_range;
-use crate::AnalyzeArgs;
 
 /// Run all three pipeline stages in sequence, honoring `--skip-collect`
 /// and `--skip-classify` flags to allow partial re-runs.
@@ -72,9 +72,7 @@ pub async fn run(config: Config, db: &mut Database, args: AnalyzeArgs) -> anyhow
                  tga analyze will walk only what's already in your local object store."
             );
         } else if args.allow_stale {
-            eprintln!(
-                "WARNING: --allow-stale active. Fetch failures will not abort the run."
-            );
+            eprintln!("WARNING: --allow-stale active. Fetch failures will not abort the run.");
         }
         let collect_stats = CollectionPipeline::new(cfg.clone())
             .with_force(args.force)
@@ -84,10 +82,7 @@ pub async fn run(config: Config, db: &mut Database, args: AnalyzeArgs) -> anyhow
             .await?;
         // Print fetch summary to stderr before the commit count so fetch
         // failures are visible even when the counts look normal.
-        crate::commands::collect::print_fetch_summary_pub(
-            &collect_stats.fetch_outcomes,
-            false,
-        );
+        crate::commands::collect::print_fetch_summary_pub(&collect_stats.fetch_outcomes, false);
 
         // Since tga 2.6.0, fetch failures abort the pipeline by default.
         if effective_strict {
@@ -104,15 +99,12 @@ pub async fn run(config: Config, db: &mut Database, args: AnalyzeArgs) -> anyhow
                 );
                 for f in &failures {
                     if let FetchOutcome::Failed { error, remote } = &f.outcome {
-                        msg.push_str(&format!(
-                            "  - {} (remote: {}): {}\n",
-                            f.repo, remote, error
-                        ));
+                        msg.push_str(&format!("  - {} (remote: {}): {}\n", f.repo, remote, error));
                     }
                 }
                 msg.push_str(
                     "\nFix: ensure SSH agent has a loaded key, or set GITHUB_TOKEN/GH_TOKEN, \
-                     or configure your git credential helper."
+                     or configure your git credential helper.",
                 );
                 anyhow::bail!("{}", msg.trim_end());
             }

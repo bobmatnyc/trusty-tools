@@ -5,6 +5,7 @@
 
 pub mod aliases;
 pub mod analyze;
+pub mod args;
 pub mod author;
 pub mod backfill;
 pub mod classify;
