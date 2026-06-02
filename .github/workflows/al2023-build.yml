@@ -121,10 +121,17 @@ jobs:
       #    Note: tar and gzip are already installed in step 0 above;
       #    listing them here again is harmless (dnf is idempotent) and
       #    keeps this step self-documenting.
+      #
+      #    --allowerasing: amazonlinux:2023 ships curl-minimal; installing
+      #    the full `curl` package conflicts unless dnf is allowed to
+      #    replace (erase) curl-minimal first.  This flag is safe here
+      #    because curl-minimal and curl are mutually exclusive providers
+      #    of the same capability — we want the full curl for its richer
+      #    CLI options used in the ORT download step below.
       # ------------------------------------------------------------------
       - name: Install build prerequisites (dnf)
         run: |
-          dnf install -y \
+          dnf install -y --allowerasing \
             gcc \
             gcc-c++ \
             make \
