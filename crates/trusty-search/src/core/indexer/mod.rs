@@ -1256,4 +1256,19 @@ impl CodeIndexer {
     pub fn has_corpus_store(&self) -> bool {
         self.corpus.is_some()
     }
+
+    /// Whether this indexer has an embedder wired (issue #601).
+    ///
+    /// Why: the reindex non-empty gate must distinguish "no embedder configured
+    /// → legitimately produces zero vectors (BM25-only / test indexer)" from
+    /// "embedder present but produced zero vectors → silent embed failure". The
+    /// gate only fires in the latter case, so it consults this accessor before
+    /// declaring a zero-vector reindex a failure.
+    /// What: `self.embedder.is_some()`.
+    /// Test: `validate::reindex_outcome` unit tests model both branches; the
+    /// end-to-end wiring is covered by the BM25-only reindex tests, which must
+    /// still complete (no embedder → not failed).
+    pub fn has_embedder(&self) -> bool {
+        self.embedder.is_some()
+    }
 }

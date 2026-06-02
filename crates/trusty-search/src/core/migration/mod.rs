@@ -67,6 +67,20 @@ pub(crate) const META_TABLE: redb::TableDefinition<&str, &[u8]> =
 /// redb `_meta` key for the schema version.
 pub(crate) const META_KEY_SCHEMA_VERSION: &str = "schema_version";
 
+/// redb `_meta` key for the canonical root path the corpus's chunk `file`
+/// fields are stored relative to (#602).
+///
+/// Why: chunk `file` fields are root-relative. If an index is re-registered
+/// under a different root and then incrementally reindexed, the content-hash
+/// fast path skips unchanged files so their stored paths are never rewritten —
+/// they stay relative to the *old* root and resolve wrong. Persisting the root
+/// the corpus was last relativized against lets the reindex orchestrator detect
+/// a move and force a full rewrite (see
+/// `service::reindex::validate::needs_path_relativization`).
+/// What: a UTF-8 path string stored under this `_meta` key, written at the end
+/// of every successful reindex.
+pub(crate) const META_KEY_INDEXED_ROOT: &str = "indexed_root";
+
 // ── Error type ────────────────────────────────────────────────────────────────
 
 /// Structured errors from the migration subsystem.
@@ -374,6 +388,56 @@ impl IndexHandle {
         tokio::task::spawn_blocking(move || corpus.write_schema_version_sync(version))
             .await
             .map_err(|e| anyhow::anyhow!("schema_version write task panicked: {e}"))?
+    }
+
+    /// Read the canonical root the corpus's chunk paths were last relativized
+    /// against (#602).
+    ///
+    /// Why: the reindex orchestrator compares this against the current root to
+    /// decide whether a move occurred between runs and a full path-rewrite is
+    /// required. `None` for a no-corpus or never-stamped index → treated as a
+    /// first-ever reindex (no forced rewrite).
+    /// What: read-locks the indexer, clones the corpus `Arc`, and reads
+    /// `_meta["indexed_root"]` on a blocking worker. Returns `None` when no
+    /// durable corpus is present.
+    /// Test: `service::reindex::validate::needs_path_relativization` covers the
+    /// decision; the redb round-trip is covered by
+    /// `corpus::tests::test_meta_indexed_root_roundtrip`.
+    pub async fn read_indexed_root(&self) -> anyhow::Result<Option<std::path::PathBuf>> {
+        let corpus = {
+            let indexer = self.indexer.read().await;
+            indexer.corpus_store()
+        };
+        let Some(corpus) = corpus else {
+            return Ok(None);
+        };
+        tokio::task::spawn_blocking(move || corpus.read_indexed_root_sync())
+            .await
+            .map_err(|e| anyhow::anyhow!("indexed_root read task panicked: {e}"))?
+    }
+
+    /// Persist the canonical root the corpus's chunk paths are now relativized
+    /// against (#602).
+    ///
+    /// Why: written at the end of every successful reindex so the next run can
+    /// detect a move. A no-corpus index has nowhere to store it, so this is a
+    /// silent no-op there (BM25-only / test indexes never need it).
+    /// What: read-locks the indexer, clones the corpus `Arc`, and writes
+    /// `_meta["indexed_root"]` on a blocking worker. `Ok(())` (no-op) when no
+    /// durable corpus is present.
+    /// Test: `corpus::tests::test_meta_indexed_root_roundtrip`.
+    pub async fn write_indexed_root(&self, root: &std::path::Path) -> anyhow::Result<()> {
+        let corpus = {
+            let indexer = self.indexer.read().await;
+            indexer.corpus_store()
+        };
+        let Some(corpus) = corpus else {
+            return Ok(());
+        };
+        let root = root.to_path_buf();
+        tokio::task::spawn_blocking(move || corpus.write_indexed_root_sync(&root))
+            .await
+            .map_err(|e| anyhow::anyhow!("indexed_root write task panicked: {e}"))?
     }
 }
 

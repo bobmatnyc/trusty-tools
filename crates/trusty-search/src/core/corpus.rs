@@ -804,6 +804,60 @@ impl CorpusStore {
         txn.commit().context("commit _meta write txn")?;
         Ok(())
     }
+
+    /// Read the canonical root path the corpus's chunk `file` fields are stored
+    /// relative to (#602).
+    ///
+    /// Why: the reindex orchestrator compares this against the current root to
+    /// decide whether a move occurred between reindex runs and the stored paths
+    /// must be re-relativized. Returning `None` for a legacy / never-stamped
+    /// corpus means "unknown prior root" — the caller treats that as a
+    /// first-ever reindex (no forced rewrite).
+    /// What: opens a read transaction on `_meta`, looks up
+    /// `META_KEY_INDEXED_ROOT`, and decodes the UTF-8 path string. Returns
+    /// `None` when the table or key is absent or the bytes are not valid UTF-8.
+    /// Test: `test_meta_indexed_root_roundtrip` in `corpus::tests`.
+    pub(crate) fn read_indexed_root_sync(&self) -> Result<Option<std::path::PathBuf>> {
+        use crate::core::migration::{META_KEY_INDEXED_ROOT, META_TABLE};
+        let txn = self.db.begin_read().context("begin _meta read txn")?;
+        let table = match txn.open_table(META_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(anyhow::anyhow!("open _meta table: {e}")),
+        };
+        match table
+            .get(META_KEY_INDEXED_ROOT)
+            .context("read indexed_root")?
+        {
+            Some(v) => match std::str::from_utf8(v.value()) {
+                Ok(s) => Ok(Some(std::path::PathBuf::from(s))),
+                Err(_) => Ok(None),
+            },
+            None => Ok(None),
+        }
+    }
+
+    /// Persist the canonical root path the corpus's chunk `file` fields are
+    /// stored relative to (#602).
+    ///
+    /// Why: written at the end of every successful reindex so a subsequent run
+    /// can detect a root move and re-relativize. See `read_indexed_root_sync`.
+    /// What: opens a write transaction, creates `_meta` if absent, and upserts
+    /// the path as its UTF-8 byte string.
+    /// Test: `test_meta_indexed_root_roundtrip` in `corpus::tests`.
+    pub(crate) fn write_indexed_root_sync(&self, root: &std::path::Path) -> Result<()> {
+        use crate::core::migration::{META_KEY_INDEXED_ROOT, META_TABLE};
+        let txn = self.db.begin_write().context("begin _meta write txn")?;
+        {
+            let mut table = txn.open_table(META_TABLE).context("open _meta table")?;
+            let s = root.to_string_lossy();
+            table
+                .insert(META_KEY_INDEXED_ROOT, s.as_bytes())
+                .context("insert indexed_root")?;
+        }
+        txn.commit().context("commit _meta write txn")?;
+        Ok(())
+    }
 }
 
 /// Iterate one of the KG adjacency tables and deserialize each row.
@@ -1030,6 +1084,27 @@ mod tests {
         assert_eq!(store.chunk_count().unwrap(), 0);
         assert!(store.load_all_chunks().unwrap().is_empty());
         assert!(store.load_all_entities().unwrap().is_empty());
+    }
+
+    /// Why: #602 — the reindex orchestrator persists the canonical root the
+    /// corpus was relativized against so a later run can detect a move. Verify
+    /// the read returns `None` before any write and the written value round-trips.
+    /// Test: this test.
+    #[test]
+    fn test_meta_indexed_root_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CorpusStore::open(&dir.path().join("index.redb")).unwrap();
+        // Never written → None (legacy / first reindex).
+        assert_eq!(store.read_indexed_root_sync().unwrap(), None);
+
+        let root = std::path::PathBuf::from("/Users/me/code/project");
+        store.write_indexed_root_sync(&root).unwrap();
+        assert_eq!(store.read_indexed_root_sync().unwrap(), Some(root.clone()));
+
+        // Overwrite with a new root (the index moved on disk).
+        let moved = std::path::PathBuf::from("/mnt/serving/project");
+        store.write_indexed_root_sync(&moved).unwrap();
+        assert_eq!(store.read_indexed_root_sync().unwrap(), Some(moved));
     }
 
     #[test]

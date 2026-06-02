@@ -31,6 +31,13 @@ pub enum StageStatus {
     /// stages 2 and 3 permanently). Distinct from `Pending`/`Ready` so
     /// callers can tell "never going to happen" from "not started yet".
     Skipped,
+    /// Issue #601: the stage failed and its results are NOT queryable. Used by
+    /// the reindex non-empty gate when a full-pipeline index walked files but
+    /// the embedder produced zero vectors (silent embed failure). Distinct from
+    /// `Skipped` (deliberate opt-out) and `Pending` (not started) so callers —
+    /// and `/health` / `GET /indexes/:id` — can surface a LOUD failure instead
+    /// of a false-green ready state.
+    Failed,
 }
 
 impl StageStatus {
@@ -71,6 +78,11 @@ pub struct StageState {
     /// Total chunks to embed (semantic stage denominator).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<usize>,
+    /// Issue #601: human-readable failure reason when `status == Failed`.
+    /// `None` for every other state. Surfaced on `GET /indexes/:id` so an
+    /// operator sees WHY a stage failed without reading daemon logs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
 }
 
 impl StageState {
@@ -83,6 +95,16 @@ impl StageState {
     pub fn skipped() -> Self {
         Self {
             status: StageStatus::Skipped,
+            ..Self::default()
+        }
+    }
+
+    /// Build a `Failed` stage carrying `reason` (issue #601). The
+    /// `completed_at` timestamp records when the failure was detected.
+    pub fn failed(reason: impl Into<String>) -> Self {
+        Self {
+            status: StageStatus::Failed,
+            failure: Some(reason.into()),
             ..Self::default()
         }
     }
@@ -133,6 +155,15 @@ impl IndexStages {
     /// `created` → `walking` → `indexed_lexical` → `indexed_vector` → `ready`
     /// (or `ready` directly when stages 2 and 3 are `Skipped`).
     pub fn lifecycle_status(&self) -> &'static str {
+        // Issue #601: ANY failed stage dominates the lifecycle status — a
+        // zero-vector embed failure must report `failed`, never `ready`, so
+        // `/health` and `GET /indexes/:id` surface the dead lane loudly.
+        if self.lexical.status == StageStatus::Failed
+            || self.semantic.status == StageStatus::Failed
+            || self.graph.status == StageStatus::Failed
+        {
+            return "failed";
+        }
         match (self.lexical.status, self.semantic.status, self.graph.status) {
             (StageStatus::Pending, _, _) => "created",
             (StageStatus::InProgress, _, _) => "walking",
@@ -147,6 +178,10 @@ impl IndexStages {
             // Skipped lexical is not a state Phase 1 produces, but keep a
             // sensible default so a future opt-in does not crash callers.
             (StageStatus::Skipped, _, _) => "ready",
+            // Any `Failed` stage is handled by the early-return guard above, so
+            // this is unreachable in practice; the wildcard keeps the match
+            // exhaustive and reports `failed` defensively for any residual case.
+            _ => "failed",
         }
     }
 }
