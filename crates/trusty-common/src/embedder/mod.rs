@@ -100,6 +100,92 @@ pub fn resolve_fastembed_cache_dir() -> std::path::PathBuf {
     std::env::temp_dir().join("fastembed")
 }
 
+/// Default CUDA `gpu_mem_limit` (bytes) — 12 GiB.
+///
+/// Why: a bare `ort::ep::CUDA::default()` leaves ORT's BFCArena unbounded and
+/// defaulting to `kNextPowerOfTwo` growth, so the very first large embedding
+/// batch grabs nearly all device VRAM up-front and a 16 GB Tesla T4 OOMs before
+/// the second batch (issue #600). Capping the arena at 12 GiB leaves ~4 GiB of
+/// headroom for the CUDA context, cuDNN workspaces, and fragmentation on a 16 GB
+/// card, which is the empirical sweet spot that removes the need for the
+/// `TRUSTY_MAX_BATCH_SIZE=32` workaround while still letting the GPU run a full
+/// 512-chunk batch.
+/// What: 12 * 1024^3 bytes, used when neither `TRUSTY_GPU_MEM_LIMIT_BYTES` nor
+/// `TRUSTY_GPU_MEM_LIMIT_MB` is set.
+/// Test: `cuda_options_default_limit` asserts `resolve_cuda_options` returns
+/// this value when no env knob is present.
+pub const DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES: usize = 12 * 1024 * 1024 * 1024;
+
+/// Resolved CUDA execution-provider tuning, derived purely from the environment.
+///
+/// Why: the option construction must be unit-testable on a host with no CUDA
+/// GPU (and possibly no `embedder-cuda` build at all), so the *values* are
+/// resolved by a pure function and only *applied* to `ort::ep::CUDA` behind the
+/// feature gate. This keeps the OOM-prevention contract (issue #600) covered by
+/// tests that always compile and run.
+/// What: carries the `gpu_mem_limit` byte cap to pass to
+/// `CUDA::with_memory_limit`. The arena-extend strategy is always
+/// `SameAsRequested` (see `build_cuda_provider`), so it is not represented as a
+/// field — there is nothing to vary.
+/// Test: `cuda_options_*` tests below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CudaOptions {
+    /// Per-process device-memory ceiling handed to ORT's `gpu_mem_limit`.
+    pub gpu_mem_limit_bytes: usize,
+}
+
+/// Resolve CUDA tuning options from the process environment.
+///
+/// Why: centralises the `TRUSTY_GPU_MEM_LIMIT_*` knob parsing so both the live
+/// EP builder and the unit tests agree on precedence and defaults, and so the
+/// VRAM-OOM fix (issue #600) is verifiable without a GPU.
+/// What: reads, in precedence order, `TRUSTY_GPU_MEM_LIMIT_BYTES` then
+/// `TRUSTY_GPU_MEM_LIMIT_MB` (MB is multiplied by 1024^2). A malformed or
+/// non-positive value is ignored and the next source is tried; if neither is
+/// usable the default [`DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES`] (12 GiB) is returned.
+/// Test: `cuda_options_default_limit`, `cuda_options_bytes_env`,
+/// `cuda_options_mb_env`, `cuda_options_bytes_takes_precedence`,
+/// `cuda_options_ignores_malformed`.
+pub fn resolve_cuda_options() -> CudaOptions {
+    let bytes = std::env::var("TRUSTY_GPU_MEM_LIMIT_BYTES")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .or_else(|| {
+            std::env::var("TRUSTY_GPU_MEM_LIMIT_MB")
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .filter(|n| *n > 0)
+                .and_then(|mb| mb.checked_mul(1024 * 1024))
+        })
+        .unwrap_or(DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES);
+    CudaOptions {
+        gpu_mem_limit_bytes: bytes,
+    }
+}
+
+/// Build a tuned CUDA execution-provider dispatch from resolved [`CudaOptions`].
+///
+/// Why: a default `ort::ep::CUDA::default().build()` inherits ORT's
+/// `kNextPowerOfTwo` BFCArena growth, which over-reserves device memory and
+/// OOMs a 16 GB Tesla T4 on the first large batch (issue #600). Forcing
+/// `kSameAsRequested` makes the arena grow only by what each allocation needs,
+/// and `gpu_mem_limit` caps the per-process device-memory ceiling so a runaway
+/// arena can never grab all VRAM.
+/// What: returns a `CUDA` EP dispatch with `arena_extend_strategy =
+/// kSameAsRequested` and `gpu_mem_limit = opts.gpu_mem_limit_bytes`.
+/// Test: the option *values* are covered by `resolve_cuda_options` tests; the
+/// EP construction itself is GPU/driver-gated and therefore exercised only on a
+/// real CUDA host (e.g. a g4dn/T4 instance), not in CI.
+#[cfg(feature = "embedder-cuda")]
+fn build_cuda_provider(opts: &CudaOptions) -> ort::execution_providers::ExecutionProviderDispatch {
+    use ort::ep::ArenaExtendStrategy;
+    ort::ep::CUDA::default()
+        .with_arena_extend_strategy(ArenaExtendStrategy::SameAsRequested)
+        .with_memory_limit(opts.gpu_mem_limit_bytes)
+        .build()
+}
+
 /// Identifier for the execution provider an embedder is actually using.
 ///
 /// Why: callers want to log which backend is active (CPU vs CoreML/Metal vs
@@ -140,6 +226,64 @@ impl std::fmt::Display for ExecutionProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// Predict the execution provider a freshly-constructed [`FastEmbedder`] will
+/// resolve, from build cfg + environment alone — without constructing a model.
+///
+/// Why: issue #604. When `trusty-search` runs the embedder out-of-process (the
+/// default lazy stdio sidecar, or a UDS/HTTP remote), the live `Embedder`
+/// handle is an RPC adapter whose `provider()` fell through to the trait
+/// default `Cpu`, so `GET /health` reported `provider=CPU` even though the
+/// sidecar's own startup log said `provider=CUDA`. The sidecar resolves its
+/// provider through this crate's [`FastEmbedder::init_options`]; since that
+/// resolution is a pure function of build features, platform, and the
+/// `TRUSTY_DEVICE` / `TRUSTY_COREML_COMPUTE_UNITS` env vars, the parent can
+/// predict the exact same answer and surface it on `/health` without an extra
+/// RPC round-trip or any change to the wire protocol.
+///
+/// What: mirrors the provider-selection branches of `init_options` in the same
+/// precedence order — `TRUSTY_DEVICE=cpu` forces `Cpu`; otherwise an
+/// `embedder-cuda` build yields `Cuda`; otherwise Apple Silicon yields a
+/// `CoreML*` tag derived from `TRUSTY_COREML_COMPUTE_UNITS` (default
+/// `CoreMLAne`); every other host yields `Cpu`. It deliberately does **not**
+/// probe whether a CUDA device actually initialises — that runtime fallback is
+/// reflected by the in-process path's own `provider()` and, for the sidecar,
+/// is reported by the sidecar's startup log.
+///
+/// Test: `resolve_expected_provider_forces_cpu`,
+/// `resolve_expected_provider_default_matches_platform`, and (Apple Silicon)
+/// `resolve_expected_provider_coreml_units` below.
+pub fn resolve_expected_provider() -> ExecutionProvider {
+    let force_cpu = std::env::var("TRUSTY_DEVICE")
+        .map(|v| v.eq_ignore_ascii_case("cpu"))
+        .unwrap_or(false);
+    if force_cpu {
+        return ExecutionProvider::Cpu;
+    }
+
+    #[cfg(feature = "embedder-cuda")]
+    {
+        return ExecutionProvider::Cuda;
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    {
+        return match std::env::var("TRUSTY_COREML_COMPUTE_UNITS")
+            .ok()
+            .as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("all") | Some("cpu_gpu") | Some("cpuandgpu") => ExecutionProvider::CoreML,
+            // Default and `cpu_only`/`cpu_ane` map to the ANE tag, matching the
+            // `units_tag` chosen in `init_options`.
+            _ => ExecutionProvider::CoreMLAne,
+        };
+    }
+
+    #[allow(unreachable_code)]
+    ExecutionProvider::Cpu
 }
 
 /// Abstraction over embedding backends.
@@ -306,11 +450,14 @@ impl FastEmbedder {
                 .map(|v| v.eq_ignore_ascii_case("cpu"))
                 .unwrap_or(false);
             if !force_cpu {
-                let cuda: ExecutionProviderDispatch = ort::ep::CUDA::default().build();
+                let cuda_opts = resolve_cuda_options();
+                let cuda: ExecutionProviderDispatch = build_cuda_provider(&cuda_opts);
                 let providers: Vec<ExecutionProviderDispatch> = vec![cuda, cpu_no_arena];
                 tracing::info!(
+                    gpu_mem_limit_bytes = cuda_opts.gpu_mem_limit_bytes,
                     "trusty-embedder: registering CUDA + CPU(no-arena) execution providers \
-                     (will fall back to CPU at session-init if no CUDA device is available)"
+                     (arena_extend_strategy=kSameAsRequested, gpu_mem_limit set to bound VRAM; \
+                     will fall back to CPU at session-init if no CUDA device is available)"
                 );
                 return (
                     opts.with_execution_providers(providers),
@@ -712,6 +859,215 @@ mod tests {
                 Some(v) => std::env::set_var("FASTEMBED_CACHE_PATH", v),
                 None => std::env::remove_var("FASTEMBED_CACHE_PATH"),
             }
+        }
+    }
+
+    /// RAII helper: set or clear a `TRUSTY_GPU_MEM_LIMIT_*` env var for the
+    /// duration of a test and restore it on drop. Keeps the CUDA-option tests
+    /// from leaking state into sibling tests that share the process env.
+    ///
+    /// Why: env vars are process-global; without restore, a stray
+    /// `TRUSTY_GPU_MEM_LIMIT_*` would skew every later `resolve_cuda_options`
+    /// call in the same binary.
+    /// What: captures the prior value, applies the new one (or removes it for
+    /// `None`), and reinstates the prior value on `Drop`.
+    /// Test: used by the `cuda_options_*` tests below.
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn apply(key: &'static str, value: Option<&str>) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: every caller holds `ENV_LOCK`, so no other thread reads
+            // or writes the environment concurrently. Rust 2024 marks env
+            // mutation `unsafe` for exactly this multi-threaded hazard.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: same single-threaded-under-ENV_LOCK invariant as `apply`.
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    /// Why: issue #600 — with no operator override the CUDA arena cap must
+    /// default to the 16 GB-T4-safe 12 GiB ceiling so the daemon never OOMs a
+    /// T4 out of the box and the `TRUSTY_MAX_BATCH_SIZE=32` workaround is no
+    /// longer required.
+    /// What: clears both env knobs and asserts the default byte value.
+    /// Test: this test.
+    #[test]
+    fn cuda_options_default_limit() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let _b = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_BYTES", None);
+        let _m = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_MB", None);
+        assert_eq!(
+            resolve_cuda_options().gpu_mem_limit_bytes,
+            DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES,
+            "default CUDA gpu_mem_limit must be 12 GiB when no env knob is set"
+        );
+        assert_eq!(DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES, 12 * 1024 * 1024 * 1024);
+    }
+
+    /// Why: operators on cards larger or smaller than a T4 must be able to set
+    /// an exact byte ceiling.
+    /// What: sets `TRUSTY_GPU_MEM_LIMIT_BYTES` and asserts it is honoured verbatim.
+    /// Test: this test.
+    #[test]
+    fn cuda_options_bytes_env() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let _b = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_BYTES", Some("8589934592"));
+        let _m = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_MB", None);
+        assert_eq!(
+            resolve_cuda_options().gpu_mem_limit_bytes,
+            8_589_934_592,
+            "explicit byte limit must be used verbatim"
+        );
+    }
+
+    /// Why: an MB knob is friendlier for operators than raw bytes.
+    /// What: sets `TRUSTY_GPU_MEM_LIMIT_MB=4096` and asserts the value is
+    /// multiplied by 1024^2 into bytes.
+    /// Test: this test.
+    #[test]
+    fn cuda_options_mb_env() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let _b = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_BYTES", None);
+        let _m = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_MB", Some("4096"));
+        assert_eq!(
+            resolve_cuda_options().gpu_mem_limit_bytes,
+            4096usize * 1024 * 1024,
+            "MB limit must be scaled to bytes"
+        );
+    }
+
+    /// Why: when both knobs are set the byte-precise one must win so operators
+    /// have an unambiguous override.
+    /// What: sets both vars and asserts the BYTES value is chosen.
+    /// Test: this test.
+    #[test]
+    fn cuda_options_bytes_takes_precedence() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let _b = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_BYTES", Some("1073741824"));
+        let _m = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_MB", Some("4096"));
+        assert_eq!(
+            resolve_cuda_options().gpu_mem_limit_bytes,
+            1_073_741_824,
+            "BYTES knob must take precedence over MB"
+        );
+    }
+
+    /// Why: a typo (`TRUSTY_GPU_MEM_LIMIT_BYTES=lots`) or a zero value must not
+    /// silently disable the arena cap — it must fall through to the next source
+    /// and ultimately the safe default.
+    /// What: sets garbage in BYTES and a valid MB, asserts MB is used; then sets
+    /// garbage in both and asserts the default.
+    /// Test: this test.
+    #[test]
+    fn cuda_options_ignores_malformed() {
+        let _g = ENV_LOCK.lock().unwrap();
+        {
+            let _b = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_BYTES", Some("not-a-number"));
+            let _m = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_MB", Some("2048"));
+            assert_eq!(
+                resolve_cuda_options().gpu_mem_limit_bytes,
+                2048usize * 1024 * 1024,
+                "malformed BYTES must fall through to a valid MB knob"
+            );
+        }
+        {
+            let _b = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_BYTES", Some("0"));
+            let _m = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_MB", Some("nope"));
+            assert_eq!(
+                resolve_cuda_options().gpu_mem_limit_bytes,
+                DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES,
+                "zero BYTES + malformed MB must fall back to the safe default"
+            );
+        }
+    }
+
+    /// Why: issue #604 — the operator escape hatch `TRUSTY_DEVICE=cpu` must
+    /// make `/health` report `CPU` on every platform/build, since it forces the
+    /// real embedder onto CPU regardless of CUDA/CoreML availability.
+    /// What: sets `TRUSTY_DEVICE=cpu` and asserts the predicted provider is
+    /// `Cpu`.
+    /// Test: this test.
+    #[test]
+    fn resolve_expected_provider_forces_cpu() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let _d = EnvVarGuard::apply("TRUSTY_DEVICE", Some("CPU"));
+        assert_eq!(resolve_expected_provider(), ExecutionProvider::Cpu);
+    }
+
+    /// Why: issue #604 — with no overrides, the predicted provider must equal
+    /// what `init_options` actually selects on this build/platform, so `/health`
+    /// matches the sidecar's startup log. On this CPU-only, non-CUDA dev build:
+    /// Apple Silicon → `CoreML(ANE)`, every other host → `CPU`.
+    /// What: clears the override env vars and asserts the platform-appropriate
+    /// default.
+    /// Test: this test.
+    #[test]
+    fn resolve_expected_provider_default_matches_platform() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let _d = EnvVarGuard::apply("TRUSTY_DEVICE", None);
+        let _u = EnvVarGuard::apply("TRUSTY_COREML_COMPUTE_UNITS", None);
+
+        let got = resolve_expected_provider();
+
+        #[cfg(feature = "embedder-cuda")]
+        let expected = ExecutionProvider::Cuda;
+        #[cfg(all(
+            not(feature = "embedder-cuda"),
+            target_arch = "aarch64",
+            target_os = "macos"
+        ))]
+        let expected = ExecutionProvider::CoreMLAne;
+        #[cfg(all(
+            not(feature = "embedder-cuda"),
+            not(all(target_arch = "aarch64", target_os = "macos"))
+        ))]
+        let expected = ExecutionProvider::Cpu;
+
+        assert_eq!(
+            got, expected,
+            "predicted provider must match init_options for this build/platform"
+        );
+    }
+
+    /// Why: issue #604 — when the operator opts into the full CPU+GPU+ANE
+    /// pipeline via `TRUSTY_COREML_COMPUTE_UNITS=all`, the predicted tag must be
+    /// the `CoreML` (All) variant so `/health` reflects the real configuration.
+    /// What: on Apple Silicon, sets the units var to `all` and asserts the
+    /// `CoreML` tag; default (unset) maps to `CoreMLAne`.
+    /// Test: this test (Apple Silicon only — the CoreML branch is cfg-gated).
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    #[cfg(not(feature = "embedder-cuda"))]
+    #[test]
+    fn resolve_expected_provider_coreml_units() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let _d = EnvVarGuard::apply("TRUSTY_DEVICE", None);
+        {
+            let _u = EnvVarGuard::apply("TRUSTY_COREML_COMPUTE_UNITS", Some("all"));
+            assert_eq!(resolve_expected_provider(), ExecutionProvider::CoreML);
+        }
+        {
+            let _u = EnvVarGuard::apply("TRUSTY_COREML_COMPUTE_UNITS", None);
+            assert_eq!(resolve_expected_provider(), ExecutionProvider::CoreMLAne);
         }
     }
 

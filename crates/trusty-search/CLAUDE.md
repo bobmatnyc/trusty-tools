@@ -734,6 +734,24 @@ embedder initialized: model=AllMiniLML6V2(Q) dim=384 provider=CUDA (CUDA GPU)
 gpu_batch_tuning: provider=CUDA → TRUSTY_MAX_BATCH_SIZE=512 (was 128)
 ```
 
+**VRAM arena bounding (issue #600).** The CUDA EP is configured with
+`arena_extend_strategy = kSameAsRequested` and an explicit `gpu_mem_limit`
+so ORT's BFCArena no longer grows by `kNextPowerOfTwo` and grabs nearly all
+device VRAM on the first large batch — which previously OOM'd a 16 GB Tesla
+T4 and forced the `TRUSTY_MAX_BATCH_SIZE=32` workaround. The per-process
+device-memory ceiling defaults to **12 GiB** (T4-safe headroom) and is
+tunable:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `TRUSTY_GPU_MEM_LIMIT_BYTES` | `12884901888` (12 GiB) | Exact CUDA `gpu_mem_limit` in bytes. Takes precedence over the MB knob. A malformed or `0` value is ignored (falls through to MB, then the default). |
+| `TRUSTY_GPU_MEM_LIMIT_MB` | — | CUDA `gpu_mem_limit` in megabytes (scaled by 1024²). Used only when `TRUSTY_GPU_MEM_LIMIT_BYTES` is unset/invalid. |
+
+Lower the ceiling on smaller cards (e.g. `TRUSTY_GPU_MEM_LIMIT_MB=6144`
+for an 8 GB GPU) or raise it on larger ones. With this bounding in place
+the `TRUSTY_MAX_BATCH_SIZE=32` workaround is no longer required on a 16 GB
+T4. The resolved limit is logged at EP registration.
+
 If CUDA EP initialisation fails at runtime (no driver, wrong CUDA version,
 GPU in use by another process), the daemon falls back to CPU with a warning —
 unless `--device gpu` was specified, in which case it exits non-zero so the

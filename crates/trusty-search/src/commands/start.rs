@@ -800,6 +800,19 @@ impl crate::core::Embedder for RemoteEmbedderAdapter {
     fn dimension(&self) -> usize {
         trusty_common::embedder::EMBED_DIM
     }
+
+    /// Report the execution provider the remote `trusty-embedderd` resolves.
+    ///
+    /// Why: issue #604. The remote sidecar selects its EP through this crate's
+    /// `init_options`, which is a pure function of build features + env, so the
+    /// parent can predict the same answer and `/health` reports the real
+    /// provider instead of the trait-default `CPU`.
+    /// What: delegates to `trusty_common::embedder::resolve_expected_provider`.
+    /// Test: `resolve_expected_provider_*` in trusty-common cover the resolver;
+    /// real-GPU end-to-end is hardware-gated.
+    fn provider(&self) -> trusty_common::embedder::ExecutionProvider {
+        trusty_common::embedder::resolve_expected_provider()
+    }
 }
 
 /// Adapter that implements trusty-search's `Embedder` trait by delegating to
@@ -843,6 +856,17 @@ impl crate::core::Embedder for UdsEmbedderAdapter {
 
     fn dimension(&self) -> usize {
         trusty_common::embedder::EMBED_DIM
+    }
+
+    /// Report the execution provider the UDS-remote `trusty-embedderd` resolves.
+    ///
+    /// Why: issue #604 — see `RemoteEmbedderAdapter::provider`. The UDS sidecar
+    /// runs the same `init_options` resolution, so the parent predicts the same
+    /// provider for `/health`.
+    /// What: delegates to `trusty_common::embedder::resolve_expected_provider`.
+    /// Test: covered by trusty-common's `resolve_expected_provider_*` tests.
+    fn provider(&self) -> trusty_common::embedder::ExecutionProvider {
+        trusty_common::embedder::resolve_expected_provider()
     }
 }
 
@@ -888,6 +912,23 @@ impl crate::core::Embedder for LazySlotEmbedderAdapter {
 
     fn dimension(&self) -> usize {
         trusty_common::embedder::EMBED_DIM
+    }
+
+    /// Report the execution provider the lazy stdio sidecar resolves.
+    ///
+    /// Why: issue #604 — this is the **default** deployment path, and it was the
+    /// direct cause of `/health` reporting `provider=CPU` while the sidecar's
+    /// own startup log said `provider=CUDA`. The `LazyEmbedderHandle` defers the
+    /// child spawn, so there is no live provider to read until the first embed;
+    /// rather than report a stale `CPU`, predict the provider the sidecar will
+    /// resolve via the shared `init_options` logic. This is correct even before
+    /// the child has spawned, because the resolution is a pure function of build
+    /// features + env.
+    /// What: delegates to `trusty_common::embedder::resolve_expected_provider`.
+    /// Test: covered by trusty-common's `resolve_expected_provider_*` tests;
+    /// real-GPU validation is hardware-gated.
+    fn provider(&self) -> trusty_common::embedder::ExecutionProvider {
+        trusty_common::embedder::resolve_expected_provider()
     }
 }
 
@@ -2011,6 +2052,55 @@ mod tests {
         assert_eq!(
             got, real_canonical,
             "canonicalize_best_effort must resolve symlinks to their target"
+        );
+    }
+
+    /// Why: issue #604 — the default lazy stdio sidecar adapter previously fell
+    /// through to the trait-default `provider() == Cpu`, so `/health` reported
+    /// `provider=CPU` even when the sidecar resolved CUDA/CoreML. The adapter
+    /// must now report the same provider the sidecar resolves, available
+    /// *before* the child spawns (the resolution is pure).
+    /// What: builds a `LazySlotEmbedderAdapter` over a non-spawned handle and
+    /// asserts its `provider()` equals `resolve_expected_provider()` (the value
+    /// the sidecar will report). No child process is started.
+    /// Test: this test.
+    #[test]
+    fn lazy_adapter_reports_resolved_provider() {
+        use crate::core::Embedder as _;
+        use crate::service::embedder_supervisor::{LazyEmbedderHandle, SupervisorConfig};
+
+        let handle = std::sync::Arc::new(LazyEmbedderHandle::new(
+            std::path::PathBuf::from("/nonexistent/trusty-embedderd"),
+            SupervisorConfig::default(),
+        ));
+        let adapter = LazySlotEmbedderAdapter { handle };
+        assert_eq!(
+            adapter.provider(),
+            trusty_common::embedder::resolve_expected_provider(),
+            "lazy stdio adapter must report the sidecar's resolved provider, not the CPU default"
+        );
+    }
+
+    /// Why: issue #604 — the UDS-remote adapter shares the same defect/fix as
+    /// the lazy adapter; `/health` must not report a stale `CPU` for a
+    /// UDS-connected sidecar.
+    /// What: builds a `UdsEmbedderAdapter` over a dummy socket path (no
+    /// connection is made by construction) and asserts `provider()` matches the
+    /// resolver.
+    /// Test: this test.
+    #[test]
+    fn uds_adapter_reports_resolved_provider() {
+        use crate::core::Embedder as _;
+
+        let adapter = UdsEmbedderAdapter {
+            client: trusty_common::embedder_client::UdsEmbedderClient::new(
+                std::path::PathBuf::from("/tmp/nonexistent-trusty-604.sock"),
+            ),
+        };
+        assert_eq!(
+            adapter.provider(),
+            trusty_common::embedder::resolve_expected_provider(),
+            "uds adapter must report the sidecar's resolved provider, not the CPU default"
         );
     }
 }
