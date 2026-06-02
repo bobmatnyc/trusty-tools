@@ -19,6 +19,8 @@
 use serde::Deserialize;
 use tracing::warn;
 
+use crate::integrations::context::ContextSourcesFileConfig;
+
 /// Environment variable that toggles whether trusty-search is a hard requirement.
 ///
 /// Why: operators need a discoverable single switch to opt into a degraded run
@@ -107,6 +109,11 @@ pub struct ContextFileConfig {
     /// `[context] require_analyze = false` opts into a degraded run when analyze
     /// is unavailable.
     pub require_analyze: Option<bool>,
+    /// `[context.sources.*]` — per-source enable/mode for the external context
+    /// sources (JIRA / Confluence / GitHub Issues; APEX in PR-B).  Defaults to an
+    /// all-default (auto-disable-without-creds) configuration when absent.
+    #[serde(default)]
+    pub sources: ContextSourcesFileConfig,
 }
 
 /// Parse a boolean env var with lenient truthiness, or `None` if unset/empty.
@@ -177,6 +184,7 @@ mod tests {
         let file = ContextFileConfig {
             require_search: None,
             require_analyze: Some(false),
+            ..Default::default()
         };
         let cfg = ContextConfig::from_env_and_file(Some(&file));
         assert!(cfg.require_search, "search stays required by default");
@@ -198,6 +206,7 @@ mod tests {
         let file = ContextFileConfig {
             require_search: Some(false),
             require_analyze: None,
+            ..Default::default()
         };
         let cfg = ContextConfig::from_env_and_file(Some(&file));
         assert!(cfg.require_search, "env true must override file false");
@@ -214,6 +223,7 @@ mod tests {
         let file = ContextFileConfig {
             require_search: None,
             require_analyze: Some(false),
+            ..Default::default()
         };
         let cfg = ContextConfig::from_env_and_file(Some(&file));
         assert!(

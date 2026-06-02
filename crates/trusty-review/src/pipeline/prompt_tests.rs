@@ -105,6 +105,7 @@ fn build_review_prompt_strips_bedrock_prefix() {
         &sample_meta(),
         "+fn x() {}",
         &empty_context(),
+        "",
         "bedrock/us.anthropic.claude-sonnet-4-6",
     );
     assert_eq!(
@@ -126,6 +127,7 @@ fn build_review_prompt_strips_openrouter_prefix() {
         &sample_meta(),
         "+fn x() {}",
         &empty_context(),
+        "",
         "openrouter/openai/gpt-5.4-mini-20260317",
     );
     assert_eq!(
@@ -143,6 +145,7 @@ fn build_review_prompt_includes_diff() {
         &sample_meta(),
         diff,
         &empty_context(),
+        "",
         "openai/gpt-5.4-mini-20260317",
     );
     assert_eq!(req.model, "openai/gpt-5.4-mini-20260317");
@@ -195,6 +198,7 @@ fn prompt_includes_context_blocks() {
         &sample_meta(),
         "+fn foo() {}",
         &context,
+        "",
         "openai/gpt-5.4-mini-20260317",
     );
     let content = &req.messages[0].content;
@@ -216,6 +220,69 @@ fn prompt_includes_context_blocks() {
     );
 }
 
+/// Verify external context markdown is embedded into the user message.
+///
+/// Why: the context orchestrator renders `## Related <source>` markdown that the
+/// prompt builder must append verbatim before the structured-output instruction
+/// (Phase 6, #550); a regression here would silently drop JIRA/Confluence/GH
+/// enrichment from the reviewer prompt.
+/// What: passes a non-empty `external_context` block and asserts it appears in
+/// the user message ahead of the closing instruction.
+/// Test: this test; no network.
+#[test]
+fn prompt_includes_external_context() {
+    let external = "## Related JIRA tickets\n\n- **PROJ-1 — Add auth** — In Progress\n";
+    let req = build_review_prompt(
+        "acme",
+        "backend",
+        &sample_meta(),
+        "+fn x() {}",
+        &empty_context(),
+        external,
+        "openai/gpt-5.4-mini-20260317",
+    );
+    let content = &req.messages[0].content;
+    assert!(
+        content.contains("## Related JIRA tickets"),
+        "external context heading must be embedded"
+    );
+    assert!(
+        content.contains("PROJ-1 — Add auth"),
+        "external context bullet must be embedded"
+    );
+    // The closing instruction must come AFTER the external context.
+    let ext_pos = content.find("Related JIRA tickets").unwrap();
+    let instr_pos = content.find("populate the structured response").unwrap();
+    assert!(
+        ext_pos < instr_pos,
+        "external context must precede the closing instruction"
+    );
+}
+
+/// Verify an empty external context block adds nothing.
+///
+/// Why: out of the box (no Atlassian/GitHub creds) the orchestrator returns an
+/// empty string; the prompt must not emit a stray blank section.
+/// What: passes an empty `external_context` and asserts no `## Related ` heading
+/// for an external source appears.
+/// Test: this test; no network.
+#[test]
+fn prompt_empty_external_context_adds_nothing() {
+    let req = build_review_prompt(
+        "o",
+        "r",
+        &sample_meta(),
+        "+fn x() {}",
+        &empty_context(),
+        "   \n",
+        "openai/gpt-5.4-mini-20260317",
+    );
+    let content = &req.messages[0].content;
+    assert!(!content.contains("Related JIRA"));
+    assert!(!content.contains("Related Confluence"));
+    assert!(!content.contains("Related GitHub issues"));
+}
+
 #[test]
 fn prompt_empty_context_omits_sections() {
     let req = build_review_prompt(
@@ -224,6 +291,7 @@ fn prompt_empty_context_omits_sections() {
         &sample_meta(),
         "+fn x() {}",
         &empty_context(),
+        "",
         "openai/gpt-5.4-nano-20260317",
     );
     let content = &req.messages[0].content;
@@ -252,6 +320,7 @@ fn build_review_prompt_includes_response_schema() {
         &sample_meta(),
         "+fn x() {}",
         &empty_context(),
+        "",
         "us.anthropic.claude-sonnet-4-6",
     );
     let schema = req
@@ -304,6 +373,7 @@ fn prompt_local_diff_mode_no_pr_metadata() {
         &meta,
         "+fn local_fn() {}",
         &empty_context(),
+        "",
         "openai/gpt-5.4-mini-20260317",
     );
     let content = &req.messages[0].content;

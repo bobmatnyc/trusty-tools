@@ -112,7 +112,9 @@ default     = ["http-server"]
 http-server = ["dep:axum", "dep:tower", "dep:tower-http", "dep:tempfile", "trusty-common/axum-server"]
 
 [dev-dependencies]
-tokio        = { workspace = true }
+# test-util enables tokio's paused-clock (`tokio::time::pause`) used by the
+# context-orchestrator timeout fail-open test (#550).
+tokio        = { workspace = true, features = ["test-util"] }
 tempfile     = { workspace = true }
 tower        = { workspace = true }
 axum         = { workspace = true }

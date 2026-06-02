@@ -205,9 +205,10 @@ pub fn build_review_prompt(
     pr_meta: &ReviewPrMeta,
     diff: &str,
     context: &ReviewContext,
+    external_context: &str,
     reviewer_model: &str,
 ) -> LlmRequest {
-    let user_message = build_user_message(owner, repo, pr_meta, diff, context);
+    let user_message = build_user_message(owner, repo, pr_meta, diff, context, external_context);
     LlmRequest {
         model: strip_provider_prefix(reviewer_model).to_string(),
         system: reviewer_system_prompt().to_string(),
@@ -260,14 +261,17 @@ impl ReviewPrMeta {
 /// context blocks.  Splitting it from the system prompt makes each independently
 /// tweakable.
 /// What: formats PR metadata as a header, then the diff block, then optional
-/// context sections for code search and static analysis.
-/// Test: `prompt_includes_context_blocks`.
+/// context sections for code search and static analysis, then any external
+/// context (`## Related <source>` markdown already rendered by the context
+/// orchestrator — JIRA / Confluence / GitHub Issues; APEX in PR-B).
+/// Test: `prompt_includes_context_blocks`, `prompt_includes_external_context`.
 fn build_user_message(
     owner: &str,
     repo: &str,
     pr_meta: &ReviewPrMeta,
     diff: &str,
     context: &ReviewContext,
+    external_context: &str,
 ) -> String {
     let mut msg = String::with_capacity(diff.len() + 2048);
 
@@ -336,6 +340,19 @@ fn build_user_message(
                 "- `{}` — {} [{}]{line_part}\n",
                 s.file, s.category, s.severity
             ));
+        }
+        msg.push('\n');
+    }
+
+    // External context block (rendered `## Related <source>` markdown from the
+    // context orchestrator — JIRA / Confluence / GitHub Issues; APEX in PR-B).
+    // It is appended verbatim because the orchestrator already owns the heading
+    // + bullet format, keeping this builder source-agnostic.
+    let external = external_context.trim();
+    if !external.is_empty() {
+        msg.push_str(external);
+        if !external.ends_with('\n') {
+            msg.push('\n');
         }
         msg.push('\n');
     }

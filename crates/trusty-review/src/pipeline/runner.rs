@@ -55,7 +55,7 @@ use crate::{
         parser::parse_review_response,
         post::{PostContext, finalize_review},
         prompt::{ReviewPrMeta, build_review_prompt},
-        runner_context::gather_context,
+        runner_context::{gather_context, gather_external_context_md},
         trigger::TriggerDecision,
         verify::maybe_verify,
     },
@@ -272,7 +272,23 @@ pub async fn run_review(
     };
 
     // ── Step 5: gather context in parallel ────────────────────────────────
-    let context = gather_context(config, &deps, &identifiers, &changed_files, &pr_meta.title).await;
+    // Required code/static-analysis context (from trusty-search/trusty-analyze)
+    // and best-effort external enrichment (JIRA/Confluence/GitHub Issues, #550)
+    // are gathered concurrently.  The external sources are FAIL-OPEN: any error
+    // contributes nothing and never blocks the review (distinct from the #590
+    // required gate above).
+    let (context, external_context) = tokio::join!(
+        gather_context(config, &deps, &identifiers, &changed_files, &pr_meta.title),
+        gather_external_context_md(
+            config,
+            &owner,
+            &repo,
+            &identifiers,
+            &changed_files,
+            &pr_meta.title,
+            input.run_mode,
+        ),
+    );
 
     // ── Step 6: build prompt and call LLM ─────────────────────────────────
     let llm_req = build_review_prompt(
@@ -281,6 +297,7 @@ pub async fn run_review(
         &pr_meta,
         &diff,
         &context,
+        &external_context,
         &input.reviewer_model,
     );
     debug!(model = %input.reviewer_model, "calling LLM reviewer");

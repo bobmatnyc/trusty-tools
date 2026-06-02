@@ -167,6 +167,14 @@ pub struct ReviewConfig {
     /// Both default to `true`: a missing dependency skips the review rather than
     /// degrading to a context-free verdict.
     pub context: ContextConfig,
+
+    // ── External context sources (Phase 6, #550) ───────────────────────────
+    /// Resolved per-source settings for the external enrichment sources
+    /// (JIRA / Confluence / GitHub Issues; APEX in PR-B).  Each source defaults
+    /// to disabled unless its credentials are present (auto-enable) — so the
+    /// crate works out of the box with no Atlassian/GitHub-context config.  These
+    /// sources are best-effort / fail-open, distinct from the REQUIRED gate above.
+    pub context_sources: crate::integrations::context::ContextSourcesConfig,
 }
 
 impl ReviewConfig {
@@ -195,6 +203,9 @@ impl ReviewConfig {
         let role_models = RoleModels::resolve(cli_overrides, &env, file_models.as_ref());
         let verification = VerificationConfig::from_env_and_file(file_verification.as_ref());
         let context = ContextConfig::from_env_and_file(file_context.as_ref());
+        let context_sources = crate::integrations::context::ContextSourcesConfig::from_env_and_file(
+            file_context.as_ref().map(|c| &c.sources),
+        );
 
         let dry_run = std::env::var("PR_INTELLIGENCE_DRY_RUN")
             .map(|v| v.to_lowercase() != "false")
@@ -242,6 +253,7 @@ impl ReviewConfig {
             live_review_requesters: load_live_review_requesters(),
             verification,
             context,
+            context_sources,
         }
     }
 
