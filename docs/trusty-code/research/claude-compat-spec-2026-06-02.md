@@ -16,7 +16,7 @@
 5. [Constraints — Decided](#5-constraints--decided)
 6. [Implementation Notes for the Rust Harness](#6-implementation-notes-for-the-rust-harness)
 7. [Critical Gotchas](#7-critical-gotchas)
-8. [Compatibility Sub-Issue Breakdown C1–C9](#8-compatibility-sub-issue-breakdown-c1c9)
+8. [Compatibility Sub-Issue Breakdown C1–C10](#8-compatibility-sub-issue-breakdown-c1c10)
 9. [Sources](#9-sources)
 
 ---
@@ -564,7 +564,7 @@ The agent loader:
 
 ## 7. Critical Gotchas
 
-These are the nine highest-risk implementation pitfalls identified during the
+These are the ten highest-risk implementation pitfalls identified during the
 compatibility study. Each should be addressed explicitly in the corresponding
 C-series sub-issue.
 
@@ -662,22 +662,23 @@ All config paths are anchored to the resolved repo root, not to cwd.
 
 ---
 
-## 8. Compatibility Sub-Issue Breakdown C1–C9
+## 8. Compatibility Sub-Issue Breakdown C1–C10
 
 These are a parallel axis from the 8 extraction phases (#639–#647). Each C-issue
 covers a self-contained compatibility concern.
 
 | Sub-issue | Title | Depends on | Key deliverables |
 |-----------|-------|------------|-----------------|
-| **C1** | Config schema + serde models | — (pure data types) | `Settings`, `AgentDef`, `SkillDef`, `CommandDef`, `McpConfig`, `ClaudeMd` Rust structs; serde/deserialize impls; unit tests against sample config files |
-| **C2** | Config loader + precedence merge | C1 | `ConfigLoader`: discovers all files, applies Managed > User > Project > Local merge for settings; parent→child load + `@import` for `CLAUDE.md`; line-based truncation; repo-root resolver (Gotchas 1, 3, 4, 9) |
-| **C3** | Permission model | C1, C2 | `PermissionGate`: union rules across scopes; deny > ask > allow first-match; `bypassPermissions`/`acceptEdits` inheritance (Gotchas 2, 7) |
-| **C4** | `.claude/agents` → MPM-delegatable agents | C1, C2, C3 | `AgentLoader`: discovers and parses agent `.md` files; registers in MPM agent registry; per-agent Bedrock/OpenRouter model resolution; tool-restriction enforcement; worktree branching from default branch (Gotchas 6, 7) |
-| **C5** | `.claude/skills` + `.claude/commands` loaders | C1, C2 | `SkillLoader` + `CommandLoader`: discovery, preloading, `disable-model-invocation` flag support; skill/command registration in MPM |
-| **C6** | MCP bridge | C1, C2, C3 | `McpBridge`: server startup (stdio/http/sse); deferred tool-schema fetching; `mcp__server__tool` namespace normalization; reconnect backoff; secret/token handling (Gotchas 5, 8) |
-| **C7** | Event-driven tool execution model + interaction APIs | C3, C4, C6 | Internal event bus over tool invocation/lifecycle; external observation API on per-project socket; CLI tool-event inspection; replaces the hook executor entirely |
-| **C8** | Built-in trusty-memory + trusty-search integration | C4 | Native clients for trusty-memory (`:7070`) and trusty-search (`:7878`); integrated into PM research phase and memory-routing logic; `MemoryBackend` trait seam preserved for testing |
-| **C9** | MPM orchestration reconciliation | C4, C5, C7, C8 | PM main loop wired to compat config: Research/Plan/Code/QA phases using loaded agents + skills + tools; mandatory verification gates; circuit breakers; explicit PM→agent delegation honoring `.claude/agents` definitions |
+| **C1** [#649] | Config schema + serde models | — (pure data types) | `Settings`, `AgentDef`, `SkillDef`, `CommandDef`, `McpConfig`, `ClaudeMd` Rust structs; serde/deserialize impls; unit tests against sample config files |
+| **C2** [#650] | Config loader + precedence merge | C1 | `ConfigLoader`: discovers all files, applies Managed > User > Project > Local merge for settings; parent→child load + `@import` for `CLAUDE.md`; line-based truncation; repo-root resolver (Gotchas 1, 3, 4, 9) |
+| **C3** [#651] | Permission model | C1, C2 | `PermissionGate`: union rules across scopes; deny > ask > allow first-match; `bypassPermissions`/`acceptEdits` inheritance (Gotchas 2, 7) |
+| **C4** [#652] | `.claude/agents` → MPM-delegatable agents | C1, C2, C3 | `AgentLoader`: discovers and parses agent `.md` files; registers in MPM agent registry; per-agent Bedrock/OpenRouter model resolution; tool-restriction enforcement; worktree branching from default branch (Gotchas 6, 7) |
+| **C5** [#653] | `.claude/skills` + `.claude/commands` loaders | C1, C2 | `SkillLoader` + `CommandLoader`: discovery, preloading, `disable-model-invocation` flag support; skill/command registration in MPM |
+| **C6** [#654] | MCP bridge | C1, C2, C3 | `McpBridge`: server startup (stdio/http/sse); deferred tool-schema fetching; `mcp__server__tool` namespace normalization; reconnect backoff; secret/token handling (Gotchas 5, 8) |
+| **C7** [#655] | Event-driven tool execution model + interaction APIs | C3, C4, C6 | Internal event bus over tool invocation/lifecycle; external observation API on per-project socket; CLI tool-event inspection; replaces the hook executor entirely |
+| **C8** [#656] | Built-in trusty-memory + trusty-search integration | C4 | Native clients for trusty-memory (`:7070`) and trusty-search (`:7878`); integrated into PM research phase and memory-routing logic; `MemoryBackend` trait seam preserved for testing |
+| **C9** [#657] | MPM orchestration reconciliation | C4, C5, C7, C8 | PM main loop wired to compat config: Research/Plan/Code/QA phases using loaded agents + skills + tools; mandatory verification gates; circuit breakers; explicit PM→agent delegation honoring `.claude/agents` definitions |
+| **C10** [#658] | Git worktree isolation support | C4, C9 | tcode provisions a dedicated git worktree branched from the default branch for each isolated delegated agent; auto-cleans on completion; honors `.claude/agents` `isolation: worktree` directive; enables safe parallel delegation mirroring MPM PM-level worktree discipline |
 
 ---
 
