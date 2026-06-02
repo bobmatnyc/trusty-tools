@@ -18,6 +18,7 @@
 //! Test: each submodule carries its own unit tests.
 
 pub mod analyze_client;
+pub mod apex_context;
 pub mod context;
 pub mod github;
 pub mod search_client;
@@ -26,6 +27,7 @@ pub use analyze_client::{
     AnalyzeClient, AnalyzeClientError, AnalyzeHealthResponse, AnalyzeIndexInfo, ComplexityHotspot,
     HttpAnalyzeClient, Smell,
 };
+pub use apex_context::{ApexContextResult, fetch_apex_context};
 pub use context::{
     ConfluenceSource, ContextSection, ContextSnippet, ContextSource, ContextSourceError,
     ContextSourcesConfig, ContextSourcesFileConfig, GithubIssuesSource, JiraSource, RetrievalMode,

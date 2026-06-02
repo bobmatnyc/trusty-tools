@@ -191,6 +191,7 @@ fn prompt_includes_context_blocks() {
             severity: "medium".to_string(),
             line: Some(20),
         }],
+        apex_results: vec![],
     };
 
     let req = build_review_prompt(
@@ -437,4 +438,63 @@ fn system_prompt_describes_unknown_grade() {
         !prompt.contains("N/A"),
         "system prompt must not list N/A as a verdict option"
     );
+}
+
+// ── APEX prompt tests (Phase 6 PR-B, REV-420) ───────────────────────────────
+/// ReviewContext with apex_results ⇒ heading, file, snippet, citation hint, ordering.
+/// Why/What: guards the APEX block from silent omission. Test: no network.
+#[test]
+fn prompt_includes_apex_context_when_present() {
+    use crate::integrations::apex_context::ApexContextResult;
+    let ctx = ReviewContext {
+        apex_results: vec![ApexContextResult {
+            file: "apex/auth-spec.md".to_string(),
+            snippet: "Token expiry must be checked.".to_string(),
+            score: 0.88,
+            start_line: Some(42),
+        }],
+        ..Default::default()
+    };
+    let content = build_review_prompt(
+        "acme",
+        "backend",
+        &sample_meta(),
+        "+fn x() {}",
+        &ctx,
+        "",
+        "openai/gpt-5.4-mini-20260317",
+    )
+    .messages[0]
+        .content
+        .clone();
+    assert!(content.contains("Related APEX product specs"));
+    assert!(content.contains("apex/auth-spec.md"));
+    assert!(content.contains("Token expiry must be checked"));
+    assert!(content.contains("[apex:"));
+    let apex_pos = content.find("Related APEX product specs").unwrap();
+    let instr_pos = content.find("populate the structured response").unwrap();
+    assert!(
+        apex_pos < instr_pos,
+        "APEX section must precede closing instruction"
+    );
+}
+
+/// Empty apex_results ⇒ no APEX section.
+/// Why/What: default config (APEX disabled) must not emit a stray heading. Test: no network.
+#[test]
+fn prompt_no_apex_section_when_empty() {
+    let content = build_review_prompt(
+        "acme",
+        "backend",
+        &sample_meta(),
+        "+fn x() {}",
+        &empty_context(),
+        "",
+        "openai/gpt-5.4-mini-20260317",
+    )
+    .messages[0]
+        .content
+        .clone();
+    assert!(!content.contains("Related APEX product specs"));
+    assert!(!content.contains("[apex:"));
 }

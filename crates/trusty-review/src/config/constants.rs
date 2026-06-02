@@ -124,6 +124,35 @@ pub const FIX_ISSUE_MAX_PER_PR: u32 = 3;
 /// (source-analysis §2.3).
 pub const FIX_ISSUE_ALLOWED_EFFORTS: &[&str] = &["low", "medium"];
 
+// ─── APEX/KB context (Phase 6 PR-B, #550, REV-420) ──────────────────────────
+
+/// Maximum APEX/KB results injected into the reviewer prompt per review.
+///
+/// Why: the reviewer context window is bounded; more than 2 APEX snippets would
+/// swamp the code context that is the primary review signal.  Two spec excerpts
+/// are enough to anchor the reviewer to the relevant product intent.
+/// What: `fetch_apex_context` truncates after this many results.
+/// Test: `apex_context_caps_at_max_results` in `integrations::apex_context`.
+pub const MAX_APEX_RESULTS: usize = 2;
+
+/// Maximum characters of an APEX snippet embedded in the prompt.
+///
+/// Why: individual spec pages can be large; capping the excerpt keeps total
+/// prompt size predictable while still giving the reviewer meaningful product
+/// context.
+/// What: snippets longer than this are truncated (UTF-8 safe) before insertion.
+/// Test: `apex_context_truncates_snippet` in `integrations::apex_context`.
+pub const MAX_APEX_SNIPPET_CHARS: usize = 600;
+
+/// Maximum characters of the APEX cross-query string.
+///
+/// Why: the PR title + description can be very long; the search daemon benefits
+/// from a bounded query.
+/// What: the first `MAX_APEX_QUERY_CHARS` chars of the cross-query are sent to
+/// trusty-search (UTF-8 safe).
+/// Test: `apex_context_truncates_long_query` in `integrations::apex_context`.
+pub const MAX_APEX_QUERY_CHARS: usize = 1000;
+
 // ─── Review version string ────────────────────────────────────────────────────
 
 /// Pipeline version identifier embedded in every `ReviewResult`.

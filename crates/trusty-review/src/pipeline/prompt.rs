@@ -24,6 +24,7 @@
 use crate::{
     integrations::{
         analyze_client::{ComplexityHotspot, Smell},
+        apex_context::ApexContextResult,
         search_client::SearchResult,
     },
     llm::{ChatMessage, LlmRequest, ResponseSchema, strip_provider_prefix},
@@ -95,13 +96,14 @@ pub fn review_response_schema() -> ResponseSchema {
 
 // ─── Context inputs ───────────────────────────────────────────────────────────
 
-/// Context assembled from trusty-search and trusty-analyze before the LLM call.
+/// Context assembled from trusty-search, trusty-analyze, and APEX before the LLM call.
 ///
 /// Why: the pipeline gathers context in parallel from multiple sources then
 /// bundles it into a single struct for prompt construction.
 /// What: all fields are optional / empty-defaulted so the pipeline degrades
 /// gracefully when a source is unavailable.
-/// Test: `build_review_prompt_includes_context_blocks`.
+/// Test: `build_review_prompt_includes_context_blocks`,
+/// `prompt_includes_apex_context` (prompt_tests.rs).
 #[derive(Debug, Default)]
 pub struct ReviewContext {
     /// Code search results from trusty-search (may be empty if unavailable).
@@ -110,6 +112,13 @@ pub struct ReviewContext {
     pub complexity_hotspots: Vec<ComplexityHotspot>,
     /// Code smells from trusty-analyze (may be empty).
     pub smells: Vec<Smell>,
+    /// APEX/KB product spec snippets (Phase 6 PR-B, REV-420, #550).
+    ///
+    /// Retrieved from the configured `apex_index` using the PR title+description
+    /// as the cross-query, then filtered by `apex_path_prefixes`.  Empty when
+    /// APEX is disabled (`apex_index` not configured) or no matching docs are
+    /// found.  Fail-open: a search error produces an empty vec, never an error.
+    pub apex_results: Vec<ApexContextResult>,
 }
 
 // ─── System prompt ────────────────────────────────────────────────────────────
@@ -351,8 +360,42 @@ fn build_user_message(
         msg.push('\n');
     }
 
+    // APEX product-spec context block (Phase 6 PR-B, REV-420).
+    // Each result is a snippet from the spec/docs corpus that semantically
+    // matches the PR content.  Cite format: [apex: `path:line` — "excerpt"].
+    if !context.apex_results.is_empty() {
+        msg.push_str("## Related APEX product specs\n\n");
+        for (i, apex) in context
+            .apex_results
+            .iter()
+            .enumerate()
+            .take(crate::config::constants::MAX_APEX_RESULTS)
+        {
+            let line_suffix = apex.start_line.map(|l| format!(":{l}")).unwrap_or_default();
+            msg.push_str(&format!(
+                "### APEX {} — `{}{}`\n",
+                i + 1,
+                apex.file,
+                line_suffix
+            ));
+            if !apex.snippet.is_empty() {
+                msg.push_str("```\n");
+                msg.push_str(&apex.snippet);
+                if !apex.snippet.ends_with('\n') {
+                    msg.push('\n');
+                }
+                msg.push_str("```\n");
+            }
+            msg.push('\n');
+        }
+        msg.push_str(
+            "When citing an APEX spec, use the format: \
+             [apex: `path/to/spec.md:15` — \"brief excerpt\"]\n\n",
+        );
+    }
+
     // External context block (rendered `## Related <source>` markdown from the
-    // context orchestrator — JIRA / Confluence / GitHub Issues; APEX in PR-B).
+    // context orchestrator — JIRA / Confluence / GitHub Issues).
     // It is appended verbatim because the orchestrator already owns the heading
     // + bullet format, keeping this builder source-agnostic.
     let external = external_context.trim();

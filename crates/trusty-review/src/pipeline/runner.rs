@@ -272,22 +272,22 @@ pub async fn run_review(
         }
     };
 
-    // ── Step 5: gather context in parallel ────────────────────────────────
-    // Required code/static-analysis context (from trusty-search/trusty-analyze)
-    // and best-effort external enrichment (JIRA/Confluence/GitHub Issues, #550)
-    // are gathered concurrently.  The external sources are FAIL-OPEN: any error
-    // contributes nothing and never blocks the review (distinct from the #590
-    // required gate above).
+    // ── Step 5: gather context in parallel (search/analyze/APEX + external) ──
+    // All sources are FAIL-OPEN: errors contribute nothing, never block the review
+    // (distinct from the #590 required gate above).  APEX (#550 PR-B) is gated by
+    // config.apex_index: empty = disabled.
+    let title = &pr_meta.title;
+    let body = &pr_meta.body;
     let (context, external_context) = tokio::join!(
-        gather_context(config, &deps, &identifiers, &changed_files, &pr_meta.title),
+        gather_context(config, &deps, &identifiers, &changed_files, title, body),
         gather_external_context_md(
             config,
             &owner,
             &repo,
             &identifiers,
             &changed_files,
-            &pr_meta.title,
-            &pr_meta.body,
+            title,
+            body,
             input.run_mode,
         ),
     );
