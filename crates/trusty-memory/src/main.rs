@@ -579,26 +579,19 @@ async fn main() -> Result<()> {
 ///
 /// Why: keeps `main` focused on parsing while putting the daemon-address
 /// discovery and dashboard launch in one place.
-/// What: `Web` resolves the live daemon address from the lock file and prints
-/// its `/ui` URL (exiting non-zero when no daemon is running); `Tui` launches
-/// the trusty-memory-specific `trusty_common::monitor::memory_tui` ratatui
-/// dashboard; `Status` and `Palaces` print scriptable health and per-palace
-/// stats via the `commands::monitor` handlers.
+/// What: `Web` delegates to `daemon_guard::open_web_dashboard` which
+/// auto-starts the daemon when not running, then opens the browser.
+/// `Tui` launches the trusty-memory-specific
+/// `trusty_common::monitor::memory_tui` ratatui dashboard; `Status` and
+/// `Palaces` print scriptable health and per-palace stats via the
+/// `commands::monitor` handlers.
 /// Test: not unit-tested (process-level entry point); `cargo run -p
-/// trusty-memory -- monitor --help` lists every target.
+/// trusty-memory -- monitor web` with no daemon auto-starts it then opens
+/// the browser.
 async fn run_monitor(target: MonitorTarget) -> Result<()> {
     use trusty_memory::commands::monitor;
     match target {
-        MonitorTarget::Web => match trusty_common::read_daemon_addr("trusty-memory")? {
-            Some(addr) => {
-                println!("{addr}/ui");
-                Ok(())
-            }
-            None => {
-                eprintln!("trusty-memory daemon not running (no address found)");
-                std::process::exit(1);
-            }
-        },
+        MonitorTarget::Web => trusty_memory::commands::daemon_guard::open_web_dashboard().await,
         MonitorTarget::Tui => trusty_common::monitor::memory_tui::run().await,
         MonitorTarget::Status { json } => monitor::handle_status(json).await,
         MonitorTarget::Palaces { id, json } => monitor::handle_palaces(id, json).await,

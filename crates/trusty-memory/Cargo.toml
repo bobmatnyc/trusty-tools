@@ -135,6 +135,11 @@ strsim = { workspace = true }
 # Issue #278: encode/decode triple IDs as URL-safe base64 for the
 # `DELETE /kg/triples/<id>` endpoint. Already in the workspace dependency table.
 base64 = { workspace = true }
+# Why: `monitor web` / `run_monitor_web` opens the daemon's web UI in the
+# default system browser (issue #687). `open` provides a portable abstraction
+# over `xdg-open` (Linux), `open` (macOS), and `start` (Windows) without
+# pulling in a GUI toolkit. Matches the pattern in trusty-search.
+open = "5"
 
 [dev-dependencies]
 tempfile = { workspace = true }
