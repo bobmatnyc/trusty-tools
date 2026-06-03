@@ -62,13 +62,13 @@ pub enum SearchClientError {
 
 // ─── Response types ───────────────────────────────────────────────────────────
 
-/// A single registered index from `GET /indexes`.
+/// A single registered index from `GET /indexes?details=true`.
 ///
 /// Why: the pipeline may need to verify the configured index exists before
 /// issuing a search.
-/// What: minimal shape — only `id` and optional `name` are needed for the
-/// MVP; other fields are ignored.
-/// Test: `index_info_deserialises`.
+/// What: minimal shape — `id` and optional `root_path` are used by the
+/// auto-derive resolver; other fields are ignored.
+/// Test: `index_info_deserialises`, `list_indexes_parses_daemon_envelope`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IndexInfo {
     /// Unique index identifier.
@@ -76,9 +76,23 @@ pub struct IndexInfo {
     /// Optional human-readable name.
     #[serde(default)]
     pub name: Option<String>,
-    /// Root path of the indexed directory.
+    /// Root path of the indexed directory (present only with `?details=true`).
     #[serde(default)]
     pub root_path: Option<String>,
+}
+
+/// Envelope wrapper for `GET /indexes?details=true`.
+///
+/// Why: the trusty-search daemon returns `{"indexes":[...]}`, not a bare array.
+/// Deserialising directly as `Vec<IndexInfo>` fails with
+/// `invalid type: map, expected a sequence`.  This wrapper absorbs the envelope
+/// so callers receive a plain `Vec<IndexInfo>`.
+/// What: single-field struct; `indexes` maps to the daemon's top-level key.
+/// Test: `list_indexes_parses_daemon_envelope`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ListIndexesResponse {
+    /// The list of registered indexes.
+    pub(crate) indexes: Vec<IndexInfo>,
 }
 
 /// A single search result item returned by `POST /indexes/{id}/search`.
@@ -162,10 +176,13 @@ pub trait SearchClient: Send + Sync {
 
     /// List registered indexes.
     ///
-    /// Why: the pipeline may need to verify the configured index exists.
-    /// What: `GET /indexes` → `Vec<IndexInfo>`.  Gracefully degrades on
-    /// transport error (returns `Err`; caller may treat as empty).
-    /// Test: `list_indexes_deserialises`.
+    /// Why: the pipeline may need to verify the configured index exists and
+    /// the auto-derive resolver needs `root_path` to match the current repo.
+    /// What: `GET /indexes?details=true` → `Vec<IndexInfo>`.  The `?details=true`
+    /// query is required so the daemon includes `root_path` in each entry.
+    /// Gracefully degrades on transport error (returns `Err`; caller treats as
+    /// daemon unreachable and falls back to `"main"`).
+    /// Test: `list_indexes_parses_daemon_envelope`.
     async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError>;
 
     /// Search within an index.
@@ -264,7 +281,9 @@ impl SearchClient for HttpSearchClient {
     }
 
     async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
-        let url = format!("{}/indexes", self.base_url);
+        // `?details=true` is REQUIRED: without it the daemon omits `root_path`
+        // from each index entry, making auto-derive unable to match any index.
+        let url = format!("{}/indexes?details=true", self.base_url);
         let resp = self
             .http
             .get(&url)
@@ -285,8 +304,11 @@ impl SearchClient for HttpSearchClient {
             });
         }
 
-        serde_json::from_str(&body)
-            .map_err(|e| SearchClientError::Parse(format!("list indexes response: {e}")))
+        // The daemon returns `{"indexes":[...]}`, not a bare array.
+        // Unwrap the envelope and return the inner Vec.
+        let envelope: ListIndexesResponse = serde_json::from_str(&body)
+            .map_err(|e| SearchClientError::Parse(format!("list indexes response: {e}")))?;
+        Ok(envelope.indexes)
     }
 
     async fn search(
@@ -330,156 +352,8 @@ impl SearchClient for HttpSearchClient {
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
+// Split into a sibling file to keep this file under the 500-line cap (#610).
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn search_client_trait_object_compiles() {
-        // This test just needs to compile; the coercion proves SearchClient is
-        // object-safe.
-        fn _accepts_dyn(_c: &dyn SearchClient) {}
-    }
-
-    #[test]
-    fn http_search_client_url_is_configurable() {
-        let client = HttpSearchClient::new("http://127.0.0.1:7878");
-        assert_eq!(client.base_url(), "http://127.0.0.1:7878");
-    }
-
-    #[test]
-    fn http_search_client_strips_trailing_slash() {
-        let client = HttpSearchClient::new("http://127.0.0.1:7878/");
-        // Trailing slash must be removed to prevent double-slash paths.
-        assert_eq!(client.base_url(), "http://127.0.0.1:7878");
-    }
-
-    #[test]
-    fn http_search_client_from_config() {
-        let mut config = crate::config::ReviewConfig::load(None);
-        config.search_url = "http://localhost:9999".to_string();
-        let client = HttpSearchClient::from_config(&config);
-        assert_eq!(client.base_url(), "http://localhost:9999");
-    }
-
-    #[test]
-    fn index_info_deserialises() {
-        let json = r#"{"id":"main","name":"trusty-tools","root_path":"/home/user/trusty-tools"}"#;
-        let info: IndexInfo = serde_json::from_str(json).unwrap();
-        assert_eq!(info.id, "main");
-        assert_eq!(info.name.as_deref(), Some("trusty-tools"));
-    }
-
-    #[test]
-    fn search_result_deserialises() {
-        let json = r#"{
-            "file": "src/lib.rs",
-            "snippet": "pub fn authenticate() {",
-            "score": 0.92,
-            "start_line": 42,
-            "end_line": 58
-        }"#;
-        let result: SearchResult = serde_json::from_str(json).unwrap();
-        assert_eq!(result.file, "src/lib.rs");
-        assert_eq!(result.snippet.as_deref(), Some("pub fn authenticate() {"));
-        assert!((result.score - 0.92_f32).abs() < 1e-5);
-        assert_eq!(result.start_line, Some(42));
-        assert_eq!(result.end_line, Some(58));
-    }
-
-    #[test]
-    fn search_result_missing_optional_fields() {
-        let json = r#"{"file":"src/main.rs"}"#;
-        let result: SearchResult = serde_json::from_str(json).unwrap();
-        assert_eq!(result.file, "src/main.rs");
-        assert!(result.snippet.is_none());
-        assert!((result.score - 0.0_f32).abs() < 1e-10);
-    }
-
-    /// Verify `SearchRequest` serialises with the correct `text` field name.
-    ///
-    /// Why: trusty-search's `SearchQuery` expects `text` (not `query`); the
-    /// wrong field name causes a 422 "missing field `text`" and disables context
-    /// retrieval for every review.  This regression test pins the wire name.
-    /// What: serialises a `SearchRequest` and asserts the JSON key is `"text"`,
-    /// not `"query"`.
-    /// Test: this test itself; no network.
-    #[test]
-    fn search_request_body_uses_text_field() {
-        let req = SearchRequest {
-            text: "fn authenticate".to_string(),
-            top_k: Some(10),
-        };
-        let json = serde_json::to_string(&req).unwrap();
-        // The wire field MUST be "text" — trusty-search rejects "query" with 422.
-        assert!(
-            json.contains("\"text\""),
-            "SearchRequest must use 'text' field name, got: {json}"
-        );
-        assert!(
-            !json.contains("\"query\""),
-            "SearchRequest must NOT use 'query' field name, got: {json}"
-        );
-        assert!(json.contains("fn authenticate"));
-        assert!(json.contains("10"));
-    }
-
-    #[test]
-    fn search_request_omits_none_top_k() {
-        let req = SearchRequest {
-            text: "async fn".to_string(),
-            top_k: None,
-        };
-        let json = serde_json::to_string(&req).unwrap();
-        assert!(!json.contains("top_k"));
-    }
-
-    #[test]
-    fn search_response_deserialises() {
-        let json = r#"{"results":[{"file":"a.rs","score":0.5},{"file":"b.rs","score":0.3}]}"#;
-        let resp: SearchResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.results.len(), 2);
-        assert_eq!(resp.results[0].file, "a.rs");
-    }
-
-    #[test]
-    fn search_error_display() {
-        let err = SearchClientError::Transport("connection refused".to_string());
-        assert!(err.to_string().contains("connection refused"));
-
-        let err = SearchClientError::Api {
-            status: 503,
-            body: "overloaded".to_string(),
-        };
-        let s = err.to_string();
-        assert!(s.contains("503"));
-        assert!(s.contains("overloaded"));
-    }
-
-    #[tokio::test]
-    async fn health_check_transport_error_on_unreachable() {
-        // Port 1 is always refused; this verifies graceful transport error handling.
-        let client = HttpSearchClient::new("http://127.0.0.1:1");
-        let result = client.health().await;
-        assert!(
-            result.is_err(),
-            "unreachable host must return an error, not panic"
-        );
-        match result.unwrap_err() {
-            SearchClientError::Unavailable(_) => {}
-            SearchClientError::Transport(_) => {}
-            other => panic!("expected Unavailable or Transport, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn search_transport_error_on_unreachable() {
-        let client = HttpSearchClient::new("http://127.0.0.1:1");
-        let result = client.search("main", "fn auth", Some(5)).await;
-        assert!(
-            result.is_err(),
-            "unreachable host must return an error, not panic"
-        );
-    }
-}
+#[path = "search_client_tests.rs"]
+mod tests;
