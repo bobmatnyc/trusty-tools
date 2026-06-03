@@ -19,6 +19,7 @@
 pub mod code_store;
 pub mod embed;
 pub mod graph;
+pub mod redb_recovery;
 pub mod redb_usearch;
 pub mod session_store;
 pub mod store;

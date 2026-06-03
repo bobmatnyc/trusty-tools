@@ -17,3 +17,25 @@ pub mod in_flight;
 
 pub use dedup::{ClaimOutcome, DedupError, DedupStore};
 pub use in_flight::{InFlightGuard, InFlightRegistry};
+
+/// Classify a `redb::DatabaseError` as an incompatible / unreadable file format
+/// (issue #702).
+///
+/// Why: redb 4.x cannot open a redb-2.x file (and rejects foreign/garbage files
+/// outright). The store layer recovers by rebuilding empty, but must do so only
+/// for genuine format problems — never for transient I/O or lock contention.
+/// What: returns `true` for `UpgradeRequired` / `RepairAborted` /
+/// `Storage(Corrupted)` / `Storage(Io(InvalidData))`; `false` otherwise.
+/// Test: `dedup::tests::incompatible_dedup_db_is_recreated` exercises the
+/// `InvalidData` path end-to-end.
+pub(crate) fn redb_error_is_incompatible_format(err: &redb::DatabaseError) -> bool {
+    use redb::{DatabaseError, StorageError};
+    match err {
+        DatabaseError::UpgradeRequired(_) | DatabaseError::RepairAborted => true,
+        DatabaseError::Storage(StorageError::Corrupted(_)) => true,
+        DatabaseError::Storage(StorageError::Io(io)) => {
+            io.kind() == std::io::ErrorKind::InvalidData
+        }
+        _ => false,
+    }
+}

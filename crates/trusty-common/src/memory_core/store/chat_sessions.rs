@@ -23,7 +23,7 @@
 //! `migrates_legacy_sqlite_rows`.
 
 use chrono::{DateTime, Utc};
-use redb::ReadableTable;
+use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -227,7 +227,7 @@ impl ChatSessionStore {
         migrate_from_sqlite_if_present(path, &redb_path)?;
 
         let db =
-            redb::Database::create(&redb_path).map_err(|e| ChatSessionStoreError::Database {
+            super::open_or_recreate(&redb_path).map_err(|e| ChatSessionStoreError::Database {
                 path: redb_path.clone(),
                 source: Box::new(e),
             })?;

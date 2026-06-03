@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use hnsw_rs::prelude::{DistCosine, Hnsw};
 use parking_lot::RwLock;
-use redb::{Database, ReadableTable, ReadableTableMetadata};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
 use thiserror::Error;
 
 use crate::memory_core::store::kg_store::{DELETED_VECTORS, VECTOR_KEYS, VECTORS};

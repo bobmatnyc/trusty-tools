@@ -32,7 +32,7 @@
 //! process), and — when the `sqlite-kg` feature is enabled — the one-shot
 //! migration from the legacy `payloads.db` sidecar.
 
-use redb::{Database, ReadableTable};
+use redb::{Database, ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -205,7 +205,7 @@ impl PayloadStore {
         #[cfg(feature = "sqlite-kg")]
         migrate_from_sqlite_if_present(path, &redb_path)?;
 
-        let db = Database::create(&redb_path).map_err(|e| PayloadStoreError::Database {
+        let db = super::open_or_recreate(&redb_path).map_err(|e| PayloadStoreError::Database {
             path: redb_path.clone(),
             source: Box::new(e),
         })?;

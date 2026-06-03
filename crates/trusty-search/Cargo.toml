@@ -93,7 +93,7 @@ open = "5"
 
 # ── Storage / vector / KG / chunking ───────────────────────────────────────
 usearch = "2.25"
-redb = "2.6"
+redb = { workspace = true }
 dashmap = "5"
 petgraph = "0.6"
 lru = "0.12"

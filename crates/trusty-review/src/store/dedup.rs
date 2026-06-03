@@ -105,6 +105,42 @@ pub enum ClaimOutcome {
     Skipped,
 }
 
+/// Open the dedup redb at `path`, recreating it empty on an incompatible
+/// (redb-2.x) format (issue #702).
+///
+/// Why: redb 4.x cannot open a `dedup.redb` written by redb 2.x. The dedup
+/// store is a best-effort idempotency cache, so on that error we move the stale
+/// file aside (`*.v2-incompatible`) and create a fresh empty store rather than
+/// crashing — losing the history at most causes one duplicate review.
+/// What: on `UpgradeRequired` / `RepairAborted` it renames the file aside, logs
+/// an `ERROR`, and retries the create; other errors map to `DedupError::Open`.
+/// Test: `incompatible_dedup_db_is_recreated`.
+fn open_dedup_db_or_recreate(path: &Path) -> Result<Database, DedupError> {
+    match Database::create(path) {
+        Ok(db) => Ok(db),
+        Err(e) if super::redb_error_is_incompatible_format(&e) => {
+            let mut backup = path.as_os_str().to_os_string();
+            backup.push(".v2-incompatible");
+            let backup = std::path::PathBuf::from(backup);
+            std::fs::rename(path, &backup).map_err(|io| {
+                DedupError::Open(format!(
+                    "incompatible-format dedup redb at {} could not be backed up: {io}",
+                    path.display()
+                ))
+            })?;
+            tracing::error!(
+                path = %path.display(),
+                backup = %backup.display(),
+                error = %e,
+                "dedup redb is in an incompatible/old format (redb 2.x); moved it aside and \
+                 creating a fresh empty dedup store"
+            );
+            Database::create(path).map_err(|e| DedupError::Open(e.to_string()))
+        }
+        Err(e) => Err(DedupError::Open(e.to_string())),
+    }
+}
+
 // ─── Store ──────────────────────────────────────────────────────────────────────
 
 /// A redb-backed SHA-keyed dedup claim store.
@@ -122,15 +158,21 @@ impl DedupStore {
     /// Open (or create) the dedup store at `path`.
     ///
     /// Why: the store lives under the review log dir so it persists across
-    /// daemon restarts (spec: `{LOG_DIR}/dedup.redb`).
-    /// What: creates the redb database file and ensures the claims table exists.
-    /// Test: `open_creates_file`.
+    /// daemon restarts (spec: `{LOG_DIR}/dedup.redb`). Issue #702: redb 4.x
+    /// cannot open a `dedup.redb` written by redb 2.x — without a guard the
+    /// daemon would crash on the first warm boot after the binary upgrade.
+    /// What: creates the redb database file (recreating it empty via
+    /// [`open_dedup_db_or_recreate`] if the existing file is in an
+    /// incompatible/old format) and ensures the claims table exists. Losing the
+    /// dedup history is harmless — at worst a previously-reviewed SHA is
+    /// re-reviewed once.
+    /// Test: `open_creates_file`, `incompatible_dedup_db_is_recreated`.
     pub fn open(path: &Path) -> Result<Self, DedupError> {
         if let Some(parent) = path.parent() {
             // Best-effort dir creation; a real failure surfaces from Database::create.
             let _ = std::fs::create_dir_all(parent);
         }
-        let db = Database::create(path).map_err(|e| DedupError::Open(e.to_string()))?;
+        let db = open_dedup_db_or_recreate(path)?;
         // Ensure the table exists so first-read transactions don't error.
         {
             let write = db
@@ -332,6 +374,34 @@ mod tests {
         let path = dir.path().join("nested").join("dedup.redb");
         let _store = DedupStore::open(&path).expect("open");
         assert!(path.exists(), "redb file must be created");
+    }
+
+    /// Why: #702 graceful-handling — a `dedup.redb` redb 4.x cannot open (a
+    /// stale redb-2.x file, simulated with garbage bytes) must NOT crash the
+    /// daemon; it is moved aside and replaced with a fresh empty store so the
+    /// reviewer keeps working (at worst one duplicate review).
+    /// What: writes garbage to `dedup.redb`, opens via `DedupStore::open`,
+    /// asserts the open succeeds and the backup file exists.
+    /// Test: this test.
+    #[test]
+    fn incompatible_dedup_db_is_recreated() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dedup.redb");
+        std::fs::File::create(&path)
+            .and_then(|mut f| f.write_all(&[0xABu8; 4096]))
+            .unwrap();
+
+        let store = DedupStore::open(&path).expect("incompatible dedup db must recover, not error");
+        assert!(
+            path.with_file_name("dedup.redb.v2-incompatible").exists(),
+            "incompatible dedup file must be backed up"
+        );
+        // Fresh store: a claim against any SHA succeeds (no stale history).
+        assert_eq!(
+            store.claim("o", "r", 1, "sha").unwrap(),
+            ClaimOutcome::Claimed
+        );
     }
 
     #[test]

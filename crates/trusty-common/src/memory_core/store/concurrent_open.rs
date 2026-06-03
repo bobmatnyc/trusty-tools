@@ -47,6 +47,13 @@ pub enum OpenMode {
     /// Operating against a process-local snapshot copy. Writes must be
     /// rejected at the store layer.
     Snapshot,
+    /// The original file was in an incompatible / old redb format (redb 2.x),
+    /// so it was moved aside (`*.v2-incompatible`) and a fresh empty database
+    /// was created in its place (issue #702). Holds the exclusive lock on the
+    /// new file like `ReadWrite`, but signals to the caller that the prior
+    /// contents were lost and the store should be surfaced as
+    /// `degraded`/`rebuilding` rather than `ready`.
+    Recreated,
 }
 
 impl OpenMode {
@@ -55,6 +62,17 @@ impl OpenMode {
     /// Test: trivially covered by the snapshot fallback test.
     pub fn is_read_only(self) -> bool {
         matches!(self, OpenMode::Snapshot)
+    }
+
+    /// Why: callers (KG store init, palace status) need to know the store was
+    /// rebuilt empty after an incompatible-format file so they can treat it as
+    /// `degraded`/needs-rebuild rather than `ready` (the #601/#694 false-healthy
+    /// guard) while still materialising tables like a normal read-write open.
+    /// What: Returns `true` only for [`OpenMode::Recreated`].
+    /// Test: `recreates_on_incompatible_format`.
+    #[must_use]
+    pub fn was_recreated(self) -> bool {
+        matches!(self, OpenMode::Recreated)
     }
 }
 
@@ -162,6 +180,33 @@ fn snapshot_path_for(original: &Path) -> PathBuf {
 pub fn try_open_or_snapshot(path: &Path) -> Result<(Arc<Database>, SnapshotGuard, OpenMode)> {
     match Database::create(path) {
         Ok(db) => Ok((Arc::new(db), SnapshotGuard::noop(), OpenMode::ReadWrite)),
+        // Issue #702: the file is in an incompatible / old redb format (redb
+        // 2.x written by a pre-4.x binary). We hold no lock on it, so it is
+        // safe to move it aside and create a fresh empty database. The caller
+        // receives `OpenMode::Recreated` and must surface degraded status —
+        // never report this store as `ready`.
+        Err(e) if super::redb_open::is_incompatible_format(&e) => {
+            let backup = super::redb_open::backup_incompatible_file(path).with_context(|| {
+                format!(
+                    "back up incompatible-format redb file {} before recreating",
+                    path.display()
+                )
+            })?;
+            let db = Database::create(path).with_context(|| {
+                format!(
+                    "create fresh redb after moving incompatible file aside at {}",
+                    path.display()
+                )
+            })?;
+            tracing::error!(
+                path = %path.display(),
+                backup = %backup.display(),
+                error = %e,
+                "redb file is in an incompatible/old format (redb 2.x); moved it aside and \
+                 created a fresh empty database — this palace must be rebuilt, not treated as ready"
+            );
+            Ok((Arc::new(db), SnapshotGuard::noop(), OpenMode::Recreated))
+        }
         Err(DatabaseError::DatabaseAlreadyOpen) => {
             let snap = snapshot_path_for(path);
             // Snapshot paths are per-call unique (pid + monotonic
@@ -194,6 +239,10 @@ pub fn try_open_or_snapshot(path: &Path) -> Result<(Arc<Database>, SnapshotGuard
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `begin_read` lives on the `ReadableDatabase` trait in redb 4.x; only the
+    // tests exercise it here, so the import is scoped to the test module to keep
+    // the non-test code free of an otherwise-unused trait import.
+    use redb::ReadableDatabase;
     use tempfile::tempdir;
 
     /// Why: Confirms the core contract — a second open against a path
@@ -266,6 +315,36 @@ mod tests {
             !snap_path.exists(),
             "snapshot file should be removed on guard drop"
         );
+    }
+
+    /// Why: #702 — an incompatible-format (redb 2.x) file at the open path must
+    /// be moved aside and replaced with a fresh empty DB returned in
+    /// `Recreated` mode, NOT crash and NOT be treated as a healthy file. This
+    /// is the central palace-open guard against the #601/#694 false-healthy bug.
+    /// What: writes garbage to the palace path, opens via `try_open_or_snapshot`,
+    /// asserts `Recreated` mode, the backup exists, and the fresh DB is writable.
+    /// Test: this test.
+    #[test]
+    fn recreates_on_incompatible_format() {
+        use std::io::Write;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("kg.redb");
+        std::fs::File::create(&path)
+            .and_then(|mut f| f.write_all(&[0xABu8; 4096]))
+            .unwrap();
+
+        let (db, _guard, mode) =
+            try_open_or_snapshot(&path).expect("incompatible file must recover, not error");
+        assert_eq!(mode, OpenMode::Recreated);
+        assert!(mode.was_recreated());
+        assert!(!mode.is_read_only(), "recreated DB holds the live lock");
+        assert!(
+            path.with_file_name("kg.redb.v2-incompatible").exists(),
+            "incompatible file must be backed up"
+        );
+        // The fresh DB is writable.
+        let wtx = db.begin_write().unwrap();
+        wtx.commit().unwrap();
     }
 
     /// Why: A path is process-scoped; running tests in parallel must not

@@ -21,7 +21,7 @@ use crate::memory_core::store::kg_store::{
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use redb::{Database, ReadableTable};
+use redb::{Database, ReadableDatabase, ReadableTable};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -248,13 +248,13 @@ impl KgStoreRedb {
         let (db, snapshot_guard, mode) = try_open_or_snapshot(path)
             .with_context(|| format!("open kg redb at {}", path.display()))?;
 
-        // Touch every table in a single write txn so they exist on disk
-        // even before the first write. Skip this step in snapshot mode
-        // because (a) the live file already initialised every table — we
-        // copied a fully-formed redb image — and (b) any write we make
-        // here would only land in the throw-away snapshot, masking the
-        // read-only intent of every later write rejection.
-        if matches!(mode, OpenMode::ReadWrite) {
+        // Touch every table in a single write txn so they exist on disk even
+        // before the first write. Skip in snapshot mode because (a) the live
+        // file already initialised every table — we copied a fully-formed redb
+        // image — and (b) any write here would only land in the throw-away
+        // snapshot, masking the read-only intent of every later write rejection.
+        // #702: a `Recreated` DB inits tables like read-write; snapshot skips.
+        if matches!(mode, OpenMode::ReadWrite | OpenMode::Recreated) {
             let wtx = db.begin_write().context("begin init txn")?;
             {
                 let _ = wtx.open_table(TRIPLES).context("init triples table")?;

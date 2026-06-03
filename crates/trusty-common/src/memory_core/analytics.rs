@@ -20,7 +20,7 @@ use anyhow::{Context, Result};
 #[cfg(feature = "sqlite-kg")]
 use anyhow::anyhow;
 use chrono::{DateTime, Utc};
-use redb::{Database, ReadableTable};
+use redb::{Database, ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -168,7 +168,7 @@ impl RecallLog {
         #[cfg(feature = "sqlite-kg")]
         migrate_from_sqlite_if_present(path, &redb_path)?;
 
-        let db = Database::create(&redb_path).with_context(|| {
+        let db = super::store::open_or_recreate(&redb_path).with_context(|| {
             format!("failed to open redb recall log at {}", redb_path.display())
         })?;
 
