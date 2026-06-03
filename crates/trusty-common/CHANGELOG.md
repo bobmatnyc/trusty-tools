@@ -1,5 +1,23 @@
 # Changelog — trusty-common
 
+## [0.12.0] — 2026-06-03
+
+### Changed
+
+- **redb 2.6 → 4.1 upgrade** (#702) — all stores upgraded to redb 4.x API.
+  Graceful old-format recovery at every store open: existing `.redb` files
+  written by redb 2.x are detected as incompatible, backed up to
+  `*.v2-incompatible`, and recreated automatically. No manual intervention
+  required.
+
+- **Memory recall ranked by similarity score** (#633) — recall results are
+  now sorted by embedding similarity score (descending) rather than insertion
+  order, surfacing the most relevant memories first.
+
+> **OPERATOR NOTE:** Existing palace `.redb` files are detected as incompatible
+> on first open, backed up to `*.v2-incompatible`, and recreated empty.
+> Re-populating palace data requires re-importing or re-creating memories.
+
 ## [0.11.1] — 2026-06-02
 
 ### Fixed

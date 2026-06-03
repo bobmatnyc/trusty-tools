@@ -7,7 +7,29 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
-## [Unreleased]
+## [0.5.0] — 2026-06-03
+
+### Added
+
+- **redb 4.x + facts store recovery** (#702) — facts store upgraded to redb 4.x
+  with graceful incompatible-file recovery: existing redb 2.x `facts.redb` is
+  backed up to `facts.redb.v2-incompatible` and recreated on first start.
+
+- **Optional `review` feature exposing trusty-review MCP tools** (#630/#631) —
+  a new `review` Cargo feature wires trusty-review's MCP tool surface into the
+  trusty-analyze daemon, enabling PR-review tools without a separate process.
+
+- **On-demand SubprocessAnalyzeClient + facts store** (#632) — the analysis
+  client now supports on-demand subprocess invocation for environments where a
+  persistent daemon is not running.
+
+- **Dashboard auto-start** (#684) — the web UI dashboard auto-starts on first
+  daemon launch without requiring a manual invocation.
+
+> **OPERATOR NOTE:** Existing `facts.redb` is backed up to
+> `facts.redb.v2-incompatible` and recreated empty on first start after upgrade.
+> No analysis history is stored in the facts store; only user-authored facts are
+> affected.
 
 ---
 

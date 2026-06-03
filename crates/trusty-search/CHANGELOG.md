@@ -7,6 +7,49 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.23.0] — 2026-06-03
+
+### Changed
+
+- **redb 4.x + incompatible-corpus backup/rebuild on open** (#702) — index.redb
+  and kg.redb are upgraded to redb 4.x. Existing redb 2.x files are detected as
+  incompatible, backed up to `*.v2-incompatible`, and rebuilt (reindex triggered
+  automatically). Possible multi-minute reindex window on first start after upgrade.
+
+- **TRUSTY_HNSW_MMAP_SERVE (default on)** (#709) — warm-booted HNSW snapshots
+  are now served directly from the mmap page cache, significantly reducing RSS.
+  Promotion to a heap-resident copy is deferred until the first write. Disable with
+  `TRUSTY_HNSW_MMAP_SERVE=0` on NFS/EFS-backed storage where cold page-fault
+  latency matters more than RSS.
+
+- **TRUSTY_VECTOR_QUANT (f16/i8)** (#712) — optional vector quantization for new
+  HNSW indexes: `f16` (≈2× smaller, small recall cost) or `i8` (≈4× smaller,
+  larger recall cost). Requires a forced reindex to take effect on existing indexes.
+
+- **Persistent reindex hash cache** (#662) — content-hash cache for incremental
+  reindex is now stored on disk and survives daemon restarts, avoiding unnecessary
+  re-embedding on startup.
+
+- **Dashboard auto-start** (#686) — the web UI dashboard auto-starts on first
+  daemon launch without requiring a manual `trusty-search ui` invocation.
+
+- **Bulk select/delete/reindex + Documents=0 fix** (#683) — UI and API support
+  bulk operations; fixed a regression where new indexes incorrectly reported 0
+  documents.
+
+- **GET /indexes?details=true root_path** (#661) — the index list endpoint now
+  accepts `details=true` to include `root_path` for each index.
+
+- **Portable-paths fix + migration M004 schema 3→4** (#674) — index paths are
+  now stored in a platform-portable form; M004 migration runs automatically on
+  first start (non-destructive and idempotent).
+
+> **OPERATOR NOTES:**
+> 1. Existing `index.redb` and `kg.redb` files are redb 2.x and will be backed up
+>    to `*.v2-incompatible` and rebuilt (reindex) on first start after upgrade.
+>    Expect a multi-minute reindex window for large indexes.
+> 2. Migration M004 runs automatically, is non-destructive, and is idempotent.
+
 ## [0.22.3] - 2026-06-02
 
 ### Fixed
