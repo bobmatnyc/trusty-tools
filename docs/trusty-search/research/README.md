@@ -25,6 +25,7 @@ These are distinct from [regression-testing/](../regression-testing/) (which tra
 
 - [`candle-metal-validation-2026-05-22.md`](candle-metal-validation-2026-05-22.md) — Candle vs ORT-CoreML embedder validation on Apple Silicon.
 - [`bm25-memory-2026-05-28.md`](bm25-memory-2026-05-28.md) — BM25 index memory-footprint investigation.
+- [`fjall-evaluation-2026-06-03.md`](fjall-evaluation-2026-06-03.md) — fjall LSM-tree vs. redb CoW B-tree: deeper evaluation and benchmark spike plan (refs #692, #694).
 
 ### Decision Documents
 
