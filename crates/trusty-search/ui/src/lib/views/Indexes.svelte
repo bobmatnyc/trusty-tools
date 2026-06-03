@@ -8,8 +8,11 @@
    * What: Header card with a create form, then a table of every index with
    * disk + last-indexed columns and per-row Reindex / Delete buttons. A
    * reindex shows a spinner + progress until the SSE `complete` event.
+   * Issue #682 adds multi-select checkboxes and a bulk-action toolbar so
+   * operators can delete or reindex many indexes in one click.
    * Test: trigger a reindex on a seeded index and confirm the spinner shows
-   * progress and clears on completion.
+   * progress and clears on completion; select two rows and confirm bulk
+   * Delete fires two DELETE calls and refreshes the list.
    */
   import { onDestroy } from 'svelte';
   import { api } from '../api.js';
@@ -31,6 +34,53 @@
   let progress = $state({});
   // Live EventSource handles keyed by index id so we can close on unmount.
   const streams = {};
+
+  // -------------------------------------------------------------------------
+  // Multi-select state (issue #682)
+  // -------------------------------------------------------------------------
+
+  /** Set of index ids currently selected via the per-row checkboxes. */
+  let selected = $state(new Set());
+
+  /** True when all (non-busy) rows are selected. */
+  let allSelected = $derived(
+    indexes.length > 0 && indexes.every((ix) => selected.has(ix.id))
+  );
+
+  /** Number of selected rows (drives the toolbar badge). */
+  let selectedCount = $derived(selected.size);
+
+  /**
+   * Why: bulk-action state needs to show per-item feedback after fan-out.
+   * What: array of { id, status: 'ok'|'error', message? } built during a
+   * bulk operation; cleared on next bulk action or list refresh.
+   * Test: mock deleteIndex to reject for one id; assert results contains
+   * one 'error' entry and one 'ok' entry.
+   */
+  let bulkResults = $state([]);
+  let bulkRunning = $state(false);
+  /** Pending bulk op type – used to show a confirm dialog for Delete. */
+  let pendingBulkOp = $state(null); // null | 'delete' | 'reindex'
+
+  function toggleSelectAll() {
+    if (allSelected) {
+      selected = new Set();
+    } else {
+      selected = new Set(indexes.map((ix) => ix.id));
+    }
+  }
+
+  function toggleRow(id) {
+    const next = new Set(selected);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    selected = next;
+  }
+
+  // -------------------------------------------------------------------------
 
   onDestroy(() => {
     for (const id of Object.keys(streams)) closeStream(id);
@@ -129,6 +179,140 @@
     }
   }
 
+  // -------------------------------------------------------------------------
+  // Bulk operations (issue #682)
+  // -------------------------------------------------------------------------
+
+  /** Max concurrent requests for bulk fan-out (avoids overwhelming the daemon). */
+  const BULK_CONCURRENCY = 4;
+
+  /**
+   * Why: Bulk delete/reindex fans out N API calls; running them all in parallel
+   * can overwhelm a single-daemon process. This helper runs `tasks` with at most
+   * `concurrency` in-flight at once, exactly like a semaphore.
+   * What: splits the task list into windows of `concurrency`, awaits each window
+   * before starting the next. Returns an ordered array of settled results.
+   * Test: pass 6 tasks with concurrency=2, assert each batch of 2 completes
+   * before the next starts.
+   */
+  async function pLimit(tasks, concurrency) {
+    const results = [];
+    for (let i = 0; i < tasks.length; i += concurrency) {
+      const batch = tasks.slice(i, i + concurrency);
+      const settled = await Promise.allSettled(batch.map((fn) => fn()));
+      results.push(...settled);
+    }
+    return results;
+  }
+
+  /**
+   * Why: operators may want to initiate a bulk op but accidentally trigger it;
+   * surfacing a confirm step for Delete (destructive) prevents data loss.
+   * What: sets `pendingBulkOp` to show an inline confirm toolbar; the actual
+   * fan-out runs from `confirmBulkOp`.
+   * Test: click "Delete selected", assert confirm banner appears; click Cancel,
+   * assert no DELETE calls were made.
+   */
+  function startBulkOp(op) {
+    if (op === 'delete') {
+      pendingBulkOp = 'delete';
+    } else {
+      // Reindex has no destructive data loss — execute immediately.
+      executeBulkReindex();
+    }
+  }
+
+  function cancelBulkOp() {
+    pendingBulkOp = null;
+  }
+
+  async function confirmBulkOp() {
+    if (pendingBulkOp === 'delete') {
+      pendingBulkOp = null;
+      await executeBulkDelete();
+    }
+  }
+
+  /**
+   * Why: bulk delete must run with bounded concurrency and surface per-item
+   * success/failure so operators can see which indexes failed.
+   * What: iterates the selected set, calls api.deleteIndex for each, collects
+   * results, refreshes the list, and clears the selection.
+   * Test: select 3 indexes, bulk delete; assert all three rows disappear and
+   * bulkResults has 3 entries each with status='ok'.
+   */
+  async function executeBulkDelete() {
+    const ids = [...selected];
+    bulkRunning = true;
+    bulkResults = [];
+    rowError = null;
+    try {
+      const tasks = ids.map((id) => async () => {
+        closeStream(id);
+        try {
+          await api.deleteIndex(id);
+          return { id, status: 'ok' };
+        } catch (err) {
+          return { id, status: 'error', message: err.message || String(err) };
+        }
+      });
+      const settled = await pLimit(tasks, BULK_CONCURRENCY);
+      bulkResults = settled.map((r) =>
+        r.status === 'fulfilled'
+          ? r.value
+          : { id: '?', status: 'error', message: r.reason?.message || String(r.reason) }
+      );
+      const failed = bulkResults.filter((r) => r.status === 'error');
+      if (failed.length > 0) {
+        rowError = `Bulk delete: ${failed.length} failed — ${failed.map((f) => f.id).join(', ')}`;
+      }
+    } finally {
+      bulkRunning = false;
+      selected = new Set();
+      await refreshIndexes().catch(() => {});
+    }
+  }
+
+  /**
+   * Why: bulk reindex queues N reindex jobs concurrently; SSE progress is per-
+   * index so existing single-row streaming still works for each.
+   * What: calls the existing `reindex(id)` function for every selected id in
+   * bounded batches, reusing the SSE progress wiring already in place.
+   * Test: select 2 indexes, bulk reindex; assert both rows show spinners.
+   */
+  async function executeBulkReindex() {
+    const ids = [...selected];
+    bulkRunning = true;
+    bulkResults = [];
+    rowError = null;
+    try {
+      const tasks = ids.map((id) => async () => {
+        try {
+          // Reuse the single-row reindex which wires SSE progress for each id.
+          await reindex(id);
+          return { id, status: 'ok' };
+        } catch (err) {
+          return { id, status: 'error', message: err.message || String(err) };
+        }
+      });
+      const settled = await pLimit(tasks, BULK_CONCURRENCY);
+      bulkResults = settled.map((r) =>
+        r.status === 'fulfilled'
+          ? r.value
+          : { id: '?', status: 'error', message: r.reason?.message || String(r.reason) }
+      );
+      const failed = bulkResults.filter((r) => r.status === 'error');
+      if (failed.length > 0) {
+        rowError = `Bulk reindex: ${failed.length} failed — ${failed.map((f) => f.id).join(', ')}`;
+      }
+    } finally {
+      bulkRunning = false;
+      selected = new Set();
+    }
+  }
+
+  // -------------------------------------------------------------------------
+
   /**
    * Why: disk_bytes is raw; operators want human units.
    * What: byte-count → "X KB / MB / GB", or "—" when null.
@@ -196,6 +380,52 @@
       {loading ? 'Refreshing…' : 'Refresh'}
     </button>
   </div>
+
+  <!-- Bulk-action toolbar (issue #682): shown when ≥1 row is selected -->
+  {#if selectedCount > 0}
+    <div class="bulk-toolbar">
+      {#if pendingBulkOp === 'delete'}
+        <!-- Confirm step for destructive delete -->
+        <span class="bulk-confirm-text">
+          Delete {selectedCount} index{selectedCount === 1 ? '' : 'es'}? On-disk data is preserved.
+        </span>
+        <button
+          class="btn btn-sm btn-danger"
+          disabled={bulkRunning}
+          onclick={confirmBulkOp}
+        >
+          {bulkRunning ? 'Deleting…' : 'Confirm delete'}
+        </button>
+        <button class="btn btn-sm" disabled={bulkRunning} onclick={cancelBulkOp}>
+          Cancel
+        </button>
+      {:else}
+        <span class="bulk-count">{selectedCount} selected</span>
+        <button
+          class="btn btn-sm"
+          disabled={bulkRunning}
+          onclick={() => startBulkOp('reindex')}
+        >
+          {bulkRunning ? 'Working…' : 'Reindex selected'}
+        </button>
+        <button
+          class="btn btn-sm btn-danger"
+          disabled={bulkRunning}
+          onclick={() => startBulkOp('delete')}
+        >
+          Delete selected
+        </button>
+        <button
+          class="btn btn-sm btn-ghost"
+          disabled={bulkRunning}
+          onclick={() => (selected = new Set())}
+        >
+          Clear selection
+        </button>
+      {/if}
+    </div>
+  {/if}
+
   <div class="card-body" style="padding: 0">
     {#if rowError}
       <div class="row-error">{rowError}</div>
@@ -212,6 +442,17 @@
         <table class="table">
           <thead>
             <tr>
+              <!-- Select-all header checkbox (issue #682) -->
+              <th class="col-check">
+                <input
+                  type="checkbox"
+                  class="checkbox"
+                  checked={allSelected}
+                  indeterminate={selectedCount > 0 && !allSelected}
+                  onchange={toggleSelectAll}
+                  aria-label="Select all indexes"
+                />
+              </th>
               <th>Name</th>
               <th>Documents</th>
               <th>Disk</th>
@@ -223,7 +464,17 @@
           </thead>
           <tbody>
             {#each indexes as ix (ix.id)}
-              <tr>
+              <tr class:selected-row={selected.has(ix.id)}>
+                <!-- Per-row checkbox (issue #682) -->
+                <td class="col-check">
+                  <input
+                    type="checkbox"
+                    class="checkbox"
+                    checked={selected.has(ix.id)}
+                    onchange={() => toggleRow(ix.id)}
+                    aria-label={`Select ${ix.id}`}
+                  />
+                </td>
                 <td><strong>{ix.id}</strong></td>
                 <td>{(ix.chunk_count ?? 0).toLocaleString()}</td>
                 <td class="text-mono text-xs">{humanBytes(ix.disk_bytes)}</td>
@@ -317,5 +568,55 @@
     to {
       transform: rotate(360deg);
     }
+  }
+
+  /* Bulk-action toolbar (issue #682) */
+  .bulk-toolbar {
+    display: flex;
+    align-items: center;
+    gap: var(--trusty-space-2);
+    padding: var(--trusty-space-2) var(--trusty-space-4);
+    background: var(--trusty-surface-raised, #f5f5f5);
+    border-bottom: 1px solid var(--trusty-border);
+    flex-wrap: wrap;
+  }
+  .bulk-count {
+    font-size: var(--trusty-fs-sm);
+    font-weight: 600;
+    color: var(--trusty-text);
+    margin-right: var(--trusty-space-1);
+  }
+  .bulk-confirm-text {
+    font-size: var(--trusty-fs-sm);
+    color: var(--trusty-danger);
+    font-weight: 500;
+    margin-right: var(--trusty-space-1);
+  }
+  .btn-ghost {
+    background: transparent;
+    border-color: transparent;
+    color: var(--trusty-text-muted);
+  }
+  .btn-ghost:hover:not(:disabled) {
+    background: var(--trusty-surface-hover, rgba(0, 0, 0, 0.06));
+    color: var(--trusty-text);
+  }
+
+  /* Per-row checkbox column */
+  .col-check {
+    width: 36px;
+    padding-left: var(--trusty-space-3);
+    padding-right: 0;
+  }
+  .checkbox {
+    cursor: pointer;
+    width: 15px;
+    height: 15px;
+    accent-color: var(--trusty-primary, #3b82f6);
+  }
+
+  /* Highlight selected rows */
+  .selected-row {
+    background: var(--trusty-primary-soft, rgba(59, 130, 246, 0.07));
   }
 </style>
