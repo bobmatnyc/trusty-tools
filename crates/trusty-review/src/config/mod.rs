@@ -16,10 +16,12 @@
 pub mod constants;
 pub mod context;
 pub mod index_resolver;
+pub mod mapreduce;
 pub mod role_models;
 pub mod verification;
 
 pub use index_resolver::{find_git_root, repo_root_from_cwd, resolve_index_from_list};
+pub use mapreduce::{DiffStats, MapMode, MapReduceConfig, ReviewPath, select_review_mode};
 
 pub use context::{ContextConfig, ContextFileConfig};
 pub use role_models::{
