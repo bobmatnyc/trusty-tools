@@ -24,6 +24,7 @@ pub mod roots_registry;
 pub mod server;
 pub mod ui;
 pub mod walker;
+pub mod warm_boot;
 pub mod watch_loop;
 pub mod watcher;
 

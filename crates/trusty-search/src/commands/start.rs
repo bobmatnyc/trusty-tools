@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::core::registry::{IndexHandle, IndexId, IndexStages, StageState, StageStatus};
-use crate::service::persistence::{load_index_registry, PersistedIndex};
+use crate::service::persistence::PersistedIndex;
 use crate::service::persistence_loader::build_indexer_from_entry;
 use crate::service::SearchAppState;
 
@@ -148,10 +148,10 @@ pub(crate) fn derive_warm_boot_stages(inputs: WarmBootInputs) -> IndexStages {
     }
 }
 
-/// Restore every index recorded in `indexes.toml` by re-registering it on the
-/// in-memory registry. For each entry we attempt to load the persisted HNSW
-/// snapshot and chunk corpus from disk so the index comes back warm (no
-/// re-indexing required).
+/// Restore every index recorded in `indexes.toml` and in colocated roots by
+/// re-registering it on the in-memory registry. For each entry we attempt to
+/// load the persisted HNSW snapshot and chunk corpus from disk so the index
+/// comes back warm (no re-indexing required).
 ///
 /// Issue #403: Warm-boot from indexes.toml (legacy global indexes) AND from
 /// filesystem-discovered colocated `.trusty-search/` indexes (dual discovery).
@@ -160,6 +160,16 @@ pub(crate) fn derive_warm_boot_stages(inputs: WarmBootInputs) -> IndexStages {
 /// which projects were registered — every restart required the user to run
 /// `trusty-search index <path>` again. Now the registry is durable and
 /// HNSW + chunks are restored automatically.
+///
+/// Issue #718 Part 2: the two discovery phases are now independent:
+///   Phase 1 — legacy entries from `indexes.toml` (fast, always accessible
+///   under launchd) are collected synchronously and registered immediately.
+///   Phase 2 — colocated entries from tracked roots are scanned with a
+///   per-root timeout via `spawn_blocking` so that a TCC-denied or hung
+///   external-volume root (e.g. `/Volumes/SSD1`) cannot block Phase 1
+///   registration. Each root gets its own 10-second deadline; timeouts and
+///   permission errors are logged loudly with actionable hints.
+///
 /// What: loads `indexes.toml` for legacy global indexes AND scans tracked roots
 /// (from `roots.toml`) for colocated `.trusty-search/` directories, then
 /// registers each discovered index. Deduplicates by index id so a root that
@@ -169,118 +179,59 @@ pub(crate) fn derive_warm_boot_stages(inputs: WarmBootInputs) -> IndexStages {
 /// Test: integration test in `tests/integration_tests.rs` that writes a
 /// registry file, calls this hook, and asserts the registry list matches.
 async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core::Embedder>) {
-    let all_entries = collect_all_index_entries();
-    if all_entries.is_empty() {
-        // Issue #718: tracing::error! is emitted by collect_all_index_entries()
-        // on read/parse failure. This warn is for the benign first-run case.
+    use crate::service::warm_boot::{collect_colocated_entries, collect_legacy_entries};
+    use std::collections::HashSet;
+
+    // ── Phase 1: legacy indexes (indexes.toml) ─────────────────────────────
+    // Fast synchronous read from the data dir (always accessible under
+    // launchd). Register these immediately so the daemon is useful as soon
+    // as possible, regardless of what happens in Phase 2.
+    let legacy_entries = collect_legacy_entries();
+    let mut seen_ids: HashSet<String> = HashSet::new();
+
+    if legacy_entries.is_empty() {
         tracing::warn!(
-            "warm-boot: no index entries (indexes.toml absent/empty). \
+            "warm-boot: no legacy index entries (indexes.toml absent/empty). \
              Under launchd, set TRUSTY_DATA_DIR to an absolute path (issue #718)."
         );
-        return;
+    } else {
+        tracing::info!(
+            "warm-boot: restoring {} legacy index registration(s) from indexes.toml",
+            legacy_entries.len()
+        );
+        for entry in legacy_entries {
+            seen_ids.insert(entry.id.clone());
+            restore_one_index(state, embedder, entry).await;
+        }
+        tracing::info!(
+            "warm-boot: legacy phase complete — {} index(es) now registered",
+            state.registry.list().len()
+        );
     }
+
+    // ── Phase 2: colocated indexes (roots.toml + fs scan) ──────────────────
+    // Each tracked root is scanned via spawn_blocking with a per-root timeout
+    // (ROOT_SCAN_TIMEOUT = 10 s) so a TCC-denied or hung external-volume root
+    // cannot block this phase or Phase 1 registration.
+    let colocated_entries = collect_colocated_entries(&seen_ids).await;
+
+    if colocated_entries.is_empty() {
+        tracing::debug!("warm-boot: no additional colocated indexes discovered");
+    } else {
+        tracing::info!(
+            "warm-boot: restoring {} colocated index registration(s) from tracked roots",
+            colocated_entries.len()
+        );
+        for entry in colocated_entries {
+            restore_one_index(state, embedder, entry).await;
+        }
+    }
+
+    let total = state.registry.list().len();
     tracing::info!(
-        "warm-boot: restoring {} index registration(s) (legacy + colocated)",
-        all_entries.len()
+        "warm-boot: complete — {} total index(es) registered (legacy + colocated)",
+        total
     );
-    for entry in all_entries {
-        restore_one_index(state, embedder, entry).await;
-    }
-}
-
-/// Collect all index entries from BOTH the legacy `indexes.toml` registry AND
-/// the filesystem-discovered colocated `.trusty-search/` directories.
-///
-/// Why: dual discovery is the compatibility bridge between the pre-#403 global
-/// storage layout and the new colocated layout. Legacy indexes loaded from
-/// `indexes.toml` keep working unchanged; newly created colocated indexes are
-/// found by scanning the tracked roots in `roots.toml`.
-/// What: merges entries, deduplicating by index id (legacy wins over colocated).
-/// Issue #718: registry read errors are logged at ERROR (not warn) and include
-/// the resolved absolute path so operators can diagnose launchd 0-index boots.
-/// Test: `dual_discovery_finds_legacy_and_colocated` in the tests block.
-fn collect_all_index_entries() -> Vec<PersistedIndex> {
-    use crate::service::fs_discovery::{scan_roots_for_colocated_indexes, DEFAULT_SCAN_DEPTH};
-    use crate::service::persistence::{data_dir, indexes_toml_path};
-    use crate::service::roots_registry::load_roots;
-
-    let mut all: Vec<PersistedIndex> = Vec::new();
-    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    // Issue #718: log the resolved data dir — primary diagnostic for 0-index boots.
-    match data_dir() {
-        Ok(ref d) => tracing::info!("warm-boot: data directory: {}", d.display()),
-        Err(ref e) => tracing::error!(
-            "warm-boot: FATAL — cannot resolve data directory; \
-             set TRUSTY_DATA_DIR in the launchd plist (issue #718). Error: {e}"
-        ),
-    }
-
-    // 1. Legacy global indexes from indexes.toml.
-    //    Issue #718: escalate from warn → error and include the resolved path.
-    let path_hint = indexes_toml_path()
-        .as_deref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "<path unresolvable>".to_string());
-    match load_index_registry() {
-        Ok(entries) if entries.is_empty() => {
-            tracing::debug!("warm-boot: indexes.toml at {path_hint} — empty (first run)")
-        }
-        Ok(entries) => {
-            tracing::info!(
-                "warm-boot: loaded {} legacy index(es) from {path_hint}",
-                entries.len()
-            );
-            for e in entries {
-                seen_ids.insert(e.id.clone());
-                all.push(e);
-            }
-        }
-        Err(e) => tracing::error!(
-            "warm-boot: FAILED reading indexes.toml at {path_hint}: {e}. \
-             Indexes MISSING on this boot. \
-             Set TRUSTY_DATA_DIR in the launchd/systemd unit (issue #718)."
-        ),
-    }
-
-    // 2. Colocated indexes discovered by scanning tracked roots.
-    let tracked_roots: Vec<std::path::PathBuf> = match load_roots() {
-        Ok(r) => r.into_iter().map(|r| r.path).collect(),
-        Err(e) => {
-            tracing::error!(
-                "warm-boot: FAILED reading roots.toml: {e}. \
-                 Colocated indexes not discovered on this boot (issue #718)."
-            );
-            Vec::new()
-        }
-    };
-
-    if !tracked_roots.is_empty() {
-        let discovered = scan_roots_for_colocated_indexes(&tracked_roots, DEFAULT_SCAN_DEPTH);
-        for colocated in discovered {
-            if seen_ids.contains(&colocated.id) {
-                // Already loaded from indexes.toml or a duplicate root scan.
-                tracing::debug!(
-                    "dual-discovery: colocated index '{}' at {} skipped (already in registry)",
-                    colocated.id,
-                    colocated.root_path.display()
-                );
-                continue;
-            }
-            seen_ids.insert(colocated.id.clone());
-            // Build a PersistedIndex for this colocated discovery with sensible
-            // defaults (no per-index config) — operators who need custom
-            // include_paths/exclude_globs must register explicitly via `trusty-search index`.
-            all.push(PersistedIndex {
-                id: colocated.id,
-                root_path: colocated.root_path,
-                colocated: true,
-                ..Default::default()
-            });
-        }
-    }
-
-    all
 }
 
 /// Attempt to locate a moved project root for a colocated index (issue #484).
