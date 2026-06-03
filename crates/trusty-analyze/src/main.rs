@@ -21,6 +21,7 @@ use trusty_analyze::service::{serve, AnalyzerAppState, DEFAULT_PORT};
 
 mod commands;
 use commands::daemon as daemon_cmds;
+use commands::daemon_guard::ensure_daemon_running;
 use commands::service::{run_service_action, ServiceAction as ServiceActionEnum};
 use commands::setup::{run_setup, SetupTarget};
 
@@ -673,19 +674,22 @@ async fn main() -> Result<()> {
             trusty_analyze::mcp::stdio::run(server).await
         }
         Cmd::Dashboard { port } => {
-            use std::net::{SocketAddr, TcpStream};
-            use std::time::Duration;
-            let addr: SocketAddr = ([127, 0, 0, 1], port).into();
-            let reachable = TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok();
-            if !reachable {
-                eprintln!(
-                    "Error: trusty-analyze is not running on port {port}.\n       Start it with: trusty-analyze serve"
-                );
-                std::process::exit(1);
-            }
+            // Auto-start the daemon when it is not yet reachable.
+            // Why: `dashboard` is a convenience command — the user should
+            // never have to manually run `trusty-analyze serve` first. Mirrors
+            // the trusty-search `daemon_guard::ensure_daemon_running` pattern.
+            // What: `ensure_daemon_running` probes `/health`, spawns the
+            // daemon in the background when absent, polls until ready (30s
+            // budget with a spinner), then returns. On success we open the UI.
+            // Test: with no daemon running, this path spawns the daemon and
+            // opens the browser. With a running daemon, the probe returns
+            // immediately and no spawn occurs.
+            ensure_daemon_running(port).await?;
             let url = format!("http://127.0.0.1:{port}/ui");
             println!("Opening {url}");
-            open::that(&url).with_context(|| format!("open {url} in browser"))?;
+            if let Err(e) = open::that(&url) {
+                eprintln!("could not launch browser ({e}). Open this URL manually: {url}");
+            }
             Ok(())
         }
         Cmd::Service { action } => {
