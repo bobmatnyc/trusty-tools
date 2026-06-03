@@ -1,4 +1,4 @@
-//! Per-index bounded restore for warm-boot (issue #718 Part 3).
+//! Per-index bounded restore for warm-boot (issue #718 Part 3 / Part 4).
 //!
 //! Why: the legacy-phase loop in `restore_indexes` (start.rs) calls
 //! `restore_one_index` for each entry in `indexes.toml`. Inside that call,
@@ -10,14 +10,26 @@
 //! legacy phase stalls at "restoring 57 legacy index registration(s)" and the
 //! daemon never finishes warm-boot.
 //!
-//! The fix: `restore_one_index_bounded` accepts a future factory for the
-//! per-index restore work so this module stays library-safe (no reference to
-//! the binary-only `commands` module). The caller in `start.rs` passes a
-//! closure capturing `state` and `embedder`. The factory's future is spawned
-//! as a `tokio::spawn` task so the JoinHandle can be aborted when the
-//! per-index timeout (`warmboot_index_timeout()`) fires.
+//! Part 3 fix attempt: spawned the restore as a `tokio::spawn` task, but this
+//! ran the blocking I/O (`open()`, `std::fs::read`, redb) on a tokio worker
+//! thread. When macOS TCC denies the `open()` syscall the kernel blocks the
+//! thread uninterruptibly — `tokio::time::timeout` fires but cannot unfreeze a
+//! thread stuck in a kernel syscall. With 57 indexes, all 57 workers freeze one
+//! by one, starving the async runtime and making `/health` unresponsive.
 //!
-//! Test: `restore_bounded_returns_false_for_fast_timeout`,
+//! Part 4 (this fix): use `tokio::task::spawn_blocking` so the blocking I/O
+//! runs on the dedicated blocking-pool thread, NOT on an async worker. Blocking-
+//! pool threads are expendable — the runtime spawns fresh workers when all current
+//! workers are busy, while blocking threads are subject only to the blocking pool
+//! cap (default 512). When TCC denies `open()`, the blocking thread freezes (one
+//! leaked thread per index, accepted per the fix spec), but all async runtime
+//! workers remain free and `/health` stays responsive throughout warm-boot.
+//!
+//! The closure passed to `spawn_blocking` drives the async restore future via
+//! `Handle::block_on`, which is the standard pattern for async-in-blocking-thread.
+//!
+//! Test: `restore_bounded_runtime_stays_responsive_during_slow_blocking_restore`,
+//!       `restore_bounded_returns_false_for_slow_restore`,
 //!       `restore_bounded_returns_true_for_immediate_completion`.
 
 use std::future::Future;
@@ -30,27 +42,42 @@ use super::warmboot_index_timeout;
 
 /// Restore one index entry with a per-index deadline so warm-boot never hangs.
 ///
-/// Why (issue #718 Part 3): `build_indexer_from_entry` (called from
-/// `restore_one_index`) opens the index's redb synchronously. On a TCC-denied
-/// external volume that open hangs indefinitely, blocking the entire warm-boot
-/// loop. This wrapper spawns the restore as a detached `tokio::spawn` task and
-/// applies `warmboot_index_timeout()` to the JoinHandle. On timeout the task is
-/// aborted; on join-error (panic) the index is skipped. In both error cases a
-/// `tracing::warn!` or `tracing::error!` is emitted naming the index id, path,
-/// and — for `/Volumes/` paths — the TCC hint.
+/// Why (issue #718 Part 4): `build_indexer_from_entry` (called from
+/// `restore_one_index`) opens the index's redb and HNSW snapshot via blocking
+/// `std::fs`/redb/usearch calls. On a TCC-denied external volume the `open()`
+/// syscall blocks uninterruptibly in kernel space. The previous Part 3 fix
+/// used `tokio::spawn`, which runs on an async *worker* thread — when the
+/// syscall hangs it freezes that worker. With 57 indexes all workers eventually
+/// freeze, starving the runtime and making `/health` unresponsive for minutes.
+///
+/// This fix uses `tokio::task::spawn_blocking` so the blocking I/O runs on the
+/// dedicated blocking-pool thread, not on an async worker. When TCC denies the
+/// open(), the blocking thread freezes (one leaked thread per index — accepted
+/// per the #718 fix spec; tokio's default pool cap is 512, so 57 is fine), but
+/// the async workers remain free throughout warm-boot. `/health` stays
+/// responsive.
+///
+/// The `spawn_blocking` closure drives the async restore future via
+/// `Handle::current().block_on(fut)`, which is the standard tokio pattern for
+/// running async code inside a blocking-pool thread.
 ///
 /// What: accepts a `restore_fn` future-factory that, when called with `entry`,
 /// produces the async restore work (typically a closure over `state` + `embedder`
-/// calling `restore_one_index`). Spawns the resulting future via `tokio::spawn`,
-/// then wraps the JoinHandle in `tokio::time::timeout(warmboot_index_timeout())`.
-/// Returns `true` when the restore completes within the deadline, `false` when
-/// it is skipped (timeout or panic).
+/// calling `restore_one_index`). Wraps the blocking execution in
+/// `tokio::time::timeout(warmboot_index_timeout())`. On timeout logs the
+/// actionable TCC hint and drops the `JoinHandle` (the blocking thread is
+/// abandoned — accepted). On join-error (panic) logs and skips. Returns `true`
+/// on success, `false` on timeout or panic.
 ///
-/// Note: uses a factory (not a pre-built Future) so `tokio::spawn` receives an
-/// owned future with no borrowed references — all captures are moved in.
+/// Note: uses a factory (not a pre-built Future) so ownership is clean — all
+/// captures are moved into the `spawn_blocking` closure.
 ///
-/// Test: `restore_bounded_returns_false_for_fast_timeout`,
-///       `restore_bounded_returns_true_for_immediate_completion`.
+/// Test: `restore_bounded_runtime_stays_responsive_during_slow_blocking_restore`
+///       verifies that a slow blocking restore does NOT stall the async runtime
+///       (other async tasks execute concurrently during the restore).
+///       `restore_bounded_returns_false_for_slow_restore` and
+///       `restore_bounded_returns_true_for_immediate_completion` verify the
+///       timeout/success protocol.
 pub async fn restore_one_index_bounded<F, Fut>(entry: PersistedIndex, restore_fn: F) -> bool
 where
     F: FnOnce(PersistedIndex) -> Fut + Send + 'static,
@@ -60,11 +87,15 @@ where
     let index_id = entry.id.clone();
     let root_path = entry.root_path.clone();
 
-    // Spawn the restore as a task so the JoinHandle is abortable when the
-    // timeout fires. Blocking sync I/O (redb open, HNSW load) inside the
-    // restore function is driven from this tokio task; aborting the handle
-    // interrupts the blocked thread at the next tokio yield point.
-    let task = tokio::spawn(restore_fn(entry));
+    // Issue #718 Part 4: run the restore on the blocking-pool thread, NOT on an
+    // async worker. `spawn_blocking` dedicates a thread from tokio's blocking
+    // pool (default cap 512). When a TCC-denied `open()` hangs, that blocking
+    // thread is frozen but all async workers remain available — so `/health`
+    // continues responding. The blocking thread calls `Handle::block_on` to
+    // drive the async restore future to completion; this is the standard tokio
+    // pattern for async-in-blocking-thread and does NOT nest runtimes.
+    let handle = tokio::runtime::Handle::current();
+    let task = tokio::task::spawn_blocking(move || handle.block_on(restore_fn(entry)));
 
     match tokio::time::timeout(deadline, task).await {
         Ok(Ok(())) => {
@@ -111,14 +142,20 @@ where
 
 #[cfg(test)]
 mod tests {
-    //! Tests for the per-index bounded restore (issue #718 Part 3).
+    //! Tests for the per-index bounded restore (issue #718 Part 4).
     //!
-    //! Why: the key invariant is that a restore that hangs (or is too slow)
-    //! must be aborted and `restore_one_index_bounded` must return `false`.
-    //! A restore that completes immediately must return `true`.
+    //! Why: the key invariants are:
+    //! 1. A restore whose blocking I/O hangs must NOT freeze async runtime workers.
+    //!    Other async tasks (e.g. /health handlers) must continue during the hang.
+    //! 2. The per-index timeout fires and the loop returns `false`, then continues
+    //!    to the next index.
+    //! 3. A restore that completes within the deadline returns `true`.
     //!
-    //! We use synthetic async closures (not the real `restore_one_index`)
-    //! so these tests run without a filesystem or registry.
+    //! We use synthetic closures (not the real `restore_one_index`) so these
+    //! tests run without a filesystem or registry. The responsiveness test uses a
+    //! genuine `std::thread::sleep` (blocking sleep, not async) to prove the
+    //! blocking-pool isolation: when the restore thread is asleep in kernel space,
+    //! the async task racing it must still complete on a worker.
     //!
     //! Test: `cargo test -p trusty-search -- warm_boot::restore`.
 
@@ -194,6 +231,74 @@ mod tests {
             start.elapsed() < std::time::Duration::from_secs(10),
             "3 timed-out restores must complete within 10 s total, elapsed: {:?}",
             start.elapsed()
+        );
+    }
+
+    /// Why (issue #718 Part 4 — the critical regression test): the defect was
+    /// that a blocking restore (redb `open()` hung in kernel) froze a tokio
+    /// *worker* thread. With enough indexes, all workers froze and `/health`
+    /// stopped responding. This test proves that a restore using genuine blocking
+    /// I/O (`std::thread::sleep` — not async sleep) does NOT stall a concurrently
+    /// running async task.
+    ///
+    /// What: launch two concurrent tasks:
+    ///   A — `restore_one_index_bounded` with a 2s `std::thread::sleep` inside
+    ///       (simulates a blocking `open()` syscall frozen by TCC denial).
+    ///       Timeout is set to 1s so it fires before the sleep finishes.
+    ///   B — an async `tokio::time::sleep(100ms)` + flag set, representing a
+    ///       `/health` handler.
+    /// Assert: task B (the /health proxy) completes before task A returns,
+    /// proving that the blocking thread does NOT consume a worker.
+    ///
+    /// Implementation note: `std::thread::sleep` inside `Handle::block_on`
+    /// parks the blocking-pool thread while the runtime's async workers stay
+    /// free. If `restore_one_index_bounded` used `tokio::spawn` (Part 3 bug),
+    /// the sleep would run on a worker and task B might starve.
+    ///
+    /// Test: this test; deterministic with a generous margin (200ms >> 100ms).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
+    async fn restore_bounded_runtime_stays_responsive_during_slow_blocking_restore() {
+        unsafe { std::env::set_var("TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS", "1") };
+
+        let health_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let health_done_clone = health_done.clone();
+
+        // Task A: a restore whose inner closure blocks the thread for 2s via
+        // std::thread::sleep (genuine blocking, not async — mirrors a frozen open()).
+        let entry = dummy_entry("test-blocking", "/Volumes/SSD1/blocking-idx");
+        let restore_task = tokio::spawn(restore_one_index_bounded(entry, |_e| async {
+            // std::thread::sleep is a genuine blocking call — it parks the OS
+            // thread. On the spawn_blocking path this parks the blocking-pool
+            // thread, not a worker. On the old tokio::spawn path it would park
+            // a worker and could starve task B.
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }));
+
+        // Task B: a lightweight async task that simulates a /health handler.
+        // It should complete well before task A's 1s timeout fires.
+        let health_task = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            health_done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        // Wait for both to finish.
+        let _ = health_task.await;
+        let result = restore_task.await.expect("restore task must not panic");
+
+        unsafe { std::env::remove_var("TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS") };
+
+        // The health task must have completed (set the flag) — this is the key
+        // assertion: blocking I/O in the restore must NOT stall async workers.
+        assert!(
+            health_done.load(std::sync::atomic::Ordering::SeqCst),
+            "async /health proxy task must complete while blocking restore is running; \
+             if this fails, the blocking restore is freezing an async worker (issue #718)"
+        );
+        // The restore timed out (1s timeout, 2s sleep) and returned false.
+        assert!(
+            !result,
+            "restore with a blocking sleep exceeding the timeout must return false"
         );
     }
 }

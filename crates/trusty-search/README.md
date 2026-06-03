@@ -528,6 +528,17 @@ To fix:
    `trusty-search index /local/path --name myproj`
 3. **Or increase the timeout** if the volume is slow but accessible:
    add `TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS=30` to the launchd plist `EnvironmentVariables`.
+4. **Or run `trusty-search` manually** (not via launchd) from your terminal.
+   macOS TCC applies different access rules to interactive processes vs. launchd
+   agents — running the daemon from a terminal shell typically has the same
+   filesystem access as your user account, without the launchd TCC restriction.
+   ```bash
+   # Stop the launchd agent first, then start manually:
+   launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.search.plist
+   trusty-search start --foreground
+   ```
+   Note: indexes restored when running manually will NOT be available when the
+   daemon is later restarted via launchd unless Full Disk Access is granted.
 
 The same TCC restriction can affect Linux systemd deployments on mount points
 that require specific permissions — grant the service user read access to the
