@@ -122,11 +122,28 @@ pub(super) fn spawn_analyze_review(
 
     // Write diff to stdin.  A missing stdin pipe is a programmer error (we always
     // request piped stdin above), so `expect` is appropriate here.
+    //
+    // BrokenPipe (EPIPE) is intentionally ignored here: it means the child
+    // process exited before reading all of stdin (e.g. `false`, or a
+    // trusty-analyze process that failed before reaching the stdin-read loop).
+    // The real failure signal is the child's non-zero exit status, which is
+    // surfaced as `Unavailable` below.  Treating EPIPE as `Transport` would
+    // mask the actual cause and break the exit-code → Unavailable mapping on
+    // Linux where the OS can deliver SIGPIPE before the write returns.
     {
         let stdin = child.stdin.as_mut().expect("stdin pipe always present");
-        stdin
-            .write_all(diff.as_bytes())
-            .map_err(|e| AnalyzeClientError::Transport(format!("write to stdin: {e}")))?;
+        match stdin.write_all(diff.as_bytes()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                // Child exited early; fall through to wait_with_output so the
+                // non-zero exit code surfaces as Unavailable.
+            }
+            Err(e) => {
+                return Err(AnalyzeClientError::Transport(format!(
+                    "write to stdin: {e}"
+                )));
+            }
+        }
         // stdin is dropped here, closing the pipe so the child sees EOF.
     }
 
