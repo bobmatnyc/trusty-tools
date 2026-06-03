@@ -94,6 +94,15 @@ open = "5"
 # ── Storage / vector / KG / chunking ───────────────────────────────────────
 usearch = "2.25"
 redb = { workspace = true }
+# Why: the `migrate-redb` subcommand reads legacy redb 2.x corpora that redb 4.x
+# cannot open (`DatabaseError::UpgradeRequired`) and copies their rows into a new
+# redb 4.x file WITHOUT re-embedding. Pulling redb 2.6 in under the `redb2` alias
+# lets the binary link both the 2.x read engine and the 4.x write engine at once.
+# Not feature-gated: the tool must be present in every default `cargo install
+# trusty-search` so an operator who upgrades into the empty-recreate path can run
+# the data-preserving migration with zero extra build steps (redb is a pure-Rust
+# B-tree — no C deps — so the binary-size cost is small).
+redb2 = { package = "redb", version = "2.6" }
 dashmap = "5"
 petgraph = "0.6"
 lru = "0.12"

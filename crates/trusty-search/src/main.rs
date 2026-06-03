@@ -615,6 +615,20 @@ enum Commands {
         dry_run: bool,
     },
 
+    /// Migrate a redb 2.x index corpus to redb 4.x, preserving data (issue #702/#707)
+    ///
+    /// Copies an old redb-2.x `index.redb` into a fresh 4.x corpus row-for-row
+    /// (chunks, entities, KG, file hashes, schema version) so an upgrade keeps
+    /// the index WITHOUT re-embedding. Backs up the original first; re-running
+    /// against an already-4.x corpus is a no-op. PATH may be the live
+    /// `index.redb` or its `*.v2-incompatible` recovery backup.
+    #[command(display_order = 28, name = "migrate-redb")]
+    MigrateRedb {
+        /// Path to the index.redb (or its .v2-incompatible backup) to migrate
+        #[arg(value_name = "PATH")]
+        path: std::path::PathBuf,
+    },
+
     /// Remove orphaned index registrations whose root_path no longer exists (issue #489)
     ///
     /// Works OFFLINE — no daemon required. Reads indexes.toml, identifies
@@ -1138,6 +1152,10 @@ async fn run() -> Result<()> {
 
         Commands::MigrateStorage { dry_run } => {
             commands::migrate_storage::handle_migrate_storage(dry_run)?;
+        }
+
+        Commands::MigrateRedb { path } => {
+            commands::migrate_redb::handle_migrate_redb(path)?;
         }
 
         Commands::PruneOrphans { dry_run, yes } => {

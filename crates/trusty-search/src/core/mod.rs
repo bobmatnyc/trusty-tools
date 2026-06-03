@@ -15,6 +15,7 @@ pub mod migration;
 pub mod mmr;
 pub mod ner;
 pub mod project_config;
+pub mod redb_migrate;
 pub mod registry;
 pub mod repo_config;
 pub mod scip_ingest;

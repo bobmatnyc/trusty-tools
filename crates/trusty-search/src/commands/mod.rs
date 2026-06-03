@@ -42,6 +42,7 @@ pub mod init;
 pub mod integrate;
 pub mod list;
 pub mod migrate;
+pub mod migrate_redb;
 pub mod migrate_storage;
 pub mod monitor;
 pub mod port;

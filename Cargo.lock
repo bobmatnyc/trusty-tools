@@ -6576,7 +6576,7 @@ dependencies = [
  "petgraph 0.8.3",
  "rand 0.8.6",
  "ratatui",
- "redb",
+ "redb 4.1.0",
  "regex",
  "reqwest 0.12.28",
  "rust-embed",
@@ -7769,6 +7769,15 @@ name = "reborrow"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
+
+[[package]]
+name = "redb"
+version = "2.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eca1e9d98d5a7e9002d0013e18d5a9b000aee942eb134883a82f06ebffb6c01"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "redb"
@@ -10709,7 +10718,7 @@ dependencies = [
  "open",
  "ort",
  "protobuf",
- "redb",
+ "redb 4.1.0",
  "reqwest 0.12.28",
  "rust-embed",
  "scip",
@@ -10813,7 +10822,7 @@ dependencies = [
  "r2d2",
  "r2d2_sqlite",
  "ratatui",
- "redb",
+ "redb 4.1.0",
  "regex",
  "reqwest 0.12.28",
  "rusqlite",
@@ -10915,7 +10924,7 @@ dependencies = [
  "libc",
  "mime_guess",
  "open",
- "redb",
+ "redb 4.1.0",
  "reqwest 0.12.28",
  "rust-embed",
  "serde",
@@ -11021,7 +11030,7 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "jsonwebtoken",
- "redb",
+ "redb 4.1.0",
  "regex",
  "reqwest 0.12.28",
  "rusqlite",
@@ -11083,7 +11092,8 @@ dependencies = [
  "petgraph 0.6.5",
  "rand 0.8.6",
  "rayon",
- "redb",
+ "redb 2.6.3",
+ "redb 4.1.0",
  "regex",
  "reqwest 0.12.28",
  "serde",
