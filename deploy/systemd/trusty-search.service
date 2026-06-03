@@ -1,0 +1,165 @@
+# trusty-search.service — production systemd unit for the trusty-search HTTP daemon
+#
+# ISSUE CONTEXT
+# -------------
+# Issue #694: an abrupt SIGKILL during shutdown while redb was mid-flush
+# truncated index.redb, leaving the index unrecoverable on Duetto EC2/EBS.
+# Root mitigations already shipped:
+#   - redb 4.x (trusty-common 0.12+) defaults to Durability::Immediate (fsync
+#     after every commit), so partial writes are far less likely to corrupt.
+#   - Graceful SIGTERM drain was added in #534: the daemon finishes in-flight
+#     axum requests before exiting.
+# THIS UNIT seals the gap: TimeoutStopSec gives the daemon enough wall-clock
+# time to drain HTTP requests AND let redb's fsync complete before systemd
+# escalates to SIGKILL.  Without a generous timeout, systemd would SIGKILL
+# after its default 90 s — potentially mid-fsync on a busy EBS volume.
+#
+# Issue #704 (EBS durability): this unit handles graceful stop.  Pair it with
+# scheduled EBS snapshots → S3 for point-in-time recovery.  Graceful stop is
+# necessary but not sufficient — volume-level backups are the durability layer.
+#
+# INSTALLATION
+# ------------
+# See README.md in this directory for the full install + restart workflow.
+#
+# FOREGROUND MODE
+# ---------------
+# `trusty-search start` (no flags) self-forks a detached background child and
+# returns immediately — wrong for systemd, which requires the supervised
+# process to stay in the foreground.  Use `trusty-search start --foreground`
+# (added alongside issue #534).  systemd manages the lifecycle; the daemon
+# must not fork itself.
+
+[Unit]
+Description=trusty-search hybrid code-search daemon (BM25 + vector + KG)
+# Wait for the network stack to be fully up before starting.
+# Why: the daemon binds a TCP port and connects to trusty-embedderd over a
+# UDS socket; starting before the loopback interface is ready is harmless
+# but logs spurious bind-retry noise.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# ── Process type ─────────────────────────────────────────────────────────────
+# Type=simple: systemd considers the service started as soon as ExecStart
+# forks.  The daemon does NOT call sd_notify(), so Type=notify is incorrect.
+# Type=forking is also wrong: --foreground keeps the daemon in the foreground
+# rather than double-forking.
+Type=simple
+
+# ── Identity ─────────────────────────────────────────────────────────────────
+# Run as a dedicated non-root user.  Create this user before enabling the unit:
+#   useradd --system --no-create-home --shell /sbin/nologin trusty
+# Adjust Group= if your deployment uses a shared data group for the EBS mount.
+User=trusty
+Group=trusty
+
+# ── Binary ───────────────────────────────────────────────────────────────────
+# Adjust the path to match where `cargo install trusty-search` placed the
+# binary on this host (typically /usr/local/bin or ~/.cargo/bin for the trusty
+# user).  Use an absolute path; systemd does not search PATH for ExecStart.
+#
+# --foreground: required — keeps the process in the foreground so systemd owns
+#               its lifecycle.  Without this flag, the daemon self-forks and
+#               systemd loses track of the PID.
+# --no-auto-discover: suppresses the startup scan that walks scan_paths and
+#               indexes every git repo it finds.  On EC2, auto-discovery should
+#               be off by default; register indexes explicitly with
+#               `trusty-search index <path>`.
+# --port 7878: explicit port; change to match your deployment or omit to use
+#               the compiled-in default (7878).
+ExecStart=/usr/local/bin/trusty-search start \
+    --foreground \
+    --no-auto-discover \
+    --port 7878
+
+# ── Graceful shutdown (#694 mitigation) ──────────────────────────────────────
+# KillSignal=SIGTERM: instruct systemd to send SIGTERM first (graceful).  This
+# is systemd's default, but stated explicitly so the intent is unambiguous.
+# The daemon's SIGTERM handler (issue #534) drains in-flight HTTP requests and
+# waits for redb to finish its current fsync before exiting.
+KillSignal=SIGTERM
+
+# TimeoutStopSec=120: THIS IS THE PRIMARY #694 MITIGATION.
+# After SIGTERM, systemd waits this many seconds before escalating to SIGKILL.
+# 120 s gives the daemon time to:
+#   1. Finish all in-flight HTTP search/reindex requests (drain phase, #534).
+#   2. Let redb complete its Durability::Immediate fsync to the EBS volume.
+#      EBS throughput can be low under concurrent I/O; a 120 s budget is
+#      generous for any realistic redb write set.  If a reindex is mid-flight
+#      when the stop arrives, the pipeline will either complete its current
+#      batch or be aborted cleanly by the shutdown signal — either way redb
+#      commits only full, fsynced transactions.
+# Without this timeout, systemd defaults to 90 s — tight for a heavily loaded
+# EBS volume.  Increase further (e.g. 300 s) if reindexing very large
+# codebases simultaneously with a stop is expected.
+TimeoutStopSec=120
+
+# ── Restart policy ───────────────────────────────────────────────────────────
+# Restart on abnormal exits (crash, OOM) but not on clean exit (systemctl stop).
+Restart=on-failure
+# Wait 5 s before restarting to avoid thundering-herd on a broken embedder or
+# OOM condition.  Increase if the daemon is crashlooping due to a transient
+# resource spike.
+RestartSec=5
+
+# ── Working directory ─────────────────────────────────────────────────────────
+# Set to the EBS mount point that holds the index data (redb files, HNSW
+# snapshots, indexes.toml).  The daemon resolves TRUSTY_DATA_DIR relative to
+# this directory when the env var is set to a relative path.  Using an absolute
+# path in TRUSTY_DATA_DIR (recommended) makes WorkingDirectory advisory only,
+# but it is good practice to set it to the data volume nonetheless.
+WorkingDirectory=/data/trusty-search
+
+# ── Environment ──────────────────────────────────────────────────────────────
+# Core logging level.  Use debug for initial bring-up; info for steady state.
+Environment=RUST_LOG=info
+
+# TRUSTY_DATA_DIR: root for all daemon-owned data (indexes.toml, per-index
+# redb/HNSW data, lockfile, port discovery file).  Point this at the EBS
+# mount so index data survives instance replacement.
+# REQUIRED on EC2/EBS — do not leave as /tmp or the daemon's XDG default.
+Environment=TRUSTY_DATA_DIR=/data/trusty-search
+
+# TRUSTY_EMBEDDER: embedding back-end.  Default ("auto"/"stdio") spawns
+# trusty-embedderd as a stdio sidecar on the first embed request.  That binary
+# must be on PATH (or set TRUSTY_EMBEDDERD_BIN to its absolute path).
+# On GPU-equipped instances, set TRUSTY_DEVICE=gpu or leave as "auto".
+# Environment=TRUSTY_EMBEDDER=auto
+
+# TRUSTY_EMBEDDERD_BIN: absolute path to trusty-embedderd if not on PATH.
+# Environment=TRUSTY_EMBEDDERD_BIN=/usr/local/bin/trusty-embedderd
+
+# TRUSTY_DEVICE: embedding device.  "auto" (default) uses CUDA if available,
+# then CoreML on Apple Silicon, then CPU.  Set "cpu" to force CPU-only.
+# Environment=TRUSTY_DEVICE=auto
+
+# TRUSTY_NO_KG: set to "1" to disable the Knowledge Graph on every new index.
+# Saves memory and indexing time on hosts where KG is not needed.
+# Environment=TRUSTY_NO_KG=1
+
+# TRUSTY_MEMORY_LIMIT_MB: soft RSS ceiling for the indexing pipeline (MiB).
+# Auto-tuned from system RAM by default.  Override on constrained instances.
+# Environment=TRUSTY_MEMORY_LIMIT_MB=4096
+
+# TRUSTY_GPU_MEM_LIMIT_BYTES: CUDA VRAM ceiling in bytes (issue #600).
+# Default 12 GiB (12884901888), safe for a 16 GB Tesla T4.
+# Reduce for smaller cards: TRUSTY_GPU_MEM_LIMIT_MB=6144 for 8 GB.
+# Environment=TRUSTY_GPU_MEM_LIMIT_BYTES=12884901888
+
+# ORT_DYLIB_PATH: required on Amazon Linux 2023 (glibc < 2.38) with CUDA
+# builds.  Point to the system libonnxruntime.so installed from an ORT GPU
+# release tarball.  Not needed for CPU-only or default bundled-ORT builds.
+# Environment=ORT_DYLIB_PATH=/opt/onnxruntime/lib/libonnxruntime.so
+
+# ── File descriptor limit ─────────────────────────────────────────────────────
+# Raise the open-file limit.  The daemon holds mmap'd redb files (one per
+# index) plus HNSW snapshot files plus HTTP keep-alive sockets.  On a machine
+# with many indexes, the default system limit (1024) is easily exhausted.
+# 65536 is a common safe ceiling for daemons that use mmap-intensive workloads.
+LimitNOFILE=65536
+
+[Install]
+# Start this service when the system reaches multi-user (non-graphical) mode —
+# the standard target for daemon services on EC2 and other headless Linux hosts.
+WantedBy=multi-user.target
