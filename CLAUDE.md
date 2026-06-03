@@ -318,6 +318,11 @@ Release workflow:
 5. Create the tag: `git tag <crate-name>-v<version>`.
 6. Push the tag: `git push origin <crate-name>-v<version>`.
 7. Publish: `cargo publish -p <crate-name>`.
+   - **UI-embedding crates** (trusty-search, trusty-memory, trusty-analyze): prefix with `SKIP_UI_BUILD=1`:
+     ```bash
+     SKIP_UI_BUILD=1 cargo publish -p <crate-name>
+     ```
+     The committed `ui-dist/` bundle is already in the repo; without this flag, `build.rs` will attempt to invoke `pnpm` inside cargo's verification tarball, which fails because it tries to modify files outside `OUT_DIR`.
 8. Build the release binary (if not already fresh): `cargo build --release -p <crate-name>`.
 9. Install the binary locally with `cargo install --path crates/<dir> --locked`
    (for crates with binaries, e.g. trusty-search, trusty-mpm). This ensures the
