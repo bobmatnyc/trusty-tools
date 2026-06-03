@@ -85,11 +85,43 @@ impl SearchClient for FakeSearchTool {
     }
 }
 
+/// A search stub that returns an error on health checks (simulates unreachable dep).
+struct FailSearchTool;
+
+#[async_trait]
+impl SearchClient for FailSearchTool {
+    async fn health(&self) -> Result<SearchHealth, SearchClientError> {
+        Err(SearchClientError::Unavailable("down".to_string()))
+    }
+
+    async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+        Err(SearchClientError::Unavailable("down".to_string()))
+    }
+
+    async fn search(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<u32>,
+    ) -> Result<Vec<SearchResult>, SearchClientError> {
+        Err(SearchClientError::Unavailable("down".to_string()))
+    }
+}
+
 fn make_tool_state(llm: Arc<dyn LlmProvider>) -> AppState {
     AppState::new(
         ReviewConfig::load(None),
         llm,
         Arc::new(FakeSearchTool),
+        None,
+    )
+}
+
+fn make_tool_state_fail_search(llm: Arc<dyn LlmProvider>) -> AppState {
+    AppState::new(
+        ReviewConfig::load(None),
+        llm,
+        Arc::new(FailSearchTool),
         None,
     )
 }
@@ -187,4 +219,64 @@ async fn review_health_inference_auth_error_degraded() {
     let health: Value = serde_json::from_str(text).expect("valid JSON");
     assert_eq!(health["inference"], "auth_error");
     assert_eq!(health["status"], "degraded");
+}
+
+// ── review_health dep-reachability tests (#722) ───────────────────────────────
+
+/// review_health MCP tool sets `status: "degraded"` when the required search dep
+/// is unreachable, even if inference itself is healthy.
+///
+/// Why: validates the #722 fix in the MCP path — callers that gate on `status`
+/// must get `"degraded"` when trusty_search is down.
+/// What: builds AppState with OkLlmTool (inference ok) + FailSearchTool (health
+/// returns Err); calls call_review_health; asserts status is "degraded" and
+/// deps.trusty_search.reachable is false.
+/// Test: this test itself.
+#[tokio::test]
+async fn review_health_required_dep_down_degraded() {
+    let state = make_tool_state_fail_search(Arc::new(OkLlmTool));
+    let result = call_review_health(&state).await;
+    let text = result["content"][0]["text"].as_str().expect("text field");
+    let health: Value = serde_json::from_str(text).expect("valid JSON");
+    assert_eq!(
+        health["status"], "degraded",
+        "required dep (trusty_search) down → status must be degraded"
+    );
+    assert_eq!(
+        health["inference"], "ok",
+        "inference must be ok (OkLlmTool always succeeds)"
+    );
+    assert_eq!(
+        health["deps"]["trusty_search"]["reachable"], false,
+        "trusty_search.reachable must be false when search is down"
+    );
+}
+
+/// review_health MCP tool stays `status: "ok"` when inference is ok and all
+/// required deps are reachable — even when analyze (non-required) is absent.
+///
+/// Why: validates the happy-path of #722 — non-required deps absent/unreachable
+/// must not degrade status.
+/// What: builds AppState with OkLlmTool + FakeSearchTool (health ok) + no analyze;
+/// calls call_review_health; asserts status is "ok" and trusty_search.reachable is true.
+/// Test: this test itself.
+#[tokio::test]
+async fn review_health_optional_dep_down_ok() {
+    // No analyze dep configured (analyze = None → analyze_reachable = false).
+    let state = make_tool_state(Arc::new(OkLlmTool));
+    let result = call_review_health(&state).await;
+    let text = result["content"][0]["text"].as_str().expect("text field");
+    let health: Value = serde_json::from_str(text).expect("valid JSON");
+    assert_eq!(
+        health["status"], "ok",
+        "optional dep absent → status must remain ok"
+    );
+    assert_eq!(
+        health["deps"]["trusty_search"]["reachable"], true,
+        "trusty_search.reachable must be true (FakeSearchTool succeeds)"
+    );
+    assert_eq!(
+        health["deps"]["trusty_analyze"]["reachable"], false,
+        "trusty_analyze.reachable must be false (no analyze configured)"
+    );
 }

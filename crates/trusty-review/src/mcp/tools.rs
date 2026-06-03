@@ -24,7 +24,10 @@ use crate::{
     integrations::github::{AuthStrategy, GithubClient, RunMode},
     models::ReviewResult,
     pipeline::{DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review},
-    service::AppState,
+    service::{
+        AppState,
+        handlers::{DepInfo, DepStatus, compute_status},
+    },
 };
 
 // ─── Tool definitions ────────────────────────────────────────────────────────
@@ -269,22 +272,49 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
 /// Why: gives Claude Code a quick way to verify that the service is reachable
 /// AND that inference is working before issuing a real review (closes #719).
 /// MPM uses this to gate `review_pr` calls so it never attempts a full review
-/// when the LLM endpoint is down or credentials are expired.
-/// What: runs the shared `InferenceProbe` (10 s TTL, 3 s timeout) against the
-/// configured reviewer LLM; returns a JSON health snapshot with `status`
-/// (`"ok"` or `"degraded"`), `inference` (`"ok"` / `"unreachable"` /
-/// `"auth_error"` / `"unknown"`), `dry_run`, `reviewer_model`, and a `deps`
-/// object listing dependency URLs.  When `inference != "ok"`, `status` is set
-/// to `"degraded"` so callers can gate on a single field.
-/// Test: `review_health_inference_ok`, `review_health_inference_auth_error_degraded`.
+/// when the LLM endpoint is down or credentials are expired.  #722 extends the
+/// status decision to factor in required-dep reachability so callers that gate
+/// on the top-level `status` field get an accurate signal even when only the
+/// search dep is down.
+/// What: probes the search dep (non-blocking health call) and the inference
+/// endpoint (via the cached `InferenceProbe`); computes `status` via the shared
+/// `compute_status` helper so the HTTP and MCP paths are always consistent;
+/// returns a JSON health snapshot with `status` (`"ok"` or `"degraded"`),
+/// `inference`, `dry_run`, `reviewer_model`, and a `deps` object with
+/// `reachable` flags for each dep.  When inference is not `"ok"` OR a required
+/// dep is unreachable, `status` becomes `"degraded"`.
+/// Test: `review_health_inference_ok`, `review_health_inference_auth_error_degraded`,
+/// `review_health_required_dep_down_degraded`, `review_health_optional_dep_down_ok`.
 async fn call_review_health(state: &AppState) -> Value {
     let reviewer_model = state.config.role_models.reviewer.model.clone();
+
+    // Non-blocking dep probes — same logic as the HTTP /health handler.
+    let search_reachable = state.search.health().await.is_ok_and(|r| r.is_healthy());
+    let analyze_reachable = match &state.analyze {
+        Some(a) => a.health().await.is_ok(),
+        None => false,
+    };
+
+    // Cached inference-reachability probe (#719).
     let inference = state
         .inference_probe
         .probe(&state.llm, &reviewer_model)
         .await;
 
-    let status = if inference.is_ok() { "ok" } else { "degraded" };
+    // Build the deps struct so compute_status can inspect required flags (#722).
+    let deps = DepStatus {
+        trusty_search: DepInfo {
+            required: true,
+            reachable: search_reachable,
+        },
+        trusty_analyze: DepInfo {
+            required: false,
+            reachable: analyze_reachable,
+        },
+    };
+
+    // #722: status is "degraded" when inference fails OR any required dep is down.
+    let status = compute_status(inference, &deps);
 
     let result = serde_json::json!({
         "status": status,
@@ -294,12 +324,12 @@ async fn call_review_health(state: &AppState) -> Value {
         "inference": inference,
         "deps": {
             "trusty_search": {
-                "url": state.config.search_url,
-                "required": true,
+                "required": deps.trusty_search.required,
+                "reachable": deps.trusty_search.reachable,
             },
             "trusty_analyze": {
-                "url": state.config.analyzer_url,
-                "required": false,
+                "required": deps.trusty_analyze.required,
+                "reachable": deps.trusty_analyze.reachable,
             },
         },
     });

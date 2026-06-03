@@ -145,16 +145,17 @@ impl AppState {
 /// traffic to this instance.  MPM uses the `inference` field to gate whether to
 /// attempt a `review_pr` call at all (closes #719).
 /// What: mirrors spec REV-706; `deps.trusty_search.reachable` reflects a
-/// non-blocking background probe cached in `AppState`; `inference` reflects the
-/// short-TTL inference-reachability probe (see `InferenceProbe`).  When
-/// `inference != "ok"`, `status` becomes `"degraded"` so callers can gate on
-/// a single field without inspecting the nested `inference` value.
+/// non-blocking background probe; `inference` reflects the short-TTL
+/// inference-reachability probe (see `InferenceProbe`).  `status` is `"degraded"`
+/// when inference is not `"ok"` OR any `required` dep is unreachable (#722).
 /// Test: `health_returns_ok_json`, `health_inference_ok_when_llm_ok`,
-/// `health_inference_auth_error_sets_degraded`.
+/// `health_inference_auth_error_sets_degraded`,
+/// `health_required_dep_down_sets_degraded`,
+/// `health_optional_dep_down_stays_ok`.
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
-    /// `"ok"` when all required deps are reachable and inference is healthy;
-    /// `"degraded"` when the inference probe returns anything other than `"ok"`.
+    /// `"ok"` when inference is healthy AND all required deps are reachable;
+    /// `"degraded"` when inference is not `"ok"` OR a required dep is unreachable.
     pub status: &'static str,
     /// Pipeline version (e.g. `"tr-0.1"`).
     pub version: &'static str,
@@ -232,6 +233,29 @@ pub struct ReviewRequest {
     pub local_diff_text: Option<String>,
 }
 
+// ─── Status computation ───────────────────────────────────────────────────────
+
+/// Compute the top-level health status string from inference and dep results.
+///
+/// Why: the status decision was previously duplicated between the HTTP handler
+/// and the MCP tool path, and it only considered `inference` — not required-dep
+/// reachability.  This helper centralises the rule so both paths are consistent
+/// and #722 is fixed: a required dep that is unreachable degrades status.
+/// What: returns `"ok"` only when `inference.is_ok()` AND every dep with
+/// `required == true` also has `reachable == true`.  Returns `"degraded"` if
+/// either condition fails.  Non-required deps never influence the result.
+/// Test: `health_status_ok_all_good`, `health_status_degraded_required_dep_down`,
+/// `health_status_degraded_inference_auth_error`,
+/// `health_status_ok_optional_dep_down` in `handlers_tests.rs`.
+pub fn compute_status(inference: InferenceStatus, deps: &DepStatus) -> &'static str {
+    let required_deps_ok = deps.trusty_search.reachable || !deps.trusty_search.required;
+    if inference.is_ok() && required_deps_ok {
+        "ok"
+    } else {
+        "degraded"
+    }
+}
+
 // ─── Route handlers ───────────────────────────────────────────────────────────
 
 /// GET /health — liveness, dependency reachability, and inference probe.
@@ -245,10 +269,12 @@ pub struct ReviewRequest {
 /// LLM provider; returns JSON with dep status, reviewer model, and inference
 /// result.  HTTP 200 always (degraded state is noted in the body, not via 5xx,
 /// to avoid false-positive load-balancer evictions).  When inference is not
-/// `"ok"`, `status` becomes `"degraded"` so callers can gate on one field.
+/// `"ok"` OR a required dep is unreachable, `status` becomes `"degraded"` so
+/// callers can gate on one field.
 /// Test: `health_inference_ok_when_llm_ok`,
 /// `health_inference_auth_error_sets_degraded`,
-/// `health_inference_unreachable_sets_degraded`.
+/// `health_required_dep_down_sets_degraded`,
+/// `health_optional_dep_down_stays_ok`.
 pub async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
     // Non-blocking dep probes — treat errors as "unreachable".
     let search_reachable = state.search.health().await.is_ok_and(|r| r.is_healthy());
@@ -264,7 +290,19 @@ pub async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
         .probe(&state.llm, &reviewer_model)
         .await;
 
-    let status = if inference.is_ok() { "ok" } else { "degraded" };
+    let deps = DepStatus {
+        trusty_search: DepInfo {
+            required: true,
+            reachable: search_reachable,
+        },
+        trusty_analyze: DepInfo {
+            required: false,
+            reachable: analyze_reachable,
+        },
+    };
+
+    // #722: status is "degraded" when inference fails OR any required dep is down.
+    let status = compute_status(inference, &deps);
 
     let body = HealthResponse {
         status,
@@ -272,16 +310,7 @@ pub async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
         dry_run: state.config.dry_run,
         reviewer_model,
         inference,
-        deps: DepStatus {
-            trusty_search: DepInfo {
-                required: true,
-                reachable: search_reachable,
-            },
-            trusty_analyze: DepInfo {
-                required: false,
-                reachable: analyze_reachable,
-            },
-        },
+        deps,
     };
 
     (StatusCode::OK, Json(body))
@@ -429,8 +458,14 @@ fn resolve_diff_source(req: &ReviewRequest) -> Result<DiffSource, String> {
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
-// Split into `handlers_tests.rs` to keep this file under the 500-line cap.
+// Split into focused sibling files to keep every file under the 500-line cap:
+//   handlers_tests.rs        — fakes, state builders, and basic handler tests.
+//   handlers_status_tests.rs — compute_status unit tests + dep-degradation (#722).
 
 #[cfg(test)]
 #[path = "handlers_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "handlers_status_tests.rs"]
+mod status_tests;
