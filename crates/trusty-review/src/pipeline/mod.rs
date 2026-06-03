@@ -10,6 +10,7 @@
 //!  - `diff`          — diff source, loading, truncation, identifier extraction.
 //!  - `diff_analyzer` — DiffAnalyzer noise filter: Stages A/B/C (spec REV-200–262).
 //!  - `grade`         — severity-anchored deterministic grade derivation (floor logic).
+//!  - `mapreduce`     — per-file diff splitter + (future) map/reduce stages (#680).
 //!  - `prompt`        — prompt construction for the reviewer role.
 //!  - `parser`        — verdict + findings parsing from LLM responses.
 //!  - `output`        — log file writing and STDOUT rendering.
@@ -25,6 +26,7 @@ pub mod context_gate;
 pub mod diff;
 pub mod diff_analyzer;
 pub mod grade;
+pub mod mapreduce;
 pub mod output;
 pub mod parser;
 pub mod post;
