@@ -3,12 +3,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use super::store_config::MmapServeMode;
+use super::store_config::{MmapServeMode, VectorQuant};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
+use usearch::{Index, IndexOptions, MetricKind};
 
 /// Sidecar JSON written alongside the usearch binary snapshot, capturing the
 /// `chunk_id → u64 key` mapping (and the `next_key` counter) so a restored
@@ -207,7 +207,7 @@ impl UsearchStore {
     ///
     /// Why: All-MiniLM-L6-v2 produces 384-dim embeddings; cosine is the standard
     /// similarity metric for sentence embeddings.
-    /// What: Builds a usearch `Index` with `MetricKind::Cos` + `ScalarKind::F32`,
+    /// What: Builds a usearch `Index` with `MetricKind::Cos` + env-selected `VectorQuant` precision,
     /// reserves `INITIAL_CAPACITY` slots, and wires up the bidirectional ID map.
     /// Test: `test_len` constructs a fresh store and asserts `len() == 0`.
     pub fn new(dim: usize) -> Result<Self> {
@@ -229,7 +229,7 @@ impl UsearchStore {
         let options = IndexOptions {
             dimensions: dim,
             metric: MetricKind::Cos,
-            quantization: ScalarKind::F32,
+            quantization: VectorQuant::from_env().scalar_kind(),
             connectivity,
             expansion_add,
             expansion_search,
