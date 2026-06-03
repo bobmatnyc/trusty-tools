@@ -19,6 +19,7 @@ pub mod repo_config;
 pub mod scip_ingest;
 pub mod search;
 pub mod store;
+pub mod store_config;
 pub mod symbol_graph;
 
 pub use chunker::{chunk_ast, chunk_text, ChunkType, RawChunk};

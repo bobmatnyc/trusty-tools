@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
+use super::store_config::MmapServeMode;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -186,11 +187,10 @@ pub struct UsearchStore {
     /// rather than `Index::load` (heap copy). Mutating operations must promote the
     /// index to a mutable copy first via [`Self::promote_view_to_mutable`].
     ///
-    /// Why (memory fix): warm-boot of N projects used to call `Index::load` for every
-    /// snapshot, copying the entire HNSW arena into heap RAM even though most indexes
-    /// are never written to in a given session (queries are read-only). Opening with
-    /// `view` keeps the file mapped and lets the OS page cache decide which pages
-    /// stay resident, dropping warm-boot RSS from ~40 GB to a small fraction of that.
+    /// Why (memory fix): warm-boot used to `Index::load` every snapshot, copying
+    /// the whole HNSW arena to heap. `view` keeps it mapped (OS page cache picks
+    /// residency), dropping warm-boot RSS from ~40 GB to a fraction; #709 makes
+    /// this the default and adds `TRUSTY_HNSW_MMAP_SERVE` to opt out.
     /// What: read by [`Self::ensure_mutable`] before every write path (`upsert`,
     /// `upsert_batch`, `remove`, `save`) so the first mutation transparently reloads
     /// the index in mutable mode. Stored as `AtomicBool` so the read path needs no
@@ -236,8 +236,7 @@ impl UsearchStore {
             multi: false,
         };
         let index = Index::new(&options).map_err(|e| anyhow!("usearch Index::new failed: {e}"))?;
-        // Clamp initial reserve to the env-configured max so a runaway
-        // `expected_chunks` doesn't pre-allocate hundreds of GB.
+        // Clamp initial reserve to the env max so a runaway hint can't preallocate GBs.
         let initial = expected_chunks
             .max(INITIAL_CAPACITY)
             .min(hnsw_max_elements());
@@ -261,6 +260,14 @@ impl UsearchStore {
     /// Vector dimensionality this store was built for.
     pub fn dim(&self) -> usize {
         self.dim
+    }
+
+    /// `true` while the HNSW is still served from the read-only mmap view (not
+    /// yet promoted to a heap copy). Test accessor for the #709 QW#1 no-promotion
+    /// invariant — lets integration tests assert the read path stays on the view.
+    #[doc(hidden)]
+    pub fn in_view_mode(&self) -> bool {
+        self.is_view.load(Ordering::Acquire)
     }
 
     /// Persist the HNSW graph and the `chunk_id → u64 key` sidecar to disk.
@@ -412,11 +419,9 @@ impl UsearchStore {
         };
         {
             let index = store.index.write().await;
-            // Use `view` instead of `load` so the snapshot is memory-mapped,
-            // not copied into heap RAM. The OS page cache then services
-            // read-only search traffic without inflating RSS. The first
-            // write transparently promotes the index back to a mutable copy
-            // via `ensure_mutable` / `promote_view_to_mutable`.
+            // Use `view` (mmap) not `load` (heap copy) so RSS stays small; the OS
+            // page cache services read-only search and the first write promotes
+            // back to a mutable copy via `ensure_mutable` (#709 QW#1).
             if let Err(e) = index.view(hnsw_str) {
                 tracing::warn!(
                     "usearch failed to view {} ({e}) — discarding snapshot",
@@ -424,10 +429,8 @@ impl UsearchStore {
                 );
                 return Ok(None);
             }
-            // NOTE: `reserve` is a mutation and would invalidate the view.
-            // We intentionally skip it here — the eventual `ensure_mutable`
-            // call will reload the file in mutable mode and reserve to the
-            // restored size on first write.
+            // NOTE: `reserve` would mutate (invalidate) the view; skip it — the
+            // eventual `ensure_mutable` reserves on first write.
         }
         store.is_view.store(true, Ordering::Release);
         *store.hnsw_path.write().await = Some(hnsw_path.to_path_buf());
@@ -444,33 +447,30 @@ impl UsearchStore {
         store
             .next_key
             .store(key_map.next_key.max(1), Ordering::Relaxed);
+        // QW#1 opt-out (#709): TRUSTY_HNSW_MMAP_SERVE=off promotes to heap now
+        // (higher RSS, no cold-fault latency on EFS/NFS). Default = mmap, no-op.
+        if MmapServeMode::from_env().promote_on_load() {
+            store.promote_view_to_mutable().await?;
+        }
         Ok(Some(store))
     }
 
-    /// If the index is currently in view (mmap, read-only) mode, reload it
-    /// from its source file in mutable mode so subsequent writes can mutate
-    /// the graph.
+    /// If the index is in view (mmap, read-only) mode, reload it from its source
+    /// file in mutable mode so subsequent writes can mutate the graph.
     ///
-    /// Why: `load_from` opens snapshots via `Index::view` so warm-boot RSS
-    /// stays small (see [`Self::load_from`] docs). usearch's view is
-    /// strictly read-only — calling `add` / `remove` / `reserve` on a
-    /// view-mode index will either error or undefined-behave. The first
-    /// mutating call must therefore promote the in-memory state by
-    /// re-reading the source file via `Index::load`, which deserialises the
-    /// graph into a heap-resident, mutable copy. From that point on this
-    /// store behaves identically to one built via `new` and never enters
-    /// view mode again.
-    /// What: relaxed-load the `is_view` flag (fast path). When set, acquire
-    /// the HNSW write lock, call `Index::load(hnsw_path)`, reserve enough
-    /// capacity for the restored size, and clear `is_view`. The flag is
-    /// double-checked under the write lock so concurrent writers race to
-    /// promote at most once. Returns `Err` if the file is no longer
-    /// readable or the source path was never recorded.
+    /// Why: `load_from` opens snapshots via `Index::view` so warm-boot RSS stays
+    /// small. usearch's view is strictly read-only — `add`/`remove`/`reserve` on
+    /// it errors or UBs. The first mutating call must promote by re-reading the
+    /// source via `Index::load` (a heap-resident mutable copy); thereafter the
+    /// store behaves like one built via `new` and never re-enters view mode.
+    /// What: relaxed-load `is_view` (fast path); when set, take the HNSW write
+    /// lock, `Index::load`, reserve to the restored size, clear `is_view`. The
+    /// flag is double-checked under the write lock so racing writers promote at
+    /// most once. Returns `Err` if the file is unreadable or the path is unknown.
     /// Test: `tests::test_view_promotes_to_mutable_on_write`.
     async fn ensure_mutable(&self) -> Result<()> {
-        // Fast path — the overwhelmingly common case is a fresh / already
-        // promoted store. Acquire-load pairs with the `Release` store in
-        // `load_from` and in `promote_view_to_mutable`.
+        // Fast path — fresh / already-promoted store. Acquire pairs with the
+        // `Release` stores in `load_from` / `promote_view_to_mutable`.
         if !self.is_view.load(Ordering::Acquire) {
             return Ok(());
         }
