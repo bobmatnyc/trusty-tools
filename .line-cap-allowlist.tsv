@@ -142,7 +142,7 @@ crates/trusty-search/src/commands/doctor_checks.rs	612
 crates/trusty-search/src/commands/integrate.rs	688
 crates/trusty-search/src/commands/reindex_engine.rs	1438
 crates/trusty-search/src/commands/reindex_ui.rs	898
-crates/trusty-search/src/commands/start.rs	2106
+crates/trusty-search/src/commands/start.rs	2139
 crates/trusty-search/src/core/chunker/mod.rs	1883
 crates/trusty-search/src/core/classifier.rs	1032
 crates/trusty-search/src/core/corpus.rs	1420

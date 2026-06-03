@@ -194,30 +194,37 @@ pub struct IndexRegistryFile {
     pub indexes: Vec<PersistedIndex>,
 }
 
-/// Resolve the daemon's data directory, mirroring `daemon::daemon_dir` so all
-/// persistence files share one parent on every platform.
+/// Resolve the daemon's data directory (absolute, cwd-independent).
 ///
-/// Why: `daemon_dir` lives behind a typed `DaemonError` and is private. We
-/// duplicate the lookup here so this module doesn't take a `DaemonError`
-/// dependency just to read its path. When `TRUSTY_DATA_DIR` is set (by
-/// `--data-dir` or directly), we honour that override so isolated daemons (e.g.
-/// cert/benchmark runs) store their registry and per-index data in the same
-/// override directory as the daemon lockfile (issue #281).
-/// What: returns `$TRUSTY_DATA_DIR` when set, otherwise
-/// `<data_local_dir>/trusty-search`. Creates the directory if missing.
-/// Test: set `TRUSTY_DATA_DIR=/tmp/ts-test`; call `data_dir()`; assert the
-/// returned path equals `/tmp/ts-test` and `indexes.toml` is created there.
+/// Why: `daemon_dir` lives behind `DaemonError`. Issue #281: `TRUSTY_DATA_DIR`
+/// lets isolated daemons coexist with the production daemon.
+/// Issue #718: three-level fallback for launchd's posix_spawn context where
+/// `dirs::data_local_dir()` (NSFileManager-backed) can return None on macOS 26:
+/// (1) `TRUSTY_DATA_DIR` env var, (2) `dirs::data_local_dir()`,
+/// (3) `$HOME`-relative path via `service::data_dir::data_dir_home_fallback`.
+/// What: returns an absolute path, creating the directory if missing.
+/// Test: `data_dir_respects_trusty_data_dir_env_var`, `data_dir_override_yields_absolute_path`,
+/// `data_dir_home_fallback_path_is_absolute`.
 pub fn data_dir() -> Result<PathBuf> {
     if let Ok(override_dir) = std::env::var("TRUSTY_DATA_DIR") {
-        let dir = PathBuf::from(override_dir);
+        let dir = PathBuf::from(&override_dir);
+        anyhow::ensure!(
+            dir.is_absolute(),
+            "TRUSTY_DATA_DIR must be an absolute path (got: {})",
+            override_dir
+        );
         std::fs::create_dir_all(&dir).context("create TRUSTY_DATA_DIR data dir")?;
+        tracing::debug!("data_dir: TRUSTY_DATA_DIR override: {}", dir.display());
         return Ok(dir);
     }
-    let dir = dirs::data_local_dir()
-        .context("could not determine data-local directory")?
-        .join("trusty-search");
-    std::fs::create_dir_all(&dir).context("create trusty-search data dir")?;
-    Ok(dir)
+    if let Some(base) = dirs::data_local_dir() {
+        let dir = base.join("trusty-search");
+        std::fs::create_dir_all(&dir).context("create trusty-search data dir")?;
+        tracing::debug!("data_dir: dirs::data_local_dir: {}", dir.display());
+        return Ok(dir);
+    }
+    // Issue #718: NSFileManager unavailable (launchd posix_spawn, macOS 26).
+    super::data_dir::data_dir_home_fallback()
 }
 
 /// Path to the registry TOML file.
@@ -959,27 +966,20 @@ root_path = "/tmp/legacy_col"
         assert_eq!(entries[0].root_path, PathBuf::from("/new"));
     }
 
-    /// Why: `data_dir()` must return the override path when `TRUSTY_DATA_DIR`
-    /// is set, so an isolated daemon's `indexes.toml` lands in the override dir
-    /// rather than the platform default (issue #281).
-    /// What: set env var to a tempdir; call `data_dir()`; assert the returned
-    /// path matches the override and the directory exists.
-    /// Test: `data_dir_respects_trusty_data_dir_env_var` (this test).
+    /// Issue #281/#718: `data_dir()` must return the override path when
+    /// `TRUSTY_DATA_DIR` is set (absolute, cwd-independent).
+    /// Why: isolated daemons and launchd restarts must land in the override dir.
+    /// What: set env var, call `data_dir()`, assert path matches and dir exists.
+    /// Test: `data_dir_respects_trusty_data_dir_env_var`.
     #[test]
+    #[serial_test::serial]
     fn data_dir_respects_trusty_data_dir_env_var() {
         let tmp = tempfile::tempdir().unwrap();
-        let override_path = tmp.path().to_path_buf();
-        // SAFETY: test-only; TRUSTY_DATA_DIR must not conflict with other
-        // parallel tests that call data_dir(). Use a unique subdir to isolate.
-        let unique = override_path.join("persistence_data_dir_test");
+        let unique = tmp.path().join("persistence_data_dir_test");
         std::fs::create_dir_all(&unique).unwrap();
-        unsafe {
-            std::env::set_var("TRUSTY_DATA_DIR", &unique);
-        }
+        unsafe { std::env::set_var("TRUSTY_DATA_DIR", &unique) };
         let result = data_dir();
-        unsafe {
-            std::env::remove_var("TRUSTY_DATA_DIR");
-        }
+        unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
         let dir = result.expect("data_dir with TRUSTY_DATA_DIR must succeed");
         assert_eq!(dir, unique, "data_dir() should return the override path");
         assert!(

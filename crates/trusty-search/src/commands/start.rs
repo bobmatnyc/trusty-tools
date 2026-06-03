@@ -171,6 +171,12 @@ pub(crate) fn derive_warm_boot_stages(inputs: WarmBootInputs) -> IndexStages {
 async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core::Embedder>) {
     let all_entries = collect_all_index_entries();
     if all_entries.is_empty() {
+        // Issue #718: tracing::error! is emitted by collect_all_index_entries()
+        // on read/parse failure. This warn is for the benign first-run case.
+        tracing::warn!(
+            "warm-boot: no index entries (indexes.toml absent/empty). \
+             Under launchd, set TRUSTY_DATA_DIR to an absolute path (issue #718)."
+        );
         return;
     }
     tracing::info!(
@@ -189,35 +195,62 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
 /// storage layout and the new colocated layout. Legacy indexes loaded from
 /// `indexes.toml` keep working unchanged; newly created colocated indexes are
 /// found by scanning the tracked roots in `roots.toml`.
-/// What: merges entries, deduplicating by index id (legacy wins over colocated
-/// when both exist with the same id — the operator should run
-/// `trusty-search migrate storage` to formally migrate).
+/// What: merges entries, deduplicating by index id (legacy wins over colocated).
+/// Issue #718: registry read errors are logged at ERROR (not warn) and include
+/// the resolved absolute path so operators can diagnose launchd 0-index boots.
 /// Test: `dual_discovery_finds_legacy_and_colocated` in the tests block.
 fn collect_all_index_entries() -> Vec<PersistedIndex> {
     use crate::service::fs_discovery::{scan_roots_for_colocated_indexes, DEFAULT_SCAN_DEPTH};
+    use crate::service::persistence::{data_dir, indexes_toml_path};
     use crate::service::roots_registry::load_roots;
 
     let mut all: Vec<PersistedIndex> = Vec::new();
     let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // 1. Legacy global indexes from indexes.toml (unchanged behaviour).
+    // Issue #718: log the resolved data dir — primary diagnostic for 0-index boots.
+    match data_dir() {
+        Ok(ref d) => tracing::info!("warm-boot: data directory: {}", d.display()),
+        Err(ref e) => tracing::error!(
+            "warm-boot: FATAL — cannot resolve data directory; \
+             set TRUSTY_DATA_DIR in the launchd plist (issue #718). Error: {e}"
+        ),
+    }
+
+    // 1. Legacy global indexes from indexes.toml.
+    //    Issue #718: escalate from warn → error and include the resolved path.
+    let path_hint = indexes_toml_path()
+        .as_deref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "<path unresolvable>".to_string());
     match load_index_registry() {
+        Ok(entries) if entries.is_empty() => {
+            tracing::debug!("warm-boot: indexes.toml at {path_hint} — empty (first run)")
+        }
         Ok(entries) => {
+            tracing::info!(
+                "warm-boot: loaded {} legacy index(es) from {path_hint}",
+                entries.len()
+            );
             for e in entries {
                 seen_ids.insert(e.id.clone());
                 all.push(e);
             }
         }
-        Err(e) => {
-            tracing::warn!("could not read indexes.toml at startup: {e}");
-        }
+        Err(e) => tracing::error!(
+            "warm-boot: FAILED reading indexes.toml at {path_hint}: {e}. \
+             Indexes MISSING on this boot. \
+             Set TRUSTY_DATA_DIR in the launchd/systemd unit (issue #718)."
+        ),
     }
 
     // 2. Colocated indexes discovered by scanning tracked roots.
     let tracked_roots: Vec<std::path::PathBuf> = match load_roots() {
         Ok(r) => r.into_iter().map(|r| r.path).collect(),
         Err(e) => {
-            tracing::warn!("could not read roots.toml at startup: {e}");
+            tracing::error!(
+                "warm-boot: FAILED reading roots.toml: {e}. \
+                 Colocated indexes not discovered on this boot (issue #718)."
+            );
             Vec::new()
         }
     };

@@ -8,6 +8,8 @@ pub mod config;
 pub mod constants;
 pub mod context_inference;
 pub mod daemon;
+/// Issue #718: HOME-based data-dir fallback for supervised-process contexts.
+pub(crate) mod data_dir;
 pub mod embed_pool;
 pub mod embedder_supervisor;
 pub mod fs_discovery;
