@@ -14,6 +14,7 @@
 //! CLI smoke-tests in this file's sibling modules.
 
 pub mod compare;
+pub mod daemon_utils;
 pub mod run;
 #[cfg(feature = "http-server")]
 pub mod serve;
