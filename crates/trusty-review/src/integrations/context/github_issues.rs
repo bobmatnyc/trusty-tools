@@ -22,8 +22,10 @@
 //! transport / API / parse error → orchestrator logs and drops the section.
 //! Never blocks the review.
 //!
-//! Test: `query_builds_search`, `parse_issues_to_section`,
-//! `disabled_without_token`, `semantic_mode_errors`, `gather_with_fakes`.
+//! Test: `query_builds_search`, `query_capped_at_256_chars`,
+//! `query_capped_at_word_boundary`, `query_short_unchanged`,
+//! `parse_issues_to_section`, `disabled_without_token`, `semantic_mode_errors`,
+//! `gather_with_fakes`.
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -43,6 +45,46 @@ const MAX_RESULTS: u32 = 5;
 
 /// Max diff identifiers folded into the keyword query.
 const MAX_QUERY_IDENTIFIERS: usize = 4;
+
+/// GitHub Search API hard limit on the `q` query-parameter length (characters).
+///
+/// Why: queries longer than 256 characters cause the GitHub Search API to return
+/// HTTP 422 Unprocessable Entity, silently dropping the entire GitHub Issues
+/// context section.  The cap is enforced in `cap_query` before the HTTP call.
+/// What: the maximum allowed query length in chars (not bytes).
+/// Test: `query_capped_at_256_chars`, `query_short_unchanged`.
+const GITHUB_QUERY_MAX_CHARS: usize = 256;
+
+/// Truncate a GitHub search query to at most `GITHUB_QUERY_MAX_CHARS` chars at a
+/// word boundary.
+///
+/// Why: prevents HTTP 422 from the GitHub Search API when the assembled query
+/// (`repo:… is:issue <keywords>`) is longer than 256 characters.  Truncating at
+/// whitespace avoids splitting a keyword token mid-word, which would corrupt the
+/// search term.
+/// What: if `q` is already within the limit it is returned unchanged.  Otherwise
+/// the function walks backwards from char position 256 to find the last
+/// whitespace character and slices there; if no whitespace is found (a single
+/// giant token) it falls back to the hard 256-char char-boundary cut.
+/// Test: `query_capped_at_256_chars`, `query_capped_at_word_boundary`,
+/// `query_short_unchanged`.
+fn cap_query(q: &str) -> &str {
+    if q.chars().count() <= GITHUB_QUERY_MAX_CHARS {
+        return q;
+    }
+    // Find the byte index at char position GITHUB_QUERY_MAX_CHARS.
+    let hard_cut_byte = q
+        .char_indices()
+        .nth(GITHUB_QUERY_MAX_CHARS)
+        .map(|(i, _)| i)
+        .unwrap_or(q.len());
+    let candidate = &q[..hard_cut_byte];
+    // Prefer to break at the last whitespace so we don't split mid-token.
+    match candidate.rfind(|c: char| c.is_whitespace()) {
+        Some(ws_byte) if ws_byte > 0 => &q[..ws_byte],
+        _ => candidate, // fallback: hard char-boundary cut
+    }
+}
 
 // ─── Auth seam (reuses #582 dual-mode auth) ─────────────────────────────────
 
@@ -287,10 +329,15 @@ impl GithubIssuesSource {
     /// Build the GitHub search query string for the subject.
     ///
     /// Why: GitHub's issue search scopes by `repo:` and `is:issue`; centralising
-    /// the construction keeps the qualifier set consistent and testable.
-    /// What: returns `repo:{owner}/{repo} is:issue <keywords>`.  `None` when
-    /// there is no keyword signal or no owner/repo (local-diff mode).
-    /// Test: `query_builds_search`.
+    /// the construction keeps the qualifier set consistent and testable.  The
+    /// assembled query is capped at 256 characters (the GitHub Search API limit)
+    /// to prevent HTTP 422 responses when the PR title + body + identifiers are
+    /// long.
+    /// What: returns `repo:{owner}/{repo} is:issue <keywords>` truncated to at
+    /// most 256 chars at a word boundary.  `None` when there is no keyword signal
+    /// or no owner/repo (local-diff mode).
+    /// Test: `query_builds_search`, `query_capped_at_256_chars`,
+    /// `query_capped_at_word_boundary`, `query_short_unchanged`.
     fn build_query(subject: &ReviewSubject) -> Option<String> {
         if subject.owner.is_empty() || subject.repo.is_empty() {
             return None;
@@ -300,10 +347,11 @@ impl GithubIssuesSource {
         if keywords.is_empty() {
             return None;
         }
-        Some(format!(
+        let full = format!(
             "repo:{}/{} is:issue {keywords}",
             subject.owner, subject.repo
-        ))
+        );
+        Some(cap_query(&full).to_string())
     }
 
     /// Parse a GitHub issue-search body into a `ContextSection`.

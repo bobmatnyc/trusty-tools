@@ -193,3 +193,93 @@ async fn gather_with_fakes() {
     assert_eq!(section.snippets[0].title, "#7 — bug");
     assert_eq!(section.snippets[0].subtitle.as_deref(), Some("closed"));
 }
+
+// ─── cap_query / build_query truncation tests (#675) ─────────────────────────
+
+#[test]
+fn query_short_unchanged() {
+    // A query already within the 256-char limit must pass through unmodified.
+    let q = cap_query("repo:acme/backend is:issue fix login");
+    assert_eq!(q, "repo:acme/backend is:issue fix login");
+    assert!(q.chars().count() <= GITHUB_QUERY_MAX_CHARS);
+}
+
+#[test]
+fn query_capped_at_256_chars() {
+    // A query longer than 256 chars must be truncated to at most 256 chars.
+    let long_keywords = "word ".repeat(60); // 300 chars of keywords
+    let subj = ReviewSubject {
+        owner: "acme".to_string(),
+        repo: "backend".to_string(),
+        title: long_keywords.trim().to_string(),
+        ..Default::default()
+    };
+    let q = GithubIssuesSource::build_query(&subj).expect("signal");
+    assert!(
+        q.chars().count() <= GITHUB_QUERY_MAX_CHARS,
+        "query was {} chars (>256): {:?}",
+        q.chars().count(),
+        q
+    );
+}
+
+#[test]
+fn query_capped_at_word_boundary() {
+    // The truncation must not split mid-word: the result must not end with a
+    // partial token (i.e. the last char must be a non-space complete word, or
+    // the cut landed exactly on a space which is stripped).
+    // Build a query that is just over 256 chars with word-aligned tokens so we
+    // can verify the boundary.
+    let prefix = "repo:acme/backend is:issue "; // 26 chars
+    let filler = "abcde ".repeat(40); // 240 chars of 6-char "word " tokens
+    let full = format!("{prefix}{filler}extra");
+    assert!(
+        full.chars().count() > GITHUB_QUERY_MAX_CHARS,
+        "test precondition: full query must exceed 256 chars"
+    );
+    let capped = cap_query(&full);
+    assert!(
+        capped.chars().count() <= GITHUB_QUERY_MAX_CHARS,
+        "capped query too long: {} chars",
+        capped.chars().count()
+    );
+    // Must not end with a space (the whitespace boundary is the trim point).
+    assert!(
+        !capped.ends_with(' '),
+        "capped query must not end with a space: {:?}",
+        capped
+    );
+}
+
+#[test]
+fn build_query_long_body_stays_under_256() {
+    // Exercises the full path: a subject whose keyword_query output would
+    // produce a >256-char assembled query is still capped by build_query.
+    let long_body = "important context word ".repeat(30); // 660 chars
+    let subj = ReviewSubject {
+        owner: "acme".to_string(),
+        repo: "backend".to_string(),
+        title: "Fix authentication flow".to_string(),
+        body: long_body,
+        identifiers: vec![
+            "authenticate".to_string(),
+            "TokenStore".to_string(),
+            "refresh_token".to_string(),
+            "validate_session".to_string(),
+        ],
+        ..Default::default()
+    };
+    let q = GithubIssuesSource::build_query(&subj).expect("signal");
+    assert!(
+        q.chars().count() <= GITHUB_QUERY_MAX_CHARS,
+        "build_query returned {} chars (>256): {:?}",
+        q.chars().count(),
+        q
+    );
+    // Must still start with the required qualifiers.
+    assert!(
+        q.starts_with("repo:acme/backend is:issue "),
+        "qualifiers stripped: {:?}",
+        q
+    );
+}
