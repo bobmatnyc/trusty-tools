@@ -3306,3 +3306,121 @@ async fn enumerate_chunks_returns_resolved_absolute_paths() {
         );
     }
 }
+
+// ── Issue #674: `path` (portable relative path) field on CodeChunk ────────────
+
+/// Why: `raw_to_code_chunk` must populate `path` with the raw stored form when
+/// the stored `file` is already relative (the normal post-#402 case).
+/// This is the read-side half of the portable-paths feature (issue #674).
+/// What: a `RawChunk` with a relative `file` → `CodeChunk.path == Some("src/lib.rs")`.
+/// Test: this test.
+#[test]
+fn raw_to_code_chunk_populates_path_for_relative_file() {
+    use crate::core::indexer::raw_to_code_chunk;
+
+    let raw = make_raw_chunk("src/lib.rs", "pub fn hello() {}\n");
+    let root = std::path::Path::new("/home/alice/proj");
+    let chunk = raw_to_code_chunk(&raw, 0.9, "bm25", None, root);
+
+    // `file` must be absolute.
+    assert!(
+        std::path::Path::new(&chunk.file).is_absolute(),
+        "file must be absolute; got {:?}",
+        chunk.file
+    );
+    assert_eq!(chunk.file, "/home/alice/proj/src/lib.rs");
+
+    // `path` must carry the root-relative form.
+    assert_eq!(
+        chunk.path.as_deref(),
+        Some("src/lib.rs"),
+        "path must be the stored relative value; got {:?}",
+        chunk.path
+    );
+}
+
+/// Why: a pre-#402 legacy chunk whose stored `file` is absolute must not have
+/// a wrong path value in the `path` field. `path` must be `None` so consumers
+/// that use `path` as a portable key do not pick up a stale absolute path.
+/// What: a `RawChunk` with an absolute `file` → `CodeChunk.path == None`.
+/// Test: this test.
+#[test]
+fn raw_to_code_chunk_path_is_none_for_absolute_file() {
+    use crate::core::indexer::raw_to_code_chunk;
+
+    let raw = make_raw_chunk("/mnt/efs/data/repos/proj/src/lib.rs", "pub fn hello() {}\n");
+    let root = std::path::Path::new("/mnt/efs/data/repos/proj");
+    let chunk = raw_to_code_chunk(&raw, 0.9, "bm25", None, root);
+
+    // `file` must pass through unchanged (absolute input → absolute output).
+    assert_eq!(chunk.file, "/mnt/efs/data/repos/proj/src/lib.rs");
+
+    // `path` must be None — we cannot strip the root reliably at read time.
+    assert_eq!(
+        chunk.path, None,
+        "path must be None for a legacy absolute-path chunk; got {:?}",
+        chunk.path
+    );
+}
+
+/// Why: `index_file` must store a relative `file` in the in-memory corpus,
+/// and search results must expose a non-null `path` carrying that relative form
+/// (issue #674 — portable-paths feature).
+/// What: index a file, search for it, assert `CodeChunk.path == Some("src/auth.rs")`.
+/// Test: this test.
+#[tokio::test]
+async fn search_result_path_field_is_populated_after_index_file() {
+    let idx = make_indexer(); // root_path = "/tmp/test"
+    idx.index_file("src/auth.rs", "pub fn authenticate() { /* ok */ }\n")
+        .await
+        .unwrap();
+
+    let q = SearchQuery {
+        text: "authenticate".to_string(),
+        top_k: 5,
+        expand_graph: false,
+        compact: false,
+        ..Default::default()
+    };
+    let results = idx.search(&q).await.unwrap();
+    assert!(!results.is_empty(), "search must find the indexed chunk");
+
+    for chunk in &results {
+        assert_eq!(
+            chunk.path.as_deref(),
+            Some("src/auth.rs"),
+            "CodeChunk.path must be the root-relative path after index_file; got {:?}",
+            chunk.path
+        );
+        // `file` must still be absolute for backward compatibility.
+        assert!(
+            std::path::Path::new(&chunk.file).is_absolute(),
+            "CodeChunk.file must be absolute; got {:?}",
+            chunk.file
+        );
+    }
+}
+
+// ── Helper: build a minimal RawChunk for unit tests ──────────────────────────
+
+fn make_raw_chunk(file: &str, content: &str) -> crate::core::chunker::RawChunk {
+    use crate::core::chunker::{ChunkType, RawChunk};
+    RawChunk {
+        id: format!("{file}:1:10"),
+        file: file.to_string(),
+        start_line: 1,
+        end_line: 10,
+        content: content.to_string(),
+        function_name: None,
+        language: None,
+        chunk_type: ChunkType::Code,
+        calls: Vec::new(),
+        inherits_from: Vec::new(),
+        chunk_depth: 0,
+        parent_chunk_id: None,
+        child_chunk_ids: Vec::new(),
+        nlp_keywords: Vec::new(),
+        nlp_code_refs: Vec::new(),
+        virtual_terms: Vec::new(),
+    }
+}

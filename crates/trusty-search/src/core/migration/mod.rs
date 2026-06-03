@@ -20,6 +20,7 @@
 pub mod m001;
 pub mod m002;
 pub mod m003;
+pub mod m004;
 
 use std::sync::Arc;
 
@@ -32,6 +33,7 @@ use crate::core::registry::IndexHandle;
 pub use m001::M001PerPubConstRust;
 pub use m002::M002AbsoluteToRelativePaths;
 pub use m003::M003HnswKeyRelativization;
+pub use m004::M004RepairAbsoluteFilePaths;
 
 // ── Schema version ────────────────────────────────────────────────────────────
 
@@ -46,7 +48,8 @@ pub use m003::M003HnswKeyRelativization;
 /// `CURRENT_SCHEMA_VERSION == registry.current_version()`.
 /// Issue #402: bump to 2 for M002 (absolute → relative file paths in redb).
 /// Issue #402 phase 2: bump to 3 for M003 (absolute → relative HNSW key IDs).
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+/// Issue #674: bump to 4 for M004 (repair any remaining absolute file paths).
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 // ── redb table for _meta ──────────────────────────────────────────────────────
 
@@ -199,6 +202,14 @@ impl MigrationRegistry {
             // Also repairs indexes stuck at schema_version=2 whose hnsw.keys.json
             // was left with absolute IDs by a prior binary that ran M002 but not M003.
             Arc::new(M003HnswKeyRelativization),
+            // Issue #674: second idempotent pass to repair any remaining absolute
+            // `file` fields that were written by a fresh reindex on AL2023 where
+            // fs::canonicalize produced a path that did not match the walker root
+            // (symlink / EFS mount mismatch), causing strip_prefix to fall back to
+            // storing the absolute path.  Newly-indexed corpora start at
+            // CURRENT_SCHEMA_VERSION=4 so they skip this migration; only corpora
+            // that were indexed by a binary at v3 or earlier will run M004.
+            Arc::new(M004RepairAbsoluteFilePaths),
         ];
         // Defensive sort: ensures chain_from returns migrations in ascending
         // version order even if a future contributor adds them out of order.

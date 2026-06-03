@@ -223,7 +223,8 @@ fn grep_search(root: &Path, term: &str, top_k: usize) -> (Vec<CodeChunk>, u128) 
             // are inert placeholders so the grep result is structurally a chunk.
             Some(CodeChunk {
                 id: format!("{rel}:{lineno}"),
-                file: rel,
+                file: rel.clone(),
+                path: Some(rel),
                 language: Some("rust".to_string()),
                 start_line: lineno,
                 end_line: lineno,

@@ -68,6 +68,7 @@ fn merge_chunks(a: CodeChunk, b: CodeChunk) -> CodeChunk {
     CodeChunk {
         id: format!("{}:{}:{}", primary.file, start_line, end_line),
         file: primary.file,
+        path: primary.path,
         language: primary.language,
         start_line,
         end_line,
@@ -167,6 +168,7 @@ fn placeholder_chunk() -> CodeChunk {
     CodeChunk {
         id: String::new(),
         file: String::new(),
+        path: None,
         language: None,
         start_line: 0,
         end_line: 0,
@@ -249,6 +251,7 @@ mod tests {
         CodeChunk {
             id: format!("{file}:{start}:{end}"),
             file: file.into(),
+            path: None,
             language: Some("rust".into()),
             start_line: start,
             end_line: end,

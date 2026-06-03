@@ -102,7 +102,7 @@ crates/trusty-memory/src/commands/setup.rs	783
 crates/trusty-memory/src/discovery.rs	877
 crates/trusty-memory/src/kg_extract.rs	608
 crates/trusty-memory/src/lib.rs	2796
-crates/trusty-memory/src/main.rs	968
+crates/trusty-memory/src/main.rs	961
 crates/trusty-memory/src/messaging.rs	843
 crates/trusty-memory/src/project_root.rs	980
 crates/trusty-memory/src/prompt_log.rs	851
@@ -148,12 +148,12 @@ crates/trusty-search/src/core/classifier.rs	1032
 crates/trusty-search/src/core/corpus.rs	1420
 crates/trusty-search/src/core/indexer/docs_penalty.rs	543
 crates/trusty-search/src/core/indexer/ingest.rs	1014
-crates/trusty-search/src/core/indexer/mod.rs	1274
+crates/trusty-search/src/core/indexer/mod.rs	1304
 crates/trusty-search/src/core/indexer/persist.rs	740
 crates/trusty-search/src/core/indexer/search.rs	1109
-crates/trusty-search/src/core/indexer/tests.rs	3308
+crates/trusty-search/src/core/indexer/tests.rs	3426
 crates/trusty-search/src/core/memory_policy.rs	1268
-crates/trusty-search/src/core/migration/mod.rs	638
+crates/trusty-search/src/core/migration/mod.rs	649
 crates/trusty-search/src/core/registry.rs	711
 crates/trusty-search/src/core/repo_config.rs	573
 crates/trusty-search/src/core/search/hierarchy.rs	658
@@ -170,7 +170,7 @@ crates/trusty-search/src/service/reindex/mod.rs	3669
 crates/trusty-search/src/service/server.rs	5493
 crates/trusty-search/src/service/walker.rs	1343
 crates/trusty-search/tests/baseline_trusty_tools.rs	721
-crates/trusty-search/tests/benchmark_harness.rs	739
+crates/trusty-search/tests/benchmark_harness.rs	740
 crates/trusty-search/tests/benchmark_open_mpm_kg.rs	845
 crates/trusty-search/tests/benchmark_open_mpm.rs	876
 crates/trusty-search/tests/benchmark_synthetic.rs	698

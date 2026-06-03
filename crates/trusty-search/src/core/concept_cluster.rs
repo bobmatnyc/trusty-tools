@@ -259,6 +259,7 @@ mod tests {
         CodeChunk {
             id: "x".into(),
             file: "x.rs".into(),
+            path: None,
             language: None,
             start_line: 1,
             end_line: 1 + content.lines().count(),

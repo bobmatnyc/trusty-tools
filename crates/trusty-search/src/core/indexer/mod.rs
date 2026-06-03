@@ -223,7 +223,24 @@ pub(crate) const HNSW_SNAPSHOT_BATCH_INTERVAL: u32 = 16;
 pub struct CodeChunk {
     /// Collision-safe ID: "{path}:{start}:{end}"
     pub id: String,
+    /// Absolute path to the source file on the current host (resolved from the
+    /// stored root-relative path at query time). Consumers that need a
+    /// mount-agnostic portable path should use [`path`] instead.
     pub file: String,
+    /// Portable root-relative path stored in the corpus (e.g. `src/lib.rs`).
+    ///
+    /// Why (issue #674 — portable-paths feature): `file` is always resolved to
+    /// an absolute host path at query time so existing consumers do not break,
+    /// but operators on EFS / NFS mounts or multi-host pipelines need a path
+    /// that survives the directory changing. `path` exposes the root-relative
+    /// form directly from the redb corpus so consumers can build their own
+    /// absolute path by joining with `root_path` as appropriate for their
+    /// environment.
+    /// `None` only for pre-#402 legacy chunks whose stored `file` was absolute
+    /// (and thus cannot be stripped to a relative form at read time); these are
+    /// repaired by the M004 migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     #[serde(default)]
     pub language: Option<String>,
     pub start_line: usize,
@@ -548,7 +565,10 @@ pub(crate) fn resolve_chunk_file(raw_file: &str, root_path: &std::path::Path) ->
 /// duplication and the inevitable per-site drift when new fields are added.
 /// What: clones every metadata field and derives `chunk_depth` (clamped to u8).
 /// The `root_path` argument is used to resolve a relative `raw.file` to an
-/// absolute path via [`resolve_chunk_file`] (issue #402).
+/// absolute path via [`resolve_chunk_file`] (issue #402) for the `file` field.
+/// The `path` field (issue #674) is populated with the raw stored form when it
+/// is already relative (the normal post-#402 case); it is `None` for legacy
+/// absolute-path chunks not yet repaired by M004.
 /// Test: covered indirectly by every search/materialization test in this file.
 pub(crate) fn raw_to_code_chunk(
     raw: &RawChunk,
@@ -558,10 +578,20 @@ pub(crate) fn raw_to_code_chunk(
     root_path: &std::path::Path,
 ) -> CodeChunk {
     let chunk_depth: u8 = raw.chunk_depth.min(u8::MAX as usize) as u8;
+    // `path` carries the raw stored (root-relative) form so consumers on
+    // multi-host / EFS mounts can use a mount-agnostic key.  When the stored
+    // value is absolute (pre-M002 legacy or missing M004 repair) we leave
+    // `path` as `None` rather than propagating a wrong mount-specific prefix.
+    let path = if !std::path::Path::new(&raw.file).is_absolute() {
+        Some(raw.file.clone())
+    } else {
+        None
+    };
     let file = resolve_chunk_file(&raw.file, root_path);
     CodeChunk {
         id: raw.id.clone(),
         file,
+        path,
         language: raw.language.clone(),
         start_line: raw.start_line,
         end_line: raw.end_line,
