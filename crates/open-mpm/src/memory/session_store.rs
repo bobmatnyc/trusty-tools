@@ -18,7 +18,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
 use super::redb_usearch::RedbUsearchStore;
@@ -168,9 +168,10 @@ impl SessionRegistry {
     pub fn open(sessions_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(sessions_dir)
             .with_context(|| format!("creating sessions dir {}", sessions_dir.display()))?;
+        // Issue #702: recovery-aware open — a stale redb-2.x registry file is
+        // moved aside and a fresh empty registry is created rather than crashing.
         let path = sessions_dir.join(REGISTRY_FILE);
-        let db = Database::create(&path)
-            .with_context(|| format!("opening session registry at {}", path.display()))?;
+        let db = crate::memory::redb_recovery::open_redb_or_recreate(&path)?;
         // Ensure the table exists.
         {
             let w = db.begin_write()?;

@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use redb::{ReadableTable, ReadableTableMetadata};
+use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
 
 use super::{PAYLOAD_TABLE, RedbUsearchStore, ensure_capacity, next_label, save_index};
 use crate::memory::store::{MemoryResult, MemoryStore, Segment};

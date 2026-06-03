@@ -19,6 +19,7 @@ pub mod kuzu;
 pub mod l1_cache;
 pub mod palace_store;
 pub mod payload_store;
+pub mod redb_open;
 pub mod vector;
 
 pub use chat_sessions::{ChatSession, ChatSessionMeta, ChatSessionStore};
@@ -26,4 +27,8 @@ pub use kg::{KnowledgeGraph, Triple};
 pub use l1_cache::{L1Cache, L1CacheError};
 pub use palace_store::{PalaceStore, PalaceStoreError};
 pub use payload_store::{PayloadRow, PayloadStore, PayloadStoreError};
+pub use redb_open::{
+    INCOMPATIBLE_SUFFIX, backup_incompatible_file, incompatible_backup_path,
+    is_incompatible_format, open_or_recreate,
+};
 pub use vector::{VectorHit, VectorStore};

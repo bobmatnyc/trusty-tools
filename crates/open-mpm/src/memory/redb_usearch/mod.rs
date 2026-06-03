@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use tokio::sync::Mutex;
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
@@ -107,9 +107,11 @@ impl RedbUsearchStore {
         std::fs::create_dir_all(store_dir)
             .with_context(|| format!("creating store dir {}", store_dir.display()))?;
 
+        // Issue #702: open via the recovery-aware helper so a stale redb-2.x
+        // `store.redb` is moved aside and a fresh empty store is created rather
+        // than crashing on warm boot after the binary upgrade.
         let db_path = store_dir.join("store.redb");
-        let db = Database::create(&db_path)
-            .with_context(|| format!("opening redb at {}", db_path.display()))?;
+        let db = crate::memory::redb_recovery::open_redb_or_recreate(&db_path)?;
 
         // Touch all tables so that subsequent read transactions don't error
         // out with TableDoesNotExist on a freshly-created database.

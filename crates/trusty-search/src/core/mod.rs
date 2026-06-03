@@ -4,6 +4,7 @@ pub mod classifier;
 #[cfg(feature = "clustering")]
 pub mod concept_cluster;
 pub mod corpus;
+pub mod corpus_recovery;
 pub mod embed;
 pub mod entity;
 pub mod git;

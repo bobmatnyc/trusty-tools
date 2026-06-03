@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::types::facts::FactRecord;
 use anyhow::{Context, Result};
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, DatabaseError, ReadableDatabase, ReadableTable, TableDefinition};
 use xxhash_rust::xxh3::Xxh3;
 
 const FACTS_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("facts");
@@ -80,6 +80,63 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Classify a `redb::DatabaseError` as an incompatible / unreadable facts file.
+///
+/// Why: the open path must recover (rebuild empty) from a redb-2.x or otherwise
+/// unparseable `facts.redb`, but must NOT do so on transient I/O or lock errors.
+/// What: returns `true` for `UpgradeRequired` / `RepairAborted` /
+/// `Storage(Corrupted)` / `Storage(Io(InvalidData))`; `false` otherwise.
+/// Test: `incompatible_facts_db_is_recreated` exercises the `InvalidData` path.
+fn facts_db_is_incompatible(err: &DatabaseError) -> bool {
+    use redb::StorageError;
+    match err {
+        DatabaseError::UpgradeRequired(_) | DatabaseError::RepairAborted => true,
+        DatabaseError::Storage(StorageError::Corrupted(_)) => true,
+        DatabaseError::Storage(StorageError::Io(io)) => {
+            io.kind() == std::io::ErrorKind::InvalidData
+        }
+        _ => false,
+    }
+}
+
+/// Open the facts redb at `path`, recreating it empty if the existing file is
+/// in an incompatible / old redb format (issue #702).
+///
+/// Why: redb 4.x cannot open a `facts.redb` written by redb 2.x — the open
+/// returns `DatabaseError::UpgradeRequired(_)`. The facts store is a
+/// re-derivable knowledge cache, so on that error we move the stale file aside
+/// (`facts.redb.v2-incompatible`) and create a fresh empty store rather than
+/// crashing the daemon. A loud `ERROR` makes the reset visible.
+/// What: tries `Database::create`. On a format-incompatibility error
+/// (`UpgradeRequired` / `RepairAborted`) it renames the file aside, logs, and
+/// retries the create. Other errors are surfaced verbatim.
+/// Test: `incompatible_facts_db_is_recreated`.
+fn open_facts_db_or_recreate(path: &Path) -> Result<Database> {
+    match Database::create(path) {
+        Ok(db) => Ok(db),
+        Err(e) if facts_db_is_incompatible(&e) => {
+            let mut backup = path.as_os_str().to_os_string();
+            backup.push(".v2-incompatible");
+            let backup = std::path::PathBuf::from(backup);
+            std::fs::rename(path, &backup).with_context(|| {
+                format!(
+                    "back up incompatible-format facts redb {} before recreating",
+                    path.display()
+                )
+            })?;
+            tracing::error!(
+                path = %path.display(),
+                backup = %backup.display(),
+                error = %e,
+                "facts redb is in an incompatible/old format (redb 2.x); moved it aside and \
+                 creating a fresh empty facts store — facts must be re-derived"
+            );
+            Database::create(path).context("create fresh facts redb after moving incompatible file")
+        }
+        Err(e) => Err(anyhow::Error::new(e)).context("open facts redb"),
+    }
+}
+
 /// redb-backed store for `FactRecord`s. Cheap to clone — `Arc<Database>`.
 #[derive(Clone)]
 pub struct FactStore {
@@ -87,8 +144,19 @@ pub struct FactStore {
 }
 
 impl FactStore {
+    /// Open (creating if absent) the facts redb at `path`.
+    ///
+    /// Why: the facts store is a `(subject, predicate, object)` knowledge cache
+    /// that recovers by being re-derived from analysis. Issue #702: redb 4.x
+    /// cannot open a `facts.redb` written by redb 2.x — without a guard the
+    /// daemon would crash on the first warm boot after the binary upgrade.
+    /// What: opens via [`open_facts_db_or_recreate`], which on an
+    /// incompatible-format error moves the stale file aside
+    /// (`*.v2-incompatible`) and creates a fresh empty store, then materialises
+    /// the facts table so reads on a brand-new file succeed.
+    /// Test: `incompatible_facts_db_is_recreated`.
     pub fn open(path: &Path) -> Result<Self> {
-        let db = Database::create(path).context("open facts redb")?;
+        let db = open_facts_db_or_recreate(path)?;
         let txn = db.begin_write().context("begin facts init txn")?;
         {
             let _t = txn
@@ -211,6 +279,32 @@ mod tests {
         let path = tmp.path().join("facts.redb");
         let store = FactStore::open(&path).expect("open facts store");
         (store, tmp)
+    }
+
+    /// Why: #702 graceful-handling — a `facts.redb` redb 4.x cannot open (a
+    /// stale redb-2.x file, simulated with garbage bytes) must NOT crash the
+    /// daemon; it is moved aside and replaced with a fresh empty store.
+    /// What: writes garbage to `facts.redb`, opens via `FactStore::open`,
+    /// asserts the open succeeds, the backup exists, and the store is empty.
+    /// Test: this test.
+    #[test]
+    fn incompatible_facts_db_is_recreated() {
+        use std::io::Write;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("facts.redb");
+        std::fs::File::create(&path)
+            .and_then(|mut f| f.write_all(&[0xABu8; 4096]))
+            .unwrap();
+
+        let store = FactStore::open(&path).expect("incompatible facts db must recover, not error");
+        assert!(
+            path.with_file_name("facts.redb.v2-incompatible").exists(),
+            "incompatible facts file must be backed up"
+        );
+        assert!(
+            store.query(None, None, None).unwrap().is_empty(),
+            "recreated facts store must start empty"
+        );
     }
 
     #[test]

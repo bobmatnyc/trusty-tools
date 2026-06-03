@@ -144,7 +144,7 @@ aws-smithy-types       = { version = "1.4" }
 clap_complete = "4"
 which = "6"
 open = "5"
-redb = "2.6"
+redb = "4"
 postcard = { version = "1", features = ["alloc"] }
 ndarray = "0.16"
 scip = "0.7"

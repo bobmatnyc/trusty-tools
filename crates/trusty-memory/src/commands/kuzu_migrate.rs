@@ -36,7 +36,7 @@
 
 use anyhow::{Context, Result};
 use colored::Colorize;
-use redb::{Database, ReadableTable, TableHandle};
+use redb::{Database, ReadableDatabase, ReadableTable, TableHandle};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;

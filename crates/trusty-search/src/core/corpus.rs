@@ -24,9 +24,10 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 
 use crate::core::chunker::RawChunk;
+use crate::core::corpus_recovery::open_corpus_db_or_recreate;
 use crate::core::entity::RawEntity;
 
 /// Default application-level page cache size for the redb corpus database, in
@@ -215,10 +216,9 @@ impl CorpusStore {
             path.display(),
             cache_bytes / (1024 * 1024),
         );
-        let db = Database::builder()
-            .set_cache_size(cache_bytes)
-            .create(path)
-            .with_context(|| format!("open redb corpus at {}", path.display()))?;
+        // Issue #702: recovery-aware open — a stale redb-2.x `index.redb` is
+        // moved aside and replaced with a fresh empty corpus (warm-boot reindex).
+        let db = open_corpus_db_or_recreate(path, cache_bytes)?;
         // Materialize both tables in a committed write txn so later read-only
         // transactions can `open_table` them even on a brand-new database.
         {
