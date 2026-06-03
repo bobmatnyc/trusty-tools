@@ -1,63 +1,93 @@
 //! Resilient warm-boot index collection for the trusty-search daemon.
 //!
-//! Why (issue #718 Part 2): the original `collect_all_index_entries` ran a
-//! blocking recursive filesystem scan (via `scan_roots_for_colocated_indexes`)
+//! Why (issue #718 Part 2 + Part 3): the original `collect_all_index_entries`
+//! ran a blocking recursive filesystem scan (via `scan_roots_for_colocated_indexes`)
 //! synchronously on the async reactor thread, then gated ALL index registration
 //! behind it. Under launchd on macOS 26 Tahoe, tracked roots on external volumes
 //! (`/Volumes/…`) trigger TCC permission checks that hang or fail silently — so
-//! the entire warm-boot restore stalled indefinitely, leaving even the accessible
-//! legacy indexes (from `indexes.toml` in `~/Library/Application Support/`) with
-//! 0 registrations. This module fixes that with two structural changes:
+//! the entire warm-boot restore stalled indefinitely. Part 2 fixed the colocated
+//! scan. Part 3 (this update) fixes the per-index restore: each call to
+//! `build_indexer_from_entry` opens a redb file on the index's path, which also
+//! hangs under TCC. `restore_one_index_bounded` wraps each per-index restore in a
+//! `tokio::spawn` task + `tokio::time::timeout` so that hung or denied indexes are
+//! skipped with a loud diagnostic and warm-boot always completes in bounded time.
 //!
-//! 1. Legacy and colocated index discovery are now **fully independent phases**.
-//!    Legacy entries are collected first (fast TOML read from the accessible data
-//!    dir) and callers should register them before initiating the colocated scan.
+//! Structural changes (this module is split into three focused submodules):
 //!
-//! 2. The colocated-roots scan is:
-//!    - Run via `tokio::task::spawn_blocking` so blocking `std::fs` calls do NOT
-//!      stall the async reactor.
-//!    - Wrapped in a per-root timeout (`ROOT_SCAN_TIMEOUT`). A single hung or
-//!      denied root is logged at `warn`/`error` and skipped; the rest still run.
-//!    - Loud: `PermissionDenied` / `EPERM` on an external/removable volume emits
-//!      an actionable hint about granting Full Disk Access to the launchd agent.
+//! 1. `mod.rs` (this file): public API — `collect_legacy_entries`,
+//!    `collect_colocated_entries`, `warmboot_index_timeout`. Timeout constants
+//!    and the env-var reader live here so both phases share a single knob.
 //!
-//! What: public API is `collect_legacy_entries` + `collect_colocated_entries`.
-//! Callers should call `collect_legacy_entries` synchronously (cheap), register
-//! those indexes, then call `collect_colocated_entries` asynchronously and
-//! register the remainder.
+//! 2. `scan.rs`: per-root blocking fs walk (`scan_one_root`), `ColocatedDiscovery`,
+//!    and `is_likely_external_volume` heuristic. Called from `spawn_blocking`.
+//!
+//! 3. `restore.rs`: `restore_one_index_bounded` — the per-index timeout wrapper
+//!    that calls `restore_one_index` (from `start.rs`) inside a spawned task with
+//!    a deadline.
 //!
 //! Test: `legacy_only_does_not_block_on_colocated`,
 //!       `colocated_scan_skips_inaccessible_root`,
-//!       `colocated_scan_partial_failure_still_returns_accessible`.
+//!       `colocated_scan_partial_failure_still_returns_accessible`,
+//!       `restore_bounded_returns_false_for_missing_root`,
+//!       `restore_bounded_returns_true_for_accessible_index`.
+
+pub mod restore;
+mod scan;
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::service::persistence::PersistedIndex;
+pub use restore::restore_one_index_bounded;
 
-/// Per-root timeout for the colocated scan.
+/// Per-root and per-index timeout for warm-boot restore operations.
 ///
-/// Why: a TCC-denied or network-backed root on macOS can hang a `read_dir` or
-/// `canonicalize` call for tens of seconds to minutes. We impose a 10-second
-/// ceiling so that N stalled roots cost at most N × 10 s, and the user gets
-/// actionable log output instead of a silent hang.
+/// Why: a TCC-denied or network-backed root on macOS can hang a `read_dir`,
+/// `canonicalize`, or `CorpusStore::open` call for tens of seconds to minutes.
+/// We impose a ceiling so that N stalled roots or indexes cost at most N × T
+/// seconds, and the user gets actionable log output instead of a silent hang.
+///
 /// What: duration applied via `tokio::time::timeout` around each root's
-/// `spawn_blocking` scan.
-/// Test: `colocated_scan_skips_inaccessible_root` verifies that a missing/
-/// unreadable root does not block accessible roots from completing.
+/// `spawn_blocking` scan AND around each per-index `restore_one_index` task.
+/// Override via `TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS` (any positive integer).
+///
+/// Test: `warmboot_index_timeout` parses valid values and falls back to the
+/// default; `colocated_scan_skips_inaccessible_root` and
+/// `restore_bounded_returns_false_for_missing_root` verify the timeout fires.
 pub const ROOT_SCAN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Read the per-index warm-boot timeout from `TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS`.
+///
+/// Why (issue #718 Part 3): provides a single configurable knob for the per-index
+/// restore deadline (colocated directory scan AND per-index redb open). Operators
+/// on machines with very slow or intermittently accessible storage can raise the
+/// value; operators who want faster daemon startup on problematic volumes can lower
+/// it.
+/// What: parses `TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS` as a `u64` of seconds.
+/// Falls back to `ROOT_SCAN_TIMEOUT` (10 s) on parse failure or if the variable
+/// is unset. A value of `0` is treated as the default (0-second timeouts are not
+/// useful in practice).
+/// Test: `warmboot_index_timeout_parses_env_var` in this module.
+pub fn warmboot_index_timeout() -> Duration {
+    let secs = std::env::var("TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(ROOT_SCAN_TIMEOUT.as_secs());
+    Duration::from_secs(secs)
+}
 
 /// Collect index entries from the durable `indexes.toml` registry only.
 ///
 /// Why (issue #718 Part 2): legacy entries live in `~/Library/Application
 /// Support/trusty-search/` which launchd can always read. Separating this from
-/// the colocated-roots scan means the 57 (or N) accessible indexes register
+/// the colocated-roots scan means the N accessible indexes register
 /// immediately, without waiting for any potentially-hung external-volume walk.
 /// What: reads `indexes.toml` via `load_index_registry`; logs the resolved data
 /// dir path so operators can confirm the correct dir is used. Returns an empty
 /// vec when the file is absent (first-run case) and logs `error` on read failure.
 /// Test: unit tests in this module; the returned entries feed directly into
-/// `restore_one_index` in `start.rs`.
+/// `restore_one_index_bounded` in `start.rs`.
 pub fn collect_legacy_entries() -> Vec<PersistedIndex> {
     use crate::service::persistence::{data_dir, indexes_toml_path, load_index_registry};
 
@@ -109,14 +139,14 @@ pub fn collect_legacy_entries() -> Vec<PersistedIndex> {
 ///
 /// What: loads `roots.toml`, then for each root:
 /// - Spawns a `spawn_blocking` task running `scan_one_root` (the sync fs walk).
-/// - Wraps it in `ROOT_SCAN_TIMEOUT` (10 s).
+/// - Wraps it in `warmboot_index_timeout()`.
 /// - On timeout: logs `warn` with the root path and the actionable hint about
 ///   Full Disk Access for the launchd agent; skips the root.
 /// - On scan error: logs `warn` and skips (does not abort other roots).
 /// - Deduplicates by index id against `known_ids` (legacy entries already seen).
 ///
-/// Test: `colocated_scan_skips_inaccessible_root`,
-///       `colocated_scan_partial_failure_still_returns_accessible`.
+/// Test: `colocated_scan_partial_failure_still_returns_accessible`,
+///       `colocated_scan_deduplicates_against_known_ids`.
 pub async fn collect_colocated_entries(
     known_ids: &std::collections::HashSet<String>,
 ) -> Vec<PersistedIndex> {
@@ -142,6 +172,7 @@ pub async fn collect_colocated_entries(
         tracked_roots.len()
     );
 
+    let timeout = warmboot_index_timeout();
     let mut results: Vec<PersistedIndex> = Vec::new();
     let mut seen_ids = known_ids.clone();
 
@@ -150,9 +181,9 @@ pub async fn collect_colocated_entries(
         let root_for_task = root.clone();
 
         // Run the blocking fs walk off the async reactor.
-        let scan_future = tokio::task::spawn_blocking(move || scan_one_root(&root_for_task));
+        let scan_future = tokio::task::spawn_blocking(move || scan::scan_one_root(&root_for_task));
 
-        match tokio::time::timeout(ROOT_SCAN_TIMEOUT, scan_future).await {
+        match tokio::time::timeout(timeout, scan_future).await {
             Ok(Ok(entries)) => {
                 for colocated in entries {
                     if seen_ids.contains(&colocated.id) {
@@ -181,7 +212,7 @@ pub async fn collect_colocated_entries(
             }
             Err(_elapsed) => {
                 // Timeout: likely a TCC-denied or network-backed external volume.
-                let is_external = is_likely_external_volume(&root_for_log);
+                let is_external = scan::is_likely_external_volume(&root_for_log);
                 if is_external {
                     tracing::warn!(
                         "warm-boot: colocated scan TIMED OUT for external-volume root {} \
@@ -191,7 +222,7 @@ pub async fn collect_colocated_entries(
                          or move the index off the external volume. \
                          Skipping this root — other roots still restored. (issue #718)",
                         root_for_log.display(),
-                        ROOT_SCAN_TIMEOUT.as_secs_f32(),
+                        timeout.as_secs_f32(),
                     );
                 } else {
                     tracing::warn!(
@@ -199,7 +230,7 @@ pub async fn collect_colocated_entries(
                          (>{:.0}s). The root may be on a network or slow filesystem. \
                          Skipping this root — other roots still restored. (issue #718)",
                         root_for_log.display(),
-                        ROOT_SCAN_TIMEOUT.as_secs_f32(),
+                        timeout.as_secs_f32(),
                     );
                 }
             }
@@ -209,102 +240,9 @@ pub async fn collect_colocated_entries(
     results
 }
 
-/// Synchronous per-root scan: discover all `.trusty-search/` directories under
-/// `root` and return one `ColocatedDiscovery` per find.
-///
-/// Why: extracted so it can run inside `spawn_blocking` (keeping blocking fs
-/// calls off the async reactor) and so each root gets an independent timeout.
-/// What: calls `scan_roots_for_colocated_indexes` for the single root; maps
-/// I/O errors to a warn-logged empty result (not a panic). A `PermissionDenied`
-/// or `EPERM` error is elevated to `error!` with an actionable hint.
-/// Test: called by `collect_colocated_entries` via spawn_blocking; error paths
-/// verified by `colocated_scan_skips_inaccessible_root`.
-fn scan_one_root(root: &std::path::Path) -> Vec<ColocatedDiscovery> {
-    use crate::service::fs_discovery::{scan_roots_for_colocated_indexes, DEFAULT_SCAN_DEPTH};
-
-    // Pre-flight: check if the root exists before we walk it, so we can emit
-    // a better error than a cryptic `canonicalize` failure.
-    match std::fs::metadata(root) {
-        Ok(_) => {}
-        Err(e) => {
-            let kind = e.kind();
-            if kind == std::io::ErrorKind::PermissionDenied {
-                tracing::error!(
-                    "warm-boot: PERMISSION DENIED accessing root {} during colocated scan: {e}. \
-                     Under launchd, this is typically a TCC denial on an external or protected \
-                     volume. Grant Full Disk Access to the launchd agent in \
-                     System Settings → Privacy & Security → Full Disk Access. (issue #718)",
-                    root.display()
-                );
-            } else if kind == std::io::ErrorKind::NotFound {
-                tracing::debug!(
-                    "warm-boot: root {} not found — skipping colocated scan",
-                    root.display()
-                );
-            } else {
-                tracing::warn!(
-                    "warm-boot: cannot access root {} for colocated scan: {e} — skipping",
-                    root.display()
-                );
-            }
-            return Vec::new();
-        }
-    }
-
-    let entries = scan_roots_for_colocated_indexes(
-        std::slice::from_ref(&root.to_path_buf()),
-        DEFAULT_SCAN_DEPTH,
-    );
-
-    entries
-        .into_iter()
-        .map(|e| ColocatedDiscovery {
-            id: e.id,
-            root_path: e.root_path,
-        })
-        .collect()
-}
-
-/// Minimal discovered-colocated-index record returned from `scan_one_root`.
-///
-/// Why: a thin local type so `scan_one_root` can be called from `spawn_blocking`
-/// without crossing any Arc/Sync boundaries that `ColocatedIndexEntry` might not
-/// satisfy in future refactors.
-/// What: mirrors the fields of `ColocatedIndexEntry` that the caller needs.
-/// Test: populated by `scan_one_root`, consumed by `collect_colocated_entries`.
-#[derive(Debug)]
-struct ColocatedDiscovery {
-    pub id: String,
-    pub root_path: PathBuf,
-}
-
-/// Heuristic: returns `true` when `path` is likely on an external or removable
-/// volume where macOS TCC may deny launchd access.
-///
-/// Why: provides a better log message distinguishing TCC-denied external volumes
-/// from merely slow NFS/SMB mounts. External volumes on macOS are conventionally
-/// mounted under `/Volumes/`; this is not authoritative but is correct for the
-/// common case (USB drives, Thunderbolt SSDs, network shares mounted as volumes).
-/// What: checks whether the canonical form of `path` starts with `/Volumes/`.
-/// Falls back gracefully if canonicalization fails.
-/// Test: `is_likely_external_volume_detection` in this module.
-fn is_likely_external_volume(path: &std::path::Path) -> bool {
-    // Fast path: string prefix check before canonicalize.
-    if path.starts_with("/Volumes") {
-        return true;
-    }
-    // Try canonicalize to catch symlinks that resolve into /Volumes.
-    if let Ok(canonical) = std::fs::canonicalize(path) {
-        if canonical.starts_with("/Volumes") {
-            return true;
-        }
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
-    //! Tests for the resilient warm-boot index collection (issue #718 Part 2).
+    //! Tests for the resilient warm-boot index collection (issue #718).
     //!
     //! Why: the key invariant is that an inaccessible or hung colocated root
     //! must never prevent the accessible legacy/colocated entries from
@@ -316,83 +254,29 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    // ── is_likely_external_volume ──────────────────────────────────────────────
+    // ── warmboot_index_timeout ────────────────────────────────────────────────
 
-    /// Why: guard the heuristic that powers the TCC-hint log message.
-    /// What: paths whose string prefix starts with `/Volumes` return true;
-    /// paths rooted at `/Library` (which stays on the boot volume) return false.
-    /// We deliberately avoid `/Users/...` in the negative assertion because on
-    /// some macOS setups (including this dev machine) `/Users/<user>/Projects`
-    /// is a symlink to `/Volumes/SSD1/Projects`, so `canonicalize` would
-    /// correctly return true — making the negative assertion a false failure.
+    /// Why: guard that the env var reader parses valid values and falls back.
+    /// What: set `TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS=42`, assert Duration is
+    /// 42s; unset, assert Duration is ROOT_SCAN_TIMEOUT.
+    /// Note: `serial` prevents racing with other env-var mutators.
     /// Test: this test.
     #[test]
-    fn is_likely_external_volume_detection() {
-        assert!(
-            is_likely_external_volume(std::path::Path::new("/Volumes/SSD1/Projects")),
-            "/Volumes/ prefix must be detected as external"
-        );
-        assert!(
-            is_likely_external_volume(std::path::Path::new("/Volumes")),
-            "/Volumes itself must be detected as external"
-        );
-        // /Library stays on the boot volume on macOS and is never under /Volumes.
-        assert!(
-            !is_likely_external_volume(std::path::Path::new(
-                "/Library/Application Support/trusty-search"
-            )),
-            "/Library/... must not be detected as external"
-        );
-        // A nonexistent path that definitely cannot canonicalize to /Volumes.
-        assert!(
-            !is_likely_external_volume(std::path::Path::new(
-                "/private/tmp/trusty-718-test-not-external"
-            )),
-            "/private/tmp/... must not be detected as external"
-        );
-    }
-
-    // ── scan_one_root ─────────────────────────────────────────────────────────
-
-    /// Why: a nonexistent root must produce an empty result without panicking.
-    /// Under launchd a TCC-denied path surfaces as PermissionDenied, but for
-    /// unit tests NotFound is a fast, safe proxy for "inaccessible root".
-    /// What: call `scan_one_root` with a path that does not exist; assert the
-    /// result is empty.
-    /// Test: this test.
-    #[test]
-    fn scan_one_root_nonexistent_returns_empty() {
-        let nonexistent = std::path::Path::new("/tmp/trusty-718-definitely-not-here-xyz9999");
-        let result = scan_one_root(nonexistent);
-        assert!(
-            result.is_empty(),
-            "nonexistent root must produce no discoveries; got: {result:?}"
-        );
-    }
-
-    /// Why: a real directory with a `.trusty-search/` subdirectory must be
-    /// discovered and returned correctly.
-    /// What: create a tempdir, add `.trusty-search/`, call `scan_one_root`,
-    /// assert one entry is returned with the correct root_path.
-    /// Test: this test.
-    #[test]
-    fn scan_one_root_finds_colocated_index() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        let ts_dir = root.join(".trusty-search");
-        std::fs::create_dir_all(&ts_dir).unwrap();
-
-        let results = scan_one_root(root);
+    #[serial_test::serial]
+    fn warmboot_index_timeout_parses_env_var() {
+        // Parse a valid value.
+        unsafe { std::env::set_var("TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS", "42") };
         assert_eq!(
-            results.len(),
-            1,
-            "one .trusty-search dir must yield one discovery; got: {results:?}"
+            warmboot_index_timeout(),
+            Duration::from_secs(42),
+            "must parse 42 from env var"
         );
-        // root_path is the parent of .trusty-search.
-        let canonical_root = root.canonicalize().unwrap();
+        // Remove and confirm fallback.
+        unsafe { std::env::remove_var("TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS") };
         assert_eq!(
-            results[0].root_path, canonical_root,
-            "root_path must be the canonical parent of .trusty-search"
+            warmboot_index_timeout(),
+            ROOT_SCAN_TIMEOUT,
+            "must fall back to ROOT_SCAN_TIMEOUT when env var is absent"
         );
     }
 

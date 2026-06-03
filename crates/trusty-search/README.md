@@ -504,6 +504,35 @@ If `trusty-search status` reports the wrong port, stop and restart the daemon.
 
 Use `trusty-search start --device cpu` to force CPU mode. The flag is persisted to `daemon.env` so it survives daemon restarts.
 
+**Indexes not restored on macOS launchd warm-boot (TCC / Full Disk Access)**
+
+When the daemon is supervised by launchd and index data lives on an external
+or removable volume (e.g. `/Volumes/SSD1`), macOS TCC may deny the agent
+access to that volume. Each per-index restore attempt is bounded by a timeout
+(default 10 s, configurable via `TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS`). On
+timeout, the daemon logs a warning like:
+
+```
+warm-boot: index 'myproj' restore TIMED OUT (>10s) — path /Volumes/SSD1/...
+is on an external/removable volume. Under launchd this is typically a TCC denial.
+HINT: grant Full Disk Access to the launchd agent in
+System Settings → Privacy & Security → Full Disk Access
+```
+
+and skips that index. The daemon still starts and serves all accessible indexes.
+To fix:
+
+1. **Grant Full Disk Access** to the launchd agent binary in
+   System Settings → Privacy & Security → Full Disk Access.
+2. **Or move the index data** off the external volume:
+   `trusty-search index /local/path --name myproj`
+3. **Or increase the timeout** if the volume is slow but accessible:
+   add `TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS=30` to the launchd plist `EnvironmentVariables`.
+
+The same TCC restriction can affect Linux systemd deployments on mount points
+that require specific permissions — grant the service user read access to the
+data directory.
+
 ## Architecture and HTTP API
 
 See [CLAUDE.md](./CLAUDE.md) for the full HTTP endpoint catalogue, query

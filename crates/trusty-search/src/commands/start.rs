@@ -156,30 +156,35 @@ pub(crate) fn derive_warm_boot_stages(inputs: WarmBootInputs) -> IndexStages {
 /// Issue #403: Warm-boot from indexes.toml (legacy global indexes) AND from
 /// filesystem-discovered colocated `.trusty-search/` indexes (dual discovery).
 ///
-/// Why (issue #85): before this hook, the daemon had no way to remember
-/// which projects were registered — every restart required the user to run
-/// `trusty-search index <path>` again. Now the registry is durable and
-/// HNSW + chunks are restored automatically.
+/// Why (issue #85): before this hook, the daemon had no way to remember which
+/// projects were registered — every restart required `trusty-search index <path>`.
 ///
-/// Issue #718 Part 2: the two discovery phases are now independent:
+/// Issue #718 Part 2: the two discovery phases are fully independent.
 ///   Phase 1 — legacy entries from `indexes.toml` (fast, always accessible
 ///   under launchd) are collected synchronously and registered immediately.
 ///   Phase 2 — colocated entries from tracked roots are scanned with a
-///   per-root timeout via `spawn_blocking` so that a TCC-denied or hung
-///   external-volume root (e.g. `/Volumes/SSD1`) cannot block Phase 1
-///   registration. Each root gets its own 10-second deadline; timeouts and
-///   permission errors are logged loudly with actionable hints.
+///   per-root timeout via `spawn_blocking`.
+///
+/// Issue #718 Part 3: each per-index restore is now bounded by
+///   `warmboot_index_timeout()` (default 10 s, configurable via
+///   `TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS`). `build_indexer_from_entry` opens
+///   the index's redb synchronously; on a TCC-denied external volume that open
+///   hangs indefinitely. The per-index timeout wraps `restore_one_index` in a
+///   `tokio::spawn` task and aborts it on timeout, so warm-boot always finishes
+///   in bounded time regardless of how many indexes are on blocked volumes.
 ///
 /// What: loads `indexes.toml` for legacy global indexes AND scans tracked roots
 /// (from `roots.toml`) for colocated `.trusty-search/` directories, then
-/// registers each discovered index. Deduplicates by index id so a root that
-/// has been migrated (appears in both sources) is only loaded once.
-/// Constructs each `IndexHandle` via `build_indexer_from_entry`, which routes
-/// to colocated or legacy storage based on the `colocated` flag.
+/// registers each discovered index. Deduplicates by index id. Each entry is
+/// restored via `restore_one_index_bounded` which aborts on timeout and logs
+/// actionable diagnostics. Emits a terminal summary line so launchd boot is
+/// fully diagnosable.
 /// Test: integration test in `tests/integration_tests.rs` that writes a
 /// registry file, calls this hook, and asserts the registry list matches.
 async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core::Embedder>) {
-    use crate::service::warm_boot::{collect_colocated_entries, collect_legacy_entries};
+    use crate::service::warm_boot::{
+        collect_colocated_entries, collect_legacy_entries, restore_one_index_bounded,
+    };
     use std::collections::HashSet;
 
     // ── Phase 1: legacy indexes (indexes.toml) ─────────────────────────────
@@ -195,43 +200,69 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
              Under launchd, set TRUSTY_DATA_DIR to an absolute path (issue #718)."
         );
     } else {
+        let total_legacy = legacy_entries.len();
         tracing::info!(
             "warm-boot: restoring {} legacy index registration(s) from indexes.toml",
-            legacy_entries.len()
+            total_legacy
         );
+        let mut legacy_ok: usize = 0;
+        let mut legacy_skipped: usize = 0;
         for entry in legacy_entries {
             seen_ids.insert(entry.id.clone());
-            restore_one_index(state, embedder, entry).await;
+            let s = state.clone();
+            let e = Arc::clone(embedder);
+            if restore_one_index_bounded(entry, move |en| async move {
+                restore_one_index(&s, &e, en).await;
+            })
+            .await
+            {
+                legacy_ok += 1;
+            } else {
+                legacy_skipped += 1;
+            }
         }
         tracing::info!(
-            "warm-boot: legacy phase complete — {} index(es) now registered",
-            state.registry.list().len()
+            "warm-boot: legacy phase complete — {legacy_ok} of {total_legacy} index(es) \
+             restored ({legacy_skipped} skipped: timeout/denied/missing)"
         );
     }
 
     // ── Phase 2: colocated indexes (roots.toml + fs scan) ──────────────────
     // Each tracked root is scanned via spawn_blocking with a per-root timeout
-    // (ROOT_SCAN_TIMEOUT = 10 s) so a TCC-denied or hung external-volume root
-    // cannot block this phase or Phase 1 registration.
+    // so a TCC-denied or hung external-volume root cannot block this phase.
     let colocated_entries = collect_colocated_entries(&seen_ids).await;
 
     if colocated_entries.is_empty() {
         tracing::debug!("warm-boot: no additional colocated indexes discovered");
     } else {
+        let total_colocated = colocated_entries.len();
         tracing::info!(
             "warm-boot: restoring {} colocated index registration(s) from tracked roots",
-            colocated_entries.len()
+            total_colocated
         );
+        let mut colocated_ok: usize = 0;
+        let mut colocated_skipped: usize = 0;
         for entry in colocated_entries {
-            restore_one_index(state, embedder, entry).await;
+            let s = state.clone();
+            let e = Arc::clone(embedder);
+            if restore_one_index_bounded(entry, move |en| async move {
+                restore_one_index(&s, &e, en).await;
+            })
+            .await
+            {
+                colocated_ok += 1;
+            } else {
+                colocated_skipped += 1;
+            }
         }
+        tracing::info!(
+            "warm-boot: colocated phase complete — {colocated_ok} of {total_colocated} \
+             index(es) restored ({colocated_skipped} skipped: timeout/denied/missing)"
+        );
     }
 
     let total = state.registry.list().len();
-    tracing::info!(
-        "warm-boot: complete — {} total index(es) registered (legacy + colocated)",
-        total
-    );
+    tracing::info!("warm-boot: complete — {total} total index(es) registered (legacy + colocated)");
 }
 
 /// Attempt to locate a moved project root for a colocated index (issue #484).
@@ -387,9 +418,12 @@ pub(crate) fn canonicalize_best_effort(path: &std::path::Path) -> std::path::Pat
 /// to match the absolute paths the indexer stored in chunk records. If
 /// canonicalization yields a different path, persists the canonical form back to
 /// indexes.toml so subsequent restarts are stable.
+/// Issue #718 Part 3: this function is `pub(crate)` so `warm_boot::restore` can
+/// call it from inside a bounded `tokio::spawn` task. Callers in `restore_indexes`
+/// should use `restore_one_index_bounded` instead of calling this directly.
 /// Test: covered by the warm-boot integration tests and the
 /// `restore_moved_colocated_index_*` unit tests in this module.
-async fn restore_one_index(
+pub(crate) async fn restore_one_index(
     state: &SearchAppState,
     embedder: &Arc<dyn crate::core::Embedder>,
     mut entry: PersistedIndex,
