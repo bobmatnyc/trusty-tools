@@ -25,6 +25,7 @@ use crate::{
     integrations::{analyze_client::AnalyzeClient, github::RunMode, search_client::SearchClient},
     llm::LlmProvider,
     pipeline::{DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review},
+    service::inference_probe::{InferenceProbe, InferenceStatus},
     store::{DedupStore, InFlightRegistry},
 };
 
@@ -59,6 +60,13 @@ pub struct AppState {
     /// In-process in-flight guard registry (Phase 1, #582) — drops duplicate
     /// concurrent webhook deliveries for the same PR / head SHA.
     pub in_flight_registry: InFlightRegistry,
+    /// Short-TTL cache for the inference-reachability probe (#719).
+    ///
+    /// Why: /health and review_health need to report whether the configured LLM
+    /// provider is actually accepting requests, not just whether the service
+    /// process is alive.  The probe is cached so repeated health polls don't
+    /// hammer the provider.
+    pub inference_probe: InferenceProbe,
 }
 
 impl AppState {
@@ -123,6 +131,7 @@ impl AppState {
             last_error: Arc::new(std::sync::Mutex::new(None)),
             dedup,
             in_flight_registry: InFlightRegistry::new(),
+            inference_probe: InferenceProbe::default(),
         }
     }
 }
@@ -133,13 +142,19 @@ impl AppState {
 ///
 /// Why: callers (load balancer, orchestrator) need a single JSON document
 /// reporting liveness and dep reachability so they can decide whether to route
-/// traffic to this instance.
+/// traffic to this instance.  MPM uses the `inference` field to gate whether to
+/// attempt a `review_pr` call at all (closes #719).
 /// What: mirrors spec REV-706; `deps.trusty_search.reachable` reflects a
-/// non-blocking background probe cached in `AppState`.
-/// Test: `health_returns_ok_json`.
+/// non-blocking background probe cached in `AppState`; `inference` reflects the
+/// short-TTL inference-reachability probe (see `InferenceProbe`).  When
+/// `inference != "ok"`, `status` becomes `"degraded"` so callers can gate on
+/// a single field without inspecting the nested `inference` value.
+/// Test: `health_returns_ok_json`, `health_inference_ok_when_llm_ok`,
+/// `health_inference_auth_error_sets_degraded`.
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
-    /// `"ok"` when all required deps are reachable.
+    /// `"ok"` when all required deps are reachable and inference is healthy;
+    /// `"degraded"` when the inference probe returns anything other than `"ok"`.
     pub status: &'static str,
     /// Pipeline version (e.g. `"tr-0.1"`).
     pub version: &'static str,
@@ -147,6 +162,9 @@ pub struct HealthResponse {
     pub dry_run: bool,
     /// Configured reviewer model slug.
     pub reviewer_model: String,
+    /// Inference-reachability probe result (#719).  One of: `"ok"`,
+    /// `"unreachable"`, `"auth_error"`, `"unknown"`.
+    pub inference: InferenceStatus,
     /// Dependency reachability snapshot.
     pub deps: DepStatus,
 }
@@ -216,29 +234,44 @@ pub struct ReviewRequest {
 
 // ─── Route handlers ───────────────────────────────────────────────────────────
 
-/// GET /health — liveness and dependency reachability.
+/// GET /health — liveness, dependency reachability, and inference probe.
 ///
 /// Why: required by load balancers and orchestrators to determine whether this
-/// instance is ready to handle traffic.
+/// instance is ready to handle traffic.  MPM uses the `inference` field to
+/// gate whether to attempt a `review_pr` call (closes #719).
 /// What: performs non-blocking health probes against trusty-search and
-/// trusty-analyze (both via `.health()` on the trait objects); returns JSON
-/// with dep status and reviewer model.  200 always (degraded state is noted
-/// in the body, not via 5xx, to avoid false-positive load-balancer evictions
-/// for the optional analyze dep).
-/// Test: `health_returns_ok_json`.
+/// trusty-analyze (both via `.health()` on the trait objects); runs the cached
+/// inference-reachability probe (10 s TTL, 3 s timeout) against the configured
+/// LLM provider; returns JSON with dep status, reviewer model, and inference
+/// result.  HTTP 200 always (degraded state is noted in the body, not via 5xx,
+/// to avoid false-positive load-balancer evictions).  When inference is not
+/// `"ok"`, `status` becomes `"degraded"` so callers can gate on one field.
+/// Test: `health_inference_ok_when_llm_ok`,
+/// `health_inference_auth_error_sets_degraded`,
+/// `health_inference_unreachable_sets_degraded`.
 pub async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
-    // Non-blocking dep probes — we fire them but treat errors as "unreachable".
+    // Non-blocking dep probes — treat errors as "unreachable".
     let search_reachable = state.search.health().await.is_ok_and(|r| r.is_healthy());
     let analyze_reachable = match &state.analyze {
         Some(a) => a.health().await.is_ok(),
         None => false,
     };
 
+    // Cached inference-reachability probe (#719).
+    let reviewer_model = state.config.role_models.reviewer.model.clone();
+    let inference = state
+        .inference_probe
+        .probe(&state.llm, &reviewer_model)
+        .await;
+
+    let status = if inference.is_ok() { "ok" } else { "degraded" };
+
     let body = HealthResponse {
-        status: "ok",
+        status,
         version: env!("CARGO_PKG_VERSION"),
         dry_run: state.config.dry_run,
-        reviewer_model: state.config.role_models.reviewer.model.clone(),
+        reviewer_model,
+        inference,
         deps: DepStatus {
             trusty_search: DepInfo {
                 required: true,

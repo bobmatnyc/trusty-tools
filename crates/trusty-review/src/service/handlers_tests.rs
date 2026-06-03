@@ -12,6 +12,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse as _};
 
+use axum::body::to_bytes;
+
 use crate::{
     integrations::{
         analyze_client::{
@@ -100,6 +102,21 @@ impl SearchClient for FailSearch {
         _: Option<u32>,
     ) -> Result<Vec<SearchResult>, SearchClientError> {
         Err(SearchClientError::Unavailable("down".to_string()))
+    }
+}
+
+// ── Fake LLM that returns auth error ─────────────────────────────────────────
+
+pub(super) struct AuthErrorLlm;
+
+#[async_trait]
+impl LlmProvider for AuthErrorLlm {
+    fn name(&self) -> &str {
+        "auth-error-fake"
+    }
+
+    async fn complete(&self, _req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        Err(LlmError::AccessDenied("test: invalid credentials".into()))
     }
 }
 
@@ -244,4 +261,75 @@ async fn review_handler_bad_request_missing_fields() {
     let response = handle_review(State(state), Json(req)).await;
     let resp: axum::response::Response = response.into_response();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ── Inference-probe handler tests (#719) ──────────────────────────────────────
+
+/// /health includes `inference: "ok"` and `status: "ok"` when the LLM succeeds.
+///
+/// Why: validates the happy-path response shape introduced in #719.
+/// What: calls handle_health with FakeLlm (always succeeds); deserialises the
+/// response body and asserts `inference == "ok"` and `status == "ok"`.
+/// Test: this test itself.
+#[tokio::test]
+async fn health_inference_ok_when_llm_succeeds() {
+    let state = test_state();
+    let response = handle_health(State(state)).await;
+    let resp: axum::response::Response = response.into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body_bytes = to_bytes(resp.into_body(), 65536).await.expect("body bytes");
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).expect("valid JSON");
+
+    assert_eq!(
+        body["inference"], "ok",
+        "inference must be 'ok' for FakeLlm"
+    );
+    assert_eq!(
+        body["status"], "ok",
+        "status must be 'ok' when inference is ok"
+    );
+    assert!(
+        body["reviewer_model"].is_string(),
+        "reviewer_model must be present"
+    );
+    assert!(body["dry_run"].is_boolean(), "dry_run must be present");
+    assert!(body["deps"].is_object(), "deps must be present");
+}
+
+/// /health sets `status: "degraded"` and `inference: "auth_error"` on LLM auth failure.
+///
+/// Why: validates the degraded-path response shape introduced in #719 — callers
+/// that gate on `status` alone need it to flip to `"degraded"` without also
+/// parsing `inference`.
+/// What: uses AuthErrorLlm (returns AccessDenied); asserts `inference == "auth_error"`
+/// and `status == "degraded"`.  HTTP 200 is still returned (degraded is in the body).
+/// Test: this test itself.
+#[tokio::test]
+async fn health_inference_auth_error_sets_degraded() {
+    let state = AppState::new(
+        crate::config::ReviewConfig::load(None),
+        Arc::new(AuthErrorLlm),
+        Arc::new(FakeSearch),
+        None,
+    );
+    let response = handle_health(State(state)).await;
+    let resp: axum::response::Response = response.into_response();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "HTTP status must be 200 even when degraded (spec REV-706)"
+    );
+
+    let body_bytes = to_bytes(resp.into_body(), 65536).await.expect("body bytes");
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).expect("valid JSON");
+
+    assert_eq!(
+        body["inference"], "auth_error",
+        "AccessDenied LLM error must map to auth_error"
+    );
+    assert_eq!(
+        body["status"], "degraded",
+        "status must be degraded when inference != ok"
+    );
 }

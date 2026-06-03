@@ -15,6 +15,7 @@
 //! Feature gate: the entire module is compiled only under `http-server`.
 
 pub mod handlers;
+pub mod inference_probe;
 pub mod webhook;
 
 pub use handlers::AppState;

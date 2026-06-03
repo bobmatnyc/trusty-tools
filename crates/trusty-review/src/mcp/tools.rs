@@ -151,7 +151,7 @@ pub async fn call_tool(tool: &str, args: &Value, state: &AppState) -> Result<Val
     match tool {
         "review_pr" => call_review_pr(args, state).await,
         "review_diff" => call_review_diff(args, state).await,
-        "review_health" => Ok(call_review_health(state)),
+        "review_health" => Ok(call_review_health(state).await),
         _ => Err(ToolError::UnknownTool),
     }
 }
@@ -267,17 +267,31 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
 /// Execute the `review_health` tool.
 ///
 /// Why: gives Claude Code a quick way to verify that the service is reachable
-/// and correctly configured before issuing a real review.
-/// What: returns a JSON health snapshot with version, dry_run flag, reviewer
-/// model, and a `deps` object listing each dependency URL.  Does not probe
-/// dependencies (no network calls) — fast and credential-free.
-/// Test: `review_health_does_not_require_creds`.
-fn call_review_health(state: &AppState) -> Value {
+/// AND that inference is working before issuing a real review (closes #719).
+/// MPM uses this to gate `review_pr` calls so it never attempts a full review
+/// when the LLM endpoint is down or credentials are expired.
+/// What: runs the shared `InferenceProbe` (10 s TTL, 3 s timeout) against the
+/// configured reviewer LLM; returns a JSON health snapshot with `status`
+/// (`"ok"` or `"degraded"`), `inference` (`"ok"` / `"unreachable"` /
+/// `"auth_error"` / `"unknown"`), `dry_run`, `reviewer_model`, and a `deps`
+/// object listing dependency URLs.  When `inference != "ok"`, `status` is set
+/// to `"degraded"` so callers can gate on a single field.
+/// Test: `review_health_inference_ok`, `review_health_inference_auth_error_degraded`.
+async fn call_review_health(state: &AppState) -> Value {
+    let reviewer_model = state.config.role_models.reviewer.model.clone();
+    let inference = state
+        .inference_probe
+        .probe(&state.llm, &reviewer_model)
+        .await;
+
+    let status = if inference.is_ok() { "ok" } else { "degraded" };
+
     let result = serde_json::json!({
-        "status": "ok",
+        "status": status,
         "version": env!("CARGO_PKG_VERSION"),
         "dry_run": state.config.dry_run,
-        "reviewer_model": state.config.role_models.reviewer.model,
+        "reviewer_model": reviewer_model,
+        "inference": inference,
         "deps": {
             "trusty_search": {
                 "url": state.config.search_url,
@@ -366,60 +380,9 @@ pub fn wrap_tool_error(msg: &str) -> Value {
     })
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+// ─── Tests ───────────────────────────────────────────────────────────────────
+// Split into `tools_tests.rs` to keep this file under the 500-line cap.
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn tools_list_has_three_tools() {
-        let tools = tool_descriptors();
-        let arr = tools.as_array().expect("must be array");
-        assert_eq!(arr.len(), 3, "expected 3 tools, got {}", arr.len());
-        let names: Vec<&str> = arr
-            .iter()
-            .filter_map(|t| t.get("name").and_then(Value::as_str))
-            .collect();
-        assert!(names.contains(&"review_pr"), "missing review_pr");
-        assert!(names.contains(&"review_diff"), "missing review_diff");
-        assert!(names.contains(&"review_health"), "missing review_health");
-    }
-
-    #[test]
-    fn each_tool_has_input_schema() {
-        let tools = tool_descriptors();
-        for tool in tools.as_array().unwrap() {
-            let name = tool.get("name").and_then(Value::as_str).unwrap_or("?");
-            assert!(
-                tool.get("inputSchema").is_some(),
-                "tool '{name}' is missing inputSchema"
-            );
-        }
-    }
-
-    #[test]
-    fn require_str_returns_error_on_missing() {
-        let args = json!({});
-        let result = require_str(&args, "owner");
-        assert!(
-            matches!(result, Err(ToolError::InvalidParams(_))),
-            "expected InvalidParams"
-        );
-    }
-
-    #[test]
-    fn require_str_extracts_value() {
-        let args = json!({ "owner": "alice" });
-        assert_eq!(require_str(&args, "owner").unwrap(), "alice");
-    }
-
-    #[test]
-    fn wrap_tool_error_sets_is_error_true() {
-        let v = wrap_tool_error("boom");
-        assert_eq!(v["isError"], json!(true));
-        let text = v["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("boom"));
-    }
-}
+#[path = "tools_tests.rs"]
+mod tests;
