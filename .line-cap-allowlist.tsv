@@ -107,7 +107,7 @@ crates/trusty-memory/src/messaging.rs	843
 crates/trusty-memory/src/project_root.rs	980
 crates/trusty-memory/src/prompt_log.rs	851
 crates/trusty-memory/src/service.rs	1704
-crates/trusty-memory/src/tools.rs	3629
+crates/trusty-memory/src/tools.rs	3628
 crates/trusty-memory/src/transport/rpc.rs	571
 crates/trusty-memory/src/web.rs	5396
 crates/trusty-memory/tests/concurrent_perf.rs	1163
@@ -167,7 +167,7 @@ crates/trusty-search/src/service/embedder_supervisor.rs	947
 crates/trusty-search/src/service/grep.rs	827
 crates/trusty-search/src/service/persistence.rs	990
 crates/trusty-search/src/service/reindex/mod.rs	3669
-crates/trusty-search/src/service/server.rs	5481
+crates/trusty-search/src/service/server.rs	5493
 crates/trusty-search/src/service/walker.rs	1343
 crates/trusty-search/tests/baseline_trusty_tools.rs	721
 crates/trusty-search/tests/benchmark_harness.rs	739

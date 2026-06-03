@@ -1444,7 +1444,12 @@ async fn collect_status_counts(state: &SearchAppState) -> (usize, usize) {
     for id in ids {
         if let Some(handle) = state.registry.get(&id) {
             let indexer = handle.indexer.read().await;
-            total_chunks = total_chunks.saturating_add(indexer.chunk_count());
+            // Issue #681: prefer durable corpus count (accurate post-eviction).
+            let count = indexer
+                .corpus_arc()
+                .and_then(|c| c.chunk_count().ok())
+                .unwrap_or_else(|| indexer.chunk_count());
+            total_chunks = total_chunks.saturating_add(count);
         }
     }
     (indexes_count, total_chunks)
@@ -2782,10 +2787,17 @@ async fn index_status_handler(
     // zero-chunk indexes without reading daemon logs.  Use `clone()` so the
     // read lock is released before we build the JSON response.
     let walk_diag = handle.walk_diagnostics.read().await.clone();
+    // Issue #681: prefer durable corpus count; in-memory map returns 0 after
+    // idle eviction (TRUSTY_CHUNKS_IDLE_EVICT_SECS default 300s). Falls back to
+    // in-memory for BM25-only / test indexers that have no corpus wired.
+    let chunk_count = indexer
+        .corpus_arc()
+        .and_then(|c| c.chunk_count().ok())
+        .unwrap_or_else(|| indexer.chunk_count());
     Ok(Json(serde_json::json!({
         "index_id": index_id.0,
         "root_path": handle.root_path,
-        "chunk_count": indexer.chunk_count(),
+        "chunk_count": chunk_count,
         "status": legacy_status,
         "stages": stages_snapshot,
         "search_capabilities": search_capabilities,
