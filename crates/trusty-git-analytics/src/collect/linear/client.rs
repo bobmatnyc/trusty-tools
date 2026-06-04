@@ -271,17 +271,15 @@ pub fn store_linear_issues(db: &Database, issues: &[LinearIssue]) -> crate::core
     Ok(count)
 }
 
-/// Resolve a `${VAR_NAME}` placeholder against the process environment.
+/// Thin local alias so existing call-sites in this module require no changes.
 ///
-/// If `raw` has the form `${NAME}`, returns the value of `NAME` (empty string
-/// if unset). Otherwise returns `raw` unchanged.
+/// Why: delegates to the canonical shared implementation in
+/// [`crate::collect::env_expand::expand_env_var`] to avoid duplication.
+/// What: passes `raw` straight through to the shared function.
+/// Test: the shared function's own test suite covers all cases; see
+/// `crate::collect::env_expand`.
 fn expand_env_var(raw: &str) -> String {
-    if raw.starts_with("${") && raw.ends_with('}') && raw.len() > 3 {
-        let var = &raw[2..raw.len() - 1];
-        std::env::var(var).unwrap_or_default()
-    } else {
-        raw.to_string()
-    }
+    crate::collect::env_expand::expand_env_var(raw)
 }
 
 #[cfg(test)]
@@ -309,11 +307,6 @@ mod tests {
         let msg = "abc-123 should not match";
         let ids = LinearClient::extract_issue_ids(msg);
         assert!(ids.is_empty());
-    }
-
-    #[test]
-    fn expand_env_var_returns_literal_when_no_placeholder() {
-        assert_eq!(expand_env_var("lin_api_xyz"), "lin_api_xyz");
     }
 
     #[test]

@@ -21,6 +21,7 @@ pub mod ai_attribution;
 pub mod azdo;
 pub mod bitbucket;
 pub mod collector;
+pub mod env_expand;
 pub mod errors;
 pub mod git;
 pub mod github;

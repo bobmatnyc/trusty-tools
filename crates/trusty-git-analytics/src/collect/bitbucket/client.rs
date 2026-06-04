@@ -93,9 +93,9 @@ impl BitbucketClient {
         let token = config
             .token
             .as_deref()
-            .map(str::trim)
+            .map(crate::collect::env_expand::expand_env_var)
+            .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .map(String::from)
             .or_else(|| {
                 std::env::var("BITBUCKET_TOKEN")
                     .ok()

@@ -558,8 +558,9 @@ fn build_client() -> Result<reqwest::Client, AzdoError> {
 }
 
 impl AzureDevOpsClient {
-    /// Construct a new client. Does not validate or contact ADO.
-    pub fn new(config: AzureDevOpsConfig) -> Self {
+    /// Construct a new client; expands any `${ENV_VAR}` in `pat` (issue #741).
+    pub fn new(mut config: AzureDevOpsConfig) -> Self {
+        config.pat = crate::collect::env_expand::expand_env_var(&config.pat);
         Self { config }
     }
 
@@ -1569,7 +1570,6 @@ mod tests {
     }
 
     // ----- Phase 1 carry-over tests -----
-
     #[test]
     fn stub_connection_info_has_phase_1() {
         let client = AzureDevOpsClient::new(sample_config());

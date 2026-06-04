@@ -10,6 +10,7 @@ use tracing::{debug, warn};
 
 use async_trait::async_trait;
 
+use crate::collect::env_expand::expand_env_var;
 use crate::collect::errors::{CollectError, Result};
 use crate::collect::pr_provider::PrProvider;
 use crate::core::config::{GithubConfig, RepositoryConfig};
@@ -190,8 +191,8 @@ fn build_http_client(config: &GithubConfig) -> Result<reqwest::Client> {
         ACCEPT,
         HeaderValue::from_static("application/vnd.github+json"),
     );
-    if let Some(token) = &config.token {
-        let val = HeaderValue::from_str(&format!("Bearer {token}"))
+    if let Some(raw) = &config.token {
+        let val = HeaderValue::from_str(&format!("Bearer {}", expand_env_var(raw)))
             .map_err(|e| CollectError::Config(format!("invalid token header: {e}")))?;
         headers.insert(AUTHORIZATION, val);
     }
@@ -883,7 +884,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // Issue #87: multi-repo / org-wide resolution
     // -----------------------------------------------------------------------
-
     use std::path::PathBuf;
 
     use crate::core::config::RepositoryConfig;
