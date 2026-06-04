@@ -1,39 +1,27 @@
 //! Resilient warm-boot index collection for the trusty-search daemon.
 //!
-//! Why (issue #718 Part 2 + Part 3): the original `collect_all_index_entries`
-//! ran a blocking recursive filesystem scan (via `scan_roots_for_colocated_indexes`)
-//! synchronously on the async reactor thread, then gated ALL index registration
-//! behind it. Under launchd on macOS 26 Tahoe, tracked roots on external volumes
-//! (`/Volumes/…`) trigger TCC permission checks that hang or fail silently — so
-//! the entire warm-boot restore stalled indefinitely. Part 2 fixed the colocated
-//! scan. Part 3 (this update) fixes the per-index restore: each call to
-//! `build_indexer_from_entry` opens a redb file on the index's path, which also
-//! hangs under TCC. `restore_one_index_bounded` wraps each per-index restore in a
-//! `tokio::spawn` task + `tokio::time::timeout` so that hung or denied indexes are
-//! skipped with a loud diagnostic and warm-boot always completes in bounded time.
+//! Why (issues #718 / #723): blocking fs scans and redb opens on a TCC-denied
+//! external volume hang uninterruptibly under macOS launchd. #718 bounded each
+//! per-root scan and per-index restore with `spawn_blocking` + timeout. #723
+//! closes the remaining gap: probes each distinct volume ONCE on a bare OS
+//! thread before any redb opens so a single blocked volume costs at most ONE
+//! leaked thread (not one-per-index).
 //!
-//! Structural changes (this module is split into three focused submodules):
+//! Submodules:
+//!   1. `mod.rs` (this file): public API and timeout env-var readers.
+//!   2. `scan.rs`: per-root blocking fs walk.
+//!   3. `restore.rs`: per-index timeout wrapper.
+//!   4. `probe.rs` (#723): per-volume accessibility probe.
 //!
-//! 1. `mod.rs` (this file): public API — `collect_legacy_entries`,
-//!    `collect_colocated_entries`, `warmboot_index_timeout`. Timeout constants
-//!    and the env-var reader live here so both phases share a single knob.
-//!
-//! 2. `scan.rs`: per-root blocking fs walk (`scan_one_root`), `ColocatedDiscovery`,
-//!    and `is_likely_external_volume` heuristic. Called from `spawn_blocking`.
-//!
-//! 3. `restore.rs`: `restore_one_index_bounded` — the per-index timeout wrapper
-//!    that calls `restore_one_index` (from `start.rs`) inside a spawned task with
-//!    a deadline.
-//!
-//! Test: `legacy_only_does_not_block_on_colocated`,
-//!       `colocated_scan_skips_inaccessible_root`,
+//! Test: `warmboot_index_timeout_parses_env_var`,
 //!       `colocated_scan_partial_failure_still_returns_accessible`,
-//!       `restore_bounded_returns_false_for_missing_root`,
-//!       `restore_bounded_returns_true_for_accessible_index`.
+//!       `colocated_scan_deduplicates_against_known_ids`.
 
+pub(super) mod probe;
 pub mod restore;
 mod scan;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -51,9 +39,7 @@ pub use restore::restore_one_index_bounded;
 /// `spawn_blocking` scan AND around each per-index `restore_one_index` task.
 /// Override via `TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS` (any positive integer).
 ///
-/// Test: `warmboot_index_timeout` parses valid values and falls back to the
-/// default; `colocated_scan_skips_inaccessible_root` and
-/// `restore_bounded_returns_false_for_missing_root` verify the timeout fires.
+/// Test: `warmboot_index_timeout_parses_env_var` in this module.
 pub const ROOT_SCAN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Read the per-index warm-boot timeout from `TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS`.
@@ -75,6 +61,47 @@ pub fn warmboot_index_timeout() -> Duration {
         .filter(|&s| s > 0)
         .unwrap_or(ROOT_SCAN_TIMEOUT.as_secs());
     Duration::from_secs(secs)
+}
+
+/// Probe the volumes backing a list of index entries and return a set of
+/// inaccessible volume keys.
+///
+/// Why (issue #723): called once at the start of each warm-boot phase
+/// (legacy and colocated). A single probe per distinct volume is cheaper and
+/// safer than one probe per index — it limits leaked OS threads to
+/// one-per-volume rather than one-per-index when a volume hangs.
+///
+/// What: extracts unique volume keys from `entries` via `probe::volume_key`,
+/// runs `probe::probe_all_volumes` with `probe::volume_probe_timeout()`, and
+/// returns the resulting inaccessible set. Each caller (`start.rs`) should
+/// filter out entries whose root path maps to an inaccessible volume key
+/// BEFORE calling `restore_one_index_bounded`.
+///
+/// Test: `probe.rs` unit tests cover volume_key and probe_all_volumes directly.
+/// End-to-end covered by the acceptance criteria in issue #723.
+pub fn probe_warmboot_volumes(entries: &[PersistedIndex]) -> HashSet<PathBuf> {
+    if entries.is_empty() {
+        return HashSet::new();
+    }
+    let paths: Vec<PathBuf> = entries.iter().map(|e| e.root_path.clone()).collect();
+    let deadline = probe::volume_probe_timeout();
+    probe::probe_all_volumes(&paths, deadline)
+}
+
+/// Returns `true` if `root_path` is on an inaccessible volume.
+///
+/// Why (issue #723): factored out of `start.rs::restore_indexes` so both the
+/// legacy and colocated restore loops can cheaply test membership without
+/// re-computing the volume key on every iteration.
+/// What: computes `probe::volume_key(root_path)` and checks membership in
+/// `inaccessible_volumes`.
+/// Test: covered indirectly by the volume-probe filtering tests.
+pub fn is_on_inaccessible_volume(
+    root_path: &std::path::Path,
+    inaccessible_volumes: &HashSet<PathBuf>,
+) -> bool {
+    let key = probe::volume_key(root_path);
+    inaccessible_volumes.contains(&key)
 }
 
 /// Collect index entries from the durable `indexes.toml` registry only.
@@ -130,14 +157,16 @@ pub fn collect_legacy_entries() -> Vec<PersistedIndex> {
 
 /// Collect colocated index entries by scanning every tracked root in `roots.toml`.
 ///
-/// Why (issue #718 Part 2): the previous implementation called the blocking
-/// recursive scan directly on the async reactor thread with no timeout. Under
-/// launchd on macOS 26 Tahoe, a root on `/Volumes/SSD1` (external volume) can
-/// block `canonicalize` or `read_dir` indefinitely due to TCC permission denial.
-/// This blocked the entire restore task, preventing even the legacy indexes from
-/// registering.
+/// Why (issue #718 Part 2 / issue #723): the previous implementation called the
+/// blocking recursive scan directly on the async reactor thread with no timeout.
+/// Under launchd on macOS 26 Tahoe, a root on `/Volumes/SSD1` (external volume)
+/// can block `canonicalize` or `read_dir` indefinitely due to TCC permission
+/// denial. This blocked the entire restore task, preventing even the legacy
+/// indexes from registering.
 ///
-/// What: loads `roots.toml`, then for each root:
+/// What: loads `roots.toml`, then — after filtering out roots on volumes already
+/// marked inaccessible by `inaccessible_volumes` (issue #723) — for each
+/// remaining root:
 /// - Spawns a `spawn_blocking` task running `scan_one_root` (the sync fs walk).
 /// - Wraps it in `warmboot_index_timeout()`.
 /// - On timeout: logs `warn` with the root path and the actionable hint about
@@ -148,7 +177,8 @@ pub fn collect_legacy_entries() -> Vec<PersistedIndex> {
 /// Test: `colocated_scan_partial_failure_still_returns_accessible`,
 ///       `colocated_scan_deduplicates_against_known_ids`.
 pub async fn collect_colocated_entries(
-    known_ids: &std::collections::HashSet<String>,
+    known_ids: &HashSet<String>,
+    inaccessible_volumes: &HashSet<PathBuf>,
 ) -> Vec<PersistedIndex> {
     use crate::service::roots_registry::load_roots;
 
@@ -167,16 +197,38 @@ pub async fn collect_colocated_entries(
         return Vec::new();
     }
 
+    // Issue #723: skip roots on volumes that already failed the pre-flight probe.
+    // This prevents issuing any open() calls on a hung volume for the scan phase.
+    let (accessible_roots, pre_skipped): (Vec<PathBuf>, Vec<PathBuf>) = tracked_roots
+        .into_iter()
+        .partition(|r| !is_on_inaccessible_volume(r, inaccessible_volumes));
+
+    if !pre_skipped.is_empty() {
+        tracing::warn!(
+            "warm-boot: skipping {} colocated root(s) on inaccessible volumes (issue #723): {}",
+            pre_skipped.len(),
+            pre_skipped
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    if accessible_roots.is_empty() {
+        return Vec::new();
+    }
+
     tracing::info!(
         "warm-boot: scanning {} tracked root(s) for colocated indexes",
-        tracked_roots.len()
+        accessible_roots.len()
     );
 
     let timeout = warmboot_index_timeout();
     let mut results: Vec<PersistedIndex> = Vec::new();
     let mut seen_ids = known_ids.clone();
 
-    for root in tracked_roots {
+    for root in accessible_roots {
         let root_for_log = root.clone();
         let root_for_task = root.clone();
 
@@ -242,7 +294,7 @@ pub async fn collect_colocated_entries(
 
 #[cfg(test)]
 mod tests {
-    //! Tests for the resilient warm-boot index collection (issue #718).
+    //! Tests for the resilient warm-boot index collection (issues #718 / #723).
     //!
     //! Why: the key invariant is that an inaccessible or hung colocated root
     //! must never prevent the accessible legacy/colocated entries from
@@ -252,7 +304,6 @@ mod tests {
     //! Test: `cargo test -p trusty-search -- warm_boot`.
 
     use super::*;
-    use std::collections::HashSet;
 
     // ── warmboot_index_timeout ────────────────────────────────────────────────
 
@@ -312,7 +363,9 @@ mod tests {
         crate::service::roots_registry::upsert_root(nonexistent).unwrap();
 
         let known_ids: HashSet<String> = HashSet::new();
-        let results = collect_colocated_entries(&known_ids).await;
+        // No volumes are inaccessible in this test.
+        let inaccessible: HashSet<PathBuf> = HashSet::new();
+        let results = collect_colocated_entries(&known_ids, &inaccessible).await;
 
         unsafe {
             std::env::remove_var("TRUSTY_DATA_DIR");
@@ -357,8 +410,9 @@ mod tests {
 
         let mut known_ids: HashSet<String> = HashSet::new();
         known_ids.insert(expected_id.clone());
+        let inaccessible: HashSet<PathBuf> = HashSet::new();
 
-        let results = collect_colocated_entries(&known_ids).await;
+        let results = collect_colocated_entries(&known_ids, &inaccessible).await;
 
         unsafe {
             std::env::remove_var("TRUSTY_DATA_DIR");
@@ -367,6 +421,60 @@ mod tests {
         assert!(
             results.is_empty(),
             "index already in known_ids must not be returned again; got: {results:?}"
+        );
+    }
+
+    /// Why (issue #723): roots on inaccessible volumes must be skipped before
+    /// any spawn_blocking scan is attempted — the volume probe prevents issuing
+    /// any open() calls on a hung volume.
+    /// What: register one real root and one root with a mocked inaccessible
+    /// volume key. Pass the mocked key in `inaccessible_volumes`; assert only
+    /// the real root's index is returned.
+    /// Note: `serial` prevents parallel env-var mutation from other tests.
+    /// Test: this test.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn colocated_scan_skips_inaccessible_volume_roots() {
+        use crate::service::fs_discovery::id_from_path;
+
+        let data_tmp = tempfile::tempdir().unwrap();
+        let real_root = tempfile::tempdir().unwrap();
+        let ts_dir = real_root.path().join(".trusty-search");
+        std::fs::create_dir_all(&ts_dir).unwrap();
+        let canonical_root = real_root.path().canonicalize().unwrap();
+        let real_id = id_from_path(&canonical_root);
+
+        // Register a fake root that looks like it's on /Volumes/BLOCKED.
+        // We won't actually create it — the test asserts it is skipped via the
+        // inaccessible_volumes filter, not via a scan timeout.
+        let fake_blocked = PathBuf::from("/Volumes/BLOCKED/some-project");
+
+        unsafe {
+            std::env::set_var("TRUSTY_DATA_DIR", data_tmp.path());
+        }
+        crate::service::roots_registry::upsert_root(real_root.path().to_path_buf()).unwrap();
+        crate::service::roots_registry::upsert_root(fake_blocked.clone()).unwrap();
+
+        let known_ids: HashSet<String> = HashSet::new();
+        // Simulate: /Volumes/BLOCKED was probed and timed out.
+        let mut inaccessible: HashSet<PathBuf> = HashSet::new();
+        inaccessible.insert(PathBuf::from("/Volumes/BLOCKED"));
+
+        let results = collect_colocated_entries(&known_ids, &inaccessible).await;
+
+        unsafe {
+            std::env::remove_var("TRUSTY_DATA_DIR");
+        }
+
+        // Only the real (non-blocked) root must be found.
+        assert_eq!(
+            results.len(),
+            1,
+            "only the accessible root must be returned; got: {results:?}"
+        );
+        assert_eq!(
+            results[0].id, real_id,
+            "the returned entry must be the real root, not the blocked one"
         );
     }
 }

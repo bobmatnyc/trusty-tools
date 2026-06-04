@@ -149,48 +149,24 @@ pub(crate) fn derive_warm_boot_stages(inputs: WarmBootInputs) -> IndexStages {
 }
 
 /// Restore every index recorded in `indexes.toml` and in colocated roots by
-/// re-registering it on the in-memory registry. For each entry we attempt to
-/// load the persisted HNSW snapshot and chunk corpus from disk so the index
-/// comes back warm (no re-indexing required).
+/// re-registering it on the in-memory registry.
 ///
-/// Issue #403: Warm-boot from indexes.toml (legacy global indexes) AND from
-/// filesystem-discovered colocated `.trusty-search/` indexes (dual discovery).
-///
-/// Why (issue #85): before this hook, the daemon had no way to remember which
-/// projects were registered — every restart required `trusty-search index <path>`.
-///
-/// Issue #718 Part 2: the two discovery phases are fully independent.
-///   Phase 1 — legacy entries from `indexes.toml` (fast, always accessible
-///   under launchd) are collected synchronously and registered immediately.
-///   Phase 2 — colocated entries from tracked roots are scanned with a
-///   per-root timeout via `spawn_blocking`.
-///
-/// Issue #718 Part 3: each per-index restore is now bounded by
-///   `warmboot_index_timeout()` (default 10 s, configurable via
-///   `TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS`). `build_indexer_from_entry` opens
-///   the index's redb synchronously; on a TCC-denied external volume that open
-///   hangs indefinitely. The per-index timeout wraps `restore_one_index` in a
-///   `tokio::spawn` task and aborts it on timeout, so warm-boot always finishes
-///   in bounded time regardless of how many indexes are on blocked volumes.
-///
-/// What: loads `indexes.toml` for legacy global indexes AND scans tracked roots
-/// (from `roots.toml`) for colocated `.trusty-search/` directories, then
-/// registers each discovered index. Deduplicates by index id. Each entry is
-/// restored via `restore_one_index_bounded` which aborts on timeout and logs
-/// actionable diagnostics. Emits a terminal summary line so launchd boot is
-/// fully diagnosable.
-/// Test: integration test in `tests/integration_tests.rs` that writes a
-/// registry file, calls this hook, and asserts the registry list matches.
+/// Why (issues #85 / #403 / #718 / #723): before this hook every restart
+/// required re-indexing. #718 bounded scans and opens with
+/// `spawn_blocking` + timeout. #723 adds probe-per-volume: each distinct
+/// volume is probed ONCE on a bare OS thread before any redb opens so a
+/// TCC-blocked volume costs at most one leaked thread (not one-per-index).
+/// What: Phase 1 reads legacy entries from `indexes.toml`; Phase 2 scans
+/// tracked roots. Each entry is restored via `restore_one_index_bounded`.
+/// Test: integration test in `tests/integration_tests.rs`.
 async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core::Embedder>) {
     use crate::service::warm_boot::{
-        collect_colocated_entries, collect_legacy_entries, restore_one_index_bounded,
+        collect_colocated_entries, collect_legacy_entries, is_on_inaccessible_volume,
+        probe_warmboot_volumes, restore_one_index_bounded,
     };
     use std::collections::HashSet;
 
     // ── Phase 1: legacy indexes (indexes.toml) ─────────────────────────────
-    // Fast synchronous read from the data dir (always accessible under
-    // launchd). Register these immediately so the daemon is useful as soon
-    // as possible, regardless of what happens in Phase 2.
     let legacy_entries = collect_legacy_entries();
     let mut seen_ids: HashSet<String> = HashSet::new();
 
@@ -200,6 +176,19 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
              Under launchd, set TRUSTY_DATA_DIR to an absolute path (issue #718)."
         );
     } else {
+        // Issue #723: probe each distinct volume once before any redb opens.
+        let inaccessible_volumes = probe_warmboot_volumes(&legacy_entries);
+        if !inaccessible_volumes.is_empty() {
+            tracing::warn!(
+                "warm-boot: {} volume(s) inaccessible (issue #723): {}",
+                inaccessible_volumes.len(),
+                inaccessible_volumes
+                    .iter()
+                    .map(|v| v.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         let total_legacy = legacy_entries.len();
         tracing::info!(
             "warm-boot: restoring {} legacy index registration(s) from indexes.toml",
@@ -209,6 +198,15 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
         let mut legacy_skipped: usize = 0;
         for entry in legacy_entries {
             seen_ids.insert(entry.id.clone());
+            if is_on_inaccessible_volume(&entry.root_path, &inaccessible_volumes) {
+                tracing::warn!(
+                    "warm-boot: skipping index '{}' — volume {} inaccessible (issue #723)",
+                    entry.id,
+                    entry.root_path.display(),
+                );
+                legacy_skipped += 1;
+                continue;
+            }
             let s = state.clone();
             let e = Arc::clone(embedder);
             if restore_one_index_bounded(entry, move |en| async move {
@@ -223,14 +221,29 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
         }
         tracing::info!(
             "warm-boot: legacy phase complete — {legacy_ok} of {total_legacy} index(es) \
-             restored ({legacy_skipped} skipped: timeout/denied/missing)"
+             restored ({legacy_skipped} skipped: timeout/denied/missing/blocked-volume)"
         );
     }
 
     // ── Phase 2: colocated indexes (roots.toml + fs scan) ──────────────────
-    // Each tracked root is scanned via spawn_blocking with a per-root timeout
-    // so a TCC-denied or hung external-volume root cannot block this phase.
-    let colocated_entries = collect_colocated_entries(&seen_ids).await;
+    // Issue #723: probe colocated roots before the async scan.
+    let colocated_inaccessible = {
+        use crate::service::roots_registry::load_roots;
+        match load_roots() {
+            Ok(roots) => {
+                let entries: Vec<crate::service::persistence::PersistedIndex> = roots
+                    .into_iter()
+                    .map(|r| crate::service::persistence::PersistedIndex {
+                        root_path: r.path,
+                        ..Default::default()
+                    })
+                    .collect();
+                probe_warmboot_volumes(&entries)
+            }
+            Err(_) => std::collections::HashSet::new(),
+        }
+    };
+    let colocated_entries = collect_colocated_entries(&seen_ids, &colocated_inaccessible).await;
 
     if colocated_entries.is_empty() {
         tracing::debug!("warm-boot: no additional colocated indexes discovered");
