@@ -193,21 +193,37 @@ impl FilteredDiff {
     /// Why: the prompt builder needs a diff string bounded to `max_chars`; this
     /// method encapsulates the rendering logic so the pipeline has one call site.
     /// What: iterates `files`, renders each surviving hunk, appends the noise
-    /// summary, and stops before exceeding `max_chars`.  Does NOT inject a
-    /// manifest header (spec REV-209 — framing-regression guard).
+    /// summary, and stops before exceeding `max_chars`.  When the budget is
+    /// exhausted mid-file or between files, a loud `[RENDER TRUNCATED …]` marker
+    /// is appended BEFORE the noise summary so the reviewer model cannot miss
+    /// that content was cut.  Both the outer-file and inner-hunk budget checks
+    /// set the same `budget_exceeded` flag and break out of all loops — this
+    /// prevents the previous silent bug where the inner `break` exited only the
+    /// hunk loop, allowing subsequent files to be appended after a half-rendered
+    /// file (hunks silently dropped with no marker).  Does NOT inject a manifest
+    /// header (spec REV-209 — framing-regression guard).
     /// Test: `filtered_diff_render_for_prompt_contains_surviving_content`,
-    /// `filtered_diff_render_respects_max_chars`.
+    /// `filtered_diff_render_respects_max_chars`,
+    /// `render_for_prompt_mid_file_hunk_overflow_loud_not_silent`,
+    /// `render_for_prompt_no_continuation_after_inner_break`.
     pub fn render_for_prompt(&self, max_chars: usize) -> String {
         let mut out = String::with_capacity(max_chars.min(64 * 1024));
         let suffix = self.build_noise_summary();
+        // Constant overhead reserved for the truncation marker (if needed) + suffix.
+        // The marker itself is ~80 chars; we round up to 120 to be safe.
+        const TRUNC_MARKER_RESERVE: usize = 120;
+        let suffix_reserve = suffix.len() + TRUNC_MARKER_RESERVE;
 
-        for file in &self.files {
+        let mut budget_exceeded = false;
+
+        'files: for file in &self.files {
             match file.disposition {
                 FileDisposition::SummaryOnly => {
                     if let Some(ref summary) = file.summary_line {
                         let line = format!("# {}: {}\n", file.filename, summary);
-                        if out.len() + line.len() + suffix.len() > max_chars {
-                            break;
+                        if out.len() + line.len() + suffix_reserve > max_chars {
+                            budget_exceeded = true;
+                            break 'files;
                         }
                         out.push_str(&line);
                     }
@@ -215,15 +231,21 @@ impl FilteredDiff {
                 FileDisposition::Kept => {
                     // Build the file header.
                     let file_header = format!("--- a/{0}\n+++ b/{0}\n", file.filename);
-                    if out.len() + file_header.len() + suffix.len() > max_chars {
-                        break;
+                    if out.len() + file_header.len() + suffix_reserve > max_chars {
+                        budget_exceeded = true;
+                        break 'files;
                     }
                     out.push_str(&file_header);
 
                     for hunk in &file.hunks {
                         let rendered = hunk.render();
-                        if out.len() + rendered.len() + suffix.len() + 1 > max_chars {
-                            break;
+                        if out.len() + rendered.len() + suffix_reserve + 1 > max_chars {
+                            // Inner budget hit: set flag and break the OUTER loop
+                            // so no further files are appended after a half-rendered
+                            // file.  This is the fix for the silent-truncation bug
+                            // where only `break` (inner) was used before.
+                            budget_exceeded = true;
+                            break 'files;
                         }
                         out.push_str(&rendered);
                         out.push('\n');
@@ -233,6 +255,36 @@ impl FilteredDiff {
                     // Dropped files are never rendered in the prompt.
                 }
             }
+        }
+
+        // Append a loud truncation marker whenever the char budget was hit so the
+        // reviewer model cannot silently miss that content was omitted.  This is
+        // the companion to `truncate_diff`'s marker: `render_for_prompt` may cut
+        // before `truncate_diff` is applied, so it must be self-announcing.
+        if budget_exceeded {
+            let remaining_files = self
+                .files
+                .iter()
+                .filter(|f| {
+                    // Count files whose content was not rendered (approximate:
+                    // any file whose header does not appear in out).
+                    !out.contains(f.filename.as_str())
+                })
+                .count();
+            let marker = if remaining_files > 0 {
+                format!(
+                    "\n[RENDER TRUNCATED — char budget ({max_chars}) reached; \
+                     ~{remaining_files} file(s) omitted; review covers only the \
+                     visible portion above]\n"
+                )
+            } else {
+                format!(
+                    "\n[RENDER TRUNCATED — char budget ({max_chars}) reached; \
+                     some hunks omitted from the last file above; review covers \
+                     only the visible portion]\n"
+                )
+            };
+            out.push_str(&marker);
         }
 
         if !suffix.is_empty() {
@@ -301,132 +353,8 @@ impl FilteredDiff {
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
+// Tests split into a sibling file to keep models.rs under the 500-line cap.
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn make_kept_file(name: &str, hunk_content: &str) -> FilteredFile {
-        FilteredFile {
-            filename: name.to_string(),
-            status: "modified".to_string(),
-            disposition: FileDisposition::Kept,
-            hunks: vec![FilteredHunk {
-                header: "@@ -1,3 +1,3 @@".to_string(),
-                lines: vec![hunk_content.to_string()],
-                substantive_confidence: 1.0,
-                reason_kept: "deterministic-pass".to_string(),
-            }],
-            dropped_hunks: vec![],
-            summary_line: None,
-        }
-    }
-
-    #[test]
-    fn filtered_hunk_render_roundtrip() {
-        let h = FilteredHunk {
-            header: "@@ -1,2 +1,2 @@".to_string(),
-            lines: vec!["-old line".to_string(), "+new line".to_string()],
-            substantive_confidence: 1.0,
-            reason_kept: "test".to_string(),
-        };
-        let rendered = h.render();
-        assert!(rendered.contains("@@ -1,2 +1,2 @@"));
-        assert!(rendered.contains("-old line"));
-        assert!(rendered.contains("+new line"));
-    }
-
-    #[test]
-    fn hunk_drop_reason_label() {
-        assert_eq!(HunkDropReason::WhitespaceOnly.label(), "whitespace-only");
-        assert_eq!(HunkDropReason::ImportOnly.label(), "import-only");
-        assert_eq!(HunkDropReason::CommentOnly.label(), "comment-only");
-        assert_eq!(
-            HunkDropReason::MechanicalHaiku.label(),
-            "mechanical (Haiku)"
-        );
-    }
-
-    #[test]
-    fn filtered_diff_render_for_prompt_contains_surviving_content() {
-        let diff = FilteredDiff {
-            files: vec![make_kept_file("src/auth.rs", "+pub fn authenticate() {}")],
-            dropped_files: vec![],
-            drop_hunk_counts: HashMap::new(),
-            original_byte_size: 500,
-            filtered_byte_size: 100,
-        };
-        let rendered = diff.render_for_prompt(10_000);
-        assert!(rendered.contains("src/auth.rs"), "file path must appear");
-        assert!(
-            rendered.contains("authenticate"),
-            "hunk content must appear"
-        );
-    }
-
-    #[test]
-    fn filtered_diff_render_respects_max_chars() {
-        // Create a large number of files — rendering should stop before max_chars.
-        let files: Vec<FilteredFile> = (0..100)
-            .map(|i| make_kept_file(&format!("src/file{i}.rs"), &"+fn foo() {}".repeat(50)))
-            .collect();
-        let diff = FilteredDiff {
-            files,
-            dropped_files: vec![],
-            drop_hunk_counts: HashMap::new(),
-            original_byte_size: 100_000,
-            filtered_byte_size: 50_000,
-        };
-        let rendered = diff.render_for_prompt(2_000);
-        assert!(
-            rendered.len() <= 2_000 + 200,
-            "rendered output must not greatly exceed max_chars: len={}",
-            rendered.len()
-        );
-    }
-
-    #[test]
-    fn filtered_diff_drop_summary_emitted() {
-        let mut drop_counts = HashMap::new();
-        drop_counts.insert(HunkDropReason::ImportOnly, 3u32);
-        drop_counts.insert(HunkDropReason::WhitespaceOnly, 1u32);
-
-        let diff = FilteredDiff {
-            files: vec![make_kept_file("src/main.rs", "+fn main() {}")],
-            dropped_files: vec![DroppedFile {
-                path: "Cargo.lock".to_string(),
-                reason: "lockfile".to_string(),
-            }],
-            drop_hunk_counts: drop_counts,
-            original_byte_size: 5_000,
-            filtered_byte_size: 200,
-        };
-
-        let rendered = diff.render_for_prompt(100_000);
-        assert!(
-            rendered.contains("DiffAnalyzer filtered"),
-            "noise summary must appear: {rendered}"
-        );
-        assert!(
-            rendered.contains("file(s) omitted"),
-            "file drop count must appear: {rendered}"
-        );
-        assert!(
-            rendered.contains("hunk(s) omitted"),
-            "hunk drop count must appear: {rendered}"
-        );
-    }
-
-    #[test]
-    fn no_summary_when_nothing_dropped() {
-        let diff = FilteredDiff {
-            files: vec![make_kept_file("src/lib.rs", "+pub fn new() {}")],
-            dropped_files: vec![],
-            drop_hunk_counts: HashMap::new(),
-            original_byte_size: 100,
-            filtered_byte_size: 100,
-        };
-        let summary = diff.build_noise_summary();
-        assert!(summary.is_empty(), "empty summary when nothing was dropped");
-    }
-}
+#[path = "models_tests.rs"]
+mod tests;
