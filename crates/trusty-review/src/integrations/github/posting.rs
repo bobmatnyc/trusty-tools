@@ -84,11 +84,14 @@ pub const REVIEW_SIGNATURE: &str = "<!-- trusty-review -->";
 /// and parseable by tooling (the fenced JSON block), matching code-intelligence
 /// so existing consumers keep working.
 /// What: renders the signature, a grade+verdict heading, the LLM prose summary
-/// (or a fallback line), a findings list, a trailing fenced ```json block holding
-/// a `VerdictBlock`, and a footer with grade/model/token telemetry (#732).
-/// Footer format: `Grade: B+ · 🤖 Reviewed by \`<model>\` · tokens ↑N ↓M · est. $X`
-/// Test: `body_contains_prose_and_json_block`, `body_contains_signature`,
-/// `body_footer_contains_grade`.
+/// (or a fallback line, trimmed), and a findings list followed by a trailing
+/// fenced ```json block holding a `VerdictBlock`.  The grade/model/token/cost
+/// footer is NOT generated here — it is appended to `result.review_body` by
+/// `finalize_review` (via `format_review_footer` in `pipeline/post.rs`) before
+/// this function is called, so the footer appears naturally in the prose section
+/// and is identical in both the live GitHub comment and the dry-run/MCP response
+/// (single source of truth for closes #728 + #732).
+/// Test: `body_contains_prose_and_json_block`, `body_contains_signature`.
 pub fn build_review_comment_body(result: &ReviewResult) -> String {
     let mut md = String::with_capacity(1024);
     md.push_str(REVIEW_SIGNATURE);
@@ -105,7 +108,8 @@ pub fn build_review_comment_body(result: &ReviewResult) -> String {
         grade_prefix, result.verdict
     ));
 
-    // Prose summary — the LLM review body, or a fallback if empty.
+    // Prose summary — the LLM review body (which already carries the
+    // format_review_footer line appended by finalize_review), or a fallback.
     if result.review_body.trim().is_empty() {
         md.push_str("_No narrative summary was produced for this review._\n\n");
     } else {
@@ -152,33 +156,7 @@ pub fn build_review_comment_body(result: &ReviewResult) -> String {
         }
     }
 
-    // Footer with grade, model, token counts, and cost (#732 + #728).
-    // Format: `Grade: B+ · 🤖 Reviewed by `model` · tokens ↑N ↓M · est. $X`
-    md.push('\n');
-    md.push_str(&build_review_footer(result));
-    md.push('\n');
-
     md
-}
-
-/// Build the review footer line containing grade, model, and token telemetry.
-///
-/// Why: surfaces the grade and telemetry in a single, scannable line at the
-/// bottom of the review comment so reviewers can quickly identify the grade and
-/// understand the review cost.  Single source of truth for the footer format so
-/// tests can assert the exact string.
-/// What: returns a string of the form
-/// `Grade: B+ · 🤖 Reviewed by \`model\` · tokens ↑N ↓M · est. $X`
-/// The grade is shown as "Grade: ?" when absent (legacy result pre-#732).
-/// Test: `body_footer_contains_grade`.
-pub fn build_review_footer(result: &ReviewResult) -> String {
-    let grade_part = result.grade.as_deref().unwrap_or("?");
-    // Strip provider prefix from the model id for a cleaner display.
-    let model_display = result.model.split('/').next_back().unwrap_or(&result.model);
-    format!(
-        "Grade: {grade_part} · 🤖 Reviewed by `{model_display}` · tokens ↑{} ↓{} · est. ${:.6}",
-        result.input_tokens, result.output_tokens, result.cost_estimate_usd,
-    )
 }
 
 // ─── Posting ────────────────────────────────────────────────────────────────────
@@ -383,15 +361,23 @@ mod tests {
         assert!(resp.is_err(), "connection to port 1 must fail");
     }
 
-    /// Footer rendering: exact format for grade B+, specific model, and token counts.
+    /// Consolidated footer: exact-string regression for grade B+, thousands separators,
+    /// and rounded cost — matching the single source of truth in pipeline/post.rs.
     ///
-    /// Why: the footer string is a product contract; any change to its format must
-    /// be intentional and visible in tests.  This test pins the exact string so
-    /// regressions are caught immediately.
-    /// Model `us.anthropic.claude-sonnet-4-6` (stored without the `bedrock/` routing
-    /// prefix, which is stripped by `build_review_prompt` before storage).
+    /// Why: this pins the consolidated footer contract end-to-end: grade is prepended,
+    /// token counts carry thousands separators, and cost is rounded to 3dp — restoring
+    /// the #728 formatting that was regressed by the duplicate `build_review_footer`
+    /// in #733.  Any format drift is caught immediately.
+    /// What: simulates the pipeline path where `finalize_review` calls
+    /// `format_review_footer(grade, model, in, out, cost)` and appends it to
+    /// `review_body`, then `build_review_comment_body` includes it in the prose
+    /// section.  Asserts the exact footer string
+    /// `Grade: B+ · 🤖 Reviewed by \`us.anthropic.claude-sonnet-4-6\` · tokens ↑13,499 ↓1,718 · est. $0.066`
+    /// Test: this test itself (no network, no FS).
     #[test]
     fn body_footer_contains_grade() {
+        use crate::pipeline::post::format_review_footer;
+
         let mut result = sample_result();
         result.grade = Some("B+".to_string());
         // The model stored in ReviewResult has the routing prefix already stripped
@@ -399,28 +385,47 @@ mod tests {
         result.model = "us.anthropic.claude-sonnet-4-6".to_string();
         result.input_tokens = 13499;
         result.output_tokens = 1718;
-        result.cost_estimate_usd = 0.066267;
-        let footer = build_review_footer(&result);
-        // Verify grade prefix, model, and tokens.
+        result.cost_estimate_usd = 0.066_267;
+
+        // Simulate finalize_review: append the consolidated footer to review_body.
+        let footer = format_review_footer(
+            result.grade.as_deref(),
+            &result.model,
+            result.input_tokens,
+            result.output_tokens,
+            result.cost_estimate_usd,
+        );
+        result.review_body.push_str(&footer);
+
+        // The consolidated footer must use thousands separators and rounded cost.
+        let expected_footer = "Grade: B+ · 🤖 Reviewed by `us.anthropic.claude-sonnet-4-6` · tokens ↑13,499 ↓1,718 · est. $0.066";
         assert!(
-            footer.starts_with("Grade: B+"),
-            "footer must start with grade: {footer}"
+            result.review_body.contains(expected_footer),
+            "review_body must contain the exact consolidated footer: {expected_footer}\nActual review_body:\n{}",
+            result.review_body
+        );
+
+        // build_review_comment_body renders result.review_body (which now contains
+        // the footer) in the prose section — verify the footer appears in the comment.
+        let body = build_review_comment_body(&result);
+        assert!(
+            body.contains(expected_footer),
+            "comment body must contain the consolidated footer: {expected_footer}\nActual body:\n{body}"
+        );
+        // Confirm no raw full-precision cost leaks into the comment.
+        assert!(
+            !body.contains("0.066267"),
+            "comment must not contain full-precision cost: {body}"
+        );
+        // Confirm thousands separators are present (not raw integers).
+        assert!(
+            body.contains("↑13,499"),
+            "comment must contain thousands-separated input tokens: {body}"
         );
         assert!(
-            footer.contains("us.anthropic.claude-sonnet-4-6"),
-            "footer must show model: {footer}"
+            body.contains("↓1,718"),
+            "comment must contain thousands-separated output tokens: {body}"
         );
-        assert!(
-            footer.contains("↑13499"),
-            "footer must show input tokens: {footer}"
-        );
-        assert!(
-            footer.contains("↓1718"),
-            "footer must show output tokens: {footer}"
-        );
-        // Verify exact format string matches spec (#732).
-        let expected = "Grade: B+ · 🤖 Reviewed by `us.anthropic.claude-sonnet-4-6` · tokens ↑13499 ↓1718 · est. $0.066267";
-        assert_eq!(footer, expected, "footer must match exact format");
     }
 
     #[test]

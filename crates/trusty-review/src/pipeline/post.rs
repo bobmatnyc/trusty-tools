@@ -48,14 +48,16 @@ use crate::{
 /// Appending the footer here (before the post/log branch) ensures a single source
 /// of truth: the same footer text appears in the live GitHub comment AND in the
 /// dry-run / MCP response, so callers see exactly what was (or would be) posted
-/// (closes #728).
-/// What: formats one line `---\n🤖 Reviewed by \`<model>\` · tokens ↑<in> ↓<out> · est. $<cost>`
-/// where token counts use thousands separators and cost is rounded to 3 decimal
-/// places (e.g. `$0.066`).  An empty model string is rendered as `(unknown)` so
-/// the line is always well-formed.
+/// (closes #728, #732).
+/// What: formats one line `[Grade: <g> · ]🤖 Reviewed by \`<model>\` · tokens ↑<in> ↓<out> · est. $<cost>`
+/// where the grade prefix is included when `grade` is `Some`, token counts use
+/// thousands separators, and cost is rounded to 3 decimal places (e.g. `$0.066`).
+/// An empty model string is rendered as `(unknown)` so the line is always well-formed.
 /// Test: `footer_format_known_tuple` (exact-string regression for the sample
-/// tuple from #728), `footer_thousands_separator` (boundary at 1 000).
+/// tuple from #728), `footer_format_with_grade` (grade-prefixed form from #732),
+/// `footer_thousands_separator` (boundary at 1 000).
 pub fn format_review_footer(
+    grade: Option<&str>,
     model: &str,
     input_tokens: u32,
     output_tokens: u32,
@@ -71,8 +73,12 @@ pub fn format_review_footer(
     let out_fmt = format_with_thousands(output_tokens);
     // Round cost to 3 decimal places; strip trailing zeros after the 3rd digit.
     let cost_fmt = format_cost(cost_usd);
+    let grade_prefix = match grade {
+        Some(g) if !g.is_empty() => format!("Grade: {g} · "),
+        _ => String::new(),
+    };
     format!(
-        "\n---\n🤖 Reviewed by `{model_display}` · tokens ↑{in_fmt} ↓{out_fmt} · est. ${cost_fmt}"
+        "\n---\n{grade_prefix}🤖 Reviewed by `{model_display}` · tokens ↑{in_fmt} ↓{out_fmt} · est. ${cost_fmt}"
     )
 }
 
@@ -208,8 +214,12 @@ pub async fn finalize_review(
     // the footer is identical in the live GitHub comment (which reads
     // result.review_body via build_review_comment_body) and in the returned
     // ReviewResult (which the MCP wrapper serialises as structured output).
-    // This is the single source of truth required by #728.
+    // This is the single source of truth required by #728 (token/cost) and
+    // #732 (grade prefix). build_review_comment_body in posting.rs must NOT
+    // generate its own footer — it should render result.review_body which
+    // already carries this footer line.
     let footer = format_review_footer(
+        result.grade.as_deref(),
         &result.model,
         result.input_tokens,
         result.output_tokens,
@@ -306,20 +316,50 @@ mod tests {
 
     // ── Footer rendering ──────────────────────────────────────────────────────
 
-    /// Exact-string regression for the sample tuple given in issue #728.
+    /// Exact-string regression for the no-grade form from issue #728.
     ///
     /// Why: the footer format is a user-facing string that must not drift
     /// silently; an exact assertion catches any change to separators, arrows,
     /// or emoji.
-    /// What: asserts the full footer line for
+    /// What: asserts the full footer line for grade=None,
     ///   model=us.anthropic.claude-sonnet-4-6, in=13499, out=1718, cost=0.066267.
     /// Test: this test itself (no network, no FS).
     #[test]
     fn footer_format_known_tuple() {
-        let footer = format_review_footer("us.anthropic.claude-sonnet-4-6", 13499, 1718, 0.066_267);
+        let footer = format_review_footer(
+            None,
+            "us.anthropic.claude-sonnet-4-6",
+            13499,
+            1718,
+            0.066_267,
+        );
         assert_eq!(
             footer,
             "\n---\n🤖 Reviewed by `us.anthropic.claude-sonnet-4-6` · tokens ↑13,499 ↓1,718 · est. $0.066"
+        );
+    }
+
+    /// Exact-string regression for the grade-prefixed form from issue #732.
+    ///
+    /// Why: the consolidated footer must prepend the grade when present, using
+    /// the same thousands separators and cost rounding as the #728 no-grade form.
+    /// Any format drift is caught immediately by this exact assertion.
+    /// What: asserts the full footer line for grade=B+,
+    ///   model=us.anthropic.claude-sonnet-4-6, in=13499, out=1718, cost=0.066267
+    ///   → `Grade: B+ · 🤖 Reviewed by \`us.anthropic.claude-sonnet-4-6\` · tokens ↑13,499 ↓1,718 · est. $0.066`
+    /// Test: this test itself (no network, no FS).
+    #[test]
+    fn footer_format_with_grade() {
+        let footer = format_review_footer(
+            Some("B+"),
+            "us.anthropic.claude-sonnet-4-6",
+            13499,
+            1718,
+            0.066_267,
+        );
+        assert_eq!(
+            footer,
+            "\n---\nGrade: B+ · 🤖 Reviewed by `us.anthropic.claude-sonnet-4-6` · tokens ↑13,499 ↓1,718 · est. $0.066"
         );
     }
 
@@ -345,7 +385,7 @@ mod tests {
     /// Test: this test itself.
     #[test]
     fn footer_empty_model_renders_unknown() {
-        let footer = format_review_footer("", 10, 5, 0.001);
+        let footer = format_review_footer(None, "", 10, 5, 0.001);
         assert!(
             footer.contains("`(unknown)`"),
             "empty model must render as (unknown): {footer}"
@@ -360,7 +400,7 @@ mod tests {
     /// Test: this test itself.
     #[test]
     fn footer_zero_cost() {
-        let footer = format_review_footer("my-model", 1, 1, 0.0);
+        let footer = format_review_footer(None, "my-model", 1, 1, 0.0);
         assert!(
             footer.contains("$0"),
             "zero cost must render as $0: {footer}"
