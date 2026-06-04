@@ -119,15 +119,22 @@ impl SupervisorConfig {
 /// the sidecar, which therefore always ran at the default of 32. CoreML safety
 /// cap: CoreML pre-allocates per-batch GPU/ANE buffers in the unified-memory
 /// pool; oversized batches can trigger jetsam SIGKILL, so the value is clamped
-/// to `coreml_cap` when `is_coreml` is `true`.
-/// What: `min(resolved, coreml_cap)` when `is_coreml`; `resolved` otherwise.
-/// Test: `sidecar_batch_size_*` in this module's `tests`.
+/// to `coreml_cap` when `is_coreml` is `true`. A zero result is invalid (the
+/// sidecar would set `TRUSTY_EMBED_BATCH_SIZE=0` which ORT rejects), so the
+/// return value is always clamped to at least 1.
+/// What: `min(resolved, coreml_cap)` when `is_coreml`; `resolved` otherwise;
+/// result is further clamped to `max(result, 1)` to prevent a zero batch size.
+/// Test: `sidecar_batch_size_*` in this module's `tests`, including
+/// `sidecar_batch_size_zero_resolved` and `sidecar_batch_size_zero_coreml_cap`.
 pub fn sidecar_batch_size(resolved: usize, is_coreml: bool, coreml_cap: usize) -> usize {
-    if is_coreml {
+    let raw = if is_coreml {
         resolved.min(coreml_cap)
     } else {
         resolved
-    }
+    };
+    // Guard: a zero batch size is invalid — the sidecar would receive
+    // TRUSTY_EMBED_BATCH_SIZE=0 which ONNX Runtime rejects. Clamp to 1.
+    raw.max(1)
 }
 
 fn parse_env<T: std::str::FromStr + Copy>(name: &str, default: T) -> T {
@@ -621,6 +628,44 @@ mod tests {
         assert_eq!(sidecar_batch_size(512, true, 64), 64);
         assert_eq!(sidecar_batch_size(16, true, 32), 16);
         assert_eq!(sidecar_batch_size(32, true, 32), 32);
+    }
+
+    #[test]
+    fn sidecar_batch_size_zero_resolved_clamps_to_one() {
+        // Why: resolved=0 would cause TRUSTY_EMBED_BATCH_SIZE=0 which ONNX
+        // Runtime rejects; the guard must clamp to 1 regardless of is_coreml.
+        // What: resolved=0, is_coreml=false → 1 (clamped from 0).
+        // Test: this test.
+        assert_eq!(
+            sidecar_batch_size(0, false, 32),
+            1,
+            "zero resolved (non-coreml) must clamp to 1"
+        );
+    }
+
+    #[test]
+    fn sidecar_batch_size_zero_coreml_cap_clamps_to_one() {
+        // Why: if the CoreML cap is 0, min(resolved, 0) = 0, which is
+        // invalid. The guard must still clamp to 1.
+        // What: resolved=32, is_coreml=true, coreml_cap=0 → 1 (clamped from 0).
+        // Test: this test.
+        assert_eq!(
+            sidecar_batch_size(32, true, 0),
+            1,
+            "zero coreml_cap must clamp result to 1"
+        );
+    }
+
+    #[test]
+    fn sidecar_batch_size_both_zero_clamps_to_one() {
+        // Why: both inputs at zero must still produce a valid result.
+        // What: resolved=0, is_coreml=true, coreml_cap=0 → 1.
+        // Test: this test.
+        assert_eq!(
+            sidecar_batch_size(0, true, 0),
+            1,
+            "resolved=0, coreml_cap=0 must clamp to 1"
+        );
     }
 
     #[test]

@@ -91,21 +91,36 @@ impl SupervisorConfig {
         }
     }
 
-    /// Convert to the `trusty_common` supervisor config type.
+    /// Convert to the `trusty_common` supervisor config type without a
+    /// sidecar batch size.
     ///
     /// Why: `EmbedderSupervisor::spawn_stdio` expects
     /// `trusty_common::embedder_client::SupervisorConfig`; this conversion
-    /// avoids duplicating field names at the call site.
+    /// avoids duplicating field names at the call site. It is used by the
+    /// integration tests (`tests/embedder_supervisor_e2e.rs`) that test
+    /// process lifecycle (spawn, crash-restart, shutdown) and do not need
+    /// batch forwarding. The production code path (`do_spawn`) does NOT use
+    /// this method — it builds the common config directly so it can populate
+    /// `sidecar_batch_size: Some(forwarded_batch)` after resolving the
+    /// execution provider (see Fix C, issue #747). The two paths are therefore
+    /// intentionally divergent: `into_common` is for simple/test spawns where
+    /// batch forwarding is irrelevant.
+    ///
     /// What: maps the three spawn-relevant fields 1:1; `idle_shutdown_secs` is
     /// trusty-search–specific and has no counterpart in the common type.
-    /// `sidecar_batch_size` is populated separately by `do_spawn` after
-    /// resolving the provider (see Fix C, issue #747).
+    /// `sidecar_batch_size` is always `None` — the sidecar will use its own
+    /// default (32). Use `do_spawn` for production paths where batch forwarding
+    /// is required.
+    ///
     /// Test: `into_common_maps_fields`.
     pub fn into_common(self) -> trusty_common::embedder_client::SupervisorConfig {
         trusty_common::embedder_client::SupervisorConfig {
             startup_timeout_secs: self.startup_timeout_secs,
             backoff_max_secs: self.backoff_max_secs,
             max_restarts: self.max_restarts,
+            // sidecar_batch_size intentionally None: this method is used by
+            // integration tests that exercise lifecycle, not batch forwarding.
+            // Production spawns go through do_spawn, which sets Some(batch).
             sidecar_batch_size: None,
         }
     }
@@ -384,6 +399,12 @@ async fn do_spawn(
     // parent's resolved value (e.g. 256 on Medium-tier + CoreML).
     // CoreML cap: oversized batches inflate unified-memory RSS and trigger
     // jetsam SIGKILL, so cap at coreml_cap on the CoreML path.
+    //
+    // Why re-resolve on each (re)spawn: intentional. The batch size and CoreML
+    // cap can change between spawns if the operator updates daemon.env and
+    // SIGTERM-restarts the daemon, or if the idle-shutdown watchdog fires and
+    // the sidecar is re-spawned later. Re-resolving here means config changes
+    // take effect on the next spawn without requiring a full daemon restart.
     let predicted_provider = trusty_common::embedder::resolve_expected_provider();
     let is_coreml = matches!(
         predicted_provider,
