@@ -14,9 +14,14 @@
 //! never crash a review (fail-safe), and falls back to leaving the result
 //! flagged dry-run.
 //!
+//! `format_review_footer` renders the compact metadata footer appended to
+//! `review_body` before posting or returning — ensuring the footer is identical
+//! in the GitHub comment and the dry-run/MCP response (closes #728).
+//!
 //! Test: `effective_dry_run` math lives in `trigger`; the post/log branch
-//! selection is covered by `decide_action_*` here, and the live happy path is
-//! covered by `#[ignore]` integration tests (needs a live PR).
+//! selection is covered by `decide_action_*` here; `format_review_footer` is
+//! covered by `footer_format_known_tuple` and `footer_thousands_separator`; the
+//! live happy path is covered by `#[ignore]` integration tests (needs a live PR).
 
 use std::sync::Arc;
 
@@ -32,6 +37,88 @@ use crate::{
     },
     store::DedupStore,
 };
+
+// ─── Metadata footer (closes #728) ───────────────────────────────────────────
+
+/// Render the compact metadata footer appended to every completed review body.
+///
+/// Why: the GitHub PR comment and the MCP `review_pr` structured response both
+/// expose `review_body`, but neither previously recorded which model produced the
+/// review or how much it cost — making reviews hard to audit at a glance.
+/// Appending the footer here (before the post/log branch) ensures a single source
+/// of truth: the same footer text appears in the live GitHub comment AND in the
+/// dry-run / MCP response, so callers see exactly what was (or would be) posted
+/// (closes #728).
+/// What: formats one line `---\n🤖 Reviewed by \`<model>\` · tokens ↑<in> ↓<out> · est. $<cost>`
+/// where token counts use thousands separators and cost is rounded to 3 decimal
+/// places (e.g. `$0.066`).  An empty model string is rendered as `(unknown)` so
+/// the line is always well-formed.
+/// Test: `footer_format_known_tuple` (exact-string regression for the sample
+/// tuple from #728), `footer_thousands_separator` (boundary at 1 000).
+pub fn format_review_footer(
+    model: &str,
+    input_tokens: u32,
+    output_tokens: u32,
+    cost_usd: f64,
+) -> String {
+    let model_display = if model.is_empty() {
+        "(unknown)".to_string()
+    } else {
+        model.to_string()
+    };
+    // Format token counts with locale-style thousands separators (groups of 3).
+    let in_fmt = format_with_thousands(input_tokens);
+    let out_fmt = format_with_thousands(output_tokens);
+    // Round cost to 3 decimal places; strip trailing zeros after the 3rd digit.
+    let cost_fmt = format_cost(cost_usd);
+    format!(
+        "\n---\n🤖 Reviewed by `{model_display}` · tokens ↑{in_fmt} ↓{out_fmt} · est. ${cost_fmt}"
+    )
+}
+
+/// Format a `u32` integer with comma thousands separators.
+///
+/// Why: token counts in the footer must be human-readable (e.g. `13,499`);
+/// Rust's standard library does not provide locale-aware formatting.
+/// What: splits the decimal representation into groups of three from the right,
+/// joining them with commas.
+/// Test: `footer_thousands_separator`.
+fn format_with_thousands(n: u32) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(len + len / 3);
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(b as char);
+    }
+    out
+}
+
+/// Format a cost in USD to a compact, sensibly-rounded string.
+///
+/// Why: `f64` default Display produces too many or too few digits (e.g.
+/// `0.06626699999` or `0.1`); the footer needs a fixed-width, readable form.
+/// What: renders at 3 decimal places, then strips trailing zeros so `$0.100`
+/// becomes `$0.1` but `$0.066` stays `$0.066`.  A zero cost renders as `$0`.
+/// Test: covered transitively by `footer_format_known_tuple`.
+fn format_cost(cost_usd: f64) -> String {
+    if cost_usd == 0.0 {
+        return "0".to_string();
+    }
+    // 3 decimal places covers sub-cent precision without excessive noise.
+    let raw = format!("{cost_usd:.3}");
+    // Strip trailing zeros after the decimal point, but keep at least one digit.
+    let trimmed = raw.trim_end_matches('0');
+    // If we stripped all fractional digits, keep the decimal point + one zero.
+    if trimmed.ends_with('.') {
+        format!("{trimmed}0")
+    } else {
+        trimmed.to_string()
+    }
+}
 
 /// The finalisation action selected for a completed review.
 ///
@@ -117,6 +204,19 @@ pub async fn finalize_review(
     print_result: bool,
     post_ctx: PostContext<'_>,
 ) -> ReviewResult {
+    // Append the metadata footer to review_body BEFORE the post/log branch so
+    // the footer is identical in the live GitHub comment (which reads
+    // result.review_body via build_review_comment_body) and in the returned
+    // ReviewResult (which the MCP wrapper serialises as structured output).
+    // This is the single source of truth required by #728.
+    let footer = format_review_footer(
+        &result.model,
+        result.input_tokens,
+        result.output_tokens,
+        result.cost_estimate_usd,
+    );
+    result.review_body.push_str(&footer);
+
     let is_github = !post_ctx.owner.is_empty() && post_ctx.owner != "local";
     let action = decide_action(config.dry_run, trigger, allow_posting, is_github);
 
@@ -203,6 +303,75 @@ async fn post_live(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Footer rendering ──────────────────────────────────────────────────────
+
+    /// Exact-string regression for the sample tuple given in issue #728.
+    ///
+    /// Why: the footer format is a user-facing string that must not drift
+    /// silently; an exact assertion catches any change to separators, arrows,
+    /// or emoji.
+    /// What: asserts the full footer line for
+    ///   model=us.anthropic.claude-sonnet-4-6, in=13499, out=1718, cost=0.066267.
+    /// Test: this test itself (no network, no FS).
+    #[test]
+    fn footer_format_known_tuple() {
+        let footer = format_review_footer("us.anthropic.claude-sonnet-4-6", 13499, 1718, 0.066_267);
+        assert_eq!(
+            footer,
+            "\n---\n🤖 Reviewed by `us.anthropic.claude-sonnet-4-6` · tokens ↑13,499 ↓1,718 · est. $0.066"
+        );
+    }
+
+    /// Verify thousands-separator boundary at exactly 1 000.
+    ///
+    /// Why: the formatter uses modular arithmetic; 1 000 is the smallest value
+    /// that triggers a separator and is easy to verify manually.
+    /// What: asserts `1000` → `"1,000"` and `999` → `"999"`.
+    /// Test: this test itself.
+    #[test]
+    fn footer_thousands_separator() {
+        assert_eq!(format_with_thousands(1000), "1,000");
+        assert_eq!(format_with_thousands(999), "999");
+        assert_eq!(format_with_thousands(1_000_000), "1,000,000");
+        assert_eq!(format_with_thousands(0), "0");
+    }
+
+    /// Empty model slug renders as `(unknown)`.
+    ///
+    /// Why: early-abort paths (fail-safe APPROVE) may return before the LLM
+    /// model field is filled in; the footer must still be well-formed.
+    /// What: asserts the footer contains `(unknown)` when model is empty.
+    /// Test: this test itself.
+    #[test]
+    fn footer_empty_model_renders_unknown() {
+        let footer = format_review_footer("", 10, 5, 0.001);
+        assert!(
+            footer.contains("`(unknown)`"),
+            "empty model must render as (unknown): {footer}"
+        );
+    }
+
+    /// Zero cost renders as `$0` (not `$0.000`).
+    ///
+    /// Why: some providers (e.g. local models, tests) report zero cost; the
+    /// trailing-zero strip must produce a clean `$0`.
+    /// What: asserts cost=0.0 → `$0`.
+    /// Test: this test itself.
+    #[test]
+    fn footer_zero_cost() {
+        let footer = format_review_footer("my-model", 1, 1, 0.0);
+        assert!(
+            footer.contains("$0"),
+            "zero cost must render as $0: {footer}"
+        );
+        assert!(
+            !footer.contains("$0."),
+            "zero cost must not have decimal: {footer}"
+        );
+    }
+
+    // ── Finalisation-action branch selection ──────────────────────────────────
 
     #[test]
     fn decide_action_live_posts() {
