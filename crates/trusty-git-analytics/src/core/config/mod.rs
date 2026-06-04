@@ -924,15 +924,39 @@ fn default_failure_window_hours() -> u32 {
 }
 
 /// GitHub API integration settings.
+///
+/// Why: centralises every GitHub-specific knob so YAML authors have a single
+/// section to edit and so type-safe validation covers all fields at once.
+/// What: deserialized from the `github:` YAML block; used by collection,
+/// resolver, and org-discovery paths throughout `tga collect`.
+/// Test: `github_config_serde_*` tests in this module; org/reviewer fields
+/// tested in `collect::github::org_discovery` and `reviewer_store` tests.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GithubConfig {
     /// Personal access token (often sourced from `GITHUB_TOKEN`).
     #[serde(default)]
     pub token: Option<String>,
 
-    /// Organization slug for org-wide queries.
+    /// Organization slug for org-wide queries (back-compat singular form).
+    ///
+    /// This field coexists with [`Self::orgs`]. Both are merged into the
+    /// effective org list (deduplicated, `orgs` first) during collection.
+    /// Prefer `orgs: [...]` for new configs; keep `org: ...` for unchanged
+    /// single-org setups.
     #[serde(default)]
     pub org: Option<String>,
+
+    /// Multi-org list for org-wide PR discovery (issue #742).
+    ///
+    /// Each entry is an org slug (e.g. `duettoresearch`). The collection
+    /// pipeline calls `GET /orgs/{org}/repos` for every entry and unions the
+    /// discovered repos with those resolved from `repositories[]`. Merged
+    /// with the singular `org` field (duplicate-free, `orgs` order
+    /// preserved) before discovery runs.
+    ///
+    /// Leave empty (the default) to keep single-org / per-repo behaviour.
+    #[serde(default)]
+    pub orgs: Vec<String>,
 
     /// Single-repository slug (`owner/name`).
     #[serde(default)]
@@ -941,6 +965,27 @@ pub struct GithubConfig {
     /// Whether to fetch pull request metadata.
     #[serde(default)]
     pub fetch_prs: bool,
+
+    /// Whether to fetch PR reviewer data from the GitHub reviews API.
+    ///
+    /// Defaults to `true` so reviewer data is collected whenever `fetch_prs`
+    /// is enabled (matching ADO behaviour). Set to `false` to opt out, e.g.
+    /// when rate limits are a concern.
+    ///
+    /// Reviewer data is fetched serially after PRs are stored. The
+    /// concurrency can be tuned via [`Self::review_fetch_concurrency`].
+    #[serde(default = "default_fetch_pr_reviews")]
+    pub fetch_pr_reviews: bool,
+
+    /// Maximum concurrent requests when fetching PR reviews (default 1).
+    ///
+    /// Serial fetching (the default) is the safest setting for rate-limit
+    /// budgets: each `GET /repos/{o}/{r}/pulls/{n}/reviews` call contributes
+    /// to the token's 5 000 req/hour ceiling. Increase carefully — GitHub's
+    /// secondary rate limits can throttle concurrent requests even when the
+    /// primary hourly bucket is non-zero.
+    #[serde(default = "default_review_fetch_concurrency")]
+    pub review_fetch_concurrency: u32,
 
     /// Optional override regex for detecting GitHub issue / PR references
     /// in commit messages.
@@ -955,6 +1000,14 @@ pub struct GithubConfig {
     /// to return an error.
     #[serde(default)]
     pub ticket_regex: Option<String>,
+}
+
+fn default_fetch_pr_reviews() -> bool {
+    true
+}
+
+fn default_review_fetch_concurrency() -> u32 {
+    1
 }
 
 /// Bitbucket Cloud API integration settings.
@@ -1500,5 +1553,72 @@ mod tests {
             cfg.repo_categories.is_empty(),
             "repo_categories defaults to empty map"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // GithubConfig serde / default tests (issue #742)
+    // -----------------------------------------------------------------------
+
+    /// Why: `github.orgs: [a, b]` must round-trip through serde so multi-org
+    /// configs are parsed correctly.
+    /// What: deserialize a YAML snippet with `orgs: [duettoresearch, hotstats]`
+    /// and assert both entries are present.
+    /// Test: pure deserialization.
+    #[test]
+    fn github_config_serde_orgs_list() {
+        let yaml = "token: ghp_test\norgs:\n  - duettoresearch\n  - hotstats\nfetch_prs: true\n";
+        let cfg: GithubConfig = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(
+            cfg.orgs,
+            vec!["duettoresearch".to_string(), "hotstats".to_string()]
+        );
+        assert!(cfg.org.is_none(), "org (singular) must be None");
+    }
+
+    /// Why: existing configs that only set `org: acme` must continue to
+    /// deserialize without error — back-compat guarantee.
+    /// What: deserialize a minimal YAML with `org: acme` only.
+    /// Test: assert org=Some("acme"), orgs is empty.
+    #[test]
+    fn github_config_serde_back_compat_singular_org() {
+        let yaml = "token: ghp_x\norg: acme\nfetch_prs: true\n";
+        let cfg: GithubConfig = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(cfg.org.as_deref(), Some("acme"));
+        assert!(cfg.orgs.is_empty(), "orgs must default to empty");
+    }
+
+    /// Why: `fetch_pr_reviews` defaults to `true` when absent from YAML so
+    /// reviewer data is collected by default (matching ADO behaviour).
+    /// What: deserialize a minimal GitHub block without `fetch_pr_reviews`.
+    /// Test: assert `fetch_pr_reviews == true`.
+    #[test]
+    fn github_config_fetch_pr_reviews_defaults_to_true() {
+        let yaml = "fetch_prs: true\n";
+        let cfg: GithubConfig = serde_yaml::from_str(yaml).expect("parse");
+        assert!(
+            cfg.fetch_pr_reviews,
+            "fetch_pr_reviews must default to true"
+        );
+        assert_eq!(cfg.review_fetch_concurrency, 1);
+    }
+
+    /// Why: an operator can opt out of reviewer ingestion by setting
+    /// `fetch_pr_reviews: false`; the default-override serde path must honour it.
+    /// What: deserialize with `fetch_pr_reviews: false`.
+    /// Test: assert the field is false.
+    #[test]
+    fn github_config_fetch_pr_reviews_can_be_disabled() {
+        let yaml = "fetch_prs: true\nfetch_pr_reviews: false\n";
+        let cfg: GithubConfig = serde_yaml::from_str(yaml).expect("parse");
+        assert!(!cfg.fetch_pr_reviews);
+    }
+
+    /// Why: `review_fetch_concurrency` defaults to 1 when absent.
+    /// What: parse YAML without the field; assert the default.
+    /// Test: pure deserialization.
+    #[test]
+    fn github_config_review_fetch_concurrency_default() {
+        let cfg: GithubConfig = serde_yaml::from_str("fetch_prs: true\n").expect("parse");
+        assert_eq!(cfg.review_fetch_concurrency, 1);
     }
 }

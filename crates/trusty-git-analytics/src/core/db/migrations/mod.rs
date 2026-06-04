@@ -13,6 +13,7 @@
 //!    `v17.rs`.
 
 mod v17;
+mod v20;
 
 use rusqlite::Connection;
 use tracing::{debug, info};
@@ -125,6 +126,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 19,
         name: "effort_percentile_stats",
         sql: include_str!("../sql/0019_effort_percentile_stats.sql"),
+    },
+    Migration {
+        version: 20,
+        name: "pr_reviewers_review_state",
+        sql: include_str!("../sql/0020_pr_reviewers_review_state.sql"),
     },
 ];
 
@@ -438,5 +444,11 @@ mod tests {
             updated_state, "merged",
             "REPLACE must update fields in place"
         );
+    }
+
+    // Migration v20 tests live in `v20.rs`.
+    #[test]
+    fn migration_v20_adds_review_state_columns() {
+        crate::core::db::migrations::v20::tests::migration_v20_adds_review_state_columns();
     }
 }

@@ -1,7 +1,5 @@
 //! Minimal GitHub REST API v3 client for fetching pull requests.
 
-use std::time::Duration;
-
 use chrono::{DateTime, Utc};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
 use rusqlite::params;
@@ -12,6 +10,7 @@ use async_trait::async_trait;
 
 use crate::collect::env_expand::expand_env_var;
 use crate::collect::errors::{CollectError, Result};
+use crate::collect::github::retry::retry_get;
 use crate::collect::pr_provider::PrProvider;
 use crate::core::config::{GithubConfig, RepositoryConfig};
 use crate::core::db::Database;
@@ -20,13 +19,9 @@ use crate::core::models::{PrState, PullRequest};
 /// HTTP `User-Agent` string sent on every request.
 const USER_AGENT_VALUE: &str = "trusty-git-analytics/0.1";
 /// GitHub REST API base URL.
-const GITHUB_API_BASE: &str = "https://api.github.com";
+pub(crate) const GITHUB_API_BASE: &str = "https://api.github.com";
 /// Page size for paginated list endpoints (GitHub max is 100).
-const PAGE_SIZE: u32 = 100;
-/// Maximum retry attempts for transient failures (5xx, 429).
-const MAX_RETRIES: u32 = 3;
-/// Base delay (in milliseconds) for exponential backoff: 1s, 2s, 4s.
-const RETRY_BASE_MS: u64 = 1000;
+pub(crate) const PAGE_SIZE: u32 = 100;
 
 /// Async GitHub REST client.
 ///
@@ -183,8 +178,15 @@ fn parse_slug(slug: &str) -> Result<(String, String)> {
     Ok((owner.to_string(), repo.to_string()))
 }
 
-/// Build the shared `reqwest::Client` for all GitHub HTTP traffic.
-fn build_http_client(config: &GithubConfig) -> Result<reqwest::Client> {
+/// Build the shared authenticated `reqwest::Client` for all GitHub HTTP traffic.
+///
+/// Why: org-discovery, reviewer-ingestion, and the PR client all need the same
+/// authed client; `pub(crate)` visibility avoids duplicating header-build logic
+/// without widening the public API surface.
+/// What: builds a `reqwest::Client` with `Authorization: Bearer <token>` (when
+/// a token is configured), the GitHub `Accept` header, and a 30-second timeout.
+/// Test: used by all GitHub call sites — covered indirectly by their tests.
+pub(crate) fn build_http_client(config: &GithubConfig) -> Result<reqwest::Client> {
     let mut headers = HeaderMap::new();
     headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
     headers.insert(
@@ -282,7 +284,9 @@ fn split_owner_repo(rest: &str) -> Option<(String, String)> {
 /// 3. Deduplicate; preserve first-seen order.
 ///
 /// Returns an empty vec if no resolution is possible — the caller should
-/// treat that as "skip PR fetching".
+/// treat that as "skip PR fetching". Org-discovered repos (from
+/// `github.orgs`) are unioned in by the caller via
+/// [`crate::collect::github::org_discovery::resolve_github_repos_with_discovered`].
 ///
 /// Why: org-wide deployments (issue #87) need to drive PR collection from
 /// `repositories[]` rather than a single `github.repo`. Mirrors the ADO PR
@@ -319,8 +323,8 @@ pub fn resolve_github_repos(
             })
             .unwrap_or_default();
 
-        // Owner: per-repo `org`, else `github.org`. We may still defer to the
-        // remote URL below when neither is present.
+        // Owner: per-repo `org`, else `github.org`. We may still defer to
+        // the remote URL below when neither is present.
         let owner_from_cfg = repo_cfg.org.clone().or_else(|| github.org.clone());
 
         let pair = if let Some(owner) = &owner_from_cfg {
@@ -411,6 +415,30 @@ impl GitHubClient {
             owner: primary_owner,
             repo: primary_repo,
             repos,
+        })
+    }
+
+    /// Construct a minimal authenticated client for fetching PR reviews only.
+    ///
+    /// Why: the reviewer-ingestion pass needs an authed client to call
+    /// `fetch_pr_reviews_for_repo(owner, repo, pr_number)` without requiring
+    /// a dummy repo slug (the old `new_for_prs("_dummy","_dummy")` workaround
+    /// was fragile — it relied on the reviews method ignoring `self.owner`).
+    /// What: builds the authed client; `owner`/`repo`/`repos` are left empty.
+    /// Only use methods that take explicit `(owner, repo)` args.
+    /// Test: `new_for_reviews_builds_without_dummy_slugs` below.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CollectError::Http`] if the `reqwest::Client` cannot be built.
+    pub fn new_for_reviews(config: &GithubConfig) -> Result<Self> {
+        let http = build_http_client(config)?;
+        Ok(Self {
+            client: http,
+            token: config.token.clone(),
+            owner: String::new(),
+            repo: String::new(),
+            repos: Vec::new(),
         })
     }
 
@@ -594,69 +622,41 @@ impl GitHubClient {
     /// Why: GitHub occasionally returns 502/504 under load and 429 when the
     /// per-token rate limit drains; a tiny retry loop avoids surfacing those
     /// as pipeline failures.
-    /// What: returns the final non-transient response (which may still be
-    /// non-success — the caller is expected to call `.error_for_status()`).
+    /// What: delegates to the free [`retry_get`] helper, passing `self.client`.
     /// Test: covered indirectly by callers and by `wiremock` integration tests.
     async fn retry_request(&self, url: &str) -> Result<reqwest::Response> {
-        let mut last_err: Option<reqwest::Error> = None;
-        for attempt in 0..=MAX_RETRIES {
-            debug!(url = %url, attempt, "GET (with retry)");
-            match self.client.get(url).send().await {
-                Ok(resp) => {
-                    let status = resp.status();
-                    let transient =
-                        status.as_u16() == 429 || (500..=599).contains(&status.as_u16());
-                    if !transient || attempt == MAX_RETRIES {
-                        return Ok(resp);
-                    }
-                    let delay = RETRY_BASE_MS * (1u64 << attempt);
-                    warn!(
-                        status = %status,
-                        attempt,
-                        delay_ms = delay,
-                        "GitHub returned transient status; retrying"
-                    );
-                    tokio::time::sleep(Duration::from_millis(delay)).await;
-                }
-                Err(e) => {
-                    if attempt == MAX_RETRIES {
-                        return Err(CollectError::Http(e));
-                    }
-                    let delay = RETRY_BASE_MS * (1u64 << attempt);
-                    warn!(error = %e, attempt, delay_ms = delay, "transport error; retrying");
-                    last_err = Some(e);
-                    tokio::time::sleep(Duration::from_millis(delay)).await;
-                }
-            }
-        }
-        // Unreachable in practice: the loop above always returns by
-        // `attempt == MAX_RETRIES`. Fall back to the last seen transport
-        // error if we ever do escape it.
-        Err(CollectError::Http(
-            last_err.expect("retry loop preserved error"),
-        ))
+        retry_get(&self.client, url).await
     }
 
     /// Fetch all reviews for a given pull request, paginating until exhausted.
     ///
     /// Why: review counts, approval status, and review latency are core PR
-    /// metrics; the bulk-PR endpoint omits reviews entirely.
+    /// metrics; the bulk-PR endpoint omits reviews entirely. Taking explicit
+    /// `(owner, repo)` rather than using `self.owner`/`self.repo` is
+    /// critical for multi-repo clients where the primary owner/repo is
+    /// unrelated to the PR being reviewed (issue #742 bug fix — the old
+    /// signature silently fetched reviews from the wrong repo).
     /// What: `GET /repos/{owner}/{repo}/pulls/{pr_number}/reviews?per_page=100`,
     /// looping pages until a short page indicates end-of-list.
-    /// Test: deserialization shape covered by `github_review_deserializes`.
+    /// Test: deserialization shape covered by `github_review_deserializes`;
+    /// correct routing verified by the reviewer-ingestion integration path.
     ///
     /// # Errors
     ///
     /// - [`CollectError::Http`] on transport / non-success HTTP responses
     ///   after retries are exhausted.
     /// - [`CollectError::Json`] on payload parse failures.
-    pub async fn fetch_pr_reviews(&self, pr_number: u64) -> Result<Vec<GitHubReview>> {
+    pub async fn fetch_pr_reviews_for_repo(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: u64,
+    ) -> Result<Vec<GitHubReview>> {
         let mut out = Vec::new();
         let mut page = 1u32;
         loop {
             let url = format!(
-                "{GITHUB_API_BASE}/repos/{}/{}/pulls/{pr_number}/reviews?per_page={PAGE_SIZE}&page={page}",
-                self.owner, self.repo
+                "{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}/reviews?per_page={PAGE_SIZE}&page={page}"
             );
             let resp = self.retry_request(&url).await?.error_for_status()?;
             let batch: Vec<GitHubReview> = resp.json().await?;
@@ -668,6 +668,17 @@ impl GitHubClient {
             page += 1;
         }
         Ok(out)
+    }
+
+    /// Expose the internal HTTP client for org-discovery requests.
+    ///
+    /// Why: `discover_org_repos` lives in a sibling module and needs the
+    /// same authenticated `reqwest::Client` without duplicating the header
+    /// build logic.
+    /// What: returns a shared reference to the underlying `reqwest::Client`.
+    /// Test: used by the reviewer-ingestion path in `collector.rs`.
+    pub fn http_client(&self) -> &reqwest::Client {
+        &self.client
     }
 
     /// Fetch all commits attached to a pull request, paginating until exhausted.
@@ -892,8 +903,11 @@ mod tests {
         GithubConfig {
             token: None,
             org: org.map(str::to_string),
+            orgs: vec![],
             repo: repo.map(str::to_string),
             fetch_prs: true,
+            fetch_pr_reviews: true,
+            review_fetch_concurrency: 1,
             ticket_regex: None,
         }
     }
@@ -1031,6 +1045,30 @@ mod tests {
             }
             Err(other) => panic!("unexpected error variant: {other:?}"),
         }
+    }
+
+    /// Why: `new_for_reviews` must build a working client without requiring
+    /// any dummy repo slugs; the previous workaround of passing
+    /// `("_dummy","_dummy")` was fragile and confusing.
+    /// What: call `new_for_reviews` and confirm the client builds successfully
+    /// and does not populate owner/repo/repos with dummy values.
+    /// Test: owner and repo are empty; repos vec is empty; no panic or error.
+    #[test]
+    fn new_for_reviews_builds_without_dummy_slugs() {
+        let cfg = gh(None, None);
+        let client = GitHubClient::new_for_reviews(&cfg).expect("client builds");
+        assert!(
+            client.owner.is_empty(),
+            "owner should be empty for reviews-only client"
+        );
+        assert!(
+            client.repo.is_empty(),
+            "repo should be empty for reviews-only client"
+        );
+        assert!(
+            client.repos.is_empty(),
+            "repos should be empty for reviews-only client"
+        );
     }
 
     /// Why: the multi-repo constructor must accept a populated list and

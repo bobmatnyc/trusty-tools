@@ -79,6 +79,8 @@ pub struct CollectionStats {
     pub authors_resolved: usize,
     /// Number of PR rows written (zero if GitHub fetch disabled).
     pub prs_fetched: usize,
+    /// Number of GitHub reviewer rows written via the reviews pass (issue #742).
+    pub reviewers_fetched: usize,
     /// Number of Linear issues fetched (0 if Linear not configured).
     pub linear_issues_fetched: usize,
     /// Number of `(repo, week)` pairs that were collected this run.
@@ -531,25 +533,39 @@ impl CollectionPipeline {
     /// Build the set of [`PrProvider`] instances enabled by the current
     /// configuration. Each provider's construction is independent — a failure
     /// is logged on `stats.errors` but does not abort the run.
+    ///
+    /// `org_discovered` contains `(owner, repo)` pairs already fetched from
+    /// the GitHub org-discovery pass (issue #742); they are unioned with the
+    /// per-repo resolver output before the GitHub client is constructed.
+    ///
+    /// Why: separating construction (sync) from org-discovery (async) keeps
+    /// the async surface minimal — callers do discovery then hand the results
+    /// in here so the final JoinSet spawning stays straightforward.
+    /// What: builds a [`GitHubClient`] (if `github.fetch_prs=true`) and a
+    /// [`BitbucketClient`] (if `bitbucket.fetch_prs=true`).
+    /// Test: covered by the collector integration tests and
+    /// `build_pr_providers_github_included` below.
     fn build_pr_providers(
         &self,
         stats: &mut CollectionStats,
+        org_discovered: &[(String, String)],
     ) -> Vec<Box<dyn PrProvider + Send + Sync>> {
         let mut providers: Vec<Box<dyn PrProvider + Send + Sync>> = Vec::new();
 
         if let Some(gh_cfg) = &self.config.github {
             if gh_cfg.fetch_prs {
-                // Multi-repo resolution (#87): drive from `repositories[]` or
-                // `github.org` when `github.repo` is not set. If nothing
-                // resolves, skip GitHub PR fetching gracefully.
-                let repos = crate::collect::github::client::resolve_github_repos(
-                    gh_cfg,
-                    &self.config.repositories,
-                );
+                // Multi-repo resolution (#87, #742): union per-repo resolution
+                // with org-discovery results before constructing the client.
+                let repos =
+                    crate::collect::github::org_discovery::resolve_github_repos_with_discovered(
+                        gh_cfg,
+                        &self.config.repositories,
+                        org_discovered,
+                    );
                 if repos.is_empty() {
                     info!(
                         "GitHub PR fetch skipped: no github.repo, no per-repo org, \
-                         and no github.org resolvable from repositories[]"
+                         no github.org/orgs resolvable from repositories[] or org discovery"
                     );
                 } else if gh_cfg.token.is_none() && std::env::var("GITHUB_TOKEN").ok().is_none() {
                     // Issue #211: surface the token misconfiguration loudly.
@@ -625,15 +641,31 @@ impl CollectionPipeline {
         providers
     }
 
-    /// Run every configured PR provider concurrently, then persist their
-    /// results on the main task.
+    /// Run every configured PR provider concurrently, persist their results,
+    /// then run the GitHub reviewer ingestion pass (issue #742).
     ///
-    /// We spawn one task per provider so a slow remote (or the second
-    /// provider being absent) doesn't gate the others. Each task returns the
-    /// fetched `Vec<PullRequest>` so the `Database` — which is not `Sync` —
-    /// is only ever touched by the orchestrator.
+    /// Why: org-discovery (async) must complete before the GitHub client is
+    /// built; reviewer ingestion runs serially after PRs are stored so we
+    /// have valid `pr_id` FK values.
+    /// What: (1) org-discovery via [`super::github_pipeline::run_github_org_discovery`],
+    /// (2) build providers + concurrent PR fetch + store, (3) serial reviewer
+    /// pass via [`super::github_pipeline::fetch_and_store_github_reviewers`].
+    /// Test: the PR-fetch path is covered by existing collector integration
+    /// tests; the reviewer pass is covered by `reviewer_store` unit tests.
     async fn fetch_and_store_prs(&self, db: &mut Database, stats: &mut CollectionStats) {
-        let providers = self.build_pr_providers(stats);
+        // Phase 1: async org-discovery so build_pr_providers has the full
+        // repo set before constructing the GitHub client.
+        let org_discovered = if let Some(gh_cfg) = &self.config.github {
+            if gh_cfg.fetch_prs && (!gh_cfg.orgs.is_empty() || gh_cfg.org.is_some()) {
+                super::github_pipeline::run_github_org_discovery(gh_cfg).await
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        let providers = self.build_pr_providers(stats, &org_discovered);
         if providers.is_empty() {
             return;
         }
@@ -693,6 +725,20 @@ impl CollectionPipeline {
                         .errors
                         .push(format!("{provider_name} PR fetch failed: {e}"));
                 }
+            }
+        }
+
+        // Phase 3 (issue #742): GitHub reviewer ingestion pass (serial, after
+        // PRs are stored so FK lookups succeed).
+        if let Some(gh_cfg) = &self.config.github {
+            if gh_cfg.fetch_prs && gh_cfg.fetch_pr_reviews {
+                super::github_pipeline::fetch_and_store_github_reviewers(
+                    db,
+                    gh_cfg,
+                    self.force_refresh_prs,
+                    stats,
+                )
+                .await;
             }
         }
     }
