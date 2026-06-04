@@ -21,6 +21,7 @@
 use tracing::{debug, warn};
 
 use super::client::{GITHUB_API_BASE, PAGE_SIZE};
+use super::retry::retry_get;
 use crate::collect::errors::{CollectError, Result};
 use crate::core::config::{GithubConfig, RepositoryConfig};
 
@@ -38,16 +39,19 @@ struct ApiOrgRepo {
 /// dynamically rather than requiring operators to maintain a full repo
 /// list; the GitHub REST API exposes all org-member repos that the
 /// token can see.
-/// What: pages the org repos endpoint (100 per page) until a short page
-/// indicates end-of-list; parses each `full_name` into an `(owner, repo)`
-/// tuple; returns the complete list. Token visibility determines which
-/// repos appear — private repos require a PAT with `repo` scope.
+/// What: pages the org repos endpoint (100 per page) using the shared
+/// [`retry_get`] helper (same 3-retry exponential backoff used by the main
+/// client), until a short page indicates end-of-list; parses each
+/// `full_name` into an `(owner, repo)` tuple; returns the complete list.
+/// Token visibility determines which repos appear — private repos require
+/// a PAT with `repo` scope.
 /// Test: `api_org_repo_full_name_splits_correctly` below (unit-level, no
 /// live network call); `discover_org_repos_live` is `#[ignore]`.
 ///
 /// # Errors
 ///
-/// - [`CollectError::Http`] on transport or non-success HTTP (after retries).
+/// - [`CollectError::Http`] on transport or non-success HTTP (after retries
+///   are exhausted; transient 5xx/429 are retried with exponential backoff).
 /// - [`CollectError::Config`] if a `full_name` returned by the API cannot be
 ///   split into `owner/name` (should not happen in practice but is guarded).
 pub async fn discover_org_repos(
@@ -60,7 +64,9 @@ pub async fn discover_org_repos(
         let url =
             format!("{GITHUB_API_BASE}/orgs/{org}/repos?type=all&per_page={PAGE_SIZE}&page={page}");
         debug!(url = %url, "GET (org repo discovery)");
-        let resp = client.get(&url).send().await.map_err(CollectError::Http)?;
+        // Route through the shared retry helper so transient 5xx/429 are
+        // retried with the same backoff as the main PR client.
+        let resp = retry_get(client, &url).await?;
 
         // Respect rate-limit hints (same pattern as the main client).
         if let Some(rem) = resp

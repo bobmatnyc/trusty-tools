@@ -2,6 +2,7 @@
 
 pub mod client;
 pub mod org_discovery;
+pub(crate) mod retry;
 pub mod reviewer_store;
 
 pub use client::{GhLabel, GitHubClient, GitHubIssue};
