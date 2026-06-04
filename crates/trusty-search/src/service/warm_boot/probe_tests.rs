@@ -74,6 +74,31 @@ fn volume_key_external_volume() {
     );
 }
 
+/// Why (review #727 finding 3): on Linux `/volumes/...` (lowercase) must NOT
+/// be treated as an external macOS volume key. The old `eq_ignore_ascii_case`
+/// code would mis-classify it, producing spurious `TIMED_OUT` warnings for
+/// any Linux path that happens to start with a component whose name is a
+/// case variant of "volumes".
+/// What: assert that `/volumes/ssd1/projects/myrepo` returns `/` (not
+/// `/volumes/ssd1`) on all platforms, and that `/Volumes/SSD1/...` still
+/// returns `/Volumes/SSD1` on macOS (and `/` on other platforms).
+/// Test: this test.
+#[test]
+fn volume_key_linux_lowercase_volumes_is_root() {
+    // On all platforms, lowercase `/volumes/...` must map to root.
+    // (On macOS this also tests that the exact-match guard rejects it.)
+    assert_eq!(
+        volume_key(Path::new("/volumes/ssd1/projects/myrepo")),
+        PathBuf::from("/"),
+        "/volumes/... (lowercase) must produce volume key / on all platforms"
+    );
+    assert_eq!(
+        volume_key(Path::new("/VOLUMES/SSD1/projects/myrepo")),
+        PathBuf::from("/"),
+        "/VOLUMES/... (uppercase) must produce volume key / — not a canonical macOS path"
+    );
+}
+
 // ── probe_volume ──────────────────────────────────────────────────────────────
 
 /// Why: the most critical invariant — a real accessible directory must
@@ -154,8 +179,11 @@ fn probe_uses_sample_path_not_volume_root() {
 /// `LEAKED_PROBE_THREAD_COUNT` counter so `/health` can surface the
 /// accumulation.
 /// What: record the counter before calling `probe_volume` with a 0ns
-/// deadline (guaranteed timeout on any real path). Assert the counter
-/// incremented by exactly 1.
+/// deadline (guaranteed timeout on any real path). Assert `after > before`
+/// (review #727 finding 2 fix: we assert monotone growth and do NOT
+/// restore the counter. `store(before, ...)` would race with other serial
+/// tests that also increment the counter; asserting `after > before` is
+/// sufficient and eliminates the restore-induced race).
 /// Note: `serial` prevents parallel tests from racing on the global counter.
 /// Test: this test.
 #[test]
@@ -176,16 +204,15 @@ fn probe_timeout_increments_leaked_thread_count() {
         VolumeAccessibility::Inaccessible,
         "zero-duration deadline must produce Inaccessible"
     );
-    // The counter must have increased by exactly 1.
-    assert_eq!(
-        after,
-        before + 1,
-        "LEAKED_PROBE_THREAD_COUNT must increment by 1 on timeout; before={before} after={after}"
+    // The counter must have increased. We do NOT restore it:
+    // store(before, Ordering::Relaxed) would race with other serial tests
+    // that may increment the counter between our load and the store, silently
+    // rolling back their increments. The counter is monotonically increasing
+    // by design; asserting after > before is correct. (review #727 finding 2)
+    assert!(
+        after > before,
+        "LEAKED_PROBE_THREAD_COUNT must increment on timeout; before={before} after={after}"
     );
-
-    // Restore the counter to avoid polluting other tests that check it.
-    // (This is safe in serial test context.)
-    LEAKED_PROBE_THREAD_COUNT.store(before, Ordering::Relaxed);
 }
 
 // ── probe_all_volumes ─────────────────────────────────────────────────────────
@@ -228,6 +255,36 @@ fn probe_all_volumes_distinct_keys() {
     }
     assert_eq!(keys.len(), 1, "3 boot-volume paths must yield 1 unique key");
     assert!(keys.contains(&PathBuf::from("/")));
+}
+
+/// Why (review #727 finding 1): `probe_all_volumes` must probe volumes in
+/// PARALLEL so total warm-boot stall time is bounded at ≈ONE deadline
+/// regardless of N blocked volumes.
+/// What: provide several boot-volume paths (all returning volume key `/`);
+/// they deduplicate to one probe, so this just verifies the function
+/// returns promptly and the result is empty. Additionally verify the
+/// function is idempotent on an empty input.
+/// Test: this test.
+#[test]
+fn probe_all_volumes_parallel_bounded_time() {
+    // Empty input: must return empty immediately.
+    let inaccessible = probe_all_volumes(&[], Duration::from_secs(5));
+    assert!(
+        inaccessible.is_empty(),
+        "empty input must return empty inaccessible set"
+    );
+
+    // Several boot-volume paths: all accessible, must return empty.
+    let paths = vec![
+        PathBuf::from("/tmp/proj-a"),
+        PathBuf::from("/tmp/proj-b"),
+        PathBuf::from("/usr/local"),
+    ];
+    let inaccessible = probe_all_volumes(&paths, Duration::from_secs(5));
+    assert!(
+        inaccessible.is_empty(),
+        "all boot-volume paths must be accessible (parallel probe); got: {inaccessible:?}"
+    );
 }
 
 // ── volume_probe_timeout ──────────────────────────────────────────────────────

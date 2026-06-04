@@ -11,6 +11,31 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ### Fixed
 
+- **Parallel volume probing — bounded warm-boot time** (review #727 finding 1,
+  issue #723) — `probe_all_volumes` now spawns ALL per-volume probe threads
+  simultaneously and collects their results under a SINGLE shared wall-clock
+  deadline. Total warm-boot stall is bounded at ≈ONE deadline regardless of
+  how many distinct volumes are being probed (previously N × deadline). Each
+  blocked volume still leaks exactly one OS thread; the
+  `LEAKED_PROBE_THREAD_COUNT` counter is incremented once per timed-out volume
+  as before. (PR #727)
+
+- **Deterministic probe counter tests** (review #727 finding 2) —
+  `probe_timeout_increments_leaked_thread_count` no longer restores the global
+  `LEAKED_PROBE_THREAD_COUNT` counter via `store(before, ...)` at the end of
+  the test. The restore was racy: it could silently roll back increments from
+  a concurrent serial test that also touches the counter. The test now asserts
+  `after >= before + 1` (monotone growth) which is the correct invariant and
+  is deterministic under a multi-threaded runner. (PR #727)
+
+- **Linux volume-key false-positive guard** (review #727 finding 3) —
+  `volume_key` now uses an exact string match (`== "Volumes"`) instead of
+  `eq_ignore_ascii_case("Volumes")`, and the `/Volumes/<label>` special-casing
+  is fully gated behind `#[cfg(target_os = "macos")]`. On Linux, paths like
+  `/volumes/...` (lowercase) were previously mis-classified as external macOS
+  volume keys, producing spurious warm-boot `TIMED_OUT` warnings. macOS
+  behavior is unchanged. (PR #727)
+
 - **Probe deeper index path for TCC detection** (review #727 finding 2, issue
   #723) — the per-volume warm-boot probe now calls `stat` on the representative
   sample index path inside the volume (e.g.
