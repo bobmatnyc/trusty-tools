@@ -9,6 +9,21 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ## [0.23.4] — 2026-06-04
 
+### Fixed (closes #747 Fix C + Fix D, closes #750)
+
+- **Per-index endpoints return clean 404 JSON for unknown index id** (closes
+  #750) — `/indexes/{id}/search`, `/indexes/{id}/status`,
+  `/indexes/{id}/search_similar`, `/indexes/{id}/index-file`,
+  `/indexes/{id}/remove-file`, `/indexes/{id}/chunks`,
+  `/indexes/{id}/graph`, `/indexes/{id}/graph/stats`, and
+  `/indexes/{id}/reindex/stream` previously returned a bare HTTP 404 with
+  no body when the index id was not registered, causing clients to fail with
+  `error decoding response body`. All per-index routes now return a
+  structured `{"error":"unknown index","index_id":"<id>"}` JSON body
+  alongside the 404 status so clients can surface "index not found — create
+  it with `create_index`" instead of an opaque decode error. A shared helper
+  (`unknown_index_response`) ensures every route is consistent.
+
 ### Fixed (closes #747 Fix C + Fix D)
 
 - **Forward resolved ONNX batch size to sidecar** (Fix C) — `do_spawn` in

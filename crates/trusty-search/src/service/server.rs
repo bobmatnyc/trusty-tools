@@ -830,6 +830,28 @@ pub struct RemoveFileRequest {
     pub path: String,
 }
 
+/// Build a well-formed `404 Not Found` JSON response for an unknown index id.
+///
+/// Why (issue #750): per-index endpoints previously returned a bare 404 with
+/// no body when the index id was not registered. Clients decode the body as
+/// JSON and fail with `error decoding response body` instead of seeing a clear
+/// "index not found" message. Centralising the response in one helper ensures
+/// all `/indexes/{id}/*` routes are consistent.
+/// What: `HTTP 404` with `Content-Type: application/json` and body
+/// `{"error":"unknown index","index_id":"<id>"}`.
+/// Test: `search_unknown_index_returns_404_json`,
+/// `status_unknown_index_returns_404_json`, and similar per-handler tests.
+fn unknown_index_response(id: &str) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({
+            "error": "unknown index",
+            "index_id": id,
+        })),
+    )
+        .into_response()
+}
+
 /// Build the axum router with the shared state.
 ///
 /// Wraps `state` in an `Arc` so every handler clones the pointer cheaply.
@@ -2032,9 +2054,12 @@ async fn search_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
     Json(mut query): Json<SearchQuery>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<Json<serde_json::Value>, Response> {
+    let index_id = IndexId::new(id.clone());
+    let handle = state
+        .registry
+        .get(&index_id)
+        .ok_or_else(|| unknown_index_response(&id))?;
     // Use the same domain-aware classifier as `CodeIndexer::search` so the
     // intent reported back to the caller matches what was used for routing.
     let intent = QueryClassifier::classify_with_domain(&query.text, &handle.domain_terms);
@@ -2064,7 +2089,7 @@ async fn search_handler(
     let mut results = indexer
         .search(&query)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
     // Issue #64: defense-in-depth post-filter. Chunks are stored with `file`
     // paths relative to the index root, so anything that escapes the root
     // (absolute path pointing elsewhere, `..` traversal, or simply a path
@@ -2619,15 +2644,18 @@ async fn search_similar_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
     Json(req): Json<SearchSimilarRequest>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<Json<serde_json::Value>, Response> {
+    let index_id = IndexId::new(id.clone());
+    let handle = state
+        .registry
+        .get(&index_id)
+        .ok_or_else(|| unknown_index_response(&id))?;
     let started = std::time::Instant::now();
     let indexer = handle.indexer.read().await;
     let chunk_id = indexer
         .find_chunk_id(&req.file, req.function.as_deref())
         .await
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
     // Issue #484: the LRU embedding cache misses for skip_kg=true indexes
     // (entries are only written at reindex time and are evicted under memory
     // pressure).  When the cache misses, fetch the chunk's text and re-embed
@@ -2638,17 +2666,17 @@ async fn search_similar_handler(
         let content = indexer
             .chunk_content_by_id(&chunk_id)
             .await
-            .ok_or(StatusCode::NOT_FOUND)?;
+            .ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
         indexer
             .embed_text(&content)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .ok_or(StatusCode::NOT_FOUND)? // BM25-only: no embedder wired
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?
+            .ok_or_else(|| StatusCode::NOT_FOUND.into_response())? // BM25-only: no embedder wired
     };
     let results = indexer
         .similar_by_embedding(&embedding, req.top_k, Some(&chunk_id))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
     let latency_ms = started.elapsed().as_millis() as u64;
     Ok(Json(serde_json::json!({
         "results": results,
@@ -2732,9 +2760,12 @@ fn first_existing_mtime_rfc3339(dir: &std::path::Path, candidates: &[&str]) -> O
 async fn index_status_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<Json<serde_json::Value>, Response> {
+    let index_id = IndexId::new(id.clone());
+    let handle = state
+        .registry
+        .get(&index_id)
+        .ok_or_else(|| unknown_index_response(&id))?;
     let indexer = handle.indexer.read().await;
     // Issue #111: surface `path_filter` so callers can see which glob filter
     // (if any) is active for the index. Returns `null` when no filter is set.
@@ -2910,9 +2941,12 @@ async fn graph_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
     Query(params): Query<GraphQueryParams>,
-) -> Result<Response, StatusCode> {
-    let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<Response, Response> {
+    let index_id = IndexId::new(id.clone());
+    let handle = state
+        .registry
+        .get(&index_id)
+        .ok_or_else(|| unknown_index_response(&id))?;
     let graph = {
         let indexer = handle.indexer.read().await;
         indexer.snapshot_symbol_graph().await
@@ -3003,9 +3037,12 @@ async fn graph_handler(
 async fn graph_stats_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<Json<serde_json::Value>, Response> {
+    let index_id = IndexId::new(id.clone());
+    let handle = state
+        .registry
+        .get(&index_id)
+        .ok_or_else(|| unknown_index_response(&id))?;
     let graph = {
         let indexer = handle.indexer.read().await;
         indexer.snapshot_symbol_graph().await
@@ -3027,14 +3064,17 @@ async fn index_file_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
     Json(req): Json<IndexFileRequest>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<Json<serde_json::Value>, Response> {
+    let index_id = IndexId::new(id.clone());
+    let handle = state
+        .registry
+        .get(&index_id)
+        .ok_or_else(|| unknown_index_response(&id))?;
     let indexer = handle.indexer.read().await;
     indexer
         .index_file(&req.path, &req.content)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
     Ok(Json(serde_json::json!({
         "index_id": index_id.0,
         "path": req.path,
@@ -3046,14 +3086,17 @@ async fn remove_file_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
     Json(req): Json<RemoveFileRequest>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<Json<serde_json::Value>, Response> {
+    let index_id = IndexId::new(id.clone());
+    let handle = state
+        .registry
+        .get(&index_id)
+        .ok_or_else(|| unknown_index_response(&id))?;
     let indexer = handle.indexer.read().await;
     let removed = indexer
         .remove_file(&req.path)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
     Ok(Json(serde_json::json!({
         "index_id": index_id.0,
         "path": req.path,
@@ -3095,9 +3138,12 @@ async fn get_index_chunks_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
     Query(params): Query<ChunksParams>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
+) -> Result<Json<serde_json::Value>, Response> {
+    let index_id = IndexId::new(id.clone());
+    let handle = state
+        .registry
+        .get(&index_id)
+        .ok_or_else(|| unknown_index_response(&id))?;
     let limit = params.limit.min(MAX_CHUNKS_LIMIT);
     let indexer = handle.indexer.read().await;
     let (total, chunks) = indexer.enumerate_chunks(params.offset, limit).await;
@@ -3590,13 +3636,13 @@ const SSE_HEARTBEAT_FRAME: &str = ": heartbeat\n\n";
 async fn reindex_stream_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
-) -> Result<Response, StatusCode> {
-    let index_id = IndexId::new(id);
+) -> Result<Response, Response> {
+    let index_id = IndexId::new(id.clone());
     let progress = state
         .reindex_progress
         .get(&index_id)
         .map(|r| Arc::clone(r.value()))
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .ok_or_else(|| unknown_index_response(&id))?;
 
     // Snapshot the replay buffer first so we don't miss the `start` event,
     // then subscribe for live updates. New events that arrive between the
@@ -3790,7 +3836,11 @@ mod tests {
         )
         .await
         .expect_err("missing index must 404");
-        assert_eq!(err, StatusCode::NOT_FOUND);
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(err.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "unknown index");
+        assert_eq!(json["index_id"], "does-not-exist");
     }
 
     /// Issue #128 — `edge_types` filter drops edges of other kinds.
@@ -5531,5 +5581,79 @@ mod tests {
             has_child_result,
             "sub-index (boost-child) must contribute results to the fan-out"
         );
+    }
+
+    // ── Issue #750: unknown index id returns 404 with JSON body ──────────
+
+    /// `POST /indexes/{id}/search` with an unknown id must return HTTP 404
+    /// with a well-formed JSON body `{"error":"unknown index","index_id":"…"}`.
+    ///
+    /// Why (issue #750): previously `.ok_or(StatusCode::NOT_FOUND)` produced a
+    /// bare 404 with no body, causing clients to fail with
+    /// `error decoding response body` instead of a clear "index not found".
+    #[tokio::test]
+    async fn search_unknown_index_returns_404_json() {
+        use crate::core::registry::IndexRegistry;
+        let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+        let err = search_handler(
+            State(state),
+            Path("no-such-index".to_string()),
+            Json(crate::core::indexer::SearchQuery {
+                text: "fn main".to_string(),
+                top_k: 5,
+                expand_graph: false,
+                compact: false,
+                branch_files: None,
+                branch_boost: 1.5,
+                branch: None,
+                stage: None,
+                mode: crate::core::indexer::SearchMode::Code,
+                exclude_archived: false,
+                refine_query: None,
+            }),
+        )
+        .await
+        .expect_err("unknown index must 404");
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(err.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "unknown index");
+        assert_eq!(json["index_id"], "no-such-index");
+    }
+
+    /// `GET /indexes/{id}/status` with an unknown id must return HTTP 404
+    /// with a well-formed JSON body `{"error":"unknown index","index_id":"…"}`.
+    ///
+    /// Why (issue #750): same root cause as search — bare 404, no JSON body.
+    #[tokio::test]
+    async fn status_unknown_index_returns_404_json() {
+        use crate::core::registry::IndexRegistry;
+        let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+        let err = index_status_handler(State(state), Path("no-such-index".to_string()))
+            .await
+            .expect_err("unknown index must 404");
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(err.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "unknown index");
+        assert_eq!(json["index_id"], "no-such-index");
+    }
+
+    /// `POST /indexes/{id}/reindex/stream` with an unknown id must return
+    /// HTTP 404 with a well-formed JSON body.
+    ///
+    /// Why (issue #750): reindex stream had the same bare-404 gap.
+    #[tokio::test]
+    async fn reindex_stream_unknown_index_returns_404_json() {
+        use crate::core::registry::IndexRegistry;
+        let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+        let err = reindex_stream_handler(State(state), Path("ghost-index".to_string()))
+            .await
+            .expect_err("unknown index must 404");
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(err.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "unknown index");
+        assert_eq!(json["index_id"], "ghost-index");
     }
 }
