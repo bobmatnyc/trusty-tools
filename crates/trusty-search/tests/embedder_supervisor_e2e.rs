@@ -28,7 +28,7 @@ mod e2e {
     #[ignore = "requires trusty-embedderd binary + ONNX model (~15 s first run)"]
     async fn supervisor_spawns_and_serves_embed_requests() {
         let binary = locate_embedderd_binary().expect("trusty-embedderd not found on PATH");
-        let cfg = SupervisorConfig::default().into_common();
+        let cfg = SupervisorConfig::default().into_common_for_tests();
         let (supervisor, slot, pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
             .await
             .expect("spawn_stdio failed");
@@ -88,10 +88,12 @@ mod e2e {
 
         // Sidecar vector.
         let binary = locate_embedderd_binary().expect("trusty-embedderd not found");
-        let (supervisor, slot, _pid_slot) =
-            EmbedderSupervisor::spawn_stdio(binary, SupervisorConfig::default().into_common())
-                .await
-                .expect("spawn_stdio failed");
+        let (supervisor, slot, _pid_slot) = EmbedderSupervisor::spawn_stdio(
+            binary,
+            SupervisorConfig::default().into_common_for_tests(),
+        )
+        .await
+        .expect("spawn_stdio failed");
         supervisor.start_supervisor_task();
         let client = slot.read().await.clone();
         let sidecar_vecs = client
@@ -127,10 +129,12 @@ mod e2e {
         ];
 
         let binary = locate_embedderd_binary().expect("trusty-embedderd not found");
-        let (supervisor, slot, _pid_slot) =
-            EmbedderSupervisor::spawn_stdio(binary, SupervisorConfig::default().into_common())
-                .await
-                .expect("spawn_stdio failed");
+        let (supervisor, slot, _pid_slot) = EmbedderSupervisor::spawn_stdio(
+            binary,
+            SupervisorConfig::default().into_common_for_tests(),
+        )
+        .await
+        .expect("spawn_stdio failed");
         supervisor.start_supervisor_task();
         let client = slot.read().await.clone();
 
@@ -162,7 +166,7 @@ mod e2e {
             ..SupervisorConfig::default()
         };
         let (supervisor, slot, pid_slot) =
-            EmbedderSupervisor::spawn_stdio(binary, cfg.into_common())
+            EmbedderSupervisor::spawn_stdio(binary, cfg.into_common_for_tests())
                 .await
                 .expect("spawn_stdio failed");
         // Issue #282: record the initial PID; after a crash + restart the slot
@@ -213,10 +217,12 @@ mod e2e {
     #[ignore = "requires trusty-embedderd binary + ONNX model (~15 s)"]
     async fn supervisor_handles_empty_batch() {
         let binary = locate_embedderd_binary().expect("trusty-embedderd not found");
-        let (supervisor, slot, _pid_slot) =
-            EmbedderSupervisor::spawn_stdio(binary, SupervisorConfig::default().into_common())
-                .await
-                .expect("spawn_stdio failed");
+        let (supervisor, slot, _pid_slot) = EmbedderSupervisor::spawn_stdio(
+            binary,
+            SupervisorConfig::default().into_common_for_tests(),
+        )
+        .await
+        .expect("spawn_stdio failed");
         supervisor.start_supervisor_task();
         let client = slot.read().await.clone();
 
@@ -237,10 +243,12 @@ mod e2e {
     #[ignore = "requires trusty-embedderd binary + ONNX model (~20 s)"]
     async fn supervisor_handles_concurrent_requests() {
         let binary = locate_embedderd_binary().expect("trusty-embedderd not found");
-        let (supervisor, slot, _pid_slot) =
-            EmbedderSupervisor::spawn_stdio(binary, SupervisorConfig::default().into_common())
-                .await
-                .expect("spawn_stdio failed");
+        let (supervisor, slot, _pid_slot) = EmbedderSupervisor::spawn_stdio(
+            binary,
+            SupervisorConfig::default().into_common_for_tests(),
+        )
+        .await
+        .expect("spawn_stdio failed");
         supervisor.start_supervisor_task();
 
         let slot = Arc::new(slot);

@@ -43,8 +43,8 @@ pub use trusty_common::embedder_client::EmbedderSupervisor;
 /// What: wraps the field names used by `trusty_common::embedder_client::SupervisorConfig`
 /// and provides a `from_env()` constructor that reads the `TRUSTY_EMBEDDERD_*`
 /// environment variables with trusty-search's preferred defaults.
-/// The `into_common()` method converts to the type expected by
-/// `EmbedderSupervisor::spawn_stdio`.
+/// The `into_common_for_tests()` method converts to the type expected by
+/// `EmbedderSupervisor::spawn_stdio` for lifecycle-only test spawns.
 /// Test: `config_from_env_defaults` and `config_from_env_overrides` in the
 /// `tests` module below.
 #[derive(Debug, Clone)]
@@ -92,7 +92,7 @@ impl SupervisorConfig {
     }
 
     /// Convert to the `trusty_common` supervisor config type without a
-    /// sidecar batch size.
+    /// sidecar batch size — **for test/lifecycle spawns only**.
     ///
     /// Why: `EmbedderSupervisor::spawn_stdio` expects
     /// `trusty_common::embedder_client::SupervisorConfig`; this conversion
@@ -103,17 +103,18 @@ impl SupervisorConfig {
     /// this method — it builds the common config directly so it can populate
     /// `sidecar_batch_size: Some(forwarded_batch)` after resolving the
     /// execution provider (see Fix C, issue #747). The two paths are therefore
-    /// intentionally divergent: `into_common` is for simple/test spawns where
-    /// batch forwarding is irrelevant.
+    /// intentionally divergent: `into_common_for_tests` is for lifecycle/test
+    /// spawns where batch forwarding is irrelevant. **Do not use this method
+    /// in production spawn paths** — the `None` batch size means the sidecar
+    /// will use its own default (32), silently losing batch forwarding.
     ///
     /// What: maps the three spawn-relevant fields 1:1; `idle_shutdown_secs` is
     /// trusty-search–specific and has no counterpart in the common type.
-    /// `sidecar_batch_size` is always `None` — the sidecar will use its own
-    /// default (32). Use `do_spawn` for production paths where batch forwarding
-    /// is required.
+    /// `sidecar_batch_size` is always `None`. Use `do_spawn` for production
+    /// paths where batch forwarding is required.
     ///
-    /// Test: `into_common_maps_fields`.
-    pub fn into_common(self) -> trusty_common::embedder_client::SupervisorConfig {
+    /// Test: `into_common_for_tests_maps_fields`.
+    pub fn into_common_for_tests(self) -> trusty_common::embedder_client::SupervisorConfig {
         trusty_common::embedder_client::SupervisorConfig {
             startup_timeout_secs: self.startup_timeout_secs,
             backoff_max_secs: self.backoff_max_secs,
@@ -699,24 +700,32 @@ mod tests {
         assert_eq!(cfg.idle_shutdown_secs, 0);
     }
 
-    /// `into_common()` must map fields correctly to the trusty-common type.
+    /// `into_common_for_tests()` must map fields correctly to the trusty-common
+    /// type and always set `sidecar_batch_size: None`.
     ///
     /// Why: field mismatch would silently use wrong defaults at runtime.
-    /// What: construct a custom config, convert, and assert the common fields.
+    /// What: construct a custom config, convert via `into_common_for_tests`,
+    /// and assert the common fields.
     /// Test: this test.
     #[test]
-    fn into_common_maps_fields() {
+    fn into_common_for_tests_maps_fields() {
         let cfg = SupervisorConfig {
             startup_timeout_secs: 99,
             backoff_max_secs: 77,
             max_restarts: 3,
             idle_shutdown_secs: 600,
         };
-        let common = cfg.into_common();
+        let common = cfg.into_common_for_tests();
         assert_eq!(common.startup_timeout_secs, 99);
         assert_eq!(common.backoff_max_secs, 77);
         assert_eq!(common.max_restarts, 3);
         // idle_shutdown_secs is trusty-search–specific; not in the common type.
+        // sidecar_batch_size must be None — this method is for test/lifecycle
+        // spawns only; production paths use do_spawn to populate Some(batch).
+        assert!(
+            common.sidecar_batch_size.is_none(),
+            "into_common_for_tests must not set sidecar_batch_size"
+        );
     }
 
     // ── default_socket_path ─────────────────────────────────────────────────

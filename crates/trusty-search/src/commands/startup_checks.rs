@@ -171,6 +171,7 @@ mod tests {
     /// asserts `false`.
     /// Test: this test.
     #[test]
+    #[serial_test::serial]
     fn device_explicit_flag_parses_truthy() {
         for val in &["1", "true", "TRUE", "True", "yes", "YES"] {
             // SAFETY: test-only, single-threaded.
@@ -189,6 +190,7 @@ mod tests {
     /// What: sets the var to falsy / empty values and asserts `false`.
     /// Test: this test.
     #[test]
+    #[serial_test::serial]
     fn device_explicit_flag_parses_falsy() {
         for val in &["0", "false", "no", "off", ""] {
             unsafe { std::env::set_var("TRUSTY_DEVICE_EXPLICIT", val) };

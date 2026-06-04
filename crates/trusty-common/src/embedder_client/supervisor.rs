@@ -124,10 +124,23 @@ impl SupervisorConfig {
 /// return value is always clamped to at least 1.
 /// What: `min(resolved, coreml_cap)` when `is_coreml`; `resolved` otherwise;
 /// result is further clamped to `max(result, 1)` to prevent a zero batch size.
+/// When `is_coreml && coreml_cap == 0` a `tracing::warn!` is emitted to stderr
+/// because that combination indicates a likely `resolve_coreml_batch_size()`
+/// misconfiguration — the clamp-to-1 keeps the system alive but will be very
+/// slow (one embedding per ONNX call).
 /// Test: `sidecar_batch_size_*` in this module's `tests`, including
 /// `sidecar_batch_size_zero_resolved` and `sidecar_batch_size_zero_coreml_cap`.
 pub fn sidecar_batch_size(resolved: usize, is_coreml: bool, coreml_cap: usize) -> usize {
     let raw = if is_coreml {
+        if coreml_cap == 0 {
+            tracing::warn!(
+                resolved,
+                "sidecar_batch_size: CoreML batch cap resolved to 0 — likely a \
+                 resolve_coreml_batch_size() misconfiguration. Clamping to 1, \
+                 which will be very slow (one embedding per ONNX call). \
+                 Check TRUSTY_COREML_TRIPWIRE_MB and available system RAM."
+            );
+        }
         resolved.min(coreml_cap)
     } else {
         resolved
