@@ -98,12 +98,15 @@ impl SupervisorConfig {
     /// avoids duplicating field names at the call site.
     /// What: maps the three spawn-relevant fields 1:1; `idle_shutdown_secs` is
     /// trusty-search–specific and has no counterpart in the common type.
+    /// `sidecar_batch_size` is populated separately by `do_spawn` after
+    /// resolving the provider (see Fix C, issue #747).
     /// Test: `into_common_maps_fields`.
     pub fn into_common(self) -> trusty_common::embedder_client::SupervisorConfig {
         trusty_common::embedder_client::SupervisorConfig {
             startup_timeout_secs: self.startup_timeout_secs,
             backoff_max_secs: self.backoff_max_secs,
             max_restarts: self.max_restarts,
+            sidecar_batch_size: None,
         }
     }
 }
@@ -357,15 +360,12 @@ impl LazyEmbedderHandle {
 /// Spawn the sidecar, wire the supervisor, optionally arm the idle-shutdown
 /// watchdog, and return the `SpawnedState`.
 ///
-/// Why: extracted from `LazyEmbedderHandle::embed_via` so the spawn logic
-/// can be tested in isolation and the embed path stays readable.
-///
-/// What: calls `EmbedderSupervisor::spawn_stdio` to start the child, detaches
-/// the crash-restart loop via `start_supervisor_task`, updates `app_pid_slot`
-/// with the initial child PID, arms the idle-shutdown watchdog when
-/// `idle_shutdown_secs > 0`, and returns `SpawnedState` for storage in the
-/// handle's `state` field.
-///
+/// Why: extracted from `LazyEmbedderHandle::embed_via` so the spawn logic can
+/// be tested in isolation. Also resolves and forwards the ONNX batch size to
+/// the sidecar as `TRUSTY_EMBED_BATCH_SIZE` (issue #747 Fix C).
+/// What: calls `EmbedderSupervisor::spawn_stdio`, detaches the crash-restart
+/// loop, updates `app_pid_slot`, and arms the idle-shutdown watchdog when
+/// `idle_shutdown_secs > 0`.
 /// Test: `lazy_handle_defers_spawn` — the spawn is triggered inside `embed_via`.
 async fn do_spawn(
     binary_path: &Path,
@@ -379,10 +379,34 @@ async fn do_spawn(
         "LazyEmbedderHandle: first embed request — spawning trusty-embedderd",
     );
 
+    // Fix C (issue #747): forward the auto-tuned batch size to the sidecar.
+    // Without this the sidecar always defaulted to 32 regardless of the
+    // parent's resolved value (e.g. 256 on Medium-tier + CoreML).
+    // CoreML cap: oversized batches inflate unified-memory RSS and trigger
+    // jetsam SIGKILL, so cap at coreml_cap on the CoreML path.
+    let predicted_provider = trusty_common::embedder::resolve_expected_provider();
+    let is_coreml = matches!(
+        predicted_provider,
+        trusty_common::embedder::ExecutionProvider::CoreML
+            | trusty_common::embedder::ExecutionProvider::CoreMLAne
+    );
+    let resolved_batch = crate::core::indexer::embed_batch_size();
+    let coreml_cap = crate::core::resolve_coreml_batch_size();
+    let forwarded_batch =
+        trusty_common::embedder_client::sidecar_batch_size(resolved_batch, is_coreml, coreml_cap);
+    tracing::info!(
+        resolved_batch,
+        forwarded_batch,
+        is_coreml,
+        coreml_cap,
+        "LazyEmbedderHandle: TRUSTY_EMBED_BATCH_SIZE={forwarded_batch} (resolved={resolved_batch})"
+    );
+
     let common_config = trusty_common::embedder_client::SupervisorConfig {
         startup_timeout_secs: config.startup_timeout_secs,
         backoff_max_secs: config.backoff_max_secs,
         max_restarts: config.max_restarts,
+        sidecar_batch_size: Some(forwarded_batch),
     };
 
     let (supervisor, client_slot, child_pid_slot) =

@@ -29,7 +29,7 @@ crates/trusty-common/src/bm25_client.rs	503
 crates/trusty-common/src/bm25.rs	645
 crates/trusty-common/src/chat/openai_compat.rs	670
 crates/trusty-common/src/claude_config.rs	526
-crates/trusty-common/src/embedder_client/supervisor.rs	587
+crates/trusty-common/src/embedder_client/supervisor.rs	651
 crates/trusty-common/src/embedder/mod.rs	1237
 crates/trusty-common/src/help.rs	690
 crates/trusty-common/src/lib.rs	1467
@@ -142,7 +142,7 @@ crates/trusty-search/src/commands/doctor_checks.rs	612
 crates/trusty-search/src/commands/integrate.rs	688
 crates/trusty-search/src/commands/reindex_engine.rs	1574
 crates/trusty-search/src/commands/reindex_ui.rs	938
-crates/trusty-search/src/commands/start.rs	2137
+crates/trusty-search/src/commands/start.rs	2140
 crates/trusty-search/src/core/chunker/mod.rs	1883
 crates/trusty-search/src/core/classifier.rs	1032
 crates/trusty-search/src/core/corpus.rs	1420
@@ -163,7 +163,7 @@ crates/trusty-search/src/main.rs	1243
 crates/trusty-search/src/mcp/tools.rs	2174
 crates/trusty-search/src/service/call_chain.rs	954
 crates/trusty-search/src/service/daemon.rs	774
-crates/trusty-search/src/service/embedder_supervisor.rs	947
+crates/trusty-search/src/service/embedder_supervisor.rs	971
 crates/trusty-search/src/service/grep.rs	827
 crates/trusty-search/src/service/persistence.rs	990
 crates/trusty-search/src/service/reindex/mod.rs	3743

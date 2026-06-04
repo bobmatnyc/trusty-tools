@@ -27,6 +27,9 @@ pub mod log_rotation;
 pub mod reindex_engine;
 pub(crate) mod reindex_ui;
 
+// Shared startup sanity checks (Fix D, issue #747)
+pub mod startup_checks;
+
 // Per-subcommand handlers
 pub mod add;
 pub mod cleanup;

@@ -1,5 +1,20 @@
 # Changelog — trusty-common
 
+## [0.13.0] — 2026-06-04
+
+### Added (closes #747 Fix C)
+
+- **`sidecar_batch_size` helper + `SupervisorConfig::sidecar_batch_size` field** —
+  `EmbedderSupervisor` now accepts an optional resolved ONNX batch size in its
+  config and forwards it as `TRUSTY_EMBED_BATCH_SIZE` to the `trusty-embedderd`
+  child process at spawn time (and on crash-restart). Previously the sidecar
+  always defaulted to 32 chunks per ONNX call regardless of what the parent
+  daemon had computed via memory-tier autosizing, leaving significant throughput
+  on the table (e.g. a Medium-tier host with CoreML computed 256 while the sidecar
+  ran at 32). A CoreML memory-safety cap (`min(resolved, coreml_cap)`) is applied
+  to prevent oversized unified-memory tensor allocations from triggering macOS
+  jetsam SIGKILL.
+
 ## [0.12.0] — 2026-06-03
 
 ### Changed

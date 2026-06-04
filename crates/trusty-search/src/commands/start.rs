@@ -1202,6 +1202,9 @@ pub async fn handle_start(
     // may already exist from a previous run.
     crate::service::load_daemon_env();
 
+    // Issue #747 Fix D: warn on stale TRUSTY_DEVICE=cpu (Apple Silicon).
+    crate::commands::startup_checks::warn_if_stale_cpu_device_on_apple_silicon();
+
     // Auto-tune memory caps based on detected system RAM (issue: memory-tier
     // autosizing). Precedence: explicit env var > daemon.env (just loaded)
     // > tier default. `MemoryPolicy::detect()` writes the resolved values

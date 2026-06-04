@@ -41,7 +41,8 @@ use super::{EmbedderClient, StdioEmbedderClient};
 /// Why: groups all tunable knobs so they can be read from env-vars in one
 /// place and passed through cleanly without threading individual vars.
 ///
-/// What: max restart count, backoff cap, and startup timeout. All fields have
+/// What: max restart count, backoff cap, startup timeout, and an optional
+/// resolved ONNX batch size to forward to the sidecar process. All fields have
 /// sensible defaults readable via `SupervisorConfig::from_env()`.
 ///
 /// Test: `from_env_uses_defaults` verifies the default values.
@@ -63,6 +64,15 @@ pub struct SupervisorConfig {
     ///
     /// Env: `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS` (default 5).
     pub startup_timeout_secs: u64,
+
+    /// Resolved ONNX batch size to forward as `TRUSTY_EMBED_BATCH_SIZE` to the
+    /// sidecar child process (issue #747 Fix C).
+    ///
+    /// Why: the parent computes an auto-tuned value the sidecar never received,
+    /// so the sidecar always defaulted to 32. `None` = do not forward.
+    /// What: when `Some(n)`, `spawn_child` sets `.env("TRUSTY_EMBED_BATCH_SIZE", n)`.
+    /// Test: `sidecar_batch_size_*` tests in this module.
+    pub sidecar_batch_size: Option<usize>,
 }
 
 impl Default for SupervisorConfig {
@@ -71,6 +81,7 @@ impl Default for SupervisorConfig {
             max_restarts: 5,
             backoff_max_secs: 60,
             startup_timeout_secs: 5,
+            sidecar_batch_size: None,
         }
     }
 }
@@ -83,6 +94,7 @@ impl SupervisorConfig {
     /// What: reads `TRUSTY_EMBEDDERD_MAX_RESTARTS`,
     /// `TRUSTY_EMBEDDERD_RESTART_BACKOFF_MAX_SECS`, and
     /// `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS` from the process environment.
+    /// `sidecar_batch_size` defaults to `None`; callers set it via the struct.
     /// Test: `from_env_uses_defaults` (no env vars set → defaults).
     pub fn from_env() -> Self {
         let def = Self::default();
@@ -96,7 +108,25 @@ impl SupervisorConfig {
                 "TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS",
                 def.startup_timeout_secs,
             ),
+            sidecar_batch_size: None,
         }
+    }
+}
+
+/// Resolve the ONNX batch size to forward to the sidecar (issue #747 Fix C).
+///
+/// Why: the parent's auto-tuned `TRUSTY_MAX_BATCH_SIZE` was never forwarded to
+/// the sidecar, which therefore always ran at the default of 32. CoreML safety
+/// cap: CoreML pre-allocates per-batch GPU/ANE buffers in the unified-memory
+/// pool; oversized batches can trigger jetsam SIGKILL, so the value is clamped
+/// to `coreml_cap` when `is_coreml` is `true`.
+/// What: `min(resolved, coreml_cap)` when `is_coreml`; `resolved` otherwise.
+/// Test: `sidecar_batch_size_*` in this module's `tests`.
+pub fn sidecar_batch_size(resolved: usize, is_coreml: bool, coreml_cap: usize) -> usize {
+    if is_coreml {
+        resolved.min(coreml_cap)
+    } else {
+        resolved
     }
 }
 
@@ -237,7 +267,8 @@ impl EmbedderSupervisor {
 /// Why: extracted so both the initial spawn and the respawn path call the same
 /// code.
 /// What: `Command::new(binary_path).arg("--stdio")` with piped stdin/stdout
-/// and inherited stderr.
+/// and inherited stderr. When `config.sidecar_batch_size` is `Some(n)`, sets
+/// `TRUSTY_EMBED_BATCH_SIZE=n` (issue #747 Fix C).
 /// Test: called by `spawn_stdio` and the supervision loop.
 async fn spawn_child(
     binary_path: &Path,
@@ -245,19 +276,28 @@ async fn spawn_child(
 ) -> Result<(Child, StdioEmbedderClient)> {
     use std::process::Stdio;
 
-    let mut child = Command::new(binary_path)
-        .arg("--stdio")
+    let mut cmd = Command::new(binary_path);
+    cmd.arg("--stdio")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
-        .kill_on_drop(true)
-        .spawn()
-        .with_context(|| {
-            format!(
-                "spawn trusty-embedderd --stdio from {}",
-                binary_path.display()
-            )
-        })?;
+        .kill_on_drop(true);
+
+    // Forward resolved ONNX batch size (issue #747 Fix C).
+    if let Some(bs) = config.sidecar_batch_size {
+        cmd.env("TRUSTY_EMBED_BATCH_SIZE", bs.to_string());
+        tracing::debug!(
+            bs,
+            "EmbedderSupervisor: forwarding TRUSTY_EMBED_BATCH_SIZE={bs}"
+        );
+    }
+
+    let mut child = cmd.spawn().with_context(|| {
+        format!(
+            "spawn trusty-embedderd --stdio from {}",
+            binary_path.display()
+        )
+    })?;
 
     let stdin = child
         .stdin
@@ -557,6 +597,30 @@ mod tests {
                 std::env::remove_var("TRUSTY_EMBEDDERD_MAX_RESTARTS");
             }
         }
+    }
+
+    // ── sidecar_batch_size tests (Fix C, issue #747) ──────────────────────
+
+    #[test]
+    fn sidecar_batch_size_cpu_passthrough() {
+        // Why: CPU path must forward resolved value unchanged.
+        // What: is_coreml=false → returns resolved.
+        // Test: this test.
+        assert_eq!(sidecar_batch_size(128, false, 32), 128);
+        assert_eq!(sidecar_batch_size(512, false, 32), 512);
+        assert_eq!(sidecar_batch_size(32, false, 32), 32);
+    }
+
+    #[test]
+    fn sidecar_batch_size_coreml_caps_and_passes_through() {
+        // Why: CoreML path must cap at coreml_cap to prevent OOM/jetsam on
+        // Apple Silicon, but pass through values at or below the cap.
+        // What: is_coreml=true → min(resolved, coreml_cap).
+        // Test: this test.
+        assert_eq!(sidecar_batch_size(256, true, 32), 32);
+        assert_eq!(sidecar_batch_size(512, true, 64), 64);
+        assert_eq!(sidecar_batch_size(16, true, 32), 16);
+        assert_eq!(sidecar_batch_size(32, true, 32), 32);
     }
 
     #[test]

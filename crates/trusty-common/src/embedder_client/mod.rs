@@ -39,7 +39,9 @@ pub use error::EmbedderError;
 pub use in_process::InProcessEmbedderClient;
 pub use remote::RemoteEmbedderClient;
 pub use stdio::StdioEmbedderClient;
-pub use supervisor::{EmbedderSupervisor, SupervisorConfig, locate_embedderd_binary};
+pub use supervisor::{
+    EmbedderSupervisor, SupervisorConfig, locate_embedderd_binary, sidecar_batch_size,
+};
 pub use types::{EmbedRequest, EmbedResponse};
 pub use uds::UdsEmbedderClient;
 

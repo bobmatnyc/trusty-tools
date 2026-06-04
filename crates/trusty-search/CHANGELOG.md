@@ -7,6 +7,26 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.23.4] — 2026-06-04
+
+### Fixed (closes #747 Fix C + Fix D)
+
+- **Forward resolved ONNX batch size to sidecar** (Fix C) — `do_spawn` in
+  `LazyEmbedderHandle` now resolves the parent's auto-tuned batch size
+  (`TRUSTY_MAX_BATCH_SIZE` / memory-tier autosizing) and forwards it to
+  `trusty-embedderd` as `TRUSTY_EMBED_BATCH_SIZE`. On the CoreML path the
+  value is capped at `TRUSTY_COREML_BATCH_SIZE` (default 32) to prevent
+  oversized unified-memory tensor allocations from triggering macOS jetsam
+  SIGKILL. Previously the sidecar always coalesced ONNX calls at its own
+  default of 32 regardless of the parent's resolved value.
+
+- **Startup warning for stale `TRUSTY_DEVICE=cpu` on Apple Silicon** (Fix D) —
+  After `load_daemon_env()`, the daemon now emits a `tracing::warn!` on stderr
+  if `TRUSTY_DEVICE=cpu` is set on an `aarch64-apple-darwin` host. This setting
+  disables CoreML ANE acceleration and is almost always a stale workaround from
+  the resolved issue #24 (fixed in v0.3.55). The warning includes the
+  remediation step (remove the env var from `daemon.env`). No auto-removal.
+
 ## [0.23.3] — 2026-06-04
 
 ### Fixed (closes #744)
