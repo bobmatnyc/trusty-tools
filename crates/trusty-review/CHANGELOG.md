@@ -6,6 +6,51 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.3.3] — 2026-06-03
+
+### Fixed
+
+- **Adversarial verifier calibration — fixes 100% refutation rate** (#726)
+
+  Three root causes were identified and fixed together:
+
+  1. **Token truncation (root cause):** The verifier role's `default_max_tokens`
+     was `16`, which is too small to hold a complete `{"judgment":"CONFIRMED","reason":"…"}`
+     JSON object. Bedrock truncated the response mid-JSON, making it unparseable,
+     which triggered a conservative refutation on every call.  Bumped to `128`.
+     The module-level fallback constant `VERIFY_MAX_TOKENS` was also raised from
+     `64` to `128` for consistency.
+
+  2. **Biased burden-of-proof prompt:** The verifier system prompt contained
+     "The default answer is REFUTED. When in doubt, REFUTE." — a strong default
+     that compounded the truncation problem.  Replaced with a symmetric,
+     evidence-weighing instruction that asks the model to decide on the actual diff
+     content without defaulting to either verdict.  The truncation/hallucination
+     hard rule (REFUTE anything referencing a file/line absent from the diff) is
+     preserved unchanged.
+
+  3. **Verdict collapse on non-clean refutations:** Unparseable/truncated verifier
+     responses were mapped to plain `VerifyOutcome::Refuted`, indistinguishable
+     from a clean model REFUTED.  `rederive_verdict` then treated all-refuted
+     rounds as "escalation rested on refuted evidence" and dropped the verdict to
+     `APPROVE`.  Two fixes:
+     - Unparseable responses are now mapped to the distinct `TruncationRefuted`
+       variant (already present in `VerifyOutcome`), separating infrastructure
+       failures from clean model judgments.
+     - `rederive_verdict` uses a three-way baseline rule: (a) any confirmed →
+       keep `primary_verdict`; (b) at least one clean model REFUTED → drop to
+       `APPROVE`; (c) all demotions were `TruncationRefuted`/`ErrorRefuted` →
+       preserve `primary_verdict` (verifier infra failed, not the reviewer's
+       reasoning).
+
+  **Regression fixture:** `verify_join_handle_regression_pr720` models the
+  dropped-`JoinHandle` finding from PR #720 (the true-positive that was wrongly
+  refuted in the original incident).  Asserts that (a) a CONFIRMED judgment
+  preserves the finding, and (b) a truncated judgment does NOT collapse the
+  verdict to APPROVE.
+
+---
+
 ## [0.3.2] — 2026-06-03
 
 ### Added

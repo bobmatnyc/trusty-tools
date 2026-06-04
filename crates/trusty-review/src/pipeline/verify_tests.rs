@@ -1,11 +1,8 @@
-//! Unit tests for `pipeline::verify` (Phase 2, #583).
+//! Unit tests for `pipeline::verify` (Phase 2, #583, #726).
 //!
-//! Why: split from `verify.rs` to keep that file under the 500-line cap while
-//! fully covering the verification round: candidate selection per primary
-//! verdict, CONFIRMED-keeps / REFUTED-demotes outcome handling, verdict
-//! re-derivation after demotion, and the liveness-gate decision logic with an
-//! injected model-unavailable provider.
-//! What: drives the public verify API with deterministic fake providers.
+//! Why: split from `verify.rs` to keep that file under the 500-line cap.
+//! What: covers candidate selection, outcome application, verdict re-derivation
+//! (paths a/b/c), end-to-end rounds, and truncation regression (#726).
 //! Test: this is the test module; each function is a self-contained unit test.
 
 use std::sync::Arc;
@@ -56,6 +53,27 @@ impl LlmProvider for FixedVerifier {
     }
 }
 
+/// A verifier that always returns the same fixed judgment text.
+struct TruncatedVerifier;
+
+#[async_trait]
+impl LlmProvider for TruncatedVerifier {
+    fn name(&self) -> &str {
+        "truncated-verifier"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        // Simulate a response truncated mid-JSON (as seen with max_tokens=16).
+        Ok(LlmResponse {
+            text: r#"{"judg"#.to_string(),
+            model: req.model.clone(),
+            input_tokens: 10,
+            output_tokens: 3,
+            latency_ms: 1,
+            cost_usd: 0.0,
+        })
+    }
+}
+
 /// A verifier that always fails with a configurable `LlmError`.
 struct FailingVerifier {
     make_err: fn() -> LlmError,
@@ -82,6 +100,9 @@ fn confirmed_provider() -> Arc<dyn LlmProvider> {
 }
 fn refuted_provider() -> Arc<dyn LlmProvider> {
     Arc::new(FixedVerifier::refuted())
+}
+fn truncated_provider() -> Arc<dyn LlmProvider> {
+    Arc::new(TruncatedVerifier)
 }
 
 // ── Candidate selection ───────────────────────────────────────────────────────
@@ -178,61 +199,91 @@ fn apply_outcome_error_refuted_also_demotes() {
 
 #[test]
 fn rederive_excludes_refuted_relaxes() {
-    // One High finding, refuted, NO candidate confirmed → excluded + neutral
-    // baseline → APPROVE.
+    // Path (b): one High finding, clean REFUTED, nothing confirmed → excluded +
+    // neutral baseline → APPROVE.
     let mut f = finding(Effort::High, 0.95);
     apply_outcome(&mut f, VerifyOutcome::Refuted);
-    let verdict = rederive_verdict(Verdict::Block, false, &[f]);
+    // any_clean_refuted=true triggers path (b): drop to APPROVE baseline.
+    let verdict = rederive_verdict(Verdict::Block, false, true, &[f]);
     assert_eq!(
         verdict,
         Verdict::Approve,
-        "a refuted-only candidate set must not contribute a BLOCK floor"
+        "a cleanly-refuted candidate set must relax BLOCK to APPROVE (path b)"
     );
 }
 
 #[test]
 fn rederive_keeps_confirmed_block() {
-    // One High finding, confirmed → survives → BLOCK floor.
+    // Path (a): one High finding, confirmed → survives → BLOCK floor.
     let mut f = finding(Effort::High, 0.95);
     apply_outcome(&mut f, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::Block, true, &[f]);
+    let verdict = rederive_verdict(Verdict::Block, true, false, &[f]);
     assert_eq!(
         verdict,
         Verdict::Block,
-        "a confirmed High finding must keep the BLOCK floor"
+        "a confirmed High finding must keep the BLOCK floor (path a)"
     );
 }
 
 #[test]
 fn rederive_confirmed_preserves_model_escalation() {
-    // Model escalated to REQUEST_CHANGES on a single confirmed Medium finding.
+    // Path (a): model escalated to REQUEST_CHANGES on a single confirmed Medium.
     // Because a candidate was confirmed, the model's escalation is preserved
     // even though the lone-Medium floor alone is only APPROVE*.
     let mut med = finding(Effort::Medium, 0.85);
     apply_outcome(&mut med, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::RequestChanges, true, &[med]);
+    let verdict = rederive_verdict(Verdict::RequestChanges, true, false, &[med]);
     assert_eq!(
         verdict,
         Verdict::RequestChanges,
-        "confirmed evidence keeps the model's escalation as a lower bound"
+        "confirmed evidence keeps the model's escalation as a lower bound (path a)"
     );
 }
 
 #[test]
 fn rederive_mixed_keeps_only_surviving_floor() {
-    // High refuted + one surviving confirmed Medium, model said BLOCK.
-    // any_confirmed=true → baseline is the model BLOCK, but the BLOCK was driven
-    // by the now-refuted High... this asserts the documented trade-off: with a
-    // confirmed candidate the model's BLOCK is preserved as a lower bound.
+    // Path (a): High refuted + one surviving confirmed Medium, model said BLOCK.
+    // any_confirmed=true → baseline is the model APPROVE*, the Medium floor.
     let mut high = finding(Effort::High, 0.95);
     apply_outcome(&mut high, VerifyOutcome::Refuted);
     let mut med = finding(Effort::Medium, 0.85);
     apply_outcome(&mut med, VerifyOutcome::Confirmed);
-    let verdict = rederive_verdict(Verdict::ApproveWithReservations, true, &[high, med]);
+    let verdict = rederive_verdict(Verdict::ApproveWithReservations, true, true, &[high, med]);
     assert_eq!(
         verdict,
         Verdict::ApproveWithReservations,
-        "surviving single Medium floors to APPROVE*; refuted High is excluded"
+        "surviving single Medium floors to APPROVE*; refuted High is excluded (path a)"
+    );
+}
+
+#[test]
+fn rederive_error_refuted_preserves_primary_verdict() {
+    // Path (c): all demotions are ErrorRefuted (infra fail) → preserve primary.
+    let mut f = finding(Effort::High, 0.95);
+    apply_outcome(
+        &mut f,
+        VerifyOutcome::ErrorRefuted {
+            error_class: "ModelNotFound".to_string(),
+        },
+    );
+    let verdict = rederive_verdict(Verdict::Block, false, false, &[f]);
+    assert_eq!(
+        verdict,
+        Verdict::Block,
+        "all-ErrorRefuted must preserve primary_verdict (path c)"
+    );
+}
+
+#[test]
+fn rederive_truncation_refuted_preserves_primary_verdict() {
+    // Path (c): all demotions are TruncationRefuted → preserve primary (#726).
+    let mut f = finding(Effort::High, 0.85);
+    apply_outcome(&mut f, VerifyOutcome::TruncationRefuted);
+    let verdict = rederive_verdict(Verdict::Block, false, false, &[f]);
+    assert_eq!(
+        verdict,
+        Verdict::Block,
+        "all-TruncationRefuted must preserve primary_verdict (path c)"
     );
 }
 
@@ -341,9 +392,8 @@ async fn verify_unknown_is_passthrough() {
 }
 
 #[tokio::test]
-async fn verify_model_unavailable_marks_error_refuted_and_relaxes() {
-    // The verifier model is unavailable (ModelNotFound). The finding must be
-    // ErrorRefuted (NOT silently confirmed), demoted, and the verdict relaxes.
+async fn verify_model_unavailable_marks_error_refuted_and_preserves_verdict() {
+    // ModelNotFound → ErrorRefuted (path c) → primary_verdict preserved (#726).
     let verifier: Arc<dyn LlmProvider> = Arc::new(FailingVerifier {
         make_err: || LlmError::ModelNotFound("stale-verifier".to_string()),
     });
@@ -358,93 +408,126 @@ async fn verify_model_unavailable_marks_error_refuted_and_relaxes() {
         None,
     )
     .await;
-    assert!(
-        matches!(
-            findings[0].verified,
-            Some(VerifyOutcome::ErrorRefuted { .. })
-        ),
-        "a model error must record ErrorRefuted, not a plain refutation/confirmation"
-    );
+    assert!(matches!(
+        findings[0].verified,
+        Some(VerifyOutcome::ErrorRefuted { .. })
+    ));
     assert_eq!(
         verdict,
-        Verdict::Approve,
-        "an unverifiable (model-down) finding must not be allowed to keep blocking"
+        Verdict::Block,
+        "ErrorRefuted-only round must preserve primary verdict"
     );
 }
 
-// ── Liveness gate decision logic ──────────────────────────────────────────────
+// ── Truncation path (#726 regression) ─────────────────────────────────────────
 
 #[tokio::test]
-async fn liveness_alive_allows_start() {
-    // The verifier responds (any text) → Ok.
-    let verifier = confirmed_provider();
-    let decision = probe_verifier_liveness(&verifier, "us.anthropic.claude-haiku-4-5").await;
+async fn verify_truncated_response_is_truncation_refuted() {
+    // Unparseable/truncated verifier output → TruncationRefuted, confidence demoted.
+    let mut findings = vec![finding(Effort::High, 0.95)];
+    run_verification_round(
+        &truncated_provider(),
+        "m",
+        "+ diff",
+        Verdict::Block,
+        &mut findings,
+        None,
+        None,
+    )
+    .await;
+    assert!(matches!(
+        findings[0].verified,
+        Some(VerifyOutcome::TruncationRefuted)
+    ));
+    assert!((findings[0].confidence - VERIFY_REFUTED_CONFIDENCE).abs() < f32::EPSILON);
+}
+
+#[tokio::test]
+async fn verify_truncation_preserves_primary_verdict() {
+    // All-TruncationRefuted (path c) → primary verdict preserved (#726 root cause).
+    let mut findings = vec![finding(Effort::High, 0.95)];
+    let verdict = run_verification_round(
+        &truncated_provider(),
+        "m",
+        "+ diff",
+        Verdict::Block,
+        &mut findings,
+        None,
+        None,
+    )
+    .await;
     assert_eq!(
-        decision,
-        LivenessDecision::Ok,
-        "a responding model allows start"
+        verdict,
+        Verdict::Block,
+        "truncation-only round must preserve primary verdict (path c)"
     );
 }
 
+/// Regression for the dropped-JoinHandle true-positive from PR #720 that was
+/// silently refuted in the #726 incident (16-token cap truncated all responses).
+/// Why: validates (a) CONFIRMED preserves finding + verdict, (b) TruncationRefuted
+/// does NOT collapse verdict to APPROVE (path c).
+/// Test: this test itself.
 #[tokio::test]
-async fn liveness_model_unavailable_refuses() {
-    // ModelNotFound is an alarm-class error → Refuse (the incident path).
-    let verifier: Arc<dyn LlmProvider> = Arc::new(FailingVerifier {
-        make_err: || LlmError::ModelNotFound("no-such-profile".to_string()),
-    });
-    let decision = probe_verifier_liveness(&verifier, "no-such-profile").await;
-    match decision {
-        LivenessDecision::Refuse {
-            error_class,
-            reason,
-        } => {
-            assert_eq!(error_class, "ModelNotFound");
-            assert!(reason.contains("no-such-profile"), "reason names the model");
-            assert!(
-                reason.contains("refusing to start"),
-                "reason must state the refusal"
-            );
-        }
-        LivenessDecision::Ok => panic!("an unavailable verifier model must refuse start"),
-    }
-}
-
-#[tokio::test]
-async fn liveness_access_denied_refuses() {
-    let verifier: Arc<dyn LlmProvider> = Arc::new(FailingVerifier {
-        make_err: || LlmError::AccessDenied("bad iam".to_string()),
-    });
-    let decision = probe_verifier_liveness(&verifier, "m").await;
-    assert!(
-        matches!(decision, LivenessDecision::Refuse { .. }),
-        "AccessDenied is alarm-class and must refuse start"
+async fn verify_join_handle_regression_pr720() {
+    let mut f = Finding::new(
+        "crates/trusty-search/src/startup.rs",
+        "resource-leak",
+        "JoinHandle dropped immediately; spawned task detached, risking pool exhaustion",
+        "Store the JoinHandle and await it in graceful shutdown",
+        0.85,
+        Effort::Medium,
     );
-}
+    f.line = Some(47);
+    let diff = "+pub fn spawn_warm_boot_task() {\n\
+                +    tokio::spawn(async move { warm_boot().await });\n\
+                +}\n";
 
-#[tokio::test]
-async fn liveness_transient_allows_start() {
-    // A transient error during the probe must NOT block startup — per-finding
-    // verification will retry at run time.
-    let verifier: Arc<dyn LlmProvider> = Arc::new(FailingVerifier {
-        make_err: || LlmError::Transport("connection reset".to_string()),
-    });
-    let decision = probe_verifier_liveness(&verifier, "m").await;
+    // Sub-test (a): CONFIRMED → finding + verdict survive.
+    let mut findings_1 = vec![f.clone()];
+    let v1 = run_verification_round(
+        &confirmed_provider(),
+        "us.anthropic.claude-sonnet-4-6",
+        diff,
+        Verdict::RequestChanges,
+        &mut findings_1,
+        None,
+        None,
+    )
+    .await;
+    assert!(matches!(
+        findings_1[0].verified,
+        Some(VerifyOutcome::Confirmed)
+    ));
     assert_eq!(
-        decision,
-        LivenessDecision::Ok,
-        "a transient probe error must not block startup"
+        v1,
+        Verdict::RequestChanges,
+        "CONFIRMED must hold REQUEST_CHANGES"
+    );
+
+    // Sub-test (b): TruncationRefuted → verdict preserved (path c — #726).
+    let mut findings_2 = vec![f];
+    let v2 = run_verification_round(
+        &truncated_provider(),
+        "us.anthropic.claude-sonnet-4-6",
+        diff,
+        Verdict::RequestChanges,
+        &mut findings_2,
+        None,
+        None,
+    )
+    .await;
+    assert!(matches!(
+        findings_2[0].verified,
+        Some(VerifyOutcome::TruncationRefuted)
+    ));
+    assert_eq!(
+        v2,
+        Verdict::RequestChanges,
+        "truncation must NOT collapse verdict to APPROVE (path c — #726)"
     );
 }
 
-#[tokio::test]
-async fn liveness_rate_limited_allows_start() {
-    let verifier: Arc<dyn LlmProvider> = Arc::new(FailingVerifier {
-        make_err: || LlmError::RateLimited,
-    });
-    let decision = probe_verifier_liveness(&verifier, "m").await;
-    assert_eq!(
-        decision,
-        LivenessDecision::Ok,
-        "rate-limit during probe is transient"
-    );
-}
+// Liveness gate decision logic is tested in `verify_liveness.rs::tests`
+// (`liveness_alive_allows_start`, `liveness_model_unavailable_refuses`, etc.)
+// to keep this file under the 500-line cap and respect module ownership.

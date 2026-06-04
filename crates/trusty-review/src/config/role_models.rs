@@ -107,7 +107,7 @@ impl RoleModels {
             crate::llm::models::DEFAULT_VERIFIER_MODEL,
             Provider::Bedrock,
             1.0,
-            16,
+            128,
         );
         let summarizer = resolve_role(
             cli_overrides.and_then(|c| c.summarizer_model.as_deref()),

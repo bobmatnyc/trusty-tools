@@ -35,9 +35,13 @@ const VERIFY_TEMPERATURE: f32 = 1.0;
 /// Maximum output tokens for a verification call.
 ///
 /// Why: the response is a single judgment plus a short reason; a tight cap keeps
-/// latency and cost low (verifier calls are high-volume).
-/// What: 64 tokens is ample for `{"judgment":"REFUTED","reason":"..."}`.
-const VERIFY_MAX_TOKENS: u32 = 64;
+/// latency and cost low (verifier calls are high-volume).  128 is the minimum
+/// that reliably fits `{"judgment":"CONFIRMED","reason":"..."}` plus any provider
+/// framing overhead — the previous value of 64 caused Bedrock to truncate the
+/// response mid-JSON, making it unparseable and forcing a conservative
+/// TruncationRefuted outcome on every call (#726).
+/// What: 128 tokens is ample for the forced-schema JSON object.
+const VERIFY_MAX_TOKENS: u32 = 128;
 
 /// Name used for the verifier's forced-output tool / json_schema.
 ///
@@ -51,13 +55,16 @@ pub const VERIFY_SCHEMA_NAME: &str = "verification_judgment";
 /// Return the verifier system prompt.
 ///
 /// Why: the verifier is a *fact-checker*, not a re-reviewer — its sole job is to
-/// confirm or refute the specific finding it is handed.  Encoding the
-/// truncation/hallucination guard here (REFUTE anything that references a
-/// file/line not present in the provided diff) is the key false-positive defence
-/// borrowed from the code-intelligence verifier protocol.
+/// confirm or refute the specific finding it is handed.  The previous prompt
+/// contained a "default to REFUTED / when in doubt REFUTE" instruction that
+/// caused 100% refutation rates when combined with a 16-token truncation bug
+/// (#726).  The replacement uses a symmetric, evidence-weighing rule so the
+/// model decides on the actual evidence rather than a biased prior.  The
+/// truncation/hallucination hard rule (REFUTE anything referencing a file/line
+/// absent from the diff) is preserved verbatim — that guard is legitimate.
 /// What: returns a static string instructing the model to emit exactly one of
-/// CONFIRMED / REFUTED with a one-line reason, and to default to REFUTED when the
-/// finding cannot be grounded in the supplied diff.
+/// CONFIRMED / REFUTED with a one-line reason, weighing the evidence in the diff
+/// symmetrically.
 /// Test: `verify_system_prompt_mentions_refuted_guard`.
 pub fn verifier_system_prompt() -> &'static str {
     r#"You are a strict code-review fact-checker. You are given the unified diff of a
@@ -79,8 +86,12 @@ about code that is not in the diff is, by definition, not verifiable and must be
 refuted. This rule is absolute — it overrides any plausibility you might infer.
 
 ## Burden of proof
-The default answer is REFUTED. Answer CONFIRMED only when the diff clearly shows
-the problem the finding describes. When in doubt, REFUTE.
+Weigh the evidence in the diff. Answer CONFIRMED when the finding is grounded in
+the diff and a reasonable engineer would agree it needs attention. Answer REFUTED
+when the finding is speculative, contradicted by the diff, or references code that
+is not present in the diff at all. Decide on the evidence — do not default to
+either verdict. If the concern is real but the diff is merely ambiguous, prefer
+CONFIRMED with a qualifying reason.
 
 Populate the structured response fields: `judgment` (CONFIRMED or REFUTED) and
 `reason` (one short sentence)."#

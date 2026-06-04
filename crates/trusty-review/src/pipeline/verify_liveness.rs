@@ -14,7 +14,7 @@
 //!
 //! Test: `liveness_alive_allows_start`, `liveness_model_unavailable_refuses`,
 //! `liveness_access_denied_refuses`, `liveness_transient_allows_start`,
-//! `liveness_rate_limited_allows_start` in `verify_tests.rs`.
+//! `liveness_rate_limited_allows_start` in the `tests` module below.
 
 use std::sync::Arc;
 
@@ -36,7 +36,7 @@ use crate::{
 /// What: `Ok` means the verifier model is alive (or the probe was disabled);
 /// `Refuse` carries the human-readable reason and the error class for the signal.
 /// Test: `liveness_alive_allows_start`, `liveness_model_unavailable_refuses`,
-/// `liveness_transient_allows_start`.
+/// `liveness_transient_allows_start` in `tests`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LivenessDecision {
     /// The verifier model responded (or the probe was skipped) — start is allowed.
@@ -64,7 +64,7 @@ pub enum LivenessDecision {
 /// `ModelNotReady` / `Validation` / `AccessDenied`) returns `Refuse`, after
 /// emitting the `verification_model_error` signal.
 /// Test: `liveness_alive_allows_start`, `liveness_model_unavailable_refuses`,
-/// `liveness_transient_allows_start`.
+/// `liveness_transient_allows_start` in `tests`.
 pub async fn probe_verifier_liveness(
     verifier: &Arc<dyn LlmProvider>,
     verifier_model: &str,
@@ -286,5 +286,80 @@ mod tests {
     async fn enforce_dry_run_missing_verifier_allows() {
         let c = cfg(true, true, true);
         assert!(enforce_verifier_liveness(&c, None).await.is_ok());
+    }
+
+    // ── probe_verifier_liveness direct tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn liveness_alive_allows_start() {
+        // The verifier responds (any text) → Ok.
+        let decision = probe_verifier_liveness(&alive(), "us.anthropic.claude-haiku-4-5").await;
+        assert_eq!(
+            decision,
+            LivenessDecision::Ok,
+            "a responding model allows start"
+        );
+    }
+
+    #[tokio::test]
+    async fn liveness_model_unavailable_refuses() {
+        // ModelNotFound is an alarm-class error → Refuse (the incident path).
+        let dead_model: Arc<dyn LlmProvider> = Arc::new(StubVerifier {
+            err: Some(|| LlmError::ModelNotFound("no-such-profile".to_string())),
+        });
+        let decision = probe_verifier_liveness(&dead_model, "no-such-profile").await;
+        match decision {
+            LivenessDecision::Refuse {
+                error_class,
+                reason,
+            } => {
+                assert_eq!(error_class, "ModelNotFound");
+                assert!(reason.contains("no-such-profile"), "reason names the model");
+                assert!(
+                    reason.contains("refusing to start"),
+                    "reason must state the refusal"
+                );
+            }
+            LivenessDecision::Ok => panic!("an unavailable verifier model must refuse start"),
+        }
+    }
+
+    #[tokio::test]
+    async fn liveness_access_denied_refuses() {
+        let access_denied: Arc<dyn LlmProvider> = Arc::new(StubVerifier {
+            err: Some(|| LlmError::AccessDenied("bad iam".to_string())),
+        });
+        let decision = probe_verifier_liveness(&access_denied, "m").await;
+        assert!(
+            matches!(decision, LivenessDecision::Refuse { .. }),
+            "AccessDenied is alarm-class and must refuse start"
+        );
+    }
+
+    #[tokio::test]
+    async fn liveness_transient_allows_start() {
+        // A transient error during the probe must NOT block startup.
+        let transient: Arc<dyn LlmProvider> = Arc::new(StubVerifier {
+            err: Some(|| LlmError::Transport("connection reset".to_string())),
+        });
+        let decision = probe_verifier_liveness(&transient, "m").await;
+        assert_eq!(
+            decision,
+            LivenessDecision::Ok,
+            "a transient probe error must not block startup"
+        );
+    }
+
+    #[tokio::test]
+    async fn liveness_rate_limited_allows_start() {
+        let rate_limited: Arc<dyn LlmProvider> = Arc::new(StubVerifier {
+            err: Some(|| LlmError::RateLimited),
+        });
+        let decision = probe_verifier_liveness(&rate_limited, "m").await;
+        assert_eq!(
+            decision,
+            LivenessDecision::Ok,
+            "rate-limit during probe is transient"
+        );
     }
 }

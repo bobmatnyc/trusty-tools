@@ -14,19 +14,14 @@
 //! refuted relaxes correctly.  `probe_verifier_liveness` is the startup gate that
 //! refuses live mode when the verifier model is unavailable.
 //!
-//! ## Why the liveness gate exists (incident rationale)
-//! code-intelligence suffered a production incident where a **stale verifier
-//! model** (an inference profile that had been deactivated) caused every
-//! verification call to fail with `ResourceNotFoundException`.  Those errors were
-//! swallowed as REFUTED, so EVERY finding was silently auto-refuted and EVERY
-//! review collapsed to APPROVE — the reviewer was effectively neutered with no
-//! visible signal.  The startup liveness probe (`probe_verifier_liveness`) exists
-//! specifically to make that failure mode loud: in live mode we refuse to start
-//! when the verifier model is dead, rather than running a defanged reviewer.
+//! ## Liveness gate
+//! The startup liveness probe (`probe_verifier_liveness`, in `verify_liveness.rs`)
+//! refuses live mode when the verifier model is dead, so a stale inference profile
+//! cannot silently auto-refute every finding.  See that module for the full incident
+//! rationale.
 //!
-//! Test: see `verify_tests.rs` — candidate selection per verdict, CONFIRMED
-//! keeps / REFUTED demotes, verdict re-derivation after demotion, and the
-//! liveness-gate decision logic with an injected model-unavailable provider.
+//! Test: `verify_tests.rs` — candidate selection, CONFIRMED/REFUTED outcomes,
+//! verdict re-derivation, truncation regression (#726), and liveness-gate logic.
 
 use std::sync::Arc;
 
@@ -163,22 +158,32 @@ pub async fn run_verification_round(
         .await;
 
     // Apply outcomes: record on the finding and demote refuted ones.  Track
-    // whether ANY candidate was confirmed — that decides whether the model's
-    // original escalation is still grounded (see `rederive_verdict`).
+    // whether ANY candidate was confirmed AND whether at least one demotion was a
+    // clean model REFUTED (as opposed to an infrastructure failure class).  These
+    // two bits together let `rederive_verdict` decide the right baseline.
     let mut any_confirmed = false;
+    let mut any_clean_refuted = false;
     for (idx, outcome) in outcomes {
-        if matches!(outcome, VerifyOutcome::Confirmed) {
-            any_confirmed = true;
+        match &outcome {
+            VerifyOutcome::Confirmed => any_confirmed = true,
+            VerifyOutcome::Refuted => any_clean_refuted = true,
+            _ => {}
         }
         apply_outcome(&mut findings[idx], outcome);
     }
 
     // Re-derive the verdict from the SURVIVING findings (refuted ones excluded).
-    let final_verdict = rederive_verdict(primary_verdict.clone(), any_confirmed, findings);
+    let final_verdict = rederive_verdict(
+        primary_verdict.clone(),
+        any_confirmed,
+        any_clean_refuted,
+        findings,
+    );
     info!(
         primary = %primary_verdict,
         final = %final_verdict,
         any_confirmed,
+        any_clean_refuted,
         "verification round complete — verdict re-derived"
     );
     final_verdict
@@ -195,28 +200,38 @@ pub async fn run_verification_round(
 ///      bound, so always passing the original BLOCK would pin the result at
 ///      BLOCK even when every blocking finding was refuted.
 ///
-/// The rule, designed to satisfy the ticket's example ("a BLOCK whose only
-/// blocking finding was REFUTED should fall back") without throwing away
-/// legitimate model escalation on *confirmed* findings:
-///   - Always exclude refuted findings from the floor computation.
-///   - If at least one candidate was CONFIRMED, the model's escalation is still
-///     grounded, so use the original `primary_verdict` as the lower bound:
-///     `max(primary_verdict, survivor_floor)` (preserves e.g. a model
-///     REQUEST_CHANGES backed by a confirmed Medium finding).
-///   - If NO candidate was confirmed (all refuted), the escalation rested on
-///     refuted evidence, so drop the lower bound to a neutral `APPROVE` baseline
-///     and let the surviving findings alone decide — relaxing the verdict.
+/// The baseline selection rule (designed to satisfy the ticket's examples while
+/// fixing the #726 verdict-collapse-on-infrastructure-failure bug):
+///
+///   a) ANY confirmed → the model's escalation is grounded, keep `primary_verdict`
+///      as the lower bound so e.g. a REQUEST_CHANGES backed by a confirmed Medium
+///      finding is not silently downgraded.
+///
+///   b) At least one clean model REFUTED (i.e. `any_clean_refuted`), no confirmed
+///      → the escalation rested on refuted evidence, drop to neutral `APPROVE`
+///      baseline and let the survivors decide.
+///
+///   c) ALL demotions were non-clean (TruncationRefuted / ErrorRefuted), nothing
+///      confirmed → the verification infrastructure failed, NOT the model's
+///      reasoning.  Preserve `primary_verdict` so a BLOCK is not silently discarded
+///      because the verifier's JSON was truncated or the model was unreachable.
+///      This is the bug fixed in #726: a 16-token cap caused 100% TruncationRefuted,
+///      which previously fell into path (b) and collapsed every review to APPROVE.
 ///
 /// `UNKNOWN` is handled by the caller and never reaches here.
-/// What: filters out refutation-variant findings, picks the baseline per the
-/// rule above, then calls `derive_verdict(baseline, survivors)`.
-/// Test: `rederive_excludes_refuted_relaxes`, `rederive_keeps_confirmed_block`,
-/// `rederive_mixed_keeps_only_surviving_floor`, and the end-to-end
-/// `verify_refuted_demotes_and_block_relaxes` /
-/// `run_review_verification_confirms_and_preserves_verdict`.
+/// What: filters out all refutation-variant findings from the survivor set, selects
+/// the baseline via the three-way rule above, then calls
+/// `derive_verdict(baseline, survivors)`.
+/// Test: `rederive_excludes_refuted_relaxes` (path b),
+/// `rederive_keeps_confirmed_block` (path a),
+/// `rederive_error_refuted_preserves_primary_verdict` (path c — regression for #726),
+/// `rederive_truncation_refuted_preserves_primary_verdict` (path c),
+/// and the end-to-end `verify_refuted_demotes_and_block_relaxes` /
+/// `verify_join_handle_regression_pr720`.
 fn rederive_verdict(
     primary_verdict: Verdict,
     any_confirmed: bool,
+    any_clean_refuted: bool,
     findings: &[Finding],
 ) -> Verdict {
     let survivors: Vec<Finding> = findings
@@ -231,13 +246,25 @@ fn rederive_verdict(
         })
         .cloned()
         .collect();
-    // Confirmed evidence keeps the model's escalation as a lower bound; an
-    // all-refuted candidate set drops to a neutral baseline so the verdict relaxes.
+
+    // Three-way baseline selection (see Why above):
+    //  a) any confirmed   → keep model's escalation (grounded evidence)
+    //  b) clean refuted   → drop to APPROVE (model said REFUTED on merits)
+    //  c) infra-only fail → keep model's escalation (don't discard on truncation/error)
     let baseline = if any_confirmed {
+        // Path (a): confirmed evidence supports the escalation.
         primary_verdict
-    } else {
+    } else if any_clean_refuted {
+        // Path (b): at least one clean REFUTED from the model — escalation rested
+        // on refuted evidence; let survivors alone decide.
         Verdict::Approve
+    } else {
+        // Path (c): all demotions were infrastructure failures (TruncationRefuted /
+        // ErrorRefuted) — preserve the model's escalation rather than silently
+        // collapsing to APPROVE due to verifier infra failure.
+        primary_verdict
     };
+
     derive_verdict(baseline, &survivors)
 }
 
@@ -295,16 +322,19 @@ struct VerifyJudgment {
 /// lifecycle error (`is_alarm`) from the verifier model must NOT be silently
 /// swallowed as a plain refutation — that is exactly the incident this phase
 /// guards against.  Such errors map to `ErrorRefuted { error_class }` AND emit
-/// the `verification_model_error` signal; only a clean CONFIRMED/REFUTED judgment
-/// (or a transient error, which is conservatively treated as unverifiable) maps
-/// to the ordinary outcomes.
+/// the `verification_model_error` signal.  An unparseable/truncated response maps
+/// to `TruncationRefuted` (distinct from a clean model `Refuted`) so
+/// `rederive_verdict` can tell apart "the model said REFUTED" from "the provider
+/// returned garbage", and preserve the model's escalation in the latter case.
 /// What: calls the verifier, parses the forced JSON judgment, and returns
 /// `Confirmed` / `Refuted` accordingly.  On an alarm-class `LlmError`, emits the
-/// signal and returns `ErrorRefuted`.  On a transient error or unparseable
-/// output, returns `Refuted` (conservative: an unverifiable finding must not be
-/// allowed to block) without raising the alarm.
+/// signal and returns `ErrorRefuted`.  On a transient error returns plain `Refuted`
+/// (conservative: unverifiable via transient fault — not a structural problem).
+/// On a successful call that returns unparseable output returns `TruncationRefuted`
+/// (structurally distinct from a clean REFUTED judgment).
 /// Test: `verify_one_confirmed`, `verify_one_refuted`,
-/// `verify_one_model_unavailable_emits_signal`.
+/// `verify_one_model_unavailable_emits_signal`,
+/// `verify_truncated_response_is_truncation_refuted`.
 async fn verify_one(verifier: &Arc<dyn LlmProvider>, req: crate::llm::LlmRequest) -> VerifyOutcome {
     let model = req.model.clone();
     match verifier.complete(req).await {
@@ -314,9 +344,11 @@ async fn verify_one(verifier: &Arc<dyn LlmProvider>, req: crate::llm::LlmRequest
             None => {
                 warn!(
                     text = %truncate(&resp.text, 120),
-                    "verifier returned unparseable judgment — treating as REFUTED (conservative)"
+                    "verifier returned unparseable/truncated judgment — recording TruncationRefuted"
                 );
-                VerifyOutcome::Refuted
+                // Use a structurally distinct variant so rederive_verdict can
+                // distinguish "model said REFUTED" from "provider returned garbage".
+                VerifyOutcome::TruncationRefuted
             }
         },
         Err(e) if e.is_alarm() => {
