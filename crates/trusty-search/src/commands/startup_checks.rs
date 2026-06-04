@@ -14,7 +14,14 @@
 //! Test: `should_warn_cpu_on_apple_silicon_*` tests in this module's `tests`.
 
 // ── Fix D (issue #747) ───────────────────────────────────────────────────────
-
+//
+// The two helpers below are only referenced from the `#[cfg(all(target_os =
+// "macos", target_arch = "aarch64"))]` block inside
+// `warn_if_stale_cpu_device_on_apple_silicon` and from the unit-test module.
+// Gate them to the same platform union so the dead_code lint is silent on
+// Linux CI while keeping the tests runnable everywhere (the logic itself is
+// platform-independent; only the *warning emission* is gated to Apple Silicon).
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
 /// Pure predicate: should the daemon warn about a stale `TRUSTY_DEVICE=cpu`
 /// setting on Apple Silicon?
 ///
@@ -48,6 +55,7 @@ pub fn should_warn_cpu_on_apple_silicon(
     !explicit && is_apple_silicon && device.eq_ignore_ascii_case("cpu")
 }
 
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
 /// Return `true` when `TRUSTY_DEVICE_EXPLICIT` is set to a truthy value.
 ///
 /// Why: lets `warn_if_stale_cpu_device_on_apple_silicon` honour the
