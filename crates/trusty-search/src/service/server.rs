@@ -4514,32 +4514,24 @@ mod tests {
 
     /// Review #727 finding 3 — `/health` surfaces the leaked probe thread count.
     ///
-    /// Why: operators monitoring a launchd-managed daemon that restarts
-    /// repeatedly need a way to detect probe thread accumulation without
-    /// reading daemon logs. The `warmboot_leaked_probe_threads` field on
-    /// `/health` provides this visibility. This test confirms the field is
-    /// present in the response and reflects the process-global counter.
+    /// Why: confirms `warmboot_leaked_probe_threads` is present and reflects the
+    /// process-global counter. `serial` + pre-call snapshot fixes the TOCTOU
+    /// where reading the counter AFTER the handler call could see a higher value
+    /// from a concurrently-running serial test, making the assertion flaky.
     ///
-    /// What: reads the current counter baseline, calls `health_handler`, and
-    /// asserts `warmboot_leaked_probe_threads` equals the current counter value.
-    /// A separate probe-module test (`probe_timeout_increments_leaked_thread_count`)
-    /// verifies the counter itself increments on timeout.
-    ///
+    /// What: capture counter before handler call; assert response field matches.
     /// Test: this test.
     #[tokio::test]
+    #[serial_test::serial]
     async fn health_includes_warmboot_leaked_probe_threads() {
         use crate::service::warm_boot::leaked_probe_thread_count;
-
+        // Snapshot BEFORE the call: serial prevents concurrent increments.
+        let expected = leaked_probe_thread_count();
         let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
         let Json(resp) = health_handler(State(state)).await;
-
-        // The field must equal the process-global counter (whatever value it
-        // currently has in this test run). We read the counter just before
-        // calling the handler so both sides see the same snapshot.
-        let expected = leaked_probe_thread_count();
         assert_eq!(
             resp.warmboot_leaked_probe_threads, expected,
-            "warmboot_leaked_probe_threads in /health must equal leaked_probe_thread_count()"
+            "warmboot_leaked_probe_threads must equal counter snapshot from before handler call"
         );
     }
 

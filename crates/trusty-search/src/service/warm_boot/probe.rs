@@ -30,11 +30,18 @@
 //! exactly one OS thread (not a tokio pool thread) and does not affect daemon
 //! responsiveness.
 //!
-//! Parallel probing (review #727 finding 1): `probe_all_volumes` spawns ALL
-//! per-volume probe threads simultaneously, then collects results under a single
-//! shared wall-clock deadline. Total probe time is bounded at ≈ONE deadline
-//! regardless of how many distinct volumes are being probed. Each blocked volume
-//! still leaks exactly one OS thread (invariant unchanged).
+//! Parallel probing — single shared channel (review #727 pass-3 HIGH):
+//! `probe_all_volumes` spawns ALL per-volume probe threads simultaneously, then
+//! collects their results from ONE shared `mpsc::channel` tagged with the volume
+//! key. The collector loops over `recv_timeout(remaining)` until all N volumes
+//! have reported OR the shared deadline elapses, recording results in ARRIVAL
+//! ORDER. Any unreported volume at deadline is marked inaccessible and its leaked-
+//! thread counter incremented once. This eliminates the fast-volume starvation bug
+//! in the previous per-channel sequential design: when a slow volume consumed the
+//! full budget, every subsequent volume got Duration::ZERO and was wrongly skipped
+//! even if its thread had already finished. Total wait ≈ ONE deadline regardless
+//! of N; each blocked volume still leaks exactly one OS thread (invariant
+//! unchanged).
 //!
 //! Leaked-thread visibility (review #727 finding 3): every timed-out probe
 //! increments `LEAKED_PROBE_THREAD_COUNT`, a process-global `AtomicUsize`.
@@ -47,7 +54,8 @@
 //!       `probe_volume_inaccessible_fast_timeout`,
 //!       `probe_uses_sample_path_not_volume_root`,
 //!       `probe_timeout_increments_leaked_thread_count`,
-//!       `probe_all_volumes_parallel_bounded_time`.
+//!       `probe_all_volumes_parallel_bounded_time`,
+//!       `probe_all_volumes_multi_volume_no_fast_starvation`.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -246,14 +254,23 @@ pub(super) fn probe_volume(
 /// index entries that live on blocked volumes without issuing further `open()`
 /// calls.
 ///
-/// Parallel probing (review #727 finding 1): all per-volume probe threads are
-/// spawned simultaneously, then collected under a SINGLE shared wall-clock
-/// deadline. Total probe time is bounded at ≈ONE `deadline` regardless of how
-/// many distinct volumes are being probed — the previous sequential design
-/// caused a worst-case stall of N×deadline (one full deadline per blocked
-/// volume before the next was even started). Each blocked volume still leaks
-/// exactly one OS thread; the `LEAKED_PROBE_THREAD_COUNT` counter is
-/// incremented once per timed-out volume as before.
+/// Parallel probing — single shared channel design (review #727 pass-3 HIGH):
+/// all per-volume probe threads send tagged results into ONE shared
+/// `mpsc::channel`. The collector loops over `recv_timeout(remaining)` until
+/// either all N volumes have reported OR the shared deadline elapses, recording
+/// each result as it arrives. Any volume that has not reported by the deadline
+/// is marked inaccessible. This eliminates the fast-volume starvation bug in
+/// the previous per-channel sequential design: if volume A blocked for the
+/// full deadline, volume B's receiver — which already had a result queued —
+/// would receive a `Duration::ZERO` timeout and be wrongly classified as
+/// inaccessible even though its probe thread completed successfully.
+///
+/// With the shared channel, the collector consumes results in arrival order
+/// (earliest-to-finish first) rather than spawn order, so a fast volume is
+/// never penalised for being ordered behind a slow one. Total wait ≈ ONE
+/// deadline regardless of N volumes; each blocked volume still leaks exactly
+/// one OS thread, and `LEAKED_PROBE_THREAD_COUNT` is incremented once per
+/// timed-out volume (same invariant as before).
 ///
 /// Probe target (review #727 finding 2): each volume is probed via its
 /// representative SAMPLE INDEX PATH (the actual deeper path that contains index
@@ -263,16 +280,18 @@ pub(super) fn probe_volume(
 /// what actually exercises the access that will be needed for index restoration.
 ///
 /// What: extracts distinct volume keys (via `volume_key`), keeping one sample
-/// path per key as the probe target. Spawns all probe threads (one per distinct
-/// volume key), then collects their results by waiting on each channel receiver
-/// for the remaining time until the shared deadline. Returns a
-/// `HashSet<PathBuf>` of inaccessible volume keys. An empty set means all
-/// probed volumes answered within the deadline.
+/// path per key as the probe target. Spawns all probe threads simultaneously
+/// (one per distinct volume key); each thread sends `(vol_key, sample_path)`
+/// into a single shared channel on completion. The collector pulls results
+/// until all N arrive or the deadline fires. Returns a `HashSet<PathBuf>` of
+/// inaccessible volume keys. An empty set means all probed volumes answered
+/// within the deadline.
 ///
 /// Test: `probe_all_volumes_accessible_returns_empty`,
 ///       `probe_all_volumes_distinct_keys`,
 ///       `probe_uses_sample_path_not_volume_root`,
-///       `probe_all_volumes_parallel_bounded_time`.
+///       `probe_all_volumes_parallel_bounded_time`,
+///       `probe_all_volumes_multi_volume_no_fast_starvation`.
 pub(super) fn probe_all_volumes(
     paths: &[PathBuf],
     deadline: Duration,
@@ -295,84 +314,124 @@ pub(super) fn probe_all_volumes(
         return HashSet::new();
     }
 
-    // Shared wall-clock deadline: record the end instant once, then all
-    // per-volume recv_timeout calls count down against the same clock.
-    // This means total probe time ≈ one deadline regardless of N volumes.
+    let n = volume_to_sample.len();
+
+    // Shared wall-clock deadline: record the end instant ONCE before spawning.
     let end = Instant::now() + deadline;
+
+    // Single shared channel — all probe threads send into the same tx clone.
+    // Payload: (vol_key, sample_path).  Sending () was sufficient before, but
+    // we now need to know WHICH volume answered so we can record it by key.
+    let (tx, rx) = mpsc::channel::<(PathBuf, PathBuf)>();
 
     // Phase 1: spawn ALL probe threads simultaneously. Each thread is a bare
     // OS thread (not a tokio pool slot) that calls std::fs::metadata on the
-    // sample path and sends () when done. The JoinHandle is dropped immediately
-    // (thread is detached). We keep the Receiver for the collection phase.
-    let pending: Vec<(PathBuf, PathBuf, mpsc::Receiver<()>)> = volume_to_sample
-        .into_iter()
-        .map(|(vol_key, sample_path)| {
-            let probe_owned = sample_path.clone();
-            let (tx, rx) = mpsc::channel::<()>();
-            let _ = std::thread::spawn(move || {
-                // Only care whether the call returned at all, not the result.
-                let _ = std::fs::metadata(&probe_owned);
-                // Ignore send errors: receiver may have already timed out.
-                let _ = tx.send(());
-            });
-            (vol_key, sample_path, rx)
-        })
-        .collect();
+    // sample path and sends (vol_key, sample_path) when done.  The JoinHandle
+    // is dropped immediately (thread is detached).  Sending into the shared
+    // channel is cheap and lock-free; order of arrival reflects which probe
+    // finished first.
+    //
+    // We keep a local map of all expected keys so the collector can identify
+    // which volumes never reported.
+    let mut all_keys: HashSet<PathBuf> = HashSet::with_capacity(n);
+    for (vol_key, sample_path) in &volume_to_sample {
+        all_keys.insert(vol_key.clone());
+        let tx = tx.clone();
+        let probe_owned = sample_path.clone();
+        let key_owned = vol_key.clone();
+        let path_owned = sample_path.clone();
+        let _ = std::thread::spawn(move || {
+            // Only care whether the call returned at all, not the result.
+            let _ = std::fs::metadata(&probe_owned);
+            // Ignore send errors: receiver may have timed out and been dropped.
+            let _ = tx.send((key_owned, path_owned));
+        });
+    }
+    // Drop our own tx clone so the channel closes when all probe threads finish
+    // (prevents recv from blocking after all senders are gone).
+    drop(tx);
 
-    // Phase 2: collect results under the shared deadline. Each recv_timeout
-    // call gets the remaining time until `end`; if the budget is already
-    // exhausted the timeout fires immediately (Duration::ZERO).
-    let mut inaccessible: HashSet<PathBuf> = HashSet::new();
+    // Phase 2: collect results from the shared channel under the shared
+    // deadline.  We pull results in ARRIVAL ORDER (fastest probe first) until
+    // either all N volumes have reported or the deadline fires.
+    //
+    // This is the correctness fix: because we pull from a single channel, a
+    // fast volume that finished while a slow one was blocking can be collected
+    // immediately — it is never handed a Duration::ZERO timeout just because
+    // it was ordered behind the slow volume in the iteration (the previous
+    // per-receiver sequential loop bug).
+    let mut reported: HashSet<PathBuf> = HashSet::with_capacity(n);
 
-    for (vol_key, sample_path, rx) in pending {
+    loop {
+        if reported.len() == n {
+            break;
+        }
         let remaining = end.saturating_duration_since(Instant::now());
         match rx.recv_timeout(remaining) {
-            Ok(()) => {
+            Ok((vol_key, sample_path)) => {
                 tracing::debug!(
                     "warm-boot: volume probe OK for {} (probed sample path: {})",
                     vol_key.display(),
                     sample_path.display(),
                 );
+                reported.insert(vol_key);
             }
             Err(_timeout_or_disconnect) => {
-                // The probe thread did not return within the remaining budget.
-                // Increment the process-global counter so `/health` surfaces it.
-                let prev = LEAKED_PROBE_THREAD_COUNT.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!(
-                    "warm-boot: probe thread for volume {} (probing {}) timed out and was \
-                     abandoned (leaked_probe_threads total: {}). (issue #723, review #727)",
-                    vol_key.display(),
-                    sample_path.display(),
-                    prev + 1,
-                );
-                // Emit the actionable operator hint.
-                let is_ext = super::scan::is_likely_external_volume(&vol_key);
-                if is_ext {
-                    tracing::warn!(
-                        "warm-boot: volume probe TIMED OUT for {} (>{:.0}s, probed: {}) — \
-                         this is likely a TCC denial on an external volume under launchd. \
-                         ALL indexes on this volume will be SKIPPED this boot. \
-                         HINT: grant Full Disk Access to the launchd agent in \
-                         System Settings → Privacy & Security → Full Disk Access, \
-                         or move indexes off the external volume. (issue #723)",
-                        vol_key.display(),
-                        deadline.as_secs_f32(),
-                        sample_path.display(),
-                    );
-                } else {
-                    tracing::warn!(
-                        "warm-boot: volume probe TIMED OUT for {} (>{:.0}s, probed: {}) — \
-                         the volume may be on a network, slow, or permission-restricted \
-                         filesystem. ALL indexes on this volume will be SKIPPED this boot. \
-                         (issue #723)",
-                        vol_key.display(),
-                        deadline.as_secs_f32(),
-                        sample_path.display(),
-                    );
-                }
-                inaccessible.insert(vol_key);
+                // Deadline elapsed (or all senders dropped — which only happens
+                // when every probe thread has finished, meaning reported.len()
+                // == n already and we would have broken above).  Stop waiting.
+                break;
             }
         }
+    }
+
+    // Any volume that did not report within the deadline is inaccessible.
+    // Increment the leaked-thread counter once per such volume and emit loud
+    // per-volume warnings with actionable operator hints.
+    let mut inaccessible: HashSet<PathBuf> = HashSet::new();
+    for vol_key in &all_keys {
+        if reported.contains(vol_key) {
+            continue;
+        }
+        // Use the sample path stored in volume_to_sample for log messages.
+        let sample_path = volume_to_sample
+            .get(vol_key)
+            .map(|p| p.as_path())
+            .unwrap_or(vol_key.as_path());
+        let prev = LEAKED_PROBE_THREAD_COUNT.fetch_add(1, Ordering::Relaxed);
+        tracing::warn!(
+            "warm-boot: probe thread for volume {} (probing {}) timed out and was \
+             abandoned (leaked_probe_threads total: {}). (issue #723, review #727)",
+            vol_key.display(),
+            sample_path.display(),
+            prev + 1,
+        );
+        // Emit the actionable operator hint.
+        let is_ext = super::scan::is_likely_external_volume(vol_key);
+        if is_ext {
+            tracing::warn!(
+                "warm-boot: volume probe TIMED OUT for {} (>{:.0}s, probed: {}) — \
+                 this is likely a TCC denial on an external volume under launchd. \
+                 ALL indexes on this volume will be SKIPPED this boot. \
+                 HINT: grant Full Disk Access to the launchd agent in \
+                 System Settings → Privacy & Security → Full Disk Access, \
+                 or move indexes off the external volume. (issue #723)",
+                vol_key.display(),
+                deadline.as_secs_f32(),
+                sample_path.display(),
+            );
+        } else {
+            tracing::warn!(
+                "warm-boot: volume probe TIMED OUT for {} (>{:.0}s, probed: {}) — \
+                 the volume may be on a network, slow, or permission-restricted \
+                 filesystem. ALL indexes on this volume will be SKIPPED this boot. \
+                 (issue #723)",
+                vol_key.display(),
+                deadline.as_secs_f32(),
+                sample_path.display(),
+            );
+        }
+        inaccessible.insert(vol_key.clone());
     }
 
     inaccessible

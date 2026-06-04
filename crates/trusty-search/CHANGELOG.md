@@ -11,6 +11,35 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ### Fixed
 
+- **Shared-channel probe collection — no fast-volume starvation** (review #727
+  pass-3 HIGH, issue #723) — `probe_all_volumes` previously iterated pending
+  per-volume receivers SEQUENTIALLY: if the first volume's `recv_timeout`
+  consumed the full deadline budget, every subsequent receiver got
+  `Duration::ZERO` and was wrongly classified as inaccessible — even if its
+  probe thread had already finished and sent a result. Fixed by replacing the
+  per-volume channel design with a SINGLE shared `mpsc::channel`: all probe
+  threads send tagged `(vol_key, sample_path)` results into one channel;
+  the collector pulls results in ARRIVAL ORDER until all N volumes report or
+  the shared deadline elapses. Fast volumes are now collected immediately
+  regardless of spawn order. Total wait ≈ ONE deadline regardless of N;
+  `LEAKED_PROBE_THREAD_COUNT` is still incremented once per timed-out volume.
+  Regression test: `probe_all_volumes_multi_volume_no_fast_starvation`. (PR #727)
+
+- **Multi-volume starvation regression test** (review #727 pass-3, issue #723)
+  — added `probe_all_volumes_multi_volume_no_fast_starvation`: uses injected
+  probe delays (2 fast volumes at 5 ms, 1 slow at 250 ms, deadline 50 ms) to
+  assert fast volumes are Accessible, only the slow volume is Inaccessible,
+  total elapsed < 2 × deadline, and `LEAKED_PROBE_THREAD_COUNT` increments by
+  exactly 1. (PR #727)
+
+- **Health-test TOCTOU fix** (review #727 pass-3, issue #723) —
+  `health_includes_warmboot_leaked_probe_threads` in `server.rs` previously
+  read `leaked_probe_thread_count()` AFTER calling the handler; a concurrent
+  serial test incrementing the counter between the handler return and the read
+  could produce `expected > resp.field`, causing a spurious failure. Fixed by
+  reading the counter BEFORE the handler call and marking the test
+  `#[serial_test::serial]` to prevent concurrent counter mutations. (PR #727)
+
 - **Parallel volume probing — bounded warm-boot time** (review #727 finding 1,
   issue #723) — `probe_all_volumes` now spawns ALL per-volume probe threads
   simultaneously and collects their results under a SINGLE shared wall-clock

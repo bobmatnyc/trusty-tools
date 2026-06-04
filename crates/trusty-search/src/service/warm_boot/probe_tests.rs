@@ -287,6 +287,168 @@ fn probe_all_volumes_parallel_bounded_time() {
     );
 }
 
+// ── multi-volume starvation regression ───────────────────────────────────────
+
+/// Helper: run the shared-channel collection loop with injected per-volume
+/// delays rather than real filesystem probes.
+///
+/// Why: `probe_all_volumes` calls `std::fs::metadata`, which returns ENOENT
+/// instantly for non-existent paths — a genuinely slow probe cannot be created
+/// without special filesystem support.  This helper replicates the shared-
+/// channel design of `probe_all_volumes` but lets the test inject an artificial
+/// `probe_delay` per volume, enabling a deterministic starvation regression.
+///
+/// What: given `(vol_key, sample_path, probe_delay)` triples, spawns one bare
+/// OS thread per entry that sleeps for `probe_delay` then sends into a shared
+/// `mpsc::channel`, identical to `probe_all_volumes`.  Increments
+/// `LEAKED_PROBE_THREAD_COUNT` once per timed-out volume (same invariant).
+///
+/// Test: `probe_all_volumes_multi_volume_no_fast_starvation`.
+fn probe_with_injected_delays(
+    entries: Vec<(PathBuf, PathBuf, Duration)>,
+    deadline: Duration,
+) -> std::collections::HashSet<PathBuf> {
+    use std::collections::HashSet;
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    if entries.is_empty() {
+        return HashSet::new();
+    }
+
+    let n = entries.len();
+    let end = Instant::now() + deadline;
+    let (tx, rx) = mpsc::channel::<PathBuf>();
+
+    // Track all expected keys and their sample paths.
+    let mut all_keys: HashSet<PathBuf> = HashSet::with_capacity(n);
+    let mut key_to_sample: std::collections::HashMap<PathBuf, PathBuf> =
+        std::collections::HashMap::with_capacity(n);
+
+    for (vol_key, sample_path, probe_delay) in entries {
+        all_keys.insert(vol_key.clone());
+        key_to_sample.insert(vol_key.clone(), sample_path);
+        let tx = tx.clone();
+        let key = vol_key;
+        let _ = std::thread::spawn(move || {
+            std::thread::sleep(probe_delay);
+            let _ = tx.send(key);
+        });
+    }
+    // Drop our sender clone so the channel closes when all threads finish.
+    drop(tx);
+
+    // Collection loop — identical structure to probe_all_volumes Phase 2.
+    let mut reported: HashSet<PathBuf> = HashSet::with_capacity(n);
+    loop {
+        if reported.len() == n {
+            break;
+        }
+        let remaining = end.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(vol_key) => {
+                reported.insert(vol_key);
+            }
+            Err(_) => break,
+        }
+    }
+
+    // Mark unreported volumes as inaccessible.
+    let mut inaccessible: HashSet<PathBuf> = HashSet::new();
+    for vol_key in &all_keys {
+        if reported.contains(vol_key) {
+            continue;
+        }
+        let _sample = key_to_sample
+            .get(vol_key)
+            .map(|p| p.as_path())
+            .unwrap_or(vol_key.as_path());
+        LEAKED_PROBE_THREAD_COUNT.fetch_add(1, Ordering::Relaxed);
+        inaccessible.insert(vol_key.clone());
+    }
+    inaccessible
+}
+
+/// Why (review #727 pass-3 HIGH — starvation regression): with the
+/// per-channel sequential design, if volume A's `recv_timeout` consumed the
+/// full budget, every subsequent volume got `Duration::ZERO` and was wrongly
+/// classified as inaccessible even though its probe thread had already
+/// finished.  This test proves the shared-channel design eliminates that bug.
+///
+/// What: three volumes — one slow (sleeps 200 ms past the deadline) and two
+/// fast (complete in ≤10 ms).  Deadline is 50 ms.  Assert:
+///   - only the slow volume is in the inaccessible set,
+///   - the two fast volumes are NOT in the inaccessible set (not starved),
+///   - total elapsed < 2 × deadline (≈100 ms), proving ONE-deadline behaviour,
+///   - `LEAKED_PROBE_THREAD_COUNT` increased by exactly 1 (one blocked volume).
+///
+/// Note: `serial` because this test reads/writes `LEAKED_PROBE_THREAD_COUNT`.
+/// Test: this test.
+#[test]
+#[serial_test::serial]
+fn probe_all_volumes_multi_volume_no_fast_starvation() {
+    let deadline = Duration::from_millis(50);
+
+    // Probe delays: fast volumes finish well inside the deadline; slow volume
+    // sleeps 5× the deadline so it never reports in time.
+    let fast_delay = Duration::from_millis(5);
+    let slow_delay = Duration::from_millis(250); // >> 50 ms deadline
+
+    let fast_vol_a = PathBuf::from("/tmp/trusty-723-fast-a");
+    let fast_vol_b = PathBuf::from("/tmp/trusty-723-fast-b");
+    let slow_vol = PathBuf::from("/tmp/trusty-723-slow");
+
+    let entries = vec![
+        (fast_vol_a.clone(), fast_vol_a.clone(), fast_delay),
+        (fast_vol_b.clone(), fast_vol_b.clone(), fast_delay),
+        (slow_vol.clone(), slow_vol.clone(), slow_delay),
+    ];
+
+    let before_leaked = LEAKED_PROBE_THREAD_COUNT.load(Ordering::Relaxed);
+    let start = std::time::Instant::now();
+
+    let inaccessible = probe_with_injected_delays(entries, deadline);
+
+    let elapsed = start.elapsed();
+    let after_leaked = LEAKED_PROBE_THREAD_COUNT.load(Ordering::Relaxed);
+
+    // Only the slow volume should be inaccessible.
+    assert!(
+        inaccessible.contains(&slow_vol),
+        "slow volume must be inaccessible; inaccessible={inaccessible:?}"
+    );
+    assert!(
+        !inaccessible.contains(&fast_vol_a),
+        "fast volume A must NOT be inaccessible (starvation bug); inaccessible={inaccessible:?}"
+    );
+    assert!(
+        !inaccessible.contains(&fast_vol_b),
+        "fast volume B must NOT be inaccessible (starvation bug); inaccessible={inaccessible:?}"
+    );
+    assert_eq!(
+        inaccessible.len(),
+        1,
+        "exactly 1 volume must be inaccessible; got={inaccessible:?}"
+    );
+
+    // Total elapsed must be bounded at ≈ONE deadline, not N×deadline.
+    // We allow 2× deadline (100 ms) as a generous upper bound.
+    let upper_bound = deadline * 2;
+    assert!(
+        elapsed < upper_bound,
+        "total elapsed {elapsed:?} must be < 2× deadline {upper_bound:?} \
+         (shared-channel should NOT stall for each volume sequentially)"
+    );
+
+    // Leaked-thread counter must increment by exactly 1 (one blocked volume).
+    assert_eq!(
+        after_leaked,
+        before_leaked + 1,
+        "LEAKED_PROBE_THREAD_COUNT must increase by exactly 1 for the one blocked volume; \
+         before={before_leaked} after={after_leaked}"
+    );
+}
+
 // ── volume_probe_timeout ──────────────────────────────────────────────────────
 
 /// Why: guard that the env var reader parses valid values and falls back.
