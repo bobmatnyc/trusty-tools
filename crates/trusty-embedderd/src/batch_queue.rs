@@ -38,10 +38,11 @@ pub const DEFAULT_BATCH_WINDOW_MS: u64 = 10;
 
 /// Default maximum batch size before forcing a flush.
 ///
-/// Why: 32 keeps ONNX tensor allocations small enough to fit comfortably
-/// in cache, while large enough to amortise the per-call overhead. Matches
-/// the empirical sweet spot observed in trusty-search's ONNX pipeline.
-pub const DEFAULT_BATCH_SIZE: usize = 32;
+/// Why: empirical sweep on M4 Max (issue #753) showed 64 gives the best
+/// throughput (~83 cps) vs 32 (~77 cps) at only modest RSS growth
+/// (285 MB → 369 MB). No OOM or CoreML tripwire was observed at 64.
+/// Raised from 32 to 64 as part of the #753 multi-flight pipeline fix.
+pub const DEFAULT_BATCH_SIZE: usize = 64;
 
 /// Channel capacity for pending requests.
 ///

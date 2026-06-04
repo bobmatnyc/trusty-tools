@@ -1,5 +1,21 @@
 # Changelog — trusty-common
 
+## [0.14.0] — 2026-06-04
+
+### Changed (closes #753)
+
+- **`StdioEmbedderClient` rewritten as multi-flight pipelined client** — the
+  previous implementation held a single `Mutex` for the entire
+  write→wait→read round-trip, allowing only one batch in flight at a time.
+  The new implementation splits into: (1) a write-only stdin `Mutex` held
+  only for `write_all + flush`, (2) a dedicated reader task that owns stdout
+  and dispatches responses via a FIFO `VecDeque<oneshot::Sender>` (no id
+  lookup needed — the sidecar never re-orders responses), and (3) an
+  `inflight` semaphore capping concurrent requests at `TRUSTY_EMBED_INFLIGHT`
+  (default 2, max 4). Crash/restart: EOF or IO error drains all pending
+  oneshots with an error so callers return immediately.
+- New env var: `TRUSTY_EMBED_INFLIGHT` — controls the semaphore depth.
+
 ## [0.13.0] — 2026-06-04
 
 ### Added (closes #747 Fix C)

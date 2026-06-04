@@ -28,10 +28,10 @@ authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 
 [workspace.dependencies]
 # ── Internal crates (path deps so the monorepo builds without publish cycles) ──
-trusty-common = { path = "crates/trusty-common", version = "0.13.0" }
+trusty-common = { path = "crates/trusty-common", version = "0.14.0" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
-trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.1" }
+trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.2" }
 # trusty-bm25-daemon: per-palace BM25 lexical-index daemon — referenced by
 # trusty-memory so `cargo install trusty-memory` produces both binaries from
 # one command (mirrors the trusty-embedderd / trusty-search pattern, PR #190).

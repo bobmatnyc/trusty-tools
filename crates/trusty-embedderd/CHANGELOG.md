@@ -1,5 +1,14 @@
 # Changelog — trusty-embedderd
 
+## [0.3.2] — 2026-06-04
+
+### Changed (closes #753)
+
+- **`DEFAULT_BATCH_SIZE` raised 32 → 64** — empirical sweep on M4 Max showed
+  batch=64 gives the best throughput (~83 cps vs ~77 at 32) at modest extra
+  RSS (369 MB vs 285 MB — safely under the CoreML tripwire ceiling). Matches
+  the `DEFAULT_COREML_BATCH_SIZE` change in `trusty-search` 0.23.5.
+
 ## [Unreleased]
 
 ### Changed

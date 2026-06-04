@@ -1,54 +1,42 @@
-//! Stdio (piped stdin/stdout) embedder client for a sidecar `trusty-embedderd`
-//! process.
+//! Multi-flight stdio embedder client for a sidecar `trusty-embedderd` process
+//! (issue #753).
 //!
-//! Why: when `trusty-search` spawns `trusty-embedderd` as a child process, the
-//! cleanest IPC transport is the pipes that were created by the OS at fork time.
-//! No socket files to manage or clean up, no port to discover, and the child
-//! exits automatically when the parent closes its end of the pipe — a free
-//! lifecycle tie that UDS and HTTP cannot provide. This is exactly the transport
-//! pattern MCP uses throughout the project.
+//! Why: the old single-Mutex write→wait→read round-trip left the ANE ~78%
+//! idle. Splitting into a write-only stdin lock and a dedicated reader task
+//! enables N concurrent in-flight batches (`TRUSTY_EMBED_INFLIGHT`, default 2).
 //!
-//! What: `StdioEmbedderClient` owns the child's `stdin` (write) and `stdout`
-//! (read) handles. Each `embed_batch` call serialises a JSON-RPC 2.0 request
-//! onto stdin, reads one newline-framed response from stdout, and deserialises
-//! it. A `Mutex` serialises all writes and reads so the single-flight
-//! constraint is trivially satisfied without a request-id correlation layer
-//! (deferred to a follow-up if multiplexing is ever needed).
+//! Order guarantee: the sidecar processes requests serially and never re-orders
+//! responses. The reader task pops the FIFO pending queue head on each response,
+//! so each reply always maps to the correct caller.
 //!
-//! Test: unit tests below cover empty-batch short-circuit, request serialisation
-//! shape, and error decoding without a live process. The `bit_identical_stdio`
-//! integration test in `trusty-embedderd/tests/bit_identical.rs` asserts
-//! bit-identical output over the real stdio sidecar path.
+//! Crash/restart: EOF or IO error drains all pending oneshots with an error so
+//! callers return immediately; the supervisor swaps in a fresh client.
+//!
+//! Test: unit tests cover wire format, error decoding, and stalled-reader
+//! timeout. Multi-flight + order-preservation: `trusty-embedderd/tests/
+//! multiflight.rs`. End-to-end: `bit_identical -- --include-ignored`.
+
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore, oneshot};
 use tokio::time::Duration;
 
+use super::{EmbedderClient, EmbedderError};
+
 // ── Per-call timeout ─────────────────────────────────────────────────────────
-//
-// Why: under memory pressure the `trusty-embedderd` sidecar can stall mid-batch
-// (CoreML / ORT arena growth on Apple Silicon unified memory). Without a
-// per-call deadline, `read_line` blocks indefinitely — the reindex task hangs,
-// the SSE stream goes silent, and the OS tears down the idle TCP connection
-// before any terminal event is ever emitted. A bounded timeout lets the batch
-// fail fast, which unblocks the task, which lets it emit a terminal SSE error
-// event.
-//
-// Default: 120 s (generous: a single very-large batch on a stalled sidecar
-// should fail within two minutes rather than hanging forever).
-// Override: set `TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS` to a positive integer.
+
 const EMBED_CALL_TIMEOUT_DEFAULT_SECS: u64 = 120;
 
-/// Read `TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS` from the environment at first use
-/// and cache it.
+/// Read `TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS` once and cache it.
 ///
-/// Why: avoids a repeated env-var lookup per batch while still allowing test
-/// code to override the default via `std::env::set_var`.
-/// What: reads the env var once, parses it as a u64, falls back to 120 on
-/// parse failure or absence.
-/// Test: `embed_call_timeout_env_override` verifies a stalled reader surfaces
-/// as a timeout error rather than hanging indefinitely.
+/// Why: avoids repeated env lookups per batch while still allowing tests to
+/// override via `std::env::set_var`.
+/// What: reads the env var, parses as u64, falls back to 120 s.
+/// Test: `embed_call_stalled_reader_times_out` exercises the timeout path.
 fn embed_call_timeout() -> Duration {
     static CACHED: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
@@ -60,11 +48,21 @@ fn embed_call_timeout() -> Duration {
     })
 }
 
-use super::{EmbedderClient, EmbedderError};
+/// Read `TRUSTY_EMBED_INFLIGHT` once; clamp to [1, 4]; default 2.
+///
+/// Why: controls max in-flight batches. Test: multi-flight tests (indirect).
+fn embed_inflight() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("TRUSTY_EMBED_INFLIGHT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|n| n.clamp(1, 4))
+            .unwrap_or(2)
+    })
+}
 
-// ── Wire types ──────────────────────────────────────────────────────────────
-// Private to this module — mirrors the types in `uds.rs` exactly so the
-// daemon side can reuse the same dispatch path for both transports.
+// ── Wire types ───────────────────────────────────────────────────────────────
 
 const METHOD_EMBED: &str = "embed";
 const JSONRPC_VERSION: &str = "2.0";
@@ -88,6 +86,11 @@ struct RpcResponse {
     result: Option<EmbedResult>,
     #[serde(default)]
     error: Option<RpcError>,
+    // id field present in wire format; we use FIFO ordering so we read but
+    // do not need to dispatch by id.
+    #[allow(dead_code)]
+    #[serde(default)]
+    id: Option<serde_json::Value>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -101,167 +104,296 @@ struct RpcError {
     message: String,
 }
 
+// ── Pending-request queue ────────────────────────────────────────────────────
+
+/// One in-flight request waiting for its response.
+struct PendingRequest {
+    /// Number of texts sent (used for count validation on reply).
+    sent: usize,
+    /// Channel to deliver the decoded result to the waiter.
+    reply: oneshot::Sender<Result<Vec<Vec<f32>>, EmbedderError>>,
+}
+
+/// FIFO queue of pending requests shared between writers and the reader task.
+/// Push on send, pop on response — sidecar never re-orders, so FIFO suffices.
+/// Mutex held only for push/pop, not during IO.
+type PendingQueue = Arc<Mutex<VecDeque<PendingRequest>>>;
+
 // ── Client ──────────────────────────────────────────────────────────────────
 
-/// `EmbedderClient` that communicates with a sidecar `trusty-embedderd` process
-/// via its piped stdin/stdout handles.
+/// Multi-flight `EmbedderClient` over a sidecar `trusty-embedderd --stdio`.
 ///
-/// Why: avoids all socket-file / port-discovery complexity for the common case
-/// where `trusty-search` itself manages the `trusty-embedderd` lifecycle. The
-/// kernel guarantees exclusive ownership of these pipes — no other process can
-/// inject or intercept frames.
+/// Why: the previous single-flight client held the write+read mutex for the
+/// entire round-trip. This kept only one batch in flight at a time and left
+/// the ANE ~78% idle during reindex. Splitting into a dedicated reader task
+/// with a write-only stdin lock allows N concurrent in-flight batches, which
+/// keeps the ANE's work queue continuously filled (issue #753).
 ///
-/// What: holds `ChildStdin` and `ChildStdout` behind `Mutex` guards. Each call
-/// to `embed_batch` acquires both locks together (write then read) so the
-/// entire request-response cycle is single-flight. Callers that need higher
-/// concurrency should batch texts before calling rather than issuing many
-/// concurrent `embed_batch` calls; the `BatchQueue` inside the daemon already
-/// coalesces batches anyway so the extra per-call serialisation on the parent
-/// side loses no throughput in practice.
+/// What: `embed_batch` acquires the write semaphore, registers a `oneshot`
+/// in the FIFO pending queue, serialises the request to the write-only stdin
+/// lock, releases both locks, then awaits the oneshot. A single reader task
+/// (spawned in `new`) owns stdout, reads response frames in arrival order,
+/// pops the head of the pending queue, and sends the decoded result. Crash/
+/// restart: EOF or read errors drain all pending oneshots with an error.
 ///
-/// Test: `cargo test -p trusty-common --features embedder-client` exercises the
-/// unit surface. End-to-end coverage lives in
-/// `trusty-embedderd/tests/bit_identical.rs` (`bit_identical_stdio`,
-/// `#[ignore]`).
+/// Test: unit tests in this module; multi-flight integration tests in
+/// `trusty-embedderd/tests/multiflight.rs`.
 pub struct StdioEmbedderClient {
-    stdin: Mutex<ChildStdin>,
-    stdout: Mutex<BufReader<ChildStdout>>,
+    /// Write half — stdin lock held only for the duration of `write_all + flush`.
+    stdin: Arc<Mutex<ChildStdin>>,
+    /// Pending FIFO queue shared between writers and the reader task.
+    pending: PendingQueue,
+    /// Semaphore bounding max in-flight requests.
+    inflight: Arc<Semaphore>,
+    /// Monotonic counter for request ids (debug tracing only).
+    next_id: Arc<AtomicU64>,
 }
 
 impl StdioEmbedderClient {
-    /// Construct a client from the raw pipe handles of a spawned child process.
+    /// Construct a multi-flight client and spawn the background reader task.
     ///
-    /// Why: callers (typically `EmbedderSupervisor`) extract `stdin` and
-    /// `stdout` from a `tokio::process::Child` with `Stdio::piped()` and hand
-    /// them directly to this constructor — no config or path needed.
-    /// What: wraps both handles in `Mutex`. The `BufReader` around stdout
-    /// provides the `read_line` primitive needed for newline-framed JSON-RPC.
+    /// Why: the reader task must be running before any `embed_batch` calls so
+    /// it can dispatch responses to waiting callers.
+    /// What: wraps stdin in a `Mutex`; wraps stdout in a `BufReader` owned
+    /// exclusively by the reader task. Spawns `reader_task` as a detached
+    /// Tokio task. Returns the client handle immediately.
     /// Test: indirectly covered by every test that constructs and calls the client.
     pub fn new(stdin: ChildStdin, stdout: ChildStdout) -> Self {
+        let stdin = Arc::new(Mutex::new(stdin));
+        let pending: PendingQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let inflight = Arc::new(Semaphore::new(embed_inflight()));
+        let next_id = Arc::new(AtomicU64::new(1));
+
+        // Spawn the reader task — it owns stdout for its lifetime.
+        let pending_clone = Arc::clone(&pending);
+        tokio::spawn(reader_task(BufReader::new(stdout), pending_clone));
+
         Self {
-            stdin: Mutex::new(stdin),
-            stdout: Mutex::new(BufReader::new(stdout)),
+            stdin,
+            pending,
+            inflight,
+            next_id,
         }
+    }
+}
+
+/// Background reader task — owns stdout, dispatches responses in FIFO order.
+///
+/// Why: keeping the read loop separate from the write path is what enables
+/// multi-flight: a caller can write the next request while this task is
+/// reading the response to the previous one.
+/// What: reads newline-terminated JSON-RPC response frames in a loop. For
+/// each frame, pops the head of `pending`, decodes the response, and sends the
+/// result to the caller's oneshot. On EOF or read error, drains all remaining
+/// pending requests with an error so they don't hang.
+/// Test: exercised by the multi-flight integration tests.
+async fn reader_task(mut reader: BufReader<ChildStdout>, pending: PendingQueue) {
+    let timeout = embed_call_timeout();
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+
+        // Wait for the next response frame under a per-call deadline.
+        let read_result = tokio::time::timeout(timeout, reader.read_line(&mut line)).await;
+
+        match read_result {
+            Err(_elapsed) => {
+                tracing::warn!(
+                    timeout_secs = timeout.as_secs(),
+                    "StdioEmbedderClient reader: timed out waiting for response \
+                     (sidecar may be stalled) — draining pending requests"
+                );
+                drain_pending_with_error(
+                    &pending,
+                    EmbedderError::Stdio(format!(
+                        "embed call timed out after {}s — sidecar may be stalled \
+                         (set TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS to adjust)",
+                        timeout.as_secs()
+                    )),
+                )
+                .await;
+                return;
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    "StdioEmbedderClient reader: IO error reading from sidecar stdout: {e}"
+                );
+                drain_pending_with_error(
+                    &pending,
+                    EmbedderError::Stdio(format!("read response from child stdout: {e}")),
+                )
+                .await;
+                return;
+            }
+            Ok(Ok(0)) => {
+                // EOF — sidecar closed stdout (crashed or was shut down).
+                tracing::info!(
+                    "StdioEmbedderClient reader: stdout EOF \
+                     (sidecar exited) — draining pending requests"
+                );
+                drain_pending_with_error(
+                    &pending,
+                    EmbedderError::Stdio(
+                        "child closed stdout before responding (process exited)".to_owned(),
+                    ),
+                )
+                .await;
+                return;
+            }
+            Ok(Ok(_)) => {
+                // Got a line — dispatch to the head of the pending queue.
+            }
+        }
+
+        // Pop the oldest pending request.
+        let req = {
+            let mut guard = pending.lock().await;
+            guard.pop_front()
+        };
+        let Some(pending_req) = req else {
+            tracing::warn!(
+                "StdioEmbedderClient reader: received response but pending queue is empty \
+                 (spurious frame from sidecar?) — ignoring"
+            );
+            continue;
+        };
+
+        // Decode the response and deliver to the waiter.
+        let result = decode_response(line.trim(), pending_req.sent);
+        // Dropping errors here is intentional: the caller may have been
+        // cancelled (e.g. the reindex task was aborted), which is fine.
+        let _ = pending_req.reply.send(result);
+    }
+}
+
+/// Decode one JSON-RPC response frame. Extracted for unit-testing.
+/// Test: `decode_response_*` unit tests below.
+fn decode_response(line: &str, sent: usize) -> Result<Vec<Vec<f32>>, EmbedderError> {
+    let resp: RpcResponse = serde_json::from_str(line)
+        .map_err(|e| EmbedderError::Stdio(format!("decode response (raw={line:?}): {e}")))?;
+
+    if let Some(err) = resp.error {
+        return Err(EmbedderError::ModelError(format!(
+            "daemon RPC error {}: {}",
+            err.code, err.message
+        )));
+    }
+
+    let result = resp.result.ok_or_else(|| {
+        EmbedderError::Stdio("response missing both result and error fields".to_owned())
+    })?;
+
+    if result.embeddings.len() != sent {
+        return Err(EmbedderError::DimensionMismatch {
+            sent,
+            got: result.embeddings.len(),
+        });
+    }
+
+    Ok(result.embeddings)
+}
+
+/// Drain all pending requests with an error (EOF / crash / timeout path).
+///
+/// Why: prevents callers from hanging when the reader exits. Supervisor then
+/// swaps in a fresh `StdioEmbedderClient`. Test: multi-flight crash simulation.
+async fn drain_pending_with_error(pending: &PendingQueue, error: EmbedderError) {
+    let mut guard = pending.lock().await;
+    for req in guard.drain(..) {
+        let _ = req.reply.send(Err(EmbedderError::Stdio(
+            // Clone the message from the source error; EmbedderError is not
+            // Clone so we re-construct a Stdio variant with the same text.
+            match &error {
+                EmbedderError::Stdio(msg) => msg.clone(),
+                EmbedderError::ModelError(msg) => msg.clone(),
+                EmbedderError::DimensionMismatch { sent, got } => {
+                    format!("dimension mismatch: sent={sent}, got={got}")
+                }
+                other => format!("{other}"),
+            },
+        )));
     }
 }
 
 #[async_trait::async_trait]
 impl EmbedderClient for StdioEmbedderClient {
-    /// Embed a batch of texts via the stdio JSON-RPC 2.0 transport.
+    /// Embed a batch via multi-flight stdio JSON-RPC 2.0.
     ///
-    /// Why: the sidecar model; see module-level doc.  Under memory pressure
-    /// (Apple Silicon unified memory, deep reindex queue) the sidecar can stall
-    /// mid-batch and never write a response line.  A per-call deadline
-    /// (`TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS`, default 120 s) bounds how long
-    /// `read_line` waits: on timeout the call returns
-    /// `EmbedderError::Stdio("embed call timed out …")` so the batch fails fast
-    /// instead of hanging indefinitely and leaving the SSE stream idle until
-    /// the OS tears down the TCP connection.
-    ///
-    /// What: acquires the stdin lock, serialises one newline-framed JSON-RPC
-    /// request, flushes to the child's stdin. Then acquires the stdout lock
-    /// and reads one newline-framed response under a `tokio::time::timeout`
-    /// bounded by `embed_call_timeout()`. Decodes `embeddings`, validates
-    /// the count, and returns. Any transport or protocol error is mapped to
-    /// `EmbedderError::Stdio`.
-    ///
-    /// Test: `embed_call_timeout_env_override` (below) + end-to-end:
-    /// `cargo test -p trusty-embedderd --test bit_identical -- --include-ignored`
+    /// Why: see module doc. Acquires inflight semaphore slot, registers oneshot
+    /// in FIFO pending queue, writes request (stdin lock held only for write +
+    /// flush), then awaits the oneshot. Reader task dispatches replies in order.
+    /// Test: `cargo test -p trusty-embedderd --test multiflight`
     async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbedderError> {
         if texts.is_empty() {
             return Ok(vec![]);
         }
         let sent = texts.len();
 
-        tracing::debug!(n = sent, "StdioEmbedderClient: sending batch");
+        // Bound concurrent in-flight requests.
+        let _permit = self
+            .inflight
+            .acquire()
+            .await
+            .map_err(|_| EmbedderError::Stdio("inflight semaphore closed".to_owned()))?;
+
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(n = sent, id, "StdioEmbedderClient: sending batch");
+
+        // Register the pending oneshot BEFORE writing the request so the
+        // reader task can never pop-before-push.
+        let (reply_tx, reply_rx) = oneshot::channel();
+        {
+            let mut guard = self.pending.lock().await;
+            guard.push_back(PendingRequest {
+                sent,
+                reply: reply_tx,
+            });
+        }
 
         // Serialise the request.
         let req = RpcRequest {
             jsonrpc: JSONRPC_VERSION,
             method: METHOD_EMBED,
             params: EmbedParams { texts: &texts },
-            id: 1,
+            id,
         };
         let mut payload = serde_json::to_vec(&req)
             .map_err(|e| EmbedderError::Stdio(format!("serialise JSON-RPC request: {e}")))?;
         payload.push(b'\n');
 
-        // Acquire both locks atomically (stdin first, stdout second — consistent
-        // order prevents a deadlock between two concurrent callers).
-        let mut stdin_guard = self.stdin.lock().await;
-        let mut stdout_guard = self.stdout.lock().await;
-
-        // Write the request frame.
-        stdin_guard
-            .write_all(&payload)
-            .await
-            .map_err(|e| EmbedderError::Stdio(format!("write request to child stdin: {e}")))?;
-        stdin_guard
-            .flush()
-            .await
-            .map_err(|e| EmbedderError::Stdio(format!("flush child stdin: {e}")))?;
-
-        // Read one newline-terminated response frame under a deadline.
-        //
-        // Why: `read_line` blocks until the sidecar writes a '\n'. Under memory
-        // pressure the sidecar can stall indefinitely — applying
-        // `tokio::time::timeout` converts that stall into a fast error so the
-        // reindex task can emit a terminal SSE event rather than hanging forever.
-        let mut line = String::new();
-        let timeout = embed_call_timeout();
-        let n = tokio::time::timeout(timeout, stdout_guard.read_line(&mut line))
-            .await
-            .map_err(|_| {
-                tracing::warn!(
-                    timeout_secs = timeout.as_secs(),
-                    "StdioEmbedderClient: embed call timed out — sidecar may be stalled"
-                );
-                EmbedderError::Stdio(format!(
-                    "embed call timed out after {}s — sidecar may be stalled \
-                     (set TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS to adjust)",
-                    timeout.as_secs()
-                ))
-            })?
-            .map_err(|e| EmbedderError::Stdio(format!("read response from child stdout: {e}")))?;
-
-        if n == 0 {
-            return Err(EmbedderError::Stdio(
-                "child closed stdout before responding (process crashed?)".to_owned(),
-            ));
+        // Write the request — stdin lock held only for write+flush, then released.
+        {
+            let mut stdin_guard = self.stdin.lock().await;
+            stdin_guard
+                .write_all(&payload)
+                .await
+                .map_err(|e| EmbedderError::Stdio(format!("write request to child stdin: {e}")))?;
+            stdin_guard
+                .flush()
+                .await
+                .map_err(|e| EmbedderError::Stdio(format!("flush child stdin: {e}")))?;
         }
+        // stdin lock released — next concurrent caller can write immediately.
+        // permit is held until this function returns, bounding inflight depth.
 
-        // Decode the response.
-        let resp: RpcResponse = serde_json::from_str(line.trim()).map_err(|e| {
-            EmbedderError::Stdio(format!("decode response (raw={:?}): {e}", line.trim()))
+        // Await the reader task's dispatch.
+        let result = reply_rx.await.map_err(|_| {
+            EmbedderError::Stdio(
+                "reader task dropped reply channel (sidecar crashed or was restarted)".to_owned(),
+            )
         })?;
 
-        if let Some(err) = resp.error {
-            return Err(EmbedderError::ModelError(format!(
-                "daemon RPC error {}: {}",
-                err.code, err.message
-            )));
-        }
-
-        let result = resp.result.ok_or_else(|| {
-            EmbedderError::Stdio("response missing both result and error fields".to_owned())
-        })?;
-
-        if result.embeddings.len() != sent {
-            return Err(EmbedderError::DimensionMismatch {
-                sent,
-                got: result.embeddings.len(),
-            });
-        }
-
-        tracing::debug!(n = sent, "StdioEmbedderClient: batch complete");
-
-        Ok(result.embeddings)
+        tracing::debug!(n = sent, id, "StdioEmbedderClient: batch complete");
+        result
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Wire format tests (no live process needed) ────────────────────────
 
     #[test]
     fn request_serialises_correctly() {
@@ -293,12 +425,11 @@ mod tests {
         // What: decode a synthetic error-response frame and check the variant.
         // Test: this test.
         let json = r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"ort failed"},"id":1}"#;
-        let resp: RpcResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.error.is_some());
-        assert!(resp.result.is_none());
-        let err = resp.error.unwrap();
-        assert_eq!(err.code, -32603);
-        assert!(err.message.contains("ort failed"));
+        let result = decode_response(json, 1);
+        assert!(
+            matches!(result, Err(EmbedderError::ModelError(_))),
+            "got: {result:?}"
+        );
     }
 
     #[test]
@@ -308,39 +439,49 @@ mod tests {
         // What: synthesise a success response and deserialise the embeddings.
         // Test: this test.
         let json = r#"{"jsonrpc":"2.0","result":{"embeddings":[[0.1,0.2],[0.3,0.4]]},"id":1}"#;
-        let resp: RpcResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.error.is_none());
-        let result = resp.result.unwrap();
-        assert_eq!(result.embeddings.len(), 2);
-        assert_eq!(result.embeddings[0][0], 0.1_f32);
+        let result = decode_response(json, 2).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0][0], 0.1_f32);
+    }
+
+    #[test]
+    fn count_mismatch_returns_dimension_error() {
+        // Why: a count mismatch between sent and received vectors must surface
+        //      as DimensionMismatch, not a silent truncation.
+        // What: send `sent=3` but the mock response has 2 embeddings.
+        // Test: this test.
+        let json = r#"{"jsonrpc":"2.0","result":{"embeddings":[[0.1],[0.2]]},"id":1}"#;
+        let result = decode_response(json, 3);
+        assert!(
+            matches!(
+                result,
+                Err(EmbedderError::DimensionMismatch { sent: 3, got: 2 })
+            ),
+            "got: {result:?}"
+        );
     }
 
     /// Verify that a stalled/silent sidecar reader produces a timeout error
     /// rather than blocking indefinitely.
     ///
-    /// Why: the root cause of the reindex-stall failure mode is `read_line`
-    /// blocking forever when the sidecar stops writing. This test proves that
-    /// `tokio::time::timeout` on a never-yielding `read_line` call (simulating
-    /// a stalled sidecar) returns an `Elapsed` error rather than hanging,
-    /// which is exactly the behaviour Fix A adds to `embed_batch`.
+    /// Why: the root cause of the reindex-stall failure mode is a read blocking
+    /// forever when the sidecar stops writing. This test proves that
+    /// `tokio::time::timeout` on a never-yielding `read_line` call returns an
+    /// `Elapsed` error rather than hanging.
     ///
     /// What: creates a `tokio::io::duplex` reader whose write end is held but
     /// never written to. Calls `read_line` with a 1 s deadline and asserts the
-    /// result is `Err(Elapsed)`. The `DuplexStream` read end blocks until data
-    /// arrives or the write end is dropped — identical to a stalled sidecar.
+    /// result is `Err(Elapsed)`. Identical to a stalled sidecar.
     ///
     /// Test: this test (`embed_call_stalled_reader_times_out`).
     #[tokio::test]
     async fn embed_call_stalled_reader_times_out() {
         use tokio::io::duplex;
 
-        // `_tx` keeps the write end alive so the read end never sees EOF —
-        // a faithful model of a stalled sidecar that has stopped writing.
         let (_tx, rx) = duplex(1024);
         let mut buf = String::new();
         let mut reader = tokio::io::BufReader::new(rx);
 
-        // This is the exact pattern introduced by Fix A into `embed_batch`.
         let result = tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut buf)).await;
 
         assert!(

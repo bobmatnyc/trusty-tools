@@ -24,6 +24,22 @@ use super::{
     ParsedBatch,
 };
 
+/// (chunk_start_index, expected_count, embed_result) — alias to satisfy clippy.
+type WaveResult = (usize, usize, Result<Vec<Vec<f32>>>);
+
+/// Concurrent in-flight sub-batches (issue #753). Reads `TRUSTY_EMBED_INFLIGHT`,
+/// clamps to [1, 4], defaults to 2. Test: `embed_chunks_in_batches` (indirect).
+fn resolve_embed_inflight() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("TRUSTY_EMBED_INFLIGHT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|n| n.clamp(1, 4))
+            .unwrap_or(2)
+    })
+}
+
 /// Resident-set-size of the current process, in megabytes.
 ///
 /// Why: used by the CoreML memory tripwire to measure the RSS delta a single
@@ -514,39 +530,21 @@ impl CodeIndexer {
         .context("batch parse task panicked")
     }
 
-    /// Batched ONNX embed across every chunk's content.
-    ///
-    /// Why: per-chunk `embed` issues one ONNX call apiece; batching
-    /// `EMBED_BATCH_SIZE` chunks per call amortizes session setup cost and
-    /// caps the per-call tensor footprint (see `EMBED_BATCH_SIZE` doc for
-    /// the macOS Jetsam history).
-    /// What: returns `Vec<Option<Vec<f32>>>` aligned 1:1 with `chunks`,
-    /// where `None` means "no embedder wired (BM25-only mode)". Fails
-    /// fast if `embed_batch` returns a wrong-sized result.
-    /// Test: covered indirectly by `test_index_files_batch_*`.
+    /// Batched ONNX embed — multi-flight pipelined (issue #753). Serial loop left
+    /// ANE ~78% idle; `TRUSTY_EMBED_INFLIGHT` (default 2) sub-batches now run
+    /// concurrently via ordered `buffered`, filling the ANE queue. CoreML tripwire
+    /// fires between waves. `Vec<Option<Vec<f32>>>` 1:1 with `chunks` (None=BM25).
+    /// Test: `test_index_files_batch_*`. Order: `tests/multiflight.rs`.
     async fn embed_chunks_in_batches(&self, chunks: &[RawChunk]) -> Result<Vec<Option<Vec<f32>>>> {
+        use futures::StreamExt as _;
+
         let mut embeddings: Vec<Option<Vec<f32>>> = vec![None; chunks.len()];
         let (Some(embedder), Some(_store)) = (&self.embedder, &self.store) else {
             return Ok(embeddings);
         };
         let chunk_total = chunks.len();
-        // Provider-aware batch sizing.
-        //
-        // Why: CoreML pre-allocates GPU/ANE buffers sized for the full batch
-        // tensor shape, drawn from Apple Silicon's unified memory pool. With
-        // the default `TRUSTY_MAX_BATCH_SIZE` (up to 512 on XLarge hosts) a
-        // single reindex batch caused a 574 MB → 72 GB RSS spike in ~14 s,
-        // and the buffers do not release between calls — they stack until
-        // jetsam kills the daemon. The CPU and CUDA paths do not exhibit
-        // this behaviour (CPU has the arena allocator disabled; CUDA's
-        // buffers live in device memory, not host RSS).
-        // What: read the live embedder's provider; if CoreML, use the
-        // smaller `TRUSTY_COREML_BATCH_SIZE` (default 32) so the per-batch
-        // buffer rises and falls between calls. Otherwise use the existing
-        // `TRUSTY_MAX_BATCH_SIZE`-derived value.
-        // Test: covered indirectly by `test_index_files_batch_*` on CPU
-        // builds; behavioural verification on CoreML is via an Apple
-        // Silicon smoke run.
+        // CoreML pre-allocates ANE buffers; oversized batches stack until jetsam
+        // kills the daemon. Use TRUSTY_COREML_BATCH_SIZE/TRUSTY_MAX_BATCH_SIZE.
         let is_coreml = matches!(
             embedder.provider(),
             trusty_common::embedder::ExecutionProvider::CoreML
@@ -555,8 +553,7 @@ impl CodeIndexer {
         let mut batch_size = if is_coreml {
             let bs = crate::core::resolve_coreml_batch_size();
             tracing::debug!(
-                "embed_chunks_in_batches: CoreML provider active ({:?}) — using \
-                 TRUSTY_COREML_BATCH_SIZE={bs} (chunks={chunk_total})",
+                "embed_chunks_in_batches: CoreML ({:?}) — TRUSTY_COREML_BATCH_SIZE={bs}",
                 embedder.provider()
             );
             bs
@@ -564,57 +561,61 @@ impl CodeIndexer {
             embed_batch_size()
         };
 
-        // CoreML memory tripwire (issue: CoreML RSS spike within a single
-        // batch). CoreML buffers are sized to the full batch tensor shape and
-        // drawn from Apple Silicon's unified memory; a too-large batch can
-        // spike RSS by tens of GB *inside* `embed_batch`, faster than the
-        // inter-batch RSS poller can react. We snapshot RSS before each call
-        // and measure the delta after it returns; if the delta exceeds the
-        // tripwire threshold, we halve `batch_size` for the remaining
-        // sub-batches (once per reindex) so RSS never climbs into jetsam
-        // territory. The tripwire is **non-fatal** — on a trip we log a
-        // warning, reduce the batch size, and continue. It applies only on
-        // the CoreML provider; CPU and CUDA paths skip it entirely (CPU has
-        // the ORT arena disabled; CUDA buffers live in device memory).
         let tripwire_mb = if is_coreml {
             crate::core::resolve_coreml_tripwire_mb()
         } else {
             0
         };
         let mut tripwire_fired = false;
-
+        let inflight = resolve_embed_inflight();
+        tracing::debug!(chunk_total, batch_size, inflight, "embed_chunks_in_batches");
         let mut batch_start = 0usize;
         while batch_start < chunk_total {
-            // `batch_size` may have been halved by the tripwire; recompute the
-            // end of the current sub-batch each iteration.
-            let batch_end = (batch_start + batch_size).min(chunk_total);
-            let batch_texts: Vec<&str> = chunks[batch_start..batch_end]
-                .iter()
-                .map(|c| c.content.as_str())
-                .collect();
+            let wave_start = batch_start;
+            let mut wave_sub_batches: Vec<(usize, Vec<String>)> = Vec::with_capacity(inflight);
+            let mut wave_pos = batch_start;
+            while wave_sub_batches.len() < inflight && wave_pos < chunk_total {
+                let end = (wave_pos + batch_size).min(chunk_total);
+                let sub: Vec<String> = chunks[wave_pos..end]
+                    .iter()
+                    .map(|c| c.content.clone())
+                    .collect();
+                wave_sub_batches.push((wave_pos, sub));
+                wave_pos = end;
+            }
 
-            // Snapshot RSS immediately before the embed call (CoreML only —
-            // `current_rss_mb` shells out, so skip the cost on CPU/CUDA).
             let rss_before = if is_coreml { current_rss_mb() } else { 0 };
+            // Dispatch concurrently — `buffered` preserves order.
+            let wave_results: Vec<WaveResult> = {
+                let iter = wave_sub_batches.into_iter().map(|(start_pos, texts)| {
+                    let emb = Arc::clone(embedder);
+                    let n = texts.len();
+                    async move {
+                        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+                        (start_pos, n, emb.embed_batch(&refs).await)
+                    }
+                });
+                futures::stream::iter(iter)
+                    .buffered(inflight)
+                    .collect()
+                    .await
+            };
 
-            let batch_vecs = embedder
-                .embed_batch(&batch_texts)
-                .await
-                .context("batch embed_batch failed")?;
-            if batch_vecs.len() != batch_texts.len() {
-                anyhow::bail!(
-                    "embed_batch returned {} vectors, expected {}",
-                    batch_vecs.len(),
-                    batch_texts.len()
-                );
-            }
-            for (offset, vec) in batch_vecs.into_iter().enumerate() {
-                embeddings[batch_start + offset] = Some(vec);
+            for (start_pos, expected_n, vecs) in wave_results {
+                let batch_vecs = vecs.context("batch embed_batch failed")?;
+                if batch_vecs.len() != expected_n {
+                    anyhow::bail!(
+                        "embed_batch returned {} vectors, expected {}",
+                        batch_vecs.len(),
+                        expected_n
+                    );
+                }
+                for (offset, vec) in batch_vecs.into_iter().enumerate() {
+                    embeddings[start_pos + offset] = Some(vec);
+                }
             }
 
-            // Measure the post-call RSS delta and trip the wire if it spiked.
-            // `rss_before == 0` means the RSS probe failed — the tripwire
-            // degrades gracefully and simply does not fire.
+            // CoreML RSS tripwire: halve batch_size if spike detected.
             if is_coreml && !tripwire_fired && rss_before > 0 {
                 let rss_after = current_rss_mb();
                 let delta_mb = rss_after.saturating_sub(rss_before);
@@ -623,22 +624,21 @@ impl CodeIndexer {
                         (batch_size / 2).max(crate::core::memory_policy::COREML_BATCH_SIZE_MIN);
                     tracing::warn!(
                         "embed_chunks_in_batches: CoreML RSS delta {}MB exceeds tripwire \
-                         {}MB after batch of {} chunks — halving batch size {} → {} for \
-                         remaining sub-batches (non-fatal, reindex continues)",
+                         {}MB after wave of {} chunks (inflight={}) — halving batch size \
+                         {} → {} for remaining waves (non-fatal, reindex continues)",
                         delta_mb,
                         tripwire_mb,
-                        batch_texts.len(),
+                        wave_pos - wave_start,
+                        inflight,
                         batch_size,
                         new_size,
                     );
                     batch_size = new_size;
-                    // Only halve once per reindex — a second trip would most
-                    // likely be the same spike still draining, not new growth.
                     tripwire_fired = true;
                 }
             }
 
-            batch_start = batch_end;
+            batch_start = wave_pos;
         }
         Ok(embeddings)
     }

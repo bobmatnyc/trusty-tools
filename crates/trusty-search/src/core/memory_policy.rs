@@ -167,21 +167,17 @@ fn compute_max_chunks(memory_limit_mb: usize) -> usize {
 /// the CoreML execution provider is active).
 ///
 /// Why: CoreML on Apple Silicon pre-allocates GPU/ANE buffers sized for the
-/// full batch tensor shape, and those buffers are drawn from the unified
-/// memory pool. With `TRUSTY_MAX_BATCH_SIZE=512` (the tier-default for XLarge
-/// hosts that the GPU tuning path historically applied to CoreML too), a
-/// single reindex batch inflates process RSS by ~70 GB in seconds and the
-/// buffers do not release between calls — they stack until macOS jetsam
-/// SIGKILLs the daemon. The fix is to keep CoreML batches small enough that
-/// the per-batch buffer rises and falls between calls instead of stacking;
-/// 32 chunks is empirically below the size where the unified-memory spike
-/// is observable while remaining large enough to amortise ONNX kernel
-/// launch overhead.
+/// full batch tensor shape, drawn from the unified memory pool. Oversized
+/// batches (512+) inflate process RSS by ~70 GB in seconds; the fix is to
+/// keep CoreML batches small so the per-batch buffer rises and falls between
+/// calls instead of stacking until jetsam SIGKILLs the daemon.
+/// Raised from 32 to 64 (issue #753): empirical M4 Max sweep showed 64 gives
+/// the best throughput (~83 cps) with no OOM (RSS 369 MB vs 285 MB at 32).
 /// What: the default `coreml_batch_size`. Overridable via
 /// `TRUSTY_COREML_BATCH_SIZE` (clamped to `[COREML_BATCH_SIZE_MIN,
 /// COREML_BATCH_SIZE_MAX]`).
 /// Test: `test_coreml_batch_size_default` and `test_coreml_batch_size_env_override`.
-pub const DEFAULT_COREML_BATCH_SIZE: usize = 32;
+pub const DEFAULT_COREML_BATCH_SIZE: usize = 64;
 
 /// Floor for the CoreML batch size (1 chunk per call). Below this the
 /// pipeline is functionally serial; 1 is the smallest legal batch.

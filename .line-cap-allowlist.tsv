@@ -152,7 +152,7 @@ crates/trusty-search/src/core/indexer/mod.rs	1304
 crates/trusty-search/src/core/indexer/persist.rs	740
 crates/trusty-search/src/core/indexer/search.rs	1109
 crates/trusty-search/src/core/indexer/tests.rs	3426
-crates/trusty-search/src/core/memory_policy.rs	1268
+crates/trusty-search/src/core/memory_policy.rs	1264
 crates/trusty-search/src/core/migration/mod.rs	649
 crates/trusty-search/src/core/registry.rs	711
 crates/trusty-search/src/core/repo_config.rs	573

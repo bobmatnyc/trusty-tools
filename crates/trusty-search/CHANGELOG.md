@@ -7,6 +7,24 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.23.5] — 2026-06-04
+
+### Changed (closes #753)
+
+- **Multi-flight pipelined embed feed** — `embed_chunks_in_batches` now
+  dispatches up to `TRUSTY_EMBED_INFLIGHT` (default 2, max 4) sub-batches
+  concurrently via `futures::stream::buffered` (ordered), eliminating the
+  round-trip gap between response-receipt and next-request-send. ANE
+  utilisation rises from ~22% to ~60–75%+ at INFLIGHT=2 (~1.4× throughput
+  vs single-flight baseline). Zero search-quality impact — same model, same
+  vectors, order guaranteed by `buffered`.
+- **`DEFAULT_COREML_BATCH_SIZE` raised 32 → 64** — empirical M4 Max sweep
+  showed batch=64 peaks at ~83 cps vs ~77 at 32 with no OOM or tripwire
+  activity (RSS 369 MB vs 285 MB — both safely under the 4 GB tripwire).
+- Requires `trusty-common` 0.14.0 and `trusty-embedderd` 0.3.2.
+
+---
+
 ## [0.23.4] — 2026-06-04
 
 ### Fixed (closes #747 Fix C + Fix D, closes #750)
