@@ -1,6 +1,6 @@
 [package]
 name = "trusty-search"
-version = "0.23.2"
+version = "0.23.3"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"

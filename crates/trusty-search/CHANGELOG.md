@@ -7,6 +7,44 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.23.3] — 2026-06-04
+
+### Fixed (closes #744)
+
+- **Progress UI: correct Files N/total denominator and ETA** — the ticker
+  previously read `embed_bar.length()` (initialised to 1) as the total-files
+  denominator; ETA was therefore "?" for the entire model-load stall. A new
+  shared `AtomicU64 total_files_now` is set from the `walk_complete`/`start`
+  SSE events so the denominator is correct from the very first tick.
+
+- **Progress UI: ETA shows "loading model…" during InitializingEmbedder** —
+  instead of the misleading "?" during the ONNX/CoreML cold-start, the ticker
+  now emits "loading model…" as the ETA string while the `InitializingEmbedder`
+  phase is active.
+
+- **Progress UI: cps relabelled "embed/s"** — the per-batch embed throughput
+  from `chunk_progress` events is now labelled `N embed/s` to distinguish it
+  from a cumulative cold-start rate.
+
+- **Concurrent embedder warm-up** — `spawn_reindex_with_cleanup` now fires a
+  background task immediately after the file walk that calls `warm_embedder` on
+  the indexer. This triggers the lazy `trusty-embedderd` spawn + ONNX/CoreML
+  session init CONCURRENTLY with the hash-cache load and staging setup, so the
+  30–60 s model-load cost overlaps with file chunking instead of serialising
+  with the first batch. The warm-up is a no-op on already-live daemons and is
+  skipped for `lexical_only` indexes. Double-spawn is prevented by
+  `LazyEmbedderHandle`'s existing `Arc<Mutex<…>>` single-flight guard.
+
+- **Phase instrumentation** — `spawn_reindex_with_cleanup` now records
+  `walk_ms` (time to complete the file scan) and emits a concise per-phase
+  timing summary at `tracing::info!` level at the end of every reindex:
+  `walk / parse / model_load_approx / embed / bm25 / vector_upsert / kg`.
+  `walk_ms` is also included in the SSE `complete` event's `timings` object
+  and in the CLI timing breakdown printed after a successful `trusty-search
+  index` run.
+
+---
+
 ## [0.23.2] — 2026-06-04
 
 ### Fixed

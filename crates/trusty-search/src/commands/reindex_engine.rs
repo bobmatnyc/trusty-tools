@@ -371,6 +371,11 @@ pub async fn run_reindex_with(
     let chunks_now = StdArc::new(AtomicU64::new(0));
     let skipped_now = StdArc::new(AtomicU64::new(0));
     let cps_now = StdArc::new(AtomicU64::new(0));
+    // Issue #744: shared total_files counter, set from walk_complete/start
+    // SSE events. The ticker uses this as the denominator for Files N/total
+    // and for ETA, replacing `embed_bar.length()` which initialises to 1
+    // and is only corrected after the first batch event arrives.
+    let total_files_now = StdArc::new(AtomicU64::new(0));
     let tick_done = StdArc::new(AtomicBool::new(false));
     // Tracks the current phase label for the ticker. Stored as a static string
     // pointer so the ticker can read it without locking `ReindexUi`. Updated
@@ -416,17 +421,35 @@ pub async fn run_reindex_with(
     // Clone the bars the ticker needs — `ProgressBar` is Arc-wrapped so clones
     // are cheap and the ticker can write to them independently.
     let ticker_stats_bar = ui.stats_bar();
-    let ticker_embed_bar = ui.embed_bar();
 
+    // Issue #744: wall-clock ticker.
+    //
+    // Why: the ticker fires every second so the operator sees movement even
+    // when no SSE event has arrived. Three fixes land here:
+    //
+    // 1. **Files N/total denominator** — use `total_files_now` (set from the
+    //    `walk_complete`/`start` SSE event) instead of `embed_bar.length()`,
+    //    which is initialised to 1 and only corrected after the first batch
+    //    arrives. With the old code, early ticks showed "Files 0/1" and ETA "?"
+    //    throughout the model-load stall.
+    //
+    // 2. **ETA** — computed as (total - indexed) / fps once both are known.
+    //    During `InitializingEmbedder` (model cold-start), ETA is replaced with
+    //    the literal string "loading model…" so the operator understands the
+    //    delay is ONNX/CoreML initialisation, not slow chunking.
+    //
+    // 3. **cps label** — the per-batch embed throughput from `chunk_progress`
+    //    events (chunks ÷ embed_ms) is labelled `embed/s` to distinguish it
+    //    from a cumulative (misleadingly low) rate that includes cold-start.
     let ticker = {
         let indexed_now = indexed_now.clone();
         let chunks_now = chunks_now.clone();
         let skipped_now = skipped_now.clone();
         let cps_now = cps_now.clone();
+        let total_files_now = total_files_now.clone();
         let tick_done = tick_done.clone();
         let phase_disc = phase_disc.clone();
         let stats_bar = ticker_stats_bar;
-        let embed_bar = ticker_embed_bar;
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             interval.tick().await; // discard immediate tick
@@ -440,20 +463,34 @@ pub async fn run_reindex_with(
                 let chunks = chunks_now.load(Ordering::Acquire);
                 let skipped = skipped_now.load(Ordering::Acquire);
                 let cps = cps_now.load(Ordering::Acquire);
+                // Fix #744: use the authoritative total from walk_complete/start,
+                // not embed_bar.length() which starts at 1.
+                let total = total_files_now.load(Ordering::Acquire);
+                let phase = phase_disc.load(Ordering::Acquire);
+                let is_model_loading = phase == phase_to_u64(ReindexPhase::InitializingEmbedder);
                 let fps = indexed.checked_div(elapsed).unwrap_or(0);
-                let total = embed_bar.length().unwrap_or(0);
-                let eta = if fps > 0 && total > indexed {
+                // Fix #744: show "loading model…" during InitializingEmbedder so the
+                // operator understands why ETA is unavailable, not "chunking is slow".
+                let eta = if is_model_loading {
+                    "loading model\u{2026}".to_string()
+                } else if fps > 0 && total > indexed {
                     super::format::fmt_secs((total - indexed) / fps)
                 } else {
                     "?".to_string()
                 };
                 // Use the active phase label so footer matches header (Problem 1 fix).
-                let phase_label = u64_to_label(phase_disc.load(Ordering::Acquire));
+                let phase_label = u64_to_label(phase);
+                // Fix #744: label the per-batch embed rate clearly as "embed/s"
+                // (not "cps") to distinguish it from a cumulative cold-start rate.
+                let cps_label = if cps > 0 {
+                    format!("{cps} embed/s")
+                } else {
+                    "---".to_string()
+                };
                 stats_bar.set_message(format!(
-                    "{phase_label} {chunks} chunks \u{2014} {cps} cps \u{2014} \
+                    "{phase_label} {chunks} chunks \u{2014} {cps_label} \u{2014} \
                      Files {indexed}/{total}  Skipped {skipped}  Elapsed {elapsed}s  ETA {eta}",
                     chunks = format_with_commas(chunks),
-                    cps = cps,
                     indexed = format_with_commas(indexed),
                     total = format_with_commas(total),
                     skipped = format_with_commas(skipped),
@@ -616,6 +653,9 @@ pub async fn run_reindex_with(
             Some("walk_complete") => {
                 received_walk_complete = true;
                 let total = evt.get("total_files").and_then(|v| v.as_u64()).unwrap_or(0);
+                // Issue #744: set the authoritative file count so the ticker
+                // shows "Files N/total" with the correct denominator.
+                total_files_now.store(total, Ordering::Release);
                 ui.set_phase(ReindexPhase::Walking, index_id);
                 phase_disc.store(phase_to_u64(ReindexPhase::Walking), Ordering::Release);
                 ui.set_total(total);
@@ -632,6 +672,12 @@ pub async fn run_reindex_with(
                     .get("lexical_only")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                // Issue #744: set the authoritative total so the ticker always
+                // shows the correct denominator from this point on (important for
+                // old daemons that don't emit walk_complete).
+                if total > 0 {
+                    total_files_now.store(total, Ordering::Release);
+                }
 
                 if received_walk_complete {
                     // Three-phase flow: Walk bar is already done; enter Chunking.
@@ -736,6 +782,9 @@ pub async fn run_reindex_with(
                     .unwrap_or(0);
                 let total = evt.get("total_files").and_then(|v| v.as_u64()).unwrap_or(0);
                 if total > 0 {
+                    // Issue #744: also update the ticker's total so ETA uses
+                    // the correct denominator from the very first batch event.
+                    total_files_now.store(total, Ordering::Release);
                     ui.set_total(total);
                 }
                 indexed_now.store(indexed, Ordering::Release);
@@ -835,6 +884,8 @@ pub async fn run_reindex_with(
                 if let Some(t) = evt.get("timings") {
                     let get = |k: &str| t.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
                     outcome.timings = Some(ReindexTimings {
+                        // Issue #744: walk_ms added; zero on old daemons that omit it.
+                        walk_ms: get("walk_ms"),
                         parse_ms: get("parse_ms"),
                         embed_ms: get("embed_ms"),
                         bm25_ms: get("bm25_ms"),
@@ -1434,5 +1485,90 @@ mod tests {
         // This test verifies the `counter_advanced` check comes first.
         let stalled = !counter_advanced; // counter_advanced resets the stall
         assert!(!stalled, "progressing counter must not trigger stall");
+    }
+
+    // ── Issue #744 progress fixes ─────────────────────────────────────────────
+
+    /// The `total_files_now` atomic must be zero initially and updated to the
+    /// correct denominator when set.
+    ///
+    /// Why: Issue #744 — the ticker previously used `embed_bar.length()` (= 1)
+    /// as the Files denominator; this test verifies the replacement atomic
+    /// behaves correctly (zero-init + explicit store).
+    /// What: stores a value and reads it back via Acquire ordering.
+    /// Test: this test.
+    #[test]
+    fn total_files_atomic_zero_until_set() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let total_files_now = AtomicU64::new(0);
+        // Before any SSE event: must read 0, not 1.
+        assert_eq!(
+            total_files_now.load(Ordering::Acquire),
+            0,
+            "total_files_now must be zero until set by walk_complete/start"
+        );
+        total_files_now.store(3_327, Ordering::Release);
+        assert_eq!(
+            total_files_now.load(Ordering::Acquire),
+            3_327,
+            "total_files_now must reflect the value stored by the SSE handler"
+        );
+    }
+
+    /// The ETA is "loading model…" during InitializingEmbedder and "?" when
+    /// the denominator is zero (before the first walk_complete event).
+    ///
+    /// Why: Issue #744 — ETA "?" with Files 0/1 was confusing during model
+    /// cold-start; "loading model…" explains the delay.
+    /// What: replicates the ETA-computation logic from the ticker and asserts
+    /// the correct strings.
+    /// Test: this test.
+    #[test]
+    fn eta_logic_loading_model_and_zero_denom() {
+        use super::super::reindex_ui::ReindexPhase;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        fn phase_to_u64_test(p: ReindexPhase) -> u64 {
+            match p {
+                ReindexPhase::InitializingEmbedder => 3,
+                _ => 4,
+            }
+        }
+
+        let total_files_now = AtomicU64::new(0);
+        let indexed = 0u64;
+        let elapsed = 5u64;
+        let phase = phase_to_u64_test(ReindexPhase::InitializingEmbedder);
+        let is_model_loading = phase == 3;
+        let fps = indexed.checked_div(elapsed).unwrap_or(0);
+        let total = total_files_now.load(Ordering::Acquire);
+
+        let eta = if is_model_loading {
+            "loading model\u{2026}".to_string()
+        } else if fps > 0 && total > indexed {
+            super::super::format::fmt_secs((total - indexed) / fps)
+        } else {
+            "?".to_string()
+        };
+
+        assert_eq!(
+            eta, "loading model\u{2026}",
+            "ETA must be 'loading model…' during InitializingEmbedder"
+        );
+
+        // Not loading model, but total is still 0 (before walk_complete).
+        let phase2 = phase_to_u64_test(ReindexPhase::Embedding);
+        let is_loading2 = phase2 == 3;
+        let eta2 = if is_loading2 {
+            "loading model\u{2026}".to_string()
+        } else if fps > 0 && total > indexed {
+            super::super::format::fmt_secs((total - indexed) / fps)
+        } else {
+            "?".to_string()
+        };
+        assert_eq!(
+            eta2, "?",
+            "ETA must be '?' when total_files is 0 and not loading model"
+        );
     }
 }

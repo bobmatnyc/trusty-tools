@@ -986,6 +986,68 @@ impl CodeIndexer {
     pub fn corpus_arc(&self) -> Option<Arc<crate::core::corpus::CorpusStore>> {
         self.corpus.as_ref().map(Arc::clone)
     }
+
+    /// Pre-warm the embedder by sending a trivial single-text batch.
+    ///
+    /// Why: Issue #744. The sidecar (`trusty-embedderd`) is lazy-spawned on the
+    /// first embedding request (issue #315). On Apple Silicon / ONNX the cold
+    /// spawn + CoreML session init takes 30 to 60 seconds, stalling the first
+    /// real batch. Calling `warm_embedder` concurrently with the file walk lets
+    /// model-load overlap with chunking instead of serialising against it.
+    ///
+    /// What: if `self.embedder` is wired, calls `embed_batch(&["warm"])` to
+    /// trigger the lazy spawn and ONNX session init. The result is discarded.
+    /// On error the failure is logged at debug level and ignored; the first
+    /// real batch will retry via the normal path. A `None` embedder is a no-op.
+    ///
+    /// Test: the live ONNX path is `#[ignore]`-gated; unit-level correctness
+    /// is covered by `warm_embedder_noop_without_embedder`.
+    pub async fn warm_embedder(&self) {
+        let Some(embedder) = &self.embedder else {
+            return;
+        };
+        // A single short string is the minimal valid batch. We only care about
+        // triggering the ONNX session init (lazy-spawn + CoreML/CUDA compile),
+        // not the returned embedding — it is immediately discarded.
+        match embedder.embed_batch(&["warm"]).await {
+            Ok(_) => {
+                tracing::debug!(
+                    "warm_embedder[{}]: embedder pre-warm succeeded",
+                    self.index_id
+                );
+            }
+            Err(e) => {
+                // Non-fatal: the first real batch will retry.
+                tracing::debug!(
+                    "warm_embedder[{}]: embedder pre-warm failed ({e}) — \
+                     will retry on first batch",
+                    self.index_id
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod warm_embedder_tests {
+    use super::super::CodeIndexer;
+
+    /// `warm_embedder` on an indexer with no embedder must be a no-op (no
+    /// panic, no hang).
+    ///
+    /// Why: Issue #744 — `warm_embedder` is called as a concurrent background
+    /// task for every non-lexical reindex. On test indexers (no embedder wired)
+    /// it must return immediately without error.
+    /// What: calls `warm_embedder` on a bare `CodeIndexer`; asserts the call
+    /// completes without panic.
+    /// Test: this test.
+    #[tokio::test]
+    async fn warm_embedder_noop_without_embedder() {
+        let indexer = CodeIndexer::new("warm-test", "/tmp");
+        // Must return immediately — no embedder is wired, so warm_embedder is a no-op.
+        indexer.warm_embedder().await;
+        // If we reach here, the no-op path worked correctly.
+    }
 }
 
 #[cfg(test)]

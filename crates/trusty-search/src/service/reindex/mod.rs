@@ -1280,6 +1280,8 @@ async fn rebuild_symbol_graph_for_reindex(handle: &IndexHandle) -> KgRebuildOutc
 
 /// Run-level timing + memory totals collected across every batch.
 struct RunTotals {
+    /// Issue #744: wall-clock elapsed from reindex start to end of file walk.
+    walk_ms: u64,
     parse_ms: u64,
     embed_ms: u64,
     bm25_ms: u64,
@@ -1352,6 +1354,9 @@ async fn emit_complete_event(
         "chunks_dropped_by_cap": totals.chunks_dropped_by_cap,
         "kg_skipped": kg.kg_skipped,
         "timings": {
+            // Issue #744: walk_ms added so the CLI and tooling can break down
+            // where wall-clock goes (walk vs parse vs model-load vs embed vs KG).
+            "walk_ms": totals.walk_ms,
             "parse_ms": totals.parse_ms,
             "embed_ms": totals.embed_ms,
             "bm25_ms": totals.bm25_ms,
@@ -1785,7 +1790,10 @@ pub fn spawn_reindex_with_cleanup(
             diag.last_walk_files_skipped = 0;
             diag.last_walk_error = None;
         }
+        // Issue #744: stamp the walk end time so the phase-timing summary
+        // can report how long the file scan took separately from parse/embed.
         let walk = collect_files_to_index(&handle);
+        let walk_ms = started.elapsed().as_millis() as u64;
         let total = walk.files.len();
         // Issue #280: persist walk counters so the status endpoint can answer
         // "why is this index empty?" without the operator needing to read logs.
@@ -1834,6 +1842,43 @@ pub fn spawn_reindex_with_cleanup(
                 "lexical_only": handle.lexical_only,
             }))
             .await;
+
+        // Issue #744 — concurrent embedder warm-up.
+        //
+        // Why: on the default `stdio` path the sidecar (`trusty-embedderd`)
+        // is lazy-spawned on the first `embed_batch` call. The ONNX model
+        // load + CoreML / CUDA session compile takes 30–60 s, completely
+        // serialising with the first batch and making it look like chunking
+        // is slow. Spawning a background warm-up task here — CONCURRENTLY
+        // with the hash-cache load and staging setup — means the sidecar is
+        // already live (or well into init) by the time the batch loop begins.
+        // On a warm daemon (PID slot already non-zero) this is a no-op: the
+        // first embed call returns immediately. The task is fire-and-forget;
+        // we do NOT await it — a warm-up failure is non-fatal and the first
+        // real batch will retry. `lexical_only` indexes never embed, so we
+        // skip the warm-up entirely to avoid a spurious lazy-spawn.
+        //
+        // Double-spawn guard: `LazyEmbedderHandle::embed_via` uses an
+        // `Arc<Mutex<Option<SpawnedState>>>` for single-flight semantics; the
+        // warm-up task and the first real batch race on that lock. Only one
+        // wins the spawn; the loser finds `state = Some` and proceeds to the
+        // embed immediately. No extra guard is needed here.
+        if !handle.lexical_only {
+            let warm_indexer = Arc::clone(&handle.indexer);
+            let warm_index_id = index_id.0.clone();
+            let warm_ms = started;
+            tokio::spawn(async move {
+                tracing::debug!("reindex[{warm_index_id}]: starting concurrent embedder warm-up");
+                let t0 = std::time::Instant::now();
+                warm_indexer.read().await.warm_embedder().await;
+                tracing::info!(
+                    "reindex[{warm_index_id}]: embedder warm-up complete in {}ms \
+                     (started {}ms after reindex began)",
+                    t0.elapsed().as_millis(),
+                    warm_ms.elapsed().as_millis(),
+                );
+            });
+        }
 
         let hashes = hashes_for(&index_id);
         // `--force` wipes the per-index content-hash cache so every file is
@@ -2396,8 +2441,37 @@ pub fn spawn_reindex_with_cleanup(
             peak_rss_mb,
             mem_limit_hit,
         );
+        // Issue #744: emit a concise per-phase timing summary so operators can
+        // identify exactly where wall-clock goes (walk, parse/chunk, model-load,
+        // embed, commit, KG rebuild). The `model_load_ms` is approximated as
+        // (elapsed_ms - walk_ms - total_parse_ms - total_embed_ms - kg.kg_ms)
+        // and represents the time the pipeline was blocked on ONNX/CoreML
+        // session init before the first embedding batch could start.
+        // All times are in milliseconds; zero means "phase did not run".
+        let model_load_approx_ms = elapsed_ms
+            .saturating_sub(walk_ms)
+            .saturating_sub(total_parse_ms)
+            .saturating_sub(total_embed_ms)
+            .saturating_sub(total_bm25_ms)
+            .saturating_sub(total_vector_upsert_ms)
+            .saturating_sub(kg.kg_ms);
+        tracing::info!(
+            "reindex phase timings: index={} walk={}ms parse={}ms \
+             model_load_approx={}ms embed={}ms bm25={}ms vector_upsert={}ms \
+             kg={}ms total={}ms",
+            index_id.0,
+            walk_ms,
+            total_parse_ms,
+            model_load_approx_ms,
+            total_embed_ms,
+            total_bm25_ms,
+            total_vector_upsert_ms,
+            kg.kg_ms,
+            elapsed_ms,
+        );
 
         let totals = RunTotals {
+            walk_ms,
             parse_ms: total_parse_ms,
             embed_ms: total_embed_ms,
             bm25_ms: total_bm25_ms,

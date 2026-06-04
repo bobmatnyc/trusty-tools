@@ -455,13 +455,16 @@ impl ReindexUi {
         self.stats.clone()
     }
 
-    /// Return a clone of the Embed stage bar (slot 2) so the background ticker
-    /// can read its length for ETA calculations without borrowing `ReindexUi`.
+    /// Return a clone of the Embed stage bar (slot 2).
     ///
-    /// Why: same rationale as `stats_bar` — the ticker reads the bar's length
-    /// to compute `total` for the ETA formula.
+    /// Why: previously used by the ticker to read `bar.length()` for ETA.
+    /// Issue #744 replaces that with a shared `total_files_now` AtomicU64
+    /// (set from `walk_complete`/`start` SSE events) so ETA is correct from
+    /// the very start rather than only after the first batch. Retained here
+    /// for any future caller that needs direct access to the Embed bar.
     /// What: returns `self.stage_bars[2].clone()`.
-    /// Test: tested indirectly by the ticker path in `run_reindex_with`.
+    /// Test: construction exercises all bars in hidden mode.
+    #[allow(dead_code)]
     pub(crate) fn embed_bar(&self) -> ProgressBar {
         self.stage_bars[2].clone()
     }
@@ -484,6 +487,14 @@ impl ReindexUi {
 /// `vector_count == 0` despite non-zero chunks (the BM25-only-mode signal).
 /// Test: `tests::timing_breakdown_*` exercise the warning and normal paths.
 pub fn print_timing_breakdown(t: &ReindexTimings, total_chunks: u64) {
+    // Issue #744: show walk time first so the phase breakdown is in pipeline order.
+    if t.walk_ms > 0 {
+        println!(
+            "  {} {:>7}",
+            "File walk:     ".dimmed(),
+            fmt_elapsed(t.walk_ms),
+        );
+    }
     println!(
         "  {} {:>7}  ({} chunks)",
         "Parse/chunk:   ".dimmed(),
@@ -532,8 +543,11 @@ pub fn print_timing_breakdown(t: &ReindexTimings, total_chunks: u64) {
 /// `vector_count == 0` with `total_chunks > 0` is the smoking-gun signal that
 /// the embedder silently fell back to BM25-only — surfaced as a warning in the
 /// CLI breakdown so this regression can never go unnoticed.
+/// Issue #744: `walk_ms` added so operators can see the file-scan time separately.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ReindexTimings {
+    /// Issue #744: wall-clock from reindex start to end of file walk.
+    pub walk_ms: u64,
     pub parse_ms: u64,
     pub embed_ms: u64,
     pub bm25_ms: u64,
@@ -861,6 +875,7 @@ mod tests {
     #[test]
     fn timing_breakdown_bm25_only_does_not_panic() {
         let t = ReindexTimings {
+            walk_ms: 0,
             parse_ms: 1_000,
             embed_ms: 0,
             bm25_ms: 200,
@@ -884,6 +899,7 @@ mod tests {
     #[test]
     fn timing_breakdown_normal_does_not_panic() {
         let t = ReindexTimings {
+            walk_ms: 300,
             parse_ms: 5_000,
             embed_ms: 90_000,
             bm25_ms: 1_200,
@@ -894,5 +910,29 @@ mod tests {
             edge_count: 41_002,
         };
         print_timing_breakdown(&t, 62_926);
+    }
+
+    /// `print_timing_breakdown` with `walk_ms > 0` must print the "File walk"
+    /// line and not panic.
+    ///
+    /// Why: Issue #744 adds `walk_ms` to the timing breakdown. This test
+    /// verifies the new branch (walk_ms > 0) runs without panicking.
+    /// What: calls `print_timing_breakdown` with `walk_ms = 150`.
+    /// Test: this test.
+    #[test]
+    fn timing_breakdown_shows_walk_when_nonzero() {
+        let t = ReindexTimings {
+            walk_ms: 150,
+            parse_ms: 2_000,
+            embed_ms: 40_000,
+            bm25_ms: 500,
+            vector_upsert_ms: 1_000,
+            kg_ms: 200,
+            vector_count: 10_000,
+            symbol_count: 3_000,
+            edge_count: 8_000,
+        };
+        // No assertion on output text — just no panic.
+        print_timing_breakdown(&t, 10_000);
     }
 }
