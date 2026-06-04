@@ -134,6 +134,9 @@ pub(super) enum VolumeAccessibility {
 ///
 /// Test: `volume_key_boot_volume`, `volume_key_external_volume`,
 ///       `volume_key_linux_lowercase_volumes_is_root`.
+// `path` is consumed only inside the macOS cfg block; on other platforms it
+// intentionally goes unused (the function always returns `/`).
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
 pub(super) fn volume_key(path: &Path) -> PathBuf {
     // The `/Volumes/<label>` convention is macOS-specific.
     #[cfg(target_os = "macos")]

@@ -14,6 +14,7 @@ use crate::integrations::{
     search_client::{IndexInfo, SearchClient, SearchClientError, SearchResult},
 };
 use async_trait::async_trait;
+use serial_test::serial;
 
 // ─── Mock clients ─────────────────────────────────────────────────────────────
 
@@ -104,6 +105,7 @@ async fn resolve_index_noop_when_explicit() {
 /// resolved value.
 /// Test: this test.
 #[tokio::test]
+#[serial]
 async fn resolve_index_updates_when_match_found() {
     let root = tempfile::tempdir().unwrap();
     // Create .git so find_git_root stops here.
@@ -196,6 +198,7 @@ async fn resolve_index_keeps_default_when_no_match() {
 /// call would consume it.
 /// Test: this test.
 #[tokio::test]
+#[serial]
 async fn wiring_cmd_run_resolve_index_updates_before_pipeline() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join(".git")).unwrap();
@@ -259,6 +262,7 @@ async fn wiring_build_app_state_explicit_index_unchanged() {
 /// of config.search_index return the derived value.
 /// Test: this test.
 #[tokio::test]
+#[serial]
 async fn wiring_cmd_compare_resolve_index_applies_to_all_model_runs() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join(".git")).unwrap();

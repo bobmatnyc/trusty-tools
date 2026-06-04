@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Per-project Claude-Code-compatible MPM orchestration harness (bin: tcode). Phase 0 scaffold; full extraction tracked in #587."
+description = "Per-project Claude-Code-compatible MPM orchestration harness (bin: tcode). Phase 1 leaf/protocol modules extracted from open-mpm (#640). Full extraction tracked in #587."
 publish = false
 
 [[bin]]
@@ -18,8 +18,27 @@ name = "trusty_code"
 path = "src/lib.rs"
 
 [dependencies]
+# Core error handling and async runtime
 anyhow = { workspace = true }
-clap = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+
+# Serialization (events, ipc, perf, build_info)
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Timestamp support (perf, build_info)
+chrono = { workspace = true }
+
+# UUID generation (ipc task IDs)
+uuid = { workspace = true }
+
+# CLI entry point (tcode binary)
+clap = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# Async test runtime (events, build_info, perf async tests)
+tokio = { workspace = true }
+# Temp directories for build_info tests
+tempfile = { workspace = true }

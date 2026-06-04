@@ -53,8 +53,11 @@ fn volume_key_boot_volume() {
 
 /// Why: guard that external macOS volumes extract the `/Volumes/<label>` key.
 /// What: paths under `/Volumes/SSD1` or `/Volumes/ExternalDrive` return
-/// `/Volumes/<label>`.
-/// Test: this test.
+/// `/Volumes/<label>`. This test is gated to macOS because `volume_key` only
+/// applies the `/Volumes/<label>` logic under `#[cfg(target_os = "macos")]`;
+/// on Linux, `/Volumes/...` correctly returns `/` (no macOS-style mounts).
+/// Test: this test — macOS only.
+#[cfg(target_os = "macos")]
 #[test]
 fn volume_key_external_volume() {
     assert_eq!(
