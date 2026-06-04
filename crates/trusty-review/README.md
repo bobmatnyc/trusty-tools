@@ -63,7 +63,7 @@ Endpoints:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Liveness + dependency status |
+| GET | `/health` | Liveness, dependency + inference status (see MCP `review_health` for schema) |
 | GET | `/status` | In-flight count + last error |
 | POST | `/review` | Synchronous on-demand review |
 | POST | `/pr/github/webhook` | GitHub PR webhook (HMAC-validated) |
@@ -110,7 +110,19 @@ Wire into Claude Code via `.mcp.json`:
 }
 ```
 
-Returns a `ReviewResult` JSON object (verdict, findings, token counts, cost estimate).
+Returns a `ReviewResult` JSON object with:
+- `verdict` (APPROVE | APPROVE* | REQUEST_CHANGES | BLOCK | Unknown)
+- `findings` (array of findings with severity + confidence)
+- `input_tokens` / `output_tokens` — LLM token usage
+- `cost_estimate_usd` — estimated API cost
+
+When posted to GitHub, the review comment includes a footer:
+
+```
+🤖 Reviewed by us.anthropic.claude-sonnet-4-6 · tokens ↑1234 ↓567 · est. $0.01
+```
+
+(↑ = input tokens, ↓ = output tokens). The footer appears identically in dry-run output.
 
 #### `review_diff`
 
@@ -131,7 +143,38 @@ Returns a `ReviewResult` JSON object (verdict, findings, token counts, cost esti
 { "name": "review_health", "arguments": {} }
 ```
 
-Returns `{ "status": "ok", "version": "...", "dry_run": true, "reviewer_model": "...", "deps": {...} }`.
+Returns a health status object:
+
+```json
+{
+  "status": "ok",
+  "version": "0.3.2",
+  "dry_run": true,
+  "reviewer_model": "us.anthropic.claude-sonnet-4-6",
+  "inference": "ok",
+  "deps": {
+    "trusty_search": {
+      "required": true,
+      "reachable": true
+    },
+    "trusty_analyze": {
+      "required": false,
+      "reachable": true
+    }
+  }
+}
+```
+
+**Status values:**
+- `ok` — all dependencies healthy and inference reachable.
+- `degraded` — a required dependency (trusty-search) or inference is unreachable.
+- `unknown` — cannot determine health state.
+
+**Inference field values:**
+- `ok` — AWS Bedrock and/or OpenRouter accessible.
+- `unreachable` — both inference providers unreachable (network/DNS error).
+- `auth_error` — inference provider reachable but auth failed (bad API key).
+- `unknown` — inference probe could not determine status.
 
 ## Environment variables
 

@@ -6,6 +6,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.3.2] — 2026-06-03
+
+### Added
+
+- **Model + token-usage footer on posted reviews** (#728) — every posted PR review
+  comment now includes a metadata footer with the reviewer model slug, input/output
+  token counts, and cost estimate (e.g., `🤖 Reviewed by us.anthropic.claude-sonnet-4-6 · tokens ↑1234 ↓567 · est. $0.01`).
+  Single-source-of-truth with the `ReviewResult` struct fields; appears identically in dry-run output.
+
+---
+
+## [0.3.1] — 2026-06-03
+
+### Fixed
+
+- **Required-dependency health gating** (#722) — `review_health` now reports
+  `status: degraded` only when a *required* dependency (trusty-search) is unreachable.
+  Non-required dependencies (trusty-analyze) being unavailable does NOT degrade status.
+  Centralized `compute_status` logic shared by HTTP + MCP paths.
+
+---
+
+## [0.3.0] — 2026-06-03
+
+### Added
+
+- **Inference reachability probe in health endpoint** (#719) — `review_health` now
+  includes an `inference` field (`ok` | `unreachable` | `auth_error` | `unknown`),
+  always-on with 10s TTL and 3s timeout. Covers Bedrock + OpenRouter availability.
+  When inference != ok, service status is degraded.
+
+---
+
 ## [0.2.0] — 2026-06-03
 
 ### Added
