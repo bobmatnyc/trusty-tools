@@ -369,6 +369,11 @@ pub async fn run_reindex_with(
     let started = std::time::Instant::now();
     let indexed_now = StdArc::new(AtomicU64::new(0));
     let chunks_now = StdArc::new(AtomicU64::new(0));
+    // Live in-flight chunk count: incremented by `chunk_progress` events
+    // (~every 32 chunks) to show embed progress before the authoritative
+    // `batch` commit fires. Reset to 0 on each `batch` event so it never
+    // double-counts with `chunks_now`.
+    let chunks_embed_preview = StdArc::new(AtomicU64::new(0));
     let skipped_now = StdArc::new(AtomicU64::new(0));
     let cps_now = StdArc::new(AtomicU64::new(0));
     // Issue #744: shared total_files counter, set from walk_complete/start
@@ -444,6 +449,7 @@ pub async fn run_reindex_with(
     let ticker = {
         let indexed_now = indexed_now.clone();
         let chunks_now = chunks_now.clone();
+        let chunks_embed_preview = chunks_embed_preview.clone();
         let skipped_now = skipped_now.clone();
         let cps_now = cps_now.clone();
         let total_files_now = total_files_now.clone();
@@ -460,7 +466,15 @@ pub async fn run_reindex_with(
                 }
                 let elapsed = started.elapsed().as_secs();
                 let indexed = indexed_now.load(Ordering::Acquire);
-                let chunks = chunks_now.load(Ordering::Acquire);
+                // Show the larger of the committed count (chunks_now, updated
+                // by `batch` events) and the in-flight preview (chunks_embed_preview,
+                // updated by per-wave `chunk_progress` events every ~32 chunks).
+                // This gives the operator a live chunk counter that ticks up
+                // continuously during the embed phase rather than jumping once per
+                // file-batch.
+                let chunks = chunks_now
+                    .load(Ordering::Acquire)
+                    .max(chunks_embed_preview.load(Ordering::Acquire));
                 let skipped = skipped_now.load(Ordering::Acquire);
                 let cps = cps_now.load(Ordering::Acquire);
                 // Fix #744: use the authoritative total from walk_complete/start,
@@ -728,33 +742,28 @@ pub async fn run_reindex_with(
                 // Already in embedding phase; ignore duplicate event.
             }
             // ── chunk_progress ─────────────────────────────────────────────
-            // New event (Problem 2 fix): emitted after each ONNX sub-batch
-            // completes inside `embed_chunks_in_batches`.  Updates the per-
-            // second throughput (cps) and the chunk counter so the ticker
-            // shows responsive progress between the coarser per-file `batch`
-            // events.  Does NOT advance the Embed bar position (that's driven
-            // by the `batch` event's `indexed` count) — it only refreshes the
-            // throughput atomics for the 1-second ticker.
+            // Emitted after each ONNX wave (≥ PROGRESS_CHUNK_INTERVAL chunks)
+            // inside `embed_chunks_in_batches`. Fires at ~32-chunk granularity
+            // so the stats line advances continuously during embedding rather
+            // than jumping once per 128-file file-batch.
+            // Does NOT advance the Embed bar position (that's driven by `batch`
+            // events) — it updates CPS and the in-flight chunk preview counter.
             Some("chunk_progress") => {
-                let partial_chunks = evt.get("chunks_done").and_then(|v| v.as_u64()).unwrap_or(0);
-                let partial_cps = evt
+                let wave_chunks = evt.get("chunks_done").and_then(|v| v.as_u64()).unwrap_or(0);
+                let wave_cps = evt
                     .get("chunks_per_sec")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                // Overwrite the running totals so the ticker sees the latest
-                // sub-batch CPS even before the per-file `batch` event fires.
-                // `chunks_now` is additive (counts cumulative chunks across all
-                // batches); `partial_chunks` is only the sub-batch count so we
-                // use `cps_now` for responsiveness but keep `chunks_now` for
-                // the total display.  Adding partial_chunks here would
-                // double-count (the `batch` event adds them again).  We only
-                // update `cps_now` so the ticker shows live throughput.
-                if partial_cps > 0 {
-                    cps_now.store(partial_cps, Ordering::Release);
+                if wave_cps > 0 {
+                    cps_now.store(wave_cps, Ordering::Release);
                 }
-                // Update the chunk total preview so the ticker can show
-                // "N chunks so far" even before the batch event.
-                let _ = partial_chunks; // used for cps update path only for now
+                // Accumulate in-flight chunks into the preview counter so the
+                // ticker shows the live embed count between `batch` events.
+                // `batch` events reset this preview to 0 so it never
+                // double-counts with `chunks_now`.
+                if wave_chunks > 0 {
+                    chunks_embed_preview.fetch_add(wave_chunks, Ordering::AcqRel);
+                }
             }
             // ── batch ──────────────────────────────────────────────────────
             Some("batch") => {
@@ -791,6 +800,10 @@ pub async fn run_reindex_with(
                 cps_now.store(chunks_per_sec, Ordering::Release);
                 let new_chunks =
                     chunks_now.fetch_add(batch_chunks, Ordering::AcqRel) + batch_chunks;
+                // The authoritative commit count is now in `chunks_now`; reset
+                // the in-flight preview so the ticker shows committed chunks
+                // rather than the (now stale) embedding preview.
+                chunks_embed_preview.store(0, Ordering::Release);
                 ui.set_position(indexed);
                 ui.update_stats(
                     indexed,

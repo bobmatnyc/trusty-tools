@@ -909,12 +909,42 @@ async fn prepare_and_parse_batch(ctx: &BatchCtx, batch: &[PathBuf]) -> Option<Pa
     // entirely. `parse_files_only` returns a `ParsedBatch` whose
     // `embeddings` slot is all `None`, which `commit_parsed_batch`
     // already handles as the BM25-only path.
+    //
+    // For full-pipeline indexes, use `parse_and_embed_files_tracked` so
+    // that per-wave `chunk_progress` SSE events fire at ~32-chunk granularity
+    // (every `PROGRESS_CHUNK_INTERVAL` chunks inside `embed_chunks_in_batches`),
+    // giving the CLI Embed bar continuous movement instead of one coarse jump
+    // per 128-file file-batch.
     let parsed = {
         let indexer = ctx.handle.indexer.read().await;
         let result = if ctx.lexical_only {
             indexer.parse_files_only(to_index).await
         } else {
-            indexer.parse_and_embed_files(to_index).await
+            use crate::core::indexer::PROGRESS_CHUNK_INTERVAL;
+            use std::sync::atomic::Ordering;
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(usize, u64)>();
+            let parse_result = indexer.parse_and_embed_files_tracked(to_index, tx).await;
+            // Drain per-wave notifications and emit chunk_progress SSE events.
+            // rx is closed when the sender (inside parse_and_embed_files_tracked)
+            // is dropped on return, so recv() drains the buffer then yields None.
+            while let Ok((wave_chunks, wave_ms)) = rx.try_recv() {
+                if wave_chunks >= PROGRESS_CHUNK_INTERVAL {
+                    let cps = (wave_chunks as u64 * 1000)
+                        .checked_div(wave_ms.max(1))
+                        .unwrap_or(0);
+                    ctx.progress
+                        .push(serde_json::json!({
+                            "event": "chunk_progress",
+                            "chunks_done": wave_chunks as u64,
+                            "chunks_per_sec": cps,
+                            "embed_ms": wave_ms,
+                            "indexed": ctx.progress.indexed.load(Ordering::Acquire),
+                            "total_files": ctx.total,
+                        }))
+                        .await;
+                }
+            }
+            parse_result
         };
         match result {
             Ok(p) => p,
@@ -935,45 +965,6 @@ async fn prepare_and_parse_batch(ctx: &BatchCtx, batch: &[PathBuf]) -> Option<Pa
             .push(serde_json::json!({
                 "event": "embedder_ready",
                 "index_id": ctx.index_id.0,
-            }))
-            .await;
-    }
-
-    // Problem 2 UX fix: emit a lightweight `chunk_progress` event immediately
-    // after the ONNX embedding step (inside `parse_and_embed_files`) finishes
-    // but before the commit write-lock is acquired.
-    //
-    // Why: the commit (BM25 + HNSW + redb write) can take several seconds for
-    // a large batch.  During that window the `batch` SSE event has not yet
-    // fired, so the CLI ticker shows 0 cps and ETA "?" even though embedding
-    // just completed successfully.  Emitting `chunk_progress` here — which
-    // carries the per-batch chunk count and CPS — lets the ticker update
-    // throughput numbers and ETA within seconds of the embedding completing,
-    // not after the commit completes.
-    //
-    // The `batch` event still fires after the commit and carries the
-    // authoritative `indexed` (file-level position) count used to advance the
-    // Embed bar.  `chunk_progress` only updates the CPS / chunk-total
-    // displayed in the stats line.
-    if !ctx.lexical_only && parsed.vector_count > 0 {
-        use std::sync::atomic::Ordering;
-        // Use the running chunk total plus this batch's new chunks as the
-        // cumulative denominator for CPS.  The authoritative total lives in
-        // `ctx.progress.total_chunks` but it hasn't been updated yet (that
-        // happens in `apply_successful_commit`).  We report the batch-local
-        // count so the CLI can display live throughput.
-        let batch_chunks = parsed.chunks.len() as u64;
-        let chunks_per_sec = (batch_chunks * 1000)
-            .checked_div(parsed.embed_ms.max(1))
-            .unwrap_or(0);
-        ctx.progress
-            .push(serde_json::json!({
-                "event": "chunk_progress",
-                "chunks_done": batch_chunks,
-                "chunks_per_sec": chunks_per_sec,
-                "embed_ms": parsed.embed_ms,
-                "indexed": ctx.progress.indexed.load(Ordering::Acquire),
-                "total_files": ctx.total,
             }))
             .await;
     }

@@ -43,6 +43,9 @@ pub(crate) mod migrations;
 mod persist;
 mod search;
 
+/// Re-export for the reindex orchestrator's progress-interval gate.
+pub(crate) use ingest::PROGRESS_CHUNK_INTERVAL;
+
 #[cfg(test)]
 pub(crate) use search::KG_REFINE_THRESHOLD;
 

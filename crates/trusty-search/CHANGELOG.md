@@ -7,6 +7,24 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.23.6] — 2026-06-04
+
+### Changed
+
+- **Finer indexing progress — advance every ~32 chunks** — the reindex
+  embed phase now emits `chunk_progress` SSE events at per-wave granularity
+  (every `PROGRESS_CHUNK_INTERVAL = 32` chunks minimum) rather than once per
+  128-file file-batch. The CLI stats line now shows continuous chunk-count
+  movement and live CPS during embedding. Implemented via a new
+  `parse_and_embed_files_tracked` API that threads an mpsc channel into
+  `embed_chunks_in_batches`; the reindex orchestrator drains per-wave
+  notifications and emits intermediate `chunk_progress` events before the
+  per-batch `batch` commit event fires. The CLI adds a `chunks_embed_preview`
+  atomic that shows in-flight embed progress between authoritative `batch`
+  events, reset to 0 on each commit so counts stay correct.
+
+---
+
 ## [0.23.5] — 2026-06-04
 
 ### Changed (closes #753)

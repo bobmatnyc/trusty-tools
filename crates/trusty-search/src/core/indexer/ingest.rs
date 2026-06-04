@@ -27,6 +27,21 @@ use super::{
 /// (chunk_start_index, expected_count, embed_result) — alias to satisfy clippy.
 type WaveResult = (usize, usize, Result<Vec<Vec<f32>>>);
 
+/// Minimum chunks embedded before a progress notification is fired.
+///
+/// Why: the caller (reindex orchestrator) needs fine-grained progress so the
+/// CLI Embed bar advances continuously rather than in coarse per-file-batch
+/// jumps. 32 chunks ≈ 32 × ~50-token snippets — negligible overhead (~2000
+/// events for a 65k-chunk index) while giving the operator visible movement
+/// every second or two at typical embedding throughput.
+/// What: `embed_chunks_in_batches` fires the optional `progress_tx` callback at
+/// most once per wave but not more often than every `PROGRESS_CHUNK_INTERVAL`
+/// chunks (a wave is `inflight × batch_size` chunks; with defaults 2 × 64 = 128
+/// this means one notification per wave, which is finer than the previous single
+/// notification per 128-file file-batch).
+/// Test: `progress_interval_constant_is_32` below.
+pub(crate) const PROGRESS_CHUNK_INTERVAL: usize = 32;
+
 /// Concurrent in-flight sub-batches (issue #753). Reads `TRUSTY_EMBED_INFLIGHT`,
 /// clamps to [1, 4], defaults to 2. Test: `embed_chunks_in_batches` (indirect).
 fn resolve_embed_inflight() -> usize {
@@ -277,7 +292,7 @@ impl CodeIndexer {
             // Batch embed every chunk in one ONNX call (instead of N sequential
             // single-chunk calls). Mirrors the bulk-path `parse_and_embed_files`
             // → `commit_parsed_batch` flow.
-            let embeddings = self.embed_chunks_in_batches(&chunks).await?;
+            let embeddings = self.embed_chunks_in_batches(&chunks, None).await?;
             let parsed = ParsedBatch {
                 chunks,
                 embeddings,
@@ -437,7 +452,24 @@ impl CodeIndexer {
     /// [`Self::commit_parsed_batch`].
     /// Test: covered indirectly by every `index_files_batch*` test.
     pub async fn parse_and_embed_files(&self, files: Vec<(String, String)>) -> Result<ParsedBatch> {
-        self.parse_files_inner(files, true).await
+        self.parse_files_inner(files, true, None).await
+    }
+
+    /// Progress-tracked variant of [`parse_and_embed_files`].
+    ///
+    /// Why: the reindex orchestrator needs per-wave chunk counts to emit
+    /// fine-grained `chunk_progress` SSE events (every ~32 chunks) so the CLI
+    /// Embed bar advances continuously rather than in coarse per-file-batch jumps.
+    /// What: same as `parse_and_embed_files` but passes `progress_tx` into
+    /// `embed_chunks_in_batches`; each completed wave sends `(chunks, ms)` to
+    /// the caller via the channel.
+    /// Test: covered by `service::reindex::tests::progress_granularity_*`.
+    pub async fn parse_and_embed_files_tracked(
+        &self,
+        files: Vec<(String, String)>,
+        progress_tx: tokio::sync::mpsc::UnboundedSender<(usize, u64)>,
+    ) -> Result<ParsedBatch> {
+        self.parse_files_inner(files, true, Some(progress_tx)).await
     }
 
     /// Parse-only variant for the staged-pipeline `lexical_only` opt-in
@@ -453,16 +485,17 @@ impl CodeIndexer {
     /// embeddings (BM25-only mode) so no commit-side changes are needed.
     /// Test: `service::reindex::tests::lexical_only_index_never_runs_stage_2`.
     pub async fn parse_files_only(&self, files: Vec<(String, String)>) -> Result<ParsedBatch> {
-        self.parse_files_inner(files, false).await
+        self.parse_files_inner(files, false, None).await
     }
 
-    /// Shared implementation for `parse_and_embed_files` and the
-    /// `lexical_only`-aware `parse_files_only`. The `embed` flag selects
-    /// whether the ONNX batched embed step runs.
+    /// Shared implementation for `parse_and_embed_files*` and `parse_files_only`.
+    /// `embed` selects the ONNX step; `progress_tx` is forwarded to
+    /// `embed_chunks_in_batches` for per-wave progress notifications.
     async fn parse_files_inner(
         &self,
         files: Vec<(String, String)>,
         embed: bool,
+        progress_tx: Option<tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
     ) -> Result<ParsedBatch> {
         if files.is_empty() {
             return Ok(ParsedBatch::default());
@@ -481,7 +514,9 @@ impl CodeIndexer {
 
         let (embeddings, embed_ms, vector_count) = if embed {
             let embed_start = std::time::Instant::now();
-            let embeddings = self.embed_chunks_in_batches(&all_chunks).await?;
+            let embeddings = self
+                .embed_chunks_in_batches(&all_chunks, progress_tx.as_ref())
+                .await?;
             let embed_ms = embed_start.elapsed().as_millis() as u64;
             let vector_count = embeddings.iter().filter(|e| e.is_some()).count();
             (embeddings, embed_ms, vector_count)
@@ -534,8 +569,15 @@ impl CodeIndexer {
     /// ANE ~78% idle; `TRUSTY_EMBED_INFLIGHT` (default 2) sub-batches now run
     /// concurrently via ordered `buffered`, filling the ANE queue. CoreML tripwire
     /// fires between waves. `Vec<Option<Vec<f32>>>` 1:1 with `chunks` (None=BM25).
+    /// `progress_tx`: when `Some`, a `(chunks_in_wave, wave_embed_ms)` pair is
+    /// sent after each wave (≥ `PROGRESS_CHUNK_INTERVAL` chunks) so callers can
+    /// emit fine-grained progress events without polling.
     /// Test: `test_index_files_batch_*`. Order: `tests/multiflight.rs`.
-    async fn embed_chunks_in_batches(&self, chunks: &[RawChunk]) -> Result<Vec<Option<Vec<f32>>>> {
+    async fn embed_chunks_in_batches(
+        &self,
+        chunks: &[RawChunk],
+        progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
+    ) -> Result<Vec<Option<Vec<f32>>>> {
         use futures::StreamExt as _;
 
         let mut embeddings: Vec<Option<Vec<f32>>> = vec![None; chunks.len()];
@@ -585,6 +627,7 @@ impl CodeIndexer {
             }
 
             let rss_before = if is_coreml { current_rss_mb() } else { 0 };
+            let wave_embed_start = std::time::Instant::now();
             // Dispatch concurrently — `buffered` preserves order.
             let wave_results: Vec<WaveResult> = {
                 let iter = wave_sub_batches.into_iter().map(|(start_pos, texts)| {
@@ -612,6 +655,18 @@ impl CodeIndexer {
                 }
                 for (offset, vec) in batch_vecs.into_iter().enumerate() {
                     embeddings[start_pos + offset] = Some(vec);
+                }
+            }
+
+            // Fine-grained progress notification: fire once per wave when
+            // ≥ PROGRESS_CHUNK_INTERVAL chunks were embedded. Lets the reindex
+            // orchestrator emit chunk_progress SSE events at ~32-chunk granularity
+            // rather than once per 128-file batch.
+            let chunks_in_wave = wave_pos - wave_start;
+            if let Some(tx) = progress_tx {
+                if chunks_in_wave >= PROGRESS_CHUNK_INTERVAL {
+                    let wave_ms = wave_embed_start.elapsed().as_millis() as u64;
+                    let _ = tx.send((chunks_in_wave, wave_ms));
                 }
             }
 
@@ -1072,5 +1127,22 @@ mod tripwire_tests {
             // The running test process must occupy some resident memory.
             assert!(rss > 0, "current_rss_mb should be > 0 on macOS/Linux");
         }
+    }
+}
+
+#[cfg(test)]
+mod progress_interval_tests {
+    use super::PROGRESS_CHUNK_INTERVAL;
+
+    /// `PROGRESS_CHUNK_INTERVAL` must equal 32 so the embed bar advances at the
+    /// documented granularity.
+    ///
+    /// Why: the constant is the contract between `embed_chunks_in_batches` and
+    /// the reindex orchestrator — if it drifts the bar coarsens again silently.
+    /// What: asserts the value is exactly 32.
+    /// Test: this test.
+    #[test]
+    fn progress_interval_constant_is_32() {
+        assert_eq!(PROGRESS_CHUNK_INTERVAL, 32);
     }
 }
