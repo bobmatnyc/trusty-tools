@@ -6612,6 +6612,7 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",
+ "trusty-code",
  "trusty-common",
  "trusty-memory",
  "trusty-search",
@@ -10775,10 +10776,15 @@ name = "trusty-code"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

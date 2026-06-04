@@ -27,6 +27,11 @@ include = [
 ]
 
 [dependencies]
+# Why (#640): Phase 1 leaf/protocol modules (events, ipc, perf, intent,
+#      progress, build_info) now live in trusty-code. open-mpm re-exports
+#      them so all existing consumers keep compiling unchanged. The
+#      reconciliation (removing open-mpm's own copies) is tracked in #647.
+trusty-code = { workspace = true }
 # Why: issue #460 unified rpc.discover — host needs the ServiceDescriptor
 #      trait + OpenRpcBuilder, plus the in-process MemoryMcpService and
 #      SearchMcpService impls. trusty-search now aligns on tree-sitter 0.26
