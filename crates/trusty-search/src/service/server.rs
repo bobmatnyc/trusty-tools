@@ -673,6 +673,21 @@ struct HealthResponse {
     /// the available newer version.
     #[serde(skip_serializing_if = "Option::is_none")]
     update_available: Option<String>,
+    /// Running count of warm-boot probe threads abandoned due to a deadline
+    /// timeout (review #727 finding 3, issue #723).
+    ///
+    /// Why: each timed-out volume probe leaks exactly one OS thread (a bare
+    /// `std::thread::spawn` that is intentionally detached so a frozen
+    /// `stat()` cannot consume a tokio pool slot). On a launchd-managed daemon
+    /// that restarts repeatedly these can accumulate silently. Surfacing the
+    /// count here lets operators detect accumulation before it matters —
+    /// typically 0 on a healthy machine; >0 indicates one or more external
+    /// volumes were TCC-blocked during this daemon's lifetime.
+    /// What: mirrors `warm_boot::leaked_probe_thread_count()`. Zero means no
+    /// probes have ever timed out in this process; N means N volumes timed out
+    /// across all warm-boot phases since the daemon started.
+    /// Test: `health_includes_warmboot_leaked_probe_threads` below.
+    warmboot_leaked_probe_threads: usize,
 }
 
 /// Embedding-model metadata surfaced by `GET /health` (issue #38).
@@ -1125,6 +1140,10 @@ async fn health_handler(State(state): State<Arc<SearchAppState>>) -> Json<Health
         // watch the startup storm drain without reading daemon logs.
         background_reindex_queue_depth: crate::service::reindex::background_reindex_queue_depth(),
         update_available,
+        // Review #727 finding 3: surface the count of probe threads abandoned
+        // due to a warm-boot deadline timeout. Zero on healthy machines; >0
+        // indicates TCC-blocked external volumes during this daemon's lifetime.
+        warmboot_leaked_probe_threads: crate::service::warm_boot::leaked_probe_thread_count(),
     })
 }
 
@@ -4490,6 +4509,37 @@ mod tests {
         assert!(
             resp.embedder_info.is_none(),
             "BM25-only daemon must omit embedder_info"
+        );
+    }
+
+    /// Review #727 finding 3 — `/health` surfaces the leaked probe thread count.
+    ///
+    /// Why: operators monitoring a launchd-managed daemon that restarts
+    /// repeatedly need a way to detect probe thread accumulation without
+    /// reading daemon logs. The `warmboot_leaked_probe_threads` field on
+    /// `/health` provides this visibility. This test confirms the field is
+    /// present in the response and reflects the process-global counter.
+    ///
+    /// What: reads the current counter baseline, calls `health_handler`, and
+    /// asserts `warmboot_leaked_probe_threads` equals the current counter value.
+    /// A separate probe-module test (`probe_timeout_increments_leaked_thread_count`)
+    /// verifies the counter itself increments on timeout.
+    ///
+    /// Test: this test.
+    #[tokio::test]
+    async fn health_includes_warmboot_leaked_probe_threads() {
+        use crate::service::warm_boot::leaked_probe_thread_count;
+
+        let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+        let Json(resp) = health_handler(State(state)).await;
+
+        // The field must equal the process-global counter (whatever value it
+        // currently has in this test run). We read the counter just before
+        // calling the handler so both sides see the same snapshot.
+        let expected = leaked_probe_thread_count();
+        assert_eq!(
+            resp.warmboot_leaked_probe_threads, expected,
+            "warmboot_leaked_probe_threads in /health must equal leaked_probe_thread_count()"
         );
     }
 

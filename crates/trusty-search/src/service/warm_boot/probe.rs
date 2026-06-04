@@ -12,22 +12,68 @@
 //! indexes on that volume, so total leaked threads are bounded at ONE per blocked
 //! volume instead of one per index.
 //!
-//! Probe strategy: issue `std::fs::metadata(volume_root)` on a bare OS thread
-//! (NOT a tokio blocking-pool thread — we never want to consume a pool slot for
-//! a syscall that may block forever). Use `std::thread::spawn` + a
-//! `std::sync::mpsc::channel` with a receive timeout to impose the wall-clock
-//! deadline. When the deadline fires the channel-receive returns `Err(Timeout)`;
-//! we log a loud warning and return `VolumeAccessibility::Inaccessible`. The
-//! probe thread is detached (its handle is dropped) — it may remain frozen in the
-//! kernel indefinitely, but it costs exactly one OS thread (not a tokio pool
-//! thread) and does not affect daemon responsiveness.
+//! Probe strategy (review #727 finding 2): probe the SAMPLE INDEX PATH inside the
+//! volume (e.g. `/Volumes/SSD1/Projects/myrepo`) rather than the bare volume
+//! mount root (e.g. `/Volumes/SSD1`). On macOS, `stat("/Volumes/SSD1")` can
+//! succeed even when TCC denies access to files inside the volume, because the
+//! volume mount-point itself is accessible while its contents are not. Probing
+//! the representative deeper path that actually contains index data is what
+//! detects the TCC-blocked-inside-volume scenario that issue #723 targets.
+//!
+//! Issue a `std::fs::metadata` on a bare OS thread (NOT a tokio blocking-pool
+//! thread — we never want to consume a pool slot for a syscall that may block
+//! forever). Use `std::thread::spawn` + a `std::sync::mpsc::channel` with a
+//! receive timeout to impose the wall-clock deadline. When the deadline fires the
+//! channel-receive returns `Err(Timeout)`; we log a loud warning and return
+//! `VolumeAccessibility::Inaccessible`. The probe thread is detached (its handle
+//! is dropped) — it may remain frozen in the kernel indefinitely, but it costs
+//! exactly one OS thread (not a tokio pool thread) and does not affect daemon
+//! responsiveness.
+//!
+//! Leaked-thread visibility (review #727 finding 3): every timed-out probe
+//! increments `LEAKED_PROBE_THREAD_COUNT`, a process-global `AtomicUsize`.
+//! The daemon's `/health` endpoint exposes this count as
+//! `warmboot_leaked_probe_threads` so operators monitoring a launchd-managed
+//! daemon that restarts repeatedly can detect accumulation before it matters.
 //!
 //! Test: `volume_key_boot_volume`, `volume_key_external_volume`,
 //!       `probe_volume_accessible_tempdir`,
-//!       `probe_volume_inaccessible_fast_timeout`.
+//!       `probe_volume_inaccessible_fast_timeout`,
+//!       `probe_uses_sample_path_not_volume_root`,
+//!       `probe_timeout_increments_leaked_thread_count`.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+
+// ── Process-global leaked-probe-thread counter (review #727 finding 3) ───────
+
+/// Running count of OS probe threads that were abandoned due to a deadline
+/// timeout (review #727 finding 3).
+///
+/// Why: each timed-out probe leaks exactly one OS thread (the bare-OS thread
+/// we spawn so a frozen `stat()` cannot consume a tokio pool slot). On a
+/// launchd-managed daemon that restarts repeatedly these can accumulate.
+/// Making the count visible in `/health` lets operators detect accumulation
+/// before it becomes a problem.
+///
+/// What: a process-global `AtomicUsize`, incremented by `probe_volume`
+/// whenever it hits the deadline. Exposed via `leaked_probe_thread_count()`.
+///
+/// Test: `probe_timeout_increments_leaked_thread_count` below.
+static LEAKED_PROBE_THREAD_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Read the current count of abandoned (timed-out) probe threads.
+///
+/// Why: `GET /health` surfaces this as `warmboot_leaked_probe_threads` so
+/// operators can detect leaked thread accumulation across daemon restarts.
+/// What: loads `LEAKED_PROBE_THREAD_COUNT` with `Relaxed` ordering; a
+/// slightly stale value is acceptable for an observability field.
+/// Test: `probe_timeout_increments_leaked_thread_count` verifies the counter
+/// is incremented; the health endpoint test verifies it appears in responses.
+pub fn leaked_probe_thread_count() -> usize {
+    LEAKED_PROBE_THREAD_COUNT.load(Ordering::Relaxed)
+}
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -116,46 +162,66 @@ pub(super) fn volume_probe_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
-/// Probe whether a volume root is accessible within a wall-clock deadline.
+/// Probe whether a volume is accessible within a wall-clock deadline.
 ///
-/// Why (issue #723): the key insight is that we must NOT use `tokio::task::
+/// Why (issue #723, review #727 finding 2): we must NOT use `tokio::task::
 /// spawn_blocking` here — we deliberately use a bare OS thread (`std::thread::
 /// spawn`) so that a frozen syscall never consumes a slot from tokio's blocking
 /// pool. The probe thread is intentionally detached (its handle is dropped); if
 /// it hangs forever it costs exactly one OS thread, not a pool slot, and does
 /// not affect async responsiveness.
 ///
-/// What: spawns a bare OS thread that calls `std::fs::metadata(volume_root)`.
+/// Probing the SAMPLE PATH (review #727 finding 2): on macOS, `stat` on the
+/// volume mount-point root (e.g. `/Volumes/SSD1`) can succeed even when TCC
+/// denies access to files inside the volume. To catch the
+/// TCC-blocked-inside-volume scenario that issue #723 targets, we probe the
+/// representative deeper sample path that actually contains index data
+/// (e.g. `/Volumes/SSD1/Projects/myrepo`) instead of the bare volume root.
+/// `volume_root` is retained for logging only; `probe_path` is what the OS
+/// thread actually calls `metadata` on.
+///
+/// What: spawns a bare OS thread that calls `std::fs::metadata(probe_path)`.
 /// Sends the result (success or error) over an `mpsc::channel`. The caller
-/// waits with `recv_timeout(deadline)`. On timeout returns `Inaccessible` and
-/// logs a loud TCC warning. On receive returns `Accessible` regardless of
-/// whether the metadata call succeeded (an error like `NotFound` or `Permission
-/// Denied` means the kernel DID return — not a hang — so subsequent calls on
-/// that volume will also return promptly).
+/// waits with `recv_timeout(deadline)`. On timeout: increments
+/// `LEAKED_PROBE_THREAD_COUNT`, emits a loud `tracing::warn!`, and returns
+/// `Inaccessible`. On receive: returns `Accessible` regardless of whether
+/// the metadata call succeeded (an ENOENT or EACCES means the kernel DID
+/// return — no hang — so subsequent calls on that volume will also return
+/// promptly). The one leaked OS thread is counted so `/health` can surface
+/// the accumulation (review #727 finding 3).
 ///
 /// Note on "accessible" semantics: `Accessible` means "the volume answers
-/// quickly" — not "you have read permission". An EACCES / EPERM on the
-/// volume root is still "accessible" for our purposes because the kernel
-/// returned rather than freezing. The per-index restore timeout handles any
-/// subsequent permission errors.
+/// quickly" — not "you have read permission". An EACCES / EPERM is still
+/// `Accessible` because the kernel returned rather than freezing. The
+/// per-index restore timeout handles any subsequent permission errors.
 ///
 /// Test: `probe_volume_accessible_tempdir` (real tmpdir, must return
-///       `Accessible`), `probe_volume_inaccessible_fast_timeout` (verify
-///       the `Inaccessible` path with a 0-duration mock approach).
-pub(super) fn probe_volume(volume_root: &Path, deadline: Duration) -> VolumeAccessibility {
+///       `Accessible`), `probe_uses_sample_path_not_volume_root` (mount root
+///       accessible but inner path inaccessible → `Inaccessible`),
+///       `probe_timeout_increments_leaked_thread_count` (counter incremented).
+pub(super) fn probe_volume(
+    volume_root: &Path,
+    probe_path: &Path,
+    deadline: Duration,
+) -> VolumeAccessibility {
     use std::sync::mpsc;
 
-    let root_owned = volume_root.to_path_buf();
+    let probe_owned = probe_path.to_path_buf();
     let (tx, rx) = mpsc::channel::<()>();
 
     // Spawn a bare OS thread. This thread may freeze permanently on a TCC-denied
     // volume. We drop its `JoinHandle` immediately — the thread becomes detached.
     // Cost: one frozen OS thread per blocked volume (not per index). tokio's
     // blocking-pool slots are unaffected.
+    //
+    // We probe `probe_path` (the actual sample index directory inside the volume)
+    // rather than `volume_root` (the mount-point root). On macOS, stat on the
+    // mount root can succeed even when TCC denies inner-file access — probing
+    // the deeper path is what catches the #723 scenario (review #727 finding 2).
     let _ = std::thread::spawn(move || {
         // We only care whether the metadata call returned at all, not the value.
         // An error (NotFound, PermissionDenied) still means the kernel answered.
-        let _ = std::fs::metadata(&root_owned);
+        let _ = std::fs::metadata(&probe_owned);
         // Send a "done" signal. Ignore send errors: the receiver may have
         // already timed out and been dropped.
         let _ = tx.send(());
@@ -163,7 +229,20 @@ pub(super) fn probe_volume(volume_root: &Path, deadline: Duration) -> VolumeAcce
 
     match rx.recv_timeout(deadline) {
         Ok(()) => VolumeAccessibility::Accessible,
-        Err(_timeout_or_disconnect) => VolumeAccessibility::Inaccessible,
+        Err(_timeout_or_disconnect) => {
+            // The probe thread did not return within the deadline — it is
+            // abandoned (detached). Increment the process-global counter so
+            // `/health` can surface the accumulation (review #727 finding 3).
+            let prev = LEAKED_PROBE_THREAD_COUNT.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                "warm-boot: probe thread for volume {} (probing {}) timed out and was abandoned \
+                 (leaked_probe_threads total: {}). (issue #723, review #727)",
+                volume_root.display(),
+                probe_path.display(),
+                prev + 1,
+            );
+            VolumeAccessibility::Inaccessible
+        }
     }
 }
 
@@ -172,15 +251,24 @@ pub(super) fn probe_volume(volume_root: &Path, deadline: Duration) -> VolumeAcce
 /// Probe every distinct volume in `paths` and return the set of inaccessible
 /// volume keys.
 ///
-/// Why (issue #723): a single call site in `mod.rs::collect_colocated_entries`
-/// and `start.rs::restore_indexes` can obtain the full inaccessible set before
-/// any restore work begins, then skip index entries that live on blocked volumes
-/// without issuing further `open()` calls.
+/// Why (issue #723, review #727 finding 2): a single call site in
+/// `mod.rs::collect_colocated_entries` and `start.rs::restore_indexes` can
+/// obtain the full inaccessible set before any restore work begins, then skip
+/// index entries that live on blocked volumes without issuing further `open()`
+/// calls.
 ///
-/// What: extracts distinct volume keys (via `volume_key`), probes each key once
-/// (via `probe_volume`), logs the outcome, and returns a
-/// `HashSet<PathBuf>` of inaccessible volume keys. An empty set means all
-/// probed volumes answered within the deadline.
+/// Probe target (review #727 finding 2): each volume is probed via its
+/// representative SAMPLE INDEX PATH (the actual deeper path that contains index
+/// data), not the bare volume mount-point root. On macOS, `stat` on
+/// `/Volumes/SSD1` can succeed even when TCC denies access to files inside the
+/// volume — probing the deeper path (e.g. `/Volumes/SSD1/Projects/myrepo`) is
+/// what actually exercises the access that will be needed for index restoration.
+///
+/// What: extracts distinct volume keys (via `volume_key`), keeping one sample
+/// path per key as the probe target. Probes each volume once (via
+/// `probe_volume`), logs the outcome, and returns a `HashSet<PathBuf>` of
+/// inaccessible volume keys. An empty set means all probed volumes answered
+/// within the deadline.
 ///
 /// Probing is sequential because each probe may block for up to `deadline`
 /// seconds and firing all probes in parallel would spawn N OS threads at once
@@ -188,7 +276,8 @@ pub(super) fn probe_volume(volume_root: &Path, deadline: Duration) -> VolumeAcce
 /// fine; for many volumes the total wait is at most `N × deadline`.
 ///
 /// Test: `probe_all_volumes_accessible_returns_empty`,
-///       `probe_all_volumes_distinct_keys`.
+///       `probe_all_volumes_distinct_keys`,
+///       `probe_uses_sample_path_not_volume_root`.
 pub(super) fn probe_all_volumes(
     paths: &[PathBuf],
     deadline: Duration,
@@ -196,6 +285,9 @@ pub(super) fn probe_all_volumes(
     use std::collections::{HashMap, HashSet};
 
     // Group paths by volume key — we probe each volume key at most once.
+    // The sample_path is the representative deeper path used as the actual
+    // probe target (review #727 finding 2): the first index path seen for
+    // this volume key.
     let mut volume_to_sample: HashMap<PathBuf, &PathBuf> = HashMap::new();
     for path in paths {
         let key = volume_key(path);
@@ -205,20 +297,24 @@ pub(super) fn probe_all_volumes(
     let mut inaccessible: HashSet<PathBuf> = HashSet::new();
 
     for (vol_key, sample_path) in &volume_to_sample {
-        let accessibility = probe_volume(vol_key, deadline);
+        // Probe the deeper sample path (not the bare volume root) so that
+        // TCC denials on inner files are detected (review #727 finding 2).
+        let accessibility = probe_volume(vol_key, sample_path, deadline);
         match accessibility {
             VolumeAccessibility::Accessible => {
                 tracing::debug!(
-                    "warm-boot: volume probe OK for {} (sample path: {})",
+                    "warm-boot: volume probe OK for {} (probed sample path: {})",
                     vol_key.display(),
                     sample_path.display(),
                 );
             }
             VolumeAccessibility::Inaccessible => {
+                // probe_volume already emitted a warn with the leaked-thread
+                // count. Emit the actionable operator hint here.
                 let is_ext = super::scan::is_likely_external_volume(vol_key);
                 if is_ext {
                     tracing::warn!(
-                        "warm-boot: volume probe TIMED OUT for {} (>{:.0}s) — \
+                        "warm-boot: volume probe TIMED OUT for {} (>{:.0}s, probed: {}) — \
                          this is likely a TCC denial on an external volume under launchd. \
                          ALL indexes on this volume will be SKIPPED this boot. \
                          HINT: grant Full Disk Access to the launchd agent in \
@@ -226,15 +322,17 @@ pub(super) fn probe_all_volumes(
                          or move indexes off the external volume. (issue #723)",
                         vol_key.display(),
                         deadline.as_secs_f32(),
+                        sample_path.display(),
                     );
                 } else {
                     tracing::warn!(
-                        "warm-boot: volume probe TIMED OUT for {} (>{:.0}s) — \
+                        "warm-boot: volume probe TIMED OUT for {} (>{:.0}s, probed: {}) — \
                          the volume may be on a network, slow, or permission-restricted \
                          filesystem. ALL indexes on this volume will be SKIPPED this boot. \
                          (issue #723)",
                         vol_key.display(),
                         deadline.as_secs_f32(),
+                        sample_path.display(),
                     );
                 }
                 inaccessible.insert(vol_key.clone());
@@ -248,179 +346,5 @@ pub(super) fn probe_all_volumes(
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    //! Tests for the per-volume probe (issue #723).
-    //!
-    //! Why: the key invariants are:
-    //! 1. `volume_key` correctly extracts `/Volumes/<label>` for external paths
-    //!    and `/` for everything else.
-    //! 2. `probe_volume` returns `Accessible` for a real, readable directory.
-    //! 3. `probe_all_volumes` deduplicates by volume key.
-    //!
-    //! We cannot reproduce the TCC-hang in unit tests, so the `Inaccessible`
-    //! path is tested via direct inspection of the timeout branch with a
-    //! vanishingly short deadline. A 1ms deadline on a real `/tmp` tempdir will
-    //! sometimes succeed (race), so we do NOT assert `Inaccessible` there —
-    //! instead we test `probe_volume` only with real-world accessible paths.
-    //! The `Inaccessible` branch is exercised in `restore.rs`'s responsiveness
-    //! test which already uses `std::thread::sleep` to simulate a blocked probe.
-    //!
-    //! Test: `cargo test -p trusty-search -- warm_boot::probe`.
-
-    use super::*;
-
-    // ── volume_key ────────────────────────────────────────────────────────────
-
-    /// Why: guard that boot-volume and non-macOS paths return `/`.
-    /// What: paths starting with `/tmp`, `/usr`, `/home` return `/`.
-    /// Test: this test.
-    #[test]
-    fn volume_key_boot_volume() {
-        assert_eq!(
-            volume_key(Path::new("/tmp/trusty-test")),
-            PathBuf::from("/"),
-            "/tmp/... must produce volume key /"
-        );
-        assert_eq!(
-            volume_key(Path::new("/usr/local/bin")),
-            PathBuf::from("/"),
-            "/usr/... must produce volume key /"
-        );
-        assert_eq!(
-            volume_key(Path::new("/")),
-            PathBuf::from("/"),
-            "root itself must produce volume key /"
-        );
-        assert_eq!(
-            volume_key(Path::new("/home/user/projects")),
-            PathBuf::from("/"),
-            "/home/... must produce volume key /"
-        );
-    }
-
-    /// Why: guard that external macOS volumes extract the `/Volumes/<label>` key.
-    /// What: paths under `/Volumes/SSD1` or `/Volumes/ExternalDrive` return
-    /// `/Volumes/<label>`.
-    /// Test: this test.
-    #[test]
-    fn volume_key_external_volume() {
-        assert_eq!(
-            volume_key(Path::new("/Volumes/SSD1/Projects/trusty-tools")),
-            PathBuf::from("/Volumes/SSD1"),
-            "/Volumes/SSD1/... must produce volume key /Volumes/SSD1"
-        );
-        assert_eq!(
-            volume_key(Path::new("/Volumes/ExternalDrive/code")),
-            PathBuf::from("/Volumes/ExternalDrive"),
-            "/Volumes/ExternalDrive/... must produce volume key /Volumes/ExternalDrive"
-        );
-        assert_eq!(
-            volume_key(Path::new("/Volumes/SSD1")),
-            PathBuf::from("/Volumes/SSD1"),
-            "/Volumes/SSD1 itself must produce volume key /Volumes/SSD1"
-        );
-    }
-
-    // ── probe_volume ──────────────────────────────────────────────────────────
-
-    /// Why: the most critical invariant — a real accessible directory must
-    /// return `Accessible` within a generous deadline.
-    /// What: create a tempdir, probe it with a 5s deadline; assert `Accessible`.
-    /// Test: this test.
-    #[test]
-    fn probe_volume_accessible_tempdir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let result = probe_volume(tmp.path(), Duration::from_secs(5));
-        assert_eq!(
-            result,
-            VolumeAccessibility::Accessible,
-            "a real tmpdir must be accessible within 5s"
-        );
-    }
-
-    /// Why: a path that does not exist returns an OS error immediately (not a
-    /// hang), so the probe should return `Accessible` — the kernel answered.
-    /// What: probe a nonexistent path with a 5s deadline; assert `Accessible`
-    /// (the probe returns fast even on error).
-    /// Test: this test.
-    #[test]
-    fn probe_volume_nonexistent_path_returns_accessible() {
-        // On all tested OSes, `metadata` on a nonexistent path returns ENOENT
-        // immediately — there is no hang. The probe thread sends () promptly.
-        let result = probe_volume(
-            Path::new("/tmp/trusty-723-definitely-not-here-xyz99999"),
-            Duration::from_secs(5),
-        );
-        assert_eq!(
-            result,
-            VolumeAccessibility::Accessible,
-            "a NotFound metadata call must return promptly (kernel answered), not time out"
-        );
-    }
-
-    // ── probe_all_volumes ────────────────────────────────────────────────────
-
-    /// Why: all-accessible paths must produce an empty inaccessible set.
-    /// What: provide several paths under /tmp; assert no inaccessible volumes.
-    /// Test: this test.
-    #[test]
-    fn probe_all_volumes_accessible_returns_empty() {
-        let paths = vec![
-            PathBuf::from("/tmp/a"),
-            PathBuf::from("/tmp/b"),
-            PathBuf::from("/usr/local"),
-        ];
-        let inaccessible = probe_all_volumes(&paths, Duration::from_secs(5));
-        assert!(
-            inaccessible.is_empty(),
-            "all boot-volume paths must be accessible; got: {inaccessible:?}"
-        );
-    }
-
-    /// Why: paths on different volumes must produce distinct volume keys and
-    /// each be probed exactly once (deduplicated).
-    /// What: three paths — two under `/tmp` (same volume key `/`) and one
-    /// hypothetical `/Volumes/SSD1/...`. Assert the volume key extraction works.
-    /// We do NOT assert the SSD1 probe result (would require the hardware).
-    /// Test: this test — validates deduplication at the key level.
-    #[test]
-    fn probe_all_volumes_distinct_keys() {
-        // Two paths on the same volume must deduplicate to one key.
-        let paths = vec![
-            PathBuf::from("/tmp/proj-a"),
-            PathBuf::from("/tmp/proj-b"),
-            PathBuf::from("/usr/local/bin"),
-        ];
-        // All on boot volume ("/"), so one unique key.
-        let mut keys: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-        for p in &paths {
-            keys.insert(volume_key(p));
-        }
-        assert_eq!(keys.len(), 1, "3 boot-volume paths must yield 1 unique key");
-        assert!(keys.contains(&PathBuf::from("/")));
-    }
-
-    // ── volume_probe_timeout ─────────────────────────────────────────────────
-
-    /// Why: guard that the env var reader parses valid values and falls back.
-    /// What: set `TRUSTY_WARMBOOT_VOLUME_PROBE_SECS=7`, assert Duration is 7s;
-    /// unset, assert Duration is the default 5s.
-    /// Note: `serial` prevents racing with other env-var mutators.
-    /// Test: this test.
-    #[test]
-    #[serial_test::serial]
-    fn volume_probe_timeout_parses_env_var() {
-        unsafe { std::env::set_var("TRUSTY_WARMBOOT_VOLUME_PROBE_SECS", "7") };
-        assert_eq!(
-            volume_probe_timeout(),
-            Duration::from_secs(7),
-            "must parse 7 from env var"
-        );
-        unsafe { std::env::remove_var("TRUSTY_WARMBOOT_VOLUME_PROBE_SECS") };
-        assert_eq!(
-            volume_probe_timeout(),
-            Duration::from_secs(5),
-            "must fall back to 5s default when env var is absent"
-        );
-    }
-}
+#[path = "probe_tests.rs"]
+mod tests;

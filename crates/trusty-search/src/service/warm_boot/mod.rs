@@ -21,6 +21,8 @@ pub(super) mod probe;
 pub mod restore;
 mod scan;
 
+pub use probe::leaked_probe_thread_count;
+
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;

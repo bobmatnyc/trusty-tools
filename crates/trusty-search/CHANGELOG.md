@@ -7,6 +7,30 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.23.2] — 2026-06-04
+
+### Fixed
+
+- **Probe deeper index path for TCC detection** (review #727 finding 2, issue
+  #723) — the per-volume warm-boot probe now calls `stat` on the representative
+  sample index path inside the volume (e.g.
+  `/Volumes/SSD1/Projects/myrepo`) instead of the bare volume mount-point root
+  (`/Volumes/SSD1`). On macOS, `stat` on the volume root can succeed even when
+  TCC denies access to files inside the volume; probing the deeper path is what
+  actually detects the TCC-blocked-inside-volume scenario that issue #723
+  targets. The once-per-volume design (at most one leaked thread per blocked
+  volume) is preserved.
+
+- **Surface leaked probe-thread count in `/health`** (review #727 finding 3,
+  issue #723) — a timed-out volume probe now increments a process-global
+  `LEAKED_PROBE_THREAD_COUNT` counter and emits a `tracing::warn!` with the
+  running total. The counter is exposed in `GET /health` as
+  `warmboot_leaked_probe_threads` (integer, always present, zero on healthy
+  machines), giving operators visibility into probe thread accumulation on
+  launchd-managed daemons that restart repeatedly.
+
+---
+
 ## [0.23.0] — 2026-06-03
 
 ### Changed
