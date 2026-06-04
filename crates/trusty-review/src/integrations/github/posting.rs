@@ -31,11 +31,15 @@ use crate::models::{Finding, ReviewResult, Verdict};
 /// Why: code-intelligence embeds a machine-readable JSON block in the review
 /// body so calibration tooling and re-runs can parse the verdict without
 /// re-deriving it from prose.  We mirror that contract exactly.
-/// What: a slim projection of `ReviewResult` — verdict, the per-finding summary,
-/// and the model — kept small to bound comment size.
+/// What: a slim projection of `ReviewResult` — grade, verdict, findings, and
+/// model — kept small to bound comment size.  The `grade` field was added in
+/// 0.3.4 (#732).
 /// Test: `body_json_block_roundtrips`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerdictBlock {
+    /// Letter grade (e.g. `"B+"`, `"F"`); `None` only for legacy results.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grade: Option<String>,
     /// Board-grade verdict string (e.g. `"APPROVE"`, `"BLOCK"`).
     pub verdict: Verdict,
     /// Reviewer model id used.
@@ -51,10 +55,11 @@ impl VerdictBlock {
     ///
     /// Why: the comment must not leak transient pipeline internals; this picks
     /// only the fields a reader or calibration tool needs.
-    /// What: clones verdict, model, version, and findings out of the result.
+    /// What: clones grade, verdict, model, version, and findings out of the result.
     /// Test: `body_json_block_roundtrips`.
     fn from_result(result: &ReviewResult) -> Self {
         Self {
+            grade: result.grade.clone(),
             verdict: result.verdict.clone(),
             model: result.model.clone(),
             review_version: result.review_version.clone(),
@@ -78,15 +83,27 @@ pub const REVIEW_SIGNATURE: &str = "<!-- trusty-review -->";
 /// Why: the body must be readable by humans (prose summary, verdict, findings)
 /// and parseable by tooling (the fenced JSON block), matching code-intelligence
 /// so existing consumers keep working.
-/// What: renders the signature, a verdict heading, the LLM prose summary (or a
-/// fallback line), a findings list, and a trailing fenced ```json block holding
-/// a `VerdictBlock`.
-/// Test: `body_contains_prose_and_json_block`, `body_contains_signature`.
+/// What: renders the signature, a grade+verdict heading, the LLM prose summary
+/// (or a fallback line), a findings list, a trailing fenced ```json block holding
+/// a `VerdictBlock`, and a footer with grade/model/token telemetry (#732).
+/// Footer format: `Grade: B+ · 🤖 Reviewed by \`<model>\` · tokens ↑N ↓M · est. $X`
+/// Test: `body_contains_prose_and_json_block`, `body_contains_signature`,
+/// `body_footer_contains_grade`.
 pub fn build_review_comment_body(result: &ReviewResult) -> String {
     let mut md = String::with_capacity(1024);
     md.push_str(REVIEW_SIGNATURE);
     md.push('\n');
-    md.push_str(&format!("## trusty-review: `{}`\n\n", result.verdict));
+
+    // Heading: show grade (if present) + verdict.
+    let grade_prefix = result
+        .grade
+        .as_deref()
+        .map(|g| format!("Grade: {g} | "))
+        .unwrap_or_default();
+    md.push_str(&format!(
+        "## trusty-review: {}`{}`\n\n",
+        grade_prefix, result.verdict
+    ));
 
     // Prose summary — the LLM review body, or a fallback if empty.
     if result.review_body.trim().is_empty() {
@@ -135,7 +152,33 @@ pub fn build_review_comment_body(result: &ReviewResult) -> String {
         }
     }
 
+    // Footer with grade, model, token counts, and cost (#732 + #728).
+    // Format: `Grade: B+ · 🤖 Reviewed by `model` · tokens ↑N ↓M · est. $X`
+    md.push('\n');
+    md.push_str(&build_review_footer(result));
+    md.push('\n');
+
     md
+}
+
+/// Build the review footer line containing grade, model, and token telemetry.
+///
+/// Why: surfaces the grade and telemetry in a single, scannable line at the
+/// bottom of the review comment so reviewers can quickly identify the grade and
+/// understand the review cost.  Single source of truth for the footer format so
+/// tests can assert the exact string.
+/// What: returns a string of the form
+/// `Grade: B+ · 🤖 Reviewed by \`model\` · tokens ↑N ↓M · est. $X`
+/// The grade is shown as "Grade: ?" when absent (legacy result pre-#732).
+/// Test: `body_footer_contains_grade`.
+pub fn build_review_footer(result: &ReviewResult) -> String {
+    let grade_part = result.grade.as_deref().unwrap_or("?");
+    // Strip provider prefix from the model id for a cleaner display.
+    let model_display = result.model.split('/').next_back().unwrap_or(&result.model);
+    format!(
+        "Grade: {grade_part} · 🤖 Reviewed by `{model_display}` · tokens ↑{} ↓{} · est. ${:.6}",
+        result.input_tokens, result.output_tokens, result.cost_estimate_usd,
+    )
 }
 
 // ─── Posting ────────────────────────────────────────────────────────────────────
@@ -338,5 +381,68 @@ mod tests {
             .send()
             .await;
         assert!(resp.is_err(), "connection to port 1 must fail");
+    }
+
+    /// Footer rendering: exact format for grade B+, specific model, and token counts.
+    ///
+    /// Why: the footer string is a product contract; any change to its format must
+    /// be intentional and visible in tests.  This test pins the exact string so
+    /// regressions are caught immediately.
+    /// Model `us.anthropic.claude-sonnet-4-6` (stored without the `bedrock/` routing
+    /// prefix, which is stripped by `build_review_prompt` before storage).
+    #[test]
+    fn body_footer_contains_grade() {
+        let mut result = sample_result();
+        result.grade = Some("B+".to_string());
+        // The model stored in ReviewResult has the routing prefix already stripped
+        // (done in build_review_prompt → strip_provider_prefix).
+        result.model = "us.anthropic.claude-sonnet-4-6".to_string();
+        result.input_tokens = 13499;
+        result.output_tokens = 1718;
+        result.cost_estimate_usd = 0.066267;
+        let footer = build_review_footer(&result);
+        // Verify grade prefix, model, and tokens.
+        assert!(
+            footer.starts_with("Grade: B+"),
+            "footer must start with grade: {footer}"
+        );
+        assert!(
+            footer.contains("us.anthropic.claude-sonnet-4-6"),
+            "footer must show model: {footer}"
+        );
+        assert!(
+            footer.contains("↑13499"),
+            "footer must show input tokens: {footer}"
+        );
+        assert!(
+            footer.contains("↓1718"),
+            "footer must show output tokens: {footer}"
+        );
+        // Verify exact format string matches spec (#732).
+        let expected = "Grade: B+ · 🤖 Reviewed by `us.anthropic.claude-sonnet-4-6` · tokens ↑13499 ↓1718 · est. $0.066267";
+        assert_eq!(footer, expected, "footer must match exact format");
+    }
+
+    #[test]
+    fn body_comment_shows_grade_in_heading() {
+        let mut result = sample_result();
+        result.grade = Some("B+".to_string());
+        let body = build_review_comment_body(&result);
+        assert!(
+            body.contains("Grade: B+"),
+            "review body heading must include grade: {body}"
+        );
+    }
+
+    #[test]
+    fn body_comment_no_grade_omits_grade_prefix() {
+        let mut result = sample_result();
+        result.grade = None;
+        let body = build_review_comment_body(&result);
+        // When grade is absent the heading should only show the verdict.
+        assert!(
+            body.contains("## trusty-review: `REQUEST_CHANGES`"),
+            "heading without grade must show bare verdict"
+        );
     }
 }

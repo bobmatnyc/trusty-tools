@@ -1,33 +1,10 @@
-//! Review pipeline runner — the top-level orchestration loop.
+//! Review pipeline runner — top-level orchestration loop.
 //!
-//! Why: wires together diff loading, context retrieval, prompt construction,
-//! LLM call, parsing, and (Phase 1, #582) the live-post-or-dry-run-log decision
-//! into a single `run_review` function that the CLI `run`/`compare` commands and
-//! the webhook service all call.
+//! Why: single entry point for CLI `run`/`compare` and the webhook service.
+//! What: diff → context gate (#590) → context → LLM → parse → grade (#732)
+//! → verify (#583) → post-or-log (#582).  Returns a `ReviewResult` on all paths.
 //!
-//! What: `run_review` runs the pipeline (diff → required-context gate → context
-//! → LLM → parse → grade) then either posts a GitHub PR review comment (live) or
-//! writes a dry-run log, gated by the trigger decision and the SHA-keyed dedup
-//! store.  Returns a `ReviewResult` even on pipeline errors (fail-safe
-//! APPROVE/UNKNOWN).
-//!
-//! Required-context contract (#590): trusty-search AND trusty-analyze are
-//! REQUIRED by default.  Before gathering context, `preflight_context` probes
-//! both; if either is unreachable the review is SKIPPED loudly
-//! (`status = Skipped`, no LLM call, never posted) rather than degrading to a
-//! context-free, false-confidence verdict.  An operator may opt a dependency out
-//! (`config.context.require_*`), in which case the run proceeds but is tagged
-//! `Degraded` and loudly labelled non-authoritative.
-//!
-//! Phase 2 (#583) adds the per-finding verification round between verdict parse
-//! and finalisation: candidate findings are confirmed/refuted by the verifier
-//! model and the verdict is re-derived so refuted blocking findings relax it.
-//!
-//! Deferred to later phases (stubs/comments intact):
-//!  - Suppression filtering + per-repo `.github/code-intelligence.yml` (Phase 3 / #584)
-//!  - Tracker-issue upsert (Phase 4 / #585)
-//!  - JIRA/Confluence/APEX/GH-Issues context (Phase 6 / #550)
-//!  - Multi-pass / enrichment rounds
+//! Deferred: suppression (#584), issue upsert (#585), multi-pass enrichment.
 //!
 //! Test: `run_review_with_fake_provider_approves`,
 //! `run_review_fail_safe_on_llm_error`,
@@ -51,7 +28,8 @@ use crate::{
         context_gate::{GateOutcome, degraded_banner, preflight_context},
         diff::{DiffSource, extract_changed_files, extract_identifiers, load_diff, truncate_diff},
         diff_analyzer::DiffAnalyzer, // noise filter (Stages A+B); #624
-        grade::derive_verdict,
+        grade::derive_verdict_with_grade,
+        letter_grade::default_grade_for_verdict,
         output::{print_review_result, write_review_log},
         parser::parse_review_response,
         post::{PostContext, finalize_review},
@@ -345,32 +323,16 @@ pub async fn run_review(
         );
     }
 
-    // ── Step 7b: apply severity-anchored floor (grading calibration) ───────
-    // Derive the final verdict from (model-proposed, findings).  The floor
-    // prevents the model from silently softening Critical/High issues to APPROVE*.
-    // UNKNOWN is always preserved as-is (diff unassessable — no floor applies).
-    let final_verdict = if parsed.is_fail_safe {
-        // Fail-safe path: the parser couldn't extract findings, so we cannot
-        // apply the severity floor.  Preserve the fail-safe APPROVE.
-        parsed.verdict
-    } else {
-        derive_verdict(parsed.verdict, &parsed.findings)
-    };
-
+    // ── Step 7b–7d: grade derivation, verification, grade reconciliation ─────
+    let (final_verdict, final_grade) = apply_grade_and_floor(&parsed);
     info!(
         verdict = %final_verdict,
+        grade = %final_grade,
         findings_count = parsed.findings.len(),
-        "final verdict after severity-anchored floor"
+        "final verdict + grade after severity-anchored floor"
     );
-
     let mut findings = parsed.findings;
-
-    // ── Step 7c: per-finding verification round (Phase 2, #583) ────────────
-    // Confirm or refute candidate findings with the verifier model; refuted
-    // findings are demoted below the advisory tier and the verdict is re-derived
-    // so a BLOCK whose only blocking finding was refuted relaxes.  `maybe_verify`
-    // applies the enabled / verifier-wired gating and returns the verdict
-    // unchanged when the round is skipped.
+    // 7c: verification round — re-derives verdict from surviving findings.
     result.verdict = maybe_verify(
         config,
         deps.verifier.as_ref(),
@@ -380,21 +342,53 @@ pub async fn run_review(
     )
     .await;
     result.findings = findings;
+    // 7d: clamp grade to stay consistent with the post-verification verdict.
+    result.grade = Some(
+        crate::pipeline::letter_grade::clamp_grade_to_verdict(final_grade, &result.verdict)
+            .to_string(),
+    );
 
     finalize_run(result, config, &input, deps.dedup.as_ref()).await
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Fetch PR metadata from GitHub and build a `ReviewPrMeta` plus the head SHA.
+/// Derive (verdict, grade) from a `ParsedReview` using grade + severity floor.
 ///
-/// Why: centralises the GitHub API call and mapping from `PrMetadata` to the
-/// lighter-weight `ReviewPrMeta` the prompt needs, and surfaces the head SHA so
-/// the runner can key the dedup store.  The token is resolved through the
-/// dual-mode auth abstraction (#582) so it works in both CLI and service modes.
-/// What: selects the auth strategy from `run_mode`, resolves a token, and calls
-/// `fetch_pr_metadata`; on any error the caller falls back to empty metadata.
-/// Test: no real-network test; tested indirectly via mock in integration tests.
+/// Why: extracted to keep `run_review` under the line cap and make it testable.
+/// What: fail-safe → (APPROVE, default grade); normal → resolves LLM grade string
+/// (or default), calls `derive_verdict_with_grade` for max(grade, model) + floor.
+/// Test: covered by runner integration tests.
+fn apply_grade_and_floor(
+    parsed: &crate::pipeline::parser::ParsedReview,
+) -> (Verdict, crate::pipeline::letter_grade::Grade) {
+    if parsed.is_fail_safe {
+        let v = parsed.verdict.clone();
+        let g = default_grade_for_verdict(&v);
+        return (v, g);
+    }
+    let grade = parsed
+        .grade
+        .as_deref()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| {
+            let g = default_grade_for_verdict(&parsed.verdict);
+            warn!(
+                verdict = %parsed.verdict,
+                default_grade = %g,
+                "LLM grade absent or unparseable — using default for verdict"
+            );
+            g
+        });
+    derive_verdict_with_grade(parsed.verdict.clone(), grade, &parsed.findings)
+}
+
+/// Fetch PR metadata and return `(ReviewPrMeta, head_sha)`.
+///
+/// Why: centralises the GitHub API call and head-SHA surfacing so the runner
+/// can key the dedup store.
+/// What: resolves token via run_mode, calls `fetch_pr_metadata`.
+/// Test: tested indirectly via mock in integration tests.
 async fn fetch_github_pr_meta(
     config: &ReviewConfig,
     owner: &str,
@@ -459,17 +453,11 @@ fn abort_dry(
     result
 }
 
-/// Apply the post-or-log finalisation for a completed review.
+/// Apply post-or-log finalisation (Phase 1, #582) for a completed review.
 ///
-/// Why: the success exit path of `run_review` must go through the same
-/// post-or-log decision (Phase 1, #582) so the live/dry policy and fail-safe
-/// error handling are applied exactly once and consistently.
-/// What: reads the PR coordinates + head SHA off the result, builds a
-/// `PostContext`, and delegates to `pipeline::post::finalize_review`, threading
-/// the trigger decision, the `allow_posting` belt, the run mode, and the
-/// optional dedup store.
-/// Test: branch selection is covered by `post::tests`; runner tests assert the
-/// dry-run side effects.
+/// Why: single exit path so live/dry policy is applied exactly once.
+/// What: builds `PostContext` from result fields, delegates to `finalize_review`.
+/// Test: `post::tests` cover branch selection; runner tests assert dry-run.
 async fn finalize_run(
     result: ReviewResult,
     config: &ReviewConfig,

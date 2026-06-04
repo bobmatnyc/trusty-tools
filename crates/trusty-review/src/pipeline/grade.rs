@@ -28,10 +28,22 @@
 //! `Verdict::Unknown` is always preserved (pass-through) — the model has
 //! signalled the diff was unassessable and no rule applies.
 //!
-//! What: exposes `derive_verdict` which accepts a model-proposed `Verdict` and
-//! a slice of `Finding` values (each carrying an `Effort` severity proxy), then
-//! returns the final verdict.  The `Effort` enum is the existing in-model
-//! severity proxy:
+//! ## Grade integration (#732)
+//!
+//! `derive_verdict_with_grade` is the new entry point for the full pipeline.
+//! It accepts the LLM's model-proposed verdict AND the grade, then:
+//!
+//!   1. Derives the grade-implied verdict via `letter_grade::verdict_for_grade`.
+//!   2. Takes the stricter of (grade-implied, model-proposed) as the new "model input".
+//!   3. Applies the existing severity floor via `derive_verdict`.
+//!
+//! Precedence: final_verdict = severity_floor(max(grade_verdict, model_verdict))
+//! This ensures the final verdict is NEVER weaker than either the grade or the
+//! severity floor independently demands.
+//!
+//! What: exposes `derive_verdict` (unchanged; used by verification re-derivation)
+//! and `derive_verdict_with_grade` (new entry point for the runner).
+//! The `Effort` enum is the existing in-model severity proxy:
 //!
 //! - `Effort::High`   → Critical or High severity finding
 //! - `Effort::Medium` → Medium severity finding
@@ -45,11 +57,15 @@
 //! `grade_floor_overrides_model_approve`,
 //! `grade_model_block_kept_when_no_critical_finding`,
 //! `grade_low_confidence_all_medium_yields_approve`,
-//! `grade_high_confidence_medium_beats_low_confidence_check`.
+//! `grade_high_confidence_medium_beats_low_confidence_check`,
+//! `derive_verdict_with_grade_grade_a_no_findings_approve`,
+//! `derive_verdict_with_grade_grade_f_no_findings_block`,
+//! `derive_verdict_with_grade_severity_overrides_grade_a`.
 
 use tracing::debug;
 
 use crate::models::{Effort, Finding, Verdict};
+use crate::pipeline::letter_grade::{Grade, clamp_grade_to_verdict, verdict_for_grade};
 
 // ─── Confidence threshold ─────────────────────────────────────────────────────
 
@@ -213,245 +229,69 @@ fn verdict_ord(v: &Verdict) -> u8 {
     }
 }
 
-// ─── Unit tests ───────────────────────────────────────────────────────────────
+// ─── Grade-aware entry point ──────────────────────────────────────────────────
+
+/// Derive the final verdict using both the LLM's grade AND the severity floor.
+///
+/// Why: the grade is the LLM's primary quality signal; the severity floor is the
+/// deterministic safety net.  Neither alone is sufficient — the grade alone could
+/// be too optimistic (e.g. a confident "A" from a model that missed a High-effort
+/// finding), and the floor alone ignores the model's holistic quality assessment.
+/// Together they guarantee: final_verdict ≥ max(grade_verdict, severity_floor).
+///
+/// What: three-step derivation:
+///   1. `grade_verdict` = `verdict_for_grade(grade)` — the grade's implied verdict.
+///   2. `effective_model` = max(grade_verdict, model_proposed) — stricter of the two.
+///      This means: if the model wrote APPROVE but its grade implies APPROVE*, the
+///      grade wins as the new "model proposal" going into the floor.
+///   3. Final = `derive_verdict(effective_model, findings)` — applies the severity
+///      floor so a High finding still floors to BLOCK even with grade "A".
+///
+/// Special case: when `model_proposed == Unknown`, it is preserved unconditionally
+/// (the model could not assess the diff; grade/floor do not apply).
+///
+/// Also returns the final grade, clamped by `clamp_grade_to_verdict` so the grade
+/// and verdict never disagree in the output.
+///
+/// Test: `derive_verdict_with_grade_grade_a_no_findings_approve`,
+/// `derive_verdict_with_grade_grade_f_no_findings_block`,
+/// `derive_verdict_with_grade_severity_overrides_grade_a`.
+pub fn derive_verdict_with_grade(
+    model_proposed: Verdict,
+    grade: Grade,
+    findings: &[Finding],
+) -> (Verdict, Grade) {
+    // UNKNOWN is terminal — preserve it; grade does not apply.
+    if model_proposed == Verdict::Unknown {
+        debug!("verdict=UNKNOWN from model — preserving (diff unassessable); grade ignored");
+        return (Verdict::Unknown, Grade::F);
+    }
+
+    // Step 1: derive the grade's implied verdict.
+    let grade_verdict = verdict_for_grade(grade);
+
+    // Step 2: effective model proposal = stricter of (grade-implied, model-proposed).
+    let effective_model = stricter_of(model_proposed.clone(), grade_verdict);
+
+    debug!(
+        model_verdict = %model_proposed,
+        grade = %grade,
+        grade_verdict = %effective_model,
+        "derive_verdict_with_grade: using effective_model = max(model, grade)",
+    );
+
+    // Step 3: apply the severity floor over the effective model proposal.
+    let final_verdict = derive_verdict(effective_model, findings);
+
+    // Clamp the grade so it is consistent with the final verdict.
+    let final_grade = clamp_grade_to_verdict(grade, &final_verdict);
+
+    (final_verdict, final_grade)
+}
+
+// ─── Unit tests ─────────────────────────────────────────────────────────────
+// Tests extracted to grade_tests.rs to keep this file under the 500-line cap.
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::models::Finding;
-
-    fn finding(effort: Effort, confidence: f32) -> Finding {
-        Finding::new("src/lib.rs", "test", "desc", "", confidence, effort)
-    }
-
-    // ── Tier 1: Critical / High ──────────────────────────────────────────────
-
-    /// Any High-effort finding must floor to BLOCK.
-    ///
-    /// Why: the calibration run showed 0% BLOCK detection; this rule is the
-    /// primary fix — High-effort (critical/high severity) findings must BLOCK.
-    /// What: model proposes APPROVE*, one High-effort finding → BLOCK.
-    #[test]
-    fn grade_critical_high_effort_yields_block() {
-        let findings = vec![finding(Effort::High, 0.9)];
-        let verdict = derive_verdict(Verdict::ApproveWithReservations, &findings);
-        assert_eq!(
-            verdict,
-            Verdict::Block,
-            "High-effort finding must floor to BLOCK"
-        );
-    }
-
-    /// High-effort floor beats a model-proposed REQUEST_CHANGES.
-    ///
-    /// Why: even if the model correctly escalates to REQUEST_CHANGES, a Critical
-    /// finding must escalate further to BLOCK.
-    #[test]
-    fn grade_high_effort_beats_request_changes() {
-        let findings = vec![finding(Effort::High, 0.85)];
-        let verdict = derive_verdict(Verdict::RequestChanges, &findings);
-        assert_eq!(verdict, Verdict::Block);
-    }
-
-    // ── Tier 2: ≥2 Medium ───────────────────────────────────────────────────
-
-    /// Two Medium findings with sufficient confidence must floor to REQUEST_CHANGES.
-    ///
-    /// Why: the calibration run showed REQUEST_CHANGES only 36% — this tier
-    /// closes the gap for PRs with multiple real concerns.
-    #[test]
-    fn grade_two_medium_yields_request_changes() {
-        let findings = vec![finding(Effort::Medium, 0.8), finding(Effort::Medium, 0.75)];
-        let verdict = derive_verdict(Verdict::ApproveWithReservations, &findings);
-        assert_eq!(verdict, Verdict::RequestChanges);
-    }
-
-    /// Three Medium findings must also floor to REQUEST_CHANGES.
-    #[test]
-    fn grade_three_medium_yields_request_changes() {
-        let findings = vec![
-            finding(Effort::Medium, 0.7),
-            finding(Effort::Medium, 0.7),
-            finding(Effort::Medium, 0.7),
-        ];
-        let verdict = derive_verdict(Verdict::Approve, &findings);
-        assert_eq!(verdict, Verdict::RequestChanges);
-    }
-
-    // ── Tier 3: Exactly 1 Medium ─────────────────────────────────────────────
-
-    /// One Medium finding must floor to APPROVE*.
-    ///
-    /// Why: a single advisory concern should not block the PR but warrants noting.
-    #[test]
-    fn grade_one_medium_yields_approve_star() {
-        let findings = vec![finding(Effort::Medium, 0.75)];
-        let verdict = derive_verdict(Verdict::Approve, &findings);
-        assert_eq!(verdict, Verdict::ApproveWithReservations);
-    }
-
-    // ── Tier 4: Only Low or no findings ─────────────────────────────────────
-
-    /// No findings → APPROVE.
-    #[test]
-    fn grade_no_findings_yields_approve() {
-        let verdict = derive_verdict(Verdict::Approve, &[]);
-        assert_eq!(verdict, Verdict::Approve);
-    }
-
-    /// Only Low-effort findings → APPROVE.
-    #[test]
-    fn grade_only_low_yields_approve() {
-        let findings = vec![finding(Effort::Low, 0.9), finding(Effort::Low, 0.7)];
-        let verdict = derive_verdict(Verdict::Approve, &findings);
-        assert_eq!(verdict, Verdict::Approve);
-    }
-
-    // ── UNKNOWN preservation ─────────────────────────────────────────────────
-
-    /// Verdict::Unknown from the model is always preserved — diff unassessable.
-    ///
-    /// Why: UNKNOWN signals "model could not assess", not "clean PR"; we must
-    /// not collapse it to APPROVE.
-    #[test]
-    fn grade_unknown_is_preserved() {
-        let findings = vec![finding(Effort::Low, 0.9)];
-        let verdict = derive_verdict(Verdict::Unknown, &findings);
-        assert_eq!(verdict, Verdict::Unknown, "UNKNOWN must be preserved");
-    }
-
-    #[test]
-    fn grade_unknown_preserved_with_no_findings() {
-        let verdict = derive_verdict(Verdict::Unknown, &[]);
-        assert_eq!(verdict, Verdict::Unknown);
-    }
-
-    // ── Floor takes the stricter ─────────────────────────────────────────────
-
-    /// Floor beats a model-proposed APPROVE when findings are High.
-    ///
-    /// Why: this is the core "stricter floor" invariant — the model cannot
-    /// soften a High finding by proposing APPROVE.
-    #[test]
-    fn grade_floor_overrides_model_approve() {
-        let findings = vec![finding(Effort::High, 0.95)];
-        let verdict = derive_verdict(Verdict::Approve, &findings);
-        assert_eq!(
-            verdict,
-            Verdict::Block,
-            "severity floor must override model-proposed APPROVE"
-        );
-    }
-
-    /// Model-proposed BLOCK is kept even when no High finding (model knows more).
-    ///
-    /// Why: the floor is a minimum; the model can still escalate beyond the floor.
-    /// A BLOCK from the model with only Medium findings remains BLOCK.
-    #[test]
-    fn grade_model_block_kept_when_no_critical_finding() {
-        let findings = vec![finding(Effort::Medium, 0.9)];
-        let verdict = derive_verdict(Verdict::Block, &findings);
-        assert_eq!(
-            verdict,
-            Verdict::Block,
-            "model BLOCK must not be downgraded by floor"
-        );
-    }
-
-    /// Model-proposed REQUEST_CHANGES is preserved when floor is lower.
-    ///
-    /// Why: the model may have identified a logic bug that the effort heuristic
-    /// grades as Low; the model's escalation should stand.
-    #[test]
-    fn grade_model_request_changes_preserved_over_lower_floor() {
-        let findings = vec![finding(Effort::Low, 0.9)];
-        let verdict = derive_verdict(Verdict::RequestChanges, &findings);
-        assert_eq!(
-            verdict,
-            Verdict::RequestChanges,
-            "model REQUEST_CHANGES must not be downgraded to APPROVE"
-        );
-    }
-
-    // ── Low-confidence collapse ─────────────────────────────────────────────
-
-    /// All findings confidence ≤ 0.65 with Medium effort → APPROVE (not APPROVE*).
-    ///
-    /// Why: Fix 4 — curb APPROVE* over-fire on clean PRs.  When the model
-    /// signals low confidence across all findings and none are High-effort, the
-    /// advisory batch is treated as noise and the floor collapses to APPROVE.
-    #[test]
-    fn grade_low_confidence_all_medium_yields_approve() {
-        let findings = vec![finding(Effort::Medium, 0.6), finding(Effort::Medium, 0.55)];
-        let verdict = derive_verdict(Verdict::ApproveWithReservations, &findings);
-        assert_eq!(
-            verdict,
-            Verdict::Approve,
-            "all-low-confidence advisory batch must not fire APPROVE*"
-        );
-    }
-
-    /// One Medium finding with confidence exactly at threshold is still advisory.
-    ///
-    /// Why: the boundary condition: confidence = 0.65 is still "low confidence"
-    /// (≤ threshold), so the collapse applies.
-    #[test]
-    fn grade_confidence_at_threshold_collapses() {
-        let findings = vec![finding(Effort::Medium, 0.65)];
-        let verdict = derive_verdict(Verdict::ApproveWithReservations, &findings);
-        assert_eq!(
-            verdict,
-            Verdict::Approve,
-            "confidence at threshold must collapse"
-        );
-    }
-
-    /// One Medium finding with confidence just above threshold is APPROVE*.
-    ///
-    /// Why: above the threshold the finding is substantive.
-    #[test]
-    fn grade_high_confidence_medium_beats_low_confidence_check() {
-        let findings = vec![finding(Effort::Medium, 0.66)];
-        let verdict = derive_verdict(Verdict::Approve, &findings);
-        assert_eq!(
-            verdict,
-            Verdict::ApproveWithReservations,
-            "confidence above threshold must yield APPROVE*"
-        );
-    }
-
-    /// Mixed confidence: one high-confidence Medium + one low-confidence Medium
-    /// is still REQUEST_CHANGES (not collapsed — not ALL low-confidence).
-    #[test]
-    fn grade_mixed_confidence_two_medium_not_collapsed() {
-        let findings = vec![finding(Effort::Medium, 0.8), finding(Effort::Medium, 0.5)];
-        let verdict = derive_verdict(Verdict::Approve, &findings);
-        assert_eq!(
-            verdict,
-            Verdict::RequestChanges,
-            "mixed-confidence Medium findings must not collapse"
-        );
-    }
-
-    // ── Compile-break BLOCK rule (severity-anchor path) ──────────────────────
-
-    /// A compile-break finding (deleted symbol with remaining references) assigned
-    /// High effort flows through to BLOCK via the tier rules.
-    ///
-    /// Why: Fix 3 — compile-break detection.  The system prompt now instructs the
-    /// model to assign Critical severity (→ Effort::High) to removed-symbol
-    /// compile breaks.  This test confirms the tier rules complete the flow to
-    /// BLOCK.
-    #[test]
-    fn grade_compile_break_high_effort_flows_to_block() {
-        // Model returns APPROVE* (it usually under-fires without the prompt fix).
-        // The High-effort finding from the prompt's compile-break rule floors it.
-        let findings = vec![finding(Effort::High, 0.95)];
-        let verdict = derive_verdict(Verdict::ApproveWithReservations, &findings);
-        assert_eq!(
-            verdict,
-            Verdict::Block,
-            "compile-break (High effort) must escalate to BLOCK"
-        );
-    }
-}
+#[path = "grade_tests.rs"]
+mod tests;

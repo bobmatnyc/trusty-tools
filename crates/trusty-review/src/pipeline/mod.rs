@@ -10,6 +10,7 @@
 //!  - `diff`          — diff source, loading, truncation, identifier extraction.
 //!  - `diff_analyzer` — DiffAnalyzer noise filter: Stages A/B/C (spec REV-200–262).
 //!  - `grade`         — severity-anchored deterministic grade derivation (floor logic).
+//!  - `letter_grade`  — letter-grade type (A+ through F) and grade→verdict mapping (#732).
 //!  - `mapreduce`     — per-file diff splitter + (future) map/reduce stages (#680).
 //!  - `prompt`        — prompt construction for the reviewer role.
 //!  - `parser`        — verdict + findings parsing from LLM responses.
@@ -26,6 +27,7 @@ pub mod context_gate;
 pub mod diff;
 pub mod diff_analyzer;
 pub mod grade;
+pub mod letter_grade;
 pub mod mapreduce;
 pub mod output;
 pub mod parser;
@@ -40,7 +42,10 @@ pub mod verify_prompt;
 
 pub use context_gate::{GateOutcome, degraded_banner, preflight_context};
 pub use diff::DiffSource;
-pub use grade::derive_verdict;
+pub use grade::{derive_verdict, derive_verdict_with_grade};
+pub use letter_grade::{
+    Grade, clamp_grade_to_verdict, default_grade_for_verdict, verdict_for_grade,
+};
 pub use output::{log_json_path, print_review_result, write_review_log};
 pub use parser::{ParsedReview, parse_review_response};
 pub use post::{FinalizeAction, PostContext, decide_action, finalize_review};

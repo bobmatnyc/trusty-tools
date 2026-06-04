@@ -237,6 +237,9 @@ pub struct ReviewResult {
     pub review_body: String,
     /// Normalised verdict.
     pub verdict: Verdict,
+    /// Letter grade (e.g. "B+", "F"); `None` only for legacy pre-#732 results.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grade: Option<String>,
     /// Extracted findings.
     pub findings: Vec<Finding>,
 
@@ -279,11 +282,9 @@ pub struct ReviewResult {
 impl ReviewResult {
     /// Construct a `ReviewResult` skeleton with sensible defaults.
     ///
-    /// Why: most fields are filled in by pipeline stages; providing a builder
-    /// avoids long constructor signatures and makes the struct evolution
-    /// backward-compatible.
-    /// What: sets `review_version` from the `REVIEW_VERSION` constant, sets
-    /// `dry_run = true`, `posted = false`, and timestamps the result.
+    /// Why: most fields are filled in by pipeline stages; a builder avoids
+    /// long constructor signatures and eases struct evolution.
+    /// What: sets `review_version`, `dry_run = true`, `posted = false`, timestamps.
     /// Test: `review_result_serde_roundtrip`.
     pub fn new(
         owner: impl Into<String>,
@@ -300,6 +301,7 @@ impl ReviewResult {
             pr_url: pr_url.into(),
             review_body: String::new(),
             verdict: Verdict::Unknown,
+            grade: None,
             findings: Vec::new(),
             model: String::new(),
             input_tokens: 0,
@@ -309,7 +311,6 @@ impl ReviewResult {
             status: ReviewStatus::Completed,
             dry_run: true,
             posted: false,
-            // Simple ISO-8601 without the chrono dep for Stage 1.
             timestamp: chrono_now(),
             error: None,
             head_sha: String::new(),
@@ -317,12 +318,10 @@ impl ReviewResult {
         }
     }
 
-    /// Fill in telemetry from an `LlmResponse`.
+    /// Copy telemetry fields from an `LlmResponse` onto this result.
     ///
-    /// Why: the pipeline receives an `LlmResponse` from the reviewer call and
-    /// needs to copy its fields onto the result struct.
-    /// What: copies `model`, `input_tokens`, `output_tokens`, `cost_usd`,
-    /// and `latency_ms` from the response.
+    /// Why: the pipeline applies response fields after a successful LLM call.
+    /// What: copies model, tokens, cost, latency, and the raw review body text.
     /// Test: covered transitively by pipeline tests.
     pub fn apply_llm_response(&mut self, resp: &crate::llm::LlmResponse) {
         self.model = resp.model.clone();

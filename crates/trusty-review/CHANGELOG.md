@@ -6,6 +6,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.3.4] — 2026-06-03
+
+### Added
+
+- **Letter-grade PR reviews (#732)** — the reviewer LLM now assigns a letter
+  grade (A+ through F, 13 half-steps) to every review, and the verdict is
+  derived from it per a fixed product mapping (APPROVE floor = B-):
+
+  | Grade band           | Verdict         |
+  |----------------------|-----------------|
+  | A+, A, A-, B+, B, B- | APPROVE          |
+  | C+, C, C-            | APPROVE*         |
+  | D+, D, D-            | REQUEST_CHANGES  |
+  | F                    | BLOCK            |
+
+  The final verdict is `max(grade_verdict, severity_floor(findings))` so the
+  grade never produces a verdict weaker than what the severity floor requires.
+
+- **Grade → verdict reconciliation with verification** — after the adversarial
+  verifier (Phase 2, #583) re-derives the verdict, the grade is clamped via
+  `clamp_grade_to_verdict` so grade and verdict never disagree in the output.
+
+- **Grade in structured output** — `ReviewResult` gains a `grade: Option<String>`
+  field (serde: `skip_serializing_if = "Option::is_none"`); the MCP `review_pr`
+  JSON output includes it alongside the verdict.
+
+- **Grade in the review footer** — the posted PR comment footer now reads:
+  `Grade: B+ · 🤖 Reviewed by \`model\` · tokens ↑N ↓M · est. $X`
+
+- **Boundary unit tests** — `grade_b_minus_yields_approve`,
+  `grade_c_plus/c_minus_yields_approve_star`,
+  `grade_d_plus/d_minus_yields_request_changes`, `grade_f_yields_block`,
+  plus `derive_verdict_with_grade_severity_overrides_grade_a` (confirmed High
+  finding clamps a model "A" grade to F), and `body_footer_contains_grade`
+  (pins the exact footer string).
+
+---
+
 ## [0.3.3] — 2026-06-03
 
 ### Fixed

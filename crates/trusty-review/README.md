@@ -111,15 +111,32 @@ Wire into Claude Code via `.mcp.json`:
 ```
 
 Returns a `ReviewResult` JSON object with:
-- `verdict` (APPROVE | APPROVE* | REQUEST_CHANGES | BLOCK | Unknown)
+- `grade` (A+ | A | A- | B+ | B | B- | C+ | C | C- | D+ | D | D- | F) — letter grade
+- `verdict` (APPROVE | APPROVE* | REQUEST_CHANGES | BLOCK | UNKNOWN)
 - `findings` (array of findings with severity + confidence)
 - `input_tokens` / `output_tokens` — LLM token usage
 - `cost_estimate_usd` — estimated API cost
 
+#### Grade → Verdict mapping
+
+The verdict is derived from the grade per a fixed product decision (APPROVE floor = B-):
+
+| Grade band           | Verdict              |
+|----------------------|----------------------|
+| A+, A, A-, B+, B, B- | APPROVE              |
+| C+, C, C-            | APPROVE*             |
+| D+, D, D-            | REQUEST_CHANGES      |
+| F                    | BLOCK                |
+
+The final verdict is `max(grade_verdict, severity_floor(findings))` — the grade
+never produces a verdict weaker than what the severity floor already requires.
+After verification (Phase 2), the grade is re-clamped to stay consistent with
+the post-verification verdict.
+
 When posted to GitHub, the review comment includes a footer:
 
 ```
-🤖 Reviewed by us.anthropic.claude-sonnet-4-6 · tokens ↑1234 ↓567 · est. $0.01
+Grade: B+ · 🤖 Reviewed by us.anthropic.claude-sonnet-4-6 · tokens ↑1234 ↓567 · est. $0.01
 ```
 
 (↑ = input tokens, ↓ = output tokens). The footer appears identically in dry-run output.

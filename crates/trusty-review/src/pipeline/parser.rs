@@ -38,11 +38,18 @@ use crate::models::{Effort, Finding, Verdict};
 /// Why: the LLM is instructed to end its response with this JSON block; we
 /// deserialise it directly for structured extraction.
 /// What: mirrors the output schema in `prompt::reviewer_system_prompt`.
-/// Unknown fields are ignored for forward-compatibility.
+/// Unknown fields are ignored for forward-compatibility.  The `grade` field is
+/// new in 0.3.4 (#732); it is optional with `serde(default)` so old responses
+/// without it still parse cleanly.
 /// Test: `parse_json_block_happy_path`.
 #[derive(Debug, Deserialize)]
 struct LlmOutputBlock {
     verdict: String,
+    #[serde(default)]
+    grade: String,
+    #[serde(default)]
+    #[allow(dead_code)] // Deserialized for schema compliance; not used programmatically.
+    grade_justification: String,
     #[serde(default)]
     summary: String,
     #[serde(default)]
@@ -77,13 +84,17 @@ struct LlmFinding {
 /// Why: the pipeline receives a `ParsedReview` and populates a `ReviewResult`
 /// from it; keeping the parsed form separate from the final result allows the
 /// pipeline to apply confidence-threshold gates before committing the result.
-/// What: contains the parsed verdict, summary, and findings list, plus a flag
-/// indicating whether the result was produced by the fail-safe path.
+/// What: contains the parsed verdict, grade, summary, and findings list, plus a
+/// flag indicating whether the result was produced by the fail-safe path.
+/// The `grade` is `None` when the LLM omitted or produced an unparseable grade;
+/// the runner falls back to `default_grade_for_verdict` in that case.
 /// Test: all parser tests assert `ParsedReview` fields.
 #[derive(Debug, Clone)]
 pub struct ParsedReview {
     /// Parsed or fail-safe verdict.
     pub verdict: Verdict,
+    /// Letter grade from the LLM (A+ through F), or `None` if not provided.
+    pub grade: Option<String>,
     /// One-line summary extracted from the JSON block, or empty string.
     pub summary: String,
     /// Parsed findings (may be empty).
@@ -104,6 +115,7 @@ impl ParsedReview {
     pub fn fail_safe(reason: impl Into<String>) -> Self {
         Self {
             verdict: Verdict::Approve,
+            grade: None,
             summary: String::new(),
             findings: Vec::new(),
             is_fail_safe: true,
@@ -157,6 +169,7 @@ pub fn parse_review_response(body: &str) -> ParsedReview {
         );
         return ParsedReview {
             verdict,
+            grade: None,
             summary: String::new(),
             findings: Vec::new(),
             is_fail_safe: false,
@@ -193,6 +206,7 @@ fn try_parse_direct_json(body: &str) -> Option<ParsedReview> {
     }
     let block: LlmOutputBlock = serde_json::from_str(trimmed).ok()?;
     let verdict = parse_verdict_string(&block.verdict).unwrap_or(Verdict::Approve);
+    let grade = extract_grade_field(&block.grade);
     let findings = block
         .findings
         .into_iter()
@@ -200,6 +214,7 @@ fn try_parse_direct_json(body: &str) -> Option<ParsedReview> {
         .collect();
     Some(ParsedReview {
         verdict,
+        grade,
         summary: block.summary,
         findings,
         is_fail_safe: false,
@@ -235,6 +250,7 @@ fn try_parse_json_block(body: &str) -> Option<ParsedReview> {
     };
 
     let verdict = parse_verdict_string(&block.verdict).unwrap_or(Verdict::Approve);
+    let grade = extract_grade_field(&block.grade);
     let findings = block
         .findings
         .into_iter()
@@ -243,6 +259,7 @@ fn try_parse_json_block(body: &str) -> Option<ParsedReview> {
 
     Some(ParsedReview {
         verdict,
+        grade,
         summary: block.summary,
         findings,
         is_fail_safe: false,
@@ -305,6 +322,38 @@ fn scan_verdict_keyword(body: &str) -> Option<Verdict> {
         return Some(Verdict::Unknown);
     }
     None
+}
+
+// ─── Grade field extraction ───────────────────────────────────────────────────
+
+/// Extract and validate the grade field from the LLM output block.
+///
+/// Why: the LLM may omit the grade, emit an empty string, or produce an
+/// invalid value.  The pipeline must degrade gracefully — an unparseable grade
+/// never panics; it returns `None` and the runner falls back to
+/// `default_grade_for_verdict`.
+/// What: trims whitespace; if empty → `None`; validates against the 13 known
+/// grade strings ("A+", "A", … "F"); invalid strings produce a warning and
+/// return `None`.
+/// Test: covered transitively by `parse_direct_json_with_grade`.
+fn extract_grade_field(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Validate against the 13 canonical grade strings.
+    const VALID_GRADES: &[&str] = &[
+        "A+", "A", "A-", "B+", "B", "B-", "C+", "C", "C-", "D+", "D", "D-", "F",
+    ];
+    if VALID_GRADES.contains(&trimmed) {
+        Some(trimmed.to_string())
+    } else {
+        warn!(
+            grade = trimmed,
+            "LLM returned unrecognised grade — ignoring (will use default)"
+        );
+        None
+    }
 }
 
 // ─── Verdict string normalization ─────────────────────────────────────────────
