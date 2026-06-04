@@ -1,0 +1,21 @@
+-- Migration v20: add review_state and submitted_at columns to pr_reviewers
+--
+-- Why: GitHub PR reviews carry a state (APPROVED / CHANGES_REQUESTED /
+--   COMMENTED / DISMISSED) and a timestamp that are distinct from the
+--   ADO `vote` integer; both columns must be NULL-safe so existing ADO
+--   rows are unaffected. Closes issue #742.
+--
+-- What: two nullable TEXT columns are added with ALTER TABLE (SQLite
+--   ADD COLUMN semantics: all existing rows get NULL for the new columns).
+--
+-- Existing ADO rows: review_state = NULL, submitted_at = NULL, vote unchanged.
+-- New GitHub rows: review_state set, vote = 0 (schema default, no numeric
+--   GitHub vote), submitted_at set-or-NULL.
+--
+-- Test: migration_v20_adds_review_state_columns (migrations::tests).
+--
+-- Note: SQLite has no ALTER TABLE … ADD COLUMN IF NOT EXISTS.  The migration
+--   runner applies each migration exactly once via schema_migrations version
+--   tracking, so these statements are safe to execute unconditionally.
+ALTER TABLE pr_reviewers ADD COLUMN review_state  TEXT;
+ALTER TABLE pr_reviewers ADD COLUMN submitted_at  TEXT;

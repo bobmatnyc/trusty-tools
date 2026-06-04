@@ -20,9 +20,9 @@ use crate::core::models::{PrState, PullRequest};
 /// HTTP `User-Agent` string sent on every request.
 const USER_AGENT_VALUE: &str = "trusty-git-analytics/0.1";
 /// GitHub REST API base URL.
-const GITHUB_API_BASE: &str = "https://api.github.com";
+pub(crate) const GITHUB_API_BASE: &str = "https://api.github.com";
 /// Page size for paginated list endpoints (GitHub max is 100).
-const PAGE_SIZE: u32 = 100;
+pub(crate) const PAGE_SIZE: u32 = 100;
 /// Maximum retry attempts for transient failures (5xx, 429).
 const MAX_RETRIES: u32 = 3;
 /// Base delay (in milliseconds) for exponential backoff: 1s, 2s, 4s.
@@ -183,6 +183,19 @@ fn parse_slug(slug: &str) -> Result<(String, String)> {
     Ok((owner.to_string(), repo.to_string()))
 }
 
+/// Build a `reqwest::Client` with GitHub auth headers for callers outside
+/// this module (org-discovery, reviewer-ingestion in `collector.rs`).
+///
+/// Why: org-discovery and the reviewer-ingestion pass live in sibling
+/// modules but need the same authenticated client; this public re-export
+/// avoids duplicating the header-build logic.
+/// What: identical to the private [`build_http_client`] — public visibility
+/// is the only difference.
+/// Test: used indirectly by org-discovery and reviewer-ingestion paths.
+pub fn build_http_client_for_discovery(config: &GithubConfig) -> Result<reqwest::Client> {
+    build_http_client(config)
+}
+
 /// Build the shared `reqwest::Client` for all GitHub HTTP traffic.
 fn build_http_client(config: &GithubConfig) -> Result<reqwest::Client> {
     let mut headers = HeaderMap::new();
@@ -282,7 +295,9 @@ fn split_owner_repo(rest: &str) -> Option<(String, String)> {
 /// 3. Deduplicate; preserve first-seen order.
 ///
 /// Returns an empty vec if no resolution is possible — the caller should
-/// treat that as "skip PR fetching".
+/// treat that as "skip PR fetching". Org-discovered repos (from
+/// `github.orgs`) are unioned in by the caller via
+/// [`crate::collect::github::org_discovery::resolve_github_repos_with_discovered`].
 ///
 /// Why: org-wide deployments (issue #87) need to drive PR collection from
 /// `repositories[]` rather than a single `github.repo`. Mirrors the ADO PR
@@ -319,8 +334,8 @@ pub fn resolve_github_repos(
             })
             .unwrap_or_default();
 
-        // Owner: per-repo `org`, else `github.org`. We may still defer to the
-        // remote URL below when neither is present.
+        // Owner: per-repo `org`, else `github.org`. We may still defer to
+        // the remote URL below when neither is present.
         let owner_from_cfg = repo_cfg.org.clone().or_else(|| github.org.clone());
 
         let pair = if let Some(owner) = &owner_from_cfg {
@@ -640,23 +655,32 @@ impl GitHubClient {
     /// Fetch all reviews for a given pull request, paginating until exhausted.
     ///
     /// Why: review counts, approval status, and review latency are core PR
-    /// metrics; the bulk-PR endpoint omits reviews entirely.
+    /// metrics; the bulk-PR endpoint omits reviews entirely. Taking explicit
+    /// `(owner, repo)` rather than using `self.owner`/`self.repo` is
+    /// critical for multi-repo clients where the primary owner/repo is
+    /// unrelated to the PR being reviewed (issue #742 bug fix — the old
+    /// signature silently fetched reviews from the wrong repo).
     /// What: `GET /repos/{owner}/{repo}/pulls/{pr_number}/reviews?per_page=100`,
     /// looping pages until a short page indicates end-of-list.
-    /// Test: deserialization shape covered by `github_review_deserializes`.
+    /// Test: deserialization shape covered by `github_review_deserializes`;
+    /// correct routing verified by the reviewer-ingestion integration path.
     ///
     /// # Errors
     ///
     /// - [`CollectError::Http`] on transport / non-success HTTP responses
     ///   after retries are exhausted.
     /// - [`CollectError::Json`] on payload parse failures.
-    pub async fn fetch_pr_reviews(&self, pr_number: u64) -> Result<Vec<GitHubReview>> {
+    pub async fn fetch_pr_reviews_for_repo(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: u64,
+    ) -> Result<Vec<GitHubReview>> {
         let mut out = Vec::new();
         let mut page = 1u32;
         loop {
             let url = format!(
-                "{GITHUB_API_BASE}/repos/{}/{}/pulls/{pr_number}/reviews?per_page={PAGE_SIZE}&page={page}",
-                self.owner, self.repo
+                "{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}/reviews?per_page={PAGE_SIZE}&page={page}"
             );
             let resp = self.retry_request(&url).await?.error_for_status()?;
             let batch: Vec<GitHubReview> = resp.json().await?;
@@ -668,6 +692,17 @@ impl GitHubClient {
             page += 1;
         }
         Ok(out)
+    }
+
+    /// Expose the internal HTTP client for org-discovery requests.
+    ///
+    /// Why: `discover_org_repos` lives in a sibling module and needs the
+    /// same authenticated `reqwest::Client` without duplicating the header
+    /// build logic.
+    /// What: returns a shared reference to the underlying `reqwest::Client`.
+    /// Test: used by the reviewer-ingestion path in `collector.rs`.
+    pub fn http_client(&self) -> &reqwest::Client {
+        &self.client
     }
 
     /// Fetch all commits attached to a pull request, paginating until exhausted.
@@ -892,8 +927,11 @@ mod tests {
         GithubConfig {
             token: None,
             org: org.map(str::to_string),
+            orgs: vec![],
             repo: repo.map(str::to_string),
             fetch_prs: true,
+            fetch_pr_reviews: true,
+            review_fetch_concurrency: 1,
             ticket_regex: None,
         }
     }

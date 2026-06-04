@@ -481,8 +481,11 @@ mod tests {
         cfg.github = Some(GithubConfig {
             token: None,
             org: None,
+            orgs: vec![],
             repo: None,
             fetch_prs: true,
+            fetch_pr_reviews: true,
+            review_fetch_concurrency: 1,
             ticket_regex: None,
         });
         let errors = ConfigValidator::new(&cfg).validate();
@@ -506,8 +509,11 @@ mod tests {
         cfg.github = Some(GithubConfig {
             token: Some("ghp_xxx".into()),
             org: None,
+            orgs: vec![],
             repo: None,
             fetch_prs: true,
+            fetch_pr_reviews: true,
+            review_fetch_concurrency: 1,
             ticket_regex: None,
         });
         let errors = ConfigValidator::new(&cfg).validate();

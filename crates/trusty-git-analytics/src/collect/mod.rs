@@ -25,6 +25,7 @@ pub mod env_expand;
 pub mod errors;
 pub mod git;
 pub mod github;
+mod github_pipeline;
 pub mod identity;
 pub mod jira;
 pub mod linear;

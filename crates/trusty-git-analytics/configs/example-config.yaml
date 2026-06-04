@@ -66,9 +66,24 @@ github:
   token: "${GITHUB_TOKEN}"
   # Either single-repo mode:
   repo: "my-org/my-app"
-  # Or org-wide mode (drives PR fetch from the entries in `repositories[]`):
+  # Or single-org mode (drives PR fetch from the entries in `repositories[]`):
   # org: "my-org"
+  #
+  # Multi-org mode (issue #742): collect PRs across multiple GitHub orgs.
+  # For each org, tga calls GET /orgs/{org}/repos (paginated) to discover
+  # all repos, then unions them with the repos listed in `repositories[]`.
+  # `org` (singular) and `orgs` coexist — both are merged, duplicates removed.
+  # orgs:
+  #   - duettoresearch
+  #   - hotstats
   fetch_prs: true
+  # Reviewer ingestion: collect GitHub PR reviewer/review data (default: true).
+  # Set to false to opt out if rate limits are a concern.
+  # Note: each PR requires one additional API call (GET /pulls/{n}/reviews).
+  # Reviews are fetched serially by default; adjust review_fetch_concurrency
+  # (default 1) only after verifying your token's rate-limit headroom.
+  # fetch_pr_reviews: true
+  # review_fetch_concurrency: 1
 
 # Linear project management integration (optional).
 # Enriches commits that reference Linear issue IDs (e.g. ENG-123) with
