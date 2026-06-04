@@ -68,11 +68,16 @@ const BUNDLED_DUETTO_VOICE: &str = include_str!("../../voices/duetto/voice.toml"
 /// What: tries `~/.config/trusty-review/voices/<name>/voice.toml` first, then
 /// falls back to bundled fixtures; `load()` returns the first match found.
 /// `extra_dirs` lets tests inject a temp directory without touching the home dir.
+/// `skip_xdg` suppresses the XDG user-config lookup so tests can assert on the
+/// bundled fixture exclusively (see `bundled_only()`).
 /// Test: `load_bundled_duetto_voice`, `load_from_custom_dir`.
 #[derive(Debug, Default)]
 pub struct VoiceLoader {
     /// Extra directories prepended to the search path (highest priority).
     extra_dirs: Vec<PathBuf>,
+    /// When `true`, skip the XDG user-config path (`~/.config/trusty-review/voices`).
+    /// Intended exclusively for tests that must assert on the bundled fixture.
+    skip_xdg: bool,
 }
 
 impl VoiceLoader {
@@ -81,7 +86,8 @@ impl VoiceLoader {
     ///
     /// Why: the production call site needs no custom directories; this is the
     /// typical path for the CLI and daemon.
-    /// What: creates a `VoiceLoader` with an empty `extra_dirs` list.
+    /// What: creates a `VoiceLoader` with an empty `extra_dirs` list and
+    /// `skip_xdg = false` (XDG search enabled).
     /// Test: `load_bundled_duetto_voice`.
     pub fn new() -> Self {
         Self::default()
@@ -92,9 +98,32 @@ impl VoiceLoader {
     /// Why: tests inject a temp directory that holds a hand-crafted `voice.toml`
     /// so they can exercise loader behaviour without writing to `~/.config`.
     /// What: the extra directories are searched before the XDG user-config path.
+    /// `skip_xdg` remains `false` so XDG is still searched after extra dirs.
     /// Test: `load_from_custom_dir`.
     pub fn with_extra_dirs(dirs: Vec<PathBuf>) -> Self {
-        Self { extra_dirs: dirs }
+        Self {
+            extra_dirs: dirs,
+            skip_xdg: false,
+        }
+    }
+
+    /// Construct a loader that skips the XDG user-config path entirely.
+    ///
+    /// Why: tests that assert on the BUNDLED fixture must not accidentally load
+    /// an external `~/.config/trusty-review/voices/duetto/voice.toml` installed
+    /// by a developer or CI machine — that would silently test the wrong thing.
+    /// `bundled_only()` guarantees only the compile-time `include_str!` fixture
+    /// is reachable for any given voice name.
+    /// What: returns a loader with no extra dirs and the XDG search path
+    /// suppressed (achieved by pre-populating `extra_dirs` with an empty sentinel
+    /// value and overriding `load` via the `skip_xdg` flag).  Internally this is
+    /// equivalent to `with_extra_dirs(vec![])` PLUS setting `skip_xdg = true`.
+    /// Test: `bundled_duetto_matches_external_when_present` in tests_integration.rs.
+    pub fn bundled_only() -> Self {
+        Self {
+            extra_dirs: vec![],
+            skip_xdg: true,
+        }
     }
 
     /// Load a voice package by name, searching directories in priority order.
@@ -116,7 +145,12 @@ impl VoiceLoader {
         }
 
         // 2. XDG user-config path: ~/.config/trusty-review/voices/<name>/voice.toml
-        if let Some(config_dir) = dirs::config_dir() {
+        //    Skipped when `skip_xdg = true` (see `bundled_only()`) so tests that
+        //    assert on the bundled fixture are not polluted by a developer's
+        //    external file at this path.
+        if !self.skip_xdg
+            && let Some(config_dir) = dirs::config_dir()
+        {
             let candidate = config_dir
                 .join("trusty-review")
                 .join("voices")

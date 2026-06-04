@@ -72,6 +72,17 @@ later" promises for real correctness or complexity problems."#;
 /// Google Eng Practices, Conventional Comments, and peer-reviewed code-review
 /// research (see module doc for full citation list).
 /// Test: `principles_addendum_is_non_empty`, `principles_contains_key_concepts`.
+///
+/// # Forward-compatibility note
+///
+/// Today this returns a compile-time constant (`&'static str`).  A future
+/// runtime-config path (e.g., loading a user-supplied `principles.md` from the
+/// XDG config dir, similar to how `VoiceLoader` handles voice packages) would
+/// change the return type to `Cow<'static, str>` or `String`.  All call sites
+/// already go through this function, so that migration will be a single-file
+/// change here plus a `Cow`/`String` adjustment at the handful of call sites
+/// that currently elide the type.  No over-engineering is warranted until that
+/// runtime path is actually needed.
 pub fn principles_addendum() -> &'static str {
     PRINCIPLES_ADDENDUM
 }

@@ -15,6 +15,11 @@ use crate::{
     voice::{VoiceConfig, principles::principles_addendum},
 };
 
+// Local fixture: this module uses a distinct meta title from prompt_tests.rs
+// (both are valid PR-meta fixtures; the helper in prompt_tests.rs uses
+// "Add authentication"; here "Add feature" is retained for clarity).
+// The shared helpers module lives under tests::helpers (prompt_tests.rs);
+// this sibling module uses an inline fixture to avoid a duplicate-mod load.
 fn sample_meta() -> ReviewPrMeta {
     ReviewPrMeta {
         title: "Add feature".to_string(),

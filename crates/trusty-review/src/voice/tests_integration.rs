@@ -65,7 +65,9 @@ fn full_pipeline_with_duetto_voice() {
 /// with the external file get a different voice than those without.  This test
 /// guards against accidental drift.
 /// What: if the external file is absent (CI), skips gracefully.  When present,
-/// asserts both parse to the same meta.name, version, and system_addendum prefix.
+/// reads the external file directly (bypassing the loader search path) and compares
+/// it against the bundled fixture loaded with `VoiceLoader::bundled_only()`, which
+/// skips the XDG path so the assertion truly compares bundled vs. external.
 /// Test: conditional on external file presence; no network.
 #[test]
 fn bundled_duetto_matches_external_when_present() {
@@ -83,9 +85,15 @@ fn bundled_duetto_matches_external_when_present() {
         return;
     }
 
-    let loader_bundled = VoiceLoader::with_extra_dirs(vec![]); // force bundled
-    let bundled = loader_bundled.load("duetto").expect("bundled must load");
+    // bundled_only() skips the XDG config dir, so `load("duetto")` can only
+    // return the compile-time `include_str!` fixture — never the external file.
+    let loader_bundled = VoiceLoader::bundled_only();
+    let bundled = loader_bundled
+        .load("duetto")
+        .expect("bundled duetto must load via bundled_only");
 
+    // Read the external file directly (not through the loader) so we can
+    // compare two clearly separated sources.
     let external_content =
         std::fs::read_to_string(&external_path).expect("external file must be readable");
     let external: VoicePackage =

@@ -8,23 +8,12 @@
 
 use super::*;
 
-fn sample_meta() -> ReviewPrMeta {
-    ReviewPrMeta {
-        title: "Add authentication".to_string(),
-        body: String::new(),
-        author: "alice".to_string(),
-        url: "https://github.com/acme/backend/pull/42".to_string(),
-    }
-}
-
-fn empty_context() -> ReviewContext {
-    ReviewContext::default()
-}
-
-/// Stock-only VoiceConfig for tests that don't exercise the voice layer.
-fn stock_voice() -> crate::voice::VoiceConfig {
-    crate::voice::VoiceConfig::stock_only()
-}
+// Shared fixture helpers (sample_meta, empty_context, stock_voice).
+// Extracted to avoid duplication across prompt_tests.rs / prompt_tests_apex.rs /
+// prompt_voice_tests.rs (#760 cleanup finding #4).
+#[path = "prompt_test_helpers.rs"]
+mod helpers;
+use helpers::{empty_context, sample_meta, stock_voice};
 
 #[test]
 fn system_prompt_contains_policy() {

@@ -8,22 +8,10 @@
 
 use super::*;
 
-fn sample_meta() -> ReviewPrMeta {
-    ReviewPrMeta {
-        title: "Add authentication".to_string(),
-        body: String::new(),
-        author: "alice".to_string(),
-        url: "https://github.com/acme/backend/pull/42".to_string(),
-    }
-}
-
-fn empty_context() -> ReviewContext {
-    ReviewContext::default()
-}
-
-fn stock_voice() -> crate::voice::VoiceConfig {
-    crate::voice::VoiceConfig::stock_only()
-}
+// Shared fixture helpers re-used from the parent test module's helpers submodule.
+// `super::helpers` is the `mod helpers` declared in `prompt_tests.rs`, which is
+// the parent of this `#[path]`-included module.
+use super::helpers::{empty_context, sample_meta, stock_voice};
 
 // ── APEX prompt tests (Phase 6 PR-B, REV-420) ───────────────────────────────
 
