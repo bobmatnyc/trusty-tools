@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.3.5] — 2026-06-03
+
+### Changed
+
+- **Footer attribution (#734)** — the review footer now reads
+  `Reviewed by Trusty-Review (\`<model>\`)` instead of `Reviewed by \`<model>\``.
+  The brand name `Trusty-Review` appears in plain text; the model slug remains
+  in backticks inside parentheses.  Both the grade-prefixed form
+  (`Grade: B+ · 🤖 Reviewed by Trusty-Review (\`model\`) · …`) and the no-grade
+  form (`🤖 Reviewed by Trusty-Review (\`model\`) · …`) are updated.
+  Single source of truth remains `format_review_footer` in `pipeline/post.rs`.
+
+---
+
 ## [0.3.4] — 2026-06-03
 
 ### Added

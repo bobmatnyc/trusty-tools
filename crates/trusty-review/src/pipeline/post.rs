@@ -49,7 +49,7 @@ use crate::{
 /// of truth: the same footer text appears in the live GitHub comment AND in the
 /// dry-run / MCP response, so callers see exactly what was (or would be) posted
 /// (closes #728, #732).
-/// What: formats one line `[Grade: <g> · ]🤖 Reviewed by \`<model>\` · tokens ↑<in> ↓<out> · est. $<cost>`
+/// What: formats one line `[Grade: <g> · ]🤖 Reviewed by Trusty-Review (\`<model>\`) · tokens ↑<in> ↓<out> · est. $<cost>`
 /// where the grade prefix is included when `grade` is `Some`, token counts use
 /// thousands separators, and cost is rounded to 3 decimal places (e.g. `$0.066`).
 /// An empty model string is rendered as `(unknown)` so the line is always well-formed.
@@ -78,7 +78,7 @@ pub fn format_review_footer(
         _ => String::new(),
     };
     format!(
-        "\n---\n{grade_prefix}🤖 Reviewed by `{model_display}` · tokens ↑{in_fmt} ↓{out_fmt} · est. ${cost_fmt}"
+        "\n---\n{grade_prefix}🤖 Reviewed by Trusty-Review (`{model_display}`) · tokens ↑{in_fmt} ↓{out_fmt} · est. ${cost_fmt}"
     )
 }
 
@@ -335,7 +335,7 @@ mod tests {
         );
         assert_eq!(
             footer,
-            "\n---\n🤖 Reviewed by `us.anthropic.claude-sonnet-4-6` · tokens ↑13,499 ↓1,718 · est. $0.066"
+            "\n---\n🤖 Reviewed by Trusty-Review (`us.anthropic.claude-sonnet-4-6`) · tokens ↑13,499 ↓1,718 · est. $0.066"
         );
     }
 
@@ -346,7 +346,7 @@ mod tests {
     /// Any format drift is caught immediately by this exact assertion.
     /// What: asserts the full footer line for grade=B+,
     ///   model=us.anthropic.claude-sonnet-4-6, in=13499, out=1718, cost=0.066267
-    ///   → `Grade: B+ · 🤖 Reviewed by \`us.anthropic.claude-sonnet-4-6\` · tokens ↑13,499 ↓1,718 · est. $0.066`
+    ///   → `Grade: B+ · 🤖 Reviewed by Trusty-Review (\`us.anthropic.claude-sonnet-4-6\`) · tokens ↑13,499 ↓1,718 · est. $0.066`
     /// Test: this test itself (no network, no FS).
     #[test]
     fn footer_format_with_grade() {
@@ -359,7 +359,7 @@ mod tests {
         );
         assert_eq!(
             footer,
-            "\n---\nGrade: B+ · 🤖 Reviewed by `us.anthropic.claude-sonnet-4-6` · tokens ↑13,499 ↓1,718 · est. $0.066"
+            "\n---\nGrade: B+ · 🤖 Reviewed by Trusty-Review (`us.anthropic.claude-sonnet-4-6`) · tokens ↑13,499 ↓1,718 · est. $0.066"
         );
     }
 

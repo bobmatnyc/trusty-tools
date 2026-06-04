@@ -372,7 +372,7 @@ mod tests {
     /// `format_review_footer(grade, model, in, out, cost)` and appends it to
     /// `review_body`, then `build_review_comment_body` includes it in the prose
     /// section.  Asserts the exact footer string
-    /// `Grade: B+ · 🤖 Reviewed by \`us.anthropic.claude-sonnet-4-6\` · tokens ↑13,499 ↓1,718 · est. $0.066`
+    /// `Grade: B+ · 🤖 Reviewed by Trusty-Review (\`us.anthropic.claude-sonnet-4-6\`) · tokens ↑13,499 ↓1,718 · est. $0.066`
     /// Test: this test itself (no network, no FS).
     #[test]
     fn body_footer_contains_grade() {
@@ -398,7 +398,7 @@ mod tests {
         result.review_body.push_str(&footer);
 
         // The consolidated footer must use thousands separators and rounded cost.
-        let expected_footer = "Grade: B+ · 🤖 Reviewed by `us.anthropic.claude-sonnet-4-6` · tokens ↑13,499 ↓1,718 · est. $0.066";
+        let expected_footer = "Grade: B+ · 🤖 Reviewed by Trusty-Review (`us.anthropic.claude-sonnet-4-6`) · tokens ↑13,499 ↓1,718 · est. $0.066";
         assert!(
             result.review_body.contains(expected_footer),
             "review_body must contain the exact consolidated footer: {expected_footer}\nActual review_body:\n{}",

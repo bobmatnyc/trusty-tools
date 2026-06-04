@@ -136,7 +136,7 @@ the post-verification verdict.
 When posted to GitHub, the review comment includes a footer:
 
 ```
-Grade: B+ · 🤖 Reviewed by us.anthropic.claude-sonnet-4-6 · tokens ↑1234 ↓567 · est. $0.01
+Grade: B+ · 🤖 Reviewed by Trusty-Review (`us.anthropic.claude-sonnet-4-6`) · tokens ↑1234 ↓567 · est. $0.01
 ```
 
 (↑ = input tokens, ↓ = output tokens). The footer appears identically in dry-run output.
