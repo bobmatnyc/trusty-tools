@@ -20,6 +20,7 @@
 //!  - `verify`        — per-finding verification round + liveness gate (Phase 2, #583).
 //!  - `runner`        — top-level orchestration loop (`run_review`).
 //!  - `trigger`       — live vs dry-run trigger classification (REV-703).
+//!  - `voice_config`  — VoiceConfig resolution (stock, principles, voice) from ReviewConfig (#754, #756).
 //!
 //! Test: each submodule carries its own unit tests.
 
@@ -39,6 +40,10 @@ pub mod trigger;
 pub mod verify;
 pub mod verify_liveness;
 pub mod verify_prompt;
+// Why: voice-config resolution is extracted from runner.rs to keep runner.rs
+// under the 500-line cap (#610).  Exposes `build_voice_config` for use by the
+// runner and for direct testing.
+pub mod voice_config;
 
 pub use context_gate::{GateOutcome, degraded_banner, preflight_context};
 pub use diff::DiffSource;
@@ -49,8 +54,11 @@ pub use letter_grade::{
 pub use output::{log_json_path, print_review_result, write_review_log};
 pub use parser::{ParsedReview, parse_review_response};
 pub use post::{FinalizeAction, PostContext, decide_action, finalize_review};
-pub use prompt::{ReviewContext, ReviewPrMeta, build_review_prompt, reviewer_system_prompt};
+pub use prompt::{
+    ReviewContext, ReviewPrMeta, build_review_prompt, build_system_prompt, reviewer_system_prompt,
+};
 pub use runner::{ReviewDeps, ReviewInput, run_review};
 pub use trigger::{TriggerDecision, classify_review_request, effective_dry_run};
 pub use verify::{maybe_verify, run_verification_round, select_candidates};
 pub use verify_liveness::{LivenessDecision, enforce_verifier_liveness, probe_verifier_liveness};
+pub use voice_config::build_voice_config;

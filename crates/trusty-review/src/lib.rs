@@ -18,6 +18,10 @@ pub mod integrations;
 pub mod llm;
 pub mod models;
 pub mod pipeline;
+// Why: the voice module holds the 3-layer prompt composition types and logic
+// (stock → principles → voice).  Always compiled — no feature gate — because
+// VoiceConfig is a pure data type used by the prompt builder in all modes.
+pub mod voice;
 // Why: Phase 1 (#582) adds live posting, which needs a durable cross-process
 // dedup claim store (redb) and an in-process in-flight guard.  These storage
 // and concurrency concerns live in their own module, separate from the

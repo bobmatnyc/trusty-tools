@@ -21,6 +21,11 @@ fn empty_context() -> ReviewContext {
     ReviewContext::default()
 }
 
+/// Stock-only VoiceConfig for tests that don't exercise the voice layer.
+fn stock_voice() -> crate::voice::VoiceConfig {
+    crate::voice::VoiceConfig::stock_only()
+}
+
 #[test]
 fn system_prompt_contains_policy() {
     let prompt = reviewer_system_prompt();
@@ -108,6 +113,7 @@ fn build_review_prompt_strips_bedrock_prefix() {
         &empty_context(),
         "",
         "bedrock/us.anthropic.claude-sonnet-4-6",
+        &stock_voice(),
     );
     assert_eq!(
         req.model, "us.anthropic.claude-sonnet-4-6",
@@ -130,6 +136,7 @@ fn build_review_prompt_strips_openrouter_prefix() {
         &empty_context(),
         "",
         "openrouter/openai/gpt-5.4-mini-20260317",
+        &stock_voice(),
     );
     assert_eq!(
         req.model, "openai/gpt-5.4-mini-20260317",
@@ -148,6 +155,7 @@ fn build_review_prompt_includes_diff() {
         &empty_context(),
         "",
         "openai/gpt-5.4-mini-20260317",
+        &stock_voice(),
     );
     assert_eq!(req.model, "openai/gpt-5.4-mini-20260317");
     assert_eq!(req.messages.len(), 1);
@@ -202,6 +210,7 @@ fn prompt_includes_context_blocks() {
         &context,
         "",
         "openai/gpt-5.4-mini-20260317",
+        &stock_voice(),
     );
     let content = &req.messages[0].content;
     assert!(
@@ -242,6 +251,7 @@ fn prompt_includes_external_context() {
         &empty_context(),
         external,
         "openai/gpt-5.4-mini-20260317",
+        &stock_voice(),
     );
     let content = &req.messages[0].content;
     assert!(
@@ -278,6 +288,7 @@ fn prompt_empty_external_context_adds_nothing() {
         &empty_context(),
         "   \n",
         "openai/gpt-5.4-mini-20260317",
+        &stock_voice(),
     );
     let content = &req.messages[0].content;
     assert!(!content.contains("Related JIRA"));
@@ -295,6 +306,7 @@ fn prompt_empty_context_omits_sections() {
         &empty_context(),
         "",
         "openai/gpt-5.4-nano-20260317",
+        &stock_voice(),
     );
     let content = &req.messages[0].content;
     assert!(
@@ -324,6 +336,7 @@ fn build_review_prompt_includes_response_schema() {
         &empty_context(),
         "",
         "us.anthropic.claude-sonnet-4-6",
+        &stock_voice(),
     );
     let schema = req
         .response_schema
@@ -377,6 +390,7 @@ fn prompt_local_diff_mode_no_pr_metadata() {
         &empty_context(),
         "",
         "openai/gpt-5.4-mini-20260317",
+        &stock_voice(),
     );
     let content = &req.messages[0].content;
     assert!(content.contains("local_fn"));
@@ -440,61 +454,7 @@ fn system_prompt_describes_unknown_grade() {
     );
 }
 
-// ── APEX prompt tests (Phase 6 PR-B, REV-420) ───────────────────────────────
-/// ReviewContext with apex_results ⇒ heading, file, snippet, citation hint, ordering.
-/// Why/What: guards the APEX block from silent omission. Test: no network.
-#[test]
-fn prompt_includes_apex_context_when_present() {
-    use crate::integrations::apex_context::ApexContextResult;
-    let ctx = ReviewContext {
-        apex_results: vec![ApexContextResult {
-            file: "apex/auth-spec.md".to_string(),
-            snippet: "Token expiry must be checked.".to_string(),
-            score: 0.88,
-            start_line: Some(42),
-        }],
-        ..Default::default()
-    };
-    let content = build_review_prompt(
-        "acme",
-        "backend",
-        &sample_meta(),
-        "+fn x() {}",
-        &ctx,
-        "",
-        "openai/gpt-5.4-mini-20260317",
-    )
-    .messages[0]
-        .content
-        .clone();
-    assert!(content.contains("Related APEX product specs"));
-    assert!(content.contains("apex/auth-spec.md"));
-    assert!(content.contains("Token expiry must be checked"));
-    assert!(content.contains("[apex:"));
-    let apex_pos = content.find("Related APEX product specs").unwrap();
-    let instr_pos = content.find("populate the structured response").unwrap();
-    assert!(
-        apex_pos < instr_pos,
-        "APEX section must precede closing instruction"
-    );
-}
-
-/// Empty apex_results ⇒ no APEX section.
-/// Why/What: default config (APEX disabled) must not emit a stray heading. Test: no network.
-#[test]
-fn prompt_no_apex_section_when_empty() {
-    let content = build_review_prompt(
-        "acme",
-        "backend",
-        &sample_meta(),
-        "+fn x() {}",
-        &empty_context(),
-        "",
-        "openai/gpt-5.4-mini-20260317",
-    )
-    .messages[0]
-        .content
-        .clone();
-    assert!(!content.contains("Related APEX product specs"));
-    assert!(!content.contains("[apex:"));
-}
+// ── APEX prompt tests ─────────────────────────────────────────────────────────
+// Extracted to prompt_tests_apex.rs to keep this file under the 500-line cap (#610).
+#[path = "prompt_tests_apex.rs"]
+mod apex_tests;

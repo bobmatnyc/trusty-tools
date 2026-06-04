@@ -19,6 +19,9 @@ pub mod index_resolver;
 pub mod mapreduce;
 pub mod role_models;
 pub mod verification;
+// Why: voice configuration loading extracted to keep config/mod.rs under the
+// 500-line cap (#610) after adding voice support (#754/#756).
+pub mod voice;
 
 pub use index_resolver::{find_git_root, repo_root_from_cwd, resolve_index_from_list};
 pub use mapreduce::{DiffStats, MapMode, MapReduceConfig, ReviewPath, select_review_mode};
@@ -88,6 +91,8 @@ struct TomlFile {
     verification: VerificationFileConfig,
     #[serde(default)]
     context: ContextFileConfig,
+    #[serde(default)]
+    voice: voice::VoiceFileConfig,
 }
 
 /// Global service configuration for trusty-review.
@@ -208,6 +213,21 @@ pub struct ReviewConfig {
     /// APEX (no prefix filtering).  Non-empty ⇒ retain only hits whose `file`
     /// starts with one of the prefixes.
     pub apex_path_prefixes: Vec<String>,
+
+    // ── Voice package (Phase 3, #754 / #756) ──────────────────────────────
+    /// Name of the voice package to load for the 3-layer prompt composition
+    /// (stock → principles → voice).
+    ///
+    /// `TRUSTY_REVIEW_VOICE_PACKAGE` env var or `[voice] package = "duetto"` in
+    /// the TOML config.  Empty/absent = no voice package (opt-in).
+    pub voice_package: Option<String>,
+
+    /// Whether the universal best-practices principles layer (#756) is enabled.
+    ///
+    /// `TRUSTY_REVIEW_PRINCIPLES=false` disables it; defaults to `true`
+    /// (default-on per issue #756 spec: "universal/safe").
+    /// The config file key is `[voice] principles = false`.
+    pub voice_principles: bool,
 }
 
 impl ReviewConfig {
@@ -231,6 +251,7 @@ impl ReviewConfig {
         let file_models = toml_file.as_ref().map(|f| f.models.clone());
         let file_verification = toml_file.as_ref().map(|f| f.verification.clone());
         let file_context = toml_file.as_ref().map(|f| f.context.clone());
+        let file_voice: Option<&voice::VoiceFileConfig> = toml_file.as_ref().map(|f| &f.voice);
 
         let env = RoleEnv::from_env();
         let role_models = RoleModels::resolve(cli_overrides, &env, file_models.as_ref());
@@ -290,6 +311,8 @@ impl ReviewConfig {
             context_sources,
             apex_index: std::env::var("TRUSTY_SEARCH_APEX_INDEX").unwrap_or_default(),
             apex_path_prefixes: load_apex_path_prefixes(),
+            voice_package: voice::load_voice_package(file_voice),
+            voice_principles: voice::load_voice_principles(file_voice),
         }
     }
 

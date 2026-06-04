@@ -29,6 +29,7 @@ use crate::{
     },
     llm::{ChatMessage, LlmRequest, ResponseSchema, strip_provider_prefix},
     models::ReviewResult,
+    voice::VoiceConfig,
 };
 
 // ─── Prompt constants ─────────────────────────────────────────────────────────
@@ -133,18 +134,16 @@ pub struct ReviewContext {
 
 // ─── System prompt ────────────────────────────────────────────────────────────
 
-/// Return the system prompt for the reviewer role.
+/// Return the stock base system prompt for the reviewer role (no layering).
 ///
-/// Why: the system prompt encodes the fail-safe verdict policy (spec REV-130),
-/// the output format contract, and the quality bar for REQUEST_CHANGES/BLOCK.
-/// Keeping it as a function (not a constant) allows conditional sections in the
-/// future (e.g. copilot-mode conditioning from spec REV-104).
-/// What: returns a static string; future versions may accept a context param.
-/// The output-format section no longer instructs the model to emit a fenced
-/// JSON block — with forced structured output enabled (via `response_schema`),
-/// the provider guarantees the response IS the JSON object, so fence-based
-/// instructions are unnecessary and would confuse models that try to
-/// literally wrap output in backticks.
+/// Why: the stock system prompt encodes the fail-safe verdict policy (spec
+/// REV-130), the output format contract, and the quality bar for
+/// REQUEST_CHANGES/BLOCK.  Kept as a function for backward compatibility and
+/// for tests that need only the stock text.  For the full 3-layer prompt
+/// (stock → principles → voice) use `build_system_prompt(voice_config)`.
+/// What: returns a static string; the output-format section uses structured
+/// output language — the provider forces JSON via `response_schema` so the
+/// model need not emit a fenced block.
 /// Test: `system_prompt_contains_policy`.
 pub fn reviewer_system_prompt() -> &'static str {
     r#"You are a senior software engineer performing a pull-request code review.
@@ -219,23 +218,49 @@ Note but do not block on: style, minor naming, documentation gaps, test coverage
 `findings` may be an empty array if there are no issues."#
 }
 
+// ─── Layered system prompt ────────────────────────────────────────────────────
+
+/// Build the layered system prompt: stock → principles → voice.
+///
+/// Why: the 3-layer composition (issues #754 + #756) is the production system
+/// prompt; this function is the single assembly point so callers only need to
+/// supply a `VoiceConfig`.
+/// What: appends principles then voice addenda to the stock base when they are
+/// non-empty; a blank separator line is inserted between layers.  When
+/// `voice_config` is all-None (stock-only), the output equals `reviewer_system_prompt()`.
+/// Test: `build_system_prompt_stock_only`, `build_system_prompt_with_principles`,
+/// `build_system_prompt_full_pipeline` in `prompt_tests.rs`.
+pub fn build_system_prompt(voice_config: &VoiceConfig) -> String {
+    let stock = reviewer_system_prompt();
+    let addendum = voice_config.combined_addendum();
+    if addendum.is_empty() {
+        return stock.to_string();
+    }
+    format!("{stock}\n\n{addendum}")
+}
+
 // ─── Prompt builder ───────────────────────────────────────────────────────────
 
 /// Build the `LlmRequest` for the reviewer role.
 ///
 /// Why: centralises all prompt-assembly logic so pipeline code stays clean and
 /// prompt iteration doesn't require touching pipeline logic.
-/// What: assembles a system prompt + user message containing the PR metadata,
-/// truncated diff, code search context (if any), and static-analysis annotations
-/// (if any).  Includes `response_schema` so the provider forces structured
-/// output via Bedrock tool-use or OpenRouter json_schema — eliminating the
-/// silent fail-safe APPROVE problem.
+/// What: assembles a layered system prompt (stock → principles → voice via
+/// `voice_config`) + user message containing the PR metadata, truncated diff,
+/// code search context (if any), and static-analysis annotations (if any).
+/// Includes `response_schema` so the provider forces structured output via
+/// Bedrock tool-use or OpenRouter json_schema.
 /// `reviewer_model` may carry a `bedrock/` or `openrouter/` routing prefix;
-/// this function strips it before setting `LlmRequest.model` so the bare id is
-/// what reaches the provider's API (the prefix is used only for routing).
+/// this function strips it before setting `LlmRequest.model`.
 /// Test: `build_review_prompt_includes_diff`, `prompt_includes_context_blocks`,
 /// `build_review_prompt_strips_bedrock_prefix`,
-/// `build_review_prompt_includes_response_schema`.
+/// `build_review_prompt_includes_response_schema`,
+/// `build_review_prompt_with_voice_config_principles`,
+/// `build_review_prompt_with_voice_config_full`.
+// Eight arguments are required to fully specify the review (PR identity, diff,
+// context, model, voice).  The parameter count is structural, not incidental;
+// splitting would make the API less ergonomic without improving cohesion.
+#[allow(clippy::too_many_arguments)]
 pub fn build_review_prompt(
     owner: &str,
     repo: &str,
@@ -244,11 +269,12 @@ pub fn build_review_prompt(
     context: &ReviewContext,
     external_context: &str,
     reviewer_model: &str,
+    voice_config: &VoiceConfig,
 ) -> LlmRequest {
     let user_message = build_user_message(owner, repo, pr_meta, diff, context, external_context);
     LlmRequest {
         model: strip_provider_prefix(reviewer_model).to_string(),
-        system: reviewer_system_prompt().to_string(),
+        system: build_system_prompt(voice_config),
         messages: vec![ChatMessage {
             role: "user".to_string(),
             content: user_message,
@@ -447,9 +473,14 @@ fn build_user_message(
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
 
-// ─── Unit tests ─────────────────────────────────────────────────────────────
 // Tests extracted to prompt_tests.rs to keep this file under the 500-line cap.
+// Voice-layering tests are in prompt_voice_tests.rs (split to keep prompt_tests.rs
+// under the cap after adding the voice_config parameter).
 
 #[cfg(test)]
 #[path = "prompt_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "prompt_voice_tests.rs"]
+mod voice_tests;

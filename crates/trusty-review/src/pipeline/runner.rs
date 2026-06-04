@@ -37,6 +37,7 @@ use crate::{
         runner_context::{gather_context, gather_external_context_md},
         trigger::TriggerDecision,
         verify::maybe_verify,
+        voice_config::build_voice_config,
     },
     store::{ClaimOutcome, DedupStore},
 };
@@ -271,6 +272,8 @@ pub async fn run_review(
     );
 
     // ── Step 6: build prompt and call LLM ─────────────────────────────────
+    // Build the 3-layer VoiceConfig (stock + principles + voice) from config.
+    let voice_config = build_voice_config(config);
     let llm_req = build_review_prompt(
         &owner,
         &repo,
@@ -279,6 +282,7 @@ pub async fn run_review(
         &context,
         &external_context,
         &input.reviewer_model,
+        &voice_config,
     );
     debug!(model = %input.reviewer_model, "calling LLM reviewer");
 
@@ -489,8 +493,6 @@ async fn finalize_run(
     )
     .await
 }
-
-// ─── Unit tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[path = "runner_tests.rs"]
