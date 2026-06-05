@@ -115,7 +115,6 @@ crates/trusty-memory/tests/mcp_stdio_tools.rs	993
 crates/trusty-mpm/src/bin/tm.rs	4639
 crates/trusty-mpm/src/client/executor.rs	935
 crates/trusty-mpm/src/client/http_client.rs	1451
-crates/trusty-mpm/src/core/agent_builder.rs	508
 crates/trusty-mpm/src/core/session_launch.rs	1119
 crates/trusty-mpm/src/daemon/api_tests.rs	1319
 crates/trusty-mpm/src/daemon/api.rs	1654

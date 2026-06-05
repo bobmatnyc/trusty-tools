@@ -13,6 +13,8 @@
 
 use std::path::Path;
 
+use super::frontmatter::parse_kv_line;
+
 /// A deployed agent as advertised to the orchestrating instance.
 ///
 /// Why: the delegation authority section needs a small, render-ready view of
@@ -77,17 +79,15 @@ fn parse_frontmatter(raw: &str) -> AgentFrontmatter {
         if line.trim() == "---" {
             break;
         }
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Some((key, value)) = line.split_once(':') else {
+        // Use the shared parser so colon-containing values (URLs, timestamps,
+        // model ids) are preserved rather than silently truncated.
+        let Some((key, value)) = parse_kv_line(line) else {
             continue;
         };
-        let value = value.trim().trim_matches(['"', '\'']).to_string();
         if value.is_empty() {
             continue;
         }
-        match key.trim().to_ascii_lowercase().as_str() {
+        match key.as_str() {
             "name" => fm.name = Some(value),
             "role" => fm.role = Some(value),
             "description" => fm.description = Some(value),
@@ -394,5 +394,64 @@ mod tests {
         let md = generate_authority(&[]);
         assert!(md.contains("## Delegation Authority"));
         assert!(md.to_lowercase().contains("no delegatable agents"));
+    }
+
+    // ── colon-in-value regression tests (issue #389) ─────────────────────────
+
+    #[test]
+    fn scan_preserves_url_in_description() {
+        // A `description:` value that is or contains a URL must not be
+        // silently truncated at the first colon.
+        let tmp = TempDir::new().unwrap();
+        write_agent(
+            tmp.path(),
+            "docs-agent",
+            "---\nname: docs-agent\nrole: docs\ndescription: See https://docs.example.com/guide\n---\n\n# Docs\n",
+        );
+        let agents = scan_agents(tmp.path());
+        assert_eq!(agents.len(), 1);
+        assert_eq!(
+            agents[0].description.as_deref(),
+            Some("See https://docs.example.com/guide"),
+            "URL in description must not be truncated"
+        );
+    }
+
+    #[test]
+    fn scan_preserves_bedrock_model_id() {
+        // A `model:` value containing a bedrock model id (with `/` and `.`)
+        // must survive the scan without truncation.
+        let tmp = TempDir::new().unwrap();
+        write_agent(
+            tmp.path(),
+            "ml-agent",
+            "---\nname: ml-agent\nrole: ml\nmodel: bedrock/us.anthropic.claude-sonnet-4-6\n---\n\n# ML\n",
+        );
+        let agents = scan_agents(tmp.path());
+        assert_eq!(agents.len(), 1);
+        assert_eq!(
+            agents[0].model.as_deref(),
+            Some("bedrock/us.anthropic.claude-sonnet-4-6"),
+            "bedrock model id must be preserved verbatim"
+        );
+    }
+
+    #[test]
+    fn scan_preserves_timestamp_in_description() {
+        // A description that embeds an ISO-8601 timestamp must keep the full
+        // timestamp including the time component (colons after the first).
+        let tmp = TempDir::new().unwrap();
+        write_agent(
+            tmp.path(),
+            "timed-agent",
+            "---\nname: timed-agent\nrole: timer\ndescription: Deployed at 2026-06-05T14:31:34\n---\n\n# Timed\n",
+        );
+        let agents = scan_agents(tmp.path());
+        assert_eq!(agents.len(), 1);
+        assert_eq!(
+            agents[0].description.as_deref(),
+            Some("Deployed at 2026-06-05T14:31:34"),
+            "timestamp in description must not be truncated"
+        );
     }
 }
