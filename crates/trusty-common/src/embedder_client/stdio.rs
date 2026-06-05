@@ -20,7 +20,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{Mutex, Semaphore, oneshot};
 use tokio::time::Duration;
@@ -166,7 +166,8 @@ impl StdioEmbedderClient {
 
         // Spawn the reader task — it owns stdout for its lifetime.
         let pending_clone = Arc::clone(&pending);
-        tokio::spawn(reader_task(BufReader::new(stdout), pending_clone));
+        let timeout = embed_call_timeout();
+        tokio::spawn(reader_task(BufReader::new(stdout), pending_clone, timeout));
 
         Self {
             stdin,
@@ -184,11 +185,19 @@ impl StdioEmbedderClient {
 /// reading the response to the previous one.
 /// What: reads newline-terminated JSON-RPC response frames in a loop. For
 /// each frame, pops the head of `pending`, decodes the response, and sends the
-/// result to the caller's oneshot. On EOF or read error, drains all remaining
-/// pending requests with an error so they don't hang.
-/// Test: exercised by the multi-flight integration tests.
-async fn reader_task(mut reader: BufReader<ChildStdout>, pending: PendingQueue) {
-    let timeout = embed_call_timeout();
+/// result to the caller's oneshot. On timeout, drains pending requests, clears
+/// the partial line buffer, and CONTINUES the loop — the task MUST NOT exit on
+/// timeout (fix #763). The stale response the sidecar eventually writes will
+/// arrive as a spurious frame once the ONNX call completes, and will be safely
+/// discarded by the empty-queue guard below. On EOF or read error the task exits
+/// and the supervisor handles respawn.
+/// Test: `reader_task_survives_timeout_and_serves_next_request` proves the task
+/// stays alive after a timeout and still delivers the next successful response.
+async fn reader_task<R: AsyncBufRead + Unpin>(
+    mut reader: R,
+    pending: PendingQueue,
+    timeout: Duration,
+) {
     let mut line = String::new();
 
     loop {
@@ -199,10 +208,22 @@ async fn reader_task(mut reader: BufReader<ChildStdout>, pending: PendingQueue) 
 
         match read_result {
             Err(_elapsed) => {
+                // CRITICAL FIX (#763): Do NOT return here. The old `return`
+                // killed the reader task permanently on the first CUDA timeout,
+                // causing every subsequent embed_batch to hang forever.
+                //
+                // Instead: drain pending callers with an error (they can retry),
+                // clear the partial line buffer, and continue the loop. When the
+                // sidecar eventually finishes the slow ONNX call and writes its
+                // response to stdout, the reader will consume it and find an
+                // empty pending queue — the "spurious frame" guard below will
+                // discard it harmlessly.
                 tracing::warn!(
                     timeout_secs = timeout.as_secs(),
                     "StdioEmbedderClient reader: timed out waiting for response \
-                     (sidecar may be stalled) — draining pending requests"
+                     (sidecar ONNX call exceeded {}s — CUDA OOM/BFCArena stall?) \
+                     — draining pending requests and re-arming; reader task STAYS ALIVE",
+                    timeout.as_secs()
                 );
                 drain_pending_with_error(
                     &pending,
@@ -213,7 +234,14 @@ async fn reader_task(mut reader: BufReader<ChildStdout>, pending: PendingQueue) 
                     )),
                 )
                 .await;
-                return;
+                // Clear any partial data accumulated in `line` during the
+                // timed-out read. The next loop iteration calls `line.clear()`
+                // anyway but we do it here for clarity.
+                line.clear();
+                // continue — re-arm the timeout and wait for the next frame.
+                // The sidecar's stale response for the timed-out batch will
+                // arrive here eventually; the empty-queue guard discards it.
+                continue;
             }
             Ok(Err(e)) => {
                 tracing::warn!(
@@ -389,105 +417,8 @@ impl EmbedderClient for StdioEmbedderClient {
     }
 }
 
+// Tests are in a sibling file to keep this file under the 500-line cap.
+// The submodule can access private items via `super::` (Rust child-module rule).
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ── Wire format tests (no live process needed) ────────────────────────
-
-    #[test]
-    fn request_serialises_correctly() {
-        // Why: guard against accidental rename of JSON-RPC fields; the daemon
-        //      parses these names literally.
-        // What: serialise a sample request and check required wire fields.
-        // Test: this test.
-        let texts = vec!["hello".to_string(), "world".to_string()];
-        let req = RpcRequest {
-            jsonrpc: JSONRPC_VERSION,
-            method: METHOD_EMBED,
-            params: EmbedParams { texts: &texts },
-            id: 1,
-        };
-        let s = serde_json::to_string(&req).unwrap();
-        assert!(s.contains("\"jsonrpc\":\"2.0\""), "must have jsonrpc 2.0");
-        assert!(s.contains("\"method\":\"embed\""), "must have embed method");
-        assert!(
-            s.contains("\"texts\":[\"hello\",\"world\"]"),
-            "must include texts"
-        );
-        assert!(s.contains("\"id\":1"), "must have id");
-    }
-
-    #[test]
-    fn error_response_maps_to_model_error() {
-        // Why: daemon RPC errors must surface as EmbedderError::ModelError so
-        //      callers can distinguish them from transport failures.
-        // What: decode a synthetic error-response frame and check the variant.
-        // Test: this test.
-        let json = r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"ort failed"},"id":1}"#;
-        let result = decode_response(json, 1);
-        assert!(
-            matches!(result, Err(EmbedderError::ModelError(_))),
-            "got: {result:?}"
-        );
-    }
-
-    #[test]
-    fn success_response_decoded() {
-        // Why: verify the happy-path decode path works end-to-end without a
-        //      live child process.
-        // What: synthesise a success response and deserialise the embeddings.
-        // Test: this test.
-        let json = r#"{"jsonrpc":"2.0","result":{"embeddings":[[0.1,0.2],[0.3,0.4]]},"id":1}"#;
-        let result = decode_response(json, 2).unwrap();
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0][0], 0.1_f32);
-    }
-
-    #[test]
-    fn count_mismatch_returns_dimension_error() {
-        // Why: a count mismatch between sent and received vectors must surface
-        //      as DimensionMismatch, not a silent truncation.
-        // What: send `sent=3` but the mock response has 2 embeddings.
-        // Test: this test.
-        let json = r#"{"jsonrpc":"2.0","result":{"embeddings":[[0.1],[0.2]]},"id":1}"#;
-        let result = decode_response(json, 3);
-        assert!(
-            matches!(
-                result,
-                Err(EmbedderError::DimensionMismatch { sent: 3, got: 2 })
-            ),
-            "got: {result:?}"
-        );
-    }
-
-    /// Verify that a stalled/silent sidecar reader produces a timeout error
-    /// rather than blocking indefinitely.
-    ///
-    /// Why: the root cause of the reindex-stall failure mode is a read blocking
-    /// forever when the sidecar stops writing. This test proves that
-    /// `tokio::time::timeout` on a never-yielding `read_line` call returns an
-    /// `Elapsed` error rather than hanging.
-    ///
-    /// What: creates a `tokio::io::duplex` reader whose write end is held but
-    /// never written to. Calls `read_line` with a 1 s deadline and asserts the
-    /// result is `Err(Elapsed)`. Identical to a stalled sidecar.
-    ///
-    /// Test: this test (`embed_call_stalled_reader_times_out`).
-    #[tokio::test]
-    async fn embed_call_stalled_reader_times_out() {
-        use tokio::io::duplex;
-
-        let (_tx, rx) = duplex(1024);
-        let mut buf = String::new();
-        let mut reader = tokio::io::BufReader::new(rx);
-
-        let result = tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut buf)).await;
-
-        assert!(
-            result.is_err(),
-            "a read_line on a never-writing reader must time out under a 1 s deadline; \
-             got: {result:?}"
-        );
-    }
-}
+#[path = "stdio_tests.rs"]
+mod tests;

@@ -400,6 +400,12 @@ async fn do_spawn(
     // parent's resolved value (e.g. 256 on Medium-tier + CoreML).
     // CoreML cap: oversized batches inflate unified-memory RSS and trigger
     // jetsam SIGKILL, so cap at coreml_cap on the CoreML path.
+    // CUDA cap (issue #763 Fix 2): tune_batch_size_for_provider sets
+    // TRUSTY_MAX_BATCH_SIZE=512 on CUDA, but forwarding 512 to the sidecar
+    // with INFLIGHT=2 causes two concurrent ORT sessions to saturate the T4
+    // BFCArena (re-triggers #600). Cap the sidecar at cuda_sidecar_batch_cap()
+    // (default 64, overridable via TRUSTY_CUDA_SIDECAR_BATCH_CAP) so the
+    // per-ORT-call batch stays within the VRAM budget.
     //
     // Why re-resolve on each (re)spawn: intentional. The batch size and CoreML
     // cap can change between spawns if the operator updates daemon.env and
@@ -412,16 +418,29 @@ async fn do_spawn(
         trusty_common::embedder::ExecutionProvider::CoreML
             | trusty_common::embedder::ExecutionProvider::CoreMLAne
     );
+    let is_cuda = matches!(
+        predicted_provider,
+        trusty_common::embedder::ExecutionProvider::Cuda
+    );
     let resolved_batch = crate::core::indexer::embed_batch_size();
     let coreml_cap = crate::core::resolve_coreml_batch_size();
-    let forwarded_batch =
-        trusty_common::embedder_client::sidecar_batch_size(resolved_batch, is_coreml, coreml_cap);
+    let cuda_cap = trusty_common::embedder_client::cuda_sidecar_batch_cap();
+    let forwarded_batch = trusty_common::embedder_client::sidecar_batch_size(
+        resolved_batch,
+        is_coreml,
+        coreml_cap,
+        is_cuda,
+        cuda_cap,
+    );
     tracing::info!(
         resolved_batch,
         forwarded_batch,
         is_coreml,
+        is_cuda,
         coreml_cap,
-        "LazyEmbedderHandle: TRUSTY_EMBED_BATCH_SIZE={forwarded_batch} (resolved={resolved_batch})"
+        cuda_cap,
+        "LazyEmbedderHandle: TRUSTY_EMBED_BATCH_SIZE={forwarded_batch} \
+         (resolved={resolved_batch}, is_cuda={is_cuda}, cuda_cap={cuda_cap})"
     );
 
     let common_config = trusty_common::embedder_client::SupervisorConfig {

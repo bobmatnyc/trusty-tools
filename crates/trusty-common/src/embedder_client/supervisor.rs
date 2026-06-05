@@ -113,24 +113,66 @@ impl SupervisorConfig {
     }
 }
 
-/// Resolve the ONNX batch size to forward to the sidecar (issue #747 Fix C).
+/// Default CUDA sidecar batch cap (issue #763 Fix 2).
+///
+/// Why: `tune_batch_size_for_provider` sets `TRUSTY_MAX_BATCH_SIZE=512` on
+/// CUDA builds for pipeline-wave efficiency, but forwarding 512 directly to the
+/// sidecar causes two concurrent 512-chunk ORT sessions to saturate the T4
+/// BFCArena — the same OOM scenario fixed by issue #600, re-triggered by the
+/// multi-flight wave size. A conservative sidecar cap decouples the parent's
+/// wave size from the sidecar's per-call ORT batch size.
+///
+/// Overridable via `TRUSTY_CUDA_SIDECAR_BATCH_CAP` at runtime.
+pub const DEFAULT_CUDA_SIDECAR_BATCH_CAP: usize = 64;
+
+/// Read the CUDA sidecar batch cap from `TRUSTY_CUDA_SIDECAR_BATCH_CAP`; fall
+/// back to `DEFAULT_CUDA_SIDECAR_BATCH_CAP` (64).
+///
+/// Why: allows operators to tune the cap without recompiling (e.g. smaller
+/// values on VRAM-constrained GPUs, larger on multi-GPU hosts with more VRAM).
+/// What: reads the env var once, parses as `usize`, clamps to `[1, 512]`.
+/// Test: `sidecar_batch_size_cuda_*` tests in this module.
+pub fn cuda_sidecar_batch_cap() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("TRUSTY_CUDA_SIDECAR_BATCH_CAP")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_CUDA_SIDECAR_BATCH_CAP)
+            .clamp(1, 512)
+    })
+}
+
+/// Resolve the ONNX batch size to forward to the sidecar (issue #747 Fix C,
+/// extended by issue #763 Fix 2).
 ///
 /// Why: the parent's auto-tuned `TRUSTY_MAX_BATCH_SIZE` was never forwarded to
 /// the sidecar, which therefore always ran at the default of 32. CoreML safety
 /// cap: CoreML pre-allocates per-batch GPU/ANE buffers in the unified-memory
 /// pool; oversized batches can trigger jetsam SIGKILL, so the value is clamped
-/// to `coreml_cap` when `is_coreml` is `true`. A zero result is invalid (the
-/// sidecar would set `TRUSTY_EMBED_BATCH_SIZE=0` which ORT rejects), so the
-/// return value is always clamped to at least 1.
-/// What: `min(resolved, coreml_cap)` when `is_coreml`; `resolved` otherwise;
-/// result is further clamped to `max(result, 1)` to prevent a zero batch size.
-/// When `is_coreml && coreml_cap == 0` a `tracing::warn!` is emitted to stderr
-/// because that combination indicates a likely `resolve_coreml_batch_size()`
-/// misconfiguration — the clamp-to-1 keeps the system alive but will be very
-/// slow (one embedding per ONNX call).
-/// Test: `sidecar_batch_size_*` in this module's `tests`, including
-/// `sidecar_batch_size_zero_resolved` and `sidecar_batch_size_zero_coreml_cap`.
-pub fn sidecar_batch_size(resolved: usize, is_coreml: bool, coreml_cap: usize) -> usize {
+/// to `coreml_cap` when `is_coreml` is `true`. CUDA safety cap (#763): with
+/// `INFLIGHT=2` the parent sends two concurrent 512-chunk waves; forwarding 512
+/// to the sidecar causes two ORT sessions to saturate the BFCArena on a T4,
+/// re-triggering the #600 OOM. `cuda_cap` (default 64, overridable via
+/// `TRUSTY_CUDA_SIDECAR_BATCH_CAP`) bounds the per-ORT-call batch size
+/// independently of the parent's wave size. A zero result is invalid (the sidecar
+/// would set `TRUSTY_EMBED_BATCH_SIZE=0` which ORT rejects), so the return value
+/// is always clamped to at least 1.
+/// What: `min(resolved, coreml_cap)` when `is_coreml`; `min(resolved, cuda_cap)`
+/// when `is_cuda`; `resolved` otherwise. Result further clamped to
+/// `max(result, 1)` to prevent a zero batch size.
+/// When `is_coreml && coreml_cap == 0` or `is_cuda && cuda_cap == 0` a
+/// `tracing::warn!` is emitted to stderr because those combinations indicate a
+/// likely misconfiguration — the clamp-to-1 keeps the system alive but will be
+/// very slow (one embedding per ONNX call).
+/// Test: `sidecar_batch_size_*` in this module's `tests`.
+pub fn sidecar_batch_size(
+    resolved: usize,
+    is_coreml: bool,
+    coreml_cap: usize,
+    is_cuda: bool,
+    cuda_cap: usize,
+) -> usize {
     let raw = if is_coreml {
         if coreml_cap == 0 {
             tracing::warn!(
@@ -142,6 +184,20 @@ pub fn sidecar_batch_size(resolved: usize, is_coreml: bool, coreml_cap: usize) -
             );
         }
         resolved.min(coreml_cap)
+    } else if is_cuda {
+        // CUDA cap: keep the sidecar's per-ORT-call batch independent of the
+        // parent's wave size. The parent may send 512-chunk waves; we cap the
+        // sidecar at `cuda_cap` (default 64) so two concurrent INFLIGHT=2
+        // sessions stay within the BFCArena budget.
+        if cuda_cap == 0 {
+            tracing::warn!(
+                resolved,
+                "sidecar_batch_size: CUDA batch cap resolved to 0 — likely a \
+                 misconfiguration. Clamping to 1. \
+                 Check TRUSTY_CUDA_SIDECAR_BATCH_CAP."
+            );
+        }
+        resolved.min(cuda_cap)
     } else {
         resolved
     };
@@ -555,155 +611,8 @@ fn which_embedderd() -> Result<PathBuf> {
     anyhow::bail!("trusty-embedderd not found on PATH")
 }
 
+// Tests are in a sibling file to keep this file under its allowlist budget.
+// The submodule can access private items via `super::` (Rust child-module rule).
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn from_env_uses_defaults_when_no_vars_set() {
-        // Why: validate that unset env vars produce the documented defaults.
-        // What: construct from env (no vars set in test process by default)
-        //       and compare each field.
-        // Test: this test.
-
-        // Save any existing env vars to restore later.
-        let saved_max = std::env::var("TRUSTY_EMBEDDERD_MAX_RESTARTS").ok();
-        let saved_backoff = std::env::var("TRUSTY_EMBEDDERD_RESTART_BACKOFF_MAX_SECS").ok();
-        let saved_timeout = std::env::var("TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS").ok();
-
-        // Ensure they are unset during the test.
-        // SAFETY: test-only, single-threaded by test framework convention.
-        unsafe {
-            std::env::remove_var("TRUSTY_EMBEDDERD_MAX_RESTARTS");
-            std::env::remove_var("TRUSTY_EMBEDDERD_RESTART_BACKOFF_MAX_SECS");
-            std::env::remove_var("TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS");
-        }
-
-        let cfg = SupervisorConfig::from_env();
-        assert_eq!(cfg.max_restarts, 5);
-        assert_eq!(cfg.backoff_max_secs, 60);
-        assert_eq!(cfg.startup_timeout_secs, 5);
-
-        // Restore.
-        unsafe {
-            if let Some(v) = saved_max {
-                std::env::set_var("TRUSTY_EMBEDDERD_MAX_RESTARTS", v);
-            }
-            if let Some(v) = saved_backoff {
-                std::env::set_var("TRUSTY_EMBEDDERD_RESTART_BACKOFF_MAX_SECS", v);
-            }
-            if let Some(v) = saved_timeout {
-                std::env::set_var("TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS", v);
-            }
-        }
-    }
-
-    #[test]
-    fn parse_env_uses_override() {
-        // Why: verify that a valid env-var value overrides the default.
-        // What: set the var to "99", call `from_env`, check the field.
-        // Test: this test.
-        let saved = std::env::var("TRUSTY_EMBEDDERD_MAX_RESTARTS").ok();
-        // SAFETY: test-only.
-        unsafe {
-            std::env::set_var("TRUSTY_EMBEDDERD_MAX_RESTARTS", "99");
-        }
-        let cfg = SupervisorConfig::from_env();
-        assert_eq!(cfg.max_restarts, 99);
-        unsafe {
-            if let Some(v) = saved {
-                std::env::set_var("TRUSTY_EMBEDDERD_MAX_RESTARTS", v);
-            } else {
-                std::env::remove_var("TRUSTY_EMBEDDERD_MAX_RESTARTS");
-            }
-        }
-    }
-
-    // ── sidecar_batch_size tests (Fix C, issue #747) ──────────────────────
-
-    #[test]
-    fn sidecar_batch_size_cpu_passthrough() {
-        // Why: CPU path must forward resolved value unchanged.
-        // What: is_coreml=false → returns resolved.
-        // Test: this test.
-        assert_eq!(sidecar_batch_size(128, false, 32), 128);
-        assert_eq!(sidecar_batch_size(512, false, 32), 512);
-        assert_eq!(sidecar_batch_size(32, false, 32), 32);
-    }
-
-    #[test]
-    fn sidecar_batch_size_coreml_caps_and_passes_through() {
-        // Why: CoreML path must cap at coreml_cap to prevent OOM/jetsam on
-        // Apple Silicon, but pass through values at or below the cap.
-        // What: is_coreml=true → min(resolved, coreml_cap).
-        // Test: this test.
-        assert_eq!(sidecar_batch_size(256, true, 32), 32);
-        assert_eq!(sidecar_batch_size(512, true, 64), 64);
-        assert_eq!(sidecar_batch_size(16, true, 32), 16);
-        assert_eq!(sidecar_batch_size(32, true, 32), 32);
-    }
-
-    #[test]
-    fn sidecar_batch_size_zero_resolved_clamps_to_one() {
-        // Why: resolved=0 would cause TRUSTY_EMBED_BATCH_SIZE=0 which ONNX
-        // Runtime rejects; the guard must clamp to 1 regardless of is_coreml.
-        // What: resolved=0, is_coreml=false → 1 (clamped from 0).
-        // Test: this test.
-        assert_eq!(
-            sidecar_batch_size(0, false, 32),
-            1,
-            "zero resolved (non-coreml) must clamp to 1"
-        );
-    }
-
-    #[test]
-    fn sidecar_batch_size_zero_coreml_cap_clamps_to_one() {
-        // Why: if the CoreML cap is 0, min(resolved, 0) = 0, which is
-        // invalid. The guard must still clamp to 1.
-        // What: resolved=32, is_coreml=true, coreml_cap=0 → 1 (clamped from 0).
-        // Test: this test.
-        assert_eq!(
-            sidecar_batch_size(32, true, 0),
-            1,
-            "zero coreml_cap must clamp result to 1"
-        );
-    }
-
-    #[test]
-    fn sidecar_batch_size_both_zero_clamps_to_one() {
-        // Why: both inputs at zero must still produce a valid result.
-        // What: resolved=0, is_coreml=true, coreml_cap=0 → 1.
-        // Test: this test.
-        assert_eq!(
-            sidecar_batch_size(0, true, 0),
-            1,
-            "resolved=0, coreml_cap=0 must clamp to 1"
-        );
-    }
-
-    #[test]
-    fn locate_binary_respects_explicit_override() {
-        // Why: `TRUSTY_EMBEDDERD_BIN` must take priority over all discovery.
-        // What: set `TRUSTY_EMBEDDERD_BIN` to a non-existent path — the
-        //       function should return an error mentioning the path.
-        // Test: this test.
-        let saved = std::env::var("TRUSTY_EMBEDDERD_BIN").ok();
-        unsafe {
-            std::env::set_var("TRUSTY_EMBEDDERD_BIN", "/no/such/binary");
-        }
-        let result = locate_embedderd_binary();
-        assert!(result.is_err(), "must fail on non-existent override path");
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("TRUSTY_EMBEDDERD_BIN"),
-            "error must mention the env var"
-        );
-        unsafe {
-            if let Some(v) = saved {
-                std::env::set_var("TRUSTY_EMBEDDERD_BIN", v);
-            } else {
-                std::env::remove_var("TRUSTY_EMBEDDERD_BIN");
-            }
-        }
-    }
-}
+#[path = "supervisor_tests.rs"]
+mod tests;
