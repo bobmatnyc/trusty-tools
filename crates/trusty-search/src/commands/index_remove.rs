@@ -64,6 +64,16 @@ pub async fn handle_index_remove(cli_path: Option<PathBuf>) -> Result<()> {
         }
     }
 
+    // Issue #767: also remove from the opt-in allowlist so the path cannot
+    // be re-registered without explicit re-approval.  Best-effort.
+    if let Err(e) = crate::allowlist::remove_from_allowlist(&registered_path, None) {
+        tracing::warn!(
+            path = %registered_path.display(),
+            error = %e,
+            "could not remove path from allowlist after index removal"
+        );
+    }
+
     println!(
         "{} Removed index {} ({})",
         "✓".green(),

@@ -21,7 +21,7 @@ mod detect;
 // Re-export the library's modules into the binary's `crate::` namespace so
 // existing `crate::core::*` / `crate::service::*` / `crate::mcp::*` imports
 // in `commands/*.rs` resolve without churn after the workspace consolidation.
-pub(crate) use trusty_search::{config, core, mcp, service};
+pub(crate) use trusty_search::{allowlist, config, core, mcp, service};
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -827,18 +827,20 @@ enum Commands {
 /// `args_conflicts_with_subcommands` lets the top-level args coexist with an
 /// optional subcommand) while opening the door to additional actions
 /// (`rename`, `move`, …) without further breaking changes.
-/// What: a single `Remove` variant carrying the optional `PATH`.
-/// Test: `cargo run -p trusty-search -- index --help` lists the variant;
+/// What: `Remove` drops a registration; `Add` writes to the allowlist so the
+/// path can later be indexed; `List` displays the current allowlist.
+/// Test: `cargo run -p trusty-search -- index --help` lists every variant;
 /// `index_remove::tests::*` cover path resolution.
 #[derive(Subcommand)]
 enum IndexAction {
-    /// Remove an index registration (daemon + global config)
+    /// Remove an index registration (daemon + global config + allowlist)
     ///
     /// Deletes the daemon-side registration matching the given (or
-    /// auto-detected) path via `DELETE /indexes/:id`, then drops the matching
-    /// entry from `~/.config/trusty-search/config.yaml` so the project is not
-    /// re-discovered on the next daemon restart. The on-disk redb / HNSW
-    /// snapshot is preserved — re-registering with the same path reuses it.
+    /// auto-detected) path via `DELETE /indexes/:id`, drops the matching
+    /// entry from `~/.config/trusty-search/config.yaml`, and also removes it
+    /// from the allowlist (`~/.config/trusty-search/indexes.toml`). The
+    /// on-disk redb / HNSW snapshot is preserved — re-registering with the
+    /// same path reuses it.
     ///
     /// AGENT USAGE: use this when a project has been moved or deleted so the
     /// daemon stops reporting an empty/stale entry. Auto-detect from CWD when
@@ -850,6 +852,43 @@ enum IndexAction {
     Remove {
         /// Directory of the index to remove (default: auto-detected from CWD)
         path: Option<std::path::PathBuf>,
+    },
+
+    /// Add a path to the opt-in allowlist (issue #767)
+    ///
+    /// Writes the path to `~/.config/trusty-search/indexes.toml` so it can
+    /// subsequently be registered and indexed. This is the ONLY way to
+    /// approve a new path under the default-deny model — the daemon will
+    /// refuse `POST /indexes` for any path not in the allowlist.
+    ///
+    /// Paths matching the hard sensitive-path denylist (e.g. ~/.ssh, /tmp,
+    /// ~/.aws) are refused with a clear error even when this command is used.
+    ///
+    /// Examples:
+    ///   trusty-search index add ~/Projects/my-repo
+    ///   trusty-search index add .   # adds the current directory
+    Add {
+        /// Directory to approve for indexing
+        path: std::path::PathBuf,
+
+        /// Optional human-readable name for the index
+        #[arg(short, long)]
+        name: Option<String>,
+    },
+
+    /// List all paths currently in the allowlist (issue #767)
+    ///
+    /// Displays the contents of `~/.config/trusty-search/indexes.toml` — the
+    /// single source of truth for what may be indexed. An empty list means
+    /// nothing can be indexed (default-deny).
+    ///
+    /// Examples:
+    ///   trusty-search index list
+    ///   trusty-search index list --json
+    List {
+        /// Emit the list as JSON instead of plain text
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1042,6 +1081,15 @@ async fn run() -> Result<()> {
         } => match action {
             Some(IndexAction::Remove { path: rm_path }) => {
                 commands::index_remove::handle_index_remove(rm_path).await?;
+            }
+            Some(IndexAction::Add {
+                path: add_path,
+                name: add_name,
+            }) => {
+                commands::index_allowlist::handle_allowlist_add(add_path, add_name).await?;
+            }
+            Some(IndexAction::List { json }) => {
+                commands::index_allowlist::handle_allowlist_list(json).await?;
             }
             None => {
                 commands::index::handle_index(

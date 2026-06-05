@@ -1666,6 +1666,79 @@ async fn create_index_handler(
         Err(resp) => return resp,
     };
     req.root_path = canonical_root;
+
+    // Issue #767: opt-in allowlist — default-deny + hard sensitive-path denylist.
+    //
+    // Skip the allowlist check in two cases:
+    // 1. `cfg!(test)` — unit tests call this handler directly with synthetic
+    //    temp-dir paths that cannot be in the real allowlist; bypassing the
+    //    check lets them test the surrounding logic (path validation, embedder
+    //    readiness, registry state) without coupling to the on-disk config.
+    // 2. `TRUSTY_ALLOW_UNLISTED=1` env var — operators or scripts that need
+    //    to pre-populate an index registry during controlled setup can opt out
+    //    of the allowlist check at runtime. NEVER set this on a production
+    //    host that handles untrusted input.
+    let skip_allowlist = cfg!(test)
+        || std::env::var("TRUSTY_ALLOW_UNLISTED")
+            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false);
+    if !skip_allowlist {
+        match crate::allowlist::check_path(&req.root_path, None) {
+            Ok(crate::allowlist::AllowlistCheck::Allowed) => {
+                // Path is explicitly allowlisted and safe — proceed.
+            }
+            Ok(crate::allowlist::AllowlistCheck::Denied { reason }) => {
+                tracing::warn!(
+                    path = %req.root_path.display(),
+                    reason = %reason,
+                    "POST /indexes rejected: sensitive path"
+                );
+                return (
+                    axum::http::StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "path '{}' matches a sensitive-path denylist pattern and cannot be indexed: {}",
+                            req.root_path.display(), reason
+                        )
+                    })),
+                )
+                    .into_response();
+            }
+            Ok(crate::allowlist::AllowlistCheck::NotAllowlisted) => {
+                tracing::warn!(
+                    path = %req.root_path.display(),
+                    "POST /indexes rejected: path not in allowlist (~/.config/trusty-search/indexes.toml)"
+                );
+                return (
+                    axum::http::StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "path '{}' is not in the allowlist. \
+                             Run `trusty-search index add {}` to approve it, \
+                             or add an [[index]] entry to ~/.config/trusty-search/indexes.toml.",
+                            req.root_path.display(), req.root_path.display()
+                        )
+                    })),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::error!(
+                    path = %req.root_path.display(),
+                    error = %e,
+                    "POST /indexes: failed to read allowlist"
+                );
+                return (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("could not check allowlist: {e}")
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     if state.registry.get(&id).is_some() {
         return Json(serde_json::json!({
             "id": req.id,

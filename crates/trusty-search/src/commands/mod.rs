@@ -40,6 +40,7 @@ pub mod dashboard;
 pub mod discover;
 pub mod doctor;
 pub mod index;
+pub mod index_allowlist;
 pub mod index_remove;
 pub mod init;
 pub mod integrate;

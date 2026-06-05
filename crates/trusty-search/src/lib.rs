@@ -10,6 +10,7 @@
 //! Test: `cargo build --lib` succeeds; `cargo test` runs integration tests
 //! that import `trusty_search::core::*`.
 
+pub mod allowlist;
 pub mod config;
 pub mod core;
 pub mod mcp;

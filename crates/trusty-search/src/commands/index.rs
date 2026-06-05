@@ -347,27 +347,30 @@ async fn index_one_with_filters(
     Ok(())
 }
 
-/// Write (or update) an entry in `~/.config/trusty-search/config.yaml`.
+/// Write (or update) entries in the YAML config and the opt-in allowlist.
 ///
 /// Why: issue #40 — the YAML config is the user-facing source of truth for
 /// indexed projects. Every successful `trusty-search index` invocation must
 /// add/update its matching `collections:` entry so a daemon restart preserves
 /// the registration and `index remove` has a row to drop. Failures here are
 /// non-fatal because the daemon-side registration already succeeded.
-/// What: loads the existing config (creating an empty one if missing), upserts
-/// a `CollectionConfig` matching `name`/`path` plus the filter-derived
-/// `exclude`/`extensions`/`domain_terms`, and saves atomically. Warnings are
-/// emitted via `tracing::warn!` so daemon logs surface them without polluting
-/// stdout.
+/// Issue #767: also write to the TOML allowlist (`indexes.toml`). Running
+/// `trusty-search index <path>` is an explicit user gesture that implies
+/// approval; persisting it to the allowlist makes the approval durable across
+/// daemon restarts without requiring a separate `index add` invocation.
+/// What: loads both config files, upserts entries, and saves atomically.
+/// Warnings are emitted via `tracing::warn!` so daemon logs surface them
+/// without polluting stdout.
 /// Test: covered indirectly by `config::tests::roundtrip_preserves_fields`
 /// (round-trip) and `config::tests::upsert_replaces_by_name` (idempotency);
-/// CLI smoke tested by running `trusty-search index` twice and inspecting the
-/// resulting YAML.
+/// CLI smoke tested by running `trusty-search index` twice and inspecting both
+/// the resulting YAML and TOML files.
 fn persist_collection_to_global_config(
     index_name: &str,
     project_path: &std::path::Path,
     filters: &RegisterFilters,
 ) {
+    // 1. Legacy YAML config (config.yaml).
     let mut cfg = match GlobalConfig::load() {
         Ok(c) => c,
         Err(e) => {
@@ -384,6 +387,22 @@ fn persist_collection_to_global_config(
     });
     if let Err(e) = cfg.save() {
         tracing::warn!("could not save global config after registering '{index_name}': {e:#}");
+    }
+
+    // 2. Issue #767: also write to the TOML allowlist (indexes.toml).
+    // Skip paths blocked by the denylist (shouldn't be reachable here because
+    // the daemon already validated them, but be defensive).
+    if crate::allowlist::is_denied(project_path).is_none() {
+        let entry = crate::allowlist::AllowlistEntry {
+            path: project_path.to_path_buf(),
+            name: Some(index_name.to_string()),
+            exclude: filters.exclude_globs.clone(),
+            extensions: filters.extensions.clone(),
+            skip_kg: filters.skip_kg,
+        };
+        if let Err(e) = crate::allowlist::add_to_allowlist(entry, None) {
+            tracing::warn!("could not write allowlist entry for '{index_name}': {e:#}");
+        }
     }
 }
 

@@ -325,6 +325,79 @@ The classifier is a sub-ms regex over the query text. KG expansion is gated
 to `Usage` intent only — caller/callee chains are scored at 70% of the
 trigger chunk's RRF score.
 
+## Opt-in index allowlist (default-deny, issue #767)
+
+As of v0.23.7, **trusty-search indexes nothing by default**. Before a path can
+be registered (via `POST /indexes`, `trusty-search index`, or any MCP tool), it
+must appear in the allowlist file at:
+
+```
+~/.config/trusty-search/indexes.toml   # macOS / Linux (XDG config dir)
+```
+
+### Format
+
+```toml
+# ~/.config/trusty-search/indexes.toml
+
+[[index]]
+path = "/Users/me/Projects/myproj"
+name = "myproj"            # optional; defaults to directory basename
+
+[[index]]
+path = "/Users/me/Projects/other"
+exclude = ["target/", "node_modules/"]   # optional extra globs
+extensions = ["rs", "ts"]               # optional explicit extensions
+skip_kg = true                          # optional per-root KG skip
+```
+
+### Adding paths
+
+The easiest way is the new `index add` subcommand, which writes the allowlist
+and then calls the daemon:
+
+```bash
+# Add to allowlist and index in one shot
+trusty-search index add ~/Projects/myproj --name myproj
+
+# List all allowlisted roots
+trusty-search index list
+trusty-search index list --json    # machine-readable
+
+# The existing trusty-search index <path> command also writes the allowlist
+trusty-search index ~/Projects/myproj --name myproj
+```
+
+You can also edit the TOML file by hand. Changes take effect on the next
+`trusty-search index` or `POST /indexes` call for that path.
+
+### Hard sensitive-path denylist
+
+Even if a path is in the allowlist, these patterns are **always refused** and
+cannot be overridden:
+
+| Pattern | Reason |
+|---------|--------|
+| `/.ssh`, `/.aws`, `/.gnupg`, `/.kube` | Credential directories |
+| `/.env`, `/secrets`, `/credentials` | Secret markers anywhere in the path |
+| `/tmp/`, `/private/tmp`, `/var/folders` | Ephemeral directories |
+| `/.config` | System config (often contains tokens) |
+| `$HOME` itself, `~/Desktop`, `~/Downloads`, `~/Documents`, `~/Library` | Home top-level dirs |
+
+The daemon returns HTTP 403 with a `{"error": "..."}` body when a denylist
+pattern matches. The error message names the matched pattern.
+
+### Operator bypass (for automation / CI)
+
+Set `TRUSTY_ALLOW_UNLISTED=1` in the daemon's environment to disable the
+allowlist check entirely. Use this only in fully controlled, network-isolated
+environments where you trust every `POST /indexes` caller. Never set this on a
+shared or production host.
+
+```bash
+TRUSTY_ALLOW_UNLISTED=1 trusty-search start
+```
+
 ## CLI
 
 ```bash
@@ -337,7 +410,10 @@ trusty-search start --no-auto-discover               # skip startup auto-discove
                                                      # daemon serves only already-registered indexes
 trusty-search stop                                   # stop daemon (SIGTERM via PID lockfile)
 trusty-search index [path] [--name <id>] [--force]   # register + index (primary command)
+                                                     # also writes ~/.config/trusty-search/indexes.toml
                                                      # auto-detects ./trusty-search.yaml
+trusty-search index add <path> [--name <id>]         # add path to allowlist + index
+trusty-search index list [--json]                    # list all allowlisted roots
 trusty-search query <text> [--index <id>] [--top-k N] [--json]
 trusty-search status                                 # daemon + index overview (alias: health)
 trusty-search doctor [--fix]                         # 6-check diagnostic + auto-repair
