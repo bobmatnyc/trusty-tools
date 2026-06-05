@@ -46,11 +46,20 @@ pub fn spawn_watch_loop(
     let (tx, mut rx) = mpsc::unbounded_channel::<WatchEvent>();
     let watcher = FileWatcher::start(root_path.to_path_buf(), tx)?;
 
+    // Canonicalize the root exactly as the reindex walker does (issue #402).
+    // `std::fs::canonicalize` resolves symlinks so that the macOS `/var` →
+    // `/private/var` alias (and similar) never cause a prefix-mismatch when
+    // the notify event path and the stored root differ only by symlink target.
+    // Fall back to the raw path when canonicalization fails (mount unmounted,
+    // permission error) — matching the reindex fallback in `validate.rs`.
+    let canonical_root =
+        std::fs::canonicalize(root_path).unwrap_or_else(|_| root_path.to_path_buf());
+
     let join = tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             match event {
                 WatchEvent::Modified(path) => {
-                    handle_modified(&path, &indexer, &indexed_files).await;
+                    handle_modified(&path, &canonical_root, &indexer, &indexed_files).await;
                 }
                 WatchEvent::Removed(path) => {
                     handle_removed(&path, &indexer, &indexed_files).await;
@@ -65,11 +74,53 @@ pub fn spawn_watch_loop(
     })
 }
 
+/// Normalize an absolute watcher event path to a repo-root-relative string,
+/// matching the path convention used by the reindex pipeline (issue #402).
+///
+/// Why: `notify` delivers absolute filesystem paths (e.g.
+/// `/Volumes/SSD1/proj/src/lib.rs`). The reindex walker stores paths
+/// *relative* to the canonical index root (e.g. `src/lib.rs`) via
+/// `strip_prefix`. When the watcher stored absolute paths instead, branch
+/// boosting (`set.contains("src/lib.rs")`) silently failed and the index
+/// became non-portable across worktrees or CI machines.
+///
+/// What: canonicalizes `event_path` (resolving symlinks, e.g. macOS
+/// `/var` → `/private/var`) then strips `canonical_root` as a prefix. If
+/// stripping succeeds, returns the relative path string. If the event path
+/// is genuinely outside the root (a symlink target outside the tree, a
+/// cross-device notification glitch), falls back to the raw
+/// `event_path.to_string_lossy()` — matching the `unwrap_or` in the reindex
+/// `strip_prefix` call.
+///
+/// Test: unit tests at the bottom of this module cover the normal case,
+/// nested subdirs, files outside root, and an optional symlink-root test.
+pub fn watcher_relative_path(canonical_root: &Path, event_path: &Path) -> String {
+    // Canonicalize the event path to resolve any symlink components.  On
+    // macOS `/var/folders/...` is a symlink to `/private/var/...`; without
+    // this canonicalization the `strip_prefix` below would fail because
+    // `canonical_root` was already resolved to `/private/...`.
+    //
+    // `canonicalize` can fail if the file was deleted between the event and
+    // this call (race window); in that case we fall back to the raw path.
+    // `strip_prefix` will still succeed as long as the raw path and root
+    // share the same byte prefix — safe on most real filesystems where
+    // the only divergence is a macOS-style symlink alias at the root.
+    let canonical_event =
+        std::fs::canonicalize(event_path).unwrap_or_else(|_| event_path.to_path_buf());
+
+    canonical_event
+        .strip_prefix(canonical_root)
+        .unwrap_or(&canonical_event)
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Re-chunk the file and merge it into the indexer. Stale chunks from a
 /// previous version of the same file are removed first so we don't accumulate
 /// dead entries on edit.
 async fn handle_modified(
     path: &Path,
+    canonical_root: &Path,
     indexer: &Arc<RwLock<CodeIndexer>>,
     indexed_files: &IndexedFiles,
 ) {
@@ -112,8 +163,14 @@ async fn handle_modified(
         }
     }
 
-    // Compute fresh chunk IDs and feed them to the indexer.
-    let path_str = path.to_string_lossy().into_owned();
+    // Issue #402 — normalize to repo-root-relative path before indexing.
+    // The reindex pipeline strips `root_path` from every walked file so the
+    // corpus stores portable relative paths (e.g. `src/lib.rs`).  The
+    // watcher previously forwarded the absolute event path (e.g.
+    // `/Volumes/SSD1/.../src/lib.rs`), diverging from that convention and
+    // silently breaking branch-boost (`set.contains("src/lib.rs")`) as well
+    // as making the index non-portable across worktrees and CI machines.
+    let path_str = watcher_relative_path(canonical_root, path);
     let (chunks, _entities) = chunk_ast(&path_str, &content);
     let new_ids: Vec<String> = chunks.iter().map(|c| c.id.clone()).collect();
 
@@ -147,8 +204,110 @@ async fn handle_removed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::time::Duration;
     use tokio::sync::RwLock;
+
+    // ── Pure unit tests for `watcher_relative_path` ──────────────────────────
+
+    /// Why: the primary fix for issue #402 — a file directly inside the root
+    /// must be stored as a bare relative name, not the absolute path.
+    /// Test: this test.
+    #[test]
+    fn watcher_relative_path_strips_root_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize root");
+        let file = root.join("lib.rs");
+        // Create the file so canonicalize works on it.
+        std::fs::write(&file, "").expect("create file");
+        let rel = watcher_relative_path(&root, &file);
+        assert_eq!(rel, "lib.rs", "expected bare filename, got {rel:?}");
+        assert!(
+            !rel.starts_with('/'),
+            "relative path must not start with '/', got {rel:?}"
+        );
+    }
+
+    /// Why: files nested under subdirectories must produce multi-component
+    /// relative paths (e.g. `src/auth/mod.rs`), not just the basename.
+    /// Test: this test.
+    #[test]
+    fn watcher_relative_path_preserves_subdirectory_structure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize root");
+        let subdir = root.join("src").join("auth");
+        std::fs::create_dir_all(&subdir).expect("create subdir");
+        let file = subdir.join("mod.rs");
+        std::fs::write(&file, "").expect("create file");
+        let rel = watcher_relative_path(&root, &file);
+        assert_eq!(
+            rel,
+            PathBuf::from("src")
+                .join("auth")
+                .join("mod.rs")
+                .display()
+                .to_string(),
+            "expected src/auth/mod.rs, got {rel:?}"
+        );
+        assert!(
+            !rel.starts_with('/'),
+            "relative path must not start with '/', got {rel:?}"
+        );
+    }
+
+    /// Why: a notify event for a file outside the index root (symlink target
+    /// outside tree, cross-device glitch) must fall back to the raw/canonical
+    /// path rather than panicking or returning an empty string. This matches
+    /// the reindex `unwrap_or(&path)` convention.
+    /// Test: this test.
+    #[test]
+    fn watcher_relative_path_falls_back_for_file_outside_root() {
+        let root_dir = tempfile::tempdir().expect("tempdir root");
+        let other_dir = tempfile::tempdir().expect("tempdir other");
+        let root = std::fs::canonicalize(root_dir.path()).expect("canonicalize root");
+        let outside = other_dir.path().join("x.rs");
+        std::fs::write(&outside, "").expect("create outside file");
+        let result = watcher_relative_path(&root, &outside);
+        // Must not start with the root prefix.
+        assert!(
+            !result.starts_with(root.to_str().unwrap_or("")),
+            "result must not start with root when file is outside: {result:?}"
+        );
+        // Must be non-empty — some path representation must survive.
+        assert!(!result.is_empty(), "result must not be empty");
+    }
+
+    /// Why: on macOS, `/var` is a symlink to `/private/var`. If `notify` delivers
+    /// a path under the real target (`/private/var/...`) while the root was
+    /// registered under the symlink (`/var/...`) — or vice versa — the prefix
+    /// stripping must still succeed. This test verifies the canonicalization
+    /// step handles that case.
+    #[cfg(unix)]
+    #[test]
+    fn watcher_relative_path_resolves_symlinked_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).expect("create real");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        // File is under the real directory.
+        let file = real.join("foo.rs");
+        std::fs::write(&file, "").expect("create file");
+
+        // Root is the symlink alias — simulates how an operator might register
+        // the index under a symlinked path.
+        let canonical_root = std::fs::canonicalize(&link).expect("canonicalize link");
+        let rel = watcher_relative_path(&canonical_root, &file);
+        assert_eq!(
+            rel, "foo.rs",
+            "expected bare filename through symlink, got {rel:?}"
+        );
+        assert!(
+            !rel.starts_with('/'),
+            "relative path must not start with '/', got {rel:?}"
+        );
+    }
 
     /// End-to-end: writing a `.rs` file inside a watched directory causes the
     /// indexer's chunk count to grow within ~2s.
