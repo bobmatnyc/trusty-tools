@@ -221,15 +221,12 @@ impl BitbucketClient {
 
     /// Persist a batch of [`PullRequest`] rows into the database.
     ///
-    /// Mirrors the GitHub client's persistence — same table, same columns.
-    /// Writes `provider = 'bitbucket'` and `repository = "<workspace>/<repo_slug>"`
-    /// so rows deduplicate against the
-    /// `(provider, repository, pr_number)` unique index from migration
-    /// `0012_pull_requests_repository.sql` (fix #88), preventing collisions
-    /// with PRs collected by the GitHub or Azure DevOps providers that
-    /// happen to share the same numeric `pr_number`, and preventing
-    /// cross-repo collisions when multiple Bitbucket repos are collected.
-    ///
+    /// Why: `ON CONFLICT … DO UPDATE` keeps existing `id` so FK-linked `pr_reviewers`
+    /// survive re-collection; `INSERT OR REPLACE` cascade-deleted them (#752).
+    /// What: `provider='bitbucket'`; `repository="<workspace>/<repo_slug>"`;
+    /// deduplicates on `(provider,repository,pr_number)` (0012/#88); existing rows
+    /// update `title`/`author`/`state`/`merged_at`/`commit_shas`. Test: see
+    /// reviewer_store integration tests for FK-preservation coverage.
     /// # Errors
     ///
     /// Propagates [`crate::core::TgaError::DbError`] on SQL failures.
@@ -242,9 +239,12 @@ impl BitbucketClient {
         let mut count = 0usize;
         for pr in prs {
             conn.execute(
-                "INSERT OR REPLACE INTO pull_requests \
-                 (provider, repository, pr_number, title, author, state, created_at, merged_at, commit_shas) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO pull_requests \
+                 (provider,repository,pr_number,title,author,state,created_at,merged_at,commit_shas) \
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) \
+                 ON CONFLICT(provider,repository,pr_number) DO UPDATE SET \
+                   title=excluded.title,author=excluded.author,state=excluded.state,\
+                   merged_at=excluded.merged_at,commit_shas=excluded.commit_shas",
                 params![
                     "bitbucket",
                     pr.repository,

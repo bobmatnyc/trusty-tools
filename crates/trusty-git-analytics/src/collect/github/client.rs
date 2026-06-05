@@ -535,14 +535,11 @@ impl GitHubClient {
 
     /// Persist a batch of [`PullRequest`] rows into the database.
     ///
-    /// Existing rows with the same `(provider, repository, pr_number)` are
-    /// replaced. The `provider` column is set to `'github'` for all rows
-    /// written by this client; `repository` comes from each `PullRequest`
-    /// in `"owner/repo"` form (see migrations
-    /// `0010_pull_requests_provider.sql` and
-    /// `0012_pull_requests_repository.sql`). Including `repository` in the
-    /// uniqueness key prevents cross-repo collisions on `pr_number` (fix
-    /// for issue #88).
+    /// Why: `ON CONFLICT … DO UPDATE` keeps existing `id` so FK-linked
+    /// `pr_reviewers` survive re-collection; `INSERT OR REPLACE` wiped them (#752).
+    /// What: new rows insert all columns; existing update `title`/`author`/`state`/
+    /// `merged_at`/`commit_shas`; `id` and `created_at` are never overwritten.
+    /// Test: reviewer_store tests cover FK-preservation.
     ///
     /// # Errors
     ///
@@ -556,9 +553,12 @@ impl GitHubClient {
         let mut count = 0usize;
         for pr in prs {
             conn.execute(
-                "INSERT OR REPLACE INTO pull_requests \
-                 (provider, repository, pr_number, title, author, state, created_at, merged_at, commit_shas) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO pull_requests \
+                 (provider,repository,pr_number,title,author,state,created_at,merged_at,commit_shas) \
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) \
+                 ON CONFLICT(provider,repository,pr_number) DO UPDATE SET \
+                   title=excluded.title,author=excluded.author,state=excluded.state,\
+                   merged_at=excluded.merged_at,commit_shas=excluded.commit_shas",
                 params![
                     "github",
                     pr.repository,
