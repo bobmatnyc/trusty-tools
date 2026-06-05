@@ -1913,27 +1913,24 @@ async fn launch(client: &reqwest::Client, url: &str, dir: Option<String>) -> any
         }
     };
 
+    // Resolve the model to inject (issue #390): config > frontmatter > default.
+    // The `launch` command acts as the PM session, not a named specialist agent.
+    let mpm_cfg = trusty_mpm::core::config::MpmConfig::load_default();
+    let pm_model = trusty_mpm::core::model_inject::resolve_pm_model(&mpm_cfg, None);
+
     // Build the `--append-system-prompt` text and write it to a temp file so
     // `claude` reads it at startup. The prompt is resolved *for this project
     // directory* so any override files under `<project>/.trusty-mpm/` take
     // effect (issue #381); `build_system_prompt_for` always yields a prompt.
     let prompt = trusty_mpm::core::session_launch::build_system_prompt_for(&path);
-    let (claude_cmd, prompt_path) = {
-        let file = std::env::temp_dir().join(format!(
-            "trusty-mpm-system-prompt-{}.txt",
-            trusty_mpm::core::session::SessionId::new().0
-        ));
-        match std::fs::write(&file, &prompt) {
-            Ok(()) => (
-                format!("claude --append-system-prompt-file {}", file.display()),
-                Some(file),
-            ),
-            Err(err) => {
-                eprintln!("warning: failed to write system prompt file: {err}");
-                ("claude".to_string(), None)
-            }
-        }
-    };
+    let prompt_path = trusty_mpm::core::model_inject::write_prompt_file(&prompt);
+    if prompt_path.is_none() {
+        eprintln!("warning: failed to write system prompt file; launching without prompt");
+    }
+    let claude_cmd = trusty_mpm::core::model_inject::build_claude_command(
+        Some(&pm_model),
+        prompt_path.as_deref(),
+    );
 
     // 5. Print the summary banner. The "Prompt:" line shows the canonical
     //    `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md` source path

@@ -135,6 +135,17 @@ impl FrameworkPaths {
         self.hooks.join("overseer.toml")
     }
 
+    /// Path of the user-facing configuration file (`config.toml`).
+    ///
+    /// Why: all code that needs to read `~/.trusty-mpm/config.toml` should
+    /// resolve the path through [`FrameworkPaths`] so the location stays
+    /// canonical and tests can redirect it to a temp directory.
+    /// What: `<root>/config.toml` — the top-level TOML file the user edits.
+    /// Test: `config_toml_path_is_under_root`.
+    pub fn config_toml(&self) -> PathBuf {
+        self.root.join("config.toml")
+    }
+
     /// Path of the framework launch instructions (`instructions/INSTRUCTIONS.md`).
     ///
     /// Why: launchers point new Claude Code sessions at this file; it is the
@@ -418,5 +429,16 @@ mod tests {
         // same path, or the installer would overwrite user edits.
         let paths = FrameworkPaths::under("/base");
         assert_ne!(paths.framework_instructions(), paths.claude_stub());
+    }
+
+    #[test]
+    fn config_toml_path_is_under_root() {
+        // The user config file must live directly under the framework root, not
+        // nested in a subdirectory, so it is easy to locate and edit.
+        let paths = FrameworkPaths::under("/base");
+        assert_eq!(
+            paths.config_toml(),
+            PathBuf::from("/base/.trusty-mpm/config.toml")
+        );
     }
 }
