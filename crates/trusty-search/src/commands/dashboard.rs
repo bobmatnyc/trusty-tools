@@ -46,18 +46,38 @@ pub async fn handle_dashboard() -> Result<()> {
     open_dashboard_url(&base)
 }
 
-/// Construct the `/ui` URL from `base` and open it in the default browser.
+/// Construct the `/ui` URL from `base` and return it as a `String`.
 ///
-/// Why: extracted so tests can exercise the URL-construction + open path
-/// independently from the async auto-start flow.
-/// What: appends `/ui` to `base`, prints the URL, calls `open::that`, and
-/// degrades gracefully (stderr warning + URL) if the browser cannot be
-/// launched (headless / CI environments).
-/// Test: `dashboard_url_is_constructed_correctly` verifies the URL shape.
-fn open_dashboard_url(base: &str) -> Result<()> {
-    let url = format!("{base}/ui");
+/// Why: pure URL construction extracted as its own function so tests can
+/// verify the correct path suffix is appended without triggering any I/O.
+/// What: trims a trailing slash from `base` (guards against `http://h:p//ui`)
+/// then appends `/ui`, returning the resulting `String`.
+/// Test: `dashboard_url_is_constructed_correctly` and
+/// `dashboard_url_has_no_double_slash` in this module cover the two
+/// interesting inputs (plain base and base with trailing slash).
+pub(crate) fn dashboard_url(base: &str) -> String {
+    format!("{}/ui", base.trim_end_matches('/'))
+}
+
+/// Open `base`'s `/ui` path using the provided opener closure.
+///
+/// Why: extracted so tests can inject a fake opener that never calls the real
+/// OS browser API — the historical `open_dashboard_url` called `open::that`
+/// directly, which meant every `cargo test` on a macOS GUI session spawned a
+/// dead browser tab to `http://127.0.0.1:19999/ui`.
+/// What: constructs the URL via `dashboard_url`, prints it to stderr, then
+/// calls `open_fn(&url)`. If `open_fn` returns `Err`, degrades gracefully by
+/// printing a warning to stderr rather than propagating the error. Always
+/// returns `Ok(())`.
+/// Test: `open_dashboard_url_degrades_gracefully_on_headless` in this module
+/// passes a closure that returns `Err` and asserts the result is `Ok(())`.
+pub(crate) fn open_dashboard_url_with<F>(open_fn: F, base: &str) -> Result<()>
+where
+    F: FnOnce(&str) -> std::io::Result<()>,
+{
+    let url = dashboard_url(base);
     eprintln!("{} Opening {} …", "◉".green(), url.cyan());
-    if let Err(e) = open::that(&url) {
+    if let Err(e) = open_fn(&url) {
         eprintln!(
             "{} could not launch browser ({e}). Open this URL manually: {}",
             "⚠".yellow(),
@@ -67,6 +87,21 @@ fn open_dashboard_url(base: &str) -> Result<()> {
     Ok(())
 }
 
+/// Construct the `/ui` URL from `base` and open it in the default browser.
+///
+/// Why: thin public wrapper over `open_dashboard_url_with` using the real
+/// `open::that` opener — keeps production behaviour identical while the inner
+/// function remains testable via closure injection.
+/// What: delegates to `open_dashboard_url_with(|u| open::that(u), base)`.
+/// Browser-open failure degrades to a stderr warning; `Ok(())` is always
+/// returned.
+/// Test: not tested directly (the real `open::that` fires a browser). The
+/// logic is fully covered by `open_dashboard_url_with` tests which inject a
+/// fake opener.
+fn open_dashboard_url(base: &str) -> Result<()> {
+    open_dashboard_url_with(|u| open::that(u), base)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,53 +109,75 @@ mod tests {
     /// Why: the URL construction is the only logic we can exercise without a
     /// real daemon or OS browser. A regression here would silently send users
     /// to the wrong path (e.g. the root `/` instead of `/ui`).
-    /// What: asserts that `open_dashboard_url` builds `<base>/ui` and returns
-    /// `Ok(())` even when browser-open fails (headless CI).
-    /// Test: this function — `open::that` fails in a headless environment but
-    /// the function must still return `Ok(())`.
+    /// What: asserts that `dashboard_url` builds `<base>/ui` for a plain
+    /// base address with no trailing slash.
+    /// Test: this function — pure, no I/O.
     #[test]
     fn dashboard_url_is_constructed_correctly() {
-        // open::that will fail headlessly; that's fine — we assert Ok(()) to
-        // confirm the graceful-degradation path works.
-        let result = open_dashboard_url("http://127.0.0.1:7878");
-        assert!(
-            result.is_ok(),
-            "open_dashboard_url must return Ok even when browser-open fails"
+        assert_eq!(
+            dashboard_url("http://127.0.0.1:7878"),
+            "http://127.0.0.1:7878/ui"
         );
     }
 
     /// Why: guards against the base URL gaining a trailing slash that would
     /// produce a double-slash in the final URL (`http://127.0.0.1:7878//ui`).
-    /// What: checks that the constructed URL has exactly one slash before `ui`.
-    /// Test: this function.
+    /// What: asserts that `dashboard_url` strips a trailing slash from `base`
+    /// before appending `/ui`, producing exactly one slash before `ui`.
+    /// Test: this function — pure, no I/O.
     #[test]
     fn dashboard_url_has_no_double_slash() {
-        // The function returns Ok even headlessly; we just need it to run
-        // without panicking to ensure the format!() path is exercised. The
-        // actual URL value is verified via string inspection in the fn body
-        // (we can't intercept open::that without a mock). A visual inspection
-        // of the format!() call in open_dashboard_url is sufficient coverage.
-        let result = open_dashboard_url("http://127.0.0.1:7878");
-        assert!(result.is_ok());
+        let url = dashboard_url("http://127.0.0.1:7878/");
+        assert_eq!(url, "http://127.0.0.1:7878/ui");
+        assert!(
+            !url.contains("//ui"),
+            "URL must not contain double-slash before ui: {url}"
+        );
     }
 
-    /// Why: `ensure_daemon_running_or_exit` is already tested in
-    /// `daemon_guard::tests`. Here we verify the already-healthy fast-path
-    /// integration: when the daemon responds on /health, `handle_dashboard`
-    /// should complete without spawning and return Ok. We test the sub-function
-    /// directly since handle_dashboard is async and spawns a real daemon.
-    /// What: calls `open_dashboard_url` with a non-routable address; confirms
-    /// it returns Ok (graceful degradation, not Err).
-    /// Test: this function.
+    /// Why: the real `open::that` call succeeds on macOS GUI sessions, so any
+    /// test that passes a real URL to `open_dashboard_url` / `open::that`
+    /// fires a browser tab — polluting every local test run. This test
+    /// verifies the graceful-degradation path by injecting a fake opener that
+    /// always returns `Err`, confirming the function returns `Ok(())` without
+    /// ever calling the real browser API.
+    /// What: calls `open_dashboard_url_with` with a closure that returns
+    /// `Err(io::Error::other("headless"))`, then asserts the return value is
+    /// `Ok(())`.
+    /// Test: this function — no real `open::that` is ever called.
     #[test]
     fn open_dashboard_url_degrades_gracefully_on_headless() {
-        // In a headless (no-GUI) environment open::that will return Err. The
-        // function must not propagate that as an Err — it should print to
-        // stderr and return Ok.
-        let result = open_dashboard_url("http://127.0.0.1:19999");
+        let result = open_dashboard_url_with(
+            |_url| Err(std::io::Error::other("headless: no display")),
+            "http://127.0.0.1:19999",
+        );
         assert!(
             result.is_ok(),
             "headless browser-open failure must not surface as Err"
+        );
+    }
+
+    /// Why: confirms that a successful opener (simulating a working GUI
+    /// session) still results in `Ok(())` — the happy path is not accidentally
+    /// broken by the refactor.
+    /// What: calls `open_dashboard_url_with` with a no-op closure that returns
+    /// `Ok(())`, then asserts the result is `Ok(())` and the URL passed to
+    /// the opener has the expected `/ui` suffix.
+    /// Test: this function — no real `open::that` is ever called.
+    #[test]
+    fn open_dashboard_url_with_succeeds_on_working_opener() {
+        let mut received_url = String::new();
+        let result = open_dashboard_url_with(
+            |url| {
+                received_url = url.to_string();
+                Ok(())
+            },
+            "http://127.0.0.1:7878",
+        );
+        assert!(result.is_ok(), "working opener must return Ok");
+        assert_eq!(
+            received_url, "http://127.0.0.1:7878/ui",
+            "opener must receive the /ui URL"
         );
     }
 }
