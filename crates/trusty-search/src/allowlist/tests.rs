@@ -396,3 +396,97 @@ fn allowlist_path_ends_with_expected_suffix() {
         "unexpected allowlist path: {s}"
     );
 }
+
+// ── Component-boundary anchoring (fix for #795 false-denial regression) ────────
+
+#[test]
+fn denylist_allows_secrets_manager_project() {
+    // Why: the former substring match wrongly denied a project whose *name*
+    // contained a denylist word ("secrets"). Component anchoring must allow it.
+    // What: /home/user/Projects/secrets-manager is NOT a "secrets" component —
+    // the component is "secrets-manager", which is a different string.
+    // Test: assert is_denied returns None for this path.
+    let path = PathBuf::from("/home/user/Projects/secrets-manager");
+    assert!(
+        super::is_denied(&path).is_none(),
+        "secrets-manager project must not be denied by denylist: {path:?}"
+    );
+}
+
+#[test]
+fn denylist_allows_credentials_validator_project() {
+    // Why: /srv/app/credentials-validator is a legitimate project name;
+    // "credentials-validator" != "credentials" so it must pass.
+    let path = PathBuf::from("/srv/app/credentials-validator");
+    assert!(
+        super::is_denied(&path).is_none(),
+        "credentials-validator project must not be denied: {path:?}"
+    );
+}
+
+#[test]
+fn denylist_allows_config_service_project() {
+    // Why: /data/projects/config-service is a legitimate project; "config-service"
+    // is not the same component as ".config", so it must pass.
+    let path = PathBuf::from("/data/projects/config-service");
+    assert!(
+        super::is_denied(&path).is_none(),
+        "config-service project must not be denied: {path:?}"
+    );
+}
+
+#[test]
+fn denylist_blocks_exact_secrets_component() {
+    // Why: /etc/secrets is the actual sensitive directory; "secrets" is an
+    // exact component, so it must be denied.
+    let path = PathBuf::from("/etc/secrets/x");
+    assert!(
+        super::is_denied(&path).is_some(),
+        "/etc/secrets must be denied: {path:?}"
+    );
+}
+
+#[test]
+fn denylist_blocks_dot_config_component() {
+    // Why: ~/.config contains application secrets; ".config" as an exact
+    // component must be denied.
+    let home = dirs::home_dir().unwrap();
+    let path = home.join(".config").join("trusty");
+    assert!(
+        super::is_denied(&path).is_some(),
+        "~/.config/trusty must be denied: {path:?}"
+    );
+}
+
+#[test]
+fn denylist_blocks_env_file() {
+    // Why: a .env file at the project root is a secrets file; the final
+    // component ".env" must be caught by SENSITIVE_FILE_NAMES.
+    let path = PathBuf::from("/home/user/myproject/.env");
+    assert!(
+        super::is_denied(&path).is_some(),
+        ".env file must be denied: {path:?}"
+    );
+}
+
+#[test]
+fn denylist_denied_path_still_rejected_when_allowlisted() {
+    // Why: even when TRUSTY_ALLOW_UNLISTED logic in server.rs is bypassed,
+    // `check_path` itself must still deny a path that is in the allowlist
+    // but also hits the hard denylist.
+    // What: put /etc/secrets in the allowlist; check_path must return Denied.
+    let dir = tmp_dir("denylist-priority");
+    let allowlist = allowlist_file(&dir);
+
+    let sensitive = PathBuf::from("/etc/secrets");
+    let mut cfg = AllowlistConfig::default();
+    cfg.upsert(entry(&sensitive));
+    cfg.save_to(&allowlist).unwrap();
+
+    let result = check_path(&sensitive, Some(&allowlist)).unwrap();
+    assert!(
+        matches!(result, AllowlistCheck::Denied { .. }),
+        "denylist must block an allowlisted sensitive path; got {result:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

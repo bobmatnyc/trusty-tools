@@ -8,10 +8,11 @@
 //! even when explicitly requested.
 //!
 //! What: two complementary guards:
-//! 1. **Hard denylist** (`SENSITIVE_PATH_PATTERNS`) — patterns matched against
-//!    the candidate path; a match produces a loud refusal regardless of any
-//!    allowlist entry. Covers `$HOME` top-level, `~/.ssh`, `~/.aws`, `/tmp`,
-//!    `.env` files, and similar.
+//! 1. **Hard denylist** (`SENSITIVE_COMPONENT_NAMES`, `SENSITIVE_FILE_NAMES`,
+//!    `SENSITIVE_PATH_PREFIXES`) — patterns matched against the candidate path
+//!    at path-component boundaries; a match produces a loud refusal regardless
+//!    of any allowlist entry. Covers `$HOME` top-level, `~/.ssh`, `~/.aws`,
+//!    `/tmp`, `.env` files, and similar.
 //! 2. **Allowlist** (`AllowlistConfig`, stored at
 //!    `~/.config/trusty-search/indexes.toml`) — the candidate path must match
 //!    an entry here (or a prefix of one) for registration to proceed. A fresh
@@ -35,45 +36,76 @@ mod tests;
 
 // ── Hard denylist ───────────────────────────────────────────────────────────
 
-/// Path fragments/suffixes that can never be indexed regardless of the
-/// allowlist. Checked case-insensitively against every path component and
-/// the full path string.
+/// Path component names that are never indexable. Each entry is compared
+/// against every individual component of the candidate path (not as a
+/// substring of the full path string).
 ///
-/// Why: defense-in-depth — even if a user accidentally adds a sensitive path
-/// to the allowlist, the denylist prevents the daemon from processing it.
-/// Loud refusal + stderr log ensures the operator always knows why.
-/// What: matched against the full canonical path string. A path is denied when
-/// any pattern appears as a substring of the normalized path.
-/// Test: `denylist_blocks_ssh_dir`, `denylist_blocks_tmp`,
-/// `denylist_blocks_env_file` in `tests.rs`.
-pub const SENSITIVE_PATH_PATTERNS: &[&str] = &[
-    // Credential / key directories
-    "/.ssh",
-    "/.aws",
-    "/.gnupg",
-    "/.kube",
-    "/.netrc",
-    "/.npmrc",
-    "/.pypirc",
-    "/.pgpass",
-    // macOS-specific sensitive dirs
-    "/Library/Keychains",
-    "/Library/Application Support",
-    // Secrets markers anywhere in the path
-    "/.env",
-    "/secrets",
-    "/credentials",
-    "/private_key",
-    "/.private",
-    // Temporary / ephemeral directories (never worth indexing)
+/// Why: raw substring matching wrongly denies legitimate paths such as
+/// `/home/user/Projects/secrets-manager` or `/srv/app/credentials-validator`
+/// because "secrets" and "credentials" appear as substrings. Anchoring at
+/// component boundaries ensures only paths that contain `secrets`, `.ssh`,
+/// etc. as a complete path segment are denied.
+/// What: `is_denied` splits the canonicalised path via `Path::components()`
+/// and checks each `Normal` component (directory name or filename) against
+/// this list using exact equality. Dotfile components like `.ssh` are also
+/// matched by exact equality.
+/// Test: `denylist_blocks_ssh_dir`, `denylist_blocks_env_file`,
+/// `denylist_allows_path_with_sensitive_word_in_name` in `tests.rs`.
+pub const SENSITIVE_COMPONENT_NAMES: &[&str] = &[
+    // Credential / key directories (exact directory names)
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".kube",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    ".pgpass",
+    ".private",
+    // Env-file directory (Python virtualenvs often name their dir ".venv",
+    // not ".env", so ".env" directories are typically secrets-bearing).
+    ".env",
+    // Secrets-bearing directory names (whole-component match only)
+    "secrets",
+    "credentials",
+    "private_key",
+    // Config dirs that tend to contain secrets
+    ".config",
+    // Generic vault/secret directory names
+    "vault",
+    "keystore",
+    // macOS sensitive subdirectory names
+    "Keychains",
+];
+
+/// Filename suffixes / exact file names that are never indexable, matched
+/// against the final path component only.
+///
+/// Why: `.env` files store environment secrets but a *directory* named
+/// `.env` is legitimate (e.g. Python virtualenvs). Matching against only
+/// the last component lets us catch `project/.env` (a file) without
+/// denying `project/.env/` if the path happens to refer to a directory
+/// named `.env` — though in practice both are sensitive.
+/// What: `is_denied` calls `path.file_name()` and checks the result
+/// against this list using exact equality.
+/// Test: `denylist_blocks_env_file_in_path` in `tests.rs`.
+pub const SENSITIVE_FILE_NAMES: &[&str] = &[".env"];
+
+/// Path prefixes matched against the full forward-slash-normalised path.
+/// Used only for well-known ephemeral or system directories whose *entire
+/// subtree* is unsafe — not for user-space directory names, which are
+/// covered by `SENSITIVE_COMPONENT_NAMES` to avoid false positives.
+///
+/// Why: `/tmp`, `/private/tmp`, and `/var/folders` are OS-managed
+/// temporaries that should never be indexed. Their paths are fixed and
+/// do not appear as user project names, so prefix matching is safe here.
+/// What: `is_denied` checks `normalised.starts_with(prefix)` for each entry.
+/// Test: `denylist_blocks_tmp` in `tests.rs`.
+pub const SENSITIVE_PATH_PREFIXES: &[&str] = &[
     "/tmp/",
     "/private/tmp",
     "/var/folders",
-    // Config dirs that tend to contain secrets
-    "/.config",
-    // Generic vault/secret path markers
-    "/vault",
-    "/keystore",
+    "/Library/Application Support",
 ];
 
 /// Additional top-level home subdirectories that are never indexable.
@@ -384,28 +416,61 @@ pub fn remove_from_allowlist(path: &Path, allowlist_path: Option<&Path>) -> Resu
 ///
 /// Why: extracted from `check_path` so tests can assert against the raw
 /// denylist logic without constructing a full config file.
-/// What: normalises the path to a forward-slash string, then checks two sets
-/// of patterns: (1) global `SENSITIVE_PATH_PATTERNS`, (2) home-relative top
-/// dirs from `SENSITIVE_HOME_TOP_DIRS`.
+/// What: applies four anchored checks in order — (1) fixed path-prefix
+/// patterns from `SENSITIVE_PATH_PREFIXES`; (2) whole-component matching
+/// against `SENSITIVE_COMPONENT_NAMES` using `Path::components()` so that
+/// `/Projects/secrets-manager` is NOT denied but `/etc/secrets` IS denied;
+/// (3) exact file-name match against `SENSITIVE_FILE_NAMES`; (4) home-relative
+/// top-level dirs from `SENSITIVE_HOME_TOP_DIRS`.
 /// Test: `denylist_blocks_ssh_dir`, `denylist_blocks_tmp`,
-/// `denylist_blocks_home_toplevel`, `denylist_allows_safe_path` in `tests.rs`.
+/// `denylist_blocks_home_toplevel`, `denylist_allows_safe_path`,
+/// `denylist_allows_path_with_sensitive_word_in_name` in `tests.rs`.
 pub fn is_denied(path: &Path) -> Option<String> {
     let path_str = path.to_string_lossy();
-    // Normalise separators on Windows (forward-slash patterns).
+    // Normalise separators so prefix checks work on Windows too.
     let normalised = path_str.replace('\\', "/");
 
-    // Global patterns.
-    for &pattern in SENSITIVE_PATH_PATTERNS {
-        if normalised.contains(pattern) {
+    // 1. Fixed path-prefix patterns (OS-managed temporaries, macOS system dirs).
+    for &prefix in SENSITIVE_PATH_PREFIXES {
+        if normalised.starts_with(prefix) {
             return Some(format!(
-                "path '{}' matches sensitive pattern '{}'; indexing refused",
+                "path '{}' is under sensitive prefix '{}'; indexing refused",
                 path.display(),
-                pattern
+                prefix
             ));
         }
     }
 
-    // Home-relative top-level directories.
+    // 2. Whole-component matching: deny when any path component is an exact
+    //    sensitive name.  This prevents `/Projects/secrets-manager` from
+    //    being denied while still blocking `/etc/secrets` or `~/.ssh`.
+    for component in path.components() {
+        // Only check Normal components (skip Root, Prefix, CurDir, ParentDir).
+        if let std::path::Component::Normal(os_name) = component {
+            let name = os_name.to_string_lossy();
+            if SENSITIVE_COMPONENT_NAMES.contains(&&*name) {
+                return Some(format!(
+                    "path '{}' contains sensitive component '{}'; indexing refused",
+                    path.display(),
+                    name
+                ));
+            }
+        }
+    }
+
+    // 3. Exact file-name match (e.g. ".env" as the final path component).
+    if let Some(fname) = path.file_name() {
+        let name = fname.to_string_lossy();
+        if SENSITIVE_FILE_NAMES.contains(&&*name) {
+            return Some(format!(
+                "path '{}' has sensitive file name '{}'; indexing refused",
+                path.display(),
+                name
+            ));
+        }
+    }
+
+    // 4. Home-relative top-level directories.
     if let Some(home) = dirs::home_dir() {
         let home_str = home.to_string_lossy().replace('\\', "/");
         // Strip the home prefix to get the relative part.
