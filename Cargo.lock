@@ -10776,12 +10776,14 @@ name = "trusty-code"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "clap",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
  "uuid",

@@ -8,18 +8,16 @@
 //! fills that role. It is the Claude-Code-native orchestration entry point —
 //! driven by API, CLI, or TUI — that runs the PM main-loop, enforces the
 //! mandatory workflow, and delegates authority to typed sub-agents according to
-//! MPM protocols. Extraction from open-mpm is tracked in epic #587; Phase 1
-//! moves the leaf/protocol modules here.
+//! MPM protocols. Extraction from open-mpm is tracked in epic #587.
 //!
 //! # Design constraints
 //!
 //! * **Claude-Code compatible** — reads `.claude/` config, agents, skills, MCP
 //!   descriptors, `CLAUDE.md`, and permission grants exactly as Claude Code does.
 //! * **API / CLI / TUI driven** — no hooks support (hooks are a Claude Code
-//!   shell-level feature; `tcode` operates above that layer).
-//! * **Per-agent model routing** — each agent in the harness may specify its own
-//!   model, independently choosing between AWS Bedrock models and OpenRouter
-//!   models. The PM is not constrained to a single provider.
+//!   shell-level feature; `tcode` operates above that layer via its event bus).
+//! * **Per-agent model routing** — each agent may specify its own model,
+//!   independently choosing between AWS Bedrock models and OpenRouter models.
 //! * **Single-instance per project** — one `tcode serve` process per `.claude/`
 //!   root; multiple CLI or TUI clients may attach to it.
 //! * **No `unwrap()` in library code** — all fallible paths use `?` with
@@ -31,24 +29,28 @@
 //! Phase 1 public surface (leaf/protocol modules extracted from open-mpm per
 //! #640):
 //!
-//! * [`events`] — process-global broadcast event bus (`Event` enum, `publish`,
-//!   `subscribe`, `emit`).
-//! * [`ipc`] — NDJSON IPC protocol for PM ↔ sub-agent communication
-//!   (`IpcMessage`, `HistoryMessage`, `serialize_message`, `parse_message`).
-//! * [`perf`] — per-phase latency + token/cost instrumentation (`TokenUsage`,
-//!   `PerfCollector`, `PerfRecord`, `cost_usd`).
-//! * [`intent`] — pure-Rust heuristic intent classifier (`IntentClass`,
-//!   `classify_intent`) for PM fast-pathing.
-//! * [`progress`] — real-time phase progress reporter (`ProgressReporter`,
-//!   `format_duration`).
-//! * [`build_info`] — monotonic build counter + version banner (`BuildInfo`,
-//!   `VERSION`, `GIT_HASH`, `version_string`).
+//! * [`events`] — process-global broadcast event bus.
+//! * [`ipc`] — NDJSON IPC protocol for PM ↔ sub-agent communication.
+//! * [`perf`] — per-phase latency + token/cost instrumentation.
+//! * [`intent`] — pure-Rust heuristic intent classifier.
+//! * [`progress`] — real-time phase progress reporter.
+//! * [`build_info`] — monotonic build counter + version banner.
+//!
+//! Phase 2 public surface (tools layer, per #641):
+//!
+//! * [`tools`] — `ToolExecutor` / `AgentRunner` / `SearchProvider` traits,
+//!   `ToolRegistry` dispatcher, `DelegateToAgentTool`, `ToolResult`.
+//! * [`rbac`] — `ServiceTier`, `UserIdentity`, access-control helpers.
+//!
+//! Phase 3 public surface (agents + LLM layer, per #642):
+//!
+//! * [`agents`] — `AgentConfig` TOML schema, `discover_agents`, `load_all_agents`.
+//! * [`identity`] — `CallerIdentity`, `RecallCeiling` for memory scoping.
+//! * [`logging`] — tracing init helpers (`init_tracing`, `init_tracing_for_test`).
 //!
 //! # Test
 //!
-//! `cargo test -p trusty-code` — all leaf modules carry their own unit tests.
-//! The event bus has a round-trip async test (`publish_round_trips_through_subscribe`).
-//! Phase 2+ will add integration tests as the PM loop is introduced.
+//! `cargo test -p trusty-code` — all modules carry their own unit tests.
 
 // ── Phase 1 leaf/protocol modules (extracted from open-mpm per #640) ──
 
@@ -66,8 +68,7 @@ pub mod events;
 /// Why: Provides a framing-safe wire protocol over stdin/stdout pipes so the
 /// PM and sub-agent subprocesses exchange structured messages without ambiguity.
 /// What: `IpcMessage` enum (Task/Result/Error), `HistoryMessage` wire type,
-/// `serialize_message`/`parse_message` helpers, `extract_summary`/
-/// `extract_files_from_content` utilities.
+/// `serialize_message`/`parse_message` helpers.
 /// Test: `ipc::tests::*` round-trips every variant.
 pub mod ipc;
 
@@ -83,16 +84,15 @@ pub mod perf;
 /// Pure-Rust heuristic intent classifier for PM fast-pathing.
 ///
 /// Why: Avoids routing trivial conversational inputs through the full
-/// subprocess pipeline — a 60-90s round trip for what should be sub-second.
+/// subprocess pipeline.
 /// What: `IntentClass` enum, `classify_intent` function.
-/// Test: `intent::classifier_tests::*`, `intent::classifier_tests_2::*`,
-/// `intent::classifier_property_tests::*`, `intent::tests::*`.
+/// Test: `intent::classifier_tests::*`.
 pub mod intent;
 
 /// Real-time phase progress reporter to stderr.
 ///
 /// Why: Workflow runs take 20–70 minutes; users need live feedback without
-/// polluting stdout (reserved for structured JSON output).
+/// polluting stdout.
 /// What: `ProgressReporter` struct with phase/wave lifecycle hooks and
 /// `format_duration` helper.
 /// Test: `progress::tests::*`.
@@ -100,19 +100,70 @@ pub mod progress;
 
 /// Build and version tracking.
 ///
-/// Why: A monotonic build counter that increments on every process start gives
-/// a deterministic identifier that pairs with semver for log correlation.
+/// Why: A monotonic build counter pairs with semver for log correlation.
 /// What: `BuildInfo` struct, `VERSION`/`GIT_HASH`/`PKG_NAME` constants,
 /// `version_string` helper.
 /// Test: `build_info::tests::*`.
 pub mod build_info;
+
+// ── Phase 2 tools layer (per #641) ──
+
+/// Tool system: traits, registry, and the delegate tool.
+///
+/// Why: The PM loop needs a polymorphic tool dispatch layer so new capabilities
+/// plug in without touching orchestration code.
+/// What: `ToolExecutor`, `AgentRunner`, `RunContext`, `AgentOutput`,
+/// `SearchProvider`, `SkillResolver`, `ToolResult`, `ToolRegistry`,
+/// `DelegateToAgentTool`.
+/// Test: `tools::traits::tests::*`, `tools::registry::tests::*`,
+/// `tools::delegate::tests::*`.
+pub mod tools;
+
+/// Role-based access control for tool execution.
+///
+/// Why: tcode exposes tools over multiple surfaces; RBAC gates execution on a
+/// stable tier ladder without per-deployment code branches.
+/// What: `ServiceTier`, `UserIdentity`, `filter_tools_for_user`,
+/// `can_access_tier`.
+/// Test: `rbac::tests::*`.
+pub mod rbac;
+
+// ── Phase 3 agents + LLM layer (per #642) ──
+
+/// Agent configuration loading.
+///
+/// Why: Sub-agents are defined declaratively in TOML files under
+/// `.claude/agents/` so model, prompt, and parameters can evolve without code
+/// changes.
+/// What: `AgentConfig`, `AgentInfo`, `LlmParams`, `SystemPrompt`, `ToolsConfig`,
+/// `RunnerConfig`, `RunnerKind`, `discover_agents`, `load_all_agents`.
+/// Test: `agents::tests::*`.
+pub mod agents;
+
+/// Caller identity hierarchy for memory scoping.
+///
+/// Why: Memory must be scoped according to who is calling — operator, PM, or
+/// sub-agent — so agents cannot self-elevate their recall scope.
+/// What: `CallerIdentity` enum, `RecallCeiling`, env-var constructors.
+/// Test: `identity::tests::*`.
+pub mod identity;
+
+/// Tracing and logging initialisation.
+///
+/// Why: All binaries need consistent stderr-bound tracing setup; centralising
+/// it prevents duplicated setup across entry points.
+/// What: `init_tracing`, `init_tracing_for_test`, `DEFAULT_LOG_LEVEL`.
+/// Test: `logging::tests::*`.
+pub mod logging;
+
+// ── Package-level re-exports ──
 
 /// Version string, re-exported so integration tests can assert it without
 /// hard-coding the constant.
 ///
 /// Why: Single source of truth for the version across CLI and any future API
 /// responses that embed it.
-/// What: the `CARGO_PKG_VERSION` compile-time env var, captured at build time.
+/// What: The `CARGO_PKG_VERSION` compile-time env var, captured at build time.
 /// Test: `cargo run -p trusty-code -- --version` must print this value.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
