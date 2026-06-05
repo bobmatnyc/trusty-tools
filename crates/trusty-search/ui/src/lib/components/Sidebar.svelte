@@ -2,8 +2,8 @@
   /*
    * Why: Fixed-position dark sidebar matching the trusty-memory layout so
    * operators jumping between the two tools get a consistent shell.
-   * What: Three top-level routes — Dashboard, Search, Indexes — backed by
-   * the hash router. Brand text reads "Trusty Search".
+   * What: Six top-level routes — Dashboard, Search, Indexes, Health, Logs,
+   * Config — backed by the hash router. Brand text reads "Trusty Search".
    * Test: Click each nav item, confirm hash updates and `.active` moves.
    */
   import { getRoute, navigate } from '../router.svelte.js';

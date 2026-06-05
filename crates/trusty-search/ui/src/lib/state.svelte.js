@@ -18,6 +18,30 @@ let _liveStats = $state(null); // { indexes, total_chunks, uptime_secs, version 
 let _statusSource = null;
 let _statusRefcount = 0;
 
+/**
+ * Why: The Chat panel must be hidden when no provider is configured, and the
+ * determination must work both before the first /health response arrives (via
+ * the server-injected window.__OPENROUTER_ENABLED__ global) and stay reactive
+ * once /health has loaded (which now includes a `chat_available` field).
+ * What: Returns true when either the injected boot global is truthy OR the
+ * most-recent /health response carries `chat_available: true`.
+ * Test: Set window.__OPENROUTER_ENABLED__ = true in the browser console; call
+ * getChatAvailable() and assert true. Set to false, assert false.
+ */
+export function getChatAvailable() {
+  // Prefer the live /health value (updated by the poll loop) so a daemon
+  // restart with a newly-configured key is picked up without page refresh.
+  if (_health?.chat_available !== undefined) {
+    return Boolean(_health.chat_available);
+  }
+  // Fall back to the server-injected boot global while the first /health
+  // round-trip is still in flight.
+  if (typeof window !== 'undefined' && window.__OPENROUTER_ENABLED__ !== undefined) {
+    return Boolean(window.__OPENROUTER_ENABLED__);
+  }
+  return false;
+}
+
 export function getHealth() {
   return _health;
 }

@@ -688,6 +688,21 @@ struct HealthResponse {
     /// across all warm-boot phases since the daemon started.
     /// Test: `health_includes_warmboot_leaked_probe_threads` below.
     warmboot_leaked_probe_threads: usize,
+    /// Whether at least one chat provider (OpenRouter or local model) is
+    /// configured and available on this daemon instance.
+    ///
+    /// Why: the Svelte dashboard uses this flag to show or hide the Chat
+    /// panel without a separate round-trip to `/api/chat/providers`. The
+    /// flag is conservative: it is `true` when `OPENROUTER_API_KEY` is set
+    /// OR when the `local_model.enabled` flag is configured — it does not
+    /// probe network reachability at health-check time (too slow for a
+    /// polling endpoint). Use `/api/chat/providers` for a live reachability
+    /// check.
+    /// What: `state.openrouter_enabled || state.local_model.enabled`.
+    /// Test: `health_chat_available_when_openrouter_configured` verifies the
+    /// flag is `true` after `with_openrouter_api_key("sk-…")` and `false`
+    /// with an empty key.
+    chat_available: bool,
 }
 
 /// Embedding-model metadata surfaced by `GET /health` (issue #38).
@@ -1166,6 +1181,7 @@ async fn health_handler(State(state): State<Arc<SearchAppState>>) -> Json<Health
         // due to a warm-boot deadline timeout. Zero on healthy machines; >0
         // indicates TCC-blocked external volumes during this daemon's lifetime.
         warmboot_leaked_probe_threads: crate::service::warm_boot::leaked_probe_thread_count(),
+        chat_available: state.openrouter_enabled || state.local_model.enabled,
     })
 }
 
@@ -4582,6 +4598,48 @@ mod tests {
         assert_eq!(
             resp.warmboot_leaked_probe_threads, expected,
             "warmboot_leaked_probe_threads must equal counter snapshot from before handler call"
+        );
+    }
+
+    /// `GET /health` reports `chat_available: true` when OpenRouter is configured,
+    /// `false` when no key is present.
+    ///
+    /// Why: The Svelte dashboard uses this flag to show/hide the Chat panel
+    /// without a separate provider-probe round-trip. The test verifies the flag
+    /// is driven purely by key presence, not by network reachability.
+    /// What: Calls `health_handler` with a state built with and without an API key,
+    /// and asserts the `chat_available` field matches.
+    /// Test: this test.
+    #[tokio::test]
+    async fn health_chat_available_when_openrouter_configured() {
+        // With a non-empty OpenRouter key → chat_available == true.
+        let state_with_key = Arc::new(
+            SearchAppState::new(IndexRegistry::new())
+                .with_openrouter_api_key("sk-or-test-key-not-real"),
+        );
+        let Json(resp_with) = health_handler(State(state_with_key)).await;
+        assert!(
+            resp_with.chat_available,
+            "chat_available must be true when OPENROUTER_API_KEY is non-empty"
+        );
+
+        // With no key and no local model → chat_available == false.
+        // Explicitly zero both so the test is hermetic regardless of the
+        // shell environment (OPENROUTER_API_KEY may be set) and the
+        // LocalModelConfig default (enabled: true targeting Ollama).
+        let state_no_key = Arc::new(
+            SearchAppState::new(IndexRegistry::new())
+                .with_openrouter_api_key("")
+                .with_local_model(trusty_common::LocalModelConfig {
+                    enabled: false,
+                    base_url: "http://localhost:11434".to_string(),
+                    model: String::new(),
+                }),
+        );
+        let Json(resp_no) = health_handler(State(state_no_key)).await;
+        assert!(
+            !resp_no.chat_available,
+            "chat_available must be false when no API key and no local model"
         );
     }
 
