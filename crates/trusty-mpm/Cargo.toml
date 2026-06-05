@@ -55,12 +55,12 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "tm"
-path = "src/bin/tm.rs"
+path = "src/bin/tm/main.rs"
 required-features = ["cli"]
 
 [[bin]]
 name = "trusty-mpm"
-path = "src/bin/tm.rs"
+path = "src/bin/tm/main.rs"
 required-features = ["cli"]
 
 [[bin]]

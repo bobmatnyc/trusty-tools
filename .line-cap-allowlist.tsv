@@ -112,7 +112,6 @@ crates/trusty-memory/src/transport/rpc.rs	571
 crates/trusty-memory/src/web.rs	5396
 crates/trusty-memory/tests/concurrent_perf.rs	1163
 crates/trusty-memory/tests/mcp_stdio_tools.rs	993
-crates/trusty-mpm/src/bin/tm.rs	4639
 crates/trusty-mpm/src/client/executor.rs	935
 crates/trusty-mpm/src/client/http_client.rs	1451
 crates/trusty-mpm/src/core/session_launch.rs	1119
