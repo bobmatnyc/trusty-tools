@@ -13,6 +13,7 @@
 //! Test: Each submodule carries its own unit tests.
 
 pub mod daemon_guard;
+pub mod daemon_lock;
 pub mod doctor;
 pub mod inbox_check;
 pub mod kg_rebuild;

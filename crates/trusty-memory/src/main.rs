@@ -30,7 +30,10 @@ use trusty_memory::commands::setup::handle_setup;
 use trusty_memory::commands::start::handle_start;
 use trusty_memory::commands::stop::handle_stop;
 use trusty_memory::commands::upgrade::handle_upgrade;
-use trusty_memory::{resolve_palace_registry_dir, run_http, run_http_dynamic, AppState};
+use trusty_memory::{
+    foreground::run_http_foreground, resolve_palace_registry_dir, run_http, run_http_dynamic,
+    AppState,
+};
 
 /// Top-level CLI for `trusty-memory`.
 #[derive(Debug, Parser)]
@@ -600,12 +603,9 @@ async fn run_monitor(target: MonitorTarget) -> Result<()> {
 
 /// Dispatch `serve` to the HTTP server (background spawn or inline foreground).
 ///
-/// Why: keeps `main` focused on parsing while putting the `AppState`
-/// construction in one place. Issue #150 removed the legacy `--stdio` flag
-/// — Claude Code now talks to the daemon through the
-/// `trusty-memory-mcp-bridge` binary (PR #149) over a Unix domain socket,
-/// which sidesteps the redb exclusive-lock deadlock that made the in-process
-/// stdio path unusable whenever a long-lived daemon was already running.
+/// Why: keeps `main` focused on parsing while `AppState` construction lives
+/// in one place. `--stdio` removed in #150; Claude Code now uses the
+/// `trusty-memory-mcp-bridge` UDS pipe (PR #149) to avoid redb deadlocks.
 /// What: resolves the palace registry directory (descending into the legacy
 /// `palaces/` subdirectory when present — see `resolve_palace_registry_dir`),
 /// builds an `AppState` rooted there, applies the `--palace` default if any,
@@ -719,10 +719,6 @@ async fn run_serve(
         spawn_startup_tasks(&state);
         run_http(state, addr).await
     } else {
-        // Default: dynamic-port HTTP daemon. Mirrors the explicit `--http`
-        // branch above (log buffer, background hydration) but lets the
-        // library pick a port from 7070..=7079 (OS-fallback) and write
-        // `~/.trusty-memory/http_addr` for clients to discover.
         let state = AppState::new(data_root)
             .with_default_palace(palace)
             .with_log_buffer(log_buffer)
@@ -735,7 +731,11 @@ async fn run_serve(
             // see no behavioural change.
             .with_bm25_client_from_env();
         spawn_startup_tasks(&state);
-        run_http_dynamic(state).await
+        if foreground {
+            run_http_foreground(state).await
+        } else {
+            run_http_dynamic(state).await
+        }
     }
 }
 

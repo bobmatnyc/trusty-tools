@@ -57,6 +57,15 @@ pub mod fd_metrics;
 pub mod chat;
 pub mod commands;
 pub mod discovery;
+/// Single-pass startup pin-file scanner (issue #470).
+///
+/// Why: builds the `palace_id → project_path` map at daemon startup without
+/// eager palace opens. One readdir sweep over the standard search roots is
+/// cheaper than the O(#palaces) per-id loop used by the doctor path and runs
+/// before the first HTTP request arrives.
+/// What: exports `scan_pin_map` and `default_search_dirs`.
+/// Test: see `startup_scan::tests`.
+pub mod foreground;
 pub mod hook_emit;
 pub mod kg_extract;
 pub mod mcp_service;
@@ -74,14 +83,6 @@ pub mod project_root;
 pub mod prompt_facts;
 pub mod prompt_log;
 pub mod service;
-/// Single-pass startup pin-file scanner (issue #470).
-///
-/// Why: builds the `palace_id → project_path` map at daemon startup without
-/// eager palace opens. One readdir sweep over the standard search roots is
-/// cheaper than the O(#palaces) per-id loop used by the doctor path and runs
-/// before the first HTTP request arrives.
-/// What: exports `scan_pin_map` and `default_search_dirs`.
-/// Test: see `startup_scan::tests`.
 pub mod startup_scan;
 pub mod tools;
 pub mod transport;
@@ -1345,9 +1346,8 @@ pub fn http_addr_path() -> Option<PathBuf> {
 /// backwards compatibility for the common case; OS-assigned fallback (`:0`)
 /// guarantees the daemon always comes up even when every preferred port is
 /// busy.
-/// What: returns the first successful `TcpListener`. Tries 7070..=7079
-/// in order, then falls back to OS-assigned. Caller inspects
-/// `local_addr()` to learn the chosen port.
+/// What: returns the first successful `TcpListener` (7070..=7079, then
+/// OS-assigned); caller inspects `local_addr()` to learn the chosen port.
 /// Test: `bind_dynamic_port_returns_listener` confirms it always binds *some*
 /// port even after another listener occupies the preferred one.
 pub async fn bind_dynamic_port() -> Result<tokio::net::TcpListener> {
