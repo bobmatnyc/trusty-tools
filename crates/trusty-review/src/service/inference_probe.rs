@@ -8,9 +8,13 @@
 //!
 //! What: `InferenceProbe` wraps a short-TTL cache (default 10 s) around a
 //! minimal real LLM call (max_tokens=1).  The cache means repeated `/health`
-//! polls don't hammer the provider; a 3 s timeout means a hung endpoint can't
-//! stall health checks.  `InferenceStatus` maps provider errors to the four
-//! states: `ok`, `unreachable`, `auth_error`, `unknown`.
+//! polls don't hammer the provider.  The per-probe timeout is configurable via
+//! `TRUSTY_REVIEW_HEALTH_TIMEOUT_SECS` (default 10 s, see #739); a timed-out
+//! probe returns `Unknown` rather than `Unreachable` so a slow Bedrock cold-start
+//! does not falsely degrade health — real review calls have a ~300 s budget, so
+//! a probe timeout should not be treated as a hard unreachability signal.
+//! `InferenceStatus` maps provider errors to the four states: `ok`,
+//! `unreachable`, `auth_error`, `unknown`.
 //!
 //! Test: `probe_status_*` unit tests in this module inject stub providers and
 //! verify each status transition. Live credential tests are separate (ignored).
@@ -20,6 +24,35 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tracing::debug;
+
+// ─── Configurable timeout helper ─────────────────────────────────────────────
+
+/// Return the per-probe hard timeout, consulting `TRUSTY_REVIEW_HEALTH_TIMEOUT_SECS`.
+///
+/// Why: AWS Bedrock cold-starts were measured at ~7.4 s (#739), which exceeded
+/// the previous hard-coded 3 s timeout and caused spurious `unreachable` /
+/// `degraded` health results.  Making the timeout configurable lets operators
+/// tune it without recompiling; 10 s comfortably covers observed cold-start
+/// latency while still bounding health-check latency.
+/// What: reads `TRUSTY_REVIEW_HEALTH_TIMEOUT_SECS` from the environment; parses
+/// it as a `u64`; falls back to `DEFAULT_HEALTH_TIMEOUT_SECS` (10) on any
+/// parse failure or if the variable is unset.  A value of 0 is treated as
+/// "use default" to prevent an accidentally zero timeout from hanging forever.
+/// Test: `health_probe_timeout_default`, `health_probe_timeout_env_override`,
+/// `health_probe_timeout_env_invalid_falls_back`,
+/// `health_probe_timeout_env_zero_falls_back` in the `tests` module.
+pub fn health_probe_timeout() -> Duration {
+    const DEFAULT_HEALTH_TIMEOUT_SECS: u64 = 10;
+    const ENV_VAR: &str = "TRUSTY_REVIEW_HEALTH_TIMEOUT_SECS";
+
+    let secs = std::env::var(ENV_VAR)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(DEFAULT_HEALTH_TIMEOUT_SECS);
+
+    Duration::from_secs(secs)
+}
 
 #[cfg(test)]
 use crate::llm::LlmResponse;
@@ -117,14 +150,18 @@ pub struct InferenceProbe {
 }
 
 impl Default for InferenceProbe {
-    /// Default TTL is 10 seconds; probe timeout is 3 seconds.
+    /// Default TTL is 10 seconds; probe timeout reads `TRUSTY_REVIEW_HEALTH_TIMEOUT_SECS` (default 10 s).
     ///
-    /// Why: matches the design brief — 10 s prevents hammering providers on
-    /// repeated health polls; 3 s ensures a hung endpoint doesn't stall /health.
-    /// What: returns an `InferenceProbe` with `ttl=10s`, `probe_timeout=3s`.
+    /// Why: the previous hard-coded 3 s timeout was shorter than observed AWS
+    /// Bedrock cold-start latency (~7.4 s), causing spurious `unreachable` /
+    /// `degraded` health results (#739).  The timeout is now 10 s by default and
+    /// configurable via `TRUSTY_REVIEW_HEALTH_TIMEOUT_SECS` so operators can tune
+    /// it without recompiling.
+    /// What: returns an `InferenceProbe` with `ttl=10s` and `probe_timeout` from
+    /// `health_probe_timeout()`.
     /// Test: `probe_default_starts_unknown`.
     fn default() -> Self {
-        Self::new(Duration::from_secs(10), Duration::from_secs(3))
+        Self::new(Duration::from_secs(10), health_probe_timeout())
     }
 }
 
@@ -188,8 +225,12 @@ impl InferenceProbe {
 /// What: sends a 1-token completion with a trivial prompt through the provider;
 /// maps any error to `InferenceStatus` via `map_llm_error`.  The call is
 /// wrapped in `tokio::time::timeout` so a hung endpoint never stalls /health.
+/// A timeout returns `Unknown` rather than `Unreachable` (#739): the probe
+/// budget is much shorter than the real review budget (~300 s), so a slow
+/// cold-start should not be reported as "endpoint unreachable" — it is simply
+/// "could not confirm reachability within the probe window".
 /// Test: `probe_returns_ok_on_success`, `probe_returns_auth_error_on_access_denied`,
-/// `probe_returns_unreachable_on_transport`, `probe_respects_timeout`.
+/// `probe_returns_unreachable_on_transport`, `probe_timeout_returns_unknown`.
 async fn run_probe(llm: &Arc<dyn LlmProvider>, model: &str, timeout: Duration) -> InferenceStatus {
     let req = LlmRequest {
         model: model.to_string(),
@@ -206,10 +247,12 @@ async fn run_probe(llm: &Arc<dyn LlmProvider>, model: &str, timeout: Duration) -
     let result = tokio::time::timeout(timeout, llm.complete(req)).await;
 
     match result {
-        // Timed out → endpoint unreachable / hung.
+        // Timed out → could not confirm reachability within the probe window.
+        // Use `Unknown` (not `Unreachable`) so a slow Bedrock cold-start does not
+        // falsely degrade health (#739).  Real review calls have a ~300 s budget.
         Err(_elapsed) => {
-            debug!("inference probe: timed out");
-            InferenceStatus::Unreachable
+            debug!("inference probe: timed out — returning Unknown (not Unreachable)");
+            InferenceStatus::Unknown
         }
         // Call completed — check the inner result.
         Ok(Ok(_)) => InferenceStatus::Ok,
@@ -221,255 +264,10 @@ async fn run_probe(llm: &Arc<dyn LlmProvider>, model: &str, timeout: Duration) -
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
+// Split into a sibling file to keep this file under the 500-line cap (#610).
+// The sibling file is included as the module body via `#[path = ...]` so it
+// has full access to private items (`run_probe`, etc.) just as inline tests would.
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use async_trait::async_trait;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    // ── Stub providers ────────────────────────────────────────────────────────
-
-    struct OkLlm;
-
-    #[async_trait]
-    impl LlmProvider for OkLlm {
-        fn name(&self) -> &str {
-            "ok-stub"
-        }
-
-        async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
-            Ok(LlmResponse {
-                text: "hi".to_string(),
-                model: req.model.clone(),
-                input_tokens: 1,
-                output_tokens: 1,
-                latency_ms: 0,
-                cost_usd: 0.0,
-            })
-        }
-    }
-
-    struct AuthErrorLlm;
-
-    #[async_trait]
-    impl LlmProvider for AuthErrorLlm {
-        fn name(&self) -> &str {
-            "auth-error-stub"
-        }
-
-        async fn complete(&self, _req: LlmRequest) -> Result<LlmResponse, LlmError> {
-            Err(LlmError::AccessDenied("invalid api key".into()))
-        }
-    }
-
-    struct TransportErrorLlm;
-
-    #[async_trait]
-    impl LlmProvider for TransportErrorLlm {
-        fn name(&self) -> &str {
-            "transport-stub"
-        }
-
-        async fn complete(&self, _req: LlmRequest) -> Result<LlmResponse, LlmError> {
-            Err(LlmError::Transport("connection refused".into()))
-        }
-    }
-
-    struct HungLlm;
-
-    #[async_trait]
-    impl LlmProvider for HungLlm {
-        fn name(&self) -> &str {
-            "hung-stub"
-        }
-
-        async fn complete(&self, _req: LlmRequest) -> Result<LlmResponse, LlmError> {
-            // Simulate an endpoint that never responds within the probe timeout.
-            tokio::time::sleep(Duration::from_secs(60)).await;
-            Err(LlmError::Transport("hung".into()))
-        }
-    }
-
-    /// A counting stub to verify the cache prevents redundant probes.
-    struct CountingLlm {
-        calls: Arc<AtomicU32>,
-    }
-
-    #[async_trait]
-    impl LlmProvider for CountingLlm {
-        fn name(&self) -> &str {
-            "counting-stub"
-        }
-
-        async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            Ok(LlmResponse {
-                text: "x".into(),
-                model: req.model.clone(),
-                input_tokens: 1,
-                output_tokens: 1,
-                latency_ms: 0,
-                cost_usd: 0.0,
-            })
-        }
-    }
-
-    // ── InferenceStatus tests ─────────────────────────────────────────────────
-
-    #[test]
-    fn probe_status_serialises_lowercase() {
-        assert_eq!(
-            serde_json::to_string(&InferenceStatus::Ok).unwrap(),
-            "\"ok\""
-        );
-        assert_eq!(
-            serde_json::to_string(&InferenceStatus::Unreachable).unwrap(),
-            "\"unreachable\""
-        );
-        assert_eq!(
-            serde_json::to_string(&InferenceStatus::AuthError).unwrap(),
-            "\"auth_error\""
-        );
-        assert_eq!(
-            serde_json::to_string(&InferenceStatus::Unknown).unwrap(),
-            "\"unknown\""
-        );
-    }
-
-    #[test]
-    fn probe_status_is_ok() {
-        assert!(InferenceStatus::Ok.is_ok());
-        assert!(!InferenceStatus::Unreachable.is_ok());
-        assert!(!InferenceStatus::AuthError.is_ok());
-        assert!(!InferenceStatus::Unknown.is_ok());
-    }
-
-    // ── Error mapping tests ───────────────────────────────────────────────────
-
-    #[test]
-    fn error_mapping_access_denied_is_auth_error() {
-        let status = map_llm_error(&LlmError::AccessDenied("denied".into()));
-        assert_eq!(status, InferenceStatus::AuthError);
-    }
-
-    #[test]
-    fn error_mapping_model_not_found_is_auth_error() {
-        let status = map_llm_error(&LlmError::ModelNotFound("no-model".into()));
-        assert_eq!(status, InferenceStatus::AuthError);
-    }
-
-    #[test]
-    fn error_mapping_model_not_ready_is_auth_error() {
-        let status = map_llm_error(&LlmError::ModelNotReady("creating".into()));
-        assert_eq!(status, InferenceStatus::AuthError);
-    }
-
-    #[test]
-    fn error_mapping_validation_is_auth_error() {
-        let status = map_llm_error(&LlmError::Validation("bad prefix".into()));
-        assert_eq!(status, InferenceStatus::AuthError);
-    }
-
-    #[test]
-    fn error_mapping_transport_is_unreachable() {
-        let status = map_llm_error(&LlmError::Transport("connection refused".into()));
-        assert_eq!(status, InferenceStatus::Unreachable);
-    }
-
-    #[test]
-    fn error_mapping_rate_limited_is_unreachable() {
-        let status = map_llm_error(&LlmError::RateLimited);
-        assert_eq!(status, InferenceStatus::Unreachable);
-    }
-
-    #[test]
-    fn error_mapping_upstream_5xx_is_unreachable() {
-        let status = map_llm_error(&LlmError::Upstream {
-            status: 503,
-            body: "overloaded".into(),
-        });
-        assert_eq!(status, InferenceStatus::Unreachable);
-    }
-
-    // ── Live probe tests ──────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn probe_returns_ok_on_success() {
-        let llm: Arc<dyn LlmProvider> = Arc::new(OkLlm);
-        let status = run_probe(&llm, "test-model", Duration::from_secs(5)).await;
-        assert_eq!(status, InferenceStatus::Ok);
-    }
-
-    #[tokio::test]
-    async fn probe_returns_auth_error_on_access_denied() {
-        let llm: Arc<dyn LlmProvider> = Arc::new(AuthErrorLlm);
-        let status = run_probe(&llm, "test-model", Duration::from_secs(5)).await;
-        assert_eq!(status, InferenceStatus::AuthError);
-    }
-
-    #[tokio::test]
-    async fn probe_returns_unreachable_on_transport() {
-        let llm: Arc<dyn LlmProvider> = Arc::new(TransportErrorLlm);
-        let status = run_probe(&llm, "test-model", Duration::from_secs(5)).await;
-        assert_eq!(status, InferenceStatus::Unreachable);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn probe_respects_timeout() {
-        // The HungLlm sleeps 60 s; the probe timeout is 10 ms.
-        // With paused clock, `tokio::time::sleep` returns instantly when
-        // the runtime advances time; `timeout` fires before HungLlm wakes.
-        let llm: Arc<dyn LlmProvider> = Arc::new(HungLlm);
-        let status = run_probe(&llm, "test-model", Duration::from_millis(10)).await;
-        assert_eq!(
-            status,
-            InferenceStatus::Unreachable,
-            "hung endpoint must produce Unreachable"
-        );
-    }
-
-    // ── Cache TTL tests ───────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn probe_cache_prevents_redundant_calls() {
-        let calls = Arc::new(AtomicU32::new(0));
-        let llm: Arc<dyn LlmProvider> = Arc::new(CountingLlm {
-            calls: Arc::clone(&calls),
-        });
-
-        // Long TTL: 60 s — the cache should remain warm across both calls.
-        let probe = InferenceProbe::new(Duration::from_secs(60), Duration::from_secs(5));
-
-        let s1 = probe.probe(&llm, "m").await;
-        let s2 = probe.probe(&llm, "m").await;
-
-        assert_eq!(s1, InferenceStatus::Ok);
-        assert_eq!(s2, InferenceStatus::Ok);
-        assert_eq!(
-            calls.load(Ordering::Relaxed),
-            1,
-            "provider must be called exactly once when cache is warm"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn probe_cache_ttl_zero_always_reprobes() {
-        let calls = Arc::new(AtomicU32::new(0));
-        let llm: Arc<dyn LlmProvider> = Arc::new(CountingLlm {
-            calls: Arc::clone(&calls),
-        });
-
-        // TTL of 0 means the cache always looks stale.
-        let probe = InferenceProbe::new(Duration::ZERO, Duration::from_secs(5));
-
-        probe.probe(&llm, "m").await;
-        probe.probe(&llm, "m").await;
-
-        assert_eq!(
-            calls.load(Ordering::Relaxed),
-            2,
-            "zero TTL must reprobe on every call"
-        );
-    }
-}
+#[path = "inference_probe_tests.rs"]
+mod tests;

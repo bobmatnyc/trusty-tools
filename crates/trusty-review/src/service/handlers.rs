@@ -241,15 +241,25 @@ pub struct ReviewRequest {
 /// and the MCP tool path, and it only considered `inference` — not required-dep
 /// reachability.  This helper centralises the rule so both paths are consistent
 /// and #722 is fixed: a required dep that is unreachable degrades status.
-/// What: returns `"ok"` only when `inference.is_ok()` AND every dep with
-/// `required == true` also has `reachable == true`.  Returns `"degraded"` if
-/// either condition fails.  Non-required deps never influence the result.
+/// `Unknown` inference (probe timed out) does NOT degrade status (#739):
+/// a slow Bedrock cold-start must not falsely report "degraded" — the operator's
+/// real review calls have a ~300 s budget, far beyond the probe window.
+/// What: returns `"ok"` only when `inference` is `Ok` or `Unknown` (timed-out
+/// probe — could not confirm but not a hard failure) AND every dep with
+/// `required == true` also has `reachable == true`.  Returns `"degraded"` when
+/// inference is `Unreachable` or `AuthError` OR a required dep is unreachable.
+/// Non-required deps never influence the result.
 /// Test: `health_status_ok_all_good`, `health_status_degraded_required_dep_down`,
 /// `health_status_degraded_inference_auth_error`,
-/// `health_status_ok_optional_dep_down` in `handlers_tests.rs`.
+/// `health_status_ok_optional_dep_down`,
+/// `health_status_ok_inference_unknown` in `handlers_status_tests.rs`.
 pub fn compute_status(inference: InferenceStatus, deps: &DepStatus) -> &'static str {
     let required_deps_ok = deps.trusty_search.reachable || !deps.trusty_search.required;
-    if inference.is_ok() && required_deps_ok {
+    // `Unknown` (probe timed out) is treated the same as `Ok` for the purpose of
+    // computing the top-level status: we do not degrade because we couldn't confirm
+    // reachability within the probe window (#739).
+    let inference_ok = inference.is_ok() || inference == InferenceStatus::Unknown;
+    if inference_ok && required_deps_ok {
         "ok"
     } else {
         "degraded"
@@ -265,12 +275,15 @@ pub fn compute_status(inference: InferenceStatus, deps: &DepStatus) -> &'static 
 /// gate whether to attempt a `review_pr` call (closes #719).
 /// What: performs non-blocking health probes against trusty-search and
 /// trusty-analyze (both via `.health()` on the trait objects); runs the cached
-/// inference-reachability probe (10 s TTL, 3 s timeout) against the configured
-/// LLM provider; returns JSON with dep status, reviewer model, and inference
-/// result.  HTTP 200 always (degraded state is noted in the body, not via 5xx,
-/// to avoid false-positive load-balancer evictions).  When inference is not
-/// `"ok"` OR a required dep is unreachable, `status` becomes `"degraded"` so
-/// callers can gate on one field.
+/// inference-reachability probe (10 s TTL, timeout configurable via
+/// `TRUSTY_REVIEW_HEALTH_TIMEOUT_SECS`, default 10 s — see #739) against the
+/// configured LLM provider; returns JSON with dep status, reviewer model, and
+/// inference result.  HTTP 200 always (degraded state is noted in the body,
+/// not via 5xx, to avoid false-positive load-balancer evictions).  When
+/// inference is `"unreachable"` or `"auth_error"` OR a required dep is
+/// unreachable, `status` becomes `"degraded"`.  A probe timeout returns
+/// `"unknown"` (not `"degraded"`) so a slow Bedrock cold-start does not
+/// falsely degrade status (#739).
 /// Test: `health_inference_ok_when_llm_ok`,
 /// `health_inference_auth_error_sets_degraded`,
 /// `health_required_dep_down_sets_degraded`,

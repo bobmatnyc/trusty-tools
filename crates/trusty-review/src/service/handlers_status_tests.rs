@@ -94,6 +94,35 @@ fn health_status_degraded_inference_auth_error() {
     );
 }
 
+/// compute_status stays "ok" when inference is `Unknown` (probe timed out) (#739).
+///
+/// Why: a slow Bedrock cold-start causes the probe to time out and return
+/// `Unknown`.  This must NOT degrade health — real review calls have a much
+/// longer budget than the probe window.  The probe reports "could not confirm"
+/// rather than "definitely unreachable", so the top-level status should not
+/// penalise the operator.
+/// What: calls compute_status with Unknown inference + all deps reachable;
+/// asserts "ok".
+/// Test: this test itself.
+#[test]
+fn health_status_ok_inference_unknown() {
+    let deps = DepStatus {
+        trusty_search: DepInfo {
+            required: true,
+            reachable: true,
+        },
+        trusty_analyze: DepInfo {
+            required: false,
+            reachable: true,
+        },
+    };
+    assert_eq!(
+        compute_status(InferenceStatus::Unknown, &deps),
+        "ok",
+        "Unknown inference (probe timed out) must not degrade status (#739)"
+    );
+}
+
 /// compute_status stays "ok" when only a non-required dep is unreachable (#722).
 ///
 /// Why: a non-required dep being down must NOT degrade status — only required deps matter.
