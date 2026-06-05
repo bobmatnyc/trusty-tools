@@ -12,8 +12,9 @@
 use anyhow::Result;
 use std::net::SocketAddr;
 
-use crate::commands::daemon_lock;
-use crate::{run_http_on, AppState, DEFAULT_HTTP_PORT};
+use crate::DEFAULT_HTTP_PORT;
+#[cfg(feature = "axum-server")]
+use crate::{commands::daemon_lock, run_http_on, AppState};
 
 /// Bind a `TcpListener` to `127.0.0.1:DEFAULT_HTTP_PORT` for the
 /// launchd/supervisor `serve --foreground` path — abort on collision.

@@ -170,6 +170,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires network access to HuggingFace to download ONNX model; run with --include-ignored"]
     fn smoke_single_embedding_shape_and_finiteness() {
         let embedder = shared_embedder();
         let v = embedder
@@ -183,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires local embedding service / ONNX model load; flaky under parallel test init (os error 57)"]
+    #[ignore = "requires network access to HuggingFace to download ONNX model; run with --include-ignored"]
     fn batch_returns_distinct_vectors_per_input() {
         let embedder = shared_embedder();
         let out = embedder
@@ -198,6 +199,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires network access to HuggingFace to download ONNX model; run with --include-ignored"]
     fn semantic_sanity_paraphrase_beats_unrelated() {
         let embedder = shared_embedder();
         let vs = embedder
