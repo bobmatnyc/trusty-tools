@@ -60,6 +60,18 @@ fn constants_are_non_empty() {
     assert!(!MPM_SKILLS_MANAGER_AGENT.trim().is_empty());
     assert!(!EXAMPLE_SKILL.trim().is_empty());
     assert!(!OUTPUT_STYLE.trim().is_empty());
+    // Phase 1 (#770) guidance skills
+    assert!(!MPM_DELEGATION_PATTERNS.trim().is_empty());
+    assert!(!MPM_VERIFICATION_PROTOCOLS.trim().is_empty());
+    assert!(!MPM_GIT_FILE_TRACKING.trim().is_empty());
+    assert!(!MPM_PR_WORKFLOW.trim().is_empty());
+    assert!(!MPM_TICKETING_INTEGRATION.trim().is_empty());
+    assert!(!MPM_CIRCUIT_BREAKER_ENFORCEMENT.trim().is_empty());
+    assert!(!MPM_BUG_REPORTING.trim().is_empty());
+    assert!(!MPM_SESSION_MANAGEMENT.trim().is_empty());
+    assert!(!MPM_SESSION_PAUSE.trim().is_empty());
+    assert!(!MPM_SESSION_RESUME.trim().is_empty());
+    assert!(!MPM_TOOL_USAGE_GUIDE.trim().is_empty());
 }
 
 #[test]
@@ -109,7 +121,7 @@ fn optimizer_toml_is_parseable() {
 #[test]
 fn bundle_table_is_complete() {
     // `ALL` must enumerate every artifact with unique, non-empty paths.
-    // Count: 4 hooks/instructions + 5 base agents + 36 concrete agents + 1 skill = 46
+    // Count: 4 hooks/instructions + 5 base agents + 36 concrete agents + 1 skill + 11 guidance skills = 57
     // Increment 1 (9): qa, research, ops, security, documentation, data-engineer,
     //   version-control, ticketing, code-analyzer
     // Increment 2 (12): python-engineer, typescript-engineer, golang-engineer,
@@ -120,11 +132,16 @@ fn bundle_table_is_complete() {
     //   tauri-engineer, web-ui-engineer, refactoring-engineer, prompt-engineer,
     //   code-critic, gcp-ops, vercel-ops, local-ops,
     //   memory-manager, mpm-agent-manager, mpm-skills-manager
-    assert_eq!(ALL.len(), 46);
+    // Phase 1 (#770) guidance skills (11):
+    //   mpm-delegation-patterns, mpm-verification-protocols, mpm-git-file-tracking,
+    //   mpm-pr-workflow, mpm-ticketing-integration, mpm-circuit-breaker-enforcement,
+    //   mpm-bug-reporting, mpm-session-management, mpm-session-pause,
+    //   mpm-session-resume, mpm-tool-usage-guide
+    assert_eq!(ALL.len(), 57);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 46, "artifact paths must be unique");
+    assert_eq!(paths.len(), 57, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
@@ -342,6 +359,73 @@ fn new_concrete_agents_deploy_via_real_asset_files() {
             composed.len() > 200,
             "composed {name} suspiciously short ({} bytes)",
             composed.len()
+        );
+    }
+}
+
+#[test]
+fn phase1_guidance_skills_are_in_bundle() {
+    // Every Phase 1 (#770) guidance skill must be present in ALL so
+    // `trusty-mpm install` deploys them offline.
+    let skill_paths: Vec<&str> = ALL
+        .iter()
+        .filter(|a| a.rel_path.starts_with("skills/mpm-"))
+        .map(|a| a.rel_path)
+        .collect();
+
+    for expected in &[
+        "skills/mpm-delegation-patterns.md",
+        "skills/mpm-verification-protocols.md",
+        "skills/mpm-git-file-tracking.md",
+        "skills/mpm-pr-workflow.md",
+        "skills/mpm-ticketing-integration.md",
+        "skills/mpm-circuit-breaker-enforcement.md",
+        "skills/mpm-bug-reporting.md",
+        "skills/mpm-session-management.md",
+        "skills/mpm-session-pause.md",
+        "skills/mpm-session-resume.md",
+        "skills/mpm-tool-usage-guide.md",
+    ] {
+        assert!(
+            skill_paths.contains(expected),
+            "missing bundled guidance skill: {expected}"
+        );
+    }
+}
+
+#[test]
+fn phase1_guidance_skills_have_frontmatter() {
+    // Every ported guidance skill must have a YAML frontmatter block with
+    // a `name:` field so the skill system can identify it.
+    let skills = [
+        ("mpm-delegation-patterns", MPM_DELEGATION_PATTERNS),
+        ("mpm-verification-protocols", MPM_VERIFICATION_PROTOCOLS),
+        ("mpm-git-file-tracking", MPM_GIT_FILE_TRACKING),
+        ("mpm-pr-workflow", MPM_PR_WORKFLOW),
+        ("mpm-ticketing-integration", MPM_TICKETING_INTEGRATION),
+        (
+            "mpm-circuit-breaker-enforcement",
+            MPM_CIRCUIT_BREAKER_ENFORCEMENT,
+        ),
+        ("mpm-bug-reporting", MPM_BUG_REPORTING),
+        ("mpm-session-management", MPM_SESSION_MANAGEMENT),
+        ("mpm-session-pause", MPM_SESSION_PAUSE),
+        ("mpm-session-resume", MPM_SESSION_RESUME),
+        ("mpm-tool-usage-guide", MPM_TOOL_USAGE_GUIDE),
+    ];
+    for (name, content) in skills {
+        assert!(
+            content.starts_with("---\n"),
+            "skill {name} is missing YAML frontmatter"
+        );
+        assert!(
+            content.contains("name:"),
+            "skill {name} frontmatter is missing `name:` field"
+        );
+        // Must not contain claude-mpm or ~/.claude-mpm references (trusty-mpm adaptation).
+        assert!(
+            !content.contains("claude-mpm") || content.contains("trusty-mpm"),
+            "skill {name} contains unadapted claude-mpm reference"
         );
     }
 }

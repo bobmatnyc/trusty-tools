@@ -214,7 +214,18 @@ fn install_then_deploy_deploys_skills() {
         &paths.claude_skills_dir(),
     )
     .unwrap();
-    assert_eq!(result.deployed, vec!["example-skill.md".to_string()]);
+    // All 12 bundled skills (1 placeholder + 11 guidance) deploy on first install.
+    assert!(
+        result.deployed.contains(&"example-skill.md".to_string()),
+        "example-skill.md must be deployed; got {:?}",
+        result.deployed
+    );
+    assert_eq!(
+        result.deployed.len(),
+        12,
+        "expected 12 skill files deployed (1 placeholder + 11 guidance); got {:?}",
+        result.deployed
+    );
     assert!(result.skipped.is_empty());
     assert!(result.unchanged.is_empty());
     let deployed = paths.claude_skills_dir().join("example-skill.md");
