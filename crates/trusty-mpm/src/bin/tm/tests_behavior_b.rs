@@ -303,3 +303,12 @@ fn compose_session_instructions_display_matches_live_prompt_with_override() {
         "bundled workflow must be replaced in display"
     );
 }
+
+#[test]
+fn cli_parses_daemon_mcp() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "daemon", "--mcp"]).unwrap();
+    match cli.command {
+        Command::Daemon { mcp, .. } => assert!(mcp),
+        other => panic!("expected Daemon, got {other:?}"),
+    }
+}
