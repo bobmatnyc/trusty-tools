@@ -295,6 +295,10 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
     // warm-boot failure.
     let registered_ids: std::collections::HashSet<String> =
         state.registry.list().into_iter().map(|id| id.0).collect();
+    // TODO(#796): `seen_ids` covers only legacy entries from `indexes.toml`; colocated
+    // index failures (Phase 2 above) are not counted here, so `failed_count` can
+    // under-report when colocated indexes time out or fail to restore.  Track
+    // colocated skipped counts and add them to this tally in a follow-up.
     let failed_count: usize = seen_ids
         .iter()
         .filter(|id| !registered_ids.contains(*id))
@@ -303,15 +307,16 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
         state
             .warmboot_failed_indexes
             .store(failed_count, std::sync::atomic::Ordering::Relaxed);
+        // Issue #796 nit: pass `failed_count` only as a structured field, not
+        // also as a positional arg (which caused a duplicate in the log output).
         tracing::error!(
             failed_count,
             registered = total,
-            "warm-boot FAIL-LOUD: {} index(es) from indexes.toml did NOT load on this boot \
-             (TCC denial, redb-format mismatch, or corrupt corpus). \
+            "warm-boot FAIL-LOUD: {failed_count} index(es) from indexes.toml did NOT load on \
+             this boot (TCC denial, redb-format mismatch, or corrupt corpus). \
              These indexes are MISSING from /health and search results. \
              Run `trusty-search health` or check /health?warmboot_failed_indexes \
              for the count, then resolve the root cause and restart (issue #764).",
-            failed_count,
         );
     }
 }

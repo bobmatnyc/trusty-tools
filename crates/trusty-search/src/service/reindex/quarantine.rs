@@ -28,6 +28,8 @@ use crate::core::registry::IndexId;
 /// quarantine an otherwise healthy index. Three consecutive failures are
 /// a strong signal that the index is broken and needs operator attention.
 /// Env: `TRUSTY_REINDEX_MAX_FAILURES` (default 3, must be ≥ 1).
+/// Note: read once at `ReindexQuarantine::new()` and cached; this function
+/// is retained for test-time overrides and the initial read.
 pub fn max_consecutive_failures() -> u32 {
     std::env::var("TRUSTY_REINDEX_MAX_FAILURES")
         .ok()
@@ -42,6 +44,8 @@ pub fn max_consecutive_failures() -> u32 {
 /// index with no operator action. The 1-hour cap gives the operator time to
 /// notice and intervene while guaranteeing automatic recovery attempts.
 /// Env: `TRUSTY_REINDEX_QUARANTINE_MAX_SECS` (default 3600 = 1 hour).
+/// Note: read once at `ReindexQuarantine::new()` and cached; this function
+/// is retained for test-time overrides and the initial read.
 pub fn max_quarantine_secs() -> u64 {
     std::env::var("TRUSTY_REINDEX_QUARANTINE_MAX_SECS")
         .ok()
@@ -70,22 +74,40 @@ struct QuarantineEntry {
 ///
 /// What: a `DashMap<IndexId, QuarantineEntry>` tracking consecutive failure
 /// counts and quarantine deadlines. Cheap to `Clone` (Arc-backed).
+/// The env-var thresholds (`TRUSTY_REINDEX_MAX_FAILURES` and
+/// `TRUSTY_REINDEX_QUARANTINE_MAX_SECS`) are read once in `new()` and cached
+/// as fields to avoid repeated `std::env::var()` + parse calls inside the
+/// DashMap critical section (issue #796).
 ///
 /// Test: `quarantine_*` tests in this module.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ReindexQuarantine {
     entries: Arc<DashMap<IndexId, QuarantineEntry>>,
+    /// Cached `TRUSTY_REINDEX_MAX_FAILURES` (issue #796).
+    max_failures: u32,
+    /// Cached `TRUSTY_REINDEX_QUARANTINE_MAX_SECS` (issue #796).
+    max_quarantine_secs: u64,
+}
+
+impl Default for ReindexQuarantine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ReindexQuarantine {
     /// Create a fresh quarantine registry (no quarantined indexes).
     ///
     /// Why: used by `SearchAppState::new()` to wire the quarantine at startup.
-    /// What: allocates an empty DashMap.
+    /// What: allocates an empty DashMap and reads the env-var thresholds once
+    /// so `record_failure` / `is_quarantined` never call `std::env::var()` in
+    /// the DashMap critical section (issue #796).
     /// Test: `quarantine_new_is_empty` below.
     pub fn new() -> Self {
         Self {
             entries: Arc::new(DashMap::new()),
+            max_failures: max_consecutive_failures(),
+            max_quarantine_secs: max_quarantine_secs(),
         }
     }
 
@@ -126,7 +148,10 @@ impl ReindexQuarantine {
     /// Test: `quarantine_triggers_after_threshold` and
     /// `quarantine_backoff_grows_exponentially` below.
     pub fn record_failure(&self, id: &IndexId) {
-        let max_failures = max_consecutive_failures();
+        // Use the cached thresholds rather than re-reading env vars on every
+        // call (issue #796: env reads inside a DashMap critical section).
+        let max_failures = self.max_failures;
+        let max_quarantine = self.max_quarantine_secs;
         let mut entry = self
             .entries
             .entry(id.clone())
@@ -147,7 +172,7 @@ impl ReindexQuarantine {
             let multiplier = 1u64.checked_shl(excess.min(30)).unwrap_or(u64::MAX);
             let backoff_secs = BASE_QUARANTINE_SECS
                 .saturating_mul(multiplier)
-                .min(max_quarantine_secs());
+                .min(max_quarantine);
             let until = Instant::now() + Duration::from_secs(backoff_secs);
             entry.quarantine_until = Some(until);
             tracing::warn!(
