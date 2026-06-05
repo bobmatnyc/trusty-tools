@@ -1,5 +1,14 @@
 # open-mpm
 
+**Harness role:** The **Agentic Harness** (planned rename: `trusty-agents`) —
+a general-purpose agentic harness for non-coding knowledge-worker workflows
+(CRM, HR, scheduling, memory, communications). Distinct from a coding harness.
+Can delegate coding tasks to `trusty-code` and managed multi-agent projects to
+`trusty-mpm`. See
+[docs/architecture/harnesses.md](../../docs/architecture/harnesses.md) for the
+full three-harness architecture, the delegation graph, and the open decision on
+the open-mpm/trusty-mpm boundary (including the proposed rename).
+
 A lightweight, composable AI agent orchestration harness in Rust.
 
 `open-mpm` runs a **PM (Project Manager) orchestrator** that delegates tasks

@@ -61,3 +61,4 @@ Proposed ──► Accepted ──► Superseded (by ADR-NNNN)
 | [0001](./0001-docs-live-top-level.md) | Design/research/ADR docs live in top-level `docs/` | Accepted |
 | [0002](./0002-single-install-convention.md) | Single-install convention for main crates | Accepted |
 | [0003](./0003-msrv-and-edition-policy.md) | MSRV 1.88 and per-crate Rust edition policy | Accepted |
+| [0004](./0004-three-harnesses-shared-event-driven-common.md) | Three distinct harnesses on a shared event-driven trusty-common foundation | Proposed |

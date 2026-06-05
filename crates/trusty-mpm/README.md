@@ -1,5 +1,12 @@
 # trusty-mpm
 
+**Harness role:** The **Meta-Harness** — PM-style multi-agent orchestration
+over coding work. Manages multi-project sessions, relays hooks, and exposes an
+MCP server to Claude Code sessions. Delegates coding tasks to `trusty-code`
+(`tcode`). See
+[docs/architecture/harnesses.md](../../docs/architecture/harnesses.md) for the
+full three-harness architecture and delegation graph.
+
 Why: A single `cargo install trusty-mpm` should install all trusty-mpm tooling — the background daemon, the CLI, the TUI dashboard, and the Telegram bot — without requiring users to install eight separate packages and coordinate their versions.
 
 What: Unified crate combining the formerly separate `trusty-mpm-{core,client,mcp,daemon,cli,tui,telegram}` sub-crates into one package with feature-gated `[[bin]]` targets.
