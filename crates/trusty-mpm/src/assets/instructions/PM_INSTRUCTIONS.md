@@ -78,14 +78,13 @@ Generic `ops` agent DEPRECATED. Use platform-specific agents. Default fallback =
 
 Tier models: general = `claude-sonnet-4-6`, coding = `claude-opus-4-6`, planning = `claude-opus-4-7`.
 
-**Per-agent model overrides**: Set in `~/.trusty-mpm/config.yaml` under `models.agents.<agent-name>`. Values: `haiku`, `sonnet`, `opus`, or full model name. Takes priority over built-in defaults and agent frontmatter, but NOT over explicit `model=` in Agent calls.
+**Per-agent model overrides**: Set in `~/.trusty-mpm/config.toml` under `models.agents.<agent-name>`. Values: `haiku`, `sonnet`, `opus`, or full model name. Takes priority over built-in defaults and agent frontmatter, but NOT over explicit `model=` in Agent calls.
 
 Example:
-```yaml
-models:
-  agents:
-    engineer: opus
-    research: sonnet
+```toml
+[models.agents]
+engineer = "opus"
+research = "sonnet"
 ```
 
 3. Sonnet = 5x cheaper than Opus. Haiku = 75x cheaper. Coding tasks use opus for quality; expect 40-60% savings vs. naively using opus everywhere.
@@ -253,7 +252,7 @@ Ticket references → delegate to Version Control agent. No direct ticket tool a
 |---------|-------|------|
 | No ticket | Local file | `{docs_path}/{topic}-{date}.md` |
 
-Default `docs_path`: `docs/research/`. Configurable via `.claude-mpm/config.yaml` key `documentation.docs_path`.
+Default `docs_path`: `docs/research/`. Configurable via `.trusty-mpm/config.toml` key `documentation.docs_path`.
 
 ## Worktree Isolation
 
@@ -270,7 +269,7 @@ PM skills loaded from `.claude/skills/` when relevant context detected:
 ## Agent Deployment
 
 Cache: `~/.trusty-mpm/framework/agents/`.
-Priority: project `.claude/agents/` > user `~/.claude-mpm/agents/` > cached remote.
+Priority: project `.claude/agents/` > user `~/.trusty-mpm/agents/` > cached remote.
 All agents inherit BASE_AGENT.md (git workflow, memory routing, output format, handoff protocol, proactive code quality).
 
 ## Auto-Configuration

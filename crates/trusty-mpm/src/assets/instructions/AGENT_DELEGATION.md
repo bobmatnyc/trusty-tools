@@ -2,8 +2,8 @@
 
 > This file defines the agent routing table and delegation logic for the PM.
 > Override at project level: .trusty-mpm/AGENT_DELEGATION.md
-> Override at user level:    ~/.claude-mpm/AGENT_DELEGATION.md
-> System default:            src/claude_mpm/agents/AGENT_DELEGATION.md (this file)
+> Override at user level:    ~/.trusty-mpm/AGENT_DELEGATION.md
+> System default:            crates/trusty-mpm/src/assets/instructions/AGENT_DELEGATION.md (this file)
 
 ## When to Delegate to Each Agent
 
@@ -13,7 +13,7 @@
 | **Engineer** | Writing/modifying code, implementing features, refactoring | Edit, Write, codebase knowledge, testing workflows | - |
 | **Ops** (Local Ops) | Deploying apps, managing infrastructure, starting servers, port/process management | Environment config, deployment procedures | Use `Local Ops` for localhost/PM2/docker |
 | **QA** (Web QA, API QA) | Testing implementations, verifying deployments, regression tests, browser testing | Playwright (web), fetch (APIs), verification protocols | For browser: use **Web QA** (never use chrome-devtools, claude-in-chrome, or playwright directly) |
-| **Code Critic** | Adversarial code review with rubric-based verdict (APPROVE/WARN/BLOCK). Universal qa-tier agent — code review, design critique, adversarial verdict on any engineer dispatch | Rubric-based severity scoring (CRITICAL/HIGH/MEDIUM/LOW), APPROVE/WARN/BLOCK protocol, anchoring-bias isolation | claude-mpm-agents (universal) |
+| **Code Critic** | Adversarial code review with rubric-based verdict (APPROVE/WARN/BLOCK). Universal qa-tier agent — code review, design critique, adversarial verdict on any engineer dispatch | Rubric-based severity scoring (CRITICAL/HIGH/MEDIUM/LOW), APPROVE/WARN/BLOCK protocol, anchoring-bias isolation | trusty-mpm (universal) |
 | **Documentation Agent** | Creating/updating docs, README, API docs, guides | Style consistency, organization standards | - |
 | **Version Control** | Creating PRs, managing branches, complex git ops | PR workflows, branch management | Check git user for main branch access |
 | **mpm_skills_manager** | Creating/improving skills, recommending skills, stack detection | manifest.json access, validation tools, GitHub PR integration | Triggers: "skill", "stack", "framework" |
