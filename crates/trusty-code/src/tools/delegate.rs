@@ -133,6 +133,21 @@ impl ToolExecutor for DelegateToAgentTool {
             return ToolResult::err("delegate_to_agent: missing 'task'");
         };
 
+        // Guard against path traversal: the LLM supplies agent_name which is
+        // joined into a filesystem path. Reject any name that is not strictly
+        // [a-zA-Z0-9_-] before the path join so a crafted value like
+        // "../../etc/passwd" cannot escape the agents config directory.
+        if agent_name.is_empty()
+            || !agent_name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return ToolResult::err(format!(
+                "Invalid agent name '{agent_name}': \
+                 agent names must be non-empty and contain only [a-zA-Z0-9_-]"
+            ));
+        }
+
         // Pre-flight validation: if a config_dir was attached, verify the agent
         // config exists before spawning. Converts a generic IO error into a
         // structured tool error the LLM can act on.
@@ -313,5 +328,77 @@ mod tests {
         let result = tool.execute(json!({"task": "something"})).await;
         assert!(result.is_error());
         assert!(result.content().contains("missing 'agent_name'"));
+    }
+
+    /// A path-traversal agent name is rejected before any filesystem access.
+    ///
+    /// Why: The LLM supplies `agent_name` which is joined into a filesystem path.
+    /// A crafted name like `../../etc/passwd` must be caught before the join to
+    /// prevent escaping the agents config directory.
+    /// What: Calls `execute` with a traversal string; asserts error and runner
+    /// not invoked.
+    /// Test: This test.
+    #[tokio::test]
+    async fn path_traversal_agent_name_is_rejected() {
+        let runner = Arc::new(RecordingRunner {
+            invoked: std::sync::Mutex::new(Vec::new()),
+        });
+        // No config_dir — traversal guard fires before config check.
+        let tool = DelegateToAgentTool::new(runner.clone());
+
+        for bad_name in &[
+            "../../etc/passwd",
+            "../sibling",
+            "agent/sub",
+            "agent name",
+            "",
+        ] {
+            let result = tool
+                .execute(json!({"agent_name": bad_name, "task": "do it"}))
+                .await;
+            assert!(
+                result.is_error(),
+                "traversal/invalid name '{bad_name}' must be rejected"
+            );
+            assert!(
+                result.content().contains("Invalid agent name"),
+                "error must describe the problem, got: {}",
+                result.content()
+            );
+        }
+        assert!(
+            runner.invoked.lock().expect("lock").is_empty(),
+            "runner must never be called for invalid names"
+        );
+    }
+
+    /// A valid agent name passes the sanitisation guard and reaches the runner.
+    ///
+    /// Why: Confirms the allowlist does not over-reject legitimate names.
+    /// What: `execute({"agent_name":"engineer",...})` without config_dir; runner
+    /// is called once.
+    /// Test: This test.
+    #[tokio::test]
+    async fn valid_agent_name_passes_sanitization() {
+        let runner = Arc::new(RecordingRunner {
+            invoked: std::sync::Mutex::new(Vec::new()),
+        });
+        let tool = DelegateToAgentTool::new(runner.clone());
+
+        for good_name in &["engineer", "qa-agent", "python_engineer", "rust-2024"] {
+            let result = tool
+                .execute(json!({"agent_name": good_name, "task": "do it"}))
+                .await;
+            assert!(
+                !result.is_error(),
+                "valid name '{good_name}' must be accepted: {}",
+                result.content()
+            );
+        }
+        assert_eq!(
+            runner.invoked.lock().expect("lock").len(),
+            4,
+            "runner must be called for each valid name"
+        );
     }
 }

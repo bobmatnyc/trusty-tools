@@ -114,6 +114,32 @@ fn main() -> Result<()> {
     }
 }
 
+/// Validate that `agent_name` contains only safe filesystem characters.
+///
+/// Why: The LLM supplies `agent_name` which is joined into a filesystem path
+/// (`<agents_dir>/<agent_name>.toml`). Without this guard a crafted name such
+/// as `../../etc/passwd` escapes the agents directory and enables path
+/// traversal. Restricting to `[a-zA-Z0-9_-]` is safe, predictable, and covers
+/// every real agent name in use.
+/// What: Returns `Ok(())` when every character is ASCII alphanumeric, `_`, or
+/// `-`, and the name is non-empty. Returns `Err` with a descriptive message
+/// otherwise.
+/// Test: `validate_agent_name_rejects_traversal` and
+/// `validate_agent_name_accepts_valid` in this module.
+fn validate_agent_name(agent_name: &str) -> Result<()> {
+    if agent_name.is_empty()
+        || !agent_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        anyhow::bail!(
+            "invalid agent name '{agent_name}': \
+             agent names must be non-empty and contain only [a-zA-Z0-9_-]"
+        );
+    }
+    Ok(())
+}
+
 /// Execute `tcode run-task`: validate agent config and report readiness.
 ///
 /// Why: Phase 6 establishes the public API entry point for single-task
@@ -125,6 +151,12 @@ fn main() -> Result<()> {
 /// Test: `cargo run -p trusty-code -- run-task engineer "write a test"
 ///        --project /path/to/project` exits 0 when engineer.toml exists.
 fn run_task(agent_name: &str, task: &str, project: &Path) -> Result<()> {
+    // Guard against path traversal via LLM-supplied agent_name.
+    if let Err(e) = validate_agent_name(agent_name) {
+        eprintln!("tcode run-task: {e}");
+        process::exit(1);
+    }
+
     // Resolve canonical project root.
     let project_root = project
         .canonicalize()
@@ -175,10 +207,15 @@ fn run_task(agent_name: &str, task: &str, project: &Path) -> Result<()> {
         .or(cfg.llm.model_override.as_deref())
         .unwrap_or("(default)");
 
+    // Char-safe truncation: slicing bytes at offset 80 panics when a multi-byte
+    // UTF-8 character straddles the boundary. Collecting the first 80 chars is
+    // always valid regardless of the Unicode content of the task string.
+    let task_preview: String = task.chars().take(80).collect();
+
     info!(
         agent = agent_name,
         model,
-        task_preview = &task[..task.len().min(80)],
+        task_preview = task_preview.as_str(),
         "tcode run-task: agent config validated"
     );
 
@@ -216,4 +253,62 @@ fn locate_agents_dir(project_root: &std::path::Path) -> PathBuf {
     }
     // Default to .claude/agents (may not exist yet).
     claude_agents
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::validate_agent_name;
+
+    /// A path-traversal agent name is rejected.
+    ///
+    /// Why: Guards the `agents_dir.join(format!("{agent_name}.toml"))` call in
+    /// `run_task` against LLM-supplied names that escape the agents directory.
+    /// What: Asserts that `../../etc/passwd` and similar strings fail validation.
+    /// Test: This test.
+    #[test]
+    fn validate_agent_name_rejects_traversal() {
+        assert!(
+            validate_agent_name("../../etc/passwd").is_err(),
+            "path traversal must be rejected"
+        );
+        assert!(
+            validate_agent_name("../sibling").is_err(),
+            "parent-dir component must be rejected"
+        );
+        assert!(
+            validate_agent_name("agent/subdir").is_err(),
+            "path separator must be rejected"
+        );
+        assert!(
+            validate_agent_name("agent name").is_err(),
+            "space must be rejected"
+        );
+        assert!(
+            validate_agent_name("").is_err(),
+            "empty string must be rejected"
+        );
+        assert!(
+            validate_agent_name("agent\0null").is_err(),
+            "null byte must be rejected"
+        );
+    }
+
+    /// A well-formed agent name is accepted.
+    ///
+    /// Why: Verifies the allowlist does not over-reject legitimate names.
+    /// What: Asserts that common agent names (`engineer`, `qa-agent`, etc.) pass.
+    /// Test: This test.
+    #[test]
+    fn validate_agent_name_accepts_valid() {
+        assert!(validate_agent_name("engineer").is_ok());
+        assert!(validate_agent_name("qa-agent").is_ok());
+        assert!(validate_agent_name("python_engineer").is_ok());
+        assert!(validate_agent_name("rust-engineer-2024").is_ok());
+        assert!(
+            validate_agent_name("A").is_ok(),
+            "single ASCII letter must pass"
+        );
+    }
 }
