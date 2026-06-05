@@ -688,20 +688,22 @@ struct HealthResponse {
     /// across all warm-boot phases since the daemon started.
     /// Test: `health_includes_warmboot_leaked_probe_threads` below.
     warmboot_leaked_probe_threads: usize,
-    /// Whether at least one chat provider (OpenRouter or local model) is
-    /// configured and available on this daemon instance.
+    /// Whether at least one chat provider (OpenRouter or a verified local model)
+    /// is actually available on this daemon instance (issue #781).
     ///
-    /// Why: the Svelte dashboard uses this flag to show or hide the Chat
-    /// panel without a separate round-trip to `/api/chat/providers`. The
-    /// flag is conservative: it is `true` when `OPENROUTER_API_KEY` is set
-    /// OR when the `local_model.enabled` flag is configured — it does not
-    /// probe network reachability at health-check time (too slow for a
-    /// polling endpoint). Use `/api/chat/providers` for a live reachability
-    /// check.
-    /// What: `state.openrouter_enabled || state.local_model.enabled`.
-    /// Test: `health_chat_available_when_openrouter_configured` verifies the
-    /// flag is `true` after `with_openrouter_api_key("sk-…")` and `false`
-    /// with an empty key.
+    /// Why: `LocalModelConfig::default()` has `enabled: true` (Ollama default),
+    /// so using `local_model.enabled` alone made the flag `true` even when Ollama
+    /// was not running and no OpenRouter key was configured — misleading the Svelte
+    /// dashboard into showing a chat panel that immediately 503'd. The corrected
+    /// semantics: `true` when `OPENROUTER_API_KEY` is set, OR when the lazy
+    /// `chat_provider` OnceCell has resolved to `Some` (a local model was
+    /// auto-detected and confirmed reachable on the first chat call). Reports
+    /// `false` in all other cases (no key, local model default not yet probed).
+    /// Use `/api/chat/providers` for a synchronous live reachability check.
+    ///
+    /// What: `state.openrouter_enabled || state.chat_provider.get().is_some_and(|p| p.is_some())`.
+    ///
+    /// Test: `health_chat_available_semantics` verifies the three cases.
     chat_available: bool,
 }
 
@@ -1181,7 +1183,18 @@ async fn health_handler(State(state): State<Arc<SearchAppState>>) -> Json<Health
         // due to a warm-boot deadline timeout. Zero on healthy machines; >0
         // indicates TCC-blocked external volumes during this daemon's lifetime.
         warmboot_leaked_probe_threads: crate::service::warm_boot::leaked_probe_thread_count(),
-        chat_available: state.openrouter_enabled || state.local_model.enabled,
+        // Issue #781: `chat_available` reflects ACTUAL availability.
+        // `LocalModelConfig::default()` has `enabled: true` (Ollama), so using
+        // `local_model.enabled` alone was always true even when Ollama is not
+        // running. The corrected logic:
+        //   - `openrouter_enabled` → key is present, so OpenRouter will accept calls.
+        //   - `chat_provider` OnceCell already resolved to `Some` → a local model
+        //     was auto-detected and is alive (network probe ran on first chat call).
+        // If no key and the OnceCell hasn't resolved yet (first boot, no chat calls),
+        // we conservatively report `false` so the UI doesn't show a chat panel that
+        // will immediately 503 on first use.
+        chat_available: state.openrouter_enabled
+            || state.chat_provider.get().is_some_and(|p| p.is_some()),
     })
 }
 
@@ -4601,18 +4614,22 @@ mod tests {
         );
     }
 
-    /// `GET /health` reports `chat_available: true` when OpenRouter is configured,
-    /// `false` when no key is present.
+    /// `GET /health` reports `chat_available` with correct semantics (issue #781).
     ///
-    /// Why: The Svelte dashboard uses this flag to show/hide the Chat panel
-    /// without a separate provider-probe round-trip. The test verifies the flag
-    /// is driven purely by key presence, not by network reachability.
-    /// What: Calls `health_handler` with a state built with and without an API key,
-    /// and asserts the `chat_available` field matches.
+    /// Why: The Svelte dashboard uses this flag to show/hide the Chat panel.
+    /// Before #781 the flag was `openrouter_enabled || local_model.enabled`, but
+    /// `LocalModelConfig::default()` has `enabled: true`, so it was always `true`
+    /// even without a working provider. The fix: `true` only when an OpenRouter
+    /// key is present OR when the lazy chat_provider OnceCell has resolved to Some.
+    /// What: Three assertions: (1) key present → true, (2) no key + OnceCell not
+    /// populated → false, (3) no key + OnceCell pre-populated with Some → true.
     /// Test: this test.
     #[tokio::test]
-    async fn health_chat_available_when_openrouter_configured() {
-        // With a non-empty OpenRouter key → chat_available == true.
+    async fn health_chat_available_semantics() {
+        use tokio::sync::OnceCell;
+
+        // Case 1: non-empty OpenRouter key → chat_available == true regardless
+        // of the OnceCell state.
         let state_with_key = Arc::new(
             SearchAppState::new(IndexRegistry::new())
                 .with_openrouter_api_key("sk-or-test-key-not-real"),
@@ -4623,23 +4640,42 @@ mod tests {
             "chat_available must be true when OPENROUTER_API_KEY is non-empty"
         );
 
-        // With no key and no local model → chat_available == false.
-        // Explicitly zero both so the test is hermetic regardless of the
-        // shell environment (OPENROUTER_API_KEY may be set) and the
-        // LocalModelConfig default (enabled: true targeting Ollama).
-        let state_no_key = Arc::new(
+        // Case 2: no key, local_model.enabled=true (the DEFAULT), OnceCell not
+        // populated yet → chat_available must be FALSE (the bug fixed by #781).
+        let state_default_local = Arc::new(
             SearchAppState::new(IndexRegistry::new())
                 .with_openrouter_api_key("")
-                .with_local_model(trusty_common::LocalModelConfig {
-                    enabled: false,
-                    base_url: "http://localhost:11434".to_string(),
-                    model: String::new(),
-                }),
+                // Explicitly use the default local model config (enabled=true)
+                // to prove the flag is NOT set just because enabled=true.
+                .with_local_model(trusty_common::LocalModelConfig::default()),
         );
-        let Json(resp_no) = health_handler(State(state_no_key)).await;
+        let Json(resp_default) = health_handler(State(state_default_local)).await;
         assert!(
-            !resp_no.chat_available,
-            "chat_available must be false when no API key and no local model"
+            !resp_default.chat_available,
+            "chat_available must be false when no key and local model not yet probed \
+             (OnceCell empty) — the #781 regression guard"
+        );
+
+        // Case 3: no key, OnceCell pre-populated with Some(provider) →
+        // chat_available must be TRUE (a local model was probed and confirmed).
+        // We simulate this by constructing a state and pre-initialising the
+        // chat_provider OnceCell with a mock provider.
+        let state_local_probed =
+            SearchAppState::new(IndexRegistry::new()).with_openrouter_api_key("");
+        let mock_provider: Arc<dyn trusty_common::ChatProvider> =
+            Arc::new(trusty_common::OpenRouterProvider::new(
+                "fake-key-for-test".to_string(),
+                "test-model".to_string(),
+            ));
+        // Pre-populate the OnceCell to simulate a successful local-model probe.
+        let cell: &OnceCell<Option<Arc<dyn trusty_common::ChatProvider>>> =
+            &state_local_probed.chat_provider;
+        cell.get_or_init(|| async { Some(mock_provider) }).await;
+        let state_arc = Arc::new(state_local_probed);
+        let Json(resp_probed) = health_handler(State(state_arc)).await;
+        assert!(
+            resp_probed.chat_available,
+            "chat_available must be true when chat_provider OnceCell resolved to Some"
         );
     }
 

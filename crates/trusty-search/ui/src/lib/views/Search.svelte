@@ -122,11 +122,14 @@
     await scrollToBottom();
 
     // Build history for the request: everything except the user message we
-    // just appended, keeping only role/content fields.
+    // just appended, keeping only role/content fields. Cap to the last
+    // HISTORY_PAIRS exchanges (issue #781) so the /chat payload stays bounded.
+    const HISTORY_PAIRS = 10;
     const history = messages
       .slice(0, -1)
       .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .map((m) => ({ role: m.role, content: m.content }));
+      .map((m) => ({ role: m.role, content: m.content }))
+      .slice(-HISTORY_PAIRS * 2);
 
     try {
       const body = await api.chat(chatIndexId, text, history);
@@ -135,10 +138,13 @@
       messages = [...messages, { role: 'assistant', content: reply, sources }];
     } catch (e) {
       // Surface 503 "no provider" as a friendly hint; expose other errors verbatim.
+      // Use e.status (numeric) from ApiError rather than substring-matching the
+      // message string (issue #781 — structured 503 detection).
       const detail = e.message || String(e);
-      const friendly = detail.includes('503')
-        ? 'Chat unavailable — set OPENROUTER_API_KEY in .env.local and restart the daemon.'
-        : `Request failed: ${detail}`;
+      const friendly =
+        e.status === 503
+          ? 'Chat unavailable — set OPENROUTER_API_KEY in .env.local and restart the daemon.'
+          : `Request failed: ${detail}`;
       messages = [
         ...messages,
         { role: 'assistant', content: friendly, error: true }

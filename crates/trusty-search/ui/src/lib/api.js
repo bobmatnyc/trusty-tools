@@ -6,8 +6,29 @@
  * production. In `vite dev`, vite.config.js proxies the API paths through to
  * 127.0.0.1:7878.
  * What: Thin wrappers returning parsed JSON or throwing on non-2xx.
+ *   Non-2xx responses throw an ApiError with a numeric `status` field so
+ *   callers can check `e.status === 503` rather than substring-matching the
+ *   message string (issue #781).
  * Test: Console-call api.health() and confirm shape matches /health.
+ *   For error handling: mock a 503 response and assert e.status === 503.
  */
+
+/**
+ * Why: Callers need a structured way to inspect HTTP errors without
+ * substring-matching the message string (issue #781).
+ * What: Extends Error with a numeric `status` field (the HTTP status code).
+ * Test: Caught errors from api.* calls expose `.status` for reliable comparisons.
+ */
+export class ApiError extends Error {
+  /**
+   * @param {number} status  HTTP status code
+   * @param {string} message Human-readable description
+   */
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
 
 async function request(path, opts = {}) {
   const res = await fetch(path, {
@@ -21,7 +42,7 @@ async function request(path, opts = {}) {
     } catch {
       /* ignore */
     }
-    throw new Error(`${res.status} ${res.statusText}: ${detail}`);
+    throw new ApiError(res.status, `${res.status} ${res.statusText}: ${detail}`);
   }
   if (res.status === 204) return null;
   const ct = res.headers.get('content-type') || '';
