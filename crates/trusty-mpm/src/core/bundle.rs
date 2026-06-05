@@ -113,6 +113,51 @@ pub const WEB_QA_AGENT: &str = include_str!("../assets/agents/web-qa.md");
 /// Concrete api-qa agent (`extends: base-qa`).
 pub const API_QA_AGENT: &str = include_str!("../assets/agents/api-qa.md");
 
+// --- Increment 3 agents ---
+
+/// Concrete javascript-engineer agent (`extends: base-engineer`).
+pub const JAVASCRIPT_ENGINEER_AGENT: &str = include_str!("../assets/agents/javascript-engineer.md");
+
+/// Concrete phoenix-engineer agent — Elixir/Phoenix (`extends: base-engineer`).
+pub const PHOENIX_ENGINEER_AGENT: &str = include_str!("../assets/agents/phoenix-engineer.md");
+
+/// Concrete dart-engineer agent — Flutter/Dart (`extends: base-engineer`).
+pub const DART_ENGINEER_AGENT: &str = include_str!("../assets/agents/dart-engineer.md");
+
+/// Concrete tauri-engineer agent (`extends: base-engineer`).
+pub const TAURI_ENGINEER_AGENT: &str = include_str!("../assets/agents/tauri-engineer.md");
+
+/// Concrete web-ui-engineer agent (`extends: base-engineer`).
+pub const WEB_UI_ENGINEER_AGENT: &str = include_str!("../assets/agents/web-ui-engineer.md");
+
+/// Concrete refactoring-engineer agent (`extends: base-engineer`).
+pub const REFACTORING_ENGINEER_AGENT: &str =
+    include_str!("../assets/agents/refactoring-engineer.md");
+
+/// Concrete prompt-engineer agent (`extends: base-engineer`).
+pub const PROMPT_ENGINEER_AGENT: &str = include_str!("../assets/agents/prompt-engineer.md");
+
+/// Concrete code-critic agent — adversarial reviewer (`extends: base-qa`).
+pub const CODE_CRITIC_AGENT: &str = include_str!("../assets/agents/code-critic.md");
+
+/// Concrete gcp-ops agent — Google Cloud Platform (`extends: base-ops`).
+pub const GCP_OPS_AGENT: &str = include_str!("../assets/agents/gcp-ops.md");
+
+/// Concrete vercel-ops agent (`extends: base-ops`).
+pub const VERCEL_OPS_AGENT: &str = include_str!("../assets/agents/vercel-ops.md");
+
+/// Concrete local-ops agent — local dev environment (`extends: base-ops`).
+pub const LOCAL_OPS_AGENT: &str = include_str!("../assets/agents/local-ops.md");
+
+/// Concrete memory-manager agent — trusty-memory MCP backend only (`extends: base-agent`).
+pub const MEMORY_MANAGER_AGENT: &str = include_str!("../assets/agents/memory-manager.md");
+
+/// Concrete mpm-agent-manager agent — bundled-asset catalog lifecycle (`extends: base-agent`).
+pub const MPM_AGENT_MANAGER_AGENT: &str = include_str!("../assets/agents/mpm-agent-manager.md");
+
+/// Concrete mpm-skills-manager agent — skill lifecycle and recommendations (`extends: base-agent`).
+pub const MPM_SKILLS_MANAGER_AGENT: &str = include_str!("../assets/agents/mpm-skills-manager.md");
+
 /// Placeholder skill definition installed to `skills/example-skill.md`.
 pub const EXAMPLE_SKILL: &str = include_str!("../assets/skills/example-skill.md");
 
@@ -323,6 +368,77 @@ pub const ALL: &[BundledArtifact] = &[
     BundledArtifact {
         rel_path: "skills/example-skill.md",
         contents: EXAMPLE_SKILL,
+        install: InstallPolicy::Overwrite,
+    },
+    // --- Increment 3: remaining 14 agents ---
+    BundledArtifact {
+        rel_path: "agents/javascript-engineer.md",
+        contents: JAVASCRIPT_ENGINEER_AGENT,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "agents/phoenix-engineer.md",
+        contents: PHOENIX_ENGINEER_AGENT,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "agents/dart-engineer.md",
+        contents: DART_ENGINEER_AGENT,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "agents/tauri-engineer.md",
+        contents: TAURI_ENGINEER_AGENT,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "agents/web-ui-engineer.md",
+        contents: WEB_UI_ENGINEER_AGENT,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "agents/refactoring-engineer.md",
+        contents: REFACTORING_ENGINEER_AGENT,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "agents/prompt-engineer.md",
+        contents: PROMPT_ENGINEER_AGENT,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "agents/code-critic.md",
+        contents: CODE_CRITIC_AGENT,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "agents/gcp-ops.md",
+        contents: GCP_OPS_AGENT,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "agents/vercel-ops.md",
+        contents: VERCEL_OPS_AGENT,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "agents/local-ops.md",
+        contents: LOCAL_OPS_AGENT,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "agents/memory-manager.md",
+        contents: MEMORY_MANAGER_AGENT,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "agents/mpm-agent-manager.md",
+        contents: MPM_AGENT_MANAGER_AGENT,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "agents/mpm-skills-manager.md",
+        contents: MPM_SKILLS_MANAGER_AGENT,
         install: InstallPolicy::Overwrite,
     },
 ];

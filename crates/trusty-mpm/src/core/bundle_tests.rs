@@ -43,6 +43,21 @@ fn constants_are_non_empty() {
     assert!(!SVELTE_ENGINEER_AGENT.trim().is_empty());
     assert!(!WEB_QA_AGENT.trim().is_empty());
     assert!(!API_QA_AGENT.trim().is_empty());
+    // Increment 3 agents
+    assert!(!JAVASCRIPT_ENGINEER_AGENT.trim().is_empty());
+    assert!(!PHOENIX_ENGINEER_AGENT.trim().is_empty());
+    assert!(!DART_ENGINEER_AGENT.trim().is_empty());
+    assert!(!TAURI_ENGINEER_AGENT.trim().is_empty());
+    assert!(!WEB_UI_ENGINEER_AGENT.trim().is_empty());
+    assert!(!REFACTORING_ENGINEER_AGENT.trim().is_empty());
+    assert!(!PROMPT_ENGINEER_AGENT.trim().is_empty());
+    assert!(!CODE_CRITIC_AGENT.trim().is_empty());
+    assert!(!GCP_OPS_AGENT.trim().is_empty());
+    assert!(!VERCEL_OPS_AGENT.trim().is_empty());
+    assert!(!LOCAL_OPS_AGENT.trim().is_empty());
+    assert!(!MEMORY_MANAGER_AGENT.trim().is_empty());
+    assert!(!MPM_AGENT_MANAGER_AGENT.trim().is_empty());
+    assert!(!MPM_SKILLS_MANAGER_AGENT.trim().is_empty());
     assert!(!EXAMPLE_SKILL.trim().is_empty());
     assert!(!OUTPUT_STYLE.trim().is_empty());
 }
@@ -94,18 +109,22 @@ fn optimizer_toml_is_parseable() {
 #[test]
 fn bundle_table_is_complete() {
     // `ALL` must enumerate every artifact with unique, non-empty paths.
-    // Count: 4 hooks/instructions + 5 base agents + 22 concrete agents + 1 skill = 32
+    // Count: 4 hooks/instructions + 5 base agents + 36 concrete agents + 1 skill = 46
     // Increment 1 (9): qa, research, ops, security, documentation, data-engineer,
     //   version-control, ticketing, code-analyzer
     // Increment 2 (12): python-engineer, typescript-engineer, golang-engineer,
     //   rust-engineer, java-engineer, php-engineer, ruby-engineer,
     //   react-engineer, nextjs-engineer, svelte-engineer, web-qa, api-qa
     // Plus engineer.md (core engineer agent)
-    assert_eq!(ALL.len(), 32);
+    // Increment 3 (14): javascript-engineer, phoenix-engineer, dart-engineer,
+    //   tauri-engineer, web-ui-engineer, refactoring-engineer, prompt-engineer,
+    //   code-critic, gcp-ops, vercel-ops, local-ops,
+    //   memory-manager, mpm-agent-manager, mpm-skills-manager
+    assert_eq!(ALL.len(), 46);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 32, "artifact paths must be unique");
+    assert_eq!(paths.len(), 46, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
@@ -171,6 +190,21 @@ fn new_concrete_agents_are_in_bundle() {
         // Increment 2 QA variants
         "agents/web-qa.md",
         "agents/api-qa.md",
+        // Increment 3 agents
+        "agents/javascript-engineer.md",
+        "agents/phoenix-engineer.md",
+        "agents/dart-engineer.md",
+        "agents/tauri-engineer.md",
+        "agents/web-ui-engineer.md",
+        "agents/refactoring-engineer.md",
+        "agents/prompt-engineer.md",
+        "agents/code-critic.md",
+        "agents/gcp-ops.md",
+        "agents/vercel-ops.md",
+        "agents/local-ops.md",
+        "agents/memory-manager.md",
+        "agents/mpm-agent-manager.md",
+        "agents/mpm-skills-manager.md",
     ] {
         assert!(
             agent_paths.contains(expected),
@@ -208,6 +242,21 @@ fn new_concrete_agents_have_extends_in_frontmatter() {
         // Increment 2 QA variants
         ("web-qa", WEB_QA_AGENT),
         ("api-qa", API_QA_AGENT),
+        // Increment 3 agents
+        ("javascript-engineer", JAVASCRIPT_ENGINEER_AGENT),
+        ("phoenix-engineer", PHOENIX_ENGINEER_AGENT),
+        ("dart-engineer", DART_ENGINEER_AGENT),
+        ("tauri-engineer", TAURI_ENGINEER_AGENT),
+        ("web-ui-engineer", WEB_UI_ENGINEER_AGENT),
+        ("refactoring-engineer", REFACTORING_ENGINEER_AGENT),
+        ("prompt-engineer", PROMPT_ENGINEER_AGENT),
+        ("code-critic", CODE_CRITIC_AGENT),
+        ("gcp-ops", GCP_OPS_AGENT),
+        ("vercel-ops", VERCEL_OPS_AGENT),
+        ("local-ops", LOCAL_OPS_AGENT),
+        ("memory-manager", MEMORY_MANAGER_AGENT),
+        ("mpm-agent-manager", MPM_AGENT_MANAGER_AGENT),
+        ("mpm-skills-manager", MPM_SKILLS_MANAGER_AGENT),
     ];
     for (name, content) in agents {
         assert!(
@@ -258,6 +307,21 @@ fn new_concrete_agents_deploy_via_real_asset_files() {
         // Increment 2 QA variants
         "web-qa",
         "api-qa",
+        // Increment 3 agents
+        "javascript-engineer",
+        "phoenix-engineer",
+        "dart-engineer",
+        "tauri-engineer",
+        "web-ui-engineer",
+        "refactoring-engineer",
+        "prompt-engineer",
+        "code-critic",
+        "gcp-ops",
+        "vercel-ops",
+        "local-ops",
+        "memory-manager",
+        "mpm-agent-manager",
+        "mpm-skills-manager",
     ];
 
     for name in agents {
