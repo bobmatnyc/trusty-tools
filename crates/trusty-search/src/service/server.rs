@@ -6024,4 +6024,57 @@ mod tests {
         assert_eq!(json["error"], "unknown index");
         assert_eq!(json["index_id"], "ghost-index");
     }
+
+    // ── Issue #749: remaining per-index 404 coverage ──────────────────────
+
+    /// `POST /indexes/{id}/index-file` with an unknown id returns 404 with a
+    /// decodable JSON error body (closes #749).
+    ///
+    /// Why: `index_file_handler` also uses `unknown_index_response`; this test
+    /// completes the per-endpoint 404 coverage set started by #750.
+    #[tokio::test]
+    async fn index_file_unknown_index_returns_404_json() {
+        use crate::core::registry::IndexRegistry;
+        let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+        let err = index_file_handler(
+            State(state),
+            Path("no-such-index".to_string()),
+            Json(IndexFileRequest {
+                path: "src/main.rs".to_string(),
+                content: "fn main() {}".to_string(),
+            }),
+        )
+        .await
+        .expect_err("unknown index must 404");
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(err.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "unknown index");
+        assert_eq!(json["index_id"], "no-such-index");
+    }
+
+    /// `POST /indexes/{id}/remove-file` with an unknown id returns 404 with a
+    /// decodable JSON error body (closes #749).
+    ///
+    /// Why: `remove_file_handler` uses `unknown_index_response`; this test
+    /// completes the per-endpoint 404 coverage.
+    #[tokio::test]
+    async fn remove_file_unknown_index_returns_404_json() {
+        use crate::core::registry::IndexRegistry;
+        let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+        let err = remove_file_handler(
+            State(state),
+            Path("no-such-index".to_string()),
+            Json(RemoveFileRequest {
+                path: "src/main.rs".to_string(),
+            }),
+        )
+        .await
+        .expect_err("unknown index must 404");
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(err.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "unknown index");
+        assert_eq!(json["index_id"], "no-such-index");
+    }
 }
