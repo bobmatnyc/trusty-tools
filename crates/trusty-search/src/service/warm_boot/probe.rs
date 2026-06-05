@@ -202,12 +202,23 @@ pub(super) fn volume_probe_timeout() -> Duration {
 /// helper so tests can exercise the probe/counter/timeout path in isolation,
 /// without needing multiple volumes.
 ///
-/// What: spawns a bare OS thread that calls `std::fs::metadata(probe_path)`.
+/// What: records the deadline as `end = Instant::now() + deadline` BEFORE
+/// spawning (so elapsed spawn time counts against the budget). If the deadline
+/// is already expired when we first check, returns `Inaccessible` immediately
+/// without waiting — a zero-duration deadline is deterministically a timeout.
+/// Otherwise spawns a bare OS thread that calls `std::fs::metadata(probe_path)`.
 /// The JoinHandle is dropped immediately (thread is detached). The caller
-/// waits with `recv_timeout(deadline)`. On timeout: increments
-/// `LEAKED_PROBE_THREAD_COUNT`, emits a `tracing::warn!`, and returns
-/// `Inaccessible`. On receive: returns `Accessible` regardless of the
-/// `metadata` result (ENOENT / EACCES means the kernel answered — no hang).
+/// waits with `recv_timeout(remaining)` where `remaining` is recomputed after
+/// the spawn so any time consumed by thread creation is also counted. On
+/// timeout: increments `LEAKED_PROBE_THREAD_COUNT`, emits a `tracing::warn!`,
+/// and returns `Inaccessible`. On receive: returns `Accessible` regardless of
+/// the `metadata` result (ENOENT / EACCES means the kernel answered — no hang).
+///
+/// Deadline enforcement is deterministic: an already-elapsed deadline is
+/// detected by the `end <= Instant::now()` pre-check that runs BEFORE the
+/// probe thread can send a result. This removes the race where a zero-duration
+/// deadline on a fast system still saw the probe complete before `recv_timeout`
+/// was called. (issue #724: probe_timeout_increments_leaked_thread_count flake)
 ///
 /// `volume_root` is used for logging only; `probe_path` is the actual target
 /// (review #727 finding 2: probing the deeper sample path, not the mount root).
@@ -221,6 +232,12 @@ pub(super) fn probe_volume(
     deadline: Duration,
 ) -> VolumeAccessibility {
     use std::sync::mpsc;
+    use std::time::Instant;
+
+    // Record the absolute end time BEFORE spawning. Elapsed spawn time counts
+    // against the budget — a zero-duration deadline is expired before the
+    // thread can ever send.
+    let end = Instant::now() + deadline;
 
     let probe_owned = probe_path.to_path_buf();
     let (tx, rx) = mpsc::channel::<()>();
@@ -230,19 +247,30 @@ pub(super) fn probe_volume(
         let _ = tx.send(());
     });
 
-    match rx.recv_timeout(deadline) {
-        Ok(()) => VolumeAccessibility::Accessible,
-        Err(_timeout_or_disconnect) => {
-            let prev = LEAKED_PROBE_THREAD_COUNT.fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(
-                "warm-boot: probe thread for volume {} (probing {}) timed out and was abandoned \
-                 (leaked_probe_threads total: {}). (issue #723, review #727)",
-                volume_root.display(),
-                probe_path.display(),
-                prev + 1,
-            );
-            VolumeAccessibility::Inaccessible
-        }
+    // Recompute remaining AFTER spawn; if zero or already elapsed, skip the
+    // recv entirely — deadline already expired.  This is the determinism fix:
+    // without this pre-check, `recv_timeout(ZERO)` can still see a message
+    // that the probe thread queued between the spawn call and the recv call on
+    // a fast machine, causing a spurious `Accessible` result.
+    let remaining = end.saturating_duration_since(Instant::now());
+    let timed_out = if remaining.is_zero() {
+        true
+    } else {
+        rx.recv_timeout(remaining).is_err()
+    };
+
+    if timed_out {
+        let prev = LEAKED_PROBE_THREAD_COUNT.fetch_add(1, Ordering::Relaxed);
+        tracing::warn!(
+            "warm-boot: probe thread for volume {} (probing {}) timed out and was abandoned \
+             (leaked_probe_threads total: {}). (issue #723, review #727)",
+            volume_root.display(),
+            probe_path.display(),
+            prev + 1,
+        );
+        VolumeAccessibility::Inaccessible
+    } else {
+        VolumeAccessibility::Accessible
     }
 }
 
