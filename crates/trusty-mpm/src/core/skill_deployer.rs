@@ -1,15 +1,17 @@
-//! Skill deployment — copies skill files into `~/.claude/skills/`.
+//! Skill deployment — writes skill directories into `~/.claude/skills/`.
 //!
-//! Why: Claude Code reads skill files from `~/.claude/skills/`. trusty-mpm must
-//! keep that directory populated with up-to-date skills, while never destroying
-//! files the user owns or has hand-edited. Skills carry no inheritance, so —
-//! unlike agents — deployment is a plain content copy, but the manifest-based
-//! ownership tracking is identical.
+//! Why: Claude Code discovers skills from `~/.claude/skills/<name>/SKILL.md`
+//! (directory per skill, entry-point file named `SKILL.md`). trusty-mpm must
+//! keep that directory populated with up-to-date skills in that format, while
+//! never destroying files the user owns or has hand-edited. Skills carry no
+//! inheritance, so — unlike agents — deployment is a plain content copy, but
+//! the manifest-based ownership tracking is identical.
 //! What: [`deploy_skills`] reads every `*.md` file from a source directory,
-//! consults the [`SkillManifest`] to classify each target file, and writes only
-//! the files it safely may. It returns a [`DeployStats`] summarising what
-//! happened.
-//! Test: `cargo test -p trusty-mpm-core skill_deployer` covers a new deploy, a
+//! derives the skill name by stripping the `.md` extension, and writes each
+//! one as `~/.claude/skills/<name>/SKILL.md`. It consults the
+//! [`SkillManifest`] to classify each target file and writes only the files it
+//! safely may. It returns a [`DeployStats`] summarising what happened.
+//! Test: `cargo test -p trusty-mpm skill_deployer` covers a new deploy, a
 //! skipped user-modified file, an unchanged file, and a user-owned file.
 
 use std::path::Path;
@@ -38,11 +40,22 @@ pub struct DeployStats {
 /// Whether a source filename names a skill file to deploy.
 ///
 /// Why: the source directory holds `.md` files; only those should be deployed,
-/// and any manifest file must be ignored.
-/// What: returns `true` for `*.md` files.
+/// and any manifest file or hidden file must be ignored.
+/// What: returns `true` for `*.md` files that do not start with `.`.
 /// Test: covered indirectly by `deploy_new_skill`.
 fn is_skill_file(name: &str) -> bool {
-    name.ends_with(".md")
+    !name.starts_with('.') && name.ends_with(".md")
+}
+
+/// Derive the skill name (manifest key and target directory name) from a
+/// source filename.
+///
+/// Why: sources are flat `<name>.md` files but the deploy target is
+/// `<dest>/<name>/SKILL.md`. Stripping `.md` gives the shared name.
+/// What: returns the filename without its `.md` suffix.
+/// Test: covered indirectly by every `deploy_*` test.
+fn skill_stem(filename: &str) -> &str {
+    filename.strip_suffix(".md").unwrap_or(filename)
 }
 
 /// Deploy all skills from `source` to `dest`.
@@ -85,43 +98,47 @@ pub fn deploy_skills(source: &Path, dest: &Path) -> Result<DeployStats, Error> {
     names.sort_unstable();
 
     for filename in names {
+        let stem = skill_stem(&filename).to_string();
         let source_path = source.join(&filename);
         let content = std::fs::read_to_string(&source_path)?;
-        let target_path = dest.join(&filename);
+        // Claude Code discovers skills from <dest>/<name>/SKILL.md.
+        let skill_dir = dest.join(&stem);
+        let target_path = skill_dir.join("SKILL.md");
 
         // Classify the existing target file, if any.
         if target_path.exists() {
-            if !manifest.is_managed(&filename) {
+            if !manifest.is_managed(&stem) {
                 // User dropped their own file here — never touch it.
-                stats.skipped.push(filename);
+                stats.skipped.push(stem);
                 continue;
             }
             let current = std::fs::read_to_string(&target_path)?;
-            if manifest.checksum_matches(&filename, &current) {
+            if manifest.checksum_matches(&stem, &current) {
                 if checksum(&content) == checksum(&current) {
                     // Deployed copy is already the latest content.
-                    stats.unchanged.push(filename);
+                    stats.unchanged.push(stem);
                     continue;
                 }
                 // Managed and unmodified by the user → safe to refresh.
             } else {
                 // Managed but the user edited it → preserve their changes.
-                stats.skipped.push(filename);
+                stats.skipped.push(stem);
                 continue;
             }
         }
 
         // Write (new file, or safe refresh of a managed file).
-        std::fs::create_dir_all(dest)?;
+        // Create <dest>/<name>/ if needed, then write SKILL.md inside it.
+        std::fs::create_dir_all(&skill_dir)?;
         std::fs::write(&target_path, &content)?;
         manifest.managed.insert(
-            filename.clone(),
+            stem.clone(),
             SkillManifestEntry {
                 checksum: checksum(&content),
                 deployed_at: now.clone(),
             },
         );
-        stats.deployed.push(filename);
+        stats.deployed.push(stem);
     }
 
     manifest.save(dest)?;
@@ -151,23 +168,25 @@ mod tests {
 
     #[test]
     fn deploy_new_skill() {
-        // A first-ever deploy must write every skill and record it in the
-        // manifest.
+        // A first-ever deploy must write every skill as <dest>/<name>/SKILL.md
+        // and record the skill name (stem) in the manifest.
         let src = TempDir::new().unwrap();
         let tgt = TempDir::new().unwrap();
         write_sources(src.path());
 
         let stats = deploy_skills(src.path(), tgt.path()).unwrap();
         assert_eq!(stats.deployed.len(), 2);
-        assert!(stats.deployed.contains(&"tm-doctor.md".to_string()));
+        // Stats report stems, not filenames.
+        assert!(stats.deployed.contains(&"tm-doctor".to_string()));
         assert!(stats.skipped.is_empty());
         assert!(stats.unchanged.is_empty());
 
-        let doctor = fs::read_to_string(tgt.path().join("tm-doctor.md")).unwrap();
+        // Each skill lands at <dest>/<name>/SKILL.md — not a flat .md file.
+        let doctor = fs::read_to_string(tgt.path().join("tm-doctor").join("SKILL.md")).unwrap();
         assert!(doctor.contains("Diagnostic skill."));
 
         let manifest = SkillManifest::load(tgt.path());
-        assert!(manifest.is_managed("tm-doctor.md"));
+        assert!(manifest.is_managed("tm-doctor"));
     }
 
     #[test]
@@ -179,17 +198,18 @@ mod tests {
 
         deploy_skills(src.path(), tgt.path()).unwrap();
 
+        // Simulate the user editing the deployed SKILL.md.
         fs::write(
-            tgt.path().join("tm-doctor.md"),
+            tgt.path().join("tm-doctor").join("SKILL.md"),
             "---\nname: tm-doctor\n---\n\nUSER HAND-EDIT\n",
         )
         .unwrap();
 
         let stats = deploy_skills(src.path(), tgt.path()).unwrap();
-        assert!(stats.skipped.contains(&"tm-doctor.md".to_string()));
-        assert!(!stats.deployed.contains(&"tm-doctor.md".to_string()));
+        assert!(stats.skipped.contains(&"tm-doctor".to_string()));
+        assert!(!stats.deployed.contains(&"tm-doctor".to_string()));
 
-        let still = fs::read_to_string(tgt.path().join("tm-doctor.md")).unwrap();
+        let still = fs::read_to_string(tgt.path().join("tm-doctor").join("SKILL.md")).unwrap();
         assert!(still.contains("USER HAND-EDIT"));
     }
 
@@ -202,44 +222,38 @@ mod tests {
         write_sources(src.path());
 
         deploy_skills(src.path(), tgt.path()).unwrap();
-        let before = fs::metadata(tgt.path().join("tm-doctor.md"))
-            .unwrap()
-            .modified()
-            .unwrap();
+        let skill_md = tgt.path().join("tm-doctor").join("SKILL.md");
+        let before = fs::metadata(&skill_md).unwrap().modified().unwrap();
 
         let stats = deploy_skills(src.path(), tgt.path()).unwrap();
-        assert!(stats.unchanged.contains(&"tm-doctor.md".to_string()));
+        assert!(stats.unchanged.contains(&"tm-doctor".to_string()));
         assert!(stats.deployed.is_empty());
 
-        let after = fs::metadata(tgt.path().join("tm-doctor.md"))
-            .unwrap()
-            .modified()
-            .unwrap();
+        let after = fs::metadata(&skill_md).unwrap().modified().unwrap();
         assert_eq!(before, after, "unchanged file must not be rewritten");
     }
 
     #[test]
     fn deploy_user_owned_skipped() {
-        // A file in the target that trusty-mpm never deployed (absent from the
-        // manifest) must be left completely untouched.
+        // A SKILL.md in the target that trusty-mpm never deployed (absent from
+        // the manifest) must be left completely untouched.
         let src = TempDir::new().unwrap();
         let tgt = TempDir::new().unwrap();
         write_sources(src.path());
 
-        fs::write(
-            tgt.path().join("tm-doctor.md"),
-            "USER OWNED — not trusty-mpm's\n",
-        )
-        .unwrap();
+        // Pre-create a user-owned skill directory for tm-doctor.
+        let user_dir = tgt.path().join("tm-doctor");
+        fs::create_dir_all(&user_dir).unwrap();
+        fs::write(user_dir.join("SKILL.md"), "USER OWNED — not trusty-mpm's\n").unwrap();
 
         let stats = deploy_skills(src.path(), tgt.path()).unwrap();
-        assert!(stats.skipped.contains(&"tm-doctor.md".to_string()));
+        assert!(stats.skipped.contains(&"tm-doctor".to_string()));
 
-        let content = fs::read_to_string(tgt.path().join("tm-doctor.md")).unwrap();
+        let content = fs::read_to_string(user_dir.join("SKILL.md")).unwrap();
         assert_eq!(content, "USER OWNED — not trusty-mpm's\n");
 
-        // example-skill.md had no conflict, so it deploys normally.
-        assert!(stats.deployed.contains(&"example-skill.md".to_string()));
+        // example-skill had no conflict, so it deploys normally.
+        assert!(stats.deployed.contains(&"example-skill".to_string()));
     }
 
     #[test]
@@ -259,8 +273,8 @@ mod tests {
         .unwrap();
 
         let stats = deploy_skills(src.path(), tgt.path()).unwrap();
-        assert!(stats.deployed.contains(&"tm-doctor.md".to_string()));
-        let refreshed = fs::read_to_string(tgt.path().join("tm-doctor.md")).unwrap();
+        assert!(stats.deployed.contains(&"tm-doctor".to_string()));
+        let refreshed = fs::read_to_string(tgt.path().join("tm-doctor").join("SKILL.md")).unwrap();
         assert!(refreshed.contains("Doctor v2"));
     }
 

@@ -49,7 +49,7 @@ pub struct SkillManifestEntry {
 pub struct SkillManifest {
     /// On-disk schema version.
     pub version: u32,
-    /// Managed files keyed by filename (e.g. `tm-doctor.md`).
+    /// Managed skills keyed by skill name / stem (e.g. `tm-doctor`, not `tm-doctor.md`).
     pub managed: HashMap<String, SkillManifestEntry>,
 }
 
