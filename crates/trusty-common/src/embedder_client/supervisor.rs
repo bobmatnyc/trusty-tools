@@ -131,6 +131,12 @@ pub const DEFAULT_CUDA_SIDECAR_BATCH_CAP: usize = 64;
 /// Why: allows operators to tune the cap without recompiling (e.g. smaller
 /// values on VRAM-constrained GPUs, larger on multi-GPU hosts with more VRAM).
 /// What: reads the env var once, parses as `usize`, clamps to `[1, 512]`.
+/// Cache note: the `OnceLock` is process-scoped and initialised on first call.
+/// Any change to `TRUSTY_CUDA_SIDECAR_BATCH_CAP` after the first call (including
+/// changes made via `std::env::set_var` in tests) will NOT be reflected. Test
+/// code that needs a different cap value must arrange for the test to execute
+/// before any other code has called this function in the same process, or must
+/// use a fresh process (e.g. `cargo test -- --test-threads=1`).
 /// Test: `sidecar_batch_size_cuda_*` tests in this module.
 pub fn cuda_sidecar_batch_cap() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();

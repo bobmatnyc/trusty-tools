@@ -5,18 +5,22 @@
 //! idle. Splitting into a write-only stdin lock and a dedicated reader task
 //! enables N concurrent in-flight batches (`TRUSTY_EMBED_INFLIGHT`, default 2).
 //!
-//! Order guarantee: the sidecar processes requests serially and never re-orders
-//! responses. The reader task pops the FIFO pending queue head on each response,
-//! so each reply always maps to the correct caller.
+//! Correlation guarantee: requests are matched to responses by JSON-RPC `id`
+//! (a monotonic `u64`). The sidecar echoes the request `id` in every response.
+//! The reader task looks up each response by id in a `HashMap`; a response
+//! whose id is not in the map (orphaned stale frame from a timed-out request)
+//! is discarded with a `warn!`. This eliminates the FIFO-misattribution hazard:
+//! a stale late-arriving response can never be dispatched to a new request.
 //!
 //! Crash/restart: EOF or IO error drains all pending oneshots with an error so
 //! callers return immediately; the supervisor swaps in a fresh client.
 //!
-//! Test: unit tests cover wire format, error decoding, and stalled-reader
-//! timeout. Multi-flight + order-preservation: `trusty-embedderd/tests/
-//! multiflight.rs`. End-to-end: `bit_identical -- --include-ignored`.
+//! Test: unit tests cover wire format, error decoding, stalled-reader timeout,
+//! and the stale-frame misattribution proof. Multi-flight + correlation:
+//! `trusty-embedderd/tests/multiflight.rs`. End-to-end: `bit_identical --
+//! --include-ignored`.
 
-use std::collections::VecDeque;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -86,11 +90,10 @@ struct RpcResponse {
     result: Option<EmbedResult>,
     #[serde(default)]
     error: Option<RpcError>,
-    // id field present in wire format; we use FIFO ordering so we read but
-    // do not need to dispatch by id.
-    #[allow(dead_code)]
-    #[serde(default)]
-    id: Option<serde_json::Value>,
+    // id is parsed separately in `extract_response_id` (via the `IdOnly`
+    // helper) rather than here, so we omit it from this struct to avoid a
+    // dead-field lint. The sidecar echoes the request id in every response;
+    // see `extract_response_id` for the correlation lookup.
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -104,7 +107,7 @@ struct RpcError {
     message: String,
 }
 
-// ── Pending-request queue ────────────────────────────────────────────────────
+// ── Pending-request map ──────────────────────────────────────────────────────
 
 /// One in-flight request waiting for its response.
 struct PendingRequest {
@@ -114,10 +117,17 @@ struct PendingRequest {
     reply: oneshot::Sender<Result<Vec<Vec<f32>>, EmbedderError>>,
 }
 
-/// FIFO queue of pending requests shared between writers and the reader task.
-/// Push on send, pop on response — sidecar never re-orders, so FIFO suffices.
-/// Mutex held only for push/pop, not during IO.
-type PendingQueue = Arc<Mutex<VecDeque<PendingRequest>>>;
+/// Id-keyed map of pending requests shared between writers and the reader task.
+///
+/// Why: using an id-keyed map instead of a FIFO queue prevents
+/// stale-frame misattribution. After a request times out its entry is removed
+/// from the map; when the sidecar eventually delivers the stale response, the
+/// reader finds no map entry for that id and discards the frame harmlessly.
+/// With a FIFO queue the stale frame would be popped and misattributed to
+/// the *next* enqueued request, silently injecting wrong embeddings into the
+/// HNSW index.
+/// Mutex held only for insert/remove, not during IO.
+type PendingMap = Arc<Mutex<HashMap<u64, PendingRequest>>>;
 
 // ── Client ──────────────────────────────────────────────────────────────────
 
@@ -130,22 +140,23 @@ type PendingQueue = Arc<Mutex<VecDeque<PendingRequest>>>;
 /// keeps the ANE's work queue continuously filled (issue #753).
 ///
 /// What: `embed_batch` acquires the write semaphore, registers a `oneshot`
-/// in the FIFO pending queue, serialises the request to the write-only stdin
+/// in the id-keyed pending map, serialises the request to the write-only stdin
 /// lock, releases both locks, then awaits the oneshot. A single reader task
-/// (spawned in `new`) owns stdout, reads response frames in arrival order,
-/// pops the head of the pending queue, and sends the decoded result. Crash/
-/// restart: EOF or read errors drain all pending oneshots with an error.
+/// (spawned in `new`) owns stdout, reads response frames, looks up the pending
+/// entry by the echoed JSON-RPC id, and dispatches the decoded result. Stale
+/// frames (id not in map) are discarded with a `warn!`. Crash/restart: EOF or
+/// read errors drain all pending oneshots with an error.
 ///
 /// Test: unit tests in this module; multi-flight integration tests in
 /// `trusty-embedderd/tests/multiflight.rs`.
 pub struct StdioEmbedderClient {
     /// Write half — stdin lock held only for the duration of `write_all + flush`.
     stdin: Arc<Mutex<ChildStdin>>,
-    /// Pending FIFO queue shared between writers and the reader task.
-    pending: PendingQueue,
+    /// Pending id-keyed map shared between writers and the reader task.
+    pending: PendingMap,
     /// Semaphore bounding max in-flight requests.
     inflight: Arc<Semaphore>,
-    /// Monotonic counter for request ids (debug tracing only).
+    /// Monotonic counter for request ids.
     next_id: Arc<AtomicU64>,
 }
 
@@ -160,7 +171,7 @@ impl StdioEmbedderClient {
     /// Test: indirectly covered by every test that constructs and calls the client.
     pub fn new(stdin: ChildStdin, stdout: ChildStdout) -> Self {
         let stdin = Arc::new(Mutex::new(stdin));
-        let pending: PendingQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let inflight = Arc::new(Semaphore::new(embed_inflight()));
         let next_id = Arc::new(AtomicU64::new(1));
 
@@ -178,24 +189,31 @@ impl StdioEmbedderClient {
     }
 }
 
-/// Background reader task — owns stdout, dispatches responses in FIFO order.
+/// Background reader task — owns stdout, dispatches responses by JSON-RPC id.
 ///
 /// Why: keeping the read loop separate from the write path is what enables
 /// multi-flight: a caller can write the next request while this task is
-/// reading the response to the previous one.
-/// What: reads newline-terminated JSON-RPC response frames in a loop. For
-/// each frame, pops the head of `pending`, decodes the response, and sends the
-/// result to the caller's oneshot. On timeout, drains pending requests, clears
-/// the partial line buffer, and CONTINUES the loop — the task MUST NOT exit on
-/// timeout (fix #763). The stale response the sidecar eventually writes will
-/// arrive as a spurious frame once the ONNX call completes, and will be safely
-/// discarded by the empty-queue guard below. On EOF or read error the task exits
-/// and the supervisor handles respawn.
+/// reading the response to the previous one. Id-based dispatch (rather than
+/// FIFO) is essential for correctness: after a request times out its pending
+/// entry is removed; if the sidecar later delivers that stale response the
+/// reader finds no entry for that id and discards the frame, preventing
+/// misattribution to a new request.
+///
+/// What: reads newline-terminated JSON-RPC response frames in a loop. For each
+/// frame, parses the echoed `id`, looks up the matching entry in `pending`,
+/// decodes the response, and sends the result to the caller's oneshot. On
+/// timeout, removes only the timed-out entry from the map (other in-flight
+/// entries remain valid), drains its oneshot with an error, clears the partial
+/// line buffer, and CONTINUES the loop — the task MUST NOT exit on timeout
+/// (fix #763). On EOF or read error the task exits and the supervisor handles
+/// respawn.
+///
 /// Test: `reader_task_survives_timeout_and_serves_next_request` proves the task
-/// stays alive after a timeout and still delivers the next successful response.
+/// stays alive after a timeout and also proves stale-frame misattribution is
+/// prevented (stale frame for request A is discarded when request B is waiting).
 async fn reader_task<R: AsyncBufRead + Unpin>(
     mut reader: R,
-    pending: PendingQueue,
+    pending: PendingMap,
     timeout: Duration,
 ) {
     let mut line = String::new();
@@ -203,44 +221,48 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
     loop {
         line.clear();
 
+        // Snapshot the oldest pending id BEFORE arming the deadline so we know
+        // which entry to remove if the timeout fires.
+        let oldest_id: Option<u64> = {
+            let guard = pending.lock().await;
+            if guard.is_empty() {
+                None
+            } else {
+                guard.keys().copied().min()
+            }
+        };
+
         // Wait for the next response frame under a per-call deadline.
         let read_result = tokio::time::timeout(timeout, reader.read_line(&mut line)).await;
 
         match read_result {
             Err(_elapsed) => {
-                // CRITICAL FIX (#763): Do NOT return here. The old `return`
-                // killed the reader task permanently on the first CUDA timeout,
-                // causing every subsequent embed_batch to hang forever.
-                //
-                // Instead: drain pending callers with an error (they can retry),
-                // clear the partial line buffer, and continue the loop. When the
-                // sidecar eventually finishes the slow ONNX call and writes its
-                // response to stdout, the reader will consume it and find an
-                // empty pending queue — the "spurious frame" guard below will
-                // discard it harmlessly.
+                // Fix #763 part 1: DO NOT return — that killed the task forever.
+                // Fix #763 part 2: remove only the oldest (stalled) entry, not all.
+                // When the sidecar eventually delivers the stale response, the
+                // id-lookup finds no entry and discards it — no misattribution.
                 tracing::warn!(
                     timeout_secs = timeout.as_secs(),
+                    timed_out_id = ?oldest_id,
                     "StdioEmbedderClient reader: timed out waiting for response \
-                     (sidecar ONNX call exceeded {}s — CUDA OOM/BFCArena stall?) \
-                     — draining pending requests and re-arming; reader task STAYS ALIVE",
+                     ({}s — CUDA OOM/BFCArena stall?) — removing stalled entry, \
+                     re-arming; task STAYS ALIVE",
                     timeout.as_secs()
                 );
-                drain_pending_with_error(
-                    &pending,
-                    EmbedderError::Stdio(format!(
-                        "embed call timed out after {}s — sidecar may be stalled \
-                         (set TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS to adjust)",
-                        timeout.as_secs()
-                    )),
-                )
-                .await;
-                // Clear any partial data accumulated in `line` during the
-                // timed-out read. The next loop iteration calls `line.clear()`
-                // anyway but we do it here for clarity.
+                if let Some(id) = oldest_id {
+                    let req = {
+                        let mut guard = pending.lock().await;
+                        guard.remove(&id)
+                    };
+                    if let Some(r) = req {
+                        let _ = r.reply.send(Err(EmbedderError::Stdio(format!(
+                            "embed call timed out after {}s (id={id}) — sidecar \
+                             stalled (set TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS to adjust)",
+                            timeout.as_secs()
+                        ))));
+                    }
+                }
                 line.clear();
-                // continue — re-arm the timeout and wait for the next frame.
-                // The sidecar's stale response for the timed-out batch will
-                // arrive here eventually; the empty-queue guard discards it.
                 continue;
             }
             Ok(Err(e)) => {
@@ -270,19 +292,39 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
                 return;
             }
             Ok(Ok(_)) => {
-                // Got a line — dispatch to the head of the pending queue.
+                // Got a line — dispatch to the matching pending entry by id.
             }
         }
 
-        // Pop the oldest pending request.
+        // Parse the response id from the frame so we can look up the pending entry.
+        // We parse the full response below; extract id first for the lookup.
+        let resp_id: Option<u64> = extract_response_id(line.trim());
+
+        let Some(response_id) = resp_id else {
+            tracing::warn!(
+                raw = %line.trim(),
+                "StdioEmbedderClient reader: received response with no parseable id — \
+                 discarding (malformed sidecar frame)"
+            );
+            continue;
+        };
+
+        // Look up and remove the pending entry for this id.
         let req = {
             let mut guard = pending.lock().await;
-            guard.pop_front()
+            guard.remove(&response_id)
         };
+
         let Some(pending_req) = req else {
+            // No entry for this id: this is a stale frame from a previously
+            // timed-out request whose entry was already removed. Discard it —
+            // this is the misattribution-prevention path.
             tracing::warn!(
-                "StdioEmbedderClient reader: received response but pending queue is empty \
-                 (spurious frame from sidecar?) — ignoring"
+                response_id,
+                "StdioEmbedderClient reader: received response for id={} but \
+                 no pending entry found — discarding stale/orphaned frame \
+                 (likely a late reply for a previously timed-out request)",
+                response_id
             );
             continue;
         };
@@ -292,6 +334,29 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
         // Dropping errors here is intentional: the caller may have been
         // cancelled (e.g. the reindex task was aborted), which is fine.
         let _ = pending_req.reply.send(result);
+    }
+}
+
+/// Extract the numeric JSON-RPC `id` from a raw response frame without
+/// fully parsing the embeddings (which can be large).
+///
+/// Why: we need the id to look up the pending entry BEFORE committing to a
+/// full decode, and we want a fast path for the common case.
+/// What: fully deserialises into `RpcResponse` (serde is fast for this shape)
+/// and extracts the `id` field as a `u64`. Returns `None` if the frame is
+/// unparseable or the id is not a u64 (e.g. null or string).
+/// Test: exercised indirectly by all reader_task tests; direct coverage via
+/// the wire-format unit tests.
+fn extract_response_id(line: &str) -> Option<u64> {
+    #[derive(serde::Deserialize)]
+    struct IdOnly {
+        #[serde(default)]
+        id: Option<serde_json::Value>,
+    }
+    let parsed: IdOnly = serde_json::from_str(line).ok()?;
+    match parsed.id? {
+        serde_json::Value::Number(n) => n.as_u64(),
+        _ => None,
     }
 }
 
@@ -322,13 +387,13 @@ fn decode_response(line: &str, sent: usize) -> Result<Vec<Vec<f32>>, EmbedderErr
     Ok(result.embeddings)
 }
 
-/// Drain all pending requests with an error (EOF / crash / timeout path).
+/// Drain all pending requests with an error (EOF / crash path).
 ///
 /// Why: prevents callers from hanging when the reader exits. Supervisor then
 /// swaps in a fresh `StdioEmbedderClient`. Test: multi-flight crash simulation.
-async fn drain_pending_with_error(pending: &PendingQueue, error: EmbedderError) {
+async fn drain_pending_with_error(pending: &PendingMap, error: EmbedderError) {
     let mut guard = pending.lock().await;
-    for req in guard.drain(..) {
+    for (_id, req) in guard.drain() {
         let _ = req.reply.send(Err(EmbedderError::Stdio(
             // Clone the message from the source error; EmbedderError is not
             // Clone so we re-construct a Stdio variant with the same text.
@@ -349,8 +414,10 @@ impl EmbedderClient for StdioEmbedderClient {
     /// Embed a batch via multi-flight stdio JSON-RPC 2.0.
     ///
     /// Why: see module doc. Acquires inflight semaphore slot, registers oneshot
-    /// in FIFO pending queue, writes request (stdin lock held only for write +
-    /// flush), then awaits the oneshot. Reader task dispatches replies in order.
+    /// in the id-keyed pending map, writes request (stdin lock held only for
+    /// write + flush), then awaits the oneshot. Reader task dispatches replies
+    /// by echoed JSON-RPC id, so stale/orphaned frames from timed-out requests
+    /// can never be misattributed to new requests.
     /// Test: `cargo test -p trusty-embedderd --test multiflight`
     async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbedderError> {
         if texts.is_empty() {
@@ -369,14 +436,17 @@ impl EmbedderClient for StdioEmbedderClient {
         tracing::debug!(n = sent, id, "StdioEmbedderClient: sending batch");
 
         // Register the pending oneshot BEFORE writing the request so the
-        // reader task can never pop-before-push.
+        // reader task can never dispatch-before-register.
         let (reply_tx, reply_rx) = oneshot::channel();
         {
             let mut guard = self.pending.lock().await;
-            guard.push_back(PendingRequest {
-                sent,
-                reply: reply_tx,
-            });
+            guard.insert(
+                id,
+                PendingRequest {
+                    sent,
+                    reply: reply_tx,
+                },
+            );
         }
 
         // Serialise the request.

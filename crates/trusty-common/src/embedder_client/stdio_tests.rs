@@ -4,8 +4,8 @@
 //! in `stdio.rs`) to keep `stdio.rs` under the 500-line cap while retaining full
 //! test coverage. As a child module, `super::` reaches private items in `stdio`.
 //!
-//! What: exercises `decode_response`, `reader_task`, and the stall/timeout path
-//! without requiring a live `trusty-embedderd` process.
+//! What: exercises `decode_response`, `reader_task`, the stall/timeout path,
+//! and the stale-frame misattribution-prevention guarantee.
 //!
 //! Test: `cargo test -p trusty-common --features embedder-client,embedder-bundled-ort`
 
@@ -79,6 +79,37 @@ fn count_mismatch_returns_dimension_error() {
     );
 }
 
+// ── extract_response_id unit tests ────────────────────────────────────
+
+#[test]
+fn extract_response_id_numeric() {
+    // Why: the id-keyed dispatch path depends on correct id extraction.
+    // What: numeric id must round-trip as u64.
+    // Test: this test.
+    let json = r#"{"jsonrpc":"2.0","result":{"embeddings":[]},"id":42}"#;
+    assert_eq!(extract_response_id(json), Some(42));
+}
+
+#[test]
+fn extract_response_id_null_returns_none() {
+    // Why: a null id (parse-error fallback from sidecar) must not cause a
+    //      lookup panic — it must produce None and be discarded by the caller.
+    // What: `id: null` → None.
+    // Test: this test.
+    let json = r#"{"jsonrpc":"2.0","error":{"code":-32700,"message":"parse error"},"id":null}"#;
+    assert_eq!(extract_response_id(json), None);
+}
+
+#[test]
+fn extract_response_id_string_returns_none() {
+    // Why: the client always sends numeric ids; a string id from an unexpected
+    //      source must produce None rather than a spurious u64.
+    // What: `id: "abc"` → None.
+    // Test: this test.
+    let json = r#"{"jsonrpc":"2.0","result":{"embeddings":[]},"id":"abc"}"#;
+    assert_eq!(extract_response_id(json), None);
+}
+
 /// Verify that a stalled/silent sidecar reader produces a timeout error
 /// rather than blocking indefinitely.
 ///
@@ -110,31 +141,52 @@ async fn embed_call_stalled_reader_times_out() {
     );
 }
 
-/// Regression test for fix #763: the reader task must survive a timeout and
-/// continue serving subsequent requests.
+/// Regression test for fix #763: the reader task must survive a timeout AND
+/// must not misattribute a stale frame to a new request.
 ///
-/// Why: the bug was a `return` in the timeout arm that permanently killed the
-/// reader task. All subsequent `embed_batch` calls would then hang forever
-/// because `reply_rx.await` had no consumer to deliver to.
+/// # Why
 ///
-/// What: drives `reader_task` directly with a controlled `tokio::io::duplex`
-/// pipe. First call: delay the response past the timeout, assert the pending
-/// oneshot receives `Err(timeout)`. Second call: deliver a valid response
-/// immediately — if the reader task is still alive, the second oneshot
-/// receives `Ok(embeddings)`. If the old `return` behavior were present, the
-/// second `reply_rx.await` would stall forever and the test would time out.
+/// **Bug 1 (task exit):** the original `return` in the timeout arm permanently
+/// killed the reader task. All subsequent `embed_batch` calls would then hang
+/// forever because `reply_rx.await` had no consumer.
 ///
-/// Old behavior (FAIL): `reader_task` would `return` on timeout, leaving all
-/// subsequent `embed_batch` callers hanging forever on `reply_rx.await`.
+/// **Bug 2 (stale-frame misattribution):** even after the task-exit was fixed
+/// with a `continue`, the FIFO queue meant that a stale late-arriving response
+/// for request A (whose timeout already errored the caller) would be popped
+/// and dispatched to request B — the next request to arrive. This silently
+/// injects wrong embeddings into the HNSW index, which is worse than an error
+/// because it is undetectable (valid-looking but wrong vectors; the zero-vector
+/// guard does not catch it).
 ///
-/// New behavior (PASS): `reader_task` drains pending, clears the line buffer,
-/// and continues the loop. Subsequent requests still receive responses.
+/// # What this test proves
+///
+/// 1. The reader task stays alive after a timeout.
+/// 2. A stale response for a timed-out request is DISCARDED, not dispatched
+///    to a subsequent request.
+/// 3. The subsequent request eventually receives its own correct response.
+///
+/// Scenario:
+/// - Enqueue request A (id=1) with `sent=2`. The sidecar is silent; the
+///   50 ms timeout fires. The reader removes A from the pending map and sends
+///   `Err(timeout)` to A's oneshot.
+/// - Now the "sidecar" delivers A's stale response (id=1, with A's embeddings).
+/// - Enqueue request B (id=2) with `sent=2`. The "sidecar" delivers B's real
+///   response (id=2, with B's embeddings).
+/// - Assert: B's oneshot receives B's embeddings (not A's). The stale frame
+///   for id=1 was discarded because id=1 is no longer in the pending map.
+///
+/// With FIFO (old): the stale frame for A would be popped and dispatched to B,
+/// so B would receive A's embeddings `[[0.1,0.2],[0.3,0.4]]` — silent
+/// corruption. This test would FAIL on the old FIFO implementation.
+///
+/// With id-keyed map (new): the stale frame id=1 is not in the map (it was
+/// removed on timeout), so it is discarded; B receives its own correct
+/// embeddings `[[0.5,0.6],[0.7,0.8]]`. This test PASSES.
 ///
 /// Test: run with `cargo test -p trusty-common
 ///   reader_task_survives_timeout_and_serves_next_request`.
 #[tokio::test]
 async fn reader_task_survives_timeout_and_serves_next_request() {
-    use std::collections::VecDeque;
     use tokio::io::{AsyncWriteExt, duplex};
     use tokio::sync::oneshot;
 
@@ -146,60 +198,97 @@ async fn reader_task_survives_timeout_and_serves_next_request() {
     let (mut writer, reader_end) = duplex(4096);
     let reader = tokio::io::BufReader::new(reader_end);
 
-    // Set up the shared pending queue.
-    let pending: PendingQueue = Arc::new(Mutex::new(VecDeque::new()));
+    // Set up the shared pending map.
+    let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
     let pending_clone = Arc::clone(&pending);
 
     // Spawn the reader task with the injected short timeout.
     let handle = tokio::spawn(reader_task(reader, pending_clone, short_timeout));
 
-    // ── Request 1: push a oneshot, wait for the timeout to fire ───────────
-    let (tx1, mut rx1) = oneshot::channel();
-    pending.lock().await.push_back(PendingRequest {
-        sent: 2,
-        reply: tx1,
-    });
+    // ── Request A (id=1): push a oneshot, wait for the timeout to fire ────
+    //
+    // We manually set id=1 here to match the stale response we'll inject
+    // below. In production the client uses AtomicU64, but for this test we
+    // drive reader_task directly and control the ids ourselves.
+    let (tx_a, mut rx_a) = oneshot::channel();
+    pending.lock().await.insert(
+        1,
+        PendingRequest {
+            sent: 2,
+            reply: tx_a,
+        },
+    );
     // Sleep 3× the timeout so the reader_task's `tokio::time::timeout`
-    // fires, drains pending (sends Err to tx1), and continues the loop.
+    // fires, removes id=1 from the map, sends Err to tx_a, and continues.
     tokio::time::sleep(short_timeout * 3).await;
 
-    // tx1 must have received Err(Stdio) from the drain.
-    let result1 = rx1.try_recv();
+    // tx_a must have received Err(Stdio) from the timeout drain.
+    let result_a = rx_a.try_recv();
     assert!(
-        matches!(result1, Ok(Err(EmbedderError::Stdio(_)))),
-        "first request after timeout must receive Err(Stdio): got {result1:?}"
+        matches!(result_a, Ok(Err(EmbedderError::Stdio(_)))),
+        "request A after timeout must receive Err(Stdio): got {result_a:?}"
     );
 
-    // ── Request 2: write a valid response immediately ──────────────────────
+    // ── Inject stale response for request A (id=1) ────────────────────────
     //
-    // First send the "stale" response the sidecar eventually produced for
-    // request 1 (its slow ONNX call finished after the parent timed out).
-    // The empty-queue guard in reader_task must discard it as a spurious frame.
-    let stale =
+    // This simulates the sidecar eventually finishing its slow ONNX call and
+    // emitting A's response AFTER A's timeout already fired. With the id-keyed
+    // map, id=1 is no longer in the map so this frame must be DISCARDED.
+    // With FIFO (the old implementation) this frame would have been dispatched
+    // to request B instead — the misattribution bug.
+    let stale_a =
         b"{\"jsonrpc\":\"2.0\",\"result\":{\"embeddings\":[[0.1,0.2],[0.3,0.4]]},\"id\":1}\n";
-    writer.write_all(stale).await.unwrap();
+    writer.write_all(stale_a).await.unwrap();
     writer.flush().await.unwrap();
 
-    // Register request 2 and write its response.
-    let (tx2, rx2) = oneshot::channel();
-    pending.lock().await.push_back(PendingRequest {
-        sent: 2,
-        reply: tx2,
-    });
-    let good =
+    // ── Request B (id=2): register and deliver its correct response ────────
+    let (tx_b, rx_b) = oneshot::channel();
+    pending.lock().await.insert(
+        2,
+        PendingRequest {
+            sent: 2,
+            reply: tx_b,
+        },
+    );
+    // B's real response — different embeddings from A's stale frame.
+    let real_b =
         b"{\"jsonrpc\":\"2.0\",\"result\":{\"embeddings\":[[0.5,0.6],[0.7,0.8]]},\"id\":2}\n";
-    writer.write_all(good).await.unwrap();
+    writer.write_all(real_b).await.unwrap();
     writer.flush().await.unwrap();
 
     // Wait generously for the reader task to process both frames.
-    let result2 = tokio::time::timeout(Duration::from_secs(2), rx2)
+    let result_b = tokio::time::timeout(Duration::from_secs(2), rx_b)
         .await
-        .expect("rx2 timed out — reader task may have exited instead of continuing")
-        .expect("rx2 channel closed unexpectedly");
+        .expect("rx_b timed out — reader task may have exited instead of continuing")
+        .expect("rx_b channel closed unexpectedly");
+
     assert!(
-        result2.is_ok(),
-        "second request must succeed after reader task survived timeout (#763): \
-         got {result2:?}"
+        result_b.is_ok(),
+        "request B must succeed after reader task survived timeout (#763): \
+         got {result_b:?}"
+    );
+
+    // KEY ASSERTION: B's embeddings must be B's own correct data, NOT A's
+    // stale data. With the old FIFO implementation this would fail because
+    // the stale frame for A would have been dispatched to B.
+    let embeddings_b = result_b.unwrap();
+    assert_eq!(
+        embeddings_b.len(),
+        2,
+        "request B must return 2 embedding vectors"
+    );
+    assert!(
+        (embeddings_b[0][0] - 0.5_f32).abs() < 1e-6,
+        "request B must receive its OWN embeddings (0.5…), not A's stale \
+         embeddings (0.1…) — misattribution bug would put 0.1 here. \
+         Got: {:?}",
+        embeddings_b[0]
+    );
+    assert!(
+        (embeddings_b[1][0] - 0.7_f32).abs() < 1e-6,
+        "request B second vector must be B's own data (0.7…), not A's (0.3…). \
+         Got: {:?}",
+        embeddings_b[1]
     );
 
     // Clean up: drop the writer to close the pipe → EOF → reader task exits.

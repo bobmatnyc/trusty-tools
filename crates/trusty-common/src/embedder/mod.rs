@@ -613,12 +613,12 @@ impl FastEmbedder {
                                 predicted_provider = %q_provider,
                                 actual_provider = "CPU",
                                 error = %q_err,
-                                "SILENT FALLBACK DETECTED (#763): {} EP failed to \
+                                "SILENT FALLBACK DETECTED (#763): {p} EP failed to \
                                  initialise — falling back to CPU. The /health endpoint \
-                                 will report provider={} but inference will run on CPU. \
+                                 will report provider={p} but inference will run on CPU. \
                                  Set TRUSTY_DEVICE=gpu to surface this as a hard failure \
                                  instead of a silent performance regression.",
-                                q_provider, q_provider
+                                p = q_provider
                             );
                             // SAFETY: see TRUSTY_DEVICE comment in
                             // init_options — the env mutation happens before
@@ -692,6 +692,27 @@ impl FastEmbedder {
     }
 }
 
+/// Return `true` if every element of `vector` is exactly `0.0`.
+///
+/// Why: extracted from `FastEmbedder::embed_batch` so the guard can be tested
+/// without a live ONNX backend. The guard rejects all-zero ORT output — a
+/// zero-initialised output buffer that was never written indicates a silent
+/// CUDA EP failure and must not reach the HNSW index.
+///
+/// What: `iter().all(|&v| v == 0.0)`. The `== 0.0` comparison is INTENTIONAL
+/// — an ORT zero-initialised buffer contains exact IEEE 754 zero (+0.0), not
+/// a near-zero value. Legitimate embeddings from a working ONNX session always
+/// contain at least one non-zero component (the model is trained to produce
+/// unit-normalised vectors away from the origin). Using exact equality avoids
+/// false positives from legitimate vectors with very small (but non-zero)
+/// components.
+///
+/// Test: `zero_vector_guard_rejects_all_zero_batch` exercises this function
+/// directly, so the guard cannot be deleted without a test failure.
+pub(crate) fn is_zero_vector(vector: &[f32]) -> bool {
+    vector.iter().all(|&v| v == 0.0)
+}
+
 #[async_trait]
 impl Embedder for FastEmbedder {
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
@@ -735,17 +756,10 @@ impl Embedder for FastEmbedder {
 
             let mut cache = self.cache.lock();
             for ((idx, key), vector) in to_compute.into_iter().zip(computed) {
-                // Zero-vector guard (fix #763 Fix 3b): a silent all-zeros
-                // batch is a clear indicator of an ORT CUDA EP failure where
-                // the output buffer was zero-initialised but not written. Raise
-                // a loud, located Err at the embedder boundary so the indexer
-                // can roll back cleanly rather than storing corrupt embeddings.
-                //
-                // An all-zero vector is semantically meaningless (it is
-                // equidistant from every point in the embedding space) and
-                // would corrupt the HNSW index silently. Better to fail loudly
-                // here and let the caller retry or skip the batch.
-                if vector.iter().all(|&v| v == 0.0) {
+                // Zero-vector guard (fix #763 Fix 3b): delegates to
+                // `is_zero_vector` — see that function's doc for the rationale
+                // behind using exact `== 0.0` comparison.
+                if is_zero_vector(&vector) {
                     anyhow::bail!(
                         "zero-vector returned by fastembed for text slot {idx} \
                          (provider={} — possible CUDA EP OOM / silent fallback). \
@@ -1249,10 +1263,12 @@ mod tests {
     /// Test: `zero_vector_guard_rejects_all_zero_batch`.
     #[test]
     fn zero_vector_guard_rejects_all_zero_batch() {
-        // Why: verify the zero-check logic that protects the HNSW index.
-        // The guard fires when `vector.iter().all(|&v| v == 0.0)`.
-        // What: build an all-zero vector and assert the guard would fire;
-        //       build a non-zero vector and assert it would pass.
+        // Why: exercise `is_zero_vector` directly so the guard function cannot
+        //      be deleted without breaking this test. Previously the guard logic
+        //      was inlined in embed_batch; extracting it here makes it testable
+        //      without an ONNX backend.
+        // What: assert that an all-zero vector returns `true` (guard fires) and
+        //       a vector with any non-zero component returns `false` (passes).
         // Test: this test.
         let zero_vec: Vec<f32> = vec![0.0; EMBED_DIM];
         let non_zero_vec: Vec<f32> = {
@@ -1260,23 +1276,20 @@ mod tests {
             v[0] = 1.0;
             v
         };
-        let all_zero = zero_vec.iter().all(|&v| v == 0.0);
-        let any_non_zero = !non_zero_vec.iter().all(|&v| v == 0.0);
         assert!(
-            all_zero,
-            "synthetic zero vector must satisfy the all-zero predicate"
+            is_zero_vector(&zero_vec),
+            "synthetic zero vector must be detected by is_zero_vector"
         );
         assert!(
-            any_non_zero,
-            "non-zero vector must NOT satisfy the all-zero predicate"
+            !is_zero_vector(&non_zero_vec),
+            "non-zero vector must NOT be detected by is_zero_vector"
         );
-        // Confirm that the MockEmbedder (which the guard does NOT apply to,
-        // since it calls FastEmbedder's embed implementation) never produces
-        // a zero vector for non-empty input.
+        // Confirm that the MockEmbedder never produces a zero vector for
+        // non-empty input (it uses a hash-based non-zero fill).
         let mock = MockEmbedder::new(EMBED_DIM);
         let hash_result = mock.hash_to_vec("some text");
         assert!(
-            hash_result.iter().any(|&v| v != 0.0),
+            !is_zero_vector(&hash_result),
             "MockEmbedder must produce non-zero vectors for non-empty input"
         );
     }

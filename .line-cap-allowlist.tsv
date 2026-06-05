@@ -29,8 +29,8 @@ crates/trusty-common/src/bm25_client.rs	503
 crates/trusty-common/src/bm25.rs	645
 crates/trusty-common/src/chat/openai_compat.rs	670
 crates/trusty-common/src/claude_config.rs	526
-crates/trusty-common/src/embedder_client/supervisor.rs	618
-crates/trusty-common/src/embedder/mod.rs	1320
+crates/trusty-common/src/embedder_client/supervisor.rs	624
+crates/trusty-common/src/embedder/mod.rs	1333
 crates/trusty-common/src/help.rs	690
 crates/trusty-common/src/lib.rs	1467
 crates/trusty-common/src/memory_core/analytics.rs	860
