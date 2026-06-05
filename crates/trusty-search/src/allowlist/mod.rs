@@ -104,7 +104,11 @@ pub const SENSITIVE_FILE_NAMES: &[&str] = &[".env"];
 pub const SENSITIVE_PATH_PREFIXES: &[&str] = &[
     "/tmp/",
     "/private/tmp",
+    // macOS canonicalises /var → /private/var, so tempdirs at
+    // /var/folders/… resolve to /private/var/folders/… after
+    // std::fs::canonicalize.  Both prefixes are required.
     "/var/folders",
+    "/private/var/folders",
     "/Library/Application Support",
 ];
 
