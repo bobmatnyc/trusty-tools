@@ -878,26 +878,37 @@ async fn prepare_and_parse_batch(ctx: &BatchCtx, batch: &[PathBuf]) -> Option<Pa
     let batch_files = payload.to_index.len();
     let to_index = payload.to_index;
 
-    // Problem 1 UX fix: detect whether the trusty-embedderd sidecar is about
-    // to be spawned for the first time (cold-start model load, 30-60 s).
+    // Problem 1 UX fix: detect whether the embedder (sidecar OR in-process)
+    // is about to be used for the first time (cold-start model load, 30-60 s).
     //
-    // The PID slot reads `0` before the first lazy spawn. If we see `0` on a
-    // non-lexical-only batch we know the upcoming `parse_and_embed_files` call
-    // will block for model initialization before any progress event fires.
-    // Emitting `embedder_init` beforehand lets the CLI show "Loading model…"
-    // instead of a frozen "Chunking… 0/N" bar.
+    // Sidecar path: The PID slot reads `0` before the first lazy spawn. If we
+    // see `0` on a non-lexical-only batch we know the upcoming
+    // `parse_and_embed_files` call will block for model initialization.
     //
-    // We only emit once: the `needs_init` flag stays `true` exactly until the
-    // first embedding call returns successfully, at which point we emit
-    // `embedder_ready`. On subsequent batches the PID is non-zero so we skip
-    // this branch entirely. `lexical_only` indexes never embed, so they never
-    // stall here.
+    // In-process path: `embedder_pid_slot` is `None` (no sidecar), but ONNX
+    // model load still happens on the first embed call. We detect this by
+    // checking whether ANY embedding has completed yet — the `indexed` counter
+    // is still 0 on the very first batch, so `needs_embedder_init=true` for
+    // the first call in either mode.
+    //
+    // Issue #823 Bug 3: the old code used `.unwrap_or(false)` which silently
+    // disabled both events for the in-process embedder. The fix uses a
+    // first-batch guard that fires regardless of embedder mode.
+    //
+    // We only emit once: after the first embedding call returns successfully,
+    // we emit `embedder_ready`. Subsequent batches have indexed > 0 so this
+    // branch is skipped. `lexical_only` indexes never embed.
+    let first_batch_ever = ctx.progress.indexed.load(AtomicOrdering::Acquire) == 0;
     let needs_embedder_init = !ctx.lexical_only
-        && ctx
-            .embedder_pid_slot
-            .as_ref()
-            .map(|slot| slot.load(AtomicOrdering::Acquire) == 0)
-            .unwrap_or(false);
+        && if let Some(slot) = ctx.embedder_pid_slot.as_ref() {
+            // Sidecar mode: PID 0 = not yet spawned.
+            slot.load(AtomicOrdering::Acquire) == 0
+        } else {
+            // In-process (or any other non-sidecar) mode: fire on the very
+            // first batch so the CLI gets an embedder_ready signal after the
+            // first embed, even if model load is fast.
+            first_batch_ever
+        };
 
     if needs_embedder_init {
         ctx.progress

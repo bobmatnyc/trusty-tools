@@ -122,7 +122,7 @@ fn phase_to_bar_slot(phase: ReindexPhase) -> Option<usize> {
 
 /// Lifecycle state of one stage bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BarState {
+pub(crate) enum BarState {
     /// Not yet started — bar shows an empty trough.
     Pending,
     /// Currently active — bar advances with SSE events.
@@ -207,7 +207,7 @@ pub(crate) struct ReindexUi {
     /// Spinner line at the top: "⟳ <phase> — <index>".
     header: ProgressBar,
     /// The four stage bars, in order: Crawl (0), Chunk (1), Embed (2), KG (3).
-    stage_bars: [ProgressBar; 4],
+    pub(crate) stage_bars: [ProgressBar; 4],
     /// Elapsed-ms snapshot for each completed stage (filled by `mark_stage_done`).
     stage_elapsed_ms: [u64; 4],
     /// Stats line below the bars (embedding throughput, ETA, etc.).
@@ -215,7 +215,7 @@ pub(crate) struct ReindexUi {
     /// Current phase; used to identify the active bar and update the header.
     pub(crate) phase: ReindexPhase,
     /// Lifecycle state of each stage bar (Pending / Active / Done).
-    bar_states: [BarState; 4],
+    pub(crate) bar_states: [BarState; 4],
 }
 
 impl ReindexUi {
@@ -313,6 +313,56 @@ impl ReindexUi {
     pub(crate) fn set_total(&self, total: u64) {
         if let Some(slot) = phase_to_bar_slot(self.phase) {
             self.stage_bars[slot].set_length(total.max(1));
+        }
+    }
+
+    /// Set the total (length) for the Embed bar (slot 2) directly, regardless
+    /// of the currently active phase.
+    ///
+    /// Why: the Embed bar must show `N/total_files` from the moment CHUNK+EMBED
+    /// begins — before any `batch` event activates `Embedding` phase. Without
+    /// this, the bar is initialised to `new(1)` and stays `0/1` for the entire
+    /// model-load period. This method lets the `walk_complete`/`start` handler
+    /// prime slot 2 with the correct denominator even while phase=Chunking.
+    ///
+    /// What: calls `set_length(total.max(1))` on `stage_bars[2]`.
+    /// Test: `tests::set_embed_total_primes_slot2_while_chunking`.
+    pub(crate) fn set_embed_total(&self, total: u64) {
+        self.stage_bars[2].set_length(total.max(1));
+    }
+
+    /// Activate the Embed bar (slot 2) into the Active visual style without
+    /// changing `self.phase`. Used when the CHUNK+EMBED phase starts so both
+    /// Chunk (slot 1) and Embed (slot 2) are visually live simultaneously.
+    ///
+    /// Why: the agreed design calls for two concurrent bars during CHUNK+EMBED;
+    /// the usual `set_phase(Embedding)` would transition the header too early.
+    /// This helper just applies the Active bar style + resets position to 0
+    /// without touching `self.phase` or the header.
+    /// What: applies `bar_style(2, BarState::Active, None)` to slot 2 and sets
+    /// `bar_states[2] = Active` if it was Pending.
+    /// Test: `tests::activate_embed_bar_does_not_change_phase`.
+    pub(crate) fn activate_embed_bar(&mut self) {
+        if self.bar_states[2] == BarState::Pending {
+            self.bar_states[2] = BarState::Active;
+            self.stage_bars[2].set_style(bar_style(2, BarState::Active, None));
+            self.stage_bars[2].set_position(0);
+        }
+    }
+
+    /// Advance the Embed bar (slot 2) position directly, regardless of the
+    /// currently active phase.
+    ///
+    /// Why: during CHUNK+EMBED both bars are live simultaneously. The Embed bar
+    /// (slot 2) trails the Chunk bar (slot 1); it advances on `batch` events
+    /// (files committed/embedded) while the Chunk bar advances on `chunk_progress`
+    /// and `batch` events (files parsed). This method lets the event loop set slot
+    /// 2 independently without changing `self.phase`.
+    /// What: calls `set_position(pos)` on `stage_bars[2]` if it is Active or Done.
+    /// Test: `tests::advance_embed_bar_sets_slot2_position`.
+    pub(crate) fn advance_embed_bar(&self, pos: u64) {
+        if self.bar_states[2] != BarState::Pending {
+            self.stage_bars[2].set_position(pos);
         }
     }
 
@@ -862,6 +912,152 @@ mod tests {
     fn abandon_does_not_panic() {
         let ui = ReindexUi::new("idx", false);
         ui.abandon("timed out".to_string());
+    }
+
+    /// `set_embed_total` must prime the Embed bar (slot 2) while phase is Chunking.
+    ///
+    /// Why: Issue #823 Bug 2 — the Embed bar stays `0/1` (ProgressBar::new(1))
+    /// during model loading because `set_total` only sets the *active* phase's bar.
+    /// `set_embed_total` lets the handler prime slot 2 independently.
+    /// What: activates Chunking phase, calls `set_embed_total(500)`, asserts
+    /// slot 2 length is 500 while slot 1 is unaffected.
+    /// Test: this test.
+    #[test]
+    fn set_embed_total_primes_slot2_while_chunking() {
+        let mut ui = ReindexUi::new("idx", false);
+        ui.set_phase(ReindexPhase::Chunking, "idx");
+        ui.set_total(500); // sets slot 1 (Chunk bar)
+        ui.set_embed_total(500); // must prime slot 2 (Embed bar)
+                                 // Slot 1 length set by set_total
+        assert_eq!(ui.stage_bars[1].length(), Some(500));
+        // Slot 2 length set by set_embed_total, not still 1
+        assert_eq!(
+            ui.stage_bars[2].length(),
+            Some(500),
+            "Embed bar must be primed to total_files, not left at ProgressBar::new(1)"
+        );
+        ui.finish("done".to_string());
+    }
+
+    /// `activate_embed_bar` must apply Active style to slot 2 without changing
+    /// `self.phase`.
+    ///
+    /// Why: Issue #823 Bug 1 — both Chunk and Embed bars must be visually live
+    /// simultaneously during CHUNK+EMBED; changing the phase would move the header.
+    /// What: activates Chunking phase, calls `activate_embed_bar`, asserts
+    /// phase is still Chunking and slot 2 state is Active.
+    /// Test: this test.
+    #[test]
+    fn activate_embed_bar_does_not_change_phase() {
+        let mut ui = ReindexUi::new("idx", false);
+        ui.set_phase(ReindexPhase::Chunking, "idx");
+        assert_eq!(ui.phase, ReindexPhase::Chunking);
+        assert_eq!(ui.bar_states[2], BarState::Pending);
+
+        ui.activate_embed_bar();
+
+        // Phase must NOT change
+        assert_eq!(ui.phase, ReindexPhase::Chunking);
+        // Slot 2 must be Active
+        assert_eq!(ui.bar_states[2], BarState::Active);
+        // Calling again must be idempotent (already Active → no change)
+        ui.activate_embed_bar();
+        assert_eq!(ui.bar_states[2], BarState::Active);
+
+        ui.finish("done".to_string());
+    }
+
+    /// `advance_embed_bar` must set slot 2 position without requiring
+    /// phase == Embedding.
+    ///
+    /// Why: Issue #823 Bug 1 — during CHUNK+EMBED both bars advance simultaneously;
+    /// the Embed bar advances from `batch` events while phase may still be Chunking.
+    /// What: activates Chunking phase, activates Embed bar, calls
+    /// `advance_embed_bar(42)`, asserts slot 2 position is 42 and slot 1 is 0.
+    /// Test: this test.
+    #[test]
+    fn advance_embed_bar_sets_slot2_position() {
+        let mut ui = ReindexUi::new("idx", false);
+        ui.set_phase(ReindexPhase::Chunking, "idx");
+        ui.set_total(200);
+        ui.set_embed_total(200);
+        ui.activate_embed_bar();
+
+        // Advance Embed bar without changing phase
+        ui.advance_embed_bar(42);
+
+        assert_eq!(
+            ui.stage_bars[2].position(),
+            42,
+            "Embed bar must advance independently of active phase"
+        );
+        // Chunk bar (slot 1) position must remain at 0 (untouched)
+        assert_eq!(ui.stage_bars[1].position(), 0);
+
+        ui.finish("done".to_string());
+    }
+
+    /// Chunk bar must NOT be frozen by `mark_stage_done` at the first batch event.
+    /// It must remain Active and advanceable while Embed bar also advances.
+    ///
+    /// Why: Issue #823 Bug 1 — the old code called `mark_stage_done(1, ...)` on
+    /// the first batch, which froze the Chunk bar at whatever partial position it
+    /// had reached. Both bars must run to completion concurrently.
+    /// What: simulates the CHUNK+EMBED phase: set up both bars with total=100,
+    /// advance Chunk bar to 50, advance Embed bar to 30, assert both still Active.
+    /// Then advance Chunk to 100, mark Chunk done — Embed still Active.
+    /// Test: this test.
+    #[test]
+    fn chunk_and_embed_bars_live_simultaneously() {
+        let mut ui = ReindexUi::new("idx", false);
+        // Simulate walk_complete → Chunking transition
+        ui.set_phase(ReindexPhase::Walking, "idx");
+        ui.set_total(100);
+        ui.set_position(100);
+        ui.mark_stage_done(0, 500);
+
+        ui.set_phase(ReindexPhase::Chunking, "idx");
+        ui.set_total(100);
+        ui.set_embed_total(100);
+        ui.activate_embed_bar();
+
+        // Simulate batch events: Chunk leads, Embed trails
+        ui.set_position(50); // Chunk bar at 50/100
+        ui.advance_embed_bar(30); // Embed bar at 30/100
+
+        assert_eq!(
+            ui.bar_states[1],
+            BarState::Active,
+            "Chunk bar must stay Active"
+        );
+        assert_eq!(
+            ui.bar_states[2],
+            BarState::Active,
+            "Embed bar must stay Active"
+        );
+        assert_eq!(ui.stage_bars[1].position(), 50);
+        assert_eq!(ui.stage_bars[2].position(), 30);
+
+        // Finish Chunk bar (e.g. at kg_start)
+        ui.set_position(100);
+        ui.mark_stage_done(1, 5_000);
+        assert_eq!(
+            ui.bar_states[1],
+            BarState::Done,
+            "Chunk bar must be Done after mark"
+        );
+
+        // Embed bar still Active, still advancing
+        assert_eq!(
+            ui.bar_states[2],
+            BarState::Active,
+            "Embed bar must still be Active after Chunk done"
+        );
+        ui.advance_embed_bar(100);
+        ui.mark_stage_done(2, 90_000);
+        assert_eq!(ui.bar_states[2], BarState::Done);
+
+        ui.finish("done".to_string());
     }
 
     /// `print_timing_breakdown` must not panic for the BM25-only fallback path

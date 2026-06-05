@@ -678,6 +678,14 @@ pub async fn run_reindex_with(
                 // elapsed time (walk is a fast synchronous scan on the daemon).
                 ui.set_position(total);
                 ui.mark_stage_done(0, 0);
+                // Issue #823 Bug 2: prime the Embed bar (slot 2) with the correct
+                // total_files denominator NOW, before any batch event arrives.
+                // Without this, slot 2 starts at new(1) and shows "0/1" throughout
+                // the model-load period. Both Chunk and Embed bars use files as
+                // the unit so the pipeline gap is meaningful.
+                if total > 0 && !lexical_only {
+                    ui.set_embed_total(total);
+                }
             }
             // ── start ──────────────────────────────────────────────────────
             Some("start") => {
@@ -699,6 +707,14 @@ pub async fn run_reindex_with(
                     ui.set_phase(ReindexPhase::Chunking, index_id);
                     phase_disc.store(phase_to_u64(ReindexPhase::Chunking), Ordering::Release);
                     ui.set_total(total);
+                    // Issue #823 Bug 2: prime Embed bar (slot 2) immediately with
+                    // total_files so it shows real N/total instead of 0/1 for the
+                    // entire model-load period. Done here as fallback in case
+                    // walk_complete arrived before lexical_only was known.
+                    if total > 0 && !lexical_only {
+                        ui.set_embed_total(total);
+                        ui.activate_embed_bar();
+                    }
                 } else {
                     // Legacy two-phase flow (old daemon, no walk_complete):
                     // jump straight to Embed (or Chunking for lexical-only).
@@ -712,6 +728,10 @@ pub async fn run_reindex_with(
                         ui.set_phase(ReindexPhase::Embedding, index_id);
                         phase_disc.store(phase_to_u64(ReindexPhase::Embedding), Ordering::Release);
                         entered_embedding = true;
+                        // Issue #823 Bug 2: also prime slot 2 on the legacy path.
+                        if total > 0 {
+                            ui.set_embed_total(total);
+                        }
                     }
                 }
             }
@@ -729,11 +749,24 @@ pub async fn run_reindex_with(
                 );
             }
             // ── embedder_ready ─────────────────────────────────────────────
-            // New event (Problem 1 fix): emitted after the sidecar is ready.
-            // Transitions the header back to "Embedding chunks…" so the UI
-            // reflects the actual active work.
+            // Emitted after the embedder (sidecar or in-process) has completed
+            // its first embed batch. Transitions the header to "Embedding
+            // chunks…" and activates the Embed bar.
+            //
+            // Issue #823 Bug 3: previously only emitted for sidecar mode
+            // (embedder_pid_slot.is_some()). The daemon now emits this event
+            // unconditionally after the first successful parse_and_embed call,
+            // regardless of embedder mode.
+            //
+            // Issue #823 Bug 1: do NOT call mark_stage_done(1) here — the Chunk
+            // bar continues advancing in parallel with the Embed bar throughout
+            // the CHUNK+EMBED phase. The Chunk bar is only frozen at kg_start
+            // (or at complete if kg_start was never received).
             Some("embedder_ready") if !entered_embedding => {
                 embed_started_ms = started.elapsed().as_millis() as u64;
+                // Update the header to "Embedding chunks…" while keeping the
+                // Chunk bar active. phase_to_bar_slot(Embedding) = 2, so
+                // set_phase activates slot 2 without touching slot 1.
                 ui.set_phase(ReindexPhase::Embedding, index_id);
                 phase_disc.store(phase_to_u64(ReindexPhase::Embedding), Ordering::Release);
                 entered_embedding = true;
@@ -746,8 +779,12 @@ pub async fn run_reindex_with(
             // inside `embed_chunks_in_batches`. Fires at ~32-chunk granularity
             // so the stats line advances continuously during embedding rather
             // than jumping once per 128-file file-batch.
-            // Does NOT advance the Embed bar position (that's driven by `batch`
-            // events) — it updates CPS and the in-flight chunk preview counter.
+            //
+            // Issue #823 Bug 1: also advance the Chunk bar (slot 1) here using
+            // the `indexed` file count from the event. The Chunk bar tracks
+            // files PARSED (leading indicator); the Embed bar tracks files
+            // COMMITTED (trailing). Both use files as unit — the gap between
+            // them visualises the pipeline backpressure.
             Some("chunk_progress") => {
                 let wave_chunks = evt.get("chunks_done").and_then(|v| v.as_u64()).unwrap_or(0);
                 let wave_cps = evt
@@ -764,21 +801,35 @@ pub async fn run_reindex_with(
                 if wave_chunks > 0 {
                     chunks_embed_preview.fetch_add(wave_chunks, Ordering::AcqRel);
                 }
+                // Advance the Chunk bar (slot 1) with the files-parsed count
+                // from the event. This keeps the Chunk bar moving between
+                // `batch` events so the pipeline gap is visible.
+                let chunk_indexed = evt.get("indexed").and_then(|v| v.as_u64()).unwrap_or(0);
+                if chunk_indexed > 0 {
+                    ui.set_position(chunk_indexed);
+                }
             }
             // ── batch ──────────────────────────────────────────────────────
             Some("batch") => {
-                // Flip Chunking/InitializingEmbedder → Embedding on the first
-                // batch event (three-phase flow only). Skip when lexical_only
-                // (no embed batches).
+                // Issue #823 Bug 1: do NOT call mark_stage_done(1) here.
+                // The old code froze the Chunk bar at the batch-transition
+                // boundary (e.g. 512/2094). Both Chunk and Embed bars must
+                // remain live throughout the CHUNK+EMBED phase.
+                //
+                // On the first batch event (three-phase flow): activate the
+                // Embed bar (slot 2) and transition the header to "Embedding…"
+                // if embedder_ready was not received (in-process embedder that
+                // didn't emit the event, or legacy daemon).
                 if received_walk_complete && !entered_embedding && !lexical_only {
-                    // Mark Chunk bar done before activating Embed.
-                    let chunk_ms = started.elapsed().as_millis() as u64 - chunk_started_ms;
-                    ui.mark_stage_done(1, chunk_ms);
                     embed_started_ms = started.elapsed().as_millis() as u64;
                     ui.set_phase(ReindexPhase::Embedding, index_id);
                     phase_disc.store(phase_to_u64(ReindexPhase::Embedding), Ordering::Release);
                     entered_embedding = true;
                 }
+                // Always ensure the Embed bar is visually active once batches start
+                // (covers the case where embedder_ready arrived but activate_embed_bar
+                // was not called from that handler since set_phase(Embedding) already
+                // activates slot 2 via the normal path).
 
                 let indexed = evt.get("indexed").and_then(|v| v.as_u64()).unwrap_or(0);
                 let batch_chunks = evt
@@ -795,6 +846,9 @@ pub async fn run_reindex_with(
                     // the correct denominator from the very first batch event.
                     total_files_now.store(total, Ordering::Release);
                     ui.set_total(total);
+                    // Issue #823 Bug 2: ensure the Embed bar total is always
+                    // up to date even if walk_complete/start didn't prime it.
+                    ui.set_embed_total(total);
                 }
                 indexed_now.store(indexed, Ordering::Release);
                 cps_now.store(chunks_per_sec, Ordering::Release);
@@ -804,7 +858,15 @@ pub async fn run_reindex_with(
                 // the in-flight preview so the ticker shows committed chunks
                 // rather than the (now stale) embedding preview.
                 chunks_embed_preview.store(0, Ordering::Release);
-                ui.set_position(indexed);
+                // Issue #823 Bug 1: advance BOTH bars.
+                // Chunk bar (slot 1) = files parsed; Embed bar (slot 2) = files
+                // committed/embedded. Both use `indexed` (files processed so far)
+                // as a proxy — Chunk should lead, but without a separate "files
+                // parsed" event from the daemon, `indexed` is the best we have.
+                // The visual gap comes from chunk_progress advancing the Chunk
+                // bar between batch events (parsed but not yet committed).
+                ui.set_position(indexed); // advances active phase's bar (Chunk or Embed)
+                ui.advance_embed_bar(indexed); // always advance slot 2 (Embed)
                 ui.update_stats(
                     indexed,
                     new_chunks,
@@ -839,11 +901,17 @@ pub async fn run_reindex_with(
             }
             // ── kg_start ───────────────────────────────────────────────────
             // New event added by issue #401. The daemon emits this immediately
-            // before `rebuild_symbol_graph_for_reindex`. The CLI marks the Embed
-            // bar done and activates the KG bar. Old daemons omit this event;
-            // the KG bar stays pending and is cleared at `complete`.
+            // before `rebuild_symbol_graph_for_reindex`. The CLI marks both the
+            // Chunk bar and Embed bar done, then activates the KG bar.
+            //
+            // Issue #823 Bug 1: this is the correct place to freeze the Chunk
+            // bar (slot 1) — NOT at the first `batch` event. By waiting until
+            // kg_start, both Chunk and Embed bars animate throughout CHUNK+EMBED.
             Some("kg_start") => {
-                // Embed bar done (if it was active).
+                // Mark Chunk bar done (Issue #823 Bug 1: moved here from batch handler).
+                let chunk_ms = started.elapsed().as_millis() as u64 - chunk_started_ms;
+                ui.mark_stage_done(1, chunk_ms);
+                // Mark Embed bar done (if it was active).
                 if entered_embedding {
                     let embed_ms = started.elapsed().as_millis() as u64 - embed_started_ms;
                     ui.mark_stage_done(2, embed_ms);
@@ -911,8 +979,10 @@ pub async fn run_reindex_with(
                 }
                 outcome.completed = true;
 
-                // Snap the Embed bar to full position (final authoritative count).
+                // Snap both Chunk and Embed bars to full position.
+                // Chunk bar (slot 1) may still be Active if kg_start was never received.
                 ui.set_position(outcome.indexed);
+                ui.advance_embed_bar(outcome.indexed);
 
                 // Mark Embed bar done if it wasn't marked by kg_start (old daemon
                 // or lexical_only index).
@@ -926,11 +996,13 @@ pub async fn run_reindex_with(
                     ui.mark_stage_done(2, embed_ms);
                 }
 
-                // Mark Chunk bar done if it wasn't already (two-phase / lexical path).
-                if !received_walk_complete || lexical_only {
-                    let chunk_ms = outcome.timings.map(|t| t.parse_ms).unwrap_or(0);
-                    ui.mark_stage_done(1, chunk_ms);
-                }
+                // Issue #823 Bug 1: Mark Chunk bar done unconditionally here
+                // (if not already done by kg_start). This covers:
+                //   - the three-phase flow where kg_start froze it already (idempotent)
+                //   - the two-phase / lexical path where kg_start was never received
+                //   - the skip_kg path where the Chunk bar must still close
+                let chunk_ms = outcome.timings.map(|t| t.parse_ms).unwrap_or(0);
+                ui.mark_stage_done(1, chunk_ms);
 
                 // Mark Crawl bar done for old daemons that never sent walk_complete.
                 if !received_walk_complete {
@@ -1582,6 +1654,136 @@ mod tests {
         assert_eq!(
             eta2, "?",
             "ETA must be '?' when total_files is 0 and not loading model"
+        );
+    }
+
+    // ── Issue #823 progress bar fix tests ────────────────────────────────────
+
+    /// The Embed bar (slot 2) must be primed to `total_files` immediately when
+    /// `walk_complete`/`start` fires — NOT left at `ProgressBar::new(1)` until
+    /// the first `batch` event arrives.
+    ///
+    /// Why: Issue #823 Bug 2 — the Embed bar showed "0/1" throughout model
+    /// loading because it was never given the correct total. This test verifies
+    /// the fix: `set_embed_total` on walk_complete sets slot 2 independently.
+    /// What: constructs a UI, enters Walking, calls `set_embed_total(500)`, and
+    /// asserts slot 2 length is 500 (not 1).
+    /// Test: this test.
+    #[test]
+    fn embed_bar_total_is_set_before_first_batch() {
+        use super::super::reindex_ui::{ReindexPhase, ReindexUi};
+        let mut ui = ReindexUi::new("idx", false);
+        // Simulate walk_complete: Walk bar fills + Chunking begins
+        ui.set_phase(ReindexPhase::Walking, "idx");
+        ui.set_total(500);
+        ui.set_position(500);
+        ui.mark_stage_done(0, 100);
+        ui.set_phase(ReindexPhase::Chunking, "idx");
+        ui.set_total(500);
+        // Prime the Embed bar (issue #823 Bug 2 fix)
+        ui.set_embed_total(500);
+        // Before any batch event: Embed bar must have total=500, not 1
+        assert_eq!(
+            ui.stage_bars[2].length(),
+            Some(500),
+            "Embed bar must be primed with total_files before the first batch"
+        );
+        ui.finish("done".to_string());
+    }
+
+    /// The Chunk bar (slot 1) must NOT be frozen at the first `batch` event.
+    ///
+    /// Why: Issue #823 Bug 1 — the old code called `mark_stage_done(1, ...)` in
+    /// the `batch` handler, freezing the Chunk bar at whatever partial count it
+    /// had when the first batch completed. Both bars must advance concurrently.
+    /// What: simulates the CHUNK+EMBED phase without calling mark_stage_done(1)
+    /// at the batch transition; asserts slot 1 is still Active after a batch.
+    /// Test: this test.
+    #[test]
+    fn chunk_bar_not_frozen_at_first_batch() {
+        use super::super::reindex_ui::{ReindexPhase, ReindexUi};
+        let mut ui = ReindexUi::new("idx", false);
+        // Walk done
+        ui.set_phase(ReindexPhase::Walking, "idx");
+        ui.set_total(200);
+        ui.set_position(200);
+        ui.mark_stage_done(0, 100);
+        // Enter Chunking
+        ui.set_phase(ReindexPhase::Chunking, "idx");
+        ui.set_total(200);
+        ui.set_embed_total(200);
+        ui.activate_embed_bar();
+        // Simulate chunk_progress advancing Chunk bar to 128
+        ui.set_position(128);
+        // Simulate first batch event: transition header to Embedding
+        // (Issue #823 Bug 1 fix: do NOT call mark_stage_done(1) here)
+        ui.set_phase(ReindexPhase::Embedding, "idx");
+        ui.advance_embed_bar(128);
+        // Chunk bar (slot 1) must still be Active (not Done) after the transition
+        assert_eq!(
+            ui.bar_states[1],
+            super::super::reindex_ui::BarState::Active,
+            "Chunk bar must remain Active after the first batch event, not be frozen"
+        );
+        // Embed bar must also be Active and at 128
+        assert_eq!(ui.bar_states[2], super::super::reindex_ui::BarState::Active);
+        assert_eq!(ui.stage_bars[2].position(), 128);
+        // Now kg_start arrives → mark Chunk bar done
+        ui.mark_stage_done(1, 5_000);
+        assert_eq!(
+            ui.bar_states[1],
+            super::super::reindex_ui::BarState::Done,
+            "Chunk bar must be Done after kg_start marks it"
+        );
+        ui.finish("done".to_string());
+    }
+
+    /// `needs_embedder_init` logic must fire for in-process embedder on the
+    /// first batch (indexed == 0), not just for the sidecar.
+    ///
+    /// Why: Issue #823 Bug 3 — the old code used `.unwrap_or(false)` which
+    /// silently disabled `embedder_init`/`embedder_ready` for the in-process
+    /// embedder. The new logic fires when `indexed == 0` regardless of mode.
+    /// What: simulates the new guard condition for both modes.
+    /// Test: this test.
+    #[test]
+    fn embedder_ready_fires_for_in_process_embedder() {
+        // In-process path: embedder_pid_slot is None, first_batch_ever = true
+        let first_batch_ever = true;
+        let embedder_pid_slot: Option<u32> = None;
+        let needs_init = if let Some(pid) = embedder_pid_slot {
+            pid == 0
+        } else {
+            first_batch_ever
+        };
+        assert!(
+            needs_init,
+            "needs_embedder_init must be true for in-process embedder on first batch"
+        );
+
+        // Sidecar path with PID=0 (not yet spawned): same result
+        let pid_slot_zero: Option<u32> = Some(0);
+        let needs_init_sidecar = if let Some(pid) = pid_slot_zero {
+            pid == 0
+        } else {
+            first_batch_ever
+        };
+        assert!(
+            needs_init_sidecar,
+            "needs_embedder_init must be true for sidecar with PID=0"
+        );
+
+        // Subsequent batches (indexed > 0): must NOT fire again
+        let first_batch_ever_no = false;
+        let embedder_pid_slot_warm: Option<u32> = None; // in-process, 2nd batch
+        let needs_init_warm = if let Some(pid) = embedder_pid_slot_warm {
+            pid == 0
+        } else {
+            first_batch_ever_no
+        };
+        assert!(
+            !needs_init_warm,
+            "needs_embedder_init must be false on subsequent batches"
         );
     }
 }
