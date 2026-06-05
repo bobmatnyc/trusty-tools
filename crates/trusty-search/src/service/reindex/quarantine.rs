@@ -86,7 +86,7 @@ pub struct ReindexQuarantine {
     /// Cached `TRUSTY_REINDEX_MAX_FAILURES` (issue #796).
     max_failures: u32,
     /// Cached `TRUSTY_REINDEX_QUARANTINE_MAX_SECS` (issue #796).
-    max_quarantine_secs: u64,
+    cached_max_quarantine_secs: u64,
 }
 
 impl Default for ReindexQuarantine {
@@ -107,7 +107,7 @@ impl ReindexQuarantine {
         Self {
             entries: Arc::new(DashMap::new()),
             max_failures: max_consecutive_failures(),
-            max_quarantine_secs: max_quarantine_secs(),
+            cached_max_quarantine_secs: max_quarantine_secs(),
         }
     }
 
@@ -151,7 +151,7 @@ impl ReindexQuarantine {
         // Use the cached thresholds rather than re-reading env vars on every
         // call (issue #796: env reads inside a DashMap critical section).
         let max_failures = self.max_failures;
-        let max_quarantine = self.max_quarantine_secs;
+        let max_quarantine = self.cached_max_quarantine_secs;
         let mut entry = self
             .entries
             .entry(id.clone())
