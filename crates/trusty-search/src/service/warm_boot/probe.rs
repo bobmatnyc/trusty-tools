@@ -252,25 +252,62 @@ pub(super) fn probe_volume(
     // without this pre-check, `recv_timeout(ZERO)` can still see a message
     // that the probe thread queued between the spawn call and the recv call on
     // a fast machine, causing a spurious `Accessible` result.
+    // (issue #724: probe_timeout_increments_leaked_thread_count flake, #810)
     let remaining = end.saturating_duration_since(Instant::now());
-    let timed_out = if remaining.is_zero() {
-        true
-    } else {
-        rx.recv_timeout(remaining).is_err()
-    };
 
-    if timed_out {
+    // Issue #738: distinguish the two error cases so operators see accurate messages.
+    // `Disconnected` means the probe thread dropped the sender without sending —
+    // it panicked or fs::metadata never returned before tx was dropped.
+    // `Timeout` means the wall-clock deadline elapsed (or the deadline was already
+    // zero before we reached recv — the `remaining.is_zero()` pre-check above
+    // enforces determinism). Only a timed-out thread is a "leaked" thread;
+    // a disconnected-without-send case is unusual but also an unreported probe
+    // so we count it toward the leaked total for operator visibility.
+    if remaining.is_zero() {
         let prev = LEAKED_PROBE_THREAD_COUNT.fetch_add(1, Ordering::Relaxed);
         tracing::warn!(
-            "warm-boot: probe thread for volume {} (probing {}) timed out and was abandoned \
-             (leaked_probe_threads total: {}). (issue #723, review #727)",
+            "warm-boot: probe thread for volume {} (probing {}) timed out (deadline \
+             already elapsed at recv) and was abandoned \
+             (leaked_probe_threads total: {}). (issue #723, review #727, #738, #810)",
             volume_root.display(),
             probe_path.display(),
             prev + 1,
         );
-        VolumeAccessibility::Inaccessible
-    } else {
-        VolumeAccessibility::Accessible
+        return VolumeAccessibility::Inaccessible;
+    }
+
+    match rx.recv_timeout(remaining) {
+        Ok(()) => VolumeAccessibility::Accessible,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            let prev = LEAKED_PROBE_THREAD_COUNT.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                "warm-boot: probe thread for volume {} (probing {}) timed out after {:?} \
+                 and was abandoned (leaked_probe_threads total: {}). \
+                 (issue #723, review #727, #738)",
+                volume_root.display(),
+                probe_path.display(),
+                deadline,
+                prev + 1,
+            );
+            VolumeAccessibility::Inaccessible
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            // The probe thread dropped the sender without sending — it panicked or
+            // the fs::metadata call never returned a value before tx was dropped.
+            // This is NOT a deadline timeout but the probe still did not answer, so
+            // the volume must be treated as inaccessible and the leaked counter is
+            // incremented once for operator visibility.
+            let prev = LEAKED_PROBE_THREAD_COUNT.fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(
+                "warm-boot: probe channel for volume {} (probing {}) disconnected without \
+                 a result — probe thread ended unexpectedly \
+                 (leaked_probe_threads total: {}). (issue #738)",
+                volume_root.display(),
+                probe_path.display(),
+                prev + 1,
+            );
+            VolumeAccessibility::Inaccessible
+        }
     }
 }
 
@@ -407,10 +444,16 @@ pub(super) fn probe_all_volumes(
                 );
                 reported.insert(vol_key);
             }
-            Err(_timeout_or_disconnect) => {
-                // Deadline elapsed (or all senders dropped — which only happens
-                // when every probe thread has finished, meaning reported.len()
-                // == n already and we would have broken above).  Stop waiting.
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Deadline elapsed — stop waiting.
+                break;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // All senders dropped — every probe thread has finished and
+                // delivered its result (or panicked without sending). Either way,
+                // reported.len() == n would have triggered the break above if all
+                // delivered; any remaining unreported volumes will be handled in
+                // the inaccessible-classification loop below. (issue #738)
                 break;
             }
         }
