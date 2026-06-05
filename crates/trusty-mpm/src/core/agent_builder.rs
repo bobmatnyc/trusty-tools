@@ -9,10 +9,21 @@
 //! Markdown document with a single merged frontmatter block on top.
 //! Test: `cargo test -p trusty-mpm-core agent_builder` covers a base-only
 //! agent, a three-deep chain, cycle detection, and the depth limit.
+//!
+//! ## Case-insensitive source resolution
+//!
+//! The base template files are named `BASE-QA.md`, `BASE-ENGINEER.md`, etc.
+//! (UPPERCASE stems), while concrete agents declare `extends: base-qa` /
+//! `extends: base-engineer` (lowercase). On macOS (case-insensitive HFS+)
+//! the filesystem transparently matches these; on Linux (case-sensitive
+//! ext4/etc.) it does not. To remain platform-independent, [`build_source_map`]
+//! scans the source directory once and builds a `HashMap` keyed by the
+//! lowercased stem. All resolution then goes through this map rather than
+//! constructing a raw path from the `extends:` value.
 
 use std::collections::HashMap;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::frontmatter::parse_kv_line;
 
@@ -73,6 +84,45 @@ impl From<std::io::Error> for AgentBuildError {
     fn from(err: std::io::Error) -> Self {
         Self::Io(err)
     }
+}
+
+/// A case-folded index of `*.md` files in a source directory.
+///
+/// Why: base template files use UPPERCASE stems (`BASE-QA.md`) while
+/// `extends:` values use lowercase (`base-qa`). A filesystem lookup of
+/// the literal extends-value fails on case-sensitive filesystems (Linux).
+/// Keying by lowercased stem lets the resolver find `BASE-QA.md` when
+/// asked for `base-qa` without relying on OS case-folding behaviour.
+/// What: maps `lowercased_stem -> full_path` for every `*.md` entry in
+/// the directory. Non-`.md` entries and subdirectories are ignored.
+/// Test: `case_insensitive_resolve_via_map` in agent_builder_tests.rs.
+pub type SourceMap = HashMap<String, PathBuf>;
+
+/// Build a [`SourceMap`] by scanning `source_dir` for `*.md` files.
+///
+/// Why: centralises directory scanning so `compose_agent` and `source_chain`
+/// each scan the directory exactly once rather than once per resolve step.
+/// What: reads directory entries, filters to `.md` files whose stem is valid
+/// UTF-8, inserts `(lowercase_stem, path)` pairs. If the directory cannot be
+/// read the map is returned empty — callers surface the missing-file error on
+/// first lookup.
+/// Test: exercised implicitly by every compose/chain test via `compose_agent`.
+pub fn build_source_map(source_dir: &Path) -> SourceMap {
+    let mut map = SourceMap::new();
+    let entries = match std::fs::read_dir(source_dir) {
+        Ok(e) => e,
+        Err(_) => return map,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            map.insert(stem.to_lowercase(), path);
+        }
+    }
+    map
 }
 
 /// The parsed frontmatter fields trusty-mpm cares about for an agent.
@@ -215,14 +265,18 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
 /// Recursively resolve an agent and its ancestors, base-first.
 ///
 /// Why: composition concatenates parent content before child content, so the
-/// chain must be walked to its root before bodies are joined.
-/// What: loads `<name>.md`, parses its frontmatter, recurses into `extends`
-/// while tracking the visited path for cycle detection and enforcing the depth
-/// limit, then returns `(frontmatter chain, body chain)` ordered base-first.
-/// Test: `cycle_detection`, `depth_exceeded`.
+/// chain must be walked to its root before bodies are joined. Accepts a
+/// pre-built [`SourceMap`] so lookups are case-insensitive on all platforms
+/// (Linux ext4 and macOS HFS+ behave identically).
+/// What: looks up `name` (lowercased) in `sources`, reads the matched file,
+/// parses its frontmatter, recurses into `extends` while tracking the visited
+/// path for cycle detection and enforcing the depth limit, then returns
+/// `(frontmatter chain, body chain)` ordered base-first.
+/// Test: `cycle_detection`, `depth_exceeded`,
+///       `case_insensitive_resolve_via_map`.
 fn resolve(
     name: &str,
-    source_dir: &Path,
+    sources: &SourceMap,
     visiting: &mut Vec<String>,
 ) -> Result<(Vec<Frontmatter>, Vec<String>), AgentBuildError> {
     if visiting.len() >= MAX_DEPTH {
@@ -234,8 +288,12 @@ fn resolve(
         return Err(AgentBuildError::Cycle(cycle));
     }
 
-    let path = source_dir.join(format!("{name}.md"));
-    let raw = match std::fs::read_to_string(&path) {
+    // Look up via lowercased key so `base-qa` matches `BASE-QA.md` on Linux.
+    let path = sources
+        .get(&name.to_lowercase())
+        .ok_or_else(|| AgentBuildError::NotFound(name.to_string()))?;
+
+    let raw = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             return Err(AgentBuildError::NotFound(name.to_string()));
@@ -247,7 +305,7 @@ fn resolve(
 
     visiting.push(name.to_string());
     let (mut frontmatters, mut bodies) = match &fm.extends {
-        Some(parent) => resolve(parent, source_dir, visiting)?,
+        Some(parent) => resolve(parent, sources, visiting)?,
         None => (Vec::new(), Vec::new()),
     };
     visiting.pop();
@@ -260,16 +318,20 @@ fn resolve(
 /// Resolves an inheritance chain and returns the composed content.
 ///
 /// Why: Claude Code has no native agent inheritance; we resolve chains at
-/// build time so CC sees only self-contained flat files.
+/// build time so CC sees only self-contained flat files. Uses a pre-built
+/// case-folded [`SourceMap`] so `extends: base-qa` finds `BASE-QA.md` on
+/// case-sensitive (Linux) filesystems without any special OS behaviour.
 ///
-/// What: reads source files from `source_dir`, parses `extends:` frontmatter,
-/// concatenates base-first, returns composed Markdown with a single merged
-/// frontmatter block at the top.
+/// What: scans `source_dir` once into a [`SourceMap`], then reads source
+/// files, parses `extends:` frontmatter, concatenates base-first, returns
+/// composed Markdown with a single merged frontmatter block at the top.
 ///
-/// Test: `compose_engineer_chain`, `compose_base_only`, `cycle_detection`
+/// Test: `compose_engineer_chain`, `compose_base_only`, `cycle_detection`,
+///       `case_insensitive_resolve_via_map`
 pub fn compose_agent(name: &str, source_dir: &Path) -> Result<String, AgentBuildError> {
+    let sources = build_source_map(source_dir);
     let mut visiting = Vec::new();
-    let (frontmatters, bodies) = resolve(name, source_dir, &mut visiting)?;
+    let (frontmatters, bodies) = resolve(name, &sources, &mut visiting)?;
 
     let mut out = merge_frontmatter(&frontmatters);
     out.push('\n');
@@ -286,14 +348,15 @@ pub fn compose_agent(name: &str, source_dir: &Path) -> Result<String, AgentBuild
 /// The ordered inheritance chain (base-first) for an agent, by name.
 ///
 /// Why: the deploy step records the resolved chain in the manifest and prints
-/// it to the operator (`base-agent -> base-engineer -> engineer`).
-/// What: walks `extends` exactly like [`compose_agent`] but returns only the
-/// agent names, base-first.
+/// it to the operator (`base-agent -> base-engineer -> engineer`). Uses a
+/// pre-built [`SourceMap`] for case-insensitive lookup on all platforms.
+/// What: scans `source_dir` once into a [`SourceMap`], then walks `extends`
+/// exactly like [`compose_agent`] but returns only the agent names, base-first.
 /// Test: `source_chain_engineer`, `source_chain_base_only`.
 pub fn source_chain(name: &str, source_dir: &Path) -> Result<Vec<String>, AgentBuildError> {
     fn walk(
         name: &str,
-        source_dir: &Path,
+        sources: &SourceMap,
         visiting: &mut Vec<String>,
         out: &mut Vec<String>,
     ) -> Result<(), AgentBuildError> {
@@ -305,8 +368,10 @@ pub fn source_chain(name: &str, source_dir: &Path) -> Result<Vec<String>, AgentB
             cycle.push(name.to_string());
             return Err(AgentBuildError::Cycle(cycle));
         }
-        let path = source_dir.join(format!("{name}.md"));
-        let raw = match std::fs::read_to_string(&path) {
+        let path = sources
+            .get(&name.to_lowercase())
+            .ok_or_else(|| AgentBuildError::NotFound(name.to_string()))?;
+        let raw = match std::fs::read_to_string(path) {
             Ok(content) => content,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 return Err(AgentBuildError::NotFound(name.to_string()));
@@ -316,16 +381,17 @@ pub fn source_chain(name: &str, source_dir: &Path) -> Result<Vec<String>, AgentB
         let (fm, _) = split_frontmatter(&raw)?;
         visiting.push(name.to_string());
         if let Some(parent) = &fm.extends {
-            walk(parent, source_dir, visiting, out)?;
+            walk(parent, sources, visiting, out)?;
         }
         visiting.pop();
         out.push(name.to_string());
         Ok(())
     }
 
+    let sources = build_source_map(source_dir);
     let mut chain = Vec::new();
     let mut visiting = Vec::new();
-    walk(name, source_dir, &mut visiting, &mut chain)?;
+    walk(name, &sources, &mut visiting, &mut chain)?;
     Ok(chain)
 }
 

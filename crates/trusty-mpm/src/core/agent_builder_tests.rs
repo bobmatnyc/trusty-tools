@@ -242,3 +242,80 @@ fn bedrock_model_id_round_trips() {
         "model id must be preserved; got:\n{composed}"
     );
 }
+
+// ── case-insensitive resolution regression test (issue #790) ─────────────────
+//
+// Root cause: base template files on disk are named `BASE-QA.md`,
+// `BASE-ENGINEER.md`, etc. (UPPERCASE stems), but concrete agents declare
+// `extends: base-qa` / `extends: base-engineer` (lowercase). On macOS
+// (case-insensitive HFS+) the OS silently matched these; on Linux
+// (case-sensitive ext4) it failed with `agent source not found: base-qa`.
+//
+// Fix: `build_source_map` keys files by their LOWERCASED stem, so the
+// resolver looks up `name.to_lowercase()` and finds the UPPERCASE file
+// regardless of the host filesystem's case behaviour.
+//
+// This test MUST NOT rely on filesystem case-folding to prove correctness.
+// It writes the base file with an UPPERCASE stem (`BASE-QA.md`) and the
+// concrete agent with `extends: base-qa` (lowercase), then asserts that
+// composition succeeds. On a case-SENSITIVE filesystem this would fail
+// with the old direct-path code but passes with the new map-based lookup.
+
+#[test]
+fn case_insensitive_resolve_via_map() {
+    // Write `BASE-QA.md` (UPPERCASE stem, as shipped in the bundle) and a
+    // concrete `qa.md` that extends it via the lowercase name `base-qa`.
+    // The SourceMap must bridge the case gap so compose_agent succeeds on
+    // both case-sensitive (Linux) and case-insensitive (macOS) filesystems.
+    let tmp = TempDir::new().unwrap();
+
+    // Write the base file with an UPPERCASE stem — matching the real asset name.
+    fs::write(
+        tmp.path().join("BASE-QA.md"),
+        "---\nname: base-qa\nrole: base-qa\n---\n\n# Base QA\n\nBASE QA BODY\n",
+    )
+    .expect("write BASE-QA.md");
+
+    // Concrete agent uses lowercase in extends — matching the real qa.md.
+    write_agent(
+        tmp.path(),
+        "qa",
+        "---\nname: qa\nrole: qa\nextends: base-qa\n---\n\n# QA Agent\n\nQA BODY\n",
+    );
+
+    // Verify the SourceMap correctly maps "base-qa" -> BASE-QA.md path.
+    let map = build_source_map(tmp.path());
+    assert!(
+        map.contains_key("base-qa"),
+        "SourceMap must contain 'base-qa' key (from BASE-QA.md); map keys: {:?}",
+        map.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        map["base-qa"].ends_with("BASE-QA.md"),
+        "SourceMap['base-qa'] must point to BASE-QA.md, got {:?}",
+        map["base-qa"]
+    );
+
+    // The composition must succeed: lowercase extends-value finds UPPERCASE file.
+    let composed = compose_agent("qa", tmp.path())
+        .expect("compose_agent must succeed: base-qa (lowercase) -> BASE-QA.md (uppercase)");
+
+    // Base body appears before the concrete agent body.
+    let base_pos = composed.find("BASE QA BODY").expect("base body present");
+    let qa_pos = composed.find("QA BODY").expect("qa body present");
+    assert!(
+        base_pos < qa_pos,
+        "base body must precede concrete agent body"
+    );
+
+    // Merged frontmatter carries the child's name.
+    assert!(
+        composed.contains("name: qa"),
+        "merged frontmatter has child name"
+    );
+    // `extends:` must not leak into the output.
+    assert!(
+        !composed.contains("extends:"),
+        "extends must not appear in output"
+    );
+}
