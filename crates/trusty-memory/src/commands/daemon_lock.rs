@@ -89,48 +89,39 @@ pub fn lock_file_path() -> Option<PathBuf> {
 
 /// Check whether a PID is alive on this Unix host.
 ///
-/// Why: `kill -0 <pid>` returns success when the process exists (regardless
-/// of whether we have permission to signal it) and `ESRCH` when it does not
-/// exist. However, the shell `kill` utility parses PID strings as signed
-/// 32-bit integers on many Linux implementations, so passing a value greater
-/// than `i32::MAX` (e.g. `u32::MAX` = 4,294,967,295) causes a signed overflow
-/// to -1. On Linux, `kill -0 -1` sends signal 0 to every process the caller
-/// may signal — a broadcast that always succeeds — causing `pid_alive` to
-/// return `true` for a nonexistent PID. A PID of 0 has similar process-group
-/// semantics. Neither 0 nor any value above `i32::MAX` can be a valid user
-/// process PID on any 32- or 64-bit Unix, so we guard against both before
-/// calling `kill`.
-/// What: returns `false` immediately for `pid == 0` or `pid > i32::MAX` (no
-/// `kill` call, no signed-overflow risk). For valid positive PIDs in
-/// `1..=i32::MAX`, runs `kill -0 <pid>` and returns `true` iff exit code is 0.
-/// On non-Unix platforms always returns `false` (stale lock is reclaimed).
-/// Test: `pid_alive_returns_false_for_pid_zero` (asserts `false` for
-/// `u32::MAX` and `0` without calling `kill`);
-/// `pid_alive_returns_true_for_current_pid` (asserts `true` for a known-live
-/// PID); `acquire_lock_reclaims_stale_pid` (end-to-end stale-lock reclaim).
+/// Why: `/bin/kill -0 <pid>` had two Linux bugs: `kill(0, 0)` signals the
+/// caller's process GROUP (false positive), and `u32::MAX as i32` = -1 gives
+/// broadcast semantics (also false positive). `libc::kill` with explicit pid
+/// guards fixes both. On non-Unix platforms always returns `false`.
+///
+/// What: returns `false` immediately for `pid == 0` or `pid > i32::MAX`
+/// (special semantics). For valid pids calls `libc::kill(pid, 0)`: 0 → alive,
+/// `ESRCH` → dead, `EPERM` → exists-but-no-permission → alive, other → alive.
+///
+/// Test: `pid_alive_returns_false_for_pid_zero`,
+/// `pid_alive_returns_false_for_overflow_pid`,
+/// `pid_alive_returns_true_for_current_pid`,
+/// `acquire_lock_reclaims_stale_pid`.
 pub fn pid_alive(pid: u32) -> bool {
+    // pid 0 → process-group semantics; pid > i32::MAX → negative pid_t
+    // (broadcast semantics).  Both are non-specific; guard before syscall.
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+
     #[cfg(unix)]
     {
-        // Guard: PID 0 targets the current process group and PID values above
-        // i32::MAX overflow to negative numbers when parsed by the shell `kill`
-        // binary (which reads its argument as a signed 32-bit integer on Linux).
-        // A negative argument to `kill -0` signals a process group, not an
-        // individual process, so it may spuriously succeed. Neither 0 nor any
-        // value > i32::MAX can represent a real user process on any supported
-        // platform, so we short-circuit here without calling `kill`.
-        if pid == 0 || pid > i32::MAX as u32 {
-            return false;
+        // SAFETY: kill(2) is async-signal-safe; signal 0 is liveness-only.
+        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if rc == 0 {
+            return true; // process exists
         }
-        std::process::Command::new("kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        // ESRCH → no such process; EPERM → exists but no permission → alive.
+        err != libc::ESRCH
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
         false
     }
 }
@@ -329,27 +320,34 @@ mod tests {
         );
     }
 
-    /// Why: out-of-range PIDs (0 and values > i32::MAX) must return `false`
-    /// WITHOUT calling `kill`, because the shell `kill` binary parses its PID
-    /// argument as a signed 32-bit integer on Linux. Passing u32::MAX
-    /// (4,294,967,295) overflows to -1, and `kill -0 -1` broadcasts to all
-    /// signable processes — always succeeding and falsely reporting the PID as
-    /// alive. PID 0 has similar process-group semantics. The guard in
-    /// `pid_alive` rejects both without invoking `kill`.
-    /// What: asserts `pid_alive(u32::MAX)` and `pid_alive(0)` both return
-    /// `false` deterministically, independent of what processes are running.
-    /// Test: itself (no `kill` call for either value — pure guard logic).
+    /// Why: `pid == 0` has process-group semantics on Linux; the guard in
+    /// `pid_alive` must short-circuit before any syscall.
+    /// What: asserts `pid_alive(0)` is `false`.
+    /// Test: itself.
     #[cfg(unix)]
     #[test]
     fn pid_alive_returns_false_for_pid_zero() {
-        // u32::MAX (4,294,967,295): would overflow to -1 on Linux shell `kill`,
-        // causing kill(-1, 0) to broadcast — must be rejected by the guard.
+        assert!(
+            !pid_alive(0),
+            "pid 0 has process-group semantics, not single-process"
+        );
+    }
+
+    /// Why: `pid > i32::MAX` overflows `pid_t` and becomes negative, giving
+    /// `kill(-1, 0)` broadcast semantics on Linux (false positive).
+    /// What: asserts both `u32::MAX` and `i32::MAX as u32 + 1` return `false`.
+    /// Test: itself.
+    #[cfg(unix)]
+    #[test]
+    fn pid_alive_returns_false_for_overflow_pid() {
         assert!(
             !pid_alive(u32::MAX),
-            "PID u32::MAX cannot be alive on any real system"
+            "u32::MAX overflows i32 → broadcast semantics"
         );
-        // PID 0: process-group sentinel, never a real user process.
-        assert!(!pid_alive(0), "PID 0 is never a live user process");
+        assert!(
+            !pid_alive(i32::MAX as u32 + 1),
+            "first value that overflows i32"
+        );
     }
 
     // ── acquire_lock ───────────────────────────────────────────────────────
@@ -375,18 +373,34 @@ mod tests {
         );
     }
 
-    /// Why: a stale lock (dead PID) must be reclaimed so the daemon can
-    /// always start after a crash or SIGKILL, without operator intervention.
-    /// What: writes a lock file containing PID u32::MAX (guaranteed dead),
-    /// calls `acquire_lock`, and asserts it succeeds and overwrites with
-    /// the current PID.
-    /// Test: itself (real fs, no daemon).
+    /// Why: stale locks must be reclaimed after a crash so the daemon can
+    /// restart. The old test used `u32::MAX` which overflows `pid_t` on Linux
+    /// (broadcast semantics → false-positive "alive"). We now spawn a real
+    /// child, reap it, and use its guaranteed-dead PID as the stale value.
+    /// What: spawns+reaps `true`, writes its PID as a stale lock, calls
+    /// `acquire_lock`, asserts success and that the PID was overwritten.
+    /// Test: itself (real fs, spawns `true`).
+    #[cfg(unix)]
     #[test]
     fn acquire_lock_reclaims_stale_pid() {
         let tmp = tempdir().expect("tempdir");
         let path = tmp.path().join("daemon.lock");
-        // Write a guaranteed-dead PID.
-        std::fs::write(&path, format!("{}\n", u32::MAX)).expect("write stale pid");
+
+        // Spawn a real child that exits immediately, then reap it so its PID
+        // is guaranteed dead by the time we call pid_alive.
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn 'true' must succeed on any Unix CI machine");
+        let dead_pid = child.id();
+        child.wait().expect("wait must succeed");
+
+        // The PID must now be dead.
+        assert!(
+            !pid_alive(dead_pid),
+            "pid_alive({dead_pid}) must be false after the child was reaped"
+        );
+
+        std::fs::write(&path, format!("{dead_pid}\n")).expect("write stale pid");
         let _guard = acquire_lock(&path).expect("acquire_lock must reclaim stale PID");
         let written = read_lock_pid(&path)
             .expect("read after reclaim must not error")
@@ -396,6 +410,22 @@ mod tests {
             std::process::id(),
             "lock file must be overwritten with current PID after stale reclaim"
         );
+    }
+
+    /// Why: non-Unix platforms always return false from `pid_alive` so any
+    /// lock is treated as stale. What: writes a PID, asserts reclaim succeeds.
+    /// Test: itself (non-Unix only).
+    #[cfg(not(unix))]
+    #[test]
+    fn acquire_lock_reclaims_stale_pid() {
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("daemon.lock");
+        std::fs::write(&path, "99999\n").expect("write stale pid");
+        let _guard = acquire_lock(&path).expect("acquire_lock must reclaim stale PID on non-Unix");
+        let written = read_lock_pid(&path)
+            .expect("read after reclaim must not error")
+            .expect("lock file must contain a PID after reclaim");
+        assert_eq!(written, std::process::id());
     }
 
     /// Why: if another live process holds the lock (e.g. the launchd-managed
