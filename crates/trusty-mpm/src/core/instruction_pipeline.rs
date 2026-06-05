@@ -72,6 +72,22 @@ pub fn assemble_system_prompt() -> String {
     [PM_INSTRUCTIONS, WORKFLOW, AGENT_DELEGATION, BASE_PM].join("\n\n---\n\n")
 }
 
+/// Write the assembled system prompt to an explicit path.
+///
+/// Why: `tm install` must be testable against a temp directory rather than the
+/// real `~/.trusty-mpm`; extracting the path-parameterised write here lets both
+/// the production path ([`install_system_prompt`]) and the install handler use
+/// the same assembly logic without touching the real home during unit tests.
+/// What: creates parent directories if absent, then writes
+/// [`assemble_system_prompt`] to `dest`.
+/// Test: `install_system_prompt_to_writes_assembled`, `install_writes_assembled_prompt`.
+pub fn install_system_prompt_to(dest: &std::path::Path) -> std::io::Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(dest, assemble_system_prompt())
+}
+
 /// Write the assembled system prompt to the trusty-mpm framework directory.
 ///
 /// Why: `tm launch` passes `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md`
@@ -79,15 +95,14 @@ pub fn assemble_system_prompt() -> String {
 /// bundled assets so it always reflects the current trusty-mpm build.
 /// What: creates `~/.trusty-mpm/framework/instructions/` if needed and writes
 /// the output of [`assemble_system_prompt`] to `INSTRUCTIONS.md`, returning the
-/// path it wrote.
+/// path it wrote. Delegates the write to [`install_system_prompt_to`].
 /// Test: `install_system_prompt_writes_file`.
 pub fn install_system_prompt() -> std::io::Result<std::path::PathBuf> {
     let home = dirs::home_dir()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no home dir"))?;
     let out_dir = home.join(".trusty-mpm/framework/instructions");
-    std::fs::create_dir_all(&out_dir)?;
     let out_path = out_dir.join("INSTRUCTIONS.md");
-    std::fs::write(&out_path, assemble_system_prompt())?;
+    install_system_prompt_to(&out_path)?;
     Ok(out_path)
 }
 
@@ -427,6 +442,43 @@ mod tests {
         let on_disk = fs::read_to_string(&out).unwrap();
         assert_eq!(on_disk, assemble_system_prompt());
         assert!(!on_disk.is_empty());
+    }
+
+    #[test]
+    fn install_system_prompt_to_writes_assembled() {
+        // Why: `tm install` calls `install_system_prompt_to` pointing at the
+        // framework path so the assembled prompt (not the 4-line stub) is on
+        // disk immediately after install — regression for issue #383.
+        // What: asserts the file written by the path-parameterised helper
+        // equals `assemble_system_prompt()` and contains key PM headings.
+        // Test: call the helper against a temp path; read back and verify content.
+        let tmp = TempDir::new().unwrap();
+        let dest = tmp.path().join("instructions").join("INSTRUCTIONS.md");
+        install_system_prompt_to(&dest).expect("write succeeds");
+        assert!(
+            dest.exists(),
+            "INSTRUCTIONS.md must exist after install_system_prompt_to"
+        );
+        let on_disk = fs::read_to_string(&dest).unwrap();
+        assert_eq!(
+            on_disk,
+            assemble_system_prompt(),
+            "content must equal assembled prompt"
+        );
+        // The 4-line stub must NOT be present (regression guard for issue #383).
+        assert!(
+            !on_disk.trim().eq("# trusty-mpm Framework Instructions\n\nThis Claude Code instance is managed by trusty-mpm.\nDaemon endpoint: ${TRUSTY_MPM_URL:-http://localhost:7799}"),
+            "stub content must not be written — full assembled prompt required"
+        );
+        // Real PM sections must be present.
+        assert!(
+            on_disk.contains("# PM Agent -- Claude MPM"),
+            "PM_INSTRUCTIONS section must be present"
+        );
+        assert!(
+            on_disk.contains("# BASE_PM Framework Floor"),
+            "BASE_PM floor must be present"
+        );
     }
 
     #[test]

@@ -1011,17 +1011,16 @@ fn telegram_stop() -> anyhow::Result<()> {
 /// Why: a fresh machine has no `~/.trusty-mpm/framework/`; `trusty-mpm install`
 /// writes the compile-time-embedded artifacts (optimizer policy, framework
 /// instructions, placeholder agent/skill) so the daemon has a working policy
-/// and launchers have instructions to point sessions at. It also installs
-/// the MPM `PreToolUse` / `PostToolUse` / `Stop` hooks into every Claude
-/// Code settings file on the machine so the daemon receives the lifecycle
-/// events that drive its circuit breaker, audit log, and dashboard. All
-/// edits are idempotent.
-/// What: resolves [`FrameworkPaths::default`] and delegates to
-/// [`install_to`], deploys composed agents, then calls
-/// [`install_claude_hooks`] to merge the MPM hook block into every
-/// discovered settings file.
+/// and launchers have instructions to point sessions at. It also assembles
+/// the full PM system prompt (overwriting the bundle stub — fixes #383),
+/// deploys composed agents and skills, and wires MPM lifecycle hooks into
+/// every Claude Code settings file. All edits are idempotent.
+/// What: resolves [`FrameworkPaths::default`], calls [`install_to`] then
+/// [`install_system_prompt_to`] to write the real assembled PM prompt,
+/// deploys agents and skills, then calls [`install_claude_hooks`].
 /// Test: `install_writes_all_artifacts`, `install_skips_existing_without_force`,
-/// `install_claude_hooks_is_idempotent`.
+/// `install_claude_hooks_is_idempotent`,
+/// `instruction_pipeline::install_system_prompt_to_writes_assembled`.
 fn install(force: bool) -> anyhow::Result<()> {
     let paths = trusty_mpm::core::paths::FrameworkPaths::default();
     let report = install_to(&paths, force)?;
@@ -1032,6 +1031,15 @@ fn install(force: bool) -> anyhow::Result<()> {
     for line in &report {
         println!("  {line}");
     }
+
+    // Overwrite the bundle stub with the fully assembled PM prompt (#383).
+    match trusty_mpm::core::instruction_pipeline::install_system_prompt_to(
+        &paths.framework_instructions_path(),
+    ) {
+        Ok(()) => println!("  \u{2713} instructions/INSTRUCTIONS.md (assembled)"),
+        Err(e) => eprintln!("warning: failed to assemble system prompt: {e:#}"),
+    }
+
     println!(
         "Composing agents into {}",
         paths.claude_agents_dir().display()
@@ -4057,33 +4065,24 @@ mod tests {
     #[test]
     fn install_then_deploy_deploys_skills() {
         // Regression for #386: a fresh install must populate `.claude/skills/`
-        // from the bundled skill sources, not leave it empty. Installing the
-        // bundle writes the skill source files; deploying them must land the
-        // bundled skill in the Claude skills dir and report a deployed line.
+        // from the bundled skill sources, not leave it empty.
         let dir = tempfile::tempdir().unwrap();
         let paths = trusty_mpm::core::paths::FrameworkPaths::under(dir.path());
         install_to(&paths, false).unwrap();
-
         let result = trusty_mpm::core::skill_deployer::deploy_skills(
             &paths.skill_source_dir(),
             &paths.claude_skills_dir(),
         )
         .unwrap();
-
-        // The single bundled skill deploys onto a fresh target.
         assert_eq!(result.deployed, vec!["example-skill.md".to_string()]);
         assert!(result.skipped.is_empty());
         assert!(result.unchanged.is_empty());
-
-        // The skill file actually lands in `.claude/skills/`.
         let deployed = paths.claude_skills_dir().join("example-skill.md");
         assert!(
             deployed.is_file(),
-            "expected deployed skill at {}",
+            "expected skill at {}",
             deployed.display()
         );
-
-        // The report formatter renders a deployed line for the skill.
         let lines = skill_report_lines(&result);
         assert!(
             lines.iter().any(|l| l.contains("example-skill.md")),
