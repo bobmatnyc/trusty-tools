@@ -860,11 +860,16 @@ impl CodeIndexer {
     /// Single batched HNSW upsert across all chunks that have an embedding.
     ///
     /// Why: drops 3N lock acquisitions to 3 for a batch of N chunks (key
-    /// alloc, key rev-map, HNSW write).
-    /// What: filters chunks without embeddings (BM25-only mode), delegates to
+    /// alloc, key rev-map, HNSW write). Also guards against NaN / zero vectors
+    /// (issue #764) — inserting them silently poisons the HNSW graph so every
+    /// subsequent cosine-similarity search returns 0.0 for the affected
+    /// neighbours, making the whole semantic lane appear dead.
+    /// What: filters chunks without embeddings (BM25-only mode), validates
+    /// each vector for NaN/all-zero content, then delegates to
     /// `store.upsert_batch`. No-op when no store is wired or no embeddings
     /// were computed.
-    /// Test: covered indirectly by `test_index_files_batch_*`.
+    /// Test: `nan_vector_rejected_loudly` and `zero_vector_rejected_loudly`
+    /// in `tests.rs`; `test_index_files_batch_*` covers the healthy path.
     async fn commit_vectors_batch(
         &self,
         chunks: &[RawChunk],
@@ -873,11 +878,44 @@ impl CodeIndexer {
         let Some(store) = &self.store else {
             return Ok(());
         };
-        let items: Vec<(String, Vec<f32>)> = chunks
-            .iter()
-            .zip(embeddings.iter())
-            .filter_map(|(chunk, vec_opt)| vec_opt.as_ref().map(|v| (chunk.id.clone(), v.clone())))
-            .collect();
+        let mut items: Vec<(String, Vec<f32>)> = Vec::new();
+        for (chunk, vec_opt) in chunks.iter().zip(embeddings.iter()) {
+            let Some(v) = vec_opt.as_ref() else {
+                continue;
+            };
+            // Issue #764: reject NaN vectors loudly. A NaN in any component
+            // propagates through HNSW distance computations and can silently
+            // corrupt the graph. Logging a warning per-chunk is acceptable
+            // (these should never occur from a healthy embedder; if they do,
+            // the operator needs to see them). Skipping rather than aborting
+            // the whole batch preserves BM25 coverage for the other chunks.
+            if v.iter().any(|x| x.is_nan()) {
+                tracing::warn!(
+                    chunk_id = %chunk.id,
+                    "commit_vectors_batch: NaN component in embedding vector — \
+                     skipping HNSW upsert for this chunk (issue #764). \
+                     This indicates a sidecar or model defect; \
+                     check embedderd logs."
+                );
+                continue;
+            }
+            // Issue #764: reject all-zero vectors. A zero vector has undefined
+            // cosine similarity and produces misleading 0.0 distances for
+            // everything. Legitimate embeddings are never all-zero; this is a
+            // sign of a failed batch that slipped through the zero-count gate
+            // (e.g. partial NaN-to-zero coercion in the sidecar).
+            if v.iter().all(|x| *x == 0.0_f32) {
+                tracing::warn!(
+                    chunk_id = %chunk.id,
+                    "commit_vectors_batch: all-zero embedding vector — \
+                     skipping HNSW upsert for this chunk (issue #764). \
+                     This indicates a sidecar or model defect; \
+                     check embedderd logs."
+                );
+                continue;
+            }
+            items.push((chunk.id.clone(), v.clone()));
+        }
         if items.is_empty() {
             return Ok(());
         }

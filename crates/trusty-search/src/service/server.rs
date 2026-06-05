@@ -278,6 +278,28 @@ pub struct SearchAppState {
     /// version available. Populated by a `tokio::spawn` in `start.rs`.
     /// Test: indirectly by the `/health` endpoint tests in this module.
     pub update_available: Arc<std::sync::Mutex<Option<String>>>,
+    /// Per-index reindex quarantine registry (issue #764).
+    ///
+    /// Why: a repeatedly-failing index (e.g. a zero-vector rollback loop on a
+    /// temp-dir apex index) retried indefinitely and re-stalled the sidecar.
+    /// The quarantine backs off exponentially after N consecutive failures so
+    /// the operator is alerted and the retry storm stops automatically.
+    /// What: `ReindexQuarantine` tracks consecutive failure counts and
+    /// quarantine deadlines; `spawn_reindex_with_cleanup` gates background
+    /// retries through `quarantine.is_quarantined()`.
+    /// Test: quarantine unit tests in `reindex/quarantine.rs`.
+    pub quarantine: crate::service::reindex::ReindexQuarantine,
+    /// Number of indexes that failed to restore during warm-boot (issue #764).
+    ///
+    /// Why: the daemon previously completed warm-boot silently even when every
+    /// index failed to open (TCC denial, redb-format mismatch). Operators saw
+    /// an empty index list with no indication that anything was wrong. This
+    /// counter makes the failure loud: `/health` surfaces
+    /// `warmboot_failed_indexes > 0` so the dashboard and monitoring can alert.
+    /// What: set by `restore_indexes` in `start.rs`; read by the health handler.
+    /// A value of `0` is the healthy steady state.
+    /// Test: `health_includes_warmboot_failed_indexes` below.
+    pub warmboot_failed_indexes: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl SearchAppState {
@@ -324,6 +346,8 @@ impl SearchAppState {
             metrics: None,
             embedderd_pid_slot: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             update_available: Arc::new(std::sync::Mutex::new(None)),
+            quarantine: crate::service::reindex::ReindexQuarantine::new(),
+            warmboot_failed_indexes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -688,6 +712,25 @@ struct HealthResponse {
     /// across all warm-boot phases since the daemon started.
     /// Test: `health_includes_warmboot_leaked_probe_threads` below.
     warmboot_leaked_probe_threads: usize,
+    /// Number of indexes that failed to restore during warm-boot (issue #764).
+    ///
+    /// Why: the daemon previously completed warm-boot silently even when every
+    /// index failed to open. Operators saw an empty index list with no indication
+    /// of any problem. Surfacing the failure count here makes the condition loud
+    /// so monitoring can alert when `warmboot_failed_indexes > 0`.
+    /// What: mirrors `state.warmboot_failed_indexes` (AtomicUsize set by
+    /// `restore_indexes` in `start.rs`). Zero is the healthy steady state.
+    /// Test: `health_includes_warmboot_failed_indexes` below.
+    warmboot_failed_indexes: usize,
+    /// Number of indexes currently quarantined by the reindex retry guard
+    /// (issue #764).
+    ///
+    /// Why: a quarantined index silently refuses background reindex attempts
+    /// until the operator resolves the root cause. Surfacing the count here
+    /// lets operators detect the condition without polling every index status.
+    /// What: mirrors `state.quarantine.quarantined_count()`. Zero is healthy.
+    /// Test: `health_includes_quarantined_index_count` below.
+    quarantined_index_count: usize,
     /// Whether at least one chat provider (OpenRouter or a verified local model)
     /// is actually available on this daemon instance (issue #781).
     ///
@@ -1183,6 +1226,17 @@ async fn health_handler(State(state): State<Arc<SearchAppState>>) -> Json<Health
         // due to a warm-boot deadline timeout. Zero on healthy machines; >0
         // indicates TCC-blocked external volumes during this daemon's lifetime.
         warmboot_leaked_probe_threads: crate::service::warm_boot::leaked_probe_thread_count(),
+        // Issue #764: fail-loud warm-boot — surface the count of indexes that
+        // failed to restore. Zero is the healthy steady state; >0 means the
+        // daemon is serving fewer indexes than were registered, which operators
+        // must investigate (TCC denial, redb-format mismatch, corrupt corpus).
+        warmboot_failed_indexes: state
+            .warmboot_failed_indexes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        // Issue #764: reindex quarantine — surface the count of currently
+        // quarantined indexes. Zero is healthy; >0 means at least one index
+        // had repeated reindex failures and is now in back-off.
+        quarantined_index_count: state.quarantine.quarantined_count(),
         // Issue #781: `chat_available` reflects ACTUAL availability.
         // `LocalModelConfig::default()` has `enabled: true` (Ollama), so using
         // `local_model.enabled` alone was always true even when Ollama is not
@@ -3607,6 +3661,36 @@ async fn reindex_handler(
     if let Some(Json(req)) = body {
         force = req.force.unwrap_or(false);
         is_interactive = !req.background.unwrap_or(false);
+
+        // Issue #764: quarantine gate — block BACKGROUND reindex requests when
+        // the index is in back-off after repeated consecutive failures.
+        // Interactive (user-initiated) requests always pass through: the
+        // operator is explicitly requesting a retry and `record_success` will
+        // clear the quarantine once the run completes successfully.
+        if !is_interactive && state.quarantine.is_quarantined(&index_id) {
+            let failures = state.quarantine.failure_count(&index_id);
+            tracing::warn!(
+                index_id = %index_id.0,
+                consecutive_failures = failures,
+                "reindex_handler: refusing background reindex — index quarantined \
+                 after {} consecutive failure(s) (issue #764). \
+                 Issue a manual reindex (POST /indexes/{}/reindex, interactive) \
+                 to force a retry.",
+                failures,
+                index_id.0,
+            );
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "index quarantined after repeated reindex failures",
+                    "index_id": index_id.0,
+                    "consecutive_failures": failures,
+                    "hint": "resolve the root cause and issue a manual \
+                             POST /indexes/{id}/reindex (without background:true) \
+                             to clear the quarantine (issue #764)",
+                })),
+            ));
+        }
         if let Some(new_root) = req.root_path {
             // Issue #63: a caller-supplied override must pass the same
             // absolute-existing-directory check as `POST /indexes`. Without
@@ -3689,6 +3773,9 @@ async fn reindex_handler(
         // request body maps to `priority=false` (background semaphore, never
         // blocks interactive requests). Default is interactive (priority=true).
         is_interactive,
+        // Issue #764: wire the quarantine so the task records failures and
+        // successes, keeping the per-index back-off state accurate.
+        Some(state.quarantine.clone()),
     );
 
     Ok(Json(serde_json::json!({

@@ -14,8 +14,11 @@
 //! Test: see `crates/trusty-search-service/src/reindex.rs#tests`.
 
 mod hash_cache;
+pub mod quarantine;
 mod staging;
 mod validate;
+
+pub use quarantine::ReindexQuarantine;
 
 use crate::core::indexer::{CommitTimings, ParsedBatch};
 use crate::core::memguard::{current_rss_mb, current_rss_mb_for_pid, index_memory_limit_mb};
@@ -323,7 +326,7 @@ impl Default for ReindexProgress {
 /// `None` and `priority=true`.
 /// Test: covered indirectly by the integration tests via `reindex_handler`.
 pub fn spawn_reindex(handle: Arc<IndexHandle>, progress: Arc<ReindexProgress>, force: bool) {
-    spawn_reindex_with_cleanup(handle, progress, force, None, None, None, true);
+    spawn_reindex_with_cleanup(handle, progress, force, None, None, None, true, None);
 }
 
 /// Walk every configured subtree under `handle.root_path`, apply repo-config
@@ -1705,6 +1708,7 @@ impl Drop for ReindexTerminationGuard {
 /// concurrent interactive request. `spawn_reindex_with_cleanup` itself is
 /// side-effect-heavy (embedded tokio runtime); the semaphore routing logic is
 /// factored into `reindex_semaphore_for` for unit testing.
+#[allow(clippy::too_many_arguments)] // 8 args: adding quarantine (issue #764) is the last arg ever needed here
 pub fn spawn_reindex_with_cleanup(
     handle: Arc<IndexHandle>,
     progress: Arc<ReindexProgress>,
@@ -1713,6 +1717,11 @@ pub fn spawn_reindex_with_cleanup(
     aborted_map: Option<Arc<DashMap<IndexId, Instant>>>,
     embedderd_pid_slot: Option<Arc<AtomicU32>>,
     priority: bool,
+    // Issue #764: optional quarantine registry. When `Some`, the task calls
+    // `record_failure` on failure and `record_success` on a clean completion
+    // so the quarantine counter stays accurate across retries. Pass
+    // `Some(state.quarantine.clone())` from the HTTP handler.
+    quarantine: Option<quarantine::ReindexQuarantine>,
 ) {
     use std::sync::atomic::Ordering as AtomicOrd;
     // Track background queue depth so /health can expose it.
@@ -2251,6 +2260,11 @@ pub fn spawn_reindex_with_cleanup(
             if let Some(h) = embedderd_poller_handle {
                 let _ = h.await;
             }
+            // Issue #764: record failure in the quarantine registry so the
+            // next background reindex attempt backs off.
+            if let Some(ref q) = quarantine {
+                q.record_failure(&index_id);
+            }
             schedule_progress_cleanup(cleanup_map, cleanup_id);
             return;
         }
@@ -2484,6 +2498,13 @@ pub fn spawn_reindex_with_cleanup(
         // The terminal event has been emitted — disarm the guard so its
         // `Drop` impl does not emit a spurious second error frame.
         term_guard.disarm();
+
+        // Issue #764: record success in the quarantine registry so consecutive
+        // failure counters are reset — a successful reindex proves the index
+        // is healthy again.
+        if let Some(ref q) = quarantine {
+            q.record_success(&index_id);
+        }
 
         // Issue #112: refresh the per-index context embedding from the
         // root-level metadata files. Best-effort — failure here is logged

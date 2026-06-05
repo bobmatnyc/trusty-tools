@@ -276,6 +276,44 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
 
     let total = state.registry.list().len();
     tracing::info!("warm-boot: complete — {total} total index(es) registered (legacy + colocated)");
+
+    // Issue #764: fail-loud warm-boot — tally total skipped/failed indexes and
+    // store the count on AppState so `/health` can surface it without operators
+    // having to tail logs. A non-zero value means the daemon is serving fewer
+    // indexes than were registered on disk; operators should investigate
+    // (TCC denial on an external volume, redb-format mismatch, corrupt corpus).
+    //
+    // "Skipped" in both phases covers: timeout, TCC denial, missing root, and
+    // restore error. All of these leave the index unregistered on this boot.
+    // We re-derive the counts from the registry: any index that was in
+    // `indexes.toml` (or discovered colocated) but is NOT in the live registry
+    // after warm-boot is a failure. Rather than track exact per-phase counts
+    // (which would require plumbing through the counters), we read the final
+    // registry size and compare to the legacy+colocated totals we already logged.
+    // The `seen_ids` set was built from legacy entries (and colocated entries were
+    // discovered separately); the registry has whatever survived. Any gap is a
+    // warm-boot failure.
+    let registered_ids: std::collections::HashSet<String> =
+        state.registry.list().into_iter().map(|id| id.0).collect();
+    let failed_count: usize = seen_ids
+        .iter()
+        .filter(|id| !registered_ids.contains(*id))
+        .count();
+    if failed_count > 0 {
+        state
+            .warmboot_failed_indexes
+            .store(failed_count, std::sync::atomic::Ordering::Relaxed);
+        tracing::error!(
+            failed_count,
+            registered = total,
+            "warm-boot FAIL-LOUD: {} index(es) from indexes.toml did NOT load on this boot \
+             (TCC denial, redb-format mismatch, or corrupt corpus). \
+             These indexes are MISSING from /health and search results. \
+             Run `trusty-search health` or check /health?warmboot_failed_indexes \
+             for the count, then resolve the root cause and restart (issue #764).",
+            failed_count,
+        );
+    }
 }
 
 /// Attempt to locate a moved project root for a colocated index (issue #484).
