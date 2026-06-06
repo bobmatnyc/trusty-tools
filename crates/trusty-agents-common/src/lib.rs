@@ -22,6 +22,33 @@
 //! Test: Compile-tested transitively via `crates/cto-assistant` (downstream
 //!       agent) and `crates/trusty-agents` (host).
 
+/// Portable perf value types: `TokenUsage`, `PhaseRecord`, `PerfTotals`, `PerfRecord`.
+///
+/// Why: Moved to trusty-agents-common in Wave 2 (issue #867, refs #830/#832) so
+///      external crates and the runner seam can reference `TokenUsage` (used in
+///      `AgentOutput`) without depending on the full `trusty-agents` binary crate.
+///      `PerfCollector` (stateful, tokio-dependent) stays in `trusty-agents::perf`.
+/// What: The four portable plain-data types for per-phase token counting,
+///       cost tracking, and full run record serialisation.
+/// Test: Unit tests in `perf::tests` plus compile-tested via `trusty-agents`.
+pub mod perf;
+
+/// AgentRunner DI seam: `HistoryMessage`, `RunContext`, `AgentOutput`, and
+/// the `AgentRunner` async trait.
+///
+/// Why: Moved to trusty-agents-common in Wave 2 (issue #867, refs #830/#832)
+///      so external crates that need to implement or test against `AgentRunner`
+///      can depend on this lightweight crate without pulling in the full
+///      `trusty-agents` binary crate.
+/// What: The runner seam — once `TokenUsage` (perf) is here, the only
+///       remaining dependencies are `std`, `anyhow`, `async-trait`, and
+///       `serde`. `HistoryMessage` is the portable IPC wire form
+///       (`{role, content}` + serde); its `into_typed()` conversion
+///       (requiring `async-openai`) stays in `trusty-agents::session`.
+/// Test: `test_run_with_history_forwards_ctx` in `runner::tests` (bug #122
+///       regression guard); compile-tested via `trusty-agents`.
+pub mod runner;
+
 /// Harness adapter framework: `HarnessAdapter` trait, value types, pattern
 /// helpers, `AdapterRegistry`, and 7 concrete adapters.
 ///

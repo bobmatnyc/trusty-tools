@@ -22,3 +22,5 @@ regex = { workspace = true }
 [dev-dependencies]
 # session_registry tests use tempfile for isolated state-dir creation.
 tempfile = { workspace = true }
+# runner::tests uses #[tokio::test] for the async AgentRunner default-impl test.
+tokio = { workspace = true }
