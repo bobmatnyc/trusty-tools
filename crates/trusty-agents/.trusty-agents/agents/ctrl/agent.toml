@@ -1,0 +1,30 @@
+[agent]
+name = "ctrl"
+role = "controller"
+# "Qwopus" = qwen3:30b — community nickname for the Opus-class local model.
+# Already installed locally; routes through OllamaAdapter at http://localhost:11434.
+model = "ollama/qwen3:30b"
+description = "ctrl — trusty-agents coordination layer (assistant + project coordinator)"
+
+[llm]
+temperature = 0.5
+# #295: ctrl is conversational/coordination — short responses are correct.
+# Bumped from 1024 → 2048 for qwen3:30b which tends toward longer prose.
+max_tokens = 2048
+use_anthropic_direct = false
+# Conversational mode (#feature-A): block markdown headers and divider rules
+# from appearing mid-response so replies stay in plain prose.
+stop_sequences = ["\n##", "\n* * *"]
+# Note: "\n---\n" intentionally excluded — qwen3 uses HR dividers naturally in
+# conversational output; including it caused mid-sentence truncation (#eval-qwen3)
+
+# #420: ctrl is the interactive user-facing coordination layer. Use Lite rather
+# than Full so it retains natural prose grammar — Full's fragment style reads
+# as terse/curt in live conversation; Lite just strips preamble and filler.
+[compress]
+enabled = true
+token_budget = 32000
+compress_task = false
+output_style = "lite"
+
+# #482: The system prompt body now lives in persona.md (MD-package format).

@@ -1,0 +1,32 @@
+[package]
+name = "trusty-agents-ui"
+version = "0.16.1"
+edition = "2021"
+description = "Tauri 2 desktop chat interface for trusty-agents"
+
+[[bin]]
+name = "trusty-agents-ui"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+tracing = "0.1"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+# Mark this crate as its own (empty) workspace so the parent workspace at
+# /Users/masa/Projects/trusty-tools/crates/trusty-agents/Cargo.toml doesn't try to claim it. The Tauri
+# crate intentionally lives outside the main workspace because its tauri/wry
+# deps don't share the parent's edition / target dir layout. (#364)
+[workspace]

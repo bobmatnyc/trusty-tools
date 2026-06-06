@@ -1,0 +1,36 @@
+# Skill sources loaded in priority order (higher priority number wins on name
+# collision). The bundled `<config_dir>/skills` directory is always appended
+# last as a safety net.
+#
+# Source types:
+#   - local      : a directory on disk (relative to project root, or absolute,
+#                  may use ~ for the user's home dir).
+#   - remote_git : a git repo cloned to ~/.trusty-agents/skills/cache/<name>/. The
+#                  cache is updated on every startup via `git fetch` +
+#                  `git reset --hard origin/<branch>`. Set `approved = true`
+#                  for any external URL you want active (otherwise startup
+#                  emits a WARN and the source is skipped).
+
+[[sources]]
+type = "local"
+path = ".trusty-agents/skills"
+priority = 10
+enabled = true
+
+[[sources]]
+type = "local"
+path = "~/.trusty-agents/skills"
+priority = 5
+enabled = true
+
+# Example remote-git source (disabled by default — copy and adapt to add your
+# own curated skill library).
+# [[sources]]
+# type = "remote_git"
+# name = "claude-mpm-agents"
+# url = "https://github.com/bobmatnyc/claude-mpm-agents"
+# branch = "main"
+# skills_subdir = "skills/"
+# priority = 3
+# approved = true
+# enabled = false

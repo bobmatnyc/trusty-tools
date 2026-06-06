@@ -2,10 +2,11 @@
 # Format: <relative/path><TAB><budget>  (budget = frozen max line count).
 # Ratchet: budgets may only DECREASE; when a file drops <= 500 remove it.
 # Regenerate with: scripts/check_line_cap.sh --update  (use --seed only to bootstrap).
-crates/open-mpm/src/ticketing/actions.rs	503
-crates/open-mpm/src/tm/manager.rs	570
-crates/open-mpm/src/tools/memory/tests.rs	605
-crates/open-mpm/src/tools/native_memory/tests.rs	507
+crates/trusty-agents/src/agents/claude_code_runner/run.rs	501
+crates/trusty-agents/src/ticketing/actions.rs	506
+crates/trusty-agents/src/tm/manager.rs	570
+crates/trusty-agents/src/tools/memory/tests.rs	605
+crates/trusty-agents/src/tools/native_memory/tests.rs	507
 crates/trusty-analyze/src/core/complexity_ts.rs	883
 crates/trusty-analyze/src/core/explain.rs	794
 crates/trusty-analyze/src/core/review.rs	787

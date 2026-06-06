@@ -295,7 +295,7 @@ let person = directory_service.find_by_email("alice@example.com")?;
 let org_chart = directory_service.org_chart(&person.id)?;
 ```
 
-### With open-mpm
+### With trusty-agents
 
 Orchestrator can dispatch directory lookup tasks:
 

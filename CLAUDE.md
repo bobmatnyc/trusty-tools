@@ -25,7 +25,7 @@ dance for cross-crate development. The authoritative crate list is the
 `crates/` with a `Cargo.toml` is a member.
 
 Key consumers of the shared libraries:
-- **open-mpm** — MPM orchestration platform (lives in `crates/open-mpm`)
+- **trusty-agents** — agent orchestration platform (lives in `crates/trusty-agents`)
 - **trusty-search** — hybrid code search daemon + MCP server
 - **trusty-memory** — MCP frontend over the memory palace (storage lives in
   `trusty-common`'s `memory-core` feature)
@@ -118,7 +118,7 @@ cargo test -p trusty-search --test baseline_trusty_tools -- --include-ignored --
 Most match (e.g. `crates/trusty-search/` → `-p trusty-search`) but note these exceptions:
 
 - `crates/trusty-git-analytics/` → `-p tga` (short name)
-- `crates/open-mpm/` → `-p open-mpm`
+- `crates/trusty-agents/` → `-p trusty-agents`
 
 Always verify the `name` field in the crate's `Cargo.toml` if you get a "package not found" error.
 
@@ -144,9 +144,9 @@ trusty-tools/               # workspace root
 │   ├── trusty-mpm-gui/      # MPM desktop GUI (Tauri, publish=false)
 │   ├── cto-assistant/       # CTO assistant CLI (publish=false)
 │   ├── trusty-git-analytics/ # developer productivity analytics (tga)
-│   ├── open-mpm/            # MPM orchestration platform (publish=false)
-│   ├── open-mpm-agent-api/  # open-mpm agent API types (publish=false)
-│   ├── open-mpm-local/      # open-mpm local execution (publish=false)
+│   ├── trusty-agents/       # agent orchestration platform (publish=false)
+│   ├── trusty-agents-common/ # trusty-agents common API types (publish=false)
+│   ├── trusty-agents-local/ # trusty-agents local execution (publish=false)
 │   └── trusty-code/         # per-project Claude-Code-compatible MPM orchestration harness (bin: tcode); Phase 0 scaffold; extraction tracked in #587
 └── .gitignore
 ```
@@ -176,7 +176,7 @@ docs/
 ├── trusty-memory/              # Follows the same three-subdir convention
 ├── trusty-common/              # (and all other published crates)
 ├── trusty-mpm/                 # covers all 8 trusty-mpm-* binaries
-├── open-mpm/
+├── trusty-agents/
 ├── trusty-analyze/
 └── trusty-git-analytics/
 ```
@@ -184,7 +184,7 @@ docs/
 **Purpose of each subdir**:
 - **`regression-testing/`** — Performance snapshots tied to releases. One `.md`
   file per measured release named `v{VERSION}-{YYYY-MM-DD}.md`; alternate-corpus
-  baselines (e.g., synthetic, open-mpm) live alongside; `current.md` is a
+  baselines (e.g., synthetic, trusty-agents) live alongside; `current.md` is a
   symlink to the latest snapshot.
 - **`research/`** — Investigation outcomes, audits, decision documents. Named
   `{topic}-{YYYY-MM-DD}.md` or `{topic}-decision-{YYYY-MM-DD}.md`.
@@ -253,16 +253,16 @@ oversized file or raise a budget unless you pass `--seed` (initial bootstrap) or
 
 Past violations (refactor tickets #170/#171/#172 are CLOSED and the splits have
 landed — all three former monoliths are now under the 500-line cap):
-- `crates/open-mpm/src/ctrl/mod.rs` — RESOLVED (#170). Split into focused
-  submodules under `crates/open-mpm/src/ctrl/` (`state`, `config`, `repl`,
+- `crates/trusty-agents/src/ctrl/mod.rs` — RESOLVED (#170). Split into focused
+  submodules under `crates/trusty-agents/src/ctrl/` (`state`, `config`, `repl`,
   `handlers`, `pm_task`, …); `mod.rs` is now a ~50-line re-export facade.
-- `crates/open-mpm/src/runtime/` — RESOLVED (#171). The original `runtime.rs`
+- `crates/trusty-agents/src/runtime/` — RESOLVED (#171). The original `runtime.rs`
   was split into a `runtime/` module; every submodule is now under the cap.
-- `crates/open-mpm/src/workflow/engine/` — RESOLVED (#172). The original
+- `crates/trusty-agents/src/workflow/engine/` — RESOLVED (#172). The original
   `engine.rs` was split into an `engine/` module; every submodule is now under
   the cap (largest is `engine/executor/run.rs` at ~485 lines).
 
-The largest remaining files in `open-mpm` (none tied to an open ticket) are
+The largest remaining files in `trusty-agents` (none tied to an open ticket) are
 `tools/memory/tests.rs` (~605) and `tm/manager.rs` (~570) — file a fresh refactor
 ticket before growing those further.
 
@@ -275,7 +275,7 @@ throughout.
 `axum-server` feature flag. Do not add axum as an unconditional dependency in
 any library crate. Enable it explicitly in crates that serve HTTP.
 
-🟡 **Rust editions** — `edition = "2024"` for `trusty-mpm`, `trusty-mpm-gui`, `open-mpm`, `open-mpm-agent-api`, and `open-mpm-local`
+🟡 **Rust editions** — `edition = "2024"` for `trusty-mpm`, `trusty-mpm-gui`, `trusty-agents`, `trusty-agents-common`, and `trusty-agents-local`
 (they use let-chains); `edition = "2021"` for all other crates. Check the crate
 `Cargo.toml` before assuming an edition.
 
@@ -469,7 +469,7 @@ Detailed implementation information for each crate lives in its own documentatio
 - **trusty-analyze** — see `crates/trusty-analyze/README.md` and `docs/trusty-analyze/` (licensed MIT, not Elastic-2.0)
 - **trusty-mpm** — see `crates/trusty-mpm/README.md` and `docs/trusty-mpm/` (unified platform: CLI binaries `tm`/`trusty-mpm`, daemon, MCP server, TUI, Telegram)
 - **trusty-mpm-gui** — see `crates/trusty-mpm-gui/README.md` (Tauri desktop GUI, publish=false)
-- **open-mpm** — see `crates/open-mpm/README.md` and `docs/open-mpm/`
+- **trusty-agents** — see `crates/trusty-agents/README.md` and `docs/trusty-agents/`
 - **trusty-git-analytics** — see `crates/trusty-git-analytics/README.md` and `docs/trusty-git-analytics/`
 
 For license details, check each crate's `Cargo.toml`: most are **Elastic License 2.0**, but `trusty-memory`, `trusty-analyze`, and a few others are **MIT**.
@@ -486,7 +486,7 @@ When the user (or any agent) refers to a crate by abbreviation, resolve it using
 | `tc` | trusty-common | `-p trusty-common` | `crates/trusty-common/` |
 | `ta` | trusty-analyze | `-p trusty-analyze` | `crates/trusty-analyze/` |
 | `mpm` | trusty-mpm | `-p trusty-mpm` | `crates/trusty-mpm/` |
-| `open-mpm` | open-mpm | `-p open-mpm` | `crates/open-mpm/` |
+| `tagent` | trusty-agents | `-p trusty-agents` | `crates/trusty-agents/` |
 | `tcode` | trusty-code | `-p trusty-code` | `crates/trusty-code/` |
 
 These abbreviations apply everywhere: ticket descriptions, build commands, references in conversation. Always expand before running `cargo` commands.
@@ -627,7 +627,7 @@ them. All patches must live in the root `Cargo.toml`.
 
 🔴 **Growing a file past 500 lines instead of splitting** — the compiler does not
 stop you, but continued feature additions to a 1,000+ line file make the module
-harder to review, reason about, and test. Split proactively. The open-mpm `ctrl/`,
+harder to review, reason about, and test. Split proactively. The trusty-agents `ctrl/`,
 `runtime/`, and `workflow/engine/` modules (#170, #171, #172) were the canonical
 examples of files that grew past the cap; all three have since been split into
 focused submodules and now serve as the worked examples of a clean split.
@@ -636,7 +636,7 @@ focused submodules and now serve as the worked examples of a clean split.
 `rustup update` and picking up a new nightly may introduce syntax that
 compiles locally but fails on CI. Prefer stable channel toolchains.
 
-🟢 **Edition mismatch** — `trusty-mpm`, `trusty-mpm-gui`, `open-mpm`, `open-mpm-agent-api`, and `open-mpm-local` use edition 2024;
+🟢 **Edition mismatch** — `trusty-mpm`, `trusty-mpm-gui`, `trusty-agents`, `trusty-agents-common`, and `trusty-agents-local` use edition 2024;
 all other crates use edition 2021. Let-chains (`if let … && let …`) only
 work in edition 2024. Do not copy let-chain patterns into edition-2021 crates.
 
@@ -653,4 +653,4 @@ PRs, issues, or commit messages that reference the former repo names.
 | `bobmatnyc/trusty-analyze` | `crates/trusty-analyze` |
 | `bobmatnyc/trusty-git-analytics` | `crates/trusty-git-analytics` |
 | `bobmatnyc/trusty-mpm` | `crates/trusty-mpm/` (unified crate) + `crates/trusty-mpm-gui/` |
-| `bobmatnyc/open-mpm` | `crates/open-mpm` |
+| `bobmatnyc/open-mpm` | `crates/trusty-agents` (renamed from `open-mpm` in #831) |

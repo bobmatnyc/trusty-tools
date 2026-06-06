@@ -6,15 +6,15 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "CTO assistant agent for open-mpm — provides HR, budget, and operational database tools."
+description = "CTO assistant agent for trusty-agents — provides HR, budget, and operational database tools."
 publish = false
 
 [dependencies]
-# Note: depends on `open-mpm-agent-api`, NOT `open-mpm` itself. Depending on
-# the host crate would create a cargo dependency cycle (open-mpm injects this
-# crate's AgentPlugin at startup, so open-mpm depends on cto-assistant). The
-# tiny agent-api crate exposes the stable trait surface to both sides.
-open-mpm-agent-api = { path = "../open-mpm-agent-api" }
+# Note: depends on `trusty-agents-common`, NOT `trusty-agents` itself. Depending on
+# the host crate would create a cargo dependency cycle (trusty-agents injects this
+# crate's AgentPlugin at startup, so trusty-agents depends on cto-assistant). The
+# tiny common crate exposes the stable trait surface to both sides.
+trusty-agents-common = { path = "../trusty-agents-common" }
 tc-services = { path = "../tc-services" }
 trusty-cto-db = { path = "../trusty-cto-db" }
 anyhow = { workspace = true }

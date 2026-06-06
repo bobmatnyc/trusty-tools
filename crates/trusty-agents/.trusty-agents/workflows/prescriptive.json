@@ -1,0 +1,68 @@
+{
+  "name": "prescriptive",
+  "description": "Research -> Plan -> Code (TDD) -> QA -> Observe",
+  "auto_push": {
+    "enabled": false,
+    "version_bump": "patch",
+    "commit_message_template": "feat(workflow): {{workflow}} build {{build}} \u2014 {{task_preview}}",
+    "push_remote": "origin",
+    "push_branch": "main"
+  },
+  "ticket_management": {
+    "enabled": false,
+    "repo": "bobmatnyc/trusty-tools",
+    "assignee": "bobmatnyc",
+    "milestone": "v0.5.0 \u2014 Intelligence & Docs",
+    "labels": [
+      "poc"
+    ],
+    "auto_relate": true,
+    "phase_comments": true,
+    "close_on_success": true
+  },
+  "phases": [
+    {
+      "name": "research",
+      "agent": "research-agent",
+      "model": "anthropic/claude-sonnet-4-6",
+      "ast_native": true,
+      "context_template": "## Research Task (YOUR JOB IS RESEARCH ONLY — DO NOT WRITE CODE)\nYour ONLY job is to produce a research JSON summary. Use web_search, fetch_url, and load_skill. Do NOT use write_file or create any source code files. Do NOT read out/ directories or any prior run artifacts.\n\nThe downstream plan-agent and code-agent will do ALL implementation from scratch — you just provide research findings.\n\n## Task\n{{task}}"
+    },
+    {
+      "name": "plan",
+      "agent": "plan-agent",
+      "model": "anthropic/claude-opus-4-6",
+      "ast_native": true,
+      "context_template": "Task: {{task}}\n\nResearch:\n{{research}}\n\nREMINDER: You MUST write `assignments.json` (relative path, in the output directory) via write_file BEFORE writing any stub files. Without assignments.json, the code phase runs as a single monolithic agent and fails quality gates on multi-file tasks. Decompose the work into topological waves \u2014 see the plan-agent system prompt for the exact schema."
+    },
+    {
+      "name": "code",
+      "agent": "engineer",
+      "model": "anthropic/claude-opus-4-6",
+      "ast_native": false,
+      "produces_files": true,
+      "context_template": "\u26a0\ufe0f  IMPORTANT \u2014 Write Location: You MUST write ALL files into {{out_dir}}.\nCreate your project directory inside {{out_dir}}, for example:\n  {{out_dir}}/table_formatter/src/...\n  {{out_dir}}/git_analyzer/src/...\nDo NOT write files to the current working directory or any path outside {{out_dir}}.\nUse absolute paths for all file writes, or run: cd {{out_dir}} as your first bash command.\n\nTask: {{task}}\n\nResearch:\n{{research}}\n\nPlan:\n{{plan}}"
+    },
+    {
+      "name": "qa",
+      "agent": "qa-agent",
+      "model": "anthropic/claude-sonnet-4-6",
+      "ast_native": false,
+      "skills": ["auto"],
+      "context_template": "Code was written under: {{out_dir}}\nDetected project root: {{project_dir}}\n\n## QA Steps \u2014 execute IN ORDER:\n\nSTEP 1 \u2014 Detect the project stack by inspecting {{project_dir}}:\n  - Cargo.toml          \u2192 Rust       \u2192 `cargo test`\n  - package.json        \u2192 JS/TS      \u2192 `npx vitest run` (if vitest config / dep) / `npx jest` / `npm test`\n  - go.mod              \u2192 Go         \u2192 `go test ./...`\n  - pyproject.toml /\n    setup.py /\n    requirements.txt    \u2192 Python     \u2192 `PYTHONPATH=src:. python3 -m pytest -v`\n  - Makefile (test)     \u2192 fallback   \u2192 `make test`\n\nFor Python projects only, optionally install deps first if a pyproject is present:\n  cd {{project_dir}} && (uv sync 2>/dev/null || pip install -e \".[test]\" 2>/dev/null || pip install -e . 2>/dev/null || true)\n\nSTEP 2 \u2014 Run the appropriate test command EXACTLY ONCE via pytest_exec:\n  cd {{project_dir}} && <detected test command> 2>&1\n\nAlways cd into {{project_dir}} (or {{out_dir}} if project_dir is empty) before running the test command. Do NOT run tests from a parent directory.\n\nIMPORTANT: Run tests and report results immediately. Do NOT try to fix failing tests \u2014 just report the results.\n\nRecovery (one extra call max, only if needed):\n  - pytest exit 4 (collection error)            \u2192 retry with `--import-mode=importlib`\n  - vitest/jest \"command not found\"             \u2192 retry with `npx --yes <runner>`\n\nSTEP 3 \u2014 Report results as a single JSON object with: passed, failed, errors, status (\"pass\"|\"fail\"), summary (one sentence including which runner was used), details (last 20 lines of output)."
+    },
+    {
+      "name": "observe",
+      "agent": "observe-agent",
+      "model": "anthropic/claude-sonnet-4-6",
+      "context_template": "Task: {{task}}\n\nResearch:\n{{research}}\n\nPlan:\n{{plan}}\n\nCode:\n{{code}}\n\nQA:\n{{qa}}"
+    },
+    {
+      "name": "docs",
+      "agent": "docs-agent",
+      "task_template": "Check that README.md exists at the project root. If it is missing or empty, create a minimal README.md with: project name, one-sentence description, install command (pip install -e \".[test]\"), and pytest -v test command. Do not rewrite an existing README — only create if absent.",
+      "context_template": "Check that README.md exists at the project root. If it is missing or empty, create a minimal README.md with: project name, one-sentence description, install command (pip install -e \".[test]\"), and pytest -v test command. Do not rewrite an existing README — only create if absent.",
+      "skip": false
+    }
+  ]
+}

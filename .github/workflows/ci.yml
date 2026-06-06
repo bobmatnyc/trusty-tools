@@ -13,7 +13,7 @@
 # cargo invocation.
 #
 # SKIP_UI_BUILD=1 is set globally: the four crates with build.rs Svelte
-# pipelines (trusty-search, trusty-memory, trusty-analyze, open-mpm) skip
+# pipelines (trusty-search, trusty-memory, trusty-analyze, trusty-agents) skip
 # pnpm when this env var is set. The committed ui-dist/ artefacts embedded
 # via include_dir!/include_str! are sufficient for compilation.
 #
@@ -27,7 +27,7 @@
 # these tests are expected to pass. They are NOT excluded here; if they go red in CI
 # that is a real bug and should block the PR.
 #
-# open-mpm git tests (git::branch::tests::list_branches_includes_current,
+# trusty-agents git tests (git::branch::tests::list_branches_includes_current,
 # git::log::tests::search_commits_finds_known_keyword) require a full git clone
 # with local branch refs and commit history. The test job uses fetch-depth: 0
 # to ensure a full (non-shallow) clone is present.
@@ -119,7 +119,7 @@ jobs:
   # ONNX-backed tests are #[ignore]-tagged; they are intentionally skipped here
   # because they require model downloads and a running embedderd daemon.
   # trusty-mpm-gui excluded: see clippy note above.
-  # fetch-depth: 0 (full clone) required for open-mpm git tests that inspect
+  # fetch-depth: 0 (full clone) required for trusty-agents git tests that inspect
   # local branch refs and search commit history.
   # --------------------------------------------------------------------------
   test:
@@ -131,7 +131,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # open-mpm's git tests (list_branches_includes_current) assert that the
+      # trusty-agents's git tests (list_branches_includes_current) assert that the
       # local branch list includes "main". GitHub Actions PR checkouts only create
       # a local branch for the PR head; "main" is only a remote ref unless we
       # explicitly create a local tracking branch for it.

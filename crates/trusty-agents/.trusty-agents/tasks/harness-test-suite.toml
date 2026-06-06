@@ -1,0 +1,162 @@
+# Harness test suite — diverse tasks to validate PM agent/skill/tool selection.
+#
+# Why: Regression coverage for the PM's registry-based agent/skill selection.
+# Given a natural-language task description, each entry asserts which agent
+# the `AgentRegistry::best_match` should pick and which skills should surface
+# from `SkillRegistry::find_by_tags`. Consumed by `trusty-agents inspect --dry-run`
+# and by the shell test runner at `tests/harness/run_inspection.sh`.
+# What: A list of `[[tasks]]` entries with: id, description, expected_agent,
+# expected_role, expected_skills (subset, may be empty), category.
+# Test: `./tests/harness/run_inspection.sh` (dry-run, no LLM calls).
+
+[[tasks]]
+id = "python-csv-parser"
+description = "Write a Python script that reads a CSV file and outputs a JSON summary with row count, column names, and sample rows"
+expected_agent = "python-engineer"
+expected_role = "engineer"
+expected_skills = ["python"]
+category = "coding"
+
+[[tasks]]
+id = "fastapi-crud"
+description = "Create a FastAPI REST API with CRUD endpoints for a Todo list, using SQLite for persistence and pytest for tests"
+expected_agent = "python-engineer"
+expected_role = "engineer"
+expected_skills = ["fastapi", "pytest"]
+category = "coding"
+
+[[tasks]]
+id = "rust-cli-tool"
+description = "Write a Rust CLI tool using clap that takes a directory path and outputs a tree view of the file structure"
+expected_agent = "engineer"
+expected_role = "engineer"
+expected_skills = ["rust"]
+category = "coding"
+
+[[tasks]]
+id = "bash-backup-script"
+description = "Write a bash script that backs up a directory to a timestamped tar.gz archive and logs the operation"
+expected_agent = "local-ops-agent"
+expected_role = "ops"
+expected_skills = []
+category = "scripting"
+
+[[tasks]]
+id = "markdown-to-html"
+description = "Convert this markdown file to HTML with a table of contents and syntax highlighting for code blocks"
+expected_agent = "engineer"
+expected_role = "engineer"
+expected_skills = []
+category = "file-conversion"
+
+[[tasks]]
+id = "website-check"
+description = "Check if https://httpbin.org/get is accessible, report the HTTP status code, response time, and any errors"
+expected_agent = "research-agent"
+expected_role = "research"
+expected_skills = []
+category = "web"
+
+[[tasks]]
+id = "research-rust-async"
+description = "Research the current best practices for async Rust in 2024 — compare tokio vs async-std and summarize key differences"
+expected_agent = "research-agent"
+expected_role = "research"
+expected_skills = []
+category = "research"
+
+[[tasks]]
+id = "api-docs"
+description = "Write API documentation for a REST API with endpoints for user management, including request/response examples"
+expected_agent = "docs-agent"
+expected_role = "docs"
+expected_skills = []
+category = "documentation"
+
+[[tasks]]
+id = "plan-multi-file"
+description = "Plan a multi-file Python project: a CLI weather app that fetches data from OpenWeatherMap API, with a config module, API client, formatter, and tests"
+expected_agent = "plan-agent"
+expected_role = "planner"
+expected_skills = ["wave-planning"]
+category = "planning"
+
+[[tasks]]
+id = "qa-pytest-suite"
+description = "Run the pytest suite in ./out/weather-app/, identify failing tests, and provide a detailed report of failures with root cause analysis"
+expected_agent = "qa-agent"
+expected_role = "qa"
+expected_skills = ["pytest"]
+category = "testing"
+
+[[tasks]]
+id = "typescript-types"
+description = "Create TypeScript interfaces and Zod schemas for a REST API response that includes pagination, error handling, and user profile data"
+expected_agent = "engineer"
+expected_role = "engineer"
+expected_skills = []
+category = "coding"
+
+[[tasks]]
+id = "git-log-analysis"
+description = "Write a Python script that analyzes git log output and produces a summary of commits by author, files changed, and activity over time"
+expected_agent = "python-engineer"
+expected_role = "engineer"
+expected_skills = ["python", "git-operations"]
+category = "coding"
+
+[[tasks]]
+id = "docker-setup"
+description = "Write a Dockerfile and docker-compose.yml for a FastAPI application with PostgreSQL and Redis"
+expected_agent = "local-ops-agent"
+expected_role = "ops"
+expected_skills = ["docker"]
+category = "ops"
+
+[[tasks]]
+id = "readme-update"
+description = "Update the README.md to document the new CLI commands: agents list, skills list, and inspect mode"
+expected_agent = "docs-agent"
+expected_role = "docs"
+expected_skills = []
+category = "documentation"
+
+[[tasks]]
+id = "go-simple"
+description = "Write a Go HTTP client that fetches JSON from a URL, retries on 5xx with exponential backoff, and includes httptest-based tests"
+expected_agent = "engineer"
+expected_role = "engineer"
+expected_skills = []
+category = "coding"
+
+[[tasks]]
+id = "bash-simple"
+description = "Write a bash log analyzer script that counts ERROR/WARN/INFO/DEBUG lines in *.log files, accepts a --since date filter, and prints a summary table"
+expected_agent = "local-ops-agent"
+expected_role = "ops"
+expected_skills = []
+category = "scripting"
+
+[[tasks]]
+id = "py-async"
+description = "Write a Python async URL health checker using asyncio and aiohttp with concurrency limiting via Semaphore and pytest-asyncio tests"
+expected_agent = "python-engineer"
+expected_role = "engineer"
+expected_skills = ["python"]
+category = "coding"
+
+[[tasks]]
+id = "ts-zod"
+description = "Create TypeScript Zod schemas for UserProfile, ApiResponse<T>, and PaginatedList<T> with a safe parseUserProfile function and vitest tests"
+expected_agent = "engineer"
+expected_role = "engineer"
+expected_skills = []
+category = "coding"
+
+[[tasks]]
+id = "rs-tokio"
+description = "Implement a Rust async TaskQueue<T> backed by tokio mpsc with semaphore-based concurrency, graceful drain, and thiserror error types"
+expected_agent = "engineer"
+expected_role = "engineer"
+expected_skills = ["rust"]
+category = "coding"

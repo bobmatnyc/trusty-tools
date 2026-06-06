@@ -146,7 +146,7 @@ documentation.
 | Crate | Description |
 |---|---|
 | `trusty-git-analytics` | Developer productivity analytics from git history |
-| `open-mpm` | MPM orchestration platform |
+| `trusty-agents` | agent orchestration platform |
 | `cto-assistant` | CTO domain assistant |
 
 ## Architecture
@@ -171,7 +171,7 @@ documentation.
          │
 ┌────────▼──────────────────────────────────────────────────────┐
 │  Orchestrator / Platform                                    │
-│  open-mpm  ·  trusty-mpm-* family  ·  trusty-git-analytics  │
+│  trusty-agents  ·  trusty-mpm-* family  ·  trusty-git-analytics  │
 └───────────────────────────────────────────────────────────────┘
 ```
 
@@ -209,12 +209,12 @@ cargo fmt
 
 **Single source of truth:** This monorepo consolidates seven formerly separate repos. All 24 crates are co-located under `crates/` with one workspace root and one `Cargo.lock` — no more `[patch.crates-io]` dances during active development.
 
-**MSRV:** Rust 1.88+ (required for `let-chains` used by `trusty-mpm-*` and `open-mpm` in edition 2024)
+**MSRV:** Rust 1.88+ (required for `let-chains` used by `trusty-mpm-*` and `trusty-agents` in edition 2024)
 
 **License:** Elastic License 2.0 (most crates), MIT (trusty-memory, trusty-analyze). See each crate's `Cargo.toml` for the authoritative license field.
 
 **Where to start:**
 - **I want to search code:** Read [crates/trusty-search/README.md](crates/trusty-search/README.md)
 - **I want persistent memory:** Read [crates/trusty-memory/README.md](crates/trusty-memory/README.md)
-- **I want the full platform:** Read [crates/open-mpm/README.md](crates/open-mpm/README.md)
+- **I want the full platform: Read [crates/trusty-agents/README.md](crates/trusty-agents/README.md)
 

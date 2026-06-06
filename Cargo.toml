@@ -4,7 +4,7 @@
 members = ["crates/*"]
 resolver = "2"
 # Exclude paths inside copied projects that contain stray manifests we don't
-# want Cargo to treat as workspace members. open-mpm bundles a `weather_alerter`
+# want Cargo to treat as workspace members. trusty-agents bundles a `weather_alerter`
 # scratch dir; trusty-mpm-gui's `src-tauri` is included via its parent crate.
 exclude = []
 
@@ -61,7 +61,7 @@ serde_yaml = "0.9"
 # `trusty_common::help` "did you mean?" suggester behind the `cli-help`
 # feature. Pure-Rust, no transitive native deps.
 strsim = "0.11"
-# Widened to `full` so trusty-mpm + open-mpm + trusty-memory get
+# Widened to `full` so trusty-mpm + trusty-agents + trusty-memory get
 # process/signal/time/fs; the originally-listed feature set is a strict
 # subset of `full`.
 tokio = { version = "1", features = ["full"] }
@@ -120,7 +120,7 @@ tiktoken-rs = "0.5"
 git2 = { version = "0.20", features = ["vendored-libgit2", "vendored-openssl"] }
 kuzu = "0.9"
 
-# Embedded assets (trusty-memory, open-mpm).
+# Embedded assets (trusty-memory, trusty-agents).
 rust-embed = { version = "8", features = ["include-exclude", "interpolate-folder-path"] }
 mime_guess = "2"
 
@@ -135,7 +135,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # parallel test threads. Used by bug-report token tests.
 serial_test = "3"
 
-# ── AWS Bedrock (optional; used by trusty-common `bedrock` feature + open-mpm + tga) ──
+# ── AWS Bedrock (optional; used by trusty-common `bedrock` feature + trusty-agents + tga) ──
 # Versions pinned to what is already resolved in Cargo.lock (1.8.17 / 1.131.0).
 # `behavior-version-latest` silences the deprecation warning on aws_config::load_from_env().
 aws-config             = { version = "1.8", features = ["behavior-version-latest"] }

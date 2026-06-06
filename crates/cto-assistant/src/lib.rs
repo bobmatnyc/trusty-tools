@@ -2,23 +2,23 @@
 //!
 //! Why: Issue #484 Phase 1 consolidated the CTO DB *service adapter* (schema
 //!      emission + dispatch over `trusty-cto-db`) into `tc_services::cto_db`.
-//!      Phase 2 (this crate) extracts the open-mpm-specific Anti-Corruption
-//!      Layer — adapting the host-agnostic `CtoDbService` to open-mpm's
-//!      `ToolExecutor` trait — out of `open-mpm` itself. The CTO assistant's
+//!      Phase 2 (this crate) extracts the trusty-agents-specific Anti-Corruption
+//!      Layer — adapting the host-agnostic `CtoDbService` to trusty-agents's
+//!      `ToolExecutor` trait — out of `trusty-agents` itself. The CTO assistant's
 //!      tools (HR/budget queries) are sensitive: keeping them in a dedicated
 //!      crate clarifies ownership and lets us tighten its dependency surface
-//!      without touching the host. `open-mpm` injects this crate's
+//!      without touching the host. `trusty-agents` injects this crate's
 //!      `AgentPlugin` at startup; the ctrl loop matches it against the
 //!      active persona name rather than hard-coding a branch.
 //! What: `CtoDbToolExecutor` newtype wraps a `tc_services::cto_db::CtoDbService`
-//!       and implements `open_mpm::agent_api::ToolExecutor` by delegating
+//!       and implements `trusty_agents::agent_api::ToolExecutor` by delegating
 //!       `name`/`schema`/`execute` to it, translating `CtoDbOutcome` into
 //!       `ToolResult`. `agent_plugin()` returns an `AgentPlugin` bound to the
 //!       `cto-assistant` persona name, holding one executor per published
 //!       CTO DB tool.
 //! SECURITY: This wrapper exposes HR/budget data. Only the `cto-assistant`
 //!           persona should ever have these tools registered. The persona
-//!           gate is enforced by `open-mpm`'s ctrl loop when it matches the
+//!           gate is enforced by `trusty-agents`'s ctrl loop when it matches the
 //!           plugin's `persona_name` field; this crate does NOT self-restrict.
 //! Test: `cto_db_tools_lists_four`, `execute_outcome_maps_to_tool_result`,
 //!       `agent_plugin_targets_cto_assistant`.
@@ -29,7 +29,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tc_services::cto_db::{CtoDbOutcome, CtoDbService};
 
-use open_mpm_agent_api::{AgentPlugin, ToolExecutor, ToolResult};
+use trusty_agents_common::{AgentPlugin, ToolExecutor, ToolResult};
 
 /// Persona name this crate's tools are scoped to.
 ///
@@ -37,15 +37,15 @@ use open_mpm_agent_api::{AgentPlugin, ToolExecutor, ToolResult};
 ///      `agent_plugin()` and any future tests / wiring code so a rename
 ///      changes one place.
 /// What: `"cto-assistant"` — matches the persona TOML name shipped under
-///       `.open-mpm/agents/cto-assistant.toml`.
+///       `.trusty-agents/agents/cto-assistant.toml`.
 /// Test: `agent_plugin_targets_cto_assistant` asserts the plugin uses this.
 pub const PERSONA_NAME: &str = "cto-assistant";
 
-/// open-mpm `ToolExecutor` adapter over a `tc_services::cto_db::CtoDbService`.
+/// trusty-agents `ToolExecutor` adapter over a `tc_services::cto_db::CtoDbService`.
 ///
-/// Why: open-mpm dispatches by tool name through `dyn ToolExecutor`. The
+/// Why: trusty-agents dispatches by tool name through `dyn ToolExecutor`. The
 ///      shared `CtoDbService` returns a host-agnostic `CtoDbOutcome`; this
-///      newtype is the seam that translates it into open-mpm's `ToolResult`.
+///      newtype is the seam that translates it into trusty-agents's `ToolResult`.
 /// What: Holds one `CtoDbService`. `execute()` calls `CtoDbService::execute`
 ///       and maps `CtoDbOutcome::Ok` → `ToolResult::ok`, `CtoDbOutcome::Err`
 ///       → recoverable `ToolResult::err` so a missing DB or a schema-drift
@@ -89,10 +89,10 @@ pub fn cto_db_tools() -> Vec<Arc<dyn ToolExecutor>> {
         .collect()
 }
 
-/// Construct the `AgentPlugin` open-mpm injects at startup.
+/// Construct the `AgentPlugin` trusty-agents injects at startup.
 ///
 /// Why: Replaces the hard-coded `if persona_name == "cto-assistant" { ... }`
-///      branch in `open-mpm`'s ctrl loop. `main.rs` calls this once and
+///      branch in `trusty-agents`'s ctrl loop. `main.rs` calls this once and
 ///      threads the result into the ctrl session; the ctrl loop then
 ///      registers these tools whenever the cto-assistant persona is active.
 /// What: Returns an `AgentPlugin` bound to `PERSONA_NAME` containing every
