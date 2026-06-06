@@ -59,7 +59,7 @@ impl ReindexOutcome {
 }
 
 /// Decide whether a finished reindex produced a usable corpus or silently
-/// embedded nothing (#601).
+/// embedded nothing (#601, #868).
 ///
 /// Why: before this gate, the orchestrator marked semantic + graph `Ready`
 /// unconditionally after the batch loop drained. When every embed batch failed
@@ -67,21 +67,33 @@ impl ReindexOutcome {
 /// `chunk_count == 0` and `/health` served a dead index as green. Embedding
 /// failure must be LOUD: a full-pipeline index that walked files but produced
 /// zero vectors is broken, not ready.
+///
+/// The `skipped_files` fix (#868): `walked_files` is the raw filesystem-walker
+/// count BEFORE hash-skip/minified-skip filtering. On a no-change incremental
+/// reindex every file is hash-skipped, so `walked_files > 0` but zero files
+/// are actually submitted to the embedder — zero vectors is EXPECTED, not a
+/// crash. The old guard misfired on this case, rolling back the staging corpus
+/// and degrading the index to BM25-only until the next forced reindex. The fix
+/// computes `newly_submitted = walked_files.saturating_sub(skipped_files)` and
+/// only fires `Failed` when files were actually sent to the embedder.
+///
 /// What: returns [`ReindexOutcome::Failed`] iff the index is **not**
 /// lexical-only, an embedder is wired (`embedder_present`), at least one file
-/// was walked, and `total_vector_count == 0`. A `lexical_only` index, or any
-/// index with no embedder configured (BM25-only / test indexer), legitimately
-/// has zero vectors, so it is always `Ready`. An index that walked zero files
-/// (empty repo / over-aggressive filter) is `Ready` too — that is an
-/// empty-but-valid corpus, not an embedder failure, and is reported separately
-/// via walk diagnostics.
+/// was walked, at least one file was newly submitted for embedding (i.e. not
+/// hash-skipped), and `total_vector_count == 0`. A `lexical_only` index, any
+/// index with no embedder configured (BM25-only / test indexer), an index
+/// that walked zero files (empty repo / over-aggressive filter), or an
+/// incremental reindex where all files were hash-skipped (`newly_submitted ==
+/// 0`) are all `Ready` — none of those is an embedder failure.
 /// Test: `reindex_outcome_*` below — covers the lexical-only exception, the
-/// no-embedder exception, the zero-files exception, the zero-vector failure,
-/// and the healthy path.
+/// no-embedder exception, the zero-files exception, the all-hash-skipped
+/// warm-boot case (#868 regression), the genuine crash, partial-skip crash,
+/// partial-skip success, and the healthy path.
 pub(crate) fn reindex_outcome(
     lexical_only: bool,
     embedder_present: bool,
     walked_files: usize,
+    skipped_files: usize,
     total_vector_count: usize,
 ) -> ReindexOutcome {
     if lexical_only {
@@ -97,10 +109,21 @@ pub(crate) fn reindex_outcome(
         // Nothing to embed: an empty (but valid) corpus, not a failure.
         return ReindexOutcome::Ready;
     }
+    // #868: files actually submitted to the embedder after hash-skip / minified
+    // filtering. On a warm no-change reindex this is 0 — zero vectors is then
+    // EXPECTED, not an embedder crash. Only fire Failed when the embedder was
+    // genuinely invoked but produced nothing.
+    let newly_submitted = walked_files.saturating_sub(skipped_files);
+    if newly_submitted == 0 {
+        // All files were hash-skipped (or minified-skipped); the embedder was
+        // never called. Zero vectors is the correct outcome — not a failure.
+        return ReindexOutcome::Ready;
+    }
     if total_vector_count == 0 {
         return ReindexOutcome::Failed {
             reason: format!(
-                "embedding produced zero vectors for {walked_files} walked file(s) — \
+                "embedding produced zero vectors for {newly_submitted} submitted file(s) \
+                 ({walked_files} walked, {skipped_files} hash-skipped) — \
                  the embedder backend likely failed for every batch (sidecar crash, \
                  OOM, or model-load stall). The previous index was preserved; \
                  check the embedderd logs and retry."
@@ -167,7 +190,7 @@ mod tests {
     #[test]
     fn reindex_outcome_lexical_only_is_ready_with_zero_vectors() {
         // lexical_only=true, embedder irrelevant.
-        let outcome = reindex_outcome(true, true, 100, 0);
+        let outcome = reindex_outcome(true, true, 100, 0, 0);
         assert!(outcome.is_ready());
         assert_eq!(outcome.failure_reason(), None);
     }
@@ -178,24 +201,9 @@ mod tests {
     /// Test: this test.
     #[test]
     fn reindex_outcome_no_embedder_is_ready_with_zero_vectors() {
-        let outcome = reindex_outcome(false, false, 100, 0);
+        let outcome = reindex_outcome(false, false, 100, 0, 0);
         assert!(outcome.is_ready());
         assert_eq!(outcome.failure_reason(), None);
-    }
-
-    /// Why: the core #601 bug — a full-pipeline index WITH an embedder that
-    /// walked files but embedded nothing is broken and must be marked failed.
-    /// Test: this test.
-    #[test]
-    fn reindex_outcome_full_pipeline_zero_vectors_fails() {
-        let outcome = reindex_outcome(false, true, 42, 0);
-        assert!(!outcome.is_ready());
-        let reason = outcome.failure_reason().expect("must carry a reason");
-        assert!(reason.contains("zero vectors"), "reason: {reason}");
-        assert!(
-            reason.contains("42"),
-            "reason should cite file count: {reason}"
-        );
     }
 
     /// Why: an empty repo (or an over-aggressive filter) walks zero files; that
@@ -204,15 +212,15 @@ mod tests {
     /// Test: this test.
     #[test]
     fn reindex_outcome_zero_files_is_ready() {
-        assert!(reindex_outcome(false, true, 0, 0).is_ready());
-        assert!(reindex_outcome(true, true, 0, 0).is_ready());
+        assert!(reindex_outcome(false, true, 0, 0, 0).is_ready());
+        assert!(reindex_outcome(true, true, 0, 0, 0).is_ready());
     }
 
     /// Why: the healthy path — files walked, vectors produced — must be Ready.
     /// Test: this test.
     #[test]
     fn reindex_outcome_healthy_is_ready() {
-        assert!(reindex_outcome(false, true, 42, 1337).is_ready());
+        assert!(reindex_outcome(false, true, 42, 0, 1337).is_ready());
     }
 
     /// Why: a single embedded vector for many files is still "the embedder
@@ -222,7 +230,80 @@ mod tests {
     /// Test: this test.
     #[test]
     fn reindex_outcome_single_vector_is_ready() {
-        assert!(reindex_outcome(false, true, 1000, 1).is_ready());
+        assert!(reindex_outcome(false, true, 1000, 0, 1).is_ready());
+    }
+
+    /// Why: regression test for #868 — a warm-boot incremental reindex where
+    /// all files are hash-skipped produces zero new vectors by design. The old
+    /// guard misfired here, rolling back the staging corpus and degrading the
+    /// index to BM25-only. With `skipped_files == walked_files`, `newly_submitted
+    /// == 0`, so the guard must return Ready.
+    /// Test: this test.
+    #[test]
+    fn reindex_outcome_all_hash_skipped_is_ready() {
+        // #868 scenario: 24 files walked, all 24 hash-skipped, 0 new vectors.
+        let outcome = reindex_outcome(false, true, 24, 24, 0);
+        assert!(
+            outcome.is_ready(),
+            "all-hash-skipped warm reindex must be Ready, got: {:?}",
+            outcome
+        );
+        assert_eq!(outcome.failure_reason(), None);
+    }
+
+    /// Why: when files were actually submitted to the embedder (not all skipped)
+    /// and zero vectors came back, that is a genuine embedder crash — must fail.
+    /// Test: this test.
+    #[test]
+    fn reindex_outcome_genuine_crash_fails() {
+        // 24 walked, 0 skipped → 24 submitted, 0 vectors → crash.
+        let outcome = reindex_outcome(false, true, 24, 0, 0);
+        assert!(!outcome.is_ready());
+        let reason = outcome.failure_reason().expect("must carry a reason");
+        assert!(reason.contains("zero vectors"), "reason: {reason}");
+        assert!(
+            reason.contains("24"),
+            "reason should cite submitted count: {reason}"
+        );
+    }
+
+    /// Why: partial skip with a crash — some files were submitted but none
+    /// embedded. Must fail (the embedder was invoked and produced nothing).
+    /// Test: this test.
+    #[test]
+    fn reindex_outcome_partial_skip_crash_fails() {
+        // 24 walked, 20 skipped → 4 submitted, 0 vectors → crash.
+        let outcome = reindex_outcome(false, true, 24, 20, 0);
+        assert!(!outcome.is_ready());
+        let reason = outcome.failure_reason().expect("must carry a reason");
+        assert!(reason.contains("zero vectors"), "reason: {reason}");
+    }
+
+    /// Why: partial skip where the submitted files were successfully embedded.
+    /// Must be Ready (the embedder worked for the files it was given).
+    /// Test: this test.
+    #[test]
+    fn reindex_outcome_partial_skip_success_is_ready() {
+        // 24 walked, 20 skipped → 4 submitted, 12 vectors → healthy.
+        let outcome = reindex_outcome(false, true, 24, 20, 12);
+        assert!(outcome.is_ready());
+        assert_eq!(outcome.failure_reason(), None);
+    }
+
+    /// Why: the core #601 bug — a full-pipeline index WITH an embedder that
+    /// walked files but embedded nothing is broken and must be marked failed.
+    /// This covers the case with no hash-skips (all files newly submitted).
+    /// Test: this test.
+    #[test]
+    fn reindex_outcome_full_pipeline_zero_vectors_fails() {
+        let outcome = reindex_outcome(false, true, 42, 0, 0);
+        assert!(!outcome.is_ready());
+        let reason = outcome.failure_reason().expect("must carry a reason");
+        assert!(reason.contains("zero vectors"), "reason: {reason}");
+        assert!(
+            reason.contains("42"),
+            "reason should cite submitted count: {reason}"
+        );
     }
 
     /// Why: confirms the strip-prefix root resolves a real symlinked directory

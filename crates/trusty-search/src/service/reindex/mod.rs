@@ -2287,6 +2287,7 @@ pub fn spawn_reindex_with_cleanup(
             handle.lexical_only,
             embedder_present,
             total,
+            progress.skipped.load(AtomicOrdering::Acquire),
             total_vector_count,
         );
         // #603: the staging corpus only promotes when the reindex is both not

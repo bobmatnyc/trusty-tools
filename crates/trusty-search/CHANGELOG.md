@@ -7,6 +7,26 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.24.1] — 2026-06-06
+
+### Fixed
+
+- **#868 — zero-vector guard misfires on all-hash-skipped incremental reindex**
+  — `reindex_outcome` now accepts a `skipped_files` count and computes
+  `newly_submitted = walked_files - skipped_files`. The `Failed` guard only
+  fires when files were actually submitted to the embedder AND produced zero
+  vectors. On a warm no-change reindex (all files hash-skipped), zero vectors
+  is the expected outcome and the corpus is correctly promoted to `Ready`
+  instead of being rolled back to the previous snapshot (closes #868).
+- **F2 — deleted-file prune now persists** — the staging corpus was previously
+  rolled back whenever the zero-vector guard misfired, discarding the
+  deleted-file prune performed earlier in the reindex. With the guard fixed,
+  the staging corpus is promoted correctly and the prune result survives.
+  No behavior change for genuine embedder failures: those still trigger
+  rollback and mark the index `Failed`.
+
+---
+
 ## [0.24.0] — 2026-06-06
 
 ### Fixed
