@@ -1,6 +1,6 @@
 # 0004. Three distinct harnesses (coding / meta / agentic) on a shared event-driven trusty-common foundation
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-05
 - **Scope:** Workspace-wide (all harness crates + `trusty-common`)
 - **Supersedes / Superseded by:** —
@@ -124,7 +124,7 @@ We will apply the following migrations as part of #587 and the rename:
 
 | Module | Current location | Migration target |
 |--------|-----------------|-----------------|
-| `workflow/` (WorkflowEngine, phase-based pipelines) | `open-mpm/src/workflow/` | Migrate to `trusty-mpm` or `trusty-common` (owner decision required — see Open Questions) |
+| `workflow/` (WorkflowEngine, phase-based pipelines) | `open-mpm/src/workflow/` | Migrate to `trusty-mpm` (accepted — see Accepted Decisions) |
 | Coding-agent ctrl loop | `open-mpm/src/ctrl/` (coding agent subset) | Extract to `trusty-code` via #587 |
 | Knowledge-worker ctrl loop | `open-mpm/src/ctrl/` (persona subset) | Stays in `trusty-agents` |
 | Cross-project session registry | `open-mpm/src/session_registry.rs` | Migrate to `trusty-mpm` |
@@ -164,22 +164,61 @@ We will apply the following migrations as part of #587 and the rename:
 - **Event-driven gap for trusty-code and trusty-mpm:** neither has a broadcast
   bus today; implementing one requires daemon-level changes to both crates.
 
+### Accepted Decisions
+
+#### open-mpm ⟷ trusty-mpm boundary — ACCEPTED
+
+The owner accepted the recommended boundary split. The following modules **move**
+out of `open-mpm` (trusty-agents) as part of #587 and the rename:
+
+| Module | Destination |
+|--------|-------------|
+| `src/workflow/` (WorkflowEngine, phase-based pipelines) | **trusty-mpm** |
+| `src/session_registry.rs` (cross-project sessions) | **trusty-mpm** |
+| `src/adapters/` (harness detection) | **trusty-mpm** |
+| Coding-agent ctrl loop (subset of `src/ctrl/`) | **trusty-code** (via #587) |
+| `src/events.rs`, `src/bus/` (event types) | **trusty-common** (`events` feature) |
+| `src/tools/traits.rs`, `src/rbac/` (ToolExecutor, ServiceTier, RBAC) | **trusty-common** (`tool-registry` feature) |
+| `src/intent/` (IntentClass, heuristic classifier) | **trusty-common** (`intent` feature) |
+
+The following **stay** in trusty-agents after the split:
+- Knowledge-worker ctrl loop (persona-driven subset of `src/ctrl/`)
+- MCP service bridge (`mcp_service_tools.rs`)
+- Domain personas (Izzie and custom TOML definitions)
+- REPL, HTTP API, Slack, Telegram transports
+- Per-conversation session state
+
+#### License — ACCEPTED
+
+The trusty-agents framework crate (`crates/open-mpm/`, planned rename
+`trusty-agents`) and its companion crates (`trusty-agents-api`,
+`trusty-agents-local`) will be licensed under **Elastic License 2.0**,
+matching trusty-search. This is NOT MIT. The license applies to all three
+crates; Cargo.toml metadata will be updated during the P0 rename — that
+change is not part of this PR.
+
 ### Open Questions
 
-1. **WorkflowEngine destination:** should `open-mpm/src/workflow/` move to
-   `trusty-mpm` (making the meta-harness the sole owner of workflow logic) or
-   to `trusty-common` (making workflow pipelines available to all three
-   harnesses)? Recommendation: `trusty-mpm` first; promote to `trusty-common`
-   only if trusty-agents needs it.
+The following questions are still open and require further owner decisions
+before the corresponding work begins:
 
-2. **Timing of open-mpm rename:** should the rename happen in the same PR as
-   #587 Phase 1, or in a dedicated rename PR before #587 starts? Recommendation:
-   dedicated rename PR before #587 to reduce scope.
+1. **Model strategy:** what is the default model routing policy for
+   trusty-agents personas (OpenRouter vs. Bedrock; model tier selection)?
+
+2. **Relationship to duetto-intelligence gateway:** how do trusty-agents
+   personas interact with the duetto-intelligence MCP gateway — do they call
+   it as a tool, or does trusty-agents embed the gateway logic directly?
 
 3. **open-mpm-agent-api retirement:** once `tool-registry` lands in
    `trusty-common`, `open-mpm-agent-api` can be retired. Should it be
    deprecated immediately or kept as a re-export shim? Recommendation: shim
-   for one release, then remove.
+   for one release, then remove. Owner decision pending.
+
+4. **v1 assistant scope:** what is the minimal useful v1 for trusty-agents
+   as a standalone harness (without the coding ctrl extracted to trusty-code)?
+
+5. **Timing vs. trusty-code #587:** should the open-mpm rename and boundary
+   migrations happen before, during, or after #587 Phase 1?
 
 See [docs/architecture/harnesses.md](../architecture/harnesses.md) for the
 full architecture spec, delegation contracts, and event model details.

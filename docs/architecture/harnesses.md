@@ -1,6 +1,6 @@
 # Three-Harness Architecture — trusty-tools
 
-**Status:** Draft
+**Status:** Accepted
 **Version:** v1
 **Subsystem:** HARNESSES
 **Owner:** Engineering / Architecture
@@ -36,7 +36,7 @@ procedures (those live in the crate-level README and `docs/<crate>/`).
 | [Shared Foundation — trusty-common](#shared-foundation--trusty-common) | What belongs to all harnesses |
 | [Event-Driven Mandate](#event-driven-mandate) | Binding architectural principle + event model |
 | [Inter-Harness Delegation](#inter-harness-delegation) | Call graph, boundaries, transport |
-| [Open Decision — Boundary Between trusty-mpm and trusty-agents](#open-decision--boundary-between-trusty-mpm-and-trusty-agents) | Flagged question with recommendation |
+| [Accepted Decision — Boundary Between trusty-mpm and trusty-agents](#accepted-decision--boundary-between-trusty-mpm-and-trusty-agents) | Owner-accepted boundary split + Elastic-2.0 license |
 | [Current Status vs. Target State](#current-status-vs-target-state) | What exists today and what is planned |
 
 ---
@@ -386,9 +386,10 @@ pub enum HarnessKind { TrustyCode, TrustyMpm, TrustyAgents }
 
 ---
 
-## Open Decision — Boundary Between trusty-mpm and trusty-agents
+## Accepted Decision — Boundary Between trusty-mpm and trusty-agents
 
-**Status: OPEN — requires owner decision before work begins on epic #587.**
+**Status: ACCEPTED — boundary and license recorded; implementation proceeds
+under epic #587 and the P0 rename.**
 
 ### The Problem
 
@@ -406,51 +407,46 @@ machinery that overlaps:
 | MCP service bridge | `src/tools/mcp_service_tools.rs` | Implicit (Claude Code sessions invoke MCP servers directly) |
 | Event bus | `src/events.rs`, `src/bus/` | Partial (hook relay only) |
 
-### The Clean Line (Proposed)
+### The Accepted Line
 
 **PM / workflow / multi-agent orchestration belongs to trusty-mpm (the meta-harness).
 General non-coding assistants belong to trusty-agents.**
 
-More precisely:
+More precisely (all items below are accepted; Cargo.toml updates happen during
+the P0 rename, not in this PR):
 
 1. **`open-mpm/src/workflow/`** — the `WorkflowEngine` and declarative phase
    pipelines (`WorkflowDef`, `PhaseDef`, parallel phases, worktree management,
-   autopush) are **generic orchestration logic** that belongs in `trusty-mpm` or
-   eventually `trusty-common`. They are not specific to knowledge-worker workflows.
-   **Recommendation: migrate to trusty-mpm or trusty-common.**
+   autopush) are **generic orchestration logic**.
+   **Decision: migrate to trusty-mpm.**
 
-2. **`open-mpm/src/ctrl/`** (the PM orchestrator loop) — this is the core of
-   what will become trusty-code. The subset that drives coding agents belongs in
-   `trusty-code` (epic #587). The subset that drives knowledge-worker personas
-   stays in trusty-agents. The split follows intent: if the agent being driven is
-   a coding agent, it belongs to trusty-code; if it is a domain persona (Izzie,
-   CRM assistant), it belongs to trusty-agents.
-   **Recommendation: split by agent type as part of #587 extraction.**
+2. **`open-mpm/src/ctrl/`** (the PM orchestrator loop) — the subset that drives
+   coding agents belongs in `trusty-code` (epic #587); the subset that drives
+   knowledge-worker personas stays in trusty-agents. The split follows intent:
+   coding agent → trusty-code; domain persona (Izzie, CRM assistant) → trusty-agents.
+   **Decision: split by agent type as part of #587 extraction.**
 
-3. **`open-mpm/src/session*.rs`** (session registry, session record) — session
-   management at the multi-project level belongs to `trusty-mpm`. Session state
-   that is intrinsic to a single knowledge-worker conversation stays in
-   trusty-agents.
-   **Recommendation: trusty-mpm owns cross-project sessions; trusty-agents owns
+3. **`open-mpm/src/session_registry.rs`** (cross-project session registry) —
+   session management at the multi-project level belongs to `trusty-mpm`.
+   Per-conversation session state intrinsic to a single knowledge-worker
+   conversation stays in trusty-agents.
+   **Decision: trusty-mpm owns cross-project sessions; trusty-agents owns
    per-conversation session state for its own loops.**
 
 4. **`open-mpm/src/tools/`, `src/rbac/`, `src/identity/`** — the
-   `ToolExecutor` trait + `ServiceTier` RBAC + `UserIdentity` are already
-   partially in `open-mpm-agent-api`. These are shared primitives.
-   **Recommendation: migrate to `trusty-common` behind a `tool-registry` feature
-   flag.**
+   `ToolExecutor` trait + `ServiceTier` RBAC + `UserIdentity` are shared primitives.
+   **Decision: migrate to `trusty-common` behind a `tool-registry` feature flag.**
 
 5. **`open-mpm/src/events.rs`, `src/bus/`** — the event bus belongs to
    `trusty-common` so all harnesses can share it.
-   **Recommendation: migrate to `trusty-common::events`.**
+   **Decision: migrate to `trusty-common::events`.**
 
 6. **`open-mpm/src/intent/`** — the intent classifier is a shared primitive.
-   **Recommendation: migrate to `trusty-common::intent`.**
+   **Decision: migrate to `trusty-common::intent`.**
 
-7. **`open-mpm/src/adapters/`** (harness adapter detection) — this is trusty-mpm
-   level functionality (recognising which harness is in a tmux pane). It currently
-   lives in open-mpm for historical reasons.
-   **Recommendation: migrate to trusty-mpm or trusty-common.**
+7. **`open-mpm/src/adapters/`** (harness adapter detection) — trusty-mpm-level
+   functionality (recognising which harness is in a tmux pane).
+   **Decision: migrate to trusty-mpm.**
 
 ### What Stays Exclusively in trusty-agents After the Split
 
@@ -463,19 +459,32 @@ More precisely:
 - Per-conversation session state and interaction log
 - Intent classifier (until extracted to trusty-common)
 
-### Owner's Decision Required
+### License Decision — ACCEPTED
 
-Before any code moves, the owner must decide:
+**trusty-agents (crates/open-mpm/, planned rename) and its companion crates
+(`trusty-agents-api`, `trusty-agents-local`) are licensed under Elastic
+License 2.0, matching trusty-search. This is NOT MIT.**
 
-1. Does `open-mpm/src/workflow/` consolidate into `trusty-mpm`, or does it remain
-   in trusty-agents as a shared utility?
-2. Does the PM main loop in `open-mpm/src/ctrl/` split simultaneously with #587,
-   or does that split happen in a later phase?
-3. Is the rename `open-mpm` → `trusty-agents` in-scope for the same PR as #587,
-   or a separate rename commit?
+This decision is recorded in
+[ADR-0004](../adr/0004-three-harnesses-shared-event-driven-common.md) under
+"Accepted Decisions". The `license` field in the three Cargo.toml files will be
+set to `"Elastic-2.0"` during the P0 rename PR — it is not changed in this
+documentation-only PR.
 
-This document records the proposed answers; the ADR (below) records the final
-decision once the owner has reviewed.
+### Remaining Open Questions
+
+The boundary and license decisions are now settled. The following questions
+remain open and will be addressed in subsequent PRs or the #587 implementation:
+
+1. **Model strategy:** default model routing policy for trusty-agents personas.
+2. **Relationship to duetto-intelligence gateway:** tool vs. embedded integration.
+3. **open-mpm-agent-api retirement timing:** shim or immediate deprecation once
+   `trusty-common::tool-registry` is ready.
+4. **v1 assistant scope:** minimal useful v1 trusty-agents without tcode extracted.
+5. **Rename timing vs. #587:** dedicated rename PR before vs. within #587 Phase 1.
+
+See [ADR-0004](../adr/0004-three-harnesses-shared-event-driven-common.md) for
+the full decision record.
 
 ---
 
