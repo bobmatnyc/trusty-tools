@@ -81,12 +81,33 @@ async fn main() -> anyhow::Result<()> {
     // skip subscriber init entirely — they have no meaningful log volume and
     // there is no global registry yet to conflict with.
     //
-    // The non-blocking writer guard `_daemon_log_guard` must live for the
-    // duration of `main` so buffered records flush before the process exits.
-    // It is declared unconditionally (as an Option) so the borrow checker is
+    // Both guards must live for the full duration of `main`:
+    //   - `_daemon_log_guard`: the non-blocking writer's WorkerGuard; dropping
+    //     it flushes and joins the background I/O thread — early drop silently
+    //     discards buffered log records.
+    //   - `_error_store`: the ErrorStore handle returned by `bug_capture_layer`.
+    //     The capture ring is Arc-backed but the *write* end is held by the
+    //     tracing layer, while the *read* end lives in `_error_store`. Dropping
+    //     `_error_store` before `main` returns means any consumer (MCP preview,
+    //     HTTP endpoint, future DaemonState slot) that tries to read the ring
+    //     after the store is gone will get an empty result. Phase 2 (#478) will
+    //     move `_error_store` into `DaemonState`; until then it must be kept
+    //     alive at main-scope.
+    //
+    // Both are declared unconditionally (as Option) so the borrow checker is
     // satisfied regardless of which cfg branch runs.
     #[cfg(feature = "daemon")]
     let mut _daemon_log_guard: Option<tracing_appender::non_blocking::WorkerGuard> = None;
+    // Why: `_error_store` carries the read half of the bug-capture ring buffer.
+    // Binding it here (not inside the inner block below) keeps it alive until
+    // `main` returns, matching the original trusty-mpmd binary's lifetime.
+    // What: holds the `ErrorStore` returned by `bug_capture_layer`; the write
+    // half lives inside the tracing layer registered with the global subscriber.
+    // Test: dropping this before `run_daemon` completes would cause the capture
+    // ring to appear empty on any subsequent read; the daemon integration tests
+    // exercise the full tracing→capture→preview path via HTTP.
+    #[cfg(feature = "daemon")]
+    let mut _error_store: Option<trusty_common::error_capture::ErrorStore> = None;
 
     if matches!(cli.command, Command::Daemon { .. }) {
         #[cfg(feature = "daemon")]
@@ -102,6 +123,10 @@ async fn main() -> anyhow::Result<()> {
             let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
             _daemon_log_guard = Some(guard);
 
+            // EnvFilter is not Clone, so we build two independent instances that
+            // both re-parse RUST_LOG from the environment — one for the stderr
+            // layer, one for the file layer. This is intentional: each layer
+            // needs its own owned filter, and re-parsing is cheap at startup.
             let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info".into());
             let file_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -112,11 +137,14 @@ async fn main() -> anyhow::Result<()> {
             // and an in-memory ring without modifying any call sites.
             // Capture writes ONLY to JSONL + in-memory ring — never stdout —
             // so this is safe for both the HTTP daemon and the MCP stdio path.
-            let (capture_layer, _error_store) = trusty_common::error_capture::bug_capture_layer(
+            let (capture_layer, store) = trusty_common::error_capture::bug_capture_layer(
                 "trusty-mpm",
                 trusty_common::error_capture::DEFAULT_CAPTURE_CAPACITY,
                 env!("CARGO_PKG_VERSION"),
             );
+            // Move store into the main-scope binding so it outlives this block
+            // and remains reachable for the entire daemon run (see comment above).
+            _error_store = Some(store);
 
             use tracing_subscriber::Layer as _;
             use tracing_subscriber::layer::SubscriberExt as _;

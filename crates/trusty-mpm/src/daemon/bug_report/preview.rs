@@ -148,7 +148,10 @@ fn crate_label(crate_target: &str) -> Option<&'static str> {
     match normalized.as_str() {
         "trusty-search" => Some("trusty-search"),
         "trusty-memory" => Some("trusty-memory"),
-        "trusty-mpm" | "tm" => Some("trusty-mpm"),
+        // "trusty-mpmd" is the former standalone daemon binary (removed in the
+        // single-binary consolidation); keep it here so that pre-existing error
+        // reports emitted by the old binary still receive the correct label.
+        "trusty-mpm" | "tm" | "trusty-mpmd" => Some("trusty-mpm"),
         "trusty-common" => Some("trusty-common"),
         "trusty-analyze" => Some("trusty-analyze"),
         "tga" | "trusty-git-analytics" => Some("tga"),
@@ -237,6 +240,20 @@ mod tests {
     fn unknown_crate_no_crate_label() {
         let labels = build_labels("some_unknown_crate");
         assert_eq!(labels, vec!["bug", "auto-reported"], "{labels:?}");
+    }
+
+    #[test]
+    fn legacy_trusty_mpmd_gets_trusty_mpm_label() {
+        // Backward compat: the former `trusty-mpmd` standalone binary was removed
+        // in the single-binary consolidation; reports it emitted must still be
+        // labelled as `trusty-mpm` so they reach the right triage queue.
+        let labels = build_labels("trusty-mpmd");
+        assert!(
+            labels.contains(&"trusty-mpm".to_string()),
+            "expected trusty-mpm label for trusty-mpmd target: {labels:?}"
+        );
+        assert!(labels.contains(&"bug".to_string()));
+        assert!(labels.contains(&"auto-reported".to_string()));
     }
 
     #[test]

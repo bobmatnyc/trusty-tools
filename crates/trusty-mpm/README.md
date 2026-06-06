@@ -85,6 +85,37 @@ The Tauri desktop GUI lives in the separate `trusty-mpm-gui` crate (it owns
 feature of this crate wraps it as an optional dependency. Building the GUI
 requires the Tauri prerequisites: `xcode-select`, `rustup`, `pnpm`.
 
+## Upgrading / Migration
+
+The standalone shim binaries `trusty-mpmd`, `trusty-mpm-tui`, `trusty-mpm-telegram`,
+and `trusty-mpm-gui` have been removed. Their functionality is now exposed through
+subcommands of the single `trusty-mpm` (or `tm`) binary:
+
+| Old binary | New command |
+|---|---|
+| `trusty-mpmd [--addr <addr>]` | `trusty-mpm daemon [--addr <addr>]` |
+| `trusty-mpm-tui` | `trusty-mpm tui` |
+| `trusty-mpm-telegram` | `trusty-mpm telegram` |
+| `trusty-mpm-gui` | `trusty-mpm gui` (requires `--features gui`) |
+
+**Update any external references** (launchd LaunchAgent plists, systemd units,
+Docker `CMD`, shell aliases, CI scripts) that reference `trusty-mpmd` to use
+`trusty-mpm daemon --addr <addr>` instead. No symlink or wrapper shim is
+provided — this is a clean break with a documented migration path.
+
+Example launchd plist update:
+
+```xml
+<!-- Before -->
+<string>/Users/you/.cargo/bin/trusty-mpmd</string>
+
+<!-- After -->
+<string>/Users/you/.cargo/bin/trusty-mpm</string>
+<string>daemon</string>
+<string>--addr</string>
+<string>127.0.0.1:7880</string>
+```
+
 ## Architecture
 
 ```
