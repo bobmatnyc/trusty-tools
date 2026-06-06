@@ -208,6 +208,39 @@ impl CodeIndexer {
         chunks.get(chunk_id).map(|c| c.content.clone())
     }
 
+    /// Remove every chunk belonging to a file and its entity list WITHOUT
+    /// triggering a symbol-graph rebuild (issue #848 prune pass).
+    ///
+    /// Why: the prune pass in `service::reindex` removes multiple deleted files
+    /// in a loop. Calling `remove_file` per file would trigger O(deleted_files)
+    /// full KG rebuilds, which is expensive. The reindex orchestrator already
+    /// rebuilds the KG once at the end of Phase 3, so the per-file rebuild is
+    /// redundant. This method is identical to `remove_file` except it skips the
+    /// `rebuild_symbol_graph` call, leaving the graph stale until the orchestrator's
+    /// Phase 3 rebuild corrects it.
+    /// What: removes chunk rows, entity row, and in-memory entity map entry for
+    /// `file_path`. Returns the number of chunks removed.
+    /// Test: covered by `prune_deleted_files_cleans_staging_corpus` in
+    /// `service::reindex::tests`.
+    pub(crate) async fn remove_file_no_kg_rebuild(&self, file_path: &str) -> Result<usize> {
+        self.ensure_chunks_loaded().await;
+        let ids: Vec<String> = {
+            let chunks = self.chunks.read().await;
+            chunks
+                .values()
+                .filter(|c| c.file == file_path)
+                .map(|c| c.id.clone())
+                .collect()
+        };
+        let removed = ids.len();
+        self.remove_chunks_from_stores(&ids).await;
+        self.entities.write().await.remove(file_path);
+        self.delete_entities_from_redb(file_path).await;
+        // NOTE: deliberately omits `self.rebuild_symbol_graph().await` —
+        // the caller (prune pass) handles the rebuild once after all files.
+        Ok(removed)
+    }
+
     /// Remove every chunk belonging to a file, plus its entity list.
     ///
     /// Why: `index-file` re-indexes a file in place, but file deletion (and

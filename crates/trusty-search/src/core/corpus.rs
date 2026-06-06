@@ -407,6 +407,73 @@ impl CorpusStore {
         Ok(())
     }
 
+    /// Return the distinct set of file paths present in the chunk corpus.
+    ///
+    /// Why: the non-force reindex prune pass (issue #848) needs to compare the
+    /// walked file set against what is stored in the corpus so it can identify
+    /// files that were deleted from disk but whose stale chunks were carried
+    /// forward by `copy_all_from`. Only the STAGING corpus is queried (after
+    /// carryover and after all batch writes), so the result reflects the full
+    /// committed state that will be promoted.
+    /// What: opens a read transaction and collects every distinct `RawChunk.file`
+    /// value by deserialising each row's JSON. Corrupt rows are skipped with a
+    /// `warn` to match `load_all_chunks`'s tolerance.
+    /// Test: `list_indexed_files_returns_distinct_files` below.
+    pub fn list_indexed_files(&self) -> Result<Vec<String>> {
+        use std::collections::HashSet;
+        let txn = self.db.begin_read().context("begin list_files read txn")?;
+        let table = txn.open_table(CHUNKS_TABLE)?;
+        let mut seen: HashSet<String> = HashSet::new();
+        for entry in table.iter().context("iterate chunks for list_files")? {
+            let (key, value) = entry.context("read chunk row for list_files")?;
+            match serde_json::from_slice::<RawChunk>(value.value()) {
+                Ok(chunk) => {
+                    seen.insert(chunk.file);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "corpus: skipping corrupt chunk row '{}' in list_indexed_files ({e})",
+                        key.value()
+                    );
+                }
+            }
+        }
+        Ok(seen.into_iter().collect())
+    }
+
+    /// Delete `FILE_HASHES_TABLE` entries for the given file paths in one
+    /// write transaction (issue #848 prune pass).
+    ///
+    /// Why: when a file is deleted from disk and its stale chunks are pruned
+    /// from the staging corpus, the persisted file-hash entry must also be
+    /// removed. Without this, the next reindex would load the stale hash,
+    /// think the (now-absent) file is unchanged, and not re-index it — leaving
+    /// the next promoted corpus with no chunks for a file that no longer exists.
+    /// What: removes each path from `FILE_HASHES_TABLE`; unknown paths are
+    /// silently ignored (idempotent). Empty input is a no-op.
+    /// Test: covered transitively by `prune_deleted_files_removes_hashes` in
+    /// `service::reindex::tests`.
+    pub fn delete_file_hash_entries(&self, files: &[String]) -> Result<()> {
+        if files.is_empty() {
+            return Ok(());
+        }
+        let txn = self
+            .db
+            .begin_write()
+            .context("begin file_hash delete txn")?;
+        {
+            let mut tbl = txn
+                .open_table(FILE_HASHES_TABLE)
+                .context("open file_hashes table for delete")?;
+            for file in files {
+                tbl.remove(file.as_str())
+                    .with_context(|| format!("delete file hash entry for {file}"))?;
+            }
+        }
+        txn.commit().context("commit file_hash delete txn")?;
+        Ok(())
+    }
+
     /// Delete a set of chunk ids in one write transaction.
     ///
     /// Why: `remove_file` / `remove_chunk` must evict from the durable store

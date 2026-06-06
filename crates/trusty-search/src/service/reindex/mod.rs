@@ -14,9 +14,12 @@
 //! Test: see `crates/trusty-search-service/src/reindex.rs#tests`.
 
 mod hash_cache;
+mod prune;
 pub mod quarantine;
 mod staging;
 mod validate;
+
+use prune::prune_deleted_files_from_staging;
 
 pub use quarantine::ReindexQuarantine;
 
@@ -2248,6 +2251,35 @@ pub fn spawn_reindex_with_cleanup(
         // lexical-only and zero-files cases are legitimate (see
         // `validate::reindex_outcome`).
         let memory_aborted = mem_limit_hit || mem_abort.load(AtomicOrdering::Acquire);
+
+        // Issue #848 — prune pass: remove stale chunks from files deleted on disk.
+        //
+        // After the #839 staging-carryover fix, `copy_all_from` pre-seeds the
+        // staging corpus with ALL live rows (correct for unchanged files).
+        // But a file deleted from disk is never walked → never re-indexed →
+        // its rows are carried forward unchanged, and search returns content
+        // from files that no longer exist.
+        //
+        // Fix: after the batch loop drains (so all changed/new files are
+        // committed to staging) and BEFORE the atomic promote, compute the
+        // set-difference between (files in staging corpus) and (files walked)
+        // and remove every deleted file's data from ALL stores atomically.
+        //
+        // Applies ONLY to the non-force path: --force starts with an empty
+        // staging corpus that is rebuilt from the current walk, so it is
+        // already correct.  `corpus_swap_tmp.is_some()` is the staging gate;
+        // `!force` guards the non-force path specifically.  Skip on memory
+        // abort (the staging corpus is being discarded anyway).
+        if corpus_swap_tmp.is_some() && !force && !memory_aborted {
+            prune_deleted_files_from_staging(
+                &handle,
+                &walk.files,
+                &canonical_root,
+                &hashes,
+                &index_id,
+            )
+            .await;
+        }
         // `has_embedder()` distinguishes a genuine embed failure (embedder
         // wired, zero vectors) from a legitimately embedder-less BM25-only /
         // test index. Only the former is a #601 failure.

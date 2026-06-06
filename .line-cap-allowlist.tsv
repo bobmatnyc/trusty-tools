@@ -144,7 +144,7 @@ crates/trusty-search/src/commands/reindex_ui.rs	1134
 crates/trusty-search/src/commands/start.rs	2183
 crates/trusty-search/src/core/chunker/mod.rs	1883
 crates/trusty-search/src/core/classifier.rs	1032
-crates/trusty-search/src/core/corpus.rs	1618
+crates/trusty-search/src/core/corpus.rs	1685
 crates/trusty-search/src/core/indexer/docs_penalty.rs	543
 crates/trusty-search/src/core/indexer/ingest.rs	1186
 crates/trusty-search/src/core/indexer/mod.rs	1307
@@ -165,7 +165,7 @@ crates/trusty-search/src/service/daemon.rs	774
 crates/trusty-search/src/service/embedder_supervisor.rs	1020
 crates/trusty-search/src/service/grep.rs	827
 crates/trusty-search/src/service/persistence.rs	990
-crates/trusty-search/src/service/reindex/mod.rs	4195
+crates/trusty-search/src/service/reindex/mod.rs	4214
 crates/trusty-search/src/service/walker.rs	1343
 crates/trusty-search/src/service/warm_boot/probe.rs	518
 crates/trusty-search/tests/baseline_trusty_tools.rs	721
