@@ -23,11 +23,47 @@
 ///      depending on the full `trusty-agents` binary crate. This shim preserves
 ///      every existing `crate::adapters::X` reference inside trusty-agents
 ///      without touching any call site.
-/// What: Wildcard re-export of `trusty_agents_common::adapters`.
-/// Test: `cargo check --workspace` verifies all internal call sites resolve.
+/// What: Explicit re-export of all public items from `trusty_agents_common::adapters`,
+///       including submodule re-exports so path-qualified references remain valid.
+/// Test: `cargo build --workspace` verifies all internal call sites resolve.
 pub mod adapters {
-    pub use trusty_agents_common::adapters::*;
+    // Submodules (re-exported so path references like `adapters::registry::Foo` resolve).
+    pub use trusty_agents_common::adapters::augment;
+    pub use trusty_agents_common::adapters::claude_code;
+    pub use trusty_agents_common::adapters::claude_mpm;
+    pub use trusty_agents_common::adapters::codex;
+    pub use trusty_agents_common::adapters::gemini;
+    pub use trusty_agents_common::adapters::patterns;
+    pub use trusty_agents_common::adapters::registry;
+    pub use trusty_agents_common::adapters::shell;
+    pub use trusty_agents_common::adapters::traits;
+    pub use trusty_agents_common::adapters::trusty_agents_adapter;
+    // Flat re-exports of every item promoted to the adapters facade.
+    pub use trusty_agents_common::adapters::{
+        // trait + value types
+        AdapterInfo,
+        // registry
+        AdapterRegistry,
+        // concrete adapters
+        AugmentAdapter,
+        ClaudeCodeAdapter,
+        ClaudeMpmAdapter,
+        CodexAdapter,
+        DetectionResult,
+        GeminiAdapter,
+        HarnessAdapter,
+        HarnessObservation,
+        HarnessState,
+        // patterns helpers
+        Pattern,
+        ShellAdapter,
+        TrustyAgentsAdapter,
+        any_match,
+        best_match,
+        last_n_lines,
+    };
 }
+
 pub mod agents;
 pub mod api;
 pub mod ast;
@@ -75,11 +111,13 @@ pub mod session_record;
 /// Why: Moved to trusty-agents-common in Wave 1 (issue #862, refs #830/#832).
 ///      This shim preserves every existing `crate::session_registry::X`
 ///      reference inside trusty-agents without touching any call site.
-/// What: Wildcard re-export of `trusty_agents_common::session_registry`.
-/// Test: `cargo check --workspace` verifies all internal call sites resolve.
+/// What: Explicit re-export of all public items from
+///       `trusty_agents_common::session_registry`.
+/// Test: `cargo build --workspace` verifies all internal call sites resolve.
 pub mod session_registry {
-    pub use trusty_agents_common::session_registry::*;
+    pub use trusty_agents_common::session_registry::{SessionEntry, SessionsRegistry};
 }
+
 pub mod skills;
 pub mod slack;
 pub mod state_writer;
