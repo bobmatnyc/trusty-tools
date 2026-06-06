@@ -8,14 +8,20 @@
 //! keeps the data greppable without a database.
 //! What: `PerfCollector` is constructed at workflow start, `record_phase`
 //! appends a `PhaseRecord` after each phase, and `flush` writes the final
-//! JSON + log line. `TokenUsage` is the provider-agnostic shape captured
-//! from each LLM call (extended with Anthropic-specific `cache_read` /
-//! `cache_creation` fields which are zero for non-Anthropic models).
+//! JSON + log line.
+//!
+//! The portable plain-data types (`TokenUsage`, `PhaseRecord`, `PerfTotals`,
+//! `PerfRecord`) were moved to `trusty-agents-common::perf` in Wave 2
+//! (issue #867, refs #830/#832). They are re-exported here so all existing
+//! `crate::perf::TokenUsage` etc. references inside `trusty-agents` continue
+//! to resolve unchanged.
+//!
 //! Test: `cost_usd_known_model`, `collector_records_phases`,
 //! `collector_totals_sum_phases`, `collector_flush_writes_json_and_log`.
 //!
 //! Module layout (see #366 split):
-//! - `mod.rs` — perf record types + `PerfCollector` lifecycle
+//! - `mod.rs` — `PerfCollector` lifecycle + explicit re-exports of the
+//!   portable types from `trusty-agents-common::perf`
 //! - `pricing.rs` — `cost_usd` + the model pricing table + formatters
 //! - `tests.rs` — unit tests
 
@@ -29,148 +35,20 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
 
 use pricing::{filename_stamp, truncate_preview};
 
 pub use pricing::cost_usd;
 
-/// Token usage captured from a single LLM round-trip.
-///
-/// Why: (#50) Anthropic's OpenRouter responses carry cache_read_input_tokens
-/// and cache_creation_input_tokens alongside the standard prompt/completion
-/// counts. Exposing those as first-class fields lets `PerfCollector` track
-/// cache effectiveness over time. For non-Anthropic models these stay 0.
-/// What: Plain struct; additive (`+`-style) accumulation is done inline in
-/// `PerfCollector::totals`.
-/// Test: `token_usage_default_is_zeros`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TokenUsage {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub cache_read_tokens: u32,
-    pub cache_creation_tokens: u32,
-}
-
-impl TokenUsage {
-    /// Construct a `TokenUsage` from the four individual counts.
-    pub fn new(prompt: u32, completion: u32, cache_read: u32, cache_creation: u32) -> Self {
-        Self {
-            prompt_tokens: prompt,
-            completion_tokens: completion,
-            cache_read_tokens: cache_read,
-            cache_creation_tokens: cache_creation,
-        }
-    }
-
-    /// Add another usage record into this one (in place).
-    ///
-    /// Why: Each phase may comprise multiple LLM turns (tool loop); we sum
-    /// them into a single `PhaseRecord`.
-    /// What: Field-wise saturating add.
-    /// Test: `token_usage_accumulates`.
-    pub fn add(&mut self, other: &TokenUsage) {
-        self.prompt_tokens = self.prompt_tokens.saturating_add(other.prompt_tokens);
-        self.completion_tokens = self
-            .completion_tokens
-            .saturating_add(other.completion_tokens);
-        self.cache_read_tokens = self
-            .cache_read_tokens
-            .saturating_add(other.cache_read_tokens);
-        self.cache_creation_tokens = self
-            .cache_creation_tokens
-            .saturating_add(other.cache_creation_tokens);
-    }
-}
-
-/// One phase's measured performance.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PhaseRecord {
-    pub name: String,
-    pub duration_ms: u64,
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub cache_read_tokens: u32,
-    pub cache_creation_tokens: u32,
-    pub cost_usd: f64,
-}
-
-/// Totals rolled up from every `PhaseRecord` in a run.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PerfTotals {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub cache_read_tokens: u32,
-    pub cache_creation_tokens: u32,
-    pub cost_usd: f64,
-}
-
-/// Full performance record persisted to `docs/performance/runs/`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PerfRecord {
-    pub build: u64,
-    pub version: String,
-    pub workflow: String,
-    pub task_preview: String,
-    pub started_at: String,
-    pub total_duration_ms: u64,
-    pub phases: Vec<PhaseRecord>,
-    pub totals: PerfTotals,
-    /// Run outcome (#56): "success" | "partial" | "failed".
-    ///
-    /// Why: When a phase fails mid-workflow, we still want to persist the
-    /// perf record so we can see where/how the run died. A separate `status`
-    /// field distinguishes clean completions from partial runs in tooling
-    /// that scans `runs/*.json`.
-    /// What: Defaults to "success" for back-compat with older fixtures.
-    #[serde(default = "default_status")]
-    pub status: String,
-    /// Name of the phase that failed, when `status != "success"` (#56).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failed_phase: Option<String>,
-    /// Distinct skill names injected into any phase prompt during this run
-    /// (#171).
-    ///
-    /// Why: Post-run persistence needs to know which skills were used so it
-    /// can increment `use_count` and refresh `last_used`. Carrying the list
-    /// through `PerfRecord` keeps the data in one place that's already
-    /// flushed to disk for analysis.
-    /// What: Deduplicated, insertion-order-preserved list of skill names.
-    /// Defaults to empty for back-compat with older fixtures.
-    #[serde(default)]
-    pub skills_used: Vec<String>,
-    /// Distinct skill names matched by the pre-plan discovery step (#173).
-    ///
-    /// Why: Discovery surfaces every skill the engine considered relevant for
-    /// a task — even if downstream prompt assembly only injected a subset (or
-    /// none). Recording the broader candidate set separately from
-    /// `skills_used` lets us measure recall vs. precision over time and
-    /// audit which signals the discovery step matched on.
-    /// What: Deduplicated, insertion-order-preserved list of skill names.
-    /// Defaults to empty for back-compat with older fixtures.
-    #[serde(default)]
-    pub skills_considered: Vec<String>,
-    /// Tests passed in the QA phase, when the QA agent emitted a parsable
-    /// JSON envelope with a `passed` count.
-    ///
-    /// Why: Run-over-run comparisons want raw test counts, not just the
-    /// pass/fail status. Tracking `tests_passed`/`tests_failed` separately
-    /// from `status` lets dashboards show "1118/1118 passing" without
-    /// re-parsing QA output.
-    /// What: `Some(N)` when QA returned a JSON envelope with `passed`,
-    /// `None` otherwise. Defaults to `None` for back-compat with older
-    /// fixtures and for runs that skip the QA phase.
-    /// Test: `test_run_record_serializes_test_counts`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tests_passed: Option<u64>,
-    /// Tests failed in the QA phase, paired with `tests_passed`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tests_failed: Option<u64>,
-}
-
-fn default_status() -> String {
-    "success".to_string()
-}
+// Why: `TokenUsage`, `PhaseRecord`, `PerfTotals`, and `PerfRecord` were
+//      extracted to `trusty-agents-common::perf` in Wave 2 (issue #867) so
+//      external crates and the `AgentRunner` seam can reference `TokenUsage`
+//      without depending on the full `trusty-agents` binary crate. Re-exports
+//      here preserve every existing `crate::perf::TokenUsage` etc. import
+//      in the workspace — internal call sites are unchanged.
+// What: Explicit re-exports of all four portable value types.
+// Test: All existing perf tests still resolve these names and pass.
+pub use trusty_agents_common::perf::{PerfRecord, PerfTotals, PhaseRecord, TokenUsage};
 
 /// Accumulator used during workflow execution.
 ///
