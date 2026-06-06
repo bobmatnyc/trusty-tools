@@ -16,7 +16,18 @@
 //! Test: Compile-tested via `crates/cto-assistant` which depends on
 //!       `trusty-agents` as a library and constructs an `AgentPlugin`.
 
-pub mod adapters;
+/// Re-export the harness adapter framework from trusty-agents-common.
+///
+/// Why: Moved to trusty-agents-common in Wave 1 (issue #862, refs #830/#832) so
+///      external crates can use `HarnessAdapter`, `AdapterRegistry`, etc. without
+///      depending on the full `trusty-agents` binary crate. This shim preserves
+///      every existing `crate::adapters::X` reference inside trusty-agents
+///      without touching any call site.
+/// What: Wildcard re-export of `trusty_agents_common::adapters`.
+/// Test: `cargo check --workspace` verifies all internal call sites resolve.
+pub mod adapters {
+    pub use trusty_agents_common::adapters::*;
+}
 pub mod agents;
 pub mod api;
 pub mod ast;
@@ -59,7 +70,16 @@ pub mod search;
 pub mod service;
 pub mod session;
 pub mod session_record;
-pub mod session_registry;
+/// Re-export the JSON-backed session ledger from trusty-agents-common.
+///
+/// Why: Moved to trusty-agents-common in Wave 1 (issue #862, refs #830/#832).
+///      This shim preserves every existing `crate::session_registry::X`
+///      reference inside trusty-agents without touching any call site.
+/// What: Wildcard re-export of `trusty_agents_common::session_registry`.
+/// Test: `cargo check --workspace` verifies all internal call sites resolve.
+pub mod session_registry {
+    pub use trusty_agents_common::session_registry::*;
+}
 pub mod skills;
 pub mod slack;
 pub mod state_writer;

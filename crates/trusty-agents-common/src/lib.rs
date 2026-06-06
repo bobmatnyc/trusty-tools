@@ -12,10 +12,38 @@
 //! What: Re-defines the previously trusty-agents-internal types — `ToolExecutor`
 //!       trait, `ToolResult` enum, `ToolExecutionTier` enum, `ServiceTier`
 //!       enum (RBAC tiers), and `AgentPlugin` struct — as the public surface.
-//!       `trusty-agents` re-exports them via `trusty_agents::agent_api` for source-level
-//!       compatibility with the existing call sites in `crates/trusty-agents/src/**`.
+//!       Also hosts the harness-adapter framework (`adapters`) and the
+//!       JSON-backed session ledger (`session_registry`), both moved here in
+//!       Wave 1 of the trusty-agents-common build-out (issue #862, refs #830/#832).
+//!       `trusty-agents` re-exports them via `trusty_agents::agent_api`,
+//!       `trusty_agents::adapters`, and `trusty_agents::session_registry` for
+//!       source-level compatibility with the existing call sites in
+//!       `crates/trusty-agents/src/**`.
 //! Test: Compile-tested transitively via `crates/cto-assistant` (downstream
 //!       agent) and `crates/trusty-agents` (host).
+
+/// Harness adapter framework: `HarnessAdapter` trait, value types, pattern
+/// helpers, `AdapterRegistry`, and 7 concrete adapters.
+///
+/// Why: Moved to trusty-agents-common in Wave 1 (issue #862) so external
+///      crates that need to implement or enumerate adapters can do so without
+///      depending on the full `trusty-agents` binary crate. Zero internal
+///      `crate::` dependencies confirmed pre-move.
+/// What: Re-exports everything that was under `trusty-agents::adapters`.
+/// Test: All unit tests in the submodules; `cargo test -p trusty-agents-common`
+///       exercises them in-place.
+pub mod adapters;
+
+/// JSON-backed session ledger (`SessionsRegistry` + `SessionEntry`).
+///
+/// Why: Moved to trusty-agents-common in Wave 1 (issue #862) alongside the
+///      adapter framework. The registry is purely `std`/`anyhow`/`chrono`/`serde`
+///      — no host-crate dependencies — making it a clean extraction.
+/// What: `SessionsRegistry` provides `open`, `record_start`, `record_end`,
+///       `list` over a flat `sessions.json` file.
+/// Test: `record_start_appends_entry`, `record_end_updates_status`, etc. in
+///       the `tests` module of `session_registry.rs`.
+pub mod session_registry;
 
 use std::sync::Arc;
 
