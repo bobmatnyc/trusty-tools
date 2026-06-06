@@ -218,6 +218,7 @@ impl PalaceRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory_core::retrieval::seed_shared_embedder_with_mock;
     use crate::memory_core::store::{kg::KnowledgeGraph, vector::UsearchStore};
     use tempfile::tempdir;
 
@@ -315,6 +316,8 @@ mod tests {
     /// Test: This test itself.
     #[tokio::test]
     async fn palace_payloads_survive_registry_restart() {
+        // Pre-seed mock embedder so no HuggingFace download is attempted. Issue #850.
+        seed_shared_embedder_with_mock();
         use crate::memory_core::palace::{Palace, RoomType};
         use chrono::Utc;
 

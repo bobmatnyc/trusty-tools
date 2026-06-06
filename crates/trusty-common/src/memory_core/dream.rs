@@ -14,7 +14,6 @@
 //! semantic-consolidation integration tests.
 
 use crate::memory_core::decay::DecayConfig;
-use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::{Drawer, RoomType};
 use crate::memory_core::retrieval::{PalaceHandle, shared_embedder};
 use crate::memory_core::semantic_consolidation::{
@@ -1077,7 +1076,7 @@ type _PalaceHandleRef = RwLock<()>;
 mod tests {
     use super::*;
     use crate::memory_core::palace::{Palace, PalaceId, RoomType};
-    use crate::memory_core::retrieval::PalaceHandle;
+    use crate::memory_core::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
     use chrono::{Duration as ChronoDuration, Utc};
     use tempfile::tempdir;
 
@@ -1120,6 +1119,10 @@ mod tests {
     }
 
     async fn open_test_handle(name: &str) -> Arc<PalaceHandle> {
+        // Pre-seed the process-wide embedder with MockEmbedder so no HuggingFace
+        // download is attempted. Safe to call multiple times — OnceCell semantics
+        // make subsequent calls a no-op. Issue #850.
+        seed_shared_embedder_with_mock();
         let dir = tempdir().unwrap();
         let palace = Palace {
             id: PalaceId::new(name),

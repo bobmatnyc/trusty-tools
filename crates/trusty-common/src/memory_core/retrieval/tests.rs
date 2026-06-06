@@ -10,6 +10,13 @@ use super::*;
 use crate::memory_core::store::{kg::KnowledgeGraph, vector::UsearchStore};
 use tempfile::tempdir;
 
+/// Pre-seed the process-wide shared embedder with `MockEmbedder` so no
+/// HuggingFace download is attempted. Safe to call multiple times (no-op
+/// after the first invocation — `OnceCell` semantics). Issue #850.
+fn init_embedder() {
+    seed_shared_embedder_with_mock();
+}
+
 fn make_handle(dir: &std::path::Path) -> PalaceHandle {
     let vs = UsearchStore::new(dir.join("idx.usearch"), 384).unwrap();
     let kg = KnowledgeGraph::open(&dir.join("kg.db")).unwrap();
@@ -33,11 +40,10 @@ fn l0_l1_always_present() {
 
 #[tokio::test]
 async fn l2_returns_relevant_drawer() {
+    init_embedder();
     let dir = tempdir().unwrap();
     let handle = make_handle(dir.path());
-    let embedder = crate::memory_core::embed::FastEmbedder::new()
-        .await
-        .unwrap();
+    let embedder = shared_embedder().await.unwrap();
 
     let room_id = uuid::Uuid::new_v4();
     let drawer = Drawer::new(room_id, "Rust is a systems programming language");
@@ -54,9 +60,15 @@ async fn l2_returns_relevant_drawer() {
         .unwrap();
     handle.add_drawer(drawer);
 
-    let results = retrieve_l2(&handle, &embedder, "systems programming Rust", None, 5)
-        .await
-        .unwrap();
+    let results = retrieve_l2(
+        &handle,
+        embedder.as_ref(),
+        "systems programming Rust",
+        None,
+        5,
+    )
+    .await
+    .unwrap();
     assert!(!results.is_empty(), "L2 should return results");
     assert!(
         uuid_prefix_eq(results[0].drawer.id, drawer_id),
@@ -75,6 +87,7 @@ async fn l2_returns_relevant_drawer() {
 /// Test: This test itself.
 #[tokio::test]
 async fn cli_remember_and_recall() {
+    init_embedder();
     use crate::memory_core::palace::Palace;
     let dir = tempdir().unwrap();
     let palace = Palace {
@@ -122,6 +135,7 @@ async fn cli_remember_and_recall() {
 /// Test: This test itself.
 #[tokio::test]
 async fn cli_forget_removes_drawer() {
+    init_embedder();
     use crate::memory_core::palace::Palace;
     let dir = tempdir().unwrap();
     let palace = Palace {
@@ -169,6 +183,7 @@ async fn cli_forget_removes_drawer() {
 /// Test: this test.
 #[tokio::test]
 async fn remember_concurrent_does_not_lose_writes() {
+    init_embedder();
     use crate::memory_core::palace::Palace;
     let dir = tempdir().unwrap();
     let palace = Palace {
@@ -240,6 +255,7 @@ async fn remember_concurrent_does_not_lose_writes() {
 /// Test: This test itself.
 #[tokio::test]
 async fn cli_list_filters_by_room() {
+    init_embedder();
     use crate::memory_core::palace::Palace;
     let dir = tempdir().unwrap();
     let palace = Palace {
@@ -296,12 +312,11 @@ async fn cli_list_filters_by_room() {
 /// Test: This test itself.
 #[tokio::test]
 async fn recall_logs_events_when_log_present() {
+    init_embedder();
     let dir = tempdir().unwrap();
     let log = Arc::new(RecallLog::open(&dir.path().join("recall.db")).unwrap());
     let mut handle = make_handle(dir.path()).with_recall_log(log.clone());
-    let embedder = crate::memory_core::embed::FastEmbedder::new()
-        .await
-        .unwrap();
+    let embedder = shared_embedder().await.unwrap();
 
     let room_id = uuid::Uuid::new_v4();
     let drawer = Drawer::new(room_id, "Rust is a systems programming language");
@@ -318,7 +333,7 @@ async fn recall_logs_events_when_log_present() {
     handle.add_drawer(drawer);
     handle.refresh_l1();
 
-    let _ = recall(&handle, &embedder, "systems programming Rust", 5)
+    let _ = recall(&handle, embedder.as_ref(), "systems programming Rust", 5)
         .await
         .unwrap();
 
@@ -344,6 +359,7 @@ async fn recall_logs_events_when_log_present() {
 /// Test: This test itself.
 #[tokio::test]
 async fn open_attaches_recall_log_automatically() {
+    init_embedder();
     use crate::memory_core::palace::Palace;
     let dir = tempdir().unwrap();
     let palace = Palace {
@@ -379,10 +395,8 @@ async fn open_attaches_recall_log_automatically() {
         .await
         .unwrap();
 
-    let embedder = crate::memory_core::embed::FastEmbedder::new()
-        .await
-        .unwrap();
-    let _ = recall(&handle, &embedder, "platypus monotreme", 5)
+    let embedder = shared_embedder().await.unwrap();
+    let _ = recall(&handle, embedder.as_ref(), "platypus monotreme", 5)
         .await
         .unwrap();
 
@@ -408,6 +422,7 @@ async fn open_attaches_recall_log_automatically() {
 /// Test: This test itself.
 #[tokio::test]
 async fn closet_updated_after_remember() {
+    init_embedder();
     use crate::memory_core::palace::Palace;
     let dir = tempdir().unwrap();
     let palace = Palace {
@@ -484,9 +499,12 @@ fn expand_query_noop_for_unmatched() {
 /// What: Remember 20 drawers, drop the handle, reopen the palace from the
 /// same data_dir, and recall a keyword from a drawer that is NOT in the
 /// top-15 by importance. The drawer must still come back.
-/// Test: This test itself.
+/// Test: Requires real ONNX embedder for semantic similarity; mark `--include-ignored`
+/// to run locally. Skipped in CI to avoid HuggingFace download / 429 flake (issue #850).
+#[ignore = "requires real ONNX embedder (issue #850)"]
 #[tokio::test]
 async fn cold_restart_recalls_beyond_l1_snapshot() {
+    init_embedder();
     use crate::memory_core::palace::Palace;
     let dir = tempdir().unwrap();
     let palace = Palace {
@@ -555,6 +573,7 @@ async fn cold_restart_recalls_beyond_l1_snapshot() {
 /// Test: This test itself.
 #[tokio::test]
 async fn shared_embedder_is_singleton() {
+    init_embedder();
     let a = shared_embedder().await.unwrap();
     let b = shared_embedder().await.unwrap();
     assert!(
@@ -571,6 +590,7 @@ async fn shared_embedder_is_singleton() {
 /// Test: This test itself.
 #[tokio::test]
 async fn retrieve_l2_tag_boost_raises_rank() {
+    init_embedder();
     use crate::memory_core::palace::Palace;
     let dir = tempdir().unwrap();
     let palace = Palace {
@@ -604,12 +624,16 @@ async fn retrieve_l2_tag_boost_raises_rank() {
         .await
         .unwrap();
 
-    let embedder = crate::memory_core::embed::FastEmbedder::new()
-        .await
-        .unwrap();
-    let results = retrieve_l2(&handle, &embedder, "vector search performance", None, 5)
-        .await
-        .unwrap();
+    let embedder = shared_embedder().await.unwrap();
+    let results = retrieve_l2(
+        &handle,
+        embedder.as_ref(),
+        "vector search performance",
+        None,
+        5,
+    )
+    .await
+    .unwrap();
 
     assert!(!results.is_empty(), "L2 should return results");
     assert!(
@@ -630,6 +654,7 @@ async fn retrieve_l2_tag_boost_raises_rank() {
 /// Test: This test itself.
 #[tokio::test]
 async fn recall_across_palaces_merges_results() {
+    init_embedder();
     use crate::memory_core::palace::Palace;
     let dir = tempdir().unwrap();
 
@@ -748,6 +773,7 @@ async fn remember_rejects_known_noise_patterns() {
 /// Issue #61: `force = true` bypasses every filter.
 #[tokio::test]
 async fn remember_force_bypasses_filter() {
+    init_embedder();
     let dir = tempdir().unwrap();
     let handle = make_handle(dir.path());
     let id = handle
@@ -767,6 +793,7 @@ async fn remember_force_bypasses_filter() {
 /// classifies them as `UserFact`.
 #[tokio::test]
 async fn note_options_skip_token_check_but_keep_noise_filter() {
+    init_embedder();
     let dir = tempdir().unwrap();
     let handle = make_handle(dir.path());
     let id = handle
@@ -806,6 +833,7 @@ async fn note_options_skip_token_check_but_keep_noise_filter() {
 /// passed through with `force` (so the classifier still fires).
 #[tokio::test]
 async fn remember_classifies_commit_messages() {
+    init_embedder();
     let dir = tempdir().unwrap();
     let handle = make_handle(dir.path());
     // Use force so the noise filter doesn't reject before classify runs.
@@ -868,9 +896,12 @@ async fn purge_expired_drops_only_past_ttl() {
 /// What: Insert two drawers — one high-importance but semantically unrelated
 /// to the query, one low-importance but closely matching the query — run
 /// `recall`, and assert the on-topic drawer appears first in the results.
-/// Test: This test itself.
+/// Test: Requires real ONNX embedder for semantic similarity; mark `--include-ignored`
+/// to run locally. Skipped in CI to avoid HuggingFace download / 429 flake (issue #850).
+#[ignore = "requires real ONNX embedder (issue #850)"]
 #[tokio::test]
 async fn recall_ranks_by_similarity_over_importance() {
+    init_embedder();
     use crate::memory_core::palace::Palace;
     let dir = tempdir().unwrap();
     let palace = Palace {
@@ -906,12 +937,15 @@ async fn recall_ranks_by_similarity_over_importance() {
         .await
         .unwrap();
 
-    let embedder = crate::memory_core::embed::FastEmbedder::new()
-        .await
-        .unwrap();
-    let results = recall(&handle, &embedder, "pangolin scaly nocturnal mammal", 10)
-        .await
-        .unwrap();
+    let embedder = shared_embedder().await.unwrap();
+    let results = recall(
+        &handle,
+        embedder.as_ref(),
+        "pangolin scaly nocturnal mammal",
+        10,
+    )
+    .await
+    .unwrap();
 
     assert!(
         !results.is_empty(),
