@@ -30,36 +30,60 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-/// Process-wide shared FastEmbedder.
+/// Process-wide shared embedder (type-erased).
 ///
 /// Why: `FastEmbedder::new()` loads a ~90 MB ONNX session — creating one per
 /// call (as the previous `recall_with_default_embedder` / `remember` /
 /// dream `dedup_pass` did) blew memory to multiple GB and forked dozens of
-/// model instances. Issue #57.
+/// model instances. Issue #57. Typed as `dyn Embedder` so tests can seed the
+/// cell with `MockEmbedder` before any ONNX download occurs (issue #850).
 /// What: A `tokio::sync::OnceCell` initialised on first use and shared by every
 /// caller that lacks a context-supplied embedder. Concurrent first-use races
-/// collapse to a single load.
+/// collapse to a single load. Tests call `seed_shared_embedder_with_mock()`
+/// before any `shared_embedder()` call to avoid HuggingFace downloads in CI.
 /// Test: `shared_embedder_is_singleton` confirms two calls return the same
 /// `Arc` pointer.
-static SHARED_EMBEDDER: OnceCell<Arc<FastEmbedder>> = OnceCell::const_new();
+static SHARED_EMBEDDER: OnceCell<Arc<dyn Embedder + Send + Sync>> = OnceCell::const_new();
 
-/// Resolve (or initialise) the process-wide shared `FastEmbedder`.
+/// Resolve (or initialise) the process-wide shared embedder.
 ///
 /// Why: Centralising fallback embedder construction guarantees at most one
 /// ONNX session per process — critical for the daemon footprint (issue #57).
-/// What: Returns a clone of the shared `Arc<FastEmbedder>`, initialising it
-/// on first call. Errors propagate from the underlying ONNX load.
+/// What: Returns a clone of the shared `Arc<dyn Embedder + Send + Sync>`,
+/// initialising it on first call via `FastEmbedder::new()`. In test builds,
+/// callers should first call `seed_shared_embedder_with_mock()` so the cell
+/// is pre-populated with `MockEmbedder` and no model download is attempted.
 /// Test: `shared_embedder_is_singleton`.
-pub async fn shared_embedder() -> Result<Arc<FastEmbedder>> {
+pub async fn shared_embedder() -> Result<Arc<dyn Embedder + Send + Sync>> {
     SHARED_EMBEDDER
         .get_or_try_init(|| async {
             let e = FastEmbedder::new()
                 .await
                 .context("init shared FastEmbedder")?;
-            Ok::<Arc<FastEmbedder>, anyhow::Error>(Arc::new(e))
+            Ok::<Arc<dyn Embedder + Send + Sync>, anyhow::Error>(Arc::new(e))
         })
         .await
         .cloned()
+}
+
+/// Pre-seed the shared embedder with a `MockEmbedder` for offline tests.
+///
+/// Why: CI environments cannot download the ~23 MB ONNX model from HuggingFace
+/// without hitting HTTP 429 rate limits. Calling this before any `remember` /
+/// `recall` / `dream_cycle` operation in tests avoids the download entirely by
+/// pre-populating the process-wide `SHARED_EMBEDDER` cell with a deterministic
+/// hash-based mock (issue #850 — mirrors the fix applied to open-mpm in #813).
+/// What: Attempts `OnceCell::set` with a 384-dim `MockEmbedder`. Idempotent
+/// — if the cell was already set (by an earlier test in the same process), the
+/// call is a silent no-op; the first caller wins.
+/// Test: All memory-core tests that exercise the embedding path call this at
+/// the start of their body; `shared_embedder_is_singleton` verifies ptr-eq.
+#[cfg(any(test, feature = "embedder-test-support"))]
+pub fn seed_shared_embedder_with_mock() {
+    use crate::embedder::MockEmbedder;
+    let mock: Arc<dyn Embedder + Send + Sync> = Arc::new(MockEmbedder::new(384));
+    // `set` returns Err if already initialised — that is the desired no-op.
+    let _ = SHARED_EMBEDDER.set(mock);
 }
 
 /// L0 — palace identity. Tiny (~100 tokens), always loaded, read from
@@ -940,8 +964,7 @@ pub async fn recall_across_palaces_with_default_embedder(
     let embedder = shared_embedder()
         .await
         .context("acquire shared embedder for recall_across_palaces")?;
-    let erased: Arc<dyn Embedder + Send + Sync> = embedder;
-    recall_across_palaces(handles, &erased, query, top_k, deep).await
+    recall_across_palaces(handles, &embedder, query, top_k, deep).await
 }
 
 /// Hash a `RoomType` to a deterministic `Uuid` so the room signal survives
