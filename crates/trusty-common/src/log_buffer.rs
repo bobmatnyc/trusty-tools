@@ -124,9 +124,12 @@ impl LogBuffer {
 /// Why: wiring this layer into the subscriber means the daemon's normal
 ///      `tracing::info!` / `warn!` calls are captured for `/logs/tail` with
 ///      no extra call sites — the buffer stays in lock-step with stderr.
-/// What: on each event, formats `[<level> <target>] <message> k=v …` into a
-///      single line and pushes it. Level/target/fields are collected via a
-///      lightweight `Visit` implementation.
+/// What: on each event, formats
+///      `<YYYY-MM-DD HH:MM:SS> [<level> <target>] <message> k=v …` into a
+///      single line and pushes it. The leading local-time timestamp (issue
+///      #846) lets the dashboard log view show when each line was emitted.
+///      Level/target/fields are collected via a lightweight `Visit`
+///      implementation.
 /// Test: `layer_captures_events` installs the layer on a real subscriber and
 ///      asserts an emitted event lands in the buffer.
 pub struct LogBufferLayer {
@@ -196,8 +199,14 @@ impl<S: tracing::Subscriber> Layer<S> for LogBufferLayer {
         // Trim the leading `"` artefact that `{:?}` adds for the message when
         // the payload was a quoted string literal — keep lines readable.
         let message = visitor.message.trim_matches('"');
+        // Prepend a local-time timestamp (issue #846) so the dashboard log
+        // view shows per-line timing. We use `chrono::Local` directly rather
+        // than `tracing_subscriber::fmt::time::LocalTime`, which is unsound in
+        // multithreaded programs.
+        let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
         let line = format!(
-            "[{} {}] {}{}",
+            "{} [{} {}] {}{}",
+            ts,
             meta.level(),
             meta.target(),
             message,
@@ -264,5 +273,33 @@ mod tests {
         assert!(line.contains("hello from test"), "line was: {line}");
         assert!(line.contains("answer=42"), "line was: {line}");
         assert!(line.contains("INFO"), "line was: {line}");
+
+        // Issue #846: every line is prefixed with a `YYYY-MM-DD HH:MM:SS `
+        // local-time timestamp. Lock in the shape without over-fitting to a
+        // specific clock value: 4-digit year, then '-', then a space-delimited
+        // time component, with the level appearing after the timestamp.
+        let bytes = line.as_bytes();
+        assert!(
+            bytes.len() >= 19,
+            "line too short to hold a timestamp: {line}"
+        );
+        assert!(
+            bytes[0..4].iter().all(u8::is_ascii_digit),
+            "expected a 4-digit year prefix, line was: {line}"
+        );
+        assert_eq!(
+            bytes[4], b'-',
+            "expected '-' after the year, line was: {line}"
+        );
+        // The timestamp must come before the level/target bracket.
+        let ts_end = line
+            .find(" [")
+            .expect("expected a ' [' after the timestamp");
+        let ts = &line[..ts_end];
+        assert_eq!(
+            ts.len(),
+            19,
+            "timestamp should be exactly 'YYYY-MM-DD HH:MM:SS', got: {ts:?}"
+        );
     }
 }

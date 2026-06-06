@@ -115,7 +115,10 @@ r2d2_sqlite = { workspace = true, optional = true }
 git2 = { workspace = true, optional = true }
 dashmap = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
-chrono = { workspace = true, optional = true }
+# Non-optional: the unconditional `log_buffer` module timestamps each captured
+# dashboard log line via `chrono::Local` (issue #846). It must be available in
+# default-features builds, so it cannot be gated behind a feature flag.
+chrono = { workspace = true }
 regex = { workspace = true, optional = true }
 kuzu = { workspace = true, optional = true }
 redb = { workspace = true, optional = true }
@@ -287,7 +290,6 @@ memory-core = [
     "dep:git2",
     "dep:dashmap",
     "dep:futures",
-    "dep:chrono",
     "dep:regex",
     "dep:parking_lot",
     "dep:thiserror",
@@ -326,7 +328,7 @@ sqlite-kg = [
 # ratatui + crossterm; the daemon HTTP clients reuse the `reqwest` already
 # required. Consumed via `trusty_common::monitor::run()` by the
 # `monitor tui` subcommand of `trusty-search` and `trusty-memory`.
-monitor-tui = ["dep:ratatui", "dep:crossterm", "dep:chrono"]
+monitor-tui = ["dep:ratatui", "dep:crossterm"]
 # Enables the `embedder_client` module: HTTP client trait + wire types +
 # InProcessEmbedderClient + RemoteEmbedderClient for the `trusty-embedderd`
 # standalone process (issue #110 Phase 1). Formerly the `trusty-embedder-client`
@@ -343,7 +345,7 @@ embedder-client = ["dep:thiserror", "embedder"]
 # JIRA, and Linear backends (absorbed from the former standalone `trusty-tickets`
 # crate). Pulls in `chrono`, `uuid`, `base64`, `thiserror`, and `toml` as
 # additional optional deps. Requires the `mcp` feature for the stdio loop.
-tickets = ["mcp", "dep:chrono", "dep:uuid", "dep:base64", "dep:thiserror", "dep:toml"]
+tickets = ["mcp", "dep:uuid", "dep:base64", "dep:thiserror", "dep:toml"]
 # Enables the `help` module: declarative CLI help loader (`HelpConfig` parsed
 # from a per-binary `help.yaml` bundled via `include_str!`), the canonical
 # `render_help` formatter, and a Jaro-Winkler-based `suggest("did you mean?")`
