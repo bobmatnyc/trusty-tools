@@ -39,17 +39,22 @@ use crate::core::registry::IndexHandle;
 /// What: grabs a read lock on the indexer, clones the corpus Arc, then runs
 /// `load_file_hashes` on a blocking worker.  Entries are inserted into `map`
 /// only when the redb value differs from the in-process one, to avoid
-/// unnecessary hash churn.  Errors are logged at `warn` and silently ignored
-/// — the cache is a pure speed optimisation; a miss just causes a re-embed.
+/// unnecessary hash churn.  Returns the number of hashes actually loaded from
+/// redb so callers can surface it in SSE events for operator observability
+/// (issue #840 Part 2).  Errors are logged at `warn` and the function returns
+/// 0 — the cache is a pure speed optimisation; a miss just causes a re-embed.
 /// Test: `load_into_cache_populates_map` below.
-pub(super) async fn load_into_cache(handle: &IndexHandle, map: &Arc<DashMap<PathBuf, String>>) {
+pub(super) async fn load_into_cache(
+    handle: &IndexHandle,
+    map: &Arc<DashMap<PathBuf, String>>,
+) -> usize {
     let corpus = {
         let indexer = handle.indexer.read().await;
         indexer.corpus_store()
     };
     let Some(corpus) = corpus else {
         // BM25-only / no durable corpus — nothing to load.
-        return;
+        return 0;
     };
     let result = tokio::task::spawn_blocking(move || corpus.load_file_hashes()).await;
     match result {
@@ -69,12 +74,15 @@ pub(super) async fn load_into_cache(handle: &IndexHandle, map: &Arc<DashMap<Path
                     count
                 );
             }
+            count
         }
         Ok(Err(e)) => {
             tracing::warn!("reindex: could not load persisted file hashes ({e}) — cold start");
+            0
         }
         Err(e) => {
             tracing::warn!("reindex: file-hash load task panicked ({e}) — cold start");
+            0
         }
     }
 }
@@ -245,10 +253,14 @@ mod tests {
                 .unwrap();
         }
 
-        // Load into a fresh map.
+        // Load into a fresh map; count must equal the number of entries written.
         let map: Arc<DashMap<PathBuf, String>> = Arc::new(DashMap::new());
-        load_into_cache(&handle, &map).await;
+        let count = load_into_cache(&handle, &map).await;
 
+        assert_eq!(
+            count, 2,
+            "load_into_cache must return the number of hashes loaded"
+        );
         assert_eq!(map.len(), 2);
         assert_eq!(
             map.get(&PathBuf::from("src/a.rs"))
@@ -341,8 +353,92 @@ mod tests {
             PathBuf::from("/tmp/no-corpus"),
         );
         let map: Arc<DashMap<PathBuf, String>> = Arc::new(DashMap::new());
-        // Must not panic.
-        load_into_cache(&handle, &map).await;
+        // Must not panic; must return 0 with no corpus.
+        let count = load_into_cache(&handle, &map).await;
+        assert_eq!(count, 0);
         assert!(map.is_empty());
+    }
+
+    // ── Issue #840 regression ─────────────────────────────────────────────────
+
+    /// Why: guards the post-restart warm-skip regression (#840).  Before the
+    /// fix, `build_indexer_from_entry` failed to open the redb corpus on
+    /// warm-boot, so `load_into_cache` returned 0 and every post-restart
+    /// reindex cold-started (Skipped 0).
+    ///
+    /// This test simulates the full cycle:
+    ///   1. Build indexer + persist file hashes to redb.
+    ///   2. Drop the corpus handle (release redb file lock — simulates daemon
+    ///      shutdown / `Drop` at the end of the previous process).
+    ///   3. Reopen the corpus via a new `CorpusStore::open` call (warm-boot).
+    ///   4. Load hashes into a fresh map and assert count > 0.
+    ///
+    /// What: uses `CorpusStore::open` directly rather than going through
+    /// `build_indexer_from_entry` so the test stays focused on the hash-cache
+    /// layer.  The companion test
+    /// `colocated_create_handler_path_survives_simulated_reload` in
+    /// `persistence_loader.rs` exercises the full `build_indexer_from_entry`
+    /// warm-boot path.
+    ///
+    /// Test: this IS the test.
+    #[tokio::test]
+    async fn warm_boot_hash_load_after_simulated_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("index.redb");
+
+        // --- Phase 1: first daemon lifetime — persist hashes ---
+        {
+            let handle = make_handle_with_corpus(&dir);
+            let new_hashes = vec![
+                (PathBuf::from("src/a.rs"), "aaa111".to_string()),
+                (PathBuf::from("src/b.rs"), "bbb222".to_string()),
+                (PathBuf::from("src/c.rs"), "ccc333".to_string()),
+            ];
+            // Persist the hashes as if a reindex committed them.
+            persist_batch(&handle, &new_hashes, 200_000, 3).await;
+            // handle (and its corpus Arc) is dropped here — redb file lock released.
+        }
+
+        // --- Phase 2: simulated restart — reopen corpus (warm-boot path) ---
+        let corpus = CorpusStore::open(&db_path).expect("#840: reopen must succeed after drop");
+        let mut indexer = CodeIndexer::new("840-test", dir.path());
+        indexer.set_corpus_store(Arc::new(corpus));
+        let handle = IndexHandle {
+            id: IndexId::new("840-test"),
+            indexer: Arc::new(RwLock::new(indexer)),
+            root_path: dir.path().to_path_buf(),
+            include_paths: vec![],
+            exclude_globs: vec![],
+            extensions: vec![],
+            domain_terms: vec![],
+            include_docs: false,
+            respect_gitignore: true,
+            path_filter: vec![],
+            context_embedding: Arc::new(RwLock::new(None)),
+            context_summary: Arc::new(RwLock::new(None)),
+            indexed_head_sha: Arc::new(RwLock::new(None)),
+            lexical_only: false,
+            skip_kg: false,
+            stages: Arc::new(RwLock::new(IndexStages::default())),
+            search_pressure: Arc::new(tokio::sync::Notify::new()),
+            walk_diagnostics: Arc::new(RwLock::new(
+                crate::core::registry::WalkDiagnostics::default(),
+            )),
+        };
+
+        // Load hashes into a fresh map — this is what `spawn_reindex` does.
+        let map: Arc<DashMap<PathBuf, String>> = Arc::new(DashMap::new());
+        let count = load_into_cache(&handle, &map).await;
+
+        // Post-restart the map must be primed so unchanged files are skipped.
+        assert_eq!(
+            count, 3,
+            "#840: warm-boot must load all 3 persisted hashes; got {count}"
+        );
+        assert_eq!(
+            map.get(&PathBuf::from("src/a.rs")).as_deref().cloned(),
+            Some("aaa111".to_string()),
+            "#840: hash for src/a.rs must match what was persisted"
+        );
     }
 }

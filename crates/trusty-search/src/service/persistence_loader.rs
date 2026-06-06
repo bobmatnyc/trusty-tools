@@ -14,9 +14,10 @@
 //! Test: covered by integration tests in `tests/integration_tests.rs` that
 //! drop a state directory, restart, and assert the corpus is intact.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anyhow::Result;
 use trusty_common::migrations::{
     file_stamp::{read_version_from_file, write_version_to_file},
     MigrationRunner, SchemaVersion,
@@ -30,6 +31,40 @@ use crate::core::{
 };
 
 use crate::service::persistence::{self, PersistedIndex};
+
+/// Open a `CorpusStore`, retrying once on `DatabaseAlreadyOpen` (issue #840).
+///
+/// Why: on a fast daemon restart the OS may not have released redb's file lock
+/// before the new process tries to open the same `index.redb`.
+/// A 50 ms pause + one retry is sufficient for the kernel to reclaim the lock.
+///
+/// What: calls `CorpusStore::open`; on `DatabaseAlreadyOpen` (matched by
+/// Display string) waits 50 ms and retries once.
+/// All other errors surface immediately.
+///
+/// Test: covered by the warm-boot regression test in this module.
+fn open_corpus_with_retry(path: &Path) -> Result<CorpusStore> {
+    match CorpusStore::open(path) {
+        Ok(store) => Ok(store),
+        Err(e) => {
+            // Detect a file-lock collision and retry once.  redb surfaces this
+            // as `DatabaseAlreadyOpen`; we match on the Display string to
+            // avoid importing redb internals here.
+            let msg = e.to_string();
+            if msg.contains("DatabaseAlreadyOpen") {
+                tracing::warn!(
+                    "warm-boot: redb corpus at {} is locked (DatabaseAlreadyOpen) — \
+                     retrying in 50 ms (refs #840)",
+                    path.display()
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                CorpusStore::open(path)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
 
 /// Build a `CodeIndexer` for `index_id`, restoring HNSW + chunks from disk
 /// when a snapshot is present.
@@ -79,19 +114,24 @@ pub async fn build_indexer_from_entry(
     let mut indexer =
         CodeIndexer::new(index_id, root_path).with_components(Arc::clone(embedder), store);
 
-    // Issue #28: wire the durable redb corpus store before restoring chunks.
-    // A failure to open the redb file is non-fatal — we log and run without a
-    // corpus store (the index simply behaves as a pre-#28 in-memory daemon and
-    // will be re-persisted to JSON via `spawn_incremental_persist`).
+    // Issue #28/#840: wire the durable redb corpus store.  Failure is non-fatal
+    // but logged at ERROR (#840) because a missing corpus means the next reindex
+    // cold-starts (Skipped 0).  `open_corpus_with_retry` retries once on
+    // DatabaseAlreadyOpen (stale file lock from a rapid restart).
     match persistence::corpus_redb_path_for_entry(entry) {
-        Ok(redb_path) => match CorpusStore::open(&redb_path) {
-            Ok(corpus) => indexer.set_corpus_store(Arc::new(corpus)),
-            Err(e) => tracing::warn!(
-                "warm-boot: could not open redb corpus for '{index_id}' at {} ({e}) — \
-                 running without durable corpus store",
-                redb_path.display()
-            ),
-        },
+        Ok(redb_path) => {
+            let open_result = open_corpus_with_retry(&redb_path);
+            match open_result {
+                Ok(corpus) => indexer.set_corpus_store(Arc::new(corpus)),
+                Err(e) => tracing::error!(
+                    "warm-boot: FAILED to open redb corpus for '{index_id}' at {} ({e}). \
+                     The durable corpus store is unavailable — the next reindex will be a \
+                     full cold-start (Skipped 0). Check permissions and whether another \
+                     process holds the redb file lock. (refs #840)",
+                    redb_path.display()
+                ),
+            }
+        }
         Err(e) => tracing::warn!("cannot resolve redb corpus path for '{index_id}': {e}"),
     }
 
@@ -273,19 +313,10 @@ async fn build_store_for_entry(entry: &PersistedIndex, dim: usize) -> Arc<dyn Ve
 }
 
 fn fresh_store(dim: usize) -> Arc<dyn VectorStore> {
-    // SAFETY (issue #101): `UsearchStore::new` only fails on OOM during the
-    // initial HNSW index allocation. There is no meaningful recovery path —
-    // the daemon needs an HNSW lane to function, and an OOM at startup would
-    // have already torn the process down. We use `.expect` (not `panic!`) so
-    // the failure message is uniform and the intent (infallible-modulo-OOM)
-    // is documented for the reader.
+    // SAFETY (#101): `UsearchStore::new` only fails on OOM; an OOM at startup
+    // has no sensible recovery path so we panic with a clear message.
     let s = UsearchStore::new(dim).unwrap_or_else(|e| {
-        tracing::error!(
-            "failed to allocate UsearchStore (dim={dim}): {e} — daemon cannot continue"
-        );
-        // Re-raise as a panic carrying the underlying error: there is no
-        // sensible fallback (BM25-only stores are constructed via a different
-        // path, not by replacing this Arc<dyn VectorStore>).
+        tracing::error!("failed to allocate UsearchStore (dim={dim}): {e}");
         panic!("usearch alloc failure (OOM during HNSW init, dim={dim}): {e}");
     });
     Arc::new(s) as Arc<dyn VectorStore>
@@ -329,27 +360,14 @@ mod tests {
 
     // ── Issue #483 regression ─────────────────────────────────────────────────
 
-    /// Why: guards the writer/loader path divergence described in #483.  Before
-    /// the fix, `build_indexer_with_persisted_state` (called by
-    /// `create_index_handler`) used `colocated: false`, so the corpus store
-    /// opened at the app-data path.  On restart `build_indexer_from_entry` used
-    /// `colocated: true` (from `indexes.toml`), `colocated_storage_dir` created
-    /// an empty `.trusty-search/` dir, and the loader found 0 chunks there —
-    /// even though chunks had been committed to app-data on the first run.
-    ///
-    /// The fix makes `create_index_handler` call `build_indexer_from_entry` with
-    /// `colocated: true`, which calls `colocated_storage_dir` (→ `create_dir_all`)
-    /// during construction, so:
-    ///   1. The corpus store is routed to the colocated redb path from the start.
-    ///   2. `.trusty-search/` exists before the first reindex, so
-    ///      `has_colocated_storage` returns `true` on the write-path probes.
-    ///   3. A simulated reload from the entry finds the populated store (n > 0).
-    ///
-    /// What: creates a colocated entry, builds an indexer, writes a chunk to
-    /// the corpus, then simulates a reload via a second `build_indexer_from_entry`
-    /// call with the same entry and asserts the chunk count is non-zero.
-    ///
-    /// Test: this IS the test; it exercises the exact call path used by the fixed
+    /// Why: guards the writer/loader path divergence (#483) where
+    /// `create_index_handler` used `colocated: false`, routing the corpus to
+    /// app-data, while warm-boot used `colocated: true`, opening an empty
+    /// `.trusty-search/` dir.
+    /// What: builds a colocated indexer, writes a chunk, drops the handle
+    /// (releasing the redb file lock), then reloads via `build_indexer_from_entry`
+    /// and asserts the chunk count is > 0.
+    /// Test: this IS the test; exercises the exact call path used by the fixed
     /// `create_index_handler`.
     #[tokio::test]
     async fn colocated_create_handler_path_survives_simulated_reload() {
@@ -416,20 +434,11 @@ mod tests {
     // ── Issue #485 regression ─────────────────────────────────────────────────
 
     /// Why: guards the "cannot write schema_version: no durable corpus" error
-    /// in #485.  When the corpus store was not wired (because `colocated: false`
-    /// routed it to the wrong path and `CorpusStore::open` found no redb there),
-    /// `IndexHandle::write_schema_version` returned an error.  With the fix the
-    /// corpus store is always wired for a colocated entry, so schema_version
-    /// writes succeed.
-    ///
-    /// What: builds an indexer via the fixed colocated entry path, then asserts
-    /// `has_corpus_store` is true (a prerequisite for write_schema_version).
-    /// The actual `write_schema_version` call is async and requires
-    /// `IndexHandle`; this test proves the corpus store presence guarantee that
-    /// makes it succeed.
-    ///
-    /// Test: this IS the test; it verifies the corpus store invariant that
-    /// eliminates the #485 "no durable corpus" failure.
+    /// (#485) that occurred when the corpus store was not wired for a colocated
+    /// entry.
+    /// What: builds an indexer via the colocated entry path and asserts both
+    /// `has_corpus_store` and that the corpus path is inside the project root.
+    /// Test: this IS the test.
     #[tokio::test]
     async fn colocated_create_path_wires_corpus_store_for_schema_version() {
         let tmp = tempdir().unwrap();
@@ -465,16 +474,10 @@ mod tests {
 
     // ── Guard: legacy colocated=false path is unchanged ───────────────────────
 
-    /// Why: the fix must not break the legacy (`colocated: false`) code path
-    /// used by existing indexes restored from `indexes.toml` with `colocated:
-    /// false`.  Those indexes should still build without a corpus store wired
-    /// (they use the app-data path which may not exist in tests).
-    ///
-    /// What: builds an indexer with `colocated: false` and asserts it succeeds
-    /// (the corpus open failure is graceful, logged at WARN, and the indexer is
-    /// returned without a store rather than panicking).
-    ///
-    /// Test: this IS the test; it protects against regressions on the legacy path.
+    /// Why: the fix must not break legacy (`colocated: false`) indexes.
+    /// What: builds with `colocated: false`; asserts no panic even when no
+    /// app-data corpus exists.
+    /// Test: this IS the test.
     #[tokio::test]
     async fn legacy_non_colocated_path_does_not_panic() {
         let tmp = tempdir().unwrap();

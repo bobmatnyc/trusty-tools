@@ -1907,11 +1907,38 @@ pub fn spawn_reindex_with_cleanup(
             }
         }
         progress.total_files.store(total, Ordering::Release);
-        // Issue #317: emit `walk_complete` BEFORE the existing `start` event so
-        // new CLI clients can render a dedicated "Walking files…" phase that
-        // transitions to "Chunking…" the moment the file count is known. Old
-        // CLI clients that don't recognise `walk_complete` simply ignore it and
-        // keep waiting for `start` as before — fully backward-compatible.
+
+        // Issues #840 / #662: load the persisted hash cache BEFORE emitting the
+        // `start` event so `hashes_loaded` is available for the event payload.
+        let hashes = hashes_for(&index_id);
+        // Issue #602: detect a root move against the corpus's persisted
+        // `indexed_root` and clear the hash cache so every file is re-written
+        // relative to the new canonical root (live-path analogue of M002/M003).
+        let prior_indexed_root = handle.read_indexed_root().await.unwrap_or(None);
+        let root_moved =
+            validate::needs_path_relativization(prior_indexed_root.as_deref(), &canonical_root);
+        let hashes_loaded: usize;
+        if force {
+            hashes.clear();
+            hash_cache::clear_persisted(&handle).await; // #662: clear redb too
+            hashes_loaded = 0;
+        } else if root_moved {
+            tracing::warn!(
+                "reindex[{}]: index root moved from {:?} to {} — clearing hash \
+                 cache to re-relativize all chunk paths against the new root",
+                index_id.0,
+                prior_indexed_root,
+                canonical_root.display(),
+            );
+            hashes.clear();
+            hash_cache::clear_persisted(&handle).await; // #662: clear redb too
+            hashes_loaded = 0;
+        } else {
+            // #662: warm cache from redb; #840 Part 2: capture count for SSE.
+            hashes_loaded = hash_cache::load_into_cache(&handle, &hashes).await;
+        }
+
+        // Issue #317: emit `walk_complete` BEFORE `start` (backward-compatible).
         progress
             .push(serde_json::json!({
                 "event": "walk_complete",
@@ -1919,6 +1946,7 @@ pub fn spawn_reindex_with_cleanup(
                 "index_id": index_id.0,
             }))
             .await;
+        // Issue #840 Part 2: `hashes_loaded` shows whether warm-skip is primed.
         progress
             .push(serde_json::json!({
                 "event": "start",
@@ -1927,6 +1955,7 @@ pub fn spawn_reindex_with_cleanup(
                 "root_path": root,
                 "force": force,
                 "lexical_only": handle.lexical_only,
+                "hashes_loaded": hashes_loaded,
             }))
             .await;
 
@@ -1937,13 +1966,13 @@ pub fn spawn_reindex_with_cleanup(
         // load + CoreML / CUDA session compile takes 30–60 s, completely
         // serialising with the first batch and making it look like chunking
         // is slow. Spawning a background warm-up task here — CONCURRENTLY
-        // with the hash-cache load and staging setup — means the sidecar is
-        // already live (or well into init) by the time the batch loop begins.
-        // On a warm daemon (PID slot already non-zero) this is a no-op: the
-        // first embed call returns immediately. The task is fire-and-forget;
-        // we do NOT await it — a warm-up failure is non-fatal and the first
-        // real batch will retry. `lexical_only` indexes never embed, so we
-        // skip the warm-up entirely to avoid a spurious lazy-spawn.
+        // with the staging setup — means the sidecar is already live (or well
+        // into init) by the time the batch loop begins. On a warm daemon (PID
+        // slot already non-zero) this is a no-op: the first embed call returns
+        // immediately. The task is fire-and-forget; we do NOT await it — a
+        // warm-up failure is non-fatal and the first real batch will retry.
+        // `lexical_only` indexes never embed, so we skip the warm-up entirely
+        // to avoid a spurious lazy-spawn.
         //
         // Double-spawn guard: `LazyEmbedderHandle::embed_via` uses an
         // `Arc<Mutex<Option<SpawnedState>>>` for single-flight semantics; the
@@ -1965,48 +1994,6 @@ pub fn spawn_reindex_with_cleanup(
                     warm_ms.elapsed().as_millis(),
                 );
             });
-        }
-
-        let hashes = hashes_for(&index_id);
-        // `--force` wipes the per-index content-hash cache so every file is
-        // re-parsed, re-embedded, and re-committed even if its bytes haven't
-        // changed since the last reindex in this daemon's lifetime. Without
-        // this, the hash-skip check below silently turns `--force` into a
-        // no-op on a warm daemon.
-        //
-        // Issue #602 — migration re-trigger: chunk `file` fields are stored
-        // relative to the root current when they were written. If this index
-        // was re-registered under a different root and is being reindexed
-        // incrementally (force=false), the hash fast-path would skip unchanged
-        // files and leave their stored paths relative to the OLD root —
-        // silently resolving wrong on the new mount. Detect a root move against
-        // the corpus's persisted `indexed_root` and clear the hash cache so
-        // every file is re-written relative to the new canonical root. This is
-        // the live-path analogue of the M002/M003 startup migrations.
-        let prior_indexed_root = handle.read_indexed_root().await.unwrap_or(None);
-        let root_moved =
-            validate::needs_path_relativization(prior_indexed_root.as_deref(), &canonical_root);
-        if force {
-            hashes.clear();
-            // Issue #662: clear the redb-persisted hashes too so a restart
-            // after a force-reindex doesn't reload stale hashes.
-            hash_cache::clear_persisted(&handle).await;
-        } else if root_moved {
-            tracing::warn!(
-                "reindex[{}]: index root moved from {:?} to {} — clearing hash \
-                 cache to re-relativize all chunk paths against the new root",
-                index_id.0,
-                prior_indexed_root,
-                canonical_root.display(),
-            );
-            hashes.clear();
-            // Issue #662: clear persisted hashes on root move for the same
-            // reason — old root-relative paths would produce wrong skip decisions.
-            hash_cache::clear_persisted(&handle).await;
-        } else {
-            // Issue #662: warm the in-process cache from the redb store so
-            // unchanged files are skipped immediately after a daemon restart.
-            hash_cache::load_into_cache(&handle, &hashes).await;
         }
 
         // Issue #28, Phase 4 + #603: stage the rebuilt corpus in a sibling
