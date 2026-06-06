@@ -7,6 +7,38 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.24.0] — 2026-06-06
+
+### Fixed
+
+- **#839 — incremental reindex data-loss carryover** — unchanged chunks are now
+  carried from the durable corpus into the staging corpus on every non-force
+  reindex, so files that were not re-parsed do not disappear from search results
+  after a reindex completes (closes #839, PR #844).
+- **#840/#849 — warm-boot opens durable redb corpus** — on daemon restart the
+  existing on-disk redb corpus is opened and chunk-hashes loaded immediately,
+  so the first reindex after a restart is incremental (only new/changed files)
+  rather than a full re-embed; the SSE `start` event now includes a
+  `hashes_loaded` field reporting the number of pre-loaded hashes (PR #849).
+- **#848 — prune deleted files on non-force reindex** — files that have been
+  removed from disk are now pruned from the corpus during a standard (non-force)
+  reindex, so the index no longer accumulates stale chunks for deleted files
+  (closes #848, PR #854).
+
+### Changed
+
+- **#826 — concurrent CHUNK+EMBED progress bars** — the reindex CLI now shows
+  the CHUNK and EMBED phases concurrently with live CPS stats, fixes the
+  spurious "Embed 0/1" display, and un-sticks the embedder-ready indicator
+  (closes #823, PR #826).
+- **#828 — server.rs split** — `service/server.rs` refactored into focused
+  submodules under the 500-line cap (closes #799, PR #828).
+- **#805 — watcher path normalization** — file-watcher paths are now normalized
+  to repo-root-relative before comparison, fixing spurious "file not in index"
+  warnings on macOS (PR #805).
+
+---
+
 ## [0.23.6] — 2026-06-04
 
 ### Changed
