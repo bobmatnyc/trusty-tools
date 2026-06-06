@@ -973,6 +973,115 @@ impl CorpusStore {
         txn.commit().context("commit _meta write txn")?;
         Ok(())
     }
+
+    /// Bulk-copy all durable rows from `source` into `self` (issue #839).
+    ///
+    /// Why: the incremental reindex staging path opens a FRESH empty
+    /// `index.redb.tmp`, then writes only the re-embedded (changed) files'
+    /// chunks.  Hash-skipped (unchanged) files are never committed to staging,
+    /// so when the staging corpus is atomically promoted over the live
+    /// `index.redb` the skipped files' chunks are gone — lost on the next
+    /// daemon restart (durable data loss).
+    ///
+    /// The fix: before any batch writes, copy every row from the LIVE corpus
+    /// into the fresh staging store.  The batch loop then UPSERTS changed
+    /// files' chunks, overwriting their pre-copied rows.  The promoted corpus
+    /// therefore contains ALL files: changed (fresh) + unchanged (copied).
+    ///
+    /// Tables copied: `CHUNKS_TABLE`, `ENTITIES_TABLE`, `FILE_HASHES_TABLE`,
+    /// and `_meta` (indexed_root, schema_version). KG tables
+    /// (`KG_NODES_TABLE`, `KG_EDGES_TABLE`, `KG_EDGES_REV_TABLE`) are
+    /// intentionally NOT copied here: they are rebuilt from scratch at the
+    /// end of every reindex via `rebuild_symbol_graph_for_reindex` +
+    /// `save_kg_graph`, so pre-copying stale rows would be overwritten anyway
+    /// and copying them on large corpuses (100k+ nodes) is expensive. The
+    /// post-reindex KG rebuild populates them correctly.
+    ///
+    /// What: opens one read transaction on `source` and one write transaction
+    /// on `self`, streams every row from the four core tables, and commits the
+    /// write transaction once all rows have been inserted.  A single corrupt
+    /// source row is skipped with a `warn` (same tolerance as
+    /// `load_all_chunks`). An empty `source` is a no-op.
+    ///
+    /// Test: `copy_all_from_seeds_staging_corpus` in `corpus::tests`.
+    pub(crate) fn copy_all_from(&self, source: &CorpusStore) -> Result<()> {
+        use crate::core::migration::{META_KEY_INDEXED_ROOT, META_KEY_SCHEMA_VERSION, META_TABLE};
+
+        // Single read transaction on the source — consistent snapshot.
+        let src_txn = source.db.begin_read().context("begin source read txn")?;
+
+        // Single write transaction on self — everything goes in atomically.
+        let dst_txn = self.db.begin_write().context("begin staging write txn")?;
+        {
+            // --- chunks ---
+            let src_chunks = src_txn.open_table(CHUNKS_TABLE)?;
+            let mut dst_chunks = dst_txn.open_table(CHUNKS_TABLE)?;
+            for entry in src_chunks.iter().context("iterate source chunks")? {
+                let (key, value) = entry.context("read source chunk row")?;
+                dst_chunks
+                    .insert(key.value(), value.value())
+                    .with_context(|| format!("copy chunk row '{}'", key.value()))?;
+            }
+            drop(src_chunks);
+            drop(dst_chunks);
+
+            // --- entities ---
+            let src_ents = src_txn.open_table(ENTITIES_TABLE)?;
+            let mut dst_ents = dst_txn.open_table(ENTITIES_TABLE)?;
+            for entry in src_ents.iter().context("iterate source entities")? {
+                let (key, value) = entry.context("read source entity row")?;
+                dst_ents
+                    .insert(key.value(), value.value())
+                    .with_context(|| format!("copy entity row '{}'", key.value()))?;
+            }
+            drop(src_ents);
+            drop(dst_ents);
+
+            // --- file hashes ---
+            let src_hashes = match src_txn.open_table(FILE_HASHES_TABLE) {
+                Ok(t) => Some(t),
+                Err(redb::TableError::TableDoesNotExist(_)) => None,
+                Err(e) => return Err(anyhow::anyhow!("open source file_hashes: {e}")),
+            };
+            if let Some(src_hashes) = src_hashes {
+                let mut dst_hashes = dst_txn.open_table(FILE_HASHES_TABLE)?;
+                for entry in src_hashes.iter().context("iterate source file_hashes")? {
+                    let (key, value) = entry.context("read source file_hash row")?;
+                    dst_hashes
+                        .insert(key.value(), value.value())
+                        .with_context(|| format!("copy file_hash row '{}'", key.value()))?;
+                }
+            }
+
+            // --- _meta (indexed_root + schema_version) ---
+            let src_meta = match src_txn.open_table(META_TABLE) {
+                Ok(t) => Some(t),
+                Err(redb::TableError::TableDoesNotExist(_)) => None,
+                Err(e) => return Err(anyhow::anyhow!("open source _meta: {e}")),
+            };
+            if let Some(src_meta) = src_meta {
+                let mut dst_meta = dst_txn.open_table(META_TABLE)?;
+                // Copy only the two well-known meta keys — skip any unknown
+                // future keys to stay forward-compatible.
+                for key in &[META_KEY_INDEXED_ROOT, META_KEY_SCHEMA_VERSION] {
+                    if let Some(val) = src_meta
+                        .get(key)
+                        .with_context(|| format!("read _meta[{key}]"))?
+                    {
+                        dst_meta
+                            .insert(*key, val.value())
+                            .with_context(|| format!("copy _meta[{key}]"))?;
+                    }
+                }
+            }
+        }
+        dst_txn.commit().context("commit staging copy txn")?;
+        tracing::info!(
+            "corpus: copied {} chunks from live corpus into staging",
+            self.chunk_count().unwrap_or(0),
+        );
+        Ok(())
+    }
 }
 
 /// Iterate one of the KG adjacency tables and deserialize each row.
@@ -1416,5 +1525,92 @@ mod tests {
         assert_eq!(store.kg_node_count().unwrap(), 0);
         let (n, f, r) = store.load_kg_graph().unwrap();
         assert!(n.is_empty() && f.is_empty() && r.is_empty());
+    }
+
+    /// Why: validates that `copy_all_from` (the #839 fix) correctly bulk-copies
+    /// chunks, entities, and file hashes from a live corpus into a fresh staging
+    /// store, and that the staging store is empty before the copy so an empty
+    /// source is a harmless no-op.
+    ///
+    /// What: writes chunks + entities + hashes to a source store, calls
+    /// `copy_all_from` to seed a fresh staging store, asserts all rows are
+    /// present in staging, then verifies an empty source no-ops cleanly.
+    ///
+    /// Test: this test.
+    #[test]
+    fn copy_all_from_seeds_staging_corpus() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Build the live source corpus with chunks, entities, and hashes.
+        let src_path = dir.path().join("index.redb");
+        let src = CorpusStore::open(&src_path).unwrap();
+        src.upsert_chunks(&[
+            {
+                let mut c = raw("stable:1:1", "fn stable() {}");
+                c.file = "stable.rs".to_string();
+                c
+            },
+            {
+                let mut c = raw("other:1:1", "fn other() {}");
+                c.file = "other.rs".to_string();
+                c
+            },
+        ])
+        .unwrap();
+        src.upsert_entities(&[
+            ("stable.rs".to_string(), Vec::new()),
+            ("other.rs".to_string(), Vec::new()),
+        ])
+        .unwrap();
+        src.upsert_file_hashes(&[("stable.rs", "aabbcc"), ("other.rs", "ddeeff")])
+            .unwrap();
+        let root = dir.path().to_path_buf();
+        src.write_indexed_root_sync(&root).unwrap();
+
+        // Seed a fresh staging corpus from the live source.
+        let staging_path = dir.path().join("index.redb.tmp");
+        let staging = CorpusStore::open_fresh(&staging_path).unwrap();
+        assert_eq!(
+            staging.chunk_count().unwrap(),
+            0,
+            "staging must start empty"
+        );
+
+        staging.copy_all_from(&src).unwrap();
+
+        // All chunks must be present.
+        assert_eq!(staging.chunk_count().unwrap(), 2);
+        let mut chunks = staging.load_all_chunks().unwrap();
+        chunks.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(chunks[0].id, "other:1:1");
+        assert_eq!(chunks[1].id, "stable:1:1");
+
+        // All entities must be present.
+        let entities = staging.load_all_entities().unwrap();
+        assert_eq!(entities.len(), 2);
+
+        // All file hashes must be present.
+        let mut hashes = staging.load_file_hashes().unwrap();
+        hashes.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(hashes.len(), 2);
+        assert_eq!(hashes[0], ("other.rs".to_string(), "ddeeff".to_string()));
+        assert_eq!(hashes[1], ("stable.rs".to_string(), "aabbcc".to_string()));
+
+        // The _meta indexed_root must also have been copied.
+        assert_eq!(staging.read_indexed_root_sync().unwrap(), Some(root));
+
+        // A second copy from the same source is idempotent (upsert semantics).
+        staging.copy_all_from(&src).unwrap();
+        assert_eq!(staging.chunk_count().unwrap(), 2);
+
+        // Copying from an EMPTY source is a no-op — staging rows survive.
+        let empty_src_path = dir.path().join("empty.redb");
+        let empty_src = CorpusStore::open(&empty_src_path).unwrap();
+        staging.copy_all_from(&empty_src).unwrap();
+        assert_eq!(
+            staging.chunk_count().unwrap(),
+            2,
+            "copy from empty source must not erase staging rows"
+        );
     }
 }

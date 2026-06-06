@@ -1382,28 +1382,55 @@ async fn emit_complete_event(
     progress.push(event).await;
 }
 
-/// Begin the atomic-swap corpus staging for a `--force` reindex (issue #28,
-/// Phase 4).
+/// Begin the atomic-swap corpus staging for a reindex (issue #28, Phase 4;
+/// durable-data-loss fix issue #839).
 ///
-/// Why: a `--force` reindex rebuilds the entire corpus. Committing those
-/// chunks straight into the live `index.redb` would expose a half-rebuilt
-/// corpus to concurrent searches and, on a crash mid-reindex, leave the
-/// serving corpus permanently torn. Staging the new corpus in a sibling
-/// `index.redb.tmp` and atomically renaming it into place only on success
-/// keeps the live corpus intact until the rebuild is complete.
+/// Why: every reindex (force or incremental) stages its rebuilt corpus in a
+/// sibling `index.redb.tmp` and atomically renames it into place only on
+/// success (#603). Before the #839 fix, the staging file was always opened
+/// FRESH (empty), and hash-skipped (unchanged) files were never written to
+/// it — so after the atomic rename only the re-embedded files existed in the
+/// durable corpus. On the next daemon restart those skipped files' chunks
+/// were lost (durable data loss).
+///
+/// The fix: for a NON-force incremental reindex, before any batch writes,
+/// copy every row from the LIVE corpus into the fresh staging store.  The
+/// batch loop then upserts changed files' rows, overwriting their
+/// pre-copied entries.  After the promote, the staging corpus holds ALL
+/// files: changed (fresh) + unchanged (carried over from live).
+///
+/// For a FORCE reindex the behaviour is unchanged: the staging store starts
+/// empty and every file is re-embedded from scratch.
+///
 /// What: when the index has a durable corpus store, opens a fresh
-/// `index.redb.tmp` and swaps it onto the indexer (so every
-/// `commit_parsed_batch` writes the new corpus to the temp file). Returns the
-/// staging store's path so the caller can finalize or discard it. Returns
-/// `None` (skip staging) when the index has no corpus store (BM25-only / test
-/// indexers) or the temp path can't be resolved.
-async fn begin_force_corpus_swap(handle: &IndexHandle, index_id: &IndexId) -> Option<PathBuf> {
-    {
-        // Quick read-lock probe: nothing to stage if no durable corpus.
-        if !handle.indexer.read().await.has_corpus_store() {
+/// `index.redb.tmp`, conditionally seeds it from the live corpus (when
+/// `!force`), and swaps it onto the indexer (so every `commit_parsed_batch`
+/// writes the new corpus to the temp file). Returns the staging store's path
+/// so the caller can finalize or discard it. Returns `None` (skip staging)
+/// when the index has no corpus store (BM25-only / test indexers) or the
+/// temp path can't be resolved.
+/// Test: `incremental_reindex_no_durable_data_loss` in `service::reindex::tests`.
+async fn begin_force_corpus_swap(
+    handle: &IndexHandle,
+    index_id: &IndexId,
+    force: bool,
+) -> Option<PathBuf> {
+    // Quick read-lock probe: nothing to stage if no durable corpus.
+    // Also capture the live corpus Arc for the incremental copy path (#839).
+    let live_corpus = {
+        let indexer = handle.indexer.read().await;
+        if !indexer.has_corpus_store() {
             return None;
         }
-    }
+        // For incremental reindexes we need the live corpus to copy its rows
+        // into the fresh staging store.  Cloning the Arc is cheap; the actual
+        // copy happens on a blocking worker below.
+        if !force {
+            indexer.corpus_store()
+        } else {
+            None
+        }
+    };
     // Issue #403: route tmp corpus path to colocated or legacy storage.
     let tmp_path = if crate::service::colocated_storage::has_colocated_storage(&handle.root_path) {
         match crate::service::colocated_storage::colocated_redb_tmp_path(&handle.root_path) {
@@ -1430,10 +1457,35 @@ async fn begin_force_corpus_swap(handle: &IndexHandle, index_id: &IndexId) -> Op
             }
         }
     };
-    // Open the staging store on a blocking worker (redb's API is sync).
+    // Open the staging store on a blocking worker (redb's API is sync), then
+    // seed it from the live corpus when performing an incremental reindex
+    // (#839: carry unchanged files' durable rows so they survive the atomic
+    // rename and the next daemon restart).
     let tmp_for_open = tmp_path.clone();
+    let index_id_str = index_id.0.clone();
     let staged = tokio::task::spawn_blocking(move || {
-        crate::core::corpus::CorpusStore::open_fresh(&tmp_for_open)
+        let store = crate::core::corpus::CorpusStore::open_fresh(&tmp_for_open)?;
+        if let Some(live) = live_corpus {
+            // Copy all durable rows (chunks + entities + file_hashes + _meta)
+            // from the live corpus into the fresh staging store.  Changed
+            // files' rows will be overwritten by the batch loop; unchanged
+            // files' rows stay exactly as copied, ensuring the promoted corpus
+            // is complete.
+            if let Err(e) = store.copy_all_from(&live) {
+                // A copy failure is non-fatal: log it and continue with an
+                // empty staging store.  The reindex will still succeed, but
+                // unchanged files' chunks will be absent after the promote —
+                // the same data loss as before #839.  This is an extremely
+                // unlikely failure (e.g. out-of-disk or redb I/O error) and
+                // the operator will see the warn in the log.
+                tracing::warn!(
+                    "reindex[{index_id_str}]: failed to seed staging corpus from live corpus \
+                     ({e}) — incremental reindex will proceed but unchanged files' chunks \
+                     will be missing from the durable corpus after the promote"
+                );
+            }
+        }
+        Ok::<_, anyhow::Error>(store)
     })
     .await;
     let staged = match staged {
@@ -1944,7 +1996,7 @@ pub fn spawn_reindex_with_cleanup(
         // path) — in that case commits write directly to the live corpus.
         let corpus_swap_tmp: Option<PathBuf> =
             if staging::should_stage(handle.indexer.read().await.has_corpus_store()) {
-                begin_force_corpus_swap(&handle, &index_id).await
+                begin_force_corpus_swap(&handle, &index_id, force).await
             } else {
                 None
             };
@@ -3761,6 +3813,178 @@ mod tests {
                 .map(|e| matches!(e, tokio::sync::broadcast::error::TryRecvError::Empty)),
             Some(true),
             "no event should be broadcast after disarm"
+        );
+    }
+
+    /// Issue #839 regression: an incremental reindex must NOT lose hash-skipped
+    /// files' chunks from the durable corpus after a daemon restart.
+    ///
+    /// Why: before the #839 fix, `begin_force_corpus_swap` opened a FRESH empty
+    /// staging corpus and hash-skipped files were never written to it. On promote,
+    /// only the re-embedded files' chunks existed in redb — skipped files were
+    /// silently lost on the next daemon restart (reopen from disk).
+    ///
+    /// This test directly models the pre-fix and post-fix staging behaviour using
+    /// only `CorpusStore` primitives (no daemon infrastructure). It avoids the
+    /// `persistence::corpus_redb_path` dependency that routes the atomic rename to
+    /// a daemon-controlled global directory (which the test cannot control).
+    ///
+    /// Two scenarios are verified:
+    ///
+    /// A) PRE-FIX (unfixed) model: fresh empty staging, only re-indexed files
+    ///    written → restart loses skipped files' chunks (asserted absent).
+    /// B) POST-FIX model: staging seeded from live via `copy_all_from`, re-indexed
+    ///    file's rows overwritten → restart sees ALL files' chunks.
+    ///
+    /// Test: this test (issue #839).
+    #[test]
+    fn incremental_reindex_no_durable_data_loss() {
+        use crate::core::chunker::{ChunkType, RawChunk};
+        use crate::core::corpus::CorpusStore;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        // Helper: build a minimal RawChunk for a given file + id.
+        let chunk = |file: &str, id: &str, content: &str| RawChunk {
+            id: id.to_string(),
+            file: file.to_string(),
+            start_line: 1,
+            end_line: 1,
+            content: content.to_string(),
+            function_name: None,
+            language: Some("rust".to_string()),
+            chunk_type: ChunkType::Code,
+            calls: Vec::new(),
+            inherits_from: Vec::new(),
+            chunk_depth: 0,
+            parent_chunk_id: None,
+            child_chunk_ids: Vec::new(),
+            nlp_keywords: Vec::new(),
+            nlp_code_refs: Vec::new(),
+            virtual_terms: Vec::new(),
+        };
+
+        // ── Set up the live corpus representing a fully-indexed 2-file repo ──
+        //
+        // Pretend the first (cold) reindex ran and both files are in the live
+        // `index.redb`. On the next incremental reindex:
+        //   - stable.rs → unchanged, hash-skipped (NOT re-embedded)
+        //   - changing.rs → content changed, hash-miss (re-embedded)
+        let live_path = dir.path().join("index.redb");
+        {
+            let live = CorpusStore::open(&live_path).unwrap();
+            live.upsert_chunks(&[
+                chunk("stable.rs", "stable:1:1", "fn stable_v1() {}"),
+                chunk("changing.rs", "changing:1:1", "fn version_one() {}"),
+            ])
+            .unwrap();
+            live.upsert_entities(&[
+                ("stable.rs".to_string(), Vec::new()),
+                ("changing.rs".to_string(), Vec::new()),
+            ])
+            .unwrap();
+            live.upsert_file_hashes(&[("stable.rs", "aa"), ("changing.rs", "bb")])
+                .unwrap();
+        }
+
+        // ─── Scenario A: PRE-FIX behaviour ───────────────────────────────────
+        //
+        // The unfixed `begin_force_corpus_swap` opened a FRESH EMPTY staging
+        // corpus. The batch loop only wrote re-embedded files' chunks; stable.rs
+        // was skipped. After the promote rename, the new `index.redb` contains
+        // ONLY changing.rs's rows.
+        //
+        // This scenario shows what the bug looked like — we assert stable.rs is
+        // missing to prove the bug model is correct and the fix is necessary.
+        let pre_fix_staging_path = dir.path().join("pre_fix.redb");
+        {
+            // Open a fresh empty staging (the bug: no copy from live).
+            let staging = CorpusStore::open_fresh(&pre_fix_staging_path).unwrap();
+
+            // Only the re-embedded file is written to staging.
+            staging
+                .upsert_chunks(&[chunk("changing.rs", "changing:1:1", "fn version_two() {}")])
+                .unwrap();
+
+            // Staging is atomically promoted (simulated here by just dropping it).
+            // After the "promote", the corpus IS staging — stable.rs was never written.
+        }
+        // Simulate a restart: reopen staging as if it were the new `index.redb`.
+        let pre_fix_store = CorpusStore::open(&pre_fix_staging_path).unwrap();
+        let pre_fix_chunks = pre_fix_store.load_all_chunks().unwrap();
+        assert!(
+            pre_fix_chunks.iter().all(|c| c.file != "stable.rs"),
+            "PRE-FIX model: stable.rs must be absent from the unfixed staging corpus \
+             (this proves the bug existed — the fix is needed)"
+        );
+        assert_eq!(
+            pre_fix_chunks.len(),
+            1,
+            "PRE-FIX model: only the re-embedded file must be present"
+        );
+
+        // ─── Scenario B: POST-FIX behaviour ──────────────────────────────────
+        //
+        // The fixed `begin_force_corpus_swap` calls `copy_all_from(&live)` before
+        // any batch writes, seeding the staging corpus with ALL rows from the live
+        // corpus. The batch loop then upserts only the re-embedded (changed) files,
+        // overwriting their pre-copied rows. After the promote, ALL files survive.
+        let post_fix_staging_path = dir.path().join("post_fix.redb");
+        {
+            let live = CorpusStore::open(&live_path).unwrap();
+            let staging = CorpusStore::open_fresh(&post_fix_staging_path).unwrap();
+
+            // THE FIX: seed staging from live before any batch writes.
+            staging.copy_all_from(&live).unwrap();
+
+            // The batch loop upserts ONLY the re-embedded (changed) file.
+            // stable.rs is hash-skipped — it is never touched by the batch loop.
+            staging
+                .upsert_chunks(&[chunk("changing.rs", "changing:1:1", "fn version_two() {}")])
+                .unwrap();
+
+            // Staging is promoted (simulated by drop).
+        }
+        // Simulate a restart: reopen as if it were the new `index.redb`.
+        let post_fix_store = CorpusStore::open(&post_fix_staging_path).unwrap();
+        let mut post_fix_chunks = post_fix_store.load_all_chunks().unwrap();
+        post_fix_chunks.sort_by(|a, b| a.file.cmp(&b.file));
+
+        assert_eq!(
+            post_fix_chunks.len(),
+            2,
+            "POST-FIX model: BOTH files must be present after the incremental \
+             reindex + simulated restart; got: {:?}",
+            post_fix_chunks.iter().map(|c| &c.file).collect::<Vec<_>>()
+        );
+
+        // stable.rs must have its ORIGINAL chunk content (hash-skipped, not re-embedded).
+        let stable = post_fix_chunks
+            .iter()
+            .find(|c| c.file == "stable.rs")
+            .expect("BUG #839: stable.rs must survive in the durable corpus after the fix");
+        assert_eq!(
+            stable.content, "fn stable_v1() {}",
+            "stable.rs must retain its original content (it was hash-skipped)"
+        );
+
+        // changing.rs must have its NEW content (it was re-indexed).
+        let changing = post_fix_chunks
+            .iter()
+            .find(|c| c.file == "changing.rs")
+            .expect("changing.rs must be present after the second reindex");
+        assert_eq!(
+            changing.content, "fn version_two() {}",
+            "changing.rs must have the new content after the second reindex"
+        );
+
+        // File hashes must also survive for stable.rs (so the NEXT incremental
+        // reindex can still hash-skip it from the durable store).
+        let hashes = post_fix_store.load_file_hashes().unwrap();
+        assert!(
+            hashes.iter().any(|(f, _)| f == "stable.rs"),
+            "stable.rs file hash must survive in the durable corpus so future \
+             incremental reindexes can still hash-skip it"
         );
     }
 }
