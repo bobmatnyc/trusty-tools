@@ -169,6 +169,10 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
     // ── Phase 1: legacy indexes (indexes.toml) ─────────────────────────────
     let legacy_entries = collect_legacy_entries();
     let mut seen_ids: HashSet<String> = HashSet::new();
+    // Issue #860: track canonicalized root_paths from legacy entries so that
+    // Phase 2 can suppress colocated entries for the same root even when
+    // the two ID schemes differ (basename vs. full-path-sanitized).
+    let mut seen_root_paths: HashSet<std::path::PathBuf> = HashSet::new();
 
     if legacy_entries.is_empty() {
         tracing::warn!(
@@ -198,6 +202,9 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
         let mut legacy_skipped: usize = 0;
         for entry in legacy_entries {
             seen_ids.insert(entry.id.clone());
+            // Issue #860: record the canonicalized root_path so Phase 2 can
+            // suppress colocated entries whose root_path is already owned here.
+            seen_root_paths.insert(canonicalize_best_effort(&entry.root_path));
             if is_on_inaccessible_volume(&entry.root_path, &inaccessible_volumes) {
                 tracing::warn!(
                     "warm-boot: skipping index '{}' — volume {} inaccessible (issue #723)",
@@ -243,7 +250,10 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
             Err(_) => std::collections::HashSet::new(),
         }
     };
-    let colocated_entries = collect_colocated_entries(&seen_ids, &colocated_inaccessible).await;
+    // Issue #860: pass seen_root_paths so the colocated scan suppresses ghost
+    // entries whose root is already owned by a legacy entry (even if the IDs differ).
+    let colocated_entries =
+        collect_colocated_entries(&seen_ids, &seen_root_paths, &colocated_inaccessible).await;
 
     if colocated_entries.is_empty() {
         tracing::debug!("warm-boot: no additional colocated indexes discovered");

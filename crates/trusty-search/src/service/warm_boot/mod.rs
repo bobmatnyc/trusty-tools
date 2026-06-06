@@ -12,10 +12,12 @@
 //!   2. `scan.rs`: per-root blocking fs walk.
 //!   3. `restore.rs`: per-index timeout wrapper.
 //!   4. `probe.rs` (#723): per-volume accessibility probe.
+//!   5. `warm_boot_tests.rs` (#860): dedup tests (inline test block extracted here).
 //!
 //! Test: `warmboot_index_timeout_parses_env_var`,
 //!       `colocated_scan_partial_failure_still_returns_accessible`,
-//!       `colocated_scan_deduplicates_against_known_ids`.
+//!       `colocated_scan_deduplicates_against_known_ids`,
+//!       `colocated_scan_deduplicates_by_root_path_against_basename_legacy_id`.
 
 pub(super) mod probe;
 pub mod restore;
@@ -159,12 +161,18 @@ pub fn collect_legacy_entries() -> Vec<PersistedIndex> {
 
 /// Collect colocated index entries by scanning every tracked root in `roots.toml`.
 ///
-/// Why (issue #718 Part 2 / issue #723): the previous implementation called the
+/// Why (issue #718 Part 2 / #723 / #860): the previous implementation called the
 /// blocking recursive scan directly on the async reactor thread with no timeout.
 /// Under launchd on macOS 26 Tahoe, a root on `/Volumes/SSD1` (external volume)
 /// can block `canonicalize` or `read_dir` indefinitely due to TCC permission
 /// denial. This blocked the entire restore task, preventing even the legacy
-/// indexes from registering.
+/// indexes from registering. Issue #860: legacy entries from `indexes.toml` carry
+/// basename-derived IDs (e.g. `trusty-tools`) while `scan_one_root` produces
+/// full-path-sanitized IDs (e.g. `Users_mac_workspace_trusty-tools`). The
+/// pre-existing ID-only dedup never fired for the same root, producing a duplicate
+/// "ghost" colocated entry on every restart. Adding `known_root_paths` closes
+/// this gap with equality-only path dedup (strict equality — NOT sub-path; a root
+/// that is a parent of a known root is still a distinct index scope).
 ///
 /// What: loads `roots.toml`, then — after filtering out roots on volumes already
 /// marked inaccessible by `inaccessible_volumes` (issue #723) — for each
@@ -174,12 +182,18 @@ pub fn collect_legacy_entries() -> Vec<PersistedIndex> {
 /// - On timeout: logs `warn` with the root path and the actionable hint about
 ///   Full Disk Access for the launchd agent; skips the root.
 /// - On scan error: logs `warn` and skips (does not abort other roots).
-/// - Deduplicates by index id against `known_ids` (legacy entries already seen).
+/// - Deduplicates by index id against `known_ids` (ID-level dedup, legacy entries).
+/// - ALSO deduplicates by canonicalized `root_path` against `known_root_paths`
+///   (root-path-level dedup, closes the basename-vs-full-path ID mismatch; #860).
+///   Only equality is checked — a colocated root whose path is a strict parent
+///   or child of a known root is NOT suppressed (correct for `IndexHierarchy`).
 ///
 /// Test: `colocated_scan_partial_failure_still_returns_accessible`,
-///       `colocated_scan_deduplicates_against_known_ids`.
+///       `colocated_scan_deduplicates_against_known_ids`,
+///       `colocated_scan_deduplicates_by_root_path_against_basename_legacy_id` (#860).
 pub async fn collect_colocated_entries(
     known_ids: &HashSet<String>,
+    known_root_paths: &HashSet<PathBuf>,
     inaccessible_volumes: &HashSet<PathBuf>,
 ) -> Vec<PersistedIndex> {
     use crate::service::roots_registry::load_roots;
@@ -240,9 +254,27 @@ pub async fn collect_colocated_entries(
         match tokio::time::timeout(timeout, scan_future).await {
             Ok(Ok(entries)) => {
                 for colocated in entries {
+                    // ID-level dedup: catches re-discovery of same-ID legacy entries.
                     if seen_ids.contains(&colocated.id) {
                         tracing::debug!(
-                            "dual-discovery: colocated index '{}' at {} skipped (already in registry)",
+                            "dual-discovery: colocated index '{}' at {} skipped \
+                             (id already in registry)",
+                            colocated.id,
+                            colocated.root_path.display()
+                        );
+                        continue;
+                    }
+                    // Root-path-level dedup (issue #860): catches the basename-vs-full-path
+                    // ID mismatch where the same root_path is registered under a different
+                    // ID scheme. Canonicalize best-effort so symlinks resolve consistently.
+                    let canonical_colocated = colocated
+                        .root_path
+                        .canonicalize()
+                        .unwrap_or_else(|_| colocated.root_path.clone());
+                    if known_root_paths.contains(&canonical_colocated) {
+                        tracing::debug!(
+                            "dual-discovery: colocated index '{}' at {} skipped \
+                             (root_path already owned by a legacy entry, issue #860)",
                             colocated.id,
                             colocated.root_path.display()
                         );
@@ -295,188 +327,5 @@ pub async fn collect_colocated_entries(
 }
 
 #[cfg(test)]
-mod tests {
-    //! Tests for the resilient warm-boot index collection (issues #718 / #723).
-    //!
-    //! Why: the key invariant is that an inaccessible or hung colocated root
-    //! must never prevent the accessible legacy/colocated entries from
-    //! registering. We simulate inaccessibility with a nonexistent path (which
-    //! returns NotFound immediately — a fast proxy for the TCC hang which
-    //! cannot be reproduced in unit tests).
-    //! Test: `cargo test -p trusty-search -- warm_boot`.
-
-    use super::*;
-
-    // ── warmboot_index_timeout ────────────────────────────────────────────────
-
-    /// Why: guard that the env var reader parses valid values and falls back.
-    /// What: set `TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS=42`, assert Duration is
-    /// 42s; unset, assert Duration is ROOT_SCAN_TIMEOUT.
-    /// Note: `serial` prevents racing with other env-var mutators.
-    /// Test: this test.
-    #[test]
-    #[serial_test::serial]
-    fn warmboot_index_timeout_parses_env_var() {
-        // Parse a valid value.
-        unsafe { std::env::set_var("TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS", "42") };
-        assert_eq!(
-            warmboot_index_timeout(),
-            Duration::from_secs(42),
-            "must parse 42 from env var"
-        );
-        // Remove and confirm fallback.
-        unsafe { std::env::remove_var("TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS") };
-        assert_eq!(
-            warmboot_index_timeout(),
-            ROOT_SCAN_TIMEOUT,
-            "must fall back to ROOT_SCAN_TIMEOUT when env var is absent"
-        );
-    }
-
-    // ── collect_colocated_entries ─────────────────────────────────────────────
-
-    /// Why: the key resilience invariant — when one root is inaccessible (or
-    /// times out under launchd), the other roots must still be scanned and
-    /// their indexes returned.
-    /// What: write a roots.toml with two entries: one real tempdir with
-    /// .trusty-search/ and one nonexistent path. Call
-    /// `collect_colocated_entries`; assert the real one is found.
-    /// Note: `serial` prevents parallel env-var mutation from other tests
-    /// (TRUSTY_DATA_DIR is a shared global state).
-    /// Test: this test.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn colocated_scan_partial_failure_still_returns_accessible() {
-        let data_tmp = tempfile::tempdir().unwrap();
-        let real_root = tempfile::tempdir().unwrap();
-        let ts_dir = real_root.path().join(".trusty-search");
-        std::fs::create_dir_all(&ts_dir).unwrap();
-
-        // Point TRUSTY_DATA_DIR at our isolated tempdir so roots.toml does not
-        // read the real system data dir. `serial` prevents concurrent tests from
-        // racing on this env var.
-        unsafe {
-            std::env::set_var("TRUSTY_DATA_DIR", data_tmp.path());
-        }
-
-        // Register both a real and a nonexistent root.
-        let nonexistent = std::path::PathBuf::from("/tmp/trusty-718-no-root-xyz9999");
-        crate::service::roots_registry::upsert_root(real_root.path().to_path_buf()).unwrap();
-        crate::service::roots_registry::upsert_root(nonexistent).unwrap();
-
-        let known_ids: HashSet<String> = HashSet::new();
-        // No volumes are inaccessible in this test.
-        let inaccessible: HashSet<PathBuf> = HashSet::new();
-        let results = collect_colocated_entries(&known_ids, &inaccessible).await;
-
-        unsafe {
-            std::env::remove_var("TRUSTY_DATA_DIR");
-        }
-
-        // The real root must be found even though the nonexistent root errored.
-        assert_eq!(
-            results.len(),
-            1,
-            "accessible root must be discovered even when another root is inaccessible; \
-             got: {results:?}"
-        );
-        let canonical_root = real_root.path().canonicalize().unwrap();
-        assert_eq!(
-            results[0].root_path, canonical_root,
-            "discovered root_path must match the real tempdir"
-        );
-    }
-
-    /// Why: entries already present in `known_ids` (from the legacy scan) must
-    /// not be duplicated in the colocated results — dedup is required.
-    /// What: register a real root and pre-populate `known_ids` with its
-    /// derived id; assert the colocated result is empty (already known).
-    /// Note: `serial` prevents parallel env-var mutation from other tests.
-    /// Test: this test.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn colocated_scan_deduplicates_against_known_ids() {
-        use crate::service::fs_discovery::id_from_path;
-
-        let data_tmp = tempfile::tempdir().unwrap();
-        let real_root = tempfile::tempdir().unwrap();
-        let ts_dir = real_root.path().join(".trusty-search");
-        std::fs::create_dir_all(&ts_dir).unwrap();
-        let canonical_root = real_root.path().canonicalize().unwrap();
-        let expected_id = id_from_path(&canonical_root);
-
-        unsafe {
-            std::env::set_var("TRUSTY_DATA_DIR", data_tmp.path());
-        }
-        crate::service::roots_registry::upsert_root(real_root.path().to_path_buf()).unwrap();
-
-        let mut known_ids: HashSet<String> = HashSet::new();
-        known_ids.insert(expected_id.clone());
-        let inaccessible: HashSet<PathBuf> = HashSet::new();
-
-        let results = collect_colocated_entries(&known_ids, &inaccessible).await;
-
-        unsafe {
-            std::env::remove_var("TRUSTY_DATA_DIR");
-        }
-
-        assert!(
-            results.is_empty(),
-            "index already in known_ids must not be returned again; got: {results:?}"
-        );
-    }
-
-    /// Why (issue #723): roots on inaccessible volumes must be skipped before
-    /// any spawn_blocking scan is attempted — the volume probe prevents issuing
-    /// any open() calls on a hung volume.
-    /// What: register one real root and one root with a mocked inaccessible
-    /// volume key. Pass the mocked key in `inaccessible_volumes`; assert only
-    /// the real root's index is returned.
-    /// Note: `serial` prevents parallel env-var mutation from other tests.
-    /// Test: this test.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn colocated_scan_skips_inaccessible_volume_roots() {
-        use crate::service::fs_discovery::id_from_path;
-
-        let data_tmp = tempfile::tempdir().unwrap();
-        let real_root = tempfile::tempdir().unwrap();
-        let ts_dir = real_root.path().join(".trusty-search");
-        std::fs::create_dir_all(&ts_dir).unwrap();
-        let canonical_root = real_root.path().canonicalize().unwrap();
-        let real_id = id_from_path(&canonical_root);
-
-        // Register a fake root that looks like it's on /Volumes/BLOCKED.
-        // We won't actually create it — the test asserts it is skipped via the
-        // inaccessible_volumes filter, not via a scan timeout.
-        let fake_blocked = PathBuf::from("/Volumes/BLOCKED/some-project");
-
-        unsafe {
-            std::env::set_var("TRUSTY_DATA_DIR", data_tmp.path());
-        }
-        crate::service::roots_registry::upsert_root(real_root.path().to_path_buf()).unwrap();
-        crate::service::roots_registry::upsert_root(fake_blocked.clone()).unwrap();
-
-        let known_ids: HashSet<String> = HashSet::new();
-        // Simulate: /Volumes/BLOCKED was probed and timed out.
-        let mut inaccessible: HashSet<PathBuf> = HashSet::new();
-        inaccessible.insert(PathBuf::from("/Volumes/BLOCKED"));
-
-        let results = collect_colocated_entries(&known_ids, &inaccessible).await;
-
-        unsafe {
-            std::env::remove_var("TRUSTY_DATA_DIR");
-        }
-
-        // Only the real (non-blocked) root must be found.
-        assert_eq!(
-            results.len(),
-            1,
-            "only the accessible root must be returned; got: {results:?}"
-        );
-        assert_eq!(
-            results[0].id, real_id,
-            "the returned entry must be the real root, not the blocked one"
-        );
-    }
-}
+#[path = "warm_boot_tests.rs"]
+mod tests;
