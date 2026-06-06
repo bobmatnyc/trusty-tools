@@ -228,7 +228,7 @@ fn skill_search_paths_respects_project_local_only_env() {
     // SAFETY: tests run single-threaded by default; we restore env on exit.
     let prev = crate::env_compat::env_var_os(
         "TAGENT_SKILLS_PROJECT_LOCAL_ONLY",
-        "TAGENT_SKILLS_PROJECT_LOCAL_ONLY",
+        "OPEN_MPM_SKILLS_PROJECT_LOCAL_ONLY",
     );
     unsafe {
         std::env::set_var("TAGENT_SKILLS_PROJECT_LOCAL_ONLY", "1");
@@ -419,7 +419,7 @@ fn load_with_index_merges_persisted_effectiveness() {
     let prev_home = std::env::var_os("HOME");
     let prev_local = crate::env_compat::env_var_os(
         "TAGENT_SKILLS_PROJECT_LOCAL_ONLY",
-        "TAGENT_SKILLS_PROJECT_LOCAL_ONLY",
+        "OPEN_MPM_SKILLS_PROJECT_LOCAL_ONLY",
     );
     unsafe {
         std::env::set_var("HOME", home.path());

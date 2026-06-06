@@ -123,7 +123,7 @@ impl ClaudeCodeAgentRunner {
         // Distinct from `AgentSpawned` (which fires when delegation is decided)
         // — this fires at the actual CLI invocation.
         crate::events::publish(crate::events::Event::AgentStarted {
-            session_id: crate::env_compat::env_var("TAGENT_RUN_ID", "TAGENT_RUN_ID")
+            session_id: crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID")
                 .unwrap_or_default(),
             agent_name: cfg.agent.name.clone(),
             runner_type: "claude-code".to_string(),
@@ -361,7 +361,7 @@ impl ClaudeCodeAgentRunner {
         // consumers too.
         {
             let session_id =
-                crate::env_compat::env_var("TAGENT_RUN_ID", "TAGENT_RUN_ID").unwrap_or_default();
+                crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID").unwrap_or_default();
             let agent_name = cfg.agent.name.clone();
             let model_name = model.clone();
             let prompt_tokens = result_usage.prompt_tokens;
@@ -457,7 +457,7 @@ impl ClaudeCodeAgentRunner {
         // #199: emit `ReportGenerated` so the UI shows the agent's report
         // size before the engine moves on to the next phase.
         crate::events::publish(crate::events::Event::ReportGenerated {
-            session_id: crate::env_compat::env_var("TAGENT_RUN_ID", "TAGENT_RUN_ID")
+            session_id: crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID")
                 .unwrap_or_default(),
             agent_name: cfg.agent.name.clone(),
             word_count: content.split_whitespace().count(),

@@ -181,7 +181,7 @@ async fn run_ctrl_inner(with_stdin: bool, ready_tx: Option<oneshot::Sender<()>>)
     // SAFETY: single-threaded startup context; set before any subprocess spawn.
     if crate::env_compat::env_var(
         "TAGENT_SKILLS_PROJECT_LOCAL_ONLY",
-        "TAGENT_SKILLS_PROJECT_LOCAL_ONLY",
+        "OPEN_MPM_SKILLS_PROJECT_LOCAL_ONLY",
     )
     .is_err()
     {

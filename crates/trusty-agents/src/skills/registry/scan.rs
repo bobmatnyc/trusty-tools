@@ -277,7 +277,7 @@ pub fn skill_search_paths(config_dir: &Path) -> Vec<PathBuf> {
     // hung CTRL's startup for 30+ minutes.
     if crate::env_compat::env_var(
         "TAGENT_SKILLS_PROJECT_LOCAL_ONLY",
-        "TAGENT_SKILLS_PROJECT_LOCAL_ONLY",
+        "OPEN_MPM_SKILLS_PROJECT_LOCAL_ONLY",
     )
     .ok()
     .filter(|v| !v.is_empty() && v != "0")

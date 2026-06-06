@@ -27,7 +27,7 @@ use crate::events::{self, Event};
 /// What: Returns `TAGENT_RUN_ID` if set, else an empty string (events with
 /// empty session_id remain visible — SSE just doesn't filter them).
 fn current_session_id() -> String {
-    crate::env_compat::env_var("TAGENT_RUN_ID", "TAGENT_RUN_ID").unwrap_or_default()
+    crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID").unwrap_or_default()
 }
 
 /// Emit `Event::LlmRequested` and return the start instant for latency
@@ -41,7 +41,7 @@ fn current_session_id() -> String {
 pub(super) fn emit_llm_requested(model: &str, prompt_tokens: Option<u32>) -> std::time::Instant {
     events::publish(Event::LlmRequested {
         session_id: current_session_id(),
-        agent_name: crate::env_compat::env_var("TAGENT_AGENT_ID", "TAGENT_AGENT_ID")
+        agent_name: crate::env_compat::env_var("TAGENT_AGENT_ID", "OPEN_MPM_AGENT_ID")
             .unwrap_or_default(),
         model: model.to_string(),
         prompt_tokens,
@@ -73,7 +73,7 @@ pub(super) fn emit_llm_responded(
     let latency_ms = started.elapsed().as_millis() as u64;
     events::publish(Event::LlmResponded {
         session_id: current_session_id(),
-        agent_name: crate::env_compat::env_var("TAGENT_AGENT_ID", "TAGENT_AGENT_ID")
+        agent_name: crate::env_compat::env_var("TAGENT_AGENT_ID", "OPEN_MPM_AGENT_ID")
             .unwrap_or_default(),
         model: model.to_string(),
         completion_tokens,
@@ -82,7 +82,7 @@ pub(super) fn emit_llm_responded(
     if prompt_tokens.is_some() {
         events::publish(Event::LlmRequested {
             session_id: current_session_id(),
-            agent_name: crate::env_compat::env_var("TAGENT_AGENT_ID", "TAGENT_AGENT_ID")
+            agent_name: crate::env_compat::env_var("TAGENT_AGENT_ID", "OPEN_MPM_AGENT_ID")
                 .unwrap_or_default(),
             model: model.to_string(),
             prompt_tokens,
@@ -111,7 +111,7 @@ pub(super) fn record_dispatch_usage(
     duration_ms: u64,
     task_for_prefix: &str,
 ) {
-    let agent = crate::env_compat::env_var("TAGENT_AGENT_ID", "TAGENT_AGENT_ID")
+    let agent = crate::env_compat::env_var("TAGENT_AGENT_ID", "OPEN_MPM_AGENT_ID")
         .unwrap_or_else(|_| "unknown".to_string());
     let record = crate::usage::UsageRecord::new(
         agent,

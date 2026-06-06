@@ -145,6 +145,7 @@ path = "src/lib.rs"
 name = "tagent"
 path = "src/main.rs"
 
+# Thin HTTP client for the trusty-agents API; retained for backward compat with scripts using the old `ompm` binary name.
 [[bin]]
 name = "ompm"
 path = "src/bin/ompm.rs"

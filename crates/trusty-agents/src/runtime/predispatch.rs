@@ -182,7 +182,7 @@ pub(super) async fn build_registries(cli: &Cli) {
         && cli.agent.is_none()
         && crate::env_compat::env_var(
             "TAGENT_SKILLS_PROJECT_LOCAL_ONLY",
-            "TAGENT_SKILLS_PROJECT_LOCAL_ONLY",
+            "OPEN_MPM_SKILLS_PROJECT_LOCAL_ONLY",
         )
         .is_err()
     {

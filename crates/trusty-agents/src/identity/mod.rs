@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// Why: Subprocesses cannot share Rust types with their parent, so we use
 /// environment variables to ferry identity over the process boundary.
 /// What: Four TAGENT_* variables — `TAGENT_CALLER` selects the variant, the
-/// rest carry the IDs each variant needs. The deprecated TAGENT_* names
+/// rest carry the IDs each variant needs. The deprecated OPEN_MPM_* names
 /// are still honoured via `crate::env_compat::env_var` fallback shims.
 /// Test: `caller_identity_from_env_*` round-trips for each variant.
 pub const ENV_CALLER: &str = "TAGENT_CALLER";
@@ -29,10 +29,11 @@ pub const ENV_PROJECT_ID: &str = "TAGENT_PROJECT_ID";
 pub const ENV_AGENT_ID: &str = "TAGENT_AGENT_ID";
 
 // Deprecated legacy names — used only as fallback keys in env_compat reads.
-pub const ENV_CALLER_DEPRECATED: &str = "TAGENT_CALLER";
-pub const ENV_SESSION_ID_DEPRECATED: &str = "TAGENT_SESSION_ID";
-pub const ENV_PROJECT_ID_DEPRECATED: &str = "TAGENT_PROJECT_ID";
-pub const ENV_AGENT_ID_DEPRECATED: &str = "TAGENT_AGENT_ID";
+// These were the OPEN_MPM_* names before the open-mpm → trusty-agents rename (#831).
+pub const ENV_CALLER_DEPRECATED: &str = "OPEN_MPM_CALLER";
+pub const ENV_SESSION_ID_DEPRECATED: &str = "OPEN_MPM_SESSION_ID";
+pub const ENV_PROJECT_ID_DEPRECATED: &str = "OPEN_MPM_PROJECT_ID";
+pub const ENV_AGENT_ID_DEPRECATED: &str = "OPEN_MPM_AGENT_ID";
 
 /// Which component is making a memory call.
 ///

@@ -131,7 +131,7 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
     // cap without reshaping the `AgentRunner` trait.
     // What: Parses the env var as u32; silently ignores unparseable values
     // so a malformed override can't brick a sub-agent.
-    if let Ok(s) = crate::env_compat::env_var("TAGENT_MAX_TURNS", "TAGENT_MAX_TURNS")
+    if let Ok(s) = crate::env_compat::env_var("TAGENT_MAX_TURNS", "OPEN_MPM_MAX_TURNS")
         && let Ok(v) = s.parse::<u32>()
         && v > 0
     {
@@ -272,12 +272,12 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
 
     // Optional out_dir for audit tool (from env set by subprocess runner).
     let out_dir =
-        crate::env_compat::env_var_os("TAGENT_OUT_DIR", "TAGENT_OUT_DIR").map(PathBuf::from);
+        crate::env_compat::env_var_os("TAGENT_OUT_DIR", "OPEN_MPM_OUT_DIR").map(PathBuf::from);
     // #222: Optional code_dir override for tools that write generated source
     // files (code-agent's WriteFileTool). Falls back to out_dir when unset
     // so legacy single-dir runs are unchanged.
     let code_dir =
-        crate::env_compat::env_var_os("TAGENT_CODE_DIR", "TAGENT_CODE_DIR").map(PathBuf::from);
+        crate::env_compat::env_var_os("TAGENT_CODE_DIR", "OPEN_MPM_CODE_DIR").map(PathBuf::from);
 
     // #81: Load the legacy skill registry once per sub-agent invocation. Missing
     // `.trusty-agents/skills/` is a graceful no-op — the registry just stays empty.

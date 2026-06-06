@@ -79,7 +79,7 @@ pub(crate) fn emit_progress_event(
     // an empty session id so the event is still visible (it just won't be
     // filtered by session).
     let session_id =
-        crate::env_compat::env_var("TAGENT_RUN_ID", "TAGENT_RUN_ID").unwrap_or_default();
+        crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID").unwrap_or_default();
     let phase = name.to_string();
     let typed = if status == "running" {
         Event::PhaseStarted { session_id, phase }

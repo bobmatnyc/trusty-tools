@@ -112,8 +112,8 @@ async fn wave_loop_runs_one_agent_per_file() {
     }
 
     // CRIT-1 (#90): Parent env must never be touched by the wave loop.
-    assert!(crate::env_compat::env_var("TAGENT_ASSIGNED_FILE", "TAGENT_ASSIGNED_FILE").is_err());
-    assert!(crate::env_compat::env_var("TAGENT_MAX_TURNS", "TAGENT_MAX_TURNS").is_err());
+    assert!(crate::env_compat::env_var("TAGENT_ASSIGNED_FILE", "OPEN_MPM_ASSIGNED_FILE").is_err());
+    assert!(crate::env_compat::env_var("TAGENT_MAX_TURNS", "OPEN_MPM_MAX_TURNS").is_err());
 }
 
 /// #166: Regression test — the per-file wave-loop task must instruct the

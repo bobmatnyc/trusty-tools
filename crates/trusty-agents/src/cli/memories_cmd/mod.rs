@@ -268,7 +268,7 @@ pub async fn run_memories_command(args: &[String]) -> Result<()> {
 /// Resolve the active session_id: prefer the run id env var, fall back to the
 /// most recent registered session, finally "default".
 pub fn current_session_id() -> String {
-    if let Ok(rid) = crate::env_compat::env_var("TAGENT_RUN_ID", "TAGENT_RUN_ID")
+    if let Ok(rid) = crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID")
         && !rid.is_empty()
     {
         return rid;

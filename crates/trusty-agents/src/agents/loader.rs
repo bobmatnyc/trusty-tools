@@ -274,7 +274,7 @@ static CONFIG_DIR_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 /// `.trusty-agents/agents` fallback (warning once).
 /// Test: Covered by `agent_config_path_honors_env_var`.
 fn agents_dir() -> PathBuf {
-    match crate::env_compat::env_var("TAGENT_CONFIG_DIR", "TAGENT_CONFIG_DIR") {
+    match crate::env_compat::env_var("TAGENT_CONFIG_DIR", "OPEN_MPM_CONFIG_DIR") {
         Ok(s) if !s.is_empty() => PathBuf::from(s),
         _ => {
             CONFIG_DIR_WARNED.get_or_init(|| {

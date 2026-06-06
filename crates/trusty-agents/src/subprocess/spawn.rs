@@ -201,7 +201,7 @@ pub(super) async fn spawn_and_run_inner(cfg: SpawnConfig<'_>) -> Result<IpcMessa
     // the parent's CWD.
     cmd.env(crate::identity::ENV_CALLER, "agent");
     cmd.env(crate::identity::ENV_AGENT_ID, agent_name);
-    if let Ok(sid) = crate::env_compat::env_var("TAGENT_RUN_ID", "TAGENT_RUN_ID")
+    if let Ok(sid) = crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID")
         && !sid.is_empty()
     {
         cmd.env(crate::identity::ENV_SESSION_ID, sid);
@@ -273,7 +273,7 @@ pub(super) async fn spawn_and_run_inner(cfg: SpawnConfig<'_>) -> Result<IpcMessa
     // when the parent decides to delegate) — this signals the work loop is
     // actually under way.
     crate::events::publish(crate::events::Event::AgentStarted {
-        session_id: crate::env_compat::env_var("TAGENT_RUN_ID", "TAGENT_RUN_ID")
+        session_id: crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID")
             .unwrap_or_default(),
         agent_name: agent_name.to_string(),
         runner_type: "subprocess".to_string(),
@@ -364,7 +364,7 @@ pub(super) async fn spawn_and_run_inner(cfg: SpawnConfig<'_>) -> Result<IpcMessa
     {
         let word_count = content.split_whitespace().count();
         crate::events::publish(crate::events::Event::ReportGenerated {
-            session_id: crate::env_compat::env_var("TAGENT_RUN_ID", "TAGENT_RUN_ID")
+            session_id: crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID")
                 .unwrap_or_default(),
             agent_name: agent_name.to_string(),
             word_count,
@@ -394,9 +394,9 @@ fn record_mistake_fire_and_forget(
 ) {
     use crate::mistake_log::{MistakeLog, MistakeRecord, truncate};
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let session_id = crate::env_compat::env_var("TAGENT_RUN_ID", "TAGENT_RUN_ID")
+    let session_id = crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID")
         .unwrap_or_else(|_| "unknown".to_string());
-    let phase = crate::env_compat::env_var("TAGENT_PHASE", "TAGENT_PHASE")
+    let phase = crate::env_compat::env_var("TAGENT_PHASE", "OPEN_MPM_PHASE")
         .unwrap_or_else(|_| "subagent".to_string());
     let task_preview: String = task.chars().take(100).collect();
     let record = MistakeRecord {

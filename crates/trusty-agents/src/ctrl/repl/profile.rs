@@ -23,8 +23,8 @@ pub(super) async fn load_or_create_user_profile()
     }
 
     let noninteractive =
-        crate::env_compat::env_var("TAGENT_NONINTERACTIVE", "TAGENT_NONINTERACTIVE").is_ok()
-            || crate::env_compat::env_var("TAGENT_API_TOKEN", "TAGENT_API_TOKEN").is_ok();
+        crate::env_compat::env_var("TAGENT_NONINTERACTIVE", "OPEN_MPM_NONINTERACTIVE").is_ok()
+            || crate::env_compat::env_var("TAGENT_API_TOKEN", "OPEN_MPM_API_TOKEN").is_ok();
     if noninteractive {
         let p = UserProfile {
             name: "User".to_string(),

@@ -265,10 +265,10 @@ impl SubprocessAgentRunner {
                         agent_name: agent_name.to_string(),
                         workflow_run_id: crate::env_compat::env_var(
                             "TAGENT_RUN_ID",
-                            "TAGENT_RUN_ID",
+                            "OPEN_MPM_RUN_ID",
                         )
                         .unwrap_or_default(),
-                        phase: crate::env_compat::env_var("TAGENT_PHASE", "TAGENT_PHASE")
+                        phase: crate::env_compat::env_var("TAGENT_PHASE", "OPEN_MPM_PHASE")
                             .unwrap_or_else(|_| "interactive".to_string()),
                         prompt: task.to_string(),
                         response: content.clone(),

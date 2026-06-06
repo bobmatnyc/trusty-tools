@@ -409,7 +409,7 @@ pub(super) async fn run_workflow(
         // by the subprocess mistake recorder; we also try the build label
         // since interaction logs use that.
         let run_id =
-            crate::env_compat::env_var("TAGENT_RUN_ID", "TAGENT_RUN_ID").unwrap_or_default();
+            crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID").unwrap_or_default();
         let candidate_ids: Vec<String> = [run_id.clone(), session_id.clone()]
             .into_iter()
             .filter(|s| !s.is_empty())

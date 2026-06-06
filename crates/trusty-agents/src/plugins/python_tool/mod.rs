@@ -208,7 +208,7 @@ impl PythonToolPlugin {
 
         // Allow tests / advanced users to override the interpreter (e.g. set
         // `TAGENT_PYTHON=python` on systems where only `python` is on PATH).
-        let python = crate::env_compat::env_var("TAGENT_PYTHON", "TAGENT_PYTHON")
+        let python = crate::env_compat::env_var("TAGENT_PYTHON", "OPEN_MPM_PYTHON")
             .unwrap_or_else(|_| "python3".to_string());
 
         // For the special "-c" + inline-script test pattern we accept a script

@@ -62,7 +62,7 @@ pub fn detect_self_project() -> Option<PathBuf> {
         None
     }
 
-    if let Ok(p) = crate::env_compat::env_var("TAGENT_PROJECT_DIR", "TAGENT_PROJECT_DIR")
+    if let Ok(p) = crate::env_compat::env_var("TAGENT_PROJECT_DIR", "OPEN_MPM_PROJECT_DIR")
         && let Ok(canon) = PathBuf::from(&p).canonicalize()
         && looks_like_self(&canon)
     {

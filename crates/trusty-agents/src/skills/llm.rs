@@ -48,7 +48,7 @@ pub(super) fn compute_cache_key(task: &str, skill_index: &str) -> u64 {
 /// What: Returns true when env var `TAGENT_SKILL_LLM=1` is set.
 /// Test: Set the var, call this, assert true; unset, call, assert false.
 pub fn skill_llm_enabled() -> bool {
-    crate::env_compat::env_var("TAGENT_SKILL_LLM", "TAGENT_SKILL_LLM").unwrap_or_default() == "1"
+    crate::env_compat::env_var("TAGENT_SKILL_LLM", "OPEN_MPM_SKILL_LLM").unwrap_or_default() == "1"
 }
 
 /// Ask `claude-haiku-4-5` (via OpenRouter) which skills are relevant to `task`.

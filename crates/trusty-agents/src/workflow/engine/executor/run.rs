@@ -396,7 +396,7 @@ impl WorkflowEngine {
 
             // #70: Fire-and-forget record this turn for background indexing.
             if let Some(idx) = &self.indexer {
-                let run_id = crate::env_compat::env_var("TAGENT_RUN_ID", "TAGENT_RUN_ID")
+                let run_id = crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID")
                     .unwrap_or_else(|_| "unknown".to_string());
                 idx.record(TurnRecord {
                     session_id: run_id,

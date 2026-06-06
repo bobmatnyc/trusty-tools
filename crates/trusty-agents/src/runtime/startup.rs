@@ -156,7 +156,7 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
                 "--workflow" | "--direct" | "--api" | "--serve" | "--agent"
             )
         });
-    let default_level = crate::env_compat::env_var("TAGENT_LOG", "TAGENT_LOG")
+    let default_level = crate::env_compat::env_var("TAGENT_LOG", "OPEN_MPM_LOG")
         .unwrap_or_else(|_| if is_interactive_repl { "warn" } else { "info" }.to_string());
 
     // #257: When running the interactive REPL, route tracing output to a log
@@ -259,7 +259,9 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
                 }
             }
             let token = token
-                .or_else(|| crate::env_compat::env_var("TAGENT_API_TOKEN", "TAGENT_API_TOKEN").ok())
+                .or_else(|| {
+                    crate::env_compat::env_var("TAGENT_API_TOKEN", "OPEN_MPM_API_TOKEN").ok()
+                })
                 .filter(|s| !s.is_empty());
             api::server::serve_with_config(api::server::ApiConfig { port, token }).await?;
             return Ok(false);
@@ -312,7 +314,7 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     // PM/workflow invocation land in the same `sessions/<run_id>/` directory.
     // SAFETY: set_var is considered unsafe in Rust 2024; we call it exactly
     // once at startup before any threads that might read env vars are spawned.
-    if crate::env_compat::env_var("TAGENT_RUN_ID", "TAGENT_RUN_ID").is_err() {
+    if crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID").is_err() {
         let run_id = uuid::Uuid::new_v4().to_string();
         // SAFETY: single-threaded context at startup.
         unsafe {

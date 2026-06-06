@@ -63,8 +63,8 @@ use anyhow::{Context, Result};
 /// `open_memory_store_selects_trusty_via_env`.
 /// New canonical name.
 pub const MEMORY_BACKEND_ENV: &str = "TAGENT_MEMORY_BACKEND";
-/// Deprecated legacy name — still honoured via env_compat fallback.
-pub const MEMORY_BACKEND_ENV_DEPRECATED: &str = "TAGENT_MEMORY_BACKEND";
+/// Deprecated legacy name (OPEN_MPM_* era, before #831 rename) — still honoured via env_compat fallback.
+pub const MEMORY_BACKEND_ENV_DEPRECATED: &str = "OPEN_MPM_MEMORY_BACKEND";
 
 /// Open the configured `MemoryStore` for `data_dir`.
 ///

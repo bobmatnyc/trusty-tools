@@ -75,8 +75,9 @@ pub struct BedrockEnvGuard {
 impl BedrockEnvGuard {
     pub fn install(profile: Option<&str>, region: Option<&str>) -> Self {
         let prev_profile =
-            crate::env_compat::env_var("TAGENT_AWS_PROFILE", "TAGENT_AWS_PROFILE").ok();
-        let prev_region = crate::env_compat::env_var("TAGENT_AWS_REGION", "TAGENT_AWS_REGION").ok();
+            crate::env_compat::env_var("TAGENT_AWS_PROFILE", "OPEN_MPM_AWS_PROFILE").ok();
+        let prev_region =
+            crate::env_compat::env_var("TAGENT_AWS_REGION", "OPEN_MPM_AWS_REGION").ok();
         // SAFETY: env mutation is process-global; documented above.
         unsafe {
             match profile {

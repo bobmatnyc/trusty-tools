@@ -215,7 +215,7 @@ pub(super) fn build_registry_for_agent(
                 // unrestricted behavior (full code_root tree writable).
                 let mut write_tool = WriteFileTool::new(dir.to_path_buf());
                 if let Some(assigned) =
-                    crate::env_compat::env_var_os("TAGENT_ASSIGNED_FILE", "TAGENT_ASSIGNED_FILE")
+                    crate::env_compat::env_var_os("TAGENT_ASSIGNED_FILE", "OPEN_MPM_ASSIGNED_FILE")
                 {
                     write_tool = write_tool.with_allowed_path(PathBuf::from(assigned));
                 }

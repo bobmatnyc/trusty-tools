@@ -306,7 +306,7 @@ pub fn language_skill_path(name: &str) -> PathBuf {
 /// What: Returns the directory holding the `skills/` subtree.
 /// Test: indirect via `persona_path_uses_env_override`.
 fn config_root() -> PathBuf {
-    if let Ok(s) = crate::env_compat::env_var("TAGENT_CONFIG_DIR", "TAGENT_CONFIG_DIR")
+    if let Ok(s) = crate::env_compat::env_var("TAGENT_CONFIG_DIR", "OPEN_MPM_CONFIG_DIR")
         && !s.is_empty()
     {
         let p = PathBuf::from(&s);

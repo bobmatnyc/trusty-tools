@@ -26,7 +26,7 @@ const EMBED_DIM: usize = 384;
 /// Resolve the current run_id for memory reads. Defaults to `default` if
 /// the env var isn't set (matches the migration-path `sessions/default/`).
 fn current_run_id() -> String {
-    crate::env_compat::env_var("TAGENT_RUN_ID", "TAGENT_RUN_ID")
+    crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID")
         .unwrap_or_else(|_| "default".to_string())
 }
 

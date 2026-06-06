@@ -119,14 +119,14 @@ pub use agents::AgentConfig;
 ///      `main.rs`; promoting it to the lib lets every consumer share one
 ///      implementation and removes the broken `crate::` path.
 /// What: Honours `TAGENT_CONFIG_DIR` (with fallback to deprecated
-///       `TAGENT_CONFIG_DIR`, stripping a legacy `/agents` suffix);
+///       `OPEN_MPM_CONFIG_DIR`, stripping a legacy `/agents` suffix);
 ///       falls back to `.trusty-agents` relative to the process CWD.
-///       If `.trusty-agents` does not exist but `.trusty-agents` does, reads
-///       from `.trusty-agents` with a migration warning.
+///       If `.trusty-agents` does not exist but `.open-mpm` does, reads
+///       from `.open-mpm` with a migration warning.
 /// Test: Indirectly via the agent-registry load path and inspection tests.
 pub fn default_bundled_config_dir() -> std::path::PathBuf {
     use std::path::{Path, PathBuf};
-    let config_dir_str = env_compat::env_var("TAGENT_CONFIG_DIR", "TAGENT_CONFIG_DIR").ok();
+    let config_dir_str = env_compat::env_var("TAGENT_CONFIG_DIR", "OPEN_MPM_CONFIG_DIR").ok();
     if let Some(s) = config_dir_str.filter(|s| !s.is_empty()) {
         let p = PathBuf::from(s);
         return if p.file_name().and_then(|n| n.to_str()) == Some("agents") {
@@ -135,14 +135,14 @@ pub fn default_bundled_config_dir() -> std::path::PathBuf {
             p
         };
     }
-    // Prefer .trusty-agents; migrate transparently from legacy .trusty-agents.
+    // Prefer .trusty-agents; migrate transparently from legacy .open-mpm.
     let new_dir = PathBuf::from(".trusty-agents");
     if !new_dir.exists() {
-        let legacy = PathBuf::from(".trusty-agents");
+        let legacy = PathBuf::from(".open-mpm");
         if legacy.exists() {
             tracing::warn!(
-                ".trusty-agents config dir detected; migrate to .trusty-agents \
-                 (trusty-agents will read from .trusty-agents until you rename it)"
+                ".open-mpm config dir detected; migrate to .trusty-agents \
+                 (trusty-agents will read from .open-mpm until you rename it)"
             );
             return legacy;
         }

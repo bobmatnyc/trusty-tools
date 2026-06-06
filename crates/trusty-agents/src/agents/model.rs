@@ -147,12 +147,12 @@ pub(crate) fn agent_env_suffix(agent_name: &str) -> String {
         .to_uppercase()
 }
 
-/// Look up `TAGENT_MODEL_<UPPER_SNAKE>` (with deprecated `TAGENT_MODEL_<UPPER_SNAKE>` fallback)
+/// Look up `TAGENT_MODEL_<UPPER_SNAKE>` (with deprecated `OPEN_MPM_MODEL_<UPPER_SNAKE>` fallback)
 /// for the given agent name.
 pub(crate) fn agent_model_env(agent_name: &str) -> Option<String> {
     let suffix = agent_env_suffix(agent_name);
     let new_var = format!("TAGENT_MODEL_{suffix}");
-    let old_var = format!("TAGENT_MODEL_{suffix}");
+    let old_var = format!("OPEN_MPM_MODEL_{suffix}");
     crate::env_compat::env_var(&new_var, &old_var)
         .ok()
         .filter(|s| !s.is_empty())
@@ -183,7 +183,7 @@ pub fn resolve_model(
     if !agent_model.is_empty() {
         return (agent_model.to_string(), ModelSource::AgentToml);
     }
-    if let Ok(v) = crate::env_compat::env_var("TAGENT_DEFAULT_MODEL", "TAGENT_DEFAULT_MODEL")
+    if let Ok(v) = crate::env_compat::env_var("TAGENT_DEFAULT_MODEL", "OPEN_MPM_DEFAULT_MODEL")
         && !v.is_empty()
     {
         return (v, ModelSource::DefaultEnv);

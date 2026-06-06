@@ -39,7 +39,7 @@ pub(super) fn detect_persona(task: &str) -> (&'static str, String) {
     let cleaned_task = strip_persona_tag(task);
     {
         let session_id =
-            crate::env_compat::env_var("TAGENT_RUN_ID", "TAGENT_RUN_ID").unwrap_or_default();
+            crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID").unwrap_or_default();
         crate::events::emit(crate::events::Event::PersonaDetected {
             session_id,
             persona: persona.to_string(),
@@ -219,7 +219,7 @@ impl WorkflowEngine {
                 "skipping phase (persona opt-out)"
             );
             let session_id =
-                crate::env_compat::env_var("TAGENT_RUN_ID", "TAGENT_RUN_ID").unwrap_or_default();
+                crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID").unwrap_or_default();
             crate::events::emit(crate::events::Event::PhaseSkipped {
                 session_id,
                 phase: phase.name.clone(),

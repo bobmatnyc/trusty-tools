@@ -28,7 +28,7 @@ fn inline_plugin(name: &str, body: &str, timeout_secs: u64) -> PythonToolPlugin 
 /// Check whether `python3` is on PATH; if not, integration-style tests are
 /// skipped (CI may not have python installed for a Rust crate).
 fn python_available() -> bool {
-    let python = crate::env_compat::env_var("TAGENT_PYTHON", "TAGENT_PYTHON")
+    let python = crate::env_compat::env_var("TAGENT_PYTHON", "OPEN_MPM_PYTHON")
         .unwrap_or_else(|_| "python3".to_string());
     std::process::Command::new(&python)
         .arg("--version")

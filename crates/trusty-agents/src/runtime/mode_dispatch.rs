@@ -211,7 +211,7 @@ pub(super) async fn dispatch_cli_mode(
         let token = cli
             .api_token
             .clone()
-            .or_else(|| crate::env_compat::env_var("TAGENT_API_TOKEN", "TAGENT_API_TOKEN").ok())
+            .or_else(|| crate::env_compat::env_var("TAGENT_API_TOKEN", "OPEN_MPM_API_TOKEN").ok())
             .filter(|s| !s.is_empty());
         return crate::api::server::serve_with_config(crate::api::server::ApiConfig {
             port,
@@ -464,7 +464,7 @@ pub(super) async fn dispatch_cli_mode(
         // Resolve the app path relative to TAGENT_PROJECT_DIR (set by the `om` wrapper)
         // or relative to cwd, falling back gracefully if the bundle isn't built.
         {
-            let app_path = crate::env_compat::env_var("TAGENT_PROJECT_DIR", "TAGENT_PROJECT_DIR")
+            let app_path = crate::env_compat::env_var("TAGENT_PROJECT_DIR", "OPEN_MPM_PROJECT_DIR")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| {
                     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))

@@ -180,8 +180,8 @@ pub async fn chat_adapter_aware(
     }
 
     let model_id = model.strip_prefix("bedrock/").unwrap_or(model);
-    let aws_profile = crate::env_compat::env_var("TAGENT_AWS_PROFILE", "TAGENT_AWS_PROFILE").ok();
-    let aws_region = crate::env_compat::env_var("TAGENT_AWS_REGION", "TAGENT_AWS_REGION").ok();
+    let aws_profile = crate::env_compat::env_var("TAGENT_AWS_PROFILE", "OPEN_MPM_AWS_PROFILE").ok();
+    let aws_region = crate::env_compat::env_var("TAGENT_AWS_REGION", "OPEN_MPM_AWS_REGION").ok();
     let bedrock_client =
         bedrock::build_client(aws_profile.as_deref(), aws_region.as_deref()).await?;
     let tools_json: Vec<serde_json::Value> = tools

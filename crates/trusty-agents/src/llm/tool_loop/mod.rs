@@ -142,8 +142,9 @@ pub async fn chat_with_tools_gated(
             .map(|t| serde_json::to_value(t).context("serialize tool for bedrock"))
             .collect::<Result<Vec<_>>>()?;
         let aws_profile =
-            crate::env_compat::env_var("TAGENT_AWS_PROFILE", "TAGENT_AWS_PROFILE").ok();
-        let aws_region = crate::env_compat::env_var("TAGENT_AWS_REGION", "TAGENT_AWS_REGION").ok();
+            crate::env_compat::env_var("TAGENT_AWS_PROFILE", "OPEN_MPM_AWS_PROFILE").ok();
+        let aws_region =
+            crate::env_compat::env_var("TAGENT_AWS_REGION", "OPEN_MPM_AWS_REGION").ok();
         let bedrock_client =
             bedrock::build_client(aws_profile.as_deref(), aws_region.as_deref()).await?;
         return bedrock::chat_with_tools(

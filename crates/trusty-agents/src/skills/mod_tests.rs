@@ -352,7 +352,7 @@ async fn auto_mode_falls_back_to_keywords_when_llm_disabled() {
     // default-off branch we want to exercise.
     // Ensure flag is off for this test.
     // We do not unset other vars.
-    let prev = crate::env_compat::env_var("TAGENT_SKILL_LLM", "TAGENT_SKILL_LLM").ok();
+    let prev = crate::env_compat::env_var("TAGENT_SKILL_LLM", "OPEN_MPM_SKILL_LLM").ok();
     // SAFETY: env mutation is process-global; acceptable in this isolated test.
     unsafe {
         std::env::remove_var("TAGENT_SKILL_LLM");

@@ -141,7 +141,7 @@ pub async fn append_usage(project_dir: &Path, record: &UsageRecord) {
 /// else the empty path (which `append_usage` will treat as cwd).
 /// Test: Indirectly via `append_usage_*` tests passing an explicit tempdir.
 pub fn project_dir() -> std::path::PathBuf {
-    if let Ok(d) = crate::env_compat::env_var("TAGENT_PROJECT_DIR", "TAGENT_PROJECT_DIR")
+    if let Ok(d) = crate::env_compat::env_var("TAGENT_PROJECT_DIR", "OPEN_MPM_PROJECT_DIR")
         && !d.is_empty()
     {
         return std::path::PathBuf::from(d);
