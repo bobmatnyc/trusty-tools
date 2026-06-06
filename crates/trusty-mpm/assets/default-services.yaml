@@ -36,7 +36,7 @@ services:
     health_url: "http://localhost:{port}/health"
     log_path: "~/.trusty-mpm/logs/trusty-mpm.log"
     version_cmd: "tm --version"
-    process_match: "trusty-mpmd"
+    process_match: "trusty-mpm"
     start_cmd: "tm daemon"
     stop_cmd: "tm stop"
     restart_cmd: "tm restart"

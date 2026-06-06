@@ -148,7 +148,7 @@ fn crate_label(crate_target: &str) -> Option<&'static str> {
     match normalized.as_str() {
         "trusty-search" => Some("trusty-search"),
         "trusty-memory" => Some("trusty-memory"),
-        "trusty-mpm" | "trusty-mpmd" => Some("trusty-mpm"),
+        "trusty-mpm" | "tm" => Some("trusty-mpm"),
         "trusty-common" => Some("trusty-common"),
         "trusty-analyze" => Some("trusty-analyze"),
         "tga" | "trusty-git-analytics" => Some("tga"),

@@ -9,7 +9,7 @@ full three-harness architecture and delegation graph.
 
 Why: A single `cargo install trusty-mpm` should install all trusty-mpm tooling — the background daemon, the CLI, the TUI dashboard, and the Telegram bot — without requiring users to install eight separate packages and coordinate their versions.
 
-What: Unified crate combining the formerly separate `trusty-mpm-{core,client,mcp,daemon,cli,tui,telegram}` sub-crates into one package with feature-gated `[[bin]]` targets.
+What: Unified crate combining the formerly separate `trusty-mpm-{core,client,mcp,daemon,cli,tui,telegram}` sub-crates into one package with a single `[[bin]]` target (`tm` / `trusty-mpm`) that exposes all functionality via subcommands.
 
 ## Installation
 
@@ -29,22 +29,24 @@ cargo add trusty-mpm --no-default-features
 | Feature | Description | Enables |
 |---|---|---|
 | `default` | Common install: CLI + daemon | `cli`, `daemon` |
-| `cli` | `tm` / `trusty-mpm` CLI binary | `daemon`, `tui`, `telegram` |
-| `daemon` | `trusty-mpmd` daemon binary + library | `mcp` |
+| `cli` | `tm` / `trusty-mpm` binary | `daemon`, `tui`, `telegram` |
+| `daemon` | Daemon library module + `daemon` subcommand | `mcp` |
 | `mcp` | MCP server library module | — |
-| `tui` | `trusty-mpm-tui` shim + TUI library | ratatui, crossterm |
-| `telegram` | `trusty-mpm-telegram` shim + bot library | teloxide |
-| `gui` | `trusty-mpm-gui` shim binary | trusty-mpm-gui (Tauri) |
+| `tui` | TUI library module (`tm tui`) | ratatui, crossterm |
+| `telegram` | Telegram bot library module (`tm telegram`) | teloxide |
+| `gui` | `tm gui` subcommand (non-default; pulls in Tauri/WebKit) | trusty-mpm-gui (Tauri) |
 
-## Binaries
+## Binary
+
+There is a single binary with two install names: `tm` (short alias) and `trusty-mpm` (canonical name), both compiled from the same source.
 
 | Binary | Feature | Description |
 |---|---|---|
 | `tm` / `trusty-mpm` | `cli` | Unified CLI: daemon control, sessions, projects, TUI, Telegram, MCP |
-| `trusty-mpmd` | `daemon` | Background daemon: HTTP API, hook relay, session registry |
-| `trusty-mpm-tui` | `tui` | Backward-compatible TUI shim (prefer `tm tui`) |
-| `trusty-mpm-telegram` | `telegram` | Backward-compatible Telegram bot shim (prefer `tm telegram`) |
-| `trusty-mpm-gui` | `gui` | Backward-compatible GUI shim (prefer `tm gui`) |
+
+All functionality previously in standalone shim binaries (`trusty-mpmd`, `trusty-mpm-tui`,
+`trusty-mpm-telegram`, `trusty-mpm-gui`) is now accessed through subcommands:
+`trusty-mpm daemon`, `trusty-mpm tui`, `trusty-mpm telegram`, `trusty-mpm gui`.
 
 ## Library Modules
 
@@ -96,11 +98,12 @@ crates/trusty-mpm/
 │   ├── tui/             # ratatui dashboard (feature: tui)
 │   ├── telegram/        # Telegram bot (feature: telegram)
 │   └── bin/
-│       ├── tm.rs                  # CLI entry point
-│       ├── trusty-mpmd.rs         # Daemon shim
-│       ├── trusty-mpm-tui.rs      # TUI shim
-│       ├── trusty-mpm-telegram.rs # Telegram shim
-│       └── trusty-mpm-gui.rs      # GUI shim
+│       └── tm/          # Single CLI entry point (compiled as both `tm` and `trusty-mpm`)
+│           ├── main.rs
+│           ├── cli.rs
+│           ├── commands/
+│           ├── formatters/
+│           └── types.rs
 └── tests/
     ├── e2e/             # HTTP-level daemon integration tests
     └── test_session_lifecycle.rs

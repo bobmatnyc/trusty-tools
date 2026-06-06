@@ -10,19 +10,19 @@ description = "trusty-mpm: unified multi-agent orchestration platform (core, dae
 
 # ── Feature flags ─────────────────────────────────────────────────────────────
 #
-# Default features build the two most common user-facing tools: the CLI (`tm`)
-# and the background daemon (`trusty-mpmd`). Users who only want the libraries
-# can opt out with `--no-default-features`.
+# Default features build the unified `tm` / `trusty-mpm` binary with daemon,
+# TUI, and Telegram support baked in. Users who only want the libraries can
+# opt out with `--no-default-features`.
 #
-# Each optional binary is gated behind a matching feature flag so users only
-# pay the compile cost for the components they actually install.
+# Each optional library module is gated behind a matching feature flag so
+# users only pay the compile cost for the components they actually need.
 [features]
 default = ["cli", "daemon"]
 
 # `cli` gates the `tm` / `trusty-mpm` binary (embeds daemon + tui + telegram).
 cli = ["daemon", "tui", "telegram"]
 
-# `daemon` gates the `trusty-mpmd` shim binary and the daemon library module.
+# `daemon` gates the daemon library module and the `daemon` subcommand.
 # Activating `daemon` also pulls in `mcp` (the daemon implements OrchestratorBackend).
 daemon = ["mcp",
           "dep:axum", "dep:tower", "dep:tower-http",
@@ -35,13 +35,13 @@ daemon = ["mcp",
 # `async-trait` is needed by the OrchestratorBackend trait definition.
 mcp = ["dep:async-trait"]
 
-# `tui` gates the `trusty-mpm-tui` shim binary and the TUI library module.
+# `tui` gates the TUI library module (`tm tui`).
 tui = ["dep:ratatui", "dep:crossterm"]
 
-# `telegram` gates the `trusty-mpm-telegram` shim binary and the Telegram library module.
+# `telegram` gates the Telegram bot library module (`tm telegram`).
 telegram = ["dep:teloxide", "dep:tokio-util"]
 
-# `gui` gates the `trusty-mpm-gui` shim binary.
+# `gui` gates the `tm gui` subcommand (non-default: pulls in Tauri/WebKit).
 # The Tauri GUI lives in the separate `trusty-mpm-gui` crate (it owns
 # `build.rs` + `tauri.conf.json` which cannot be merged into a generic crate).
 gui = ["dep:trusty-mpm-gui"]
@@ -62,26 +62,6 @@ required-features = ["cli"]
 name = "trusty-mpm"
 path = "src/bin/tm/main.rs"
 required-features = ["cli"]
-
-[[bin]]
-name = "trusty-mpmd"
-path = "src/bin/trusty-mpmd.rs"
-required-features = ["daemon"]
-
-[[bin]]
-name = "trusty-mpm-tui"
-path = "src/bin/trusty-mpm-tui.rs"
-required-features = ["tui"]
-
-[[bin]]
-name = "trusty-mpm-telegram"
-path = "src/bin/trusty-mpm-telegram.rs"
-required-features = ["telegram"]
-
-[[bin]]
-name = "trusty-mpm-gui"
-path = "src/bin/trusty-mpm-gui.rs"
-required-features = ["gui"]
 
 # ── Integration tests ─────────────────────────────────────────────────────────
 [[test]]

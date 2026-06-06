@@ -8,8 +8,9 @@
 ## Context
 
 The trusty-* ecosystem ships several user-facing tools, each of which is really a
-*family* of binaries: `trusty-mpm` provides `tm`, `trusty-mpm`, `trusty-mpmd`
-(daemon), `trusty-mpm-tui`, `trusty-mpm-telegram`, and `trusty-mpm-gui`;
+*family* of binaries: `trusty-mpm` provides `tm` and `trusty-mpm` (two install
+names for the same binary), with `daemon`, `tui`, `telegram`, and `gui`
+functionality exposed as subcommands rather than separate binaries;
 `trusty-search` provides `trusty-search` plus its `trusty-embedderd` sidecar.
 
 If these binaries lived in separate crates, a user would have to run multiple
@@ -21,9 +22,10 @@ release/install flow (CLAUDE.md "Git Tag / Release Convention") that uses
 A one-crate-per-tool model makes that single, atomic install path possible.
 
 The crate manifests confirm the pattern: `crates/trusty-mpm/Cargo.toml` declares
-the CLI/daemon/TUI/telegram/GUI binaries as `[[bin]]` shims over one library,
-and `crates/trusty-search/Cargo.toml` declares both `trusty-search` and
-`trusty-embedderd` as `[[bin]]` targets of one crate.
+a single `[[bin]]` target (compiled under two names: `tm` and `trusty-mpm`) that
+exposes all functionality via subcommands, and `crates/trusty-search/Cargo.toml`
+declares both `trusty-search` and `trusty-embedderd` as `[[bin]]` targets of one
+crate.
 
 ## Decision
 
@@ -40,8 +42,8 @@ can depend on them; in-workspace consumers resolve them by path.
   can never version-skew because they're built from the same crate.
 - **Positive:** the macOS code-signing pitfall is avoided by always using
   `cargo install` (atomic rename), never `cp`.
-- **Negative:** a single crate carries multiple binary targets, so a change to
-  any binary triggers a rebuild of the whole crate; large families (trusty-mpm)
+- **Negative:** a single crate carries a complex binary target, so a change to
+  any subcommand triggers a rebuild of the whole crate; large families (trusty-mpm)
   must guard against the 500-line file cap by splitting modules, not binaries.
 - **Neutral:** crates are still versioned and tagged independently
   (`<crate>-v<version>`); bundling binaries does not change per-crate release
