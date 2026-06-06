@@ -34,30 +34,29 @@ use crate::service::persistence::{self, PersistedIndex};
 
 /// Open a `CorpusStore`, retrying once on `DatabaseAlreadyOpen` (issue #840).
 ///
-/// Why: on a fast daemon restart the OS may not have released redb's file lock
-/// before the new process tries to open the same `index.redb`.
-/// A 50 ms pause + one retry is sufficient for the kernel to reclaim the lock.
-///
-/// What: calls `CorpusStore::open`; on `DatabaseAlreadyOpen` (matched by
-/// Display string) waits 50 ms and retries once.
-/// All other errors surface immediately.
-///
-/// Test: covered by the warm-boot regression test in this module.
-fn open_corpus_with_retry(path: &Path) -> Result<CorpusStore> {
+/// Why: on a fast daemon restart the OS may not have released redb's file lock.
+/// A 50 ms async sleep avoids blocking a tokio worker thread during the retry.
+/// What: calls `CorpusStore::open`; on `DatabaseError::DatabaseAlreadyOpen`
+/// (matched via typed downcast) sleeps 50 ms and retries once. All other
+/// errors surface immediately.
+/// Test: `corpus_recovery::tests::database_already_open_variant_is_stable`
+/// (pinning) + warm-boot tests in this module.
+async fn open_corpus_with_retry(path: &Path) -> Result<CorpusStore> {
     match CorpusStore::open(path) {
         Ok(store) => Ok(store),
         Err(e) => {
-            // Detect a file-lock collision and retry once.  redb surfaces this
-            // as `DatabaseAlreadyOpen`; we match on the Display string to
-            // avoid importing redb internals here.
-            let msg = e.to_string();
-            if msg.contains("DatabaseAlreadyOpen") {
+            // Typed downcast — redb error-message rewording cannot disable retry.
+            let is_already_open = e
+                .downcast_ref::<redb::DatabaseError>()
+                .map(|db_err| matches!(db_err, redb::DatabaseError::DatabaseAlreadyOpen))
+                .unwrap_or(false);
+            if is_already_open {
                 tracing::warn!(
                     "warm-boot: redb corpus at {} is locked (DatabaseAlreadyOpen) — \
                      retrying in 50 ms (refs #840)",
                     path.display()
                 );
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 CorpusStore::open(path)
             } else {
                 Err(e)
@@ -120,7 +119,7 @@ pub async fn build_indexer_from_entry(
     // DatabaseAlreadyOpen (stale file lock from a rapid restart).
     match persistence::corpus_redb_path_for_entry(entry) {
         Ok(redb_path) => {
-            let open_result = open_corpus_with_retry(&redb_path);
+            let open_result = open_corpus_with_retry(&redb_path).await;
             match open_result {
                 Ok(corpus) => indexer.set_corpus_store(Arc::new(corpus)),
                 Err(e) => tracing::error!(

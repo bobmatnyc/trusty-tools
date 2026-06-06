@@ -1917,11 +1917,10 @@ pub fn spawn_reindex_with_cleanup(
         let prior_indexed_root = handle.read_indexed_root().await.unwrap_or(None);
         let root_moved =
             validate::needs_path_relativization(prior_indexed_root.as_deref(), &canonical_root);
-        let hashes_loaded: usize;
-        if force {
+        let hashes_loaded: usize = if force {
             hashes.clear();
             hash_cache::clear_persisted(&handle).await; // #662: clear redb too
-            hashes_loaded = 0;
+            0
         } else if root_moved {
             tracing::warn!(
                 "reindex[{}]: index root moved from {:?} to {} — clearing hash \
@@ -1932,11 +1931,11 @@ pub fn spawn_reindex_with_cleanup(
             );
             hashes.clear();
             hash_cache::clear_persisted(&handle).await; // #662: clear redb too
-            hashes_loaded = 0;
+            0
         } else {
             // #662: warm cache from redb; #840 Part 2: capture count for SSE.
-            hashes_loaded = hash_cache::load_into_cache(&handle, &hashes).await;
-        }
+            hash_cache::load_into_cache(&handle, &hashes).await
+        };
 
         // Issue #317: emit `walk_complete` BEFORE `start` (backward-compatible).
         progress

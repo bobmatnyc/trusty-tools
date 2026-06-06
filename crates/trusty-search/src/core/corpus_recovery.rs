@@ -143,6 +143,27 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    /// Why: `open_corpus_with_retry` in `persistence_loader` matches
+    /// `DatabaseError::DatabaseAlreadyOpen` via typed downcast; this test pins
+    /// that redb still produces that exact variant for a double-open so a redb
+    /// version bump that renames or restructures the error fails CI instead of
+    /// silently disabling the retry guard (issue #840).
+    /// What: opens a redb `Database` twice and asserts the second error matches
+    /// the `DatabaseAlreadyOpen` variant.
+    /// Test: this IS the test.
+    #[test]
+    fn database_already_open_variant_is_stable() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("lock-check.redb");
+        let _first = redb::Database::create(&path).expect("first open must succeed");
+        let err = redb::Database::create(&path)
+            .expect_err("second open must fail with DatabaseAlreadyOpen");
+        assert!(
+            matches!(err, DatabaseError::DatabaseAlreadyOpen),
+            "redb must still emit DatabaseAlreadyOpen for a double-open; got: {err:?}"
+        );
+    }
+
     /// Why: `UpgradeRequired` is the canonical redb-2.x-file signal and
     /// `RepairAborted` an unrecoverable corrupt-file signal; both must classify
     /// as recover-by-rebuild, while lock contention must not.
