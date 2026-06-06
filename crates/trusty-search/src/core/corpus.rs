@@ -999,9 +999,11 @@ impl CorpusStore {
     ///
     /// What: opens one read transaction on `source` and one write transaction
     /// on `self`, streams every row from the four core tables, and commits the
-    /// write transaction once all rows have been inserted.  A single corrupt
-    /// source row is skipped with a `warn` (same tolerance as
-    /// `load_all_chunks`). An empty `source` is a no-op.
+    /// write transaction once all rows have been inserted.  Any row error or
+    /// I/O failure is fatal and propagated immediately via `?` — a partial
+    /// copy that gets promoted would be data loss, so all-or-nothing semantics
+    /// are required.  An empty `source` is a no-op (zero rows → commits an
+    /// empty transaction).
     ///
     /// Test: `copy_all_from_seeds_staging_corpus` in `corpus::tests`.
     pub(crate) fn copy_all_from(&self, source: &CorpusStore) -> Result<()> {
