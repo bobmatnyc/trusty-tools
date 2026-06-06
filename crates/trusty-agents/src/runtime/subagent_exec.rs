@@ -93,7 +93,7 @@ pub(super) async fn run_subagent_single_shot(
             Vec::with_capacity(hist_compressed.len() + 2);
         messages.push(system_msg);
         for h in &hist_compressed {
-            messages.push(h.clone().into_typed()?);
+            messages.push(session::history_message_into_typed(h.clone())?);
         }
         let user_msg: ChatCompletionRequestMessage =
             ChatCompletionRequestUserMessageArgs::default()
@@ -182,7 +182,7 @@ pub(super) async fn run_subagent_with_tools(
     let mut messages: Vec<ChatCompletionRequestMessage> = Vec::new();
     messages.push(system_msg);
     for h in &hist_for_wire {
-        messages.push(h.clone().into_typed()?);
+        messages.push(session::history_message_into_typed(h.clone())?);
     }
     let user_msg: ChatCompletionRequestMessage = ChatCompletionRequestUserMessageArgs::default()
         .content(task_for_wire.as_str())

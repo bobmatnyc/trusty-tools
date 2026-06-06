@@ -6,10 +6,15 @@
 //! the workflow engine and PM loop testable.
 //! What: Defines `ToolExecutor`, `AgentRunner`, `SearchProvider`, and
 //! `SkillResolver`. All are object-safe (`dyn`-able) and `Send + Sync`.
+//!
+//! `ToolExecutor`, `ToolResult`, and `ToolExecutionTier` live in
+//! `trusty-agents-common` (moved in the original extraction). `AgentRunner`,
+//! `RunContext`, and `AgentOutput` were moved to `trusty-agents-common::runner`
+//! in Wave 2 (issue #867, refs #830/#832). All are re-exported here so every
+//! existing `crate::tools::traits::X` import resolves unchanged.
+//!
 //! Test: Mock impls of each trait are constructed in unit tests for
 //! `ToolRegistry`, `WorkflowEngine`, and related code.
-
-use std::path::PathBuf;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -24,159 +29,15 @@ use serde::{Deserialize, Serialize};
 // Test: All existing tool tests still resolve these names and pass.
 pub use trusty_agents_common::{ToolExecutionTier, ToolExecutor, ToolResult};
 
-/// Per-invocation context threaded from orchestrator to agent runner.
-///
-/// Why: Previously, orchestrators (the wave loop in particular) passed
-/// per-call directives like the assigned file path and a tightened turn
-/// budget via process-global env vars (`std::env::set_var`). That is
-/// unsound in Rust 2024 because env mutation is not thread-safe under
-/// multi-threaded tokio runtimes. Threading a `RunContext` through the
-/// `AgentRunner` trait replaces the shared mutation with a per-call value
-/// that runners can apply to the child process (via `Command::env` / `current_dir`)
-/// without touching the parent's environment.
-/// What: Carries optional overrides — the assigned file for single-file
-/// wave-loop invocations, a per-call max-turns cap, and a working directory
-/// that the runner should use as the subprocess CWD.
-/// Test: Exercised indirectly through the wave-loop and runner dispatch
-/// tests (`wave_loop_runs_one_agent_per_file`, runner unit tests).
-#[derive(Debug, Default, Clone)]
-pub struct RunContext {
-    /// When `Some(path)`, the runner should scope any file-writing tool to
-    /// exactly this relative path. The wave loop sets this so each per-file
-    /// agent can only emit its assigned file.
-    pub assigned_file: Option<PathBuf>,
-    /// When `Some(n)`, the runner should enforce a max-turns cap of `n` for
-    /// this single invocation, overriding whatever the agent's TOML sets.
-    pub max_turns_override: Option<u32>,
-    /// When `Some(dir)`, the runner should use `dir` as the subprocess's
-    /// current working directory. Needed for the claude-code runner so the
-    /// CLI's file-writing tools resolve relative paths inside `out_dir`.
-    pub working_dir: Option<PathBuf>,
-    /// When `Some(model)`, the runner should use `model` as the LLM model for
-    /// this invocation, overriding the agent TOML's `[agent].model` /
-    /// `[llm].model_override`. Sourced from the workflow phase's
-    /// `model` field (#107, renamed from `model_override` in #359).
-    ///
-    /// Why: Previously the workflow engine only logged `phase.model`
-    /// as "advisory" — it never reached the runner. For `ClaudeCodeAgentRunner`
-    /// this meant every phase used the plan-agent TOML's model
-    /// (`claude-sonnet-4-6`) regardless of what `config/workflows/*.json`
-    /// specified. Threading the override through `RunContext` lets the runner
-    /// pass it as `--model` to the `claude` CLI (and via
-    /// `TAGENT_MODEL_<AGENT>` env for subprocess runners), preserving the
-    /// documented priority chain (env > phase override > agent TOML > default).
-    /// What: Optional string (e.g. `"anthropic/claude-opus-4-6"`). Runners that
-    /// don't understand it are free to ignore it; the default
-    /// `AgentRunner::run_with_context` still falls back to `run()` for mock
-    /// test doubles.
-    /// Test: `ClaudeCodeAgentRunner::run_with_config_ctx` honors it; the
-    /// engine populates it from `phase.model` in both the non-wave
-    /// and wave-loop paths.
-    pub model: Option<String>,
-}
-
-/// Structured output returned by an `AgentRunner`.
-///
-/// Why: Downstream workflow phases need a concise `summary` (~500 words) for
-/// template substitution while file-extraction still needs the full `content`.
-/// Bundling them in one struct lets callers choose which to consume without
-/// needing separate trait methods.
-/// What: `content` is the raw agent output; `summary` is the extracted
-/// `## Summary` section (or a prefix fallback).
-/// Test: See workflow engine tests; constructed from `IpcMessage::Result`.
-#[derive(Debug, Clone)]
-pub struct AgentOutput {
-    pub content: String,
-    pub summary: Option<String>,
-    /// Aggregated LLM token usage for this agent invocation (#47).
-    ///
-    /// Why: `WorkflowEngine` needs per-phase token/cost data for the perf
-    /// record. Bubbling it from the sub-agent through the runner trait keeps
-    /// the instrumentation pipeline single-sourced.
-    /// What: `TokenUsage::default()` (all zeros) when no usage was reported
-    /// by the sub-agent (e.g. older binary or pre-LLM tool-only error).
-    /// Test: `perf::tests::collector_records_phases` exercises the sink;
-    /// end-to-end wiring is covered by workflow integration.
-    pub usage: crate::perf::TokenUsage,
-}
-
-impl AgentOutput {
-    /// Build from content alone; summary/usage will be defaults.
-    #[allow(dead_code)]
-    pub fn from_content(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            summary: None,
-            usage: crate::perf::TokenUsage::default(),
-        }
-    }
-
-    /// Return summary if present, else fall back to content.
-    #[allow(dead_code)]
-    pub fn summary_or_content(&self) -> &str {
-        self.summary.as_deref().unwrap_or(&self.content)
-    }
-}
-
-/// Runs a task against a named agent.
-///
-/// Why: Abstracts over how an agent is executed — subprocess, in-process, or
-/// mock. Lets tests avoid spawning real processes.
-/// What: `run(agent_name, task)` returns the agent's `AgentOutput` (content
-/// plus optional summary). `run_with_history` extends this to pass prior
-/// conversation turns for persistent-session agents (#51); the default
-/// implementation ignores history so legacy impls keep working unchanged.
-/// Test: `tests/` substitute in-memory implementations.
-#[async_trait]
-pub trait AgentRunner: Send + Sync {
-    async fn run(&self, agent_name: &str, task: &str) -> Result<AgentOutput>;
-
-    /// Run a task while forwarding any prior session history.
-    ///
-    /// Why: Persistent-session agents (#51) need their caller to replay
-    /// earlier user/assistant turns so the sub-agent can rebuild context
-    /// in a fresh subprocess. Bug #122: the previous default fell through to
-    /// `run()` instead of `run_with_context()`, so persistent-session callers
-    /// silently lost `working_dir` and `model` carried in `ctx`.
-    /// What: Default implementation ignores `history` and delegates to
-    /// `run_with_context(ctx)`, so `working_dir` and `model` are
-    /// honoured even for runners that do not override `run_with_history`.
-    /// Concrete runners that know how to carry history across the process
-    /// boundary override this.
-    /// Test: `SubprocessAgentRunner` exercises the override; the default
-    /// path is covered by `test_run_with_history_forwards_ctx` and the
-    /// existing mock-runner tests in `workflow`.
-    async fn run_with_history(
-        &self,
-        agent_name: &str,
-        task: &str,
-        _history: &[crate::session::HistoryMessage],
-        ctx: &RunContext,
-    ) -> Result<AgentOutput> {
-        // Default: fall through to run_with_context so working_dir + model
-        // are honoured even when the concrete runner doesn't override run_with_history.
-        self.run_with_context(agent_name, task, ctx).await
-    }
-
-    /// Run a task with a `RunContext` carrying per-invocation overrides.
-    ///
-    /// Why: Replaces unsafe `std::env::set_var` threading of per-call state
-    /// (assigned file, tightened turn budget, working dir) with a structured
-    /// value that runners can apply to the child process only. Default impl
-    /// ignores the context and falls back to `run()` so existing mock runners
-    /// (including test doubles) keep working unchanged.
-    /// What: Concrete runners override this to scope env vars to the child
-    /// (`Command::env`) and optionally set its CWD (`Command::current_dir`).
-    /// Test: Wave-loop tests prove the context fields reach the child.
-    async fn run_with_context(
-        &self,
-        agent_name: &str,
-        task: &str,
-        _ctx: &RunContext,
-    ) -> Result<AgentOutput> {
-        self.run(agent_name, task).await
-    }
-}
+// Why: `AgentRunner`, `RunContext`, `AgentOutput`, and `HistoryMessage` were
+//      extracted to `trusty-agents-common::runner` in Wave 2 (issue #867,
+//      refs #830/#832) so external crates can implement or mock the runner
+//      seam without depending on the full `trusty-agents` binary crate.
+//      Re-exports here preserve every existing `crate::tools::traits::AgentRunner`,
+//      `RunContext`, `AgentOutput` reference inside `trusty-agents`.
+// What: Explicit re-exports from the shared runner module.
+// Test: All existing AgentRunner tests and workflow tests still resolve and pass.
+pub use trusty_agents_common::runner::{AgentOutput, AgentRunner, RunContext};
 
 /// A search hit returned by a `SearchProvider`.
 #[derive(Debug, Clone, Serialize, Deserialize)]

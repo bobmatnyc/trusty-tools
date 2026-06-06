@@ -9,6 +9,17 @@
 //! history; `SessionManager` is an `Arc<Mutex<HashMap<..>>>` keyed by agent
 //! name that exposes async `get_history`, `extend_history`, `clear_agent`,
 //! and `clear_all`.
+//!
+//! `HistoryMessage` (the portable `{role, content}` IPC wire type) was moved
+//! to `trusty-agents-common::runner` in Wave 2 (issue #867, refs #830/#832)
+//! and is re-exported here so all existing `crate::session::HistoryMessage`
+//! references resolve unchanged.
+//!
+//! `history_message_into_typed()` is the async-openai conversion helper that
+//! was previously `HistoryMessage::into_typed()`. Because the struct now lives
+//! in `trusty-agents-common` (which does not depend on async-openai), the
+//! method has been hoisted to a standalone function in this module.
+//!
 //! Test: See the `tests` module — empty history for new agent, extend +
 //! retrieve, isolated clear per agent, and global clear.
 
@@ -20,8 +31,39 @@ use async_openai::types::{
     ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
     ChatCompletionRequestUserMessageArgs,
 };
-use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+
+// Why: `HistoryMessage` was extracted to `trusty-agents-common::runner` in
+//      Wave 2 (issue #867) so external crates that implement `AgentRunner`
+//      can reference the IPC wire type without depending on `trusty-agents`.
+//      Re-exporting here preserves every existing `crate::session::HistoryMessage`
+//      import in the workspace.
+// What: Explicit re-export of the portable struct.
+// Test: All existing tests that construct HistoryMessage values still pass.
+pub use trusty_agents_common::runner::HistoryMessage;
+
+/// Convert a `HistoryMessage` into async-openai's typed message format.
+///
+/// Why: This was previously `HistoryMessage::into_typed(self)` but the struct
+/// now lives in `trusty-agents-common` which does not depend on `async-openai`.
+/// Hoisting the conversion to a standalone function here keeps the async-openai
+/// coupling in `trusty-agents` where the dependency already exists.
+/// What: Dispatches on role; unknown roles (including "system") default to user.
+/// Test: `history_message_typed_round_trip` in `session::tests`.
+pub fn history_message_into_typed(msg: HistoryMessage) -> Result<ChatCompletionRequestMessage> {
+    match msg.role.as_str() {
+        "assistant" => Ok(ChatCompletionRequestAssistantMessageArgs::default()
+            .content(msg.content)
+            .build()
+            .context("failed to build assistant message")?
+            .into()),
+        _ => Ok(ChatCompletionRequestUserMessageArgs::default()
+            .content(msg.content)
+            .build()
+            .context("failed to build user message")?
+            .into()),
+    }
+}
 
 /// Conversation history for a single agent.
 ///
@@ -77,69 +119,6 @@ impl AgentSession {
                 .into();
         self.history.push(msg);
         Ok(())
-    }
-}
-
-/// Simple `{role, content}` serializable form used over IPC.
-///
-/// Why: `ChatCompletionRequestMessage` is an async-openai enum with complex
-/// shape that doesn't round-trip cleanly through our JSON IPC. A tiny
-/// `HistoryMessage` is trivially serde-friendly and enough to rebuild the
-/// typed messages on the sub-agent side.
-/// What: Pair of `role` ("user"|"assistant"|"system") and `content` strings.
-/// Test: See session tests + IPC round-trip in `ipc::tests`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HistoryMessage {
-    pub role: String,
-    pub content: String,
-}
-
-impl HistoryMessage {
-    /// Construct a `HistoryMessage` with role=`"user"`.
-    ///
-    /// Why: Callers serialize a dialog turn over IPC without touching the
-    /// role string directly, avoiding typos.
-    /// What: Plain struct literal with `role="user"`.
-    /// Test: Indirectly via `history_message_typed_round_trip`.
-    #[allow(dead_code)]
-    pub fn user(content: impl Into<String>) -> Self {
-        Self {
-            role: "user".to_string(),
-            content: content.into(),
-        }
-    }
-    /// Construct a `HistoryMessage` with role=`"assistant"`.
-    ///
-    /// Why: Symmetric with `user` — keeps IPC construction declarative.
-    /// What: Plain struct literal with `role="assistant"`.
-    /// Test: Indirectly via `history_message_typed_round_trip`.
-    #[allow(dead_code)]
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self {
-            role: "assistant".to_string(),
-            content: content.into(),
-        }
-    }
-
-    /// Convert a `HistoryMessage` back into async-openai's typed message.
-    ///
-    /// Why: The sub-agent needs to prepend wire-format history as real
-    /// `ChatCompletionRequestMessage` values in its outgoing request.
-    /// What: Dispatches on role; unknown roles default to user.
-    /// Test: `history_message_typed_round_trip`.
-    pub fn into_typed(self) -> Result<ChatCompletionRequestMessage> {
-        match self.role.as_str() {
-            "assistant" => Ok(ChatCompletionRequestAssistantMessageArgs::default()
-                .content(self.content)
-                .build()
-                .context("failed to build assistant message")?
-                .into()),
-            _ => Ok(ChatCompletionRequestUserMessageArgs::default()
-                .content(self.content)
-                .build()
-                .context("failed to build user message")?
-                .into()),
-        }
     }
 }
 
@@ -283,8 +262,8 @@ mod tests {
     fn history_message_typed_round_trip() {
         let u = HistoryMessage::user("hello");
         let a = HistoryMessage::assistant("world");
-        let _: ChatCompletionRequestMessage = u.into_typed().unwrap();
-        let _: ChatCompletionRequestMessage = a.into_typed().unwrap();
+        let _: ChatCompletionRequestMessage = history_message_into_typed(u).unwrap();
+        let _: ChatCompletionRequestMessage = history_message_into_typed(a).unwrap();
     }
 
     #[tokio::test]
