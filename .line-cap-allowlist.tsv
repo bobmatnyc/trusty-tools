@@ -100,7 +100,7 @@ crates/trusty-memory/src/commands/kuzu_migrate.rs	664
 crates/trusty-memory/src/commands/prompt_context.rs	1614
 crates/trusty-memory/src/commands/service.rs	525
 crates/trusty-memory/src/commands/setup.rs	783
-crates/trusty-memory/src/discovery.rs	877
+crates/trusty-memory/src/discovery.rs	884
 crates/trusty-memory/src/kg_extract.rs	608
 crates/trusty-memory/src/lib.rs	2796
 crates/trusty-memory/src/main.rs	961
@@ -166,8 +166,8 @@ crates/trusty-search/src/service/daemon.rs	774
 crates/trusty-search/src/service/embedder_supervisor.rs	1020
 crates/trusty-search/src/service/grep.rs	827
 crates/trusty-search/src/service/persistence.rs	990
-crates/trusty-search/src/service/reindex/mod.rs	4214
-crates/trusty-search/src/service/walker.rs	1343
+crates/trusty-search/src/service/reindex/mod.rs	4212
+crates/trusty-search/src/service/walker.rs	1344
 crates/trusty-search/src/service/warm_boot/probe.rs	518
 crates/trusty-search/tests/baseline_trusty_tools.rs	721
 crates/trusty-search/tests/benchmark_harness.rs	740

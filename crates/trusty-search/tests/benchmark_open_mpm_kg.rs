@@ -157,7 +157,7 @@ fn open_mpm_root() -> PathBuf {
     manifest_dir
         .parent()
         .expect("trusty-search manifest dir must have a parent (crates/)")
-        .join("open-mpm")
+        .join("trusty-agents")
 }
 
 fn ground_truth_path() -> PathBuf {
@@ -274,7 +274,7 @@ async fn probe_existing_index(client: &Client) -> Option<u64> {
     let expected = open_mpm_root();
     let expected_str = expected.to_string_lossy();
     // Permit equality or suffix match (the daemon may canonicalise).
-    if registered != expected_str && !registered.ends_with("crates/open-mpm") {
+    if registered != expected_str && !registered.ends_with("crates/trusty-agents") {
         println!(
             "    existing index root '{registered}' does not match expected '{expected_str}' — \
              will recreate"
@@ -294,7 +294,7 @@ async fn register_index(client: &Client) {
     let root = open_mpm_root();
     assert!(
         root.is_dir(),
-        "open-mpm crate root does not exist at {root:?} — wrong workspace layout?"
+        "trusty-agents crate root does not exist at {root:?} — wrong workspace layout?"
     );
     let body = json!({
         "id": INDEX_NAME,
@@ -526,8 +526,8 @@ async fn run_query(client: &Client, query: &GroundTruthQuery, tool: Tool) -> Que
 
 fn normalise_path(file: &str) -> String {
     let trimmed = file.trim_start_matches("./");
-    if let Some(idx) = trimmed.find("open-mpm/") {
-        let after = &trimmed[idx + "open-mpm/".len()..];
+    if let Some(idx) = trimmed.find("trusty-agents/") {
+        let after = &trimmed[idx + "trusty-agents/".len()..];
         return after.to_string();
     }
     trimmed.to_string()

@@ -171,11 +171,11 @@ struct QueryResult {
 
 // ── Path helpers ────────────────────────────────────────────────────────────
 
-/// Absolute path of the open-mpm crate root.
+/// Absolute path of the trusty-agents crate root.
 ///
 /// Why: the daemon needs an absolute path; deriving it from
 /// `CARGO_MANIFEST_DIR` keeps the harness portable.
-/// What: trusty-search's manifest dir + `../open-mpm`.
+/// What: trusty-search's manifest dir + `../trusty-agents`.
 /// Test: `ground_truth_path()` and `open_mpm_root()` resolve to existing
 /// directories — `register_index` panics on a non-existent root.
 fn open_mpm_root() -> PathBuf {
@@ -183,7 +183,7 @@ fn open_mpm_root() -> PathBuf {
     manifest_dir
         .parent()
         .expect("trusty-search manifest dir must have a parent (crates/)")
-        .join("open-mpm")
+        .join("trusty-agents")
 }
 
 /// Absolute path of the ground-truth JSON file.
@@ -296,7 +296,7 @@ async fn register_index(client: &Client) {
     let root = open_mpm_root();
     assert!(
         root.is_dir(),
-        "open-mpm crate root does not exist at {root:?} — wrong workspace layout?"
+        "trusty-agents crate root does not exist at {root:?} — wrong workspace layout?"
     );
     let body = json!({
         "id": INDEX_NAME,
@@ -577,14 +577,14 @@ async fn resolve_kg_seed(client: &Client, seed_text: &str) -> Option<String> {
 /// Why: the daemon may return absolute paths or relative paths depending
 /// on index registration; normalising removes the ambiguity.
 /// What: strips leading "./" and everything up to and including the
-///   "open-mpm/" segment if it appears.
+///   "trusty-agents/" segment if it appears.
 /// Test: `any_match` relies on this for ground-truth comparison.
 fn normalise_path(file: &str) -> String {
     let trimmed = file.trim_start_matches("./");
-    // If the daemon reported an absolute path inside crates/open-mpm/, strip
+    // If the daemon reported an absolute path inside crates/trusty-agents/, strip
     // everything up to and including that segment.
-    if let Some(idx) = trimmed.find("open-mpm/") {
-        let after = &trimmed[idx + "open-mpm/".len()..];
+    if let Some(idx) = trimmed.find("trusty-agents/") {
+        let after = &trimmed[idx + "trusty-agents/".len()..];
         return after.to_string();
     }
     trimmed.to_string()

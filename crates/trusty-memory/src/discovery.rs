@@ -553,7 +553,8 @@ mod tests {
     /// Why: Ambiguous auto-abbrevs must be dropped; unique ones must fire.
     /// trusty-code (#639) made `tc` collide with trusty-common — must suppress.
     /// `tc→trusty-common` stays via explicit alias table, not auto-generation.
-    /// `ta→trusty-analyze` is the stable unambiguous example. All shorts unique.
+    /// trusty-agents (#831) made `ta` collide with trusty-analyze — must suppress.
+    /// `tr→trusty-review` is a stable unambiguous example. All shorts unique.
     /// Test: this test itself.
     #[test]
     fn first_letter_abbrev_emits_unique_workspace_initials() {
@@ -565,12 +566,18 @@ mod tests {
                 .all(|x| !(x.short == "tc" && x.source == DiscoverySource::FirstLetterAbbrev)),
             "ambiguous `tc` must not appear; got: {d:?}"
         );
+        // Ambiguous `ta` (trusty-agents vs trusty-analyze, since #831) must be suppressed.
+        assert!(
+            d.iter()
+                .all(|x| !(x.short == "ta" && x.source == DiscoverySource::FirstLetterAbbrev)),
+            "ambiguous `ta` must not appear; got: {d:?}"
+        );
         // An unambiguous abbrev must still fire — happy-path guard.
         assert!(
-            d.iter().any(|x| x.short == "ta"
-                && x.full == "trusty-analyze"
+            d.iter().any(|x| x.short == "tr"
+                && x.full == "trusty-review"
                 && x.source == DiscoverySource::FirstLetterAbbrev),
-            "expected ta→trusty-analyze; got: {d:?}"
+            "expected tr→trusty-review; got: {d:?}"
         );
         // Uniqueness: no two auto-abbrevs share the same short key.
         let mut seen = HashSet::new();

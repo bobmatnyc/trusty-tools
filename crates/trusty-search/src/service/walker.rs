@@ -89,6 +89,7 @@ pub const SKIP_DIRS: &[&str] = &[
     ".claude",
     ".claude-mpm",
     ".open-mpm",
+    ".trusty-agents",
     ".cursor",
     ".aider",
     ".continue",
