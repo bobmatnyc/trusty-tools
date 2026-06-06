@@ -14,7 +14,6 @@
 //!
 //! Crash/restart: EOF or IO error drains all pending oneshots with an error so
 //! callers return immediately; the supervisor swaps in a fresh client.
-//!
 //! Test: unit tests cover wire format, error decoding, stalled-reader timeout,
 //! and the stale-frame misattribution proof. Multi-flight + correlation:
 //! `trusty-embedderd/tests/multiflight.rs`. End-to-end: `bit_identical --
@@ -30,6 +29,7 @@ use tokio::sync::{Mutex, Semaphore, oneshot};
 use tokio::time::Duration;
 
 use super::{EmbedderClient, EmbedderError};
+use crate::embedder::{ExecutionProvider, resolve_expected_provider};
 
 // ── Per-call timeout ─────────────────────────────────────────────────────────
 
@@ -193,28 +193,28 @@ impl StdioEmbedderClient {
     }
 }
 
+/// Why: issue #857 — former static "CUDA OOM/BFCArena stall?" text was emitted
+/// on every platform, sending macOS (CoreML/ANE) operators down the wrong path.
+/// What: maps each [`ExecutionProvider`] to a terse, provider-specific hint.
+/// Test: `timeout_stall_hint_is_provider_aware` in `stdio_tests.rs`.
+fn timeout_stall_hint(provider: ExecutionProvider) -> &'static str {
+    match provider {
+        ExecutionProvider::Cuda => "CUDA OOM/BFCArena stall?",
+        ExecutionProvider::CoreML | ExecutionProvider::CoreMLAne => {
+            "CoreML/ANE session-init or oversized-batch stall?"
+        }
+        ExecutionProvider::Cpu => "embedder sidecar stall?",
+    }
+}
+
 /// Background reader task — owns stdout, dispatches responses by JSON-RPC id.
 ///
-/// Why: keeping the read loop separate from the write path is what enables
-/// multi-flight: a caller can write the next request while this task is
-/// reading the response to the previous one. Id-based dispatch (rather than
-/// FIFO) is essential for correctness: after a request times out its pending
-/// entry is removed; if the sidecar later delivers that stale response the
-/// reader finds no entry for that id and discards the frame, preventing
-/// misattribution to a new request.
-///
-/// What: reads newline-terminated JSON-RPC response frames in a loop. For each
-/// frame, parses the echoed `id`, looks up the matching entry in `pending`,
-/// decodes the response, and sends the result to the caller's oneshot. On
-/// timeout, removes only the timed-out entry from the map (other in-flight
-/// entries remain valid), drains its oneshot with an error, clears the partial
-/// line buffer, and CONTINUES the loop — the task MUST NOT exit on timeout
-/// (fix #763). On EOF or read error the task exits and the supervisor handles
-/// respawn.
-///
-/// Test: `reader_task_survives_timeout_and_serves_next_request` proves the task
-/// stays alive after a timeout and also proves stale-frame misattribution is
-/// prevented (stale frame for request A is discarded when request B is waiting).
+/// Why: separating the read loop from the write path enables multi-flight; id-
+/// based dispatch prevents stale-frame misattribution after a timeout (fix #763).
+/// What: reads newline-framed JSON-RPC responses, looks up each by echoed id,
+/// and dispatches to the caller's oneshot. On timeout, removes only the oldest
+/// stalled entry and CONTINUEs — MUST NOT exit (fix #763). On EOF, exits.
+/// Test: `reader_task_survives_timeout_and_serves_next_request` in stdio_tests.
 async fn reader_task<R: AsyncBufRead + Unpin>(
     mut reader: R,
     pending: PendingMap,
@@ -241,17 +241,19 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
 
         match read_result {
             Err(_elapsed) => {
-                // Fix #763 part 1: DO NOT return — that killed the task forever.
-                // Fix #763 part 2: remove only the oldest (stalled) entry, not all.
-                // When the sidecar eventually delivers the stale response, the
-                // id-lookup finds no entry and discards it — no misattribution.
+                // Fix #763: DO NOT return (kills the task); remove only the oldest
+                // entry (not all) so other in-flight requests stay valid. The stale
+                // frame is discarded by the id-lookup when it eventually arrives.
+                // Issue #857: provider-aware hint so macOS operators are not misled.
+                let stall_hint = timeout_stall_hint(resolve_expected_provider());
                 tracing::warn!(
                     timeout_secs = timeout.as_secs(),
                     timed_out_id = ?oldest_id,
                     "StdioEmbedderClient reader: timed out waiting for response \
-                     ({}s — CUDA OOM/BFCArena stall?) — removing stalled entry, \
+                     ({}s — {}) — removing stalled entry, \
                      re-arming; task STAYS ALIVE",
-                    timeout.as_secs()
+                    timeout.as_secs(),
+                    stall_hint,
                 );
                 if let Some(id) = oldest_id {
                     let req = {

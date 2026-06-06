@@ -295,3 +295,58 @@ async fn reader_task_survives_timeout_and_serves_next_request() {
     drop(writer);
     let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
 }
+
+/// Verify that `timeout_stall_hint` returns provider-appropriate text (issue #857).
+///
+/// Why: a regression guard ensures that the CUDA hint is never emitted for
+/// non-CUDA providers and that each branch returns a non-empty, provider-specific
+/// string — so future changes to the hint text cannot silently collapse all
+/// variants to the same message or to an empty string.
+/// What: calls `timeout_stall_hint` for every `ExecutionProvider` variant and
+/// asserts the expected substring is present.
+/// Test: this test.
+#[test]
+fn timeout_stall_hint_is_provider_aware() {
+    use crate::embedder::ExecutionProvider;
+
+    let cuda = super::timeout_stall_hint(ExecutionProvider::Cuda);
+    assert!(
+        cuda.contains("CUDA"),
+        "CUDA provider must mention CUDA; got: {cuda:?}"
+    );
+    assert!(
+        !cuda.contains("CoreML"),
+        "CUDA hint must not mention CoreML; got: {cuda:?}"
+    );
+
+    let coreml = super::timeout_stall_hint(ExecutionProvider::CoreML);
+    assert!(
+        coreml.contains("CoreML"),
+        "CoreML provider must mention CoreML; got: {coreml:?}"
+    );
+    assert!(
+        !coreml.contains("CUDA"),
+        "CoreML hint must not mention CUDA; got: {coreml:?}"
+    );
+
+    let coreml_ane = super::timeout_stall_hint(ExecutionProvider::CoreMLAne);
+    assert!(
+        coreml_ane.contains("CoreML"),
+        "CoreMLAne provider must mention CoreML; got: {coreml_ane:?}"
+    );
+    assert!(
+        !coreml_ane.contains("CUDA"),
+        "CoreMLAne hint must not mention CUDA; got: {coreml_ane:?}"
+    );
+
+    let cpu = super::timeout_stall_hint(ExecutionProvider::Cpu);
+    assert!(
+        !cpu.contains("CUDA"),
+        "CPU hint must not mention CUDA; got: {cpu:?}"
+    );
+    assert!(
+        !cpu.contains("CoreML"),
+        "CPU hint must not mention CoreML; got: {cpu:?}"
+    );
+    assert!(!cpu.is_empty(), "CPU hint must not be empty");
+}
