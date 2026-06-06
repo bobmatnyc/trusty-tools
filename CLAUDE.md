@@ -469,7 +469,9 @@ Detailed implementation information for each crate lives in its own documentatio
 - **trusty-analyze** — see `crates/trusty-analyze/README.md` and `docs/trusty-analyze/` (licensed MIT, not Elastic-2.0)
 - **trusty-mpm** — see `crates/trusty-mpm/README.md` and `docs/trusty-mpm/` (unified platform: CLI binaries `tm`/`trusty-mpm`, daemon, MCP server, TUI, Telegram)
 - **trusty-mpm-gui** — see `crates/trusty-mpm-gui/README.md` (Tauri desktop GUI, publish=false)
-- **trusty-agents** — see `crates/trusty-agents/README.md` and `docs/trusty-agents/`
+- **trusty-agents** — see `crates/trusty-agents/README.md` and `docs/trusty-agents/` (agent orchestration platform, bin: `tagent`)
+- **trusty-agents-common** — see `crates/trusty-agents-common/README.md` (common API types for trusty-agents, publish=false)
+- **trusty-agents-local** — see `crates/trusty-agents-local/README.md` (local execution engine for trusty-agents, publish=false)
 - **trusty-git-analytics** — see `crates/trusty-git-analytics/README.md` and `docs/trusty-git-analytics/`
 
 For license details, check each crate's `Cargo.toml`: most are **Elastic License 2.0**, but `trusty-memory`, `trusty-analyze`, and a few others are **MIT**.
@@ -486,7 +488,9 @@ When the user (or any agent) refers to a crate by abbreviation, resolve it using
 | `tc` | trusty-common | `-p trusty-common` | `crates/trusty-common/` |
 | `ta` | trusty-analyze | `-p trusty-analyze` | `crates/trusty-analyze/` |
 | `mpm` | trusty-mpm | `-p trusty-mpm` | `crates/trusty-mpm/` |
-| `tagent` | trusty-agents | `-p trusty-agents` | `crates/trusty-agents/` |
+| `tagent` or `t-agents` | trusty-agents | `-p trusty-agents` | `crates/trusty-agents/` (bin: `tagent`) |
+| `t-agents-common` | trusty-agents-common | `-p trusty-agents-common` | `crates/trusty-agents-common/` |
+| `t-agents-local` | trusty-agents-local | `-p trusty-agents-local` | `crates/trusty-agents-local/` |
 | `tcode` | trusty-code | `-p trusty-code` | `crates/trusty-code/` |
 
 These abbreviations apply everywhere: ticket descriptions, build commands, references in conversation. Always expand before running `cargo` commands.
