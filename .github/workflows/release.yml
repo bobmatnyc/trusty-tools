@@ -384,7 +384,7 @@ jobs:
         run: dnf install -y tar gzip
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # ── AL2023: install full build prerequisites via dnf ────────────────────
       - name: Install build prerequisites (AL2023 — dnf)
@@ -596,7 +596,7 @@ jobs:
 
       # ── Upload build artifacts for the release job ───────────────────────────
       - name: Upload assets as workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ${{ steps.package.outputs.asset_name }}
           path: |
@@ -622,7 +622,7 @@ jobs:
 
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: release-assets
           # Download every artifact produced by the build matrix.
@@ -659,78 +659,265 @@ jobs:
             release-assets/**/*.tar.gz.sha256
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # JOB 4: homebrew-bump  (PLACEHOLDER — NOT YET IMPLEMENTED)
+  # JOB 4: homebrew-bump
   #
-  # This job is intentionally a no-op.  It is guarded by `if: false` so it
-  # never runs.  The comments below document what it WILL do once the
-  # `bobmatnyc/homebrew-trusty` tap is set up.
+  # WHY: After a real tag release (non-dry-run), update the Homebrew tap
+  #   bobmatnyc/homebrew-trusty so `brew install bobmatnyc/trusty/<crate>`
+  #   picks up the new version automatically.  The tap hosts a binary formula
+  #   (pre-built bottles) rather than a source formula.
   #
-  # PLANNED IMPLEMENTATION:
-  #   When this job is activated, it will:
-  #   1. Download the .sha256 files produced by the `build` job for each
-  #      Tier-1 platform (aarch64-apple-darwin, x86_64-unknown-linux-gnu).
-  #   2. Compute or read the SHA-256 of each .tar.gz asset.
-  #   3. Check out bobmatnyc/homebrew-trusty (requires a deploy key or
-  #      a PAT with `contents:write` scope on that repo, stored as a secret).
-  #   4. Update the formula file `Formula/<crate>.rb`:
-  #      - Bump `version` to the new version string.
-  #      - Update the `url` for each bottle / source URL.
-  #      - Update the `sha256` fields.
-  #   5. Commit and push the updated formula to homebrew-trusty's main branch.
-  #   6. (Optional) If the crate meets homebrew-core criteria, open a PR to
-  #      homebrew/homebrew-core using `brew bump-formula-pr` — feasible now
-  #      that the workspace license is Apache-2.0.
+  # WHAT:
+  #   1. Download the .sha256 files from the artifacts produced by the build job.
+  #   2. Parse the SHA-256 hex strings for the two Tier-1 platforms:
+  #        aarch64-apple-darwin  (macOS arm64)
+  #        x86_64-unknown-linux-gnu  (Linux x86_64)
+  #   3. Check out bobmatnyc/homebrew-trusty using HOMEBREW_TAP_TOKEN (a PAT
+  #      with repo scope on the tap repo — stored as a secret, never hardcoded).
+  #   4. Generate (or idempotently update) tap/Formula/<crate>.rb with:
+  #        - correct version string
+  #        - per-platform `url` pointing at the GitHub release asset
+  #        - per-platform `sha256` from the downloaded checksum files
+  #      The formula uses `on_macos { on_arm { … } }` / `on_linux { … }` blocks
+  #      so Homebrew serves the correct pre-built binary per platform.
+  #   5. Commit (only if the file changed) and push to the tap's main branch.
   #
-  # SECRETS NEEDED (to be added to the repo before activating this job):
-  #   - HOMEBREW_TAP_TOKEN: a PAT with `contents:write` on bobmatnyc/homebrew-trusty
+  # GUARDS:
+  #   - Runs ONLY on real tag pushes (dry_run != 'true').
+  #   - Runs ONLY when the HOMEBREW_TAP_ENABLED repository variable is 'true'.
+  #     This lets the job exist in the workflow without doing anything until the
+  #     tap and token are actually configured.
+  #   - HOMEBREW_TAP_TOKEN secret must be set to a PAT with `repo` scope on
+  #     bobmatnyc/homebrew-trusty before enabling.
   #
-  # To activate: remove the `if: false` guard and fill in the steps below.
+  # TO ACTIVATE (once bobmatnyc/homebrew-trusty tap is set up):
+  #   1. Create the tap repo: `gh repo create bobmatnyc/homebrew-trusty --public`
+  #   2. Add secret: Settings → Secrets → HOMEBREW_TAP_TOKEN (PAT, repo scope)
+  #   3. Add variable: Settings → Variables → HOMEBREW_TAP_ENABLED = true
+  #   The job will then run automatically on every subsequent real tag push.
   # ─────────────────────────────────────────────────────────────────────────────
   homebrew-bump:
-    name: "Homebrew tap update (PLACEHOLDER — disabled)"
+    name: "Homebrew tap update"
     needs: [setup, release]
     runs-on: ubuntu-latest
-    # This job is disabled until bobmatnyc/homebrew-trusty tap automation is implemented.
-    # Guard: the env var HOMEBREW_TAP_ENABLED must be set to 'true' in repo/org variables
-    # AND the HOMEBREW_TAP_TOKEN secret must be configured before this job does anything real.
-    # In practice it will always be skipped until a maintainer activates it by:
-    #   1. Setting repo variable HOMEBREW_TAP_ENABLED=true
-    #   2. Adding the HOMEBREW_TAP_TOKEN secret
-    #   3. Implementing the steps below
-    if: ${{ vars.HOMEBREW_TAP_ENABLED == 'true' }}
+    # Only run on real tag releases (not dry-runs) and only when the tap is enabled.
+    # HOMEBREW_TAP_ENABLED must be set to 'true' as a repository/org variable AND
+    # HOMEBREW_TAP_TOKEN must be configured as a secret before this job does anything.
+    # Until both are configured the job is skipped silently.
+    if: needs.setup.outputs.dry_run != 'true' && vars.HOMEBREW_TAP_ENABLED == 'true'
+    timeout-minutes: 10
+
     steps:
-      # PLACEHOLDER STEP — replace with real implementation when ready.
+      # ── Download the .sha256 checksum files produced by the build job ────────
+      # Each matrix entry uploaded an artifact containing:
+      #   <crate>-<version>-<suffix>.tar.gz
+      #   <crate>-<version>-<suffix>.tar.gz.sha256
+      # We only need the .sha256 files for the two Tier-1 platforms.
+      - name: Download build artifacts (sha256 files)
+        uses: actions/download-artifact@v5
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      # ── Check out the Homebrew tap repository ────────────────────────────────
+      # HOMEBREW_TAP_TOKEN is a PAT with `repo` (contents:write) scope on
+      # bobmatnyc/homebrew-trusty.  It is stored as a repository secret and
+      # is NEVER printed or echoed in any step.
+      - name: Checkout bobmatnyc/homebrew-trusty tap
+        uses: actions/checkout@v5
+        with:
+          repository: bobmatnyc/homebrew-trusty
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      # ── Generate / update the formula ────────────────────────────────────────
+      # This step:
+      #   - Reads the SHA-256 from the .sha256 files for each Tier-1 platform.
+      #   - Constructs the GitHub release asset URLs using the tag / crate / version.
+      #   - Writes (or overwrites) tap/Formula/<crate>.rb.
       #
-      # - name: Checkout homebrew-trusty tap
-      #   uses: actions/checkout@v4
-      #   with:
-      #     repository: bobmatnyc/homebrew-trusty
-      #     token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-      #     path: homebrew-trusty
+      # Formula structure (binary formula, per-platform bottle blocks):
       #
-      # - name: Download .sha256 assets
-      #   uses: actions/download-artifact@v4
-      #   with:
-      #     path: release-assets
-      #     merge-multiple: true
+      #   class <CrateClass> < Formula
+      #     desc "..."
+      #     homepage "https://github.com/bobmatnyc/trusty-tools"
+      #     version "<version>"
+      #     license "Elastic-2.0"  # or MIT per crate
       #
-      # - name: Update formula version + sha256
-      #   shell: bash
-      #   run: |
-      #     CRATE="${{ needs.setup.outputs.crate }}"
-      #     VERSION="${{ needs.setup.outputs.version }}"
-      #     FORMULA="homebrew-trusty/Formula/${CRATE}.rb"
-      #     # Read SHA-256 for each platform from the .sha256 files and
-      #     # patch the formula with sed / ruby / or a dedicated bump script.
-      #     # ...
+      #     on_macos do
+      #       on_arm do
+      #         url "https://github.com/bobmatnyc/trusty-tools/releases/download/<tag>/<asset-aarch64>.tar.gz"
+      #         sha256 "<hex>"
+      #       end
+      #     end
       #
-      # - name: Commit and push updated formula
-      #   working-directory: homebrew-trusty
-      #   run: |
-      #     git config user.name  "github-actions[bot]"
-      #     git config user.email "github-actions[bot]@users.noreply.github.com"
-      #     git add Formula/
-      #     git commit -m "chore: bump ${CRATE} to v${VERSION}"
-      #     git push
-      - name: No-op placeholder
-        run: echo "homebrew-bump job is disabled (if:false guard). See comments to activate."
+      #     on_linux do
+      #       on_intel do
+      #         url "https://github.com/bobmatnyc/trusty-tools/releases/download/<tag>/<asset-x86_64>.tar.gz"
+      #         sha256 "<hex>"
+      #       end
+      #     end
+      #
+      #     def install
+      #       bin.install "<binary>"  # repeat for multi-binary crates
+      #     end
+      #   end
+      #
+      # The script is idempotent: running it twice for the same version produces
+      # the identical file (same content → git detects no change → no commit).
+      - name: Generate or update Formula/<crate>.rb
+        shell: bash
+        env:
+          CRATE:   ${{ needs.setup.outputs.crate }}
+          VERSION: ${{ needs.setup.outputs.version }}
+          # TAG is the raw git ref name, e.g. "trusty-analyze-v0.5.1"
+          TAG:     ${{ github.ref_name }}
+          # GITHUB_REPOSITORY is "bobmatnyc/trusty-tools"
+          REPO:    ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          FORMULA_DIR="tap/Formula"
+          mkdir -p "${FORMULA_DIR}"
+          FORMULA_FILE="${FORMULA_DIR}/${CRATE}.rb"
+
+          # ── Locate SHA-256 files for the two Tier-1 platforms ──────────────
+          # The .sha256 files written by the build job contain one line:
+          #   <hex>  <filename>.tar.gz
+          # (sha256sum / shasum -a 256 output format)
+
+          MACOS_SUFFIX="aarch64-apple-darwin"
+          LINUX_SUFFIX="x86_64-unknown-linux-gnu"
+
+          MACOS_SHA256_FILE=$(find release-assets -name "${CRATE}-${VERSION}-${MACOS_SUFFIX}.tar.gz.sha256" | head -1)
+          LINUX_SHA256_FILE=$(find release-assets -name "${CRATE}-${VERSION}-${LINUX_SUFFIX}.tar.gz.sha256" | head -1)
+
+          if [[ -z "${MACOS_SHA256_FILE}" ]]; then
+            echo "ERROR: macOS sha256 file not found for ${CRATE}-${VERSION}-${MACOS_SUFFIX}"
+            find release-assets -name "*.sha256" | sort
+            exit 1
+          fi
+          if [[ -z "${LINUX_SHA256_FILE}" ]]; then
+            echo "ERROR: Linux sha256 file not found for ${CRATE}-${VERSION}-${LINUX_SUFFIX}"
+            find release-assets -name "*.sha256" | sort
+            exit 1
+          fi
+
+          # Extract the hex digest (first field on the line).
+          MACOS_SHA256=$(awk '{print $1}' "${MACOS_SHA256_FILE}")
+          LINUX_SHA256=$(awk '{print $1}' "${LINUX_SHA256_FILE}")
+
+          echo "macOS arm64  SHA-256: ${MACOS_SHA256}"
+          echo "Linux x86_64 SHA-256: ${LINUX_SHA256}"
+
+          # ── Asset URLs ─────────────────────────────────────────────────────
+          BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+          MACOS_URL="${BASE_URL}/${CRATE}-${VERSION}-${MACOS_SUFFIX}.tar.gz"
+          LINUX_URL="${BASE_URL}/${CRATE}-${VERSION}-${LINUX_SUFFIX}.tar.gz"
+
+          # ── Convert crate name to Ruby class name ──────────────────────────
+          # e.g. "trusty-analyze" → "TrustyAnalyze"
+          CLASS_NAME=$(echo "${CRATE}" | sed 's/-\([a-z]\)/\U\1/g; s/^\([a-z]\)/\U\1/')
+
+          # ── Determine binaries to install ──────────────────────────────────
+          # Map known multi-binary crates; default is the crate name itself.
+          case "${CRATE}" in
+            trusty-search)  INSTALL_BINS="trusty-search trusty-embedderd" ;;
+            trusty-memory)  INSTALL_BINS="trusty-memory trusty-memory-mcp-bridge trusty-bm25-daemon" ;;
+            trusty-mpm)     INSTALL_BINS="tm trusty-mpm" ;;
+            trusty-git-analytics) INSTALL_BINS="tga" ;;
+            trusty-code)    INSTALL_BINS="tcode" ;;
+            *)              INSTALL_BINS="${CRATE}" ;;
+          esac
+
+          # Build the `bin.install` lines.
+          BIN_INSTALL_LINES=""
+          for BIN in ${INSTALL_BINS}; do
+            BIN_INSTALL_LINES="${BIN_INSTALL_LINES}    bin.install \"${BIN}\"\n"
+          done
+
+          # ── Write the formula ───────────────────────────────────────────────
+          # Using a Python heredoc inside bash to avoid quoting hazards with
+          # Ruby string literals and backslashes.
+          python3 - <<PYEOF
+          import os, textwrap
+          crate        = os.environ["CRATE"]
+          version      = os.environ["VERSION"]
+          class_name   = "${CLASS_NAME}"
+          macos_url    = "${MACOS_URL}"
+          macos_sha256 = "${MACOS_SHA256}"
+          linux_url    = "${LINUX_URL}"
+          linux_sha256 = "${LINUX_SHA256}"
+          formula_file = "${FORMULA_FILE}"
+
+          bin_lines = ""
+          for b in "${INSTALL_BINS}".split():
+              bin_lines += f'    bin.install "{b}"\n'
+
+          formula = f"""\
+          # Generated by the Binary Release workflow (release.yml).
+          # Do not edit by hand — changes will be overwritten on the next release.
+          # To customise behaviour, edit .github/workflows/release.yml in
+          # bobmatnyc/trusty-tools (homebrew-bump job, "Generate or update Formula" step).
+          class {class_name} < Formula
+            desc "trusty-tools: {crate} binary"
+            homepage "https://github.com/bobmatnyc/trusty-tools"
+            version "{version}"
+
+            # macOS arm64 (Apple Silicon) pre-built binary
+            on_macos do
+              on_arm do
+                url "{macos_url}"
+                sha256 "{macos_sha256}"
+              end
+            end
+
+            # Linux x86_64 (glibc 2.17+) pre-built binary
+            on_linux do
+              on_intel do
+                url "{linux_url}"
+                sha256 "{linux_sha256}"
+              end
+            end
+
+            def install
+          {bin_lines.rstrip()}
+            end
+
+            test do
+              system bin/"{crate.split("-")[0]}", "--version"
+            end
+          end
+          """
+
+          # textwrap.dedent strips the leading indentation added by the f-string.
+          output = textwrap.dedent(formula)
+          with open(formula_file, "w") as f:
+              f.write(output)
+          print(f"Wrote formula to {formula_file}")
+          PYEOF
+
+          echo "--- Formula content ---"
+          cat "${FORMULA_FILE}"
+
+      # ── Commit and push (only when the formula actually changed) ─────────────
+      # Using git diff --quiet to detect changes avoids creating empty commits
+      # if the formula was already at this version (idempotent re-runs).
+      - name: Commit and push updated formula
+        shell: bash
+        env:
+          CRATE:   ${{ needs.setup.outputs.crate }}
+          VERSION: ${{ needs.setup.outputs.version }}
+        working-directory: tap
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add Formula/
+
+          if git diff --cached --quiet; then
+            echo "Formula unchanged — no commit needed (idempotent re-run)."
+          else
+            git commit -m "chore: bump ${CRATE} formula to v${VERSION}"
+            git push
+            echo "Formula pushed to bobmatnyc/homebrew-trusty."
+          fi

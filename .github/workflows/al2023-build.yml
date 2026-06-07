@@ -108,7 +108,7 @@ jobs:
       # 1. Checkout the repo inside the container.
       # ------------------------------------------------------------------
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # ------------------------------------------------------------------
       # 2. Install build prerequisites via dnf.
