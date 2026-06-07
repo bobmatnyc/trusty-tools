@@ -57,7 +57,7 @@ trusty-memory port --addr        # host:port: 127.0.0.1:7070
 trusty-memory port --json        # {"addr":"127.0.0.1","port":7070}
 
 # Shell substitution — stdout is clean (logs go to stderr):
-curl http://127.0.0.1:$(trusty-memory port)/api/v1/health
+curl http://127.0.0.1:$(trusty-memory port)/health
 ```
 
 Exits non-zero with a message on stderr when no daemon is running, so shell
@@ -68,6 +68,12 @@ substitution fails cleanly.
 The same `trusty-memory serve` daemon serves the embedded Svelte admin UI
 at the bound address (printed by `trusty-memory monitor web` once the
 daemon is running) and a REST API under `/api/v1/`.
+
+Key REST API field names (verified against `src/web.rs` and `src/service.rs`):
+- Recall endpoints (`GET /api/v1/palaces/{id}/recall` and `GET /api/v1/recall`) accept
+  the query string as **`q`** (not `query`): `?q=my+search+term&top_k=5`.
+- Drawer-create body (`POST /api/v1/palaces/{id}/drawers`) expects a **`content`** field
+  (not `text`) for the drawer body.
 
 ### Bind to a named palace
 
@@ -418,18 +424,19 @@ Memories and vector indexes persist under the OS-standard data directory:
 - **Linux**: `~/.local/share/trusty-memory/<palace-id>/`
 
 Each palace directory contains:
-- `drawers.db` — SQLite metadata store
-- `vectors.usearch` — usearch vector index
-- `kg.db` — knowledge-graph triples (SQLite)
-- `chat_sessions.db` — chat session history
+- `kg.redb` — redb store for drawer metadata and knowledge-graph triples
+- `index.usearch` — usearch vector index (approximate nearest-neighbour)
+- `recall.redb` — recall analytics log (redb; migrated from `recall.db` on first open)
+- `l1_cache.json` — top-15 drawers by importance (L1 hot cache, rebuilt at each write)
+- `palace.json` — palace metadata (name, description, created_at)
 
 ## Architecture
 
 ```
 trusty-memory (this crate)          trusty-common `memory-core` feature
   axum HTTP/SSE server     ──────►  PalaceRegistry
-  Unix domain socket       ──────►  usearch vector index
-  embedded Svelte UI               SQLite metadata + KG
+  Unix domain socket       ──────►  usearch vector index (index.usearch)
+  embedded Svelte UI               redb metadata + KG (kg.redb)
   23 MCP tools                     fastembed (AllMiniLML6V2Q)
 
 trusty-memory-mcp-bridge (separate binary, PR #149)
@@ -437,7 +444,7 @@ trusty-memory-mcp-bridge (separate binary, PR #149)
 ```
 
 The `memory-core` feature of `trusty-common` owns the storage engine: `usearch` for approximate
-nearest-neighbor search, SQLite for metadata and knowledge-graph triples, and
+nearest-neighbor search, `redb` for drawer metadata and knowledge-graph triples, and
 `fastembed` for 384-dim text embeddings. The MCP server (`trusty-memory`) is a
 thin protocol layer on top.
 

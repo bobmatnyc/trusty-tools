@@ -577,7 +577,7 @@ curl http://127.0.0.1:$(trusty-search port)/health
 trusty-memory port                                   # bare port: 7070
 trusty-memory port --addr                            # host:port: 127.0.0.1:7070
 trusty-memory port --json                            # {"addr":"127.0.0.1","port":7070}
-curl http://127.0.0.1:$(trusty-memory port)/api/v1/health
+curl http://127.0.0.1:$(trusty-memory port)/health
 
 # Fire-and-forget memory note from any agent (no MCP tool needed):
 # Sub-agents spawned via Claude Code's Agent tool do not inherit MCP
