@@ -3,7 +3,7 @@ name = "trusty-memory"
 version = "0.15.0"
 edition = "2021"
 description = "MCP server (stdio + HTTP/SSE) for trusty-memory"
-license = "MIT"
+license.workspace = true
 readme = "README.md"
 
 exclude = [".fastembed_cache/", "ui/node_modules/**"]

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/bobmatnyc/trusty-search/actions/workflows/ci.yml/badge.svg)](https://github.com/bobmatnyc/trusty-search/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/trusty-search.svg)](https://crates.io/crates/trusty-search)
-[![License: ELv2](https://img.shields.io/badge/License-Elastic%20License%202.0-blue.svg)](./LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
 Machine-wide, blazingly fast hybrid code search service. One install per machine,
 one always-on daemon, unlimited named indexes.
@@ -24,37 +24,85 @@ This README and the rustdoc stay in-crate; everything else lives under `docs/`.
 - **macOS 12+ or Linux** (Windows: not yet supported)
 - **~2 GB disk** for model cache (downloaded on first run to `~/Library/Caches/trusty-search/` on macOS or `$XDG_DATA_HOME/trusty-search/` on Linux)
 
-## Install
+## Installation
 
-### From crates.io (recommended)
+### From GitHub Releases (recommended for binary users)
+
+Prebuilt binaries are available for macOS (Apple Silicon) and Linux (x86_64).
+
+1. Download the latest release from [GitHub Releases](https://github.com/bobmatnyc/trusty-tools/releases):
+   - Look for assets tagged `trusty-search-v0.24.1`
+   - Download the archive for your platform:
+     - **macOS arm64 (Apple Silicon)**: `trusty-search-v0.24.1-aarch64-apple-darwin.tar.gz`
+     - **Linux x86_64**: `trusty-search-v0.24.1-x86_64-unknown-linux-gnu.tar.gz`
+
+2. Extract and install:
+   ```bash
+   tar xzf trusty-search-v0.24.1-*.tar.gz
+   chmod +x trusty-search
+   sudo mv trusty-search /usr/local/bin/    # or ~/.local/bin/ if you prefer user install
+   ```
+
+3. Verify the installation:
+   ```bash
+   trusty-search --version
+   ```
+
+### From Source with Cargo
+
+Requires Rust 1.91 or later ([install Rust](https://rustup.rs/)).
 
 ```bash
-cargo install trusty-search
+cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-search --locked
 ```
 
-### From source
+This builds from the latest commit on `main` and installs the binary to `~/.cargo/bin/`. Make sure `~/.cargo/bin/` is on your PATH.
+
+To install a specific version:
+```bash
+cargo install --git https://github.com/bobmatnyc/trusty-tools --tag trusty-search-v0.24.1 trusty-search --locked
+```
+
+### With Homebrew (planned — not yet available)
 
 ```bash
-git clone https://github.com/bobmatnyc/trusty-search
-cd trusty-search
-cargo install --path . --locked
+brew tap bobmatnyc/trusty
+brew install trusty-search
 ```
 
-### Apple Silicon
+This installation method is under development. For now, use GitHub Releases or `cargo install`.
 
-CoreML GPU acceleration is enabled automatically on M1/M2/M3/M4. No flags or extra installs are needed. The startup log confirms the active provider:
+Once available, this will provide:
+- Automatic updates via `brew upgrade trusty-search`
+- Standard macOS / Linux PATH integration
+- Optional dependency resolution (e.g., system libraries for ONNX Runtime)
 
-```
-embedder initialized: model=AllMiniLML6V2(Q) dim=384 provider=CoreML (Metal GPU / ANE)
-```
+### Prerequisites & Special Cases
 
-### NVIDIA GPU (CUDA)
+#### System Requirements
+
+- **RAM**: 16 GB minimum. The daemon performs a hard check at startup and will exit with an actionable error on under-spec hosts. Set `TRUSTY_SKIP_RAM_CHECK=1` to bypass (use at your own risk).
+- **Disk**: ~2 GB for the model cache (downloaded on first run to `~/Library/Caches/trusty-search/` on macOS or `$XDG_DATA_HOME/trusty-search/` on Linux).
+- **OS**: macOS 12+ or Linux. Windows support is not yet available.
+
+#### Optional: GPU Acceleration
+
+- **macOS with Apple Silicon (M1/M2/M3/M4)**: CoreML GPU acceleration is enabled automatically. No configuration needed. The startup log will confirm: `provider=CoreML (Metal GPU / ANE)`.
+- **NVIDIA GPU (CUDA)**: Install with `cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-search --features cuda --locked`. Requires CUDA toolkit installed on the host. See `CLAUDE.md` in the repository for `ORT_DYLIB_PATH` setup on Amazon Linux 2023.
+
+#### Note: UI-Embedded Build
+
+This crate embeds a Svelte admin UI compiled into the binary. The UI is pre-built and included in releases; no additional steps are needed to use the daemon. The `SKIP_UI_BUILD=1` environment variable only applies to CI/development workflows and should not be set by end users.
+
+### Verify Installation
+
+All installations can be verified by running:
 
 ```bash
-cargo install trusty-search --features cuda
+trusty-search --version
 ```
 
-Requires CUDA toolkit installed on the host. See [CLAUDE.md](./CLAUDE.md) for `ORT_DYLIB_PATH` setup on Amazon Linux 2023 and other glibc 2.34 hosts.
+Expected output: the semantic version of the installed binary (e.g., `trusty-search 0.24.1`).
 
 ## Quick start
 
@@ -634,6 +682,4 @@ pipeline, multi-request design, memory tuning reference, and release process.
 
 ## License
 
-[Elastic License 2.0 (ELv2)](./LICENSE) — free for internal use; you may not
-provide trusty-search as a hosted or managed service to third parties without
-a commercial agreement. See [LICENSE](./LICENSE) for the full terms.
+Licensed under the [MIT License](./LICENSE).

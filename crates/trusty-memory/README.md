@@ -28,11 +28,89 @@ long-term memory backend.
 
 ## Installation
 
+### From GitHub Releases (recommended for binary users)
+
+Prebuilt binaries are available for macOS (Apple Silicon) and Linux (x86_64).
+
+1. Download the latest release from [GitHub Releases](https://github.com/bobmatnyc/trusty-tools/releases):
+   - Look for assets tagged `trusty-memory-v0.15.0`
+   - Download the archive for your platform:
+     - **macOS arm64 (Apple Silicon)**: `trusty-memory-v0.15.0-aarch64-apple-darwin.tar.gz`
+     - **Linux x86_64**: `trusty-memory-v0.15.0-x86_64-unknown-linux-gnu.tar.gz`
+
+2. Extract and install:
+   ```bash
+   tar xzf trusty-memory-v0.15.0-*.tar.gz
+   chmod +x trusty-memory
+   sudo mv trusty-memory /usr/local/bin/    # or ~/.local/bin/ if you prefer user install
+   ```
+
+3. Verify the installation:
+   ```bash
+   trusty-memory --version
+   ```
+
+### From Source with Cargo
+
+Requires Rust 1.91 or later ([install Rust](https://rustup.rs/)).
+
 ```bash
-cargo install trusty-memory
+cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-memory --locked
 ```
 
-The installed binary is named `trusty-memory`.
+This builds from the latest commit on `main` and installs the binary to `~/.cargo/bin/`. Make sure `~/.cargo/bin/` is on your PATH.
+
+Installing `trusty-memory` produces three binaries in one command: `trusty-memory`, `trusty-memory-mcp-bridge`, and `trusty-bm25-daemon`.
+
+To install a specific version:
+```bash
+cargo install --git https://github.com/bobmatnyc/trusty-tools --tag trusty-memory-v0.15.0 trusty-memory --locked
+```
+
+### With Homebrew (planned — not yet available)
+
+```bash
+brew tap bobmatnyc/trusty
+brew install trusty-memory
+```
+
+This installation method is under development. For now, use GitHub Releases or `cargo install`.
+
+Once available, this will provide:
+- Automatic updates via `brew upgrade trusty-memory`
+- Standard macOS / Linux PATH integration
+- Optional dependency resolution (e.g., system libraries for ONNX Runtime)
+
+### Prerequisites & Special Cases
+
+#### Prerequisites
+
+None — the daemon is self-contained and requires no external databases or configuration files to start.
+
+#### Optional: OpenRouter API Key
+
+The embedded memory UI includes a chat panel that requires an OpenRouter API key for the language model integration. Set `OPENROUTER_API_KEY` in your environment or enter it in the UI to enable chat features.
+
+```bash
+export OPENROUTER_API_KEY=sk-or-v1-...
+trusty-memory              # Start the daemon with chat enabled
+```
+
+Chat is optional; the daemon fully functions without it.
+
+#### Note: Embedded Svelte UI
+
+This crate embeds a Svelte admin UI (built and compiled into the binary). The UI is pre-built and included in releases; no additional steps are needed. The embedded UI runs on `http://127.0.0.1:<port>` — see the daemon output for the live port.
+
+### Verify Installation
+
+All installations can be verified by running:
+
+```bash
+trusty-memory --version
+```
+
+Expected output: the semantic version of the installed binary (e.g., `trusty-memory 0.15.0`).
 
 ## Quick Start
 
@@ -538,7 +616,7 @@ cargo check -p trusty-memory
 
 ## License
 
-Licensed under the [MIT License](https://opensource.org/licenses/MIT).
+Licensed under the [MIT License](./LICENSE).
 
 ## Repository
 
