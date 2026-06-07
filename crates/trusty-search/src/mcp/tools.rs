@@ -605,6 +605,15 @@ impl McpServer {
             .await
             .map_err(|e| DispatchError::Transport(format!("decode {url}: {e}")))?;
         if !status.is_success() {
+            // Issue #882: 400 means invalid input — surface as InvalidParams.
+            if status == reqwest::StatusCode::BAD_REQUEST {
+                let msg = body
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("bad request")
+                    .to_owned();
+                return Err(DispatchError::InvalidParams(msg));
+            }
             return Err(DispatchError::Transport(format!(
                 "POST {url} returned {status}: {body}"
             )));
@@ -2172,3 +2181,7 @@ mod tests {
         assert_eq!(captured.lock().await.as_slice(), &["/search".to_string()]);
     }
 }
+
+// Issue #882: empty-query MCP tests (separate file — line-cap budget).
+#[cfg(test)]
+mod tests_empty_query;

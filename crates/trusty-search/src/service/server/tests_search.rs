@@ -1,7 +1,74 @@
 //! Tests for `file_is_within_root` and the search handler.
 use super::helpers::file_is_within_root;
 use super::*;
-use axum::Json;
+use axum::{http::StatusCode, Json};
+
+// ── Issue #882: empty / whitespace-only query validation ──────────────────────
+
+/// Why: an empty query must be rejected before touching the index so callers
+/// get an actionable error instead of arbitrary top-k results from a pure
+/// k-NN fallback.
+/// What: builds a minimal bare index and asserts search_handler returns HTTP
+/// 400 with `{"error": "query must not be empty"}` for both `""` and `"   "`.
+/// Test: this test.
+#[tokio::test]
+async fn search_handler_rejects_empty_query() {
+    use crate::core::embed::{Embedder, MockEmbedder};
+    use crate::core::indexer::{CodeIndexer, SearchQuery, SearchStage};
+    use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
+    use crate::core::store::{UsearchStore, VectorStore};
+    use tempfile::tempdir;
+
+    let tmp = tempdir().unwrap();
+    let dim = 16;
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(dim));
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(dim).expect("usearch"));
+    let indexer = CodeIndexer::new("empty-q-test", tmp.path())
+        .with_components(Arc::clone(&embedder), Arc::clone(&store));
+    let registry = IndexRegistry::new();
+    let handle = IndexHandle::bare(
+        IndexId::new("empty-q-idx"),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        tmp.path().to_path_buf(),
+    );
+    registry.register(handle);
+    let state = Arc::new(SearchAppState::new(registry));
+    state.install_embedder(embedder).await;
+
+    for text in ["", "   ", "\t\n"] {
+        let resp = search_handler(
+            axum::extract::State(Arc::clone(&state)),
+            axum::extract::Path("empty-q-idx".to_string()),
+            axum::extract::Json(SearchQuery {
+                text: text.to_string(),
+                top_k: 5,
+                expand_graph: false,
+                compact: false,
+                branch_files: None,
+                branch_boost: 1.5,
+                branch: None,
+                stage: Some(SearchStage::Lexical),
+                mode: crate::core::indexer::SearchMode::Code,
+                exclude_archived: false,
+                refine_query: None,
+            }),
+        )
+        .await;
+
+        let (status, Json(body)) = resp.expect_err("empty query must return Err");
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "expected 400 for query={text:?}, got {status}"
+        );
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("query must not be empty"),
+            "wrong error body for query={text:?}: {body:?}"
+        );
+    }
+}
+
 #[test]
 fn file_is_within_root_relative_ok() {
     let root = std::path::Path::new("/Users/me/proj");

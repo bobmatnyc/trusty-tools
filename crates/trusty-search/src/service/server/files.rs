@@ -193,6 +193,14 @@ pub(super) async fn grep_handler(
     Path(id): Path<String>,
     Json(req): Json<crate::service::grep::GrepRequest>,
 ) -> Result<Json<crate::service::grep::GrepResponse>, (StatusCode, Json<serde_json::Value>)> {
+    // Issue #882: empty / whitespace-only patterns match every line in every
+    // file, producing a meaningless dump of the entire corpus.
+    if req.pattern.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "pattern must not be empty" })),
+        ));
+    }
     let compiled = crate::service::grep::CompiledGrep::compile(&req).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -238,6 +246,13 @@ pub(super) async fn global_grep_handler(
     State(state): State<Arc<SearchAppState>>,
     Json(req): Json<crate::service::grep::GrepRequest>,
 ) -> Result<Json<crate::service::grep::GrepResponse>, (StatusCode, Json<serde_json::Value>)> {
+    // Issue #882: same guard as grep_handler — an empty pattern matches every line.
+    if req.pattern.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "pattern must not be empty" })),
+        ));
+    }
     let compiled = crate::service::grep::CompiledGrep::compile(&req).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,

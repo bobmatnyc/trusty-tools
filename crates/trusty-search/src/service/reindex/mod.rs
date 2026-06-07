@@ -594,17 +594,31 @@ async fn reset_stages_for_reindex(handle: &Arc<IndexHandle>) {
 /// batch — exposing the in-progress state is what enables the search
 /// handler's graceful-degradation guarantee (BM25 lane queryable while
 /// HNSW is still warming up).
+///
+/// `corpus_total_chunks` (issue #879): the **total** chunk count in the
+/// corpus after this reindex (obtained from the durable corpus store), NOT
+/// the per-run counter from `ReindexProgress::total_chunks`. The per-run
+/// counter is 0 on a no-change incremental pass (all files hash-skipped),
+/// which caused `stages.lexical.chunks` to report 0 while the top-level
+/// `chunk_count` field correctly reported the cumulative total. Using the
+/// corpus total keeps the two fields consistent.
 async fn mark_lexical_ready_semantic_in_progress(
     handle: &Arc<IndexHandle>,
     files: usize,
-    chunks: usize,
-    total_chunks: usize,
+    corpus_total_chunks: usize,
+    total_chunks_for_embed: usize,
 ) {
     let mut stages = handle.stages.write().await;
     stages.lexical.status = StageStatus::Ready;
     stages.lexical.completed_at = Some(now_rfc3339());
     stages.lexical.files = Some(files);
-    stages.lexical.chunks = Some(chunks);
+    // Issue #879: report the total corpus chunk count, not just the
+    // per-reindex-pass count. On a no-change incremental reindex the
+    // per-pass count is 0 (all files hash-skipped), but the corpus still
+    // holds the full set of chunks from prior runs. Using the corpus total
+    // keeps `stages.lexical.chunks` consistent with the top-level
+    // `chunk_count` field in the status response.
+    stages.lexical.chunks = Some(corpus_total_chunks);
     // On lexical-only indexes the semantic + graph slots stay `Skipped` —
     // the reset hook pre-populated them. Don't overwrite the terminal
     // state. For full-pipeline indexes the semantic stage has been running
@@ -613,7 +627,7 @@ async fn mark_lexical_ready_semantic_in_progress(
     if !handle.lexical_only && stages.semantic.status == StageStatus::Pending {
         stages.semantic.status = StageStatus::InProgress;
         stages.semantic.started_at = Some(now_rfc3339());
-        stages.semantic.total = Some(total_chunks);
+        stages.semantic.total = Some(total_chunks_for_embed);
     }
 }
 
@@ -2303,11 +2317,31 @@ pub fn spawn_reindex_with_cleanup(
         // index semantic + graph stay `Skipped`.
         {
             let files_done = progress.indexed.load(AtomicOrdering::Acquire);
-            let chunks_done = progress.total_chunks.load(AtomicOrdering::Acquire);
+            // Issue #879: pass the corpus TOTAL chunk count, not the per-run
+            // counter. On a no-change incremental reindex (all files
+            // hash-skipped) `progress.total_chunks` is 0, but the corpus
+            // still holds all chunks from prior runs. Prefer the durable
+            // redb corpus count; fall back to the in-memory chunk map
+            // (non-durable / test indexes); final fallback is the per-run
+            // counter (first-ever reindex with a staging corpus).
+            let corpus_total_chunks = {
+                let indexer = handle.indexer.read().await;
+                indexer
+                    .corpus_arc()
+                    .and_then(|c| c.chunk_count().ok())
+                    .unwrap_or_else(|| {
+                        let in_mem = indexer.chunk_count();
+                        if in_mem > 0 {
+                            in_mem
+                        } else {
+                            progress.total_chunks.load(AtomicOrdering::Acquire)
+                        }
+                    })
+            };
             mark_lexical_ready_semantic_in_progress(
                 &handle,
                 files_done,
-                chunks_done,
+                corpus_total_chunks,
                 total_vector_count,
             )
             .await;
@@ -2548,6 +2582,12 @@ pub fn spawn_reindex_with_cleanup(
             // rather than reporting freshness we can no longer verify.
             let new_sha = crate::core::git::head_sha(&handle.root_path);
             *handle.indexed_head_sha.write().await = new_sha;
+            // Issue #878: stamp the authoritative last-indexed timestamp so
+            // GET /indexes/:id/status always returns a non-null `last_indexed`
+            // after a successful reindex, regardless of storage layout
+            // (legacy global vs. colocated) or whether index.redb mtime is
+            // visible from the data-dir path that index_disk_and_mtime checks.
+            *handle.last_indexed_at.write().await = Some(now_rfc3339());
         }
 
         // Final synchronous RSS poll so the peak reflects post-KG memory
@@ -2704,6 +2744,7 @@ mod tests {
             context_embedding: Arc::new(tokio::sync::RwLock::new(None)),
             context_summary: Arc::new(tokio::sync::RwLock::new(None)),
             indexed_head_sha: Arc::new(tokio::sync::RwLock::new(None)),
+            last_indexed_at: Arc::new(tokio::sync::RwLock::new(None)),
             lexical_only: false,
             skip_kg: false,
             stages: Arc::new(tokio::sync::RwLock::new(IndexStages::default())),
@@ -2785,6 +2826,7 @@ mod tests {
             context_embedding: Arc::new(tokio::sync::RwLock::new(None)),
             context_summary: Arc::new(tokio::sync::RwLock::new(None)),
             indexed_head_sha: Arc::new(tokio::sync::RwLock::new(None)),
+            last_indexed_at: Arc::new(tokio::sync::RwLock::new(None)),
             lexical_only: false,
             skip_kg: false,
             stages: Arc::new(tokio::sync::RwLock::new(IndexStages::default())),
@@ -3358,6 +3400,7 @@ mod tests {
             context_embedding: Arc::new(tokio::sync::RwLock::new(None)),
             context_summary: Arc::new(tokio::sync::RwLock::new(None)),
             indexed_head_sha: Arc::new(tokio::sync::RwLock::new(None)),
+            last_indexed_at: Arc::new(tokio::sync::RwLock::new(None)),
             lexical_only,
             skip_kg,
             stages: Arc::new(tokio::sync::RwLock::new(stages)),
@@ -4209,5 +4252,122 @@ mod tests {
                 "copy_all_from sanity: must copy all 2 chunks from the live corpus"
             );
         }
+    }
+
+    /// Issue #878: `handle.last_indexed_at` must be stamped with a non-null
+    /// RFC-3339 timestamp after a successful reindex completes.
+    ///
+    /// Why: `GET /indexes/:id/status` returned `last_indexed: null` after a
+    /// fresh reindex because the disk-mtime heuristic (`index_disk_and_mtime`)
+    /// only checks the legacy global data dir and returns `None` for colocated
+    /// indexes or newly-created indexes whose redb file is in a location the
+    /// heuristic does not probe. Stamping `last_indexed_at` on the handle at
+    /// reindex-complete time provides a storage-agnostic authoritative source.
+    /// What: stages a tiny repo, runs a full reindex, asserts that
+    /// `handle.last_indexed_at` is `Some` and parseable as RFC-3339.
+    /// Test: this test.
+    #[tokio::test]
+    async fn last_indexed_stamped_after_reindex() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        fs::write(root.join("alpha.rs"), "pub fn alpha() {}\n").unwrap();
+
+        let handle = make_handle_with_flag("li-stamp-test", root, false);
+        let progress = Arc::new(ReindexProgress::new());
+        spawn_reindex(handle.clone(), progress.clone(), false);
+
+        for _ in 0..200 {
+            if progress.status.load() == ReindexStatus::Complete {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(progress.status.load(), ReindexStatus::Complete);
+
+        let ts = handle.last_indexed_at.read().await.clone();
+        assert!(
+            ts.is_some(),
+            "#878: last_indexed_at must be Some after a completed reindex; got None"
+        );
+        // Verify it is a valid RFC-3339 timestamp.
+        let ts_str = ts.unwrap();
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&ts_str).is_ok(),
+            "#878: last_indexed_at must be a valid RFC-3339 string; got: {ts_str}"
+        );
+    }
+
+    /// Issue #879: `stages.lexical.chunks` must report the **total** corpus
+    /// chunk count, not just the per-reindex-pass count.
+    ///
+    /// Why: on a no-change incremental reindex (all files hash-skipped)
+    /// `progress.total_chunks` is 0 because no files were re-committed.
+    /// The previous implementation set `stages.lexical.chunks = 0` in that
+    /// case, while the top-level `chunk_count` field correctly showed the
+    /// full corpus total. After this fix both must agree.
+    /// What: stages a tiny repo, runs a first reindex (commits real chunks),
+    /// records the corpus total, then runs a no-change second reindex
+    /// (`force=false`). Asserts that `stages.lexical.chunks` equals the
+    /// corpus total both after the first and after the second pass.
+    /// Test: this test.
+    #[tokio::test]
+    async fn lexical_chunks_reports_corpus_total_not_pass_count() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        fs::write(
+            root.join("beta.rs"),
+            "pub fn beta() {}\npub fn gamma() {}\npub fn delta() {}\n",
+        )
+        .unwrap();
+
+        let handle = make_handle_with_flag("lc-total-test", root, false);
+
+        // ── First reindex: commits real chunks ────────────────────────────────
+        let progress1 = Arc::new(ReindexProgress::new());
+        spawn_reindex(handle.clone(), progress1.clone(), false);
+        for _ in 0..200 {
+            if progress1.status.load() == ReindexStatus::Complete {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(progress1.status.load(), ReindexStatus::Complete);
+        let chunks_pass1 = progress1.total_chunks.load(Ordering::Acquire);
+        assert!(
+            chunks_pass1 > 0,
+            "first reindex must commit at least one chunk"
+        );
+
+        let stages_after_pass1 = handle.stages.read().await.clone();
+        let lexical_chunks_after_pass1 = stages_after_pass1.lexical.chunks.unwrap_or(0);
+        assert_eq!(
+            lexical_chunks_after_pass1, chunks_pass1,
+            "#879: after first reindex stages.lexical.chunks ({lexical_chunks_after_pass1}) \
+             must equal total_chunks ({chunks_pass1})"
+        );
+
+        // ── Second reindex: no-change (all files hash-skipped, 0 new chunks) ─
+        let progress2 = Arc::new(ReindexProgress::new());
+        spawn_reindex(handle.clone(), progress2.clone(), false);
+        for _ in 0..200 {
+            if progress2.status.load() == ReindexStatus::Complete {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(progress2.status.load(), ReindexStatus::Complete);
+        let chunks_pass2 = progress2.total_chunks.load(Ordering::Acquire);
+        assert_eq!(
+            chunks_pass2, 0,
+            "no-change reindex must produce 0 new chunks (all hash-skipped); got {chunks_pass2}"
+        );
+
+        let stages_after_pass2 = handle.stages.read().await.clone();
+        let lexical_chunks_after_pass2 = stages_after_pass2.lexical.chunks.unwrap_or(0);
+        assert_eq!(
+            lexical_chunks_after_pass2, chunks_pass1,
+            "#879: after no-change reindex stages.lexical.chunks ({lexical_chunks_after_pass2}) \
+             must equal the corpus total ({chunks_pass1}), not the per-pass count ({chunks_pass2})"
+        );
     }
 }
