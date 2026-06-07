@@ -72,6 +72,22 @@ pub mod adapters;
 ///       the `tests` module of `session_registry.rs`.
 pub mod session_registry;
 
+/// Unified harness event envelope, process-global broadcast bus, and filter.
+///
+/// Why: Wave 3 (epic #830, refs #833) unifies real-time event streaming across
+///      the three harnesses (`trusty-agents`, `trusty-mpm`, `trusty-code`) onto
+///      one `HarnessEvent` envelope flowing over a single process-global
+///      broadcast bus. Phase 0 (this module) lands the foundation only — the
+///      types, the bus, the subscription API, and a lightweight `Filter` — with
+///      NO consumers wired yet. Migration of existing emit sites happens in
+///      P1–P4. See ADR-0005.
+/// What: Re-exports `HarnessEvent`, `HarnessPayload`, `HarnessSource`,
+///       `LifecycleEvent`, `Lag`, `Filter`, the `bus`/`subscribe`/`publish`/
+///       `emit`/`recv_with_lag` helpers, and the `EVENT_LINE_PREFIX` relay
+///       constant from the `events::*` submodules.
+/// Test: `events::tests` is the comprehensive suite for this foundation type.
+pub mod events;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
