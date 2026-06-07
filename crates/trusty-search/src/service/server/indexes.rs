@@ -296,6 +296,7 @@ pub(super) async fn create_index_handler(
         context_embedding: Arc::new(tokio::sync::RwLock::new(None)),
         context_summary: Arc::new(tokio::sync::RwLock::new(None)),
         indexed_head_sha: Arc::new(tokio::sync::RwLock::new(indexed_head_sha)),
+        last_indexed_at: Arc::new(tokio::sync::RwLock::new(None)),
         lexical_only,
         skip_kg,
         stages: Arc::new(tokio::sync::RwLock::new(stages)),

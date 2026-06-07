@@ -151,6 +151,9 @@ pub(super) async fn reindex_handler(
                     // Preserve the indexed-HEAD SHA across the root_path
                     // override — a subsequent reindex will refresh it.
                     indexed_head_sha: Arc::clone(&handle.indexed_head_sha),
+                    // Preserve the last-indexed timestamp across root-path
+                    // override — a subsequent reindex will refresh it (issue #878).
+                    last_indexed_at: Arc::clone(&handle.last_indexed_at),
                     // Issue #109, Phase 1: preserve the lexical-only flag
                     // and stages snapshot across the root override — a
                     // root_path override is not an opt-out change.

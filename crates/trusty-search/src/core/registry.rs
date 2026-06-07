@@ -331,46 +331,43 @@ pub struct IndexHandle {
     /// Test: `skip_kg_index_never_runs_phase3` in `service::reindex::tests`.
     pub skip_kg: bool,
 
-    /// Per-stage lifecycle state surface for the staged pipeline
-    /// (issue #109, Phase 1).
+    /// Per-stage lifecycle state surface for the staged pipeline (issue #109).
     ///
-    /// Why: the search handler reads this to compute `search_capabilities`
-    /// and skip lanes whose stage is not yet ready. Wrapped in
-    /// `Arc<RwLock<>>` so the reindex task can flip stage states between
-    /// `Pending` / `InProgress` / `Ready` without rebuilding the handle.
-    /// What: an `IndexStages` carrying three `StageState` slots (lexical /
-    /// semantic / graph). On a `lexical_only` index, semantic and graph
-    /// are pre-set to `Skipped` so the search handler never blocks.
+    /// Why: search handler reads this to compute `search_capabilities` and
+    /// skip lanes whose stage is not yet ready; reindex task flips states
+    /// without rebuilding the handle.
+    /// What: `IndexStages` with three `StageState` slots (lexical/semantic/
+    /// graph). `lexical_only` pre-sets semantic+graph to `Skipped`.
     /// Test: `stage_status_capabilities_*` (registry) and
     /// `service::reindex::tests::stage_*` (e2e).
     pub stages: Arc<RwLock<IndexStages>>,
 
+    /// RFC-3339 timestamp stamped at reindex-complete time (issue #878).
+    ///
+    /// Why: `index_disk_and_mtime` only checks the legacy global data dir;
+    /// colocated and freshly-created indexes return `null`. In-memory stamping
+    /// is storage-agnostic and always non-null after a successful reindex.
+    /// What: `Arc<RwLock<Option<String>>>` written alongside `indexed_head_sha`
+    /// on success. `None` for unindexed / warm-booted handles (status endpoint
+    /// falls back to disk mtime). `Some(rfc3339)` after first completed pass.
+    /// Test: `last_indexed_stamped_after_reindex` in `service::reindex::tests`.
+    pub last_indexed_at: Arc<RwLock<Option<String>>>,
+
     /// Stage-2 backpressure notifier (issue #109, Phase 1 stub).
     ///
-    /// Why: stage 2 runs concurrently with search traffic. When a search
-    /// arrives it pings this notifier so the embedder briefly yields,
-    /// keeping query latency responsive. Phase 1 ships a stub: the embedder
-    /// loop waits up to 100 ms on a `notified()` between batches. Phase 2
-    /// will tune the policy.
-    /// What: an `Arc<tokio::sync::Notify>` so handlers can call `notify_one`
-    /// without holding the indexer lock.
-    /// Test: not directly tested in Phase 1 — the stub is best-effort and
-    /// the search handler's existing latency tests cover regression.
+    /// Why: search arrivals ping this to let the embedder briefly yield,
+    /// keeping query latency responsive during concurrent reindexes.
+    /// What: `Arc<tokio::sync::Notify>` — `notify_one` from handlers.
+    /// Test: not directly tested; latency tests cover regression.
     pub search_pressure: Arc<tokio::sync::Notify>,
 
     /// Walk diagnostic snapshot (issue #280).
     ///
-    /// Why: when a reindex produces zero chunks, operators need to know
-    /// whether the walk itself failed (permission error, all files filtered,
-    /// root path missing) or if parsing/embedding was the culprit. This
-    /// field is updated at the start and end of every walk, giving
-    /// `GET /indexes/:id/status` enough information to answer "why is this
-    /// index empty?".
-    /// What: `Arc<RwLock<WalkDiagnostics>>` so the reindex background task
-    /// can write without rebuilding the handle, and the HTTP handler can
-    /// read without waiting for the reindex to finish.
-    /// Test: `walk_diagnostics_populated_after_reindex` in
-    /// `service::reindex::tests`.
+    /// Why: zero-chunk reindexes need per-walk context (errors, file
+    /// counts) surfaced in `GET /indexes/:id/status`.
+    /// What: `Arc<RwLock<WalkDiagnostics>>` — written at walk start/end,
+    /// read by the HTTP handler without holding the reindex lock.
+    /// Test: `walk_diagnostics_populated_after_reindex` (reindex tests).
     pub walk_diagnostics: Arc<tokio::sync::RwLock<WalkDiagnostics>>,
 }
 
@@ -431,6 +428,7 @@ impl IndexHandle {
             context_embedding: Arc::new(RwLock::new(None)),
             context_summary: Arc::new(RwLock::new(None)),
             indexed_head_sha: Arc::new(RwLock::new(None)),
+            last_indexed_at: Arc::new(RwLock::new(None)),
             lexical_only: false,
             skip_kg: false,
             stages: Arc::new(RwLock::new(IndexStages::default())),
