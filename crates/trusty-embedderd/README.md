@@ -169,4 +169,4 @@ TRUSTY_EMBEDDER=unix:/tmp/my-embedderd.sock trusty-search start
 
 ## License
 
-[Elastic License 2.0](LICENSE) — matching the rest of the trusty-* ecosystem.
+[MIT License](LICENSE).

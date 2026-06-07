@@ -144,7 +144,7 @@ handshake. Live Google API calls are out of scope for the test suite.
 
 ## License
 
-Licensed under the [Elastic License 2.0](https://www.elastic.co/licensing/elastic-license).
+Licensed under the [MIT License](https://opensource.org/licenses/MIT).
 
 ## Repository
 

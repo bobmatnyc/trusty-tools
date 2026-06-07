@@ -330,7 +330,7 @@ monitor-tui = ["dep:ratatui", "dep:crossterm", "dep:chrono"]
 # Enables the `embedder_client` module: HTTP client trait + wire types +
 # InProcessEmbedderClient + RemoteEmbedderClient for the `trusty-embedderd`
 # standalone process (issue #110 Phase 1). Formerly the `trusty-embedder-client`
-# crate (MIT) — moved here under Elastic-2.0. Requires `reqwest` (already a
+# crate — consolidated here. Requires `reqwest` (already a
 # workspace dep), `async-trait`, and `thiserror` (already workspace deps).
 # The `embedder` feature is NOT implied so callers that only need the HTTP
 # client path don't pull in fastembed/ORT. Use

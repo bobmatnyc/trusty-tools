@@ -1382,6 +1382,4 @@ Full benchmark: [`docs/trusty-git-analytics/regression-testing/v1.3.0-2026-05-27
 
 ## License
 
-**Non-commercial use only.** See [LICENSE](LICENSE) for terms.
-
-Elastic License 2.0
+MIT — see [LICENSE](LICENSE).

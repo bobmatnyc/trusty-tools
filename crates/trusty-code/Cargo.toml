@@ -3,9 +3,8 @@ name = "trusty-code"
 version = "0.0.0"
 edition = "2024"
 rust-version.workspace = true
-# license.workspace resolves to "Elastic-2.0" SPDX; publish=false so crates.io
-# validation is never triggered. When/if publish is enabled, switch to
-# license-file = "LICENSE" per CLAUDE.md note.
+# license.workspace resolves to "MIT"; publish=false so crates.io validation
+# is never triggered, but LICENSE is kept in-crate for correctness.
 license.workspace = true
 authors.workspace = true
 repository.workspace = true

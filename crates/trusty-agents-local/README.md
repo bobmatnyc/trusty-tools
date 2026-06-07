@@ -2,7 +2,7 @@
 
 Plugin shim for MPM that executes tasks locally (Bash, file operations, process spawning). Implements the agent-api contract for the orchestrator.
 
-**License**: Elastic License 2.0
+**License**: MIT
 
 ## Purpose
 

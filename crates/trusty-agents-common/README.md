@@ -2,7 +2,7 @@
 
 Shared type definitions and RPC interfaces for MPM agents and orchestrator communication.
 
-**License**: Elastic License 2.0
+**License**: MIT
 
 ## Purpose
 

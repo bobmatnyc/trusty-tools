@@ -17,12 +17,11 @@ rust-version = "1.91"
 # version = "0.4.0" — REMOVED. Every crate manages its own version independently
 # in its own Cargo.toml. See issue #343 and CLAUDE.md "Git Tag / Release Convention".
 # When publishing, bump only the crates that actually changed.
-# NOTE: workspace-level license preserved because several existing crates
-# (trusty-common, trusty-mcp-core, trusty-mpm-core, …) reference it via
-# `license.workspace = true`. Per migration instructions we must not alter
-# individual crates' license fields. trusty-memory-* and a few others declare
-# their own (MIT or Elastic-2.0) directly and are unaffected.
-license = "Elastic-2.0"
+# NOTE: workspace-level license is MIT. All crates that do not declare an
+# explicit license field inherit this via `license.workspace = true`.
+# trusty-search uses `license-file` (excluded from relicense, see #893).
+# trusty-memory declares `license = "MIT"` directly (unchanged).
+license = "MIT"
 repository = "https://github.com/bobmatnyc/trusty-tools"
 authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 

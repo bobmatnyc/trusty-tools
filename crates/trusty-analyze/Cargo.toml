@@ -2,7 +2,7 @@
 name        = "trusty-analyze"
 version     = "0.5.0"
 edition     = "2021"
-license     = "MIT"
+license.workspace    = true
 authors.workspace    = true
 repository.workspace = true
 homepage             = "https://github.com/bobmatnyc/trusty-tools"

@@ -1,7 +1,7 @@
 # trusty-common
 
 [![crates.io](https://img.shields.io/crates/v/trusty-common.svg)](https://crates.io/crates/trusty-common)
-[![License: Elastic-2.0](https://img.shields.io/badge/License-Elastic--2.0-blue.svg)](https://www.elastic.co/licensing/elastic-license)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Shared utility surface for the `trusty-*` AI tooling ecosystem. This crate is
 the result of consolidating several formerly separate crates into one. The
@@ -269,7 +269,7 @@ cargo test -p trusty-common --features embedder -- --include-ignored
 
 ## License
 
-Licensed under the [Elastic License 2.0](https://www.elastic.co/licensing/elastic-license).
+Licensed under the [MIT License](https://opensource.org/licenses/MIT).
 
 ## Repository
 

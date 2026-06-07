@@ -2,7 +2,7 @@
 
 CTO assistant CLI application for querying organizational context, managing employee directory, and administering roles and permissions.
 
-**License**: Elastic License 2.0
+**License**: MIT
 
 ## Purpose
 

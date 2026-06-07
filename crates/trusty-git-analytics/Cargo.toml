@@ -8,7 +8,7 @@ edition = "2021"
 # floor is now 1.91 (aws-smithy-* indirect deps); aligning prevents MSRV drift.
 rust-version = "1.91"
 authors = ["Bob Matsuoka <bob@matsuoka.com>"]
-license = "Elastic-2.0"
+license.workspace = true
 repository = "https://github.com/bobmatnyc/trusty-tools"
 description = "Developer productivity analytics — git commit collection, classification, and reporting"
 keywords = ["git", "analytics", "productivity", "developer-metrics"]

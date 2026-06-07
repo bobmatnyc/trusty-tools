@@ -2,7 +2,7 @@
 
 SQLite-backed persistent database for CTO context, employee directory, organizational structure, and user preferences.
 
-**License**: Elastic License 2.0
+**License**: MIT
 
 ## Purpose
 

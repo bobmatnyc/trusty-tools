@@ -2,7 +2,7 @@
 
 High-level service layer adapters for CTO database, Granola API, and Google Workspace clients. Provides unified query and mutation interfaces for organizational context, user preferences, and directory information.
 
-**License**: Elastic License 2.0
+**License**: MIT
 
 ## Purpose
 

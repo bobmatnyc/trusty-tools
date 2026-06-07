@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.91"
 description = "Tauri + web dashboard for trusty-mpm fleet management"
 publish = false
+license.workspace = true
 
 [lib]
 name = "trusty_mpm_gui"

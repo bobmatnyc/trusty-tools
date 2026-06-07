@@ -269,4 +269,4 @@ cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-review \
 
 ## License
 
-Elastic License 2.0 — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).

@@ -2,7 +2,7 @@
 
 MPM desktop GUI application built with Tauri. Provides a graphical interface to trusty-mpm daemon functionality (agent orchestration, memory management, session control, Telegram bot administration).
 
-**License**: Elastic License 2.0
+**License**: MIT
 
 **Note**: This crate has `publish = false` and is not published to crates.io.
 
