@@ -10,6 +10,7 @@ This document defines the canonical installation convention that every distribut
 - `trusty-search` — hybrid code search daemon + MCP server
 - `trusty-memory` — memory palace MCP frontend (with embedded Svelte UI)
 - `trusty-analyze` — code analysis daemon + MCP server
+- `trusty-review` — code review analyzer daemon + MCP server
 - `trusty-mpm` — unified MPM platform (CLI binaries: `tm`, `trusty-mpm`)
 - `trusty-git-analytics` (tga) — developer productivity analytics
 - `trusty-code` — per-project Claude-Code orchestration harness
@@ -27,7 +28,7 @@ The workspace supports three installation channels per crate. Every distributabl
 ### Platform Support
 
 **Tier 1 (required for every release)**:
-- **macOS arm64** (`aarch64-apple-darwin`) — built on GitHub Actions (apple-latest runner)
+- **macOS arm64 (Apple Silicon)** (`aarch64-apple-darwin`) — built on GitHub Actions (apple-latest runner)
 - **Linux x86_64** (`x86_64-unknown-linux-gnu`) — built on GitHub Actions (ubuntu-latest runner)
 
 **Tier 2 (optional per crate)**:
@@ -36,6 +37,7 @@ The workspace supports three installation channels per crate. Every distributabl
 - **NVIDIA GPU (CUDA)** — optional feature flag; build documented separately if supported.
 
 **Not supported**:
+- macOS x86_64 (Intel) — only Apple Silicon (`aarch64-apple-darwin`) is targeted
 - Windows (future consideration; not part of this convention)
 - musl targets for core daemons (exception: `tga` supports musl statically)
 
@@ -50,13 +52,12 @@ Every distributable crate must use this **canonical template** verbatim in the `
 
 ### From GitHub Releases (recommended for binary users)
 
-Prebuilt binaries are available for macOS (Apple Silicon & Intel) and Linux (x86_64).
+Prebuilt binaries are available for macOS (Apple Silicon) and Linux (x86_64).
 
 1. Download the latest release from [GitHub Releases](https://github.com/bobmatnyc/trusty-tools/releases):
    - Look for assets tagged `{{CRATE}}-v{{VERSION}}`
    - Download the archive for your platform:
-     - **macOS arm64**: `{{CRATE}}-v{{VERSION}}-aarch64-apple-darwin.tar.gz`
-     - **macOS Intel**: `{{CRATE}}-v{{VERSION}}-x86_64-apple-darwin.tar.gz`
+     - **macOS arm64 (Apple Silicon)**: `{{CRATE}}-v{{VERSION}}-aarch64-apple-darwin.tar.gz`
      - **Linux x86_64**: `{{CRATE}}-v{{VERSION}}-x86_64-unknown-linux-gnu.tar.gz`
 
 2. Extract and install:
@@ -218,6 +219,35 @@ trusty-analyze start
 This crate embeds a Svelte admin UI compiled into the binary. The UI is pre-built and included in releases; no additional steps are needed.
 ```
 
+### trusty-review
+
+```markdown
+#### System Requirements
+
+- **RAM**: 8 GB minimum.
+- **Disk**: ~500 MB for the model cache (downloaded on first run).
+- **OS**: macOS 12+ or Linux. Windows support is not yet available.
+
+#### LLM Configuration (required for code review)
+
+The code review daemon requires an LLM for analysis. Configure via environment variables:
+
+```bash
+# OpenRouter (default, requires API key)
+export OPENROUTER_API_KEY=sk-or-v1-...
+trusty-review start
+
+# AWS Bedrock (optional alternative)
+export TRUSTY_LLM_MODEL=bedrock/us.anthropic.claude-sonnet-4-6
+export AWS_REGION=us-east-1
+trusty-review start
+```
+
+#### Optional: NVIDIA GPU (CUDA)
+
+Install with `cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-review --features cuda --locked`. Requires CUDA toolkit.
+```
+
 ### trusty-mpm (trusty-mpm binaries)
 
 ```markdown
@@ -298,11 +328,23 @@ This allows the daemon to run on newer systems where the bundled ORT library (gl
 
 ### Design
 
-A self-owned Homebrew tap (`bobmatnyc/homebrew-trusty`) will provide prebuilt-binary formulae (bottles) for macOS and Linux. This design choice is intentional:
+Homebrew distribution will be provided via **one of two paths**, each with distinct tradeoffs:
 
-- **Why not homebrew-core?** The Elastic License 2.0 is not OSI-approved, so homebrew-core does not accept ELv2-licensed crates. A self-owned tap is the standard practice for proprietary/non-OSI software.
-- **Why bottles (prebuilt)?** GitHub Actions builds are fast and produce tested binaries; end users avoid compilation time.
-- **Fallback to source:** Formulae include a fallback to building from source if a bottle is not available for the target platform.
+**Option A: Self-Owned Tap** (`bobmatnyc/homebrew-trusty`)
+- Full control over release timing, bottle curation, and dependencies.
+- Faster iteration for patch releases and platform-specific variants.
+- Users must explicitly `brew tap bobmatnyc/trusty` once, then `brew install` as normal.
+- **Likely the near-term pragmatic choice** for rapid cadence and experimental features.
+
+**Option B: Homebrew Core** (`homebrew/core`)
+- Apache-2.0 is OSI-approved, so homebrew-core is now eligible (ELv2 blockage removed).
+- No user tap setup required — direct `brew install trusty-search` from core formulae.
+- Longer review latency (core maintainers vet all PRs); slower time-to-release for patches.
+- Higher visibility and discoverability; native macOS/Linux user expectation.
+
+Both approaches use **bottles (prebuilt binaries)** so end users avoid compilation time. Fallback to building from source is included for unrepresented platforms.
+
+**Current direction**: A self-owned tap is planned first (Phase 2) for faster iteration and decoupling from core-review cycles. Migration to homebrew-core can follow once the tap is stable and the community demonstrates demand.
 
 ### Intended UX (when available)
 
@@ -325,14 +367,14 @@ brew uninstall trusty-search
 
 ### Release Workflow Integration (Implementation Road Map)
 
-Once the tap is created, the release workflow will:
+Once a chosen path is created, the release workflow will:
 
 1. Build GitHub Release binaries (as today).
-2. Trigger a webhook or automated PR in `bobmatnyc/homebrew-trusty` to bump the formula's version and bottle checksums.
-3. The tap's CI will build and test bottles for macOS (arm64 + x86_64) and Linux (x86_64).
+2. Trigger a webhook or automated PR to the tap (self-owned or core) to bump the formula's version and bottle checksums.
+3. The tap's CI will build and test bottles for macOS (arm64) and Linux (x86_64).
 4. Users run `brew upgrade` to fetch the new bottle on next run.
 
-**Current status**: Planned for Phase 2. The GitHub Release infrastructure is ready; the Homebrew tap automation is not yet in place.
+**Current status**: Planned for Phase 2. The GitHub Release infrastructure is ready; the Homebrew automation is not yet in place. The self-owned tap is the expected first implementation.
 
 ---
 
@@ -354,8 +396,7 @@ Use this checklist to verify a crate conforms to the INSTALL-CONVENTION:
   - [ ] `{{PREREQUISITES_SLOT}}` replaced with crate-specific prerequisites or removed if none apply
 
 - [ ] **GitHub Release binaries are published** for each release tagged `<crate>-v<version>`:
-  - [ ] macOS arm64 asset available (`aarch64-apple-darwin.tar.gz`)
-  - [ ] macOS x86_64 asset available (`x86_64-apple-darwin.tar.gz`)
+  - [ ] macOS arm64 (Apple Silicon) asset available (`aarch64-apple-darwin.tar.gz`)
   - [ ] Linux x86_64 asset available (`x86_64-unknown-linux-gnu.tar.gz`)
   - [ ] Each asset is a `.tar.gz` containing the binary and optional docs
 
@@ -377,8 +418,7 @@ Distributable crates **must** have a GitHub Actions workflow that:
 
 1. **Triggers on tag push** matching the pattern `<crate>-v<version>` (e.g., `trusty-search-v0.4.0`)
 2. **Builds for Tier 1 platforms**:
-   - macOS arm64 (`aarch64-apple-darwin`)
-   - macOS x86_64 (`x86_64-apple-darwin`)
+   - macOS arm64 (Apple Silicon) (`aarch64-apple-darwin`)
    - Linux x86_64 (`x86_64-unknown-linux-gnu`)
 3. **Creates GitHub Release** with platform-specific binaries as `.tar.gz` assets
 4. **Computes SHA256** hashes for each asset and includes them in the release notes or a companion file
