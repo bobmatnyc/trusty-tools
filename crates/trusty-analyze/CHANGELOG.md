@@ -47,6 +47,92 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.4.1] — 2026-06-01
+
+### Added
+- **Load-dynamic ORT feature for glibc < 2.38** (closes #536) — a new `load-dynamic`
+  Cargo feature lets `ort` dlopen a system-installed `libonnxruntime.so` instead of
+  linking the bundled static library, enabling installation on Amazon Linux 2023
+  (glibc 2.34) and other older-glibc hosts.
+
+### Added
+- **AWS Bedrock LLM provider for deep-analysis pass** (closes #530) — the
+  `POST /analyze/deep` endpoint and `deep_analysis` MCP tool now route LLM calls
+  through AWS Bedrock when `TRUSTY_LLM_MODEL` starts with `bedrock/`. Auth uses
+  the standard AWS credential chain; no OpenRouter key is needed.
+
+### Fixed
+- **MCP `deep_analysis` timeout** (closes #528) — raised the timeout above
+  OpenRouter's 120 s limit; improved error messaging when the API key is absent.
+
+### Changed
+- Excluded `ui/node_modules` from cargo package; fixed `.gitignore` for the
+  embedded UI source tree.
+
+---
+
+## [0.3.0] — 2026-06-01
+
+### Added
+- **Connection-safe daemon upgrades** (closes #534) — graceful shutdown drains
+  in-flight requests before exit; the `mcp_bridge` binary reconnects with
+  exponential backoff after a restart. Use `launchctl bootout` (SIGTERM), not
+  `kickstart -k` (SIGKILL), when upgrading.
+
+---
+
+## [0.2.1] — 2026-05-31
+
+### Fixed
+- Repaired `LaunchdConfig` build break introduced in 0.2.0.
+- Added `reqwest` timeouts to all outbound HTTP calls to trusty-search.
+- `spawn_blocking` used for neural-embedding calls to avoid blocking the async runtime.
+
+---
+
+## [0.2.0] — 2026-05-29
+
+### Added
+- **Update-check helper** (closes #455) — CLI notifies the user when a newer
+  version of `trusty-analyze` is available on crates.io.
+- **Declarative CLI help system** (closes #216) — structured `help.yaml` with
+  `suggest` completing unknown subcommands; wired into all user-facing CLIs.
+- **`axum` behind feature flag** (closes #249) — `axum` and `tower-http` are now
+  optional behind the `http-server` feature flag, matching the convention
+  established in `trusty-common`. Library consumers can drop the HTTP stack with
+  `default-features = false`.
+- Documentation migrated from in-crate to top-level `docs/trusty-analyze/`.
+
+---
+
+## [0.1.10] — 2026-05-22
+
+### Fixed
+- Routed all daemon output to stderr (MCP stdio framing requires a clean stdout).
+- Resolved `list_facts` read-lock contention under concurrent MCP requests (#66, #67).
+
+### Changed
+- Included `ui/dist` and the MCP stdio harness in the release binary tarball.
+
+---
+
+## [0.1.6] — 2026-05-20
+
+### Changed
+- Adopted `trusty-common` `LaunchdConfig` and `claude_config` helpers in the
+  service/setup module (closes #3), eliminating duplicate macOS service-install
+  logic.
+
+---
+
+## [0.1.5] — 2026-05-20
+
+### Changed
+- Renamed crate from `trusty-analyzer` to `trusty-analyze` for consistency with
+  the rest of the `trusty-*` ecosystem.
+
+---
+
 ## [0.1.2] — 2026-05-11
 
 ### Added
@@ -133,5 +219,15 @@ GET  /indexes/:id/clusters?k=N&method=bow|neural
 
 ---
 
-[Unreleased]: https://github.com/bobmatnyc/trusty-analyze/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/bobmatnyc/trusty-analyze/releases/tag/v0.1.0
+[Unreleased]: https://github.com/bobmatnyc/trusty-tools/compare/trusty-analyze-v0.5.0...HEAD
+[0.5.0]: https://github.com/bobmatnyc/trusty-tools/releases/tag/trusty-analyze-v0.5.0
+[0.4.2]: https://github.com/bobmatnyc/trusty-tools/releases/tag/trusty-analyze-v0.4.2
+[0.4.1]: https://github.com/bobmatnyc/trusty-tools/releases/tag/trusty-analyze-v0.4.1
+[0.3.0]: https://github.com/bobmatnyc/trusty-tools/releases/tag/trusty-analyze-v0.3.0
+[0.2.1]: https://github.com/bobmatnyc/trusty-tools/releases/tag/trusty-analyze-v0.2.1
+[0.2.0]: https://github.com/bobmatnyc/trusty-tools/releases/tag/trusty-analyze-v0.2.0
+[0.1.10]: https://github.com/bobmatnyc/trusty-tools/releases/tag/trusty-analyze-v0.1.10
+[0.1.6]: https://github.com/bobmatnyc/trusty-tools/releases/tag/trusty-analyze-v0.1.6
+[0.1.5]: https://github.com/bobmatnyc/trusty-tools/releases/tag/trusty-analyze-v0.1.5
+[0.1.2]: https://github.com/bobmatnyc/trusty-tools/releases/tag/trusty-analyze-v0.1.2
+[0.1.0]: https://github.com/bobmatnyc/trusty-tools/releases/tag/trusty-analyze-v0.1.0

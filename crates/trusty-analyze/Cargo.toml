@@ -11,7 +11,14 @@ description = "Sidecar code-analysis daemon for trusty-search: complexity, smell
 keywords    = ["code-analysis", "complexity", "code-smells", "mcp", "daemon"]
 categories  = ["development-tools", "command-line-utilities"]
 build       = "build.rs"
-exclude     = ["ui/node_modules"]
+exclude     = [
+    "ui/node_modules",
+    "ui/src",
+    "ui/package.json",
+    "ui/vite.config.js",
+    "ui/pnpm-lock.yaml",
+    "ui/pnpm-workspace.yaml",
+]
 
 [[bin]]
 name = "trusty-analyze"
@@ -138,6 +145,12 @@ ner     = ["dep:ort", "dep:tokenizers"]
 #      feature so the reusable tool surface (`tools::call_tool`, `AppState`,
 #      `build_review_state`) is reachable.
 review  = ["dep:trusty-review", "trusty-review/mcp"]
+
+[package.metadata.docs.rs]
+# Why: docs.rs builds with no features by default; the binary requires
+#      http-server which pulls in axum. Listing it here ensures the full
+#      public API surface (service module) is documented on docs.rs.
+features = ["http-server"]
 
 [dev-dependencies]
 tempfile       = { workspace = true }

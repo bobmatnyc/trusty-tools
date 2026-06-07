@@ -16,19 +16,57 @@ Full documentation lives at the workspace top level in
 [regression-testing](../../docs/trusty-analyze/regression-testing/) subdirs.
 This README and the rustdoc stay in-crate; everything else lives under `docs/`.
 
+## Prerequisites
+
+> **trusty-analyze requires a running `trusty-search` daemon.**
+>
+> The analyzer performs a startup health check against `http://127.0.0.1:7878/health`
+> (or the URL given by `--search-url`) and exits with code 1 if that check fails.
+> There is no standalone or offline mode. **Start `trusty-search` before starting
+> `trusty-analyze`.**
+>
+> Install trusty-search: `cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-search --locked`
+> or see [trusty-search's README](../trusty-search/README.md) for prebuilt binaries.
+
 ## Installation
 
-### Standard install (macOS / modern Linux, glibc ≥ 2.38)
+### Install from prebuilt binary
+
+Prebuilt binaries for **macOS arm64** and **Linux x86_64** are published on the
+[GitHub Releases page](https://github.com/bobmatnyc/trusty-tools/releases) under
+tags of the form `trusty-analyze-v<version>` (e.g. `trusty-analyze-v0.5.0`).
 
 ```bash
-cargo install trusty-analyze
+# macOS arm64 (Apple Silicon) — example for v0.5.0
+VERSION=0.5.0
+curl -fsSL \
+  "https://github.com/bobmatnyc/trusty-tools/releases/download/trusty-analyze-v${VERSION}/trusty-analyze-aarch64-apple-darwin.tar.gz" \
+  | tar xz
+sudo mv trusty-analyze /usr/local/bin/
+
+# Linux x86_64 — example for v0.5.0
+VERSION=0.5.0
+curl -fsSL \
+  "https://github.com/bobmatnyc/trusty-tools/releases/download/trusty-analyze-v${VERSION}/trusty-analyze-x86_64-unknown-linux-gnu.tar.gz" \
+  | tar xz
+sudo mv trusty-analyze /usr/local/bin/
+```
+
+Check the Releases page for the exact artifact names for your version.
+
+### Install with cargo
+
+**Standard install — macOS arm64 or Linux glibc ≥ 2.38:**
+
+```bash
+cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-analyze --locked
 ```
 
 The default build bundles a prebuilt ONNX Runtime (via `fastembed/ort-download-binaries`)
 for the neural concept-clustering embedder. This is the correct choice for macOS and
 any Linux host with glibc 2.38 or later.
 
-### Amazon Linux 2023 / glibc < 2.38 (system ORT)
+**Amazon Linux 2023 / glibc < 2.38 (system ORT):**
 
 The bundled ONNX Runtime static library (included by the default `bundled-ort` feature)
 is built against glibc 2.38. Linking it on AL2023 (glibc 2.34) or any other host with
@@ -51,7 +89,8 @@ sudo ln -sf "/opt/onnxruntime-linux-x64-${ORT_VERSION}" /opt/onnxruntime
 Step 2 — build without the bundled ORT:
 
 ```bash
-cargo install trusty-analyze --no-default-features --features http-server,load-dynamic
+cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-analyze \
+    --locked --no-default-features --features http-server,load-dynamic
 ```
 
 Step 3 — export `ORT_DYLIB_PATH` and start the daemon:
@@ -70,11 +109,11 @@ If no system ORT is available, install without any ORT backend. The daemon will 
 run with the deterministic BoW embedder (no semantic clustering):
 
 ```bash
-cargo install trusty-analyze --no-default-features --features http-server
+cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-analyze \
+    --locked --no-default-features --features http-server
 ```
 
-The installed binary is named `trusty-analyze`. The crate name on crates.io is
-`trusty-analyze`.
+The installed binary is named `trusty-analyze`.
 
 ## Quick Start
 
