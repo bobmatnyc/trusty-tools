@@ -830,8 +830,20 @@ fn spawn_startup_tasks(state: &AppState) {
         // `RUST_LOG=warn` level.
         let pin_scan_started = std::time::Instant::now();
         let pin_map_ref = bg_state.pin_project_map.clone();
+        // Fix #880: when a data-dir override is active the daemon is running
+        // in an isolated environment (test rig, CI, parallel run). The
+        // default_search_dirs() scan walks the REAL user environment
+        // (~/Projects, ~/Developer, …) and would import palaces from the
+        // live system into the isolated data root, defeating isolation.
+        // Use an empty search list so the scan is a no-op; the pin map stays
+        // empty for the lifetime of this isolated instance.
+        let override_active = trusty_memory::is_data_dir_override_active();
         let scan_result = tokio::task::spawn_blocking(move || {
-            let search_dirs = trusty_memory::startup_scan::default_search_dirs();
+            let search_dirs = if override_active {
+                Vec::new()
+            } else {
+                trusty_memory::startup_scan::default_search_dirs()
+            };
             trusty_memory::startup_scan::scan_pin_map(&search_dirs)
         })
         .await;
