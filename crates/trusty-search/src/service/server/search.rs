@@ -51,9 +51,23 @@ pub(super) async fn search_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
     Json(mut query): Json<SearchQuery>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // Issue #882: reject empty / whitespace-only queries before touching the
+    // index. An empty query falls through to a pure k-NN vector search that
+    // returns arbitrary top-k results — not useful and potentially expensive.
+    if query.text.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "query must not be empty" })),
+        ));
+    }
     let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
+    let handle = state.registry.get(&index_id).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("unknown index: {}", index_id.0) })),
+        )
+    })?;
     // Use the same domain-aware classifier as `CodeIndexer::search` so the
     // intent reported back to the caller matches what was used for routing.
     let intent = QueryClassifier::classify_with_domain(&query.text, &handle.domain_terms);
@@ -80,10 +94,12 @@ pub(super) async fn search_handler(
     handle.search_pressure.notify_one();
     let started = std::time::Instant::now();
     let indexer = handle.indexer.read().await;
-    let mut results = indexer
-        .search(&query)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut results = indexer.search(&query).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "internal search error" })),
+        )
+    })?;
     // Issue #64: defense-in-depth post-filter. Chunks are stored with `file`
     // paths relative to the index root, so anything that escapes the root
     // (absolute path pointing elsewhere, `..` traversal, or simply a path
@@ -233,7 +249,15 @@ fn default_global_top_k() -> usize {
 pub(super) async fn global_search_handler(
     State(state): State<Arc<SearchAppState>>,
     Json(req): Json<GlobalSearchRequest>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // Issue #882: reject empty / whitespace-only queries before fan-out.
+    if req.query.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "query must not be empty" })),
+        ));
+    }
+
     use crate::core::search::rrf::{rrf_fuse, RRF_K};
 
     let all_ids = state.registry.list();

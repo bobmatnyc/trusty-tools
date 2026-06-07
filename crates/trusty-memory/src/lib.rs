@@ -1394,6 +1394,34 @@ fn write_http_addr_file(path: &Path, addr: &SocketAddr) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Return `true` when a non-default data directory is in effect.
+///
+/// Why (issue #880): two startup side-effects must be suppressed when the
+/// daemon runs with an isolated/overridden data root:
+/// 1. The legacy `~/.trusty-memory/http_addr` dotfile write — it would
+///    overwrite the real production daemon's discovery file with the isolated
+///    instance's throwaway address.
+/// 2. The startup pin-scan — it reads project pin files from the **real**
+///    user environment (~/Projects, ~/Developer, …) and imports palaces from
+///    the real environment into the isolated data root, defeating isolation.
+///
+/// A "non-default data dir" means `TRUSTY_DATA_DIR_OVERRIDE` is set to a
+/// non-empty, non-whitespace value. Empty or whitespace-only values are
+/// treated as unset (same rule as `resolve_data_dir`), so an accidental blank
+/// env var does not suppress the dotfile write on real production instances.
+/// What: reads `TRUSTY_DATA_DIR_OVERRIDE`; returns `true` when it contains a
+/// non-empty, non-whitespace string. Returns `false` otherwise.
+/// Test: `is_data_dir_override_active_when_set`,
+///       `is_data_dir_override_inactive_when_unset`,
+///       `is_data_dir_override_inactive_when_blank`.
+#[inline]
+pub fn is_data_dir_override_active() -> bool {
+    matches!(
+        std::env::var(trusty_common::DATA_DIR_OVERRIDE_ENV),
+        Ok(v) if !v.trim().is_empty()
+    )
+}
+
 /// Resolve the dotfile discovery path `~/.trusty-memory/http_addr`.
 ///
 /// Why (issue #498): external tooling such as claude-mpm's `migrate_trusty_autodetect`
@@ -1403,11 +1431,22 @@ fn write_http_addr_file(path: &Path, addr: &SocketAddr) -> std::io::Result<()> {
 /// so the daemon was writing to the OS-standard location while readers expected
 /// the dotfile location. Writing to both locations keeps every reader happy
 /// regardless of which convention they follow.
-/// What: returns `$HOME/.trusty-memory/http_addr`, or `None` when
-/// `dirs::home_dir()` is unavailable.
-/// Test: `dotfile_http_addr_path_uses_home_dir`.
+///
+/// Fix #880: returns `None` when `TRUSTY_DATA_DIR_OVERRIDE` is active so an
+/// isolated instance (test rig, CI, parallel run) never overwrites the real
+/// production daemon's discovery dotfile.
+///
+/// What: returns `$HOME/.trusty-memory/http_addr` in the default (production)
+/// case, or `None` when `dirs::home_dir()` is unavailable OR when a data-dir
+/// override is active (see `is_data_dir_override_active`).
+/// Test: `dotfile_http_addr_path_uses_home_dir`,
+///       `dotfile_suppressed_when_override_active`.
 #[cfg(feature = "axum-server")]
 fn dotfile_http_addr_path() -> Option<PathBuf> {
+    // Fix #880: never write to the shared dotfile when an override is active.
+    if is_data_dir_override_active() {
+        return None;
+    }
     dirs::home_dir().map(|h| h.join(".trusty-memory").join("http_addr"))
 }
 

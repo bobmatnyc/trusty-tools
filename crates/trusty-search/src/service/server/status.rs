@@ -119,7 +119,16 @@ pub(super) async fn index_status_handler(
     // the admin UI's enhanced Indexes table. Both are derived from the
     // per-index data directory; absent / unreadable values degrade to null
     // so a fresh (never-reindexed) index still returns a 200.
-    let (disk_bytes, last_indexed) = index_disk_and_mtime(&index_id.0);
+    let (disk_bytes, disk_last_indexed) = index_disk_and_mtime(&index_id.0);
+    // Issue #878: prefer the in-memory `last_indexed_at` timestamp stamped
+    // at reindex-complete time. This is authoritative regardless of storage
+    // layout (legacy global dir vs. colocated `.trusty-search/`) and is
+    // always non-null after a successful reindex in this daemon session.
+    // Fall back to the disk-mtime heuristic for warm-booted indexes whose
+    // `last_indexed_at` was not yet populated (i.e. indexed before the fix
+    // or not yet reindexed since the last daemon restart).
+    let in_memory_last_indexed = handle.last_indexed_at.read().await.clone();
+    let last_indexed = in_memory_last_indexed.or(disk_last_indexed);
     // Issue #80: surface a coarse lifecycle status. The legacy top-level
     // `status` field stays for back-compat — it collapses to `indexing` while
     // any reindex task is running and `ready` otherwise (mirrors the v0.8.x
