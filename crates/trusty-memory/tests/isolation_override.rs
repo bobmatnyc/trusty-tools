@@ -129,6 +129,14 @@ fn wait_for_file(path: &Path) -> bool {
 /// before accepting the first connection — gives us an exact readiness signal
 /// with no wasted time.
 ///
+/// Ordering note (TOCTOU): this helper polls for
+/// `<override_base>/trusty-memory/http_addr` as its readiness signal. The
+/// daemon writes that file synchronously inside `run_http_on`, which runs
+/// AFTER the dotfile-write guard and pin-scan have already completed. If
+/// future refactors move the `http_addr` write earlier in the startup
+/// sequence (e.g. before the pin-scan), callers that rely on "http_addr
+/// present ⟹ pin-scan done" must update this readiness signal accordingly.
+///
 /// What: spawns the child with piped stdio so it produces no console noise,
 /// polls until `<override_base>/trusty-memory/http_addr` exists or
 /// `BOOT_TIMEOUT` elapses, kills the child, reaps it via `wait`. Panics if
@@ -191,6 +199,14 @@ fn boot_isolated(override_base: &Path) {
 /// resolved (unusual locked-down environment).
 #[test]
 fn isolated_instance_does_not_overwrite_dotfile() {
+    // Acquire the process-wide env lock. This test does not itself mutate
+    // TRUSTY_DATA_DIR_OVERRIDE, but the unit tests in this same binary do.
+    // Holding the lock serialises execution so a concurrent unit test cannot
+    // transiently clear the env var between the child's fork and its own
+    // `is_data_dir_override_active()` check, which would cause the child
+    // to take the production code path and write to the dotfile.
+    let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+
     let dotfile = match dotfile_path() {
         Some(p) => p,
         None => {
@@ -274,21 +290,32 @@ fn isolated_instance_does_not_overwrite_dotfile() {
 ///
 /// What: boots an isolated daemon with an empty data dir (no pin files, no
 /// pre-seeded palaces). After the boot we list every directory inside the
-/// isolated `trusty-memory/` subdirectory — every directory found is a palace.
-/// We assert that none of the palaces whose names are known real-environment
-/// markers (e.g. `cto`, `duetto`, `trusty-tools`, `open-mpm`) were created
-/// inside the isolated root. Real-env palaces can only appear if the startup
-/// pin-scan leaked; they can never be created by the daemon's own default
-/// seeding logic.
+/// isolated `trusty-memory/` subdirectory. Because the temp dir starts
+/// completely empty (no pin files, no project roots), a correctly isolated
+/// daemon has nothing to scan and nothing to seed — the palace registry must
+/// contain ZERO palaces. Any non-zero count is conclusive evidence that the
+/// startup pin-scan or some other seeding path leaked through the isolation
+/// guard. The assertion is self-contained: it does not depend on the names
+/// of real-environment palaces the developer happens to have installed.
 ///
-/// Why named-marker assertions instead of a hard count: palace count depends
-/// on what default seeding the daemon performs (may legitimately seed more
-/// than one palette in the future). Named-marker assertions are immune to
-/// count changes while still conclusively proving that no real-env palace
-/// leaked in.
+/// Why zero-count instead of named-marker assertions: the previous approach
+/// used a hard-coded list of developer-specific palace names (`cto`, `duetto`,
+/// etc.) which caused the test to be brittle — it passed on machines where
+/// those projects did not exist, but would fail on any machine that happened
+/// to have a pin file for an unlisted project. A zero-count assertion is
+/// correct for any machine and any developer because the temp dir is
+/// verifiably empty before the daemon boots.
 /// Test: this test.
 #[test]
 fn isolated_instance_does_not_import_real_env_palaces() {
+    // Acquire the process-wide env lock before spawning the child. This test
+    // does not mutate TRUSTY_DATA_DIR_OVERRIDE itself, but the unit tests in
+    // this same binary do. Holding the lock serialises execution so a
+    // concurrent unit test cannot transiently clear the env var between the
+    // child's fork and its `is_data_dir_override_active()` check, which would
+    // cause the child to take the production code path and walk real env paths.
+    let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+
     let tmp = tempfile::tempdir().expect("tempdir");
 
     // Boot an isolated daemon against the empty temp dir.
@@ -301,34 +328,21 @@ fn isolated_instance_does_not_import_real_env_palaces() {
     // The `palaces/` subdir layout is also a valid layout; check both.
     let palace_dirs = collect_palace_dirs(&data_root);
 
-    // Build a set of palace directory base-names for cheap lookup.
-    let palace_names: Vec<&str> = palace_dirs
-        .iter()
-        .filter_map(|p| p.file_name())
-        .filter_map(|n| n.to_str())
-        .collect();
-
-    // These are well-known palace ids that exist in the developer's real
-    // environment. They can only appear in the override data root if the
-    // startup pin-scan leaked through the isolation guard.
-    //
-    // Why this list: it is robust to future changes in default-seeded palace
-    // count (which we do NOT control) while still conclusively proving that
-    // real-env palaces were not imported. Adding more real-env markers here
-    // makes the test more conservative; removing them would weaken it.
-    const REAL_ENV_MARKERS: &[&str] = &["cto", "duetto", "trusty-tools", "open-mpm", "claude-mpm"];
-
-    for marker in REAL_ENV_MARKERS {
-        let leaked = palace_names.iter().any(|name| name.starts_with(marker));
-        assert!(
-            !leaked,
-            "Isolated instance created a '{marker}' palace inside the override data root — \
-             the startup pin-scan must not import palaces from the real environment.\n\
-             Override root: {}\n\
-             Palaces found: {palace_dirs:?}",
-            tmp.path().display()
-        );
-    }
+    // The temp dir was empty when the daemon booted — no pin files exist, so
+    // the pin-scan has nothing to discover, and no default seeding should
+    // occur for an isolated instance. The isolated palace registry must be
+    // empty. Any palace found here can only have come from the real
+    // environment leaking through the isolation guard.
+    assert!(
+        palace_dirs.is_empty(),
+        "Isolated instance created palace directories inside the override data root, \
+         but the temp dir started empty — the startup pin-scan must not import palaces \
+         from the real environment, and no default seeding should occur for an isolated \
+         instance.\n\
+         Override root: {}\n\
+         Palaces found: {palace_dirs:?}",
+        tmp.path().display()
+    );
 }
 
 /// Collect every subdirectory under `data_root` that looks like a palace

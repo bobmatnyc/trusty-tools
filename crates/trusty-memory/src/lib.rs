@@ -1409,12 +1409,12 @@ fn write_http_addr_file(path: &Path, addr: &SocketAddr) -> std::io::Result<()> {
 /// non-empty, non-whitespace value. Empty or whitespace-only values are
 /// treated as unset (same rule as `resolve_data_dir`), so an accidental blank
 /// env var does not suppress the dotfile write on real production instances.
-///
 /// What: reads `TRUSTY_DATA_DIR_OVERRIDE`; returns `true` when it contains a
 /// non-empty, non-whitespace string. Returns `false` otherwise.
 /// Test: `is_data_dir_override_active_when_set`,
 ///       `is_data_dir_override_inactive_when_unset`,
 ///       `is_data_dir_override_inactive_when_blank`.
+#[inline]
 pub fn is_data_dir_override_active() -> bool {
     matches!(
         std::env::var(trusty_common::DATA_DIR_OVERRIDE_ENV),
