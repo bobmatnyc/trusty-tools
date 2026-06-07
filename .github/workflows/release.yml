@@ -1,0 +1,706 @@
+# Generic per-crate binary release workflow for all distributable trusty crates.
+#
+# WHY:
+#   Every distributable crate in the workspace shares the same tag convention
+#   (<crate>-v<version>), the same Rust MSRV, and the same macOS arm64 /
+#   Linux x86_64 platform matrix. Rather than maintaining a bespoke workflow per
+#   crate, a single data-driven workflow covers them all: adding support for a
+#   new crate is a one-line change to the CRATE_CONFIG map in the `setup` job.
+#
+# WHAT:
+#   1. `setup`     — parse tag / dispatch inputs → validate crate → emit build matrix.
+#   2. `build`     — matrix fan-out: compile, strip, tar+sha256 each asset.
+#   3. `release`   — create/update GitHub Release, upload all assets.
+#   4. `homebrew-bump` — PLACEHOLDER (no-op); see comments there.
+#
+# TRIGGERS:
+#   - push of any tag matching `*-v*`  (e.g. `trusty-analyze-v0.5.0`)
+#   - workflow_dispatch for manual dry-runs (skips the release upload by default)
+#
+# ASSET NAMING CONVENTION (matches INSTALL-CONVENTION.md / PR #891):
+#   <crate>-<version>-<target>.tar.gz           (standard variants)
+#   <crate>-<version>-x86_64-linux-al2023.tar.gz  (AL2023 load-dynamic variant)
+#   <crate>-<version>-<target>.tar.gz.sha256    (paired checksum)
+
+name: Binary Release
+
+on:
+  push:
+    tags:
+      - "*-v*"
+  workflow_dispatch:
+    inputs:
+      crate:
+        description: "Crate name (e.g. trusty-analyze)"
+        required: true
+        type: string
+      version:
+        description: "Version string without leading 'v' (e.g. 0.5.0)"
+        required: true
+        type: string
+      dry_run:
+        description: "Dry run — build but do not upload to GitHub Releases"
+        required: false
+        type: boolean
+        default: true
+
+# Required so the release job can create/update GitHub Releases.
+permissions:
+  contents: write
+
+# Cancel any in-flight run for the same ref to avoid wasted compute.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Suppress fastembed/ort download progress bars in build logs.
+  RUST_LOG: warn
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 1: setup
+#
+# Parses the tag (or dispatch inputs) into {crate, version}, looks up the
+# per-crate config table, and emits a JSON build matrix consumed by the
+# `build` job.  Fails fast with a clear message if the crate is not in the
+# config map or if the tag does not match the expected pattern.
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  setup:
+    name: Parse tag / resolve crate config
+    runs-on: ubuntu-latest
+    outputs:
+      crate:    ${{ steps.parse.outputs.crate }}
+      version:  ${{ steps.parse.outputs.version }}
+      matrix:   ${{ steps.matrix.outputs.matrix }}
+      dry_run:  ${{ steps.parse.outputs.dry_run }}
+
+    steps:
+      - name: Parse tag or dispatch inputs
+        id: parse
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            CRATE="${{ github.event.inputs.crate }}"
+            VERSION="${{ github.event.inputs.version }}"
+            DRY_RUN="${{ github.event.inputs.dry_run }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            # Expected pattern: <crate>-v<version>  e.g. trusty-analyze-v0.5.0
+            if [[ ! "$TAG" =~ ^(.+)-v([0-9].+)$ ]]; then
+              echo "ERROR: tag '$TAG' does not match <crate>-v<version> pattern."
+              exit 1
+            fi
+            CRATE="${BASH_REMATCH[1]}"
+            VERSION="${BASH_REMATCH[2]}"
+            DRY_RUN="false"
+          fi
+          {
+            echo "crate=$CRATE"
+            echo "version=$VERSION"
+            echo "dry_run=$DRY_RUN"
+          } >> "$GITHUB_OUTPUT"
+          echo "Parsed: crate=$CRATE  version=$VERSION  dry_run=$DRY_RUN"
+
+      # ── Per-crate configuration table ──────────────────────────────────────
+      # Each entry encodes everything the build job needs for one crate:
+      #
+      #   cargo_pkg      – value passed to -p (the Cargo package name)
+      #   binaries       – space-separated list of binary names to package
+      #   skip_ui_build  – "true" to set SKIP_UI_BUILD=1 (UI-embedding crates)
+      #   cargo_features – value for --features flag (empty = use defaults)
+      #   no_default_features – "true" to pass --no-default-features
+      #   al2023_variant – "true" to also build the AL2023 load-dynamic asset
+      #   al2023_no_default_features – "true" for the AL2023 build
+      #   al2023_features – --features value for the AL2023 build
+      #
+      # TO ADD A NEW CRATE: append one `elif [[ "$CRATE" == "<name>" ]]; then`
+      # block with the variables filled in.  Everything else is automatic.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Resolve per-crate config
+        id: config
+        shell: bash
+        run: |
+          CRATE="${{ steps.parse.outputs.crate }}"
+
+          if [[ "$CRATE" == "trusty-search" ]]; then
+            # Binary: trusty-search + bundled sidecar trusty-embedderd
+            # UI-embedding crate: SKIP_UI_BUILD=1 required for cargo publish / build
+            # ORT-bundling (bundled-ort default): AL2023 load-dynamic variant needed
+            CARGO_PKG="trusty-search"
+            BINARIES="trusty-search trusty-embedderd"
+            SKIP_UI_BUILD="true"
+            CARGO_FEATURES=""
+            NO_DEFAULT_FEATURES="false"
+            AL2023_VARIANT="true"
+            AL2023_NO_DEFAULT="true"
+            AL2023_FEATURES="http-server,load-dynamic"
+
+          elif [[ "$CRATE" == "trusty-memory" ]]; then
+            # Binaries: trusty-memory + trusty-memory-mcp-bridge + trusty-bm25-daemon
+            # UI-embedding crate: SKIP_UI_BUILD=1
+            # No ORT bundling (uses BM25 sidecar, not ONNX directly): no AL2023 variant
+            CARGO_PKG="trusty-memory"
+            BINARIES="trusty-memory trusty-memory-mcp-bridge trusty-bm25-daemon"
+            SKIP_UI_BUILD="true"
+            CARGO_FEATURES=""
+            NO_DEFAULT_FEATURES="false"
+            AL2023_VARIANT="false"
+            AL2023_NO_DEFAULT="false"
+            AL2023_FEATURES=""
+
+          elif [[ "$CRATE" == "trusty-analyze" ]]; then
+            # Binary: trusty-analyze
+            # UI-embedding crate: SKIP_UI_BUILD=1
+            # ORT-bundling (bundled-ort default): AL2023 load-dynamic variant needed
+            CARGO_PKG="trusty-analyze"
+            BINARIES="trusty-analyze"
+            SKIP_UI_BUILD="true"
+            CARGO_FEATURES=""
+            NO_DEFAULT_FEATURES="false"
+            AL2023_VARIANT="true"
+            AL2023_NO_DEFAULT="true"
+            AL2023_FEATURES="http-server,load-dynamic"
+
+          elif [[ "$CRATE" == "trusty-review" ]]; then
+            # Binary: trusty-review
+            # No UI, no ORT bundling
+            CARGO_PKG="trusty-review"
+            BINARIES="trusty-review"
+            SKIP_UI_BUILD="false"
+            CARGO_FEATURES=""
+            NO_DEFAULT_FEATURES="false"
+            AL2023_VARIANT="false"
+            AL2023_NO_DEFAULT="false"
+            AL2023_FEATURES=""
+
+          elif [[ "$CRATE" == "trusty-mpm" ]]; then
+            # Binaries: tm, trusty-mpm, trusty-mpmd, trusty-mpm-tui, trusty-mpm-telegram
+            # (trusty-mpm-gui requires Tauri + system webview — excluded from CLI dist)
+            # Default features include cli+daemon, which covers the above five.
+            # No UI embedding, no ORT.
+            CARGO_PKG="trusty-mpm"
+            BINARIES="tm trusty-mpm trusty-mpmd trusty-mpm-tui trusty-mpm-telegram"
+            SKIP_UI_BUILD="false"
+            CARGO_FEATURES="cli,daemon,tui,telegram"
+            NO_DEFAULT_FEATURES="false"
+            AL2023_VARIANT="false"
+            AL2023_NO_DEFAULT="false"
+            AL2023_FEATURES=""
+
+          elif [[ "$CRATE" == "trusty-git-analytics" ]]; then
+            # Cargo package name is `tga` (short name in Cargo.toml)
+            # Single binary: tga
+            CARGO_PKG="tga"
+            BINARIES="tga"
+            SKIP_UI_BUILD="false"
+            CARGO_FEATURES=""
+            NO_DEFAULT_FEATURES="false"
+            AL2023_VARIANT="false"
+            AL2023_NO_DEFAULT="false"
+            AL2023_FEATURES=""
+
+          elif [[ "$CRATE" == "trusty-code" ]]; then
+            # Single binary: tcode
+            CARGO_PKG="trusty-code"
+            BINARIES="tcode"
+            SKIP_UI_BUILD="false"
+            CARGO_FEATURES=""
+            NO_DEFAULT_FEATURES="false"
+            AL2023_VARIANT="false"
+            AL2023_NO_DEFAULT="false"
+            AL2023_FEATURES=""
+
+          else
+            echo "ERROR: crate '$CRATE' is not in the release config map."
+            echo "  Distributable crates: trusty-search, trusty-memory, trusty-analyze,"
+            echo "    trusty-review, trusty-mpm, trusty-git-analytics, trusty-code"
+            echo "  Out-of-scope (publish=false / internal): trusty-agents*, trusty-mpm-gui,"
+            echo "    tc-services, cto-assistant, trusty-cto-db, trusty-gworkspace,"
+            echo "    trusty-common, trusty-embedderd (bundled with trusty-search),"
+            echo "    trusty-bm25-daemon (bundled with trusty-memory)"
+            exit 1
+          fi
+
+          # Export config values as step outputs for the matrix job below.
+          {
+            echo "cargo_pkg=$CARGO_PKG"
+            echo "binaries=$BINARIES"
+            echo "skip_ui_build=$SKIP_UI_BUILD"
+            echo "cargo_features=$CARGO_FEATURES"
+            echo "no_default_features=$NO_DEFAULT_FEATURES"
+            echo "al2023_variant=$AL2023_VARIANT"
+            echo "al2023_no_default=$AL2023_NO_DEFAULT"
+            echo "al2023_features=$AL2023_FEATURES"
+          } >> "$GITHUB_OUTPUT"
+
+      # ── Build matrix generation ─────────────────────────────────────────────
+      # Emits a JSON `include` array consumed by the `build` job's
+      # `strategy.matrix.include`.  Each entry carries all the fields the build
+      # job needs so it never needs to repeat crate-specific logic.
+      #
+      # Standard variants:
+      #   { runner: macos-14,      target: aarch64-apple-darwin,      variant: standard }
+      #   { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu,  variant: standard }
+      #
+      # AL2023 variant (ORT crates only):
+      #   { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu,  variant: al2023   }
+      #   (built inside an amazonlinux:2023 container; named …-x86_64-linux-al2023)
+      # ─────────────────────────────────────────────────────────────────────────
+      - name: Generate build matrix
+        id: matrix
+        shell: python3 {0}
+        env:
+          CARGO_PKG:            ${{ steps.config.outputs.cargo_pkg }}
+          BINARIES:             ${{ steps.config.outputs.binaries }}
+          SKIP_UI_BUILD:        ${{ steps.config.outputs.skip_ui_build }}
+          CARGO_FEATURES:       ${{ steps.config.outputs.cargo_features }}
+          NO_DEFAULT_FEATURES:  ${{ steps.config.outputs.no_default_features }}
+          AL2023_VARIANT:       ${{ steps.config.outputs.al2023_variant }}
+          AL2023_NO_DEFAULT:    ${{ steps.config.outputs.al2023_no_default }}
+          AL2023_FEATURES:      ${{ steps.config.outputs.al2023_features }}
+          CRATE:                ${{ steps.parse.outputs.crate }}
+          VERSION:              ${{ steps.parse.outputs.version }}
+        run: |
+          import json, os
+
+          crate        = os.environ["CRATE"]
+          version      = os.environ["VERSION"]
+          pkg          = os.environ["CARGO_PKG"]
+          bins         = os.environ["BINARIES"].split()
+          skip_ui      = os.environ["SKIP_UI_BUILD"] == "true"
+          feats        = os.environ["CARGO_FEATURES"]
+          no_def       = os.environ["NO_DEFAULT_FEATURES"] == "true"
+          al2023       = os.environ["AL2023_VARIANT"] == "true"
+          al_no_def    = os.environ["AL2023_NO_DEFAULT"] == "true"
+          al_feats     = os.environ["AL2023_FEATURES"]
+
+          common = dict(
+              crate=crate,
+              version=version,
+              cargo_pkg=pkg,
+              binaries=bins,
+              skip_ui_build=skip_ui,
+              cargo_features=feats,
+              no_default_features=no_def,
+          )
+
+          includes = [
+              {**common,
+               "runner": "macos-14",
+               "target": "aarch64-apple-darwin",
+               "variant": "standard",
+               "asset_suffix": "aarch64-apple-darwin",
+               "container": "",
+               "al2023_no_default": False,
+               "al2023_features": ""},
+              {**common,
+               "runner": "ubuntu-latest",
+               "target": "x86_64-unknown-linux-gnu",
+               "variant": "standard",
+               "asset_suffix": "x86_64-unknown-linux-gnu",
+               "container": "",
+               "al2023_no_default": False,
+               "al2023_features": ""},
+          ]
+
+          if al2023:
+              includes.append({
+                  **common,
+                  "runner": "ubuntu-latest",
+                  "target": "x86_64-unknown-linux-gnu",
+                  "variant": "al2023",
+                  "asset_suffix": "x86_64-linux-al2023",
+                  # Use the AL2023-specific build flags (load-dynamic, no bundled-ort)
+                  "cargo_features": al_feats,
+                  "no_default_features": al_no_def,
+                  "container": "amazonlinux:2023",
+                  "al2023_no_default": al_no_def,
+                  "al2023_features": al_feats,
+              })
+
+          matrix = {"include": includes}
+          result = json.dumps(matrix)
+          print(f"matrix={result}")
+
+          import pathlib
+          output_file = pathlib.Path(os.environ["GITHUB_OUTPUT"])
+          with output_file.open("a") as f:
+              f.write(f"matrix={result}\n")
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 2: build
+  #
+  # Fan-out matrix job.  Each entry builds one crate × platform × variant.
+  # Produces: one .tar.gz + one .tar.gz.sha256 per matrix entry.
+  #
+  # AL2023 entries run inside an amazonlinux:2023 container (glibc 2.34).
+  # Standard entries run natively on the GitHub runner.
+  # ─────────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build ${{ matrix.crate }} ${{ matrix.asset_suffix }}
+    needs: setup
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+
+    # AL2023 variant runs inside an Amazon Linux 2023 container.
+    # Standard variants have no container (empty string → no container).
+    container: ${{ matrix.container != '' && matrix.container || null }}
+
+    steps:
+      # ── AL2023 container bootstrap ──────────────────────────────────────────
+      # amazonlinux:2023 ships without tar/gzip, which actions/checkout needs.
+      # This step is a no-op on non-container runners (the condition guards it).
+      - name: Install tar/gzip (AL2023 container prerequisite)
+        if: matrix.variant == 'al2023'
+        run: dnf install -y tar gzip
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── AL2023: install full build prerequisites via dnf ────────────────────
+      - name: Install build prerequisites (AL2023 — dnf)
+        if: matrix.variant == 'al2023'
+        run: |
+          dnf install -y --allowerasing \
+            gcc gcc-c++ make openssl-devel perl \
+            curl tar gzip pkg-config findutils binutils
+
+      # ── Standard runners: install system deps ───────────────────────────────
+      - name: Install build prerequisites (Ubuntu)
+        if: matrix.variant == 'standard' && matrix.runner == 'ubuntu-latest'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev binutils curl
+
+      # ── Rust toolchain ───────────────────────────────────────────────────────
+      # AL2023 container cannot use the dtolnay action (needs runner Node.js),
+      # so we install via rustup directly.  Standard runners use the action.
+      - name: Install Rust 1.91 (MSRV) via rustup — AL2023
+        if: matrix.variant == 'al2023'
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain 1.91 \
+                       --target ${{ matrix.target }}
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install Rust (MSRV 1.91) — standard runners
+        if: matrix.variant == 'standard'
+        uses: dtolnay/rust-toolchain@1.91
+        with:
+          targets: ${{ matrix.target }}
+
+      # ── Cargo cache ─────────────────────────────────────────────────────────
+      # AL2023 uses actions/cache directly (Swatinem requires Node.js 20+,
+      # which the amazonlinux:2023 runner image does not provide).
+      - name: Cache cargo registry + artefacts (AL2023)
+        if: matrix.variant == 'al2023'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: al2023-1.91-${{ matrix.crate }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            al2023-1.91-${{ matrix.crate }}-
+            al2023-1.91-
+
+      - name: Cache cargo registry + artefacts (standard)
+        if: matrix.variant == 'standard'
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-${{ matrix.crate }}
+
+      # ── AL2023: download ONNX Runtime for load-dynamic builds ───────────────
+      # Supplies the system libonnxruntime.so that the `ort` crate dlopen()s at
+      # runtime.  ORT 1.20.1 was built on Ubuntu 20.04 (glibc 2.31), so it
+      # loads cleanly on AL2023 (glibc 2.34).
+      # The ORT version here must match the version the workspace's ort-sys
+      # rc.12 expects (see al2023-build.yml for full rationale).
+      - name: Download ONNX Runtime 1.20.1 (AL2023 load-dynamic)
+        if: matrix.variant == 'al2023'
+        shell: bash
+        env:
+          ORT_VERSION: "1.20.1"
+        run: |
+          ORT_DIR="/opt/onnxruntime-${ORT_VERSION}"
+          ORT_TARBALL="onnxruntime-linux-x64-${ORT_VERSION}.tgz"
+          ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_TARBALL}"
+
+          echo "Downloading ORT ${ORT_VERSION} from ${ORT_URL}"
+          curl -fsSL --retry 3 --retry-delay 5 -o "/tmp/${ORT_TARBALL}" "${ORT_URL}"
+          mkdir -p "${ORT_DIR}"
+          tar -xzf "/tmp/${ORT_TARBALL}" -C "${ORT_DIR}" --strip-components=1
+          rm "/tmp/${ORT_TARBALL}"
+
+          DYLIB_PATH=$(find "${ORT_DIR}/lib" -name "libonnxruntime.so.${ORT_VERSION}" | head -1)
+          if [[ -z "${DYLIB_PATH}" ]]; then
+            DYLIB_PATH=$(find "${ORT_DIR}/lib" -name "libonnxruntime.so" | head -1)
+          fi
+          if [[ -z "${DYLIB_PATH}" ]]; then
+            echo "ERROR: libonnxruntime.so not found after extraction."
+            find "${ORT_DIR}" -name "*.so*" || true
+            exit 1
+          fi
+
+          echo "ORT_DYLIB_PATH=${DYLIB_PATH}" >> "$GITHUB_ENV"
+          echo "Found: ${DYLIB_PATH}"
+
+      # ── Build ────────────────────────────────────────────────────────────────
+      # Applies per-crate env vars, optional --no-default-features, optional
+      # --features.  The build command is identical for all crates — only the
+      # env + flags differ.
+      - name: Build release binary
+        shell: bash
+        # SKIP_UI_BUILD is a per-step env var set from the matrix field.
+        # Using a step-level env block is cleanest: no shell quoting hazards,
+        # no shellcheck warnings, and the value is validated at workflow parse time.
+        env:
+          SKIP_UI_BUILD: ${{ matrix.skip_ui_build && '1' || '' }}
+        run: |
+          CARGO_ARGS="-p ${{ matrix.cargo_pkg }} --release --target ${{ matrix.target }}"
+
+          if [[ "${{ matrix.no_default_features }}" == "true" ]]; then
+            CARGO_ARGS="$CARGO_ARGS --no-default-features"
+          fi
+
+          if [[ -n "${{ matrix.cargo_features }}" ]]; then
+            CARGO_ARGS="$CARGO_ARGS --features ${{ matrix.cargo_features }}"
+          fi
+
+          echo "Running: cargo build $CARGO_ARGS"
+          # SC2086 is intentional: CARGO_ARGS is word-split on purpose (flag list).
+          # shellcheck disable=SC2086
+          cargo build $CARGO_ARGS
+
+      # ── Strip + package ──────────────────────────────────────────────────────
+      # Strips each binary to reduce asset size, packages them into a .tar.gz
+      # alongside LICENSE and README.md, and computes a .sha256 checksum.
+      #
+      # Asset naming: <crate>-<version>-<asset_suffix>.tar.gz
+      #   Standard:  trusty-analyze-0.5.0-aarch64-apple-darwin.tar.gz
+      #   AL2023:    trusty-analyze-0.5.0-x86_64-linux-al2023.tar.gz
+      #
+      # AL2023 note: the asset README includes a note that ORT_DYLIB_PATH must
+      # be set at runtime to point at a compatible libonnxruntime.so.
+      - name: Strip, package, and checksum
+        id: package
+        shell: bash
+        run: |
+          CRATE="${{ matrix.crate }}"
+          VERSION="${{ matrix.version }}"
+          TARGET="${{ matrix.target }}"
+          SUFFIX="${{ matrix.asset_suffix }}"
+          ASSET_NAME="${CRATE}-${VERSION}-${SUFFIX}"
+          STAGING_DIR="staging/${ASSET_NAME}"
+
+          mkdir -p "${STAGING_DIR}"
+
+          # Strip and copy each binary.
+          for BIN in ${{ join(matrix.binaries, ' ') }}; do
+            BIN_PATH="target/${TARGET}/release/${BIN}"
+            if [[ ! -f "${BIN_PATH}" ]]; then
+              echo "ERROR: expected binary not found: ${BIN_PATH}"
+              exit 1
+            fi
+            strip "${BIN_PATH}" || true   # strip may not be available on all hosts; non-fatal
+            cp "${BIN_PATH}" "${STAGING_DIR}/"
+            echo "Packaged: ${BIN}"
+          done
+
+          # Include LICENSE and README if present.
+          [[ -f "LICENSE" ]]                                   && cp "LICENSE"    "${STAGING_DIR}/" || true
+          [[ -f "crates/${CRATE}/README.md" ]]                 && cp "crates/${CRATE}/README.md" "${STAGING_DIR}/" || true
+          [[ ! -f "crates/${CRATE}/README.md" && -f "README.md" ]] && cp "README.md" "${STAGING_DIR}/" || true
+
+          # AL2023 variant: append a runtime note about ORT_DYLIB_PATH.
+          if [[ "${{ matrix.variant }}" == "al2023" ]]; then
+            cat > "${STAGING_DIR}/ORT-RUNTIME-NOTE.txt" <<'ORTNOTE'
+          Amazon Linux 2023 / glibc < 2.38 variant — load-dynamic ORT build
+          =====================================================================
+          This binary was compiled with --no-default-features
+          --features http-server,load-dynamic.  It does NOT bundle ONNX Runtime
+          static libraries; instead it dlopen()s libonnxruntime.so at startup.
+
+          REQUIRED at runtime:
+            export ORT_DYLIB_PATH=/path/to/libonnxruntime.so
+
+          Compatible ORT build: 1.20.1 linux-x64 (Ubuntu 20.04 / glibc 2.31)
+            https://github.com/microsoft/onnxruntime/releases/tag/v1.20.1
+
+          Example install:
+            curl -fsSL https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz \
+              | tar xz -C /opt
+            export ORT_DYLIB_PATH=/opt/onnxruntime-linux-x64-1.20.1/lib/libonnxruntime.so.1.20.1
+          ORTNOTE
+          fi
+
+          # Create the archive.
+          tar -czf "${ASSET_NAME}.tar.gz" -C staging "${ASSET_NAME}"
+
+          # Compute SHA-256 checksum.
+          if command -v sha256sum &>/dev/null; then
+            sha256sum "${ASSET_NAME}.tar.gz" > "${ASSET_NAME}.tar.gz.sha256"
+          else
+            shasum -a 256 "${ASSET_NAME}.tar.gz" > "${ASSET_NAME}.tar.gz.sha256"
+          fi
+
+          {
+            echo "asset_archive=${ASSET_NAME}.tar.gz"
+            echo "asset_checksum=${ASSET_NAME}.tar.gz.sha256"
+            echo "asset_name=${ASSET_NAME}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "--- Built assets ---"
+          ls -lh "${ASSET_NAME}.tar.gz" "${ASSET_NAME}.tar.gz.sha256"
+          cat "${ASSET_NAME}.tar.gz.sha256"
+
+      # ── Upload build artifacts for the release job ───────────────────────────
+      - name: Upload assets as workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.asset_name }}
+          path: |
+            ${{ steps.package.outputs.asset_archive }}
+            ${{ steps.package.outputs.asset_checksum }}
+          retention-days: 7
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 3: release
+  #
+  # Downloads all per-platform artifacts and uploads them to the GitHub Release
+  # for this tag.  Creates the release if it does not exist yet.
+  #
+  # Skipped entirely when dry_run == 'true' (workflow_dispatch dry-runs).
+  # ─────────────────────────────────────────────────────────────────────────────
+  release:
+    name: Create / update GitHub Release
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    if: needs.setup.outputs.dry_run != 'true'
+    timeout-minutes: 15
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          # Download every artifact produced by the build matrix.
+          merge-multiple: true
+
+      - name: List assets to be uploaded
+        run: |
+          echo "Assets to upload:"
+          find release-assets -type f | sort
+
+      - name: Detect prerelease
+        id: prerelease
+        shell: bash
+        run: |
+          VERSION="${{ needs.setup.outputs.version }}"
+          # Treat as prerelease if version contains a hyphen (e.g. 0.5.0-alpha.1)
+          if [[ "$VERSION" == *"-"* ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "Detected prerelease version: $VERSION"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create / update GitHub Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "${{ needs.setup.outputs.crate }} v${{ needs.setup.outputs.version }}"
+          prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/**/*.tar.gz
+            release-assets/**/*.tar.gz.sha256
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 4: homebrew-bump  (PLACEHOLDER — NOT YET IMPLEMENTED)
+  #
+  # This job is intentionally a no-op.  It is guarded by `if: false` so it
+  # never runs.  The comments below document what it WILL do once the
+  # `bobmatnyc/homebrew-trusty` tap is set up.
+  #
+  # PLANNED IMPLEMENTATION:
+  #   When this job is activated, it will:
+  #   1. Download the .sha256 files produced by the `build` job for each
+  #      Tier-1 platform (aarch64-apple-darwin, x86_64-unknown-linux-gnu).
+  #   2. Compute or read the SHA-256 of each .tar.gz asset.
+  #   3. Check out bobmatnyc/homebrew-trusty (requires a deploy key or
+  #      a PAT with `contents:write` scope on that repo, stored as a secret).
+  #   4. Update the formula file `Formula/<crate>.rb`:
+  #      - Bump `version` to the new version string.
+  #      - Update the `url` for each bottle / source URL.
+  #      - Update the `sha256` fields.
+  #   5. Commit and push the updated formula to homebrew-trusty's main branch.
+  #   6. (Optional) If the crate meets homebrew-core criteria, open a PR to
+  #      homebrew/homebrew-core using `brew bump-formula-pr` — feasible now
+  #      that the workspace license is Apache-2.0.
+  #
+  # SECRETS NEEDED (to be added to the repo before activating this job):
+  #   - HOMEBREW_TAP_TOKEN: a PAT with `contents:write` on bobmatnyc/homebrew-trusty
+  #
+  # To activate: remove the `if: false` guard and fill in the steps below.
+  # ─────────────────────────────────────────────────────────────────────────────
+  homebrew-bump:
+    name: "Homebrew tap update (PLACEHOLDER — disabled)"
+    needs: [setup, release]
+    runs-on: ubuntu-latest
+    # This job is disabled until bobmatnyc/homebrew-trusty tap automation is implemented.
+    # Guard: the env var HOMEBREW_TAP_ENABLED must be set to 'true' in repo/org variables
+    # AND the HOMEBREW_TAP_TOKEN secret must be configured before this job does anything real.
+    # In practice it will always be skipped until a maintainer activates it by:
+    #   1. Setting repo variable HOMEBREW_TAP_ENABLED=true
+    #   2. Adding the HOMEBREW_TAP_TOKEN secret
+    #   3. Implementing the steps below
+    if: ${{ vars.HOMEBREW_TAP_ENABLED == 'true' }}
+    steps:
+      # PLACEHOLDER STEP — replace with real implementation when ready.
+      #
+      # - name: Checkout homebrew-trusty tap
+      #   uses: actions/checkout@v4
+      #   with:
+      #     repository: bobmatnyc/homebrew-trusty
+      #     token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      #     path: homebrew-trusty
+      #
+      # - name: Download .sha256 assets
+      #   uses: actions/download-artifact@v4
+      #   with:
+      #     path: release-assets
+      #     merge-multiple: true
+      #
+      # - name: Update formula version + sha256
+      #   shell: bash
+      #   run: |
+      #     CRATE="${{ needs.setup.outputs.crate }}"
+      #     VERSION="${{ needs.setup.outputs.version }}"
+      #     FORMULA="homebrew-trusty/Formula/${CRATE}.rb"
+      #     # Read SHA-256 for each platform from the .sha256 files and
+      #     # patch the formula with sed / ruby / or a dedicated bump script.
+      #     # ...
+      #
+      # - name: Commit and push updated formula
+      #   working-directory: homebrew-trusty
+      #   run: |
+      #     git config user.name  "github-actions[bot]"
+      #     git config user.email "github-actions[bot]@users.noreply.github.com"
+      #     git add Formula/
+      #     git commit -m "chore: bump ${CRATE} to v${VERSION}"
+      #     git push
+      - name: No-op placeholder
+        run: echo "homebrew-bump job is disabled (if:false guard). See comments to activate."
