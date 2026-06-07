@@ -40,7 +40,7 @@ trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.2" }
 trusty-bm25-daemon = { path = "crates/trusty-bm25-daemon", version = "0.1.0" }
 # tga: trusty-git-analytics — developer productivity analytics.
 # Referenced by trusty-review for contributor-profile data pipeline (#558).
-tga = { path = "crates/trusty-git-analytics", version = "2.7.0" }
+tga = { path = "crates/trusty-git-analytics", version = "2.7.1" }
 # trusty-mpm: unified crate (replaces the former trusty-mpm-{core,mcp,client,
 # daemon,cli,tui,telegram} sub-crates). The gui sub-crate is kept separate
 # because it owns Tauri's build.rs and tauri.conf.json.

@@ -5,6 +5,22 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.1] - 2026-06-07
+
+### Changed
+
+- **First public prebuilt-binary Release** — tga is now distributed via the
+  generic binary release workflow (`release.yml`), publishing
+  `tga-<version>-aarch64-apple-darwin.tar.gz` and
+  `tga-<version>-x86_64-unknown-linux-gnu.tar.gz` (with paired `.sha256`
+  checksums) to GitHub Releases on every `tga-v*` tag push.
+- **Install-convention README adoption** — the crate README follows the
+  workspace install-convention (`INSTALL-CONVENTION.md`) so curl-install
+  instructions and Homebrew tap stubs are consistent with trusty-analyze,
+  trusty-review, and trusty-search.
+- **Workspace MIT relicense** — `tga` is MIT licensed (consistent with the
+  workspace-level MIT default for distributable tooling crates).
+
 ## [2.6.1] - 2026-06-04
 
 ### Fixed
