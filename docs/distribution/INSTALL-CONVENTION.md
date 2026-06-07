@@ -337,7 +337,7 @@ Homebrew distribution will be provided via **one of two paths**, each with disti
 - **Likely the near-term pragmatic choice** for rapid cadence and experimental features.
 
 **Option B: Homebrew Core** (`homebrew/core`)
-- Apache-2.0 is OSI-approved, so homebrew-core is now eligible (ELv2 blockage removed).
+- MIT is OSI-approved, so homebrew-core is now eligible (ELv2 blockage removed).
 - No user tap setup required — direct `brew install trusty-search` from core formulae.
 - Longer review latency (core maintainers vet all PRs); slower time-to-release for patches.
 - Higher visibility and discoverability; native macOS/Linux user expectation.
