@@ -1301,12 +1301,15 @@ pub fn expand_query(query: &str) -> String {
 /// What: Runs `retrieve_l2` to obtain vector-similarity scores, builds a
 /// score map from those results, applies `rescore_l1_by_similarity` to patch
 /// L1 entries so importance alone can't dominate relevance-first ranking
-/// (issue #633), deduplicates by drawer id, and finally sorts the merged list
-/// by score descending.  Applies `expand_query` before embedding to bridge
-/// the user-vocabulary / technical-vocabulary gap.
+/// (issue #633), deduplicates by drawer id, sorts the merged list by score
+/// descending, and finally **truncates to `top_k`** (issue #877) so the
+/// caller always receives at most `top_k` results regardless of how many
+/// L0/L1 entries the palace has.  Applies `expand_query` before embedding
+/// to bridge the user-vocabulary / technical-vocabulary gap.
 /// Test: `recall_ranks_by_similarity_over_importance` verifies that a
 /// low-importance but on-topic drawer outranks a high-importance but
 /// off-topic drawer after this function returns.
+/// `recall_top_k_caps_result_count` (issue #877) verifies the length cap.
 pub async fn recall(
     handle: &PalaceHandle,
     embedder: &dyn Embedder,
@@ -1336,6 +1339,12 @@ pub async fn recall(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    // Issue #877: enforce the top_k contract. L0+L1 can add up to
+    // L1_CAP+1 entries before any L2 hits are merged; without this truncation
+    // the caller receives more than top_k results whenever the palace has a
+    // non-empty identity string plus several high-importance drawers.
+    combined.truncate(top_k);
+
     log_recall(handle, query, &combined);
     Ok(combined)
 }
@@ -1346,7 +1355,9 @@ pub async fn recall(
 /// instead of the metadata-filtered L2.
 /// What: Same as `recall` but uses `retrieve_l3` for the heavy layer.
 /// L1 entries are still re-scored via `rescore_l1_by_similarity` so the
-/// final ranking is similarity-first (issue #633).
+/// final ranking is similarity-first (issue #633). The merged list is
+/// **truncated to `top_k`** (issue #877) before returning so the caller
+/// always receives at most `top_k` results.
 /// Test: Symmetric with `recall`; covered indirectly.
 pub async fn recall_deep(
     handle: &PalaceHandle,
@@ -1371,6 +1382,9 @@ pub async fn recall_deep(
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+
+    // Issue #877: enforce the top_k contract (same as `recall`).
+    combined.truncate(top_k);
 
     log_recall(handle, query, &combined);
     Ok(combined)

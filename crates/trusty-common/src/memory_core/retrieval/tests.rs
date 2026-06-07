@@ -1070,3 +1070,71 @@ fn rescore_l1_by_similarity_patches_scores() {
         results[2].score
     );
 }
+
+/// Regression test for issue #877 — recall must never return more than
+/// top_k results even when the palace has more L0+L1 entries than top_k.
+///
+/// Why: `recall` builds L0+L1 (up to L1_CAP+1 = 16 entries) before merging
+/// L2 hits. Without a final `.truncate(top_k)` call the caller receives
+/// L0+L1+L2 results, which can far exceed the requested top_k (e.g.
+/// top_k=5 → 15 results when the palace has 14 L1 drawers plus identity).
+/// What: Populate a palace with more drawers than top_k, run recall with a
+/// small top_k, and assert `results.len() <= top_k` for both the shallow
+/// and deep paths.
+/// Test: This test itself.
+#[tokio::test]
+async fn recall_top_k_caps_result_count() {
+    init_embedder();
+    use crate::memory_core::palace::Palace;
+    let dir = tempdir().unwrap();
+    let palace = Palace {
+        id: PalaceId::new("topk-cap-test"),
+        name: "TopKCap".into(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: dir.path().join("topk-cap-test"),
+    };
+    std::fs::create_dir_all(&palace.data_dir).unwrap();
+    let handle = PalaceHandle::open(&palace).unwrap();
+
+    // Insert 20 drawers — enough to populate all 15 L1 slots plus 5 extras,
+    // so L0+L1 alone would return 16 entries (identity + 15 L1 drawers).
+    for i in 0..20u32 {
+        handle
+            .remember(
+                format!(
+                    "test fact number {i} about the recall top-k cap regression \
+                     with enough tokens to pass the default filter check"
+                ),
+                RoomType::General,
+                vec![],
+                // Varying importance so the L1 snapshot gets different drawers.
+                (i as f32) * 0.04 + 0.1,
+            )
+            .await
+            .unwrap();
+    }
+
+    let embedder = shared_embedder().await.unwrap();
+    let top_k = 5_usize;
+
+    // Shallow recall (L0+L1+L2) must return <= top_k.
+    let shallow = recall(&handle, embedder.as_ref(), "test fact recall", top_k)
+        .await
+        .unwrap();
+    assert!(
+        shallow.len() <= top_k,
+        "shallow recall: expected at most {top_k} results, got {}",
+        shallow.len()
+    );
+
+    // Deep recall (L0+L1+L3) must also return <= top_k.
+    let deep = recall_deep(&handle, embedder.as_ref(), "test fact recall", top_k)
+        .await
+        .unwrap();
+    assert!(
+        deep.len() <= top_k,
+        "deep recall: expected at most {top_k} results, got {}",
+        deep.len()
+    );
+}
