@@ -102,8 +102,8 @@ crates/trusty-memory/src/commands/service.rs	525
 crates/trusty-memory/src/commands/setup.rs	783
 crates/trusty-memory/src/discovery.rs	884
 crates/trusty-memory/src/kg_extract.rs	608
-crates/trusty-memory/src/lib.rs	2796
-crates/trusty-memory/src/main.rs	961
+crates/trusty-memory/src/lib.rs	2835
+crates/trusty-memory/src/main.rs	973
 crates/trusty-memory/src/messaging.rs	843
 crates/trusty-memory/src/project_root.rs	980
 crates/trusty-memory/src/prompt_log.rs	851
