@@ -19,28 +19,82 @@ This README and the rustdoc stay in-crate; everything else lives under `docs/`.
 
 ## Installation
 
-### From crates.io (recommended)
+### From GitHub Releases (recommended for binary users)
+
+Prebuilt binaries are available for macOS (Apple Silicon) and Linux (x86_64).
+
+1. Download the latest release from [GitHub Releases](https://github.com/bobmatnyc/trusty-tools/releases):
+   - Look for assets tagged `tga-v2.7.0`
+   - Download the archive for your platform:
+     - **macOS arm64 (Apple Silicon)**: `tga-v2.7.0-aarch64-apple-darwin.tar.gz`
+     - **Linux x86_64**: `tga-v2.7.0-x86_64-unknown-linux-gnu.tar.gz`
+
+2. Extract and install:
+   ```bash
+   tar xzf tga-v2.7.0-*.tar.gz
+   chmod +x tga
+   sudo mv tga /usr/local/bin/    # or ~/.local/bin/ if you prefer user install
+   ```
+
+3. Verify the installation:
+   ```bash
+   tga --version
+   ```
+
+### From Source with Cargo
+
+Requires Rust 1.91 or later ([install Rust](https://rustup.rs/)).
 
 ```bash
-cargo install tga
+cargo install --git https://github.com/bobmatnyc/trusty-tools tga --locked
 ```
 
-This installs the `tga` binary to `~/.cargo/bin/`. Ensure `~/.cargo/bin` is in your `PATH`.
+This builds from the latest commit on `main` and installs the binary to `~/.cargo/bin/`. Make sure `~/.cargo/bin/` is on your PATH.
 
-### From source
+To install a specific version:
+```bash
+cargo install --git https://github.com/bobmatnyc/trusty-tools --tag tga-v2.7.0 tga --locked
+```
+
+### With Homebrew (planned — not yet available)
 
 ```bash
-git clone https://github.com/bobmatnyc/trusty-tools
-cd trusty-tools/crates/trusty-git-analytics
-cargo install --path .
+brew tap bobmatnyc/trusty
+brew install tga
 ```
 
-### Verify installation
+This installation method is under development. For now, use GitHub Releases or `cargo install`.
+
+Once available, this will provide:
+- Automatic updates via `brew upgrade tga`
+- Standard macOS / Linux PATH integration
+- Optional dependency resolution (e.g., system libraries for ONNX Runtime)
+
+### Prerequisites & Special Cases
+
+#### System Requirements
+
+- **Git**: standard; the tool reads git history via git2.
+- **OS**: macOS or Linux (Windows support via WSL2; not officially tested).
+- **Database**: SQLite (bundled; no external SQLite install required).
+
+#### Configuration
+
+The CLI reads from `tga.yaml` or `~/.config/tga/config.yaml`. See the crate README and the configuration specification for details on setting up repository paths, identity resolvers, and report outputs.
+
+```bash
+tga analyze --config /path/to/tga.yaml
+```
+
+### Verify Installation
+
+All installations can be verified by running:
 
 ```bash
 tga --version
-tga --help
 ```
+
+Expected output: the semantic version of the installed binary (e.g., `tga 2.7.0`).
 
 ## Quick Start
 

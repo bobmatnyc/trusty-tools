@@ -13,16 +13,89 @@ What: Unified crate combining the formerly separate `trusty-mpm-{core,client,mcp
 
 ## Installation
 
+### From GitHub Releases (recommended for binary users)
+
+Prebuilt binaries are available for macOS (Apple Silicon) and Linux (x86_64).
+
+1. Download the latest release from [GitHub Releases](https://github.com/bobmatnyc/trusty-tools/releases):
+   - Look for assets tagged `trusty-mpm-v0.6.2`
+   - Download the archive for your platform:
+     - **macOS arm64 (Apple Silicon)**: `trusty-mpm-v0.6.2-aarch64-apple-darwin.tar.gz`
+     - **Linux x86_64**: `trusty-mpm-v0.6.2-x86_64-unknown-linux-gnu.tar.gz`
+
+2. Extract and install:
+   ```bash
+   tar xzf trusty-mpm-v0.6.2-*.tar.gz
+   chmod +x tm trusty-mpm
+   sudo mv tm trusty-mpm /usr/local/bin/    # or ~/.local/bin/ if you prefer user install
+   ```
+
+3. Verify the installation:
+   ```bash
+   tm --version
+   ```
+
+### From Source with Cargo
+
+Requires Rust 1.91 or later ([install Rust](https://rustup.rs/)).
+
 ```bash
-# Install the common toolset (CLI + daemon):
-cargo install trusty-mpm
-
-# Install with TUI and Telegram bot:
-cargo install trusty-mpm --features tui,telegram
-
-# Install just the library (no binaries):
-cargo add trusty-mpm --no-default-features
+cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-mpm --locked
 ```
+
+This builds from the latest commit on `main` and installs the binaries (`tm` and `trusty-mpm`) to `~/.cargo/bin/`. Make sure `~/.cargo/bin/` is on your PATH.
+
+To install a specific version:
+```bash
+cargo install --git https://github.com/bobmatnyc/trusty-tools --tag trusty-mpm-v0.6.2 trusty-mpm --locked
+```
+
+### With Homebrew (planned — not yet available)
+
+```bash
+brew tap bobmatnyc/trusty
+brew install trusty-mpm
+```
+
+This installation method is under development. For now, use GitHub Releases or `cargo install`.
+
+Once available, this will provide:
+- Automatic updates via `brew upgrade trusty-mpm`
+- Standard macOS / Linux PATH integration
+- Optional dependency resolution (e.g., system libraries for ONNX Runtime)
+
+### Prerequisites & Special Cases
+
+#### System Requirements
+
+- **Node.js** (optional): only needed if you plan to use the MPM JavaScript SDK or integrate with third-party JavaScript tooling. The daemon and CLI work independently of Node.
+- **OS**: macOS 12+ or Linux. Windows support is not yet available.
+
+#### Binaries Installed
+
+This crate installs two binaries with the same functionality:
+- `tm` — shorter alias for quick access
+- `trusty-mpm` — canonical name
+
+Both are identical; choose whichever you prefer. The CLI (`tm` / `trusty-mpm`) discovers the running daemon automatically via the standard socket or HTTP port and requires no configuration beyond a running daemon.
+
+#### Configuration
+
+The daemon reads from `~/.config/trusty-mpm/config.yaml` by default. See the `trusty-mpm` crate README for configuration examples and the full option reference.
+
+```bash
+tm daemon --config /path/to/config.yaml
+```
+
+### Verify Installation
+
+All installations can be verified by running:
+
+```bash
+tm --version
+```
+
+Expected output: the semantic version of the installed binary (e.g., `tm 0.6.2`).
 
 ## Feature Flags
 
