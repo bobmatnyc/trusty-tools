@@ -68,6 +68,7 @@ async fn search_handler_rejects_empty_query() {
         );
     }
 }
+
 #[test]
 fn file_is_within_root_relative_ok() {
     let root = std::path::Path::new("/Users/me/proj");

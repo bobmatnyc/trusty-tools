@@ -607,8 +607,11 @@ impl McpServer {
         if !status.is_success() {
             // Issue #882: 400 means invalid input — surface as InvalidParams.
             if status == reqwest::StatusCode::BAD_REQUEST {
-                let msg = body.get("error").and_then(Value::as_str)
-                    .unwrap_or("bad request").to_owned();
+                let msg = body
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("bad request")
+                    .to_owned();
                 return Err(DispatchError::InvalidParams(msg));
             }
             return Err(DispatchError::Transport(format!(
