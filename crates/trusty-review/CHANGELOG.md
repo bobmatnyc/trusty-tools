@@ -6,6 +6,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.3.6] — 2026-06-07
+
+### Added
+
+- **Prebuilt binary distribution via GitHub Releases** — the `trusty-review`
+  binary is now published to GitHub Releases on every tagged version for
+  `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`. Install without a
+  Rust toolchain:
+  ```
+  curl -L https://github.com/bobmatnyc/trusty-tools/releases/download/trusty-review-v0.3.6/trusty-review-aarch64-apple-darwin.tar.gz | tar xz
+  ```
+  or via `cargo install --git`:
+  ```
+  cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-review --locked
+  ```
+- **README install-convention docs** — README updated with a prebuilt-binary
+  install section and explicit `cargo install --git` instructions alongside the
+  existing `cargo install trusty-review` (crates.io) path.
+
+### Changed
+
+- **`profile` Cargo feature gate** — the contributor-profile pipeline
+  (`tga` + `rusqlite` heavy deps) is now gated behind the opt-in `profile`
+  feature (still on by default). Users who only need core review without
+  `git2`/`rusqlite` compilation overhead can build with:
+  ```
+  cargo install trusty-review --no-default-features --features http-server,mcp
+  ```
+- **Workspace MIT relicense** — the workspace `license` field was changed from
+  `Elastic-2.0` to `MIT`; `trusty-review` inherits `license.workspace = true`
+  and is now MIT-licensed.
+
+---
+
 ## [0.3.5] — 2026-06-03
 
 ### Changed

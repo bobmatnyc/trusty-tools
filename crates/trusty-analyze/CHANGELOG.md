@@ -7,6 +7,41 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.5.1] — 2026-06-07
+
+### Added
+
+- **Prebuilt binary distribution via GitHub Releases** — the `trusty-analyze`
+  binary is now published to GitHub Releases on every tagged version for
+  `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, and
+  `x86_64-unknown-linux-gnu` (Amazon Linux 2023 `load-dynamic` variant).
+  Install without Rust toolchain:
+  ```
+  curl -L https://github.com/bobmatnyc/trusty-tools/releases/download/trusty-analyze-v0.5.1/trusty-analyze-aarch64-apple-darwin.tar.gz | tar xz
+  ```
+  or via `cargo install --git`:
+  ```
+  cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-analyze --locked
+  ```
+- **Cargo.toml packaging metadata** — added `exclude`, `keywords`, `categories`,
+  and `[package.metadata.docs.rs]` so docs.rs renders the full API surface
+  (including the `http-server` feature) and the crates.io page is correctly
+  categorised.
+- **Expanded `lib.rs` module-level docs** — top-level rustdoc now covers the
+  analysis pipeline, transport options (HTTP API + MCP stdio/SSE), feature
+  flags (`http-server`, `bundled-ort`, `load-dynamic`, `cuda`, `ner`, `review`),
+  and quickstart examples.
+- **CHANGELOG backfill** — all patch releases since 0.1.0 documented with
+  accurate dates and descriptions.
+
+### Changed
+
+- **Workspace MIT relicense** — the workspace `license` field was changed from
+  `Elastic-2.0` to `MIT`; `trusty-analyze` inherits `license.workspace = true`
+  and is now MIT-licensed.
+
+---
+
 ## [0.5.0] — 2026-06-03
 
 ### Added
@@ -219,7 +254,8 @@ GET  /indexes/:id/clusters?k=N&method=bow|neural
 
 ---
 
-[Unreleased]: https://github.com/bobmatnyc/trusty-tools/compare/trusty-analyze-v0.5.0...HEAD
+[Unreleased]: https://github.com/bobmatnyc/trusty-tools/compare/trusty-analyze-v0.5.1...HEAD
+[0.5.1]: https://github.com/bobmatnyc/trusty-tools/releases/tag/trusty-analyze-v0.5.1
 [0.5.0]: https://github.com/bobmatnyc/trusty-tools/releases/tag/trusty-analyze-v0.5.0
 [0.4.2]: https://github.com/bobmatnyc/trusty-tools/releases/tag/trusty-analyze-v0.4.2
 [0.4.1]: https://github.com/bobmatnyc/trusty-tools/releases/tag/trusty-analyze-v0.4.1
