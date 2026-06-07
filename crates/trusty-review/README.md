@@ -13,25 +13,54 @@ It ships as:
 - a long-lived **HTTP webhook server** (`serve` subcommand, port 7880)
 - a **JSON-RPC 2.0 / MCP stdio service** (`serve --stdio`) for Claude Code integration
 
-## Install
+## Installation
+
+### Install from prebuilt binary
+
+Download the latest prebuilt binary for your platform from the
+[GitHub Releases](https://github.com/bobmatnyc/trusty-tools/releases) page.
+Binaries follow the tag convention `trusty-review-v<version>`:
+
+| Platform | Archive name |
+|----------|-------------|
+| macOS arm64 | `trusty-review-aarch64-apple-darwin.tar.gz` |
+| Linux x86\_64 (glibc) | `trusty-review-x86_64-unknown-linux-gnu.tar.gz` |
+
+Extract and place the `trusty-review` binary on your `PATH`.
+
+### Install with cargo
 
 ```bash
-cargo install trusty-review --locked
+cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-review --locked
 ```
 
-This installs the `trusty-review` binary.
+This builds and installs the `trusty-review` binary from the latest `main` branch.
 
-## Prerequisites
+### Prerequisites
 
-Two sidecar daemons must be running for full context retrieval:
-
-- **trusty-search** on `:7878` — code-context hybrid search
-- **trusty-analyze** on `:7879` — complexity and quality metrics (optional)
-
-```bash
-cargo install trusty-search --locked && trusty-search start
-cargo install trusty-analyze --locked && trusty-analyze start
-```
+> **Required:** A GitHub token (`GITHUB_TOKEN`) or GitHub App credentials for PR
+> fetching and (optionally) posting review comments. Set
+> `PR_INTELLIGENCE_DRY_RUN=false` to enable comment posting (default: dry-run).
+>
+> **LLM credentials:** AWS Bedrock credentials (env vars, `~/.aws/credentials`,
+> IAM role, or SSO) for the default `bedrock/` provider, or `OPENROUTER_API_KEY`
+> for OpenRouter models.
+>
+> **Contributor profiling** (`trusty-review profile`): requires a pre-populated
+> `tga` SQLite database. Set `TRUSTY_TGA_DB` or pass `--db <path>`. Compiled in
+> by default; omit with `--no-default-features --features http-server,mcp` for a
+> slimmer build without `tga`/`rusqlite` compilation.
+>
+> **Sidecar services** (optional, degrade gracefully when absent):
+> - **trusty-search** on `:7878` — code-context hybrid search for richer reviews
+> - **trusty-analyze** on `:7879` — complexity and quality metrics
+>
+> ```bash
+> cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-search --locked
+> cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-analyze --locked
+> trusty-search start
+> trusty-analyze serve
+> ```
 
 ## Quick start — one-shot review
 
@@ -229,6 +258,14 @@ Provider prefix convention:
 |---------|---------|-------------|
 | `http-server` | yes | Axum HTTP daemon (`serve` subcommand without `--stdio`) |
 | `mcp` | yes | MCP stdio JSON-RPC service (`serve --stdio`) |
+| `profile` | yes | Longitudinal contributor-profiling pipeline (`profile` subcommand); pulls in `tga` + `rusqlite` |
+
+Slim build (no contributor profiling, no `tga`/`rusqlite` compilation):
+
+```bash
+cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-review \
+  --locked --no-default-features --features http-server,mcp
+```
 
 ## License
 

@@ -10,6 +10,7 @@
 //! Test: `cargo run -p trusty-review -- --help` must succeed; each subcommand
 //! is tested in its own module under `commands/`.
 
+#[cfg(feature = "profile")]
 mod cli_profile;
 mod cli_verify;
 mod commands;
@@ -90,6 +91,9 @@ enum Commands {
     ///
     /// Always dry-run safe: never posts PR comments.  Use --github-issue to
     /// opt-in to creating/updating a per-contributor GitHub issue thread.
+    ///
+    /// Requires the `profile` Cargo feature (enabled by default).
+    #[cfg(feature = "profile")]
     Profile(cli_profile::ProfileArgs),
 }
 
@@ -120,6 +124,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         Commands::Compare(args) => cmd_compare(config, args).await,
         #[cfg(feature = "http-server")]
         Commands::Serve(args) => cmd_serve(config, args).await,
+        #[cfg(feature = "profile")]
         Commands::Profile(args) => cli_profile::cmd_profile(config, args).await,
     }
 }

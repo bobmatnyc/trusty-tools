@@ -29,8 +29,10 @@ pub mod voice;
 pub mod store;
 // Why: longitudinal contributor profiling (epic #558) requires a dedicated
 // module for data models, identity resolution, period assembly, and diff
-// sampling.  It is always compiled (no feature gate) because these types are
-// pure data structures and read-only DB queries with no HTTP / axum dep.
+// sampling.  Gated behind the `profile` feature because it pulls in tga and
+// rusqlite (heavy deps with vendored C libraries) that users who only need the
+// core review pipeline should not have to compile.
+#[cfg(feature = "profile")]
 pub mod profile;
 
 // Why: the service module is gated behind `http-server` so library consumers
