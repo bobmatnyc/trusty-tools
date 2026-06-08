@@ -54,10 +54,10 @@ and reusing `trusty-tools` were considered and rejected; `trusty-controller`
      `cargo install --path crates/trusty-controller --locked`;
   5. restart daemons via `launchctl bootout` / `launchctl bootstrap` (graceful
      SIGTERM restart convention).
-- **OPEN sub-decision (not resolved here):** license choice —
-  `Elastic-2.0` (like trusty-search, uses `license-file = "LICENSE"`) vs `MIT`
-  (like trusty-memory / trusty-analyze). Recorded as unresolved;
-  **Elastic-2.0 is the workspace default**.
+- **License:** `Elastic-2.0` (the workspace default), declared in the crate's
+  `Cargo.toml` as `license-file = "LICENSE"` (not `license = "Elastic-2.0"` —
+  Elastic-2.0 is not an SPDX identifier and would be rejected at publish time;
+  this matches the trusty-search convention). The crate ships a `LICENSE` file.
 
 ### Documentation charter
 
@@ -102,5 +102,5 @@ and reusing `trusty-tools` were considered and rejected; `trusty-controller`
 
 - [x] Resolve naming
 - [x] Resolve charter conventions
-- [ ] Add tctl alias to CLAUDE.md abbreviation table
-- [ ] Resolve license choice (Elastic-2.0 vs MIT)
+- [x] Add tctl alias to CLAUDE.md abbreviation table
+- [x] Resolve license choice (Elastic-2.0, license-file = "LICENSE")

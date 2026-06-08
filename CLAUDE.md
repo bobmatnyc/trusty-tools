@@ -492,6 +492,7 @@ When the user (or any agent) refers to a crate by abbreviation, resolve it using
 | `t-agents-common` | trusty-agents-common | `-p trusty-agents-common` | `crates/trusty-agents-common/` |
 | `t-agents-local` | trusty-agents-local | `-p trusty-agents-local` | `crates/trusty-agents-local/` |
 | `tcode` | trusty-code | `-p trusty-code` | `crates/trusty-code/` |
+| `tctl` | trusty-controller | `-p trusty-controller` | `crates/trusty-controller/` |
 
 These abbreviations apply everywhere: ticket descriptions, build commands, references in conversation. Always expand before running `cargo` commands.
 
