@@ -46,7 +46,7 @@ pub(super) fn validate_root_path(path: &std::path::Path) -> Result<std::path::Pa
                     "root_path must be absolute (got {:?}); relative paths \
                      would be resolved against the daemon's CWD which is \
                      not the caller's CWD",
-                    path.display().to_string()
+                    path.display()
                 ),
             })),
         )
@@ -58,7 +58,7 @@ pub(super) fn validate_root_path(path: &std::path::Path) -> Result<std::path::Pa
             Json(serde_json::json!({
                 "error": format!(
                     "root_path {:?} does not exist or is not a directory",
-                    path.display().to_string()
+                    path.display()
                 ),
             })),
         )
@@ -79,7 +79,7 @@ pub(super) fn validate_root_path(path: &std::path::Path) -> Result<std::path::Pa
                 Json(serde_json::json!({
                     "error": format!(
                         "root_path {:?} could not be canonicalized: {}",
-                        path.display().to_string(),
+                        path.display(),
                         e
                     ),
                 })),

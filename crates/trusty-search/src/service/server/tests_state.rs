@@ -41,14 +41,17 @@ async fn create_index_returns_503_with_error_when_embedder_failed() {
     // proceeds to the embedder-error branch we're asserting on.
     // Note: `tempfile::tempdir()` creates dirs under /tmp which is now
     // in the sensitive-root denylist — use target/ under the workspace root.
-    let cwd = std::env::current_dir().expect("cwd");
-    let test_dir = cwd.join(format!("target/test-embedder-fail-{}", std::process::id()));
-    std::fs::create_dir_all(&test_dir).expect("create test_dir");
+    let base = std::env::current_dir().expect("cwd").join("target");
+    std::fs::create_dir_all(&base).ok();
+    let test_dir = tempfile::Builder::new()
+        .prefix("ts-embedder-fail-")
+        .tempdir_in(&base)
+        .expect("create test_dir under target/");
     let resp = create_index_handler(
         State(state_arc),
         Json(CreateIndexRequest {
             id: "demo".to_string(),
-            root_path: test_dir.clone(),
+            root_path: test_dir.path().to_path_buf(),
             include_paths: None,
             exclude_globs: None,
             extensions: None,
@@ -78,7 +81,6 @@ async fn create_index_returns_503_with_error_when_embedder_failed() {
         err_str.contains("init timed out after 60s"),
         "expected recorded timeout message to be surfaced, got: {err_str}",
     );
-    let _ = std::fs::remove_dir_all(&test_dir); // best-effort cleanup
 }
 
 /// Issue #121: after the embedder is installed successfully, a previously

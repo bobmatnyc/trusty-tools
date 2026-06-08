@@ -200,9 +200,15 @@ fn validate_root_path_denylist_blocks_symlink_to_ssh() {
     if !ssh.is_dir() {
         return; // No ~/.ssh on this machine — skip.
     }
-    // Create a symlink in a non-denied location pointing at ~/.ssh.
-    // We use /tmp for the symlink itself (the link file lives there, not the target).
-    let link = std::env::temp_dir().join(format!("ts-denylist-ssh-link-{}", std::process::id()));
+    // Create a symlink under target/ so both the symlink location and resolved
+    // target are unambiguous: the link itself lives in a non-denied path, but
+    // its resolved target (~/.ssh) is in SENSITIVE_PATH_PREFIXES.  Using
+    // std::env::temp_dir() is unreliable here because on macOS it returns
+    // /private/var/folders/… which is itself in the denylist, causing the
+    // rejection to fire at the wrong check.
+    let base = std::env::current_dir().expect("cwd").join("target");
+    std::fs::create_dir_all(&base).ok();
+    let link = base.join(format!("ts-denylist-ssh-link-{}", std::process::id()));
     let _ = std::fs::remove_file(&link);
     if std::os::unix::fs::symlink(&ssh, &link).is_err() {
         return; // Cannot create symlink — skip.
