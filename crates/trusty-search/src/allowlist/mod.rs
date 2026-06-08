@@ -2,36 +2,30 @@
 //!
 //! Why: trusty-search previously auto-registered any directory it encountered
 //! (cwd probes, MCP calls, transient worktrees), creating 74 unrequested indexes
-//! including private directories with personal data and `.env` files. This module
-//! enforces that NOTHING is indexed unless the user explicitly approves it via
-//! the allowlist, and that certain sensitive path patterns can never be indexed
-//! even when explicitly requested.
+//! including private directories with personal data and `.env` files.
 //!
 //! What: two complementary guards:
-//! 1. **Hard denylist** (`SENSITIVE_COMPONENT_NAMES`, `SENSITIVE_FILE_NAMES`,
-//!    `SENSITIVE_PATH_PREFIXES`) — patterns matched against the candidate path
-//!    at path-component boundaries; a match produces a loud refusal regardless
-//!    of any allowlist entry. Covers `$HOME` top-level, `~/.ssh`, `~/.aws`,
-//!    `/tmp`, `.env` files, and similar.
+//! 1. **Hard denylist** — patterns matched at path-component boundaries; a
+//!    match produces a loud refusal regardless of any allowlist entry.
 //! 2. **Allowlist** (`AllowlistConfig`, stored at
-//!    `~/.config/trusty-search/allowlist.toml`) — the candidate path must match
-//!    an entry here (or a prefix of one) for registration to proceed. A fresh
-//!    daemon with an empty allowlist accepts ZERO new indexes. The file is named
-//!    `allowlist.toml` (not `indexes.toml`) to avoid the macOS path collision
-//!    where `config_dir()==data_local_dir()==~/Library/Application Support`.
+//!    `~/.config/trusty-search/allowlist.toml`) — default-deny; a fresh daemon
+//!    accepts ZERO new indexes. File is `allowlist.toml` (not `indexes.toml`) to
+//!    avoid the macOS collision where `config_dir()==data_local_dir()`.
+//!    On first load, [`migration`] attempts a one-time copy from the old
+//!    `indexes.toml` path; if that file is the daemon registry it will fail to
+//!    parse and the migration is silently skipped.
 //!
-//! Call [`check_path`] from the index-creation path (`POST /indexes` handler,
-//! CLI `trusty-search index`) before any registration occurs. When the check
-//! passes, also call [`add_to_allowlist`] so the allowlist file stays in sync.
+//! Call [`check_path`] from every index-creation path before registration.
+//! Then call [`add_to_allowlist`] to keep the file in sync.
 //!
-//! Test: unit tests in `tests.rs` cover default-deny (unlisted path rejected),
-//! allowlist hit (listed path accepted), denylist override (sensitive path
-//! rejected even when allowlisted), malformed config handling, and the
-//! add/remove helpers.
+//! Test: `tests.rs` (unit); `collision_tests.rs` (collision + migration).
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+mod migration;
+pub use migration::{legacy_allowlist_path, try_migrate_legacy};
 
 #[cfg(test)]
 mod collision_tests;
@@ -141,13 +135,13 @@ pub const SENSITIVE_HOME_TOP_DIRS: &[&str] = &[
 /// One allowlisted root entry.
 ///
 /// Why: stores the user-approved path alongside optional per-root settings.
-/// What: serialised to TOML `[[index]]` array-of-tables. `path` is required;
-/// `root_path` serde alias accepted for daemon-registry compat (defence-in-depth).
-/// Test: `roundtrip_preserves_all_fields`, `root_path_alias_deserializes`.
+/// What: TOML `[[index]]` array entry. Only `path` is accepted; the former
+/// `root_path` alias was removed so daemon-registry entries cannot parse as
+/// allowlist approvals (they would bypass the opt-in security gate).
+/// Test: `roundtrip_preserves_all_fields`; `migration_daemon_registry_is_not_migrated`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AllowlistEntry {
-    /// Absolute path to the approved project root (`root_path` alias accepted).
-    #[serde(alias = "root_path")]
+    /// Absolute path to the approved project root.
     pub path: PathBuf,
 
     /// Optional override for the index name. When absent the CLI/daemon
@@ -204,14 +198,20 @@ impl AllowlistConfig {
         }
     }
 
-    /// Load from the default XDG path.
+    /// Load from the default XDG path, running the one-time legacy migration
+    /// when needed.
     ///
     /// Why: single entry point for all callers that need the allowlist; hides
-    /// the path logic.
-    /// What: delegates to [`Self::load_from`] with [`Self::default_path()`].
-    /// Test: integration tested by `trusty-search index list`.
+    /// the path logic and the migration handshake.
+    /// What: attempts a one-time migration from the pre-rename `indexes.toml`
+    /// path (safe no-op when `allowlist.toml` already exists or the legacy file
+    /// is the daemon registry), then delegates to [`Self::load_from`].
+    /// Test: `migration_real_allowlist_is_migrated` in `collision_tests.rs`;
+    /// integration-tested by `trusty-search index list`.
     pub fn load() -> Result<Self> {
-        Self::load_from(&Self::default_path())
+        let new_path = Self::default_path();
+        migration::try_migrate_legacy(&new_path, &migration::legacy_allowlist_path());
+        Self::load_from(&new_path)
     }
 
     /// Load from an explicit path (used by tests to avoid touching the real config).
