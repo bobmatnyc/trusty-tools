@@ -1,6 +1,6 @@
 # 0007. Monotonic-integer `contract_version` + 3-layer extensible verb model
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-08
 - **Scope:** Workspace-wide (the `trusty_common` contract module; every stack
   member that `trusty-controller`/`tctl` manages — trusty-search, trusty-memory,

@@ -1,6 +1,6 @@
 # DOC-3 — Scope Model (System vs Project)
 
-**Status:** Draft (drafted; open questions for owner)
+**Status:** Accepted (owner-approved)
 **Source spec:** ../01-spec/trusty-end-to-end-setup.md
 
 ## Purpose
@@ -43,7 +43,9 @@ Not every tool has both layers. **CLI-only / serve-only tools** (e.g.
 trusty-review, which today implements only `serve`) are effectively
 **system-only**: they have no per-project state to ensure. The model must degrade
 to "this tool has no project layer" rather than assuming every tool is
-two-layer. (See Open Question 2.)
+two-layer. (RESOLVED — Resolved Decisions Q2: such tools are modeled as
+**system-only** members with no project layer; project-scoped verbs report
+"unsupported" via DOC-1's `verbs[]` graceful-degrade.)
 
 **Status is composite.** A daemon can be `running`/`healthy` (system-ok) while a
 given project is `pending` (unindexed). The two layers are reported and
@@ -109,7 +111,7 @@ controller applies when a tool implements the verb.)
 | `stop` | **system only** | takes the daemon down |
 | `health` | **both** | system: daemon liveness; project: per-project state status |
 | `doctor` | **both** | emits a mix of system- and project-scoped checks, each tagged with its own `scope` (DOC-1 D7) |
-| `config` | **both** | system: daemon-level resource (port, model); project: per-project overrides. **Project config overrides system defaults** (§7). See Open Question 3 on read-only vs read-write. |
+| `config` | **both** | system: daemon-level resource (port, model); project: per-project overrides. **Project config overrides system defaults** (§7), as a read-time resolution rule. The controller's `config` verb is **read/report-only** (RESOLVED — Resolved Decisions Q3). |
 | index / reindex | **project only** | valid only once the system layer `exists` |
 | palace-create | **project only** | valid only once the system layer `exists` |
 
@@ -201,9 +203,12 @@ This mirrors the daemon's own existing precedence for env knobs
 (`shell env > daemon.env > tier default` in trusty-search's memory policy) — the
 controller's scope-precedence rule is the cross-tool generalization of that
 pattern. **Note the spec non-goal** ("not a tool-internal config editor"): the
-controller *reads and reports* this precedence and *dispatches* a tool's own
-`config` verb; it does not itself edit a tool's internal config files. See Open
-Question 3 for the read-only/read-write boundary.
+controller's `config` verb is **read/report-only** — it surfaces effective values
+and their precedence. "Project overrides system" is a **read-time resolution
+rule**, not the controller mutating files. The controller MAY *dispatch* a tool's
+own `config`-write subcommand, but it **never edits a tool's internal config
+files directly** (RESOLVED — Resolved Decisions Q3, reconciling the spec
+non-goal).
 
 ### 8. Shared project-identity convention
 
@@ -211,40 +216,50 @@ A single, stable rule binds every project-scoped op to the right cwd. This
 convention is **defined here** and referenced by DOC-6 (conformance — tools must
 agree on it) and DOC-8 (install/bootstrap — the auto-config engine uses it).
 
-**Proposed rule (grounded in `detect_project()`):** walk up from the cwd and take
-the **first git repository root** (the nearest ancestor directory containing
-`.git`) as the project root. The **stable project id** is derived from that root
-path and is used as both the trusty-search `IndexId` and the trusty-memory
-palace id, so a single identity keys all per-project state across tools.
+**Canonical rule (grounded in `detect_project()`; owner-approved, ADR-0008).**
+Walk up from the cwd and take the **nearest enclosing git repository root** (the
+first ancestor directory containing `.git`) as the project root. The **canonical
+stable project id is the full-path slug of that root** (the `id_from_path`
+scheme, e.g. `Users_mac_workspace_my-project`), used as both the trusty-search
+`IndexId` and the trusty-memory palace id, so a single identity keys all
+per-project state across tools. The git-root **basename is a display-only alias**.
 
 Detection precedence (matches the existing implemented walk):
 
 1. nearest ancestor with `.git` → **git root** (strongest signal);
 2. else nearest ancestor with a tool marker (e.g. `.trusty-search`, `.claude/`,
    `CLAUDE.md`) → **marker root**;
-3. else **fallback** to the cwd itself (and warn — `DetectionMethod::Fallback`).
+3. else **fallback** to the cwd itself, derive the id from the **cwd path-slug**,
+   and **warn** (`DetectionMethod::Fallback`) — the controller does **not**
+   refuse.
 
-**Id-derivation caveat (must be resolved — Open Question 1).** The codebase
-currently has **two** id schemes and they disagree:
+**Id-derivation decision (RESOLVED — see Resolved Decisions Q1 and ADR-0008).**
+The codebase currently has **two** id schemes that disagree:
 
 - `detect.rs` uses the **basename** of the root (`my-project`), which is short
   and human-friendly but **collides** when two repos share a basename (e.g.
   `~/work/api` and `~/personal/api`).
 - `fs_discovery.rs::id_from_path` uses a **full-path slug**
-  (`Users_mac_workspace_my-project`), which is collision-free but ugly.
+  (`Users_mac_workspace_my-project`), which is collision-free.
 
 The live daemon registry shows **both forms registered for the same root** today
 (e.g. `trusty-tools` *and* `Users_mac_workspace_trusty-tools`), confirming the
-ambiguity is real, not hypothetical. The controller needs **one** canonical rule.
-*Recommendation:* canonicalize on the **full-path slug** (collision-free, stable
-across restarts, already proven `stable-and-safe` by `id_from_path`'s test) and
-treat the basename as a display alias only. Escalated as Open Question 1.
+ambiguity is real, not hypothetical. **The full-path slug scheme wins** as the
+single canonical id (collision-free, stable across restarts, already proven
+`stable-and-safe` by `id_from_path`'s test); the basename is a display alias
+only. This reconciles the live `detect.rs`-vs-`fs_discovery.rs` inconsistency and
+is recorded as the authoritative decision in
+[ADR-0008](../../../adr/0008-project-identity-convention.md).
 
-**Edge cases the rule must name (see Open Questions):**
+**Edge cases the rule names (RESOLVED — see Resolved Decisions):**
 
-- **No git root** — what is the id? (Open Question 1: cwd path-slug vs refuse.)
-- **Nested repos / git worktrees / monorepo subdirs** — does each subdir map to
-  the enclosing repo, the worktree, or its own id? (Open Question 4.)
+- **No git root and no marker** — id = **cwd path-slug + `Fallback` warning**
+  (never refuse). (Q1.)
+- **Git worktrees** — each worktree gets its **own** id keyed on its
+  working-directory path. (Q4.)
+- **Monorepo subdirs** — all subdirs share the **nearest enclosing git root's**
+  id/index/palace; per-subdir sub-projects only via an explicit marker (e.g.
+  trusty-search's existing `trusty-search.yaml` multi-index). (Q4.)
 - **Multiple projects sharing one daemon** — fine by design (the daemon is
   multi-index), *provided* ids are collision-free; this is the core argument for
   the path-slug scheme.
@@ -327,9 +342,10 @@ trusty-mpm in any rung, tag, or precedence rule.
     concept: the two named ladders, verb scope-polymorphism table, blast-radius
     tagging, ordering guarantee, and config-precedence rule.
   - A **single canonical** project-identity rule reconciling the two existing,
-    currently-divergent id schemes (Open Question 1).
+    currently-divergent id schemes (RESOLVED — Resolved Decisions Q1; ADR-0008).
   - Modeling **single-layer (CLI-only) tools** like trusty-review inside a
-    model built around daemon+project state (Open Question 2).
+    model built around daemon+project state (RESOLVED — Resolved Decisions Q2:
+    system-only members with no project layer).
 
 ## Cross-cutting notes
 
@@ -351,61 +367,60 @@ trusty-mpm in any rung, tag, or precedence rule.
 - [x] Define blast-radius tagging
 - [x] Define ensure-system-then-project ordering
 - [x] Define config precedence
-- [x] Propose the shared project-identity convention + edge cases
+- [x] Define the shared project-identity convention + edge cases (canonical rule
+      now recorded in §8 + ADR-0008)
 - [x] Define rollup interplay (feeds DOC-4) and orchestrator forward-compat
-- [ ] **Owner: resolve the Open Questions below** (esp. OQ1 id scheme — blocks DOC-6/DOC-8)
-- [ ] Coordinate final `scope` field semantics back into DOC-1 (bidirectional edge)
-- [ ] Team review → Accepted
+- [x] **Owner: resolve the open questions** (all five resolved below; Q1 id
+      scheme unblocks DOC-6/DOC-8 and is recorded in ADR-0008)
+- [x] Coordinate final `scope` field semantics back into DOC-1 (bidirectional
+      edge — DOC-1 D7; the config-provenance `sources[].scope` sub-vocabulary
+      `{env|project|system}` is documented in DOC-1 as distinct from the D7
+      `--scope {project|system|all}` wire vocabulary)
+- [x] Team review → Accepted (owner-approved)
 
-## Open Questions for Owner
+## Resolved Decisions
 
-1. **Canonical project-id rule when there is no git root (and basename vs
-   path-slug).** Two id schemes coexist in the codebase and disagree:
-   `detect.rs` uses the root **basename** (`my-project`, collides across repos
-   sharing a name); `fs_discovery.rs::id_from_path` uses a **full-path slug**
-   (`Users_mac_workspace_my-project`, collision-free). The live daemon already
-   has *both* forms registered for the same root, so the ambiguity is real.
-   *Recommendation:* adopt the **full-path slug** as the single canonical id
-   (collision-free, stable, already test-proven) with the basename as a
-   display-only alias; when there is **no git root and no marker**, derive the id
-   from the **cwd path-slug** and emit a `Fallback` warning (rather than
-   refusing). Please confirm, or choose "refuse without a git root" instead. This
-   blocks DOC-6 (cross-tool agreement) and DOC-8 (auto-config keys).
+The five questions previously escalated to the owner are now **resolved
+(owner-approved)**. Each resolution is folded into the design body above; the
+authoritative statements are recorded here.
 
-2. **How do CLI-only / serve-only tools (e.g. trusty-review, which implements
-   only `serve`) fit a model built around daemon + project state?**
-   *Recommendation:* model them as **system-only** members with **no project
-   layer** — the project ladder is simply "not applicable," and project-scoped
-   verbs report "unsupported" via DOC-1's `verbs[]` graceful-degrade. Confirm
-   this, or specify a different treatment (e.g. a lightweight per-project config
-   layer even without a daemon).
+1. **Canonical project-id rule (no-git-root case; basename vs path-slug).**
+   **Resolution:** the canonical project id is the **full-path slug** of the
+   nearest enclosing git root (collision-free, e.g.
+   `Users_mac_workspace_my-project`); the git-root **basename is a display-only
+   alias**. When there is **no git root and no marker**, derive the id from the
+   **cwd path-slug** and emit a `Fallback` warning — the controller does **not**
+   refuse. This resolves the live-codebase inconsistency between the **basename**
+   scheme in `detect.rs` and the **full-path slug** scheme in
+   `fs_discovery.rs::id_from_path` (both currently registered in the daemon for
+   the same root); the **slug scheme wins**. Authoritative record:
+   [ADR-0008](../../../adr/0008-project-identity-convention.md). Unblocks DOC-6
+   (cross-tool agreement) and DOC-8 (auto-config keys). See §8.
 
-3. **Is `config` strictly read-only at both scopes?** The spec non-goal says the
-   controller is "not a tool-internal config editor," but §7 asserts "project
-   config overrides system defaults," which implies writes somewhere.
-   *Recommendation:* the controller's `config` verb is **read/report-only at the
-   controller level** — it surfaces effective values and precedence and may
-   **dispatch a tool's own `config` write subcommand**, but never edits a tool's
-   internal config files directly. The "project overrides system" precedence is a
-   **resolution rule applied at read time**, not the controller mutating files.
-   Confirm this reconciliation, or relax the non-goal.
+2. **CLI-only / serve-only tools (e.g. trusty-review).** **Resolution:** modeled
+   as **system-only** members with **no project layer**; the project ladder is
+   "not applicable," and project-scoped verbs report **"unsupported"** via
+   DOC-1's `verbs[]` graceful-degrade. See §1.
 
-4. **How do git worktrees and monorepo subdirectories map to project identity?**
-   A worktree shares a repo but lives at a different path; a monorepo has one
-   `.git` at the top with many logical sub-projects beneath it. *Recommendation
-   (default):* identity = the **nearest enclosing git root**, so all monorepo
-   subdirs share one project id and one index/palace (matches today's
-   `detect_project` walk, which stops at the first `.git`); worktrees, having
-   their own working directory, get their **own** id keyed on the worktree path.
-   Please confirm, or specify per-subdir sub-project identities (which would need
-   an explicit marker like `.trusty-search` or a `trusty-search.yaml`
-   multi-index file — the latter already exists in trusty-search).
+3. **Is `config` read-only?** **Resolution:** the controller's `config` verb is
+   **read/report-only** — it surfaces effective values and their precedence.
+   "Project overrides system" is a **read-time resolution rule**, not the
+   controller mutating files. The controller MAY **dispatch a tool's own
+   `config`-write subcommand**, but it **never edits a tool's internal config
+   files directly**. This reconciles the spec non-goal ("not a tool-internal
+   config editor"). See §7.
 
-5. **Is "fresh" (project state up to date) controller-observable, or only
-   tool-reported?** Freshness needs comparing indexed content against current
-   content (e.g. indexed HEAD vs git HEAD via `head_sha`, or content
-   fingerprints). *Recommendation:* keep freshness **tool-reported** — the tool
-   exposes a `fresh` boolean / `pending` status through its `doctor`/`health`
-   JSON (DOC-1), and the controller never inspects the repo or the index itself
-   (zero tool-specific logic, per the spec). Confirm that freshness is a contract
-   field the tool must emit, rather than something the controller computes.
+4. **Worktrees / monorepo subdirs.** **Resolution:** identity = the **nearest
+   enclosing git root**, so **monorepo subdirs share one** id / index / palace
+   (matches today's `detect_project` walk, which stops at the first `.git`). A
+   **worktree gets its own id keyed on its working-directory path**. Per-subdir
+   sub-projects exist **only** via an explicit marker (e.g. trusty-search's
+   existing `trusty-search.yaml` multi-index file). Recorded in
+   [ADR-0008](../../../adr/0008-project-identity-convention.md). See §8.
+
+5. **Is "fresh" controller-observable or tool-reported?** **Resolution:**
+   **tool-reported** — the tool emits `fresh`/`pending` through its
+   `doctor`/`health` JSON (DOC-1); the controller **never inspects the repo or
+   the index itself**, preserving zero tool-specific logic. Freshness is a
+   contract field the tool must emit, not something the controller computes.
+   See §2.

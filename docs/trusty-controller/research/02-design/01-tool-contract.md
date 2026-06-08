@@ -1,8 +1,8 @@
 # DOC-1 — The Versioned Tool Contract (FOUNDATIONAL)
 
-**Status:** Review (schemas drafted; pending DOC-3 scope coordination + team review)
+**Status:** Accepted (owner-approved; schemas + scope coordinated with DOC-3)
 **Source spec:** ../01-spec/trusty-end-to-end-setup.md
-**ADR:** [0007 — Monotonic-integer `contract_version` + 3-layer extensible verb model](../../../adr/0007-tool-contract-versioning-and-verb-model.md) (Proposed)
+**ADR:** [0007 — Monotonic-integer `contract_version` + 3-layer extensible verb model](../../../adr/0007-tool-contract-versioning-and-verb-model.md) (Accepted)
 
 ## Purpose
 
@@ -164,6 +164,11 @@ respect D8 redaction (`***redacted***`).
   down`. `messages` is always an array (may be empty).
 - Exit codes (D5): `0` ok · `1` fail/down · `2` degraded/warn · `3`
   contract-or-usage error (e.g. unknown/unadvertised verb, malformed args).
+  **Code `3` is produced at the dispatcher/controller boundary, *not* by the
+  envelope-status→exit-code mapping** — there is no envelope `status` value that
+  maps to `3`. A `3` means the request never produced a valid envelope (unknown
+  verb, malformed args, contract-incompatible tool below the floor); the
+  `EnvelopeStatus::exit_code()` mapping only ever yields `0`/`1`/`2`.
 
 ### `doctor.data`
 
@@ -298,6 +303,10 @@ Carries the capability advertisement (D3b) and version axes (D2). Envelope
 - `verbs[]` presence is **independent of `contract_version`** (D3, critical
   split): the controller MUST read `verbs[]` to decide what to invoke, never
   infer from the integer.
+- **claude-mpm's `verbs[]` advertisement is deferred to DOC-6** (the
+  orchestrator-adapter design): the *shape* of `verbs[]` is locked here, but
+  exactly which verbs the Python claude-mpm adapter will advertise (and how it
+  synthesizes them) is **not** decided in this doc — see DOC-6.
 
 **Worked example:**
 
@@ -329,14 +338,18 @@ One shared schema (the three verbs differ only in the `action` value):
 ```json
 {
   "action": "restart",                   // "start" | "stop" | "restart"
-  "previous_state": "running",           // "running" | "stopped" | "unknown"
-  "new_state": "running",                // "running" | "stopped"
+  "previous_state": "running",           // ENUM: "running" | "stopped" | "unknown"
+  "new_state": "running",                // ENUM: "running" | "stopped" | "unknown"
   "pid": 4821,                           // ? new daemon pid (start/restart, when applicable)
   "port": 7879,                          // ? bound port (start/restart)
   "noop": false                          // true when already in target state (e.g. start an already-running daemon)
 }
 ```
 
+- **`previous_state` / `new_state` are a fixed enum `running | stopped |
+  unknown`**, not free strings — for contract stability and consistency with the
+  other status enums (D4). `unknown` covers a `previous_state` the tool cannot
+  determine (e.g. no PID lockfile before a `start`).
 - Idempotency: `start` on a running daemon → `status:"ok"`, `noop:true`,
   `previous_state==new_state=="running"`. `stop` on a stopped daemon likewise.
 - CLI-only members that advertise no lifecycle verbs simply omit them from
@@ -389,8 +402,17 @@ explicit spec non-goal. Secrets redacted with the fixed marker (D8).
 ```
 
 - The precedence model that produces `effective` is the tool's own; DOC-1 only
-  fixes the *shape*. `sources[].scope` reuses the D7 wire vocabulary plus `env`
-  for environment-derived values.
+  fixes the *shape*.
+- **Two distinct scope vocabularies (keep these separate).** The `--scope` flag
+  and every per-check `scope` field use the **D7 wire vocabulary
+  `{project|system|all}`** — *which layer a verb or check addresses*. The
+  config-provenance `sources[].scope` field is a **separate, related
+  sub-vocabulary `{env|project|system}`** — *where a config value originated*
+  (an environment variable vs a project config file vs a system default). These
+  are not the same axis: `all` is meaningful for `--scope` but never appears as a
+  provenance origin, and `env` is a provenance origin but never a `--scope`
+  value. Documenting the distinction explicitly keeps D7's wire format clean —
+  `sources[].scope` is a config-provenance label, not a D7 scope.
 
 **Worked example:**
 
@@ -533,11 +555,17 @@ pub struct VersionData {
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleAction { Start, Stop, Restart }
 
+/// Fixed lifecycle state enum (not a free string) for contract stability and
+/// consistency with the other status enums.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleState { Running, Stopped, Unknown }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LifecycleData {
     pub action: LifecycleAction,
-    pub previous_state: String,             // "running" | "stopped" | "unknown"
-    pub new_state: String,                  // "running" | "stopped"
+    pub previous_state: LifecycleState,     // running | stopped | unknown
+    pub new_state: LifecycleState,          // running | stopped | unknown
     #[serde(skip_serializing_if = "Option::is_none")] pub pid: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")] pub port: Option<u16>,
     #[serde(default)] pub noop: bool,
@@ -779,6 +807,13 @@ other contract-conformant member.
 - [x] Specify the `trusty_common` contract module API (trait + envelope + data types)
 - [x] Define the `contract_version` floor + the "what's new per version" ledger (v1 baseline)
 - [x] Publish the conformance checklist for DOC-6
-- [x] Write the contract-version ADR (charter B2) — [ADR-0007](../../../adr/0007-tool-contract-versioning-and-verb-model.md)
-- [ ] Coordinate `scope` fields with DOC-3
-- [ ] Team review → Accepted
+- [x] Write the contract-version ADR (charter B2) — [ADR-0007](../../../adr/0007-tool-contract-versioning-and-verb-model.md) (now Accepted)
+- [x] Coordinate `scope` fields with DOC-3 (DOC-3 Accepted; D7 wire vocabulary
+      `{project|system|all}` documented as distinct from the config-provenance
+      `sources[].scope` sub-vocabulary `{env|project|system}`)
+- [x] Team review → Accepted (owner-approved)
+
+> **Deferred (not design-time):** claude-mpm's concrete `verbs[]` advertisement
+> is deferred to DOC-6 (orchestrator-adapter design). Everything remaining is
+> implementation-time work (DOC-6 retrofits against the `trusty_common::contract`
+> module), not design.
