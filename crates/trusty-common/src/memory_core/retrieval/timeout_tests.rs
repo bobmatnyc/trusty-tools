@@ -55,11 +55,12 @@ mod tests {
         unsafe {
             std::env::remove_var("TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS");
         }
-        assert!(
-            result.is_err(),
-            "shared_embedder() must return Err when init times out, got Ok"
-        );
-        let err = result.err().expect("checked above");
+        // `expect_err` requires T: Debug which Arc<dyn Embedder> doesn't
+        // satisfy, so we match instead.
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("shared_embedder() must return Err when init times out, got Ok"),
+        };
         let msg = format!("{err:#}");
         assert!(
             msg.contains("timed out") || msg.contains("FastEmbedder"),
@@ -159,7 +160,7 @@ mod tests {
             result.is_err(),
             "remember must return Err when write-lock times out, got Ok"
         );
-        let err = result.err().expect("checked above");
+        let err = result.expect_err("checked above");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("timed out") || msg.contains("write-lock"),
