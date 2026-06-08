@@ -99,7 +99,7 @@ crates/trusty-memory/src/commands/doctor.rs	1123
 crates/trusty-memory/src/commands/kuzu_migrate.rs	664
 crates/trusty-memory/src/commands/prompt_context.rs	1617
 crates/trusty-memory/src/commands/service.rs	525
-crates/trusty-memory/src/commands/setup.rs	783
+crates/trusty-memory/src/commands/setup.rs	539
 crates/trusty-memory/src/discovery.rs	884
 crates/trusty-memory/src/kg_extract.rs	608
 crates/trusty-memory/src/lib.rs	3061
