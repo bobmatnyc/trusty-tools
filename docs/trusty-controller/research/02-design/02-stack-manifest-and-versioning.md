@@ -1,6 +1,6 @@
 # DOC-2 — Stack Manifest/BOM + Version & Changelog Advertisement (FOUNDATIONAL)
 
-**Status:** Draft (drafted; open questions for owner)
+**Status:** Accepted (owner-approved)
 **Source spec:** ../01-spec/trusty-end-to-end-setup.md
 
 ## Purpose
@@ -54,11 +54,12 @@ JSON exception). TOML has first-class comments (so the shipped default BOM can b
 self-documenting), is diff-friendly for the lockfile use case, and `serde` +
 `toml` are already workspace dependencies. JSON is reserved for the wire/contract
 layer (DOC-1 envelopes); the manifest is config, not wire, so TOML fits the repo
-convention. (If the owner prefers a single serialization format across the
-controller, JSON is a viable alternative — see Open Question 1.)
+convention. (Owner-approved: TOML; see Resolved Decision Q1.)
 
-**Recommended location strategy: embedded default + optional override file
-("both").** Concretely:
+**Location strategy: embedded default + optional SYSTEM-level override file
+(owner-approved; see Resolved Decision Q2).** v1 ships exactly two manifest
+tiers — a compiled-in default and an optional system-scope override. There is
+**no per-project manifest override** in v1. Concretely:
 
 - **Embedded default BOM (compiled-in).** `trusty-controller` ships a canonical
   default manifest **compiled into the `tctl` binary** (via `include_str!` of a
@@ -75,32 +76,35 @@ controller, JSON is a viable alternative — see Open Question 1.)
   resolved via the existing `trusty_common` `resolve_data_dir`/`config` helpers.
   When present it **overrides** the embedded default. This lets a user pin to a
   newer (or older) stack version, or add a member, without rebuilding `tctl`.
+  The manifest is **system-scope only** — there is no per-project manifest
+  override. (Project-SCOPED *operations* and per-project state/identity still
+  exist, but they are owned by DOC-3, not the manifest; see the clarification
+  below.)
 
-- **Optional per-project override.** A repo-local `trusty-controller.toml` (or a
-  `[controller]` table inside an existing project marker) MAY override
-  **version pins and enable/disable flags only** — it MUST NOT add new members or
-  change install sources (security: a checked-out repo must not be able to point
-  the controller at an arbitrary install command). Per DOC-3, project-level state
-  is **not** in the manifest (DOC-3 scope: the manifest describes *system-layer*
-  members; project readiness is discovered at runtime, never stored here). The
-  per-project override is therefore deliberately narrow — see Open Question 2.
+- **The manifest is system-scope; project state is DOC-3's.** Removing the
+  per-project *manifest* override does **not** remove project-scoped behaviour:
+  per DOC-3, the manifest describes only *system-layer* members, while
+  per-project readiness, state, and identity are discovered at runtime and owned
+  by DOC-3 — never stored in the BOM. The two concepts are distinct: there is no
+  per-project manifest, but project-scoped operations remain per DOC-3.
 
 - **Fetched/remote channel: explicitly deferred.** Fetching a manifest from a
   release URL (a "stable / beta channel") is a natural extension but is **not in
   v1**. The embedded default already gives a known-good BOM per release; remote
   channels add a fetch/trust/signing surface that DOC-9 (upgrade flow) should own
-  if/when it lands. Flagged as Open Question 3.
+  if/when it lands. (Owner-approved deferral; see Resolved Decision Q3.)
 
 **Precedence (highest → lowest):**
 
 ```
-per-project override (pins/flags only)
-  > system override file (~/.config/trusty-controller/manifest.toml)
-    > embedded default BOM (compiled into tctl)
+system override file (~/.config/trusty-controller/manifest.toml)
+  > embedded default BOM (compiled into tctl)
 ```
 
-This mirrors DOC-3 §7's config precedence (`project > system > built-in default`)
-exactly, so the controller has **one** precedence rule across config and manifest.
+There are only two manifest tiers in v1 (no project tier). This is the
+manifest-scope subset of DOC-3 §7's config precedence
+(`project > system > built-in default`): the manifest simply has no project
+tier, so its rule reduces to `system override > embedded default`.
 
 ### 3. Manifest entry schema
 
@@ -119,7 +123,7 @@ Each stack member is one `[[member]]` entry. Fields:
 | `ui` | no | UI-availability + discovery hint sub-table (see below). Drives DOC-7 (the controller UI links out to member UIs, never reimplements them — spec §56). Omit for members with no UI. |
 | `changelog` | yes | Changelog source descriptor (a sub-table — see §5). Drives DOC-9 headline extraction. |
 | `depends_on` | no | Array of member `id`s this member requires at runtime (e.g. `trusty-analyze` → `["trusty-search"]`). Informs DOC-4 rollup / ordering; does not duplicate DOC-1 health `deps`. |
-| `enabled` | no | `true` (default) \| `false`. A per-project or system override can disable a member without removing its registry entry. |
+| `enabled` | no | `true` (default) \| `false`. A system override file can disable a member without removing its registry entry. |
 
 **`install` sub-table** (tagged by `source`):
 
@@ -264,10 +268,10 @@ without taking it away:
   which independent versions are pinned together. A crate can ship `0.24.2`
   to crates.io without any stack version existing for it yet; the stack version is
   cut later, when the combination is tested.
-- **Naming scheme (recommendation):** `YYYY.MM-N` (e.g. `2026.06-1`), a
+- **Naming scheme (owner-approved):** `YYYY.MM-N` (e.g. `2026.06-1`), a
   date-anchored, monotonically-increasing label decoupled from any single crate's
-  semver — because no single crate's version can name the whole tuple. (Open
-  Question 4 surfaces calendar-version vs. an opaque incrementing integer.)
+  semver — because no single crate's version can name the whole tuple. (See
+  Resolved Decision Q4.)
 - **How a user pins / moves between stack versions:**
   - *Pin:* the embedded default BOM already pins the stack version this `tctl`
     release shipped with. To move, the user either (a) upgrades `tctl` itself
@@ -293,12 +297,13 @@ Versions correspond to Cargo.toml patch releases"*). So the format is **not
 fully net-new** — it is *already keepachangelog-shaped*; what is net-new is making
 it **reliably machine-parseable** for headline extraction.
 
-**Recommendation: standardize on Keep a Changelog (1.0.0) as the parseable
-contract, with a thin set of enforced conventions** rather than inventing a new
-format (the team already writes this format; a new format would mean rewriting 10
-changelogs). The enforced conventions are:
+**Decision: standardize on Keep a Changelog (1.0.0) as the parse-target
+contract, parsed best-effort with graceful degradation — no CI enforcement
+gate** (owner-approved; see Resolved Decision Q5). The team already writes this
+format, so a new format would mean rewriting 10 changelogs for no gain. The
+parse target follows these conventions:
 
-1. **Version headers are H2 in the exact form** `## [<semver>] — <YYYY-MM-DD>`
+1. **Version headers are H2 in the form** `## [<semver>] — <YYYY-MM-DD>`
    (em-dash or hyphen accepted). This is the parse anchor — the controller splits
    the file on `## [` headers, reads the bracketed semver, and selects the slice
    of entries with `installed_version < v <= target_version`.
@@ -310,9 +315,14 @@ changelogs). The enforced conventions are:
    list item up to the first sentence / first `—` continuation, so the rendered
    "headlines between A and B" are the bolded leaders, not the full prose.
 
-This yields headlines deterministically with **no new authoring burden** — the
-existing changelogs already conform; only a lint (Open Question 5) would enforce
-the H2 form going forward.
+**Conformance is a convention, not a CI-enforced gate.** Headline extraction is
+**best-effort**: when a tool's changelog is missing, unreachable, or does not
+conform to the H2 anchor above, the controller **degrades gracefully** — it
+omits/skips headlines for that one tool and surfaces a soft note ("changelog
+headlines unavailable for `<tool>`") rather than failing the upgrade flow. There
+is **no lint or CI gate** enforcing the changelog format; the existing
+changelogs already conform, and any drift simply costs headlines for the
+affected tool, never a build failure.
 
 **`changelog` sub-table schema:**
 
@@ -395,11 +405,11 @@ entry and (b) the DOC-6 adapter — never in the controller.
   This is the manifest-side counterpart to DOC-1 D8 (which redacts secrets in
   *contract output*); together they ensure no secret transits either the static
   registry or the runtime wire.
-- **Override files cannot widen attack surface.** Per §2, a **per-project**
-  override may change only version pins and `enabled` flags — it MUST NOT add a
-  member or change an `install` source, so a hostile checked-out repo cannot make
-  the controller run an arbitrary install command. (A system-level override file
-  is trusted, being user-owned at the OS config dir.)
+- **Only a trusted system override exists.** Per §2, v1 has **no per-project
+  manifest override** — the only override tier is the system-level file, which is
+  trusted by virtue of being user-owned at the OS config dir. Because no
+  checked-out repo can contribute manifest entries or install sources, a hostile
+  repo cannot make the controller run an arbitrary install command.
 - **No code execution from the manifest.** The manifest is declarative data; the
   controller composes install/upgrade commands from a fixed set of `source`
   templates (`cargo install …`, `pipx install …`) — it never executes a free-form
@@ -453,68 +463,83 @@ Source-first audit, 2026-06-08.
 
 - **Security / secrets:** no secrets in the manifest — install sources, URLs, and
   version pins only (§8; counterpart to DOC-1 D8).
-- **Single precedence rule:** manifest override precedence
-  (`project > system override > embedded default`) is the **same** ordering as
-  DOC-3 §7's config precedence — one mental model across config and manifest.
-- **Project state is not in the manifest:** per DOC-3, the manifest describes
-  **system-layer** members only; per-project readiness (configured/exists/fresh)
-  is discovered at runtime via the contract, never stored in the BOM.
+- **Single precedence rule:** manifest override precedence is
+  `system override > embedded default` — the manifest-scope subset of DOC-3 §7's
+  config precedence (which has no project tier for the manifest in v1). One
+  mental model across config and manifest.
+- **Manifest is system-scope; project state is not in the manifest:** v1 has
+  **no per-project manifest override**. Per DOC-3, the manifest describes
+  **system-layer** members only; per-project readiness, state, and identity
+  (configured/exists/fresh) are discovered at runtime via the contract and owned
+  by DOC-3, never stored in the BOM. Project-scoped *operations* still exist
+  (DOC-3); only a per-project *manifest* override is excluded.
 
 ## Remaining work
 
-- [x] Pick format & location strategy (TOML; embedded default + override file)
+- [x] Pick format & location strategy (TOML; embedded default + **system-level**
+      override only — no per-project manifest override in v1)
 - [x] Define the `[[member]]` entry schema (incl. `install`, `ui`, `changelog`,
       `kind`, contract pins) with annotated example listing the real current tools
 - [x] Define "stack version" + the lockfile-of-version-tuples model (#343-aware)
-- [x] Choose a structured, parseable changelog format (keepachangelog + enforced
-      H2/headline conventions) and the headline-extraction rule
+- [x] Choose stack-version naming scheme (date-anchored `YYYY.MM-N`)
+- [x] Choose a structured, parseable changelog format (keepachangelog as the
+      parse target) and the headline-extraction rule — **best-effort, no CI gate**
 - [x] Fix the discovery rule (manifest = static registry; `version --json` =
       runtime capability) and document the division of labour
 - [x] Orchestrator forward-compat (claude-mpm now → trusty-mpm later) via the
       swappable `kind = "orchestrator"` entry
-- [x] Security note (no secrets; override scoping; no code execution)
-- [ ] **Owner: resolve the open questions below**
-- [ ] Team review → Accepted
+- [x] Security note (no secrets; system-only override; no code execution)
+- [x] **Owner: resolve the open questions** (see Resolved Decisions below)
+- [ ] *(implementation-time)* wire best-effort changelog parsing + graceful
+      degradation into DOC-9's upgrade flow
+- [ ] *(DOC-6-owned)* pin the canonical `claude-mpm` package name (pipx vs uvx),
+      first-BOM version, and authoritative changelog URL (currently placeholders)
 
 ---
 
-## Open Questions for Owner
+## Resolved Decisions
 
-1. **Manifest serialization format — TOML vs JSON.** Recommendation: **TOML**
-   (matches the repo's hand-authored config convention, supports comments for the
-   self-documenting embedded BOM, `toml` already a workspace dep). The counter-
-   argument is uniformity with DOC-1's JSON contract wire format — if you prefer a
-   single serialization across the controller, JSON works (lose inline comments).
-   **Decision needed:** TOML (recommended) or JSON?
+All six questions were resolved by the owner (owner-approved, 2026-06-08). Two
+decisions (Q2, Q5) diverged from the draft and the body above has been revised
+accordingly.
 
-2. **Scope of the per-project override.** Recommendation: a project-local
-   `trusty-controller.toml` may override **only** version pins and `enabled`
-   flags, never add members or change install sources (security, §8). Is a
-   per-project override wanted **at all** in v1, and if so is the pins-only
-   restriction acceptable — or should v1 ship with **no** per-project manifest
-   override (system-level override file only)?
+1. **Manifest serialization format — TOML.** *Confirmed as drafted.* The
+   manifest is authored/serialized as **TOML**, matching the repo's
+   hand-authored config convention, supporting comments for the self-documenting
+   embedded BOM, and reusing the already-present `toml` workspace dep. JSON
+   remains reserved for the DOC-1 contract wire layer.
 
-3. **Remote/fetched manifest channel.** Recommendation: **defer** — v1 ships the
-   embedded default BOM + optional local override file only; a fetched
-   "stable/beta channel" manifest (with its trust/signing surface) is left to a
-   future DOC-9 extension. Confirm remote channels are out of scope for v1.
+2. **Scope of the per-project override — SYSTEM-level override ONLY (CHANGED).**
+   *Diverges from the draft.* v1 ships with **no per-project manifest override**.
+   The only override tier is the **SYSTEM-level** file
+   (`~/.config/trusty-controller/manifest.toml`) layered over the embedded
+   default; precedence reduces to `system override > embedded default`. The
+   per-project `trusty-controller.toml` / pins-only override described in the
+   original draft has been removed from the design (§2, §8, Cross-cutting).
+   *Clarification:* this removes only a per-project *manifest* override —
+   project-SCOPED operations and per-project state/identity still exist and are
+   owned by DOC-3; the manifest is system-scope only.
 
-4. **Stack-version naming scheme.** Recommendation: date-anchored `YYYY.MM-N`
-   (e.g. `2026.06-1`), decoupled from any single crate's semver. Alternative: an
-   opaque monotonically-increasing integer (`1`, `2`, …) or a semver-style
-   `MAJOR.MINOR.PATCH` for the stack as a whole. **Which naming scheme do you
-   want for `stack_version`?**
+3. **Remote/fetched manifest channel — deferred.** *Confirmed as drafted.* v1 =
+   embedded default BOM + optional system override file only. A fetched
+   "stable/beta channel" manifest (with its trust/signing surface) is a future
+   extension, left to DOC-9 if/when it lands.
 
-5. **Changelog conformance enforcement.** Recommendation: standardize on Keep a
-   Changelog with a **CI lint** enforcing the `## [<semver>] — <date>` H2 header
-   form (so headline extraction never silently breaks). Do you want that lint
-   added to the per-crate CI now (small net-new gate, like the line-cap gate), or
-   should headline parsing be **best-effort** (skip/degrade on a non-conforming
-   changelog) without a hard CI gate?
+4. **Stack-version naming scheme — date-anchored `YYYY.MM-N`.** *Confirmed as
+   drafted.* `stack_version` uses a date-anchored, monotonically-increasing
+   label (e.g. `2026.06-1`), decoupled from any single crate's semver.
 
-6. **`claude-mpm` version & changelog URL pins.** The worked example uses
-   placeholders (`version = "0.0.0"`, a `<org>` changelog URL) because the
-   orchestrator-adapter design (DOC-6) owns the concrete claude-mpm coordination.
-   **Owner/DOC-6:** what is the canonical claude-mpm package name (pipx vs uvx),
-   the version to pin in the first BOM, and the authoritative raw `CHANGELOG.md`
-   URL?
+5. **Changelog conformance enforcement — best-effort parsing, NO CI gate
+   (CHANGED).** *Diverges from the draft.* Keep a Changelog remains the
+   expected/parse-target format, but headline extraction is **best-effort**: on a
+   non-conforming or missing changelog the controller **degrades gracefully**
+   (omits/skips headlines for that tool and surfaces a soft note) rather than
+   failing. There is **no CI lint gate**; conformance is a convention, not an
+   enforced gate (§5).
+
+6. **`claude-mpm` version & changelog URL pins — deferred to DOC-6.** *Confirmed.*
+   The orchestrator entry in the worked example uses placeholders in v1
+   (`version = "0.0.0"`, a `<org>` changelog URL). The canonical package name
+   (pipx vs uvx), the pinned version, and the authoritative raw `CHANGELOG.md`
+   URL are owned by the orchestrator-adapter design (DOC-6) and remain
+   placeholders here until DOC-6 finalizes them.
