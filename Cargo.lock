@@ -10870,6 +10870,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-console"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "dirs 5.0.1",
+ "http-body-util",
+ "mime_guess",
+ "open",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "which 6.0.3",
+]
+
+[[package]]
 name = "trusty-cto-db"
 version = "0.1.3"
 dependencies = [
