@@ -90,7 +90,7 @@ async fn run_status_for_cwd(
                 "✗".red(),
                 cwd.display()
             );
-            std::process::exit(1);
+            anyhow::bail!("no index registered for current directory");
         }
         1 => {
             let m = &matches[0];
@@ -110,7 +110,9 @@ async fn run_status_for_cwd(
                     eprintln!("    {} ({})", m.id.bold(), m.root_path.display());
                 }
                 eprintln!("Re-run: trusty-search index-status <id> --watch");
-                std::process::exit(1);
+                anyhow::bail!(
+                    "--watch requires an explicit index id when multiple indexes cover cwd"
+                );
             }
             // No watch: print all tables in turn using the pre-fetched bodies.
             // (Re-fetching is unnecessary for a static snapshot.)
@@ -223,6 +225,17 @@ async fn fetch_status(client: &reqwest::Client, url: &str) -> Result<serde_json:
 
 // ─── Rendering helpers ────────────────────────────────────────────────────────
 
+/// Number of lines rendered by `print_status_table`: 1 header + 3 stage rows.
+///
+/// Why: the TTY-clear path uses `\x1b[{N}F` (cursor-up N lines) to overwrite
+/// the previous table in-place. This constant must stay equal to the actual
+/// rendered line count — header plus one row per stage (lexical/semantic/graph).
+/// If the table gains or loses rows, update this constant and the comment.
+/// What: used by `print_status_table_tty_clear` to build the cursor-up escape.
+/// Test: visually — a wrong value causes either a scrolling table or garbled
+/// output. There is no mechanical test because it requires a live TTY.
+const WATCH_TABLE_LINES: usize = 4; // 1 header + 3 stage rows (lexical/semantic/graph)
+
 /// Render a 3-row stage table to stdout (single-shot or TTY watch mode).
 ///
 /// Why: both the single-shot path and the TTY watch path need the same
@@ -246,13 +259,14 @@ pub fn print_status_table(index_id: &str, body: &serde_json::Value) {
 /// Why: without erasure, each 1-second poll appends 5 new lines, scrolling
 /// the terminal. The ANSI escape moves the cursor up and clears the lines
 /// rendered on the previous iteration so the table appears to update in place.
-/// What: prints `\x1b[4F` (cursor up 4 lines — 1 header + 3 stage rows) and
-/// then the table; on the first call `\x1b[0J` (clear to end-of-screen)
-/// ensures the viewport is clean.
+/// What: prints `\x1b[{WATCH_TABLE_LINES}F` (cursor up N lines — 1 header +
+/// 3 stage rows) and then the table; `\x1b[0J` (clear to end-of-screen)
+/// ensures the viewport is clean. The line count is `WATCH_TABLE_LINES` —
+/// **it must equal the number of lines `print_status_table` actually emits**.
 /// Test: covered via integration; the escape sequence is only emitted on a TTY.
 fn print_status_table_tty_clear(index_id: &str, body: &serde_json::Value) {
-    // Move cursor up 4 lines (1 header + 3 stage rows) to overwrite previous.
-    print!("\x1b[4F\x1b[0J");
+    // Move cursor up WATCH_TABLE_LINES (1 header + 3 stage rows) to overwrite.
+    print!("\x1b[{WATCH_TABLE_LINES}F\x1b[0J");
     print_status_table(index_id, body);
 }
 
@@ -284,6 +298,22 @@ fn print_status_line_nontty(index_id: &str, body: &serde_json::Value) {
     }
 }
 
+/// Truncate a failure-reason string to at most 80 display characters.
+///
+/// Why: raw failure reasons can be multi-kilobyte stack traces; rendering them
+/// verbatim breaks the terminal table layout.
+/// What: if `msg` exceeds 80 chars, returns the first 79 chars followed by `…`
+/// (Unicode ellipsis, one column wide), giving exactly 80 displayed columns.
+/// If `msg` fits, returns it unchanged as an owned `String`.
+/// Test: `failure_message_truncated_at_80_chars` in this module's tests.
+pub fn truncate_reason(msg: &str) -> String {
+    if msg.len() > 80 {
+        format!("{}…", &msg[..79])
+    } else {
+        msg.to_string()
+    }
+}
+
 /// Render one stage row: `  <label>   <status>   [progress]`.
 ///
 /// Why: keeps stage-row formatting consistent and testable in isolation.
@@ -306,13 +336,10 @@ pub fn print_stage_row(label: &str, stage: Option<&serde_json::Value>) {
     // Embed progress: show when `embedded` or `total` are present.
     let embedded = stage.get("embedded").and_then(|v| v.as_u64());
     let total = stage.get("total").and_then(|v| v.as_u64());
-    let failure = stage.get("failure").and_then(|v| v.as_str()).map(|s| {
-        if s.len() > 80 {
-            format!("{}…", &s[..79])
-        } else {
-            s.to_string()
-        }
-    });
+    let failure = stage
+        .get("failure")
+        .and_then(|v| v.as_str())
+        .map(truncate_reason);
 
     match (embedded, total, failure) {
         (Some(emb), Some(tot), _) if tot > 0 => {
@@ -382,15 +409,17 @@ mod tests {
         assert_eq!(colorize_status("unknown").to_string(), "unknown");
     }
 
-    /// `print_stage_row` must include `embedded / total (N%)` when both fields
-    /// are present and `total > 0`.
+    /// `format_with_commas` formats embed progress numbers correctly and the
+    /// percentage arithmetic is correct for a known sample.
     ///
-    /// Why: operators need to see numeric embed progress, not just "in_progress".
-    /// What: constructs a synthetic stage JSON with `embedded=62914` and
-    /// `total=152616`, captures stdout, and asserts the formatted numbers appear.
+    /// Why: guards the formatting helpers used by `print_stage_row` so a
+    /// refactor of the comma-formatter or arithmetic cannot silently break
+    /// the rendered output operators rely on.
+    /// What: checks that `format_with_commas` produces comma-separated strings
+    /// and that integer percent truncation gives 41% for 62914/152616.
     /// Test: this test.
     #[test]
-    fn render_stage_row_shows_embed_progress() {
+    fn embed_progress_pct_arithmetic() {
         colored::control::set_override(false);
         let embedded: u64 = 62_914;
         let total: u64 = 152_616;
@@ -400,23 +429,36 @@ mod tests {
         assert_eq!(format_with_commas(total), "152,616");
     }
 
-    /// `print_stage_row` truncates long failure messages to ≤ 81 chars
-    /// (80 chars + ellipsis).
+    /// `truncate_reason` truncates long failure messages to exactly 80 display
+    /// columns (79 chars + 1-column `…` ellipsis).
     ///
     /// Why: a 4 KB stack trace in a failure message would break the terminal
-    /// table layout.
-    /// What: constructs a stage JSON with a 200-char failure string, calls
-    /// `print_stage_row`, and asserts the display value was trimmed.
-    /// Test: this test (logic validated via the truncation expression).
+    /// table layout; this guards the production truncation path in `print_stage_row`.
+    /// What: calls `truncate_reason` with a 200-char string and a short string,
+    /// asserting the char count and pass-through behaviour respectively.
+    /// Test: this test calls the real `truncate_reason` function used by
+    /// `print_stage_row`.
     #[test]
     fn failure_message_truncated_at_80_chars() {
+        // Long message: must be truncated to 80 display columns.
         let long_msg = "x".repeat(200);
-        let truncated = if long_msg.len() > 80 {
-            format!("{}…", &long_msg[..79])
-        } else {
-            long_msg.clone()
-        };
-        assert_eq!(truncated.chars().count(), 80);
+        let truncated = truncate_reason(&long_msg);
+        assert_eq!(
+            truncated.chars().count(),
+            80,
+            "truncated string must be 79 chars + ellipsis = 80 display columns"
+        );
+        assert!(truncated.ends_with('…'), "must end with ellipsis character");
+
+        // Short message: must pass through unchanged.
+        let short_msg = "connection refused";
+        let result = truncate_reason(short_msg);
+        assert_eq!(result, short_msg, "short messages must not be modified");
+
+        // Exactly 80 chars: must pass through unchanged.
+        let exact_msg = "y".repeat(80);
+        let result = truncate_reason(&exact_msg);
+        assert_eq!(result, exact_msg, "80-char messages must not be truncated");
     }
 
     /// The percentage computation must use `checked_div` and return 0 when
