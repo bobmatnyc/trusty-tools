@@ -110,7 +110,11 @@ pub fn build_router(state: SearchAppState) -> Router {
         .route("/indexes/{id}/grep", post(grep_handler))
         .route("/indexes/{id}/search", post(search_handler))
         .route("/indexes/{id}/search_similar", post(search_similar_handler))
-        // Query timeout applied first (outermost layer = evaluated first).
+        // Concurrency limiter is outermost (evaluated first; bounds the queue
+        // wait). Query timeout is inner (starts after admission; bounds handler
+        // execution). In axum, each successive `.route_layer` call wraps the
+        // previously stacked layers, so the limiter — added last — becomes the
+        // outer layer that a request reaches first.
         .route_layer(axum::middleware::from_fn(apply_query_timeout))
         .layer(axum::Extension(Arc::clone(&query_timeout_cfg)))
         .route_layer(axum::middleware::from_fn(

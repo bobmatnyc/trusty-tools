@@ -277,20 +277,41 @@ mod tests {
             .layer(Extension(limiter))
     }
 
-    /// Build a router whose `/forever` handler never returns — simulates a
-    /// handler stalled by a blocked embedder call (the issue #907 hang scenario).
-    fn forever_router(limiter: Arc<ConcurrencyLimiter>) -> Router {
-        Router::new()
+    /// Build a router whose `/forever` handler signals a oneshot once it holds
+    /// the permit, then stalls — simulates a blocked embedder call (issue #907).
+    ///
+    /// Why: the handler must notify the test harness *after* it acquires the
+    /// permit so the second request is sent only when the semaphore is
+    /// exhausted. This makes the test deterministic; a time-based sleep was
+    /// the flaky pattern this replaces.
+    /// What: returns the router and a oneshot receiver that fires when the
+    /// in-flight handler has acquired its permit.
+    /// Test: `queue_wait_returns_503_on_timeout`.
+    fn forever_router_with_signal(
+        limiter: Arc<ConcurrencyLimiter>,
+    ) -> (Router, tokio::sync::oneshot::Receiver<()>) {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        // Wrap in Arc<Mutex<Option<…>>> so we can move into the async closure
+        // and take the sender exactly once.
+        let tx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(tx)));
+        let router = Router::new()
             .route(
                 "/forever",
-                get(|| async {
-                    // This future is never resolved in the test; the router will
-                    // just drop it when we don't await the oneshot.
-                    std::future::pending::<&str>().await
+                get(move || {
+                    let tx = std::sync::Arc::clone(&tx);
+                    async move {
+                        // Signal: we now hold the permit.
+                        if let Some(sender) = tx.lock().await.take() {
+                            let _ = sender.send(());
+                        }
+                        // Stall forever — never resolves during the test.
+                        std::future::pending::<&str>().await
+                    }
                 }),
             )
             .route_layer(axum::middleware::from_fn(apply_limiter))
-            .layer(Extension(limiter))
+            .layer(Extension(limiter));
+        (router, rx)
     }
 
     #[tokio::test]
@@ -353,22 +374,23 @@ mod tests {
         let _ = in_flight.await;
     }
 
-    /// Prove that a request waiting in the semaphore queue returns 503 (not
-    /// a hang) when the queue-wait deadline expires (issue #907 fix 2).
+    /// Prove that a request waiting in the semaphore queue returns 503 (not a
+    /// hang) when the queue-wait deadline expires (issue #907 fix 2).
     ///
-    /// Why: before this fix `.acquire_owned().await` blocked forever when all
+    /// Why: before the fix `.acquire_owned().await` blocked forever when all
     /// permits were held by a stalled operation. The fix wraps the await in
-    /// `tokio::time::timeout`; this test proves it fires.
+    /// `tokio::time::timeout`; this test proves it fires deterministically.
     /// What: 1 permit, queue depth 1, timeout 50 ms. A first request holds the
-    /// permit indefinitely. A second request is admitted to the queue and waits.
-    /// After the timeout the second request must receive 503, not hang.
+    /// permit and fires a oneshot once admitted. Only after that signal is the
+    /// second request sent, guaranteeing the semaphore is exhausted. The second
+    /// request must receive 503 after ~50 ms, not hang.
     /// Test: this test.
     #[tokio::test]
     async fn queue_wait_returns_503_on_timeout() {
         // 1 permit, 1 queue slot, 50 ms deadline — the second request will be
         // admitted to the queue but time out before the first request finishes.
         let limiter = ConcurrencyLimiter::with_limits_and_timeout(1, 1, Duration::from_millis(50));
-        let app = forever_router(limiter);
+        let (app, permit_acquired) = forever_router_with_signal(limiter);
 
         let req = || {
             Request::builder()
@@ -379,8 +401,14 @@ mod tests {
 
         // Kick off the first request — it grabs the only permit and stalls.
         let _in_flight = tokio::spawn(app.clone().oneshot(req()));
-        // Yield to let the first request acquire the permit.
-        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        // Wait until the first request signals it holds the permit.  This
+        // replaces the timing-sensitive `sleep(5ms)` with a deterministic
+        // signal so the second request is sent only after admission is
+        // confirmed and the semaphore is definitely exhausted.
+        permit_acquired
+            .await
+            .expect("in-flight handler must send the permit-acquired signal");
 
         // Second request: admitted to the queue but should 503 after ~50 ms.
         let start = std::time::Instant::now();
