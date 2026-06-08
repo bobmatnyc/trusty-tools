@@ -76,7 +76,11 @@ enum Command {
     /// way to take it down that does not depend on launchd / systemd.
     Stop,
 
-    /// Run the daemon.
+    /// Run the daemon.  Mode matrix (#914 PR4):
+    ///   serve                  → HTTP daemon (default, dynamic port, background)
+    ///   serve --http[=ADDR]    → explicit HTTP; optional bind address
+    ///   serve --foreground     → HTTP in foreground (launchd / systemd)
+    ///   serve --stdio          → direct stdio JSON-RPC MCP server (Claude Code)
     ///
     /// Default mode is HTTP/SSE with dynamic port selection (7070..=7079, OS
     /// fallback). Without `--foreground`, `serve` self-spawns a detached
@@ -93,10 +97,19 @@ enum Command {
     /// another process.  Every request resolves within a deadline — success
     /// or an explicit JSON-RPC error — so the MCP client never hangs.
     Serve {
-        /// Bind the HTTP/SSE server to a specific address. When omitted,
-        /// the daemon binds dynamically.
-        #[arg(long, value_name = "ADDR", conflicts_with = "stdio")]
-        http: Option<SocketAddr>,
+        /// Select HTTP mode explicitly with an optional bind address.
+        ///
+        /// `--http` (bare): dynamic port (same as bare `serve`).
+        /// `--http 127.0.0.1:7070`: bind that exact address.
+        /// Absent: default HTTP mode — bare `serve` behaviour unchanged.
+        #[arg(
+            long,
+            value_name = "ADDR",
+            num_args = 0..=1,
+            require_equals = false,
+            conflicts_with = "stdio"
+        )]
+        http: Option<Option<SocketAddr>>,
 
         /// Run the HTTP daemon in the foreground (do not self-spawn).
         ///
@@ -541,7 +554,11 @@ async fn main() -> Result<()> {
             if stdio {
                 run_serve_stdio(palace).await
             } else {
-                run_serve(http, foreground, palace, log_buffer, error_store).await
+                // Flatten Option<Option<SocketAddr>> → Option<SocketAddr>.
+                // --http (bare) → Some(None) → flatten → None → dynamic port.
+                // --http ADDR   → Some(Some(addr)) → flatten → Some(addr).
+                // absent        → None → flatten → None → dynamic port.
+                run_serve(http.flatten(), foreground, palace, log_buffer, error_store).await
             }
         }
         Command::Migrate {
@@ -656,7 +673,7 @@ async fn run_serve_stdio(palace: Option<String>) -> Result<()> {
     trusty_memory::commands::serve_stdio::run_stdio(data_root, palace).await
 }
 
-/// Dispatch `serve` to the HTTP server (background spawn or inline foreground).
+/// Dispatch `serve` (HTTP path) to the HTTP server.
 ///
 /// Why: keeps `main` focused on parsing while `AppState` construction lives
 /// in one place. The direct `--stdio` path (`serve --stdio`, PR1 #919) is
@@ -969,6 +986,10 @@ fn spawn_startup_tasks(state: &AppState) {
     });
 }
 
+// CLI parse tests: `serve --http` / `--stdio` semantics (#914 PR4)
+#[cfg(test)]
+#[path = "cli_tests.rs"]
+mod cli_tests;
 // ---------------------------------------------------------------------------
 // Tests for spawn_startup_tasks (#474)
 // ---------------------------------------------------------------------------

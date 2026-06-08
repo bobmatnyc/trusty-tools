@@ -8,7 +8,7 @@
 //! removed alongside them. The remaining HTTP and sustained-load tests still
 //! provide meaningful concurrency coverage.
 //!
-//! What: five `#[ignore]`-tagged integration tests that each measure a
+//! What: four `#[ignore]`-tagged integration tests that each measure a
 //! different facet of the live daemon's concurrent-performance envelope:
 //!   - HTTP concurrent reads (`test_http_concurrent_reads`)
 //!   - HTTP concurrent mixed reads + writes (`test_http_concurrent_rw`)

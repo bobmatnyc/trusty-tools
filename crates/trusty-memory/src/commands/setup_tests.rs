@@ -257,3 +257,43 @@ fn patch_one_installs_hook_when_mcp_already_present() {
     assert!(!outcome.mcp_wrote, "MCP entry already present");
     assert!(outcome.hook_wrote, "hook freshly installed");
 }
+
+/// Why: regression for the PR3→PR4 upgrade path — an existing install whose
+/// Claude settings file has the old MCP entry shape `args: ["serve"]` (no
+/// `--stdio`, written before PR2 landed) must be rewritten to `args:
+/// ["serve", "--stdio"]` when `setup` (or `migrate kuzu-memory`) is re-run.
+/// Without this check the setup code could silently leave a stale entry
+/// pointing at the HTTP-daemon path, breaking direct-stdio Claude Code
+/// integration even after the binary upgrade.
+/// What: seeds a settings file with the pre-PR2 MCP entry shape (`args:
+/// ["serve"]`), calls `patch_one` with the current canonical entry (`args:
+/// ["serve", "--stdio"]`), and asserts `mcp_wrote = true` (the stale entry
+/// was replaced) and that the written file contains the `--stdio` arg.
+/// Test: this function (upgrade-path regression guard, issue #914 PR4).
+#[test]
+fn patch_one_upgrades_serve_entry_to_serve_stdio() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("settings.json");
+    // Old-shape entry: `args: ["serve"]` — written by pre-PR2 releases.
+    let seed = json!({
+        "mcpServers": {
+            MCP_SERVER_KEY: { "command": "trusty-memory", "args": ["serve"] }
+        }
+    });
+    std::fs::write(&path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
+
+    let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
+    let outcome = patch_one(&path, &entry).expect("patch ok");
+    assert!(
+        outcome.mcp_wrote,
+        "old args:[\"serve\"] entry must be rewritten to args:[\"serve\",\"--stdio\"]"
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let args = value["mcpServers"][MCP_SERVER_KEY]["args"]
+        .as_array()
+        .expect("args array present after upgrade");
+    assert_eq!(args[0], "serve", "first arg is 'serve'");
+    assert_eq!(args[1], "--stdio", "second arg is '--stdio' after upgrade");
+}
