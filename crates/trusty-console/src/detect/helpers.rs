@@ -69,10 +69,13 @@ pub(super) fn tcp_probe(addr: &str) -> bool {
 ///
 /// Why: When the daemon is Running we surface the version in the card so
 /// operators can see at a glance which build is deployed.
-/// What: Issues a minimal HTTP/1.1 GET over a raw `TcpStream` with a 1s
-/// read timeout. Uses no external HTTP client so detect() stays sync-only
-/// without pulling in reqwest blocking. Returns `None` on any error
-/// (network, parse, missing field) — the caller degrades gracefully.
+/// What: Issues a minimal HTTP/1.0 GET over a raw `TcpStream` with a 1 s
+/// read timeout. HTTP/1.0 is used deliberately — servers do not send
+/// `Transfer-Encoding: chunked` in HTTP/1.0 responses, so the raw body can
+/// be parsed without a chunked-transfer decoder. Uses no external HTTP
+/// client so detect() stays sync-only without pulling in reqwest blocking.
+/// Returns `None` on any error (network, parse, missing field) — the caller
+/// degrades gracefully.
 /// Test: Not tested against a real daemon in unit tests; the server
 /// integration test in `server.rs` verifies the overall JSON shape.
 pub(super) fn fetch_health_version(addr: &str) -> Option<String> {
@@ -84,7 +87,9 @@ pub(super) fn fetch_health_version(addr: &str) -> Option<String> {
         .set_read_timeout(Some(Duration::from_millis(800)))
         .ok()?;
 
-    let request = format!("GET /health HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    // HTTP/1.0: server must not use Transfer-Encoding: chunked, so we can
+    // read the body directly after the blank-line separator.
+    let request = format!("GET /health HTTP/1.0\r\nHost: {addr}\r\n\r\n");
     stream.write_all(request.as_bytes()).ok()?;
 
     let mut buf = Vec::new();
@@ -195,13 +200,33 @@ mod tests {
 
     // ── tcp_probe ───────────────────────────────────────────────────────────
 
-    /// Why: unreachable port must yield false (not panic).
-    /// What: probes a port almost certainly unused in CI (14999).
+    /// Why: a closed port must yield false (not panic or block).
+    /// What: binds port 0 (OS assigns a free port), captures the addr, drops
+    /// the listener so the port closes, then asserts tcp_probe returns false.
+    /// Using an OS-assigned port avoids CI flap from hardcoded port numbers.
     /// Test: this test itself.
     #[test]
     fn test_tcp_probe_unreachable() {
-        // Port 14999 is unlikely to be in use in any CI environment.
-        assert!(!tcp_probe("127.0.0.1:14999"));
+        use std::net::TcpListener;
+        // Bind to get a free OS port, then drop so the port is closed.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind free port");
+        let addr = listener.local_addr().expect("local_addr").to_string();
+        drop(listener);
+        assert!(!tcp_probe(&addr), "closed port must return false");
+    }
+
+    /// Why: a listening port must yield true.
+    /// What: binds port 0, keeps the listener alive, asserts tcp_probe returns
+    /// true against that addr, then drops the listener to release the port.
+    /// Test: this test itself.
+    #[test]
+    fn test_tcp_probe_reachable() {
+        use std::net::TcpListener;
+        // Keep the listener alive while probing — port must be open.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind free port");
+        let addr = listener.local_addr().expect("local_addr").to_string();
+        assert!(tcp_probe(&addr), "listening port must return true");
+        drop(listener);
     }
 
     /// Why: malformed address must not panic.

@@ -101,6 +101,15 @@ impl ServiceConnector for AnalyzeConnector {
     /// Test: `test_analyze_connector_with_stale_addr_file`,
     /// `test_analyze_connector_no_addr_file`.
     fn detect(&self) -> ServiceInfo {
+        // Why: this method intentionally re-implements detection rather than
+        // delegating to the shared `detect_service()` helper in helpers.rs.
+        // `detect_service()` only tries the addr-file path; it has no fallback
+        // to a well-known default port. trusty-analyze may be running on its
+        // fixed default port (7879) without having written an http_addr file
+        // (e.g. launched manually or upgraded in place). The extra
+        // default-port probe below covers that case. Do not "simplify" this
+        // by calling detect_service() — the fallback step would be silently
+        // dropped and the daemon would appear as Available when it is Running.
         if !binary_on_path("trusty-analyze") {
             return ServiceInfo {
                 id: self.id().to_string(),
