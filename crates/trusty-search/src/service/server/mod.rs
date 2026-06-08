@@ -27,6 +27,8 @@ mod tickers;
 
 // cfg(test) sub-modules — each < 500 lines
 #[cfg(test)]
+mod tests_denylist;
+#[cfg(test)]
 mod tests_grep;
 #[cfg(test)]
 mod tests_health;

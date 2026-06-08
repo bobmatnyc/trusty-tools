@@ -41,6 +41,7 @@ pub mod discover;
 pub mod doctor;
 pub mod index;
 pub mod index_allowlist;
+pub(crate) mod index_persist;
 pub mod index_remove;
 pub mod init;
 pub mod integrate;

@@ -247,6 +247,12 @@ async fn create_index_rejects_nonexistent_root_path() {
 /// the symlink alias, the walker emits file paths under the alias, and
 /// search queries from the canonical mount point return zero hits because
 /// `file_is_within_root` won't match.
+///
+/// Note: `tempfile::tempdir()` creates dirs under `/tmp/` which is now in
+/// the sensitive-root denylist. This test uses a directory under
+/// `std::env::current_dir()` (the workspace root, not under /tmp) so that
+/// `validate_root_path` accepts the directory while still exercising the
+/// symlink-canonicalization logic.
 #[cfg(unix)]
 #[tokio::test]
 async fn create_index_canonicalizes_symlinked_root_path() {
@@ -259,11 +265,14 @@ async fn create_index_canonicalizes_symlinked_root_path() {
     state.install_embedder(embedder).await;
     let state_arc = Arc::new(state);
 
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let real_root = std::fs::canonicalize(tmp.path()).expect("canonicalize real root");
-    let parent = real_root.parent().expect("tempdir has parent");
-    let link_path = parent.join(format!(
-        "trusty-search-server-symlink-{}",
+    // Create a non-denied real directory under the workspace root so the
+    // denylist does not block the registration. /tmp is denied.
+    let cwd = std::env::current_dir().expect("cwd");
+    let real_root = cwd.join(format!("target/test-symlink-real-{}", std::process::id()));
+    std::fs::create_dir_all(&real_root).expect("create real_root");
+    let real_root = std::fs::canonicalize(&real_root).expect("canonicalize real root");
+    let link_path = cwd.join(format!(
+        "target/trusty-search-server-symlink-{}",
         std::process::id()
     ));
     let _ = std::fs::remove_file(&link_path);
@@ -290,6 +299,7 @@ async fn create_index_canonicalizes_symlinked_root_path() {
     )
     .await;
     let _ = std::fs::remove_file(&link_path); // best-effort cleanup
+    let _ = std::fs::remove_dir_all(&real_root);
     assert_eq!(resp.status(), StatusCode::OK);
 
     let handle = state_arc
@@ -307,6 +317,10 @@ async fn create_index_canonicalizes_symlinked_root_path() {
 }
 
 /// Issue #63: an absolute, existing directory must be accepted.
+///
+/// Note: uses a non-denied path (under the workspace `target/` directory)
+/// rather than `tempfile::tempdir()` (which creates dirs under `/tmp/`,
+/// now in the sensitive-root denylist).
 #[tokio::test]
 async fn create_index_accepts_valid_absolute_root_path() {
     use crate::core::registry::IndexRegistry;
@@ -315,12 +329,17 @@ async fn create_index_accepts_valid_absolute_root_path() {
     let embedder: Arc<dyn Embedder> = Arc::new(crate::core::embed::MockEmbedder::new(8));
     state.install_embedder(embedder).await;
     let state_arc = Arc::new(state);
-    let tmp = tempfile::tempdir().expect("tempdir");
+
+    // Use a directory under the workspace root (not /tmp) so the denylist passes.
+    let cwd = std::env::current_dir().expect("cwd");
+    let test_dir = cwd.join(format!("target/test-valid-abs-{}", std::process::id()));
+    std::fs::create_dir_all(&test_dir).expect("create test_dir");
+
     let resp = create_index_handler(
         State(Arc::clone(&state_arc)),
         Json(CreateIndexRequest {
             id: "valid-abs".into(),
-            root_path: tmp.path().to_path_buf(),
+            root_path: test_dir.clone(),
             include_paths: None,
             exclude_globs: None,
             extensions: None,
@@ -333,5 +352,7 @@ async fn create_index_accepts_valid_absolute_root_path() {
         }),
     )
     .await;
+    let _ = std::fs::remove_dir_all(&test_dir); // best-effort cleanup
     assert_eq!(resp.status(), StatusCode::OK);
 }
+// Denylist tests live in `tests_denylist.rs` (split to keep this file ≤ 500 lines).

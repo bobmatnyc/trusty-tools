@@ -6,12 +6,27 @@
 //! avoids duplication and keeps the 500-line cap on each handler file.
 //! What: `validate_root_path`, `file_is_within_root`,
 //! `embedder_initializing_response`, `embedder_error_response`.
-//! Test: `file_is_within_root_*` and `create_index_canonicalizes_*` tests.
+//! Test: `file_is_within_root_*`, `create_index_canonicalizes_*`, and
+//! `validate_root_path_denylist_*` tests.
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Json, Response},
 };
 
+/// Validate `path` as a safe, canonical root for indexing.
+///
+/// Why: Defense-in-depth for the daemon — even when the CLI-side check
+/// (`commands/index.rs`) is bypassed (direct HTTP calls, MCP tools, scripts),
+/// the daemon must refuse sensitive roots. The hard denylist in
+/// `crate::allowlist::is_denied` is the authoritative gate; this function
+/// applies it **after** canonicalization so symlink tricks or `..` traversals
+/// cannot bypass the check.
+/// What: in order — (1) rejects empty/non-absolute/non-dir paths; (2)
+/// canonicalizes via `std::fs::canonicalize` to resolve symlinks; (3) calls
+/// `crate::allowlist::is_denied` on the canonical path and returns 400 with the
+/// denial reason when matched.
+/// Test: `validate_root_path_denylist_rejects_ssh`, `_rejects_home`,
+/// `_rejects_tmp`, `_accepts_project_dir` in `tests_index.rs`.
 #[allow(clippy::result_large_err)]
 pub(super) fn validate_root_path(path: &std::path::Path) -> Result<std::path::PathBuf, Response> {
     if path.as_os_str().is_empty() {
@@ -56,20 +71,36 @@ pub(super) fn validate_root_path(path: &std::path::Path) -> Result<std::path::Pa
     // a 400 with the underlying I/O error rather than fall back to the
     // un-canonicalized path — half-resolved paths are exactly what produced the
     // mismatch in the first place.
-    match std::fs::canonicalize(path) {
-        Ok(canonical) => Ok(canonical),
-        Err(e) => Err((
+    let canonical = match std::fs::canonicalize(path) {
+        Ok(p) => p,
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "root_path {:?} could not be canonicalized: {}",
+                        path.display().to_string(),
+                        e
+                    ),
+                })),
+            )
+                .into_response());
+        }
+    };
+    // Hard denylist check on the canonical path — symlinks and `..` traversals
+    // are already resolved above, so no bypass is possible.
+    if let Some(reason) = crate::allowlist::is_denied(&canonical) {
+        return Err((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "error": format!(
-                    "root_path {:?} could not be canonicalized: {}",
-                    path.display().to_string(),
-                    e
+                    "indexing refused: {reason}"
                 ),
             })),
         )
-            .into_response()),
+            .into_response());
     }
+    Ok(canonical)
 }
 
 /// Determine whether a chunk's stored `file` field falls within an index's

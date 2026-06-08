@@ -36,15 +36,19 @@ async fn create_index_returns_503_with_error_when_embedder_failed() {
         .install_embedder_error("init timed out after 60s")
         .await;
     let state_arc = Arc::new(state);
-    // Use a real tempdir so the issue #63 root_path validator (which now
-    // runs ahead of the embedder check) accepts the path and the
-    // handler proceeds to the embedder-error branch we're asserting on.
-    let tmp = tempfile::tempdir().expect("tempdir");
+    // Use a real non-denied directory so the `validate_root_path` guard
+    // (issue #63 + index-denylist) accepts the path and the handler
+    // proceeds to the embedder-error branch we're asserting on.
+    // Note: `tempfile::tempdir()` creates dirs under /tmp which is now
+    // in the sensitive-root denylist — use target/ under the workspace root.
+    let cwd = std::env::current_dir().expect("cwd");
+    let test_dir = cwd.join(format!("target/test-embedder-fail-{}", std::process::id()));
+    std::fs::create_dir_all(&test_dir).expect("create test_dir");
     let resp = create_index_handler(
         State(state_arc),
         Json(CreateIndexRequest {
             id: "demo".to_string(),
-            root_path: tmp.path().to_path_buf(),
+            root_path: test_dir.clone(),
             include_paths: None,
             exclude_globs: None,
             extensions: None,
@@ -74,6 +78,7 @@ async fn create_index_returns_503_with_error_when_embedder_failed() {
         err_str.contains("init timed out after 60s"),
         "expected recorded timeout message to be surfaced, got: {err_str}",
     );
+    let _ = std::fs::remove_dir_all(&test_dir); // best-effort cleanup
 }
 
 /// Issue #121: after the embedder is installed successfully, a previously
