@@ -24,7 +24,7 @@ use serde_json::json;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::connector::{ServiceConnector, ServiceInfo};
+use crate::connector::ServiceConnector;
 
 // ─── embedded UI ─────────────────────────────────────────────────────────────
 
@@ -109,16 +109,24 @@ async fn health_handler() -> impl IntoResponse {
 /// Why: The Svelte SPA fetches this endpoint on load to render service cards.
 /// What: Iterates the connector list, calls `detect()` on each, serialises the
 /// results to JSON. detect() is CPU-bound but fast (file reads + TCP probes);
-/// run in a blocking task to avoid blocking the async runtime.
-/// Test: `test_services_route_returns_json` below.
-async fn services_handler(State(state): State<AppState>) -> impl IntoResponse {
+/// run in a blocking task to avoid blocking the async runtime. A panic in the
+/// blocking task is surfaced as HTTP 500 rather than silently returning an
+/// empty list (which would be indistinguishable from "no services installed").
+/// Test: `test_services_route_returns_json` and
+/// `test_services_handler_returns_500_on_panic` below.
+async fn services_handler(State(state): State<AppState>) -> axum::response::Response {
     let connectors = state.connectors.clone();
-    let infos: Vec<ServiceInfo> =
-        tokio::task::spawn_blocking(move || connectors.iter().map(|c| c.detect()).collect())
-            .await
-            .unwrap_or_default();
-
-    axum::Json(infos)
+    match tokio::task::spawn_blocking(move || {
+        connectors.iter().map(|c| c.detect()).collect::<Vec<_>>()
+    })
+    .await
+    {
+        Ok(infos) => axum::Json(infos).into_response(),
+        Err(e) => {
+            tracing::error!("service detection task panicked: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 /// `GET /` — serve the SPA index.html.
@@ -325,5 +333,39 @@ mod tests {
             .unwrap_or("")
             .to_string();
         assert!(ct.contains("text/html"), "expected text/html, got: {ct}");
+    }
+
+    /// A connector whose `detect()` always panics — simulates a buggy plugin.
+    struct PanicConnector;
+
+    impl ServiceConnector for PanicConnector {
+        fn id(&self) -> &'static str {
+            "panic-svc"
+        }
+        fn display_name(&self) -> &'static str {
+            "Panic Service"
+        }
+        fn detect(&self) -> ServiceInfo {
+            panic!("intentional test panic from PanicConnector");
+        }
+    }
+
+    /// Why: a panicking connector must not silently return HTTP 200 with an
+    /// empty list — that is indistinguishable from "no services installed".
+    /// The handler must return HTTP 500 so the UI can display an error state.
+    /// What: builds the router with a PanicConnector, issues GET
+    /// /api/console/services, asserts the response status is 500.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn test_services_handler_returns_500_on_panic() {
+        let state = AppState::new(vec![Box::new(PanicConnector)]);
+        let router = build_router(state);
+
+        let req = Request::builder()
+            .uri("/api/console/services")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

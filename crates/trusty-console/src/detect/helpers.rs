@@ -49,18 +49,20 @@ pub(super) fn read_addr_file(path: &std::path::Path) -> Option<String> {
 /// Why: The discovery file may be stale (daemon crashed without cleanup). A
 /// fast TCP probe confirms the port is actually open before we call it Running.
 /// What: Attempts a non-blocking TCP connect with a 300 ms timeout. Returns
-/// `true` only on a successful connection.
-/// Test: `test_tcp_probe_unreachable` below.
+/// `true` only on a successful connection. Returns `false` immediately if
+/// `addr` cannot be parsed as a `SocketAddr` (no fallback to a random port,
+/// which could produce a misleading `false` connection result).
+/// Test: `test_tcp_probe_unreachable` and `test_tcp_probe_malformed_addr` below.
 pub(super) fn tcp_probe(addr: &str) -> bool {
-    if let Ok(stream) = TcpStream::connect_timeout(
-        &addr.parse().ok().unwrap_or("127.0.0.1:1".parse().unwrap()),
-        Duration::from_millis(300),
-    ) {
-        drop(stream);
-        true
-    } else {
-        false
-    }
+    let Ok(socket_addr) = addr.parse() else {
+        return false;
+    };
+    TcpStream::connect_timeout(&socket_addr, Duration::from_millis(300))
+        .map(|s| {
+            drop(s);
+            true
+        })
+        .unwrap_or(false)
 }
 
 /// Fetch `/health` from `host:port` and extract the `version` field.

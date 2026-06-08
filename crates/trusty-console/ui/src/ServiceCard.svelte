@@ -14,8 +14,8 @@
     absent: '#64748b',
   };
 
-  $derived: var statusLabel = STATUS_LABELS[service.status] ?? service.status;
-  $derived: var statusColor = STATUS_COLORS[service.status] ?? '#94a3b8';
+  let statusLabel = $derived(STATUS_LABELS[service.status] ?? service.status);
+  let statusColor = $derived(STATUS_COLORS[service.status] ?? '#94a3b8');
 </script>
 
 <div class="card">
