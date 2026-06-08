@@ -172,34 +172,111 @@ Cleanest long-term answer; do after Phase 1 proves the normalized output shape.
 
 ## 7. Gotchas the build session must handle
 
-- **SARIF version is opt-in.** Roslyn's `ErrorLog` defaults to **legacy SARIF
-  v1**. Pass `version=2` or `version=2.1` (both mean 2.1.0). The literal
-  `version=2.1.0` is **rejected** (dotnet/roslyn#45644). This is the *same*
-  2.1.0 detekt emits — `runs[].results[]`, `ruleId`, `message.text`,
-  `physicalLocation`, `level` — so the parser shape is known.
-- **Comma collides with MSBuild `-p:` parsing.** `-p:ErrorLog=out.sarif,version=2.1`
-  can make MSBuild treat `version` as a separate property. **Verify the exact
-  Linux syntax** (semicolon escaping vs quoting vs response file) before relying
-  on it — open question O1 below.
+- **Comma MUST be `%2C`-escaped — RESOLVED EMPIRICALLY (was O1).** Tested on
+  `dotnet 10.0.107` (macOS) against `HotStats.Crypto`:
+
+  | `-p:` form | SARIF produced |
+  |---|---|
+  | `ErrorLog=out.sarif,version=2.1` (bare comma) | ❌ silently **v1.0.0** (`version` swallowed as a separate property) |
+  | `"ErrorLog=out.sarif,version=2.1"` (quoted whole value) | ❌ **no SARIF file** |
+  | `ErrorLog=out.sarif%2Cversion=2.1` (**escaped comma**) | ✅ **v2.1.0** |
+  | `ErrorLog=out.sarif,version=2` | ❌ v1.0.0 |
+
+  The collision is in MSBuild's `-p:` property parser, **not** the shell, so the
+  `%2C` escape is required even when passing the arg as a single argv element
+  from Rust. Adapter builds the arg as
+  `format!("-p:ErrorLog={path}%2Cversion=2.1")`. Getting this wrong fails
+  *silently* (a valid file, wrong version) — the most dangerous failure mode.
+- **SARIF version is opt-in.** Roslyn's `ErrorLog` defaults to legacy SARIF v1;
+  the literal `version=2.1.0` is rejected (dotnet/roslyn#45644). The emitted
+  2.1.0 is the *same* shape detekt uses (`runs[].results[]`, `ruleId`,
+  `message.text`, `physicalLocation`, `level`) — **confirmed by inspecting real
+  output** (§7.1).
+- **`artifactLocation.uri` is a `file://` ABSOLUTE URI — NEW gotcha.** Verified:
+  Roslyn emits `file:///Users/.../Crypto.cs`, *not* a relative `A.kt` like
+  detekt. The file-filter step (`file_matches`) must strip the `file://` scheme
+  and compare absolute paths, not assume a relative tail. This is a concrete
+  delta from the detekt parser and another reason to keep them separate.
 - **Output is native but NOT strictly schema-conformant.** Keep the parser
-  lenient (no SARIF-schema validator). This non-conformance is the concrete
-  reason the C# parser stays separate from detekt's.
+  lenient (no SARIF-schema validator).
 - **Performance is the real risk.** Cold build = restore + full compile. Design
-  the build/cache/latency story deliberately (Phase 1.4) — this is where the
-  adapter is genuinely unlike its 9 siblings.
+  the build/cache/latency story deliberately (Phase 1.4).
 
-## 8. Optional signal boost (zero extra build cost)
+### 7.1 Captured real SARIF result (use as the Phase-0 test fixture)
 
-Add analyzer NuGets via `PackageReference` / `Directory.Build.props`:
-`StyleCop.Analyzers`, `SonarAnalyzer.CSharp` — they fire during the same build
-and flow through the same ErrorLog SARIF. **Skip Security Code Scan**: original
-package deprecated; successor `SecurityCodeScan.VS2019` stale at 5.6.7 since
-Sept 2022.
+From `dotnet build HotStats.Crypto.csproj --no-restore
+-p:ErrorLog=out.sarif%2Cversion=2.1 -p:EnableNETAnalyzers=true
+-p:AnalysisLevel=latest-all -p:EnforceCodeStyleInBuild=true` → **14 results**,
+8 distinct rules (CA1052, CA1305, CA1507, CA1802, CA2208, CA5379, CA5387,
+CA5401). First result, trimmed:
+
+```json
+{
+  "ruleId": "CA1052",
+  "level": "warning",
+  "message": { "text": "Type 'Crypto' is a static holder type but is neither static nor NotInheritable" },
+  "locations": [{
+    "physicalLocation": {
+      "artifactLocation": { "uri": "file:///Users/maui/dve/experiments/hotstats/HotStatsGeoAPI/HotStats.Crypto/Crypto.cs" },
+      "region": { "startLine": 15, "startColumn": 18, "endLine": 15, "endColumn": 24 }
+    }
+  }]
+}
+```
+
+The mapping is 1:1 with `sarif_result_to_diag` in `kotlin.rs` — only the `uri`
+normalization differs.
+
+## 8. Signal source — built-in analyzers via flags, no NuGet (validated)
+
+**Default path needs no `PackageReference` edits.** The .NET SDK ships the
+NetAnalyzers ruleset; enable it purely through build flags the adapter passes:
+
+```
+-p:EnableNETAnalyzers=true -p:AnalysisLevel=latest-all -p:EnforceCodeStyleInBuild=true
+```
+
+Validated on `HotStats.Crypto`: this surfaced 14 CA/IDE findings on otherwise
+clean-building code, with **zero** project-file modification. This is strictly
+better than the issue's "add analyzer NuGets" suggestion for the default path
+(no mutation of the user's tree, no restore of extra packages).
+
+*Optional* deeper signal still available by adding `StyleCop.Analyzers` /
+`SonarAnalyzer.CSharp` via `Directory.Build.props` — same ErrorLog SARIF output.
+**Skip Security Code Scan**: original package deprecated; successor
+`SecurityCodeScan.VS2019` stale at 5.6.7 since Sept 2022.
+
+## 8a. Test fixtures (on disk, ready)
+
+`dotnet 10.0.107` is on PATH. Two real C# estates are checked out locally:
+
+- **Revecore** — `/Users/maui/dve/portfolio/revecore/repos/...` (e.g.
+  `BottomLineSystems/ScopeAutomation.Api` net8.0, `ScopeAutomationConsumer`
+  net8.0).
+- **HotStats** — `/Users/maui/dve/experiments/hotstats/...` (e.g.
+  `HotStatsGeoAPI/HotStatsGeoAPI` net8.0 Web, `HotStats.Crypto` netstandard2.0 —
+  the smoke-test fixture used above, restores + builds in <1s).
+
+**Reality check that shapes the adapter and motivates Phase 2:** across both
+estates there are **584 `.csproj`, of which only 71 are SDK-style and 513 are
+legacy non-SDK** (packages.config / full-MSBuild, mostly .NET Framework). On
+macOS/Linux `dotnet build` can only touch SDK-style projects targeting .NET
+Core/5+/standard — and even some SDK-style ones target `net48`/`net472`
+(Framework) which won't build off-Windows. So:
+
+- The adapter **must gracefully skip** projects it cannot build (legacy non-SDK,
+  Framework-only TFMs) — detect and no-op, never error the whole run.
+- Realistic Phase-0/1 fixtures = the `net8.0` / `netcoreapp3.1` /
+  `netstandard2.x` SDK-style subset (HotStats.Crypto, HotStatsGeoAPI,
+  ScopeAutomation.Api, GraphTableManager, …).
+- The legacy-heavy skew is the strongest argument for **Phase 2 (generic SARIF
+  ingest)**: legacy .NET-Framework estates are built in the user's own
+  VS/MSBuild environment, which then posts SARIF — no in-tree build needed.
 
 ## 9. Open questions to resolve during the build
 
-- **O1 — MSBuild comma-escaping:** exact reliable Linux syntax to pass
-  `ErrorLog=…,version=2.1` through `dotnet build -p:` without misparsing.
+- **O1 — MSBuild comma-escaping: RESOLVED.** Use `%2C`
+  (`-p:ErrorLog=path%2Cversion=2.1`). See §7. Bare comma silently yields v1.0.0.
 - **O2 — Warm-build latency:** MSBuild-server / long-lived workspace / BuildHost
   approach to avoid repeated restore + cold compile. Decides whether C# linting
   is practically usable at scale.
@@ -217,10 +294,14 @@ Sept 2022.
   `.cs` files in an indexed real-disk .NET project, correctly filtered per file.
 - No regression to the existing 10 file-scoped adapters.
 - `RoslynTool` never panics; absent `dotnet` → silently skipped at discovery.
-- C#-private SARIF parser unit-tested against captured fixtures
-  (incl. v1-default-rejection and lenient-walk-of-non-conformant cases).
+- C#-private SARIF parser unit-tested against the captured §7.1 fixture,
+  incl. `file://`-URI normalization in the file-filter and garbage tolerance.
 - `descriptors.rs` advertises `csharp`; registry discovers `RoslynTool`.
 - Build-class timeout is configurable and defaults high enough for a cold build.
+- Adapter passes `-p:EnableNETAnalyzers=true -p:AnalysisLevel=latest-all
+  -p:EnforceCodeStyleInBuild=true` and `%2C`-escapes the ErrorLog comma.
+- Unbuildable projects (legacy non-SDK, Framework-only TFMs off-Windows) are
+  skipped gracefully, not surfaced as errors.
 
 ## 11. Key sources
 
