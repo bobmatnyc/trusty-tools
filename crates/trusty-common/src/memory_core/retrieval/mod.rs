@@ -305,6 +305,19 @@ impl PalaceHandle {
         self.kg.is_read_only() || self.vector_store.is_read_only()
     }
 
+    /// Return a clone of the write mutex for use in tests.
+    ///
+    /// Why: Tests that simulate a held write lock need access to the mutex so
+    /// they can acquire it in a background task before calling `remember`.
+    /// Exposing a test-only accessor rather than poking the field directly
+    /// keeps the field visibility flexible and makes intent explicit.
+    /// What: Returns `Arc::clone(&self.write_mutex)`.
+    /// Test: `write_lock_timeout_returns_error_when_held` in `timeout_tests`.
+    #[cfg(test)]
+    pub fn write_mutex_for_test(&self) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(&self.write_mutex)
+    }
+
     /// Construct a new `PalaceHandle` with empty drawer table and L1 cache.
     ///
     /// Why: The registry creates handles eagerly when a palace is opened; the
@@ -595,20 +608,12 @@ impl PalaceHandle {
         // so the write mutex doesn't impact read throughput.
         // Issue #906: bound the lock acquisition so a stuck embedder on one
         // writer doesn't cascade an indefinite queue of waiters.
-        let _write_guard = {
-            let lock_timeout = timeouts::write_lock_timeout();
-            tokio::time::timeout(lock_timeout, self.write_mutex.lock())
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "palace '{}' write-lock acquisition timed out after {:?} \
-                         (issue #906); a previous writer may be stuck — retry or \
-                         increase TRUSTY_WRITE_LOCK_TIMEOUT_SECS",
-                        self.id,
-                        lock_timeout
-                    )
-                })?
-        };
+        let _write_guard = timeouts::lock_with_timeout(
+            &self.write_mutex,
+            timeouts::write_lock_timeout(),
+            self.id.as_str(),
+        )
+        .await?;
 
         // Issue #61: signal/noise gate. `force == true` bypasses entirely.
         // `enforce_min_tokens` lets `memory_note` keep the noise patterns
@@ -745,19 +750,12 @@ impl PalaceHandle {
         // can't interleave with an append. See `write_mutex` docs on
         // `PalaceHandle`.
         // Issue #906: bound the lock acquisition to avoid cascading hangs.
-        let _write_guard = {
-            let lock_timeout = timeouts::write_lock_timeout();
-            tokio::time::timeout(lock_timeout, self.write_mutex.lock())
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "palace '{}' write-lock acquisition timed out after {:?} on \
-                         forget path (issue #906); increase TRUSTY_WRITE_LOCK_TIMEOUT_SECS",
-                        self.id,
-                        lock_timeout
-                    )
-                })?
-        };
+        let _write_guard = timeouts::lock_with_timeout(
+            &self.write_mutex,
+            timeouts::write_lock_timeout(),
+            self.id.as_str(),
+        )
+        .await?;
 
         // Best-effort vector removal — usearch may legitimately not have the
         // key (e.g. if remember failed mid-flight); we propagate other errors.

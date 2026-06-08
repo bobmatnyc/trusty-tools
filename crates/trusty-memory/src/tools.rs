@@ -967,20 +967,10 @@ async fn handle_memory_remember(state: &AppState, args: Value) -> Result<Value> 
     // Issue #906: bound the acquisition so a stuck embedder on a prior writer
     // does not cascade an indefinite queue of callers waiting for this lock.
     let write_lock = state.palace_write_lock(palace);
-    let _write_guard = {
-        let lock_timeout = timeouts::write_lock_timeout();
-        tokio::time::timeout(lock_timeout, write_lock.lock())
+    let _write_guard =
+        timeouts::lock_with_timeout(&write_lock, timeouts::write_lock_timeout(), palace)
             .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "memory_remember: palace '{}' write-lock timed out after {:?} \
-                     (issue #906); a previous writer may be stuck — retry or \
-                     increase TRUSTY_WRITE_LOCK_TIMEOUT_SECS",
-                    palace,
-                    lock_timeout
-                )
-            })?
-    };
+            .map_err(|e| anyhow::anyhow!("memory_remember: {e:#}"))?;
 
     // Issue #220: rolling dedup window — skip when a near-duplicate
     // landed in the same palace within the last 5 minutes. The
@@ -1075,19 +1065,10 @@ async fn handle_memory_note(state: &AppState, args: Value) -> Result<Value> {
     // they snapshot.
     // Issue #906: bound the acquisition to prevent cascading hangs.
     let write_lock = state.palace_write_lock(palace);
-    let _write_guard = {
-        let lock_timeout = timeouts::write_lock_timeout();
-        tokio::time::timeout(lock_timeout, write_lock.lock())
+    let _write_guard =
+        timeouts::lock_with_timeout(&write_lock, timeouts::write_lock_timeout(), palace)
             .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "memory_note: palace '{}' write-lock timed out after {:?} \
-                     (issue #906); increase TRUSTY_WRITE_LOCK_TIMEOUT_SECS if needed",
-                    palace,
-                    lock_timeout
-                )
-            })?
-    };
+            .map_err(|e| anyhow::anyhow!("memory_note: {e:#}"))?;
     // Issue #220: rolling dedup window — same gate as
     // `memory_remember`. `memory_note` has no `force` arg, so the
     // gate is unconditional: curated short-fact writes that happen

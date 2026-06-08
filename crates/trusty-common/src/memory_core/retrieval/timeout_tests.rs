@@ -128,7 +128,7 @@ mod tests {
 
         // Hold the write lock in a background task indefinitely until we
         // signal it to release.
-        let mutex = handle.write_mutex.clone();
+        let mutex = handle.write_mutex_for_test();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
         let holder = tokio::spawn(async move {
             let _guard = mutex.lock().await;
