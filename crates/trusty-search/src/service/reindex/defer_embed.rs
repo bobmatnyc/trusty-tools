@@ -20,6 +20,7 @@
 
 use crate::core::registry::{IndexHandle, StageState, StageStatus};
 use crate::service::reindex::{background_reindex_semaphore, now_rfc3339, ReindexProgress};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// Spawn the C2 deferred-embed background pass (issue #923).
@@ -66,6 +67,15 @@ pub(super) fn spawn_deferred_embed_pass(handle: Arc<IndexHandle>, progress: Arc<
             total_chunks,
         );
 
+        // Issue #929: populate total + embedded=0 before embedding starts so
+        // `GET /indexes/:id/status` shows real N/total progress rather than 0/0.
+        {
+            let mut stages = handle.stages.write().await;
+            stages.semantic.started_at = Some(now_rfc3339());
+            stages.semantic.total = Some(total_chunks);
+            stages.semantic.embedded = Some(0);
+        }
+
         // Emit an SSE event so observers (UI, CLI `--watch`) know embedding
         // has started. This fires on the progress handle after the fast-pass
         // `complete` event, so late SSE subscribers may see it.
@@ -77,10 +87,29 @@ pub(super) fn spawn_deferred_embed_pass(handle: Arc<IndexHandle>, progress: Arc<
             }))
             .await;
 
+        // Issue #929: wire a per-wave progress channel so the stage counter
+        // advances in real time while embedding is in progress.
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<(usize, u64)>();
+        let embedded_counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&embedded_counter);
+        let stages_clone = Arc::clone(&handle.stages);
+        // Spawn a task that drains wave notifications and updates stages.semantic.embedded.
+        let progress_updater = tokio::spawn(async move {
+            while let Some((wave_chunks, _ms)) = progress_rx.recv().await {
+                let n = counter_clone.fetch_add(wave_chunks, Ordering::AcqRel) + wave_chunks;
+                let mut stages = stages_clone.write().await;
+                stages.semantic.embedded = Some(n);
+            }
+        });
+
         let result = {
             let indexer = handle.indexer.read().await;
-            indexer.embed_deferred_chunks().await
+            indexer.embed_deferred_chunks(Some(&progress_tx)).await
         };
+        // Drop the sender so the updater task's recv loop terminates.
+        drop(progress_tx);
+        // Wait for the updater to finish processing any buffered notifications.
+        let _ = progress_updater.await;
 
         match result {
             Ok((embedded, total)) => {
@@ -139,10 +168,8 @@ pub(super) fn spawn_deferred_embed_pass(handle: Arc<IndexHandle>, progress: Arc<
                         "message": reason,
                     }))
                     .await;
-                // TODO(#923-followup): embed progress (embed_start / embed_error
-                // events) should also be exposed via the /indexes/:id/status
-                // polling endpoint so callers that missed the SSE stream can
-                // observe the failure without subscribing to the event stream.
+                // Issue #929: semantic.total was pre-seeded before embedding;
+                // the Failed state replaces it (StageState::failed clears it).
             }
         }
     });
@@ -295,6 +322,84 @@ mod tests {
         assert!(
             stages.semantic.failure.is_some(),
             "Failed stage must carry the failure reason"
+        );
+    }
+
+    /// Issue #929: `spawn_deferred_embed_pass` must populate `stages.semantic.total`
+    /// (and `embedded = 0`) BEFORE calling `embed_deferred_chunks` so that
+    /// `GET /indexes/:id/status` returns a non-trivial `N / total` even if polling
+    /// starts immediately after the fast pass completes.
+    ///
+    /// Why: without pre-seeding `total`, the `print_stage_row` and non-TTY watch
+    /// loop both receive `total = 0`, rendering `0 / 0 (0%)` for the entire
+    /// background embed pass. Pre-seeding lets operators see real progress.
+    /// What: commits one chunk (so total_chunks = 1), calls `spawn_deferred_embed_pass`
+    /// on a BM25-only handle, and asserts that `semantic.total == Some(1)` is
+    /// visible BEFORE the pass completes (by racing a read against the spawn).
+    /// Test: this test.
+    #[tokio::test]
+    async fn deferred_embed_pass_pre_seeds_total_before_embedding() {
+        use crate::core::{
+            chunker::{ChunkType, RawChunk},
+            indexer::ParsedBatch,
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let indexer = CodeIndexer::new("defer-total-test", root.clone());
+        // Commit one synthetic chunk so total_chunks = 1.
+        let parsed = ParsedBatch {
+            chunks: vec![RawChunk {
+                id: "test:1:1".into(),
+                file: "test.rs".into(),
+                start_line: 1,
+                end_line: 1,
+                content: "fn total_test() {}".into(),
+                function_name: None,
+                language: Some("rust".into()),
+                chunk_type: ChunkType::Code,
+                calls: vec![],
+                inherits_from: vec![],
+                chunk_depth: 0,
+                parent_chunk_id: None,
+                child_chunk_ids: vec![],
+                nlp_keywords: vec![],
+                nlp_code_refs: vec![],
+                virtual_terms: vec![],
+            }],
+            embeddings: vec![None],
+            entities_by_file: vec![],
+            parse_ms: 0,
+            embed_ms: 0,
+            vector_count: 0,
+        };
+        indexer.commit_parsed_batch(parsed, false).await.ok();
+
+        let handle = Arc::new(crate::core::registry::IndexHandle::bare(
+            IndexId::new("defer-total-test"),
+            Arc::new(tokio::sync::RwLock::new(indexer)),
+            root,
+        ));
+        let progress = Arc::new(ReindexProgress::new());
+        spawn_deferred_embed_pass(handle.clone(), progress.clone());
+
+        // Poll until total is populated (pre-seeded before embed starts).
+        let mut total_seen: Option<usize> = None;
+        for _ in 0..200 {
+            let stages = handle.stages.read().await;
+            if stages.semantic.total.is_some() {
+                total_seen = stages.semantic.total;
+                break;
+            }
+            drop(stages);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            total_seen,
+            Some(1),
+            "stages.semantic.total must be pre-seeded to 1 (the chunk count) \
+             before embed_deferred_chunks runs — so /indexes/:id/status shows \
+             real N/total progress even during embedding"
         );
     }
 }

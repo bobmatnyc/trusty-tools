@@ -111,7 +111,21 @@ pub async fn handle_index(
                     CONFIG_FILENAME
                 );
             }
-            for idx in &cfg.indexes {
+            let n_indexes = cfg.indexes.len();
+            for (i, idx) in cfg.indexes.iter().enumerate() {
+                // Issue #929: print a clear banner before each index so the
+                // operator can distinguish back-to-back completion blocks when
+                // a YAML declares multiple indexes (e.g. duetto-backend +
+                // duetto-frontend). The banner is emitted for all counts,
+                // including the single-index case, so piped logs always carry
+                // the index name.
+                println!(
+                    "{} [{}/{}] indexing '{}'",
+                    "\u{2192}".cyan(),
+                    i + 1,
+                    n_indexes,
+                    idx.name.bold()
+                );
                 let mut filters = filters_from_index_config(idx);
                 // Issue #109, Phase 1: `--lexical-only` is a one-shot CLI
                 // flag that applies to every declared index in the

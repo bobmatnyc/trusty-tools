@@ -1122,14 +1122,16 @@ impl CodeIndexer {
 
     /// Embed all corpus chunks and upsert vectors into HNSW (issue #923 C2 pass).
     ///
-    /// Why: the fast pass (C1) stored chunks without embedding; this method is
-    /// the catch-up job that fills the semantic lane without re-parsing.
-    /// Idempotent — re-running re-embeds chunks whose vectors are absent.
-    /// What: snapshots `RawChunk`s under read lock, calls `embed_chunks_in_batches`,
-    /// then `commit_vectors_batch` + `commit_embeddings_cache`. Returns `(embedded, total)`.
-    /// Test: `deferred_embed_pass_marks_semantic_ready_and_is_idempotent` in
-    /// `service::reindex::tests`.
-    pub async fn embed_deferred_chunks(&self) -> Result<(usize, usize)> {
+    /// Why: fast pass (C1) stored chunks without embedding; this catch-up job
+    /// fills the semantic lane. `progress_tx` is forwarded to
+    /// `embed_chunks_in_batches` so callers can update `stages.semantic.embedded`
+    /// per wave for live N/total progress on `/indexes/:id/status` (issue #929).
+    /// What: snapshots chunks, embeds in batches, commits vectors + cache. Idempotent.
+    /// Test: `deferred_embed_pass_marks_semantic_ready_and_is_idempotent`.
+    pub async fn embed_deferred_chunks(
+        &self,
+        progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
+    ) -> Result<(usize, usize)> {
         let chunks: Vec<RawChunk> = {
             self.ensure_chunks_loaded().await;
             let map = self.chunks.read().await;
@@ -1139,13 +1141,11 @@ impl CodeIndexer {
         if total == 0 || self.embedder.is_none() || self.store.is_none() {
             return Ok((0, total));
         }
-        let embeddings = self.embed_chunks_in_batches(&chunks, None).await?;
+        let embeddings = self.embed_chunks_in_batches(&chunks, progress_tx).await?;
         self.commit_vectors_batch(&chunks, &embeddings).await?;
-        // Populate the in-memory embedding cache so subsequent MMR re-rank
-        // calls can retrieve vectors without hitting the HNSW store.
+        // In-memory embedding cache: subsequent MMR re-rank skips HNSW.
         self.commit_embeddings_cache(&chunks, embeddings).await;
-        let embedded = chunks.len();
-        Ok((embedded, total))
+        Ok((chunks.len(), total))
     }
 }
 

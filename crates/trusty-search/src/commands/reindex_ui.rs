@@ -549,18 +549,18 @@ impl ReindexUi {
 
 /// Format the per-phase indexing time breakdown into a `String`.
 ///
-/// Why: separating the formatting logic from the print call allows unit tests
-/// to assert on the actual rendered text rather than on a local copy of the
-/// template strings — a refactor that changes the output now fails the test
-/// rather than silently diverging.
-/// What: returns the full multi-line breakdown string.  Every path — including
-/// the vector>0 footnote path and the BM25-only path — ends with exactly one
-/// trailing `\n` so `print_timing_breakdown`'s `print!` leaves the cursor on
-/// a fresh line without needing `println!`.
-/// Test: `tests::timing_breakdown_contains_overlap_disclaimer` and related
-/// tests assert on the returned string directly; `tests::timing_breakdown_ends_with_newline`
-/// asserts the single trailing `\n` invariant for both paths.
-pub fn format_timing_breakdown(t: &ReindexTimings, total_chunks: u64, elapsed_ms: u64) -> String {
+/// Why: separating formatting from printing lets tests assert on rendered text.
+/// What: returns the full multi-line breakdown ending with exactly one `\n`.
+///       `defer_embed`/`lexical_only` select the embed-line message for the
+///       three distinct zero-vector states (see `tests::embed_line_*`).
+/// Test: `tests::timing_breakdown_*` and `tests::embed_line_*`.
+pub fn format_timing_breakdown(
+    t: &ReindexTimings,
+    total_chunks: u64,
+    elapsed_ms: u64,
+    defer_embed: bool,
+    lexical_only: bool,
+) -> String {
     let mut out = String::new();
 
     // Issue #744: show walk time first so the phase breakdown is in pipeline order.
@@ -591,13 +591,26 @@ pub fn format_timing_breakdown(t: &ReindexTimings, total_chunks: u64, elapsed_ms
         format_with_commas(total_chunks),
     ));
     if t.vector_count == 0 && total_chunks > 0 {
-        out.push_str(&format!(
-            "    {} {}\n",
-            "embed  ".dimmed(),
-            "SKIPPED (embedder unavailable \u{2014} BM25-only mode)"
-                .yellow()
-                .bold(),
-        ));
+        // #929: three-way embed line: lexical_only→calm, defer_embed→suppress, else→loud warn.
+        if lexical_only {
+            out.push_str(&format!(
+                "    {} {}\n",
+                "embed  ".dimmed(),
+                "SKIPPED (lexical-only index \u{2014} embedding disabled by config)"
+                    .dimmed()
+                    .bold(),
+            ));
+        } else if !defer_embed {
+            out.push_str(&format!(
+                "    {} {}\n",
+                "embed  ".dimmed(),
+                "SKIPPED (embedder sidecar not running/unreachable \u{2014} \
+                 index is BM25-only until re-indexed)"
+                    .yellow()
+                    .bold(),
+            ));
+        }
+        // defer_embed=true → suppress; background note covers this case.
     } else {
         let embed_line = format!("{} {:>7}", "embed  ".dimmed(), fmt_elapsed(t.embed_ms));
         out.push_str(&format!(
@@ -651,20 +664,20 @@ pub fn format_timing_breakdown(t: &ReindexTimings, total_chunks: u64, elapsed_ms
 
 /// Print the per-phase indexing time breakdown after a successful reindex.
 ///
-/// Why: gives the operator proof that each subsystem ran and how long it took.
-/// The breakdown must be **honest about the pipeline architecture**: the daemon
-/// runs a producer (parse + embed, no write lock) concurrently with a consumer
-/// (commit = BM25 + HNSW upsert + redb, holds write lock), so the subsystem
-/// times overlap and do NOT sum to the wall-clock total.  Displaying them as a
-/// stacked sequential list implied a false causal ordering and made the numbers
-/// look wrong (they don't add up).
-///
+/// Why: thin print wrapper so callers don't need to capture a String.
 /// What: delegates to `format_timing_breakdown` and prints the result.
-/// Test: `tests::timing_breakdown_*` exercise warning and normal paths on the
-/// `format_timing_breakdown` helper; this function is exercised by the
-/// smoke-test calls in the same suite.
-pub fn print_timing_breakdown(t: &ReindexTimings, total_chunks: u64, elapsed_ms: u64) {
-    print!("{}", format_timing_breakdown(t, total_chunks, elapsed_ms));
+/// Test: `tests::timing_breakdown_*` smoke-test calls exercise this path.
+pub fn print_timing_breakdown(
+    t: &ReindexTimings,
+    total_chunks: u64,
+    elapsed_ms: u64,
+    defer_embed: bool,
+    lexical_only: bool,
+) {
+    print!(
+        "{}",
+        format_timing_breakdown(t, total_chunks, elapsed_ms, defer_embed, lexical_only)
+    );
 }
 
 /// Per-subsystem indexing timings parsed from the SSE `complete` event.
@@ -1161,7 +1174,7 @@ mod tests {
             symbol_count: 10,
             edge_count: 4,
         };
-        print_timing_breakdown(&t, 1_234, 1_500);
+        print_timing_breakdown(&t, 1_234, 1_500, false, false);
     }
 
     /// `print_timing_breakdown` must not panic for a normal completion with
@@ -1185,7 +1198,7 @@ mod tests {
             symbol_count: 14_823,
             edge_count: 41_002,
         };
-        print_timing_breakdown(&t, 62_926, 95_000);
+        print_timing_breakdown(&t, 62_926, 95_000, false, false);
     }
 
     /// `format_timing_breakdown` output must contain the "overlapping / does not
@@ -1216,7 +1229,7 @@ mod tests {
             symbol_count: 14_823,
             edge_count: 41_002,
         };
-        let out = format_timing_breakdown(&t, 62_926, 95_000);
+        let out = format_timing_breakdown(&t, 62_926, 95_000, false, false);
         assert!(
             out.contains("overlapping"),
             "output must contain 'overlapping'; got:\n{out}"
@@ -1244,7 +1257,7 @@ mod tests {
             "EMBED_STAR_NOTE footnote must appear when vector_count > 0; got:\n{out}"
         );
         // Smoke-test the print path too (no panic = structural correctness).
-        print_timing_breakdown(&t, 62_926, 95_000);
+        print_timing_breakdown(&t, 62_926, 95_000, false, false);
     }
 
     /// The EMBED_STAR_NOTE footnote must be absent in BM25-only mode and present
@@ -1273,7 +1286,7 @@ mod tests {
             symbol_count: 10,
             edge_count: 4,
         };
-        let out_bm25 = format_timing_breakdown(&bm25_only, 1_234, 1_500);
+        let out_bm25 = format_timing_breakdown(&bm25_only, 1_234, 1_500, false, false);
         assert!(
             !out_bm25.contains("overlapping pipeline"),
             "EMBED_STAR_NOTE must be absent when vector_count==0; got:\n{out_bm25}"
@@ -1290,7 +1303,7 @@ mod tests {
             symbol_count: 14_823,
             edge_count: 41_002,
         };
-        let out_vec = format_timing_breakdown(&with_vectors, 62_926, 95_000);
+        let out_vec = format_timing_breakdown(&with_vectors, 62_926, 95_000, false, false);
         assert!(
             out_vec.contains("overlapping pipeline"),
             "EMBED_STAR_NOTE must be present when vector_count>0; got:\n{out_vec}"
@@ -1322,7 +1335,7 @@ mod tests {
             symbol_count: 14_823,
             edge_count: 41_002,
         };
-        let out = format_timing_breakdown(&t, 62_926, 95_000);
+        let out = format_timing_breakdown(&t, 62_926, 95_000, false, false);
         assert!(
             out.contains("vectors upserted"),
             "output must contain 'vectors upserted' to unambiguously attribute the \
@@ -1373,7 +1386,7 @@ mod tests {
             edge_count: 8_000,
         };
         // No assertion on output text — just no panic.
-        print_timing_breakdown(&t, 10_000, 44_000);
+        print_timing_breakdown(&t, 10_000, 44_000, false, false);
     }
 
     /// `format_timing_breakdown` must end with exactly one `\n` in both the
@@ -1406,7 +1419,7 @@ mod tests {
             symbol_count: 14_823,
             edge_count: 41_002,
         };
-        let out_vec = format_timing_breakdown(&with_vectors, 62_926, 95_000);
+        let out_vec = format_timing_breakdown(&with_vectors, 62_926, 95_000, false, false);
         assert!(
             out_vec.ends_with('\n'),
             "vector>0 path: output must end with '\\n'; got:\n{out_vec:?}"
@@ -1428,7 +1441,7 @@ mod tests {
             symbol_count: 10,
             edge_count: 4,
         };
-        let out_bm25 = format_timing_breakdown(&bm25_only, 1_234, 1_500);
+        let out_bm25 = format_timing_breakdown(&bm25_only, 1_234, 1_500, false, false);
         assert!(
             out_bm25.ends_with('\n'),
             "BM25-only path: output must end with '\\n'; got:\n{out_bm25:?}"
@@ -1439,3 +1452,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "reindex_ui_embed_tests.rs"]
+mod embed_tests;
