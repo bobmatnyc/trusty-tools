@@ -85,16 +85,21 @@ enum Command {
     /// actual HTTP server, and by launchd / systemd). Pass `--http <ADDR>`
     /// to bind a specific address.
     ///
-    /// Claude Code integration: install the `trusty-memory-mcp-bridge`
-    /// binary into your `.mcp.json` — it pipes stdio between Claude Code
-    /// and the daemon over a Unix domain socket (PR #149). The legacy
-    /// `serve --stdio` flag was removed in PR for #150 because it
-    /// deadlocked on the redb exclusive write lock whenever a daemon was
-    /// already running.
+    /// Claude Code integration (recommended): install the
+    /// `trusty-memory-mcp-bridge` binary into your `.mcp.json` — it pipes
+    /// stdio between Claude Code and the daemon over a Unix domain socket
+    /// (PR #149).
+    ///
+    /// Alternative (issue #914): use `serve --stdio` for a direct stdio
+    /// JSON-RPC MCP server.  This mode binds no HTTP port or UDS socket;
+    /// stdout is the JSON-RPC channel.  Palaces are opened read-only via
+    /// the snapshot fallback when a write lock is held by another process.
+    /// Every request resolves within a deadline — success or an explicit
+    /// JSON-RPC error — so the MCP client never hangs.
     Serve {
         /// Bind the HTTP/SSE server to a specific address. When omitted,
         /// the daemon binds dynamically.
-        #[arg(long, value_name = "ADDR")]
+        #[arg(long, value_name = "ADDR", conflicts_with = "stdio")]
         http: Option<SocketAddr>,
 
         /// Run the HTTP daemon in the foreground (do not self-spawn).
@@ -103,8 +108,19 @@ enum Command {
         /// share a `start` / `serve` UX. Long-running supervisors (launchd,
         /// systemd, Docker) need a foreground process to manage, so they
         /// pass `--foreground` to opt out of the spawn.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "stdio")]
         foreground: bool,
+
+        /// Run a direct stdio JSON-RPC MCP server (issue #914).
+        ///
+        /// Why: reinstates `serve --stdio` as a safe, deadlock-free code
+        /// path.  When set, no axum HTTP server and no UDS listener are
+        /// bound — stdout is the exclusive JSON-RPC channel.  All
+        /// non-protocol output (update checks, banners) is suppressed.
+        /// Every request resolves within a deadline so the MCP client
+        /// never hangs.
+        #[arg(long)]
+        stdio: bool,
 
         /// Bind every MCP tool call to this palace when the caller omits the
         /// `palace` argument.
@@ -496,12 +512,12 @@ async fn main() -> Result<()> {
     );
 
     // Update check: emitted only for human-facing subcommands. `serve`
-    // (foreground) is the long-running HTTP/MCP daemon — stdout/stderr are
-    // owned by the supervisor or the JSON-RPC framing, so we must not print
-    // anything there. `start` self-spawns a detached `serve --foreground`
-    // child and exits immediately; the very brief window makes the notice
-    // useless. `upgrade` does its own fresh check, so we skip the throttled
-    // notice to avoid a redundant second check on the same run.
+    // (foreground or stdio) is the long-running HTTP/MCP daemon — stdout/stderr
+    // are owned by the supervisor or the JSON-RPC framing, so we must not print
+    // anything there. `start` self-spawns a detached `serve --foreground` child
+    // and exits immediately; the very brief window makes the notice useless.
+    // `upgrade` does its own fresh check, so we skip the throttled notice to
+    // avoid a redundant second check on the same run.
     // The check is throttled to once per 24 h (on-disk cache), so on a
     // typical run this is a sub-millisecond cache-hit with no network I/O.
     let is_daemon_path = matches!(cli.command, Command::Serve { .. } | Command::Start);
@@ -523,8 +539,15 @@ async fn main() -> Result<()> {
         Command::Serve {
             http,
             foreground,
+            stdio,
             palace,
-        } => run_serve(http, foreground, palace, log_buffer, error_store).await,
+        } => {
+            if stdio {
+                run_serve_stdio(palace).await
+            } else {
+                run_serve(http, foreground, palace, log_buffer, error_store).await
+            }
+        }
         Command::Migrate {
             target,
             dry_run,
@@ -601,11 +624,48 @@ async fn run_monitor(target: MonitorTarget) -> Result<()> {
     }
 }
 
+/// Dispatch `serve --stdio` to the direct stdio JSON-RPC MCP server.
+///
+/// Why: `--stdio` reinstates the direct stdio path removed in #150, now safe
+/// because the snapshot-based read-only fallback means the stdio process
+/// never deadlocks against a running HTTP daemon's exclusive redb lock.
+/// Stdout hygiene: no update-check banner, no HTTP bind announcement, no
+/// eprintln! — stdout is the JSON-RPC channel and must carry only protocol
+/// bytes.
+/// What: resolves the data dir (same guards as `run_serve`), then delegates
+/// to `commands::serve_stdio::run_stdio` which builds `AppState` and enters
+/// `trusty_common::mcp::run_stdio_loop`.
+/// Test: `tests/serve_stdio_e2e.rs` spawns a real child, asserts bounded
+/// responses.
+async fn run_serve_stdio(palace: Option<String>) -> Result<()> {
+    let data_dir = trusty_common::resolve_data_dir("trusty-memory")?;
+    if !data_dir.is_absolute() {
+        anyhow::bail!(
+            "resolved trusty-memory data directory {:?} is not absolute; \
+             refusing to start stdio server",
+            data_dir
+        );
+    }
+    if data_dir == std::path::Path::new("/") {
+        anyhow::bail!(
+            "resolved trusty-memory data directory is the filesystem root (/); \
+             refusing to start stdio server",
+        );
+    }
+    let data_root = resolve_palace_registry_dir(data_dir);
+    // Apply one-shot idempotent migration (same as HTTP serve path).
+    if let Err(e) = trusty_memory::commands::migrations::migrate_default_palace_name(&data_root) {
+        tracing::warn!("default-palace name migration skipped: {e:#}");
+    }
+    trusty_memory::commands::serve_stdio::run_stdio(data_root, palace).await
+}
+
 /// Dispatch `serve` to the HTTP server (background spawn or inline foreground).
 ///
 /// Why: keeps `main` focused on parsing while `AppState` construction lives
-/// in one place. `--stdio` removed in #150; Claude Code now uses the
-/// `trusty-memory-mcp-bridge` UDS pipe (PR #149) to avoid redb deadlocks.
+/// in one place. The direct `--stdio` path is handled by `run_serve_stdio`
+/// above; Claude Code can use either `--stdio` (direct) or the
+/// `trusty-memory-mcp-bridge` UDS pipe (PR #149).
 /// What: resolves the palace registry directory (descending into the legacy
 /// `palaces/` subdirectory when present — see `resolve_palace_registry_dir`),
 /// builds an `AppState` rooted there, applies the `--palace` default if any,

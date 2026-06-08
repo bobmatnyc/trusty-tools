@@ -103,12 +103,12 @@ crates/trusty-memory/src/commands/setup.rs	783
 crates/trusty-memory/src/discovery.rs	884
 crates/trusty-memory/src/kg_extract.rs	608
 crates/trusty-memory/src/lib.rs	3061
-crates/trusty-memory/src/main.rs	1010
+crates/trusty-memory/src/main.rs	1067
 crates/trusty-memory/src/messaging.rs	843
 crates/trusty-memory/src/project_root.rs	980
 crates/trusty-memory/src/prompt_log.rs	851
 crates/trusty-memory/src/service.rs	1704
-crates/trusty-memory/src/tools.rs	3776
+crates/trusty-memory/src/tools.rs	3808
 crates/trusty-memory/src/transport/rpc.rs	571
 crates/trusty-memory/src/web.rs	5421
 crates/trusty-memory/tests/concurrent_perf.rs	1163
