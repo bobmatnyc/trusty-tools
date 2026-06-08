@@ -1,6 +1,6 @@
 # DOC-5 — Controller CLI Command Surface + Dispatch
 
-**Status:** Draft (drafted; open questions for owner)
+**Status:** Accepted (owner-approved)
 **Source spec:** ../01-spec/trusty-end-to-end-setup.md
 **Consumes:** [DOC-1](./01-tool-contract.md) (Accepted), [DOC-2](./02-stack-manifest-and-versioning.md) (Accepted), [DOC-3](./03-scope-model.md) (Accepted), [DOC-4](./04-doctor-health-rollup.md) (Accepted)
 **Cross-ref:** [DOC-0](./00-naming-and-doc-charter.md), [DOC-6](./06-contract-conformance-and-mpm-adapter.md) (Accepted)
@@ -45,6 +45,7 @@ tctl
 ├── upgrade [<member>…]          upgrade stack (or named members) to BOM pins      → DOC-9
 │   └── (alias: update)          `update` == `upgrade`; see §1.3 on the verb pair
 ├── updates                      LIST available updates + changelog headlines (read-only) → DOC-9 / DOC-2 §5
+├── ensure [--scope project]     idempotent ensure-project pass (no-op if ready)   → DOC-8
 ├── start   [<member>…]          start daemon(s) — system
 ├── stop    [<member>…]          stop daemon(s) — system
 ├── restart [<member>…]          restart all daemons + UI services — system        → §7
@@ -72,6 +73,7 @@ passthrough — see §1.4.
 | `tctl install [m…]` | system | Install missing members from the manifest `install` descriptor; idempotent (already-installed = no-op). | DOC-8 |
 | `tctl upgrade [m…]` | system | Move installed members to the BOM-pinned versions; restart so the new version takes effect. | DOC-9 |
 | `tctl updates` | all | **List** (read-only) which members have a newer pinned/available version, with changelog headlines between current and target. | DOC-9, DOC-2 §5 |
+| `tctl ensure [--scope project]` | project | Idempotent ensure-project pass: run only if not already set up; no-op when ready. Explicit entry point for the setup automation. | DOC-8 |
 | `tctl start [m…]` | system | Bring member daemon(s) up (lifecycle `start`). | DOC-1 |
 | `tctl stop [m…]` | system | Take member daemon(s) down (lifecycle `stop`). | DOC-1 |
 | `tctl restart [m…]` | system | Bounce all daemon members **and the controller's own UI service** (lifecycle `restart`). | §7, DOC-1 |
@@ -362,12 +364,23 @@ diffs and renders changelog headlines parsed best-effort from each member's
 `changelog` descriptor (DOC-2 §5). It is the spec's *"show available updates …
 plus changelog headlines"* (§90). It never mutates and needs no confirmation.
 
+**`tctl ensure`** is the idempotent entry point for the ensure-project pass.
+It runs only if the project is not already set up, and is a no-op when ready.
+DOC-8 owns the launch-hook that automatically calls this pass on claude-mpm
+startup (so the user does not need to run it manually for typical workflows);
+`tctl ensure` is the explicit manual escape hatch and is also invoked explicitly
+during system setup. DOC-5 defines the command surface and scope behaviour;
+DOC-8 owns the mechanics and the auto-launch wiring.
+
 Relationship to the owning docs (kept crisp to avoid overlap):
 
 - **DOC-5 defines** the command *names*, flags, scope/confirmation UX, and that
-  each entry point dispatches via the §2 engine.
+  each entry point dispatches via the §2 engine. **DOC-5 performs no hidden
+  mutation** (e.g. on read commands like `stack doctor`). Explicit `tctl ensure`
+  is the named entry point for the setup pass.
 - **DOC-8 owns** the install/bootstrap *mechanics* (zero-knowledge install,
-  ensure-project auto-config, ordering).
+  ensure-project auto-config, ordering, and the launch-hook that auto-calls
+  `tctl ensure` on startup).
 - **DOC-9 owns** the upgrade *mechanics* (update detection, changelog extraction,
   upgrade + take-effect restart).
 - **DOC-4 owns** the rollup the `stack` verbs render.
@@ -446,6 +459,13 @@ enum Commands {
 
     /// List available updates + changelog headlines (read-only). → DOC-9 / DOC-2 §5
     Updates,
+
+    /// Idempotent ensure-project pass; no-op when already set up. → DOC-8
+    Ensure {
+        /// Scope for ensure. Default: project (inside project dir) or system (outside).
+        /// Explicit --scope all runs both layers.
+        scope: Option<String>,
+    },
 
     /// Start member daemon(s) — system.
     Start { members: Vec<String> },
@@ -644,7 +664,7 @@ controller reuses are confirmed against the tree.
 
 **Design:**
 
-- [x] Lock the command surface (install / updates / upgrade / restart / stack
+- [x] Lock the command surface (install / updates / upgrade / ensure / restart / stack
       health / stack doctor / start / stop / config / status / port / ui /
       self-check / passthrough) with one-line semantics (§1)
 - [x] Resolve `update` vs `upgrade` (noun listing vs verb action) (§1.3)
@@ -657,7 +677,7 @@ controller reuses are confirmed against the tree.
 - [x] Specify interactivity / long-running-op UX + the DOC-8/DOC-9 hand-off (§5)
 - [x] Pin the clap derive structure as an implementation target (§6)
 - [x] Specify what `restart` covers (daemons + UI services + controller self) (§7)
-- [ ] **Owner: resolve the open questions below**
+- [x] Owner approved: all 5 open questions resolved (§ Resolved Decisions)
 - [ ] Team review → Accepted
 
 **Implementation-time (out of design scope):**
@@ -667,43 +687,36 @@ controller reuses are confirmed against the tree.
 - [ ] Wire the passthrough validator (manifest ids + `verbs[]`) and the parallel
       probe/timeout collector (DOC-4 §1.3)
 
-## Open Questions for Owner
+## Resolved Decisions
 
-1. **`update` vs `upgrade` naming.** DOC-5 drafts `tctl updates` (read-only
-   listing, plural noun) and `tctl upgrade` (mutating action, verb), with
-   `tctl update` as a visible alias of `upgrade` and `tctl upgrade --check` as a
-   dry-run equivalent of `updates`. **Recommendation:** keep this split — it is
-   unambiguous and matches the spec's exact phrasing (§90). Confirm, or collapse
-   to a single `update` verb with an `--list`/`--check` flag if you prefer one
-   command.
+1. **`update` vs `upgrade` naming (Owner-approved).** The split is **KEPT**:
+   - `tctl updates` (read-only listing, plural noun) — shows available upgrades + changelog headlines.
+   - `tctl upgrade` (mutating verb) — moves members to BOM pins and restarts.
+   - `tctl update` is a visible alias of `upgrade` (muscle-memory compatibility).
+   - `tctl upgrade --check` is a dry-run equivalent of `tctl updates`.
 
-2. **Per-tool introspection surface.** DOC-5 drafts `tctl <tool> doctor` (generic
-   passthrough) for a single member, reserving top-level `tctl doctor` for the
-   `--self-check` conformance audit and `tctl stack doctor` for the rollup.
-   **Recommendation:** keep the passthrough form — it needs no extra flag plumbing
-   and keeps the three doctor surfaces cleanly separated. Confirm, or request a
-   `tctl doctor --tool <x>` selector instead.
+   This is unambiguous and matches the spec's exact phrasing (§90, §1.3).
 
-3. **Non-TTY default for system-mutating ops without `--yes`.** DOC-5 drafts:
-   a system-mutating op (`install`/`upgrade`/`restart`/`stop`) on a **non-TTY**
-   stdin **without `--yes`** **aborts with exit `3`** (fail loud), rather than
-   silently proceeding. **Recommendation:** abort-loud — it prevents a scripted
-   command from interrupting every session on a shared box by omission. Confirm,
-   or choose "non-TTY implies `--yes`" (more convenient for naive scripts, riskier).
+2. **Per-tool introspection surface (Owner-approved).** The passthrough form is **KEPT**:
+   - `tctl <tool> doctor` (e.g. `tctl trusty-search doctor`) — raw envelope, generic passthrough.
+   - `tctl doctor --self-check <member>` — conformance audit (controller capability).
+   - `tctl stack doctor [m]` — rolled-up stack-wide view (DOC-4 matrix + drill-down).
 
-4. **Does `tctl restart` bounce the controller's own UI service by default?**
-   DOC-5 drafts `restart` bouncing all member daemons **and** the controller's own
-   DOC-7 UI service (restarted last to avoid self-kill mid-sweep). **Recommendation:**
-   include the controller UI by default (the spec says "all daemons + UI services",
-   §93), with a future `--exclude-self` escape hatch if needed. Confirm, or scope
-   `tctl restart` to member daemons only and require an explicit `tctl restart
-   trusty-controller` for the UI.
+   Three cleanly separated doctor surfaces, no extra flag plumbing (§1.4).
 
-5. **Should `tctl` auto-run the "ensure project" pass on relevant commands, or
-   only on explicit `install`?** DOC-3/DOC-8 define an idempotent ensure-project
-   pass that runs every claude-mpm launch. DOC-5 currently exposes it only via
-   `tctl install` (entry point) and leaves the auto-on-launch wiring to DOC-8.
-   **Recommendation:** keep DOC-5 explicit-only (no hidden mutation on read
-   commands like `stack doctor`); let DOC-8 own the launch-hook that calls the
-   ensure pass. Confirm this boundary, or ask DOC-5 to add an explicit
-   `tctl ensure [--scope project]` command as the named entry point for that pass.
+3. **Non-TTY default for system-mutating ops without `--yes` (Owner-approved).** **Abort loud**:
+   - System-mutating ops (`install`/`upgrade`/`restart`/`stop`) on **non-TTY stdin without `--yes`** → **exit `3`** (fail loud).
+   - Prevents a scripted command from interrupting every session by omission (§3.3, §4.3).
+
+4. **Does `tctl restart` bounce the controller's own UI service by default? (Owner-approved).** **YES, include the controller**:
+   - `tctl restart` bounces all member daemons **AND** the controller's own DOC-7 UI service.
+   - Controller UI restarted **last** to avoid self-kill mid-sweep.
+   - Future `--exclude-self` escape hatch noted but not required in v1 (§7, §1.2).
+   - Covers "all daemons + UI services" per spec (§93).
+
+5. **"Ensure project" boundary — explicit entry point required (Owner-approved).** **Add `tctl ensure`**:
+   - DOC-5 defines **no hidden mutation** on read commands (`stack doctor`, `config`, etc.).
+   - Ensure-project pass is **explicit-only**: entry point is `tctl ensure [--scope project]`.
+   - DOC-8 owns the launch-hook that calls this pass on claude-mpm launch (auto-run on startup).
+   - `tctl ensure` is idempotent: no-op when already set up (§5, §1.2).
+   - `tctl ensure` now appears in the command tree (§1.1) and one-line semantics (§1.2).
