@@ -1624,6 +1624,11 @@ async fn handle_kg_gaps(state: &AppState, args: Value) -> Result<Value> {
 }
 
 async fn handle_memory_recall_all(state: &AppState, args: Value) -> Result<Value> {
+    // Issue #914 (Part A): fast readiness preflight — mirror the guard on
+    // every other embedder-touching handler. Without this, a `memory_recall_all`
+    // call while the daemon is still Warming blocks behind the OnceCell init
+    // (up to 180 s) instead of returning the fast bounded error.
+    state.readiness_check()?;
     let query = args
         .get("q")
         .and_then(|v| v.as_str())
@@ -3767,6 +3772,33 @@ mod tests {
         )
         .await;
         let err = result.expect_err("memory_note must fail while Warming");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("warming up"),
+            "error must mention 'warming up'; got: {msg}"
+        );
+    }
+
+    /// Why (issue #914 Part A): `memory_recall_all` was the only
+    /// embedder-touching handler without the readiness preflight from #912.
+    /// It must return the fast "warming up" error immediately — not block
+    /// behind an open-ended OnceCell init — while the daemon is `Warming`.
+    /// What: construct a state that stays `Warming` (no `set_ready`), dispatch
+    /// `memory_recall_all`, assert the error message mentions "warming".
+    /// Test: this test (regression guard for the gap fixed in #914 Part A).
+    #[tokio::test]
+    async fn recall_all_returns_warming_error_while_state_is_warming() {
+        let (state, _tmp) = test_state_warming();
+
+        let result = dispatch_tool(
+            &state,
+            "memory_recall_all",
+            serde_json::json!({
+                "q": "test query that should be rejected while warming up"
+            }),
+        )
+        .await;
+        let err = result.expect_err("memory_recall_all must fail while Warming");
         let msg = err.to_string();
         assert!(
             msg.contains("warming up"),
