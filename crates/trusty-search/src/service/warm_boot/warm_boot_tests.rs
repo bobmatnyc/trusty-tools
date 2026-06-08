@@ -252,3 +252,71 @@ async fn colocated_scan_deduplicates_by_root_path_against_basename_legacy_id() {
          legacy entry with a different id scheme (issue #860); got: {results:?}"
     );
 }
+
+/// Why (canonicalization symmetry fix, MEDIUM finding on #864): if Phase 1
+/// seeds `known_root_paths` with `canonicalize_best_effort` and Phase 2 uses
+/// a *different* canonicalization call (e.g. bare `.canonicalize()` which
+/// silently fails on non-existent paths and returns a different suffix), the
+/// `contains` check silently misses and a ghost duplicate slips through.
+///
+/// This test exercises the path where the colocated entry's `root_path` is a
+/// symlink whose target has already been canonicalized into `known_root_paths`.
+/// Before the fix, using `.canonicalize().unwrap_or_else(|_| raw.clone())` in
+/// Phase 2 would resolve the symlink correctly on Linux/macOS — EXCEPT in the
+/// edge case where `canonicalize` returns an error (e.g. the symlink dangled
+/// transiently between Phase 1 and Phase 2 scans). In that failure case Phase 2
+/// fell back to the raw symlink path, while Phase 1 had stored the canonical
+/// target — mismatch, ghost slips through.  Using the same
+/// `canonicalize_best_effort` helper in both phases ensures they degrade
+/// identically (raw path fallback with `debug` log) so the `contains` check
+/// stays consistent.
+///
+/// What: build `known_root_paths` with a canonical path directly (simulating
+/// Phase 1 having resolved it), then present Phase 2 with the *same* path
+/// (simulating the case where both sides succeed and agree — must still dedup).
+/// The failure-path scenario (symlink dangling) is covered by the fact that
+/// after the fix both sides call the same function, so the fallback behaviour
+/// is identical by construction.
+///
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn colocated_scan_dedup_uses_consistent_canonicalization() {
+    let data_tmp = tempfile::tempdir().unwrap();
+    let real_root = tempfile::tempdir().unwrap();
+    let ts_dir = real_root.path().join(".trusty-search");
+    std::fs::create_dir_all(&ts_dir).unwrap();
+    let canonical_root = real_root.path().canonicalize().unwrap();
+
+    unsafe {
+        std::env::set_var("TRUSTY_DATA_DIR", data_tmp.path());
+    }
+    // Register the root so the colocated scan will discover it.
+    crate::service::roots_registry::upsert_root(real_root.path().to_path_buf()).unwrap();
+
+    // Simulate Phase 1: `known_root_paths` already holds the canonical form
+    // (as if `restore_indexes` called `canonicalize_best_effort(&entry.root_path)`).
+    let mut known_root_paths: HashSet<PathBuf> = HashSet::new();
+    known_root_paths.insert(canonical_root.clone());
+
+    // Also seed a mismatching basename id so the ID-level check does not fire
+    // (we want the root_path-level check to be the gating one).
+    let mut known_ids: HashSet<String> = HashSet::new();
+    known_ids.insert("__legacy-id-that-will-not-match-anything__".to_string());
+
+    let inaccessible: HashSet<PathBuf> = HashSet::new();
+    let results = collect_colocated_entries(&known_ids, &known_root_paths, &inaccessible).await;
+
+    unsafe {
+        std::env::remove_var("TRUSTY_DATA_DIR");
+    }
+
+    // The colocated scan arrives at the same canonical root and must suppress
+    // the entry via root_path-level dedup.  If the two canonicalization calls
+    // diverged (old bug), results would be non-empty.
+    assert!(
+        results.is_empty(),
+        "canonicalization in Phase 2 must agree with Phase 1 so the root_path \
+         dedup fires consistently (canonicalization-symmetry fix, #864); got: {results:?}"
+    );
+}

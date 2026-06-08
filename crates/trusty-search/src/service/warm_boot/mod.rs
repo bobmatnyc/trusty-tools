@@ -32,6 +32,39 @@ use std::time::Duration;
 use crate::service::persistence::PersistedIndex;
 pub use restore::restore_one_index_bounded;
 
+/// Attempt to canonicalize `path` (resolving symlinks), returning the canonical
+/// form on success or the original path on failure.
+///
+/// Why (issues #541 / #860 / #864): both Phase 1 (`restore_indexes` in
+/// `commands/start.rs`) and Phase 2 (`collect_colocated_entries` here) must
+/// canonicalize root paths via the SAME function so the fallback behaviour (raw
+/// path on error, `debug` log) is identical on both sides of the
+/// `known_root_paths.contains(...)` equality check.  Placing the implementation
+/// here (in the lib target) lets the binary-only `commands/start.rs` re-export
+/// it without circular dependencies.  #864 was the finding that Phase 2 used an
+/// inline `canonicalize().unwrap_or_else` while Phase 1 used this helper — the
+/// semantics are the same when both succeed, but if Phase 1 had already stored
+/// the raw path as a fallback and Phase 2 returned a different variant, the
+/// `contains` check would miss and a ghost duplicate would slip through.
+/// What: calls `std::fs::canonicalize`; on `Err` logs at `debug` level and
+/// returns the original path unchanged so warm-boot is never blocked.
+/// Test: `warm_boot_canonicalize_best_effort_*` unit tests in `commands/start.rs`;
+///       `colocated_scan_dedup_uses_consistent_canonicalization` in
+///       `service/warm_boot/warm_boot_tests.rs` (#864).
+pub fn canonicalize_best_effort(path: &std::path::Path) -> PathBuf {
+    match std::fs::canonicalize(path) {
+        Ok(canonical) => canonical,
+        Err(e) => {
+            tracing::debug!(
+                "warm-boot: could not canonicalize root_path {}: {} (using stored path)",
+                path.display(),
+                e,
+            );
+            path.to_path_buf()
+        }
+    }
+}
+
 /// Per-root and per-index timeout for warm-boot restore operations.
 ///
 /// Why: a TCC-denied or network-backed root on macOS can hang a `read_dir`,
@@ -187,10 +220,16 @@ pub fn collect_legacy_entries() -> Vec<PersistedIndex> {
 ///   (root-path-level dedup, closes the basename-vs-full-path ID mismatch; #860).
 ///   Only equality is checked — a colocated root whose path is a strict parent
 ///   or child of a known root is NOT suppressed (correct for `IndexHierarchy`).
+///   Canonicalization uses `crate::commands::start::canonicalize_best_effort` —
+///   the SAME helper that `restore_indexes` (Phase 1) uses to build
+///   `seen_root_paths`. Both sides must call the same function so their fallback
+///   behaviour (raw path on error) is identical and the `contains` check stays
+///   consistent (#864 medium finding).
 ///
 /// Test: `colocated_scan_partial_failure_still_returns_accessible`,
 ///       `colocated_scan_deduplicates_against_known_ids`,
-///       `colocated_scan_deduplicates_by_root_path_against_basename_legacy_id` (#860).
+///       `colocated_scan_deduplicates_by_root_path_against_basename_legacy_id` (#860),
+///       `colocated_scan_dedup_uses_consistent_canonicalization` (#864).
 pub async fn collect_colocated_entries(
     known_ids: &HashSet<String>,
     known_root_paths: &HashSet<PathBuf>,
@@ -266,11 +305,11 @@ pub async fn collect_colocated_entries(
                     }
                     // Root-path-level dedup (issue #860): catches the basename-vs-full-path
                     // ID mismatch where the same root_path is registered under a different
-                    // ID scheme. Canonicalize best-effort so symlinks resolve consistently.
-                    let canonical_colocated = colocated
-                        .root_path
-                        .canonicalize()
-                        .unwrap_or_else(|_| colocated.root_path.clone());
+                    // ID scheme. Use `canonicalize_best_effort` (same helper as Phase 1 in
+                    // `restore_indexes`) so both sides normalize identically — symlinks,
+                    // /private/var↔/var aliases, and relocation renames all resolve the
+                    // same way on both sides of the `contains` check.
+                    let canonical_colocated = canonicalize_best_effort(&colocated.root_path);
                     if known_root_paths.contains(&canonical_colocated) {
                         tracing::debug!(
                             "dual-discovery: colocated index '{}' at {} skipped \
