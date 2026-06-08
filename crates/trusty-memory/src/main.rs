@@ -790,9 +790,6 @@ fn spawn_startup_tasks(state: &AppState) {
                     elapsed_ms,
                     "background embedder warm-up complete; daemon is now Ready (issues #910/#911)"
                 );
-                eprintln!(
-                    "trusty-memory: embedder warm-up complete in {elapsed_ms}ms — daemon is Ready"
-                );
                 warmup_state.set_ready();
             }
             Err(e) => tracing::error!(

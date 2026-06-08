@@ -2380,9 +2380,13 @@ mod tests {
     ///       `recall_returns_warming_error_while_state_is_warming`,
     ///       `note_returns_warming_error_while_state_is_warming`.
     fn test_state_warming() -> (crate::AppState, tempfile::TempDir) {
-        unsafe {
+        // Use OnceLock so the env var is written exactly once across all
+        // parallel test threads — avoids the unsynchronised set_var race while
+        // remaining consistent with the idempotent-write approach in test_state().
+        static SKIP_ENFORCEMENT_SET: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        SKIP_ENFORCEMENT_SET.get_or_init(|| unsafe {
             std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
-        }
+        });
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
         let state = crate::AppState::new(root);

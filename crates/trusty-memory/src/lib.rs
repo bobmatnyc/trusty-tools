@@ -1270,24 +1270,52 @@ impl AppState {
     ///
     /// Why: the preflight in every bounded handler calls this and returns the
     /// error immediately so no embedding / redb I/O is attempted while the
-    /// daemon is still initialising (issue #911).
+    /// daemon is still initialising (tracks #911 internally).
     /// What: cheaply reads `daemon_readiness`; returns the fast error string
     /// on `Warming`.  Zero allocation on the happy path.
     /// Test: covered by `tools::tests::remember_returns_warming_error_while_state_is_warming`.
     pub fn readiness_check(&self) -> Result<()> {
         if self.readiness() == DaemonReadiness::Warming {
             return Err(anyhow::anyhow!(
-                "trusty-memory is warming up (embedder initialising), \
-                 please retry in a few seconds (issue #911)"
+                "trusty-memory is warming up (embedder initialising); \
+                 please retry in a few seconds"
             ));
         }
         Ok(())
     }
 
+    /// Obtain the shared `FastEmbedder` instance, initialising it on first call.
+    ///
+    /// Why: centralises lazy embedder access so every tool handler goes through
+    /// one bounded init path (tracks #910 internally).
+    /// What: wraps `OnceCell::get_or_try_init` with a timeout so a slow
+    /// CoreML/CUDA first-compile cannot block a handler indefinitely.  On
+    /// timeout the `OnceCell` is left unresolved and the next caller retries.
+    ///
+    /// **Callers on the request path MUST call `readiness_check()` before
+    /// this method.**  The four guarded handlers (`memory_remember`,
+    /// `memory_recall`, `memory_recall_deep`, `memory_note`) do so; any new
+    /// handler that calls `embedder()` must follow the same pattern.
+    /// Reaching this method while still `Warming` is not a bug — the warm-up
+    /// task itself calls `embedder()` while in `Warming` state — but request
+    /// handlers should have short-circuited before here via `readiness_check()`.
+    ///
+    /// The `readiness_check()` preflight is the PRIMARY guard (fast rejection
+    /// with no I/O).  This timeout is the last-resort backstop in case a
+    /// handler bypasses the preflight or the warm-up task itself hits a
+    /// pathological init delay.  If this timeout fires the `OnceCell` is left
+    /// in the unresolved state and the next call retries from scratch.
     pub async fn embedder(&self) -> Result<Arc<FastEmbedder>> {
         use trusty_common::memory_core::timeouts;
         let cell = self.embedder.clone();
         let timeout = timeouts::embedder_init_timeout();
+        // `readiness_check()` is the PRIMARY guard — handlers return a fast
+        // warming error before reaching here.  This timeout is the last-resort
+        // backstop: if the embedder init races past the preflight (e.g. in the
+        // warm-up task itself, which calls embedder() while still Warming) or
+        // the CoreML/CUDA compile stalls, we fail fast rather than blocking
+        // indefinitely.  On timeout the OnceCell stays unresolved; the next
+        // caller will retry the init from scratch.
         let embedder = tokio::time::timeout(
             timeout,
             cell.get_or_try_init(|| async {
@@ -1298,7 +1326,7 @@ impl AppState {
         .await
         .map_err(|_| {
             anyhow::anyhow!(
-                "AppState::embedder() timed out after {:?} (issue #910); \
+                "AppState::embedder() timed out after {:?}; \
                  the CoreML/CUDA model is taking unusually long to compile — \
                  increase TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS if needed",
                 timeout
@@ -1935,11 +1963,16 @@ mod tests {
     /// Test: `daemon_readiness_transitions_warming_to_ready`,
     ///       `readiness_check_ok_when_ready_err_when_warming`.
     fn test_state_warming() -> (AppState, tempfile::TempDir) {
+        // Use OnceLock so the env var is written exactly once across all
+        // parallel test threads — avoids the unsynchronised set_var race while
+        // remaining consistent with the idempotent-write approach used in
+        // `test_state()`.
+        static SKIP_ENFORCEMENT_SET: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        SKIP_ENFORCEMENT_SET.get_or_init(|| unsafe {
+            std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
+        });
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
-        unsafe {
-            std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
-        }
         // Deliberately do NOT call set_ready() — stays in Warming state.
         (AppState::new(root), tmp)
     }
