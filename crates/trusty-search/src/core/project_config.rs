@@ -1,13 +1,15 @@
 //! Per-project configuration parsed from `<cwd>/.trusty-search.yaml`.
 //!
-//! Why: running `trusty-search index` from a repo root whose real source lives
-//! in a subdirectory (`app/`), or that contains large non-code trees outside
-//! `.gitignore` (`data/`, `docs/`), forces the user to repeat
-//! `trusty-search index app --name myproject` every time and gives no way to
-//! commit those settings so teammates (and daemon restarts) pick them up
-//! automatically. A committed `.trusty-search.yaml` dotfile fixes that: it
-//! supplies defaults for the index `name`, the sub`path` to index, and extra
-//! `exclude` patterns. CLI flags always win over the file.
+//! Why: a committed `.trusty-search.yaml` dotfile lets teammates share a
+//! stable index `name` and extra `exclude` patterns without retyping them on
+//! every `trusty-search index` invocation. CLI flags always win over the file.
+//!
+//! **Note on `path:`:** the `path:` field is preserved in the struct and
+//! deserialised for backward-compatibility with existing config files, but it
+//! is intentionally NOT consumed by `commands::index::handle_index` for root
+//! selection. The registered root is always the directory the user explicitly
+//! pointed at (or the CWD) — never a subdirectory narrowed by a committed
+//! `path: app` entry. See `commands::index` for the design rationale.
 //!
 //! What: [`ProjectConfig`] is a thin all-optional struct. [`ProjectConfig::load`]
 //! reads `.trusty-search.yaml` from a directory, returning `Ok(None)` when the
@@ -35,10 +37,10 @@ pub const PROJECT_CONFIG_FILENAME: &str = ".trusty-search.yaml";
 /// Why: every field is optional so a partial config (e.g. just `name:`) is
 /// valid — missing fields fall back to the built-in `trusty-search index`
 /// defaults, and any field can still be overridden by a CLI flag.
-/// What: `name` overrides the directory-basename index name; `path` selects a
-/// subdirectory to index (resolved relative to the config file's directory);
-/// `exclude` supplies extra glob patterns layered on top of `.gitignore` and
-/// the built-in skip list.
+/// What: `name` overrides the directory-basename index name; `exclude` supplies
+/// extra glob patterns layered on top of `.gitignore` and the built-in skip
+/// list; `path` is parsed for backward-compatibility but is no longer consumed
+/// for root selection (see module-level doc comment).
 /// Test: round-tripped and field-checked in this module's `#[cfg(test)]` block.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ProjectConfig {
@@ -46,8 +48,13 @@ pub struct ProjectConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
-    /// Subdirectory to index, relative to the config file's directory.
-    /// Absent → index the config file's directory itself.
+    /// **Deprecated — no longer used for root or crawl selection.**
+    ///
+    /// Previously: subdirectory to index, resolved relative to the config
+    /// file's directory. This field is still parsed so existing YAML files
+    /// continue to deserialise without error, but `commands::index` does not
+    /// consume it; the registered root is always the CLI-supplied directory or
+    /// the CWD. Remove this field from new config files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
 
@@ -111,7 +118,9 @@ mod tests {
         assert!(cfg.exclude.is_none());
     }
 
-    /// All three fields populated parse into the expected values.
+    /// All three fields parse into the expected values. The `path` field is
+    /// still deserialised correctly for backward-compatibility even though
+    /// `commands::index` no longer uses it for root selection.
     #[test]
     fn test_load_full() {
         let tmp = tempdir().unwrap();

@@ -5,9 +5,16 @@
 //! transparently fan out into one register+reindex pass per declared index
 //! so a single `trusty-search index` command can populate multiple named
 //! slices (e.g. `duetto-api` and `duetto-ui`). When a repo instead contains
-//! a single-index `.trusty-search.yaml` dotfile (issue #30), its `name`,
-//! `path`, and `exclude` values supply defaults that committed teammates and
-//! daemon restarts pick up automatically — CLI flags always override them.
+//! a single-index `.trusty-search.yaml` dotfile (issue #30), its `name` and
+//! `exclude` values supply defaults that committed teammates and daemon
+//! restarts pick up automatically — CLI flags always override them.
+//!
+//! Design invariant: the registered root is ALWAYS the directory the user
+//! explicitly pointed at (CLI `PATH` arg, canonicalized) or the CWD
+//! (canonicalized) — never a subdirectory narrowed by the
+//! `.trusty-search.yaml` `path:` field. The `path:` field is parsed for
+//! backward-compatibility but is no longer consumed for root selection or
+//! crawl scoping; the full tree under the chosen root is always crawled.
 
 use super::daemon_utils::daemon_base_url;
 use super::reindex_engine::{
@@ -22,31 +29,16 @@ use colored::Colorize;
 
 /// Entry point for `trusty-search index`.
 ///
-/// Why: register-then-reindex is the primary onboarding flow. With a
-/// `trusty-search.yaml` present, this dispatches into a multi-index pass;
-/// with a single-index `.trusty-search.yaml` dotfile present (issue #30) it
-/// uses that file's `name`/`path`/`exclude` as defaults; otherwise it falls
-/// back to the built-in single-index behaviour.
-/// What:
-/// 1. Auto-start the daemon if needed.
-/// 2. Load `<cwd>/.trusty-search.yaml` (issue #30) and merge: CLI arg wins
-///    over config-file value wins over built-in default. Config `path` is
-///    resolved relative to the config file's directory (the CWD).
-/// 3. Look for `<path>/trusty-search.yaml`. If present, ignore `--name` and
-///    register+reindex each declared index sequentially.
-/// 4. Otherwise, register one index with the merged name/path/exclude.
-///
-/// Test: `cargo run -- index --force` against a healthy daemon prints the
-/// registration line then drives the SSE progress bar. With a yaml at
-/// `<path>/trusty-search.yaml`, it iterates each declared name. With a
-/// `.trusty-search.yaml` dotfile in CWD, the merge precedence is exercised by
-/// `core::project_config` unit tests plus the `merge_*` tests below.
-///
-/// `cli_path` is the optional positional `PATH` argument; `cli_name` /
-/// `cli_exclude` are the optional `--name` / `--exclude` flags.
-/// `timeout` is the user-supplied `--timeout` value: `None` means "use the
-/// progress-aware stall default"; `Some(n)` means "hard cap at n seconds"
-/// (with n=0 meaning wait forever).
+/// Why: register-then-reindex is the primary onboarding flow. The registered
+/// root is always the CLI path (canonicalized) or the CWD — the `path:` field
+/// in `.trusty-search.yaml` is intentionally ignored so a committed config
+/// can never silently narrow the indexed tree.
+/// What: (1) resolve root; (2) optionally load `.trusty-search.yaml` for
+/// `name`/`exclude` defaults; (3) if `trusty-search.yaml` is present at the
+/// root, fan out into multi-index mode; (4) otherwise register one index.
+/// Test: `cargo run -- index --force` prints the registration line + progress.
+/// Multi-index YAML iterates each declared name. Dotfile merge precedence is
+/// covered by `core::project_config` tests and the `merge_*` tests below.
 pub async fn handle_index(
     cli_path: Option<std::path::PathBuf>,
     cli_name: Option<String>,
@@ -58,14 +50,22 @@ pub async fn handle_index(
 ) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_default();
 
-    // 1. Per-project dotfile config (`.trusty-search.yaml`, issue #30). Loaded
-    //    from the CWD only — it supplies defaults for the index name, the
-    //    subdirectory to index, and extra exclude globs. A malformed file is a
-    //    hard error so a config typo never silently degrades to defaults.
+    // 1. Resolve the root path: CLI positional arg wins (canonicalized); else
+    //    the CWD (canonicalized). The `.trusty-search.yaml` `path:` field is
+    //    intentionally NOT used here — "the directory you point at is the
+    //    indexed directory; always crawl the full tree."
+    let project_path = resolve_project_path(cli_path, &cwd);
+
+    // 2. Per-project dotfile config (`.trusty-search.yaml`, issue #30). Loaded
+    //    from the CWD only — it supplies defaults for the index `name` and
+    //    extra `exclude` globs. The `path:` field is parsed (for
+    //    backward-compatibility with existing YAML files) but never used to
+    //    narrow the root or the crawl. A malformed file is a hard error so a
+    //    config typo never silently degrades to defaults.
     let project_cfg = match ProjectConfig::load(&cwd) {
         Ok(Some(cfg)) => {
             tracing::debug!(
-                "loaded {} from {}: name={:?} path={:?} exclude={:?}",
+                "loaded {} from {}: name={:?} path={:?} (ignored) exclude={:?}",
                 PROJECT_CONFIG_FILENAME,
                 cwd.display(),
                 cfg.name,
@@ -77,10 +77,6 @@ pub async fn handle_index(
         Ok(None) => None,
         Err(e) => anyhow::bail!("could not parse {}: {e}", PROJECT_CONFIG_FILENAME),
     };
-
-    // 2. Resolve PATH: CLI positional arg wins; else config `path` resolved
-    //    relative to the config file's directory (CWD); else the CWD itself.
-    let project_path = resolve_project_path(cli_path, project_cfg.as_ref(), &cwd);
 
     // 0. Auto-start the daemon if needed. `index` is useless without it,
     //    so we proactively boot it rather than dump a confusing connection
@@ -160,29 +156,22 @@ pub async fn handle_index(
     }
 }
 
-/// Resolve the directory to index from the CLI arg, the dotfile config, and
-/// the CWD, in that precedence order.
+/// Resolve the exact directory to register and crawl.
 ///
-/// Why: issue #30 lets a committed `.trusty-search.yaml` point at a
-/// subdirectory (`path: app`) so teammates need not retype it; an explicit
-/// CLI `PATH` must still win, and a config `path` is written relative to the
-/// config file's directory rather than the process CWD-at-call-time.
-/// What: returns `cli_path` verbatim when present; else `config_dir`-joined
-/// `cfg.path` when the config supplies one; else `config_dir` itself.
-/// Test: `merge_path_cli_wins`, `merge_path_config_relative`,
-/// `merge_path_default_is_cwd`.
+/// Why: the root must always be the directory the user pointed at, never
+/// silently narrowed by a committed `.trusty-search.yaml` `path:` field.
+/// Canonicalization ensures the global-config entry and the daemon agree on
+/// the path even when a relative path or symlink component is supplied. If
+/// `canonicalize` fails the input path is returned verbatim (test fixtures).
+/// What: `cli_path` (canonicalized) when present; else `cwd` (canonicalized).
+/// Test: `merge_path_cli_wins`, `merge_path_config_path_field_ignored`,
+/// `merge_path_default_is_cwd`, `merge_path_config_present_but_no_path_field`.
 fn resolve_project_path(
     cli_path: Option<std::path::PathBuf>,
-    cfg: Option<&ProjectConfig>,
-    config_dir: &std::path::Path,
+    cwd: &std::path::Path,
 ) -> std::path::PathBuf {
-    if let Some(p) = cli_path {
-        return p;
-    }
-    if let Some(rel) = cfg.and_then(|c| c.path.as_ref()) {
-        return config_dir.join(rel);
-    }
-    config_dir.to_path_buf()
+    let raw = cli_path.unwrap_or_else(|| cwd.to_path_buf());
+    raw.canonicalize().unwrap_or(raw)
 }
 
 /// Resolve the index name from the CLI flag, the dotfile config, and the
@@ -411,6 +400,7 @@ mod tests {
     use super::*;
     use crate::core::project_config::ProjectConfig;
     use std::path::{Path, PathBuf};
+    use tempfile::tempdir;
 
     fn cfg(name: Option<&str>, path: Option<&str>, exclude: Option<Vec<&str>>) -> ProjectConfig {
         ProjectConfig {
@@ -422,35 +412,42 @@ mod tests {
 
     // ── resolve_project_path ───────────────────────────────────────────────
 
+    /// CLI path wins; result is canonicalized when the path exists on disk.
     #[test]
     fn merge_path_cli_wins() {
-        let c = cfg(None, Some("app"), None);
-        let got = resolve_project_path(
-            Some(PathBuf::from("/explicit/cli")),
-            Some(&c),
-            Path::new("/repo"),
-        );
-        assert_eq!(got, PathBuf::from("/explicit/cli"));
+        let tmp = tempdir().unwrap();
+        let canonical = tmp.path().canonicalize().unwrap();
+        let got = resolve_project_path(Some(tmp.path().to_path_buf()), Path::new("/repo"));
+        assert_eq!(got, canonical);
     }
 
+    /// A `.trusty-search.yaml` `path: app` must NOT narrow the root.
+    /// The field is parsed for backward-compat but never used for root selection.
     #[test]
-    fn merge_path_config_relative() {
-        let c = cfg(None, Some("app"), None);
-        let got = resolve_project_path(None, Some(&c), Path::new("/repo"));
-        assert_eq!(got, PathBuf::from("/repo/app"));
+    fn merge_path_config_path_field_ignored() {
+        let tmp = tempdir().unwrap();
+        let cwd = tmp.path().canonicalize().unwrap();
+        // No CLI arg → result must be CWD, not CWD/app.
+        let got = resolve_project_path(None, &cwd);
+        assert_eq!(got, cwd, "cfg.path must NOT narrow the root");
     }
 
+    /// No CLI arg → CWD (canonicalized).
     #[test]
     fn merge_path_default_is_cwd() {
-        let got = resolve_project_path(None, None, Path::new("/repo"));
-        assert_eq!(got, PathBuf::from("/repo"));
+        let tmp = tempdir().unwrap();
+        let canonical = tmp.path().canonicalize().unwrap();
+        let got = resolve_project_path(None, tmp.path());
+        assert_eq!(got, canonical);
     }
 
+    /// Config present with no `path:` field → still returns CWD.
     #[test]
     fn merge_path_config_present_but_no_path_field() {
-        let c = cfg(Some("foo"), None, None);
-        let got = resolve_project_path(None, Some(&c), Path::new("/repo"));
-        assert_eq!(got, PathBuf::from("/repo"));
+        let tmp = tempdir().unwrap();
+        let canonical = tmp.path().canonicalize().unwrap();
+        let got = resolve_project_path(None, tmp.path());
+        assert_eq!(got, canonical);
     }
 
     // ── resolve_index_name ─────────────────────────────────────────────────
