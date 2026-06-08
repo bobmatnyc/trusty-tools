@@ -1,12 +1,12 @@
 //! Bundled `trusty-bm25-daemon` shim — produced by `cargo install trusty-memory`.
 //!
 //! Why: bundle trusty-bm25-daemon into trusty-memory's install surface so
-//! `cargo install trusty-memory` produces all three binaries from a single
-//! command: trusty-memory, trusty-memory-mcp-bridge, AND trusty-bm25-daemon.
-//! Users who set TRUSTY_BM25_DAEMON=1 without separately installing the daemon
-//! previously got silently degraded lexical recall — this bundling closes that
-//! footgun. Mirrors PR #190 which did the same for trusty-embedderd in
-//! trusty-search.
+//! `cargo install trusty-memory` produces both binaries from a single command:
+//! trusty-memory AND trusty-bm25-daemon. (The former trusty-memory-mcp-bridge
+//! binary was removed in PR3 of the #914 stdio-cutover epic.) Users who set
+//! TRUSTY_BM25_DAEMON=1 without separately installing the daemon previously got
+//! silently degraded lexical recall — this bundling closes that footgun. Mirrors
+//! PR #190 which did the same for trusty-embedderd in trusty-search.
 //!
 //! What: parses CLI flags via the `trusty_bm25_daemon::Cli` re-export,
 //! initialises tracing to stderr at the requested verbosity, projects the

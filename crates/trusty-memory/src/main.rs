@@ -1,18 +1,19 @@
 //! CLI entry point for the `trusty-memory` binary.
 //!
 //! Why: ship a thin clap-to-handler shim so users can `cargo install
-//! trusty-memory` and invoke `trusty-memory serve` (the HTTP/SSE daemon
-//! consumed by Claude Code via the `trusty-memory-mcp-bridge` companion
-//! binary) or `trusty-memory migrate kuzu-memory` (which rewrites Claude
-//! settings files that still reference the legacy kuzu-memory MCP server).
-//! All real logic lives in the library and the `commands::migrate` module —
-//! this file does CLI parsing and dispatch only.
-//! What: defines a `clap::Parser` with `serve` and `migrate` subcommands.
-//! `serve` defers to `trusty_memory::run_http` / `run_http_dynamic`;
-//! Claude Code talks to the daemon through the `trusty-memory-mcp-bridge`
-//! stdio-to-UDS pipe (PR #149). `migrate` defers to
-//! `commands::migrate::handle_migrate`.
-//! Test: `cargo run -p trusty-memory -- --help` lists both subcommands.
+//! trusty-memory` and invoke `trusty-memory serve --stdio` (the direct
+//! MCP stdio server, PR1 #919 of the #914 stdio-cutover epic), `trusty-memory
+//! serve` (the HTTP/SSE daemon), or `trusty-memory migrate kuzu-memory`
+//! (which rewrites Claude settings files that still reference the legacy
+//! kuzu-memory MCP server). All real logic lives in the library and the
+//! `commands::` modules — this file does CLI parsing and dispatch only.
+//! The former `trusty-memory-mcp-bridge` binary and UDS transport were
+//! removed in PR3 of the #914 epic; `serve --stdio` is the canonical
+//! stdio integration.
+//! What: defines a `clap::Parser` with `serve`, `migrate`, and other
+//! subcommands. `serve --stdio` defers to `commands::serve_stdio`;
+//! `serve` (HTTP) defers to `trusty_memory::run_http` / `run_http_dynamic`.
+//! Test: `cargo run -p trusty-memory -- --help` lists all subcommands.
 //! `cargo run -p trusty-memory -- migrate kuzu-memory --dry-run` exercises
 //! the migrate path end-to-end without modifying any files.
 
@@ -85,17 +86,12 @@ enum Command {
     /// actual HTTP server, and by launchd / systemd). Pass `--http <ADDR>`
     /// to bind a specific address.
     ///
-    /// Claude Code integration (recommended): install the
-    /// `trusty-memory-mcp-bridge` binary into your `.mcp.json` — it pipes
-    /// stdio between Claude Code and the daemon over a Unix domain socket
-    /// (PR #149).
-    ///
-    /// Alternative (issue #914): use `serve --stdio` for a direct stdio
-    /// JSON-RPC MCP server.  This mode binds no HTTP port or UDS socket;
-    /// stdout is the JSON-RPC channel.  Palaces are opened read-only via
-    /// the snapshot fallback when a write lock is held by another process.
-    /// Every request resolves within a deadline — success or an explicit
-    /// JSON-RPC error — so the MCP client never hangs.
+    /// Claude Code integration (recommended): use `serve --stdio` for a
+    /// direct stdio JSON-RPC MCP server (PR1 #919, #914).  This mode binds
+    /// no HTTP port; stdout is the JSON-RPC channel.  Palaces are opened
+    /// read-only via the snapshot fallback when a write lock is held by
+    /// another process.  Every request resolves within a deadline — success
+    /// or an explicit JSON-RPC error — so the MCP client never hangs.
     Serve {
         /// Bind the HTTP/SSE server to a specific address. When omitted,
         /// the daemon binds dynamically.
@@ -663,9 +659,8 @@ async fn run_serve_stdio(palace: Option<String>) -> Result<()> {
 /// Dispatch `serve` to the HTTP server (background spawn or inline foreground).
 ///
 /// Why: keeps `main` focused on parsing while `AppState` construction lives
-/// in one place. The direct `--stdio` path is handled by `run_serve_stdio`
-/// above; Claude Code can use either `--stdio` (direct) or the
-/// `trusty-memory-mcp-bridge` UDS pipe (PR #149).
+/// in one place. The direct `--stdio` path (`serve --stdio`, PR1 #919) is
+/// handled by `run_serve_stdio` above; the HTTP path runs the full axum daemon.
 /// What: resolves the palace registry directory (descending into the legacy
 /// `palaces/` subdirectory when present — see `resolve_palace_registry_dir`),
 /// builds an `AppState` rooted there, applies the `--palace` default if any,

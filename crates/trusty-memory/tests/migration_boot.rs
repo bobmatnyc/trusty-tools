@@ -21,8 +21,9 @@
 //! it. `--foreground` is required because plain `serve` self-spawns and
 //! exits 0 (see `commands::start`), which would race the kill below.
 //! `--http 127.0.0.1:0` picks an OS-assigned port so concurrent test runs
-//! cannot collide on the historic default 7070. Issue #150 removed the
-//! cheaper `serve --stdio` boot path that this test originally used.
+//! cannot collide on the historic default 7070. (`serve --stdio`, added in
+//! PR1 #919, binds no HTTP port and would not expose the migration timing
+//! we need to verify here.)
 //!
 //! Test: `cargo test -p trusty-memory --test migration_boot`. Requires Cargo
 //! to have built the binary via `CARGO_BIN_EXE_trusty-memory`.
@@ -84,13 +85,12 @@ fn locate_binary() -> PathBuf {
 /// long enough for the migration to run, then kill the child. Returns once
 /// the child is reaped.
 ///
-/// Why: issue #150 removed the `serve --stdio` flag (the previous cheapest
-/// boot path) because it deadlocked on redb's exclusive write lock whenever
-/// a long-lived daemon was already running. `serve --foreground` is now the
-/// canonical "supervisor-friendly" mode — it does not self-spawn, so the
-/// child PID we kill is the actual daemon. We bind `--http 127.0.0.1:0`
-/// so the OS assigns a free port: concurrent test runs (and any locally
-/// running daemon on the historic 7070) never collide.
+/// Why: `serve --foreground` is the canonical "supervisor-friendly" mode —
+/// it does not self-spawn, so the child PID we kill is the actual daemon.
+/// We bind `--http 127.0.0.1:0` so the OS assigns a free port: concurrent
+/// test runs (and any locally running daemon on the historic 7070) never
+/// collide. (`serve --stdio`, added in PR1 #919, binds no HTTP port and
+/// would not expose the migration timing we need to verify here.)
 /// What: spawns the binary with `--foreground --http 127.0.0.1:0`, pipes
 /// every stdio to dev-null equivalents, waits BOOT_WAIT, then sends SIGKILL
 /// via `Child::kill`. Reaps via `wait`.

@@ -34,20 +34,6 @@ path = "src/main.rs"
 required-features = ["axum-server"]
 
 [[bin]]
-# Why: Multi-transport refactor — Claude Code launches MCP servers as
-#      stdio child processes, but the trusty-memory daemon owns the redb
-#      locks and must not be re-spawned per session. The bridge is a
-#      ~40-line byte pipe between Claude Code's stdio and the daemon's
-#      Unix domain socket. The bridge MUST NEVER open redb — it has no
-#      database knowledge whatsoever, only `tokio::io::copy_bidirectional`
-#      between stdin/stdout and the socket.
-# What: standalone binary; depends on the library for the socket path
-#      resolution helper and nothing else.
-# Test: `bridge_byte_pipe_smoke` in tests/uds_roundtrip.rs.
-name = "trusty-memory-mcp-bridge"
-path = "src/bin/mcp_bridge.rs"
-
-[[bin]]
 # Why: Bundle the trusty-bm25-daemon binary into the trusty-memory install
 #      surface so `cargo install trusty-memory` produces all three binaries
 #      in one command. Users who set TRUSTY_BM25_DAEMON=1 without separately
@@ -57,7 +43,7 @@ path = "src/bin/mcp_bridge.rs"
 #      crate. This file just wires the tokio runtime and delegates to
 #      `trusty_bm25_daemon::run()`.
 # Test: `cargo install --path crates/trusty-memory --root /tmp/test` should
-#      produce trusty-memory, trusty-memory-mcp-bridge, AND trusty-bm25-daemon.
+#      produce trusty-memory AND trusty-bm25-daemon.
 name = "trusty-bm25-daemon"
 path = "src/bin/bm25_daemon.rs"
 
@@ -150,11 +136,10 @@ tower = { workspace = true }
 #      in-process MCP discovery (e.g. `open-mpm`) should not be forced to
 #      compile the axum + tower-http HTTP/SSE surface. Mirrors the
 #      `trusty-common` pattern where `axum-server` gates the same crates.
-# Defaults to `axum-server` so the `trusty-memory` / `trusty-memory-mcp-bridge`
-# / `trusty-bm25-daemon` binaries — and the standard `cargo install
-# trusty-memory` / `cargo test -p trusty-memory` flows — keep building exactly
-# as before. Consumers that want the slim library surface override with
-# `default-features = false`.
+# Defaults to `axum-server` so the `trusty-memory` / `trusty-bm25-daemon`
+# binaries — and the standard `cargo install trusty-memory` / `cargo test
+# -p trusty-memory` flows — keep building exactly as before. Consumers that
+# want the slim library surface override with `default-features = false`.
 default = ["axum-server"]
 # Enables the axum HTTP/SSE daemon surface (`web`, `chat`, `run_http_*`,
 # `sse_handler`, `bind_dynamic_port`, etc.). Pulls in `axum`, `tower-http`,

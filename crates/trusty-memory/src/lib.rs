@@ -1,21 +1,19 @@
-//! MCP server (HTTP/SSE + UDS) for trusty-memory.
+//! MCP server (HTTP/SSE + stdio) for trusty-memory.
 //!
 //! Why: Claude Code and other MCP-aware clients integrate with trusty-memory
 //! through the standardized Model Context Protocol; we expose memory + KG
-//! tools so they can be called by name. Claude Code itself speaks stdio,
-//! but the in-process `serve --stdio` path was removed in issue #150
-//! because it deadlocked on the redb exclusive write lock whenever a
-//! long-lived daemon was already running — the canonical stdio integration
-//! is now the `trusty-memory-mcp-bridge` binary (PR #149), which pipes
-//! Claude Code's stdio over a Unix domain socket to the daemon.
+//! tools so they can be called by name. The canonical stdio integration is
+//! `trusty-memory serve --stdio` (PR1 #919 of the #914 cutover epic), a
+//! self-contained direct MCP server that binds no HTTP port or UDS socket.
+//! The former `trusty-memory-mcp-bridge` binary and Unix-domain-socket
+//! transport were removed in PR3 (#914) once `serve --stdio` made them dead
+//! code.
 //! What: Provides `run_http` / `run_http_dynamic` / `run_http_on` (axum
-//! HTTP/SSE + REST + UI) and the `transport::uds` module (Unix-domain
-//! socket transport for the MCP bridge), plus an `AppState` that carries
-//! the shared `PalaceRegistry`, on-disk data root, and a lazily-initialized
-//! embedder.
+//! HTTP/SSE + REST + UI) plus an `AppState` that carries the shared
+//! `PalaceRegistry`, on-disk data root, and a lazily-initialized embedder.
 //! Test: `cargo test -p trusty-memory` validates handshake + dispatch via
-//! the in-process `handle_message` unit tests and the `tests/uds_roundtrip.rs`
-//! end-to-end harness.
+//! the in-process `handle_message` unit tests and the
+//! `tests/serve_stdio_e2e.rs` end-to-end harness.
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -1594,7 +1592,10 @@ fn dotfile_http_addr_path() -> Option<PathBuf> {
 ///
 /// Why: A long-running daemon mode lets non-stdio clients (browsers, curl,
 /// future remote agents) hit `/health`, the `/api/v1/*` REST surface, and the
-/// embedded admin SPA.
+/// embedded admin SPA. The Unix-domain-socket transport and the
+/// `trusty-memory-mcp-bridge` binary were removed in PR3 of the #914
+/// stdio-cutover epic; the canonical MCP integration is now
+/// `trusty-memory serve --stdio` (PR1 #919).
 /// What: axum router built from `web::router()` plus a `/sse` stub for the
 /// existing MCP-over-SSE clients. Caller provides a pre-bound listener so
 /// port auto-detection lives at the call site. Before accepting connections
@@ -1675,14 +1676,6 @@ pub async fn run_http_on(state: AppState, listener: tokio::net::TcpListener) -> 
         (None, None)
     };
 
-    // Multi-transport refactor: bind the Unix domain socket alongside
-    // the HTTP listener. The UDS serves NDJSON JSON-RPC 2.0 for the
-    // `trusty-memory-mcp-bridge` binary (and any local CLI that wants
-    // to skip HTTP overhead). Failures are logged but never block the
-    // HTTP server from coming up — UDS is best-effort on hosts where
-    // it's unsupported (e.g. some Docker overlays).
-    let uds_sock_path = spawn_uds_listener(state.clone()).await;
-
     // Keep a handle to the BM25 supervisor (if any) so we can call
     // `shutdown()` on the exit path. Cloning here is cheap (`Arc`) and
     // detaches the lifetime of the supervisor from the `state` move into
@@ -1712,9 +1705,6 @@ pub async fn run_http_on(state: AppState, listener: tokio::net::TcpListener) -> 
     if let Some(p) = written_dotfile_path.as_ref() {
         let _ = std::fs::remove_file(p);
     }
-    if let Some(p) = uds_sock_path.as_ref() {
-        let _ = std::fs::remove_file(p);
-    }
 
     // Issue #193: gracefully reap every spawned BM25 daemon before the
     // process exits so each one gets a chance to flush its snapshot and
@@ -1727,57 +1717,6 @@ pub async fn run_http_on(state: AppState, listener: tokio::net::TcpListener) -> 
 
     serve_result?;
     Ok(())
-}
-
-/// Spawn the UDS accept loop alongside the HTTP server.
-///
-/// Why: UDS is an additive transport — failing to bind it (unusual
-/// $TMPDIR layout, permission error on macOS) should not block the
-/// HTTP daemon from coming up. Logging the failure and returning
-/// `None` lets the caller skip cleanup later.
-/// What: resolves [`transport::uds::socket_path`], cleans any stale
-/// file, binds, writes the `<data_root>/uds_addr` discovery file, and
-/// spawns the accept loop on a background tokio task. Returns the
-/// bound path so the caller can clean it up on shutdown.
-/// Test: covered by `uds_ndjson_roundtrip` in the integration tests
-/// and the unit tests in [`transport::uds`].
-#[cfg(feature = "axum-server")]
-async fn spawn_uds_listener(state: AppState) -> Option<PathBuf> {
-    // Use a data-root-scoped socket path so multiple daemons (typical
-    // in tests) don't collide on the shared `$TMPDIR/trusty-memory.sock`.
-    // Production daemons (those rooted at the canonical data dir) still
-    // get the canonical socket path so the bridge can find it without
-    // reading the discovery file.
-    let sock_path = transport::uds::socket_path_for(&state.data_root);
-    let listener = match transport::uds::bind_uds(&sock_path).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::warn!(
-                "UDS bind at {} failed: {e:#}; continuing without UDS transport",
-                sock_path.display()
-            );
-            return None;
-        }
-    };
-    info!("UDS listener bound at {}", sock_path.display());
-    eprintln!("UDS listener bound at {}", sock_path.display());
-    // Best-effort: write the address discovery file so the bridge can
-    // find the live socket even when the daemon was started with an
-    // unusual $TMPDIR.
-    if let Err(e) = transport::uds::write_uds_addr_file(&state.data_root, &sock_path) {
-        tracing::warn!(
-            "could not write {}/{}: {e:#}",
-            state.data_root.display(),
-            transport::uds::UDS_ADDR_FILE
-        );
-    }
-    let task_state = state.clone();
-    tokio::spawn(async move {
-        if let Err(e) = transport::uds::run_uds(task_state, listener).await {
-            tracing::error!("UDS accept loop exited: {e:#}");
-        }
-    });
-    Some(sock_path)
 }
 
 /// Convenience: bind `addr` and serve via [`run_http_on`].

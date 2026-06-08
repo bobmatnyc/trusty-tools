@@ -2,14 +2,14 @@
 //!
 //! Why: Keep CLI handlers out of `lib.rs` so the library surface stays focused
 //! on MCP server code while the binary stays a thin clap-to-handler shim.
-//! What: One submodule per subcommand. `serve` is wired directly to
-//! `crate::run_http` / `crate::run_http_dynamic` in `main.rs` (the legacy
-//! `crate::run_stdio` entry point was removed in issue #150 — Claude Code
-//! now talks to the daemon via the `trusty-memory-mcp-bridge` stdio-to-UDS
-//! pipe from PR #149); `migrate` rewrites Claude settings to point at
-//! trusty-memory; `service` manages the macOS launchd LaunchAgent; `setup`
-//! orchestrates first-time install (data dir + launchd + Claude settings
-//! patch).
+//! What: One submodule per subcommand. `serve --stdio` is handled by
+//! `serve_stdio` (direct MCP, PR1 #919 of the #914 cutover epic); `serve`
+//! (HTTP) is wired to `crate::run_http` / `crate::run_http_dynamic` in
+//! `main.rs`; `migrate` rewrites Claude settings to point at trusty-memory;
+//! `service` manages the macOS launchd LaunchAgent; `setup` orchestrates
+//! first-time install (data dir + launchd + Claude settings patch). The
+//! former `trusty-memory-mcp-bridge` binary and UDS transport were removed
+//! in PR3 of the #914 epic.
 //! Test: Each submodule carries its own unit tests.
 
 pub mod daemon_guard;
