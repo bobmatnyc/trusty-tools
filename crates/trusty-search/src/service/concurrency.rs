@@ -10,20 +10,26 @@
 //! `Retry-After` header so they back off and try again instead of piling up
 //! more pressure.
 //!
+//! Additionally (issue #907): the semaphore `.acquire_owned().await` is now
+//! bounded by `TRUSTY_QUEUE_TIMEOUT_SECS` (default 30 s). When the wait
+//! exceeds the deadline the request returns 503 immediately rather than
+//! hanging indefinitely behind a stalled reindex or a burst that never clears.
+//!
 //! What: An `Arc<ConcurrencyLimiter>` installed as an axum `Extension`. The
 //! middleware fn `apply_limiter` reads it out of the request extensions,
 //! attempts a non-blocking `Semaphore::try_acquire`, and if that fails,
 //! checks whether the bounded waiting queue still has room (via the
 //! `waiting` `AtomicUsize`). When the queue is also full it returns 503
-//! immediately; otherwise it waits for a permit. Light endpoints (`/health`,
-//! `/metrics`, `/indexes`) bypass this middleware entirely by not being
-//! wrapped in the limited router subtree.
+//! immediately; otherwise it waits for a permit (bounded by the queue
+//! timeout). Light endpoints (`/health`, `/metrics`, `/indexes`) bypass this
+//! middleware entirely by not being wrapped in the limited router subtree.
 //!
 //! Config:
 //!   - `TRUSTY_MAX_CONCURRENT_REQUESTS` (default 8) — semaphore permits.
 //!   - `TRUSTY_QUEUE_DEPTH` (default 32) — max waiters before 503.
+//!   - `TRUSTY_QUEUE_TIMEOUT_SECS` (default 30) — max wait for a permit (issue #907).
 //!
-//! Test: covered by `tests` at the bottom — limit, queue, and 503 paths.
+//! Test: covered by `tests` at the bottom — limit, queue, 503, and queue-timeout paths.
 
 use axum::{
     body::Body,
@@ -42,6 +48,30 @@ const DEFAULT_MAX_CONCURRENT: usize = 8;
 /// Default waiting-queue depth when `TRUSTY_QUEUE_DEPTH` is unset.
 const DEFAULT_QUEUE_DEPTH: usize = 32;
 
+/// Default bounded wait for a concurrency-semaphore permit (issue #907).
+///
+/// Why: `acquire_owned().await` blocks forever when all permits are held by a
+/// stalled reindex. 30 s is long enough to absorb normal burst traffic and
+/// short enough that a user query never hangs past a client's own HTTP timeout.
+const DEFAULT_QUEUE_TIMEOUT_SECS: u64 = 30;
+
+/// Read `TRUSTY_QUEUE_TIMEOUT_SECS` once and cache it.
+///
+/// Why: avoids repeated env lookups per request while still allowing tests to
+/// override via `std::env::set_var` before the first call.
+/// What: reads env var, parses as u64, falls back to `DEFAULT_QUEUE_TIMEOUT_SECS`.
+/// Test: `queue_wait_returns_503_on_timeout`.
+fn queue_timeout() -> std::time::Duration {
+    static CACHED: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let secs = std::env::var("TRUSTY_QUEUE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_QUEUE_TIMEOUT_SECS);
+        std::time::Duration::from_secs(secs)
+    })
+}
+
 /// Shared limiter state, cloned into every request via axum's `Extension`.
 ///
 /// Why: a single semaphore + atomic counter shared across handlers is the
@@ -50,12 +80,17 @@ const DEFAULT_QUEUE_DEPTH: usize = 32;
 /// queues unboundedly.
 /// What: `semaphore` enforces in-flight count, `waiting` tracks queued-but-
 /// not-yet-admitted requests so we can fast-fail the (N+1)th waiter.
-/// Test: `limiter_returns_503_when_queue_full`, `limiter_admits_up_to_concurrency`.
+/// `queue_timeout` bounds the `.acquire_owned().await` so a request can
+/// never hang indefinitely behind a stalled index operation (issue #907).
+/// Test: `limiter_returns_503_when_queue_full`, `limiter_admits_up_to_concurrency`,
+/// `queue_wait_returns_503_on_timeout`.
 pub struct ConcurrencyLimiter {
     semaphore: Arc<Semaphore>,
     queue_depth: usize,
     waiting: Arc<AtomicUsize>,
     max_concurrent: usize,
+    /// Bounded wait deadline for a semaphore permit (issue #907).
+    queue_timeout: std::time::Duration,
 }
 
 impl ConcurrencyLimiter {
@@ -86,17 +121,38 @@ impl ConcurrencyLimiter {
             queue_depth,
             waiting: Arc::new(AtomicUsize::new(0)),
             max_concurrent,
+            queue_timeout: queue_timeout(),
         })
     }
 
     /// Construct a limiter with explicit knobs (tests, integration callers).
     #[cfg(test)]
     pub fn with_limits(max_concurrent: usize, queue_depth: usize) -> Arc<Self> {
+        Self::with_limits_and_timeout(
+            max_concurrent,
+            queue_depth,
+            std::time::Duration::from_secs(DEFAULT_QUEUE_TIMEOUT_SECS),
+        )
+    }
+
+    /// Construct a limiter with explicit knobs including a custom queue timeout.
+    ///
+    /// Why: allows tests to inject a very short queue timeout to prove the
+    /// 503-on-timeout path fires without actually waiting 30 s.
+    /// What: same as `with_limits` but overrides the queue-wait deadline.
+    /// Test: `queue_wait_returns_503_on_timeout`.
+    #[cfg(test)]
+    pub fn with_limits_and_timeout(
+        max_concurrent: usize,
+        queue_depth: usize,
+        queue_timeout: std::time::Duration,
+    ) -> Arc<Self> {
         Arc::new(Self {
             semaphore: Arc::new(Semaphore::new(max_concurrent.max(1))),
             queue_depth,
             waiting: Arc::new(AtomicUsize::new(0)),
             max_concurrent: max_concurrent.max(1),
+            queue_timeout,
         })
     }
 
@@ -161,14 +217,27 @@ pub async fn apply_limiter(
                 tracing::warn!("concurrency limiter: queue full, returning 503");
                 return busy_response();
             }
-            // Wait for a permit. On success, decrement the waiter counter.
-            let acquired = limiter.semaphore.clone().acquire_owned().await;
+            // Wait for a permit, bounded by the queue timeout (issue #907).
+            // On timeout, return 503 immediately — never hang indefinitely.
+            let deadline = limiter.queue_timeout;
+            let acquired =
+                tokio::time::timeout(deadline, limiter.semaphore.clone().acquire_owned()).await;
             limiter.waiting.fetch_sub(1, Ordering::Relaxed);
             metrics::gauge!("trusty_queue_depth")
                 .set(limiter.waiting.load(Ordering::Relaxed) as f64);
             match acquired {
-                Ok(p) => p,
-                Err(_) => {
+                Err(_elapsed) => {
+                    // Timed out waiting for a permit — return busy/503 with a
+                    // Retry-After header so clients back off gracefully.
+                    metrics::counter!("trusty_requests_rejected_total").increment(1);
+                    tracing::warn!(
+                        timeout_secs = deadline.as_secs(),
+                        "concurrency limiter: queue-wait timed out, returning 503 (issue #907)"
+                    );
+                    return busy_response();
+                }
+                Ok(Ok(p)) => p,
+                Ok(Err(_)) => {
                     // Semaphore closed — should never happen during normal
                     // operation; fail closed.
                     return busy_response();
@@ -202,6 +271,22 @@ mod tests {
                 get(|| async {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     "ok"
+                }),
+            )
+            .route_layer(axum::middleware::from_fn(apply_limiter))
+            .layer(Extension(limiter))
+    }
+
+    /// Build a router whose `/forever` handler never returns — simulates a
+    /// handler stalled by a blocked embedder call (the issue #907 hang scenario).
+    fn forever_router(limiter: Arc<ConcurrencyLimiter>) -> Router {
+        Router::new()
+            .route(
+                "/forever",
+                get(|| async {
+                    // This future is never resolved in the test; the router will
+                    // just drop it when we don't await the oneshot.
+                    std::future::pending::<&str>().await
                 }),
             )
             .route_layer(axum::middleware::from_fn(apply_limiter))
@@ -266,5 +351,61 @@ mod tests {
             Some("2")
         );
         let _ = in_flight.await;
+    }
+
+    /// Prove that a request waiting in the semaphore queue returns 503 (not
+    /// a hang) when the queue-wait deadline expires (issue #907 fix 2).
+    ///
+    /// Why: before this fix `.acquire_owned().await` blocked forever when all
+    /// permits were held by a stalled operation. The fix wraps the await in
+    /// `tokio::time::timeout`; this test proves it fires.
+    /// What: 1 permit, queue depth 1, timeout 50 ms. A first request holds the
+    /// permit indefinitely. A second request is admitted to the queue and waits.
+    /// After the timeout the second request must receive 503, not hang.
+    /// Test: this test.
+    #[tokio::test]
+    async fn queue_wait_returns_503_on_timeout() {
+        // 1 permit, 1 queue slot, 50 ms deadline — the second request will be
+        // admitted to the queue but time out before the first request finishes.
+        let limiter = ConcurrencyLimiter::with_limits_and_timeout(1, 1, Duration::from_millis(50));
+        let app = forever_router(limiter);
+
+        let req = || {
+            Request::builder()
+                .uri("/forever")
+                .body(Body::empty())
+                .expect("valid request")
+        };
+
+        // Kick off the first request — it grabs the only permit and stalls.
+        let _in_flight = tokio::spawn(app.clone().oneshot(req()));
+        // Yield to let the first request acquire the permit.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        // Second request: admitted to the queue but should 503 after ~50 ms.
+        let start = std::time::Instant::now();
+        let waiting = app.oneshot(req()).await.expect("oneshot returns");
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            waiting.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "queue-wait timeout must return 503, got {} (elapsed: {:?})",
+            waiting.status(),
+            elapsed,
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "queue-wait timeout must not block indefinitely (elapsed: {:?})",
+            elapsed,
+        );
+        assert_eq!(
+            waiting
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .map(|v| v.to_str().unwrap()),
+            Some("2"),
+            "503 response must include Retry-After header"
+        );
     }
 }

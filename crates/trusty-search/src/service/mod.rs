@@ -19,6 +19,7 @@ pub mod mcp_descriptor;
 pub mod metrics;
 pub mod persistence;
 pub mod persistence_loader;
+pub mod query_timeout;
 pub mod reindex;
 pub mod roots_registry;
 pub mod server;

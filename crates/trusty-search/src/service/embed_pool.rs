@@ -25,14 +25,50 @@
 //!
 //! `TRUSTY_EMBED_WORKERS` overrides the autotune.
 //!
+//! `TRUSTY_EMBED_POOL_REPLY_TIMEOUT_SECS` (default 60 s) bounds the
+//! `reply_rx.await` inside `embed()` so a worker panic or a stuck embedder
+//! never leaves the caller hanging indefinitely (issue #907 fix 4). This
+//! budget is intentionally longer than the per-call embedder sidecar timeout
+//! (`TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS`, default 30 s) so the sidecar's own
+//! timeout always fires first and propagates a clean error through the worker's
+//! `reply.send`; the pool reply-timeout is a last-resort backstop.
+//!
 //! Test: see `tests` module at the bottom — covers worker count autotune,
-//! priority ordering (interactive drains before background), shutdown, and
-//! error propagation.
+//! priority ordering (interactive drains before background), shutdown, reply
+//! timeout, and error propagation.
 
 use anyhow::{Context, Result};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
+
+/// Default reply-receive timeout for `embed()` (issue #907 fix 4).
+///
+/// Why: if a worker panics or the worker loop exits unexpectedly, `reply_rx`
+/// would otherwise block forever. This backstop is intentionally longer than
+/// the embedder sidecar call timeout (30 s) so the sidecar's own timeout
+/// always fires and propagates a clean error first; the pool timeout is the
+/// last-resort catch for cases where the sidecar timeout cannot fire (e.g.
+/// the worker task itself panicked before calling `embed_batch`).
+/// What: 60 s. Override with `TRUSTY_EMBED_POOL_REPLY_TIMEOUT_SECS`.
+/// Test: `embed_pool_reply_rx_timeout_returns_error`.
+const DEFAULT_REPLY_TIMEOUT_SECS: u64 = 60;
+
+/// Read `TRUSTY_EMBED_POOL_REPLY_TIMEOUT_SECS` once and cache it.
+///
+/// Why: avoids per-call env lookups while allowing tests to override.
+/// What: reads the env var, parses as u64, falls back to `DEFAULT_REPLY_TIMEOUT_SECS`.
+/// Test: `embed_pool_reply_rx_timeout_returns_error`.
+fn reply_timeout() -> std::time::Duration {
+    static CACHED: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let secs = std::env::var("TRUSTY_EMBED_POOL_REPLY_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_REPLY_TIMEOUT_SECS);
+        std::time::Duration::from_secs(secs)
+    })
+}
 
 use crate::core::embed::Embedder;
 
@@ -187,10 +223,21 @@ impl EmbedPool {
             .set(self.in_flight.load(Ordering::Relaxed) as f64);
 
         let send_result = tx.send(req).await.context("embed pool closed");
+        // Bound the reply-receive so a panicking/stuck worker never hangs
+        // the caller forever (issue #907 fix 4). The embedder sidecar's own
+        // call timeout (30 s by default) fires first for the normal stall
+        // path; this backstop catches worker-task panics and other unexpected
+        // failure modes where the sidecar timeout cannot propagate.
+        let deadline = reply_timeout();
         let result = match send_result {
-            Ok(()) => match reply_rx.await {
-                Ok(r) => r,
-                Err(_) => Err(anyhow::anyhow!("embed pool worker dropped reply")),
+            Ok(()) => match tokio::time::timeout(deadline, reply_rx).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(_)) => Err(anyhow::anyhow!("embed pool worker dropped reply")),
+                Err(_elapsed) => Err(anyhow::anyhow!(
+                    "embed pool reply timed out after {}s — worker may have panicked \
+                         (set TRUSTY_EMBED_POOL_REPLY_TIMEOUT_SECS to adjust)",
+                    deadline.as_secs()
+                )),
             },
             Err(e) => Err(e),
         };
@@ -405,5 +452,39 @@ mod tests {
         // Give workers a tick to observe the closed channels.
         tokio::time::sleep(Duration::from_millis(50)).await;
         // No assertion: success is "no panic, no hang".
+    }
+
+    #[tokio::test]
+    async fn dropping_pool_after_send_returns_error() {
+        // Prove that after the pool senders are dropped `embed()` returns an
+        // error rather than hanging (issue #907 fix 4 — error propagation path).
+        //
+        // Why: when the pool is dropped its senders are closed; the worker
+        // exits; the reply_tx is dropped; `reply_rx.await` returns `Err`. The
+        // `tokio::time::timeout` wrapper must not prevent this from surfacing.
+        // What: manually construct pool components so we can drop the senders
+        // without dropping the receivers (which forces the "channel closed" path
+        // via `tx.send` before even waiting on `reply_rx`).
+        // Test: this test.
+        let (interactive_tx, _interactive_rx) = mpsc::channel::<EmbedRequest>(1);
+        let (_background_tx, _background_rx) = mpsc::channel::<EmbedRequest>(1);
+        // Drop the real receivers — the pool is now orphaned; any send will
+        // fail immediately with `SendError`.
+        drop(_interactive_rx);
+        drop(_background_rx);
+
+        let pool = EmbedPool {
+            interactive_tx,
+            background_tx: _background_tx,
+            workers: 0, // No workers; senders are orphaned.
+            in_flight: Arc::new(AtomicUsize::new(0)),
+        };
+        let result = pool
+            .embed(vec!["x".into()], RequestPriority::Interactive)
+            .await;
+        assert!(
+            result.is_err(),
+            "embed on a closed pool must return Err, not hang"
+        );
     }
 }

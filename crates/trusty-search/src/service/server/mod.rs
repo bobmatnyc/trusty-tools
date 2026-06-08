@@ -76,11 +76,21 @@ use self::health::upgrade_handler;
 /// Build the axum router with the shared state.
 ///
 /// Why: Wraps `state` in an `Arc` so every handler clones the pointer cheaply.
-/// What: Mounts every route, applies the concurrency limiter to expensive endpoints,
-/// installs the Prometheus metrics route when a recorder is wired, and wraps the
-/// whole router in the standard CORS/tracing/gzip middleware from `trusty-common`.
+/// What: Mounts every route, applies the concurrency limiter to expensive
+/// endpoints, applies a query deadline to interactive routes only (issue #907),
+/// installs the Prometheus metrics route when a recorder is wired, and wraps
+/// the whole router in the standard CORS/tracing/gzip middleware from
+/// `trusty-common`.
+///
+/// Route grouping (issue #907):
+/// - `interactive_limited`: concurrency-limited AND query-timeout-bounded;
+///   contains search/grep/search_similar routes only.
+/// - `bulk_limited`: concurrency-limited only (no per-request deadline);
+///   contains reindex/index-file/remove-file which are legitimately long-running.
+///
 /// Test: each handler test builds the router via this function using `oneshot`.
 pub fn build_router(state: SearchAppState) -> Router {
+    use crate::service::query_timeout::{apply_query_timeout, QueryTimeoutConfig};
     use crate::service::ui::{
         chat_handler, list_chat_providers, ui_asset_handler, ui_index_handler,
     };
@@ -90,13 +100,28 @@ pub fn build_router(state: SearchAppState) -> Router {
     spawn_idle_chunk_eviction_ticker(Arc::clone(&state_arc));
 
     let limiter = crate::service::concurrency::ConcurrencyLimiter::from_env();
+    let query_timeout_cfg = QueryTimeoutConfig::from_env();
 
-    let limited = Router::new()
+    // Interactive routes: concurrency-limited AND query-deadline-bounded.
+    // MUST NOT include reindex / index-file — those are legitimately long-running.
+    let interactive_limited = Router::new()
         .route("/search", post(global_search_handler))
         .route("/grep", post(global_grep_handler))
         .route("/indexes/{id}/grep", post(grep_handler))
         .route("/indexes/{id}/search", post(search_handler))
         .route("/indexes/{id}/search_similar", post(search_similar_handler))
+        // Query timeout applied first (outermost layer = evaluated first).
+        .route_layer(axum::middleware::from_fn(apply_query_timeout))
+        .layer(axum::Extension(Arc::clone(&query_timeout_cfg)))
+        .route_layer(axum::middleware::from_fn(
+            crate::service::concurrency::apply_limiter,
+        ))
+        .layer(axum::Extension(Arc::clone(&limiter)))
+        .with_state(Arc::clone(&state_arc));
+
+    // Bulk / long-running routes: concurrency-limited but NO per-request
+    // query deadline — reindex and index-file can legitimately run for minutes.
+    let bulk_limited = Router::new()
         .route("/indexes/{id}/index-file", post(index_file_handler))
         .route("/indexes/{id}/remove-file", post(remove_file_handler))
         .route("/indexes/{id}/reindex", post(reindex_handler))
@@ -135,7 +160,7 @@ pub fn build_router(state: SearchAppState) -> Router {
         .route("/upgrade", post(upgrade_handler))
         .with_state(Arc::clone(&state_arc));
 
-    let mut router = free.merge(limited);
+    let mut router = free.merge(interactive_limited).merge(bulk_limited);
 
     if let Some(metrics_state) = state_arc.metrics.clone() {
         router = router
