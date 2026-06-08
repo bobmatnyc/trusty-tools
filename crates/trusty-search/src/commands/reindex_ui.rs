@@ -135,10 +135,11 @@ pub(crate) enum BarState {
 
 /// Label prefix for each slot (matches the 4 stages in issue #401 order).
 ///
-/// Slot 2 ("Embed") annotates the concurrent commit that runs alongside it:
-/// while the producer (parse+embed) fills a batch the previous commit
-/// (BM25+HNSW upsert+redb) runs concurrently in the consumer.  The label
-/// makes that overlap visible without altering the pipeline itself.
+/// Slot 2 uses "Embed*" — the asterisk is **intentional**: it signals that
+/// during the Embed phase the consumer (BM25 + HNSW upsert + redb) runs
+/// concurrently with the producer (parse+embed), so the two subsystems
+/// overlap in wall-clock time.  The footnote `EMBED_STAR_NOTE` explains this
+/// annotation in the post-reindex timing breakdown.  Do not remove the `*`.
 const STAGE_LABELS: [&str; 4] = ["Crawl", "Chunk", "Embed*", "KG"];
 
 /// Footnote displayed beneath the timing breakdown to explain the Embed* bar
@@ -541,10 +542,13 @@ impl ReindexUi {
 /// to assert on the actual rendered text rather than on a local copy of the
 /// template strings — a refactor that changes the output now fails the test
 /// rather than silently diverging.
-/// What: returns the full multi-line breakdown string (no trailing newline on
-/// the last line) that `print_timing_breakdown` prints verbatim.
+/// What: returns the full multi-line breakdown string.  Every path — including
+/// the vector>0 footnote path and the BM25-only path — ends with exactly one
+/// trailing `\n` so `print_timing_breakdown`'s `print!` leaves the cursor on
+/// a fresh line without needing `println!`.
 /// Test: `tests::timing_breakdown_contains_overlap_disclaimer` and related
-/// tests assert on the returned string directly.
+/// tests assert on the returned string directly; `tests::timing_breakdown_ends_with_newline`
+/// asserts the single trailing `\n` invariant for both paths.
 pub fn format_timing_breakdown(t: &ReindexTimings, total_chunks: u64, elapsed_ms: u64) -> String {
     let mut out = String::new();
 
@@ -621,8 +625,15 @@ pub fn format_timing_breakdown(t: &ReindexTimings, total_chunks: u64, elapsed_ms
     ));
     // Footnote for the Embed* bar label — only meaningful when vectors were
     // actually committed (BM25-only mode has no concurrent upsert to explain).
+    //
+    // Newline discipline: the KG line above already ends with `\n`, so the
+    // BM25-only path (no footnote) terminates correctly.  The vector>0 path
+    // appends the footnote text and then its own `\n`, so both paths end with
+    // exactly one trailing newline.  `print!` in `print_timing_breakdown` then
+    // leaves the cursor on a fresh line without needing a `println!` wrapper.
     if t.vector_count > 0 {
-        out.push_str(&format!("{}", EMBED_STAR_NOTE.dimmed()));
+        out.push_str(&EMBED_STAR_NOTE.dimmed().to_string());
+        out.push('\n');
     }
     out
 }
@@ -1180,6 +1191,9 @@ mod tests {
     /// Test: this test.
     #[test]
     fn timing_breakdown_contains_overlap_disclaimer() {
+        // Disable ANSI color codes so assertions match plain text regardless of
+        // TERM, CLICOLOR_FORCE, or NO_COLOR in the test environment.
+        colored::control::set_override(false);
         let t = ReindexTimings {
             walk_ms: 0,
             parse_ms: 5_000,
@@ -1192,9 +1206,6 @@ mod tests {
             edge_count: 41_002,
         };
         let out = format_timing_breakdown(&t, 62_926, 95_000);
-
-        // Strip ANSI color escapes for plain-text assertions.
-        // indicatif / colored may wrap strings; we test on the raw bytes.
         assert!(
             out.contains("overlapping"),
             "output must contain 'overlapping'; got:\n{out}"
@@ -1237,6 +1248,9 @@ mod tests {
     /// Test: this test.
     #[test]
     fn embed_star_footnote_guarded_by_vector_count() {
+        // Disable ANSI color codes so substring assertions match plain text
+        // regardless of TERM / CLICOLOR_FORCE in the test environment.
+        colored::control::set_override(false);
         let bm25_only = ReindexTimings {
             walk_ms: 0,
             parse_ms: 1_000,
@@ -1283,6 +1297,9 @@ mod tests {
     /// Test: this test.
     #[test]
     fn upsert_vector_count_annotation_is_unambiguous() {
+        // Disable ANSI color codes so substring assertions match plain text
+        // regardless of TERM / CLICOLOR_FORCE in the test environment.
+        colored::control::set_override(false);
         let t = ReindexTimings {
             walk_ms: 0,
             parse_ms: 5_000,
@@ -1345,5 +1362,68 @@ mod tests {
         };
         // No assertion on output text — just no panic.
         print_timing_breakdown(&t, 10_000, 44_000);
+    }
+
+    /// `format_timing_breakdown` must end with exactly one `\n` in both the
+    /// vector>0 (footnote) path and the BM25-only (no footnote) path.
+    ///
+    /// Why: `print_timing_breakdown` uses `print!` not `println!`; if the
+    /// returned string does not end with `\n` the subsequent output (e.g.
+    /// the post-reindex health check) collides with the last line of the
+    /// breakdown.  Conversely, two trailing newlines insert an unwanted blank
+    /// line.  This test pins the single-`\n` invariant so regressions are
+    /// caught immediately.
+    /// What: calls `format_timing_breakdown` for both the vector>0 and the
+    /// BM25-only case and asserts `ends_with('\n')` and
+    /// `!ends_with("\n\n")` for each.
+    /// Test: this test.
+    #[test]
+    fn timing_breakdown_ends_with_newline() {
+        // Disable ANSI color codes so the string comparison is deterministic.
+        colored::control::set_override(false);
+
+        // vector > 0 path (footnote appended)
+        let with_vectors = ReindexTimings {
+            walk_ms: 0,
+            parse_ms: 5_000,
+            embed_ms: 90_000,
+            bm25_ms: 1_200,
+            vector_upsert_ms: 3_400,
+            kg_ms: 800,
+            vector_count: 62_926,
+            symbol_count: 14_823,
+            edge_count: 41_002,
+        };
+        let out_vec = format_timing_breakdown(&with_vectors, 62_926, 95_000);
+        assert!(
+            out_vec.ends_with('\n'),
+            "vector>0 path: output must end with '\\n'; got:\n{out_vec:?}"
+        );
+        assert!(
+            !out_vec.ends_with("\n\n"),
+            "vector>0 path: output must not have double trailing newline; got:\n{out_vec:?}"
+        );
+
+        // BM25-only path (no footnote)
+        let bm25_only = ReindexTimings {
+            walk_ms: 0,
+            parse_ms: 1_000,
+            embed_ms: 0,
+            bm25_ms: 200,
+            vector_upsert_ms: 0,
+            kg_ms: 50,
+            vector_count: 0,
+            symbol_count: 10,
+            edge_count: 4,
+        };
+        let out_bm25 = format_timing_breakdown(&bm25_only, 1_234, 1_500);
+        assert!(
+            out_bm25.ends_with('\n'),
+            "BM25-only path: output must end with '\\n'; got:\n{out_bm25:?}"
+        );
+        assert!(
+            !out_bm25.ends_with("\n\n"),
+            "BM25-only path: output must not have double trailing newline; got:\n{out_bm25:?}"
+        );
     }
 }
