@@ -1,7 +1,19 @@
 # trusty-controller — Design Document Set
 
-**Status:** Draft — stub set
+**Status:** Draft — stub set (DOC-0 charter is **Accepted**)
 **Source spec:** ../01-spec/trusty-end-to-end-setup.md
+
+> **Location:** this design set lives under `docs/trusty-controller/research/`
+> following the repo's per-crate documentation convention (`01-spec/` is the
+> frozen source-of-record; `02-design/` is this refinement layer). It was
+> relocated here from the former `docs-local/02-trusty-controller/` path.
+>
+> **DOC-0 is Accepted.** The naming & documentation charter is resolved: the
+> crate is **`trusty-controller`** (dir `crates/trusty-controller/`), the binary
+> is **`tctl`**, and the alias is **`tctl`**. The naming decision is recorded as
+> an ADR ([`docs/adr/0006-trusty-controller-naming.md`](../../../adr/0006-trusty-controller-naming.md)).
+> See [`00-naming-and-doc-charter.md`](./00-naming-and-doc-charter.md) for the
+> full set of decisions (scope framing, publishing, documentation charter).
 
 ## Rationale
 
@@ -110,9 +122,18 @@ These themes recur across multiple docs and must stay consistent:
 - **Project-identity convention** — a shared rule (git root → index-id/palace-id)
   binds project-scope ops to the right cwd. Defined in DOC-3, referenced by
   DOC-6 and DOC-8.
+- **Orchestrator-swap forward-compatibility** (DOC-0 charter, A4) — the
+  orchestrator is a pluggable stack member: **claude-mpm** (Python, external) is
+  the current stable orchestrator, coordinated via a Python contract adapter
+  (DOC-6); **trusty-mpm** (`crates/trusty-mpm`, Rust) is the planned in-house
+  replacement, not yet ready. The contract + manifest (DOC-1/DOC-2) and the
+  conformance/adapter doc (DOC-6) must treat the orchestrator as swappable
+  (claude-mpm now → trusty-mpm later) without controller changes.
 
 ## TODO
 
-- [ ] Resolve DOC-0 naming so all downstream filenames/examples can be finalized
+- [x] Resolve DOC-0 naming (`trusty-controller` / `tctl`) — recorded in
+      `docs/adr/0006-trusty-controller-naming.md`; downstream filenames/examples
+      can now be finalized
 - [ ] Promote DOC-1 and DOC-2 from stub to full schema definitions
 - [ ] Review the dependency graph with the team
