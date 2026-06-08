@@ -1,4 +1,4 @@
-//! Handler for `trusty-search status <index-id> [--watch]` (issue #929).
+//! Handler for `trusty-search index-status [INDEX] [--watch]` (issue #929).
 //!
 //! Why: the defer-embed feature (#923) runs semantic embedding as a background
 //! job AFTER the fast pass completes. Without a dedicated per-index status
@@ -7,14 +7,16 @@
 //! that gap by rendering a concise per-stage status table with live embed
 //! progress, and — with `--watch` — polls until embedding finishes.
 //!
-//! What: queries `GET /indexes/:id/status`, renders a table of
-//!   `lexical | semantic | graph` stage states with the current
-//!   `embedded / total chunks (N%)` progress for the semantic stage,
-//!   and (with `--watch`) polls every ~1 s until `semantic.status == ready`
-//!   or `failed`, then exits cleanly.
+//! What: when an `index_id` is provided, queries `GET /indexes/:id/status`
+//! directly.  When no id is given, resolves the current working directory to
+//! the matching index(es) via `index_cwd_resolve::resolve_cwd_indexes` and
+//! renders a table for each one.  With `--watch` and a single match the table
+//! is polled every ~1 s until `semantic.status == ready|failed`.  With
+//! `--watch` and multiple matches the user is asked to re-run with an explicit
+//! id (a predictable, safe behaviour that avoids interleaved output).
 //!
-//! Test: unit tests for the rendering helper in this module; integration
-//! coverage via `cargo test -p trusty-search`.
+//! Test: unit tests for the rendering helper and cwd resolution in this module
+//! and `index_cwd_resolve`; integration coverage via `cargo test -p trusty-search`.
 
 use super::daemon_utils::daemon_base_url;
 use super::format::format_with_commas;
@@ -25,23 +27,125 @@ use std::time::Duration;
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
-/// Handle `trusty-search status <index_id> [--watch]`.
+/// Handle `trusty-search index-status [index_id] [--watch]`.
 ///
 /// Why: exposes per-stage reindex status and deferred-embed progress so
 /// operators can track background embedding without reading daemon logs.
-/// What: fetches `/indexes/:id/status`, renders a stage table, and (when
-/// `watch=true`) re-polls every ~1 s until the semantic stage settles.
+/// When no id is provided, defaults to the index(es) covering the current
+/// working directory — mirroring the convention used by `trusty-search index .`.
+///
+/// What: if `index_id` is `Some`, fetches `/indexes/:id/status` and renders
+/// a stage table (watch polls every ~1 s).  If `index_id` is `None`, resolves
+/// the cwd to matching indexes and renders each one; `--watch` with multiple
+/// matches errors with the candidate ids so the user can pick.
+///
 /// Test: `handle_index_status_renders_ready_table` in this module's tests.
-pub async fn handle_index_status(index_id: &str, watch: bool, json: bool) -> Result<()> {
-    crate::commands::daemon_guard::ensure_daemon_running_or_exit(&daemon_base_url()).await?;
-
+pub async fn handle_index_status(index_id: Option<&str>, watch: bool, json: bool) -> Result<()> {
     let base = daemon_base_url();
-    let client = trusty_common::server::daemon_http_client()?;
-    let url = format!("{}/indexes/{}/status", base, index_id);
+    crate::commands::daemon_guard::ensure_daemon_running_or_exit(&base).await?;
 
+    let client = trusty_common::server::daemon_http_client()?;
+
+    match index_id {
+        Some(id) => {
+            // Explicit id: single-index path (original behaviour).
+            let url = format!("{}/indexes/{}/status", base, id);
+            run_status_for_single(id, &url, &client, watch, json).await
+        }
+        None => {
+            // No id: resolve from cwd.
+            run_status_for_cwd(&client, &base, watch, json).await
+        }
+    }
+}
+
+// ─── CWD resolution path ──────────────────────────────────────────────────────
+
+/// Resolve CWD → matching index(es) and render status for each.
+///
+/// Why: `index_id` is optional — when omitted the user expects the same
+/// context-aware defaulting as `trusty-search index .`.
+/// What: calls `resolve_cwd_indexes`, then dispatches to the single-index
+/// or multi-index renderer.  With `--watch` and more than one match, prints
+/// the candidate ids to stderr and exits non-zero rather than producing
+/// interleaved output.
+/// Test: multi-match and no-match paths exercised by unit tests in
+/// `index_cwd_resolve`; cwd single-match path exercised below.
+async fn run_status_for_cwd(
+    client: &reqwest::Client,
+    base: &str,
+    watch: bool,
+    json: bool,
+) -> Result<()> {
+    use super::index_cwd_resolve::resolve_cwd_indexes;
+
+    let matches = resolve_cwd_indexes(client, base).await?;
+
+    match matches.len() {
+        0 => {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            eprintln!(
+                "{} no trusty-search index registered for {} — \
+                 run 'trusty-search index .' to create one",
+                "✗".red(),
+                cwd.display()
+            );
+            std::process::exit(1);
+        }
+        1 => {
+            let m = &matches[0];
+            let url = format!("{}/indexes/{}/status", base, m.id);
+            run_status_for_single(&m.id, &url, client, watch, json).await
+        }
+        _ => {
+            // Multiple indexes cover cwd.
+            if watch {
+                // --watch with multiple matches is ambiguous — require explicit id.
+                eprintln!(
+                    "{} --watch requires an explicit index id when multiple indexes \
+                     cover the current directory. Candidates:",
+                    "✗".red()
+                );
+                for m in &matches {
+                    eprintln!("    {} ({})", m.id.bold(), m.root_path.display());
+                }
+                eprintln!("Re-run: trusty-search index-status <id> --watch");
+                std::process::exit(1);
+            }
+            // No watch: print all tables in turn using the pre-fetched bodies.
+            // (Re-fetching is unnecessary for a static snapshot.)
+            for m in &matches {
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&m.status_body)?);
+                } else {
+                    print_status_table(&m.id, &m.status_body);
+                    println!(); // blank line between tables
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+// ─── Single-index status path ─────────────────────────────────────────────────
+
+/// Render (or poll) the status for one known index id.
+///
+/// Why: the explicit-id path and the cwd single-match path converge here so
+/// the rendering + watch logic lives in exactly one place.
+/// What: single-shot fetches and renders; with `watch=true` polls every ~1 s
+/// until the semantic stage settles.
+/// Test: rendering logic covered by unit tests; polling covered by integration
+/// tests.
+async fn run_status_for_single(
+    index_id: &str,
+    url: &str,
+    client: &reqwest::Client,
+    watch: bool,
+    json: bool,
+) -> Result<()> {
     if !watch {
-        // Single-shot: fetch once and render.
-        let body = fetch_status(&client, &url).await?;
+        let body = fetch_status(client, url).await?;
         if json {
             println!("{}", serde_json::to_string_pretty(&body)?);
         } else {
@@ -53,7 +157,7 @@ pub async fn handle_index_status(index_id: &str, watch: bool, json: bool) -> Res
     // --watch: poll every ~1 s until semantic stage settles (Ready or Failed).
     let is_tty = std::io::stdout().is_terminal();
     loop {
-        let body = fetch_status(&client, &url).await?;
+        let body = fetch_status(client, url).await?;
         let semantic_status = body
             .get("stages")
             .and_then(|s| s.get("semantic"))
@@ -74,7 +178,6 @@ pub async fn handle_index_status(index_id: &str, watch: bool, json: bool) -> Res
         }
 
         if semantic_status == "ready" || semantic_status == "failed" {
-            // Emit a newline after the in-place refresh before any final msg.
             if is_tty && !json {
                 println!();
             }
@@ -149,8 +252,6 @@ pub fn print_status_table(index_id: &str, body: &serde_json::Value) {
 /// Test: covered via integration; the escape sequence is only emitted on a TTY.
 fn print_status_table_tty_clear(index_id: &str, body: &serde_json::Value) {
     // Move cursor up 4 lines (1 header + 3 stage rows) to overwrite previous.
-    // On the very first iteration the cursor is already at the right position,
-    // so the sequence is harmless (scrolls at most to the top of the screen).
     print!("\x1b[4F\x1b[0J");
     print_status_table(index_id, body);
 }
@@ -272,14 +373,12 @@ mod tests {
     /// Test: this test.
     #[test]
     fn colorize_status_maps_known_values() {
-        // Disable color so `to_string()` returns bare text.
         colored::control::set_override(false);
         assert_eq!(colorize_status("ready").to_string(), "ready");
         assert_eq!(colorize_status("in_progress").to_string(), "embedding");
         assert_eq!(colorize_status("failed").to_string(), "failed");
         assert_eq!(colorize_status("pending").to_string(), "pending");
         assert_eq!(colorize_status("skipped").to_string(), "skipped");
-        // Unknown values pass through.
         assert_eq!(colorize_status("unknown").to_string(), "unknown");
     }
 
@@ -293,9 +392,6 @@ mod tests {
     #[test]
     fn render_stage_row_shows_embed_progress() {
         colored::control::set_override(false);
-        // Capture stdout is not trivial in unit tests without a helper crate.
-        // We test the logic by exercising `format_with_commas` directly and
-        // confirming the percentage formula.
         let embedded: u64 = 62_914;
         let total: u64 = 152_616;
         let pct = embedded * 100 / total;
@@ -320,7 +416,6 @@ mod tests {
         } else {
             long_msg.clone()
         };
-        // 79 chars + ellipsis = 80 visible chars + 1 byte for '…' (3-byte UTF-8).
         assert_eq!(truncated.chars().count(), 80);
     }
 
@@ -335,7 +430,6 @@ mod tests {
     fn embed_progress_pct_zero_total_guard() {
         let embedded: u64 = 0;
         let total: u64 = 0;
-        // Production code uses `(emb * 100).checked_div(tot).unwrap_or(0)`.
         let pct = (embedded * 100).checked_div(total).unwrap_or(0);
         assert_eq!(
             pct, 0,
