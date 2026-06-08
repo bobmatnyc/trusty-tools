@@ -108,6 +108,10 @@ We will adopt a single canonical project-identity rule:
   path-slug scheme; the daemon registry currently holding both forms for one root
   needs to converge on the slug. This is a one-time reconciliation tracked as
   DOC-6/DOC-8 follow-up.
+- **Canonical helpers hoisted into `trusty_common`.** The canonical
+  project-identity helpers (`id_from_path`, `detect_project`) will be hoisted into
+  `trusty_common` as the single shared implementation (decided in DOC-6 Q9), so all
+  tools consume one slug implementation rather than each carrying its own.
 - **Slug ergonomics.** The canonical id is not human-friendly; all human-facing
   surfaces must deliberately use the display alias rather than the slug.
 - **Marker discipline for sub-projects.** Teams wanting per-subdir identities in

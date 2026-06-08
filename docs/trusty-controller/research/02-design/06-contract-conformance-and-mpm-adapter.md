@@ -1,6 +1,6 @@
 # DOC-6 — Per-Tool Contract Conformance + claude-mpm Python Adapter
 
-**Status:** Draft (drafted; open questions for owner)
+**Status:** Accepted (owner-approved)
 **Source spec:** ../01-spec/trusty-end-to-end-setup.md
 **Consumes:** [DOC-1](./01-tool-contract.md) (Accepted), [DOC-2](./02-stack-manifest-and-versioning.md) (Accepted)
 **Cross-ref:** [DOC-0](./00-naming-and-doc-charter.md), [DOC-3](./03-scope-model.md), [ADR-0007](../../../adr/0007-tool-contract-versioning-and-verb-model.md), [ADR-0008](../../../adr/0008-project-identity-convention.md)
@@ -120,7 +120,7 @@ Sources: `crates/trusty-search/src/main.rs`, `src/commands/` (`doctor.rs`,
 | `version` | `⚠️` clap `--version` flag only; no `verbs[]` | Add a real `version` subcommand emitting `VersionData` with `verbs[]` + `contract_version` | `main.rs` (new `Version` variant), `commands/` |
 | `start`/`stop` | `⚠️` `start [...]`/`stop` — text | Emit `LifecycleData{action,previous_state,new_state,...}`; `--json` | `commands/start.rs`, `commands/stop.rs` |
 | `restart` | `❌` absent (operators use launchd `bootout`/`bootstrap`) | Net-new: compose stop→start (or `LaunchdConfig::bootout`+`bootstrap`); emit `LifecycleData` | new `commands/restart.rs` |
-| `config` | `⚠️` `config get\|set <key> [val]` — **live memory-limit mutation**, NOT effective merged config | Add the read-only effective-config verb (DOC-1 `config.data`); **keep the existing `config get/set` as a separate, non-contract subcommand** — see §2.6 | `commands/config.rs` |
+| `config` | `⚠️` `config get\|set <key> [val]` — **live memory-limit mutation**, NOT effective merged config | Make the read-only effective-config verb (DOC-1 `config.data`) the **default `config`**; move the existing mutation behind `config set`/`config tune` (and `config get <key>` for a single value) — see §2.6 | `commands/config.rs` |
 | `version.verbs[]` | `❌` | advertised by the new `version` verb | as above |
 | envelope/`contract_version` | `❌` | provided by `trusty_common::contract::Dispatcher` | shared module (§3) |
 
@@ -213,14 +213,15 @@ project per D7), with secrets redacted (D8); editing is an explicit spec non-goa
 
 trusty-search already has a `config` subcommand — but it is a **live-mutating
 `get`/`set`** for daemon memory limits, a *different verb with the same name*.
-The retrofit MUST NOT overload it. **Recommendation:** introduce the contract
-`config` as the default `config` (read-only effective view) and move the existing
-mutation behind explicit `config get`/`config set` subcommands (or rename to
-`config tune`). The contract `config` (no subcommand / `--json`) returns
-`ConfigData`; `config get/set` remains a tool-internal escape hatch the controller
-*may dispatch* but never treats as the contract verb. This is the only place the
-contract verb name collides with existing behaviour, so it needs explicit
-disambiguation. **(Open Question 1 — exact CLI shape.)**
+The retrofit MUST NOT overload it. **Decision (owner-approved):** the contract
+`config` (read-only effective merged view) becomes the **default `config` verb**;
+trusty-search's existing live-mutating behaviour moves behind explicit
+`config set` / `config tune` subcommands, with `config get <key>` reading a single
+value. The contract `config` (no subcommand / `--json`) returns `ConfigData`;
+`config get`/`config set`/`config tune` remain tool-internal subcommands the
+controller *may dispatch* but never treats as the contract verb. This is the only
+place the contract verb name collides with existing behaviour, and this
+disambiguation resolves it.
 
 ### 3. Shared-vs-per-crate retrofit strategy
 
@@ -298,8 +299,8 @@ other way. Three options:
 | **(b) Controller-side shim** | A small adapter the controller invokes that maps claude-mpm's existing `mpm-doctor`/CLI output into the contract envelope | No claude-mpm changes; lives in *this* repo (we control it); retired cleanly when trusty-mpm lands | Brittle (parses human output); an extra hop; must track claude-mpm CLI drift |
 | **(c) Hybrid** | Native where cheap (`version`/`health`), shim for the rest (`doctor`) | Pragmatic balance; native verbs are stable, shim only where output is messy | Two mechanisms to maintain; split ownership |
 
-**Recommendation: (b) the controller-side shim for v1, with a documented
-migration path toward (a)/retirement.** Rationale:
+**Decision: (b) the controller-side shim for v1, retired wholesale when trusty-mpm
+lands** (no native-verb upstreaming — Resolved Decision 4). Rationale:
 
 - **Ownership & velocity.** The shim lives in this monorepo, so DOC-6 can land it
   without a cross-repo dependency on the external claude-mpm release cycle. We
@@ -313,17 +314,17 @@ migration path toward (a)/retirement.** Rationale:
   version`); lifecycle/`config` are degraded. A shim for three read-only verbs is
   small and testable.
 
-**Where the shim lives & how it is invoked.** A Rust adapter inside the controller
-(candidate home: a `trusty_common::contract::orchestrator` submodule, or a
-controller-local module if it should not ship in the shared library). The manifest
-`claude-mpm` entry is `kind = "orchestrator"`, `binary = "claude-mpm"` (DOC-2 §3).
-**Recommendation:** the controller, on seeing `kind = "orchestrator"` for a
-non-Rust member, routes its contract calls through the shim instead of expecting
-the binary itself to emit envelopes. The shim shells out to claude-mpm's existing
-commands (`mpm-doctor`, a version probe, a liveness probe), parses their output,
-and assembles the DOC-1 envelope in Rust using the *same* `trusty_common::contract`
-types — so the wire output is byte-identical to a native Rust tool's. **(Open
-Question 2 — does the shim ship in `trusty_common` or controller-local?)**
+**Where the shim lives & how it is invoked.** **Decision (owner-approved):** the
+claude-mpm adapter/shim lives in **`trusty_common::contract::orchestrator`** — a
+shared submodule shipped in the published `trusty-common` crate, sibling to the
+rest of the contract types. The manifest `claude-mpm` entry is
+`kind = "orchestrator"`, `binary = "claude-mpm"` (DOC-2 §3). The controller, on
+seeing `kind = "orchestrator"` for a non-Rust member, routes its contract calls
+through the shim instead of expecting the binary itself to emit envelopes. The shim
+shells out to claude-mpm's existing commands (`mpm-doctor`, a version probe, a
+liveness probe), parses their output, and assembles the DOC-1 envelope in Rust
+using the *same* `trusty_common::contract` types — so the wire output is
+byte-identical to a native Rust tool's.
 
 **`verbs[]` advertisement (resolves DOC-1's deferral).** The adapter advertises a
 **partial, hand-maintained set**:
@@ -339,12 +340,12 @@ Question 2 — does the shim ship in `trusty_common` or controller-local?)**
   orchestrator process answers, `down` otherwise; `degraded` if a probed
   dependency such as the configured MCP servers is unreachable).
 - `version` — probe claude-mpm's reported version, emit the `verbs[]` set above.
-- `start`/`stop`/`restart`/`config` — **NOT advertised** in v1. claude-mpm's
-  lifecycle is owned by however the user launches it (terminal session, not a
-  supervised daemon), so the adapter cannot reliably bounce it; `config` is the
-  orchestrator's own concern. The controller degrades gracefully (DOC-1 D3) — it
-  simply never offers these verbs for the orchestrator member. **(Open Question 3
-  — confirm lifecycle/config stay unsupported in v1.)**
+- `start`/`stop`/`restart`/`config` — **NOT advertised** in v1 (owner-approved).
+  claude-mpm's lifecycle is owned by however the user launches it (terminal
+  session, not a supervised daemon), so the adapter cannot reliably bounce it;
+  `config` is the orchestrator's own concern. The controller degrades gracefully
+  (DOC-1 D3) — it simply never offers these verbs for the orchestrator member. The
+  adapter therefore advertises exactly `["doctor","health","version"]`.
 
 **Scope mapping.** Per DOC-3 §10, the orchestrator is a **system-layer member**.
 The adapter's `doctor`/`health` checks are `scope:"system"`. claude-mpm *may* carry
@@ -354,7 +355,8 @@ surface, DOC-3 §10); if the adapter later surfaces project-scoped checks, they 
 system-only.
 
 **Install path.** Per DOC-2 §3 / DOC-8 §38 the install source is
-`source = "python"` with `tool = "pipx"` (or `uvx`). See §5 for the pin
+`source = "python"` with `tool = "uv"` — claude-mpm is installed and upgraded via
+`uv tool install claude-mpm` / `uv tool upgrade claude-mpm`. See §5 for the pin
 resolution.
 
 **Cross-repo ownership & sequencing.** This is the one piece of work that touches
@@ -364,52 +366,42 @@ resolution.
   decisive advantage of option (b). It can be authored, tested, and shipped in the
   same PR sequence as the Rust retrofits.
 - The shim's **correctness depends on claude-mpm's CLI surface staying stable**
-  (the format of `mpm-doctor`, the version probe). Recommendation: pin the
-  claude-mpm version in the BOM (§5) so the shim is tested against a known output
-  format, and treat claude-mpm CLI drift as a shim-maintenance task gated by
+  (the format of `mpm-doctor`, the version probe). The claude-mpm version is pinned
+  in the BOM at implementation time (§5) so the shim is tested against a known
+  output format, and claude-mpm CLI drift is a shim-maintenance task gated by
   DOC-10's isolation tests.
-- If/when option (a) native verbs become desirable, they are upstreamed to the
-  claude-mpm repo and the shim short-circuits to them (hybrid → native), but that
-  is **out of scope for v1**. **(Open Question 4 — who owns upstreaming, if ever.)**
+- Native-verb upstreaming (option a / hybrid) is **deferred (owner-approved)**: no
+  cross-repo upstream work is pursued. The shim suffices until trusty-mpm retires
+  it (§6), so there is no upstream-ownership question to resolve in v1.
 
 ### 5. Resolving DOC-2 Q6 (claude-mpm package/version/changelog pins)
 
 DOC-2 deferred Q6 (the canonical claude-mpm package name, pinned version, and
-authoritative `CHANGELOG.md` URL) to DOC-6. Resolved as far as source-verifiable;
-unverifiable facts are escalated to Open Questions.
+authoritative `CHANGELOG.md` URL) to DOC-6. All three are now resolved
+(owner-approved).
 
-- **Install tool — pipx (recommended), uvx as the documented alternative.**
-  DOC-8 §38 frames the choice as pipx vs uvx; DOC-2's worked example already uses
-  `tool = "pipx"`. **Recommendation:** standardize on **pipx** for v1 (it is the
-  conventional, widely-installed Python-app isolator and matches DOC-2's example);
-  document `uvx` as a drop-in alternative the system-override manifest may select.
-  This is a manifest field (`install.tool`), so changing it later is a one-line
-  override, not a code change. **(Open Question 5 — confirm pipx as default.)**
+- **Install/upgrade tool — `uv`.** claude-mpm is installed and upgraded via
+  `uv tool install claude-mpm` / `uv tool upgrade claude-mpm`. `uv` is the single
+  tool — there is no pipx default or uvx override. This is the install path the
+  manifest's `install` sub-table records for the orchestrator member
+  (`source = "python"`, `tool = "uv"`).
 
-- **Canonical package name — `claude-mpm` (recommended, pending PyPI
-  confirmation).** The manifest `binary`/`package` and DOC-2's example both use
-  `claude-mpm`. **Recommendation:** pin `package = "claude-mpm"`. I cannot verify
-  the exact PyPI distribution name from inside this monorepo (claude-mpm is
-  external), so the authoritative PyPI name is **(Open Question 6).**
+- **Canonical package name — `claude-mpm`.** The manifest `binary`/`package` use
+  `claude-mpm`, installed and upgraded via `uv` per the bullet above
+  (`uv tool install claude-mpm`).
 
-- **Pinned version — strategy, not a literal.** DOC-2's worked example uses the
-  placeholder `version = "0.0.0"`. **Recommendation:** pin the **first BOM** to the
-  latest claude-mpm release that the shim has been **tested against** (the shim's
-  parsing is version-coupled, §4). Concretely: when the shim lands, set the BOM
-  pin to whatever claude-mpm version DOC-10's isolation test installs and
-  validates; bump it in lockstep with shim updates. The literal version is **(Open
-  Question 7)** because it depends on the claude-mpm release current at
-  implementation time, which I cannot read here.
+- **Pinned version — pin at implementation.** DOC-2's worked example uses the
+  placeholder `version = "0.0.0"`; the design keeps a placeholder for the manifest
+  orchestrator entry. The **concrete version is pinned when the shim is built and
+  tested against a specific claude-mpm release** (the shim's parsing is
+  version-coupled, §4). When the shim lands, set the BOM pin to whatever claude-mpm
+  version DOC-10's isolation test installs and validates, and bump it in lockstep
+  with shim updates.
 
-- **Authoritative `CHANGELOG.md` URL.** DOC-2's example uses
-  `https://raw.githubusercontent.com/<org>/claude-mpm/main/CHANGELOG.md` with a
-  placeholder `<org>`. The CLAUDE.md "Former Repos" table shows the trusty-agents
-  family originated from `bobmatnyc/open-mpm`, and the broader ecosystem lives
-  under the `bobmatnyc` GitHub org, so a **likely** canonical URL is
-  `https://raw.githubusercontent.com/bobmatnyc/claude-mpm/main/CHANGELOG.md`
-  (parsed best-effort as keepachangelog per DOC-2 §5, degrading gracefully if
-  absent). I cannot confirm the external repo path or default branch from here, so
-  the exact URL is **(Open Question 8).**
+- **Authoritative `CHANGELOG.md` URL —**
+  `https://raw.githubusercontent.com/bobmatnyc/claude-mpm/main/CHANGELOG.md`. This
+  literal is used as the orchestrator's changelog source (parsed best-effort as
+  keepachangelog per DOC-2 §5, degrading gracefully if absent).
 
 ### 6. Forward-compatibility (claude-mpm → trusty-mpm)
 
@@ -457,10 +449,16 @@ slug. Single-layer members (trusty-review) have no project layer and are exempt.
 
 This is a per-tool conformance clause (not just a search bug): every tool that
 emits a `scope:"project"` check must derive that project's id via the shared rule,
-not its own scheme. **Recommendation:** expose the canonical `id_from_path` (and
-the `detect_project` walk) from `trusty_common` so every tool — and the adapter —
-computes the id identically, eliminating the divergence at the source. **(Open
-Question 9 — hoist project-identity into `trusty_common`?)**
+not its own scheme. **Decision (owner-approved):** hoist project-identity into
+`trusty_common`. Expose **`id_from_path` + `detect_project`** from `trusty_common`
+as the **single canonical implementation** (full-path slug, per ADR-0008), and have
+every tool — and the adapter — consume the shared helper rather than its own. This
+eliminates the `detect.rs` basename vs `fs_discovery.rs` slug divergence at the
+source: the slug scheme becomes the one shared implementation, and the basename is
+retained only as a display alias. This is a **decided retrofit item** — part of the
+trusty-search retrofit and a precondition for any tool emitting `scope:"project"`
+checks: `detect.rs` and `fs_discovery.rs` are reconciled by replacing both with the
+hoisted `trusty_common` helpers.
 
 ### 8. Conformance verification
 
@@ -549,8 +547,9 @@ Source-first re-audit, 2026-06-08 (clap command enums + axum health handlers +
   - All of trusty-review's CLI contract verbs.
   - The claude-mpm Python contract adapter (synthesizes everything) — no machine
     contract exists today.
-  - Reconciling the two project-id schemes (`detect.rs` basename vs
-    `fs_discovery.rs` slug) to the ADR-0008 canonical slug.
+  - Hoisting the canonical `id_from_path` + `detect_project` into `trusty_common`
+    (the single shared slug implementation, ADR-0008) and reconciling the two
+    project-id schemes (`detect.rs` basename vs `fs_discovery.rs` slug) onto it.
 
 ## Cross-cutting notes
 
@@ -567,68 +566,79 @@ Source-first re-audit, 2026-06-08 (clap command enums + axum health handlers +
 
 ## Remaining work
 
+**Design (complete):**
+
 - [x] Re-confirm the per-tool current-state audit against the source tree (clap
       enums + health handlers + `trusty_common` modules)
 - [x] Define the conformance model + tiers (T0–T3; mandatory T1 floor)
 - [x] Per-tool gap audit + retrofit plan (file/module landing sites) for the four
       Rust tools, incl. trusty-review as laggard and the `config` semantics change
-- [x] Shared-vs-per-crate strategy (recommend `trusty_common::contract`) + sequence
-- [x] claude-mpm adapter design (recommend controller-side shim) + `verbs[]`
-- [x] Resolve DOC-2 Q6 as far as source-verifiable (pipx, package name, version
-      strategy, changelog URL) — residue in Open Questions
+- [x] Shared-vs-per-crate strategy (`trusty_common::contract`) + sequence
+- [x] claude-mpm adapter design (controller-side shim in
+      `trusty_common::contract::orchestrator`) + `verbs[]`
+- [x] Resolve DOC-2 Q6 (install tool = `uv`, package = `claude-mpm`, version
+      pinned at implementation, changelog URL) — see §5
 - [x] Forward-compat (trusty-mpm replaces shim) + project-identity conformance
 - [x] Conformance verification design (`tctl doctor --self-check`; ties to DOC-10)
-- [ ] **Owner: resolve the Open Questions below**
-- [ ] *(implementation-time)* Land `trusty_common::contract` + Dispatcher; retrofit
-      search → memory/analyze → review; build the claude-mpm shim (DOC-6 retrofits)
+- [x] Owner: resolve the open questions (all 9 approved — see Resolved Decisions)
+
+**Implementation-time (remaining):**
+
+- [ ] *(implementation-time)* Build `trusty_common::contract` + Dispatcher (envelope
+      + data structs + enums + `ContractTool` trait + `redact_value`), and hoist the
+      canonical `id_from_path` + `detect_project` into `trusty_common` (Q9). Bump
+      `trusty-common`.
+- [ ] *(implementation-time)* Per-tool retrofits, in order: trusty-search (incl.
+      reconciling `detect.rs`/`fs_discovery.rs` onto the hoisted helpers and the
+      `config` default-verb split) → trusty-memory & trusty-analyze → trusty-review.
+- [ ] *(implementation-time)* Build the claude-mpm shim in
+      `trusty_common::contract::orchestrator`; pin the concrete claude-mpm version it
+      is tested against (§5) and wire `uv tool install`/`upgrade` into the install
+      path.
 - [ ] *(DOC-10-owned)* Wire `--self-check` into the isolation harness as the
-      conformance acceptance gate
+      conformance acceptance gate.
 
-## Open Questions for Owner
+## Resolved Decisions
 
-1. **`config` verb disambiguation (trusty-search).** The contract `config` is
-   read-only effective config; trusty-search's existing `config get/set` is
-   live-mutating. Recommended: contract `config` becomes the default verb; the
-   existing mutation moves behind `config get`/`config set` (or `config tune`). Is
-   that CLI shape acceptable, or should the contract verb take a different name
-   (e.g. `config show`) to avoid any collision?
+All nine questions below were **approved by the owner** (2026-06-08). They are
+recorded here for traceability; the DESIGN body above has been updated to read as
+decided throughout.
 
-2. **Where does the claude-mpm shim live?** Recommended: a
-   `trusty_common::contract::orchestrator` submodule (shared) vs a controller-local
-   module (not shipped in the public `trusty_common`). Which home — and should the
-   shim ship in the published `trusty-common` crate at all?
+1. **`config` verb disambiguation (trusty-search).** The contract `config`
+   (read-only effective merged config) becomes the **default `config` verb**;
+   trusty-search's existing live-mutating behaviour moves behind `config set` /
+   `config tune`, with `config get <key>` reading a single value. See §2.6 and §2.1.
 
-3. **claude-mpm lifecycle/`config` verbs in v1.** Recommended: the adapter
-   advertises only `["doctor","health","version"]` and leaves `start`/`stop`/
-   `restart`/`config` unsupported (degraded), because claude-mpm's lifecycle is
-   user-session-owned, not daemon-supervised. Confirm lifecycle/config stay out of
-   v1.
+2. **claude-mpm shim location.** The adapter/shim lives in
+   **`trusty_common::contract::orchestrator`** — a shared submodule shipped in the
+   published `trusty-common` crate. See §4.
 
-4. **Cross-repo upstreaming ownership.** If native `claude-mpm <verb> --json`
-   (option a / hybrid) is ever pursued, who owns the upstream PRs to the external
-   claude-mpm repo? Recommended: defer entirely — the shim suffices until
-   trusty-mpm retires it.
+3. **claude-mpm v1 verbs.** The adapter advertises exactly
+   **`["doctor","health","version"]`**; lifecycle (`start`/`stop`/`restart`) and
+   `config` are **unsupported in v1** (claude-mpm is user-session-owned, not
+   daemon-supervised). See §4.
 
-5. **pipx vs uvx as the default install tool.** Recommended: pipx as default
-   (matches DOC-2's example and conventional Python-app isolation); uvx documented
-   as a system-override alternative. Confirm pipx as the v1 default.
+4. **Cross-repo upstreaming ownership.** **Deferred** — no native-verb upstream work
+   is pursued; the shim suffices until trusty-mpm retires it (§6). See §4.
 
-6. **Canonical claude-mpm PyPI package name.** Recommended: `claude-mpm`. I cannot
-   verify the exact PyPI distribution name from inside this monorepo (external
-   tool). Confirm the authoritative PyPI name to pin in `install.package`.
+5. **Install/upgrade tool — `uv`.** claude-mpm is installed and upgraded via
+   `uv tool install claude-mpm` / `uv tool upgrade claude-mpm`. `uv` is the single
+   tool (no pipx default, no uvx override) and is the orchestrator install path the
+   manifest's `install` sub-table records. See §4 and §5.
 
-7. **First-BOM claude-mpm pinned version.** Recommended strategy: pin to the
-   claude-mpm release the shim is tested against (version-coupled to the shim's
-   parsing), bumped in lockstep. The literal version depends on the release current
-   at implementation time — please supply (or confirm "pin at implementation").
+6. **Canonical package name — `claude-mpm`**, installed/upgraded via `uv` per #5.
+   See §5.
 
-8. **Authoritative claude-mpm `CHANGELOG.md` URL.** Recommended (unverified):
-   `https://raw.githubusercontent.com/bobmatnyc/claude-mpm/main/CHANGELOG.md`
-   (parsed best-effort as keepachangelog, degrading gracefully if absent). Confirm
-   the org/repo path and default branch.
+7. **First-BOM pinned version — pin at implementation.** The manifest orchestrator
+   entry uses a placeholder version in the design; the concrete version is pinned
+   when the shim is built and tested against a specific claude-mpm release. See §5.
 
-9. **Hoist project-identity into `trusty_common`?** Recommended: expose the
-   canonical `id_from_path` + `detect_project` walk from `trusty_common` so every
-   tool and the adapter compute the project id identically (eliminating the
-   `detect.rs` basename vs `fs_discovery.rs` slug divergence at the source per
-   ADR-0008). Approve hoisting, or keep per-crate with a conformance test?
+8. **Authoritative `CHANGELOG.md` URL —**
+   `https://raw.githubusercontent.com/bobmatnyc/claude-mpm/main/CHANGELOG.md`, used
+   as the orchestrator's changelog source. See §5.
+
+9. **Hoist project-identity into `trusty_common`.** Expose `id_from_path` +
+   `detect_project` from `trusty_common` as the single canonical implementation
+   (full-path slug, per ADR-0008), eliminating the `detect.rs` basename vs
+   `fs_discovery.rs` slug divergence; each tool consumes the shared helper. Recorded
+   as a decided retrofit item in §7.
