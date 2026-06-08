@@ -30,6 +30,7 @@ use trusty_common::memory_core::retrieval::{
     recall, recall_across_palaces, recall_deep, RememberOptions,
 };
 use trusty_common::memory_core::store::kg::Triple;
+use trusty_common::memory_core::timeouts;
 use uuid::Uuid;
 
 /// Look up the friendly palace name (Palace.name) from the in-memory cache,
@@ -963,8 +964,23 @@ async fn handle_memory_remember(state: &AppState, args: Value) -> Result<Value> 
     // and the `write_drawer` call so the redb write inside
     // `remember_with_options` happens with the gate snapshot still
     // visible to subsequent waiters.
+    // Issue #906: bound the acquisition so a stuck embedder on a prior writer
+    // does not cascade an indefinite queue of callers waiting for this lock.
     let write_lock = state.palace_write_lock(palace);
-    let _write_guard = write_lock.lock().await;
+    let _write_guard = {
+        let lock_timeout = timeouts::write_lock_timeout();
+        tokio::time::timeout(lock_timeout, write_lock.lock())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "memory_remember: palace '{}' write-lock timed out after {:?} \
+                     (issue #906); a previous writer may be stuck — retry or \
+                     increase TRUSTY_WRITE_LOCK_TIMEOUT_SECS",
+                    palace,
+                    lock_timeout
+                )
+            })?
+    };
 
     // Issue #220: rolling dedup window — skip when a near-duplicate
     // landed in the same palace within the last 5 minutes. The
@@ -1057,8 +1073,21 @@ async fn handle_memory_note(state: &AppState, args: Value) -> Result<Value> {
     // `write_drawer` call so the redb write inside
     // `remember_with_options` is visible to subsequent waiters before
     // they snapshot.
+    // Issue #906: bound the acquisition to prevent cascading hangs.
     let write_lock = state.palace_write_lock(palace);
-    let _write_guard = write_lock.lock().await;
+    let _write_guard = {
+        let lock_timeout = timeouts::write_lock_timeout();
+        tokio::time::timeout(lock_timeout, write_lock.lock())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "memory_note: palace '{}' write-lock timed out after {:?} \
+                     (issue #906); increase TRUSTY_WRITE_LOCK_TIMEOUT_SECS if needed",
+                    palace,
+                    lock_timeout
+                )
+            })?
+    };
     // Issue #220: rolling dedup window — same gate as
     // `memory_remember`. `memory_note` has no `force` arg, so the
     // gate is unconditional: curated short-fact writes that happen

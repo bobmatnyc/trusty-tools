@@ -21,6 +21,7 @@ use crate::memory_core::store::kg::KnowledgeGraph;
 use crate::memory_core::store::l1_cache::L1Cache;
 use crate::memory_core::store::palace_store::PalaceStore;
 use crate::memory_core::store::vector::{UsearchStore, VectorStore};
+use crate::memory_core::timeouts;
 use anyhow::{Context, Result};
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -49,16 +50,33 @@ static SHARED_EMBEDDER: OnceCell<Arc<dyn Embedder + Send + Sync>> = OnceCell::co
 ///
 /// Why: Centralising fallback embedder construction guarantees at most one
 /// ONNX session per process — critical for the daemon footprint (issue #57).
+/// Issue #906: `FastEmbedder::new()` can take 30-120 s on a CoreML cold-compile
+/// or a CUDA warm-up — without a timeout the first `memory_remember` or
+/// `memory_recall` call blocks indefinitely. Wrapping in
+/// `tokio::time::timeout` turns the hang into an explicit error that the
+/// caller (and the daemon) can surface to the user.
 /// What: Returns a clone of the shared `Arc<dyn Embedder + Send + Sync>`,
-/// initialising it on first call via `FastEmbedder::new()`. In test builds,
-/// callers should first call `seed_shared_embedder_with_mock()` so the cell
-/// is pre-populated with `MockEmbedder` and no model download is attempted.
-/// Test: `shared_embedder_is_singleton`.
+/// initialising it on first call via `FastEmbedder::new()`. The init is
+/// bounded by `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` (default 180 s). In test
+/// builds, callers should first call `seed_shared_embedder_with_mock()` so
+/// the cell is pre-populated with `MockEmbedder` and no model download is
+/// attempted.
+/// Test: `shared_embedder_is_singleton`; timeout path covered by
+///       `timeout_wrapper_fires_on_embedder_init` in retrieval::tests.
 pub async fn shared_embedder() -> Result<Arc<dyn Embedder + Send + Sync>> {
+    let timeout = timeouts::embedder_init_timeout();
     SHARED_EMBEDDER
         .get_or_try_init(|| async {
-            let e = FastEmbedder::new()
+            let e = tokio::time::timeout(timeout, FastEmbedder::new())
                 .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "FastEmbedder cold init timed out after {:?} (issue #906); \
+                         increase TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS if the model \
+                         needs more time on this host",
+                        timeout
+                    )
+                })?
                 .context("init shared FastEmbedder")?;
             Ok::<Arc<dyn Embedder + Send + Sync>, anyhow::Error>(Arc::new(e))
         })
@@ -575,7 +593,22 @@ impl PalaceHandle {
         // pipeline below. Other palaces' writes proceed in parallel.
         // Reads (`recall`, `list_drawers`, etc.) never acquire this lock,
         // so the write mutex doesn't impact read throughput.
-        let _write_guard = self.write_mutex.lock().await;
+        // Issue #906: bound the lock acquisition so a stuck embedder on one
+        // writer doesn't cascade an indefinite queue of waiters.
+        let _write_guard = {
+            let lock_timeout = timeouts::write_lock_timeout();
+            tokio::time::timeout(lock_timeout, self.write_mutex.lock())
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "palace '{}' write-lock acquisition timed out after {:?} \
+                         (issue #906); a previous writer may be stuck — retry or \
+                         increase TRUSTY_WRITE_LOCK_TIMEOUT_SECS",
+                        self.id,
+                        lock_timeout
+                    )
+                })?
+        };
 
         // Issue #61: signal/noise gate. `force == true` bypasses entirely.
         // `enforce_min_tokens` lets `memory_note` keep the noise patterns
@@ -614,12 +647,24 @@ impl PalaceHandle {
         // spin up a fresh ONNX session per call (issue #57). The
         // OnceCell-backed `shared_embedder` guarantees at most one model load
         // for the lifetime of the process.
+        // Issue #906: both `shared_embedder()` (cold init path) and
+        // `embed_batch` carry their own bounded timeouts — if the embedder
+        // hangs mid-batch the remember call returns an error instead of
+        // blocking the write-lock indefinitely.
         let embedder = shared_embedder()
             .await
             .context("acquire shared embedder for remember")?;
-        let vecs = embedder
-            .embed_batch(&[content])
+        let embed_timeout = timeouts::embed_batch_timeout();
+        let vecs = tokio::time::timeout(embed_timeout, embedder.embed_batch(&[content]))
             .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "embed_batch timed out after {:?} on remember path (issue #906); \
+                     increase TRUSTY_EMBED_BATCH_TIMEOUT_SECS if batches legitimately \
+                     take longer on this host",
+                    embed_timeout
+                )
+            })?
             .context("embed drawer content")?;
         if let Some(v) = vecs.into_iter().next() {
             self.vector_store
@@ -699,7 +744,20 @@ impl PalaceHandle {
         // drawer-table state and so the vector / KG / in-memory removals
         // can't interleave with an append. See `write_mutex` docs on
         // `PalaceHandle`.
-        let _write_guard = self.write_mutex.lock().await;
+        // Issue #906: bound the lock acquisition to avoid cascading hangs.
+        let _write_guard = {
+            let lock_timeout = timeouts::write_lock_timeout();
+            tokio::time::timeout(lock_timeout, self.write_mutex.lock())
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "palace '{}' write-lock acquisition timed out after {:?} on \
+                         forget path (issue #906); increase TRUSTY_WRITE_LOCK_TIMEOUT_SECS",
+                        self.id,
+                        lock_timeout
+                    )
+                })?
+        };
 
         // Best-effort vector removal — usearch may legitimately not have the
         // key (e.g. if remember failed mid-flight); we propagate other errors.
@@ -1481,3 +1539,8 @@ impl RetrievalLayers {
 
 #[cfg(test)]
 mod tests;
+
+// Issue #906: bounded-timeout behavioral tests (isolated test module so they
+// do not inflate the already-large tests.rs budget).
+#[cfg(test)]
+mod timeout_tests;

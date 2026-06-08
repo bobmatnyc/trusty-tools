@@ -766,6 +766,29 @@ async fn run_serve(
 ///       and populates the map; the log emission is confirmed by the throwaway
 ///       daemon run documented in the session notes.
 fn spawn_startup_tasks(state: &AppState) {
+    // Issue #906: eager embedder warm-up. Spawn BEFORE the palace hydration
+    // task so the CoreML / CUDA cold compile (30-120 s on first run) races
+    // ahead concurrently and the warm embedder is likely ready by the time
+    // the first `memory_remember` / `memory_recall` arrives. Failure here
+    // is non-fatal — we log at ERROR level and continue; the lazy-init path
+    // in `shared_embedder()` will retry on the first real request (and now
+    // returns a bounded error instead of hanging).
+    tokio::spawn(async move {
+        let ws = std::time::Instant::now();
+        tracing::info!("starting background embedder warm-up (issue #906)");
+        match trusty_common::memory_core::retrieval::shared_embedder().await {
+            Ok(_) => tracing::info!(
+                elapsed_ms = ws.elapsed().as_millis() as u64,
+                "background embedder warm-up complete"
+            ),
+            Err(e) => tracing::error!(
+                elapsed_ms = ws.elapsed().as_millis() as u64,
+                "background embedder warm-up failed (memory ops will re-attempt \
+                 on first request): {e:#}"
+            ),
+        }
+    });
+
     let bg_state = state.clone();
     tokio::spawn(async move {
         let started = std::time::Instant::now();

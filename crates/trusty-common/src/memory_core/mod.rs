@@ -25,6 +25,7 @@ pub mod registry;
 pub mod retrieval;
 pub mod semantic_consolidation;
 pub mod store;
+pub mod timeouts;
 
 pub use community::{KnowledgeGap, find_communities};
 pub use palace::{Drawer, DrawerType, Palace, PalaceId, Room, RoomType, Wing};

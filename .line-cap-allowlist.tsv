@@ -37,7 +37,7 @@ crates/trusty-common/src/lib.rs	1467
 crates/trusty-common/src/memory_core/analytics.rs	860
 crates/trusty-common/src/memory_core/dream.rs	1820
 crates/trusty-common/src/memory_core/git.rs	568
-crates/trusty-common/src/memory_core/retrieval/mod.rs	1483
+crates/trusty-common/src/memory_core/retrieval/mod.rs	1546
 crates/trusty-common/src/memory_core/retrieval/tests.rs	1140
 crates/trusty-common/src/memory_core/semantic_consolidation.rs	968
 crates/trusty-common/src/memory_core/store/chat_sessions.rs	930
@@ -103,12 +103,12 @@ crates/trusty-memory/src/commands/setup.rs	783
 crates/trusty-memory/src/discovery.rs	884
 crates/trusty-memory/src/kg_extract.rs	608
 crates/trusty-memory/src/lib.rs	2835
-crates/trusty-memory/src/main.rs	973
+crates/trusty-memory/src/main.rs	996
 crates/trusty-memory/src/messaging.rs	843
 crates/trusty-memory/src/project_root.rs	980
 crates/trusty-memory/src/prompt_log.rs	851
 crates/trusty-memory/src/service.rs	1704
-crates/trusty-memory/src/tools.rs	3628
+crates/trusty-memory/src/tools.rs	3657
 crates/trusty-memory/src/transport/rpc.rs	571
 crates/trusty-memory/src/web.rs	5396
 crates/trusty-memory/tests/concurrent_perf.rs	1163
