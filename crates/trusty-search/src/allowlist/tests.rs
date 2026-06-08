@@ -29,7 +29,7 @@ fn tmp_dir(label: &str) -> PathBuf {
 }
 
 fn allowlist_file(dir: &Path) -> PathBuf {
-    dir.join("indexes.toml")
+    dir.join("allowlist.toml")
 }
 
 fn entry(path: &Path) -> AllowlistEntry {
@@ -389,11 +389,12 @@ fn remove_from_allowlist_noop_when_absent() {
 
 #[test]
 fn allowlist_path_ends_with_expected_suffix() {
+    // Why: must be allowlist.toml (not indexes.toml) to avoid macOS collision.
     let p = AllowlistConfig::default_path();
     let s = p.to_string_lossy();
     assert!(
-        s.ends_with("trusty-search/indexes.toml") || s.ends_with("trusty-search-indexes.toml"),
-        "unexpected allowlist path: {s}"
+        s.ends_with("trusty-search/allowlist.toml") || s.ends_with("trusty-search-allowlist.toml"),
+        "must be allowlist.toml, not indexes.toml: {s}"
     );
 }
 

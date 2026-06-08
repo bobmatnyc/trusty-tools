@@ -14,9 +14,11 @@
 //!    of any allowlist entry. Covers `$HOME` top-level, `~/.ssh`, `~/.aws`,
 //!    `/tmp`, `.env` files, and similar.
 //! 2. **Allowlist** (`AllowlistConfig`, stored at
-//!    `~/.config/trusty-search/indexes.toml`) — the candidate path must match
+//!    `~/.config/trusty-search/allowlist.toml`) — the candidate path must match
 //!    an entry here (or a prefix of one) for registration to proceed. A fresh
-//!    daemon with an empty allowlist accepts ZERO new indexes.
+//!    daemon with an empty allowlist accepts ZERO new indexes. The file is named
+//!    `allowlist.toml` (not `indexes.toml`) to avoid the macOS path collision
+//!    where `config_dir()==data_local_dir()==~/Library/Application Support`.
 //!
 //! Call [`check_path`] from the index-creation path (`POST /indexes` handler,
 //! CLI `trusty-search index`) before any registration occurs. When the check
@@ -31,6 +33,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+mod collision_tests;
 #[cfg(test)]
 mod tests;
 
@@ -136,15 +140,14 @@ pub const SENSITIVE_HOME_TOP_DIRS: &[&str] = &[
 
 /// One allowlisted root entry.
 ///
-/// Why: stores the user-approved path alongside optional per-root settings
-/// (include/exclude globs, `skip_kg`) so a single config file captures both
-/// "what is indexed" and "how it is indexed".
-/// What: serialised to TOML `[[index]]` array-of-tables. `path` is the only
-/// required field; all others default to sane values on deserialization.
-/// Test: `roundtrip_preserves_all_fields` in `tests.rs`.
+/// Why: stores the user-approved path alongside optional per-root settings.
+/// What: serialised to TOML `[[index]]` array-of-tables. `path` is required;
+/// `root_path` serde alias accepted for daemon-registry compat (defence-in-depth).
+/// Test: `roundtrip_preserves_all_fields`, `root_path_alias_deserializes`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AllowlistEntry {
-    /// Absolute path to the approved project root.
+    /// Absolute path to the approved project root (`root_path` alias accepted).
+    #[serde(alias = "root_path")]
     pub path: PathBuf,
 
     /// Optional override for the index name. When absent the CLI/daemon
@@ -187,18 +190,17 @@ pub struct AllowlistConfig {
 }
 
 impl AllowlistConfig {
-    /// XDG-style path: `~/.config/trusty-search/indexes.toml`.
+    /// XDG-style path: `~/.config/trusty-search/allowlist.toml`.
     ///
-    /// Why: distinct from the daemon's `config.yaml` so the allowlist can be
-    /// read without pulling in the full user config, and so scripts/operators
-    /// can manage it independently.
-    /// What: resolves via `dirs::config_dir()`, falling back to a relative
-    /// path in process-only environments (CI containers, test sandboxes).
-    /// Test: `allowlist_path_ends_with_expected_suffix` in `tests.rs`.
+    /// Why: `allowlist.toml` (not `indexes.toml`) prevents the macOS collision
+    /// where `config_dir()==data_local_dir()`; daemon registry stays `indexes.toml`.
+    /// What: resolves via `dirs::config_dir()`; falls back to a relative path.
+    /// Test: `allowlist_path_ends_with_expected_suffix`,
+    /// `allowlist_path_does_not_collide_with_daemon_registry`.
     pub fn default_path() -> PathBuf {
         match dirs::config_dir() {
-            Some(base) => base.join("trusty-search").join("indexes.toml"),
-            None => PathBuf::from("trusty-search-indexes.toml"),
+            Some(base) => base.join("trusty-search").join("allowlist.toml"),
+            None => PathBuf::from("trusty-search-allowlist.toml"),
         }
     }
 
@@ -372,14 +374,11 @@ pub fn check_path(path: &Path, allowlist_path: Option<&Path>) -> Result<Allowlis
 /// Add `path` to the allowlist file atomically, after validating it against
 /// the hard denylist.
 ///
-/// Why: `trusty-search index add <path>` and `trusty-search index <path>`
-/// must both write the allowlist before forwarding to the daemon. This helper
-/// centralises the write so both call sites behave identically.
-/// What: loads the config, upserts the entry, saves atomically. Returns an
-/// error when the denylist blocks the path so callers surface a clear message.
-/// The `allowlist_path` parameter is injectable for tests.
-/// Test: `add_to_allowlist_persists_entry`, `add_to_allowlist_blocked_by_denylist`
-/// in `tests.rs`.
+/// Why: `trusty-search index add/index` must write the allowlist before
+/// forwarding to the daemon; this helper centralises the write.
+/// What: loads, upserts, saves atomically. Errors when denylist blocks path.
+/// `allowlist_path` is injectable for tests.
+/// Test: `add_to_allowlist_persists_entry`, `add_to_allowlist_blocked_by_denylist`.
 pub fn add_to_allowlist(entry: AllowlistEntry, allowlist_path: Option<&Path>) -> Result<()> {
     // Denylist check before touching the file.
     if let Some(reason) = is_denied(&entry.path) {
