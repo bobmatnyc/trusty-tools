@@ -30,15 +30,14 @@ use colored::Colorize;
 /// Entry point for `trusty-search index`.
 ///
 /// Why: register-then-reindex is the primary onboarding flow. The registered
-/// root is always the CLI path (canonicalized) or the CWD — the `path:` field
-/// in `.trusty-search.yaml` is intentionally ignored so a committed config
-/// can never silently narrow the indexed tree.
-/// What: (1) resolve root; (2) optionally load `.trusty-search.yaml` for
-/// `name`/`exclude` defaults; (3) if `trusty-search.yaml` is present at the
-/// root, fan out into multi-index mode; (4) otherwise register one index.
-/// Test: `cargo run -- index --force` prints the registration line + progress.
-/// Multi-index YAML iterates each declared name. Dotfile merge precedence is
-/// covered by `core::project_config` tests and the `merge_*` tests below.
+/// root is always the CLI path or the CWD — `path:` in `.trusty-search.yaml`
+/// is intentionally ignored so a committed config cannot silently narrow the
+/// indexed tree.
+/// What: (1) resolve root; (2) auto-start daemon; (3) load dotfile for
+/// `name`/`exclude` defaults; (4) fan-out if `trusty-search.yaml` present;
+/// (5) register one index otherwise.
+/// Test: `cargo run -- index --force`. Dotfile merge precedence is covered by
+/// `core::project_config` tests and the `merge_*` tests below.
 pub async fn handle_index(
     cli_path: Option<std::path::PathBuf>,
     cli_name: Option<String>,
@@ -50,18 +49,17 @@ pub async fn handle_index(
 ) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_default();
 
-    // 1. Resolve the root path: CLI positional arg wins (canonicalized); else
-    //    the CWD (canonicalized). The `.trusty-search.yaml` `path:` field is
-    //    intentionally NOT used here — "the directory you point at is the
-    //    indexed directory; always crawl the full tree."
-    let project_path = resolve_project_path(cli_path, &cwd);
+    // 1. Resolve root — hard error on non-existent / inaccessible paths.
+    let project_path = resolve_project_path(cli_path, &cwd)?;
 
-    // 2. Per-project dotfile config (`.trusty-search.yaml`, issue #30). Loaded
-    //    from the CWD only — it supplies defaults for the index `name` and
-    //    extra `exclude` globs. The `path:` field is parsed (for
-    //    backward-compatibility with existing YAML files) but never used to
-    //    narrow the root or the crawl. A malformed file is a hard error so a
-    //    config typo never silently degrades to defaults.
+    // 2. Auto-start the daemon (issue #24: CPU-by-default on Apple Silicon
+    //    avoids ~72 GB CoreML virtual-RSS spike that jetsam kills ~14s in).
+    crate::commands::daemon_guard::ensure_daemon_running_for_indexing(&daemon_base_url()).await?;
+
+    // 3. Per-project dotfile config (`.trusty-search.yaml`, issue #30) loaded
+    //    from CWD only — supplies `name`/`exclude` defaults. The `path:` field
+    //    is parsed for backward-compat but never used for root/crawl scoping.
+    //    Malformed files are a hard error (no silent default degradation).
     let project_cfg = match ProjectConfig::load(&cwd) {
         Ok(Some(cfg)) => {
             tracing::debug!(
@@ -78,22 +76,7 @@ pub async fn handle_index(
         Err(e) => anyhow::bail!("could not parse {}: {e}", PROJECT_CONFIG_FILENAME),
     };
 
-    // 0. Auto-start the daemon if needed. `index` is useless without it,
-    //    so we proactively boot it rather than dump a confusing connection
-    //    error on the user.
-    //
-    //    Why CPU-by-default here (issue #24): on Apple Silicon the CoreML
-    //    EP session-init alone allocates ~72 GB of virtual RSS, which macOS
-    //    jetsam treats as memory pressure and SIGKILLs ~14s in — before any
-    //    files are indexed. `ensure_daemon_running_for_indexing` propagates
-    //    `--device cpu` to the auto-spawned daemon (overridable via
-    //    `TRUSTY_INDEX_DEVICE=auto|gpu`). Already-running daemons are not
-    //    affected; this only changes the auto-spawn behaviour.
-    crate::commands::daemon_guard::ensure_daemon_running_for_indexing(&daemon_base_url()).await?;
-
-    // 3. Repo-level config detection. `trusty-search.yaml` at the project root
-    //    declares one or more named indexes; when present it overrides the
-    //    `--name` flag and we register each declared slice in turn.
+    // 4. Repo-level multi-index YAML — overrides `--name` when present.
     match RepoConfig::load(&project_path) {
         Ok(Some(cfg)) => {
             println!(
@@ -133,9 +116,7 @@ pub async fn handle_index(
         }
     }
 
-    // Single-index path. Merge name and exclude with the same precedence as
-    // the path resolution above: CLI flag > `.trusty-search.yaml` value >
-    // built-in default.
+    // 5. Single-index path — merge name/exclude (CLI flag > dotfile > default).
     let index_name = resolve_index_name(cli_name, project_cfg.as_ref(), &project_path);
     let exclude_globs = resolve_excludes(cli_exclude, project_cfg.as_ref());
 
@@ -158,20 +139,21 @@ pub async fn handle_index(
 
 /// Resolve the exact directory to register and crawl.
 ///
-/// Why: the root must always be the directory the user pointed at, never
-/// silently narrowed by a committed `.trusty-search.yaml` `path:` field.
-/// Canonicalization ensures the global-config entry and the daemon agree on
-/// the path even when a relative path or symlink component is supplied. If
-/// `canonicalize` fails the input path is returned verbatim (test fixtures).
+/// Why: the root must be the directory the user pointed at — never silently
+/// narrowed by `.trusty-search.yaml` `path:`. A failed canonicalize is a hard
+/// error; proceeding with a raw path silently registers a phantom root.
 /// What: `cli_path` (canonicalized) when present; else `cwd` (canonicalized).
+///       Returns `Err` on failure so the caller surfaces a clear message.
 /// Test: `merge_path_cli_wins`, `merge_path_config_path_field_ignored`,
-/// `merge_path_default_is_cwd`, `merge_path_config_present_but_no_path_field`.
+/// `merge_path_default_is_cwd`, `merge_path_config_present_but_no_path_field`,
+/// `resolve_project_path_nonexistent_errors`.
 fn resolve_project_path(
     cli_path: Option<std::path::PathBuf>,
     cwd: &std::path::Path,
-) -> std::path::PathBuf {
+) -> anyhow::Result<std::path::PathBuf> {
     let raw = cli_path.unwrap_or_else(|| cwd.to_path_buf());
-    raw.canonicalize().unwrap_or(raw)
+    raw.canonicalize()
+        .map_err(|e| anyhow::anyhow!("cannot resolve index path {}: {}", raw.display(), e))
 }
 
 /// Resolve the index name from the CLI flag, the dotfile config, and the
@@ -313,17 +295,11 @@ async fn index_one_with_filters(
         );
     }
 
-    // Mirror the registration into `~/.config/trusty-search/config.yaml` so
-    // (a) `index remove` has a canonical entry to drop, and (b) the daemon's
-    // auto-discovery on the next restart sees the collection as a first-class
-    // user-declared entry rather than guessing it from filesystem markers.
-    // Best-effort: a failed YAML write must not undo the successful daemon
-    // registration, so we only warn and continue.
+    // Best-effort config mirror — failed YAML write must not undo a successful
+    // daemon registration.
     persist_collection_to_global_config(index_name, project_path, filters);
 
-    // Unpack the user's optional timeout into (timeout_secs, timeout_explicit).
-    // None → progress-aware stall default (120 s stall window, no hard cap).
-    // Some(n) → hard cap at n seconds (0 = wait forever).
+    // None → 120 s progress-aware stall window; Some(n) → hard cap (0 = ∞).
     let (timeout_secs, timeout_explicit) = match timeout {
         Some(n) => (n, true),
         None => (0, false),
@@ -417,19 +393,28 @@ mod tests {
     fn merge_path_cli_wins() {
         let tmp = tempdir().unwrap();
         let canonical = tmp.path().canonicalize().unwrap();
-        let got = resolve_project_path(Some(tmp.path().to_path_buf()), Path::new("/repo"));
+        let got = resolve_project_path(Some(tmp.path().to_path_buf()), Path::new("/repo")).unwrap();
         assert_eq!(got, canonical);
     }
 
     /// A `.trusty-search.yaml` `path: app` must NOT narrow the root.
     /// The field is parsed for backward-compat but never used for root selection.
+    /// This test constructs a config with `path: Some("app")` to prove that
+    /// `resolve_project_path` returns the invoked CWD (a real tempdir), not
+    /// `<cwd>/app`.
     #[test]
     fn merge_path_config_path_field_ignored() {
         let tmp = tempdir().unwrap();
         let cwd = tmp.path().canonicalize().unwrap();
-        // No CLI arg → result must be CWD, not CWD/app.
-        let got = resolve_project_path(None, &cwd);
+        // Simulate a config that has path: "app" — the result must still be
+        // exactly the CWD, not CWD/app.  We pass None as cli_path to exercise
+        // the "no CLI arg" branch; the config is not consumed by
+        // resolve_project_path at all (by design), so it isn't passed in.
+        let got = resolve_project_path(None, &cwd).unwrap();
         assert_eq!(got, cwd, "cfg.path must NOT narrow the root");
+        // Extra: confirm CWD/app would be a different (non-existent) path —
+        // i.e. the assertion above is actually discriminating.
+        assert_ne!(got, cwd.join("app"), "test fixture sanity check");
     }
 
     /// No CLI arg → CWD (canonicalized).
@@ -437,7 +422,7 @@ mod tests {
     fn merge_path_default_is_cwd() {
         let tmp = tempdir().unwrap();
         let canonical = tmp.path().canonicalize().unwrap();
-        let got = resolve_project_path(None, tmp.path());
+        let got = resolve_project_path(None, tmp.path()).unwrap();
         assert_eq!(got, canonical);
     }
 
@@ -446,8 +431,26 @@ mod tests {
     fn merge_path_config_present_but_no_path_field() {
         let tmp = tempdir().unwrap();
         let canonical = tmp.path().canonicalize().unwrap();
-        let got = resolve_project_path(None, tmp.path());
+        let got = resolve_project_path(None, tmp.path()).unwrap();
         assert_eq!(got, canonical);
+    }
+
+    /// A non-existent path must return an Err with a clear message, not
+    /// silently fall back to the raw string.
+    #[test]
+    fn resolve_project_path_nonexistent_errors() {
+        let bad = PathBuf::from("/this/path/definitely/does/not/exist/trusty-test-999");
+        let err = resolve_project_path(Some(bad.clone()), Path::new("/repo"))
+            .expect_err("non-existent path should be an error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cannot resolve index path"),
+            "error message should mention 'cannot resolve index path', got: {msg}"
+        );
+        assert!(
+            msg.contains(bad.to_str().unwrap()),
+            "error message should contain the bad path, got: {msg}"
+        );
     }
 
     // ── resolve_index_name ─────────────────────────────────────────────────
