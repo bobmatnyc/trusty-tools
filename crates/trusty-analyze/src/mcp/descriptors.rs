@@ -61,13 +61,13 @@ pub fn base_tool_descriptors() -> Value {
         },
         {
             "name": "run_diagnostics",
-            "description": "Run available external static-analysis tools (clippy, ruff, biome, staticcheck, pmd, rubocop, phpstan, swiftlint, detekt, clang-tidy) across the index corpus on demand. Tools are auto-discovered: only installed binaries run. Returns normalized diagnostics with file, line, severity, rule code, and message.",
+            "description": "Run available external static-analysis tools (clippy, ruff, biome, staticcheck, pmd, rubocop, phpstan, swiftlint, detekt, clang-tidy, roslyn) across the index corpus on demand. Tools are auto-discovered: only installed binaries run. Returns normalized diagnostics with file, line, severity, rule code, and message.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "index":    { "type": "string" },
                     "index_id": { "type": "string" },
-                    "language": { "type": "string", "description": "Optional: restrict to one language tag (rust, python, typescript, go, java, ruby, php, swift, kotlin, cpp)" },
+                    "language": { "type": "string", "description": "Optional: restrict to one language tag (rust, python, typescript, go, java, ruby, php, swift, kotlin, cpp, csharp)" },
                     "tools":    { "type": "string", "description": "Optional: comma-separated list of tool names to run; defaults to all available" }
                 }
             }

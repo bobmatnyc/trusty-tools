@@ -19,8 +19,8 @@ use std::sync::{Arc, OnceLock};
 use dashmap::DashMap;
 
 use crate::core::tool_impls::{
-    BiomeTool, ClangtidyTool, ClippyTool, DetektTool, PhpstanTool, PmdTool, RubocopTool, RuffTool,
-    StaticcheckTool, SwiftlintTool,
+    BiomeTool, ClangtidyTool, ClippyTool, DetektTool, PhpstanTool, PmdTool, RoslynTool,
+    RubocopTool, RuffTool, StaticcheckTool, SwiftlintTool,
 };
 use crate::core::tools::{StaticTool, ToolDiagnostic};
 
@@ -56,6 +56,7 @@ impl ToolRegistry {
             Arc::new(SwiftlintTool),
             Arc::new(DetektTool),
             Arc::new(ClangtidyTool),
+            Arc::new(RoslynTool),
         ];
 
         for tool in all_tools {

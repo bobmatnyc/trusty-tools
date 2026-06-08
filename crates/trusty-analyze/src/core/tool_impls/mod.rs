@@ -11,6 +11,7 @@
 //! against a captured fixture.
 
 pub mod c;
+pub mod csharp;
 pub mod go;
 pub mod java;
 pub mod kotlin;
@@ -22,6 +23,7 @@ pub mod swift;
 pub mod typescript;
 
 pub use c::ClangtidyTool;
+pub use csharp::RoslynTool;
 pub use go::StaticcheckTool;
 pub use java::PmdTool;
 pub use kotlin::DetektTool;
