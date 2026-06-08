@@ -110,6 +110,18 @@ pub struct IndexConfig {
     /// Test: `repo_config::tests::skip_kg_round_trips_yaml` in this module.
     #[serde(default)]
     pub skip_kg: bool,
+
+    /// Deferred-embedding opt-out (issue #923). When `true` (the default),
+    /// the fast pass runs synchronously (walk → chunk → BM25 → KG → `Ready`
+    /// for lexical+graph) and semantic embedding runs in the background.
+    /// Set `false` in `trusty-search.yaml` to force synchronous full indexing.
+    ///
+    /// Why: per-index YAML control lets CI pipelines opt out while interactive
+    /// sessions keep the fast-start benefit.
+    /// What: `true` (default) → deferred. `false` → synchronous (old behaviour).
+    /// Test: `repo_config::tests::defer_embed_round_trips_yaml` in this module.
+    #[serde(default = "default_true")]
+    pub defer_embed: bool,
 }
 
 fn default_true() -> bool {
@@ -132,6 +144,7 @@ impl Default for IndexConfig {
             include_docs: true,
             respect_gitignore: true,
             skip_kg: false,
+            defer_embed: true,
         }
     }
 }

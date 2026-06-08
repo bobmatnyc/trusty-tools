@@ -249,6 +249,9 @@ pub(crate) fn filters_from_index_config(idx: &IndexConfig) -> RegisterFilters {
         // in the per-index YAML block it propagates here; the CLI `--no-kg`
         // flag can override it upward (see `handle_index`).
         skip_kg: idx.skip_kg,
+        // Issue #923: `defer_embed` is a first-class YAML field. Default `true`
+        // in `IndexConfig::default()`; only set to `false` by explicit YAML opt-out.
+        defer_embed: idx.defer_embed,
     }
 }
 
@@ -286,11 +289,14 @@ async fn index_one_with_filters(
 ) -> Result<()> {
     // Issue #109, Phase 1: `lexical_only` must always go through the
     // filter-aware register call so the daemon receives the opt-in field.
+    // Issue #923: `!filters.defer_embed` (opt-out) likewise forces the
+    // filtered path so the daemon receives `defer_embed: false`.
     let result = if filters.include_paths.is_empty()
         && filters.exclude_globs.is_empty()
         && filters.extensions.is_empty()
         && filters.domain_terms.is_empty()
         && !filters.lexical_only
+        && filters.defer_embed
     {
         register_index_with_daemon(index_name, project_path).await
     } else {

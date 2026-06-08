@@ -114,6 +114,23 @@ pub struct PersistedIndex {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub skip_kg: bool,
 
+    /// Deferred-embedding mode (issue #923): when `true` (the default), the
+    /// fast pass (walk → chunk → BM25 → KG) runs synchronously and marks
+    /// lexical + graph stages `Ready` in seconds. Embedding is deferred to a
+    /// background job. Set to `false` to force the old synchronous full index
+    /// (semantic `Ready` before the call returns). Has no effect when
+    /// `lexical_only = true`.
+    ///
+    /// Why: persisted so an `indexes.toml` round-trip preserves the caller's
+    /// choice — `false` survives daemon restarts without the operator
+    /// re-specifying the opt-out.
+    /// What: defaults to `true` (deferred is the new default). Only `false`
+    /// is written to disk (via `skip_serializing_if = "is_true"`) so existing
+    /// `indexes.toml` files continue to load as `true`.
+    /// Test: `defer_embed_round_trips` in this module.
+    #[serde(default = "default_defer_embed", skip_serializing_if = "is_true")]
+    pub defer_embed: bool,
+
     /// Issue #403: whether this index uses colocated storage (`<root_path>/.trusty-search/`)
     /// rather than the legacy global data directory (`<data_dir>/indexes/<id>/`).
     ///
@@ -136,6 +153,12 @@ pub struct PersistedIndex {
 /// allowed). Centralising the default here keeps it identical for
 /// deserialisation and for the `PersistedIndex::default()` fallback.
 fn default_respect_gitignore() -> bool {
+    true
+}
+
+/// Default for `defer_embed`: `true` — the fast-pass / deferred-embed mode is
+/// the default behaviour for all new and loaded indexes (issue #923).
+fn default_defer_embed() -> bool {
     true
 }
 
@@ -181,6 +204,7 @@ impl Default for PersistedIndex {
             respect_gitignore: true,
             lexical_only: false,
             skip_kg: false,
+            defer_embed: true,
             colocated: false,
         }
     }

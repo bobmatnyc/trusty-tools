@@ -1119,6 +1119,45 @@ impl CodeIndexer {
             }
         }
     }
+
+    /// Embed every chunk already in the corpus and upsert the resulting
+    /// vectors into the HNSW store. Used by the deferred-embed background pass
+    /// (issue #923).
+    ///
+    /// Why: the fast pass (C1) stores chunks in redb + BM25 without embedding
+    /// them so the index is searchable lexically within seconds. This method is
+    /// the C2 catch-up: it reads all chunks, embeds in batches (reusing the
+    /// existing `embed_chunks_in_batches` logic), and upserts into HNSW — no
+    /// re-parsing, no re-chunking. Idempotent: re-running only re-embeds chunks
+    /// that weren't already in HNSW (usearch `upsert_batch` is itself
+    /// idempotent). Returns `(embedded, total)` so callers can report progress.
+    ///
+    /// What: snapshots all corpus `RawChunk`s (read lock only, very fast),
+    /// feeds them through `embed_chunks_in_batches`, and calls
+    /// `commit_vectors_batch` + `commit_embeddings_cache` for each sub-batch.
+    /// The read lock on `chunks` is held only during the snapshot — embedding
+    /// is done outside any lock.
+    ///
+    /// Test: `deferred_embed_pass_marks_semantic_ready_and_is_idempotent` in
+    /// `service::reindex::tests` (end-to-end with a mock embedder).
+    pub async fn embed_deferred_chunks(&self) -> Result<(usize, usize)> {
+        let chunks: Vec<RawChunk> = {
+            self.ensure_chunks_loaded().await;
+            let map = self.chunks.read().await;
+            map.values().cloned().collect()
+        };
+        let total = chunks.len();
+        if total == 0 || self.embedder.is_none() || self.store.is_none() {
+            return Ok((0, total));
+        }
+        let embeddings = self.embed_chunks_in_batches(&chunks).await?;
+        self.commit_vectors_batch(&chunks, &embeddings).await?;
+        // Populate the in-memory embedding cache so subsequent MMR re-rank
+        // calls can retrieve vectors without hitting the HNSW store.
+        self.commit_embeddings_cache(&chunks, embeddings).await;
+        let embedded = chunks.len();
+        Ok((embedded, total))
+    }
 }
 
 #[cfg(test)]

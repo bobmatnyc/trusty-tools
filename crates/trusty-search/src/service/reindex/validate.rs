@@ -91,6 +91,7 @@ impl ReindexOutcome {
 /// partial-skip success, and the healthy path.
 pub(crate) fn reindex_outcome(
     lexical_only: bool,
+    defer_embed: bool,
     embedder_present: bool,
     walked_files: usize,
     skipped_files: usize,
@@ -98,6 +99,12 @@ pub(crate) fn reindex_outcome(
 ) -> ReindexOutcome {
     if lexical_only {
         // Lexical-only indexes never embed; zero vectors is expected.
+        return ReindexOutcome::Ready;
+    }
+    if defer_embed {
+        // Issue #923: in deferred-embed mode the fast pass intentionally
+        // produces zero vectors — embedding runs as a separate background job.
+        // The zero-vector gate does not apply here.
         return ReindexOutcome::Ready;
     }
     if !embedder_present {
@@ -190,7 +197,7 @@ mod tests {
     #[test]
     fn reindex_outcome_lexical_only_is_ready_with_zero_vectors() {
         // lexical_only=true, embedder irrelevant.
-        let outcome = reindex_outcome(true, true, 100, 0, 0);
+        let outcome = reindex_outcome(true, false, true, 100, 0, 0);
         assert!(outcome.is_ready());
         assert_eq!(outcome.failure_reason(), None);
     }
@@ -201,7 +208,7 @@ mod tests {
     /// Test: this test.
     #[test]
     fn reindex_outcome_no_embedder_is_ready_with_zero_vectors() {
-        let outcome = reindex_outcome(false, false, 100, 0, 0);
+        let outcome = reindex_outcome(false, false, false, 100, 0, 0);
         assert!(outcome.is_ready());
         assert_eq!(outcome.failure_reason(), None);
     }
@@ -212,15 +219,15 @@ mod tests {
     /// Test: this test.
     #[test]
     fn reindex_outcome_zero_files_is_ready() {
-        assert!(reindex_outcome(false, true, 0, 0, 0).is_ready());
-        assert!(reindex_outcome(true, true, 0, 0, 0).is_ready());
+        assert!(reindex_outcome(false, false, true, 0, 0, 0).is_ready());
+        assert!(reindex_outcome(true, false, true, 0, 0, 0).is_ready());
     }
 
     /// Why: the healthy path — files walked, vectors produced — must be Ready.
     /// Test: this test.
     #[test]
     fn reindex_outcome_healthy_is_ready() {
-        assert!(reindex_outcome(false, true, 42, 0, 1337).is_ready());
+        assert!(reindex_outcome(false, false, true, 42, 0, 1337).is_ready());
     }
 
     /// Why: a single embedded vector for many files is still "the embedder
@@ -230,7 +237,7 @@ mod tests {
     /// Test: this test.
     #[test]
     fn reindex_outcome_single_vector_is_ready() {
-        assert!(reindex_outcome(false, true, 1000, 0, 1).is_ready());
+        assert!(reindex_outcome(false, false, true, 1000, 0, 1).is_ready());
     }
 
     /// Why: regression test for #868 — a warm-boot incremental reindex where
@@ -242,7 +249,7 @@ mod tests {
     #[test]
     fn reindex_outcome_all_hash_skipped_is_ready() {
         // #868 scenario: 24 files walked, all 24 hash-skipped, 0 new vectors.
-        let outcome = reindex_outcome(false, true, 24, 24, 0);
+        let outcome = reindex_outcome(false, false, true, 24, 24, 0);
         assert!(
             outcome.is_ready(),
             "all-hash-skipped warm reindex must be Ready, got: {:?}",
@@ -257,7 +264,7 @@ mod tests {
     #[test]
     fn reindex_outcome_genuine_crash_fails() {
         // 24 walked, 0 skipped → 24 submitted, 0 vectors → crash.
-        let outcome = reindex_outcome(false, true, 24, 0, 0);
+        let outcome = reindex_outcome(false, false, true, 24, 0, 0);
         assert!(!outcome.is_ready());
         let reason = outcome.failure_reason().expect("must carry a reason");
         assert!(reason.contains("zero vectors"), "reason: {reason}");
@@ -273,7 +280,7 @@ mod tests {
     #[test]
     fn reindex_outcome_partial_skip_crash_fails() {
         // 24 walked, 20 skipped → 4 submitted, 0 vectors → crash.
-        let outcome = reindex_outcome(false, true, 24, 20, 0);
+        let outcome = reindex_outcome(false, false, true, 24, 20, 0);
         assert!(!outcome.is_ready());
         let reason = outcome.failure_reason().expect("must carry a reason");
         assert!(reason.contains("zero vectors"), "reason: {reason}");
@@ -285,7 +292,7 @@ mod tests {
     #[test]
     fn reindex_outcome_partial_skip_success_is_ready() {
         // 24 walked, 20 skipped → 4 submitted, 12 vectors → healthy.
-        let outcome = reindex_outcome(false, true, 24, 20, 12);
+        let outcome = reindex_outcome(false, false, true, 24, 20, 12);
         assert!(outcome.is_ready());
         assert_eq!(outcome.failure_reason(), None);
     }
@@ -296,7 +303,7 @@ mod tests {
     /// Test: this test.
     #[test]
     fn reindex_outcome_full_pipeline_zero_vectors_fails() {
-        let outcome = reindex_outcome(false, true, 42, 0, 0);
+        let outcome = reindex_outcome(false, false, true, 42, 0, 0);
         assert!(!outcome.is_ready());
         let reason = outcome.failure_reason().expect("must carry a reason");
         assert!(reason.contains("zero vectors"), "reason: {reason}");
@@ -304,6 +311,20 @@ mod tests {
             reason.contains("42"),
             "reason should cite submitted count: {reason}"
         );
+    }
+
+    /// Why (issue #923): in defer-embed mode the fast pass intentionally
+    /// produces zero vectors — the zero-vector gate must not fire.
+    /// Test: this test.
+    #[test]
+    fn reindex_outcome_defer_embed_is_ready_with_zero_vectors() {
+        // defer_embed=true, embedder present, files walked, zero vectors — must be Ready.
+        let outcome = reindex_outcome(false, true, true, 50, 0, 0);
+        assert!(
+            outcome.is_ready(),
+            "defer_embed fast pass must be Ready despite zero vectors"
+        );
+        assert_eq!(outcome.failure_reason(), None);
     }
 
     /// Why: confirms the strip-prefix root resolves a real symlinked directory

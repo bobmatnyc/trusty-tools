@@ -162,6 +162,10 @@ pub(super) async fn reindex_handler(
                     // root_path override — the operator's KG choice is
                     // orthogonal to the path being indexed.
                     skip_kg: handle.skip_kg,
+                    // Issue #923: preserve the defer_embed flag across the
+                    // root_path override — the operator's embedding-mode
+                    // choice is orthogonal to the path being indexed.
+                    defer_embed: handle.defer_embed,
                     stages: Arc::clone(&handle.stages),
                     search_pressure: Arc::clone(&handle.search_pressure),
                     // Preserve walk diagnostics across root-path override — a

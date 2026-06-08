@@ -331,6 +331,28 @@ pub struct IndexHandle {
     /// Test: `skip_kg_index_never_runs_phase3` in `service::reindex::tests`.
     pub skip_kg: bool,
 
+    /// Deferred-embedding mode (issue #923): when `true` (the default),
+    /// the fast pass (walk → chunk → BM25 → KG) runs synchronously and
+    /// marks lexical + graph stages `Ready` in seconds, making the index
+    /// searchable immediately. Embedding (semantic stage) is deferred to a
+    /// background job that runs after the fast pass completes.
+    ///
+    /// Why: on large repos the ONNX embedding pass dominates reindex time
+    /// (minutes), blocking all search while BM25+KG — which finish in
+    /// seconds — are ready. With `defer_embed=true`, users can search the
+    /// index immediately while semantic vectors are filled in the background.
+    ///
+    /// What: a bare `bool`, set once at `POST /indexes` and persisted to
+    /// `indexes.toml` so it survives daemon restarts. Defaults to `true`.
+    /// Opt out with `defer_embed: false` to force the old synchronous full
+    /// index (semantic Ready before the call returns).
+    ///
+    /// Note: has no effect when `lexical_only=true` — that flag permanently
+    /// skips semantic regardless.
+    ///
+    /// Test: see `service::reindex::tests::defer_embed_*`.
+    pub defer_embed: bool,
+
     /// Per-stage lifecycle state surface for the staged pipeline (issue #109).
     ///
     /// Why: search handler reads this to compute `search_capabilities` and
@@ -431,6 +453,7 @@ impl IndexHandle {
             last_indexed_at: Arc::new(RwLock::new(None)),
             lexical_only: false,
             skip_kg: false,
+            defer_embed: true,
             stages: Arc::new(RwLock::new(IndexStages::default())),
             search_pressure: Arc::new(tokio::sync::Notify::new()),
             walk_diagnostics: Arc::new(tokio::sync::RwLock::new(WalkDiagnostics::default())),

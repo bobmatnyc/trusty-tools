@@ -590,6 +590,8 @@ pub(crate) async fn restore_one_index(
     // graph stage is forced to Skipped at warm-boot regardless of on-disk
     // state (config intent wins over stale on-disk graph data).
     let skip_kg = entry.skip_kg;
+    // Issue #923: read defer_embed from the persisted entry. Default `true`.
+    let defer_embed = entry.defer_embed;
     // Issue #135: inspect the on-disk artifacts that
     // `build_indexer_from_entry` just restored and derive the staged-pipeline
     // state from them. Before this, every warm-booted index landed with
@@ -648,6 +650,7 @@ pub(crate) async fn restore_one_index(
         last_indexed_at: Arc::new(tokio::sync::RwLock::new(None)),
         lexical_only,
         skip_kg,
+        defer_embed,
         stages: Arc::new(tokio::sync::RwLock::new(stages)),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
         walk_diagnostics: Arc::new(tokio::sync::RwLock::new(

@@ -118,6 +118,20 @@ pub struct CreateIndexRequest {
     /// Test: `skip_kg_index_never_runs_phase3` in `service::reindex::tests`.
     #[serde(default)]
     pub skip_kg: Option<bool>,
+
+    /// Deferred-embedding opt-out (issue #923). When `None` or `Some(true)`
+    /// (the default), the fast pass runs synchronously and marks lexical + graph
+    /// `Ready` within seconds; semantic embedding is deferred to a background
+    /// job. Set `Some(false)` to force the old synchronous full index — semantic
+    /// is `Ready` before the reindex call returns.
+    ///
+    /// Why: exposes the per-index `defer_embed` flag on the wire so callers can
+    /// opt out of deferred embedding when they need semantic search available
+    /// immediately (e.g. CI pipelines that query right after indexing).
+    /// What: `None` / missing maps to `true` (deferred is the new default).
+    /// Test: `defer_embed_false_forces_synchronous_index` in `service::reindex::tests`.
+    #[serde(default)]
+    pub defer_embed: Option<bool>,
 }
 
 #[derive(Deserialize)]

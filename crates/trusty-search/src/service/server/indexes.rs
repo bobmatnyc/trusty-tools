@@ -229,6 +229,10 @@ pub(super) async fn create_index_handler(
         let v = std::env::var("TRUSTY_NO_KG").unwrap_or_default();
         matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
     });
+    // Issue #923: deferred-embedding mode. Default `true` — the fast-pass /
+    // background-embed path. Callers opt out by passing `defer_embed: false`
+    // to force synchronous full indexing. Has no effect on `lexical_only` indexes.
+    let defer_embed: bool = req.defer_embed.unwrap_or(true);
     // Issue #403: new indexes use colocated storage (`<root>/.trusty-search/`).
     // Register the root in `roots.toml` so the startup scanner can find it on
     // the next daemon boot, and ensure `.trusty-search/` is git-ignored.
@@ -255,6 +259,7 @@ pub(super) async fn create_index_handler(
             respect_gitignore,
             lexical_only,
             skip_kg,
+            defer_embed,
             colocated,
         },
     ) {
@@ -299,6 +304,7 @@ pub(super) async fn create_index_handler(
         last_indexed_at: Arc::new(tokio::sync::RwLock::new(None)),
         lexical_only,
         skip_kg,
+        defer_embed,
         stages: Arc::new(tokio::sync::RwLock::new(stages)),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
         walk_diagnostics: Arc::new(tokio::sync::RwLock::new(

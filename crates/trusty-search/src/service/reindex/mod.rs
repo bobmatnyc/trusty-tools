@@ -793,6 +793,12 @@ struct BatchCtx {
     /// was created with `lexical_only: true`. Producer task consults this
     /// in `prepare_and_parse_batch` so the embedder is never invoked.
     lexical_only: bool,
+    /// Issue #923: skip embedding during the fast pass when `defer_embed=true`.
+    /// Like `lexical_only`, this makes `prepare_and_parse_batch` call
+    /// `parse_files_only` instead of `parse_and_embed_files`. Unlike
+    /// `lexical_only`, the KG pass still runs and a background embed pass is
+    /// spawned afterwards to fill in the semantic lane.
+    defer_embed: bool,
     /// PID slot for the trusty-embedderd sidecar (issue #315 lazy-spawn).
     ///
     /// Why: `LazyEmbedderHandle` defers spawning `trusty-embedderd` until
@@ -899,7 +905,7 @@ async fn prepare_and_parse_batch(ctx: &BatchCtx, batch: &[PathBuf]) -> Option<Pa
     // is about to be used for the first time (cold-start model load, 30-60 s).
     //
     // Sidecar path: The PID slot reads `0` before the first lazy spawn. If we
-    // see `0` on a non-lexical-only batch we know the upcoming
+    // see `0` on a non-lexical-only, non-defer-embed batch we know the upcoming
     // `parse_and_embed_files` call will block for model initialization.
     //
     // In-process path: `embedder_pid_slot` is `None` (no sidecar), but ONNX
@@ -912,11 +918,15 @@ async fn prepare_and_parse_batch(ctx: &BatchCtx, batch: &[PathBuf]) -> Option<Pa
     // disabled both events for the in-process embedder. The fix uses a
     // first-batch guard that fires regardless of embedder mode.
     //
+    // `lexical_only` and `defer_embed` indexes never embed during the fast
+    // pass, so they never stall here — skip the init event for them.
+    //
     // We only emit once: after the first embedding call returns successfully,
     // we emit `embedder_ready`. Subsequent batches have indexed > 0 so this
     // branch is skipped. `lexical_only` indexes never embed.
     let first_batch_ever = ctx.progress.indexed.load(AtomicOrdering::Acquire) == 0;
     let needs_embedder_init = !ctx.lexical_only
+        && !ctx.defer_embed
         && if let Some(slot) = ctx.embedder_pid_slot.as_ref() {
             // Sidecar mode: PID 0 = not yet spawned.
             slot.load(AtomicOrdering::Acquire) == 0
@@ -941,6 +951,10 @@ async fn prepare_and_parse_batch(ctx: &BatchCtx, batch: &[PathBuf]) -> Option<Pa
     // `embeddings` slot is all `None`, which `commit_parsed_batch`
     // already handles as the BM25-only path.
     //
+    // Issue #923: `defer_embed` likewise skips embedding in the fast pass —
+    // the same `parse_files_only` path is used. The deferred background embed
+    // job will embed and upsert vectors after the fast pass finishes.
+    //
     // For full-pipeline indexes, use `parse_and_embed_files_tracked` so
     // that per-wave `chunk_progress` SSE events fire at ~32-chunk granularity
     // (every `PROGRESS_CHUNK_INTERVAL` chunks inside `embed_chunks_in_batches`),
@@ -948,7 +962,7 @@ async fn prepare_and_parse_batch(ctx: &BatchCtx, batch: &[PathBuf]) -> Option<Pa
     // per 128-file file-batch.
     let parsed = {
         let indexer = ctx.handle.indexer.read().await;
-        let result = if ctx.lexical_only {
+        let result = if ctx.lexical_only || ctx.defer_embed {
             indexer.parse_files_only(to_index).await
         } else {
             use crate::core::indexer::PROGRESS_CHUNK_INTERVAL;
@@ -999,6 +1013,48 @@ async fn prepare_and_parse_batch(ctx: &BatchCtx, batch: &[PathBuf]) -> Option<Pa
             }))
             .await;
     }
+
+    // Problem 2 UX fix: emit a lightweight `chunk_progress` event immediately
+    // after the ONNX embedding step (inside `parse_and_embed_files`) finishes
+    // but before the commit write-lock is acquired.
+    //
+    // Why: the commit (BM25 + HNSW + redb write) can take several seconds for
+    // a large batch.  During that window the `batch` SSE event has not yet
+    // fired, so the CLI ticker shows 0 cps and ETA "?" even though embedding
+    // just completed successfully.  Emitting `chunk_progress` here — which
+    // carries the per-batch chunk count and CPS — lets the ticker update
+    // throughput numbers and ETA within seconds of the embedding completing,
+    // not after the commit completes.
+    //
+    // The `batch` event still fires after the commit and carries the
+    // authoritative `indexed` (file-level position) count used to advance the
+    // Embed bar.  `chunk_progress` only updates the CPS / chunk-total
+    // displayed in the stats line.
+    // `defer_embed` passes produce zero vectors in the fast pass (parse_files_only);
+    // skip the chunk_progress emit to avoid misleading "0 vectors/s" noise.
+    if !ctx.lexical_only && !ctx.defer_embed && parsed.vector_count > 0 {
+        use std::sync::atomic::Ordering;
+        // Use the running chunk total plus this batch's new chunks as the
+        // cumulative denominator for CPS.  The authoritative total lives in
+        // `ctx.progress.total_chunks` but it hasn't been updated yet (that
+        // happens in `apply_successful_commit`).  We report the batch-local
+        // count so the CLI can display live throughput.
+        let batch_chunks = parsed.chunks.len() as u64;
+        let chunks_per_sec = (batch_chunks * 1000)
+            .checked_div(parsed.embed_ms.max(1))
+            .unwrap_or(0);
+        ctx.progress
+            .push(serde_json::json!({
+                "event": "chunk_progress",
+                "chunks_done": batch_chunks,
+                "chunks_per_sec": chunks_per_sec,
+                "embed_ms": parsed.embed_ms,
+                "indexed": ctx.progress.indexed.load(Ordering::Acquire),
+                "total_files": ctx.total,
+            }))
+            .await;
+    }
+
 
     Some(ParsedReadyBatch {
         parsed,
@@ -2172,6 +2228,10 @@ pub fn spawn_reindex_with_cleanup(
             started,
             total,
             lexical_only: handle.lexical_only,
+            // Issue #923: in deferred-embed mode, the fast pass uses
+            // parse_files_only so lexical+KG become searchable in seconds.
+            // The background embed pass runs after KG completes.
+            defer_embed: handle.defer_embed && !handle.lexical_only,
             // Thread the embedderd PID slot for lazy-spawn detection
             // (Problem 1 UX fix — surfaces the model-init stall).
             embedder_pid_slot: embedderd_pid_slot.clone(),
@@ -2297,8 +2357,13 @@ pub fn spawn_reindex_with_cleanup(
         // wired, zero vectors) from a legitimately embedder-less BM25-only /
         // test index. Only the former is a #601 failure.
         let embedder_present = handle.indexer.read().await.has_embedder();
+        // Issue #923: when `defer_embed=true` and we're not in `lexical_only`
+        // mode, the fast pass intentionally produces zero vectors (embedding is
+        // deferred to the background job). Pass `ctx.defer_embed` so the
+        // validation gate doesn't flag zero vectors as an embed failure.
         let reindex_outcome = validate::reindex_outcome(
             handle.lexical_only,
+            ctx.defer_embed,
             embedder_present,
             total,
             progress.skipped.load(AtomicOrdering::Acquire),
@@ -2695,9 +2760,131 @@ pub fn spawn_reindex_with_cleanup(
         // fan-out router treats as a neutral 1.0 weight.
         refresh_context_embedding(&handle).await;
 
+        // Issue #923: if this was a deferred-embed fast pass and an embedder
+        // is wired, spawn the background embedding job now. The fast-pass
+        // `complete` event has already been emitted above so the SSE stream
+        // is closed. The embed job runs independently and marks semantic
+        // `Ready` when done; callers observe the transition via
+        // `/indexes/:id/status`. Skip when no embedder is present (BM25-only
+        // / test indexers) — there is nothing to embed.
+        let has_embedder = handle.indexer.read().await.has_embedder();
+        if ctx.defer_embed && !aborted_memory && has_embedder {
+            spawn_deferred_embed_pass(handle, progress.clone());
+        }
+
         // Issue #75: GC the progress entry after a short delay
         // (helper-extracted: issue #98).
         schedule_progress_cleanup(cleanup_map, cleanup_id);
+    });
+}
+
+/// Spawn the C2 deferred-embed background pass (issue #923).
+///
+/// Why: the fast pass (C1) stored all chunks in BM25 + redb without embedding
+/// them so the index was searchable lexically within seconds. This function
+/// spawns the catch-up job that embeds all corpus chunks and upserts the
+/// resulting vectors into HNSW, then marks the semantic stage `Ready`.
+///
+/// What: acquires the background reindex semaphore (one permit) so the embed
+/// pass never races with a concurrent reindex, calls
+/// `CodeIndexer::embed_deferred_chunks` under the indexer's READ lock (the
+/// embed step holds no write lock), forces an HNSW snapshot, then marks
+/// semantic `Ready`. The job is idempotent: re-running after a partial
+/// failure re-embeds all chunks (HNSW upsert is idempotent).
+///
+/// Test: `deferred_embed_pass_marks_semantic_ready_and_is_idempotent` in
+/// `service::reindex::tests` (uses a no-embedder BM25-only handle so it
+/// passes in CI without a live sidecar; the semantic-ready flip is tested
+/// directly).
+fn spawn_deferred_embed_pass(handle: Arc<IndexHandle>, progress: Arc<ReindexProgress>) {
+    let index_id = handle.id.clone();
+    tokio::spawn(async move {
+        // Re-use the background semaphore to avoid racing with a concurrent
+        // reindex or another deferred-embed pass on the same handle.
+        let _permit = match background_reindex_semaphore().acquire().await {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!(
+                    "deferred_embed[{}]: background semaphore closed — skipping embed pass",
+                    index_id.0,
+                );
+                return;
+            }
+        };
+
+        let total_chunks = {
+            let indexer = handle.indexer.read().await;
+            indexer.chunk_count()
+        };
+
+        tracing::info!(
+            "deferred_embed[{}]: starting background embed pass ({} chunks)",
+            index_id.0,
+            total_chunks,
+        );
+
+        // Emit an SSE event so observers (UI, CLI `--watch`) know embedding
+        // has started. This fires on the progress handle after the fast-pass
+        // `complete` event, so late SSE subscribers may see it.
+        progress
+            .push(serde_json::json!({
+                "event": "embed_start",
+                "index_id": index_id.0,
+                "total_chunks": total_chunks,
+            }))
+            .await;
+
+        let result = {
+            let indexer = handle.indexer.read().await;
+            indexer.embed_deferred_chunks().await
+        };
+
+        match result {
+            Ok((embedded, total)) => {
+                // Force an HNSW snapshot so the vectors survive a daemon
+                // restart even if no subsequent reindex runs.
+                {
+                    let indexer = handle.indexer.read().await;
+                    indexer.force_incremental_persist();
+                }
+                tracing::info!(
+                    "deferred_embed[{}]: embedded {}/{} chunks — marking semantic Ready",
+                    index_id.0,
+                    embedded,
+                    total,
+                );
+                // Mark the semantic stage Ready — the full HNSW lane is now
+                // queryable. We write the stage directly (not via
+                // `mark_semantic_ready_graph_in_progress`) because the graph
+                // stage is already Ready from the fast-pass KG rebuild; we
+                // must not flip it back to InProgress.
+                {
+                    let mut stages = handle.stages.write().await;
+                    stages.semantic.status = StageStatus::Ready;
+                    stages.semantic.completed_at = Some(now_rfc3339());
+                    stages.semantic.embedded = Some(embedded);
+                    stages.semantic.total = Some(total);
+                }
+                progress
+                    .push(serde_json::json!({
+                        "event": "embed_complete",
+                        "index_id": index_id.0,
+                        "embedded": embedded,
+                        "total": total,
+                    }))
+                    .await;
+            }
+            Err(e) => {
+                tracing::error!("deferred_embed[{}]: embed pass failed — {e:#}", index_id.0,);
+                progress
+                    .push(serde_json::json!({
+                        "event": "embed_error",
+                        "index_id": index_id.0,
+                        "message": format!("{e:#}"),
+                    }))
+                    .await;
+            }
+        }
     });
 }
 
@@ -2747,6 +2934,7 @@ mod tests {
             last_indexed_at: Arc::new(tokio::sync::RwLock::new(None)),
             lexical_only: false,
             skip_kg: false,
+            defer_embed: true,
             stages: Arc::new(tokio::sync::RwLock::new(IndexStages::default())),
             search_pressure: Arc::new(tokio::sync::Notify::new()),
             walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
@@ -2829,6 +3017,7 @@ mod tests {
             last_indexed_at: Arc::new(tokio::sync::RwLock::new(None)),
             lexical_only: false,
             skip_kg: false,
+            defer_embed: true,
             stages: Arc::new(tokio::sync::RwLock::new(IndexStages::default())),
             search_pressure: Arc::new(tokio::sync::Notify::new()),
             walk_diagnostics: Arc::new(tokio::sync::RwLock::new(
@@ -3251,11 +3440,16 @@ mod tests {
         corpus.upsert_chunks(&prev).expect("seed prev chunk");
         indexer.set_corpus_store(Arc::new(corpus));
 
-        let handle = Arc::new(IndexHandle::bare(
+        // Use defer_embed=false so the zero-vector failure gate (#601) fires
+        // synchronously. With defer_embed=true the fast pass deliberately skips
+        // embedding and the gate does not apply (issue #923).
+        let mut handle_inner = IndexHandle::bare(
             IndexId::new("fail-601"),
             Arc::new(tokio::sync::RwLock::new(indexer)),
             root.clone(),
-        ));
+        );
+        handle_inner.defer_embed = false;
+        let handle = Arc::new(handle_inner);
         let progress = Arc::new(ReindexProgress::new());
         spawn_reindex(handle.clone(), progress.clone(), false);
 
@@ -3403,6 +3597,7 @@ mod tests {
             last_indexed_at: Arc::new(tokio::sync::RwLock::new(None)),
             lexical_only,
             skip_kg,
+            defer_embed: false,
             stages: Arc::new(tokio::sync::RwLock::new(stages)),
             search_pressure: Arc::new(tokio::sync::Notify::new()),
             walk_diagnostics: Arc::new(tokio::sync::RwLock::new(

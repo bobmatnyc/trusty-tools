@@ -1240,10 +1240,10 @@ pub async fn register_index_with_daemon(
 /// forwards the resolved values to the daemon when registering each
 /// index so the daemon stores them on the `IndexHandle` and applies them
 /// to subsequent reindex + search calls.
-/// What: thin struct carrying the four fields. `Default` = empty everywhere,
-/// which keeps the original single-index path unchanged.
+/// What: thin struct carrying the four fields. `Default` has empty collections,
+/// `lexical_only=false`, `skip_kg=false`, `defer_embed=true` (issue #923 default).
 /// Test: `commands::index::handle_index` populates this from `IndexConfig`.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RegisterFilters {
     pub include_paths: Vec<String>,
     pub exclude_globs: Vec<String>,
@@ -1264,6 +1264,37 @@ pub struct RegisterFilters {
     /// `"skip_kg": true`. The daemon stores it in `indexes.toml`.
     /// Test: covered by `skip_kg_index_never_runs_phase3` (end-to-end).
     pub skip_kg: bool,
+    /// Issue #923: deferred-embedding mode (default `true`). When `true`, the
+    /// fast pass (walk → chunk → BM25 → KG) completes synchronously and marks
+    /// lexical + graph stages `Ready` within seconds; semantic (HNSW vector)
+    /// embedding is deferred to a background job. Set to `false` to request
+    /// the old synchronous full-index behaviour.
+    ///
+    /// Why: forwards the per-index YAML `defer_embed:` field (and any future
+    /// CLI flag) to the daemon's `POST /indexes` body.
+    /// What: when `false`, the request body includes `"defer_embed": false`
+    /// so the daemon stores the opt-out on the `IndexHandle`.
+    /// Test: covered by `defer_embed_false_forces_synchronous_index` (end-to-end).
+    pub defer_embed: bool,
+}
+
+impl Default for RegisterFilters {
+    /// Why: `defer_embed` must default to `true` (issue #923 default-on); plain
+    /// `#[derive(Default)]` would set it to `false` since `bool::default()=false`.
+    /// What: all collection fields empty, boolean flags at their correct defaults:
+    /// `lexical_only=false`, `skip_kg=false`, `defer_embed=true`.
+    /// Test: `RegisterFilters::default().defer_embed` asserted in unit tests.
+    fn default() -> Self {
+        Self {
+            include_paths: vec![],
+            exclude_globs: vec![],
+            extensions: vec![],
+            domain_terms: vec![],
+            lexical_only: false,
+            skip_kg: false,
+            defer_embed: true,
+        }
+    }
 }
 
 /// Variant of [`register_index_with_daemon`] that forwards filter/domain
@@ -1303,6 +1334,12 @@ pub async fn register_index_with_daemon_filtered(
     }
     if filters.skip_kg {
         create_body["skip_kg"] = serde_json::json!(true);
+    }
+    // Issue #923: only send `defer_embed: false` when the caller opts out;
+    // the server default is `true`, so omitting the field avoids noise in the
+    // request body for the common case.
+    if !filters.defer_embed {
+        create_body["defer_embed"] = serde_json::json!(false);
     }
     match client.post(&create_url).json(&create_body).send().await {
         Ok(resp) if resp.status().is_success() => {

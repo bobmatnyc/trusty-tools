@@ -229,6 +229,7 @@ mod tests {
             last_indexed_at: Arc::new(RwLock::new(None)),
             lexical_only: false,
             skip_kg: false,
+            defer_embed: true,
             stages: Arc::new(RwLock::new(IndexStages::default())),
             search_pressure: Arc::new(tokio::sync::Notify::new()),
             walk_diagnostics: Arc::new(RwLock::new(
