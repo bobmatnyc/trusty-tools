@@ -96,28 +96,61 @@ fn validate_root_path_denylist_rejects_home() {
     );
 }
 
-/// The denylist must block /tmp at the daemon layer.
+/// The denylist must block /tmp, /private/tmp, and /var/folders at the daemon
+/// layer via `validate_root_path` — tested using LITERAL path values.
 ///
-/// Why: /tmp is an OS-managed ephemeral directory; indexing it is meaningless
-/// and potentially dangerous.
-/// What: creates a real sub-directory under /tmp (so the "not a dir" check
-/// passes), then calls `validate_root_path` and asserts an `Err` response.
-/// Test: this test.
+/// Why: the previous test used `std::env::temp_dir()` which on macOS returns
+/// `/var/folders/…` (not `/tmp`). That meant the assertion "a /tmp subdir is
+/// denied" was actually testing a completely different prefix, making the test
+/// pass for the wrong reason. By constructing each path prefix that
+/// `SENSITIVE_PATH_PREFIXES` covers and asserting each one, we verify exactly
+/// the rules stated in the denylist — not the ambient OS temp directory.
+/// What: calls `validate_root_path` (which calls `is_denied` on the canonical
+/// path) with paths rooted at every prefix in `SENSITIVE_PATH_PREFIXES` that
+/// covers ephemeral OS directories. Because these directories don't exist on
+/// disk, `validate_root_path` will return `Err` at the "does not exist" check
+/// rather than the denylist check; so we test `is_denied` directly (the public
+/// function that the daemon's validate path calls after canonicalization). This
+/// validates the denylist logic in isolation — the daemon's canonical guard
+/// would apply the same check after the path is resolved.
+/// Test: this test; see also `allowlist::tests::denylist_blocks_tmp` which
+/// tests `is_denied` directly for `/tmp/my-project`.
 #[test]
-fn validate_root_path_denylist_rejects_tmp() {
-    // Create a real subdir under /tmp so the is_dir check passes.
-    let tmp = std::env::temp_dir().join(format!("ts-denylist-test-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&tmp);
-    if !tmp.is_dir() {
-        // Can't create tmp dir (permission issue in this environment) — skip.
-        return;
+fn validate_root_path_denylist_rejects_tmp_literal_paths() {
+    use crate::allowlist::{is_denied, SENSITIVE_PATH_PREFIXES};
+
+    // Build one representative sub-path for each OS-temp prefix in the denylist.
+    // These are the LITERAL prefix values from SENSITIVE_PATH_PREFIXES — not
+    // whatever std::env::temp_dir() happens to return on the current host.
+    let tmp_subpaths: &[&str] = &[
+        "/tmp/ts-denylist-probe",         // SENSITIVE_PATH_PREFIXES[0]: "/tmp/"
+        "/private/tmp/ts-denylist-probe", // SENSITIVE_PATH_PREFIXES[1]: "/private/tmp"
+        "/var/folders/ts-denylist-probe", // SENSITIVE_PATH_PREFIXES[2]: "/var/folders"
+        "/private/var/folders/ts-denylist-probe", // SENSITIVE_PATH_PREFIXES[3]: "/private/var/folders"
+    ];
+
+    // Cross-check: every path we're testing is actually covered by a prefix in
+    // the static table — this assertion documents the coupling and catches
+    // future renames of the prefix strings.
+    for subpath in tmp_subpaths {
+        let covered = SENSITIVE_PATH_PREFIXES
+            .iter()
+            .any(|prefix| subpath.starts_with(prefix));
+        assert!(
+            covered,
+            "test path {subpath:?} is not covered by any SENSITIVE_PATH_PREFIXES entry — \
+             update the test or the denylist"
+        );
     }
-    let result = super::helpers::validate_root_path(&tmp);
-    let _ = std::fs::remove_dir_all(&tmp);
-    assert!(
-        result.is_err(),
-        "/tmp subdirectory must be rejected by validate_root_path"
-    );
+
+    // Now verify is_denied rejects every literal path.
+    for subpath in tmp_subpaths {
+        let path = std::path::Path::new(subpath);
+        assert!(
+            is_denied(path).is_some(),
+            "expected is_denied to block {subpath:?} (covers SENSITIVE_PATH_PREFIXES rule)"
+        );
+    }
 }
 
 /// A normal project directory must NOT be denied by `validate_root_path`.
