@@ -197,10 +197,21 @@ Cleanest long-term answer; do after Phase 1 proves the normalized output shape.
   detekt. The file-filter step (`file_matches`) must strip the `file://` scheme
   and compare absolute paths, not assume a relative tail. This is a concrete
   delta from the detekt parser and another reason to keep them separate.
+- **`--no-incremental` is REQUIRED — discovered building HotStats.Crypto.** An
+  up-to-date incremental `dotnet build` skips the `CoreCompile` target, so the
+  Roslyn analyzers never re-run and the ErrorLog is left empty. Verified: the
+  same project that yields **14** diagnostics on a forced build yields **0** on
+  a second incremental build. Every adapter invocation must pass
+  `--no-incremental` (or delete `obj/`/target `Rebuild`) to force a recompile.
+  This is the single biggest performance lever: it means **every** invocation
+  pays a full compile, not just cold ones — see §6 Phase 1.4 (the per-`.csproj`
+  build dedup + warm-state story is what makes this affordable).
 - **Output is native but NOT strictly schema-conformant.** Keep the parser
   lenient (no SARIF-schema validator).
-- **Performance is the real risk.** Cold build = restore + full compile. Design
-  the build/cache/latency story deliberately (Phase 1.4).
+- **Performance is the real risk.** Cold build = restore + full compile, and
+  `--no-incremental` forces a full compile *every* time. Design the
+  build/cache/latency story deliberately (Phase 1.4): build once per `.csproj`
+  (not per file), reuse restore state, and bound concurrency.
 
 ### 7.1 Captured real SARIF result (use as the Phase-0 test fixture)
 
@@ -254,8 +265,10 @@ better than the issue's "add analyzer NuGets" suggestion for the default path
 difficulty ladder:
 
 **Tier 1 — smoke / parser fidelity: `HotStats.Crypto`** (netstandard2.0, 1
-source file). Restores + builds in <1s, no NuGet. Used above to validate the
-ErrorLog pipeline and capture the §7.1 SARIF fixture. Good for Phase-0 parser
+source file). Restores + builds in <1s, no NuGet. Used to validate the ErrorLog
+pipeline, capture the §7.1 SARIF fixture, AND validate the shipped Phase-0
+`RoslynTool::run()` end-to-end: it returns 14 real CA/CS diagnostics, correctly
+scheme-stripped and filtered to the file (PR #942). Good for Phase-0 parser
 tests and CI-friendly checks.
 
 **Tier 2 — build-path edge cases: Revecore `ScopeAutomation`** (the largest
