@@ -132,6 +132,30 @@ enum Commands {
     #[command(alias = "st", display_order = 3)]
     Status,
 
+    /// Show per-stage status for a single index, with optional live embed tracking
+    ///
+    /// Displays per-stage status (lexical / semantic / graph) for the given index.
+    /// When the deferred-embed background job is running, shows embed progress as
+    /// `embedded / total chunks (N%)`.
+    ///
+    /// Use `--watch` to poll every ~1 s until semantic embedding finishes (or fails),
+    /// then exit automatically.  Ctrl-C exits cleanly at any time.
+    ///
+    /// Examples:
+    ///   trusty-search status my-index
+    ///   trusty-search status my-index --watch
+    ///   trusty-search status my-index --json
+    #[command(display_order = 4)]
+    #[allow(clippy::doc_markdown)]
+    IndexStatus {
+        /// Index ID to inspect (as shown by `trusty-search list`)
+        index_id: String,
+
+        /// Poll every ~1 s until semantic embedding finishes, then exit
+        #[arg(long)]
+        watch: bool,
+    },
+
     /// Register and index a project, or remove an existing registration  [alias: idx]
     ///
     /// With no subcommand: registers the index with the daemon if needed, then
@@ -1059,6 +1083,10 @@ async fn run() -> Result<()> {
 
         Commands::Status => {
             commands::status::handle_status(cli.json).await?;
+        }
+
+        Commands::IndexStatus { index_id, watch } => {
+            commands::index_status::handle_index_status(&index_id, watch, cli.json).await?;
         }
 
         Commands::Init {

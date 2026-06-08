@@ -2020,6 +2020,10 @@ pub fn spawn_reindex_with_cleanup(
             }))
             .await;
         // Issue #840 Part 2: `hashes_loaded` shows whether warm-skip is primed.
+        // Issue #929: `defer_embed` tells the CLI whether embedding will run
+        // in the background so it can print the appropriate status note.
+        // Mirror the `BatchCtx` logic: defer_embed = handle.defer_embed && !lexical_only.
+        let effective_defer_embed = handle.defer_embed && !handle.lexical_only;
         progress
             .push(serde_json::json!({
                 "event": "start",
@@ -2029,6 +2033,7 @@ pub fn spawn_reindex_with_cleanup(
                 "force": force,
                 "lexical_only": handle.lexical_only,
                 "hashes_loaded": hashes_loaded,
+                "defer_embed": effective_defer_embed,
             }))
             .await;
 

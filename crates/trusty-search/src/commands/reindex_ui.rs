@@ -133,22 +133,33 @@ pub(crate) enum BarState {
 
 // ─── Style helpers ────────────────────────────────────────────────────────────
 
-/// Label prefix for each slot (matches the 4 stages in issue #401 order).
+/// Label prefix for each slot (matches the 4 stages in issue #401 / #929 order).
 ///
-/// Slot 2 uses "Embed*" — the asterisk is **intentional**: it signals that
-/// during the Embed phase the consumer (BM25 + HNSW upsert + redb) runs
-/// concurrently with the producer (parse+embed), so the two subsystems
-/// overlap in wall-clock time.  The footnote `EMBED_STAR_NOTE` explains this
-/// annotation in the post-reindex timing breakdown.  Do not remove the `*`.
-const STAGE_LABELS: [&str; 4] = ["Crawl", "Chunk", "Embed*", "KG"];
+/// Issue #929: labels updated to reflect the 4-stage reindex UX:
+///   [1/4] Scan          (was "Crawl") — file-tree walk
+///   [2/4] Chunk         — parse + chunk
+///   [3/4] Lexical(BM25) (was "Embed*") — BM25 index; in defer-embed mode the
+///                        foreground pass does NOT embed vectors here
+///   [4/4] KG            — knowledge-graph rebuild
+///
+/// The old "Embed*" label and its asterisk are retired because in the default
+/// defer-embed path the Embed bar no longer runs during the foreground pass —
+/// embedding happens as a background job AFTER `complete`. The asterisk
+/// footnote was only meaningful when Embed ran in the foreground.
+const STAGE_LABELS: [&str; 4] = ["Scan", "Chunk", "Lexical(BM25)", "KG"];
 
-/// Footnote displayed beneath the timing breakdown to explain the Embed* bar
-/// annotation in the live progress display.
+/// Footnote displayed beneath the timing breakdown when vectors were upserted.
 ///
-/// NOTE (forward-compat): a future "searchable now; embeddings N% backfilling"
-/// line can be added adjacent to this constant when deferred-embed is supported.
+/// Shown only when `vector_count > 0` (synchronous / non-defer-embed mode)
+/// to explain that the BM25 and vector-upsert stages run concurrently in the
+/// synchronous path.  In the default defer-embed path, `vector_count==0` on
+/// the fast pass so this note is never printed.
+///
+/// Why/What: even with the new "Lexical(BM25)" foreground label (issue #929),
+/// the overlap note remains accurate for synchronous full-index runs where
+/// BM25 + HNSW upsert still run concurrently with parse+embed.
 const EMBED_STAR_NOTE: &str =
-    "  * Embed bar runs concurrently with BM25 + vector-upsert commit (overlapping pipeline)";
+    "  * BM25 + vector-upsert commit runs concurrently with parse+embed (overlapping pipeline)";
 
 /// Build the `ProgressStyle` for a bar in each of the three lifecycle states.
 ///
@@ -1323,19 +1334,20 @@ mod tests {
         );
     }
 
-    /// `STAGE_LABELS[2]` must contain the asterisk annotation that signals
-    /// concurrent BM25+vector commit during the Embed phase.
+    /// Issue #929: `STAGE_LABELS[2]` must use the "Lexical(BM25)" label to
+    /// reflect the 4-stage reindex UX where the foreground pass only runs
+    /// lexical indexing (not semantic embedding).
     ///
-    /// Why: the live bar label is the first place operators see the "Embed*"
-    /// annotation; a regression here would silently remove the concurrent-
-    /// pipeline signal.
-    /// What: asserts `STAGE_LABELS[2]` contains `"*"`.
+    /// Why: the old "Embed*" label was misleading in the default defer-embed
+    /// mode where no embedding happens in the foreground pass; "Lexical(BM25)"
+    /// accurately describes what stage 3 actually does.
+    /// What: asserts `STAGE_LABELS[2]` is the expected label.
     /// Test: this test.
     #[test]
-    fn stage_label_embed_has_concurrent_annotation() {
-        assert!(
-            STAGE_LABELS[2].contains('*'),
-            "Embed stage label must carry '*' to signal concurrent commit; got {:?}",
+    fn stage_label_slot2_is_lexical_bm25() {
+        assert_eq!(
+            STAGE_LABELS[2], "Lexical(BM25)",
+            "Stage 2 label must be 'Lexical(BM25)' (issue #929); got {:?}",
             STAGE_LABELS[2]
         );
     }

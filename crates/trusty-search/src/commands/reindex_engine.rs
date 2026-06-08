@@ -603,6 +603,11 @@ pub async fn run_reindex_with(
     let mut received_walk_complete = false;
     let mut lexical_only = false;
     let mut entered_embedding = false;
+    // Issue #929: whether the daemon is running embedding as a background job.
+    // Set from the `defer_embed` field in the `start` SSE event (new in #929).
+    // When true, the CLI prints a "searchable now; embedding in background" note
+    // after `complete` instead of treating completion as fully done.
+    let mut defer_embed = false;
 
     // Elapsed-ms accumulators for per-stage done frames. Walk/chunk don't have
     // SSE timing events, so we approximate from wall-clock; Embed and KG have
@@ -692,6 +697,13 @@ pub async fn run_reindex_with(
                 let total = evt.get("total_files").and_then(|v| v.as_u64()).unwrap_or(0);
                 lexical_only = evt
                     .get("lexical_only")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                // Issue #929: detect defer-embed mode from the start event.
+                // Old daemons (pre-#929) don't emit this field; absence → false
+                // (assume synchronous, no background note).
+                defer_embed = evt
+                    .get("defer_embed")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 // Issue #744: set the authoritative total so the ticker always
@@ -1133,6 +1145,22 @@ pub async fn run_reindex_with(
     // print it as the single authoritative number — subsystem times overlap.
     if let Some(t) = outcome.timings {
         print_timing_breakdown(&t, outcome.total_chunks, outcome.elapsed_ms);
+    }
+
+    // Issue #929: if the daemon is running embedding in the background, print a
+    // clear "searchable now; embedding running in background" note so the user
+    // knows:
+    //   1. The index is already queryable via lexical + KG search.
+    //   2. Semantic (vector) search will be available once the background job
+    //      finishes — they can track it via `trusty-search status <id> --watch`.
+    if defer_embed {
+        println!();
+        println!("{} Searchable now (lexical + graph).", "\u{2713}".green());
+        println!("\u{23f3} Semantic embedding running in background.");
+        println!(
+            "   Track:  trusty-search status {} --watch",
+            index_id.cyan()
+        );
     }
 
     // Post-reindex health check (blue-green safety net).

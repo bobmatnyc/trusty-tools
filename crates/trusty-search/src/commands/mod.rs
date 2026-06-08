@@ -43,6 +43,7 @@ pub mod index;
 pub mod index_allowlist;
 pub(crate) mod index_persist;
 pub mod index_remove;
+pub mod index_status;
 pub mod init;
 pub mod integrate;
 pub mod list;
