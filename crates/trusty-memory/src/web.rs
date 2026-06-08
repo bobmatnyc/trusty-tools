@@ -244,6 +244,16 @@ struct HealthResponse {
     /// the available newer version.
     #[serde(skip_serializing_if = "Option::is_none")]
     update_available: Option<String>,
+    /// Daemon readiness state (issues #910 / #911).
+    ///
+    /// Why: operators and monitoring scripts need to distinguish "the daemon
+    /// is alive but the embedder hasn't finished compiling yet" from "the
+    /// daemon is fully operational". Before this field, a fresh daemon looked
+    /// healthy to external monitors even while `memory_remember` /
+    /// `memory_recall` calls were returning warming errors.
+    /// What: `"warming"` until the embedder init succeeds; `"ready"` once
+    /// `spawn_startup_tasks` flips `AppState::daemon_readiness`.
+    daemon_state: String,
 }
 
 /// `GET /health` — unauthenticated liveness probe with store/recall smoke test.
@@ -300,6 +310,13 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     };
 
     let update_available = state.update_available.lock().ok().and_then(|g| g.clone());
+    // Issues #910/#911: surface readiness so monitors and Claude Code can
+    // distinguish "alive but warming" from "fully ready".
+    let daemon_state = match state.readiness() {
+        crate::DaemonReadiness::Warming => "warming",
+        crate::DaemonReadiness::Ready => "ready",
+    }
+    .to_string();
 
     Json(HealthResponse {
         status,
@@ -313,6 +330,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         open_fds,
         fd_soft_limit,
         update_available,
+        daemon_state,
     })
 }
 
@@ -1978,7 +1996,11 @@ mod tests {
         unsafe {
             std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
         }
-        AppState::new(root)
+        let state = AppState::new(root);
+        // Pre-existing tests exercise functional paths — flip to Ready so the
+        // issue #911 warming preflight does not reject them.
+        state.set_ready();
+        state
     }
 
     #[test]
@@ -5061,6 +5083,9 @@ mod tests {
         let root = tmp.path().to_path_buf();
         std::mem::forget(tmp);
         let state = AppState::new(root);
+        // Flip to Ready so the issue #911 warming preflight allows dispatch_tool
+        // to proceed (the call below goes through the MCP handler path).
+        state.set_ready();
         let palace = trusty_common::memory_core::Palace {
             id: PalaceId::new("cred-mcp"),
             name: "cred-mcp".to_string(),

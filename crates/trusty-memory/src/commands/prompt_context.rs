@@ -1265,6 +1265,9 @@ mod tests {
         let data_root = trusty_common::resolve_data_dir("trusty-memory")
             .expect("resolve data dir under override");
         let state = crate::AppState::new(data_root.clone());
+        // Flip to Ready so the issue #911 warming preflight does not reject
+        // the `memory_remember` calls that seed fixture data below.
+        state.set_ready();
 
         // Create the palace via MCP dispatch so the on-disk metadata
         // matches what a real client would have produced. The slug here

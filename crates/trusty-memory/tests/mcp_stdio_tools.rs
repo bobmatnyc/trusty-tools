@@ -62,6 +62,9 @@ impl Fixture {
             std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
         }
         let state = AppState::new(tmp.path().to_path_buf());
+        // Flip to Ready so the issue #911 warming preflight does not reject
+        // memory_remember / memory_recall calls made in integration tests.
+        state.set_ready();
         Self { _tmp: tmp, state }
     }
 
@@ -147,7 +150,11 @@ fn lock_palace_files(data_dir: &Path) -> (Database, Database) {
 /// What: Wraps `data_root` in a new `AppState`.
 /// Test: Indirect.
 fn fresh_state(data_root: &Path) -> AppState {
-    AppState::new(data_root.to_path_buf())
+    let state = AppState::new(data_root.to_path_buf());
+    // Tests that call fresh_state are in Ready context; set_ready keeps the
+    // issue #911 preflight from blocking any subsequent remember/recall calls.
+    state.set_ready();
+    state
 }
 
 // ---------------------------------------------------------------------------
@@ -536,6 +543,9 @@ where
         std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
     }
     let state = AppState::new(data_root.to_path_buf());
+    // Flip to Ready so the #911 preflight does not block memory_remember
+    // calls made inside the seed closure.
+    state.set_ready();
     create_palace(&state, palace).await;
     seed(state, palace.to_string()).await;
     // state drops here, releasing every Arc<KgDbState> strong reference.

@@ -908,6 +908,10 @@ fn attach_mcp_attribution(tags: &mut Vec<String>) {
 // ----------------------------------------------------------------------
 
 async fn handle_memory_remember(state: &AppState, args: Value) -> Result<Value> {
+    // Issue #911: fast readiness preflight — return an explicit bounded error
+    // immediately if the daemon is still warming up (embedder not yet
+    // initialised) so the caller is never parked behind an open-ended init.
+    state.readiness_check()?;
     let palace = resolve_palace(state, &args, "memory_remember")?;
     let palace = palace.as_str();
     let raw_text = args
@@ -1011,6 +1015,8 @@ async fn handle_memory_remember(state: &AppState, args: Value) -> Result<Value> 
 }
 
 async fn handle_memory_note(state: &AppState, args: Value) -> Result<Value> {
+    // Issue #911: fast readiness preflight — same guard as memory_remember.
+    state.readiness_check()?;
     // Issue #61: curated short-fact shortcut. Bypasses the token
     // threshold (so "User prefers snake_case" is accepted) but still
     // applies noise-pattern rejects so the tool can't be used to
@@ -1115,6 +1121,8 @@ async fn handle_memory_note(state: &AppState, args: Value) -> Result<Value> {
 }
 
 async fn handle_memory_recall(state: &AppState, args: Value) -> Result<Value> {
+    // Issue #911: fast readiness preflight.
+    state.readiness_check()?;
     let palace = resolve_palace(state, &args, "memory_recall")?;
     let query = args
         .get("query")
@@ -1140,6 +1148,8 @@ async fn handle_memory_recall(state: &AppState, args: Value) -> Result<Value> {
 }
 
 async fn handle_memory_recall_deep(state: &AppState, args: Value) -> Result<Value> {
+    // Issue #911: fast readiness preflight.
+    state.readiness_check()?;
     let palace = resolve_palace(state, &args, "memory_recall_deep")?;
     let query = args
         .get("query")
@@ -2356,7 +2366,28 @@ mod tests {
         }
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
-        (AppState::new(root), tmp)
+        let state = AppState::new(root);
+        // Pre-existing tests exercise functional paths — flip to Ready so the
+        // issue #911 warming preflight does not reject them.
+        state.set_ready();
+        (state, tmp)
+    }
+
+    /// Why: warming-state tests need a fresh state that explicitly stays in
+    /// Warming. The `test_state()` helper flips to Ready by default; this
+    /// variant skips that step so the preflight guard can be tested.
+    /// Test: `remember_returns_warming_error_while_state_is_warming`,
+    ///       `recall_returns_warming_error_while_state_is_warming`,
+    ///       `note_returns_warming_error_while_state_is_warming`.
+    fn test_state_warming() -> (crate::AppState, tempfile::TempDir) {
+        unsafe {
+            std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let state = crate::AppState::new(root);
+        // Deliberately do NOT call set_ready() — state stays Warming.
+        (state, tmp)
     }
 
     /// Why: Issue #26 — when the server is started with `--palace`, the
@@ -3634,5 +3665,108 @@ mod tests {
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
             other => panic!("expected Full overflow, got {other:?}"),
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Issues #910 / #911 — readiness preflight in remember / recall handlers
+    // -------------------------------------------------------------------------
+
+    /// Why (issue #911): while the daemon is still `Warming`, `memory_remember`
+    /// must return an explicit error immediately — never block or queue behind
+    /// the embedder init.
+    /// What: construct a state that remains in Warming state (no `set_ready`),
+    /// dispatch `memory_remember`, assert the error message mentions "warming".
+    /// Test: this test.
+    #[tokio::test]
+    async fn remember_returns_warming_error_while_state_is_warming() {
+        // Use test_state_warming() so the daemon stays in Warming state.
+        // The readiness preflight fires BEFORE the embedder is accessed, so
+        // no mock embedder is needed.
+        let (state, _tmp) = test_state_warming();
+        // Create the palace so the handler doesn't fail on "palace not found".
+        let _ = dispatch_tool(
+            &state,
+            "palace_create",
+            serde_json::json!({"name": "warmtest"}),
+        )
+        .await;
+
+        let result = dispatch_tool(
+            &state,
+            "memory_remember",
+            serde_json::json!({
+                "palace": "warmtest",
+                "text": "test memory that should be rejected while warming up"
+            }),
+        )
+        .await;
+        let err = result.expect_err("memory_remember must fail while Warming");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("warming up"),
+            "error must mention 'warming up'; got: {msg}"
+        );
+    }
+
+    /// Why (issue #911): while the daemon is still `Warming`, `memory_recall`
+    /// must return an explicit error immediately.
+    /// What: construct a Warming state, dispatch `memory_recall`, assert the
+    /// error message mentions "warming".
+    /// Test: this test.
+    #[tokio::test]
+    async fn recall_returns_warming_error_while_state_is_warming() {
+        let (state, _tmp) = test_state_warming();
+        let _ = dispatch_tool(
+            &state,
+            "palace_create",
+            serde_json::json!({"name": "warmtest-recall"}),
+        )
+        .await;
+
+        let result = dispatch_tool(
+            &state,
+            "memory_recall",
+            serde_json::json!({
+                "palace": "warmtest-recall",
+                "query": "test query"
+            }),
+        )
+        .await;
+        let err = result.expect_err("memory_recall must fail while Warming");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("warming up"),
+            "error must mention 'warming up'; got: {msg}"
+        );
+    }
+
+    /// Why (issue #911): `memory_note` must also return the warming error while
+    /// the daemon is `Warming` (it shares the same preflight guard).
+    /// Test: this test.
+    #[tokio::test]
+    async fn note_returns_warming_error_while_state_is_warming() {
+        let (state, _tmp) = test_state_warming();
+        let _ = dispatch_tool(
+            &state,
+            "palace_create",
+            serde_json::json!({"name": "warmtest-note"}),
+        )
+        .await;
+
+        let result = dispatch_tool(
+            &state,
+            "memory_note",
+            serde_json::json!({
+                "palace": "warmtest-note",
+                "content": "short note content here"
+            }),
+        )
+        .await;
+        let err = result.expect_err("memory_note must fail while Warming");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("warming up"),
+            "error must mention 'warming up'; got: {msg}"
+        );
     }
 }

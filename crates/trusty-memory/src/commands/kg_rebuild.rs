@@ -217,6 +217,9 @@ mod tests {
             std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
         }
         let state = AppState::new(tmp.path().to_path_buf());
+        // Flip to Ready so the issue #911 readiness preflight does not block
+        // the memory_remember calls that seed fixture drawers.
+        state.set_ready();
 
         // Create two palaces, one drawer each.
         let _ = crate::tools::dispatch_tool(&state, "palace_create", json!({"name": "a"})).await?;
@@ -283,6 +286,9 @@ mod tests {
             std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
         }
         let state = AppState::new(tmp.path().to_path_buf());
+        // Flip to Ready so the issue #911 readiness preflight does not block
+        // the memory_remember calls that seed fixture drawers.
+        state.set_ready();
 
         let _ = crate::tools::dispatch_tool(&state, "palace_create", json!({"name": "a"})).await?;
         let _ = crate::tools::dispatch_tool(&state, "palace_create", json!({"name": "b"})).await?;
