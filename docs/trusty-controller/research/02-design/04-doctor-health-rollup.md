@@ -1,6 +1,6 @@
 # DOC-4 — Doctor/Health Rollup Model
 
-**Status:** Draft (drafted; open questions for owner)
+**Status:** Accepted (owner-approved)
 **Source spec:** ../01-spec/trusty-end-to-end-setup.md
 **Consumes:** [DOC-1](./01-tool-contract.md) (Accepted), [DOC-2](./02-stack-manifest-and-versioning.md) (Accepted), [DOC-3](./03-scope-model.md) (Accepted)
 **Cross-ref:** [DOC-6](./06-contract-conformance-and-mpm-adapter.md) (Accepted), [DOC-0](./00-naming-and-doc-charter.md)
@@ -91,13 +91,14 @@ The rollup MUST be **resilient to a single slow/hung member**:
   therefore ≈ the slowest single member, not the sum. This matters because
   `stack health` is meant to be a *fast* liveness sweep (§4).
 - **Per-tool timeout → synthesized `down`/`unreachable` envelope.** Each probe
-  has its own deadline (recommended defaults: **2 s for `health`**, **10 s for
-  `doctor`** — doctor does deeper work; both overridable via a controller flag —
-  see Open Question 1). On timeout (or a process spawn error, a non-zero exit
-  with no parseable envelope, or unparseable output) the controller **synthesizes
-  a terminal envelope** for that member rather than blocking or propagating the
-  hang. DOC-1 already specifies this for `health` ("the controller synthesizes a
-  `down` envelope" when the tool is not answering); DOC-4 generalizes it to all
+  has its own deadline with **defaults: 2 s for `health`, 10 s for `doctor`** —
+  doctor does deeper work. These defaults are overridable via a single controller
+  flag **`--timeout=<secs>`** in v1; per-member manifest timeouts are deferred.
+  On timeout (or a process spawn error, a non-zero exit with no parseable
+  envelope, or unparseable output) the controller **synthesizes a terminal
+  envelope** for that member rather than blocking or propagating the hang.
+  DOC-1 already specifies this for `health` ("the controller synthesizes a `down`
+  envelope" when the tool is not answering); DOC-4 generalizes it to all
   introspection verbs and distinguishes the *reason* (§5.1: missing vs down vs
   unreachable/timeout).
 - **No partial blocking.** A member that never returns is recorded as
@@ -123,7 +124,7 @@ DOC-4 proposes a **four-value stack-verdict vocabulary**:
 | **`ready`** | Everything the stack needs is present, healthy, and version-ok. | doctor `ok`; health `running` |
 | **`degraded`** | Usable but impaired — a warning, a non-fatal dependency problem, or an older-but-acceptable contract. The stack works; something wants attention. | doctor `warn`; health `degraded`; older-but-≥-floor `contract_version`; a *required dep* unreachable that the owning tool already surfaced as `degraded` |
 | **`pending`** | Setup in progress / not-yet-done **but not broken** — the DOC-3 "unindexed = system-ready, project-pending, NOT broken" state. Only ever arises from **project-scope** signals. | doctor `pending` (project scope) |
-| **`down`** | Broken — a system check failed or a daemon is not answering. The stack (for the affected member) is unusable. | doctor `fail`; health `down`; below-floor / contract-incompatible member (see Open Question 4) |
+| **`down`** | Broken — a system check failed or a daemon is not answering. The stack (for the affected member) is unusable. | doctor `fail`; health `down`; below-floor / contract-incompatible member (renders with `reason: "contract_incompatible"` + upgrade remediation) |
 
 `skipped` is **not** a verdict value — a skipped check contributes nothing (it is
 absorbed: it neither improves nor worsens the rollup), exactly like DOC-1's
@@ -139,7 +140,11 @@ it is invisible to the verdict fold.
 > first-class, *positive-trajectory* state. (See Open Question 2 on whether `ready`
 > should instead be named `ok` for symmetry with the doctor vocabulary.)
 
-**Mapping function (doctor check / health envelope → verdict):**
+**Mapping function (doctor check / health envelope → stack verdict):**
+
+The stack verdict uses **`ready`** for the all-good state (matching DOC-3's
+readiness-ladder language), while individual cells may still echo the source
+`ok` for envelope compatibility.
 
 ```
 doctor check status → verdict:        health envelope status → verdict:
@@ -210,11 +215,12 @@ over exactly the checks tagged with that scope. **Precise stack verdict:** apply
 §2.1 precedence over **the system-track per-member verdicts only**, then *append*
 the project track as advisory annotation. The global verdict is therefore a
 function of system checks; project `pending` is reported but is **never** the
-reason the stack verdict is worse than `ready`. (See Open Question 3 for whether
-a project `fail`/`down` — distinct from `pending` — should be allowed to affect
-the global verdict; the recommendation is that a genuine project-scope `fail`
-degrades only the project cell, not the global verdict, because its blast radius
-is one repo.)
+reason the stack verdict is worse than `ready`. A genuine project-scope
+`fail`/`down` (distinct from `pending`) **degrades only the project cell**, not
+the global verdict, because its blast radius is one repo. The exit code stays
+system-track-driven — a broken index in one checkout is not a machine-level
+stack failure. Surface such failures prominently in the project column and
+in `-v`, but do not fail a CI gate checking system health.
 
 #### 2.3 The three folds (summary)
 
@@ -318,7 +324,7 @@ the verdict and the matrix rendering for each.
 | **Down** — installed but daemon not answering | binary runs, but `health` → no response / connection refused; controller synthesizes a `down` envelope (DOC-1) | `down` | `✗ down — daemon not running`; remediation = `start` (DOC-1 lifecycle): "run `trusty-search start`". |
 | **Unreachable / timeout** — process hangs past deadline | per-tool timeout fires (§1.3) | `down` (sub-reason `unreachable`) | `✗ down — unreachable (timed out after 2s)`; never blocks the rest of the rollup. |
 | **Older contract** — `contract_version` below target `N` but ≥ floor `F` | `version --json` reports `contract_version` in `[F, N)` | `degraded` | `! degraded — older contract (cv=1, target=2)`; render only the fields that level guarantees; **never hard-fail** (DOC-1 D2). |
-| **Below floor / contract-incompatible** — `contract_version < F` | `version --json` reports `cv < F` | see Open Question 4 | recommendation: `down` for the member's row + a distinct `contract-incompatible` sub-reason (the member cannot be trusted to speak the contract). |
+| **Below floor / contract-incompatible** — `contract_version < F` | `version --json` reports `cv < F` | `down` with `reason: "contract_incompatible"` | `down` for the member's row + a distinct `contract-incompatible` sub-reason with an upgrade remediation (DOC-9). Does NOT raise the controller-level exit `3` — the stack verdict carries `down`/exit `1` instead. The member cannot be trusted to speak the contract. |
 | **Verb not advertised** — member lacks the verb (e.g. claude-mpm has no `config`/lifecycle; a project verb on a system-only tool) | verb absent from `verbs[]` | `n/a` (absorbed) | `— n/a`; **not a failure** (DOC-1 D3 / DOC-3 Q2 graceful-degrade). A system-only tool's *project* column is always `n/a`. |
 | **Cross-tool dependency failure** — tool degraded *because* a dep is down | the owning tool's `health` reports `degraded` with `deps[].reachable=false` | `degraded` on the **dependent**; root cause owns the `down` | de-duplicated — see §5.4. |
 
@@ -441,7 +447,7 @@ project-local distinction.
 | Stack verdict | Exit code | Rationale |
 |---|---|---|
 | `ready` | **0** | nothing to do |
-| `pending` (project-only; system all `ready`) | **0** (recommended) | DOC-3: project-pending is **not broken** — usable now. CI that just provisioned a box and hasn't indexed yet should not see a non-zero "failure." (See Open Question 5 — an alternative is a dedicated `pending` exit code so CI can *wait*.) |
+| `pending` (project-only; system all `ready`) | **0** (default) | DOC-3: project-pending is **not broken** — usable now. CI that just provisioned a box and hasn't indexed yet should not see a non-zero "failure." An opt-in `--fail-on-pending` flag may be added later for polling use cases, but v1 defaults to 0. |
 | `degraded` | **2** | mirrors DOC-1 D5 `2 = degraded/warn`; usable but impaired |
 | `down` | **1** | mirrors DOC-1 D5 `1 = fail/down`; the stack is broken |
 | controller/usage error (bad flag, unknown member, manifest unreadable) | **3** | DOC-1 D5 `3` — produced at the controller boundary, not from a verdict |
@@ -476,6 +482,7 @@ embedded per-member envelopes):
   "verdict": "degraded",
   "exit_code": 2,
   "summary": { "ready": 2, "degraded": 1, "pending": 1, "down": 0, "na": 2 },
+  "note": "`na` is included to distinguish intentionally-blank cells from missing data; it does not participate in the verdict fold"
   "members": [
     {
       "id": "trusty-search",
@@ -626,66 +633,49 @@ the rollup needs already exist as prior art in trusty-review's `compute_status()
 - [x] Define exit-code semantics from the verdict, system-track-driven (§7)
 - [x] Define human + `--json` output formats; the `--json` rollup structure DOC-7
       renders (§8)
-- [ ] **Owner: resolve the Open Questions below**
-- [ ] Team review → Accepted
+- [x] **Owner: resolve all 6 design decisions** (completed 2026-06-08)
+- [ ] Team review (pending)
 - [ ] *(implementation-time)* finalize the controller-side rollup serde struct
       (reusing `trusty_common::contract` types) and the matrix renderer
 
-## Open Questions for Owner
+## Resolved Decisions
 
-1. **Per-tool timeout defaults & override.** The draft proposes **2 s for
-   `health`** and **10 s for `doctor`** per member (parallel collection, hung tool
-   synthesized as `unreachable`). Are those defaults right, and should the
-   override be a controller flag (`--timeout`), a manifest per-member field, or
-   both? *Recommendation: ship the 2 s/10 s defaults with a single
-   `--timeout=<secs>` controller flag in v1; defer per-member manifest timeouts.*
+**All decisions below are owner-approved (2026-06-08).**
 
-2. **Verdict value name: `ready` vs `ok`.** The unified vocabulary uses
-   **`ready`** for the all-good state (matching DOC-3's readiness-ladder language),
-   but DOC-1's doctor vocabulary uses **`ok`**. Should the stack verdict say
-   `ready` (ladder-consistent) or `ok` (envelope-consistent)? *Recommendation:
-   `ready` for the stack-level verdict (it reads naturally on the matrix and
-   matches DOC-3's "version-ok/ready" ladder), while individual cells may still
-   echo the source `ok`. This is purely a naming choice with no behavioral
-   effect.*
+1. **Per-tool timeout defaults & override (APPROVED):** Ship **2 s for `health`,
+   10 s for `doctor`** per member. Parallel collection with hung tools
+   synthesized as `unreachable`. Override via a single controller flag
+   **`--timeout=<secs>`** in v1. Per-member manifest timeouts deferred to later
+   release. *Implemented in §1.3.*
 
-3. **May a genuine project-scope `fail`/`down` (not `pending`) raise the GLOBAL
-   verdict?** §2.2 says the system track drives the global verdict and project
-   `pending` never worsens it. But a project check could be a real `fail` (e.g. a
-   corrupt index for *this* repo), distinct from `pending`. Should that degrade
-   only the project cell (blast radius = one repo) or also the stack verdict?
-   *Recommendation: degrade only the **project cell** and the **exit code stays
-   driven by the system track** — a broken index in one checkout is not a
-   machine-level stack failure. Surface it prominently in the project column and
-   in `-v`, but do not fail a CI gate that is checking system health. (If the
-   owner wants project failures to be CI-visible, add a `--scope project`
-   exit-code mode — see Q5.)*
+2. **Verdict value name: `ready` vs `ok` (APPROVED):** Stack-level verdict uses
+   **`ready`** (matching DOC-3's readiness-ladder language and reading naturally
+   on the matrix). Individual cells may still echo the source `ok` for envelope
+   compatibility. Purely a naming choice with no behavioral effect. *Implemented
+   in §2.0 and mapping function.*
 
-4. **Below-floor / contract-incompatible member: `down` or a distinct verdict?**
-   A member advertising `contract_version < F` (the manifest floor) cannot be
-   trusted to speak the contract. DOC-1 rejects such a request at the *dispatcher*
-   boundary with exit `3`. At the **rollup** level, should that member's row be
-   `down` (broken), a new dedicated `incompatible` verdict, or `degraded` (treated
-   like merely-old)? *Recommendation: render it **`down`** with a distinct
-   `reason: "contract_incompatible"` sub-reason and an **upgrade** remediation
-   (DOC-9); it is broken-for-our-purposes, unlike a ≥-floor older contract which
-   is `degraded`. Do **not** let it raise the controller-level exit `3` (that code
-   is reserved for the controller's own usage errors, per DOC-1) — the stack
-   verdict carries `down`/exit `1` instead.*
+3. **Project-scope `fail`/`down` isolation (APPROVED):** A genuine project-scope
+   `fail`/`down` (distinct from `pending`) **degrades only the project cell**, 
+   not the global verdict, because its blast radius is one repo. The exit code
+   stays **system-track-driven** — a broken index in one checkout is not a
+   machine-level stack failure. Surface such failures prominently in the project
+   column and in `-v`, but do not fail a CI gate checking system health.
+   *Implemented in §2.2 and §7.*
 
-5. **Should project-`pending` get a dedicated "wait" exit code for CI?** §7
-   recommends `pending` → exit **0** (not broken). But a CI/provisioning script
-   might want to *poll until ready* and would prefer a distinguishable code (e.g.
-   a `pending` exit `4`/`75 EX_TEMPFAIL`) to "keep waiting" vs "done." Should
-   `tctl stack doctor` expose such a mode? *Recommendation: keep the default
-   `pending → 0` (so the common "is the machine healthy" gate never false-fails),
-   and add an opt-in `--wait`/`--fail-on-pending` flag later if a polling use case
-   materializes; do not reserve a new exit code in v1.*
+4. **Below-floor / contract-incompatible member (APPROVED):** Render as **`down`**
+   with a distinct `reason: "contract_incompatible"` sub-reason and an
+   **upgrade** remediation (DOC-9). The member cannot be trusted to speak the
+   contract. Does **NOT** raise the controller-level exit `3` (reserved for
+   controller usage errors per DOC-1) — the stack verdict carries `down`/exit `1`
+   instead. Distinct from a ≥-floor older contract, which is `degraded`.
+   *Implemented in §5 edge-states table and §6 remediation.*
 
-6. **`n/a` vs absent in the `--json` `summary` counts.** The matrix shows `— n/a`
-   cells (verb/scope not applicable). Should `na` appear as a first-class count in
-   the `--json` `summary` (as drafted: `"na": 2`), or be omitted so consumers only
-   ever see the four real verdicts? *Recommendation: include `na` in the summary
-   (it tells the UI how many cells are intentionally blank vs missing data), but
-   keep it out of the precedence fold (it never affects the verdict). This is the
-   shape drafted in §8.2.*
+5. **Project-`pending` exit code (APPROVED):** Default to **`pending → exit 0`**
+   (so the common "is the machine healthy" gate never false-fails). An opt-in
+   `--fail-on-pending` flag may be added later if a polling use case materializes;
+   do not reserve a new exit code in v1. *Implemented in §7 exit-code table.*
+
+6. **`n/a` in `--json` summary (APPROVED):** Include **`na` count** in the
+   `summary` so the UI distinguishes intentionally-blank cells from missing data.
+   Keep `na` **OUT of the precedence fold** — it never affects the verdict.
+   *Implemented in §8.2 JSON structure and cross-referenced in the note.*
