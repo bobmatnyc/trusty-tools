@@ -1,6 +1,6 @@
 # DOC-8 — Install/Bootstrap Flow (UUC1, UUC2)
 
-**Status:** Draft (drafted; open questions for owner)
+**Status:** Accepted (owner-approved)
 **Source spec:** ../01-spec/trusty-end-to-end-setup.md
 **Consumes:** [DOC-2](./02-stack-manifest-and-versioning.md) (Accepted), [DOC-3](./03-scope-model.md) (Accepted), [DOC-5](./05-controller-cli.md) (Accepted)
 **Cross-ref:** [DOC-4](./04-doctor-health-rollup.md) (Accepted), [DOC-6](./06-contract-conformance-and-mpm-adapter.md) (Accepted), [DOC-9](./09-upgrade-flow.md), [DOC-10](./10-isolation-testing-harness.md), [DOC-0](./00-naming-and-doc-charter.md), [ADR-0008](../../../adr/0008-project-identity-convention.md)
@@ -122,9 +122,8 @@ Two CLAUDE.md-grounded subtleties the install flow MUST honor:
    sets `SKIP_UI_BUILD=1` in the install subprocess environment for these members
    defensively, so a host without pnpm never has `cargo install` fail in the UI
    build step. Which members need it is read from the manifest `ui` sub-table
-   (`ui.available = true` ⇒ set `SKIP_UI_BUILD=1`), not hard-coded. **(Open
-   Question 1 — whether `ui.available` is the right signal, or the manifest should
-   carry an explicit `install.skip_ui_build` flag.)**
+   (`ui.available = true` ⇒ set `SKIP_UI_BUILD=1`), not hard-coded. (Resolved
+   Decision 1: locked for v1.)
 
 2. **macOS cdhash / code-signing caveat — never `cp`, always `cargo install`.**
    The root CLAUDE.md is emphatic: on macOS a plain
@@ -155,8 +154,8 @@ way it does for cargo (§5).
 The orchestrator's *contract surface* is synthesized by the DOC-6 shim
 (`trusty_common::contract::orchestrator`), so step-5 verification of claude-mpm
 routes through the shim (`doctor`/`health`/`version` only — its advertised `verbs[]`).
-Its concrete pinned version is the DOC-6 §5 placeholder until the shim is built
-(Open Question 2 ties this to DOC-10).
+DOC-8 performs an unpinned `uv tool install claude-mpm` and verifies via the shim;
+the concrete pinned version is owned by DOC-6/DOC-10. (Resolved Decision 2: locked for v1.)
 
 #### 1.5 Idempotency (DOC-3 §4: install runs once)
 
@@ -314,10 +313,10 @@ stream** the controller reuses verbatim — no new progress protocol:
   controller's contract-level signal for "is it done yet" without holding the SSE
   stream open.
 
-#### 3.3 Block vs stream vs background (the decision)
+#### 3.3 Block vs stream vs background (locked behavior)
 
 The ensure pass kicks off the reindex but **does not block** on full completion by
-default. Recommended behavior (Open Question 3 — confirm the default):
+default. The locked behavior (Resolved Decision 3):
 
 - **Interactive `tctl ensure` (TTY):** kick off the reindex, **stream** the SSE
   progress bar to **stderr** (matching DOC-5 §4.1 / DOC-4: data on stdout, progress
@@ -329,10 +328,9 @@ default. Recommended behavior (Open Question 3 — confirm the default):
   must be fast and non-blocking (§4.2), so it fires `reindex {force:false}` and
   returns without consuming the stream; progress is observable later via
   `tctl stack doctor` (project `pending`) or the trusty-search UI (DOC-7 link-out).
-- **Opt-in blocking:** a `--wait` flag (recommended, Open Question 3) makes
-  `tctl ensure --wait` consume the SSE stream to `complete` and only then return —
-  for CI / DOC-10 harness use that wants "fully ready" as a gate. Mirrors DOC-4's
-  deferred `--fail-on-pending` idea.
+- **Opt-in blocking:** a `--wait` flag makes `tctl ensure --wait` consume the SSE
+  stream to `complete` and only then return — for CI / DOC-10 harness use that wants
+  "fully ready" as a gate. Mirrors DOC-4's deferred `--fail-on-pending` idea.
 
 Exit-code consistency: a project `pending` is **exit 0** (DOC-4 §7 Resolved
 Decision 5 — project-pending is not broken), so a launch hook that leaves the index
@@ -345,31 +343,31 @@ startup"* to DOC-8. This is the wiring that makes UUC1 zero-effort: the user nev
 types `tctl ensure` for normal workflows — it fires when claude-mpm launches in a
 project dir.
 
-#### 4.1 Mechanism (recommendation)
+#### 4.1 Mechanism (locked; Resolved Decision 4)
 
 claude-mpm is **external** (a different repo; DOC-6 §4 cross-repo note), so the
 hook must not require modifying claude-mpm's core. There is **strong in-tree
 precedent**: the trusty-memory/trusty-search `setup` already installs a
 **claude-mpm/Claude-Code startup hook** into the settings file
 (`merge_prompt_context_hook`, verified in `claude_config` + `setup.rs`) that runs
-on session start. DOC-8's recommended mechanism (Open Question 4 — confirm):
+on session start.
 
 - **Primary: a claude-mpm / Claude Code startup hook** that invokes
   `tctl ensure --scope project --yes` (non-interactive, backgrounded reindex per
   §3.3). The hook is installed **idempotently into the project `.mcp.json` /
-  settings** during the system install's optional ensure step (§1.1 step 7) or on
-  the first manual `tctl ensure`, reusing the same `claude_config` atomic-write +
-  hook-merge primitives the per-tool `setup` already uses. This makes the hook a
-  *one-line shell-out to `tctl`*, so all the real logic stays in the controller
-  (single source of truth) and the hook itself never needs to change.
+  settings both during `tctl install`'s optional ensure step (§1.1 step 7) AND on
+  the first manual `tctl ensure`**, reusing the same `claude_config` atomic-write +
+  hook-merge primitives the per-tool `setup` already uses (idempotent either way).
+  This makes the hook a *one-line shell-out to `tctl`*, so all the real logic stays
+  in the controller (single source of truth) and the hook itself never needs to change.
 - **Fallback: a thin wrapper / alias.** Where a startup hook is unavailable, a
   `claude-mpm` launch wrapper (or shell alias) that runs `tctl ensure` first, then
   `exec`s the real orchestrator, achieves the same effect. This is the
   lowest-coupling option and works regardless of claude-mpm internals.
-- **Not recommended for v1: MCP-triggered ensure.** Triggering the pass from an MCP
-  server call (e.g. on first tool use) couples auto-config to a specific tool's MCP
-  lifecycle and muddies the "no hidden mutation" line DOC-5 drew. Keep ensure an
-  explicit (hook-invoked) command, not a side effect of a search/memory call.
+- **Not for v1: MCP-triggered ensure.** Triggering the pass from an MCP server call
+  (e.g. on first tool use) couples auto-config to a specific tool's MCP lifecycle
+  and muddies the "no hidden mutation" line DOC-5 drew. Keep ensure an explicit
+  (hook-invoked) command, not a side effect of a search/memory call.
 
 #### 4.2 Idempotency + fast no-op cost (the load-bearing property)
 
@@ -410,7 +408,7 @@ but it may have been removed, or `uv` may be absent for the orchestrator.
 - **uv:** probe `uv --version` on PATH. Required only when the orchestrator member
   (`source = "python"`) is in the selection.
 
-**When a hard dependency is absent — GUIDE and ABORT (recommendation; Open Question 5):**
+**When a hard dependency is absent — GUIDE and ABORT (Resolved Decision 5):**
 
 The controller **does not attempt to auto-install** a toolchain in v1. Rationale:
 auto-installing rustup/cargo (or `uv`) means running a remote install script
@@ -429,11 +427,10 @@ $ tctl install
 ```
 
 (Same shape for a missing `uv`: point at `https://astral.sh/uv`.) This is the
-guide-and-abort half of the trade-off. **Open Question 5** asks whether a future
-opt-in `tctl install --bootstrap-toolchain` (which *would* run the official
-installer, with an explicit consent prompt) is wanted; v1 recommendation is
-guide-and-abort only. Exit code is the controller-boundary **`3`** (DOC-5 §4.3 —
-a precondition/usage failure produced before any member runs), distinct from a
+guide-and-abort approach for v1. A future opt-in `tctl install --bootstrap-toolchain`
+(which *would* run the official installer with an explicit consent prompt) is
+deferred beyond v1. Exit code is the controller-boundary **`3`** (DOC-5 §4.3 — a
+precondition/usage failure produced before any member runs), distinct from a
 member `down`.
 
 ### 6. Platform specifics (MUC2: macOS primary, Linux secondary)
@@ -456,14 +453,14 @@ otherwise dispatches each member's own `service`/lifecycle contract verb, which 
 where the per-OS knowledge already lives. **The deep platform matrix (exact
 systemd unit content, Linux port/data-dir conventions, container nuances) is
 deferred to DOC-10** (isolation harness, MUC1/MUC2), which must exercise both
-OSes; DOC-8 only fixes the *shape* of the divergence. **(Open Question 6 — confirm
-systemd-user as the Linux v1 target vs. foreground-only.)**
+OSes; DOC-8 only fixes the *shape* of the divergence. (Resolved Decision 6: Linux v1
+target is systemd-user where available, foreground fallback.)
 
-### 7. Failure / partial-install handling
+### 7. Failure / partial-install handling (Resolved Decision 7)
 
 A member can fail to install (cargo build error, network, missing toolchain mid-run)
-or fail to verify (installs but won't start / can't speak the contract). The flow's
-behavior (recommendation; Open Question 7 confirms abort-vs-continue default):
+or fail to verify (installs but won't start / can't speak the contract). The locked
+flow behavior:
 
 - **Continue, don't abort, by default.** A failure on one member does **not** abort
   the remaining members (they may be independent — a failed trusty-review should not
@@ -596,8 +593,8 @@ Source-first audit, 2026-06-08 (trusty-search MCP search + Read against the tree
       deferring the deep matrix to DOC-10 (§6)
 - [x] Specify failure / partial-install handling + idempotent re-run recovery (§7)
 - [x] Fix the install-vs-upgrade boundary with DOC-9 (§8)
-- [ ] **Owner: resolve the open questions below**
-- [ ] Team review → Accepted
+- [x] **Owner: resolve all 7 open questions** → **Resolved Decisions (all owner-approved)**
+- [ ] Team review → Ready
 - [ ] *(implementation-time)* build the install/ensure orchestration in
       `crates/trusty-controller/src/` (dispatch the `install`/`service`/contract
       verbs per manifest; reuse `trusty_common::{claude_config, launchd, update,
@@ -607,59 +604,53 @@ Source-first audit, 2026-06-08 (trusty-search MCP search + Read against the tree
 
 ---
 
-## Open Questions for Owner
+## Resolved Decisions
 
-1. **`SKIP_UI_BUILD` signal — `ui.available` vs an explicit manifest flag (§1.3).**
-   DOC-8 derives "set `SKIP_UI_BUILD=1` for this member" from the manifest `ui`
-   sub-table (`ui.available = true`). That couples a *UI-presence* hint to a
-   *build-time* behavior. **Recommendation:** keep using `ui.available` for v1
-   (it is correct today — every UI-embedding crate is exactly the set that needs
-   the flag), but consider adding an explicit `install.skip_ui_build = true` field
-   to DOC-2's `install` sub-table if a future member embeds a UI yet does not need
-   pnpm at install time (or vice-versa). Confirm the v1 choice.
+1. **`SKIP_UI_BUILD` signal — derived from `ui.available` (§1.3).** (Owner-approved)
+   For v1, the controller derives "set `SKIP_UI_BUILD=1` for this member" from the
+   manifest `ui` sub-table (`ui.available = true`). This is correct today — every
+   UI-embedding crate (trusty-search, trusty-memory, trusty-controller) is exactly
+   the set that needs the flag. An explicit `install.skip_ui_build` field may be
+   added to DOC-2's `install` sub-table in a future version only if a member's
+   UI-presence diverges from its install-time build need. Locked for v1.
 
-2. **claude-mpm pinned version for install/verify (§1.4).** The orchestrator's BOM
-   version is a DOC-6 §5 placeholder ("pin at implementation, when the shim is
-   tested against a specific claude-mpm release"). **Recommendation:** DOC-8 install
-   treats the orchestrator as "install latest via `uv tool install claude-mpm`,
-   then verify via the shim" until DOC-10 pins a concrete tested version; the pin is
-   owned by DOC-6/DOC-10, not DOC-8. Confirm DOC-8 may proceed with an unpinned
-   `uv tool install` in v1.
+2. **claude-mpm pinned version for install/verify — unpinned in DOC-8 (§1.4).** (Owner-approved)
+   DOC-8 install treats the orchestrator as "install latest via `uv tool install
+   claude-mpm`, then verify via the shim" in v1. The concrete pinned version is
+   owned by DOC-6/DOC-10, not DOC-8. When DOC-10 pins a tested release, that
+   version flows into the manifest's `version` field; DOC-8 does not carry a separate
+   pin. Locked for v1.
 
-3. **Default blocking behavior of `tctl ensure` + a `--wait` flag (§3.3).**
-   **Recommendation:** interactive `tctl ensure` returns at *usable-now* (project
-   configured + exists) while streaming reindex progress to stderr, the launch hook
-   backgrounds the reindex entirely, and an opt-in `--wait` makes ensure block until
-   the index is `fresh` (for CI / DOC-10). Project-`pending` stays exit 0. Confirm
-   the default is "return at usable-now, don't block on full index," and approve the
-   `--wait` flag.
+3. **Default blocking behavior of `tctl ensure` — return at usable-now + `--wait` opt-in (§3.3).** (Owner-approved)
+   Interactive `tctl ensure` (TTY) returns at *usable-now* (project configured +
+   exists) while streaming reindex progress to stderr; the launch hook backgrounds
+   the reindex entirely (non-TTY, fast no-op cost). An opt-in `--wait` flag makes
+   `tctl ensure --wait` block until the index reaches `fresh` (for CI / DOC-10 use).
+   Project-`pending` always exits 0. Locked for v1.
 
-4. **Launch-hook mechanism (§4).** **Recommendation:** primary = a claude-mpm /
-   Claude-Code **startup hook** that shells out to `tctl ensure --scope project --yes`
-   (installed idempotently via the existing `claude_config` hook-merge primitive,
-   reusing the `merge_prompt_context_hook` precedent); fallback = a launch
-   wrapper/alias; **not** MCP-triggered in v1. Confirm the hook approach and whether
-   the hook is installed during `tctl install`'s optional ensure step, on first
-   `tctl ensure`, or both.
+4. **Launch-hook mechanism — primary startup hook + idempotent install timing (§4).** (Owner-approved)
+   Primary = a claude-mpm / Claude-Code **startup hook** that shells out to
+   `tctl ensure --scope project --yes` (installed idempotently via the existing
+   `claude_config` hook-merge primitive, reusing the `merge_prompt_context_hook`
+   precedent); fallback = a launch wrapper/alias. NOT MCP-triggered in v1. The hook
+   is installed **both during `tctl install`'s optional ensure step AND on first
+   `tctl ensure`** (idempotent either way). Locked for v1.
 
-5. **Missing Rust toolchain / `uv` — guide-and-abort vs attempt auto-install (§5).**
-   **Recommendation:** v1 = **guide and abort** (fail fast with copy-paste install
-   commands + non-zero exit `3`); the controller does **not** run remote toolchain
-   installers as a side effect of `tctl install`. Optionally add a future opt-in
-   `tctl install --bootstrap-toolchain` (explicit consent) that *does* run the
-   official rustup/uv installer. Confirm guide-and-abort for v1 and whether the
-   opt-in bootstrap flag is wanted later.
+5. **Missing Rust toolchain / `uv` — guide-and-abort (§5).** (Owner-approved)
+   v1 = **guide and abort** (fail fast with copy-paste install commands +
+   non-zero exit `3`); the controller does NOT run remote toolchain installers as
+   a side effect of `tctl install`. A future opt-in `tctl install --bootstrap-toolchain`
+   (explicit consent) may run the official rustup/uv installer, but is deferred.
+   Locked for v1.
 
-6. **Linux daemon supervision target for v1 (§6).** macOS uses launchd (grounded).
-   **Recommendation:** Linux v1 installs a **systemd user unit** where `systemctl
-   --user` is available, falling back to documented foreground/daemonless
-   (`<binary> serve`) otherwise; the exact unit content and Linux path/port
-   conventions are deferred to DOC-10. Confirm systemd-user as the v1 Linux target
-   (vs. foreground-only in v1, systemd later).
+6. **Linux daemon supervision target for v1 — systemd user (§6).** (Owner-approved)
+   macOS uses launchd (grounded). Linux v1 installs a **systemd user unit** where
+   `systemctl --user` is available, falling back to documented foreground/daemonless
+   (`<binary> serve`) otherwise. The exact unit content and Linux path/port
+   conventions are deferred to DOC-10 (isolation harness). Locked for v1.
 
-7. **Partial-install: continue vs abort default (§7).** **Recommendation:**
-   **continue** (install all selected members, report failures in a DOC-4 matrix,
-   exit `1` on any system `down`), with dependency-aware clustering so a failed
-   dependency surfaces its dependents as `blocked-by` rather than independently
-   failing; idempotent re-run is the recovery path. Confirm "continue + report"
-   over "abort on first failure."
+7. **Partial-install behavior — continue and report (§7).** (Owner-approved)
+   **Continue** on member failure (install all selected members, report failures in a
+   DOC-4 matrix, exit `1` on any system `down`), with dependency-aware clustering so
+   a failed dependency surfaces its dependents as `blocked-by` rather than
+   independently failing. Idempotent re-run is the recovery path. Locked for v1.
