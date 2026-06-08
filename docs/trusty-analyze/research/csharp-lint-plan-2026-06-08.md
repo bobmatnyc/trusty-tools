@@ -246,32 +246,54 @@ better than the issue's "add analyzer NuGets" suggestion for the default path
 **Skip Security Code Scan**: original package deprecated; successor
 `SecurityCodeScan.VS2019` stale at 5.6.7 since Sept 2022.
 
-## 8a. Test fixtures (on disk, ready)
+## 8a. Test fixtures (on disk, ready) — a three-tier ladder
 
 `dotnet 10.0.107` is on PATH. Two real C# estates are checked out locally:
+**Revecore** (`/Users/maui/dve/portfolio/revecore/repos/...`) and **HotStats**
+(`/Users/maui/dve/experiments/hotstats/...`). Use them as a deliberate
+difficulty ladder:
 
-- **Revecore** — `/Users/maui/dve/portfolio/revecore/repos/...` (e.g.
-  `BottomLineSystems/ScopeAutomation.Api` net8.0, `ScopeAutomationConsumer`
-  net8.0).
-- **HotStats** — `/Users/maui/dve/experiments/hotstats/...` (e.g.
-  `HotStatsGeoAPI/HotStatsGeoAPI` net8.0 Web, `HotStats.Crypto` netstandard2.0 —
-  the smoke-test fixture used above, restores + builds in <1s).
+**Tier 1 — smoke / parser fidelity: `HotStats.Crypto`** (netstandard2.0, 1
+source file). Restores + builds in <1s, no NuGet. Used above to validate the
+ErrorLog pipeline and capture the §7.1 SARIF fixture. Good for Phase-0 parser
+tests and CI-friendly checks.
 
-**Reality check that shapes the adapter and motivates Phase 2:** across both
-estates there are **584 `.csproj`, of which only 71 are SDK-style and 513 are
-legacy non-SDK** (packages.config / full-MSBuild, mostly .NET Framework). On
-macOS/Linux `dotnet build` can only touch SDK-style projects targeting .NET
-Core/5+/standard — and even some SDK-style ones target `net48`/`net472`
-(Framework) which won't build off-Windows. So:
+**Tier 2 — build-path edge cases: Revecore `ScopeAutomation`** (the largest
+**buildable** modern cluster — net8.0 `ScopeAutomationApi` ~60 cs +
+`ScopeAutomation.UI.Server` ~55 cs + `ScopeAutomationConsumer` ~17 cs, plus a
+`BridgeNg` netcoreapp2.1 ~99 cs). Real multi-project build with project
+references and NuGet restore — exercises `.cs` → enclosing `.csproj`
+resolution, per-project build dedup, and filtering across several projects.
 
-- The adapter **must gracefully skip** projects it cannot build (legacy non-SDK,
-  Framework-only TFMs) — detect and no-op, never error the whole run.
-- Realistic Phase-0/1 fixtures = the `net8.0` / `netcoreapp3.1` /
-  `netstandard2.x` SDK-style subset (HotStats.Crypto, HotStatsGeoAPI,
-  ScopeAutomation.Api, GraphTableManager, …).
-- The legacy-heavy skew is the strongest argument for **Phase 2 (generic SARIF
-  ingest)**: legacy .NET-Framework estates are built in the user's own
-  VS/MSBuild environment, which then posts SARIF — no in-tree build needed.
+**Tier 3 — scale, graceful-skip, and the Phase-2 ingest path: Revecore
+`Bridge`** (`BottomLineSystems/Bridge`). The real large messy estate they
+maintain: **~300 projects, 31 solutions, ~5,600 `.cs` files**, of which
+**299/300 are legacy non-SDK**, 283 target **.NET Framework v4.8**, 286 use
+`packages.config`; WinForms + classic `.asmx` services, including a
+**17,101-line** `EDISearchForm.cs`; mixed TFMs in one tree (v4.8/v4.6.1/v4.0/
+v4.5/v3.5/net48). **Bridge is NOT buildable by the in-tree `dotnet build`
+path** (legacy non-SDK + .NET Framework needs Windows + full MSBuild/VS +
+Framework reference assemblies). It is therefore the canonical test for the two
+hardest behaviours:
+- **graceful-skip** — the adapter must detect unbuildable projects (legacy
+  non-SDK, Framework-only TFMs off-Windows) and no-op per project, never
+  erroring the whole `run_diagnostics` call or hanging on a doomed restore;
+- **Phase 2 (generic SARIF ingest)** — the *only* way to lint an estate like
+  Bridge: build it on Windows in the user's own VS/MSBuild (same ErrorLog SARIF,
+  or Roslynator/VS), then POST the SARIF. Bridge is the proof that Phase 2 is
+  not optional polish but the path for the common real-world shape.
+
+**Estate-wide reality (both repos):** **584 `.csproj`, only 71 SDK-style, 513
+legacy non-SDK.** `dotnet build` off-Windows only touches SDK-style projects on
+.NET Core/5+/standard; some SDK-style ones still target `net48`/`net472` and
+won't build either. The legacy-heavy skew is exactly why graceful-skip and
+Phase 2 are first-class requirements, not afterthoughts.
+
+**Edge cases Bridge specifically surfaces** (for whoever hardens the adapter):
+mixed-TFM solutions; `<TargetFramework>` vs legacy `<TargetFrameworkVersion>`;
+multi-targeting (`net8.0;net48;net472`); `packages.config` (no SDK restore);
+generated files (`*.Designer.cs`, `*.asmx.cs`) that should likely be filtered;
+and very large single files that stress whole-file handling and SARIF volume.
 
 ## 9. Open questions to resolve during the build
 
