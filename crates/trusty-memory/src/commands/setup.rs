@@ -15,8 +15,8 @@
 //!      shared `LaunchdConfig`. On other platforms, this phase is skipped
 //!      with a friendly note.
 //!   3. Patches every discovered Claude settings file with an MCP server
-//!      entry pointing at `trusty-memory serve`. Falls back to creating
-//!      `~/.claude/settings.json` when no settings files were found.
+//!      entry pointing at `trusty-memory serve --stdio`. Falls back to
+//!      creating `~/.claude/settings.json` when no settings files were found.
 //!
 //! Test: unit tests cover the patch phase against tempdir-rooted settings
 //! files. The launchd phase is side-effecting (macOS only) and exercised
@@ -368,7 +368,7 @@ fn patch_claude_settings_phase() -> Result<SettingsPatchSummary> {
         home.display()
     );
 
-    let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve"]);
+    let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
     let files = discover_claude_settings(&home, default_settings_max_depth());
 
     if files.is_empty() {
@@ -543,7 +543,7 @@ mod tests {
     fn patch_one_creates_missing_file() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("settings.json");
-        let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve"]);
+        let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
 
         let outcome = patch_one(&path, &entry).expect("patch ok");
         assert!(outcome.mcp_wrote, "first patch writes the MCP entry");
@@ -554,6 +554,7 @@ mod tests {
         let server = &value["mcpServers"][MCP_SERVER_KEY];
         assert_eq!(server["command"], "trusty-memory");
         assert_eq!(server["args"][0], "serve");
+        assert_eq!(server["args"][1], "--stdio");
 
         let hook_entries = value["hooks"][HOOK_EVENT].as_array().unwrap();
         assert_eq!(hook_entries.len(), 1, "exactly one matcher block");
@@ -587,10 +588,10 @@ mod tests {
     fn patch_one_installs_session_start_hook_when_upgrading() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("settings.json");
-        let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve"]);
+        let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
         let seed = json!({
             "mcpServers": {
-                MCP_SERVER_KEY: { "command": "trusty-memory", "args": ["serve"] }
+                MCP_SERVER_KEY: { "command": "trusty-memory", "args": ["serve", "--stdio"] }
             },
             "hooks": {
                 HOOK_EVENT: [{
@@ -640,12 +641,12 @@ mod tests {
     fn patch_one_adds_session_start_when_legacy_user_prompt_submit_has_different_shape() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("settings.json");
-        let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve"]);
+        let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
         // Legacy shape: UserPromptSubmit entry without a `timeout` field,
         // which an older trusty-memory release may have written.
         let seed = json!({
             "mcpServers": {
-                MCP_SERVER_KEY: { "command": "trusty-memory", "args": ["serve"] }
+                MCP_SERVER_KEY: { "command": "trusty-memory", "args": ["serve", "--stdio"] }
             },
             "hooks": {
                 HOOK_EVENT: [{
@@ -699,7 +700,7 @@ mod tests {
     fn patch_one_is_idempotent() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("settings.json");
-        let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve"]);
+        let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
 
         let first = patch_one(&path, &entry).unwrap();
         assert!(first.mcp_wrote && first.hook_wrote, "first patch writes");
@@ -738,7 +739,7 @@ mod tests {
         });
         std::fs::write(&path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
 
-        let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve"]);
+        let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
         let outcome = patch_one(&path, &entry).expect("patch ok");
         assert!(outcome.mcp_wrote);
         assert!(outcome.hook_wrote);
@@ -768,10 +769,10 @@ mod tests {
     fn patch_one_installs_hook_when_mcp_already_present() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("settings.json");
-        let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve"]);
+        let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
         let seed = json!({
             "mcpServers": {
-                MCP_SERVER_KEY: { "command": "trusty-memory", "args": ["serve"] }
+                MCP_SERVER_KEY: { "command": "trusty-memory", "args": ["serve", "--stdio"] }
             }
         });
         std::fs::write(&path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();

@@ -247,7 +247,7 @@ pub fn migrate_config_file(path: &Path, dry_run: bool) -> ConfigMigrateResult {
     }
     servers.insert(
         TRUSTY_KEY.to_string(),
-        mcp_server_entry(TRUSTY_KEY, &["serve"]),
+        mcp_server_entry(TRUSTY_KEY, &["serve", "--stdio"]),
     );
 
     if dry_run {
@@ -343,6 +343,7 @@ mod tests {
         );
         assert_eq!(servers["trusty-memory"]["command"], "trusty-memory");
         assert_eq!(servers["trusty-memory"]["args"][0], "serve");
+        assert_eq!(servers["trusty-memory"]["args"][1], "--stdio");
 
         // Backup preserves multi-dot filename: settings.local.json.bak
         assert!(
@@ -383,7 +384,7 @@ mod tests {
             "mcpServers": {
                 "trusty-memory": {
                     "command": "trusty-memory",
-                    "args": ["serve"]
+                    "args": ["serve", "--stdio"]
                 }
             }
         });
