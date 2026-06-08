@@ -1264,26 +1264,17 @@ pub struct RegisterFilters {
     /// `"skip_kg": true`. The daemon stores it in `indexes.toml`.
     /// Test: covered by `skip_kg_index_never_runs_phase3` (end-to-end).
     pub skip_kg: bool,
-    /// Issue #923: deferred-embedding mode (default `true`). When `true`, the
-    /// fast pass (walk → chunk → BM25 → KG) completes synchronously and marks
-    /// lexical + graph stages `Ready` within seconds; semantic (HNSW vector)
-    /// embedding is deferred to a background job. Set to `false` to request
-    /// the old synchronous full-index behaviour.
-    ///
-    /// Why: forwards the per-index YAML `defer_embed:` field (and any future
-    /// CLI flag) to the daemon's `POST /indexes` body.
-    /// What: when `false`, the request body includes `"defer_embed": false`
-    /// so the daemon stores the opt-out on the `IndexHandle`.
-    /// Test: covered by `defer_embed_false_forces_synchronous_index` (end-to-end).
+    /// Issue #923: deferred-embedding (default `true`). Fast pass completes
+    /// synchronously (lexical + KG `Ready`); semantic embedding is deferred to
+    /// a background job. Set `false` for synchronous full-index behaviour.
+    /// Why/What/Test: see `register_index_with_daemon_filtered`.
     pub defer_embed: bool,
 }
 
 impl Default for RegisterFilters {
-    /// Why: `defer_embed` must default to `true` (issue #923 default-on); plain
-    /// `#[derive(Default)]` would set it to `false` since `bool::default()=false`.
-    /// What: all collection fields empty, boolean flags at their correct defaults:
-    /// `lexical_only=false`, `skip_kg=false`, `defer_embed=true`.
-    /// Test: `RegisterFilters::default().defer_embed` asserted in unit tests.
+    /// Why: `bool::default()=false` would mis-set `defer_embed`; manual impl
+    /// sets `defer_embed=true` (issue #923 default-on).
+    /// What/Test: all collections empty; `lexical_only=skip_kg=false`, `defer_embed=true`.
     fn default() -> Self {
         Self {
             include_paths: vec![],
@@ -1335,9 +1326,7 @@ pub async fn register_index_with_daemon_filtered(
     if filters.skip_kg {
         create_body["skip_kg"] = serde_json::json!(true);
     }
-    // Issue #923: only send `defer_embed: false` when the caller opts out;
-    // the server default is `true`, so omitting the field avoids noise in the
-    // request body for the common case.
+    // Issue #923: omit `defer_embed` when true (server default); only send when opting out.
     if !filters.defer_embed {
         create_body["defer_embed"] = serde_json::json!(false);
     }

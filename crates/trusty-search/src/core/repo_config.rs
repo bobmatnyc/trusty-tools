@@ -124,6 +124,15 @@ pub struct IndexConfig {
     pub defer_embed: bool,
 }
 
+/// Shared serde default helper that returns `true`.
+///
+/// Why: serde's `default` attribute requires a path to a zero-arg fn returning
+/// the field type; `bool::default()` returns `false`, so fields whose absent
+/// value should be `true` (e.g. `respect_gitignore`, `include_docs`,
+/// `defer_embed`) must name a custom helper. One shared fn avoids repetition.
+/// What: always returns `true`.
+/// Test: `repo_config::tests` — any test that omits a `default_true` field
+/// and asserts the loaded value is `true` exercises this helper.
 fn default_true() -> bool {
     true
 }

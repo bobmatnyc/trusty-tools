@@ -128,6 +128,9 @@ pub struct PersistedIndex {
     /// is written to disk (via `skip_serializing_if = "is_true"`) so existing
     /// `indexes.toml` files continue to load as `true`.
     /// Test: `defer_embed_round_trips` in this module.
+    // Serde asymmetry note: `lexical_only` / `skip_kg` use `Not::not` to skip
+    // the default `false`; `defer_embed` uses `is_true` to skip the default
+    // `true`. The helper name reflects the value that equals the default.
     #[serde(default = "default_defer_embed", skip_serializing_if = "is_true")]
     pub defer_embed: bool,
 
