@@ -1,7 +1,8 @@
 # DOC-1 — The Versioned Tool Contract (FOUNDATIONAL)
 
-**Status:** Draft (decisions recorded; per-verb schemas, grounding, conformance checklist & ADR pending)
+**Status:** Review (schemas drafted; pending DOC-3 scope coordination + team review)
 **Source spec:** ../01-spec/trusty-end-to-end-setup.md
+**ADR:** [0007 — Monotonic-integer `contract_version` + 3-layer extensible verb model](../../../adr/0007-tool-contract-versioning-and-verb-model.md) (Proposed)
 
 ## Purpose
 
@@ -129,6 +130,524 @@ All verb output (`config`, `version`, `doctor` remediation hints, etc.) MUST
 redact secrets — API keys, tokens, AWS credentials, connection strings — using
 the fixed marker `"***redacted***"`.
 
+## Per-verb `data` schemas (`contract_version: 1`)
+
+Every verb returns the **uniform envelope** from D3; only `data` varies. The
+envelope is specified once here, then each verb's `data` schema + one worked
+example (full envelope) follows. All examples are at `contract_version: 1` and
+respect D8 redaction (`***redacted***`).
+
+> **Notation.** Schemas are precisely-annotated JSON skeletons: `field: type` with
+> `?` marking optional fields, `|` for enum unions, and `// …` for notes. Enum
+> string sets are listed inline. These map 1:1 onto the serde structs in the
+> module API below.
+
+### Envelope (all verbs)
+
+```json
+{
+  "contract_version": 1,                 // integer; D2. Always present.
+  "tool": "trusty-search",               // stable tool id (matches manifest/DOC-2 key)
+  "tool_version": "0.12.3",              // tool's own semver (CARGO_PKG_VERSION)
+  "verb": "doctor",                      // the verb that produced this envelope
+  "scope": "system",                     // "project" | "system" | "all"  (D7 wire format; DOC-3 owns behaviour)
+  "status": "ok",                        // verb-appropriate vocabulary (D4); mirrored by exit code (D5)
+  "data": {},                            // verb-specific; schemas below
+  "messages": [                          // human-readable notes; never carries secrets (D8)
+    { "level": "info", "text": "…" }     // level: "info" | "warn" | "error"
+  ]
+}
+```
+
+- `status` vocabulary by verb (D4): introspection `doctor`/`version` and
+  lifecycle/`config` use `ok | warn | fail`; `health` uses `running | degraded |
+  down`. `messages` is always an array (may be empty).
+- Exit codes (D5): `0` ok · `1` fail/down · `2` degraded/warn · `3`
+  contract-or-usage error (e.g. unknown/unadvertised verb, malformed args).
+
+### `doctor.data`
+
+```json
+{
+  "checks": [
+    {
+      "id": "daemon_running",            // stable machine id (snake_case), unique within tool
+      "title": "Daemon running",         // short human label
+      "scope": "system",                 // "project" | "system"  (per-check; D7)
+      "status": "ok",                    // "ok" | "warn" | "fail" | "pending" | "skipped"
+      "detail": "Daemon running at 127.0.0.1:7879 (v0.12.3)",  // human detail; redacted
+      "remediation": "Run `trusty-search start`."              // optional fix hint; null when none / status ok
+    }
+  ],
+  "summary": {                           // aggregate counts over checks[]
+    "ok": 5, "warn": 1, "fail": 0, "pending": 1, "skipped": 0,
+    "total": 7
+  }
+}
+```
+
+- `pending` carries the spec's *"unindexed = system-ready, project-pending, NOT
+  broken"* semantic (D4): a project-scope check that cannot run yet but is not a
+  failure. `skipped` = deliberately not run (e.g. platform N/A).
+- Envelope `status` rollup: any `fail` → `fail`; else any `warn` → `warn`; else
+  `ok`. (`pending`/`skipped` never worsen the rollup.) This rollup rule is the
+  per-tool input DOC-4 consumes for the stack-wide rollup.
+
+**Worked example** (full envelope):
+
+```json
+{
+  "contract_version": 1,
+  "tool": "trusty-search",
+  "tool_version": "0.12.3",
+  "verb": "doctor",
+  "scope": "all",
+  "status": "warn",
+  "data": {
+    "checks": [
+      { "id": "daemon_running", "title": "Daemon running", "scope": "system",
+        "status": "ok", "detail": "Daemon running at 127.0.0.1:7879 (v0.12.3)", "remediation": null },
+      { "id": "model_cache", "title": "Embedding model cached", "scope": "system",
+        "status": "ok", "detail": "all-MiniLM-L6-v2 present (84 MB)", "remediation": null },
+      { "id": "data_dir_writable", "title": "Data directory writable", "scope": "system",
+        "status": "ok", "detail": "/Users/me/Library/Application Support/trusty-search (writable)", "remediation": null },
+      { "id": "lock_file", "title": "Lock file healthy", "scope": "system",
+        "status": "ok", "detail": "PID 4821 is running", "remediation": null },
+      { "id": "log_rotation", "title": "Log rotation configured", "scope": "system",
+        "status": "warn", "detail": "stderr.log has no rotation policy",
+        "remediation": "Run `trusty-search doctor --fix` to install newsyslog rotation." },
+      { "id": "project_index", "title": "Project index present", "scope": "project",
+        "status": "pending", "detail": "No index registered for this project yet (system is ready).",
+        "remediation": "Run `trusty-search index` in the project root." }
+    ],
+    "summary": { "ok": 4, "warn": 1, "fail": 0, "pending": 1, "skipped": 0, "total": 6 }
+  },
+  "messages": [{ "level": "warn", "text": "1 warning. Re-run with --fix to auto-repair." }]
+}
+```
+
+Exit code: `2` (warn).
+
+### `health.data`
+
+Minimal by design (D4): the **envelope `status`** carries the
+`running | degraded | down` verdict; `data` carries supporting telemetry.
+
+```json
+{
+  "uptime_secs": 4210,                   // ? omitted when down / not applicable
+  "port": 7879,                          // ? bound port; omitted when down
+  "addr": "127.0.0.1:7879",             // ? full bound address
+  "pid": 4821,                           // ? daemon pid when known
+  "deps": [                              // ? dependency reachability (from trusty-review/analyze prior art)
+    { "id": "trusty-search", "required": true, "reachable": true }
+  ],
+  "detail": "store/recall round-trip ok"  // ? short triage phrase, esp. when degraded
+}
+```
+
+- `down` ⇒ the tool/daemon is not answering; the controller synthesizes a `down`
+  envelope (it still gets `tool`, `verb`, `status:"down"`, empty/partial `data`)
+  rather than the tool emitting it. `degraded` ⇒ up but a required dep is
+  unreachable or a self-probe failed (prior art: review `compute_status`, analyze
+  `search_reachable`, memory round-trip probe).
+
+**Worked example** (degraded — required dep down):
+
+```json
+{
+  "contract_version": 1,
+  "tool": "trusty-analyze",
+  "tool_version": "0.4.1",
+  "verb": "health",
+  "scope": "system",
+  "status": "degraded",
+  "data": {
+    "uptime_secs": 120,
+    "port": 7879,
+    "addr": "127.0.0.1:7879",
+    "deps": [ { "id": "trusty-search", "required": true, "reachable": false } ],
+    "detail": "trusty-search unreachable at 127.0.0.1:7878"
+  },
+  "messages": [{ "level": "warn", "text": "Required dependency trusty-search is unreachable." }]
+}
+```
+
+Exit code: `2` (degraded).
+
+### `version.data`
+
+Carries the capability advertisement (D3b) and version axes (D2). Envelope
+`status` is `ok` whenever the tool can answer.
+
+```json
+{
+  "verbs": ["doctor", "health", "version", "start", "stop", "restart", "config"],
+                                         // capability advertisement (D3b); the authoritative supported-verb list
+  "tool_version": "0.12.3",             // duplicated from envelope for standalone parsing convenience
+  "contract_version": 1,                // duplicated from envelope; the negotiated level this tool speaks
+  "min_contract_version": 1,            // ? lowest level this tool can still serve (defaults to contract_version)
+  "build": {                            // ? optional, redacted build metadata
+    "git_sha": "a1b2c3d",
+    "rustc": "1.91.0",
+    "target": "aarch64-apple-darwin"
+  }
+}
+```
+
+- `verbs[]` presence is **independent of `contract_version`** (D3, critical
+  split): the controller MUST read `verbs[]` to decide what to invoke, never
+  infer from the integer.
+
+**Worked example:**
+
+```json
+{
+  "contract_version": 1,
+  "tool": "trusty-search",
+  "tool_version": "0.12.3",
+  "verb": "version",
+  "scope": "system",
+  "status": "ok",
+  "data": {
+    "verbs": ["doctor", "health", "version", "start", "stop", "restart", "config"],
+    "tool_version": "0.12.3",
+    "contract_version": 1,
+    "min_contract_version": 1,
+    "build": { "git_sha": "a1b2c3d", "rustc": "1.91.0", "target": "aarch64-apple-darwin" }
+  },
+  "messages": []
+}
+```
+
+Exit code: `0`.
+
+### `start` / `stop` / `restart`.data (lifecycle)
+
+One shared schema (the three verbs differ only in the `action` value):
+
+```json
+{
+  "action": "restart",                   // "start" | "stop" | "restart"
+  "previous_state": "running",           // "running" | "stopped" | "unknown"
+  "new_state": "running",                // "running" | "stopped"
+  "pid": 4821,                           // ? new daemon pid (start/restart, when applicable)
+  "port": 7879,                          // ? bound port (start/restart)
+  "noop": false                          // true when already in target state (e.g. start an already-running daemon)
+}
+```
+
+- Idempotency: `start` on a running daemon → `status:"ok"`, `noop:true`,
+  `previous_state==new_state=="running"`. `stop` on a stopped daemon likewise.
+- CLI-only members that advertise no lifecycle verbs simply omit them from
+  `verbs[]`; the controller degrades gracefully (D3).
+
+**Worked example** (restart):
+
+```json
+{
+  "contract_version": 1,
+  "tool": "trusty-memory",
+  "tool_version": "0.10.0",
+  "verb": "restart",
+  "scope": "system",
+  "status": "ok",
+  "data": {
+    "action": "restart",
+    "previous_state": "running",
+    "new_state": "running",
+    "pid": 5099,
+    "port": 7070,
+    "noop": false
+  },
+  "messages": [{ "level": "info", "text": "Daemon restarted gracefully (drained in-flight requests)." }]
+}
+```
+
+Exit code: `0`.
+
+### `config.data`
+
+**Read-only** effective merged config (system + project per D7); editing is an
+explicit spec non-goal. Secrets redacted with the fixed marker (D8).
+
+```json
+{
+  "effective": {                         // fully-merged view the tool actually runs with
+    "memory_limit_mb": 8192,
+    "embedder": "stdio",
+    "openrouter_api_key": "***redacted***",
+    "port": 7879
+  },
+  "sources": [                           // ? provenance, lowest→highest precedence; values redacted too
+    { "scope": "system",  "path": "~/.config/trusty-search/config.yaml", "keys": ["memory_limit_mb", "embedder"] },
+    { "scope": "project", "path": "./trusty-search.yaml",               "keys": ["port"] },
+    { "scope": "env",     "path": null, "keys": ["openrouter_api_key"] }
+  ],
+  "redacted_keys": ["openrouter_api_key"] // ? convenience list of which keys were masked
+}
+```
+
+- The precedence model that produces `effective` is the tool's own; DOC-1 only
+  fixes the *shape*. `sources[].scope` reuses the D7 wire vocabulary plus `env`
+  for environment-derived values.
+
+**Worked example:**
+
+```json
+{
+  "contract_version": 1,
+  "tool": "trusty-search",
+  "tool_version": "0.12.3",
+  "verb": "config",
+  "scope": "all",
+  "status": "ok",
+  "data": {
+    "effective": {
+      "memory_limit_mb": 8192,
+      "embedder": "stdio",
+      "openrouter_api_key": "***redacted***",
+      "port": 7879
+    },
+    "sources": [
+      { "scope": "system",  "path": "~/.config/trusty-search/config.yaml", "keys": ["memory_limit_mb", "embedder"] },
+      { "scope": "project", "path": "./trusty-search.yaml",               "keys": ["port"] },
+      { "scope": "env",     "path": null,                                  "keys": ["openrouter_api_key"] }
+    ],
+    "redacted_keys": ["openrouter_api_key"]
+  },
+  "messages": []
+}
+```
+
+Exit code: `0`.
+
+## `trusty_common` contract module — API sketch (DOC-6 build target)
+
+Home: a new `contract` module in `trusty-common` (D6), sibling to the existing
+`mcp` / `rpc` / `launchd` modules. The Rust types below are a **design sketch**,
+not committed source — DOC-6's retrofits implement against them. Edition-2021
+safe (no let-chains) so every member crate can depend on it.
+
+```rust
+// trusty_common::contract  (new module; D6)
+
+use serde::{Deserialize, Serialize};
+
+/// The single negotiated capability level. Monotonic integer (D2).
+pub const CONTRACT_VERSION: u32 = 1;
+
+/// Verb-appropriate top-level status (D4). Serialized lowercase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvelopeStatus {
+    Ok, Warn, Fail,            // introspection (doctor/version), config, lifecycle
+    Running, Degraded, Down,   // health
+}
+
+impl EnvelopeStatus {
+    /// Exit code mirror (D5): 0 ok/running · 1 fail/down · 2 warn/degraded.
+    /// (Code 3 = contract/usage error is produced by the dispatcher, not here.)
+    pub fn exit_code(self) -> i32 {
+        match self {
+            EnvelopeStatus::Ok | EnvelopeStatus::Running => 0,
+            EnvelopeStatus::Fail | EnvelopeStatus::Down => 1,
+            EnvelopeStatus::Warn | EnvelopeStatus::Degraded => 2,
+        }
+    }
+}
+
+/// Wire scope (D7). DOC-3 owns the behavioural model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Scope { Project, System, All }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageLevel { Info, Warn, Error }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message { pub level: MessageLevel, pub text: String }
+
+/// The uniform envelope (D3a), generic over the per-verb `data`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Envelope<T> {
+    pub contract_version: u32,
+    pub tool: String,
+    pub tool_version: String,
+    pub verb: String,
+    pub scope: Scope,
+    pub status: EnvelopeStatus,
+    pub data: T,
+    #[serde(default)]
+    pub messages: Vec<Message>,
+}
+
+// ---- per-verb data structs (one per schema above) ----
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckStatus { Ok, Warn, Fail, Pending, Skipped }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DoctorCheck {
+    pub id: String,
+    pub title: String,
+    pub scope: Scope,
+    pub status: CheckStatus,
+    pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DoctorSummary { pub ok: u32, pub warn: u32, pub fail: u32,
+                           pub pending: u32, pub skipped: u32, pub total: u32 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DoctorData { pub checks: Vec<DoctorCheck>, pub summary: DoctorSummary }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DepInfo { pub id: String, pub required: bool, pub reachable: bool }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HealthData {
+    #[serde(skip_serializing_if = "Option::is_none")] pub uptime_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub addr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub deps: Vec<DepInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionData {
+    pub verbs: Vec<String>,                 // D3b capability advertisement
+    pub tool_version: String,
+    pub contract_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")] pub min_contract_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub build: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleAction { Start, Stop, Restart }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LifecycleData {
+    pub action: LifecycleAction,
+    pub previous_state: String,             // "running" | "stopped" | "unknown"
+    pub new_state: String,                  // "running" | "stopped"
+    #[serde(skip_serializing_if = "Option::is_none")] pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub port: Option<u16>,
+    #[serde(default)] pub noop: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigSource { pub scope: String, pub path: Option<String>, pub keys: Vec<String> }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigData {
+    pub effective: serde_json::Value,       // already-redacted merged view
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub sources: Vec<ConfigSource>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub redacted_keys: Vec<String>,
+}
+
+/// Fixed secret marker (D8). The module also offers a redaction helper so every
+/// tool masks identically (none exists in trusty-common today).
+pub const REDACTED: &str = "***redacted***";
+pub fn redact_value(_key: &str, _val: &str) -> String { REDACTED.to_string() }
+
+/// The trait every Rust tool implements (D6). Each method returns typed data;
+/// the tool never builds the envelope by hand.
+#[allow(async_fn_in_trait)]
+pub trait ContractTool {
+    /// Stable tool id (matches the DOC-2 manifest key).
+    fn tool_id(&self) -> &str;
+    /// The tool's own semver (typically env!("CARGO_PKG_VERSION")).
+    fn tool_version(&self) -> &str;
+    /// Verbs this tool actually implements — drives D3b advertisement.
+    fn supported_verbs(&self) -> Vec<String>;
+
+    async fn doctor(&self, scope: Scope) -> DoctorData;
+    async fn health(&self, scope: Scope) -> (EnvelopeStatus, HealthData); // status is running/degraded/down
+    fn version(&self, scope: Scope) -> VersionData;                       // pure; never fails
+    async fn start(&self, scope: Scope) -> LifecycleData;                 // optional verbs may be unimplemented
+    async fn stop(&self, scope: Scope) -> LifecycleData;
+    async fn restart(&self, scope: Scope) -> LifecycleData;
+    async fn config(&self, scope: Scope) -> ConfigData;                   // values pre-redacted by the tool
+}
+
+/// Dispatcher: serializes the envelope and computes the process exit code (D5).
+/// Tools wire their `main()` subcommand to call this. It owns:
+///  - wrapping typed `data` in `Envelope<T>` with the shared metadata,
+///  - rolling doctor checks up to the envelope status,
+///  - rejecting unadvertised/unknown verbs with exit code 3,
+///  - printing JSON to stdout (logs stay on stderr per repo rule).
+pub struct Dispatcher;
+
+impl Dispatcher {
+    /// Roll a doctor result up to an envelope status (any fail→Fail, else any
+    /// warn→Warn, else Ok; pending/skipped never worsen it).
+    pub fn doctor_status(d: &DoctorData) -> EnvelopeStatus { /* … */ EnvelopeStatus::Ok }
+
+    /// Build, print to stdout, and return the exit code for a typed result.
+    pub fn emit<T: Serialize>(env: &Envelope<T>) -> i32 { /* serde_json to stdout */ env.status.exit_code() }
+}
+```
+
+DOC-6 retrofit then reduces to: *implement `ContractTool` + wire each subcommand
+to `Dispatcher::emit`*. claude-mpm (Python) emits the same JSON shapes from its
+adapter rather than using these Rust types (D6).
+
+## `contract_version` ledger
+
+**Negotiation floor.** The controller declares a **floor** `F` and targets a
+level `N` (`N >= F`). It accepts any tool whose advertised `contract_version >=
+F`, and for a tool below `N` renders only the fields level `tool_cv` guarantees
+(graceful degrade, never hard-fail). A tool below `F` is rejected as
+contract-incompatible (exit code `3` at the controller boundary). For the v1
+launch, **floor `F = 1`**.
+
+**Rule (D3, restated):** *adding a verb does NOT bump `contract_version`.* Verb
+presence is advertised via `verbs[]` (a capability). Bump the integer **only**
+when the envelope shape or an existing verb's `data` schema changes in a way that
+is **not** a pure additive superset (i.e., would break an older consumer).
+Adding an **optional** field is additive and does NOT bump.
+
+| `contract_version` | What it guarantees / what changed |
+|---|---|
+| **1** (baseline) | The uniform envelope (`contract_version`, `tool`, `tool_version`, `verb`, `scope`, `status`, `data`, `messages`). Status vocabularies: `ok\|warn\|fail` (doctor/version/config/lifecycle), `running\|degraded\|down` (health). Doctor-check status `ok\|warn\|fail\|pending\|skipped`. Scope wire vocabulary `project\|system\|all`. Exit-code mirror `0/1/2/3`. Secret redaction marker `***redacted***`. Per-verb `data` schemas for `doctor`, `health`, `version` (incl. `verbs[]` advertisement), `start`/`stop`/`restart`, `config` exactly as specified above. Capability advertisement + generic passthrough semantics. |
+| 2+ (future, illustrative — not yet defined) | Reserved for genuinely breaking shape changes, e.g. renaming/removing an envelope field, changing a `status` enum's meaning, or making a previously-optional field required. New **verbs** and new **optional** fields land at v1 without a bump. |
+
+## Conformance snapshot (DOC-6 input)
+
+Gap audit as of 2026-06-08 — the matrix DOC-6 will action. Rows = stack members;
+columns = the seven verbs + the `version.verbs[]` advertisement + a uniform
+`--json`/envelope output + `contract_version`. Cells: `✅` conformant today ·
+`⚠️` exists but text-only / different shape / partial · `❌` missing.
+
+> **Reality check:** essentially every introspection/lifecycle verb is `⚠️` or
+> `❌` against the contract — the *commands* often exist but emit human text, not
+> the envelope. No tool advertises `verbs[]` or emits `contract_version` today.
+> So the controller-facing contract is effectively **net-new across the board**;
+> the `⚠️` cells just mean "there's existing behaviour to wrap," not "almost
+> done."
+
+| Tool | `doctor` | `health` | `version` | `start` | `stop` | `restart` | `config` | `version.verbs[]` | uniform `--json`/envelope | `contract_version` |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **trusty-search** | ⚠️ text checks | ⚠️ `status`/`GET /health` JSON, wrong shape | ⚠️ `--version` flag only | ⚠️ text | ⚠️ text | ❌ | ⚠️ runtime get/set only | ❌ | ⚠️ scattered (`port`,`status`,`list`) | ❌ |
+| **trusty-memory** | ⚠️ text checks (`Pass/Warn/Fail`) | ⚠️ `GET /health` JSON (`ok/degraded`), no CLI verb | ⚠️ `--version` flag only | ⚠️ text | ⚠️ text | ❌ | ❌ | ❌ | ⚠️ scattered (`port`,`monitor`) | ❌ |
+| **trusty-analyze** | ⚠️ text checks | ⚠️ `health` CLI + `GET /health` (`ok/degraded`) | ⚠️ `--version` flag only | ⚠️ text | ⚠️ text | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **trusty-review** | ❌ | ⚠️ `GET /health` JSON (`ok/degraded` + `deps`), no CLI verb | ❌ (`--version` flag only) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **claude-mpm** (ext.) | ⚠️ `mpm-doctor` text (assumed) | ⚠️ process liveness only (assumed) | ❌ | ⚠️ depends on run mode | ⚠️ depends on run mode | ❌ | ❌ | ❌ | ❌ | ❌ |
+
+Highest-leverage DOC-6 work, in order: (1) land the `trusty_common::contract`
+module + `Dispatcher`; (2) retrofit trusty-search (richest existing surface →
+fastest conformance, sets the pattern); (3) memory & analyze (their `GET /health`
+already speaks the degraded vocabulary); (4) trusty-review (net-new CLI verbs —
+the laggard); (5) the claude-mpm Python adapter (synthesizes everything).
+
 ## Dependencies
 
 ### Consumes (inputs)
@@ -140,15 +659,111 @@ the fixed marker `"***redacted***"`.
 
 ## Grounding (exists vs. net-new)
 
-- **BIGGEST GAP.** Existing `doctor` / `health` / `status` commands are
-  human-text; there is no `--json`, no `version --json`, no `contract_version`.
-- **Partial template:** the daemon `GET /health` returns JSON
-  (`{ status, version, indexes }`) — a useful starting shape.
-- **Worst offender:** `trusty-review` implements none of the verbs (only `serve`).
+Source-first audit of the **real** current command/HTTP surfaces (clap command
+enums + axum handlers), 2026-06-08. The schemas below standardize the **union**
+of what already exists rather than inventing a new surface; the daemon `GET
+/health` JSON is the template for the envelope's introspection payload. Headline
+findings:
 
-The decisions above standardize the **union** of these existing surfaces rather
-than inventing a new one — the daemon `GET /health` JSON is the template for the
-envelope's introspection payload.
+- **BIGGEST GAP — no JSON introspection contract.** `doctor` / `health` /
+  `status` emit coloured human text. No tool has a `version` subcommand (only
+  clap's `--version` flag); none emits a `contract_version`; none advertises a
+  `verbs[]` array. `--json` exists only on a scattered handful of subcommands
+  (`port`, `status`/`query`, `list`, `monitor`) — never as a uniform
+  contract flag on the introspection verbs.
+- **Partial template — daemon `GET /health`.** All four daemons return a JSON
+  health body, but with **divergent shapes and status vocabularies** (see table).
+  trusty-search is the richest; trusty-review and trusty-analyze already use a
+  `status: "ok"|"degraded"` vocabulary that maps cleanly onto D4's health enum.
+- **No `restart` anywhere.** Every tool has `start`+`stop`, but `restart` is
+  net-new for all of them (operators currently use launchd `bootout`/`bootstrap`).
+- **`config` is search-only and runtime-only.** Only trusty-search has a `config`
+  subcommand, and it is a `get`/`set` for live daemon memory limits — not the
+  read-only *effective merged config* this contract defines. memory / analyze /
+  review have no `config` verb at all.
+- **Worst offender — trusty-review.** Implements **none** of the seven verbs at
+  the CLI level (only `Run` / `Compare` / `Serve` / `Profile`). Its only
+  contract-relevant surface is the daemon's `GET /health` + `GET /status`, which
+  is, ironically, the closest existing match to the target envelope `status`
+  semantics. trusty-review is the heaviest DOC-6 retrofit.
+- **claude-mpm has no machine contract.** It is Python, external to this repo
+  (orchestrator is pluggable per ADR-0006), and exposes only human-oriented
+  `mpm-doctor`-style commands today (spec §82). The adapter must **synthesize**
+  the entire contract surface; details are DOC-6, summarized below.
+
+### Per-tool command surface
+
+`✅` = exists & contract-shaped · `⚠️` = exists but text-only / different shape /
+partial · `❌` = absent. "Source" cites the clap enum / axum handler read.
+
+#### trusty-search (richest) — `crates/trusty-search/src/main.rs`, `commands/`, `service/server/health.rs`
+
+| Verb | Current CLI | JSON? | Notes |
+|---|---|---|---|
+| `doctor` | `doctor [--fix]` (`commands/doctor.rs`) | ❌ text | 6 checks via `CheckResult::{Ok,Warn,Error}(String)` — message-only, no ids/scope/remediation |
+| `health` | `status` (alias `health`) | ⚠️ `status --json` exists | richest daemon body |
+| `version` | clap `--version` flag only | ❌ | no `verbs[]` advertisement |
+| `start` / `stop` | `start [...]` / `stop` | ❌ | text |
+| `restart` | ❌ absent | — | net-new |
+| `config` | `config get\|set <key> [val]` | ❌ text | live memory-limit knobs, not effective merged config |
+| extras | `serve`, `port [--json]`, `service install\|uninstall\|status\|logs`, `upgrade [--check\|--yes]`, `integrate`, `setup`, `monitor`, `index`, `query [--json]`, `list [--json]`, `reindex`, `cleanup`, `convert`, `migrate*` | mixed | — |
+
+`GET /health` body (`HealthResponse`, the **template**):
+`{ status:"ok", version, indexes, uptime_secs, embedder, embedder_error?, rss_mb, rss_limit_mb, disk_bytes, cpu_pct, embedder_info?{dimension,provider,quantized}, embedderd_rss_mb?, background_reindex_queue_depth, update_available? }`.
+`status` is the literal `"ok"` (not the running/degraded/down vocabulary).
+`POST /upgrade` returns `{ status:"checked"|"installing"|"up_to_date", current, latest, update_available, message }`.
+
+#### trusty-memory — `crates/trusty-memory/src/main.rs`, `commands/doctor.rs`, `web.rs`
+
+| Verb | Current CLI | JSON? | Notes |
+|---|---|---|---|
+| `doctor` | `doctor` (`commands/doctor.rs`) | ❌ text | `CheckStatus::{Pass,Warn,Fail}` + label + optional detail; richer than search (has a `label`), still no ids/scope/remediation; also a separate palace-audit (`PalaceAuditStatus`) |
+| `health` | ❌ no CLI verb (HTTP only) | ❌ CLI | daemon body has `status:"ok"|"degraded"` already |
+| `version` | clap `--version` only | ❌ | — |
+| `start` / `stop` | `start` / `stop` | ❌ | text |
+| `restart` | ❌ | — | net-new |
+| `config` | ❌ | — | net-new |
+| extras | `serve`, `setup`, `migrate`, `prompt-context`, `service`, `monitor [status\|palaces --json]`, `send-message`, `inbox-check`, `note`, `kg-rebuild`, `link`, `port [--json]`, `upgrade` | mixed | — |
+
+`GET /health` body (`HealthResponse`): `{ status:"ok"|"degraded", detail?, version, rss_mb, disk_bytes, cpu_pct, uptime_secs, addr?, open_fds?, fd_soft_limit?, update_available? }`. **Already carries the degraded vocabulary + `detail` + `uptime` + `addr`** — closest to the target `health.data`/envelope split.
+
+#### trusty-analyze — `crates/trusty-analyze/src/main.rs`, `service/mod.rs`
+
+| Verb | Current CLI | JSON? | Notes |
+|---|---|---|---|
+| `doctor` | `doctor [--port]` | ❌ text | also an MCP `run_diagnostics` tool |
+| `health` | `health` (CLI verb) + `GET /health` | ⚠️ | daemon body uses `status:"ok"|"degraded"` |
+| `version` | clap `--version` only | ❌ | — |
+| `start` / `stop` | `start [...]` / `stop [...]` | ❌ | text |
+| `restart` | ❌ | — | net-new |
+| `config` | ❌ | — | net-new |
+| extras | `serve`, `status`, `service install\|uninstall\|status\|logs`, `setup`, `facts`, `analyze`, `review`, `deep`, `review-pr`, `mcp`, `dashboard`, `completions` | mixed | hard runtime dep on trusty-search |
+
+`GET /health` body (`HealthResponse`): `{ status:"ok"|"degraded", version, search_reachable }` — minimal; `degraded` ⇔ trusty-search unreachable (200 vs 503). A natural model for the envelope's dependency-aware health `status`.
+
+#### trusty-review (laggard) — `crates/trusty-review/src/main.rs`, `service/handlers.rs`
+
+| Verb | Current CLI | JSON? | Notes |
+|---|---|---|---|
+| all seven verbs | ❌ **none at CLI** | ❌ | CLI is `Run` / `Compare` / `Serve` / `Profile` only |
+| `health` (HTTP) | `GET /health`, `GET /status` (daemon) | ✅ JSON | best existing match to target `status` semantics |
+
+`GET /health` body (`HealthResponse`): `{ status:"ok"|"degraded", version, dry_run, reviewer_model, inference:"ok"|"unreachable"|"auth_error"|"unknown", deps:{ trusty_search:{required,reachable}, trusty_analyze:{required,reachable} } }`, with a `compute_status()` that degrades on bad inference or an unreachable *required* dep. `GET /status` → `{ in_flight, last_error? }`. This dep-graph + `compute_status` rollup is the prototype for the controller-level health rollup (DOC-4) and informs `health.data`'s optional `deps` block.
+
+#### claude-mpm (Python orchestrator — external, pluggable per ADR-0006)
+
+Not in this repo. Known/assumed today: a human-oriented `mpm-doctor`-style
+capability exists (spec §82) but there is **no machine-JSON contract** — no
+envelope, no `contract_version`, no `verbs[]`, no `--json`. To satisfy this
+contract the **adapter must synthesize the entire surface**: wrap whatever
+`mpm-doctor`/CLI output exists into `doctor.data.checks[]`, emit a `version`
+envelope with a hand-maintained `verbs[]` (likely `doctor`,`health`,`version`;
+`start`/`stop`/`restart`/`config` may be `❌`/degraded depending on how
+claude-mpm is run), and map process liveness to `health`. Full adapter design is
+**DOC-6** — this paragraph is the contract-side note only. Because the
+orchestrator is swappable (claude-mpm now → trusty-mpm later), the adapter is the
+*only* place orchestrator-specific glue lives; the controller treats it like any
+other contract-conformant member.
 
 ## Cross-cutting notes
 
@@ -159,11 +774,11 @@ envelope's introspection payload.
 
 ## Remaining work
 
-- [ ] Author per-verb `data` JSON schemas at `contract_version: 1` (`doctor`, `health`, `version`, `start`, `stop`, `restart`, `config`) with worked examples
-- [ ] Grounding: capture actual current CLI/HTTP output of trusty-search / trusty-memory / trusty-analyze / trusty-review + claude-mpm `mpm-doctor`, and standardize the union into the schemas
-- [ ] Specify the `trusty_common` contract module API (trait + envelope + data types)
-- [ ] Define the `contract_version` floor + the "what's new per version" ledger (v1 baseline)
-- [ ] Publish the conformance checklist for DOC-6
-- [ ] Write the contract-version ADR (charter B2)
+- [x] Author per-verb `data` JSON schemas at `contract_version: 1` (`doctor`, `health`, `version`, `start`, `stop`, `restart`, `config`) with worked examples
+- [x] Grounding: capture actual current CLI/HTTP output of trusty-search / trusty-memory / trusty-analyze / trusty-review + claude-mpm `mpm-doctor`, and standardize the union into the schemas
+- [x] Specify the `trusty_common` contract module API (trait + envelope + data types)
+- [x] Define the `contract_version` floor + the "what's new per version" ledger (v1 baseline)
+- [x] Publish the conformance checklist for DOC-6
+- [x] Write the contract-version ADR (charter B2) — [ADR-0007](../../../adr/0007-tool-contract-versioning-and-verb-model.md)
 - [ ] Coordinate `scope` fields with DOC-3
 - [ ] Team review → Accepted
