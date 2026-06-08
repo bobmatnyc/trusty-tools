@@ -1129,8 +1129,10 @@ pub async fn run_reindex_with(
 
     // Per-subsystem timing breakdown (rendered after `ui.finish` so indicatif
     // doesn't redraw over our printed lines). Skipped for old daemons.
+    // Pass the SSE `elapsed_ms` (wall-clock total) so the breakdown can
+    // print it as the single authoritative number — subsystem times overlap.
     if let Some(t) = outcome.timings {
-        print_timing_breakdown(&t, outcome.total_chunks);
+        print_timing_breakdown(&t, outcome.total_chunks, outcome.elapsed_ms);
     }
 
     // Post-reindex health check (blue-green safety net).
