@@ -9,6 +9,7 @@
  * Test: Call refreshHealth() in console, then getHealth() — assert non-null.
  */
 import { api } from './api.js';
+import { apiUrl } from './base.js';
 
 const LS_KEY = 'trusty-analyzer.selectedIndex';
 const LS_THEME_KEY = 'trusty-analyzer.theme';
@@ -161,7 +162,7 @@ export async function refreshFacts(subject, predicate) {
  * Test: POST a fact and watch the facts table update without manual refresh.
  */
 export function initEventStream() {
-  const es = new EventSource('/sse');
+  const es = new EventSource(apiUrl('/sse'));
   es.onopen = () => {
     _sseConnected = true;
   };

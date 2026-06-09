@@ -4,18 +4,20 @@
  * The analyzer serves the bundle at /ui and the API at flat paths
  * (/health, /indexes, /facts, ...) so requests are always same-origin in
  * production. In `vite dev`, vite.config.js proxies the API paths through to
- * 127.0.0.1:7879.
+ * 127.0.0.1:7879. When served through the trusty-console reverse-proxy at
+ * /proxy/analyze/, apiUrl() rebases absolute paths to the proxy sub-path so
+ * every API call reaches the daemon via the proxy instead of 404ing at the
+ * console host root.
  * What: Thin wrappers returning parsed JSON or throwing on non-2xx.
  * Test: Console-call api.health() and confirm shape matches /health.
+ *   Proxy mode: open the SPA at /proxy/analyze/ and confirm api.health()
+ *   fetches /proxy/analyze/health not /health.
  */
 
-const BASE =
-  typeof window !== 'undefined' && window.__ANALYZER_BASE__
-    ? window.__ANALYZER_BASE__
-    : '';
+import { apiUrl } from './base.js';
 
 async function request(path, opts = {}) {
-  const res = await fetch(BASE + path, {
+  const res = await fetch(apiUrl(path), {
     headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
     ...opts
   });

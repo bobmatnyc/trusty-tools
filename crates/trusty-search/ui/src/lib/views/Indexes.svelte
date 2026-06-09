@@ -16,6 +16,7 @@
    */
   import { onDestroy } from 'svelte';
   import { api } from '../api.js';
+  import { apiUrl } from '../base.js';
   import { getIndexes, getLoading, getError, refreshIndexes } from '../state.svelte.js';
 
   let indexes = $derived(getIndexes());
@@ -123,7 +124,7 @@
     try {
       const res = await api.reindex(id);
       progress = { ...progress, [id]: { indexed: 0, total: 0 } };
-      const url = res?.stream_url || `/indexes/${encodeURIComponent(id)}/reindex/stream`;
+      const url = apiUrl(res?.stream_url || `/indexes/${encodeURIComponent(id)}/reindex/stream`);
       closeStream(id);
       const src = new EventSource(url);
       streams[id] = src;

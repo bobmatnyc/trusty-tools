@@ -4,14 +4,21 @@
  * The daemon serves the bundle at /ui and the API at flat paths
  * (/health, /indexes, /search, ...) so requests are always same-origin in
  * production. In `vite dev`, vite.config.js proxies the API paths through to
- * 127.0.0.1:7878.
+ * 127.0.0.1:7878. When served through the trusty-console reverse-proxy at
+ * /proxy/search/, apiUrl() rebases absolute paths to the proxy sub-path so
+ * every API call reaches the daemon via the proxy instead of 404ing at the
+ * console host root.
  * What: Thin wrappers returning parsed JSON or throwing on non-2xx.
  *   Non-2xx responses throw an ApiError with a numeric `status` field so
  *   callers can check `e.status === 503` rather than substring-matching the
  *   message string (issue #781).
  * Test: Console-call api.health() and confirm shape matches /health.
  *   For error handling: mock a 503 response and assert e.status === 503.
+ *   Proxy mode: open the SPA at /proxy/search/ and confirm api.health()
+ *   fetches /proxy/search/health not /health.
  */
+
+import { apiUrl } from './base.js';
 
 /**
  * Why: Callers need a structured way to inspect HTTP errors without
@@ -31,7 +38,7 @@ export class ApiError extends Error {
 }
 
 async function request(path, opts = {}) {
-  const res = await fetch(path, {
+  const res = await fetch(apiUrl(path), {
     headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
     ...opts
   });

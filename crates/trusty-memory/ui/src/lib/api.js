@@ -4,12 +4,19 @@
  * parsing. The daemon serves the SPA at `/` and the API under `/api/v1/*`
  * (plus `/health`), so requests are always same-origin in production. In
  * `vite dev`, vite.config.js proxies `/api` and `/health` to the daemon.
+ * When served through the trusty-console reverse-proxy at /proxy/memory/,
+ * apiUrl() rebases absolute paths to the proxy sub-path so every API call
+ * reaches the daemon via the proxy instead of 404ing at the console host root.
  * What: Thin wrappers returning parsed JSON or throwing on non-2xx.
  * Test: Console-call api.health() and confirm the shape matches /health.
+ *   Proxy mode: open the SPA at /proxy/memory/ and confirm api.health()
+ *   fetches /proxy/memory/health not /health.
  */
 
+import { apiUrl } from './base.js';
+
 async function request(path, opts = {}) {
-  const res = await fetch(path, {
+  const res = await fetch(apiUrl(path), {
     headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
     ...opts
   });

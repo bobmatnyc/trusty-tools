@@ -9,6 +9,7 @@
  */
 
 import { api } from './api.js';
+import { apiUrl } from './base.js';
 
 let _health = $state(null);
 let _indexes = $state([]); // [{ id, chunk_count, root_path }]
@@ -67,7 +68,7 @@ export function subscribeStatusStream() {
   _statusRefcount += 1;
   if (_statusSource) return _statusSource;
 
-  const src = new EventSource('/status/stream');
+  const src = new EventSource(apiUrl('/status/stream'));
   src.onmessage = (ev) => {
     let event;
     try {

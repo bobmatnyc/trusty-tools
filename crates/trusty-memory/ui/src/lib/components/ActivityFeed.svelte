@@ -19,6 +19,7 @@
    */
   import { onMount, onDestroy } from 'svelte';
   import { api } from '../api.js';
+  import { apiUrl } from '../base.js';
 
   // Live in-memory buffer for SSE-pushed events. Caps prevent unbounded
   // growth in long-running sessions; the persistent history endpoint
@@ -184,7 +185,7 @@
     }
 
     try {
-      source = new EventSource('/sse');
+      source = new EventSource(apiUrl('/sse'));
     } catch (e) {
       scheduleReconnect();
       return;
