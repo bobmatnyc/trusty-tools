@@ -30,7 +30,7 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 | C2 | CRITICAL | DOC-8 launch-hook precedent is misattributed; no claude-mpm startup hook verified to exist | DOC-8 §4.1/§4.3/Resolved-Decision-4 | ✅ code-verified | ✅ Resolved |
 | C3 | CRITICAL | `verbs[]` presence independent of `contract_version` opens an unversioned breaking-change channel | DOC-1 D3, ADR-0007 §3, DOC-1 ledger | — | ✅ Resolved |
 | C4 | CRITICAL | DOC-4 dependency de-duplication needs root-cause inference the controller can't do generically | DOC-4 §5.4/§2.3/§8.2 | — | ✅ Resolved |
-| C5 | CRITICAL | DOC-9 "new versions take effect via connection-safe restart" assumes a `restart` verb DOC-6 says is net-new on every tool | DOC-9 §5.1, DOC-6 §2.1–2.4 | — | 🔴 Open |
+| C5 | CRITICAL | DOC-9 "new versions take effect via connection-safe restart" assumes a `restart` verb DOC-6 says is net-new on every tool | DOC-9 §5.1, DOC-6 §2.1–2.4 | — | ✅ Resolved |
 | M1 | MAJOR | "Zero tool-specific logic" is oversold (relocated, not eliminated) | spec §83; DOC-2 §6, DOC-5 §1/§2.2, DOC-6 §4, DOC-3 §7, DOC-7 | — | 🔴 Open |
 | M2 | MAJOR | `stack_version` tuple will rot (no test owner, no CI gate, embedded in the binary) | DOC-2 §4, Resolved-Q5 | — | 🔴 Open |
 | M3 | MAJOR | Cross-repo claude-mpm dependency is load-bearing in 4 places but never assessed as one systemic risk | DOC-6 §4, DOC-8 §4/§5, DOC-9 §3.4, DOC-10 §6 | — | 🔴 Open |
@@ -120,9 +120,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** the take-effect mechanism dispatches the `restart` contract verb, but DOC-6 marks `restart` ❌ absent/net-new on search/memory/analyze/review; presented as low-risk reuse. Also conflates "drains HTTP requests" (true) with "doesn't interrupt sessions" (false).
 - **Failure mode:** `tctl upgrade` silently gates on an unbuilt cross-crate retrofit; reader under-budgets it.
 - **Fix direction:** state `restart` is net-new per DOC-6 and the take-effect restart depends on that retrofit; separate request-drain from session-continuity.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** Option A — honest scoping, no design change. Keep restart-as-verb (per-OS knowledge in the member; controller stays tool-agnostic). DOC-9 §5.1 reframed to distinguish the grounded primitives (launchd bootout/bootstrap, #534 graceful drain in `trusty_common`) from the net-new `restart` contract verb, which DOC-6 §2.1–2.4 marks ❌ absent on every daemon (new `commands/restart.rs` on search/memory/analyze; review heaviest) — so take-effect depends on that DOC-6 T2-lifecycle retrofit, not free reuse; cross-linked to the m11 / DOC-6 §2 retrofit-scope realism. Request-drain (in-flight HTTP requests complete, #534) separated from session-continuity (NOT preserved — MCP/Claude Code sessions interrupted, `mcp_bridge` reconnects with backoff, in-flight session state lost), reconciling §5.1/§5.3 with the §3.2 blast-radius warning. B/C (controller-driven supervisor restart to avoid the net-new verbs) rejected for v1: would move per-OS supervision knowledge into the controller and ripple into DOC-1/5/6.
+- **Follow-up:** DOC-9 §5.1 + §5.3 reworded (net-new `restart` verb + DOC-6 dependency + m11 cross-link; request-drain vs session-continuity separation). No mechanism change. Implementation follow-up already tracked in DOC-6 §2.1–2.4 (the per-tool `restart` retrofit) and DOC-11 m11 (effort realism).
 
 ---
 

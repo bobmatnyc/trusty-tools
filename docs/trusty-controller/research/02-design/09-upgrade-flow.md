@@ -455,24 +455,43 @@ running daemon use it — the old process keeps serving until it is restarted.
 **The restart/reload step is therefore mandatory, not optional**, and is the
 defining responsibility of `tctl upgrade` over a bare `cargo install`.
 
-#### 5.1 Connection-safe graceful restart (daemons)
+#### 5.1 Graceful restart of daemons (request-drain, not session-continuity)
 
-For each upgraded `kind = "daemon"` member the controller drives a
-**connection-safe graceful restart** — the exact convention CLAUDE.md (#534)
-mandates and which `trusty_common` already implements:
+For each upgraded `kind = "daemon"` member the controller drives a graceful
+restart that **drains in-flight HTTP requests** before swapping in the new
+binary. Two things must be kept distinct here, because one is grounded reuse and
+the other is net-new work:
 
-- **SIGTERM, not SIGKILL.** Use `launchctl bootout` (sends SIGTERM) → `bootstrap`,
-  **never** `kickstart -k` (SIGKILL). As of trusty-common 0.10.0 all three HTTP
-  daemons implement graceful shutdown via `trusty_common::shutdown::shutdown_signal`
-  (verified: awaits SIGTERM/SIGINT, feeds axum `with_graceful_shutdown`), so they
-  **drain in-flight requests before exiting**. `mcp_bridge` reconnects with
-  exponential backoff across the bounce (CLAUDE.md #534).
-- **The primitives are grounded:** `trusty_common::launchd::LaunchdConfig::{bootout,
-  bootstrap}` (verified: `bootout` runs `launchctl bootout gui/<uid>/<label>` and
-  treats "not loaded" as success; `bootstrap` boots out first then
-  `launchctl bootstrap gui/<uid> <plist>`). The controller invokes the member's
-  **`restart` contract verb** (DOC-1 lifecycle / DOC-6: composed from `bootout` +
-  `bootstrap`), so the per-OS knowledge lives in the member, not the controller.
+- **The primitives are grounded.** The launchd bounce and the request-drain it
+  composes are already implemented in `trusty_common`. Use `launchctl bootout`
+  (sends SIGTERM) → `bootstrap`, **never** `kickstart -k` (SIGKILL):
+  `trusty_common::launchd::LaunchdConfig::{bootout,bootstrap}` (verified:
+  `bootout` runs `launchctl bootout gui/<uid>/<label>` and treats "not loaded"
+  as success; `bootstrap` boots out first then
+  `launchctl bootstrap gui/<uid> <plist>`). As of trusty-common 0.10.0 all three
+  HTTP daemons implement graceful shutdown via
+  `trusty_common::shutdown::shutdown_signal` (verified: awaits SIGTERM/SIGINT,
+  feeds axum `with_graceful_shutdown`), so they drain in-flight HTTP requests
+  before exiting — exactly the convention CLAUDE.md (#534) mandates.
+- **The `restart` contract verb is net-new.** What the controller actually
+  dispatches is the member's `restart` contract verb (DOC-1 lifecycle), and that
+  verb is **not yet built**: DOC-6 §2.1–2.4 marks `restart` as ❌ absent on every
+  daemon. Search, memory, and analyze each need a new `commands/restart.rs` that
+  composes the grounded `bootout` + `bootstrap` primitives above; review is the
+  heaviest retrofit. Keeping the per-OS knowledge inside the member's `restart`
+  verb (rather than the controller) is the deliberate architecture — but it means
+  the take-effect step, the defining responsibility of `tctl upgrade` over a bare
+  `cargo install`, **depends on** that DOC-6 T2-lifecycle retrofit landing. It is
+  not free reuse; this net-new `restart` surface is part of the retrofit-scope
+  realism noted in DOC-11 m11 / DOC-6 §2.
+- **Request-drain is not session-continuity.** The drain guarantees in-flight
+  HTTP requests complete before exit (true, #534) — it does **not** preserve
+  sessions. An MCP / Claude Code session bound to that daemon **is interrupted**
+  across the bounce: `mcp_bridge` reconnects with exponential backoff, but
+  in-flight session/stream state is lost. This is exactly what the §3.2
+  blast-radius warning states ("all active projects and sessions on this machine
+  will be interrupted") — the restart is connection-safe at the HTTP request
+  layer, not session-transparent.
 - **Linux** uses `systemctl --user restart` (or stop+start the foreground process)
   per DOC-8 §6; the deep matrix is DOC-10's. The cdhash caveat is macOS-only.
 
@@ -507,11 +526,17 @@ on stderr — DOC-5 §4):
     daemon up at 127.0.0.1:7879 (v0.25.0) … ok
 ```
 
-During the bounce the daemon is briefly unavailable; because the restart is
+During the bounce the daemon is briefly unavailable. Because the restart is
 graceful (drain-then-exit) and the controller waits for the daemon to answer
-`health` again before declaring the member done (§7), the window is the drain
-time plus a fast rebind — not an abrupt kill. A still-indexing project after
-restart is `project: pending`, **not** an error (DOC-3 §2 / DOC-4 §2.0 — exit 0).
+`health` again before declaring the member done (§7), the window is the
+request-drain time plus a fast rebind — not an abrupt kill. But "drain" is
+bounded to in-flight HTTP requests, not sessions: any MCP / Claude Code session
+bound to that daemon **is interrupted** across the bounce, consistent with the
+§3.2 blast-radius warning (`mcp_bridge` reconnects with backoff; in-flight
+session/stream state is lost). So the user sees a short unavailability window
+*and* a session interruption on bound daemons — not a transparent drain. A
+still-indexing project after restart is `project: pending`, **not** an error
+(DOC-3 §2 / DOC-4 §2.0 — exit 0).
 
 #### 5.4 The "restart between Claude Code sessions" convention
 
