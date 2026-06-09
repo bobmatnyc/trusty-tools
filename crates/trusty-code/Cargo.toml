@@ -45,6 +45,9 @@ async-trait = { workspace = true }
 # Phase 3: TOML config parsing for AgentConfig
 toml = { workspace = true }
 
+# Structured error types for library code (FsError, etc.)
+thiserror = { workspace = true }
+
 [dev-dependencies]
 # Async test runtime (events, build_info, perf async tests, tools tests)
 tokio = { workspace = true }
