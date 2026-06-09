@@ -130,15 +130,16 @@ Each stack member is one `[[member]]` entry. Fields:
 ```toml
 # cargo source — the common case (crates.io)
 install = { source = "cargo", crate = "trusty-search" }   # → cargo install trusty-search --locked
-# python source — claude-mpm today (DOC-0 forward-compat; DOC-8 §38 pipx/uvx)
-install = { source = "python", tool = "pipx", package = "claude-mpm" } # → pipx install claude-mpm
+# python source — claude-mpm today (DOC-0 forward-compat; DOC-6 Resolved Decision 5)
+install = { source = "python", tool = "uv", package = "claude-mpm" } # → uv tool install claude-mpm
 ```
 
 - `source = "cargo"` → the controller composes `cargo install <crate> --locked`
   (the exact command DOC-9 reuses via `trusty_common::update::perform_upgrade`,
   which already shells out to `cargo install <name> --locked`).
-- `source = "python"` → for the Python orchestrator; `tool` selects `pipx`/`uvx`
-  (DOC-8 §38). This is the *only* non-cargo install path.
+- `source = "python"` → for the Python orchestrator; `tool` selects `uv`
+  (DOC-6 Resolved Decision 5: `uv tool install claude-mpm`). This is the *only*
+  non-cargo install path.
 - **Sidecars are NOT members.** Per the single-install convention (CLAUDE.md;
   verified: `crates/trusty-search/Cargo.toml` declares `trusty-embedderd` as a
   bundled second binary so `cargo install trusty-search` installs *both*), the
@@ -242,10 +243,10 @@ id = "claude-mpm"
 display_name = "Claude MPM (orchestrator)"
 binary = "claude-mpm"
 kind = "orchestrator"                 # the pluggable orchestrator slot (DOC-0 A4 / DOC-3 §10)
-install = { source = "python", tool = "pipx", package = "claude-mpm" }
-version = "0.0.0"                     # placeholder — pinned by DOC-6 adapter design
+install = { source = "python", tool = "uv", package = "claude-mpm" }
+version = "0.0.0"                     # placeholder — pinned by DOC-10 discover-and-freeze mechanism
 min_contract_version = 1              # satisfied via the Python contract adapter (DOC-6)
-changelog = { source = "url", url = "https://raw.githubusercontent.com/<org>/claude-mpm/main/CHANGELOG.md", format = "keepachangelog" }
+changelog = { source = "url", url = "https://raw.githubusercontent.com/bobmatnyc/claude-mpm/main/CHANGELOG.md", format = "keepachangelog" }
 ```
 
 ### 4. "Stack version" definition
@@ -380,7 +381,7 @@ The manifest models the orchestrator as **one swappable member** (DOC-0 A4,
 DOC-3 §10), via the `kind = "orchestrator"` slot:
 
 - **Today:** the `claude-mpm` entry uses `install = { source = "python", tool =
-  "pipx", package = "claude-mpm" }` and a `source = "url"` changelog. Its contract
+  "uv", package = "claude-mpm" }` and a `source = "url"` changelog. Its contract
   surface is **synthesized by the Python adapter** (DOC-6); from the manifest's
   point of view it is just another `[[member]]` with a `min_contract_version`.
 - **Later:** when `trusty-mpm` (the in-house Rust replacement, not yet ready —
@@ -412,7 +413,7 @@ entry and (b) the DOC-6 adapter — never in the controller.
   repo cannot make the controller run an arbitrary install command.
 - **No code execution from the manifest.** The manifest is declarative data; the
   controller composes install/upgrade commands from a fixed set of `source`
-  templates (`cargo install …`, `pipx install …`) — it never executes a free-form
+  templates (`cargo install …`, `uv tool install …`) — it never executes a free-form
   command string from the manifest.
 
 ---
@@ -456,7 +457,7 @@ Source-first audit, 2026-06-08.
 | **Single-install / sidecars** | Verified: `crates/trusty-search/Cargo.toml` bundles `trusty-embedderd` as a second `[[bin]]` so `cargo install trusty-search` installs both; trusty-memory similarly parents `trusty-bm25-daemon`. | Sidecars get **no** `[[member]]` entry; they ride their parent's single install (§3). |
 | **Changelogs** | Every member crate has a `CHANGELOG.md`; they **already declare Keep a Changelog** format (search header confirms it) with `## [x.y.z] — DATE` headers and bolded headline list items. | Changelog format is **mostly grounded** — keepachangelog is standardized as the parse contract; net-new work is only making H2 headers reliably machine-parseable (§5). |
 | **UI discovery** | trusty-search/trusty-memory serve a UI at `/ui` and expose `port --json` / `port.lock`. | `ui = { available, path = "/ui", port_source = "port_json" }`; the live port is discovered at runtime, never pinned (§3). |
-| **claude-mpm install** | External Python tool; DOC-8 §38 confirms the install path is Python (pipx/uvx) — "the one path not [cargo]". | `install = { source = "python", tool = "pipx", package = "claude-mpm" }` (§3, §7). |
+| **claude-mpm install** | External Python tool; DOC-6 Resolved Decision 5 confirms the install path is `uv tool install claude-mpm` — "the one path not [cargo]". | `install = { source = "python", tool = "uv", package = "claude-mpm" }` (§3, §7). |
 | **The manifest itself** | **Fully net-new.** No manifest/BOM, no `stack_version`, no tool registry exists today. | This whole document. |
 
 ## Cross-cutting notes
@@ -492,8 +493,13 @@ Source-first audit, 2026-06-08.
 - [x] **Owner: resolve the open questions** (see Resolved Decisions below)
 - [ ] *(implementation-time)* wire best-effort changelog parsing + graceful
       degradation into DOC-9's upgrade flow
-- [ ] *(DOC-6-owned)* pin the canonical `claude-mpm` package name (pipx vs uvx),
-      first-BOM version, and authoritative changelog URL (currently placeholders)
+- [x] *(DOC-6-owned)* resolve the canonical `claude-mpm` install path and package
+      name (RESOLVED in DOC-6 Resolved Decision 5: `uv tool install claude-mpm`,
+      package `claude-mpm`, changelog URL
+      `https://raw.githubusercontent.com/bobmatnyc/claude-mpm/main/CHANGELOG.md`)
+- [x] *(DOC-10-owned)* discover-and-freeze the concrete `claude-mpm` version pin
+      (RESOLVED in DOC-10 Resolved Decision 3: harness captures version on first
+      run and flows it into DOC-2's manifest `version` field)
 
 ---
 
@@ -537,9 +543,12 @@ accordingly.
    failing. There is **no CI lint gate**; conformance is a convention, not an
    enforced gate (§5).
 
-6. **`claude-mpm` version & changelog URL pins — deferred to DOC-6.** *Confirmed.*
-   The orchestrator entry in the worked example uses placeholders in v1
-   (`version = "0.0.0"`, a `<org>` changelog URL). The canonical package name
-   (pipx vs uvx), the pinned version, and the authoritative raw `CHANGELOG.md`
-   URL are owned by the orchestrator-adapter design (DOC-6) and remain
-   placeholders here until DOC-6 finalizes them.
+6. **`claude-mpm` package name, install mechanism, changelog URL, and version pin
+   — resolved across DOC-6 and DOC-10.** *Confirmed.* The orchestrator entry
+   uses `install = { source = "python", tool = "uv", package = "claude-mpm" }`
+   (resolved in DOC-6 Resolved Decision 5) with changelog URL
+   `https://raw.githubusercontent.com/bobmatnyc/claude-mpm/main/CHANGELOG.md`.
+   The version placeholder (`version = "0.0.0"`) is replaced by DOC-10's
+   discover-and-freeze mechanism (DOC-10 Resolved Decision 3): the harness
+   installs claude-mpm unpinned, captures the resolved version, and freezes it
+   as the BOM pin, flowing back into this field.

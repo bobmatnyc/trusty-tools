@@ -1,6 +1,6 @@
 # DOC-10 — Isolation Testing Harness (MUC1, MUC2)
 
-**Status:** Draft (drafted; open questions for owner)
+**Status:** Accepted (owner-approved)
 **Source spec:** ../01-spec/trusty-end-to-end-setup.md
 **Consumes:** [DOC-5](./05-controller-cli.md) (Accepted), [DOC-8](./08-install-bootstrap.md) (Accepted), [DOC-9](./09-upgrade-flow.md) (Accepted), [DOC-4](./04-doctor-health-rollup.md) (Accepted), [DOC-2](./02-stack-manifest-and-versioning.md) (Accepted)
 **Gated by:** [DOC-6](./06-contract-conformance-and-mpm-adapter.md) (Accepted) — only conformant members can be installed/rolled-up/asserted; `tctl doctor --self-check` (DOC-6 §8) is reused as the per-member conformance gate.
@@ -575,8 +575,8 @@ existing integration-test patterns confirmed).
 - [x] Recommend CI-vs-maintainer split (Linux per-PR, macOS nightly/manual) (§6b)
 - [x] Specify harness mechanics (released vs worktree BOM; provision/teardown;
       where it lives) (§7)
-- [ ] **Owner: resolve the Open Questions below**
-- [ ] Team review → Accepted
+- [x] **Owner: resolve the decisions** (all 6 approved, 2026-06-09)
+- [ ] Team review → ready to implement
 - [ ] *(implementation-time)* build `crates/trusty-controller/tests/isolation_harness.rs`
       + `tests/isolation/provision-{macos,linux}.sh` + `make` targets, reusing the
       `bundled_install.rs`/baseline-suite patterns and the `trusty_common::contract`
@@ -590,57 +590,49 @@ existing integration-test patterns confirmed).
 
 ---
 
-## Open Questions for Owner
+## Resolved Decisions
 
-1. **macOS VM tooling — confirm `tart` as the canonical local tool (§3.2).** The
-   draft recommends **tart** (Apple-Silicon-native, CI-standard, disposable
-   lifecycle) for self-hosted/maintainer-local macOS isolation, with lima (Linux
-   guests only), UTM (GUI-first), and Anka (commercial) as fallbacks; and treats a
-   GitHub-hosted `macos-14` runner as *itself* the isolation host in CI (no nested
-   VM). **Recommendation: adopt tart locally + `macos-14` runner in CI.** Does the
-   owner approve tart as the canonical local choice, or is there an existing
-   macOS-VM investment (e.g. Anka infrastructure) the harness should target instead?
+All six decisions were approved by the owner (owner-approved, 2026-06-09).
 
-2. **Does v1 ship the systemd-user Linux leg, or only the foreground container leg?
-   (§4.1).** The container harness uses foreground/daemonless supervision (no
-   systemd), which fully exercises install→ready→upgrade. The *systemd-user* product
-   path (DOC-8 §6) needs a full Linux VM with a user session to validate its unit
-   content. **Recommendation: ship the foreground container leg in v1 (every-PR
-   gate); make the systemd-user VM leg a deferred, manual/nightly add-on.** Does the
-   owner want the systemd-user VM leg in v1 scope, or deferred?
+1. **macOS VM tooling — adopt `tart` as the canonical local tool (§3.2).** *Approved
+   as drafted.* The harness uses **tart** (Apple-Silicon-native, CI-standard,
+   disposable lifecycle) as the canonical local macOS isolation tool, with lima
+   (Linux guests only), UTM (GUI-first), and Anka (commercial) as documented
+   fallbacks. In CI, the GitHub-hosted **`macos-14` runner** itself serves as the
+   isolation host (no nested VM); the runner's separate login session and uid
+   provide the required launchd isolation (§3.2).
 
-3. **claude-mpm pin: discover-and-freeze, or owner-specified up front? (§6).** The
-   draft's mechanism installs claude-mpm unpinned the *first* time, captures what
-   `uv` resolved, and freezes that as the asserted BOM pin (re-captured when the shim
-   is updated). The alternative is the owner naming a specific claude-mpm version up
-   front that the shim is built/tested against. **Recommendation: discover-and-freeze
-   (the harness picks the version it validated), with the owner able to override to a
-   named version.** Should the harness pick the version, or does the owner want to
-   nominate a specific claude-mpm release for the first BOM? (This is the one
-   cross-repo dependency — DOC-6 §4.)
+2. **Linux legs in v1 — ship foreground/daemonless container leg; systemd-user VM
+   is deferred (§4.1).** *Approved as drafted.* v1 ships the **foreground
+   container leg** (no systemd, every-PR gate) fully exercising install→ready→upgrade
+   in a stock Docker container. The *systemd-user* product path (DOC-8 §6) is
+   validated separately on a **full Linux VM** (lima/cloud), run manually/nightly,
+   not on every PR. This resolves DOC-8 Q6 for the harness: the container harness
+   uses foreground/daemonless supervision because standard Docker has no systemd.
 
-4. **Where the harness lives — confirm `crates/trusty-controller/tests/` + shell
-   provisioning scripts (§7.3).** The draft puts the assertion driver in
+3. **claude-mpm pin — discover-and-freeze, with owner override (§6).** *Approved as
+   drafted.* The harness installs claude-mpm **unpinned** the first time
+   (`uv tool install claude-mpm`), probes the resolved version via the DOC-6 shim,
+   and **freezes that as the asserted BOM orchestrator pin** (flowing back into
+   DOC-2's manifest `version`, replacing the `0.0.0` placeholder). The owner may
+   override with a named version. Re-capturing occurs when the shim is updated
+   (DOC-6 §5 bump-in-lockstep). This satisfies cross-repo dependency on DOC-6.
+
+4. **Harness location — Rust test + shell provisioning + new workflow (§7.3).**
+   *Approved as drafted.* Assertions live in
    `crates/trusty-controller/tests/isolation_harness.rs` (`#[ignore]`-tagged,
-   generalizing `bundled_install.rs`/the baseline suite), the VM/container lifecycle
-   in `crates/trusty-controller/tests/isolation/*.sh`, and CI in a new
-   `.github/workflows/isolation.yml`. **Recommendation: as drafted (Rust assertions +
-   shell provisioning + new workflow).** Does the owner prefer a different home —
-   e.g. a dedicated top-level `scripts/isolation/` for the shell parts, or a separate
-   harness crate?
+   generalizing `bundled_install.rs` and the baseline suite); VM/container
+   provisioning and teardown in shell scripts under `crates/trusty-controller/tests/isolation/`
+   (or `scripts/isolation/`); CI scheduling in a new `.github/workflows/isolation.yml`.
 
-5. **CI cadence for the macOS leg — nightly cron vs manual-only? (§6b).** The draft
-   recommends the Linux container leg on **every PR** (cheap) and the macOS leg
-   **nightly + `workflow_dispatch`** (costly hosted-macOS minutes), mirroring
-   `al2023-build.yml`. **Recommendation: macOS nightly + manual; Linux per-PR.** Is a
-   nightly macOS run acceptable given hosted-macOS minute costs, or should the macOS
-   leg be **manual-only** (`workflow_dispatch`) until a stack-version cut?
+5. **CI cadence — macOS nightly + `workflow_dispatch`; Linux every PR (§6b).**
+   *Approved as drafted.* The Linux container leg runs **every PR** (cheap, path-filtered
+   to controller + harness + BOM). The macOS leg runs **nightly cron + manual
+   `workflow_dispatch`** (costly hosted-macOS minutes), mirroring the established
+   `al2023-build.yml` precedent.
 
-6. **`released` vs `worktree` as the default harness source (§7.1).** The draft
-   supports both and defaults to **`released`** (truest UUC2 — installs from
-   crates.io exactly as a user would) for CI/regression, with `worktree` (install the
-   working tree's freshly-built binaries) for pre-publish validation.
-   **Recommendation: default `released` in CI; `worktree` opt-in for local
-   pre-release checks.** Confirm, or should the per-PR CI gate instead test the
-   `worktree` build (catching unreleased regressions earlier, at the cost of not
-   testing the real published install path)?
+6. **Harness source — default `released`; `worktree` opt-in (§7.1).** *Approved as
+   drafted.* The harness defaults to **`released`** mode (installs from crates.io,
+   testing the real published install path, truest UUC2) for CI regression and
+   maintainer usage. The **`worktree` opt-in** (install freshly-built binaries from
+   the working tree) is available for pre-release validation before publishing.
