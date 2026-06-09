@@ -355,27 +355,35 @@ async fn health_includes_embedder_info_when_ready() {
 /// Why: with only `num_cpus` workers (e.g. 8 on a 4-core machine) and
 /// embed-pool tasks blocking on 30 s sidecar calls, the axum accept loop
 /// is scheduled too rarely, causing health probes to time out.
-/// What: verifies the worker-thread formula `max(available_parallelism, 16)`
-/// produces a value >= 16 regardless of available parallelism.
+/// What: verifies the `worker_thread_count` helper enforces the 16-thread
+/// floor — specifically that a single-CPU machine is lifted to 16, and
+/// that a 32-CPU machine is NOT clamped (returns 32). The helper is also
+/// used in `main()` so this test guards any future removal of the floor.
 /// Test: this test.
 #[test]
 fn worker_thread_count_at_least_16() {
-    let cpu_count = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    let worker_threads = std::cmp::max(cpu_count, 16);
-    assert!(
-        worker_threads >= 16,
-        "worker_threads must be at least 16; got {worker_threads} (cpu_count={cpu_count})"
+    use crate::worker_thread_count;
+
+    // Floor: a 1-CPU machine must produce exactly 16 workers.
+    assert_eq!(
+        worker_thread_count(1),
+        16,
+        "worker_thread_count(1) must return 16 (floor enforced)"
     );
 
-    // Also verify a multi-thread runtime can be built with this count — the
-    // test confirms the formula and API are correct without spawning the full daemon.
+    // Pass-through: a 32-CPU machine must produce exactly 32 workers.
+    assert_eq!(
+        worker_thread_count(32),
+        32,
+        "worker_thread_count(32) must return 32 (no artificial cap)"
+    );
+
+    // Verify the runtime can actually be built with the floor count.
     let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(worker_threads)
+        .worker_threads(worker_thread_count(1))
         .enable_all()
         .build()
-        .expect("runtime builder must succeed with worker_threads >= 16");
+        .expect("runtime builder must succeed with worker_thread_count(1) == 16");
     // rt is intentionally dropped immediately — we only needed to verify it builds.
     drop(rt);
 }

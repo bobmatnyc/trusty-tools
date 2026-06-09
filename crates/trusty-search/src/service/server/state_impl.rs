@@ -67,6 +67,8 @@ impl SearchAppState {
                 crate::service::server::state::WarmBootSummary::default(),
             )),
             prior_index_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            last_rss_mb: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            last_cpu_pct_bits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -288,7 +290,7 @@ impl SearchAppState {
     /// authoritative readiness signal.
     ///
     /// What: calls `try_read()` on the embedder slot; returns `Some(embedder)`
-    /// when the lock is uncontested and the slot is populated, `None` otherwise.
+    /// when the lock is uncontended and the slot is populated, `None` otherwise.
     /// Callers that receive `None` should fall back to the last-known status
     /// (e.g. from `is_embedder_ready()`) rather than awaiting.
     ///

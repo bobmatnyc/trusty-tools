@@ -975,12 +975,12 @@ enum IntentArg {
 /// Embed-pool workers block on 30 s sidecar calls; with only num_cpus workers the
 /// axum accept loop starves under heavy CoreML/CUDA load → false "daemon down".
 /// What: `max(available_parallelism, 16)` workers. Blocking pool unchanged (512).
-/// Test: `worker_thread_count_at_least_16` in tests_health.
+/// Test: `worker_thread_count_at_least_16` in tests_state.rs.
 fn main() {
     let cpu_count = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    let worker_threads = std::cmp::max(cpu_count, 16);
+    let worker_threads = trusty_search::worker_thread_count(cpu_count);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(worker_threads)
         .enable_all()

@@ -23,9 +23,13 @@ pub(super) struct HealthResponse {
     pub(super) embedder: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) embedder_error: Option<String>,
+    /// Process RSS in MB. On `try_lock` contention returns the last
+    /// successfully-sampled value; `0` only before the very first sample.
     pub(super) rss_mb: u64,
     pub(super) rss_limit_mb: u64,
     pub(super) disk_bytes: u64,
+    /// CPU usage percent. Same staleness semantics as `rss_mb`: returns the
+    /// last good sample on contention, `0.0` only before the first sample.
     pub(super) cpu_pct: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) embedder_info: Option<EmbedderInfo>,
@@ -113,15 +117,32 @@ pub(super) async fn health_handler(
     // Mutex because sysinfo derives CPU% from the delta between refreshes.
     //
     // Issue #1006 — Option B: use `try_lock()` instead of `.lock().await` so
-    // the health handler never parks waiting for the sys-metrics lock. When
-    // the lock is held (highly unlikely — only the health handler itself takes
-    // it), skip the sample and return the last-known zeroed values. `/health`
-    // must be fast and liveness-only; a single missed sample is acceptable.
+    // the health handler never parks waiting for the sys-metrics lock.
+    //
+    // Issue #1016 review: on contention return the last successfully-sampled
+    // values from the atomic cache instead of zeros — zeroed metrics can
+    // false-alarm monitors that alert on rss_mb == 0 or cpu_pct == 0.
     let (rss_mb, cpu_pct) = if let Ok(mut metrics) = state.sys_metrics.try_lock() {
-        metrics.sample()
+        let (rss, cpu) = metrics.sample();
+        // Update the atomic cache so contended future polls have a real fallback.
+        state
+            .last_rss_mb
+            .store(rss, std::sync::atomic::Ordering::Relaxed);
+        state
+            .last_cpu_pct_bits
+            .store(cpu.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        (rss, cpu)
     } else {
-        // Lock contended: return neutral values rather than blocking.
-        (0u64, 0.0f32)
+        // Lock contended: return the last successfully-sampled values.
+        // Falls back to (0, 0.0) only before the very first sample lands,
+        // which is preferable to blocking the handler.
+        let rss = state.last_rss_mb.load(std::sync::atomic::Ordering::Relaxed);
+        let cpu = f32::from_bits(
+            state
+                .last_cpu_pct_bits
+                .load(std::sync::atomic::Ordering::Relaxed),
+        );
+        (rss, cpu)
     };
     // `rss_limit_mb` mirrors the resolved TRUSTY_MEMORY_LIMIT_MB soft cap.
     // `memory_limit_mb()` returns `None` when no limit is configured.

@@ -292,6 +292,25 @@ pub struct SearchAppState {
     /// after warm-boot completes. `0` = no prior run known (first run).
     /// Test: `health_emits_fda_hint_when_loaded_below_prior_count`.
     pub prior_index_count: Arc<std::sync::atomic::AtomicUsize>,
+    /// Cached RSS (MB) from the most recent successful `sys_metrics.sample()`.
+    ///
+    /// Why (issue #1016): when `sys_metrics.try_lock()` fails in the health
+    /// handler (i.e. another health poll is concurrently sampling), returning 0
+    /// causes monitors that alert on `rss_mb == 0` to false-alarm. Caching the
+    /// last good sample and returning it on contention prevents false alarms.
+    /// What: an `AtomicU64` written on every successful `SysMetrics::sample()`
+    /// call; read by `health_handler` as a fallback when `try_lock()` fails.
+    /// `0` only on the very first health poll before any sample has ever landed.
+    /// Test: `health_rss_fallback_on_contention` in tests_state.rs.
+    pub last_rss_mb: Arc<std::sync::atomic::AtomicU64>,
+    /// Cached CPU percentage (f32 bits) from the last successful sample.
+    ///
+    /// Why (issue #1016): same rationale as `last_rss_mb` — avoids returning
+    /// `cpu_pct == 0.0` when the metrics lock is transiently contended.
+    /// What: stores `f32::to_bits()` in an `AtomicU32`; `health_handler` reads
+    /// it via `f32::from_bits()` on contention.
+    /// Test: `health_rss_fallback_on_contention` in tests_state.rs.
+    pub last_cpu_pct_bits: Arc<std::sync::atomic::AtomicU32>,
 }
 
 /// Per-boot summary of warm-boot index loading, surfaced on `GET /health`.
