@@ -151,6 +151,13 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     // Best-effort removal of the discovery file on clean shutdown.
     // Only remove the file if it still points to our address; another
     // instance may have already written a new one.
+    //
+    // RESIDUAL RACE: the read → compare → delete sequence is not atomic. A
+    // second instance could write a new address between our read and our
+    // remove_file, causing us to delete a file we should not. The window is
+    // tiny (milliseconds) and the consequence is cosmetic (a stale `port`
+    // invocation returns the default rather than the live address). No
+    // behavior change is required — this comment documents the known race.
     if let Ok(Some(recorded)) = trusty_common::read_daemon_addr("trusty-console")
         && recorded == addr_string
         && let Ok(dir) = trusty_common::resolve_data_dir("trusty-console")

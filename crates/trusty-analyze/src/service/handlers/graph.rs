@@ -24,7 +24,7 @@ use crate::core::{
     bow_embedding, cluster as run_cluster, extract_doc_comments, extract_kg_from_scip,
     ClusterResult, NerExtractor, ScipIngestSummary,
 };
-use crate::embedder::{BowEmbedder, Embedder, EmbedderKind};
+use crate::embedder::{Embedder, EmbedderKind};
 use crate::service::events::{fetch_chunks, AnalyzerAppState, AnalyzerEvent, ApiError};
 use crate::types::{KgGraph, KgNode, RawEntity};
 
@@ -177,10 +177,9 @@ pub async fn clusters_for_index(
 
     // Resolve embedder. For neural, defer to the shared state embedder (which
     // may itself be BOW if fastembed failed to load at startup). For BOW,
-    // construct a fresh stateless BowEmbedder so we never go through fastembed
-    // when the user explicitly asked for BOW.
+    // the bow_embedding free function is called directly — no BowEmbedder
+    // allocation needed.
     let neural_embedder: Arc<dyn Embedder> = state.embedder.clone();
-    let bow_embedder = BowEmbedder::with_dim(BOW_DIM);
     let effective_kind_initial: EmbedderKind = match method {
         EmbedderKind::Neural => neural_embedder.kind(),
         EmbedderKind::Bow => EmbedderKind::Bow,
@@ -238,9 +237,6 @@ pub async fn clusters_for_index(
             (fallback, EmbedderKind::Bow, BOW_DIM)
         }
     };
-    // Suppress unused-variable warning if bow_embedder was not directly used
-    let _ = &bow_embedder;
-
     let embeddings: Vec<(String, Vec<f32>)> = chunks
         .iter()
         .zip(vecs)

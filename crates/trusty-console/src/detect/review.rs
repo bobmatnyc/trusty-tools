@@ -54,6 +54,15 @@ impl ReviewConnector {
     }
 
     fn addr_file_path(&self) -> PathBuf {
+        // NOTE: This uses `~/.trusty-review/http_addr` (home-anchored), which
+        // is consistent with the path that trusty-review's write_daemon_addr
+        // writes when `dirs::data_dir()` is None and the fallback
+        // `~/.trusty-review` branch of `resolve_data_dir` is taken. On macOS
+        // where `dirs::data_dir()` returns `~/Library/Application Support`,
+        // the daemon writes to `~/Library/Application Support/trusty-review/
+        // http_addr` instead. This connector reads the home-fallback path only
+        // — it will miss the daemon on macOS unless `TRUSTY_DATA_DIR_OVERRIDE`
+        // forces the home path. Tracked for future alignment in #979.
         let home = self
             .home_dir
             .clone()
@@ -113,42 +122,51 @@ mod tests {
     }
 
     /// Why: when http_addr contains a valid but unreachable address, the
-    /// connector must return Available (binary present, file present, TCP failed).
-    /// This test requires `trusty-review` to NOT be on PATH — it short-circuits
-    /// to Absent if it is, which is the correct behaviour in that environment.
+    /// connector must return Available (binary present, file present, TCP failed)
+    /// when the binary is on PATH, or Absent when it is not.
     /// What: creates a fake HOME with `.trusty-review/http_addr = 127.0.0.1:14995`
-    /// and calls detect(); expects either Absent (binary not on PATH in CI) or
-    /// Available (binary on PATH, TCP fails on 14995).
+    /// and calls detect(); branches on `which::which("trusty-review")` so the
+    /// assertion is deterministic in both CI (no binary) and dev (binary present).
     /// Test: this test itself.
     #[test]
     fn test_review_connector_with_stale_addr_file() {
         let tmp = make_home_with_addr(".trusty-review/http_addr", "127.0.0.1:14995");
         let connector = ReviewConnector::with_home(tmp.path().to_path_buf());
         let info = connector.detect();
-        // Either Absent (no binary) or Available (binary present, TCP stale).
-        assert!(
-            info.status == ServiceStatus::Absent || info.status == ServiceStatus::Available,
-            "expected Absent or Available, got {:?}",
-            info.status
-        );
+        let binary_present = which::which("trusty-review").is_ok();
+        if binary_present {
+            assert_eq!(
+                info.status,
+                ServiceStatus::Available,
+                "binary present, stale TCP → Available"
+            );
+        } else {
+            assert_eq!(info.status, ServiceStatus::Absent, "binary absent → Absent");
+        }
         assert_eq!(info.id, "trusty-review");
         assert_eq!(info.display_name, "Trusty Review");
     }
 
-    /// Why: when no http_addr file exists, detect() must return Absent or
-    /// Available depending on whether the binary is on PATH.
-    /// What: temp HOME with no trusty-review dir.
+    /// Why: when no http_addr file exists, the result depends only on whether
+    /// the binary is on PATH.
+    /// What: temp HOME with no trusty-review dir; branches on
+    /// `which::which("trusty-review")` for a deterministic assertion.
     /// Test: this test itself.
     #[test]
     fn test_review_connector_no_addr_file() {
         let tmp = TempDir::new().expect("tempdir");
         let connector = ReviewConnector::with_home(tmp.path().to_path_buf());
         let info = connector.detect();
-        assert!(
-            info.status == ServiceStatus::Absent || info.status == ServiceStatus::Available,
-            "expected Absent or Available, got {:?}",
-            info.status
-        );
+        let binary_present = which::which("trusty-review").is_ok();
+        if binary_present {
+            assert_eq!(
+                info.status,
+                ServiceStatus::Available,
+                "binary present, no addr file → Available"
+            );
+        } else {
+            assert_eq!(info.status, ServiceStatus::Absent, "binary absent → Absent");
+        }
         assert!(info.url.is_none());
     }
 }

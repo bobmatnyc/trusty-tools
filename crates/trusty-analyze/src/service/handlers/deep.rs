@@ -185,17 +185,7 @@ pub(crate) fn synthesise_review_from_chunks(
             .map(|c| c.content.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        let lang = match path.rsplit('.').next().unwrap_or("") {
-            "rs" => "rust",
-            "ts" => "typescript",
-            "tsx" => "tsx",
-            "js" => "javascript",
-            "jsx" => "jsx",
-            "py" => "python",
-            "go" => "go",
-            "java" => "java",
-            _ => "unknown",
-        };
+        let lang = super::lang_for_extension(&path);
         let metrics = compute_complexity_for(&joined, lang);
         let raw_smells = detect_smells(&joined);
         let smells: Vec<SmellHit> = raw_smells

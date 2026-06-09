@@ -132,12 +132,13 @@ pub async fn serve(state: AnalyzerAppState, start_port: u16) -> Result<()> {
     // Best-effort removal of the daemon address file on clean shutdown so the
     // next `trusty-analyze port` invocation does not return a stale address.
     // Mirrors trusty-search's `daemon.rs` cleanup (see service/daemon.rs).
-    // Errors are intentionally ignored — the lockfile, not the addr file, is
-    // what gates the next daemon instance.
-    if let Ok(Some(_)) = trusty_common::read_daemon_addr("trusty-analyze") {
-        if let Ok(dir) = trusty_common::resolve_data_dir("trusty-analyze") {
-            let _ = std::fs::remove_file(dir.join("http_addr"));
-        }
+    // The read_daemon_addr() guard that was here previously was removed:
+    // remove_file already ignores NotFound, so the guard only introduced a
+    // TOCTOU window (another process could create the file between the read
+    // and the remove). Errors are intentionally ignored — the lockfile, not
+    // the addr file, is what gates the next daemon instance.
+    if let Ok(dir) = trusty_common::resolve_data_dir("trusty-analyze") {
+        let _ = std::fs::remove_file(dir.join("http_addr"));
     }
     Ok(())
 }

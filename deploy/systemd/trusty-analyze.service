@@ -100,6 +100,15 @@ RestartSec=5
 # relative to `$HOME/.trusty-tools/trusty-analyze/` (XDG / dirs-rs default)
 # regardless of WorkingDirectory, but pointing WorkingDirectory at the data
 # volume is good practice for log aggregation.
+#
+# The directory /data/trusty-analyze must exist before the service starts.
+# Either create it once during provisioning:
+#   sudo mkdir -p /data/trusty-analyze && sudo chown trusty:trusty /data/trusty-analyze
+# or let systemd create it at start time by uncommenting:
+#   RuntimeDirectory=trusty-analyze  (creates /run/trusty-analyze; survives only the run)
+# or:
+#   StateDirectory=trusty-analyze    (creates /var/lib/trusty-analyze; persists across reboots)
+ExecStartPre=/bin/mkdir -p /data/trusty-analyze
 WorkingDirectory=/data/trusty-analyze
 
 # ── Environment ──────────────────────────────────────────────────────────────
@@ -140,11 +149,6 @@ Environment=RUST_LOG=info
 # Environment=AWS_ACCESS_KEY_ID=…
 # Environment=AWS_SECRET_ACCESS_KEY=…
 # Environment=AWS_SESSION_TOKEN=…
-
-# ── trusty-search URL (alternative to --search-url flag) ─────────────────────
-# Setting TRUSTY_SEARCH_URL here is equivalent to passing --search-url.
-# Useful when the search daemon port changes across environments.
-# Environment=TRUSTY_SEARCH_URL=http://127.0.0.1:7878
 
 # ── ONNX Runtime (load-dynamic builds only) ──────────────────────────────────
 # ORT_DYLIB_PATH: required on Amazon Linux 2023 (glibc < 2.38) with the

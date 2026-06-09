@@ -14,8 +14,9 @@
 //!   - `--json`: JSON object      →  `{"addr":"127.0.0.1","port":7879}\n`
 //!
 //! Every intentional port/JSON output goes to **stdout**. Error messages go to
-//! **stderr**. When no daemon is running the command exits non-zero so shell
-//! substitution (`$(trusty-analyze port)`) fails cleanly.
+//! **stderr**. When no daemon is running the command falls back to the compiled-in
+//! default address and prints a stderr warning; it exits 0 so scripted callers
+//! that start the daemon after querying the port are not broken by the check.
 //!
 //! Test: unit tests in this module cover all three output formats plus the
 //! missing-daemon error path using a fake address string.
@@ -60,10 +61,14 @@ pub fn parse_port_from_addr(addr: &str) -> Option<u16> {
 /// Why: separating the formatting logic from the I/O lets unit tests assert
 /// the output string without spawning a daemon or touching a lockfile.
 /// What: takes a validated `host:port` string plus the desired format and
-/// returns the formatted string. Returns `None` when the port cannot be
-/// parsed (which indicates a corrupt or empty discovery file).
-/// Test: `format_port_output_*` unit tests cover all three variants and the
-/// malformed-addr None path.
+/// returns the formatted string. For the JSON format, IPv6 bracket notation
+/// (e.g. `[::1]`) is stripped from the `addr` field because the JSON consumer
+/// receives a plain hostname, not a URI — the brackets are only required in
+/// URI authority syntax. The `--addr` output keeps the original string
+/// unchanged for URI validity. Returns `None` when the port cannot be parsed
+/// (which indicates a corrupt or empty discovery file).
+/// Test: `format_port_output_*` unit tests cover all three variants, the IPv6
+/// bracket-stripping behaviour for the JSON path, and the malformed-addr None path.
 pub fn format_output(addr: &str, format: PortFormat) -> Option<String> {
     match format {
         PortFormat::Port => {
@@ -74,7 +79,11 @@ pub fn format_output(addr: &str, format: PortFormat) -> Option<String> {
         PortFormat::Json => {
             let port = parse_port_from_addr(addr)?;
             let colon = addr.rfind(':')?;
-            let host = &addr[..colon];
+            let host_part = &addr[..colon];
+            // Strip surrounding brackets for IPv6 addresses (e.g. `[::1]` → `::1`)
+            // so the JSON `addr` field contains a plain host, not a URI bracket form.
+            // Matches trusty-review's port.rs implementation.
+            let host = host_part.trim_matches(|c| c == '[' || c == ']');
             Some(format!(r#"{{"addr":"{host}","port":{port}}}"#))
         }
     }
@@ -88,10 +97,11 @@ pub fn format_output(addr: &str, format: PortFormat) -> Option<String> {
 /// What: reads the address from the `http_addr` discovery file via
 /// `trusty_common::read_daemon_addr("trusty-analyze")`, formats it per the
 /// caller's flags, and prints to stdout. Falls back to the compiled-in
-/// `DEFAULT_PORT` (7879) so the command is useful even when no daemon is
-/// running (e.g. in scripts that start the daemon after querying the port).
-/// On a parse error (corrupt address) the message goes to stderr and the
-/// function returns `Err`.
+/// `DEFAULT_PORT` (7879) when no discovery file exists, printing a stderr
+/// warning so operators know the value is a default/fallback rather than the
+/// live daemon's address. Exits 0 in the fallback case so scripts that start
+/// the daemon after querying the port are not broken by the check. On a parse
+/// error (corrupt address) the message goes to stderr and exits non-zero.
 /// Test: unit tests cover all format variants and the missing-file fallback;
 /// the fallback to DEFAULT_PORT is verified by `handle_port_fallback_to_default`.
 pub fn handle_port(format: PortFormat) -> Result<()> {
@@ -100,7 +110,13 @@ pub fn handle_port(format: PortFormat) -> Result<()> {
         Ok(Some(_)) | Ok(None) => {
             // No discovery file — fall back to the default port so scripts
             // that call `trusty-analyze port` before starting the daemon still
-            // get a usable answer. Mirror trusty-memory's fallback behavior.
+            // get a usable answer. Print a warning so callers know this is the
+            // compiled-in default, not the live daemon's address.
+            eprintln!(
+                "trusty-analyze: no daemon running (address file not found); \
+                 reporting compiled-in default {DEFAULT_PORT}. \
+                 Start with `trusty-analyze serve` for the live address."
+            );
             format!("127.0.0.1:{DEFAULT_PORT}")
         }
         Err(e) => {
@@ -174,6 +190,19 @@ mod tests {
     #[test]
     fn format_port_output_ipv6_port() {
         assert_eq!(parse_port_from_addr("[::1]:7879"), Some(7879));
+    }
+
+    /// `--json` with an IPv6 address strips the brackets from the `addr` field.
+    ///
+    /// Why: JSON consumers expect a plain hostname (`::1`), not the URI
+    /// bracket form (`[::1]`); the `--addr` output keeps brackets for URI
+    /// validity, but JSON is a different serialisation context.
+    #[test]
+    fn format_port_output_json_ipv6_strips_brackets() {
+        assert_eq!(
+            format_output("[::1]:7879", PortFormat::Json),
+            Some(r#"{"addr":"::1","port":7879}"#.to_string())
+        );
     }
 
     /// A corrupt address (no `:`) returns `None` instead of panicking.

@@ -71,8 +71,10 @@ impl AnalyzeConnector {
     /// Why: trusty-analyze's fixed default port is 7879. Used as a fallback
     /// when no http_addr file is found.
     /// What: Returns the address string `"127.0.0.1:7879"`.
-    /// Test: Covered by the detect() fallback path.
-    fn default_addr() -> &'static str {
+    /// Test: Covered by the detect() fallback path and
+    /// `test_analyze_connector_*` tests that branch on whether the default
+    /// port has a daemon running.
+    pub(crate) fn default_addr() -> &'static str {
         "127.0.0.1:7879"
     }
 }
@@ -163,6 +165,7 @@ impl ServiceConnector for AnalyzeConnector {
 
 #[cfg(test)]
 mod tests {
+    use super::super::helpers::tcp_probe;
     use super::*;
     use std::fs;
     use tempfile::TempDir;
@@ -175,36 +178,70 @@ mod tests {
         tmp
     }
 
-    /// Why: stale addr file must yield Available (not Running) because TCP fails.
-    /// What: creates `.trusty-analyze/http_addr = 127.0.0.1:14996`.
+    /// Why: stale addr file must yield Available (not Running) because TCP on
+    /// port 14996 fails. However, the AnalyzeConnector also probes the default
+    /// port 7879 as a fallback. If `trusty-analyze` is running on 7879 in the
+    /// test environment this test returns Running — which is correct behaviour.
+    /// What: creates `.trusty-analyze/http_addr = 127.0.0.1:14996` and calls
+    /// detect(); branches on whether the binary is present and the default port
+    /// is reachable, producing a deterministic assertion regardless of environment.
     /// Test: this test itself.
     #[test]
     fn test_analyze_connector_with_stale_addr_file() {
         let tmp = make_home_with_addr(".trusty-analyze/http_addr", "127.0.0.1:14996");
         let connector = AnalyzeConnector::with_home(tmp.path().to_path_buf());
         let info = connector.detect();
-        assert!(
-            info.status == ServiceStatus::Absent || info.status == ServiceStatus::Available,
-            "expected Absent or Available, got {:?}",
-            info.status
-        );
+        let binary_present = which::which("trusty-analyze").is_ok();
+        let default_running = tcp_probe(AnalyzeConnector::default_addr());
+        if !binary_present {
+            assert_eq!(info.status, ServiceStatus::Absent, "binary absent → Absent");
+        } else if default_running {
+            assert_eq!(
+                info.status,
+                ServiceStatus::Running,
+                "binary present, default port running → Running"
+            );
+        } else {
+            assert_eq!(
+                info.status,
+                ServiceStatus::Available,
+                "binary present, no running daemon → Available"
+            );
+        }
         assert_eq!(info.id, "trusty-analyze");
         assert_eq!(info.display_name, "Trusty Analyze");
     }
 
-    /// Why: no addr file and no running daemon must yield Absent or Available.
-    /// What: empty temp HOME.
+    /// Why: no addr file; result depends on whether the binary is present and
+    /// the daemon is running on the default port.
+    /// What: empty temp HOME; branches deterministically on
+    /// `which::which("trusty-analyze")` and a probe of the default port.
     /// Test: this test itself.
     #[test]
     fn test_analyze_connector_no_addr_file() {
         let tmp = TempDir::new().expect("tempdir");
         let connector = AnalyzeConnector::with_home(tmp.path().to_path_buf());
         let info = connector.detect();
+        let binary_present = which::which("trusty-analyze").is_ok();
+        let default_running = tcp_probe(AnalyzeConnector::default_addr());
+        if !binary_present {
+            assert_eq!(info.status, ServiceStatus::Absent, "binary absent → Absent");
+        } else if default_running {
+            assert_eq!(
+                info.status,
+                ServiceStatus::Running,
+                "binary present, default port running → Running"
+            );
+        } else {
+            assert_eq!(
+                info.status,
+                ServiceStatus::Available,
+                "binary present, no running daemon → Available"
+            );
+        }
         assert!(
-            info.status == ServiceStatus::Absent || info.status == ServiceStatus::Available,
-            "expected Absent or Available without addr file, got {:?}",
-            info.status
+            info.status != ServiceStatus::Absent || info.version.is_none(),
+            "Absent must have no version"
         );
-        assert!(info.version.is_none());
     }
 }
