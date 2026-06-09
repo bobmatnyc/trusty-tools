@@ -285,28 +285,85 @@ maintain: **~300 projects, 31 solutions, ~5,600 `.cs` files**, of which
 `packages.config`; WinForms + classic `.asmx` services, including a
 **17,101-line** `EDISearchForm.cs`; mixed TFMs in one tree (v4.8/v4.6.1/v4.0/
 v4.5/v3.5/net48). **Bridge is NOT buildable by the in-tree `dotnet build`
-path** (legacy non-SDK + .NET Framework needs Windows + full MSBuild/VS +
-Framework reference assemblies). It is therefore the canonical test for the two
-hardest behaviours:
+path** — but the reason is its *legacy non-SDK + `packages.config` format* plus
+Windows-only frameworks (WinForms/WPF/`System.Web`/`.asmx`), **not** the `net48`
+target itself (§8c). It is therefore the canonical test for the two hardest
+behaviours:
 - **graceful-skip** — the adapter must detect unbuildable projects (legacy
-  non-SDK, Framework-only TFMs off-Windows) and no-op per project, never
-  erroring the whole `run_diagnostics` call or hanging on a doomed restore;
+  non-SDK / `packages.config`; Windows-only-framework projects) and no-op per
+  project, never erroring the whole `run_diagnostics` call or hanging on a
+  doomed restore;
 - **Phase 2 (generic SARIF ingest)** — the *only* way to lint an estate like
   Bridge: build it on Windows in the user's own VS/MSBuild (same ErrorLog SARIF,
   or Roslynator/VS), then POST the SARIF. Bridge is the proof that Phase 2 is
   not optional polish but the path for the common real-world shape.
 
 **Estate-wide reality (both repos):** **584 `.csproj`, only 71 SDK-style, 513
-legacy non-SDK.** `dotnet build` off-Windows only touches SDK-style projects on
-.NET Core/5+/standard; some SDK-style ones still target `net48`/`net472` and
-won't build either. The legacy-heavy skew is exactly why graceful-skip and
-Phase 2 are first-class requirements, not afterthoughts.
+legacy non-SDK.** The build-on-Linux line is **project *format*, not target
+framework** (see §8c — verified empirically): `dotnet build` on macOS/Linux
+builds **any SDK-style project, including `net48`/`net472`** (the SDK
+auto-restores the Framework reference assemblies), but cannot drive **legacy
+non-SDK / `packages.config`** projects. So the buildable subset is the ~71
+SDK-style projects (regardless of TFM); the 513 legacy non-SDK projects are the
+ones that need graceful-skip + Phase 2. The legacy-heavy skew is exactly why
+those are first-class requirements, not afterthoughts.
 
 **Edge cases Bridge specifically surfaces** (for whoever hardens the adapter):
 mixed-TFM solutions; `<TargetFramework>` vs legacy `<TargetFrameworkVersion>`;
 multi-targeting (`net8.0;net48;net472`); `packages.config` (no SDK restore);
 generated files (`*.Designer.cs`, `*.asmx.cs`) that should likely be filtered;
 and very large single files that stress whole-file handling and SARIF volume.
+
+## 8c. .NET Framework on Linux — what builds, what doesn't (verified)
+
+"Can you lint .NET Framework on Linux?" is commonly answered "no" because the
+*runtime* is Windows-only. That's the wrong frame: **Roslyn and the C# compiler
+are fully cross-platform, so `net4x` *compiles* (and therefore lints) on
+Linux/macOS.** The blocker is three *separable* things, none of which is "the
+Framework target":
+
+1. **Project format** — legacy non-SDK (`<Project ToolsVersion="15.0"
+   xmlns="…msbuild/2003">`) vs SDK-style. The .NET SDK's MSBuild drives
+   SDK-style cleanly; legacy projects don't get the implicit reference-assembly
+   package and don't restore well.
+2. **`packages.config` restore** — `dotnet restore` only handles
+   `PackageReference`; it *silently no-ops* on `packages.config` (needs classic
+   `nuget.exe` / Mono).
+3. **Windows-only frameworks** — WinForms, WPF, classic `System.Web` / `.asmx`.
+   These assemblies have no cross-platform build, regardless of project format.
+
+**Empirically verified on this host (`dotnet 10.0.107`, macOS, no Mono):**
+
+| Project shape | Result |
+|---|---|
+| **SDK-style, `net48`, `PackageReference`** (`HotStats.ExcelExport`, `-f net48`) | ✅ **built + 7 analyzer diagnostics**; SDK auto-restored the Framework reference assemblies |
+| **Legacy non-SDK, `packages.config`, `net48`** (`Bridge/.../OklahomaHeart`) | ❌ `MSB3644: reference assemblies for .NETFramework v4.8 not found`; `dotnet restore` reported "none of the projects contain packages to restore" (ignored `packages.config`) |
+
+**Implication for the adapter:** RoslynTool **already lints any SDK-style
+project on Linux/macOS, `net48`/`net472` included** — that subset needs no
+special handling. Only legacy non-SDK / `packages.config` / Windows-only-
+framework projects fall to graceful-skip + Phase 2.
+
+**Partial fallback for legacy *non-UI* libraries — `FrameworkPathOverride`.**
+The `MSB3644` failure above is *only* the missing reference assemblies. You can
+supply them cross-platform without Windows: restore the
+`Microsoft.NETFramework.ReferenceAssemblies.net48` NuGet once, then build the
+legacy project with
+`dotnet build /p:FrameworkPathOverride=<…/lib/net48>` (or set
+`FrameworkPathOverride` in a repo-root `Directory.Build.props`). This clears
+`MSB3644` and lets Roslyn analyzers run on legacy non-SDK class libraries. It
+does **not** solve blockers #2 (`packages.config` dependencies stay unresolved →
+`CS0246` noise for types from those packages) or #3 (WinForms/WPF/`System.Web`
+have no cross-platform assemblies). So it's a *best-effort* path for pure-BCL /
+non-UI legacy libs, not a general fix — Bridge's WinForms/`.asmx` projects still
+require a Windows build → SARIF ingest (Phase 2).
+
+**Decision tree for Phase 1/2:**
+- SDK-style (any TFM) → build in-tree today (Phase 1).
+- Legacy non-SDK, non-UI, BCL-only deps → optional `FrameworkPathOverride`
+  best-effort (degraded semantics where `packages.config` deps are referenced).
+- Legacy non-SDK with `packages.config` deps and/or WinForms/WPF/`System.Web` →
+  Windows build + generic SARIF ingest (Phase 2). This is the Bridge case.
 
 ## 9. Open questions to resolve during the build
 
