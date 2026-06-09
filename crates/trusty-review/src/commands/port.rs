@@ -59,9 +59,14 @@ pub fn parse_port_from_addr(addr: &str) -> Option<u16> {
 /// Why: separating the formatting logic from the I/O lets unit tests assert
 /// the output string without spawning a daemon or touching a discovery file.
 /// What: takes a validated `host:port` string plus the desired format and
-/// returns the formatted string to print. Returns `None` when the port cannot
-/// be parsed from the address (which would indicate a corrupt discovery file).
-/// Test: `format_output_*` unit tests cover all three variants and edge cases.
+/// returns the formatted string to print. For the JSON format, IPv6 bracket
+/// notation (e.g. `[::1]`) is stripped from the `addr` field because the JSON
+/// consumer receives a plain hostname, not a URI — the brackets are only
+/// required in URI authority syntax. The `--addr` output keeps the original
+/// string unchanged for URI validity. Returns `None` when the port cannot be
+/// parsed from the address (which would indicate a corrupt discovery file).
+/// Test: `format_output_*` unit tests cover all three variants and edge cases,
+/// including the IPv6 bracket-stripping behaviour for the JSON path.
 pub fn format_output(addr: &str, format: PortFormat) -> Option<String> {
     match format {
         PortFormat::Port => {
@@ -72,7 +77,10 @@ pub fn format_output(addr: &str, format: PortFormat) -> Option<String> {
         PortFormat::Json => {
             let port = parse_port_from_addr(addr)?;
             let colon = addr.rfind(':')?;
-            let host = &addr[..colon];
+            let host_part = &addr[..colon];
+            // Strip surrounding brackets for IPv6 addresses (e.g. `[::1]` → `::1`)
+            // so the JSON `addr` field contains a plain host, not a URI bracket form.
+            let host = host_part.trim_matches(|c| c == '[' || c == ']');
             Some(format!(r#"{{"addr":"{host}","port":{port}}}"#))
         }
     }
@@ -85,28 +93,22 @@ pub fn format_output(addr: &str, format: PortFormat) -> Option<String> {
 /// work without guessing. Closes issue #957 (ops parity with trusty-search).
 /// What: reads the address from the `http_addr` discovery file via
 /// `trusty_common::read_daemon_addr("trusty-review")`, formats it per the
-/// caller's flags, and prints to stdout. On any error (no daemon, missing
-/// file, corrupt address) the message goes to stderr and the function returns
-/// `Err` so `main` exits non-zero.
+/// caller's flags, and prints to stdout. Returns `Err` (with a human-readable
+/// message) on any error (no daemon, missing file, corrupt address) so `main`
+/// can exit non-zero via the normal anyhow error path without bypassing Drop.
 /// Test: unit tests cover all format variants; the discovery-file path is
 /// covered by `daemon_utils` tests that write fake discovery files.
 pub fn handle_port(format: PortFormat) -> Result<()> {
     let addr = match trusty_common::read_daemon_addr("trusty-review") {
         Ok(Some(a)) if !a.is_empty() => a,
         Ok(Some(_)) | Ok(None) => {
-            // Fall back to the default port as a best-effort hint.  We
-            // cannot confirm the daemon is actually running on this port,
-            // so exit non-zero with a clear explanation rather than
-            // silently printing a potentially wrong address.
-            eprintln!(
+            anyhow::bail!(
                 "trusty-review: no daemon running (address file not found). \
                  Start with `trusty-review serve`."
             );
-            std::process::exit(1);
         }
         Err(e) => {
-            eprintln!("trusty-review: could not read daemon address: {e:#}");
-            std::process::exit(1);
+            anyhow::bail!("trusty-review: could not read daemon address: {e:#}");
         }
     };
 
@@ -116,12 +118,11 @@ pub fn handle_port(format: PortFormat) -> Result<()> {
             Ok(())
         }
         None => {
-            eprintln!(
+            anyhow::bail!(
                 "trusty-review: daemon address file contains an unrecognised \
                  address `{addr}` (expected host:port). \
                  Re-start the daemon with `trusty-review serve`."
             );
-            std::process::exit(1);
         }
     }
 }
@@ -175,8 +176,21 @@ mod tests {
     /// Why: on dual-stack hosts the daemon might bind `[::1]:7880`; `rfind`
     /// correctly splits on the final `:` rather than the first.
     #[test]
-    fn format_output_ipv6_port() {
+    fn parse_port_ipv6() {
         assert_eq!(parse_port_from_addr("[::1]:7880"), Some(7880));
+    }
+
+    /// `--json` with an IPv6 address strips the brackets from the `addr` field.
+    ///
+    /// Why: JSON consumers expect a plain hostname (`::1`), not the URI
+    /// bracket form (`[::1]`); the `--addr` output keeps brackets for URI
+    /// validity, but JSON is a different serialisation context.
+    #[test]
+    fn format_output_json_ipv6_strips_brackets() {
+        assert_eq!(
+            format_output("[::1]:7880", PortFormat::Json),
+            Some(r#"{"addr":"::1","port":7880}"#.to_string())
+        );
     }
 
     /// A corrupt address (no `:`) returns `None` instead of panicking.
