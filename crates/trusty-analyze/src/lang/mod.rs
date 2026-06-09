@@ -14,6 +14,7 @@
 
 pub mod adapters;
 pub mod detection;
+pub mod ext_map;
 #[allow(clippy::module_inception)]
 pub mod lang;
 
@@ -34,4 +35,5 @@ pub use adapters::swift::SwiftAnalyzer;
 pub use adapters::typescript::TypeScriptAnalyzer;
 pub use adapters::{go::GoAnalyzer, java::JavaAnalyzer, python::PythonAnalyzer};
 pub use detection::{detect_frameworks, DetectionResult, LanguageDetector};
+pub use ext_map::{lang_for_extension, lang_for_linter};
 pub use lang::{LanguageAnalyzer, StaticAnalysisResult};

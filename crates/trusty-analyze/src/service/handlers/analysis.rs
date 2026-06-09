@@ -228,7 +228,6 @@ pub(crate) fn run_diagnostics_blocking(
     tool_filter: Option<Vec<String>>,
 ) -> Vec<crate::core::ToolDiagnostic> {
     use crate::core::global_registry;
-    use crate::lang::LanguageDetector;
 
     let registry = global_registry();
     let scratch = match tempfile::tempdir() {
@@ -245,9 +244,13 @@ pub(crate) fn run_diagnostics_blocking(
     // `src/b/main.rs` both have basename `main.rs`). Without a unique subdir
     // the second write would overwrite the first and lose its diagnostics.
     for (idx, (file, content)) in by_file.into_iter().enumerate() {
-        let Some(lang) = LanguageDetector::detect_file(&file) else {
+        // Use lang_for_linter: returns the ToolRegistry key (e.g. .tsx →
+        // "typescript" for BiomeTool, .c → "cpp" for clang-tidy).
+        // Returns None for unrecognized extensions; skip those files.
+        let Some(lang) = crate::lang::ext_map::lang_for_linter(&file) else {
             continue;
         };
+        let lang = lang.to_string();
         if let Some(want) = &language_filter {
             if &lang != want {
                 continue;

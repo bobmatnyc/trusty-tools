@@ -34,85 +34,6 @@ pub struct DetectionResult {
 /// File-extension-based language detector.
 pub struct LanguageDetector;
 
-/// Per-language extension matchers. Each helper returns the canonical
-/// language tag if the path's extension belongs to that language.
-///
-/// Why: Splitting per-language keeps each helper trivially testable and
-/// caps the cyclomatic complexity of the dispatcher at the number of
-/// supported languages, regardless of how many extensions each one has.
-/// What: Lowercase suffix match against a language's known extension set.
-/// Test: `detect_file_extension_mapping` exercises each helper through the
-/// public `detect_file` dispatcher.
-fn detect_rust(lower: &str) -> Option<&'static str> {
-    if lower.ends_with(".rs") {
-        Some("rust")
-    } else {
-        None
-    }
-}
-
-fn detect_typescript(lower: &str) -> Option<&'static str> {
-    if lower.ends_with(".tsx") || lower.ends_with(".ts") {
-        Some("typescript")
-    } else {
-        None
-    }
-}
-
-fn detect_javascript(lower: &str) -> Option<&'static str> {
-    const EXTS: &[&str] = &[".jsx", ".js", ".mjs", ".cjs"];
-    if EXTS.iter().any(|e| lower.ends_with(e)) {
-        Some("javascript")
-    } else {
-        None
-    }
-}
-
-fn detect_python(lower: &str) -> Option<&'static str> {
-    if lower.ends_with(".py") || lower.ends_with(".pyi") {
-        Some("python")
-    } else {
-        None
-    }
-}
-
-fn detect_java(lower: &str) -> Option<&'static str> {
-    if lower.ends_with(".java") {
-        Some("java")
-    } else {
-        None
-    }
-}
-
-fn detect_go(lower: &str) -> Option<&'static str> {
-    if lower.ends_with(".go") {
-        Some("go")
-    } else {
-        None
-    }
-}
-
-fn detect_cpp(lower: &str) -> Option<&'static str> {
-    const EXTS: &[&str] = &[".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".c", ".h"];
-    if EXTS.iter().any(|e| lower.ends_with(e)) {
-        Some("cpp")
-    } else {
-        None
-    }
-}
-
-/// Ordered list of per-language detectors. First match wins.
-type LanguageDetectorFn = fn(&str) -> Option<&'static str>;
-const LANGUAGE_DETECTORS: &[LanguageDetectorFn] = &[
-    detect_rust,
-    detect_typescript,
-    detect_javascript,
-    detect_python,
-    detect_java,
-    detect_go,
-    detect_cpp,
-];
-
 /// Per-build-system manifest matchers. Each helper returns the canonical
 /// build-system tag if the path basename matches a known manifest.
 fn build_cargo(lower: &str) -> Option<&'static str> {
@@ -139,7 +60,8 @@ fn build_go_mod(lower: &str) -> Option<&'static str> {
     matches_basename(lower, &["go.mod"]).then_some("go-mod")
 }
 
-const BUILD_SYSTEM_DETECTORS: &[LanguageDetectorFn] = &[
+type BuildDetectorFn = fn(&str) -> Option<&'static str>;
+const BUILD_SYSTEM_DETECTORS: &[BuildDetectorFn] = &[
     build_cargo,
     build_maven,
     build_gradle,
@@ -157,13 +79,15 @@ fn matches_basename(lower: &str, names: &[&str]) -> bool {
 
 impl LanguageDetector {
     /// Detect the language of a single file from its extension.
-    /// Returns `None` for unknown extensions.
+    ///
+    /// Why: delegates to the canonical `ext_map::lang_for_linter` so all
+    /// language routing goes through one table. Returns `None` for
+    /// unrecognized extensions (callers can skip those files).
+    /// What: returns the linter tag — e.g. `.tsx` → `"typescript"`,
+    /// `.c` → `"cpp"` — so `ToolRegistry` lookups resolve correctly.
+    /// Test: `detect_file_extension_mapping` exercises the full extension set.
     pub fn detect_file(path: &str) -> Option<String> {
-        let lower = path.to_lowercase();
-        LANGUAGE_DETECTORS
-            .iter()
-            .find_map(|d| d(&lower))
-            .map(|s| s.to_string())
+        super::ext_map::lang_for_linter(path).map(|s| s.to_string())
     }
 
     /// Detect a build system from a single file basename.
@@ -428,32 +352,42 @@ mod tests {
         assert_eq!(r.build_system.as_deref(), Some("pip"));
     }
 
-    // --- Helper-level unit tests (new, per refactor target) ------------------
+    // --- Extension coverage via detect_file ----------------------------------
 
     #[test]
-    fn detect_rust_helper_matches_only_dot_rs() {
-        assert_eq!(detect_rust("foo.rs"), Some("rust"));
-        assert_eq!(detect_rust("foo.RS"), None); // detect_file lowercases first
-        assert_eq!(detect_rust("foo.rust"), None);
-        assert_eq!(detect_rust("foo.py"), None);
+    fn detect_file_rust_case_insensitive() {
+        assert_eq!(LanguageDetector::detect_file("foo.rs"), Some("rust".into()));
+        assert_eq!(LanguageDetector::detect_file("foo.RS"), Some("rust".into()));
+        assert_eq!(LanguageDetector::detect_file("foo.rust"), None);
     }
 
     #[test]
-    fn detect_javascript_helper_covers_all_js_variants() {
-        assert_eq!(detect_javascript("a.js"), Some("javascript"));
-        assert_eq!(detect_javascript("a.jsx"), Some("javascript"));
-        assert_eq!(detect_javascript("a.mjs"), Some("javascript"));
-        assert_eq!(detect_javascript("a.cjs"), Some("javascript"));
-        assert_eq!(detect_javascript("a.ts"), None);
+    fn detect_file_covers_all_js_variants() {
+        for ext in [".js", ".jsx", ".mjs", ".cjs"] {
+            let path = format!("a{ext}");
+            assert_eq!(
+                LanguageDetector::detect_file(&path),
+                Some("javascript".into()),
+                "ext={ext}"
+            );
+        }
+        assert_eq!(
+            LanguageDetector::detect_file("a.ts"),
+            Some("typescript".into())
+        );
     }
 
     #[test]
-    fn detect_cpp_helper_covers_c_and_cpp_extensions() {
+    fn detect_file_covers_cpp_and_c_extensions() {
         for ext in [".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".c", ".h"] {
             let path = format!("file{ext}");
-            assert_eq!(detect_cpp(&path), Some("cpp"), "ext={ext}");
+            assert_eq!(
+                LanguageDetector::detect_file(&path),
+                Some("cpp".into()),
+                "ext={ext}"
+            );
         }
-        assert_eq!(detect_cpp("file.txt"), None);
+        assert_eq!(LanguageDetector::detect_file("file.txt"), None);
     }
 
     #[test]

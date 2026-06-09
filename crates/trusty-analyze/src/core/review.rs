@@ -250,27 +250,15 @@ fn parse_hunk_new_start(header: &str) -> Result<u32, ReviewError> {
 }
 
 /// Guess a language name from a file extension, for the complexity dispatcher.
+///
+/// Why: delegates to the canonical extension table so review-path language
+/// detection stays in sync with all other consumers without maintaining a
+/// separate if/else chain.
+/// What: thin wrapper over `crate::lang::ext_map::lang_for_extension`.
+/// Test: exercised indirectly by callers above; canonical coverage lives in
+/// `crate::lang::ext_map::tests`.
 fn language_for_path(path: &str) -> &'static str {
-    let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".rs") {
-        "rust"
-    } else if lower.ends_with(".tsx") {
-        "tsx"
-    } else if lower.ends_with(".ts") {
-        "typescript"
-    } else if lower.ends_with(".jsx") {
-        "jsx"
-    } else if lower.ends_with(".js") {
-        "javascript"
-    } else if lower.ends_with(".py") {
-        "python"
-    } else if lower.ends_with(".go") {
-        "go"
-    } else if lower.ends_with(".java") {
-        "java"
-    } else {
-        "unknown"
-    }
+    crate::lang::ext_map::lang_for_extension(path)
 }
 
 /// Map a [`CodeSmell`] to its `(category, severity)` review projection.

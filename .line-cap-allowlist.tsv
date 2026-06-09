@@ -9,7 +9,7 @@ crates/trusty-agents/src/tools/memory/tests.rs	605
 crates/trusty-agents/src/tools/native_memory/tests.rs	507
 crates/trusty-analyze/src/core/complexity_ts.rs	883
 crates/trusty-analyze/src/core/explain.rs	523
-crates/trusty-analyze/src/core/review.rs	787
+crates/trusty-analyze/src/core/review.rs	775
 crates/trusty-analyze/src/lang/adapters/cpp.rs	522
 crates/trusty-analyze/src/lang/adapters/go.rs	743
 crates/trusty-analyze/src/lang/adapters/java.rs	694
@@ -21,7 +21,7 @@ crates/trusty-analyze/src/lang/adapters/rust.rs	530
 crates/trusty-analyze/src/lang/adapters/scala.rs	583
 crates/trusty-analyze/src/lang/adapters/swift.rs	531
 crates/trusty-analyze/src/lang/adapters/typescript.rs	680
-crates/trusty-analyze/src/lang/detection.rs	616
+crates/trusty-analyze/src/lang/detection.rs	550
 crates/trusty-analyze/src/main.rs	870
 crates/trusty-analyze/src/mcp/mod.rs	1178
 crates/trusty-analyze/tests/stdio_harness.rs	639
