@@ -10701,7 +10701,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-analyze"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10797,7 +10797,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.14.2"
+version = "0.14.3"
 dependencies = [
  "anyhow",
  "async-trait",

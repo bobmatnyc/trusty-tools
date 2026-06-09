@@ -30,7 +30,7 @@ authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 # trusty-code: per-project Claude-Code-compatible MPM orchestration harness (#587).
 # publish=false; version 0.0.0 intentionally — pre-release scaffold.
 trusty-code = { path = "crates/trusty-code" }
-trusty-common = { path = "crates/trusty-common", version = "0.14.2" }
+trusty-common = { path = "crates/trusty-common", version = "0.14.3" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
 trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.2" }
