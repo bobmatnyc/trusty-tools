@@ -49,6 +49,11 @@ trusty-mpm = { path = "crates/trusty-mpm", version = "0.5.0" }
 # (behind the optional `review` feature) so the analyze MCP server can expose
 # the trusty-review pipeline as `tr_review_*` tools (#630).
 trusty-review = { path = "crates/trusty-review", version = "0.3.6" }
+# trusty-console: web dashboard for trusty services. Referenced by all 4
+# daemon crates + trusty-mpm so `cargo install <any-daemon>` also installs
+# trusty-console (Single-Install Convention, epic #943). Mirrors the pattern
+# of trusty-embedderd (issue #187) and trusty-bm25-daemon (PR #190).
+trusty-console = { path = "crates/trusty-console", version = "0.1.0" }
 
 # ── Async runtime / HTTP ────────────────────────────────────────────────────
 anyhow = "1"
@@ -194,6 +199,7 @@ tree-sitter-scala = "0.24"
 trusty-common = { path = "crates/trusty-common" }
 trusty-embedderd = { path = "crates/trusty-embedderd" }
 trusty-bm25-daemon = { path = "crates/trusty-bm25-daemon" }
+trusty-console = { path = "crates/trusty-console" }
 
 [profile.dev]
 opt-level = 0

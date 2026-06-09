@@ -12,14 +12,23 @@ description            = "Web console that detects and surfaces running trusty s
 keywords    = ["dashboard", "console", "services", "trusty", "developer-tools"]
 categories  = ["command-line-utilities", "development-tools"]
 build       = "build.rs"
-publish     = false
-exclude     = [
-    "ui/node_modules",
-    "ui/src",
-    "ui/package.json",
-    "ui/vite.config.js",
-    "ui/pnpm-lock.yaml",
+include = [
+    "src/**/*",
+    "build.rs",
+    "ui/dist/**/*",
+    "Cargo.toml",
+    "README.md",
 ]
+
+[lib]
+# Why: Expose the daemon's startup sequence as a library so bundled shim
+# binaries inside host crates (trusty-search, trusty-memory, trusty-analyze,
+# trusty-review, trusty-mpm) can call `trusty_console::run()` without
+# duplicating any logic. Mirrors trusty-embedderd (issue #187) and
+# trusty-bm25-daemon (PR #190). crate-type rlib keeps link semantics clean.
+name       = "trusty_console"
+path       = "src/lib.rs"
+crate-type = ["rlib"]
 
 [[bin]]
 name = "trusty-console"

@@ -10701,7 +10701,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-analyze"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10756,6 +10756,7 @@ dependencies = [
  "tree-sitter-swift",
  "tree-sitter-typescript",
  "trusty-common",
+ "trusty-console",
  "trusty-review",
  "which 6.0.3",
  "xxhash-rust",
@@ -10947,7 +10948,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10981,6 +10982,7 @@ dependencies = [
  "tracing",
  "trusty-bm25-daemon",
  "trusty-common",
+ "trusty-console",
  "uuid",
 ]
 
@@ -11027,6 +11029,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "trusty-common",
+ "trusty-console",
  "trusty-mpm-gui",
  "utoipa",
  "utoipa-swagger-ui",
@@ -11049,7 +11052,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11086,11 +11089,12 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trusty-common",
+ "trusty-console",
 ]
 
 [[package]]
 name = "trusty-search"
-version = "0.24.1"
+version = "0.24.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11167,6 +11171,7 @@ dependencies = [
  "tree-sitter-swift",
  "tree-sitter-typescript",
  "trusty-common",
+ "trusty-console",
  "trusty-embedderd",
  "usearch",
  "uuid",

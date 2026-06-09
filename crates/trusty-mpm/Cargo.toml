@@ -63,6 +63,15 @@ name = "trusty-mpm"
 path = "src/bin/tm/main.rs"
 required-features = ["cli"]
 
+[[bin]]
+# Why: Bundle trusty-console into trusty-mpm's install surface so
+#      `cargo install trusty-mpm` also installs the web dashboard
+#      (Single-Install Convention, epic #943). All dashboard logic lives in
+#      the trusty-console library crate; this is a thin shim.
+#      No required-features: trusty-console has no feature gates.
+name = "trusty-console"
+path = "src/bin/trusty_console.rs"
+
 # ── Integration tests ─────────────────────────────────────────────────────────
 [[test]]
 name = "e2e"
@@ -79,6 +88,10 @@ path = "tests/services_integration.rs"
 [dependencies]
 trusty-common = { workspace = true, features = ["mcp", "cli-help", "bug-capture"] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
+# Why: bundle trusty-console (Single-Install Convention, epic #943). Declaring
+# it as a dep causes `cargo install trusty-mpm` to also install trusty-console.
+# All dashboard logic stays in the trusty-console library crate.
+trusty-console = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name        = "trusty-analyze"
-version     = "0.5.1"
+version     = "0.5.2"
 edition     = "2021"
 license.workspace    = true
 authors.workspace    = true
@@ -30,6 +30,14 @@ path = "src/main.rs"
 # accidentally trying to build this binary without axum and failing to link
 # the `service` and `mcp::sse` modules.
 required-features = ["http-server"]
+
+[[bin]]
+# Why: Bundle trusty-console into trusty-analyze's install surface so
+#      `cargo install trusty-analyze` also installs the web dashboard
+#      (Single-Install Convention, epic #943). All dashboard logic lives in
+#      the trusty-console library crate; this is a thin shim.
+name = "trusty-console"
+path = "src/bin/trusty_console.rs"
 
 [lib]
 name = "trusty_analyze"
@@ -103,6 +111,10 @@ tokenizers = { workspace = true, optional = true }
 #      and the crates.io publish are unaffected (trusty-review need not be
 #      published). The `review` feature pulls it in with its `mcp` feature.
 trusty-review = { workspace = true, optional = true }
+# Why: bundle trusty-console (Single-Install Convention, epic #943). Declaring
+# it as a dep causes `cargo install trusty-analyze` to also install trusty-console.
+# All dashboard logic stays in the trusty-console library crate.
+trusty-console = { workspace = true }
 
 [features]
 # Why (issue #249): mirrors the `trusty-common` / `trusty-memory` rule that

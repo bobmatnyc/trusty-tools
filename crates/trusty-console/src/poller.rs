@@ -70,6 +70,16 @@ pub struct PollerCache {
     inner: Arc<RwLock<Option<CachedSnapshot>>>,
 }
 
+impl Default for PollerCache {
+    /// Why: Required by clippy's `new_without_default` lint when `new()` takes
+    /// no arguments — also convenient for test setup.
+    /// What: Delegates to `PollerCache::new()`.
+    /// Test: Implicitly tested wherever `PollerCache::new()` is called.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PollerCache {
     /// Create a new, empty `PollerCache`.
     ///

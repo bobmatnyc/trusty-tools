@@ -1,6 +1,6 @@
 [package]
 name = "trusty-memory"
-version = "0.15.0"
+version = "0.15.1"
 edition = "2021"
 description = "MCP server (stdio + HTTP/SSE) for trusty-memory"
 license.workspace = true
@@ -47,6 +47,14 @@ required-features = ["axum-server"]
 name = "trusty-bm25-daemon"
 path = "src/bin/bm25_daemon.rs"
 
+[[bin]]
+# Why: Bundle trusty-console into trusty-memory's install surface so
+#      `cargo install trusty-memory` also installs the web dashboard
+#      (Single-Install Convention, epic #943). All dashboard logic lives in
+#      the trusty-console library crate; this is a thin shim.
+name = "trusty-console"
+path = "src/bin/trusty_console.rs"
+
 [dependencies]
 # Why: `axum-server` is gated on this crate's own `axum-server` feature so
 #      downstream library consumers (e.g. `open-mpm` linking
@@ -63,6 +71,10 @@ trusty-common = { path = "../trusty-common", version = "0.14.1", default-feature
 #      src/bin/bm25_daemon.rs calls `trusty_bm25_daemon::run()` so all daemon
 #      logic stays in the trusty-bm25-daemon library crate.
 trusty-bm25-daemon = { workspace = true }
+# Why: bundle trusty-console (Single-Install Convention, epic #943). Declaring
+# it as a dep causes `cargo install trusty-memory` to also install trusty-console.
+# All dashboard logic stays in the trusty-console library crate.
+trusty-console = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

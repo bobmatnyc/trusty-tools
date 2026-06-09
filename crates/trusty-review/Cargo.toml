@@ -1,6 +1,6 @@
 [package]
 name        = "trusty-review"
-version     = "0.3.6"
+version     = "0.3.7"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true
@@ -17,6 +17,14 @@ publish     = true
 name               = "trusty-review"
 path               = "src/main.rs"
 required-features  = []
+
+[[bin]]
+# Why: Bundle trusty-console into trusty-review's install surface so
+#      `cargo install trusty-review` also installs the web dashboard
+#      (Single-Install Convention, epic #943). All dashboard logic lives in
+#      the trusty-console library crate; this is a thin shim.
+name = "trusty-console"
+path = "src/bin/trusty_console.rs"
 
 [lib]
 name = "trusty_review"
@@ -74,6 +82,10 @@ clap         = { workspace = true }
 # The `mcp` feature is enabled only under the `mcp` cargo feature of this crate
 # (which is on by default) to pull in the JSON-RPC 2.0 stdio loop primitives.
 trusty-common = { workspace = true }
+# Why: bundle trusty-console (Single-Install Convention, epic #943). Declaring
+# it as a dep causes `cargo install trusty-review` to also install trusty-console.
+# All dashboard logic stays in the trusty-console library crate.
+trusty-console = { workspace = true }
 
 # ── JWT / HMAC / crypto (GitHub App auth) ─────────────────────────────────
 jsonwebtoken = { workspace = true }
