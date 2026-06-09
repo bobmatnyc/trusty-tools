@@ -5,20 +5,26 @@
 //! `ui/dist/`. Running `pnpm build` here means a plain `cargo build` always
 //! produces a binary with up-to-date assets, with no separate UI build step.
 //! What: Skips entirely if `SKIP_UI_BUILD=1` (CI / first-time bootstrap when
-//! pnpm is unavailable). Otherwise runs `pnpm install` (frozen lockfile if
-//! present) followed by `pnpm build` in `ui/`. Emits cargo:rerun directives
-//! so a `cargo build` only re-runs the JS pipeline when UI sources change.
-//! Test: `SKIP_UI_BUILD=1 cargo check` exits without invoking pnpm; a normal
-//! `cargo build` populates `ui/dist/index.html`.
+//! pnpm is unavailable). Otherwise runs `<pm> install [--frozen-lockfile]`
+//! followed by `<pm> run build` in `ui/`. Emits cargo:rerun directives so a
+//! `cargo build` only re-runs the JS pipeline when UI sources change.
+//!
+//! NOTE: The core UI-build logic (SKIP_UI_BUILD guard, pnpm detection,
+//! install+build pipeline, placeholder fallback) is intentionally kept
+//! identical across trusty-memory, trusty-analyze, trusty-console, and
+//! trusty-search (issue #987). `scripts/check_buildrs_sync.sh` asserts that
+//! the canonical implementation block does not drift between these four files.
+//!
+//! Test: `SKIP_UI_BUILD=1 cargo check -p trusty-analyze` exits without invoking
+//! pnpm; a normal `cargo build` populates `ui/dist/index.html`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
-    let ui_dir = Path::new(&manifest_dir).join("ui");
+    let crate_root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
+    let ui_dir = crate_root.join("ui");
     let dist_dir = ui_dir.join("dist");
-    let pkg_json = ui_dir.join("package.json");
 
     println!("cargo:rerun-if-env-changed=SKIP_UI_BUILD");
     println!("cargo:rerun-if-changed=ui/package.json");
@@ -26,97 +32,127 @@ fn main() {
     println!("cargo:rerun-if-changed=ui/index.html");
     println!("cargo:rerun-if-changed=ui/src");
 
+    build_svelte_ui(&ui_dir, &dist_dir, "trusty-analyze");
+}
+
+// ── CANONICAL BLOCK BEGIN (kept in sync by scripts/check_buildrs_sync.sh) ──
+
+/// Run the Svelte UI build pipeline, or degrade gracefully to a placeholder.
+///
+/// Why: Centralises SKIP_UI_BUILD handling, pnpm detection, frozen-lockfile
+/// install, and placeholder fallback so all four UI-embedding crates share
+/// identical logic without a published build-helper crate (#987).
+/// What: Checks SKIP_UI_BUILD, detects pnpm/npm, runs install + build inside
+/// `ui_dir`, writes a placeholder on any failure so the Rust build still
+/// completes even without the JS toolchain.
+/// Test: `SKIP_UI_BUILD=1 cargo check` short-circuits; `cargo build` with pnpm
+/// installed populates `dist_dir/index.html` with real Vite output.
+fn build_svelte_ui(ui_dir: &Path, dist_dir: &Path, crate_name: &str) {
+    // Step 1: honour explicit skip (CI / `cargo publish --verify`).
     if std::env::var("SKIP_UI_BUILD").as_deref() == Ok("1") {
-        println!("cargo:warning=SKIP_UI_BUILD=1 — skipping UI build");
-        ensure_dist_placeholder(&dist_dir);
+        if !dist_dir.join("index.html").exists() {
+            println!(
+                "cargo:warning=SKIP_UI_BUILD=1 but {dist}/ is empty — \
+                 run `pnpm --dir ui install && pnpm --dir ui build` before publishing.",
+                dist = dist_dir.display()
+            );
+            ensure_placeholder(dist_dir, crate_name);
+        }
         return;
     }
 
-    if !pkg_json.exists() {
-        println!("cargo:warning=ui/package.json missing — skipping UI build");
-        ensure_dist_placeholder(&dist_dir);
+    // Step 2: no `ui/package.json` means we are inside an extracted tarball
+    // that already shipped the dist — nothing to build.
+    if !ui_dir.join("package.json").exists() {
+        ensure_placeholder(dist_dir, crate_name);
         return;
     }
 
-    if which("pnpm").is_none() {
+    // Step 3: detect package manager (pnpm preferred, npm fallback).
+    let Some(pm) = detect_pm() else {
         println!(
-            "cargo:warning=pnpm not found on PATH — skipping UI build (set SKIP_UI_BUILD=1 to silence)"
+            "cargo:warning={crate_name}: no pnpm/npm on PATH — skipping UI \
+             build (set SKIP_UI_BUILD=1 to silence, or install pnpm)."
         );
-        ensure_dist_placeholder(&dist_dir);
+        ensure_placeholder(dist_dir, crate_name);
+        return;
+    };
+
+    // Step 4a: install — prefer frozen lockfile when pnpm-lock.yaml exists.
+    let mut install_args = vec!["install"];
+    if ui_dir.join("pnpm-lock.yaml").exists() {
+        install_args.push("--frozen-lockfile");
+    }
+    let install_ok = Command::new(pm)
+        .args(&install_args)
+        .current_dir(ui_dir)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !install_ok {
+        println!("cargo:warning={crate_name}: `{pm} install` failed — embedding placeholder UI.");
+        ensure_placeholder(dist_dir, crate_name);
         return;
     }
 
-    // pnpm install — prefer frozen lockfile if a lockfile exists.
-    let lockfile = ui_dir.join("pnpm-lock.yaml");
-    let install_args: Vec<&str> = if lockfile.exists() {
-        vec!["install", "--frozen-lockfile"]
-    } else {
-        vec!["install"]
-    };
-    let install_status = Command::new("pnpm")
-        .args(&install_args)
-        .current_dir(&ui_dir)
-        .status();
-    match install_status {
-        Ok(s) if s.success() => {}
-        Ok(s) => {
-            println!("cargo:warning=pnpm install failed with status {s:?}");
-            ensure_dist_placeholder(&dist_dir);
-            return;
-        }
-        Err(e) => {
-            println!("cargo:warning=failed to spawn pnpm install: {e}");
-            ensure_dist_placeholder(&dist_dir);
-            return;
-        }
-    }
-
-    let build_status = Command::new("pnpm")
-        .args(["build"])
-        .current_dir(&ui_dir)
-        .status();
-    match build_status {
-        Ok(s) if s.success() => {}
-        Ok(s) => {
-            println!("cargo:warning=pnpm build failed with status {s:?}");
-            ensure_dist_placeholder(&dist_dir);
-        }
-        Err(e) => {
-            println!("cargo:warning=failed to spawn pnpm build: {e}");
-            ensure_dist_placeholder(&dist_dir);
-        }
+    // Step 4b: build.
+    let build_ok = Command::new(pm)
+        .args(["run", "build"])
+        .current_dir(ui_dir)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !build_ok {
+        println!("cargo:warning={crate_name}: `{pm} run build` failed — embedding placeholder UI.");
+        ensure_placeholder(dist_dir, crate_name);
     }
 }
 
-/// Ensure `ui/dist/` exists with at least an index.html so rust-embed can
-/// embed *something* — a missing folder makes the include fail at compile time.
-fn ensure_dist_placeholder(dist_dir: &Path) {
+/// Write a stub `index.html` so embed macros compile without the JS build.
+///
+/// Why: `rust_embed` and `include_dir!` fail at compile time if the referenced
+/// directory is absent or empty; a single-file stub is the minimum viable
+/// artefact that satisfies both macros while making the "UI not built" state
+/// obvious to anyone who opens `/` in a browser.
+/// What: Creates `dist_dir` if needed and writes a minimal HTML document.
+/// Idempotent — exits immediately if `index.html` already exists.
+/// Test: After `SKIP_UI_BUILD=1 cargo build`, `dist_dir/index.html` exists.
+fn ensure_placeholder(dist_dir: &Path, crate_name: &str) {
     if dist_dir.join("index.html").exists() {
         return;
     }
     let _ = std::fs::create_dir_all(dist_dir);
-    let _ = std::fs::write(
-        dist_dir.join("index.html"),
-        "<!doctype html><html><body><p>trusty-analyze: UI assets not built. \
+    let html = format!(
+        "<!doctype html><html><body><p>{crate_name}: UI assets not built. \
          Run <code>pnpm --dir ui install &amp;&amp; pnpm --dir ui build</code> \
-         and rebuild.</p></body></html>",
+         and rebuild.</p></body></html>"
     );
+    let _ = std::fs::write(dist_dir.join("index.html"), html);
 }
 
-/// Cheap which() — avoid a heavy dep just for build.rs.
-fn which(cmd: &str) -> Option<std::path::PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(cmd);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        for ext in ["cmd", "exe"] {
-            let with_ext = dir.join(format!("{cmd}.{ext}"));
-            if with_ext.is_file() {
-                return Some(with_ext);
-            }
-        }
+/// Detect the available Node.js package manager on PATH.
+///
+/// Why: The workspace uses pnpm (lockfile is `pnpm-lock.yaml`), but `npm`
+/// works as a fallback on machines that have Node but not pnpm separately.
+/// What: Probes `pnpm --version` then `npm --version`; returns the first
+/// that exits 0, or `None` when neither is found.
+/// Test: `detect_pm()` returns `Some("pnpm")` on a standard dev machine;
+/// `Some("npm")` on a machine without pnpm; `None` in a bare container.
+fn detect_pm() -> Option<&'static str> {
+    let ok = |bin: &str| {
+        Command::new(bin)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    if ok("pnpm") {
+        Some("pnpm")
+    } else if ok("npm") {
+        Some("npm")
+    } else {
+        None
     }
-    None
 }
+
+// ── CANONICAL BLOCK END ──
