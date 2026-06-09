@@ -285,12 +285,17 @@ fn percent_decode(s: &str) -> String {
 /// Why: Roslyn emits absolute paths while the caller may pass a relative or
 /// absolute path; matching must be on a path-*component* suffix, not a raw
 /// string suffix — otherwise `/abs/NotFoo.cs` would falsely match `Foo.cs`.
-/// What: direct equality, or one path is a `/`-anchored suffix of the other.
-/// Test: `roslyn_file_matches_anchors_on_separator` in unit tests.
+/// On Windows a SARIF `file:///C:\Users\...\Foo.cs` URI yields backslash
+/// paths after `strip_file_scheme`, so all matching silently fails unless we
+/// normalise both sides to forward slashes before comparing.
+/// What: normalises `\` → `/` on both arguments, then checks direct equality
+/// or `/`-anchored suffix on either side.
+/// Test: `roslyn_file_matches_anchors_on_separator` and
+/// `roslyn_file_matches_windows_backslash_paths` in unit tests.
 fn roslyn_file_matches(diag_file: &str, want: &str) -> bool {
-    diag_file == want
-        || diag_file.ends_with(&format!("/{want}"))
-        || want.ends_with(&format!("/{diag_file}"))
+    let diag = diag_file.replace('\\', "/");
+    let w = want.replace('\\', "/");
+    diag == w || diag.ends_with(&format!("/{w}")) || w.ends_with(&format!("/{diag}"))
 }
 
 /// Map a SARIF level string to a `Severity`.
@@ -411,5 +416,30 @@ mod tests {
         assert!(!roslyn_file_matches("/a/b/Foo.cs", "/a/b/Bar.cs"));
         // No false positive: must anchor on a path separator
         assert!(!roslyn_file_matches("/abs/NotFoo.cs", "Foo.cs"));
+    }
+
+    #[test]
+    fn roslyn_file_matches_windows_backslash_paths() {
+        // Why: on Windows, a SARIF `file:///C:\Users\x\src\Foo.cs` URI
+        // yields a backslash path after strip_file_scheme; without
+        // normalisation the forward-slash suffix anchors never fire and
+        // all C# results are silently dropped on the primary C# platform.
+        // What: both sides are normalised to forward slashes before comparing.
+        // Test: assert that Windows-style backslash paths match the expected
+        // file name and path suffixes, and do not false-positive on unrelated files.
+
+        // Windows absolute path with backslashes matches just the filename.
+        assert!(roslyn_file_matches("C:\\Users\\x\\src\\Foo.cs", "Foo.cs"));
+        // Windows absolute path matches a forward-slash relative segment.
+        assert!(roslyn_file_matches(
+            "C:\\Users\\x\\src\\Foo.cs",
+            "src/Foo.cs"
+        ));
+        // Mixed: want has backslashes, diag_file has forward slashes.
+        assert!(roslyn_file_matches("/abs/src/Foo.cs", "src\\Foo.cs"));
+        // No false positive across different filenames.
+        assert!(!roslyn_file_matches("C:\\Users\\x\\src\\Foo.cs", "Bar.cs"));
+        // No false positive on a name that is a suffix of another (NotFoo.cs vs Foo.cs).
+        assert!(!roslyn_file_matches("C:\\Users\\x\\NotFoo.cs", "Foo.cs"));
     }
 }
