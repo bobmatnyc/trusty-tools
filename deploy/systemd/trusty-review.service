@@ -1,0 +1,133 @@
+# trusty-review.service — production systemd unit for the trusty-review HTTP daemon
+#
+# DEPLOYMENT CONTEXT
+# ------------------
+# trusty-review is the LLM-backed PR-review service.  It uses the `serve`
+# subcommand to start a foreground HTTP daemon on port 7880 (distinct from
+# trusty-search :7878 and trusty-analyze :7879).
+#
+# KEY TIMING NOTE (LLM calls)
+# ---------------------------
+# Review requests fan out to LLM providers (Bedrock, OpenRouter) whose
+# round-trips can take 30–90 seconds for large diffs.  The stop timeout must
+# therefore be generous enough to let the drain phase complete all in-flight
+# LLM calls before systemd escalates to SIGKILL.  120 s is chosen to cover
+# the 90 s worst-case LLM latency plus a 30 s buffer for response processing.
+#
+# GRACEFUL SHUTDOWN
+# -----------------
+# `trusty-review serve` implements graceful SIGTERM drain (axum `serve_with_graceful_shutdown`):
+# the daemon drains all in-flight HTTP requests before exiting.  Without a
+# generous TimeoutStopSec, systemd would SIGKILL mid-review after 90 s (the
+# default), producing incomplete review output and potentially corrupt dedup.redb.
+#
+# INSTALLATION
+# ------------
+# See README.md in this directory for the full install + restart workflow.
+
+[Unit]
+Description=trusty-review LLM-backed PR-review daemon
+# Wait for the network stack before starting — the daemon binds a TCP port
+# and makes outbound HTTPS connections to LLM APIs and GitHub.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# ── Process type ─────────────────────────────────────────────────────────────
+# Type=simple: `trusty-review serve` stays in the foreground; it does NOT
+# call sd_notify(), so Type=notify is incorrect.
+Type=simple
+
+# ── Identity ─────────────────────────────────────────────────────────────────
+# Run as a dedicated non-root user.  Create before enabling:
+#   useradd --system --no-create-home --shell /sbin/nologin trusty
+# Adjust Group= if your deployment uses a shared data group.
+User=trusty
+Group=trusty
+
+# ── Binary ───────────────────────────────────────────────────────────────────
+# Adjust the path to match where `cargo install trusty-review` placed the
+# binary (typically /usr/local/bin or ~/.cargo/bin for the trusty user).
+# Use an absolute path; systemd does not search PATH for ExecStart.
+#
+# `serve` starts the HTTP daemon in the foreground.  Do NOT add `--stdio`;
+# that flag switches to the MCP JSON-RPC stdio mode, which is wrong for
+# systemd supervision.
+#
+# --port 7880: explicit port; change to match your deployment or omit to use
+#              the compiled-in default (7880).
+ExecStart=/usr/local/bin/trusty-review serve \
+    --port 7880 \
+    --bind 127.0.0.1
+
+# ── Graceful shutdown (LLM-aware timeout) ────────────────────────────────────
+# KillSignal=SIGTERM: instruct systemd to send SIGTERM first (graceful).
+# This is systemd's default, but stated explicitly for clarity.  The daemon's
+# SIGTERM handler drains in-flight HTTP requests before exiting.
+KillSignal=SIGTERM
+
+# TimeoutStopSec=120: PRIMARY STOP BUDGET.
+# After SIGTERM, systemd waits this many seconds before escalating to SIGKILL.
+# 120 s covers:
+#   1. In-flight LLM calls that can take 30–90 s for large diffs.
+#   2. Final response processing and dedup.redb transaction flush.
+# Increase to 180 s or more if reviews of very large PRs (many files, high
+# token counts) routinely exceed 90 s LLM latency on your deployment.
+TimeoutStopSec=120
+
+# ── Restart policy ───────────────────────────────────────────────────────────
+# Restart on abnormal exits (crash, signal) but not on clean `systemctl stop`.
+Restart=on-failure
+# 5 s back-off before restarting to avoid rapid crashloop on transient errors
+# (e.g. LLM API rate-limit, network partition, bad config file).
+RestartSec=5
+
+# ── Working directory ─────────────────────────────────────────────────────────
+# Point at the directory that holds the review logs and dedup.redb store.
+# Adjust to match your deployment's data layout.
+WorkingDirectory=/data/trusty-review
+
+# ── Environment ──────────────────────────────────────────────────────────────
+# Core logging level.  Use debug for initial bring-up; info for steady state.
+Environment=RUST_LOG=info
+
+# GITHUB_TOKEN: required for fetching PR diffs from private repos.
+# Set to a GitHub personal-access-token or GitHub App installation token with
+# `pull_requests: read` and `contents: read` scopes.
+# Environment=GITHUB_TOKEN=ghp_…
+
+# AWS credentials: required when TRUSTY_LLM_MODEL is set to a bedrock/… model.
+# The full AWS credential chain (env vars, ~/.aws/credentials, IAM instance
+# role) is supported; set these only if you cannot use instance metadata.
+# Environment=AWS_REGION=us-east-1
+# Environment=AWS_ACCESS_KEY_ID=AKIA…
+# Environment=AWS_SECRET_ACCESS_KEY=…
+
+# OPENROUTER_API_KEY: required when using OpenRouter-routed LLM models (the
+# default when TRUSTY_LLM_MODEL is not set or is not prefixed with bedrock/).
+# Environment=OPENROUTER_API_KEY=sk-or-…
+
+# PR_INTELLIGENCE_DRY_RUN: set to "true" to suppress all GitHub comment posting
+# (safe default for staging environments; false in production to post reviews).
+# Environment=PR_INTELLIGENCE_DRY_RUN=true
+
+# TRUSTY_LLM_MODEL: override the LLM model used for reviews.
+# Default: determined by config.toml / compiled-in fallback.
+# Examples:
+#   bedrock/us.anthropic.claude-sonnet-4-6  → routes through AWS Bedrock
+#   anthropic/claude-3-5-sonnet             → routes through OpenRouter
+# Environment=TRUSTY_LLM_MODEL=bedrock/us.anthropic.claude-sonnet-4-6
+
+# TRUSTY_SEARCH_URL: base URL of the trusty-search daemon for code context
+# retrieval.  Auto-detected from the trusty-search discovery file when unset.
+# Environment=TRUSTY_SEARCH_URL=http://127.0.0.1:7878
+
+# ── File descriptor limit ─────────────────────────────────────────────────────
+# Raise the open-file limit for the dedup.redb store and concurrent HTTP
+# keep-alive connections.
+LimitNOFILE=65536
+
+[Install]
+# Start when the system reaches multi-user (non-graphical) mode — the standard
+# target for daemon services on EC2 and other headless Linux hosts.
+WantedBy=multi-user.target
