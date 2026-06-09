@@ -33,8 +33,9 @@ pub mod review;
 /// plus the unknown fallback.
 pub(crate) fn lang_for_extension(path: &str) -> &'static str {
     let lower = path.to_ascii_lowercase();
-    // Walk by suffix so multi-component extensions like `.d.ts` are not needed:
-    // the caller's concern is the last meaningful extension.
+    // Walk by suffix: `.d.ts` files end with `.ts` and are intentionally matched
+    // by the `.ts` arm below (returns "typescript"), which is correct — `.d.ts`
+    // files are TypeScript declaration files and should be analysed as TypeScript.
     if lower.ends_with(".rs") {
         "rust"
     } else if lower.ends_with(".tsx") {
@@ -120,5 +121,15 @@ mod tests {
     fn lang_for_extension_case_insensitive() {
         assert_eq!(lang_for_extension("main.RS"), "rust");
         assert_eq!(lang_for_extension("App.TSX"), "tsx");
+    }
+
+    /// `.d.ts` declaration files are matched by the `.ts` arm (returns "typescript").
+    ///
+    /// Why: TypeScript declaration files share the `.ts` suffix; they should be
+    /// analysed as TypeScript, not treated as unknown.
+    #[test]
+    fn lang_for_extension_dts_is_typescript() {
+        assert_eq!(lang_for_extension("src/index.d.ts"), "typescript");
+        assert_eq!(lang_for_extension("types/global.D.TS"), "typescript");
     }
 }

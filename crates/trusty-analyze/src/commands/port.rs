@@ -80,10 +80,16 @@ pub fn format_output(addr: &str, format: PortFormat) -> Option<String> {
             let port = parse_port_from_addr(addr)?;
             let colon = addr.rfind(':')?;
             let host_part = &addr[..colon];
-            // Strip surrounding brackets for IPv6 addresses (e.g. `[::1]` → `::1`)
-            // so the JSON `addr` field contains a plain host, not a URI bracket form.
-            // Matches trusty-review's port.rs implementation.
-            let host = host_part.trim_matches(|c| c == '[' || c == ']');
+            // Strip a single matching pair of brackets for IPv6 addresses
+            // (e.g. `[::1]` → `::1`) so the JSON `addr` field contains a
+            // plain host, not a URI bracket form.  Using strip_prefix + strip_suffix
+            // instead of trim_matches ensures only one balanced pair is removed —
+            // trim_matches would strip multiple leading/trailing brackets if the
+            // address were somehow doubly-bracketed.
+            let host = host_part
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .unwrap_or(host_part);
             Some(format!(r#"{{"addr":"{host}","port":{port}}}"#))
         }
     }
@@ -106,12 +112,13 @@ pub fn format_output(addr: &str, format: PortFormat) -> Option<String> {
 /// the fallback to DEFAULT_PORT is verified by `handle_port_fallback_to_default`.
 pub fn handle_port(format: PortFormat) -> Result<()> {
     let addr = match trusty_common::read_daemon_addr("trusty-analyze") {
+        // Non-empty address read from the discovery file — daemon is running.
         Ok(Some(a)) if !a.is_empty() => a,
-        Ok(Some(_)) | Ok(None) => {
-            // No discovery file — fall back to the default port so scripts
-            // that call `trusty-analyze port` before starting the daemon still
-            // get a usable answer. Print a warning so callers know this is the
-            // compiled-in default, not the live daemon's address.
+        // Empty string or missing entry: no live daemon; fall back to the
+        // compiled-in default so scripts that query the port before starting
+        // the daemon still get a usable answer.  Warning goes to stderr only
+        // on this genuine fallback path, never when a real address was found.
+        Ok(_) => {
             eprintln!(
                 "trusty-analyze: no daemon running (address file not found); \
                  reporting compiled-in default {DEFAULT_PORT}. \
