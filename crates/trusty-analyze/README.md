@@ -137,13 +137,33 @@ Probe the daemon over HTTP without the CLI — useful for monitoring, systemd
 `ExecStartPost`, or container readiness probes:
 
 ```bash
-curl http://127.0.0.1:7879/health
+# Port-safe idiom — resolves the live port without hard-coding 7879:
+curl http://127.0.0.1:$(trusty-analyze port)/health
 # → {"status":"ok","search_reachable":true}
+
+# Or with the full host:port form:
+curl http://$(trusty-analyze port --addr)/health
+
+# Hard-coded form (works when port is always 7879):
+curl http://127.0.0.1:7879/health
 ```
 
 `search_reachable` reflects whether the upstream `trusty-search` daemon (port
 7878) is responding; a `false` here means analysis endpoints will fail even
 though the analyzer process itself is up.
+
+### Port discovery (`trusty-analyze port`)
+
+The `port` subcommand reads the daemon's live address from its discovery file
+so scripts work even when the daemon auto-selected a free port:
+
+```bash
+trusty-analyze port          # bare port:     7879
+trusty-analyze port --addr   # host:port:     127.0.0.1:7879
+trusty-analyze port --json   # JSON:          {"addr":"127.0.0.1","port":7879}
+```
+
+Falls back to `7879` when no daemon is running.
 
 ## Features
 

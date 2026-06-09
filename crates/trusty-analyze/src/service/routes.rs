@@ -129,6 +129,16 @@ pub async fn serve(state: AnalyzerAppState, start_port: u16) -> Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(trusty_common::shutdown_signal())
         .await?;
+    // Best-effort removal of the daemon address file on clean shutdown so the
+    // next `trusty-analyze port` invocation does not return a stale address.
+    // Mirrors trusty-search's `daemon.rs` cleanup (see service/daemon.rs).
+    // Errors are intentionally ignored — the lockfile, not the addr file, is
+    // what gates the next daemon instance.
+    if let Ok(Some(_)) = trusty_common::read_daemon_addr("trusty-analyze") {
+        if let Ok(dir) = trusty_common::resolve_data_dir("trusty-analyze") {
+            let _ = std::fs::remove_file(dir.join("http_addr"));
+        }
+    }
     Ok(())
 }
 

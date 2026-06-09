@@ -1,0 +1,163 @@
+# trusty-analyze.service — production systemd unit for the trusty-analyze HTTP daemon
+#
+# BACKGROUND
+# ----------
+# trusty-analyze is the code-analysis sidecar for trusty-search: it fetches
+# chunk corpora from the search daemon over HTTP, runs cyclomatic/cognitive
+# complexity analysis, code-smell detection, quality grading, and fact-store
+# queries, then serves results on port 7879 via HTTP and MCP stdio.
+#
+# Hard runtime dependency: trusty-analyze refuses to start if trusty-search is
+# unreachable (startup health check → exit 1). The `After=` directive below
+# ensures systemd starts trusty-search.service first when both units are
+# present on the same host.
+#
+# GRACEFUL SHUTDOWN (mirrors trusty-search.service #694 mitigation)
+# -----------------------------------------------------------------
+# KillSignal=SIGTERM + TimeoutStopSec=120 gives the daemon enough time to drain
+# in-flight HTTP requests (axum graceful shutdown, issue #534) before systemd
+# escalates to SIGKILL. After the drain the daemon removes its `http_addr`
+# discovery file so the next `trusty-analyze port` invocation does not return
+# a stale address.
+#
+# INSTALLATION
+# ------------
+# 1. Create the service user (if not already present):
+#      useradd --system --no-create-home --shell /sbin/nologin trusty
+# 2. Install the binary (from cargo or a release tarball):
+#      cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-analyze --locked
+#    or copy the prebuilt binary to /usr/local/bin/trusty-analyze.
+# 3. Copy this file:
+#      sudo cp deploy/systemd/trusty-analyze.service /etc/systemd/system/
+# 4. Set the mandatory environment variables (see [Service] section below).
+# 5. Reload and enable:
+#      sudo systemctl daemon-reload
+#      sudo systemctl enable --now trusty-analyze.service
+#
+# FOREGROUND MODE
+# ---------------
+# `trusty-analyze serve` keeps the process in the foreground by default
+# (unlike the legacy `trusty-analyze start` which self-forks). systemd
+# manages the lifecycle; the daemon must not fork itself.
+
+[Unit]
+Description=trusty-analyze code-analysis sidecar daemon (complexity, smells, quality, facts)
+# Wait for the network stack and for trusty-search (hard dependency).
+After=network-online.target trusty-search.service
+Wants=network-online.target
+# trusty-analyze fails fast when trusty-search is down; restart policy handles
+# recovery once the search daemon comes back up.
+
+[Service]
+# ── Process type ─────────────────────────────────────────────────────────────
+# Type=simple: systemd considers the service started as soon as ExecStart
+# forks. The daemon does NOT call sd_notify(), so Type=notify is incorrect.
+# `trusty-analyze serve` keeps the process in the foreground (no double-fork).
+Type=simple
+
+# ── Identity ─────────────────────────────────────────────────────────────────
+# Run as a dedicated non-root user.  Create this user before enabling the unit:
+#   useradd --system --no-create-home --shell /sbin/nologin trusty
+# Adjust Group= if your deployment uses a shared data group.
+User=trusty
+Group=trusty
+
+# ── Binary ───────────────────────────────────────────────────────────────────
+# Adjust the path to match where `cargo install trusty-analyze` placed the
+# binary on this host (typically /usr/local/bin or ~/.cargo/bin for the trusty
+# user).  Use an absolute path; systemd does not search PATH for ExecStart.
+#
+# --port 7879: explicit port; change to match your deployment or omit to use
+#              the compiled-in default (7879).
+# --search-url: point at the running trusty-search daemon; adjust the port if
+#               trusty-search is not on its default 7878.
+ExecStart=/usr/local/bin/trusty-analyze serve \
+    --port 7879 \
+    --search-url http://127.0.0.1:7878
+
+# ── Graceful shutdown (#694 parity with trusty-search) ───────────────────────
+# KillSignal=SIGTERM: send SIGTERM first (graceful). The daemon's SIGTERM
+# handler (issue #534) drains in-flight HTTP requests and removes the
+# `http_addr` discovery file before exiting.
+KillSignal=SIGTERM
+
+# TimeoutStopSec=120: wait up to 120 s after SIGTERM before escalating to
+# SIGKILL. Analysis requests (especially deep LLM passes) can take tens of
+# seconds; 120 s gives the drain phase enough budget to complete normally.
+# Increase if deep-analysis jobs routinely exceed 60 s on this deployment.
+TimeoutStopSec=120
+
+# ── Restart policy ───────────────────────────────────────────────────────────
+# Restart on abnormal exits (crash, OOM, trusty-search-down startup failure)
+# but not on clean `systemctl stop`.
+Restart=on-failure
+# Wait 5 s before restarting to give trusty-search time to come back up if a
+# restart cascade is the root cause.
+RestartSec=5
+
+# ── Working directory ─────────────────────────────────────────────────────────
+# Set to the data volume. The daemon resolves its facts store and addr file
+# relative to `$HOME/.trusty-tools/trusty-analyze/` (XDG / dirs-rs default)
+# regardless of WorkingDirectory, but pointing WorkingDirectory at the data
+# volume is good practice for log aggregation.
+WorkingDirectory=/data/trusty-analyze
+
+# ── Environment ──────────────────────────────────────────────────────────────
+# Core logging level.  Use debug for initial bring-up; info for steady state.
+Environment=RUST_LOG=info
+
+# TRUSTY_SEARCH_URL: base URL of the running trusty-search daemon.
+# Must match the --search-url flag above or be set here instead.
+# Environment=TRUSTY_SEARCH_URL=http://127.0.0.1:7878
+
+# TRUSTY_ANALYZER_PORT: override the default listen port (7879).
+# Environment=TRUSTY_ANALYZER_PORT=7879
+
+# TRUSTY_ANALYZER_FACTS: path to the redb facts store.
+# Defaults to ~/.trusty-tools/trusty-analyze/facts.redb (home-anchored, #632).
+# Environment=TRUSTY_ANALYZER_FACTS=/data/trusty-analyze/facts.redb
+
+# ── LLM / OpenRouter (for `POST /analyze/deep`) ──────────────────────────────
+# OPENROUTER_API_KEY: required to enable deep (LLM-augmented) analysis.
+# Without this, /analyze/deep returns 400 MissingApiKey.
+# Environment=OPENROUTER_API_KEY=sk-or-…
+
+# TRUSTY_LLM_MODEL: LLM model id for the deep-analysis narrative pass.
+# Default: openai/gpt-4o-mini (OpenRouter).
+# Set to bedrock/<model-id> to route through AWS Bedrock instead.
+# Example: bedrock/us.anthropic.claude-sonnet-4-6
+# Environment=TRUSTY_LLM_MODEL=openai/gpt-4o-mini
+
+# ── AWS Bedrock (when TRUSTY_LLM_MODEL starts with "bedrock/") ───────────────
+# TRUSTY_AWS_REGION: AWS region for Bedrock Converse calls. Default: us-east-1.
+# Takes priority over AWS_REGION.
+# Environment=TRUSTY_AWS_REGION=us-east-1
+
+# AWS_REGION: fallback region; overridden by TRUSTY_AWS_REGION.
+# Environment=AWS_REGION=us-east-1
+
+# Standard AWS credential chain (env vars, ~/.aws/credentials, IAM roles, SSO).
+# Environment=AWS_ACCESS_KEY_ID=…
+# Environment=AWS_SECRET_ACCESS_KEY=…
+# Environment=AWS_SESSION_TOKEN=…
+
+# ── trusty-search URL (alternative to --search-url flag) ─────────────────────
+# Setting TRUSTY_SEARCH_URL here is equivalent to passing --search-url.
+# Useful when the search daemon port changes across environments.
+# Environment=TRUSTY_SEARCH_URL=http://127.0.0.1:7878
+
+# ── ONNX Runtime (load-dynamic builds only) ──────────────────────────────────
+# ORT_DYLIB_PATH: required on Amazon Linux 2023 (glibc < 2.38) with the
+# load-dynamic build variant. Point to the system libonnxruntime.so path.
+# Not needed for default bundled-ORT (macOS, Linux glibc ≥ 2.38).
+# Environment=ORT_DYLIB_PATH=/opt/onnxruntime/lib/libonnxruntime.so
+
+# ── File descriptor limit ─────────────────────────────────────────────────────
+# Raise the open-file limit. The daemon holds open redb files, HTTP keep-alive
+# sockets, and (when tree-sitter analysis is active) source file handles.
+LimitNOFILE=65536
+
+[Install]
+# Start this service when the system reaches multi-user (non-graphical) mode —
+# the standard target for daemon services on EC2 and other headless Linux hosts.
+WantedBy=multi-user.target

@@ -22,6 +22,7 @@ use trusty_analyze::service::{serve, AnalyzerAppState, DEFAULT_PORT};
 mod commands;
 use commands::daemon as daemon_cmds;
 use commands::daemon_guard::ensure_daemon_running;
+use commands::port::{handle_port, PortFormat};
 use commands::service::{run_service_action, ServiceAction as ServiceActionEnum};
 use commands::setup::{run_setup, SetupTarget};
 
@@ -154,6 +155,19 @@ enum Cmd {
     },
     /// Probe both daemons.
     Health,
+    /// Report the daemon's listening port.
+    ///
+    /// Reads the discovery file written on bind. Falls back to 7879 when
+    /// no daemon is running. Useful for shell substitution:
+    /// `curl http://127.0.0.1:$(trusty-analyze port)/health`
+    Port {
+        /// Print `host:port` instead of the bare port number.
+        #[arg(long, conflicts_with = "json")]
+        addr: bool,
+        /// Print `{"addr":"…","port":…}` JSON instead of the bare port.
+        #[arg(long, conflicts_with = "addr")]
+        json: bool,
+    },
     /// Run an MCP stdio server pointed at the analyzer daemon.
     Mcp {
         /// Base URL of the analyzer daemon. Defaults to http://127.0.0.1:7879.
@@ -669,6 +683,13 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
+        Cmd::Port { addr, json } => handle_port(if json {
+            PortFormat::Json
+        } else if addr {
+            PortFormat::Addr
+        } else {
+            PortFormat::Port
+        }),
         Cmd::Mcp { analyzer_url } => {
             let server = AnalyzerMcpServer::new(analyzer_url);
             trusty_analyze::mcp::stdio::run(server).await
