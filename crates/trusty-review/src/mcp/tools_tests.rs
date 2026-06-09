@@ -2,9 +2,12 @@
 //!
 //! Why: split from `tools.rs` to keep that file under the 500-line cap while
 //! preserving full test coverage for all tool handlers and the inference-probe
-//! integration (#719).
+//! integration (#719/#722).
 //! What: exercises `tool_descriptors`, `require_str`, `wrap_tool_error`, and
-//! `call_review_health` (both happy path and auth-error path).
+//! `call_review_health` (happy path, auth-error, and dep-reachability paths).
+//! The `call_tool` dispatch tests for `review_diff` / `review_pr` live in the
+//! sibling `tools_dispatch_tests.rs` module (#949) to keep each file under the
+//! 500-line cap.
 //! Test: this is the test module; each `#[test]` / `#[tokio::test]` is a
 //! self-contained unit test.
 

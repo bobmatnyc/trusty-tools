@@ -411,8 +411,14 @@ pub fn wrap_tool_error(msg: &str) -> Value {
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
-// Split into `tools_tests.rs` to keep this file under the 500-line cap.
+// Split across two test modules to keep each file under the 500-line cap.
+//  - `tools_tests.rs`          — descriptors, helpers, review_health (#719/#722)
+//  - `tools_dispatch_tests.rs` — call_tool dispatch: review_diff / review_pr (#949)
 
 #[cfg(test)]
 #[path = "tools_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tools_dispatch_tests.rs"]
+mod dispatch_tests;

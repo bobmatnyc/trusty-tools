@@ -181,6 +181,13 @@ jobs:
           CI: ""
         run: cargo test --workspace --exclude trusty-mpm-gui
 
+      # Explicit per-crate step so trusty-review failures are individually
+      # attributed in the GitHub Actions UI (closes #950).
+      - name: cargo test -p trusty-review
+        env:
+          CI: ""
+        run: cargo test -p trusty-review
+
   # --------------------------------------------------------------------------
   # msrv: verify the workspace compiles on the effective MSRV.
   # cargo check is used (not test) to keep this job fast: the MSRV guarantee
