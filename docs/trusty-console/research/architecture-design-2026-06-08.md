@@ -55,12 +55,16 @@ Add `trusty-common = { workspace = true }` for shutdown_signal/write_daemon_addr
 ## MVP vs later
 
 - **P0 (issue #959):** health dashboard for all 4 daemons + complete workspace-convention alignment. ~½ day.
+
+  **Operator note:** trusty-analyze writes no discovery file (see issue #956), so the P0 health dashboard assumes port 7879. If trusty-analyze is started on a non-default port, the console will show it as unreachable until #956 lands. Promoting the #956 discovery-file fix into P0 scope would remove this caveat.
 - **P1 (issue #960):** /proxy/{daemon}/{*path} reverse-proxy (reqwest streaming) + base-href handling + background health-poll cache + SPA links into proxied views. Watch the 500-line cap on server.rs — split proxy routes + poller into their own modules.
 - **P2 (future):** cross-daemon features (unified search bar, memory recall panel, review trigger); optional console_status MCP tool.
 
 ## 5 key decisions before P1 (issue #960)
 
 1. Path-rewriting strategy: response-body `<base>` injection (zero daemon changes, fragile) vs Vite `base` config per daemon (clean one-liner, needs coordinated daemon releases). RECOMMENDED: Vite base if daemon changes acceptable.
+
+   **Caveat — response-body injection is genuinely fragile:** it requires buffering the response (breaking streaming and Content-Length), it conflicts with Content-Encoding/compression (proxied HTML compression must be disabled), and it can corrupt pages if `<head>` is split across chunks. Pursue it ONLY if coordinated daemon releases are truly impossible; otherwise prefer the Vite `base` config approach.
 2. trusty-analyze discovery file: add write_daemon_addr to trusty-analyze (see issue #956) vs keep hard-coded 7879 fallback.
 3. Background health-poll caching: per-request TCP probes (simple, blocks response on 4 probes) vs background tokio task with Arc<RwLock<...>> cache (lower latency). RECOMMENDED: background cache, 15s interval.
 4. Proxy implementation crate: reqwest streaming (already a dep) vs hyper direct. RECOMMENDED: reqwest.
