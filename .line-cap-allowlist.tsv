@@ -163,7 +163,7 @@ crates/trusty-search/src/service/daemon.rs	774
 crates/trusty-search/src/service/embedder_supervisor.rs	1020
 crates/trusty-search/src/service/grep.rs	827
 crates/trusty-search/src/service/persistence.rs	1017
-crates/trusty-search/src/service/reindex/mod.rs	2789
+crates/trusty-search/src/service/reindex/mod.rs	2855
 crates/trusty-search/src/service/reindex/tests.rs	1674
 crates/trusty-search/src/service/walker.rs	1344
 crates/trusty-search/src/service/warm_boot/probe.rs	518

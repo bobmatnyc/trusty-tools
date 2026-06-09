@@ -1,10 +1,11 @@
-//! Issue #848 regression tests for the prune pass.
+//! Issue #848 and #855 regression tests for the prune pass and orphan-chunk fix.
 //!
 //! Why: isolated here to keep `prune.rs` under the 500-line cap while
 //! preserving full coverage for the path-normalisation helper and the
 //! data-safety disk-existence guard.
-//! What: four tests — normalisation round-trip, disk-existence guard predicate,
-//! `list_indexed_files` distinctness, pre-fix and post-fix prune models.
+//! What: five tests — normalisation round-trip, disk-existence guard predicate,
+//! `list_indexed_files` distinctness, pre-fix and post-fix prune models (#848),
+//! and orphan-chunk regression test (#855).
 //! Test: all tests in this file run as part of `cargo test -p trusty-search`.
 
 use super::to_corpus_relative_path;
@@ -311,5 +312,185 @@ fn prune_pass_removes_deleted_file_from_staged_corpus() {
     assert!(
         hashes.iter().any(|(f, _)| f == "kept.rs"),
         "#848 POST-FIX: file-hash entry for kept.rs must still be present"
+    );
+}
+
+/// Issue #855 — orphan-chunk regression model: when a changed file re-chunks
+/// to FEWER chunks (e.g. a function is deleted), the old chunk IDs that were
+/// carried into the staging corpus by `copy_all_from` must be removed BEFORE
+/// the new, smaller chunk set is written (delete-then-insert semantics).
+///
+/// Without the fix, the staging corpus would contain BOTH the new chunks AND
+/// the old chunks that no longer exist in the file — "orphan" rows that are
+/// promoted to the live corpus and returned by search until the next `--force`
+/// reindex.
+///
+/// Why: this is the core regression proof for issue #855. The pre-fix
+/// sub-test documents the wrong behaviour (orphan chunks survive); the
+/// post-fix sub-test documents the correct behaviour (orphan chunks are gone).
+///
+/// What: models the staging corpus lifecycle at the CorpusStore level:
+///   1. Seeds a live corpus with a file `shrunk.rs` having 3 chunks.
+///   2. Seeds a staging corpus from live (`copy_all_from`).
+///   3. PRE-FIX: verifies that a naive upsert-only re-commit of 1 new chunk
+///      leaves the 2 old chunks still present (proving the bug).
+///   4. POST-FIX: applies the delete-then-insert pattern (delete old chunks
+///      before inserting the new one) and verifies exactly 1 chunk survives.
+///
+/// Test: this test.
+#[test]
+fn changed_file_orphan_chunks_removed_before_reinsert() {
+    use crate::core::chunker::{ChunkType, RawChunk};
+    use crate::core::corpus::CorpusStore;
+
+    let dir = tempfile::tempdir().unwrap();
+
+    let chunk = |file: &str, id: &str, content: &str| RawChunk {
+        id: id.to_string(),
+        file: file.to_string(),
+        start_line: 1,
+        end_line: 1,
+        content: content.to_string(),
+        function_name: None,
+        language: Some("rust".to_string()),
+        chunk_type: ChunkType::Code,
+        calls: Vec::new(),
+        inherits_from: Vec::new(),
+        chunk_depth: 0,
+        parent_chunk_id: None,
+        child_chunk_ids: Vec::new(),
+        nlp_keywords: Vec::new(),
+        nlp_code_refs: Vec::new(),
+        virtual_terms: Vec::new(),
+    };
+
+    // ─── Live corpus: shrunk.rs has 3 chunks ─────────────────────────────────
+    let live_path = dir.path().join("855_live.redb");
+    {
+        let live = CorpusStore::open(&live_path).unwrap();
+        live.upsert_chunks(&[
+            chunk("shrunk.rs", "shrunk:fn_a", "fn fn_a() {}"),
+            chunk("shrunk.rs", "shrunk:fn_b", "fn fn_b() {}"),
+            chunk("shrunk.rs", "shrunk:fn_c", "fn fn_c() {}"),
+        ])
+        .unwrap();
+        live.upsert_file_hashes(&[("shrunk.rs", "old_hash")])
+            .unwrap();
+    }
+
+    // ─── Staging seeded from live (copy_all_from) ─────────────────────────────
+    let staging_path = dir.path().join("855_staging.redb");
+    {
+        let live = CorpusStore::open(&live_path).unwrap();
+        let staging = CorpusStore::open_fresh(&staging_path).unwrap();
+        staging.copy_all_from(&live).unwrap();
+        // Verify: staging starts with all 3 chunks.
+        let initial = staging.list_indexed_files().unwrap();
+        assert!(
+            initial.iter().any(|f| f == "shrunk.rs"),
+            "#855 setup: staging must contain shrunk.rs after copy_all_from"
+        );
+        let initial_chunks = staging
+            .load_all_chunks()
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.file == "shrunk.rs")
+            .count();
+        assert_eq!(
+            initial_chunks, 3,
+            "#855 setup: staging must start with 3 chunks for shrunk.rs"
+        );
+    }
+
+    // ─── PRE-FIX model: upsert-only re-commit (the bug) ──────────────────────
+    // Simulate what the OLD non-force reindex did: just upsert the 1 new chunk
+    // without first deleting the old 3.  The 2 orphan chunks survive.
+    let prefix_staging_path = dir.path().join("855_prefix_staging.redb");
+    {
+        let live = CorpusStore::open(&live_path).unwrap();
+        let staging = CorpusStore::open_fresh(&prefix_staging_path).unwrap();
+        staging.copy_all_from(&live).unwrap();
+        // Only upsert 1 new chunk (no delete of old ones).
+        staging
+            .upsert_chunks(&[chunk("shrunk.rs", "shrunk:fn_a", "fn fn_a_new() {}")])
+            .unwrap();
+    }
+    let prefix = CorpusStore::open(&prefix_staging_path).unwrap();
+    let prefix_chunks: Vec<_> = prefix
+        .load_all_chunks()
+        .unwrap()
+        .into_iter()
+        .filter(|c| c.file == "shrunk.rs")
+        .collect();
+    assert_eq!(
+        prefix_chunks.len(),
+        3, // 1 new + 2 orphans → DATA LOSS BUG
+        "#855 PRE-FIX model: upsert-only must leave 3 chunks (1 new + 2 orphan), \
+         proving the orphan-chunk bug exists"
+    );
+    // The orphan chunks with stale content must still be present.
+    assert!(
+        prefix_chunks.iter().any(|c| c.id == "shrunk:fn_b"),
+        "#855 PRE-FIX model: orphan chunk shrunk:fn_b must survive upsert-only"
+    );
+    assert!(
+        prefix_chunks.iter().any(|c| c.id == "shrunk:fn_c"),
+        "#855 PRE-FIX model: orphan chunk shrunk:fn_c must survive upsert-only"
+    );
+
+    // ─── POST-FIX model: delete-then-insert (the fix) ─────────────────────────
+    // Simulate what the FIXED non-force reindex does: delete all prior chunks
+    // for shrunk.rs, THEN insert the 1 new chunk.  Exactly 1 chunk survives.
+    let postfix_staging_path = dir.path().join("855_postfix_staging.redb");
+    {
+        let live = CorpusStore::open(&live_path).unwrap();
+        let staging = CorpusStore::open_fresh(&postfix_staging_path).unwrap();
+        staging.copy_all_from(&live).unwrap();
+
+        // Step 1: delete all old chunks for shrunk.rs (the fix).
+        let old_chunk_ids: Vec<String> = staging
+            .load_all_chunks()
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.file == "shrunk.rs")
+            .map(|c| c.id)
+            .collect();
+        staging.delete_chunks(&old_chunk_ids).unwrap();
+
+        // Step 2: insert only the 1 new chunk.
+        staging
+            .upsert_chunks(&[chunk("shrunk.rs", "shrunk:fn_a", "fn fn_a_new() {}")])
+            .unwrap();
+    }
+    let postfix = CorpusStore::open(&postfix_staging_path).unwrap();
+    let postfix_chunks: Vec<_> = postfix
+        .load_all_chunks()
+        .unwrap()
+        .into_iter()
+        .filter(|c| c.file == "shrunk.rs")
+        .collect();
+    assert_eq!(
+        postfix_chunks.len(),
+        1, // exactly 1 new chunk, no orphans
+        "#855 POST-FIX: delete-then-insert must leave exactly 1 chunk for shrunk.rs; \
+         found: {:?}",
+        postfix_chunks.iter().map(|c| &c.id).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        postfix_chunks[0].id, "shrunk:fn_a",
+        "#855 POST-FIX: the surviving chunk must be the newly inserted one"
+    );
+    assert_eq!(
+        postfix_chunks[0].content, "fn fn_a_new() {}",
+        "#855 POST-FIX: the surviving chunk must have the NEW content, not stale content"
+    );
+    // The orphan chunks must be gone.
+    assert!(
+        !postfix_chunks.iter().any(|c| c.id == "shrunk:fn_b"),
+        "#855 POST-FIX: orphan chunk shrunk:fn_b must be removed by delete-then-insert"
+    );
+    assert!(
+        !postfix_chunks.iter().any(|c| c.id == "shrunk:fn_c"),
+        "#855 POST-FIX: orphan chunk shrunk:fn_c must be removed by delete-then-insert"
     );
 }

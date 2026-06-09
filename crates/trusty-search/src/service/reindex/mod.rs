@@ -881,6 +881,16 @@ struct ParsedReadyBatch {
     /// Files actually submitted to the indexer (post hash/minified filtering).
     /// Used to size the per-batch commit event.
     batch_files: usize,
+    /// Corpus-relative paths of every file being re-indexed in this batch
+    /// (i.e. the files that were NOT hash-skipped). Used by
+    /// `commit_parsed_and_finalize` to remove stale chunks for changed files
+    /// BEFORE inserting the new chunks (fix for issue #855: delete-then-insert
+    /// semantics to prevent orphan chunk IDs when a file shrinks).
+    ///
+    /// These strings are exactly the keys stored in the corpus (produced by
+    /// `to_corpus_relative_path` in `prepare_batch_payload`), so the removal
+    /// finds precisely the right prior chunks.
+    changed_corpus_paths: Vec<String>,
 }
 
 /// Stage 1 of the pipelined per-batch flow: read every file in `batch`,
@@ -1062,6 +1072,7 @@ async fn prepare_and_parse_batch(ctx: &BatchCtx, batch: &[PathBuf]) -> Option<Pa
         parsed,
         new_hashes: payload.new_hashes,
         batch_files,
+        changed_corpus_paths: payload.changed_corpus_paths,
     })
 }
 
@@ -1073,11 +1084,26 @@ async fn prepare_and_parse_batch(ctx: &BatchCtx, batch: &[PathBuf]) -> Option<Pa
 /// Why: commits must remain sequential (one write lock at a time), but the
 /// producer can already be reading + parsing the next batch in parallel with
 /// this work — that's the whole point of the pipeline (issue #20).
+///
+/// Issue #855 (delete-then-insert for changed files): before writing the new
+/// chunks, remove every prior chunk belonging to each CHANGED file. This
+/// prevents orphan chunk IDs when a file re-chunks to FEWER chunks (e.g. a
+/// function is deleted): the old chunk IDs carried into the staging store by
+/// `copy_all_from` would otherwise survive alongside the new IDs, and search
+/// would return stale content until the next `--force` reindex.
+///
+/// Sequencing is critical: the removal MUST happen BEFORE the new chunks are
+/// written (so we only remove the old set, not what we just inserted). The
+/// write lock is held for the entire remove-then-insert window so no reader
+/// can observe a partially-updated state. The KG is NOT rebuilt here (matching
+/// `remove_file_no_kg_rebuild`); the reindex orchestrator rebuilds it once at
+/// Phase 3, which is already the existing behaviour.
 async fn commit_parsed_and_finalize(ctx: &BatchCtx, ready: ParsedReadyBatch) -> BatchOutcome {
     let ParsedReadyBatch {
         parsed,
         new_hashes,
         batch_files,
+        changed_corpus_paths,
     } = ready;
     let parse_ms = parsed.parse_ms;
     let embed_ms = parsed.embed_ms;
@@ -1085,6 +1111,29 @@ async fn commit_parsed_and_finalize(ctx: &BatchCtx, ready: ParsedReadyBatch) -> 
 
     let commit = {
         let indexer = ctx.handle.indexer.write().await;
+
+        // Issue #855: delete-then-insert for changed files. For every file
+        // being re-indexed in this batch, remove its previous chunks from ALL
+        // stores (in-memory map, HNSW, BM25, redb) before writing the new
+        // chunks. Brand-new files (not previously in the corpus) have no prior
+        // chunks to remove; `remove_file_no_kg_rebuild` returns 0 for them
+        // without error.
+        //
+        // This must run INSIDE the same write-lock window as the subsequent
+        // `commit_parsed_batch` so the two operations are atomic from the
+        // perspective of concurrent readers (a search holding the READ lock
+        // will either see the full old set or the full new set, never a mix).
+        for file_path in &changed_corpus_paths {
+            if let Err(e) = indexer.remove_file_no_kg_rebuild(file_path).await {
+                tracing::warn!(
+                    "reindex[{}]: #855 pre-commit remove failed for {} ({e}) \
+                     — stale chunks may persist until next --force reindex",
+                    ctx.index_id.0,
+                    file_path,
+                );
+            }
+        }
+
         match indexer.commit_parsed_batch(parsed, true).await {
             Ok(c) => c,
             Err(e) => {
@@ -1120,6 +1169,11 @@ struct BatchPayload {
     to_index: Vec<(String, String)>,
     to_index_paths: Vec<PathBuf>,
     new_hashes: Vec<(PathBuf, String)>,
+    /// Corpus-relative paths of files being re-indexed (same strings as the
+    /// first element of each `to_index` entry). Carried separately so
+    /// `commit_parsed_and_finalize` can remove stale chunks before inserting
+    /// new ones without re-deriving the paths from `new_hashes`.
+    changed_corpus_paths: Vec<String>,
 }
 
 /// Read every file in `batch` concurrently, then drop read errors, minified
@@ -1141,6 +1195,12 @@ async fn prepare_batch_payload(ctx: &BatchCtx, batch: &[PathBuf]) -> BatchPayloa
     let mut to_index: Vec<(String, String)> = Vec::with_capacity(batch.len());
     let mut to_index_paths: Vec<PathBuf> = Vec::with_capacity(batch.len());
     let mut new_hashes: Vec<(PathBuf, String)> = Vec::with_capacity(batch.len());
+    // Issue #855: track the corpus-relative path of every file being
+    // re-indexed so `commit_parsed_and_finalize` can remove the prior
+    // chunks before inserting the new set (delete-then-insert per changed
+    // file). Only changed files (hash-miss) reach this list; unchanged and
+    // error files are skipped before the push below.
+    let mut changed_corpus_paths: Vec<String> = Vec::with_capacity(batch.len());
     for (path, content_res) in read_results {
         // Use the shared canonical normalisation from `prune` so every
         // relative-path string stored in the corpus is produced by the
@@ -1192,12 +1252,18 @@ async fn prepare_batch_payload(ctx: &BatchCtx, batch: &[PathBuf]) -> BatchPayloa
         to_index.push((path_str, content));
         to_index_paths.push(path.clone());
         new_hashes.push((path, h));
+        // Issue #855: record the corpus-relative path so the commit phase
+        // can remove prior (stale) chunks for this file before inserting the
+        // new set.  `rel` is the canonical corpus key — same string written
+        // to the chunk's `file` field, so removal finds exactly the right rows.
+        changed_corpus_paths.push(rel);
     }
 
     BatchPayload {
         to_index,
         to_index_paths,
         new_hashes,
+        changed_corpus_paths,
     }
 }
 
