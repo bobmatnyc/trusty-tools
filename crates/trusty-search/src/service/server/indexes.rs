@@ -171,8 +171,27 @@ pub(super) async fn create_index_handler(
         colocated: true,
         ..Default::default()
     };
+    // Issue #954: propagate HNSW alloc failure (OOM) as a 500 response
+    // rather than a panic so the daemon continues serving other requests.
     let mut indexer =
-        crate::service::persistence_loader::build_indexer_from_entry(&init_entry, &embedder).await;
+        match crate::service::persistence_loader::build_indexer_from_entry(&init_entry, &embedder)
+            .await
+        {
+            Ok(idx) => idx,
+            Err(e) => {
+                tracing::error!(
+                    "create_index: HNSW allocator failed for '{}': {e} (closes #954)",
+                    req.id
+                );
+                return (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(serde_json::json!({
+                        "error": format!("HNSW allocation failed (OOM): {e}")
+                    })),
+                )
+                    .into_response();
+            }
+        };
 
     // Resolve repo-config filters (issue: trusty-search.yaml wiring). The
     // CLI sends `paths:` as relative strings; resolve them against `root_path`

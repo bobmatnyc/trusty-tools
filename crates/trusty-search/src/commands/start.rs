@@ -563,7 +563,19 @@ pub(crate) async fn restore_one_index(
         }
     }
 
-    let mut indexer = build_indexer_from_entry(&entry, embedder).await;
+    // Issue #954: propagate HNSW alloc failure (OOM) as a skip rather than
+    // a panic so the daemon can still serve the remaining indexes.
+    let mut indexer = match build_indexer_from_entry(&entry, embedder).await {
+        Ok(idx) => idx,
+        Err(e) => {
+            tracing::error!(
+                "warm-boot: skipping index '{}' — HNSW allocator failed: {e} \
+                 (closes #954; daemon will restart on next boot via systemd Restart=on-failure)",
+                entry.id
+            );
+            return;
+        }
+    };
     // Restore per-index filters and domain vocabulary from indexes.toml.
     // Resolve `include_paths` to absolute under `root_path` so the reindex
     // walker can prune without per-call path arithmetic. `.` and empty

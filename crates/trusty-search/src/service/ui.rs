@@ -91,7 +91,13 @@ pub async fn ui_asset_handler(
             .header(header::CONTENT_TYPE, mime)
             .header(header::CACHE_CONTROL, cache_control_for(trimmed))
             .body(Body::from(file.contents()))
-            .expect("response builder fields are all valid");
+            // Why: the builder only fails when an invalid status code or
+            // malformed header value is supplied. `StatusCode::OK` is a
+            // valid constant, and both `mime` and `cache_control_for` return
+            // `&'static str` literals verified at compile time — the builder
+            // cannot produce an error here. `expect` is correct; this is a
+            // genuine programmer-error invariant, not a runtime condition.
+            .expect("response builder fields are all valid static values");
     }
     // SPA fallback.
     serve_index(&state).await
@@ -114,7 +120,13 @@ async fn serve_index(state: &SearchAppState) -> Response {
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from(body))
-        .expect("response builder fields are all valid")
+        // Why: the builder only fails on invalid status codes or malformed
+        // header values. `StatusCode::OK` is a compile-time constant and both
+        // header values are string literals — the builder cannot produce an
+        // error here. `expect` is the correct choice; this is a programmer-error
+        // invariant (the literals cannot change at runtime), not a recoverable
+        // condition.
+        .expect("response builder fields are all valid static values")
 }
 
 fn mime_for(path: &str) -> &'static str {

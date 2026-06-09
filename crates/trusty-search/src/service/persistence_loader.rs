@@ -1,18 +1,14 @@
-//! Shared helper that builds a `CodeIndexer`, attempting to restore a
-//! previously-persisted HNSW snapshot and chunk corpus from disk.
+//! Shared helper that builds a `CodeIndexer` by restoring a persisted HNSW
+//! snapshot and chunk corpus from disk.
 //!
-//! Why (issue #85): both `POST /indexes` and the daemon-startup
-//! `restore_indexes` hook need the same logic — construct the indexer, wire
-//! the embedder, attempt to load HNSW + chunks, and fall back to an empty
-//! index on any failure. Centralising this prevents drift between the two
-//! call sites (and the inevitable "the warm-boot path silently runs in
-//! BM25-only mode" footgun).
-//! What: `build_indexer_with_persisted_state` returns a fully-wired
-//! `CodeIndexer`. On a corrupt or missing snapshot it falls back to a fresh
-//! empty store + corpus and logs at WARN/INFO so operators can tell which
-//! path was taken.
-//! Test: covered by integration tests in `tests/integration_tests.rs` that
-//! drop a state directory, restart, and assert the corpus is intact.
+//! Why (issue #85): both `POST /indexes` and `restore_indexes` need the same
+//! logic — construct the indexer, wire the embedder, load HNSW + chunks, fall
+//! back on any soft failure. Centralising prevents drift between call sites.
+//! What: `build_indexer_from_entry` returns `Result<CodeIndexer, anyhow::Error>`.
+//! Corrupt/missing snapshots fall back to an empty store (logged at WARN/INFO).
+//! OOM allocating the HNSW store surfaces as `Err` so callers can skip the
+//! index cleanly instead of panicking (closes #954).
+//! Test: integration tests in `tests/integration_tests.rs`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -65,20 +61,17 @@ async fn open_corpus_with_retry(path: &Path) -> Result<CorpusStore> {
     }
 }
 
-/// Build a `CodeIndexer` for `index_id`, restoring HNSW + chunks from disk
-/// when a snapshot is present.
+/// Build a `CodeIndexer` for `index_id`, restoring HNSW + chunks from disk.
 ///
-/// Why: see module docs.
-/// What: tries `UsearchStore::load_from` first; falls back to a fresh empty
-/// store if the load returns `Ok(None)` (no snapshot) or `Err` (corrupt
-/// snapshot — logged at WARN). Then attaches the embedder + store, and
-/// finally calls `load_chunks_from_disk` to rehydrate the corpus.
+/// Why: see module docs. Returns `Err` only on OOM allocating the fresh store.
+/// What: tries `UsearchStore::load_from`; falls back to fresh on missing/corrupt
+/// snapshot (logged at WARN); attaches embedder + store; rehydrates corpus.
 /// Test: see module docs.
 pub async fn build_indexer_with_persisted_state(
     index_id: &str,
     root_path: PathBuf,
     embedder: &Arc<dyn Embedder>,
-) -> CodeIndexer {
+) -> Result<CodeIndexer> {
     // Build a minimal PersistedIndex so we can use the entry-aware path helpers.
     // `colocated` defaults to false (legacy global storage) for backward
     // compatibility — callers that have a full `PersistedIndex` should call
@@ -94,22 +87,21 @@ pub async fn build_indexer_with_persisted_state(
 /// Build a `CodeIndexer` from a `PersistedIndex`, routing storage to colocated
 /// or legacy global paths based on `entry.colocated`.
 ///
-/// Why: the caller has a full `PersistedIndex` (from `indexes.toml` or from
-/// filesystem discovery), including the `colocated` flag. Using this variant
-/// means no flag is lost — colocated indexes open their storage from
-/// `<root_path>/.trusty-search/` and legacy indexes from the global data dir.
+/// Why: preserves the `colocated` flag — colocated indexes open storage from
+/// `<root_path>/.trusty-search/`; legacy from the global data dir. Returns
+/// `Err` only on OOM; corrupt/missing snapshots fall back to an empty store.
 /// What: resolves paths via `hnsw_path_for_entry` / `corpus_redb_path_for_entry`,
-/// then proceeds identically to the original `build_indexer_with_persisted_state`.
+/// builds the store (with fallback), attaches the embedder, rehydrates corpus.
 /// Test: `colocated_indexer_builds_from_entry` covers the colocated path;
 /// the existing warm-boot integration tests cover the legacy path.
 pub async fn build_indexer_from_entry(
     entry: &PersistedIndex,
     embedder: &Arc<dyn Embedder>,
-) -> CodeIndexer {
+) -> Result<CodeIndexer> {
     let index_id = &entry.id;
     let root_path = entry.root_path.clone();
     let dim = embedder.dimension();
-    let store: Arc<dyn VectorStore> = build_store_for_entry(entry, dim).await;
+    let store: Arc<dyn VectorStore> = build_store_for_entry(entry, dim).await?;
     let mut indexer =
         CodeIndexer::new(index_id, root_path).with_components(Arc::clone(embedder), store);
 
@@ -135,7 +127,7 @@ pub async fn build_indexer_from_entry(
     }
 
     restore_corpus_for_entry(&mut indexer, entry).await;
-    indexer
+    Ok(indexer)
 }
 
 /// Restore the chunk corpus for `indexer`, preferring the redb store and
@@ -256,16 +248,14 @@ fn stamp_if_unversioned_for_entry(entry: &PersistedIndex) {
     }
 }
 
-/// Try to load the HNSW snapshot for `entry`, routing to colocated or legacy
-/// storage. On any failure (missing, corrupt, dimension mismatch) returns a
-/// fresh empty `UsearchStore`.
+/// Try to load the HNSW snapshot for `entry`. On soft failure (missing, corrupt,
+/// dim mismatch) falls back to a fresh empty store. Returns `Err` only on OOM.
 ///
-/// Why: mirrors the original `build_store` but uses `hnsw_path_for_entry` so
-/// colocated indexes read from `<root>/.trusty-search/hnsw.usearch`.
-/// What: resolves the path, checks for the file, loads, falls back to fresh.
-/// Test: covered by the warm-boot integration tests (legacy path) and the
-/// colocated integration tests (colocated path).
-async fn build_store_for_entry(entry: &PersistedIndex, dim: usize) -> Arc<dyn VectorStore> {
+/// Why: uses `hnsw_path_for_entry` so colocated indexes read from the project's
+/// `.trusty-search/hnsw.usearch`; propagates OOM as `Err` (closes #954).
+/// What: resolves path, checks for snapshot, loads (or falls back), returns store.
+/// Test: warm-boot integration tests (legacy) + colocated integration tests.
+async fn build_store_for_entry(entry: &PersistedIndex, dim: usize) -> Result<Arc<dyn VectorStore>> {
     let index_id = &entry.id;
     let path = match persistence::hnsw_path_for_entry(entry) {
         Ok(p) => p,
@@ -284,7 +274,7 @@ async fn build_store_for_entry(entry: &PersistedIndex, dim: usize) -> Arc<dyn Ve
                         index_id,
                         path.display()
                     );
-                    return Arc::new(store);
+                    return Ok(Arc::new(store));
                 }
                 tracing::warn!(
                     "warm-boot: hnsw snapshot for '{}' has dim {} but embedder is {} — starting fresh",
@@ -311,14 +301,25 @@ async fn build_store_for_entry(entry: &PersistedIndex, dim: usize) -> Arc<dyn Ve
     fresh_store(dim)
 }
 
-fn fresh_store(dim: usize) -> Arc<dyn VectorStore> {
-    // SAFETY (#101): `UsearchStore::new` only fails on OOM; an OOM at startup
-    // has no sensible recovery path so we panic with a clear message.
-    let s = UsearchStore::new(dim).unwrap_or_else(|e| {
-        tracing::error!("failed to allocate UsearchStore (dim={dim}): {e}");
-        panic!("usearch alloc failure (OOM during HNSW init, dim={dim}): {e}");
-    });
-    Arc::new(s) as Arc<dyn VectorStore>
+/// Allocate a fresh empty `UsearchStore`. Returns `Err` on OOM instead of
+/// panicking so callers can skip the index with a diagnostic log (#954).
+///
+/// Why: the HNSW allocator can fail on memory-constrained hosts at warm-boot;
+/// propagating the error lets the daemon keep serving remaining indexes rather
+/// than aborting. Systemd `Restart=on-failure` handles persistent OOM.
+/// What: calls `UsearchStore::new(dim)`; logs ERROR and returns `Err` on failure.
+/// Test: normal allocation exercised by all persistence_loader tests; OOM path
+/// is not reproducible in unit tests (requires near-full RAM).
+fn fresh_store(dim: usize) -> Result<Arc<dyn VectorStore>> {
+    UsearchStore::new(dim)
+        .map(|s| Arc::new(s) as Arc<dyn VectorStore>)
+        .map_err(|e| {
+            tracing::error!(
+                "failed to allocate UsearchStore (dim={dim}): {e} — \
+                 index will be skipped (OOM, #954)"
+            );
+            anyhow::anyhow!("usearch alloc failure (OOM, dim={dim}): {e}")
+        })
 }
 
 #[cfg(test)]
@@ -384,7 +385,7 @@ mod tests {
         // build_indexer_from_entry (the fixed call path): colocated_storage_dir
         // is invoked via corpus_redb_path_for_entry → colocated_redb_path →
         // colocated_storage_dir, creating `.trusty-search/` on disk.
-        let indexer = build_indexer_from_entry(&entry, &embedder).await;
+        let indexer = build_indexer_from_entry(&entry, &embedder).await.unwrap();
 
         // The corpus store must be wired and pointing into `.trusty-search/`.
         assert!(
@@ -413,7 +414,7 @@ mod tests {
 
         // --- Phase 2: simulate daemon restart — reload from the same entry ---
         // This is what `restore_indexes` does on startup.
-        let reloaded = build_indexer_from_entry(&entry, &embedder).await;
+        let reloaded = build_indexer_from_entry(&entry, &embedder).await.unwrap();
         assert!(
             reloaded.has_corpus_store(),
             "#483: reloaded indexer must have a corpus store"
@@ -450,7 +451,7 @@ mod tests {
             colocated: true,
             ..Default::default()
         };
-        let indexer = build_indexer_from_entry(&entry, &embedder).await;
+        let indexer = build_indexer_from_entry(&entry, &embedder).await.unwrap();
 
         // Corpus store must be present — this is the prerequisite that prevents
         // the "cannot write schema_version: no durable corpus" error (#485).
@@ -489,9 +490,9 @@ mod tests {
             colocated: false,
             ..Default::default()
         };
-        // Must not panic even when no app-data corpus exists.
-        let _indexer = build_indexer_from_entry(&entry, &embedder).await;
-        // Not asserting has_corpus_store here: app-data path may or may not
-        // resolve in a test environment. The key invariant is no panic.
+        // Must not fail even when no app-data corpus exists.
+        build_indexer_from_entry(&entry, &embedder).await.unwrap();
+        // Key invariant: no error. Corpus store presence is not asserted here:
+        // app-data path may or may not resolve in a test environment.
     }
 }
