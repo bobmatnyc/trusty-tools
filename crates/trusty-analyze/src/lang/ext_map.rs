@@ -67,7 +67,9 @@ pub static EXT_MAP: &[ExtEntry] = &[
     // ── TypeScript / TSX / module variants ──────────────────────────────────
     // Order: .tsx before .ts so the suffix check short-circuits on tsx paths.
     e!(".tsx", "tsx", "typescript"),
+    // MUST precede `.ts` — `ends_with` suffix match; see ext_map_suffix_ordering_invariant test.
     e!(".mts", "typescript"),
+    // MUST precede `.ts` — `ends_with` suffix match; see ext_map_suffix_ordering_invariant test.
     e!(".cts", "typescript"),
     e!(".ts", "typescript"),
     // ── JavaScript / JSX / module variants ──────────────────────────────────
@@ -84,6 +86,7 @@ pub static EXT_MAP: &[ExtEntry] = &[
     // ── Go ──────────────────────────────────────────────────────────────────
     e!(".go", "go"),
     // ── Kotlin ──────────────────────────────────────────────────────────────
+    // MUST precede `.ts` — `ends_with` suffix match; see ext_map_suffix_ordering_invariant test.
     e!(".kts", "kotlin"),
     e!(".kt", "kotlin"),
     // ── Swift ───────────────────────────────────────────────────────────────
@@ -284,6 +287,46 @@ mod tests {
                 "duplicate extension in EXT_MAP: {:?}",
                 entry.ext
             );
+        }
+    }
+
+    /// EXT_MAP must list longer/more-specific suffixes before the shorter ones they subsume.
+    ///
+    /// Why: `lang_for_extension` and `lang_for_linter` both use `ends_with` and
+    /// return the *first* match. If a shorter suffix (e.g. `.ts`) appears before a
+    /// longer one that ends with it (e.g. `.mts`, `.cts`, `.kts`), every file
+    /// matching the longer suffix is silently misrouted to the shorter suffix's
+    /// language — `.kts` would return `"typescript"` instead of `"kotlin"` with no
+    /// compile-time or startup warning.
+    ///
+    /// What: iterates every ordered pair `(a_idx, b_idx)` of distinct EXT_MAP entries;
+    /// when `EXT_MAP[a_idx].ext` ends with `EXT_MAP[b_idx].ext` and is strictly
+    /// longer, asserts `a_idx < b_idx` (the more-specific suffix precedes the
+    /// less-specific one).
+    ///
+    /// Test: this function IS the test.
+    #[test]
+    fn ext_map_suffix_ordering_invariant() {
+        for (a_idx, a_entry) in EXT_MAP.iter().enumerate() {
+            for (b_idx, b_entry) in EXT_MAP.iter().enumerate() {
+                if a_idx == b_idx {
+                    continue;
+                }
+                // a is longer and its tail matches b → a is more-specific, must come first.
+                if a_entry.ext.ends_with(b_entry.ext) && a_entry.ext.len() > b_entry.ext.len() {
+                    assert!(
+                        a_idx < b_idx,
+                        "EXT_MAP suffix-ordering violation: {:?} (index {}) ends with {:?} \
+                         (index {}) but appears AFTER it — the more-specific suffix must \
+                         precede the less-specific one so `ends_with` matching routes \
+                         correctly (e.g. `.kts` must precede `.ts`)",
+                        a_entry.ext,
+                        a_idx,
+                        b_entry.ext,
+                        b_idx,
+                    );
+                }
+            }
         }
     }
 
