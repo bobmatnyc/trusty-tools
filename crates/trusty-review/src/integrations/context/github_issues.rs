@@ -131,7 +131,10 @@ impl DualModeTokenResolver {
 #[async_trait]
 impl IssueTokenResolver for DualModeTokenResolver {
     async fn resolve(&self, owner: &str) -> Result<String, ContextSourceError> {
-        let client = GithubClient::new();
+        let client = GithubClient::new().map_err(|e| ContextSourceError::NotConfigured {
+            src: SOURCE_NAME,
+            reason: format!("failed to build HTTP client: {e}"),
+        })?;
         AuthStrategy::select(self.run_mode, None)
             .resolve_token(&client, &self.config, owner)
             .await
@@ -177,20 +180,29 @@ impl ReqwestIssueSearch {
     /// Construct with a default 15s-timeout client.
     ///
     /// Why: bound the worst-case latency of an enrichment call.
-    /// What: builds a reqwest client; panics only on TLS-backend init failure.
+    /// What: builds a reqwest client.  Returns `Err(ContextSourceError::Transport)`
+    /// if the TLS backend cannot be initialised — surfaces the failure to
+    /// `GithubIssuesSource::from_config` instead of panicking at startup (closes
+    /// #953).
     /// Test: covered transitively by `GithubIssuesSource::from_config`.
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, ContextSourceError> {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .build()
-            .expect("reqwest::Client::build failed — TLS backend unavailable");
-        Self { http }
+            .map_err(|e| ContextSourceError::Transport {
+                src: SOURCE_NAME,
+                err: TransportErr(format!("failed to build HTTP client: {e}")),
+            })?;
+        Ok(Self { http })
     }
 }
 
 impl Default for ReqwestIssueSearch {
+    /// Why: `Default` cannot return `Result`; production callers use `new()`.
+    /// What: delegates to `Self::new().expect(…)`.
+    /// Test: covered by `GithubIssuesSource::from_config`.
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("reqwest::Client::build failed — TLS backend unavailable")
     }
 }
 
@@ -236,6 +248,39 @@ impl IssueSearchTransport for ReqwestIssueSearch {
             });
         }
         Ok(text)
+    }
+}
+
+// Disabled sentinels: used by `from_config` when TLS init fails to build a
+// permanently-disabled source.  `is_enabled()` is false so `gather` is never
+// called; these impls satisfy the trait bounds but are unreachable dead-ends.
+
+struct DisabledTokenResolver;
+
+#[async_trait]
+impl IssueTokenResolver for DisabledTokenResolver {
+    async fn resolve(&self, _owner: &str) -> Result<String, ContextSourceError> {
+        Err(ContextSourceError::NotConfigured {
+            src: SOURCE_NAME,
+            reason: "HTTP transport unavailable (TLS init failed)".to_string(),
+        })
+    }
+}
+
+struct DisabledIssueSearch;
+
+#[async_trait]
+impl IssueSearchTransport for DisabledIssueSearch {
+    async fn search(
+        &self,
+        _token: &str,
+        _query: &str,
+        _per_page: u32,
+    ) -> Result<String, ContextSourceError> {
+        Err(ContextSourceError::Transport {
+            src: SOURCE_NAME,
+            err: TransportErr("HTTP transport unavailable (TLS init failed)".to_string()),
+        })
     }
 }
 
@@ -294,16 +339,33 @@ impl GithubIssuesSource {
     /// available.  An explicit `enabled = false` still wins.
     /// What: computes `effective_enabled(true)` (auto-enable when not explicitly
     /// disabled), and attaches the `DualModeTokenResolver` + prod transport.
+    /// If the reqwest TLS backend cannot be initialised the source is constructed
+    /// in a permanently-disabled state so it degrades gracefully instead of
+    /// panicking at startup (closes #953).
     /// Test: `from_config_respects_explicit_disable`.
     pub fn from_config(cfg: &super::SourceConfig, run_mode: RunMode, config: ReviewConfig) -> Self {
         // GitHub credentials may come from `gh` even with no env token, so we
         // cannot cheaply pre-detect them; treat as available and fail-open later.
+        let transport = match ReqwestIssueSearch::new() {
+            Ok(t) => Box::new(t) as Box<dyn IssueSearchTransport>,
+            Err(e) => {
+                tracing::error!(
+                    "github_issues: failed to build HTTP transport (source disabled): {e}"
+                );
+                return Self {
+                    enabled: false,
+                    mode: cfg.mode,
+                    token: Box::new(DisabledTokenResolver),
+                    transport: Box::new(DisabledIssueSearch),
+                };
+            }
+        };
         let enabled = cfg.effective_enabled(true);
         Self {
             enabled,
             mode: cfg.mode,
             token: Box::new(DualModeTokenResolver::new(run_mode, config)),
-            transport: Box::new(ReqwestIssueSearch::new()),
+            transport,
         }
     }
 
@@ -431,9 +493,6 @@ impl ContextSource for GithubIssuesSource {
         Self::parse_section(&body)
     }
 }
-
-// ─── Unit tests ─────────────────────────────────────────────────────────────
-// Extracted to github_issues_tests.rs to keep this file under the 500-line cap.
 
 #[cfg(test)]
 #[path = "github_issues_tests.rs"]

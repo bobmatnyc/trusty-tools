@@ -109,8 +109,10 @@ pub async fn build_review_state() -> Result<AppState> {
         None
     };
 
-    let search = HttpSearchClient::from_config(&config);
-    let analyze = HttpAnalyzeClient::from_config(&config);
+    let search = HttpSearchClient::from_config(&config)
+        .map_err(|e| anyhow::anyhow!("failed to build search HTTP client: {e}"))?;
+    let analyze = HttpAnalyzeClient::from_config(&config)
+        .map_err(|e| anyhow::anyhow!("failed to build analyze HTTP client: {e}"))?;
 
     info!(
         reviewer_model = %config.role_models.reviewer.model,

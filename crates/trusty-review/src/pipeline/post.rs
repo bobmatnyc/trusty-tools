@@ -297,7 +297,7 @@ async fn post_live(
     config: &ReviewConfig,
     ctx: &PostContext<'_>,
 ) -> Result<(), crate::integrations::github::GithubError> {
-    let client = GithubClient::new();
+    let client = GithubClient::new()?;
     let strategy = AuthStrategy::select(ctx.run_mode, None);
     let token = strategy.resolve_token(&client, config, ctx.owner).await?;
     let posted = post_pr_review(&client, ctx.owner, ctx.repo, ctx.pr, &token, result).await?;

@@ -65,7 +65,7 @@ pub async fn load_diff(source: &DiffSource) -> Result<String, GithubError> {
             pr,
             token,
         } => {
-            let client = GithubClient::new();
+            let client = GithubClient::new()?;
             debug!(owner, repo, pr, "fetching PR diff from GitHub");
             fetch_pr_diff(&client, owner, repo, *pr, token).await
         }

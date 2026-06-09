@@ -168,7 +168,13 @@ impl Reporter {
     /// no real network calls).
     pub async fn upsert_github_issue(&self, profile: &ContributorProfile) -> Option<String> {
         let config = self.github_config.as_ref()?;
-        let client = GithubClient::new();
+        let client = match GithubClient::new() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, "upsert_github_issue: failed to build HTTP client — skipping");
+                return None;
+            }
+        };
         let markdown = render_markdown(profile);
 
         match reporter_github::github_upsert_issue(&client, config, profile, &markdown).await {

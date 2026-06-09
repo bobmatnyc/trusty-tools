@@ -288,7 +288,7 @@ mod tests {
     async fn resolve_app_token_no_credentials_errors() {
         // App mode without app_id/private_key must yield an Auth error
         // (no network call is made).
-        let client = GithubClient::new();
+        let client = GithubClient::new().expect("TLS init should succeed in tests");
         let result = resolve_app_token(&client, None, None, &[], "any-owner").await;
         match result {
             Err(GithubError::Auth(_)) => {}
@@ -301,7 +301,7 @@ mod tests {
         // App creds present but no installation matches the owner → MissingToken.
         // mint_app_jwt runs but exchange is never reached (no match), so this is
         // network-free.
-        let client = GithubClient::new();
+        let client = GithubClient::new().expect("TLS init should succeed in tests");
         let installs = vec![("otherorg".to_string(), 123_u64)];
         let result = resolve_app_token(
             &client,

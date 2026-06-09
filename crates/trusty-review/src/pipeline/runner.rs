@@ -400,7 +400,7 @@ async fn fetch_github_pr_meta(
     pr: u64,
     run_mode: RunMode,
 ) -> Result<(ReviewPrMeta, String), GithubError> {
-    let client = GithubClient::new();
+    let client = GithubClient::new()?;
     let token = AuthStrategy::select(run_mode, None)
         .resolve_token(&client, config, owner)
         .await?;

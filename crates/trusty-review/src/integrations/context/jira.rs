@@ -80,21 +80,32 @@ impl ReqwestJiraTransport {
     ///
     /// Why: external enrichment must not hang a review; a tight timeout bounds
     /// the worst case (the orchestrator also wraps each source in a timeout).
-    /// What: builds a reqwest client; panics only on TLS-backend init failure
-    /// (a programmer/environment error, never a runtime condition).
-    /// Test: covered transitively by `JiraSource::with_default_transport`.
-    pub fn new() -> Self {
+    /// What: builds a reqwest client.  Returns `Err(ContextSourceError::Transport)`
+    /// if the TLS backend cannot be initialised — surfaces the failure to
+    /// `JiraSource::from_config` instead of panicking at startup (closes #953).
+    /// Test: covered transitively by `JiraSource::from_config`.
+    pub fn new() -> Result<Self, ContextSourceError> {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .build()
-            .expect("reqwest::Client::build failed — TLS backend unavailable");
-        Self { http }
+            .map_err(|e| ContextSourceError::Transport {
+                src: "jira",
+                err: super::TransportErr(format!("failed to build HTTP client: {e}")),
+            })?;
+        Ok(Self { http })
     }
 }
 
 impl Default for ReqwestJiraTransport {
+    /// Construct with default settings; panics only on TLS-backend init failure.
+    ///
+    /// Why: `Default` cannot return `Result`; kept for compatibility.
+    /// Production callers inside `from_config` use `Self::new()` and handle the
+    /// error gracefully instead.
+    /// What: delegates to `Self::new().expect(…)`.
+    /// Test: covered by `JiraSource::from_config`.
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("reqwest::Client::build failed — TLS backend unavailable")
     }
 }
 
@@ -145,6 +156,33 @@ impl JiraTransport for ReqwestJiraTransport {
     }
 }
 
+// ─── Disabled transport (fallback on TLS-init failure) ──────────────────────
+
+/// A no-op `JiraTransport` used when TLS backend init fails.
+///
+/// Why: `from_config` must never panic; when `ReqwestJiraTransport::new()`
+/// fails the source is constructed with this sentinel so it is permanently
+/// disabled and `gather` never calls it (guarded by `is_enabled`).
+/// What: always returns an `Api` error — but since `is_enabled()` is false the
+/// orchestrator skips `gather` entirely and this code is never reached.
+/// Test: covered implicitly by the `from_config` TLS-failure path.
+struct DisabledJiraTransport;
+
+#[async_trait]
+impl JiraTransport for DisabledJiraTransport {
+    async fn search_jql(
+        &self,
+        _creds: &AtlassianCreds,
+        _jql: &str,
+        _max_results: u32,
+    ) -> Result<String, ContextSourceError> {
+        Err(ContextSourceError::Transport {
+            src: SOURCE_NAME,
+            err: super::TransportErr("HTTP transport unavailable (TLS init failed)".to_string()),
+        })
+    }
+}
+
 // ─── The source ─────────────────────────────────────────────────────────────
 
 /// LIVE JIRA context source.
@@ -171,15 +209,30 @@ impl JiraSource {
     /// auto-disable (no creds → disabled unless explicitly enabled).
     /// What: resolves `AtlassianCreds::from_env_for(Jira)`, computes
     /// `effective_enabled(creds_present)`, and attaches the production transport.
+    /// If the reqwest TLS backend cannot be initialised the source is constructed
+    /// in a permanently-disabled state so it degrades gracefully instead of
+    /// panicking at startup (closes #953).
     /// Test: `disabled_when_no_creds`.
     pub fn from_config(cfg: &super::SourceConfig) -> Self {
         let creds = AtlassianCreds::from_env_for(AtlassianProduct::Jira);
+        let transport = match ReqwestJiraTransport::new() {
+            Ok(t) => Box::new(t) as Box<dyn JiraTransport>,
+            Err(e) => {
+                tracing::error!("jira: failed to build HTTP transport (source disabled): {e}");
+                return Self {
+                    enabled: false,
+                    mode: cfg.mode,
+                    creds: None,
+                    transport: Box::new(DisabledJiraTransport),
+                };
+            }
+        };
         let enabled = cfg.effective_enabled(creds.is_some());
         Self {
             enabled,
             mode: cfg.mode,
             creds,
-            transport: Box::new(ReqwestJiraTransport::new()),
+            transport,
         }
     }
 
@@ -288,177 +341,5 @@ impl ContextSource for JiraSource {
 // ─── Unit tests ─────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn creds() -> AtlassianCreds {
-        AtlassianCreds {
-            email: "bob@acme.com".to_string(),
-            token: "tok".to_string(), // pragma: allowlist secret
-            base_url: "https://acme.atlassian.net".to_string(),
-        }
-    }
-
-    /// A `JiraTransport` returning a fixed body (or error) without network.
-    struct FakeJira {
-        body: Result<String, ()>,
-    }
-
-    #[async_trait]
-    impl JiraTransport for FakeJira {
-        async fn search_jql(
-            &self,
-            _creds: &AtlassianCreds,
-            _jql: &str,
-            _max: u32,
-        ) -> Result<String, ContextSourceError> {
-            self.body.clone().map_err(|_| ContextSourceError::Api {
-                src: SOURCE_NAME,
-                status: 500,
-                body: "boom".to_string(),
-            })
-        }
-    }
-
-    fn subject() -> ReviewSubject {
-        ReviewSubject {
-            owner: "acme".to_string(),
-            repo: "backend".to_string(),
-            title: "Add token refresh".to_string(),
-            identifiers: vec!["TokenStore".to_string()],
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn query_builds_jql_keyword() {
-        // No ticket key in title/body → keyword fallback path.
-        let jql = JiraSource::build_jql(&subject()).expect("has signal");
-        assert!(jql.contains("text ~ \"Add token refresh TokenStore\""));
-        assert!(jql.contains("ORDER BY updated DESC"));
-    }
-
-    #[test]
-    fn query_builds_jql_ticket_ids() {
-        // Fix 1: a ticket key in the title → exact issueKey lookup, NOT keyword.
-        let subj = ReviewSubject {
-            title: "PROJ-42 add token refresh".to_string(),
-            identifiers: vec!["TokenStore".to_string()],
-            ..Default::default()
-        };
-        let jql = JiraSource::build_jql(&subj).expect("has signal");
-        assert_eq!(jql, "issueKey in (PROJ-42) ORDER BY updated DESC");
-        assert!(!jql.contains("text ~"));
-    }
-
-    #[test]
-    fn query_ticket_ids_scan_body_too() {
-        // A key only in the PR body is still found (title has no key).
-        let subj = ReviewSubject {
-            title: "Add token refresh".to_string(),
-            body: "Implements PROJ-7 and PROJ-8.".to_string(),
-            ..Default::default()
-        };
-        let jql = JiraSource::build_jql(&subj).expect("has signal");
-        assert_eq!(jql, "issueKey in (PROJ-7, PROJ-8) ORDER BY updated DESC");
-    }
-
-    #[test]
-    fn query_ticket_ids_dedup_and_capped() {
-        // Duplicates collapse; the list is capped at MAX_RESULTS keys.
-        let ids: Vec<String> = (1..=10).map(|n| format!("PROJ-{n}")).collect();
-        let subj = ReviewSubject {
-            title: format!("{} PROJ-1", ids.join(" ")),
-            ..Default::default()
-        };
-        let jql = JiraSource::build_jql(&subj).expect("has signal");
-        // Exactly MAX_RESULTS (5) keys, comma-separated.
-        let inner = jql
-            .trim_start_matches("issueKey in (")
-            .split(')')
-            .next()
-            .unwrap();
-        assert_eq!(inner.split(", ").count(), MAX_RESULTS as usize);
-    }
-
-    #[test]
-    fn query_strips_quotes() {
-        let subj = ReviewSubject {
-            title: "Add \"quoted\" thing".to_string(),
-            ..Default::default()
-        };
-        let jql = JiraSource::build_jql(&subj).unwrap();
-        // No raw double-quotes inside the keyword payload would break the JQL.
-        assert!(!jql.contains("\"quoted\""));
-    }
-
-    #[test]
-    fn query_none_without_signal() {
-        let subj = ReviewSubject::default();
-        assert!(JiraSource::build_jql(&subj).is_none());
-    }
-
-    #[tokio::test]
-    async fn disabled_when_no_creds() {
-        // Forced-on but no creds → NotConfigured (fail-open at orchestrator).
-        let src = JiraSource::new(
-            true,
-            RetrievalMode::Live,
-            None,
-            Box::new(FakeJira {
-                body: Ok("{}".into()),
-            }),
-        );
-        let r = src.gather(&subject()).await;
-        assert!(matches!(r, Err(ContextSourceError::NotConfigured { .. })));
-    }
-
-    #[tokio::test]
-    async fn semantic_mode_errors() {
-        let src = JiraSource::new(
-            true,
-            RetrievalMode::Semantic,
-            Some(creds()),
-            Box::new(FakeJira {
-                body: Ok("{}".into()),
-            }),
-        );
-        let r = src.gather(&subject()).await;
-        assert!(matches!(
-            r,
-            Err(ContextSourceError::SemanticNotImplemented { src: "jira" })
-        ));
-    }
-
-    #[tokio::test]
-    async fn gather_with_fake_transport() {
-        let body =
-            r#"{"issues":[{"key":"PROJ-7","fields":{"summary":"Fix","status":{"name":"Open"}}}]}"#;
-        let src = JiraSource::new(
-            true,
-            RetrievalMode::Live,
-            Some(creds()),
-            Box::new(FakeJira {
-                body: Ok(body.to_string()),
-            }),
-        );
-        let section = src.gather(&subject()).await.expect("ok");
-        assert_eq!(section.snippets.len(), 1);
-        assert_eq!(section.snippets[0].title, "PROJ-7 — Fix");
-    }
-
-    #[tokio::test]
-    async fn gather_propagates_api_error_for_logging() {
-        let src = JiraSource::new(
-            true,
-            RetrievalMode::Live,
-            Some(creds()),
-            Box::new(FakeJira { body: Err(()) }),
-        );
-        let r = src.gather(&subject()).await;
-        assert!(matches!(
-            r,
-            Err(ContextSourceError::Api { status: 500, .. })
-        ));
-    }
-}
+#[path = "jira_tests.rs"]
+mod tests;

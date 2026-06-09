@@ -370,7 +370,7 @@ mod tests {
         let mut config = ReviewConfig::load(None);
         config.github_app_id = None;
         config.github_app_private_key = None;
-        let client = GithubClient::new();
+        let client = GithubClient::new().expect("TLS init should succeed in tests");
         let result = AuthStrategy::App
             .resolve_token(&client, &config, "acme")
             .await;

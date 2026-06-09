@@ -23,13 +23,13 @@ fn search_client_trait_object_compiles() {
 
 #[test]
 fn http_search_client_url_is_configurable() {
-    let client = HttpSearchClient::new("http://127.0.0.1:7878");
+    let client = HttpSearchClient::new("http://127.0.0.1:7878").expect("TLS init should succeed");
     assert_eq!(client.base_url(), "http://127.0.0.1:7878");
 }
 
 #[test]
 fn http_search_client_strips_trailing_slash() {
-    let client = HttpSearchClient::new("http://127.0.0.1:7878/");
+    let client = HttpSearchClient::new("http://127.0.0.1:7878/").expect("TLS init should succeed");
     // Trailing slash must be removed to prevent double-slash paths.
     assert_eq!(client.base_url(), "http://127.0.0.1:7878");
 }
@@ -38,7 +38,7 @@ fn http_search_client_strips_trailing_slash() {
 fn http_search_client_from_config() {
     let mut config = crate::config::ReviewConfig::load(None);
     config.search_url = "http://localhost:9999".to_string();
-    let client = HttpSearchClient::from_config(&config);
+    let client = HttpSearchClient::from_config(&config).expect("TLS init should succeed");
     assert_eq!(client.base_url(), "http://localhost:9999");
 }
 
@@ -187,7 +187,7 @@ fn search_error_display() {
 #[tokio::test]
 async fn health_check_transport_error_on_unreachable() {
     // Port 1 is always refused; this verifies graceful transport error handling.
-    let client = HttpSearchClient::new("http://127.0.0.1:1");
+    let client = HttpSearchClient::new("http://127.0.0.1:1").expect("TLS init should succeed");
     let result = client.health().await;
     assert!(
         result.is_err(),
@@ -202,7 +202,7 @@ async fn health_check_transport_error_on_unreachable() {
 
 #[tokio::test]
 async fn search_transport_error_on_unreachable() {
-    let client = HttpSearchClient::new("http://127.0.0.1:1");
+    let client = HttpSearchClient::new("http://127.0.0.1:1").expect("TLS init should succeed");
     let result = client.search("main", "fn auth", Some(5)).await;
     assert!(
         result.is_err(),

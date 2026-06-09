@@ -346,7 +346,8 @@ mod tests {
     async fn post_pr_review_transport_error_on_unreachable() {
         // Posting to a guaranteed-unreachable host yields a Transport error,
         // never a panic. (127.0.0.1:1 is always refused.)
-        let client = GithubClient::with_timeout(std::time::Duration::from_millis(200));
+        let client = GithubClient::with_timeout(std::time::Duration::from_millis(200))
+            .expect("TLS init should succeed in tests");
         let result = sample_result();
         // Override the base by hitting a refused port through a raw request:
         // post_pr_review always targets api.github.com, so we instead assert the

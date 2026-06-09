@@ -72,7 +72,8 @@ pub struct CompareArgs {
 pub async fn cmd_compare(mut config: ReviewConfig, args: CompareArgs) -> Result<()> {
     // Resolve the search index from the daemon once before the per-model loop.
     // When TRUSTY_SEARCH_INDEX is explicitly set, resolve_index is a no-op.
-    let search_for_resolve = HttpSearchClient::from_config(&config);
+    let search_for_resolve = HttpSearchClient::from_config(&config)
+        .map_err(|e| anyhow::anyhow!("failed to build search HTTP client: {e}"))?;
     config.resolve_index(&search_for_resolve).await;
 
     let models: Vec<String> = args.models.clone().unwrap_or_else(|| {
@@ -157,7 +158,8 @@ async fn resolve_diff_source_compare(
         .pr
         .ok_or_else(|| anyhow::anyhow!("PR number is required (or use --local-diff)"))?;
 
-    let client = GithubClient::new();
+    let client = GithubClient::new()
+        .map_err(|e| anyhow::anyhow!("failed to build GitHub HTTP client: {e}"))?;
     let token = AuthStrategy::select(RunMode::Cli, None)
         .resolve_token(&client, config, &owner)
         .await

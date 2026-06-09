@@ -244,7 +244,8 @@ mod tests {
     #[tokio::test]
     async fn fetch_pr_diff_transport_error_on_unreachable_host() {
         // Sending to a guaranteed-unreachable address must yield a Transport error.
-        let client = GithubClient::with_timeout(std::time::Duration::from_millis(200));
+        let client = GithubClient::with_timeout(std::time::Duration::from_millis(200))
+            .expect("TLS init should succeed in tests");
         // 127.0.0.1:1 is always refused (port 1 is reserved/privileged).
         let result = client
             .http

@@ -17,7 +17,8 @@ use super::{
 
 #[test]
 fn subprocess_client_binary_accessor() {
-    let client = SubprocessAnalyzeClient::new("trusty-analyze", "http://127.0.0.1:7878");
+    let client = SubprocessAnalyzeClient::new("trusty-analyze", "http://127.0.0.1:7878")
+        .expect("TLS init should succeed");
     assert_eq!(client.binary(), "trusty-analyze");
 }
 
@@ -25,7 +26,8 @@ fn subprocess_client_binary_accessor() {
 #[tokio::test]
 async fn subprocess_client_health_check_fails_gracefully() {
     // Port 1 is always refused.
-    let client = SubprocessAnalyzeClient::new("trusty-analyze", "http://127.0.0.1:1");
+    let client = SubprocessAnalyzeClient::new("trusty-analyze", "http://127.0.0.1:1")
+        .expect("TLS init should succeed");
     let result = client.health().await;
     assert!(
         result.is_err(),
@@ -40,7 +42,8 @@ async fn subprocess_client_health_check_fails_gracefully() {
 /// has_analysis must return false (not panic) on transport error.
 #[tokio::test]
 async fn subprocess_client_has_analysis_returns_false_on_error() {
-    let client = SubprocessAnalyzeClient::new("trusty-analyze", "http://127.0.0.1:1");
+    let client = SubprocessAnalyzeClient::new("trusty-analyze", "http://127.0.0.1:1")
+        .expect("TLS init should succeed");
     assert!(
         !client.has_analysis("main").await,
         "has_analysis must return false on error"
@@ -50,7 +53,8 @@ async fn subprocess_client_has_analysis_returns_false_on_error() {
 /// complexity_hotspots always returns empty for the subprocess model.
 #[tokio::test]
 async fn subprocess_client_hotspots_returns_empty() {
-    let client = SubprocessAnalyzeClient::new("trusty-analyze", "http://127.0.0.1:7878");
+    let client = SubprocessAnalyzeClient::new("trusty-analyze", "http://127.0.0.1:7878")
+        .expect("TLS init should succeed");
     let result = client.complexity_hotspots("main", Some(10)).await.unwrap();
     assert!(
         result.is_empty(),
@@ -61,7 +65,8 @@ async fn subprocess_client_hotspots_returns_empty() {
 /// smells always returns empty for the subprocess model.
 #[tokio::test]
 async fn subprocess_client_smells_returns_empty() {
-    let client = SubprocessAnalyzeClient::new("trusty-analyze", "http://127.0.0.1:7878");
+    let client = SubprocessAnalyzeClient::new("trusty-analyze", "http://127.0.0.1:7878")
+        .expect("TLS init should succeed");
     let result = client.smells("main").await.unwrap();
     assert!(
         result.is_empty(),
@@ -74,7 +79,8 @@ async fn subprocess_client_smells_returns_empty() {
 async fn subprocess_client_binary_not_found() {
     // "trusty-analyze-nonexistent-binary" is guaranteed not to be on PATH.
     let client =
-        SubprocessAnalyzeClient::new("trusty-analyze-nonexistent-binary", "http://127.0.0.1:1");
+        SubprocessAnalyzeClient::new("trusty-analyze-nonexistent-binary", "http://127.0.0.1:1")
+            .expect("TLS init should succeed");
     // health() probes search first; search is down so it short-circuits with
     // Unavailable before reaching the binary check.  We test analyze_diff
     // directly for the binary-not-found path.
@@ -221,6 +227,7 @@ fn spawn_analyze_review_with_fake_binary_that_fails() {
 #[test]
 fn subprocess_client_trait_object_compiles() {
     fn _accepts_dyn(_c: &dyn AnalyzeClient) {}
-    let client = SubprocessAnalyzeClient::new("trusty-analyze", "http://127.0.0.1:7878");
+    let client = SubprocessAnalyzeClient::new("trusty-analyze", "http://127.0.0.1:7878")
+        .expect("TLS init should succeed");
     _accepts_dyn(&client);
 }

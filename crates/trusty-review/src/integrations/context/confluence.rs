@@ -71,20 +71,33 @@ impl ReqwestConfluenceTransport {
     /// Construct with a default 15s-timeout client.
     ///
     /// Why: bound the worst-case latency of an enrichment call.
-    /// What: builds a reqwest client; panics only on TLS-backend init failure.
+    /// What: builds a reqwest client.  Returns `Err(ContextSourceError::Transport)`
+    /// if the TLS backend cannot be initialised — surfaces the failure to
+    /// `ConfluenceSource::from_config` instead of panicking at startup (closes
+    /// #953).
     /// Test: covered transitively by `ConfluenceSource::from_config`.
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, ContextSourceError> {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .build()
-            .expect("reqwest::Client::build failed — TLS backend unavailable");
-        Self { http }
+            .map_err(|e| ContextSourceError::Transport {
+                src: "confluence",
+                err: super::TransportErr(format!("failed to build HTTP client: {e}")),
+            })?;
+        Ok(Self { http })
     }
 }
 
 impl Default for ReqwestConfluenceTransport {
+    /// Construct with default settings; panics only on TLS-backend init failure.
+    ///
+    /// Why: `Default` cannot return `Result`; kept for compatibility.
+    /// Production callers inside `from_config` use `Self::new()` and handle the
+    /// error gracefully instead.
+    /// What: delegates to `Self::new().expect(…)`.
+    /// Test: covered by `ConfluenceSource::from_config`.
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("reqwest::Client::build failed — TLS backend unavailable")
     }
 }
 
@@ -134,6 +147,33 @@ impl ConfluenceTransport for ReqwestConfluenceTransport {
     }
 }
 
+// ─── Disabled transport (fallback on TLS-init failure) ──────────────────────
+
+/// A no-op `ConfluenceTransport` used when TLS backend init fails.
+///
+/// Why: `from_config` must never panic; when `ReqwestConfluenceTransport::new()`
+/// fails the source is constructed with this sentinel so it is permanently
+/// disabled and `gather` never calls it (guarded by `is_enabled`).
+/// What: always returns an `Api` error — but since `is_enabled()` is false the
+/// orchestrator skips `gather` entirely and this code is never reached.
+/// Test: covered implicitly by the `from_config` TLS-failure path.
+struct DisabledTransport;
+
+#[async_trait]
+impl ConfluenceTransport for DisabledTransport {
+    async fn search_cql(
+        &self,
+        _creds: &AtlassianCreds,
+        _cql: &str,
+        _limit: u32,
+    ) -> Result<String, ContextSourceError> {
+        Err(ContextSourceError::Transport {
+            src: SOURCE_NAME,
+            err: super::TransportErr("HTTP transport unavailable (TLS init failed)".to_string()),
+        })
+    }
+}
+
 // ─── The source ─────────────────────────────────────────────────────────────
 
 /// LIVE Confluence context source.
@@ -155,16 +195,33 @@ impl ConfluenceSource {
     ///
     /// Why: the runner wires the source without knowing credential mechanics.
     /// What: resolves `AtlassianCreds::from_env_for(Confluence)`, computes
-    /// `effective_enabled`, and attaches the production transport.
+    /// `effective_enabled`, and attaches the production transport.  If the
+    /// reqwest TLS backend cannot be initialised the source is constructed in a
+    /// permanently-disabled state (enabled=false) so it degrades gracefully
+    /// instead of panicking at startup (closes #953).
     /// Test: `disabled_when_no_creds`.
     pub fn from_config(cfg: &super::SourceConfig) -> Self {
         let creds = AtlassianCreds::from_env_for(AtlassianProduct::Confluence);
+        let transport = match ReqwestConfluenceTransport::new() {
+            Ok(t) => Box::new(t) as Box<dyn ConfluenceTransport>,
+            Err(e) => {
+                tracing::error!(
+                    "confluence: failed to build HTTP transport (source disabled): {e}"
+                );
+                return Self {
+                    enabled: false,
+                    mode: cfg.mode,
+                    creds: None,
+                    transport: Box::new(DisabledTransport),
+                };
+            }
+        };
         let enabled = cfg.effective_enabled(creds.is_some());
         Self {
             enabled,
             mode: cfg.mode,
             creds,
-            transport: Box::new(ReqwestConfluenceTransport::new()),
+            transport,
         }
     }
 

@@ -89,8 +89,11 @@ impl GithubClient {
     ///
     /// Why: most callers do not need to customise timeout or TLS settings.
     /// What: builds a `reqwest::Client` with a 30-second request timeout.
+    /// Returns `Err(GithubError::Transport)` if the TLS backend cannot be
+    /// initialised — surfaces the failure to the caller rather than panicking
+    /// at daemon startup (closes #953).
     /// Test: used by auth and pr module tests.
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, GithubError> {
         Self::with_timeout(std::time::Duration::from_secs(30))
     }
 
@@ -98,25 +101,32 @@ impl GithubClient {
     ///
     /// Why: tests use short timeouts (e.g. 200ms) to verify transport-error
     /// handling quickly.
-    /// What: builds a `reqwest::Client` with the specified timeout; panics only
-    /// if the TLS backend cannot be initialised (a programmer error — not a
-    /// runtime condition).
+    /// What: builds a `reqwest::Client` with the specified timeout.  Returns
+    /// `Err(GithubError::Transport)` if the TLS backend cannot be initialised
+    /// — surfaces the failure instead of panicking at startup (closes #953).
     /// Test: used by pr module transport-error tests.
-    pub fn with_timeout(timeout: std::time::Duration) -> Self {
+    pub fn with_timeout(timeout: std::time::Duration) -> Result<Self, GithubError> {
         let http = reqwest::Client::builder()
             .timeout(timeout)
             .build()
-            .expect("reqwest::Client::build failed — TLS backend unavailable");
-        Self {
+            .map_err(|e| GithubError::Transport(format!("failed to build HTTP client: {e}")))?;
+        Ok(Self {
             http,
             user_agent: "trusty-review".to_string(),
-        }
+        })
     }
 }
 
 impl Default for GithubClient {
+    /// Construct with default settings; panics only on TLS-backend init failure.
+    ///
+    /// Why: `Default` cannot return `Result`; kept for test code and contexts
+    /// where the caller already knows TLS is available.  Production paths should
+    /// use `GithubClient::new()` and propagate the error.
+    /// What: delegates to `Self::new().expect(…)`.
+    /// Test: `github_client_default_constructs`.
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("reqwest::Client::build failed — TLS backend unavailable")
     }
 }
 

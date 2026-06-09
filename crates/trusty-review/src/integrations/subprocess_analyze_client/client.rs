@@ -40,26 +40,33 @@ impl SubprocessAnalyzeClient {
     /// Why: allows callers and tests to inject specific paths without relying on
     /// PATH or env vars.
     /// What: builds the probe client (5-second timeout, matching the HTTP path).
+    /// Returns `Err(AnalyzeClientError::ClientInit)` if the TLS backend cannot
+    /// be initialised — surfaces the failure to the caller rather than panicking
+    /// at daemon startup (closes #953).
     /// Test: `subprocess_client_health_check_fails_gracefully`.
-    pub fn new(binary: impl Into<String>, search_url: impl Into<String>) -> Self {
+    pub fn new(
+        binary: impl Into<String>,
+        search_url: impl Into<String>,
+    ) -> Result<Self, AnalyzeClientError> {
         let probe_http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .build()
-            .expect("reqwest::Client::build is infallible with valid config");
-        Self {
+            .map_err(|e| AnalyzeClientError::ClientInit(e.to_string()))?;
+        Ok(Self {
             binary: binary.into(),
             search_url: search_url.into(),
             probe_http,
-        }
+        })
     }
 
     /// Construct from a `ReviewConfig`.
     ///
     /// Why: the canonical factory used by both `run.rs` and `serve.rs`.
     /// What: reads `TRUSTY_ANALYZE_BIN` (falls back to `"trusty-analyze"`) for
-    /// the binary; takes `config.search_url` for the health probe.
+    /// the binary; takes `config.search_url` for the health probe.  Propagates
+    /// any TLS-backend init failure as `Err`.
     /// Test: `subprocess_client_from_config`.
-    pub fn from_config(config: &crate::config::ReviewConfig) -> Self {
+    pub fn from_config(config: &crate::config::ReviewConfig) -> Result<Self, AnalyzeClientError> {
         let binary = std::env::var(ENV_ANALYZE_BIN)
             .ok()
             .filter(|s| !s.is_empty())

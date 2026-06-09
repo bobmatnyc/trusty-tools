@@ -97,7 +97,8 @@ pub async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
     // When the operator set TRUSTY_SEARCH_INDEX explicitly, resolve_index is
     // a no-op.  On any failure (daemon unreachable, no match) it logs a
     // warning and leaves search_index at its current value.
-    let search_for_resolve = HttpSearchClient::from_config(&config_with_overrides);
+    let search_for_resolve = HttpSearchClient::from_config(&config_with_overrides)
+        .map_err(|e| anyhow::anyhow!("failed to build search HTTP client: {e}"))?;
     config_with_overrides
         .resolve_index(&search_for_resolve)
         .await;
@@ -161,7 +162,8 @@ pub async fn resolve_diff_source_run(config: &ReviewConfig, args: &RunArgs) -> R
         .pr
         .context("PR number is required (or use --local-diff)")?;
 
-    let client = GithubClient::new();
+    let client = GithubClient::new()
+        .map_err(|e| anyhow::anyhow!("failed to build GitHub HTTP client: {e}"))?;
     let token = AuthStrategy::select(RunMode::Cli, None)
         .resolve_token(&client, config, &owner)
         .await
@@ -199,12 +201,14 @@ pub async fn build_deps_async(
 
     let verifier = cli_verify::build_verifier_opt(config).await;
 
-    let search = HttpSearchClient::from_config(config);
+    let search = HttpSearchClient::from_config(config)
+        .map_err(|e| anyhow::anyhow!("failed to build search HTTP client: {e}"))?;
     // Use the on-demand subprocess client instead of the HTTP daemon client.
     // Rationale: #632 — trusty-analyze is invoked on demand as a subprocess
     // (trusty-analyze review --index-id <id> -) rather than requiring a
     // long-running trusty-analyze serve daemon.
-    let analyze = SubprocessAnalyzeClient::from_config(config);
+    let analyze = SubprocessAnalyzeClient::from_config(config)
+        .map_err(|e| anyhow::anyhow!("failed to build analyze HTTP client: {e}"))?;
 
     Ok(ReviewDeps {
         llm,

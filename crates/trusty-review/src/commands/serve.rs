@@ -132,13 +132,15 @@ async fn build_app_state(mut config: ReviewConfig) -> Result<AppState> {
     // registered root_path is matched against the current repo and the correct
     // index id is used even when TRUSTY_SEARCH_INDEX is not set.  The call is
     // a no-op when search_index_explicit is true (operator overrode it).
-    let search = HttpSearchClient::from_config(&config);
+    let search = HttpSearchClient::from_config(&config)
+        .map_err(|e| anyhow::anyhow!("failed to build search HTTP client: {e}"))?;
     config.resolve_index(&search).await;
     // Use the on-demand subprocess client instead of the HTTP daemon client.
     // Rationale: #632 — trusty-analyze is invoked on demand as a subprocess
     // (trusty-analyze review --index-id <id> -) rather than requiring a
     // long-running trusty-analyze serve daemon.
-    let analyze = SubprocessAnalyzeClient::from_config(&config);
+    let analyze = SubprocessAnalyzeClient::from_config(&config)
+        .map_err(|e| anyhow::anyhow!("failed to build analyze HTTP client: {e}"))?;
 
     let dedup_path = config.log_dir.join("dedup.redb");
     let dedup = match trusty_review::store::DedupStore::open(&dedup_path) {

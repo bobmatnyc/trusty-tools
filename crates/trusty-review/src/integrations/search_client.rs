@@ -34,7 +34,8 @@ use serde::{Deserialize, Serialize};
 /// context).
 /// What: `Transport` wraps reqwest failures; `Api` carries non-2xx responses;
 /// `Parse` indicates unexpected JSON; `Unavailable` is the soft degradation
-/// signal.
+/// signal; `ClientInit` covers TLS-backend initialisation failures at
+/// construction time so callers receive an `Err` instead of a panic.
 /// Test: `search_error_display`.
 #[derive(Debug, thiserror::Error)]
 pub enum SearchClientError {
@@ -58,6 +59,10 @@ pub enum SearchClientError {
     /// trusty-search health check failed: service is unavailable.
     #[error("trusty-search is unavailable: {0}")]
     Unavailable(String),
+
+    /// reqwest client construction failed (TLS backend unavailable).
+    #[error("failed to build HTTP client: {0}")]
+    ClientInit(String),
 }
 
 // ─── Response types ───────────────────────────────────────────────────────────
@@ -221,25 +226,28 @@ impl HttpSearchClient {
     /// Why: allows tests and library consumers to point the client at any URL
     /// without going through the config system.
     /// What: strips any trailing slash from `base_url` to avoid double-slash
-    /// path construction.
+    /// path construction.  Returns `Err(ClientInit)` if the TLS backend cannot
+    /// be initialised — surfaces the failure to the caller rather than panicking
+    /// at daemon startup (closes #953).
     /// Test: `http_search_client_url_is_configurable`.
-    pub fn new(base_url: impl Into<String>) -> Self {
+    pub fn new(base_url: impl Into<String>) -> Result<Self, SearchClientError> {
         let raw = base_url.into();
         let base_url = raw.trim_end_matches('/').to_string();
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .expect("reqwest::Client::build failed");
-        Self { base_url, http }
+            .map_err(|e| SearchClientError::ClientInit(e.to_string()))?;
+        Ok(Self { base_url, http })
     }
 
     /// Construct from a `ReviewConfig`, reading `search_url`.
     ///
     /// Why: the pipeline constructs the client from its injected config rather
     /// than reading env vars.
-    /// What: calls `Self::new(config.search_url.clone())`.
+    /// What: calls `Self::new(config.search_url.clone())` and propagates any
+    /// TLS-backend init failure as `Err`.
     /// Test: `http_search_client_from_config`.
-    pub fn from_config(config: &crate::config::ReviewConfig) -> Self {
+    pub fn from_config(config: &crate::config::ReviewConfig) -> Result<Self, SearchClientError> {
         Self::new(config.search_url.clone())
     }
 

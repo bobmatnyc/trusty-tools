@@ -184,7 +184,8 @@ async fn call_review_pr(args: &Value, state: &AppState) -> Result<Value, ToolErr
         .to_string();
 
     // Resolve GitHub token.
-    let client = GithubClient::new();
+    let client = GithubClient::new()
+        .map_err(|e| ToolError::InvalidParams(format!("failed to build HTTP client: {e}")))?;
     let token = AuthStrategy::select(RunMode::Serve, None)
         .resolve_token(&client, &state.config, owner)
         .await
