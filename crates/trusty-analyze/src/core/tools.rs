@@ -110,15 +110,27 @@ pub trait StaticTool: Send + Sync {
     /// implementation falls back to calling `run` per file so the other ten
     /// tools are unaffected.
     /// What: default iterates `files`, calls `self.run(f, "")` for each, and
-    /// merges the results. Override in project-scoped tools to build once and
-    /// filter.
+    /// merges the results. Per-file errors are logged at warn level and
+    /// skipped (log-and-continue) so one failing file does not abort the
+    /// remaining files — this matches the dispatcher's own log-and-continue
+    /// behavior for file-scoped tools. Override in project-scoped tools to
+    /// build once and filter.
     /// Test: default fallback is exercised by non-project tools in the
     /// diagnostics pipeline. `RoslynTool`'s override is tested in
     /// `tool_impls/csharp.rs`.
     fn run_project(&self, files: &[PathBuf]) -> anyhow::Result<Vec<ToolDiagnostic>> {
         let mut out = Vec::new();
         for f in files {
-            out.extend(self.run(f, "")?);
+            match self.run(f, "") {
+                Ok(diags) => out.extend(diags),
+                Err(e) => {
+                    tracing::warn!(
+                        tool = self.name(),
+                        file = %f.display(),
+                        "run_project default: per-file run failed, skipping: {e:#}"
+                    );
+                }
+            }
         }
         Ok(out)
     }

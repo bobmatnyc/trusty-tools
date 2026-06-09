@@ -57,6 +57,21 @@ impl ToolRegistry {
         Self::from_tools(all_tools)
     }
 
+    /// Build a `ToolRegistry` from an explicit list for use in tests. Unlike
+    /// `from_tools`, this is `pub` so test modules outside this crate can
+    /// inject synthetic tools without relying on binary availability on the
+    /// host.
+    ///
+    /// Why: the project-scoped skip test in `service/tests.rs` needs to
+    /// construct a registry with a fake project-scoped tool to assert that
+    /// `run_project` is never called when `root_path` is `None`. Exposing
+    /// this constructor avoids duplicating `from_tools` logic.
+    /// What: delegates to `from_tools`.
+    /// Test: used by `run_diagnostics_blocking_project_scoped_skips_when_no_root`.
+    pub fn from_tools_for_test(all_tools: Vec<Arc<dyn StaticTool>>) -> Self {
+        Self::from_tools(all_tools)
+    }
+
     /// Build a registry from an explicit tool list: keep the available ones and
     /// bucket each under its primary [`language`](StaticTool::language) plus any
     /// [`aliases`](StaticTool::aliases).

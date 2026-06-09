@@ -200,6 +200,11 @@ pub async fn diagnostics_for_index(
     // Fetch index details (including root_path) for project-scoped tools.
     // Errors are non-fatal: project-scoped tools will gracefully skip if
     // root_path is unavailable, while file-scoped tools are unaffected.
+    //
+    // TODO(follow-up): replace this full-index-list round-trip with a
+    // per-index lookup once `GET /indexes/:id/status` exposes `root_path`.
+    // The current call fetches ALL indexes and linear-scans for the matching
+    // id on every request, which is wasteful for large deployments.
     let root_path = state
         .search
         .index_details()

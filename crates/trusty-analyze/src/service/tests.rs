@@ -150,6 +150,82 @@ fn run_diagnostics_blocking_respects_language_filter() {
     assert!(diags.is_empty());
 }
 
+/// Why: project-scoped tools (e.g. Roslyn) must be completely skipped — not
+/// just return empty — when `root_path` is `None`. Previously the test
+/// asserted `let _ = diags;` (only checked no panic). This version enforces
+/// the contract by injecting a `FakeProjectScopedTool` that records every
+/// `run_project` call and asserting the call count is zero.
+/// What: builds a `ToolRegistry` containing only `FakeProjectScopedTool`
+/// registered under `"csharp"`, passes a `.cs` file with `root_path = None`,
+/// and asserts: (a) result is `Ok(vec![])`, (b) `run_project` was never
+/// invoked.
+/// Test: this test itself.
+#[test]
+fn run_diagnostics_blocking_project_scoped_skips_when_no_root() {
+    use crate::core::tool_registry::ToolRegistry;
+    use crate::core::tools::{StaticTool, ToolDiagnostic};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+
+    // A fake project-scoped tool that counts how many times run_project is
+    // called, mirroring the FakeAliasedTool pattern in tool_registry tests.
+    #[derive(Clone)]
+    struct FakeProjectScopedTool {
+        call_count: Arc<Mutex<u32>>,
+    }
+    impl StaticTool for FakeProjectScopedTool {
+        fn name(&self) -> &str {
+            "fake-project-scoped"
+        }
+        fn language(&self) -> &str {
+            "csharp"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn is_project_scoped(&self) -> bool {
+            true
+        }
+        fn run(&self, _file: &Path, _content: &str) -> anyhow::Result<Vec<ToolDiagnostic>> {
+            Ok(Vec::new())
+        }
+        fn run_project(&self, _files: &[PathBuf]) -> anyhow::Result<Vec<ToolDiagnostic>> {
+            *self.call_count.lock().unwrap() += 1;
+            Ok(Vec::new())
+        }
+    }
+
+    let counter = Arc::new(Mutex::new(0u32));
+    let tool = FakeProjectScopedTool {
+        call_count: Arc::clone(&counter),
+    };
+
+    // Build a registry with only our fake tool, bypassing global discovery.
+    let registry = ToolRegistry::from_tools_for_test(vec![Arc::new(tool)]);
+
+    let mut by_file = std::collections::HashMap::new();
+    by_file.insert("src/Foo.cs".to_string(), "class Foo {}".to_string());
+
+    let diags = crate::service::diagnostics_dispatch::run_diagnostics_blocking_with_registry(
+        by_file, None, // language_filter
+        None, // tool_filter
+        None, // root_path — the None case we are testing
+        &registry,
+    );
+
+    // Contract: result is empty (no diagnostics produced without a root path).
+    assert!(
+        diags.is_empty(),
+        "expected no diagnostics when root_path is None, got: {diags:?}"
+    );
+    // Contract: run_project was never called.
+    let calls = *counter.lock().unwrap();
+    assert_eq!(
+        calls, 0,
+        "run_project must not be called when root_path is None, was called {calls} times"
+    );
+}
+
 #[tokio::test]
 async fn diagnostics_endpoint_surfaces_search_failure_as_502() {
     // The stub search client is unreachable, so fetching the corpus fails

@@ -58,15 +58,40 @@ fn abs_to_rel<'a>(abs_diag_file: &str, rel_real_pairs: &'a [(String, String)]) -
     None
 }
 
-/// Blocking core of the diagnostics endpoint: writes files to scratch (for
-/// file-scoped tools) or hands real on-disk paths (for project-scoped tools).
+/// Blocking core of the diagnostics endpoint, using the process-wide global
+/// tool registry.
 ///
-/// Why: project-scoped tools like Roslyn require a real `.csproj` on disk
-/// to produce any output; the previous approach of writing files to a scratch
-/// dir yielded zero results for C#. This function now branches on
-/// `tool.is_project_scoped()` and dispatches accordingly. File-scoped tools
-/// keep the original scratch-dir behavior unchanged.
-/// What:
+/// Why: the production call site uses the global (lazily-discovered) registry
+/// of whatever tools are installed on the host. This wrapper keeps the
+/// existing call signature unchanged so no callers need updating.
+/// What: delegates to `run_diagnostics_blocking_with_registry` with
+/// `global_registry()`.
+/// Test: `run_diagnostics_blocking_skips_unknown_languages`,
+/// `run_diagnostics_blocking_respects_language_filter`.
+pub fn run_diagnostics_blocking(
+    by_file: HashMap<String, String>,
+    language_filter: Option<String>,
+    tool_filter: Option<Vec<String>>,
+    root_path: Option<String>,
+) -> Vec<ToolDiagnostic> {
+    use crate::core::global_registry;
+    run_diagnostics_blocking_with_registry(
+        by_file,
+        language_filter,
+        tool_filter,
+        root_path,
+        global_registry(),
+    )
+}
+
+/// Registry-parameterized version of the blocking diagnostics dispatch.
+///
+/// Why: tests need to inject a synthetic `ToolRegistry` (containing fake
+/// project-scoped tools that count `run_project` invocations) to assert the
+/// skip-when-no-root contract is actually enforced rather than just not
+/// panicking.
+/// What: same dispatch logic as the production path, but accepts any
+/// `&ToolRegistry` instead of always using `global_registry()`.
 ///   1. Groups `by_file` entries by language (honouring `language_filter`).
 ///   2. For each language, splits available tools into project-scoped and
 ///      file-scoped buckets (honouring `tool_filter` by name in both).
@@ -78,23 +103,20 @@ fn abs_to_rel<'a>(abs_diag_file: &str, rel_real_pairs: &'a [(String, String)]) -
 ///      that `exist()`. Call `tool.run_project(&real_paths)`. Map each
 ///      `diag.file` (absolute) back to the index-relative rel via
 ///      `abs_to_rel`. Drop diagnostics that don't map to any indexed file.
-///      When `root_path` is `None`, log at debug and skip project-scoped
-///      tools (graceful degradation).
+///      When `root_path` is `None`, log at info and skip (graceful degradation).
 ///   5. Returns the merged `Vec<ToolDiagnostic>`.
 ///
-/// Test: `run_diagnostics_blocking_skips_unknown_languages`,
-/// `run_diagnostics_blocking_respects_language_filter`, and
-/// `run_diagnostics_blocking_project_scoped_skips_when_no_root`.
-pub fn run_diagnostics_blocking(
+/// Test: `run_diagnostics_blocking_project_scoped_skips_when_no_root` uses
+/// this directly with a `FakeProjectScopedTool` registry.
+pub fn run_diagnostics_blocking_with_registry(
     by_file: HashMap<String, String>,
     language_filter: Option<String>,
     tool_filter: Option<Vec<String>>,
     root_path: Option<String>,
+    registry: &crate::core::tool_registry::ToolRegistry,
 ) -> Vec<ToolDiagnostic> {
-    use crate::core::global_registry;
     use crate::lang::LanguageDetector;
 
-    let registry = global_registry();
     let scratch = match tempfile::tempdir() {
         Ok(d) => d,
         Err(e) => {
@@ -175,9 +197,15 @@ pub fn run_diagnostics_blocking(
         let root = match &root_path {
             Some(r) => r,
             None => {
-                tracing::debug!(
+                // Raise to info so operators see why C# diagnostics return
+                // zero without setting RUST_LOG=debug. The usual cause is that
+                // the index was not fetched with ?details=true, so root_path
+                // was not included in the corpus response — an operational
+                // misconfiguration, not a normal code path.
+                tracing::info!(
                     "project-scoped tools available for {lang} but root_path is None; \
-                     skipping (graceful — index not yet queried with ?details=true)"
+                     skipping (index was not fetched with ?details=true — \
+                     C# diagnostics will be empty until root_path is available)"
                 );
                 continue;
             }

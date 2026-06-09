@@ -69,6 +69,10 @@ colored            = { workspace = true }
 dirs               = { workspace = true }
 which              = { workspace = true }
 tempfile           = { workspace = true }
+# Why: process-group kill on timeout for run_command_with_timeout. Used only on
+#      Unix (POSIX setsid + killpg) and gated behind #[cfg(unix)] at call sites
+#      so Windows builds are unaffected. libc 0.2 is already a workspace dep.
+libc               = { workspace = true }
 open               = { workspace = true }
 redb               = { workspace = true }
 dashmap            = { workspace = true }
