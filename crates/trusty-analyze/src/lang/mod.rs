@@ -13,6 +13,7 @@
 //! and asserts at least one expected node is extracted.
 
 pub mod adapters;
+pub mod call_target;
 pub mod detection;
 pub mod ext_map;
 #[allow(clippy::module_inception)]

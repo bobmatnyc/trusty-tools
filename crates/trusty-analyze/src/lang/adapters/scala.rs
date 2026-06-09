@@ -20,10 +20,10 @@
 //!
 //! Test: see the `tests` module.
 
+use crate::lang::call_target::build_call_target;
+use crate::lang::{LanguageAnalyzer, StaticAnalysisResult};
 use crate::types::{CodeChunk, KgEdge, KgEdgeKind, KgGraph, KgNode, KgNodeKind};
 use tree_sitter::{Node, Parser};
-
-use crate::lang::{LanguageAnalyzer, StaticAnalysisResult};
 
 /// tree-sitter-scala-backed analyzer.
 pub struct ScalaAnalyzer;
@@ -203,7 +203,7 @@ fn recurse(
                 // Body can be a `block` (def f() = { ... }) or any expression
                 // (def f() = expr). Scan all children — extract_calls stops at
                 // nested function/class boundaries so this is safe.
-                for edge in extract_calls(node, src, &id, &chunk.file) {
+                for edge in extract_calls(node, src, &id) {
                     graph.edges.push(edge);
                 }
             }
@@ -305,7 +305,7 @@ fn emit_import(node: Node, src: &[u8], chunk: &CodeChunk, graph: &mut KgGraph, p
     });
 }
 
-fn extract_calls(body: Node, src: &[u8], caller_id: &str, file: &str) -> Vec<KgEdge> {
+fn extract_calls(body: Node, src: &[u8], caller_id: &str) -> Vec<KgEdge> {
     use std::collections::HashMap;
 
     let mut counts: HashMap<String, u32> = HashMap::new();
@@ -343,7 +343,7 @@ fn extract_calls(body: Node, src: &[u8], caller_id: &str, file: &str) -> Vec<KgE
         .into_iter()
         .map(|(callee, count)| KgEdge {
             from: caller_id.to_string(),
-            to: format!("scala:Function:{file}:{callee}"),
+            to: build_call_target("scala", "Function", &callee),
             kind: KgEdgeKind::Calls,
             weight: count as f32,
         })

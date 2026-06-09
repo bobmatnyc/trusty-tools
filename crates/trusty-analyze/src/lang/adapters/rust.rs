@@ -21,10 +21,10 @@
 //! Test: `rust_analyzer_extracts_function` parses a minimal `fn hello() {}`
 //! chunk and asserts a Function node is produced.
 
+use crate::lang::call_target::build_call_target;
+use crate::lang::{LanguageAnalyzer, StaticAnalysisResult};
 use crate::types::{CodeChunk, KgEdge, KgEdgeKind, KgGraph, KgNode, KgNodeKind};
 use tree_sitter::{Node, Parser};
-
-use crate::lang::{LanguageAnalyzer, StaticAnalysisResult};
 
 /// tree-sitter-rust-backed analyzer.
 pub struct RustAnalyzer;
@@ -185,7 +185,7 @@ fn walk_rust(node: Node, src: &[u8], chunk: &CodeChunk, graph: &mut KgGraph) {
                     // Extract direct calls from the function body and emit
                     // deduplicated Calls edges from this fn to each callee.
                     if let Some(body) = child_by_field(node, "body") {
-                        for edge in extract_calls(body, src, &id, &chunk.file) {
+                        for edge in extract_calls(body, src, &id) {
                             graph.edges.push(edge);
                         }
                     }
@@ -328,7 +328,7 @@ fn has_test_attribute(node: Node, src: &[u8]) -> bool {
 ///
 /// Test: `rust_adapter_extracts_call_edges` and
 /// `rust_adapter_deduplicates_repeated_calls` cover the happy paths.
-fn extract_calls(fn_body: Node, src: &[u8], caller_id: &str, file: &str) -> Vec<KgEdge> {
+fn extract_calls(fn_body: Node, src: &[u8], caller_id: &str) -> Vec<KgEdge> {
     use std::collections::HashMap;
 
     let mut counts: HashMap<String, u32> = HashMap::new();
@@ -361,7 +361,7 @@ fn extract_calls(fn_body: Node, src: &[u8], caller_id: &str, file: &str) -> Vec<
         .into_iter()
         .map(|(callee, count)| KgEdge {
             from: caller_id.to_string(),
-            to: format!("rust:Function:{file}:{callee}"),
+            to: build_call_target("rust", "Function", &callee),
             kind: KgEdgeKind::Calls,
             weight: count as f32,
         })

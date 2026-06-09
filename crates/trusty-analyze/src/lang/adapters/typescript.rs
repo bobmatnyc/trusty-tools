@@ -10,10 +10,10 @@
 //! Test: `ts_analyzer_extracts_function` parses `function hello() {}` and
 //! asserts the Function node is produced.
 
+use crate::lang::call_target::build_call_target;
+use crate::lang::{LanguageAnalyzer, StaticAnalysisResult};
 use crate::types::{CodeChunk, KgEdge, KgEdgeKind, KgGraph, KgNode, KgNodeKind};
 use tree_sitter::{Node, Parser};
-
-use crate::lang::{LanguageAnalyzer, StaticAnalysisResult};
 
 /// tree-sitter-typescript-backed analyzer (also handles TSX).
 pub struct TypeScriptAnalyzer;
@@ -284,7 +284,7 @@ fn emit_named_callable(
         weight: 1.0,
     });
     if let Some(body) = node.child_by_field_name("body") {
-        for edge in extract_calls(body, src, &id, &chunk.file, language) {
+        for edge in extract_calls(body, src, &id, language) {
             graph.edges.push(edge);
         }
     }
@@ -328,7 +328,7 @@ fn emit_arrow_var_declarators(
             weight: 1.0,
         });
         if let Some(body) = val.child_by_field_name("body") {
-            for edge in extract_calls(body, src, &id, &chunk.file, language) {
+            for edge in extract_calls(body, src, &id, language) {
                 graph.edges.push(edge);
             }
         }
@@ -414,13 +414,7 @@ fn emit_class_heritage(
 ///
 /// Test: `ts_adapter_extracts_call_edges` and
 /// `ts_adapter_deduplicates_repeated_calls` cover the happy paths.
-fn extract_calls(
-    body: Node,
-    src: &[u8],
-    caller_id: &str,
-    file: &str,
-    language: &str,
-) -> Vec<KgEdge> {
+fn extract_calls(body: Node, src: &[u8], caller_id: &str, language: &str) -> Vec<KgEdge> {
     use std::collections::HashMap;
 
     let mut counts: HashMap<String, u32> = HashMap::new();
@@ -459,7 +453,7 @@ fn extract_calls(
         .into_iter()
         .map(|(callee, count)| KgEdge {
             from: caller_id.to_string(),
-            to: format!("{language}:Function:{file}:{callee}"),
+            to: build_call_target(language, "Function", &callee),
             kind: KgEdgeKind::Calls,
             weight: count as f32,
         })

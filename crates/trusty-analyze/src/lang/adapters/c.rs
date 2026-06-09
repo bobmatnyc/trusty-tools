@@ -17,10 +17,10 @@
 //! Test: see the `tests` module — covers detection, function/struct/enum
 //! extraction, call scoping, dedup, and `#include` imports.
 
+use crate::lang::call_target::build_call_target;
+use crate::lang::{LanguageAnalyzer, StaticAnalysisResult};
 use crate::types::{CodeChunk, KgEdge, KgEdgeKind, KgGraph, KgNode, KgNodeKind};
 use tree_sitter::{Node, Parser};
-
-use crate::lang::{LanguageAnalyzer, StaticAnalysisResult};
 
 /// tree-sitter-c-backed analyzer.
 pub struct CAnalyzer;
@@ -159,7 +159,7 @@ fn recurse(node: Node, src: &[u8], chunk: &CodeChunk, graph: &mut KgGraph, paren
                     weight: 1.0,
                 });
                 if let Some(body) = node.child_by_field_name("body") {
-                    for edge in extract_calls(body, src, &id, &chunk.file) {
+                    for edge in extract_calls(body, src, &id) {
                         graph.edges.push(edge);
                     }
                 }
@@ -281,7 +281,7 @@ fn emit_include(node: Node, src: &[u8], chunk: &CodeChunk, graph: &mut KgGraph, 
 
 /// Extract `call_expression` nodes from a function body and produce
 /// deduplicated `Calls` edges keyed by callee name.
-fn extract_calls(body: Node, src: &[u8], caller_id: &str, file: &str) -> Vec<KgEdge> {
+fn extract_calls(body: Node, src: &[u8], caller_id: &str) -> Vec<KgEdge> {
     use std::collections::HashMap;
 
     let mut counts: HashMap<String, u32> = HashMap::new();
@@ -308,7 +308,7 @@ fn extract_calls(body: Node, src: &[u8], caller_id: &str, file: &str) -> Vec<KgE
         .into_iter()
         .map(|(callee, count)| KgEdge {
             from: caller_id.to_string(),
-            to: format!("c:Function:{file}:{callee}"),
+            to: build_call_target("c", "Function", &callee),
             kind: KgEdgeKind::Calls,
             weight: count as f32,
         })

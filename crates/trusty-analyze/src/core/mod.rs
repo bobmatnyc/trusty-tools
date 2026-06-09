@@ -15,6 +15,7 @@
 //!   trusty-search
 
 pub mod blame;
+pub mod call_resolver;
 pub mod client;
 pub mod complexity;
 pub mod complexity_ts;

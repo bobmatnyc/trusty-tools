@@ -25,10 +25,10 @@
 //! basic happy paths; `python_adapter_extracts_call_edges` and
 //! `python_adapter_deduplicates_repeated_calls` cover call-edge extraction.
 
+use crate::lang::call_target::build_call_target;
+use crate::lang::{LanguageAnalyzer, StaticAnalysisResult};
 use crate::types::{CodeChunk, KgEdge, KgEdgeKind, KgGraph, KgNode, KgNodeKind};
 use tree_sitter::{Node, Parser};
-
-use crate::lang::{LanguageAnalyzer, StaticAnalysisResult};
 
 /// tree-sitter-python-backed analyzer.
 pub struct PythonAnalyzer;
@@ -255,7 +255,7 @@ fn walk(root: Node, src: &[u8], chunk: &CodeChunk, graph: &mut KgGraph) {
             weight: 1.0,
         });
         if let Some(body) = def.child_by_field_name("body") {
-            for edge in extract_calls(body, src, &id, &chunk.file) {
+            for edge in extract_calls(body, src, &id) {
                 graph.edges.push(edge);
             }
         }
@@ -444,7 +444,7 @@ fn emit_imports(node: Node, src: &[u8], chunk: &CodeChunk, graph: &mut KgGraph, 
 /// unique callee with `weight = call_count as f32`.
 /// Test: `python_adapter_extracts_call_edges` and
 /// `python_adapter_deduplicates_repeated_calls` cover the happy paths.
-fn extract_calls(body: Node, src: &[u8], caller_id: &str, file: &str) -> Vec<KgEdge> {
+fn extract_calls(body: Node, src: &[u8], caller_id: &str) -> Vec<KgEdge> {
     use std::collections::HashMap;
 
     let mut counts: HashMap<String, u32> = HashMap::new();
@@ -479,7 +479,7 @@ fn extract_calls(body: Node, src: &[u8], caller_id: &str, file: &str) -> Vec<KgE
         .into_iter()
         .map(|(callee, count)| KgEdge {
             from: caller_id.to_string(),
-            to: format!("python:Function:{file}:{callee}"),
+            to: build_call_target("python", "Function", &callee),
             kind: KgEdgeKind::Calls,
             weight: count as f32,
         })

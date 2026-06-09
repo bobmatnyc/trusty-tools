@@ -1,20 +1,29 @@
-//! Post-processing pass that merges duplicate KgNodes across chunks.
+//! Post-processing pass that merges duplicate KgNodes across chunks and
+//! resolves unresolved call-edge targets to real node ids.
 //!
 //! Why: the analyzer processes 40-line overlapping windows, so the same
 //! function can appear in multiple chunks. Without linking, the graph has
 //! many duplicate nodes with different IDs but the same qualified_name.
+//! Additionally, call-edge targets are emitted as unresolved name references
+//! (format `{lang}:{kind}::{callee}`) and must be matched to real node ids
+//! before the graph is returned to consumers.
 //!
 //! What: groups nodes by (language, kind, qualified_name), merges duplicates
-//! into a single node (taking the widest line range), and rewires edges to
-//! point to the canonical node ID. Edges between merged nodes become self-loops
-//! and are removed.
+//! into a single node (taking the widest line range), rewires edges to
+//! point to the canonical node ID, then runs a second pass that resolves
+//! unresolved call-edge targets by name matching against the canonical node set.
+//! Edges between merged nodes become self-loops and are removed.  Call edges
+//! whose callee cannot be found in the node set are preserved with their
+//! unresolved target form so consumers can identify external calls.
 //!
 //! Test: `merge_deduplicates_nodes_with_same_qualified_name` verifies that two
 //! identical fn nodes collapse to one. `self_loops_are_removed_after_merge`
-//! verifies edges between merged nodes are dropped.
+//! verifies edges between merged nodes are dropped.  `resolve_calls_*` tests
+//! verify intra-file, cross-file, and class-method-qualified resolution.
 
 use std::collections::HashMap;
 
+use crate::core::call_resolver::resolve_calls;
 use crate::types::{KgEdge, KgGraph, KgNode};
 
 /// Merge duplicate nodes (same language + kind + qualified_name) and rewire
@@ -124,10 +133,13 @@ pub fn link(graph: KgGraph) -> KgGraph {
         }
     }
 
-    KgGraph {
+    let deduped = KgGraph {
         nodes: canonical_nodes,
         edges: clean_edges,
-    }
+    };
+
+    // Second pass: resolve unresolved call-edge targets.
+    resolve_calls(deduped)
 }
 
 #[cfg(test)]
