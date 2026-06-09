@@ -10,6 +10,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing::info;
+use trusty_common::{init_tracing, shutdown_signal, write_daemon_addr};
 
 mod connector;
 mod detect;
@@ -66,14 +67,9 @@ struct ServeArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Init tracing — always to stderr so stdout stays clean.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+    // Init tracing via the workspace convention — always to stderr, respects
+    // RUST_LOG, verbose_count=1 maps to "info" so the startup banner is visible.
+    init_tracing(1);
 
     let cli = Cli::parse();
 
@@ -86,8 +82,9 @@ async fn main() -> Result<()> {
 ///
 /// Why: Separating the serve logic from `main` keeps main() thin and allows
 /// this function to be called from integration tests.
-/// What: Builds the router, binds the TCP listener, optionally opens a browser,
-/// then serves until SIGTERM/SIGINT.
+/// What: Builds the router, binds the TCP listener, writes the discovery file
+/// so other tools can locate this daemon, optionally opens a browser, then
+/// serves until SIGTERM/SIGINT with graceful shutdown.
 /// Test: Server integration tests in `server.rs` cover the router directly
 /// without exercising this function (to avoid real TCP binding in unit tests).
 async fn run_serve(args: ServeArgs) -> Result<()> {
@@ -100,7 +97,14 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         .with_context(|| format!("failed to bind {}", args.http))?;
 
     let addr = listener.local_addr().context("get local addr")?;
+    let addr_string = addr.to_string();
     info!("trusty-console listening on http://{addr}");
+
+    // Write the discovery file so CLI commands and other services can find us.
+    // Best-effort: log a warning on failure but do not abort the serve.
+    if let Err(e) = write_daemon_addr("trusty-console", &addr_string) {
+        tracing::warn!("could not write trusty-console discovery file: {e}");
+    }
 
     let console_url = format!("http://{addr}");
     eprintln!("trusty-console: {console_url}");
@@ -111,8 +115,19 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     }
 
     axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server error")?;
+
+    // Best-effort removal of the discovery file on clean shutdown.
+    // Only remove the file if it still points to our address; another
+    // instance may have already written a new one.
+    if let Ok(Some(recorded)) = trusty_common::read_daemon_addr("trusty-console")
+        && recorded == addr_string
+        && let Ok(dir) = trusty_common::resolve_data_dir("trusty-console")
+    {
+        let _ = std::fs::remove_file(dir.join("http_addr"));
+    }
 
     Ok(())
 }

@@ -10889,6 +10889,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "trusty-common",
  "which 6.0.3",
 ]
 
