@@ -131,6 +131,20 @@ trusty-analyze analyze <index-id> --top-k 20
 trusty-analyze health
 ```
 
+### Ops health check
+
+Probe the daemon over HTTP without the CLI — useful for monitoring, systemd
+`ExecStartPost`, or container readiness probes:
+
+```bash
+curl http://127.0.0.1:7879/health
+# → {"status":"ok","search_reachable":true}
+```
+
+`search_reachable` reflects whether the upstream `trusty-search` daemon (port
+7878) is responding; a `false` here means analysis endpoints will fail even
+though the analyzer process itself is up.
+
 ## Features
 
 - Cyclomatic and cognitive complexity per chunk, file, and index
@@ -308,6 +322,24 @@ cargo clippy -p trusty-analyze --all-targets -- -D warnings
 ```
 
 See [CLAUDE.md](./CLAUDE.md) for full architecture, API reference, and project history.
+
+## Publishing
+
+`trusty-analyze` is a **UI-embedding crate**: its `build.rs` invokes `pnpm` to
+build the embedded Svelte dashboard served from `src/service/` unless told to
+skip it. When publishing, always set `SKIP_UI_BUILD=1` so the committed
+`ui-dist/` bundle is used as-is:
+
+```bash
+SKIP_UI_BUILD=1 cargo publish -p trusty-analyze
+```
+
+Without the flag, `cargo publish` runs `build.rs` inside the verification
+tarball, where `pnpm` tries to write outside `OUT_DIR` and the publish fails.
+The same flag applies to the sibling UI-embedding crates (`trusty-search`,
+`trusty-memory`). See the workspace release workflow in the root
+[CLAUDE.md](../../CLAUDE.md) and the `cargo-publish` skill for the full
+tag → publish → install sequence (`trusty-analyze-v<version>`).
 
 ## License
 

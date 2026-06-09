@@ -1,8 +1,8 @@
 # trusty-memory — System Architecture
 
 > **Status:** Canonical · Living Document
-> **Last reviewed:** 2026-06-01
-> **Derived from:** code/docs/tickets audit (v0.14.0)
+> **Last reviewed:** 2026-06-08
+> **Derived from:** code/docs/tickets audit (v0.15.0)
 
 **Status legend:** ✅ Implemented · 🟡 Partial · 🔵 Designed-not-built · ⚪ Aspirational
 
@@ -10,6 +10,22 @@ This document describes how trusty-memory fits together: the **frontend/core
 split**, the multi-transport model, the bundled BM25 sidecar, the fire-and-forget
 remember path, the storage model, the progressive-retrieval layering, and the
 source-module map.
+
+## 0.15.0 changes
+
+This revision refreshes the spec to v0.15.0. The changes affecting architecture:
+
+- **redb 4.x store migration (#702)** — all embedded redb stores (activity and
+  memory) were upgraded from redb 2.x to 4.x. Existing 2.x stores are detected as
+  incompatible on first start, backed up to `*.v2-incompatible`, and recreated
+  empty (graceful recovery rather than a hard failure). This affects the storage
+  model below — the on-disk format is no longer interchangeable with pre-0.15.0
+  daemons.
+- **Dashboard auto-start (#687)** — the embedded Svelte web UI dashboard now
+  auto-starts on first daemon launch; no separate manual invocation is required.
+- **`add_alias` / `discover_aliases` optional `palace` param (#664)** — both MCP
+  tools now accept an optional `palace` argument to scope alias operations to a
+  specific palace instead of the active/default one.
 
 Module paths under `memory_core/` refer to
 `crates/trusty-common/src/memory_core/`; all other paths refer to

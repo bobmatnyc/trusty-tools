@@ -32,11 +32,10 @@
 # with local branch refs and commit history. The test job uses fetch-depth: 0
 # to ensure a full (non-shallow) clone is present.
 #
-# MSRV NOTE: [workspace.package] rust-version = "1.88" in Cargo.toml is STALE.
-# The current Cargo.lock pulls aws-sdk-* / aws-smithy-* crates at versions that
-# declare rust-version = "1.91.1". The effective MSRV is therefore 1.91, not 1.88.
-# The msrv job below is pinned to 1.91 to reflect reality. The Cargo.toml
-# rust-version field should be updated to "1.91" in a follow-up commit.
+# MSRV NOTE: the effective MSRV is 1.91, declared as [workspace.package]
+# rust-version = "1.91" in the root Cargo.toml. It is driven by indirect
+# aws-sdk-* / aws-smithy-* crates that declare rust-version = "1.91.1". The
+# msrv job below pins dtolnay/rust-toolchain@1.91 to enforce this floor.
 
 name: CI
 
@@ -188,12 +187,11 @@ jobs:
   # is that the code *compiles* on the minimum toolchain, not that tests pass.
   # trusty-mpm-gui excluded: see clippy note above.
   #
-  # Toolchain is 1.91 — NOT the 1.88 declared in [workspace.package].rust-version.
-  # The current Cargo.lock pulls aws-sdk-*/aws-smithy-* at versions that require
-  # rustc >= 1.91.1. [workspace.package].rust-version = "1.88" in the root
-  # Cargo.toml is therefore stale and should be updated to "1.91". This CI job
-  # enforces the real minimum; the Cargo.toml value is a known inconsistency
-  # tracked as a follow-up: bump rust-version to 1.91 in Cargo.toml.
+  # Toolchain is 1.91, matching [workspace.package].rust-version = "1.91" in the
+  # root Cargo.toml. The current Cargo.lock pulls aws-sdk-*/aws-smithy-* at
+  # versions that require rustc >= 1.91.1, which sets the effective MSRV. This
+  # job pins the toolchain to that floor so the workspace is guaranteed to
+  # compile on the declared minimum.
   # --------------------------------------------------------------------------
   msrv:
     name: MSRV check (1.91)

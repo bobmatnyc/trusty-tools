@@ -1,11 +1,26 @@
 # trusty-memory — Product Requirements Document
 
 > **Status:** Canonical · Living Document
-> **Last reviewed:** 2026-06-01
-> **Derived from:** code/docs/tickets audit (v0.14.0)
+> **Last reviewed:** 2026-06-08
+> **Derived from:** code/docs/tickets audit (v0.15.0)
 
 **Status legend:** ✅ Implemented · 🟡 Partial · 🔵 Designed-not-built · ⚪ Aspirational
 Each requirement is framed **Vision / Current / Gap**.
+
+## 0.15.0 changes
+
+This revision refreshes the PRD to v0.15.0. Product-visible changes since v0.14.0:
+
+- **redb 4.x store migration (#702)** — embedded activity and memory stores moved
+  from redb 2.x to 4.x. On first start after upgrade, incompatible 2.x stores are
+  backed up to `*.v2-incompatible` and recreated empty (graceful recovery, no
+  crash). Operators upgrading from <0.15.0 should expect a one-time reset of these
+  stores.
+- **Dashboard auto-start (#687)** — the web UI dashboard auto-starts on first
+  daemon launch; operators no longer need a manual command to bring it up.
+- **`add_alias` / `discover_aliases` optional `palace` param (#664)** — both MCP
+  tools now accept an optional `palace` argument so callers can scope alias
+  operations to a named palace.
 
 ---
 
