@@ -14,8 +14,27 @@
     absent: '#64748b',
   };
 
+  // Short daemon keys used by the proxy routes (/proxy/{key}/).
+  const DAEMON_KEYS = {
+    'trusty-search': 'search',
+    'trusty-memory': 'memory',
+    'trusty-analyze': 'analyze',
+    'trusty-review': 'review',
+  };
+
   let statusLabel = $derived(STATUS_LABELS[service.status] ?? service.status);
   let statusColor = $derived(STATUS_COLORS[service.status] ?? '#94a3b8');
+
+  /**
+   * Proxy base path for this daemon, available only when it is running and
+   * has a known daemon key.  The console SPA opens the daemon UI through the
+   * proxy so operators never need to remember per-daemon ports.
+   */
+  let proxyPath = $derived(
+    service.status === 'running' && DAEMON_KEYS[service.id]
+      ? `/proxy/${DAEMON_KEYS[service.id]}/`
+      : null
+  );
 </script>
 
 <div class="card">
@@ -32,7 +51,13 @@
     {#if service.version}
       <p class="version">Version: <code>{service.version}</code></p>
     {/if}
-    {#if service.url}
+    {#if proxyPath}
+      <p class="proxy-link">
+        <a href="{proxyPath}" target="_blank" rel="noopener noreferrer">
+          Open UI via console proxy →
+        </a>
+      </p>
+    {:else if service.url}
       <p class="url">
         <a href="{service.url}" target="_blank" rel="noopener noreferrer">{service.url}</a>
       </p>
@@ -107,5 +132,9 @@
   }
   .hint {
     font-style: italic;
+  }
+  .proxy-link a {
+    color: #2563eb;
+    font-weight: 500;
   }
 </style>

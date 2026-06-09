@@ -1,15 +1,20 @@
 //! Axum HTTP server for the trusty-console.
 //!
 //! Why: The console needs a lightweight HTTP server that serves the embedded
-//! SPA and a single JSON API route for service detection.
-//! What: Builds an axum `Router` with `GET /health` (liveness probe),
-//! `GET /api/console/services` (detect all services, return JSON array),
-//! `GET /` and `GET /ui/*path` (serve the embedded Svelte SPA).
+//! SPA, a JSON API route for service status, and a reverse-proxy layer for
+//! all daemon sub-paths.
+//! What: Builds an axum `Router` with:
+//!   - `GET /health` — liveness probe.
+//!   - `GET /api/console/services` — return cached snapshot (background poll).
+//!   - `ANY /proxy/{daemon}/{*path}` — reverse-proxy to live daemon.
+//!   - `GET /` and `GET /ui/*path` — serve the embedded Svelte SPA.
+//!
 //! All logs go to stderr; stdout is clean.
-//! Test: The `tests` module at the bottom starts the router in a real axum
-//! test client and asserts `/api/console/services` returns valid JSON.
+//!
+//! Test: The `tests` module starts the router in a real axum test client.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     Router,
@@ -17,7 +22,7 @@ use axum::{
     extract::{Path, State},
     http::{Response, StatusCode, header},
     response::IntoResponse,
-    routing::get,
+    routing::{any, get},
 };
 use rust_embed::RustEmbed;
 use serde_json::json;
@@ -25,6 +30,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::connector::ServiceConnector;
+use crate::poller::PollerCache;
 
 // ─── embedded UI ─────────────────────────────────────────────────────────────
 
@@ -43,25 +49,63 @@ struct UiAssets;
 
 /// Shared application state injected into every route handler.
 ///
-/// Why: Connectors are created once at startup and reused for every request
-/// so that there is no per-request allocation of the Vec.
-/// What: Wraps the connector list in an `Arc` for cheap cloning.
+/// Why: Connectors, the poller cache, and the HTTP client are created once at
+/// startup and reused for every request so there is no per-request allocation.
+/// What: Wraps the connector list, poller cache, and reqwest client in `Arc`s
+/// for cheap cloning.
 /// Test: Constructed in `build_router`; exercised by the integration test.
 #[derive(Clone)]
 pub struct AppState {
     connectors: Arc<Vec<Box<dyn ServiceConnector>>>,
+    poller_cache: PollerCache,
+    http_client: Arc<reqwest::Client>,
 }
 
 impl AppState {
     /// Create a new `AppState` from a list of connectors.
     ///
-    /// Why: Lets tests inject a custom connector list.
-    /// What: Wraps `connectors` in `Arc`.
+    /// Why: Lets tests inject a custom connector list and a fresh cache.
+    /// What: Wraps `connectors` in `Arc`; initialises an empty `PollerCache`
+    /// and a default `reqwest::Client`.
     /// Test: Used in `build_router` and directly in `tests`.
     pub fn new(connectors: Vec<Box<dyn ServiceConnector>>) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("reqwest client init");
         Self {
             connectors: Arc::new(connectors),
+            poller_cache: PollerCache::new(),
+            http_client: Arc::new(client),
         }
+    }
+
+    /// Access the shared connector list.
+    ///
+    /// Why: The background poller and the fallback `spawn_blocking` path both
+    /// need the connector list.
+    /// What: Returns a clone of the `Arc` (cheap).
+    /// Test: Used by `run_serve` in `main.rs`.
+    pub fn connectors(&self) -> Arc<Vec<Box<dyn ServiceConnector>>> {
+        Arc::clone(&self.connectors)
+    }
+
+    /// Access the background poll cache.
+    ///
+    /// Why: Routes read from the cache; the background task writes to it.
+    /// What: Returns a clone of the `PollerCache` handle (cheap — it's an Arc).
+    /// Test: Used by `services_handler` and `proxy_handler`.
+    pub fn poller_cache(&self) -> &PollerCache {
+        &self.poller_cache
+    }
+
+    /// Access the shared `reqwest::Client`.
+    ///
+    /// Why: Re-using one client enables connection pooling across proxy requests.
+    /// What: Returns a clone of the `Arc<reqwest::Client>` (cheap).
+    /// Test: Used by `proxy_handler`.
+    pub fn http_client(&self) -> Arc<reqwest::Client> {
+        Arc::clone(&self.http_client)
     }
 }
 
@@ -72,13 +116,14 @@ impl AppState {
 /// Why: Extracting the router into its own function allows both `main` and the
 /// test harness to share the same routing configuration without running a real
 /// TCP server.
-/// What: Returns a `Router<()>` with CORS, tracing middleware, and the four
-/// routes.
+/// What: Returns a `Router<()>` with CORS, tracing middleware, and all routes.
 /// Test: Called from `tests::test_services_route_returns_json` below.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/api/console/services", get(services_handler))
+        // Reverse-proxy: /proxy/{daemon}/{*path}
+        .route("/proxy/{daemon}/{*path}", any(crate::proxy::proxy_handler))
         .route("/", get(spa_index_handler))
         .route("/ui", get(spa_index_handler))
         .route("/ui/", get(spa_index_handler))
@@ -104,18 +149,25 @@ async fn health_handler() -> impl IntoResponse {
     }))
 }
 
-/// `GET /api/console/services` — detect all services and return JSON array.
+/// `GET /api/console/services` — return cached snapshot of all services.
 ///
 /// Why: The Svelte SPA fetches this endpoint on load to render service cards.
-/// What: Iterates the connector list, calls `detect()` on each, serialises the
-/// results to JSON. detect() is CPU-bound but fast (file reads + TCP probes);
-/// run in a blocking task to avoid blocking the async runtime. A panic in the
-/// blocking task is surfaced as HTTP 500 rather than silently returning an
-/// empty list (which would be indistinguishable from "no services installed").
+///      With the background poller in place the response is instant (no per-
+///      request TCP probes).
+/// What: Reads the latest `CachedSnapshot` from the `PollerCache`. If the first
+/// poll has not completed yet, falls back to a synchronous on-demand detection
+/// so the UI always gets data (the first-boot latency is acceptable; after that
+/// every response is cache-backed).  A panic in the fallback blocking task
+/// surfaces as HTTP 500 rather than an empty 200.
 /// Test: `test_services_route_returns_json` and
 /// `test_services_handler_returns_500_on_panic` below.
 async fn services_handler(State(state): State<AppState>) -> axum::response::Response {
-    let connectors = state.connectors.clone();
+    if let Some(snap) = state.poller_cache().snapshot().await {
+        return axum::Json(snap.services).into_response();
+    }
+
+    // First-boot fallback: run a one-shot detection synchronously.
+    let connectors = state.connectors();
     match tokio::task::spawn_blocking(move || {
         connectors.iter().map(|c| c.detect()).collect::<Vec<_>>()
     })
@@ -367,5 +419,37 @@ mod tests {
             .expect("request");
         let resp = router.oneshot(req).await.expect("response");
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// Why: the proxy route for an unknown daemon key must return 400.
+    /// What: issues GET /proxy/unknown/health, asserts 400.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn test_proxy_unknown_daemon_returns_400() {
+        let router = build_router(make_test_state());
+
+        let req = Request::builder()
+            .uri("/proxy/unknown/health")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Why: the proxy route for a known daemon that is not running must return
+    /// 503 (cache not populated) when no poll has occurred yet.
+    /// What: issues GET /proxy/search/health on a fresh state (no poll),
+    /// asserts 503 SERVICE_UNAVAILABLE.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn test_proxy_known_daemon_cold_cache_returns_503() {
+        let router = build_router(make_test_state());
+
+        let req = Request::builder()
+            .uri("/proxy/search/health")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

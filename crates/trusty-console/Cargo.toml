@@ -41,6 +41,7 @@ open               = { workspace = true }
 rust-embed         = { workspace = true }
 mime_guess         = { workspace = true }
 trusty-common      = { workspace = true }
+reqwest            = { workspace = true }
 
 [dev-dependencies]
 tempfile       = { workspace = true }

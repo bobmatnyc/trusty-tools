@@ -2,10 +2,14 @@
 //!
 //! Why: Operators need a single browser page that shows the runtime state of
 //! every trusty service on their machine. P0 implements detection + home cards;
-//! later phases add service-specific tabs and MCP integration.
-//! What: Parses `serve` subcommand, starts the axum HTTP server, optionally
-//! opens the browser. All logs go to stderr.
-//! Test: `cargo test -p trusty-console` covers detection and server routes.
+//! P1 adds a reverse-proxy under `/proxy/{daemon}/` and a background health-poll
+//! cache so service status is instant on every page load.
+//! What: Parses `serve` subcommand, starts the axum HTTP server, launches the
+//! background poller, optionally opens the browser. All logs go to stderr.
+//! Test: `cargo test -p trusty-console` covers detection, server routes, and
+//! proxy URL construction.
+
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -14,6 +18,8 @@ use trusty_common::{init_tracing, shutdown_signal, write_daemon_addr};
 
 mod connector;
 mod detect;
+mod poller;
+mod proxy;
 mod server;
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
@@ -37,7 +43,7 @@ struct Cli {
 
 /// Available subcommands.
 ///
-/// Why: P0 only has `serve`; future phases add `status` (CLI-only) etc.
+/// Why: P0/P1 only has `serve`; future phases add `status` (CLI-only) etc.
 /// What: Clap enum; each variant carries its own args.
 /// Test: Subcommand selection tested via `Cli::parse_from`.
 #[derive(Debug, Subcommand)]
@@ -49,8 +55,10 @@ enum Commands {
 /// Arguments for `trusty-console serve`.
 ///
 /// Why: The bind address must be configurable so users can change the port when
-/// 7788 is taken; `--open` is a convenience for developers.
-/// What: Optional `--http` (default `127.0.0.1:7788`) and `--open` flag.
+/// 7788 is taken; `--open` is a convenience for developers; `--poll-interval`
+/// lets operators tune the background health-poll frequency.
+/// What: Optional `--http` (default `127.0.0.1:7788`), `--open`, and
+/// `--poll-interval` flags.
 /// Test: Default address tested in `test_serve_args_defaults` below.
 #[derive(Debug, Parser)]
 struct ServeArgs {
@@ -61,6 +69,10 @@ struct ServeArgs {
     /// Open the console in the default browser after starting.
     #[arg(long, default_value_t = false)]
     open: bool,
+
+    /// Background health-poll interval in seconds (default: 15).
+    #[arg(long, default_value_t = 15u64)]
+    poll_interval: u64,
 }
 
 // ─── entry point ─────────────────────────────────────────────────────────────
@@ -82,15 +94,32 @@ async fn main() -> Result<()> {
 ///
 /// Why: Separating the serve logic from `main` keeps main() thin and allows
 /// this function to be called from integration tests.
-/// What: Builds the router, binds the TCP listener, writes the discovery file
-/// so other tools can locate this daemon, optionally opens a browser, then
+/// What: Builds the router, binds the TCP listener, writes the discovery file,
+/// starts the background health-poll task, optionally opens a browser, then
 /// serves until SIGTERM/SIGINT with graceful shutdown.
 /// Test: Server integration tests in `server.rs` cover the router directly
 /// without exercising this function (to avoid real TCP binding in unit tests).
 async fn run_serve(args: ServeArgs) -> Result<()> {
     let connectors = detect::all_connectors();
     let state = server::AppState::new(connectors);
-    let router = server::build_router(state);
+
+    // Kick off an eager first poll so the cache is warm before the first
+    // HTTP request arrives.
+    {
+        let cache = state.poller_cache().clone();
+        let c = state.connectors();
+        cache.poll_once(c).await;
+    }
+
+    // Start the background poller that refreshes the cache on the configured
+    // interval.
+    poller::start(
+        state.poller_cache().clone(),
+        state.connectors(),
+        Duration::from_secs(args.poll_interval),
+    );
+
+    let router = server::build_router(state.clone());
 
     let listener = tokio::net::TcpListener::bind(&args.http)
         .await
@@ -148,6 +177,7 @@ mod tests {
             Commands::Serve(args) => {
                 assert_eq!(args.http, "127.0.0.1:7788");
                 assert!(!args.open);
+                assert_eq!(args.poll_interval, 15);
             }
         }
     }
@@ -161,6 +191,19 @@ mod tests {
         match cli.command {
             Commands::Serve(args) => {
                 assert_eq!(args.http, "0.0.0.0:9000");
+            }
+        }
+    }
+
+    /// Why: --poll-interval must override the default.
+    /// What: parses `serve --poll-interval 30`.
+    /// Test: this test itself.
+    #[test]
+    fn test_serve_args_custom_poll_interval() {
+        let cli = Cli::parse_from(["trusty-console", "serve", "--poll-interval", "30"]);
+        match cli.command {
+            Commands::Serve(args) => {
+                assert_eq!(args.poll_interval, 30);
             }
         }
     }
