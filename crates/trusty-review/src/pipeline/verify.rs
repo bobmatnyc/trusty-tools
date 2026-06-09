@@ -35,7 +35,7 @@ use crate::{
         BLOCK_VERDICT_MIN_CONFIDENCE, VERIFY_CANDIDATE_MIN_CONFIDENCE, VERIFY_REFUTED_CONFIDENCE,
     },
     llm::{LlmError, LlmProvider},
-    models::{Finding, Verdict, VerifyOutcome},
+    models::{Effort, Finding, Verdict, VerifyOutcome},
     pipeline::{grade::derive_verdict, verify_prompt::build_verify_request},
 };
 
@@ -157,10 +157,7 @@ pub async fn run_verification_round(
         .collect()
         .await;
 
-    // Apply outcomes: record on the finding and demote refuted ones.  Track
-    // whether ANY candidate was confirmed AND whether at least one demotion was a
-    // clean model REFUTED (as opposed to an infrastructure failure class).  These
-    // two bits together let `rederive_verdict` decide the right baseline.
+    // Apply outcomes: record on the finding and demote refuted ones.
     let mut any_confirmed = false;
     let mut any_clean_refuted = false;
     for (idx, outcome) in outcomes {
@@ -191,43 +188,28 @@ pub async fn run_verification_round(
 
 /// Re-derive the final verdict from the surviving (non-refuted) findings.
 ///
-/// Why: after verification, the *surviving* findings are the ground truth — a
-/// refuted finding can no longer justify a blocking verdict.  Two facts make a
-/// naive `derive_verdict` call insufficient:
-///   1. the severity floor is keyed on a finding's `Effort`, so a refuted
-///      High-effort finding would still force a BLOCK floor on its tier alone;
-///   2. `derive_verdict` also treats its `model_proposed` argument as a lower
-///      bound, so always passing the original BLOCK would pin the result at
-///      BLOCK even when every blocking finding was refuted.
+/// Why: refuted findings can no longer justify a blocking verdict; `derive_verdict`
+/// treats its model_proposed as a lower bound, so always passing the original
+/// BLOCK would pin the result even when every blocking finding was refuted.
 ///
-/// The baseline selection rule (designed to satisfy the ticket's examples while
-/// fixing the #726 verdict-collapse-on-infrastructure-failure bug):
-///
-///   a) ANY confirmed → the model's escalation is grounded, keep `primary_verdict`
-///      as the lower bound so e.g. a REQUEST_CHANGES backed by a confirmed Medium
-///      finding is not silently downgraded.
-///
-///   b) At least one clean model REFUTED (i.e. `any_clean_refuted`), no confirmed
-///      → the escalation rested on refuted evidence, drop to neutral `APPROVE`
-///      baseline and let the survivors decide.
-///
-///   c) ALL demotions were non-clean (TruncationRefuted / ErrorRefuted), nothing
-///      confirmed → the verification infrastructure failed, NOT the model's
-///      reasoning.  Preserve `primary_verdict` so a BLOCK is not silently discarded
-///      because the verifier's JSON was truncated or the model was unreachable.
-///      This is the bug fixed in #726: a 16-token cap caused 100% TruncationRefuted,
-///      which previously fell into path (b) and collapsed every review to APPROVE.
+/// Four-way baseline selection:
+///   a)  confirmed + at least one confirmed High-effort finding
+///       → keep `primary_verdict` (grounded critical evidence, e.g. BLOCK stays BLOCK)
+///   a2) confirmed, but only Medium/Low-effort findings confirmed (#1015)
+///       → cap lower bound at APPROVE*; a lone confirmed Medium must not anchor
+///         REQUEST_CHANGES from a floor-driven escalation
+///   b)  clean model REFUTED, nothing confirmed
+///       → drop to APPROVE baseline (escalation rested on refuted evidence)
+///   c)  all demotions are infra failures (TruncationRefuted/ErrorRefuted), no confirmed
+///       → preserve `primary_verdict` (do not discard on verifier infra failure, #726)
 ///
 /// `UNKNOWN` is handled by the caller and never reaches here.
-/// What: filters out all refutation-variant findings from the survivor set, selects
-/// the baseline via the three-way rule above, then calls
+/// What: filters survivors (non-refuted), selects baseline, calls
 /// `derive_verdict(baseline, survivors)`.
-/// Test: `rederive_excludes_refuted_relaxes` (path b),
-/// `rederive_keeps_confirmed_block` (path a),
-/// `rederive_error_refuted_preserves_primary_verdict` (path c — regression for #726),
-/// `rederive_truncation_refuted_preserves_primary_verdict` (path c),
-/// and the end-to-end `verify_refuted_demotes_and_block_relaxes` /
-/// `verify_join_handle_regression_pr720`.
+/// Test: `rederive_excludes_refuted_relaxes` (b), `rederive_keeps_confirmed_block` (a),
+/// `rederive_confirmed_medium_caps_at_approve_star` (a2 — #1015),
+/// `rederive_error_refuted_preserves_primary_verdict` (c — #726),
+/// `rederive_truncation_refuted_preserves_primary_verdict` (c).
 fn rederive_verdict(
     primary_verdict: Verdict,
     any_confirmed: bool,
@@ -247,13 +229,33 @@ fn rederive_verdict(
         .cloned()
         .collect();
 
-    // Three-way baseline selection (see Why above):
-    //  a) any confirmed   → keep model's escalation (grounded evidence)
-    //  b) clean refuted   → drop to APPROVE (model said REFUTED on merits)
-    //  c) infra-only fail → keep model's escalation (don't discard on truncation/error)
-    let baseline = if any_confirmed {
-        // Path (a): confirmed evidence supports the escalation.
+    // Does any confirmed (surviving) finding have High effort?
+    let any_confirmed_high = survivors
+        .iter()
+        .filter(|f| matches!(f.verified, Some(VerifyOutcome::Confirmed)))
+        .any(|f| f.effort == Effort::High);
+
+    // Four-way baseline selection (see Why above):
+    //  a)  confirmed + at least one High-effort confirmed
+    //      → keep primary_verdict as lower bound (grounded critical evidence)
+    //  a2) confirmed, but only Medium/Low confirmed
+    //      → cap lower bound at APPROVE* (advisory tier); don't let a floor-driven
+    //         REQUEST_CHANGES pin the verdict when the confirmed finding is merely
+    //         Medium-effort (#1015)
+    //  b)  clean refuted, nothing confirmed
+    //      → drop to APPROVE; let survivors alone decide
+    //  c)  infra-only fail (TruncationRefuted / ErrorRefuted), nothing confirmed
+    //      → preserve primary_verdict (don't discard on infra failure #726)
+    let baseline = if any_confirmed && any_confirmed_high {
+        // Path (a): confirmed High-effort evidence supports the escalation fully.
         primary_verdict
+    } else if any_confirmed {
+        // Path (a2): confirmed evidence, but only Medium/Low tier.  Cap the lower
+        // bound at APPROVE* so a lone confirmed Medium cannot permanently anchor a
+        // REQUEST_CHANGES verdict that was itself only floor-driven (#1015).
+        // `derive_verdict(APPROVE*, survivors)` will still escalate further if the
+        // surviving findings warrant it (e.g. a surviving High → BLOCK).
+        Verdict::ApproveWithReservations
     } else if any_clean_refuted {
         // Path (b): at least one clean REFUTED from the model — escalation rested
         // on refuted evidence; let survivors alone decide.

@@ -14,14 +14,17 @@
 //!    model-proposed APPROVE* downward.  Prevents APPROVE* over-fire on
 //!    clean PRs with speculative low-confidence findings.
 //!
-//! 2. SEVERITY FLOOR: take the stricter of (model-proposed, severity-derived):
+//! 2. SEVERITY FLOOR: take the stricter of (model-proposed, severity-derived).
+//!    As of #1015, Medium findings only count when `confidence > 0.80`
+//!    (`FLOOR_MIN_CONFIDENCE`); advisory-tier Medium findings (0.66–0.80)
+//!    must not force REQUEST_CHANGES on PRs the model judged clean.
 //!
-//!   | Finding set                               | Minimum floor   |
-//!   |-------------------------------------------|-----------------|
-//!   | Any `High` effort (critical/high sev.)    | BLOCK           |
-//!   | ≥2 `Medium` effort findings               | REQUEST_CHANGES |
-//!   | Exactly 1 `Medium` effort finding         | APPROVE*        |
-//!   | Only `Low` effort or no findings           | APPROVE         |
+//!   | Finding set                                          | Minimum floor   |
+//!   |------------------------------------------------------|-----------------|
+//!   | Any `High` effort (critical/high sev.)               | BLOCK           |
+//!   | ≥2 `Medium` effort with confidence > 0.80            | REQUEST_CHANGES |
+//!   | Exactly 1 `Medium` effort with confidence > 0.80     | APPROVE*        |
+//!   | Only `Low` effort or no floor-counting findings      | APPROVE         |
 //!
 //!   The model can never soften a Critical or High finding below the floor.
 //!
@@ -58,6 +61,8 @@
 //! `grade_model_block_kept_when_no_critical_finding`,
 //! `grade_low_confidence_all_medium_yields_approve`,
 //! `grade_high_confidence_medium_beats_low_confidence_check`,
+//! `grade_advisory_medium_below_floor_threshold_does_not_escalate`,
+//! `grade_high_confidence_medium_above_floor_threshold_escalates`,
 //! `derive_verdict_with_grade_grade_a_no_findings_approve`,
 //! `derive_verdict_with_grade_grade_f_no_findings_block`,
 //! `derive_verdict_with_grade_severity_overrides_grade_a`.
@@ -67,7 +72,7 @@ use tracing::debug;
 use crate::models::{Effort, Finding, Verdict};
 use crate::pipeline::letter_grade::{Grade, clamp_grade_to_verdict, verdict_for_grade};
 
-// ─── Confidence threshold ─────────────────────────────────────────────────────
+// ─── Confidence thresholds ────────────────────────────────────────────────────
 
 /// Confidence threshold below which a finding is considered advisory-only.
 ///
@@ -79,6 +84,23 @@ use crate::pipeline::letter_grade::{Grade, clamp_grade_to_verdict, verdict_for_g
 /// substantive; those at or below are advisory.
 /// Test: `grade_low_confidence_all_medium_yields_approve`.
 const LOW_CONFIDENCE_THRESHOLD: f32 = 0.65;
+
+/// Minimum confidence for a Medium-effort finding to count toward the severity
+/// floor (closes #1015).
+///
+/// Why: advisory-tier Medium findings (confidence 0.66–0.80) are often
+/// speculative; letting two of them force REQUEST_CHANGES over-escalates clean
+/// PRs that the model holistically judged APPROVE/B+.  Raising the floor-count
+/// gate ensures only well-grounded Medium findings drive the REQUEST_CHANGES
+/// floor, while the LOW_CONFIDENCE_THRESHOLD override still collapses the
+/// entire batch when ALL findings are at or below 0.65.
+/// What: a Medium finding counts toward the REQUEST_CHANGES floor ONLY when
+/// its `confidence > FLOOR_MIN_CONFIDENCE`.  High-effort findings are
+/// unaffected — a confirmed Critical/High still → BLOCK regardless of
+/// confidence.
+/// Test: `grade_advisory_medium_below_floor_threshold_does_not_escalate`,
+/// `grade_high_confidence_medium_above_floor_threshold_escalates`.
+const FLOOR_MIN_CONFIDENCE: f32 = 0.80;
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -154,14 +176,25 @@ pub fn derive_verdict(model_proposed: Verdict, findings: &[Finding]) -> Verdict 
 /// The low-confidence override is handled separately in `derive_verdict` before
 /// this function is called; by the time this is reached, the batch has at least
 /// one substantive finding.
+///
+/// As of #1015, Medium findings only count toward the REQUEST_CHANGES and
+/// APPROVE* floors when their `confidence > FLOOR_MIN_CONFIDENCE` (0.80).
+/// Advisory-tier Medium findings (confidence 0.66–0.80) are speculative; they
+/// must not force REQUEST_CHANGES over-escalation on PRs the model holistically
+/// judged clean.  High-effort behavior is unchanged: any confirmed High finding
+/// still floors to BLOCK regardless of confidence.
+///
 /// What: applies the four-tier rule set:
 ///
 /// 1. Any `High`-effort finding → BLOCK (Critical/High severity)
-/// 2. ≥2 `Medium`-effort findings → REQUEST_CHANGES
-/// 3. Exactly 1 `Medium`-effort finding → APPROVE*
-/// 4. Only `Low` / no findings → APPROVE
+/// 2. ≥2 `Medium`-effort findings with `confidence > 0.80` → REQUEST_CHANGES
+/// 3. Exactly 1 `Medium`-effort finding with `confidence > 0.80` → APPROVE*
+/// 4. Only `Low` / no floor-counting findings → APPROVE
 ///
-/// Test: `grade_two_medium_yields_request_changes`, `grade_one_medium_yields_approve_star`.
+/// Test: `grade_two_medium_yields_request_changes`,
+/// `grade_one_medium_yields_approve_star`,
+/// `grade_advisory_medium_below_floor_threshold_does_not_escalate`,
+/// `grade_high_confidence_medium_above_floor_threshold_escalates`.
 fn severity_floor(findings: &[Finding]) -> Verdict {
     if findings.is_empty() {
         return Verdict::Approve;
@@ -169,9 +202,12 @@ fn severity_floor(findings: &[Finding]) -> Verdict {
 
     // Partition findings by effort tier.
     let has_high = findings.iter().any(|f| f.effort == Effort::High);
+
+    // Only count Medium findings whose confidence clears the floor threshold
+    // (#1015: advisory-tier Medium findings must not force REQUEST_CHANGES).
     let medium_count = findings
         .iter()
-        .filter(|f| f.effort == Effort::Medium)
+        .filter(|f| f.effort == Effort::Medium && f.confidence > FLOOR_MIN_CONFIDENCE)
         .count();
 
     // Tier 1: any High-effort (critical/high severity) → BLOCK floor.
@@ -179,17 +215,17 @@ fn severity_floor(findings: &[Finding]) -> Verdict {
         return Verdict::Block;
     }
 
-    // Tier 2: ≥2 Medium-effort findings → REQUEST_CHANGES.
+    // Tier 2: ≥2 high-confidence Medium-effort findings → REQUEST_CHANGES.
     if medium_count >= 2 {
         return Verdict::RequestChanges;
     }
 
-    // Tier 3: exactly 1 Medium-effort finding → APPROVE*.
+    // Tier 3: exactly 1 high-confidence Medium-effort finding → APPROVE*.
     if medium_count == 1 {
         return Verdict::ApproveWithReservations;
     }
 
-    // Tier 4: only Low-effort or no findings.
+    // Tier 4: only Low-effort, no findings, or all-advisory Medium findings.
     Verdict::Approve
 }
 

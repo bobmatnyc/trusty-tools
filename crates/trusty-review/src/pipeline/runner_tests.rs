@@ -653,8 +653,15 @@ async fn run_review_verification_refutes_and_relaxes_verdict() {
     );
 }
 
-/// The verification round, when wired in, CONFIRMS the finding and the verdict
-/// is preserved.
+/// The verification round, when wired in, CONFIRMS the Medium finding; after #1015
+/// a lone confirmed Medium anchors at APPROVE* (path a2), not REQUEST_CHANGES.
+///
+/// Why: before #1015 path (a) preserved primary_verdict (REQUEST_CHANGES) on any
+/// confirmed finding.  After #1015, only confirmed High-effort triggers path (a);
+/// confirmed Medium triggers path (a2) which caps the baseline at APPROVE*.
+/// The APPROVE* result is correct — the model judged REQUEST_CHANGES holistically
+/// but the only confirmed evidence is a single Medium finding, which justifies
+/// at most APPROVE*.
 #[tokio::test]
 async fn run_review_verification_confirms_and_preserves_verdict() {
     let (source, _tmp) = local_diff_source("+fn bad() {}\n");
@@ -676,10 +683,11 @@ async fn run_review_verification_confirms_and_preserves_verdict() {
     );
 
     let result = run_review(&config, input, deps).await;
+    // After #1015: confirmed Medium → path (a2) → APPROVE* (not REQUEST_CHANGES).
     assert_eq!(
         result.verdict,
-        Verdict::RequestChanges,
-        "a confirmed finding must preserve the REQUEST_CHANGES verdict"
+        Verdict::ApproveWithReservations,
+        "confirmed Medium → APPROVE* (path a2 — #1015); not REQUEST_CHANGES"
     );
 }
 

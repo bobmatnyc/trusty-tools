@@ -48,23 +48,28 @@ fn grade_high_effort_beats_request_changes() {
 
 // ── Tier 2: ≥2 Medium ────────────────────────────────────────────────────────
 
-/// Two Medium findings with sufficient confidence must floor to REQUEST_CHANGES.
+/// Two high-confidence Medium findings (confidence > 0.80) must floor to REQUEST_CHANGES.
 ///
 /// Why: the calibration run showed REQUEST_CHANGES only 36% — this tier closes
-/// the gap for PRs with multiple real concerns.
+/// the gap for PRs with multiple well-grounded concerns.  Only findings with
+/// confidence > FLOOR_MIN_CONFIDENCE (0.80) count toward the floor (#1015).
 #[test]
 fn grade_two_medium_yields_request_changes() {
-    let findings = vec![finding(Effort::Medium, 0.8), finding(Effort::Medium, 0.75)];
+    let findings = vec![finding(Effort::Medium, 0.85), finding(Effort::Medium, 0.82)];
     let verdict = derive_verdict(Verdict::ApproveWithReservations, &findings);
     assert_eq!(verdict, Verdict::RequestChanges);
 }
 
+/// Three high-confidence Medium findings (confidence > 0.80) must floor to REQUEST_CHANGES.
+///
+/// Why: with confidence > FLOOR_MIN_CONFIDENCE, three Medium findings are genuine
+/// concerns warranting REQUEST_CHANGES (#1015).
 #[test]
 fn grade_three_medium_yields_request_changes() {
     let findings = vec![
-        finding(Effort::Medium, 0.7),
-        finding(Effort::Medium, 0.7),
-        finding(Effort::Medium, 0.7),
+        finding(Effort::Medium, 0.85),
+        finding(Effort::Medium, 0.85),
+        finding(Effort::Medium, 0.85),
     ];
     let verdict = derive_verdict(Verdict::Approve, &findings);
     assert_eq!(verdict, Verdict::RequestChanges);
@@ -72,12 +77,14 @@ fn grade_three_medium_yields_request_changes() {
 
 // ── Tier 3: Exactly 1 Medium ─────────────────────────────────────────────────
 
-/// One Medium finding must floor to APPROVE*.
+/// One high-confidence Medium finding (confidence > 0.80) must floor to APPROVE*.
 ///
-/// Why: a single advisory concern should not block the PR but warrants noting.
+/// Why: a single well-grounded concern should not block the PR but warrants
+/// noting.  Only findings with confidence > FLOOR_MIN_CONFIDENCE (0.80) count
+/// toward the floor (#1015).
 #[test]
 fn grade_one_medium_yields_approve_star() {
-    let findings = vec![finding(Effort::Medium, 0.75)];
+    let findings = vec![finding(Effort::Medium, 0.85)];
     let verdict = derive_verdict(Verdict::Approve, &findings);
     assert_eq!(verdict, Verdict::ApproveWithReservations);
 }
@@ -183,21 +190,35 @@ fn grade_confidence_at_threshold_collapses() {
     );
 }
 
-/// One Medium finding with confidence just above threshold is APPROVE*.
+/// One Medium finding above LOW_CONFIDENCE_THRESHOLD but below FLOOR_MIN_CONFIDENCE.
 ///
-/// Why: above the threshold the finding is substantive.
+/// Why: this finding (confidence 0.66) is above the all-advisory-batch collapse
+/// threshold (0.65), so it prevents the low-confidence override from firing.
+/// However, it is below FLOOR_MIN_CONFIDENCE (0.80), so it does NOT count toward
+/// the REQUEST_CHANGES / APPROVE* floor — the floor is APPROVE.
+/// What: one Medium@0.66 → medium_count=0 (not > 0.80) → floor=APPROVE.
+/// Test: this test itself.
 #[test]
 fn grade_high_confidence_medium_beats_low_confidence_check() {
     let findings = vec![finding(Effort::Medium, 0.66)];
     let verdict = derive_verdict(Verdict::Approve, &findings);
-    assert_eq!(verdict, Verdict::ApproveWithReservations);
+    // 0.66 > LOW_CONFIDENCE_THRESHOLD so all-low-confidence override does NOT fire.
+    // 0.66 ≤ FLOOR_MIN_CONFIDENCE so medium_count=0 → floor=APPROVE → APPROVE.
+    assert_eq!(verdict, Verdict::Approve);
 }
 
+/// Mixed-confidence Medium findings: one above FLOOR_MIN_CONFIDENCE, one below.
+///
+/// Why: only the finding with confidence > 0.80 counts toward the floor (#1015).
+/// One floor-counting Medium → APPROVE* (not REQUEST_CHANGES).  The old test
+/// (confidence 0.8, 0.5 → REQUEST_CHANGES) encoded the over-aggressive behavior
+/// that caused #1015; confidence 0.8 is NOT > 0.80.
 #[test]
-fn grade_mixed_confidence_two_medium_not_collapsed() {
-    let findings = vec![finding(Effort::Medium, 0.8), finding(Effort::Medium, 0.5)];
+fn grade_mixed_confidence_two_medium_only_one_counts() {
+    let findings = vec![finding(Effort::Medium, 0.85), finding(Effort::Medium, 0.5)];
     let verdict = derive_verdict(Verdict::Approve, &findings);
-    assert_eq!(verdict, Verdict::RequestChanges);
+    // Only the 0.85 finding counts (> 0.80); one floor-counting Medium → APPROVE*.
+    assert_eq!(verdict, Verdict::ApproveWithReservations);
 }
 
 // ── Compile-break BLOCK rule ─────────────────────────────────────────────────
@@ -309,12 +330,14 @@ fn derive_verdict_with_grade_model_escalates_above_grade() {
 
 /// Grade "C-", model APPROVE, two high-confidence Medium findings → REQUEST_CHANGES.
 ///
-/// Why: grade "C-" → APPROVE*, model APPROVE → effective = APPROVE*. Then
-/// two Medium findings floor to REQUEST_CHANGES (stricter than APPROVE*).
+/// Why: grade "C-" → APPROVE*, model APPROVE → effective = APPROVE*.  Two Medium
+/// findings with confidence > 0.80 floor to REQUEST_CHANGES (stricter than APPROVE*).
 /// Grade "C-" must then clamp to D+ (ceiling of REQUEST_CHANGES band).
+/// Note: confidence must be > FLOOR_MIN_CONFIDENCE (0.80); findings at 0.80 no
+/// longer count (#1015).
 #[test]
 fn derive_verdict_with_grade_floor_stricter_than_grade() {
-    let findings = vec![finding(Effort::Medium, 0.8), finding(Effort::Medium, 0.8)];
+    let findings = vec![finding(Effort::Medium, 0.85), finding(Effort::Medium, 0.85)];
     let (v, g) = derive_verdict_with_grade(Verdict::Approve, Grade::CMinus, &findings);
     assert_eq!(v, Verdict::RequestChanges);
     assert_eq!(
@@ -322,4 +345,88 @@ fn derive_verdict_with_grade_floor_stricter_than_grade() {
         Grade::DPlus,
         "grade must clamp to D+ (ceiling of REQUEST_CHANGES)"
     );
+}
+
+// ── #1015 regression: advisory Medium findings must not over-escalate ────────
+
+/// Model APPROVE/B+ + two Medium findings at confidence 0.70 must NOT escalate
+/// to REQUEST_CHANGES (#1015 primary regression).
+///
+/// Why: advisory-tier Medium findings (confidence ≤ FLOOR_MIN_CONFIDENCE = 0.80)
+/// are speculative; the floor must not override the model's holistic APPROVE/B+
+/// judgment.  This was the live bug: top-level REQUEST_CHANGES on PRs with only
+/// advisory findings.
+/// What: zero floor-counting Mediums (both 0.70 ≤ 0.80) → floor = APPROVE →
+/// final = max(APPROVE, APPROVE) = APPROVE.
+/// Test: this test itself.
+#[test]
+fn grade_approve_b_plus_two_medium_advisory_stays_approve() {
+    let findings = vec![finding(Effort::Medium, 0.70), finding(Effort::Medium, 0.70)];
+    let (v, g) = derive_verdict_with_grade(Verdict::Approve, Grade::BPlus, &findings);
+    assert_eq!(
+        v,
+        Verdict::Approve,
+        "advisory Medium@0.70 must not escalate APPROVE/B+ to REQUEST_CHANGES (#1015)"
+    );
+    // Grade B+ is in the APPROVE band — no clamping needed.
+    assert_eq!(g, Grade::BPlus);
+}
+
+/// Advisory Medium findings do not count even at the LOW_CONFIDENCE_THRESHOLD boundary.
+///
+/// Why: confidence 0.70 is above LOW_CONFIDENCE_THRESHOLD (0.65) so the all-low-
+/// confidence override does NOT fire, but it is below FLOOR_MIN_CONFIDENCE (0.80)
+/// so the floor-count does not trigger either.  These findings are neither
+/// "all advisory noise" nor "confirmed blocking concerns" — and that is correct.
+/// What: two Medium@0.70 → floor = APPROVE → APPROVE.
+/// Test: this test itself.
+#[test]
+fn grade_advisory_medium_below_floor_threshold_does_not_escalate() {
+    let findings = vec![
+        finding(Effort::Medium, 0.70),
+        finding(Effort::Medium, 0.72),
+        finding(Effort::Medium, 0.75),
+    ];
+    let verdict = derive_verdict(Verdict::Approve, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::Approve,
+        "Medium findings below FLOOR_MIN_CONFIDENCE must not force REQUEST_CHANGES"
+    );
+}
+
+/// Two Medium findings ABOVE the floor threshold DO escalate appropriately.
+///
+/// Why: confirms the complementary behavior — the fix is calibrated, not a
+/// blanket suppression.  Well-grounded Medium findings (confidence > 0.80)
+/// still trigger REQUEST_CHANGES.
+/// What: two Medium@0.85 → both count → floor = REQUEST_CHANGES.
+/// Test: this test itself.
+#[test]
+fn grade_high_confidence_medium_above_floor_threshold_escalates() {
+    let findings = vec![finding(Effort::Medium, 0.85), finding(Effort::Medium, 0.85)];
+    let verdict = derive_verdict(Verdict::Approve, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::RequestChanges,
+        "Medium findings above FLOOR_MIN_CONFIDENCE must still trigger REQUEST_CHANGES"
+    );
+}
+
+/// A confirmed High finding still drives BLOCK even with a B+ grade (#1015 regression).
+///
+/// Why: the fix must not soften correctness blockers.  High-effort findings are
+/// independent of FLOOR_MIN_CONFIDENCE — they always floor to BLOCK.
+/// What: grade B+ (APPROVE) + model APPROVE + one High@0.90 → BLOCK, grade F.
+/// Test: this test itself.
+#[test]
+fn grade_confirmed_high_still_blocks_despite_b_plus_grade() {
+    let findings = vec![finding(Effort::High, 0.90)];
+    let (v, g) = derive_verdict_with_grade(Verdict::Approve, Grade::BPlus, &findings);
+    assert_eq!(
+        v,
+        Verdict::Block,
+        "High-effort finding must still BLOCK regardless of grade (#1015 regression)"
+    );
+    assert_eq!(g, Grade::F, "grade must clamp to F when verdict=BLOCK");
 }

@@ -226,24 +226,22 @@ fn rederive_keeps_confirmed_block() {
 }
 
 #[test]
-fn rederive_confirmed_preserves_model_escalation() {
-    // Path (a): model escalated to REQUEST_CHANGES on a single confirmed Medium.
-    // Because a candidate was confirmed, the model's escalation is preserved
-    // even though the lone-Medium floor alone is only APPROVE*.
+fn rederive_confirmed_medium_caps_at_approve_star() {
+    // Path (a2) — #1015: confirmed Medium-only caps baseline at APPROVE*; does not
+    // anchor REQUEST_CHANGES from a floor-driven escalation.
     let mut med = finding(Effort::Medium, 0.85);
     apply_outcome(&mut med, VerifyOutcome::Confirmed);
     let verdict = rederive_verdict(Verdict::RequestChanges, true, false, &[med]);
     assert_eq!(
         verdict,
-        Verdict::RequestChanges,
-        "confirmed evidence keeps the model's escalation as a lower bound (path a)"
+        Verdict::ApproveWithReservations,
+        "confirmed Medium caps at APPROVE* (path a2 — #1015)"
     );
 }
 
 #[test]
 fn rederive_mixed_keeps_only_surviving_floor() {
-    // Path (a): High refuted + one surviving confirmed Medium, model said BLOCK.
-    // any_confirmed=true → baseline is the model APPROVE*, the Medium floor.
+    // Path (a2): High refuted + confirmed Medium@0.85, model said APPROVE*.
     let mut high = finding(Effort::High, 0.95);
     apply_outcome(&mut high, VerifyOutcome::Refuted);
     let mut med = finding(Effort::Medium, 0.85);
@@ -463,17 +461,16 @@ async fn verify_truncation_preserves_primary_verdict() {
     );
 }
 
-/// Regression for the dropped-JoinHandle true-positive from PR #720 that was
-/// silently refuted in the #726 incident (16-token cap truncated all responses).
-/// Why: validates (a) CONFIRMED preserves finding + verdict, (b) TruncationRefuted
-/// does NOT collapse verdict to APPROVE (path c).
+/// Regression for the dropped-JoinHandle true-positive (PR #720, #726 incident).
+/// Why: (a) CONFIRMED Medium → APPROVE* (path a2, #1015 — pre-#1015 was REQUEST_CHANGES);
+/// (b) TruncationRefuted must NOT collapse to APPROVE (path c, #726).
 /// Test: this test itself.
 #[tokio::test]
 async fn verify_join_handle_regression_pr720() {
     let mut f = Finding::new(
         "crates/trusty-search/src/startup.rs",
         "resource-leak",
-        "JoinHandle dropped immediately; spawned task detached, risking pool exhaustion",
+        "JoinHandle dropped; spawned task detached, risking pool exhaustion",
         "Store the JoinHandle and await it in graceful shutdown",
         0.85,
         Effort::Medium,
@@ -483,7 +480,7 @@ async fn verify_join_handle_regression_pr720() {
                 +    tokio::spawn(async move { warm_boot().await });\n\
                 +}\n";
 
-    // Sub-test (a): CONFIRMED → finding + verdict survive.
+    // Sub-test (a): CONFIRMED Medium → path (a2): baseline=APPROVE*, stays APPROVE*.
     let mut findings_1 = vec![f.clone()];
     let v1 = run_verification_round(
         &confirmed_provider(),
@@ -499,10 +496,11 @@ async fn verify_join_handle_regression_pr720() {
         findings_1[0].verified,
         Some(VerifyOutcome::Confirmed)
     ));
+    // After #1015: a confirmed Medium caps at APPROVE* (path a2), not REQUEST_CHANGES.
     assert_eq!(
         v1,
-        Verdict::RequestChanges,
-        "CONFIRMED must hold REQUEST_CHANGES"
+        Verdict::ApproveWithReservations,
+        "CONFIRMED Medium → APPROVE* (path a2 — #1015)"
     );
 
     // Sub-test (b): TruncationRefuted → verdict preserved (path c — #726).
@@ -524,7 +522,32 @@ async fn verify_join_handle_regression_pr720() {
     assert_eq!(
         v2,
         Verdict::RequestChanges,
-        "truncation must NOT collapse verdict to APPROVE (path c — #726)"
+        "truncation must NOT collapse to APPROVE (path c — #726)"
+    );
+}
+
+// ── #1015 regression ──────────────────────────────────────────────────────────
+
+/// Regression: APPROVE + two Medium@0.70 must stay APPROVE (#1015).
+/// Advisory Mediums (≤ 0.80) excluded from floor count; APPROVE stays APPROVE.
+#[tokio::test]
+async fn verify_approve_two_advisory_medium_stays_approve() {
+    let verifier = confirmed_provider();
+    let mut findings = vec![finding(Effort::Medium, 0.70), finding(Effort::Medium, 0.70)];
+    let verdict = run_verification_round(
+        &verifier,
+        "m",
+        "+ advisory diff",
+        Verdict::Approve,
+        &mut findings,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        verdict,
+        Verdict::Approve,
+        "advisory Medium@0.70 must not escalate APPROVE to REQUEST_CHANGES (#1015)"
     );
 }
 
