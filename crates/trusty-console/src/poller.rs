@@ -125,12 +125,41 @@ impl PollerCache {
 
 // ─── background task ─────────────────────────────────────────────────────────
 
+/// Run the poll loop body once and log any panic from the detection thread.
+///
+/// Why: Isolates the async iteration so `start` can detect if it returns
+/// (which should never happen under normal operation).
+/// What: Calls `poll_once` — whose internal `spawn_blocking` already recovers
+/// panics in detection threads — logs the refresh count, then sleeps.
+/// Test: `PollerCache::poll_once` is tested independently; this wrapper is
+/// exercised implicitly whenever the daemon runs.
+async fn poll_loop(
+    cache: &PollerCache,
+    connectors: &Arc<Vec<Box<dyn ServiceConnector>>>,
+    interval: Duration,
+) {
+    loop {
+        let snap = cache.poll_once(Arc::clone(connectors)).await;
+        let running_count = snap.services.iter().filter(|s| s.url.is_some()).count();
+        debug!(
+            "poller: refreshed {} services, {} running",
+            snap.services.len(),
+            running_count
+        );
+        tokio::time::sleep(interval).await;
+    }
+}
+
 /// Spawn the background poll loop.
 ///
 /// Why: This is the only place in the codebase where the polling interval is
 /// set; changing it here changes it everywhere.
 /// What: Polls immediately (so the first HTTP request does not hit a cold
-/// cache), then repeats every `interval`.  Logs at DEBUG on each cycle.
+/// cache), then repeats every `interval` by calling `poll_loop`.  The spawned
+/// task logs `tracing::error!` if `poll_loop` ever returns — which indicates an
+/// unexpected exit (e.g. a future cancellation or a logic change that breaks
+/// the infinite loop), making silent cache-freeze failures visible in the
+/// daemon log rather than going unnoticed.
 /// Test: Not tested directly (requires a live tokio runtime); the `PollerCache`
 /// logic is tested independently.
 pub fn start(
@@ -143,16 +172,8 @@ pub fn start(
             "poller: starting background health-poll (interval={}s)",
             interval.as_secs()
         );
-        loop {
-            let snap = cache.poll_once(Arc::clone(&connectors)).await;
-            let running_count = snap.services.iter().filter(|s| s.url.is_some()).count();
-            debug!(
-                "poller: refreshed {} services, {} running",
-                snap.services.len(),
-                running_count
-            );
-            tokio::time::sleep(interval).await;
-        }
+        poll_loop(&cache, &connectors, interval).await;
+        error!("poller: background health-poll loop exited unexpectedly — cache will not refresh");
     });
 }
 

@@ -21,8 +21,6 @@ use tracing::{debug, warn};
 
 use crate::server::AppState;
 
-use super::KNOWN_DAEMONS;
-
 // Hop-by-hop headers that must not be forwarded in either direction.
 // RFC 7230 §6.1 and common proxy practice.
 static HOP_BY_HOP: &[&str] = &[
@@ -42,8 +40,9 @@ static HOP_BY_HOP: &[&str] = &[
 /// stored in `CachedSnapshot.services`.
 ///
 /// Why: The URL uses short names (`search`, `memory`, …) while `ServiceInfo.id`
-/// uses the full `trusty-*` prefix.  This function bridges the two.
-/// What: Returns the full service ID, or `None` for unknown keys.
+/// uses the full `trusty-*` prefix.  This function is the single source of
+/// truth for the proxy allowlist: `None` means the key is not permitted.
+/// What: Returns the full service ID, or `None` for unknown/disallowed keys.
 /// Test: `test_daemon_key_mapping` below.
 fn full_id(daemon_key: &str) -> Option<&'static str> {
     match daemon_key {
@@ -53,6 +52,21 @@ fn full_id(daemon_key: &str) -> Option<&'static str> {
         "review" => Some("trusty-review"),
         _ => None,
     }
+}
+
+/// Guard that rejects any upstream URL that is not a local loopback address.
+///
+/// Why: The console is a strictly local tool.  If a bug or compromise caused a
+/// non-loopback URL to enter the poller cache, forwarding to it would turn the
+/// console into an SSRF vector.  This guard prevents that by enforcing that the
+/// resolved base URL is always a local address before any bytes are sent.
+/// What: Returns `true` if `url` starts with `http://127.`, `http://[::1]`, or
+/// `http://localhost`; `false` for anything else.
+/// Test: `test_is_local_upstream_*` below.
+fn is_local_upstream(url: &str) -> bool {
+    url.starts_with("http://127.")
+        || url.starts_with("http://[::1]")
+        || url.starts_with("http://localhost")
 }
 
 /// Build the upstream URL from a base URL, sub-path, and optional query string.
@@ -120,14 +134,10 @@ pub async fn proxy_handler(
     Path((daemon_key, subpath)): Path<(String, String)>,
     req: Request,
 ) -> Response {
-    // Validate daemon key against the explicit allowlist.
-    if !KNOWN_DAEMONS.contains(&daemon_key.as_str()) {
-        warn!("proxy: unknown daemon key '{daemon_key}'");
-        return error_response(StatusCode::BAD_REQUEST, "unknown daemon");
-    }
-
-    // Map short key → full id, then look up the base URL in the cache.
+    // Map short key → full id via the exhaustive match in full_id(), which is
+    // the single source of truth for the proxy allowlist.
     let Some(full_daemon_id) = full_id(&daemon_key) else {
+        warn!("proxy: unknown daemon key '{daemon_key}'");
         return error_response(StatusCode::BAD_REQUEST, "unknown daemon");
     };
 
@@ -151,6 +161,14 @@ pub async fn proxy_handler(
         }
     };
 
+    // SSRF guard: the console is a local-only tool; reject any upstream that is
+    // not a loopback address.  A non-local URL in the cache would be a bug or
+    // compromise — fail closed rather than forward.
+    if !is_local_upstream(&base_url) {
+        warn!("proxy: upstream '{base_url}' is not a local address — rejecting (SSRF guard)");
+        return error_response(StatusCode::BAD_GATEWAY, "upstream not local");
+    }
+
     // Decompose request into parts so we can access headers and body.
     let (parts, body) = req.into_parts();
 
@@ -170,12 +188,16 @@ pub async fn proxy_handler(
     // Filter headers before consuming body.
     let safe_headers = filter_headers(&parts.headers);
 
-    // Collect body bytes.
-    let body_bytes: Bytes = match axum::body::to_bytes(body, 64 * 1024 * 1024).await {
+    // Collect body bytes (64 MiB cap).
+    const BODY_LIMIT: usize = 64 * 1024 * 1024;
+    let body_bytes: Bytes = match axum::body::to_bytes(body, BODY_LIMIT).await {
         Ok(b) => b,
         Err(e) => {
             warn!("proxy: failed to read request body: {e}");
-            return error_response(StatusCode::BAD_REQUEST, "failed to read request body");
+            return error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request body exceeds proxy limit of 64 MiB",
+            );
         }
     };
 
@@ -289,6 +311,32 @@ mod tests {
             build_upstream_url("http://127.0.0.1:7878", "health", Some("")),
             "http://127.0.0.1:7878/health"
         );
+    }
+
+    /// Why: the SSRF guard must accept loopback IPv4, IPv6, and localhost but
+    /// reject any other URL including external hosts and non-loopback RFC-1918.
+    /// What: calls is_local_upstream with accepted and rejected URLs.
+    /// Test: this test itself.
+    #[test]
+    fn test_is_local_upstream_accepted() {
+        assert!(is_local_upstream("http://127.0.0.1:7878"));
+        assert!(is_local_upstream("http://127.0.0.1:7878/health"));
+        assert!(is_local_upstream("http://127.1.2.3:9000"));
+        assert!(is_local_upstream("http://[::1]:8080"));
+        assert!(is_local_upstream("http://localhost:7070"));
+        assert!(is_local_upstream("http://localhost"));
+    }
+
+    /// Why: non-local URLs must be rejected to prevent SSRF.
+    /// What: calls is_local_upstream with external and RFC-1918 URLs.
+    /// Test: this test itself.
+    #[test]
+    fn test_is_local_upstream_rejected() {
+        assert!(!is_local_upstream("http://192.168.1.1:7878"));
+        assert!(!is_local_upstream("http://10.0.0.1:7879"));
+        assert!(!is_local_upstream("http://evil.example.com/steal"));
+        assert!(!is_local_upstream("https://127.0.0.1:7878")); // https, not http
+        assert!(!is_local_upstream("http://0.0.0.0:7878"));
     }
 
     /// Why: full_id must map all known short keys to their trusty-* IDs.

@@ -13,11 +13,3 @@
 pub mod routes;
 
 pub use routes::proxy_handler;
-
-/// Daemon identifiers that the proxy accepts.
-///
-/// Why: An explicit allowlist prevents the proxy from becoming an open
-/// relay to arbitrary upstream hosts — only these four strings are valid.
-/// What: A static slice of daemon IDs matching `ServiceInfo::id`.
-/// Test: `routes::tests::test_build_upstream_url_*`.
-pub const KNOWN_DAEMONS: &[&str] = &["search", "memory", "analyze", "review"];
