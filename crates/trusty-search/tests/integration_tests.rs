@@ -21,6 +21,73 @@ fn test_bm25_smoke() {
     assert!(s > 0.0);
 }
 
+// ── Bm25Index boundary / property tests ──────────────────────────────────────
+//
+// `core::bm25` is a pure re-export (`BM25Index as Bm25Index`), so the unit
+// tests that exercise its constructor surface live here in the integration
+// harness, which already imports via `trusty_search::core::bm25::Bm25Index`.
+
+/// Empty corpus: `score_query_all` must return an empty list — there are no
+/// documents to rank.
+#[test]
+fn bm25_empty_corpus_returns_no_results() {
+    use trusty_search::core::bm25::Bm25Index;
+    let idx = Bm25Index::new();
+    let results = idx.score_query_all("rust tokio", 10);
+    assert!(
+        results.is_empty(),
+        "empty corpus must produce zero results, got {results:?}"
+    );
+}
+
+/// Single-document corpus: querying a term that appears in the document must
+/// return that document with a positive score.
+#[test]
+fn bm25_single_doc_matching_term_scores_positive() {
+    use trusty_search::core::bm25::Bm25Index;
+    let mut idx = Bm25Index::new();
+    idx.upsert_document("doc-a", "rust async programming tokio runtime");
+    let results = idx.score_query_all("rust async", 10);
+    assert!(
+        !results.is_empty(),
+        "a query matching the only document must return at least one result"
+    );
+    let (doc_id, score) = &results[0];
+    assert_eq!(doc_id, "doc-a");
+    assert!(*score > 0.0, "matching document must have a positive score");
+}
+
+/// Score monotonicity: a document with more occurrences of the query term
+/// should score greater than or equal to one with fewer occurrences.
+/// Verifies that BM25 term-frequency weighting is preserved through the
+/// re-export boundary.
+#[test]
+fn bm25_higher_term_frequency_scores_higher_or_equal() {
+    use trusty_search::core::bm25::Bm25Index;
+    let mut idx = Bm25Index::new();
+    // "search" appears once in doc-low, five times in doc-high.
+    idx.upsert_document("doc-low", "search is useful");
+    idx.upsert_document("doc-high", "search search search search search engine");
+
+    let results = idx.score_query_all("search", 10);
+    assert_eq!(results.len(), 2, "both documents contain the query term");
+
+    // results are sorted descending by score; doc-high should come first.
+    assert_eq!(
+        results[0].0,
+        "doc-high",
+        "doc with higher term frequency must rank first; got order: {:?}",
+        results
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        results[0].1 >= results[1].1,
+        "higher-frequency document must have score >= lower-frequency document"
+    );
+}
+
 #[test]
 fn test_chunker_smoke() {
     use trusty_search::core::chunker::chunk_text;

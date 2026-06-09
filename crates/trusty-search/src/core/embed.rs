@@ -75,3 +75,88 @@ where
         <E as trusty_common::embedder::Embedder>::provider(self)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trusty_common::embedder::ExecutionProvider;
+
+    /// Verify that the blanket adapter correctly delegates `embed_batch` to the
+    /// underlying `trusty_common::embedder::Embedder` implementation.
+    ///
+    /// Uses `MockEmbedder` (deterministic, no ONNX I/O) with a known dimension
+    /// and a batch of N strings, then asserts shape and that each vector is
+    /// non-empty (MockEmbedder always produces non-zero content for non-empty
+    /// inputs).
+    #[tokio::test]
+    async fn embed_adapter_delegates_embed_batch_correctly() {
+        const DIM: usize = 16;
+        let mock = MockEmbedder::new(DIM);
+
+        // Feed 3 distinct strings through the in-crate Embedder facade.
+        let texts = ["hello world", "rust async tokio", "code search engine"];
+        let result = Embedder::embed_batch(&mock, &texts)
+            .await
+            .expect("embed_batch should not fail with MockEmbedder");
+
+        // Shape: one vector per input text.
+        assert_eq!(
+            result.len(),
+            texts.len(),
+            "embed_batch must return one vector per input"
+        );
+
+        // Dimension: every vector has the expected width.
+        for (i, vec) in result.iter().enumerate() {
+            assert_eq!(
+                vec.len(),
+                DIM,
+                "vector[{i}] has wrong dimension: expected {DIM}, got {}",
+                vec.len()
+            );
+        }
+
+        // Non-trivial content: MockEmbedder hashes input bytes so non-empty
+        // strings must produce at least one non-zero component.
+        for (i, vec) in result.iter().enumerate() {
+            let nonzero = vec.iter().any(|&x| x != 0.0);
+            assert!(
+                nonzero,
+                "vector[{i}] is all zeros — MockEmbedder contract violated"
+            );
+        }
+    }
+
+    /// Verify that `embed_batch` with distinct inputs produces distinct output
+    /// vectors — the adapter must not collapse all results to the same value.
+    #[tokio::test]
+    async fn embed_adapter_produces_distinct_vectors_for_distinct_inputs() {
+        const DIM: usize = 32;
+        let mock = MockEmbedder::new(DIM);
+
+        let texts = ["alpha", "beta"];
+        let result = Embedder::embed_batch(&mock, &texts)
+            .await
+            .expect("embed_batch should not fail");
+
+        assert_ne!(
+            result[0], result[1],
+            "distinct inputs must produce distinct embedding vectors"
+        );
+    }
+
+    /// Verify that `provider()` passes through from the underlying
+    /// `trusty_common::embedder::Embedder`. `MockEmbedder` does not override
+    /// `provider()`, so the shared-crate default (`ExecutionProvider::Cpu`)
+    /// must be surfaced through the in-crate facade.
+    #[test]
+    fn embed_adapter_provider_passthrough_returns_cpu_for_mock() {
+        let mock = MockEmbedder::new(8);
+        // MockEmbedder uses the shared-crate default, which is Cpu.
+        assert_eq!(
+            Embedder::provider(&mock),
+            ExecutionProvider::Cpu,
+            "provider() passthrough must return Cpu for MockEmbedder"
+        );
+    }
+}
