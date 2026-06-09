@@ -95,9 +95,12 @@ pub fn run_diagnostics_blocking(
 ///   1. Groups `by_file` entries by language (honouring `language_filter`).
 ///   2. For each language, splits available tools into project-scoped and
 ///      file-scoped buckets (honouring `tool_filter` by name in both).
-///   3. File-scoped tools: write each file to a scratch tempdir, call
+///   3. File-scoped tools: write each file to a unique numeric subdirectory
+///      under the scratch tempdir (keyed by loop index), call
 ///      `tool.run(scratch_path, content)`, rewrite `diag.file` back to the
-///      index-relative path.
+///      index-relative path. The per-file subdir prevents basename collisions:
+///      two files `src/a/main.rs` and `src/b/main.rs` have the same basename
+///      but different indices, so they never overwrite each other.
 ///   4. Project-scoped tools: only if `root_path` is `Some`. Build real
 ///      on-disk paths by joining `root` with the rel path; keep only those
 ///      that `exist()`. Call `tool.run_project(&real_paths)`. Map each
@@ -108,6 +111,8 @@ pub fn run_diagnostics_blocking(
 ///
 /// Test: `run_diagnostics_blocking_project_scoped_skips_when_no_root` uses
 /// this directly with a `FakeProjectScopedTool` registry.
+/// `run_diagnostics_blocking_with_registry_two_files_same_basename` (below)
+/// proves the per-file subdir isolation prevents basename collisions.
 pub fn run_diagnostics_blocking_with_registry(
     by_file: HashMap<String, String>,
     language_filter: Option<String>,
@@ -165,12 +170,25 @@ pub fn run_diagnostics_blocking_with_registry(
 
         // --- FILE-SCOPED tools (original scratch-dir behavior) ---
         if !file_tools.is_empty() {
-            for (rel_file, content) in file_pairs {
+            // Use an incrementing counter so each file gets a unique scratch
+            // subdir. This prevents basename collisions: `src/a/main.rs` and
+            // `src/b/main.rs` both have basename `main.rs`, so without a
+            // unique subdir the second write overwrites the first and its
+            // diagnostics are silently lost. The fix mirrors commit 16cd8eac
+            // (closes #976) that applied the same isolation to
+            // `run_diagnostics_blocking` in `handlers/analysis.rs`.
+            for (idx, (rel_file, content)) in file_pairs.iter().enumerate() {
                 let name = Path::new(rel_file)
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "chunk.txt".to_string());
-                let path = scratch.path().join(&name);
+                // Unique numeric subdir prevents basename collisions.
+                let file_dir = scratch.path().join(idx.to_string());
+                if let Err(e) = std::fs::create_dir_all(&file_dir) {
+                    tracing::warn!("failed to create scratch subdir for {name}: {e}");
+                    continue;
+                }
+                let path = file_dir.join(&name);
                 if let Err(e) = std::fs::write(&path, content) {
                     tracing::warn!("failed to write scratch file {name}: {e}");
                     continue;
@@ -268,6 +286,121 @@ pub fn run_diagnostics_blocking_with_registry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why: two files with identical basenames in different index directories
+    /// must each produce diagnostics independently; the basename-collision bug
+    /// (writing `scratch/main.rs` twice) silently drops the first file's
+    /// diagnostics. This test FAILS against `scratch.path().join(&name)` (the
+    /// old code) and PASSES after the per-file `scratch/<idx>/name` fix.
+    ///
+    /// What: injects a `FakeFileScopedTool` that records every `(path, content)`
+    /// it receives. Passes two same-basename Rust files. Asserts: (a) the fake
+    /// tool was called twice, (b) the two paths are distinct, (c) neither
+    /// rel_file mapping is lost (both appear in the output).
+    ///
+    /// Test: this test itself. Does not require any external linter.
+    #[test]
+    fn run_diagnostics_blocking_with_registry_two_files_same_basename() {
+        use crate::core::tool_registry::ToolRegistry;
+        use crate::core::tools::{StaticTool, ToolDiagnostic};
+        use std::path::{Path, PathBuf};
+        use std::sync::{Arc, Mutex};
+
+        /// A fake file-scoped tool that records the (path, content) passed to
+        /// each `run` call and returns a single dummy diagnostic so the caller
+        /// can assert both files' diagnostics survive the pipeline.
+        #[derive(Clone)]
+        struct FakeFileScopedTool {
+            calls: Arc<Mutex<Vec<(PathBuf, String)>>>,
+        }
+        impl StaticTool for FakeFileScopedTool {
+            fn name(&self) -> &str {
+                "fake-file-scoped"
+            }
+            fn language(&self) -> &str {
+                "rust"
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn is_project_scoped(&self) -> bool {
+                false
+            }
+            fn run(&self, file: &Path, content: &str) -> anyhow::Result<Vec<ToolDiagnostic>> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((file.to_path_buf(), content.to_string()));
+                // Return one diagnostic so the caller can assert it maps back
+                // to the correct index-relative path.
+                Ok(vec![ToolDiagnostic {
+                    file: file.to_string_lossy().into_owned(),
+                    line: 1,
+                    col: 1,
+                    message: "fake".into(),
+                    severity: crate::core::tools::Severity::Warning,
+                    tool: "fake-file-scoped".into(),
+                    code: None,
+                }])
+            }
+            fn run_project(&self, _files: &[PathBuf]) -> anyhow::Result<Vec<ToolDiagnostic>> {
+                Ok(Vec::new())
+            }
+        }
+
+        let calls = Arc::new(Mutex::new(Vec::<(PathBuf, String)>::new()));
+        let tool = FakeFileScopedTool {
+            calls: Arc::clone(&calls),
+        };
+        let registry = ToolRegistry::from_tools_for_test(vec![Arc::new(tool)]);
+
+        let mut by_file = HashMap::new();
+        by_file.insert("src/a/main.rs".to_string(), "fn a() {}".to_string());
+        by_file.insert("src/b/main.rs".to_string(), "fn b() {}".to_string());
+
+        let diags = run_diagnostics_blocking_with_registry(
+            by_file, None, // language_filter
+            None, // tool_filter
+            None, // root_path
+            &registry,
+        );
+
+        let recorded = calls.lock().unwrap();
+        // Both files must have been sent to the tool.
+        assert_eq!(
+            recorded.len(),
+            2,
+            "expected 2 tool invocations (one per file), got {}; \
+             basename collision likely dropped one",
+            recorded.len()
+        );
+        // The two scratch paths must be distinct — collision means same path.
+        let path0 = &recorded[0].0;
+        let path1 = &recorded[1].0;
+        assert_ne!(
+            path0, path1,
+            "the two files were written to the same scratch path ({path0:?}); \
+             per-file subdir isolation is broken"
+        );
+        // Both diagnostics must survive back-mapping (neither was lost).
+        assert_eq!(
+            diags.len(),
+            2,
+            "expected 2 diagnostics in output (one per file), got {}; \
+             one file's diagnostics were silently dropped",
+            diags.len()
+        );
+        // Verify both index-relative paths appear in the output.
+        let files: Vec<&str> = diags.iter().map(|d| d.file.as_str()).collect();
+        assert!(
+            files.contains(&"src/a/main.rs"),
+            "src/a/main.rs missing from output: {files:?}"
+        );
+        assert!(
+            files.contains(&"src/b/main.rs"),
+            "src/b/main.rs missing from output: {files:?}"
+        );
+    }
 
     #[test]
     fn abs_to_rel_exact_match() {

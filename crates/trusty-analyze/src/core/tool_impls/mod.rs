@@ -90,7 +90,12 @@ pub fn build_tool_timeout() -> Duration {
 /// timeout the **entire process group** is sent SIGKILL (Unix:
 /// `kill(-pgid, SIGKILL)`), then the reader threads are joined so no OS
 /// resources leak. On non-Unix platforms the child PID is killed directly
-/// (best-effort; child descendants may survive).
+/// (best-effort; child descendants may survive). If `setsid()` fails in the
+/// `pre_exec` hook (EPERM — caller already a process-group leader, which can
+/// happen in some container or test-harness setups), `spawn()` returns an
+/// Err rather than proceeding: a child that didn't get its own session would
+/// share the parent's process group, making the timeout-path
+/// `kill(-pgid, SIGKILL)` target the parent group.
 /// Test: `timeout_kills_child_process` spawns `sleep 30` with a sub-second
 /// timeout and verifies: (a) the call returns Err quickly, and (b) the child
 /// process is no longer running after the call returns.
@@ -112,15 +117,27 @@ pub fn run_command_with_timeout(
     // and catch any dotnet/MSBuild child processes that were spawned by the
     // child. This is safe because we discard the tty: the child has
     // stdin=null and we never send it signals from a terminal.
+    //
+    // setsid() can fail with EPERM if the caller is already a process-group
+    // leader (e.g. in certain test harnesses or container setups). When that
+    // happens we MUST propagate the error: proceeding with spawn() would leave
+    // the child in the parent's process group, so the timeout-path
+    // `kill(-pgid, SIGKILL)` would target the parent group — potentially
+    // killing the service or test runner. Returning Err from pre_exec causes
+    // spawn() to fail cleanly with the OS error rather than proceeding unsafely.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         // SAFETY: setsid() is async-signal-safe and has no preconditions
-        // beyond "not already a process group leader", which is guaranteed
-        // for a newly-forked child.
+        // beyond "not already a process group leader". We propagate EPERM
+        // (caller already a group leader) as an Err so spawn() rejects the
+        // child rather than proceeding with an unsafe kill target.
         unsafe {
             cmd.pre_exec(|| {
-                libc::setsid();
+                let rc = libc::setsid();
+                if rc < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
                 Ok(())
             });
         }
