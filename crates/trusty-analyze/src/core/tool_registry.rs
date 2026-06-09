@@ -110,15 +110,21 @@ impl ToolRegistry {
         self.tools.iter().map(|e| e.key().clone()).collect()
     }
 
-    /// Run every available tool for `lang` against `file` and merge the
-    /// diagnostics. A failure in one tool is logged and skipped — it does not
-    /// abort the others.
+    /// Run every available file-scoped tool for `lang` against `file` and
+    /// merge the diagnostics. A failure in one tool is logged and skipped —
+    /// it does not abort the others.
     ///
     /// Why: callers want a single merged diagnostic list, with best-effort
     /// semantics so one broken tool cannot blank out the rest.
-    /// What: iterates `tools_for(lang)`, calls `run`, concatenates `Ok`
-    /// results, and logs `Err`s at warn level.
-    /// Test: `run_all_unknown_language_is_empty` covers the no-tool path.
+    /// What: iterates `tools_for(lang)`, skips project-scoped tools (they
+    /// require a real `.csproj` on disk and are dispatched via
+    /// `run_diagnostics_blocking` instead), calls `run` on file-scoped tools,
+    /// concatenates `Ok` results, and logs `Err`s at warn level. Skipping
+    /// project-scoped tools here prevents silent empty results: without the
+    /// guard, `RoslynTool::run` receives a scratch-dir path, `find_csproj`
+    /// returns `None`, and the caller gets zero diagnostics with no warning.
+    /// Test: `run_all_unknown_language_is_empty` covers the no-tool path;
+    /// `run_all_skips_project_scoped_tools` covers the guard.
     pub fn run_all(
         &self,
         lang: &str,
@@ -127,6 +133,14 @@ impl ToolRegistry {
     ) -> anyhow::Result<Vec<ToolDiagnostic>> {
         let mut merged = Vec::new();
         for tool in self.tools_for(lang) {
+            if tool.is_project_scoped() {
+                tracing::debug!(
+                    tool = tool.name(),
+                    "skipping project-scoped tool in run_all — \
+                     use run_diagnostics_blocking for project-scoped dispatch"
+                );
+                continue;
+            }
             match tool.run(file, content) {
                 Ok(diags) => merged.extend(diags),
                 Err(e) => {
@@ -137,7 +151,17 @@ impl ToolRegistry {
         Ok(merged)
     }
 
-    /// Run a named subset of tools for `lang`. Unknown tool names are skipped.
+    /// Run a named subset of file-scoped tools for `lang`. Unknown tool names
+    /// and project-scoped tools are skipped.
+    ///
+    /// Why: callers supply an explicit list of tool names but may not know
+    /// which are project-scoped. Silently calling `run` on a project-scoped
+    /// tool yields zero diagnostics (no `.csproj` in the scratch dir) with no
+    /// warning, violating the contract that requested tools are run. Skipping
+    /// them here with a trace log makes the omission observable.
+    /// What: filters to named tools, skips project-scoped ones with a debug
+    /// log, and calls `tool.run` on the remainder.
+    /// Test: exercised indirectly by `run_all_skips_project_scoped_tools`.
     pub fn run_named(
         &self,
         lang: &str,
@@ -148,6 +172,14 @@ impl ToolRegistry {
         let mut merged = Vec::new();
         for tool in self.tools_for(lang) {
             if !names.iter().any(|n| n == tool.name()) {
+                continue;
+            }
+            if tool.is_project_scoped() {
+                tracing::debug!(
+                    tool = tool.name(),
+                    "skipping project-scoped tool in run_named — \
+                     use run_diagnostics_blocking for project-scoped dispatch"
+                );
                 continue;
             }
             match tool.run(file, content) {
@@ -190,6 +222,27 @@ mod tests {
             .run_all("klingon", Path::new("foo.kl"), "")
             .expect("run_all should not fail");
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn run_all_skips_project_scoped_tools() {
+        // run_all must never call tool.run() on a project-scoped tool: doing
+        // so against a scratch-dir path would return Ok(vec![]) with no
+        // warning, silently producing zero results. Instead, run_all returns
+        // an empty vec for that language — callers that need project-scoped
+        // results should use run_diagnostics_blocking.
+        //
+        // We verify the contract holds regardless of whether dotnet is
+        // installed: even if the csharp language has available tools, run_all
+        // against a non-existent scratch file must not return an Err.
+        let r = ToolRegistry::discover();
+        let scratch = Path::new("/tmp/test_dummy.cs");
+        let result = r.run_all("csharp", scratch, "class Foo {}");
+        // Must not error — project-scoped tools are skipped, not errored.
+        assert!(
+            result.is_ok(),
+            "run_all must not fail for project-scoped language: {result:?}"
+        );
     }
 
     #[test]

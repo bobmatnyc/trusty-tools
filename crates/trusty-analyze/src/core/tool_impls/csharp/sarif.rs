@@ -1,166 +1,17 @@
-//! `RoslynTool` — C#/.NET diagnostics via the .NET SDK Roslyn analyzers.
+//! Roslyn SARIF parser and file-matching helpers.
 //!
-//! Why: Roslyn is the canonical C# compiler and analyzer host; it emits
-//! SARIF via MSBuild's ErrorLog property, covering both compiler errors and
-//! .NET analyzer rules (CA*, IDE*, CS*).
-//! What: resolves the nearest `.csproj`, runs `dotnet build` with
-//! `-p:ErrorLog=<tmp>%2Cversion=2.1`, and normalizes the resulting SARIF
-//! `runs[0].results[]` array into `ToolDiagnostic`s for the target file.
-//! Test: `parse_roslyn_sarif_extracts_result` parses a captured SARIF fixture.
+//! Why: SARIF parsing, percent-decoding, file-path matching, and severity
+//! normalization are cohesive parsing concerns that are independently testable.
+//! Keeping them in a dedicated submodule keeps `mod.rs` focused on the
+//! `StaticTool` implementation and the compiler invocation.
+//! What: exposes `parse_roslyn_sarif`, `roslyn_file_matches`, and related
+//! helpers used by both `run()` (single-file filter) and `run_project()`
+//! (multi-file filter).
+//! Test: all helpers are covered by unit tests in this module.
 
-use std::path::Path;
-
-use anyhow::Result;
 use serde_json::Value;
 
-use super::run_command;
-use crate::core::tools::{Severity, StaticTool, ToolDiagnostic};
-
-/// C#/.NET static-analysis tool backed by the Roslyn compiler (dotnet SDK).
-///
-/// Why: provides IDE-grade diagnostics (CA rules, style enforcement, compiler
-/// errors) without requiring a separate linter binary — only the .NET SDK.
-/// What: shells out to `dotnet build` with SARIF output enabled, parses the
-/// result, and filters to the target file.
-/// Test: unit tests exercise the parser against a captured fixture; the
-/// `run` method itself is not tested with a live dotnet invocation.
-pub struct RoslynTool;
-
-impl StaticTool for RoslynTool {
-    fn name(&self) -> &str {
-        "roslyn"
-    }
-
-    fn language(&self) -> &str {
-        "csharp"
-    }
-
-    /// Returns true when the `dotnet` SDK binary is on `PATH`.
-    ///
-    /// Why: avoids wasted invocations on machines without the .NET SDK.
-    /// What: delegates to `which::which("dotnet")`.
-    /// Test: always evaluates at runtime; not directly unit-tested.
-    fn is_available(&self) -> bool {
-        which::which("dotnet").is_ok()
-    }
-
-    /// Run Roslyn analyzers on `file` via `dotnet build` and return findings.
-    ///
-    /// Why: MSBuild's `-p:ErrorLog` redirects diagnostics into SARIF; this is
-    /// the only stable way to capture Roslyn analyzer output without a custom
-    /// tool host.
-    /// What: walks parent dirs for a `.csproj`, runs restore + build with SARIF
-    /// output enabled, parses the SARIF, and filters results to `file`.
-    /// Test: the SARIF parser is unit-tested independently; the full `run` path
-    /// is side-effect-only (spawns dotnet) and is not invoked in unit tests.
-    fn run(&self, file: &Path, _content: &str) -> Result<Vec<ToolDiagnostic>> {
-        let dir = file.parent().unwrap_or_else(|| Path::new("."));
-
-        let csproj = match find_csproj(dir) {
-            Some(p) => p,
-            None => return Ok(Vec::new()),
-        };
-
-        let tmp = tempfile::Builder::new()
-            .suffix(".sarif")
-            .tempfile()
-            .map_err(|e| anyhow::anyhow!("failed to create temp sarif file: {e}"))?;
-        // Close our write handle (retaining the deletion guard) so MSBuild can
-        // open the file: on Windows an open NamedTempFile handle is exclusive
-        // and would otherwise block dotnet from writing the SARIF.
-        let sarif_path = tmp.into_temp_path();
-
-        let tmp_path = sarif_path.to_string_lossy().into_owned();
-        let csproj_path = csproj.to_string_lossy().into_owned();
-
-        // Best-effort restore — ignore errors (offline or already restored).
-        let _ = run_command("dotnet", &["restore", &csproj_path], dir);
-
-        // The %2C escapes the comma so MSBuild parses the -p: value correctly.
-        // A literal comma would split the value at the MSBuild level, yielding
-        // legacy SARIF v1 instead of the requested 2.1 format.
-        let errorlog_arg = format!("-p:ErrorLog={}%2Cversion=2.1", tmp_path);
-        // `--no-incremental` is REQUIRED: an up-to-date incremental build skips
-        // the CoreCompile target, so the Roslyn analyzers never re-run and the
-        // ErrorLog is left empty. Forcing a recompile is the only way to get
-        // analyzer diagnostics on every invocation (verified against
-        // HotStats.Crypto: incremental → 0 results, --no-incremental → 14).
-        let build_res = run_command(
-            "dotnet",
-            &[
-                "build",
-                &csproj_path,
-                "--no-restore",
-                "--no-incremental",
-                &errorlog_arg,
-                "-p:EnableNETAnalyzers=true",
-                "-p:AnalysisLevel=latest-all",
-                "-p:EnforceCodeStyleInBuild=true",
-            ],
-            dir,
-        );
-
-        if let Err(e) = build_res {
-            // Spawn failure or 30s timeout: log and fall through. A partial
-            // SARIF may still have been written before the process died, and a
-            // non-zero compiler exit (which run_command reports as Ok, not Err)
-            // already produces a complete SARIF we want to parse.
-            tracing::debug!("dotnet build invocation failed: {e}");
-        }
-
-        let sarif = std::fs::read_to_string(&tmp_path).unwrap_or_default();
-        let all_diags = parse_roslyn_sarif(&sarif);
-
-        // Filter to the requested file only.
-        let target = file.to_string_lossy().into_owned();
-        let filtered = all_diags
-            .into_iter()
-            .filter(|d| roslyn_file_matches(&d.file, &target))
-            .collect();
-
-        Ok(filtered)
-    }
-}
-
-/// Walk parent directories upward from `start` to find the nearest `.csproj`.
-///
-/// Why: `dotnet build` requires a project file; a single file cannot be built
-/// in isolation. The walk is bounded so a file with no project above it cannot
-/// trigger a full filesystem-root scan or, worse, pick an unrelated project in
-/// a distant ancestor and build the wrong thing.
-/// What: iterates ancestors of `start` (at most `MAX_ASCENT` levels), returning
-/// the first directory that contains a `.csproj`; stops ascending once it
-/// reaches a directory containing `.git` (the repository root) so it never
-/// crosses into a parent repo.
-/// Test: not directly tested; exercised indirectly through `run`.
-fn find_csproj(start: &Path) -> Option<std::path::PathBuf> {
-    const MAX_ASCENT: usize = 24;
-    let mut current = start;
-    for _ in 0..MAX_ASCENT {
-        if let Ok(entries) = std::fs::read_dir(current) {
-            let found = entries.flatten().find_map(|e| {
-                let name = e.file_name();
-                if name.to_string_lossy().ends_with(".csproj") {
-                    Some(e.path())
-                } else {
-                    None
-                }
-            });
-            if let Some(p) = found {
-                return Some(p);
-            }
-        }
-        // Don't ascend past the repository root into an unrelated parent repo.
-        if current.join(".git").exists() {
-            return None;
-        }
-        match current.parent() {
-            Some(p) => current = p,
-            None => return None,
-        }
-    }
-    None
-}
+use crate::core::tools::{Severity, ToolDiagnostic};
 
 /// Parse a Roslyn/MSBuild SARIF 2.1 document into diagnostics.
 ///
@@ -170,7 +21,7 @@ fn find_csproj(start: &Path) -> Option<std::path::PathBuf> {
 /// `roslyn_result_to_diag`, and collects the non-None results.
 /// Test: `parse_roslyn_sarif_extracts_result` exercises this against a
 /// captured real fixture string.
-fn parse_roslyn_sarif(sarif: &str) -> Vec<ToolDiagnostic> {
+pub fn parse_roslyn_sarif(sarif: &str) -> Vec<ToolDiagnostic> {
     let root = match serde_json::from_str::<Value>(sarif.trim()) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
@@ -292,7 +143,7 @@ fn percent_decode(s: &str) -> String {
 /// or `/`-anchored suffix on either side.
 /// Test: `roslyn_file_matches_anchors_on_separator` and
 /// `roslyn_file_matches_windows_backslash_paths` in unit tests.
-fn roslyn_file_matches(diag_file: &str, want: &str) -> bool {
+pub fn roslyn_file_matches(diag_file: &str, want: &str) -> bool {
     let diag = diag_file.replace('\\', "/");
     let w = want.replace('\\', "/");
     diag == w || diag.ends_with(&format!("/{w}")) || w.ends_with(&format!("/{diag}"))
@@ -304,7 +155,7 @@ fn roslyn_file_matches(diag_file: &str, want: &str) -> bool {
 /// What: maps `"error"` → Error, `"warning"` → Warning,
 /// `"note"`/`"info"` → Info, everything else → Hint.
 /// Test: `severity_from_str_maps_correctly` in unit tests.
-fn severity_from_str(s: &str) -> Severity {
+pub fn severity_from_str(s: &str) -> Severity {
     match s {
         "error" => Severity::Error,
         "warning" => Severity::Warning,

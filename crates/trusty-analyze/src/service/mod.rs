@@ -32,6 +32,7 @@
 //! Test: `cargo test -p trusty-analyze` boots the router with a stub
 //! search client and exercises every route end-to-end.
 
+mod diagnostics_dispatch;
 mod ui;
 
 pub mod events;

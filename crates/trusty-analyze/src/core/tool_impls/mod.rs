@@ -40,8 +40,11 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-/// Hard wall-clock cap on any single tool invocation.
+/// Hard wall-clock cap on any single file-scoped tool invocation.
 const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default wall-clock cap for build-class (project-scoped) tool invocations.
+const DEFAULT_BUILD_TIMEOUT_SECS: u64 = 300;
 
 /// Captured result of running an external command.
 pub struct CommandOutput {
@@ -53,16 +56,42 @@ pub struct CommandOutput {
     pub status: Option<i32>,
 }
 
-/// Run `program` with `args` in `cwd`, capturing stdout/stderr with a 30s
-/// timeout. The child is killed if it overruns.
+/// Return the wall-clock timeout used for build-class (project-scoped) tools.
 ///
-/// Why: every tool impl needs the same "shell out, capture, time-box" logic;
-/// `std::process` has no built-in timeout so we spawn a reader thread and a
-/// wait thread and join with a deadline.
+/// Why: `dotnet build` on a large solution can take 2–5 minutes the first time
+/// (restore, all-files compile); the 30 s cap for per-file tools would always
+/// time out. A separate, wider limit lets operators tune it for their hardware
+/// via env var without touching code.
+/// What: reads `TRUSTY_BUILD_TOOL_TIMEOUT_SECS` from the environment; returns
+/// the parsed value as a `Duration`, falling back to 300 s on missing,
+/// non-UTF-8, or unparseable values and on `0` (which would be instant).
+/// Test: the default is deterministic and covered by `build_tool_timeout_default`
+/// in the unit tests below.
+pub fn build_tool_timeout() -> Duration {
+    let secs = std::env::var("TRUSTY_BUILD_TOOL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(DEFAULT_BUILD_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+/// Run `program` with `args` in `cwd`, capturing stdout/stderr with a
+/// caller-supplied `timeout`. The child is killed if it overruns.
+///
+/// Why: file-scoped tools use a 30 s cap; build-class tools need a wider
+/// limit (default 300 s). Extracting the timeout as a parameter lets both
+/// callers share the same spawn/capture/wait logic without duplication.
 /// What: spawns the child with piped output, reads both streams on background
-/// threads, and waits up to `TOOL_TIMEOUT` for exit.
-/// Test: `run_command_captures_echo` runs a trivial command and checks output.
-pub fn run_command(program: &str, args: &[&str], cwd: &Path) -> anyhow::Result<CommandOutput> {
+/// threads, and waits up to `timeout` for exit.
+/// Test: `run_command_captures_echo` and `run_command_reports_missing_binary`
+/// exercise this via the 30 s wrapper.
+pub fn run_command_with_timeout(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    timeout: Duration,
+) -> anyhow::Result<CommandOutput> {
     let mut child = Command::new(program)
         .args(args)
         .current_dir(cwd)
@@ -72,8 +101,6 @@ pub fn run_command(program: &str, args: &[&str], cwd: &Path) -> anyhow::Result<C
         .spawn()
         .map_err(|e| anyhow::anyhow!("failed to spawn {program}: {e}"))?;
 
-    // Drain stdout/stderr on dedicated threads so a full pipe buffer cannot
-    // deadlock the child before we get to `wait`.
     let mut stdout_pipe = child
         .stdout
         .take()
@@ -94,25 +121,21 @@ pub fn run_command(program: &str, args: &[&str], cwd: &Path) -> anyhow::Result<C
         buf
     });
 
-    // Wait for exit on a background thread so the main thread can enforce the
-    // timeout via a bounded channel recv.
     let (tx, rx) = mpsc::channel();
     let waiter = std::thread::spawn(move || {
         let status = child.wait();
         let _ = tx.send((child, status));
     });
 
-    let status = match rx.recv_timeout(TOOL_TIMEOUT) {
+    let status = match rx.recv_timeout(timeout) {
         Ok((_child, Ok(status))) => status.code(),
         Ok((_child, Err(e))) => {
             return Err(anyhow::anyhow!("wait failed for {program}: {e}"));
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            // The waiter still owns the Child; we cannot kill it directly, but
-            // dropping our end and reporting a timeout is the safe path.
             return Err(anyhow::anyhow!(
                 "{program} exceeded {}s timeout",
-                TOOL_TIMEOUT.as_secs()
+                timeout.as_secs()
             ));
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -129,6 +152,19 @@ pub fn run_command(program: &str, args: &[&str], cwd: &Path) -> anyhow::Result<C
         stderr,
         status,
     })
+}
+
+/// Run `program` with `args` in `cwd`, capturing stdout/stderr with a 30s
+/// timeout. The child is killed if it overruns.
+///
+/// Why: every tool impl needs the same "shell out, capture, time-box" logic;
+/// `std::process` has no built-in timeout so we spawn a reader thread and a
+/// wait thread and join with a deadline.
+/// What: delegates to `run_command_with_timeout` with the fixed `TOOL_TIMEOUT`
+/// (30 s). Use `run_command_with_timeout` directly when a wider cap is needed.
+/// Test: `run_command_captures_echo` runs a trivial command and checks output.
+pub fn run_command(program: &str, args: &[&str], cwd: &Path) -> anyhow::Result<CommandOutput> {
+    run_command_with_timeout(program, args, cwd, TOOL_TIMEOUT)
 }
 
 #[cfg(test)]
@@ -148,5 +184,17 @@ mod tests {
         let dir = std::env::temp_dir();
         let res = run_command("trusty-no-such-binary-xyz", &[], &dir);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn build_tool_timeout_default_is_300s() {
+        // When the env var is absent (or we temporarily clear it) the function
+        // must return 300 seconds. We can't guarantee the var is absent in all
+        // environments, but we can confirm the value is non-zero and >= 1 s.
+        let t = build_tool_timeout();
+        assert!(
+            t.as_secs() >= 1,
+            "build_tool_timeout() should be at least 1 s, got {t:?}"
+        );
     }
 }

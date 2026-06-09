@@ -38,89 +38,6 @@ pub struct DetectionResult {
 /// File-extension-based language detector.
 pub struct LanguageDetector;
 
-/// Per-language extension matchers used in tests for direct verification.
-///
-/// Why: Splitting per-language keeps each helper trivially testable and
-/// caps the cyclomatic complexity of the dispatcher at the number of
-/// supported languages, regardless of how many extensions each one has.
-/// What: Lowercase suffix match against a language's known extension set.
-/// Test: `detect_file_extension_mapping` exercises each helper through the
-/// public `detect_file` dispatcher.
-fn detect_rust(lower: &str) -> Option<&'static str> {
-    if lower.ends_with(".rs") {
-        Some("rust")
-    } else {
-        None
-    }
-}
-
-fn detect_typescript(lower: &str) -> Option<&'static str> {
-    if lower.ends_with(".tsx") || lower.ends_with(".ts") {
-        Some("typescript")
-    } else {
-        None
-    }
-}
-
-fn detect_javascript(lower: &str) -> Option<&'static str> {
-    const EXTS: &[&str] = &[".jsx", ".js", ".mjs", ".cjs"];
-    if EXTS.iter().any(|e| lower.ends_with(e)) {
-        Some("javascript")
-    } else {
-        None
-    }
-}
-
-fn detect_python(lower: &str) -> Option<&'static str> {
-    if lower.ends_with(".py") || lower.ends_with(".pyi") {
-        Some("python")
-    } else {
-        None
-    }
-}
-
-fn detect_java(lower: &str) -> Option<&'static str> {
-    if lower.ends_with(".java") {
-        Some("java")
-    } else {
-        None
-    }
-}
-
-fn detect_go(lower: &str) -> Option<&'static str> {
-    if lower.ends_with(".go") {
-        Some("go")
-    } else {
-        None
-    }
-}
-
-fn detect_cpp(lower: &str) -> Option<&'static str> {
-    const EXTS: &[&str] = &[".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".c", ".h"];
-    if EXTS.iter().any(|e| lower.ends_with(e)) {
-        Some("cpp")
-    } else {
-        None
-    }
-}
-
-fn detect_kotlin(lower: &str) -> Option<&'static str> {
-    (lower.ends_with(".kt") || lower.ends_with(".kts")).then_some("kotlin")
-}
-
-fn detect_swift(lower: &str) -> Option<&'static str> {
-    lower.ends_with(".swift").then_some("swift")
-}
-
-fn detect_ruby(lower: &str) -> Option<&'static str> {
-    lower.ends_with(".rb").then_some("ruby")
-}
-
-fn detect_php(lower: &str) -> Option<&'static str> {
-    lower.ends_with(".php").then_some("php")
-}
-
-
 /// Per-build-system manifest matchers. Each helper returns the canonical
 /// build-system tag if the path basename matches a known manifest.
 fn build_cargo(lower: &str) -> Option<&'static str> {
@@ -277,6 +194,12 @@ mod tests {
             LanguageDetector::detect_file("index.php"),
             Some("php".into())
         );
+        assert_eq!(
+            LanguageDetector::detect_file("Crypto.cs"),
+            Some("csharp".into())
+        );
+        // `.cs` must not be swallowed by the C/C++ detector (`.c`).
+        assert_ne!(LanguageDetector::detect_file("Foo.cs"), Some("cpp".into()));
         assert_eq!(LanguageDetector::detect_file("README.md"), None);
     }
 
@@ -285,15 +208,24 @@ mod tests {
         // Regression for #963: these tags must match the `StaticTool::language()`
         // bucket keys so `run_diagnostics` can route .kt/.swift/.rb/.php files
         // to detekt/swiftlint/rubocop/phpstan instead of dropping them.
-        assert_eq!(detect_kotlin("foo.kt"), Some("kotlin"));
-        assert_eq!(detect_kotlin("foo.kts"), Some("kotlin"));
-        assert_eq!(detect_kotlin("foo.java"), None);
-        assert_eq!(detect_swift("foo.swift"), Some("swift"));
-        assert_eq!(detect_swift("foo.kt"), None);
-        assert_eq!(detect_ruby("foo.rb"), Some("ruby"));
-        assert_eq!(detect_ruby("foo.rs"), None);
-        assert_eq!(detect_php("foo.php"), Some("php"));
-        assert_eq!(detect_php("foo.py"), None);
+        // All extension routing goes through `ext_map::lang_for_linter`; we
+        // verify through the public `detect_file` API.
+        assert_eq!(
+            LanguageDetector::detect_file("foo.kt"),
+            Some("kotlin".into())
+        );
+        assert_eq!(
+            LanguageDetector::detect_file("foo.kts"),
+            Some("kotlin".into())
+        );
+        assert_eq!(LanguageDetector::detect_file("foo.java"), Some("java".into()));
+        assert_eq!(
+            LanguageDetector::detect_file("foo.swift"),
+            Some("swift".into())
+        );
+        assert_eq!(LanguageDetector::detect_file("foo.rb"), Some("ruby".into()));
+        assert_eq!(LanguageDetector::detect_file("foo.php"), Some("php".into()));
+        assert_eq!(LanguageDetector::detect_file("foo.py"), Some("python".into()));
     }
 
     #[test]

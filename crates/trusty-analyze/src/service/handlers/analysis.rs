@@ -165,9 +165,12 @@ pub struct DiagnosticsParams {
 ///
 /// Why: tree-sitter heuristics are uniform but shallow; real linters catch
 /// far more, but only when their binary is installed. This endpoint discovers
-/// what is available and runs it, file by file.
+/// what is available and runs it, file by file. Project-scoped tools (Roslyn)
+/// receive real on-disk paths via `root_path`; file-scoped tools write to a
+/// scratch dir as before.
 /// What: fetches the corpus, reconstructs whole-file content from chunks,
-/// writes each file to a scratch dir, and dispatches to `ToolRegistry`.
+/// fetches the index root_path (for project-scoped tools), then delegates all
+/// dispatch to `diagnostics_dispatch::run_diagnostics_blocking`.
 /// Test: `diagnostics_endpoint_returns_empty_when_no_tools` boots the router
 /// with a stub client and confirms a well-formed empty response.
 pub async fn diagnostics_for_index(
@@ -194,10 +197,25 @@ pub async fn diagnostics_for_index(
         }
     }
 
+    // Fetch index details (including root_path) for project-scoped tools.
+    // Errors are non-fatal: project-scoped tools will gracefully skip if
+    // root_path is unavailable, while file-scoped tools are unaffected.
+    let root_path = state
+        .search
+        .index_details()
+        .await
+        .ok()
+        .and_then(|v| v.into_iter().find(|s| s.id == id).and_then(|s| s.root_path));
+
     // Heavy work (process spawns, blocking I/O) runs off the async runtime.
     let language_filter = params.language.clone();
     let diagnostics: Vec<crate::core::ToolDiagnostic> = tokio::task::spawn_blocking(move || {
-        run_diagnostics_blocking(by_file, language_filter, tool_filter)
+        crate::service::diagnostics_dispatch::run_diagnostics_blocking(
+            by_file,
+            language_filter,
+            tool_filter,
+            root_path,
+        )
     })
     .await
     .map_err(|e| ApiError::internal(format!("diagnostics task panicked: {e}")))?;
@@ -207,92 +225,6 @@ pub async fn diagnostics_for_index(
         "count": diagnostics.len(),
         "diagnostics": diagnostics,
     })))
-}
-
-/// Blocking core of the diagnostics endpoint: writes files to a scratch dir
-/// and runs the discovered tools. Kept separate so it can run under
-/// `spawn_blocking`.
-///
-/// Why: heavy I/O (process spawns, file writes) must not block the async
-/// executor. The caller dispatches this function via `spawn_blocking`.
-/// What: iterates the per-file content map, writes each file to a unique
-/// per-file subdirectory under a shared scratch dir, runs available linter
-/// tools, and rewrites the scratch paths back to index-relative paths before
-/// returning.
-/// Test: `run_diagnostics_blocking_two_files_same_basename` (below) proves
-/// that two files with the same basename (e.g. `src/a/main.rs` vs
-/// `src/b/main.rs`) each get their own subdir and neither overwrites the other.
-pub(crate) fn run_diagnostics_blocking(
-    by_file: HashMap<String, String>,
-    language_filter: Option<String>,
-    tool_filter: Option<Vec<String>>,
-) -> Vec<crate::core::ToolDiagnostic> {
-    use crate::core::global_registry;
-
-    let registry = global_registry();
-    let scratch = match tempfile::tempdir() {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!("failed to create scratch dir for diagnostics: {e}");
-            return Vec::new();
-        }
-    };
-
-    let mut out = Vec::new();
-    // Use an incrementing counter so each file gets a unique scratch subdir.
-    // This prevents basename collisions (e.g. `src/a/main.rs` vs
-    // `src/b/main.rs` both have basename `main.rs`). Without a unique subdir
-    // the second write would overwrite the first and lose its diagnostics.
-    for (idx, (file, content)) in by_file.into_iter().enumerate() {
-        // Use lang_for_linter: returns the ToolRegistry key (e.g. .tsx →
-        // "typescript" for BiomeTool, .c → "cpp" for clang-tidy).
-        // Returns None for unrecognized extensions; skip those files.
-        let Some(lang) = crate::lang::ext_map::lang_for_linter(&file) else {
-            continue;
-        };
-        let lang = lang.to_string();
-        if let Some(want) = &language_filter {
-            if &lang != want {
-                continue;
-            }
-        }
-        if registry.tools_for(&lang).is_empty() {
-            continue;
-        }
-
-        // Preserve the original file name so tools key diagnostics correctly.
-        // Use a numeric subdir to avoid basename collisions across index paths.
-        let name = std::path::Path::new(&file)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "chunk.txt".to_string());
-        let file_dir = scratch.path().join(idx.to_string());
-        if let Err(e) = std::fs::create_dir_all(&file_dir) {
-            tracing::warn!("failed to create scratch subdir for {name}: {e}");
-            continue;
-        }
-        let path = file_dir.join(&name);
-        if let Err(e) = std::fs::write(&path, &content) {
-            tracing::warn!("failed to write scratch file {name}: {e}");
-            continue;
-        }
-
-        let result = match &tool_filter {
-            Some(names) => registry.run_named(&lang, names, &path, &content),
-            None => registry.run_all(&lang, &path, &content),
-        };
-        match result {
-            Ok(mut diags) => {
-                // Rewrite the scratch path back to the index-relative path.
-                for d in &mut diags {
-                    d.file = file.clone();
-                }
-                out.extend(diags);
-            }
-            Err(e) => tracing::warn!("diagnostics for {file} failed: {e:#}"),
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -320,7 +252,9 @@ mod tests {
         // We cannot assert on diagnostic counts (no tools in CI), but if the
         // basename collision bug were still present this would panic on the
         // second create_dir_all (or silently overwrite) — not crash-free.
-        let _result = run_diagnostics_blocking(by_file, None, None);
+        let _result = crate::service::diagnostics_dispatch::run_diagnostics_blocking(
+            by_file, None, None, None,
+        );
         // Reaching here without panic means the subdir isolation works.
     }
 }

@@ -20,10 +20,22 @@ const CHUNK_PAGE_LIMIT: usize = 1000;
 /// queueing requests on the client side.
 const CHUNK_PAGE_CONCURRENCY: usize = 4;
 
-/// Summary of one registered index, as returned by `GET /indexes`.
+/// Summary of one registered index.
+///
+/// Why: callers (the analyzer service, tests) need both the index id and the
+/// on-disk root path so project-scoped tools (Roslyn, etc.) can resolve chunk
+/// paths to real files without out-of-band configuration.
+/// What: populated either by `list_indexes` (id only, root_path = None) or by
+/// `index_details` (id + root_path from `?details=true`).
+/// Test: `index_summary_deserializes_with_and_without_root_path` confirms
+/// serde round-trips for both shapes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexSummary {
     pub id: String,
+    /// Absolute on-disk root path of the indexed source tree.
+    /// Present only when fetched via `index_details` (`?details=true`).
+    #[serde(default)]
+    pub root_path: Option<String>,
 }
 
 /// HTTP/2 client for trusty-search (port 7878).
@@ -92,8 +104,42 @@ impl TrustySearchClient {
         Ok(body
             .indexes
             .into_iter()
-            .map(|id| IndexSummary { id })
+            .map(|id| IndexSummary {
+                id,
+                root_path: None,
+            })
             .collect())
+    }
+
+    /// `GET /indexes?details=true` — return every index with its root_path.
+    ///
+    /// Why: project-scoped tools (e.g. `RoslynTool`) need the real on-disk root
+    /// path of each index so they can resolve chunk-relative file paths to
+    /// absolute paths and invoke the compiler against the real project tree.
+    /// `list_indexes()` only returns ids; this method fetches the richer form.
+    /// What: GETs `{base}/indexes?details=true`, expects the response shape
+    /// `{"indexes": [{id, root_path}, ...]}`, and deserializes into
+    /// `Vec<IndexSummary>` with `root_path` populated where the daemon provides it.
+    /// Test: `index_details_deserializes_root_path` tests the serde shape directly
+    /// without a live server by parsing a hand-built JSON string.
+    pub async fn index_details(&self) -> Result<Vec<IndexSummary>> {
+        #[derive(Deserialize)]
+        struct Listing {
+            indexes: Vec<IndexSummary>,
+        }
+        let url = format!("{}/indexes?details=true", self.base_url);
+        let body: Listing = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?
+            .error_for_status()
+            .with_context(|| format!("non-2xx from {url}"))?
+            .json()
+            .await
+            .with_context(|| format!("decode {url}"))?;
+        Ok(body.indexes)
     }
 
     /// `GET /indexes/:id/chunks` — bulk export of every chunk for `index_id`.
@@ -173,4 +219,41 @@ async fn fetch_chunk_page(
         .await
         .with_context(|| format!("decode {url}"))?;
     Ok(body.chunks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_summary_deserializes_with_and_without_root_path() {
+        // With root_path present.
+        let json = r#"{"id":"abc","root_path":"/home/user/proj"}"#;
+        let s: IndexSummary = serde_json::from_str(json).expect("deserialize with root_path");
+        assert_eq!(s.id, "abc");
+        assert_eq!(s.root_path.as_deref(), Some("/home/user/proj"));
+
+        // Without root_path (serde default = None).
+        let json2 = r#"{"id":"xyz"}"#;
+        let s2: IndexSummary = serde_json::from_str(json2).expect("deserialize without root_path");
+        assert_eq!(s2.id, "xyz");
+        assert!(s2.root_path.is_none());
+    }
+
+    #[test]
+    fn index_details_deserializes_root_path() {
+        // Simulate the JSON body returned by GET /indexes?details=true.
+        // Tests that the response shape {indexes:[{id, root_path}]} is parsed correctly.
+        let json = r#"{"indexes":[{"id":"idx1","root_path":"/src/myapp"},{"id":"idx2"}]}"#;
+        #[derive(serde::Deserialize)]
+        struct Listing {
+            indexes: Vec<IndexSummary>,
+        }
+        let listing: Listing = serde_json::from_str(json).expect("parse listing");
+        assert_eq!(listing.indexes.len(), 2);
+        assert_eq!(listing.indexes[0].id, "idx1");
+        assert_eq!(listing.indexes[0].root_path.as_deref(), Some("/src/myapp"));
+        assert_eq!(listing.indexes[1].id, "idx2");
+        assert!(listing.indexes[1].root_path.is_none());
+    }
 }
