@@ -12,6 +12,7 @@
 
 use super::*;
 use serde_json::json;
+use std::collections::HashSet;
 use std::sync::Arc;
 use trusty_common::mcp::error_codes;
 
@@ -104,16 +105,6 @@ async fn dispatch_initialize_returns_server_info() {
 }
 
 #[tokio::test]
-async fn dispatch_tools_list_returns_three_tools() {
-    let state = test_state();
-    let req = make_req("tools/list", json!({}));
-    let resp = dispatch(req, &state).await;
-    let result = resp.result.expect("expected result");
-    let tools = result["tools"].as_array().expect("tools must be array");
-    assert_eq!(tools.len(), 3, "expected 3 tools");
-}
-
-#[tokio::test]
 async fn dispatch_unknown_tool_returns_method_not_found() {
     let state = test_state();
     let req = make_req("not_a_tool", json!({}));
@@ -201,16 +192,15 @@ async fn dispatch_tools_list_three_tools_names_verified() {
     let resp = dispatch(req, &state).await;
     let result = resp.result.expect("expected result");
     let tools = result["tools"].as_array().expect("tools must be array");
+    let names: HashSet<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    let expected: HashSet<&str> = ["review_pr", "review_diff", "review_health"]
+        .into_iter()
+        .collect();
     assert_eq!(
-        tools.len(),
-        3,
-        "expected exactly 3 tools, got {}",
-        tools.len()
+        names, expected,
+        "tools/list returned unexpected set: {:?}",
+        names
     );
-    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-    assert!(names.contains(&"review_pr"), "missing review_pr");
-    assert!(names.contains(&"review_diff"), "missing review_diff");
-    assert!(names.contains(&"review_health"), "missing review_health");
 }
 
 /// Binary stdio smoke test: spawn `trusty-review serve --stdio`, send MCP
@@ -283,17 +273,21 @@ async fn stdio_serve_tools_list_returns_three_tools() {
         .await
         .expect("read tools/list response")
         .expect("non-EOF tools/list line");
+
+    // Parse and collect results before killing the child so an assertion
+    // panic cannot orphan the subprocess.
     let resp: Value =
         serde_json::from_str(&list_line).expect("tools/list response must be valid JSON");
-    let tools = resp["result"]["tools"]
+    let tool_count = resp["result"]["tools"]
         .as_array()
-        .expect("result.tools must be array");
+        .map(|a| a.len())
+        .unwrap_or(0);
+
+    // Unconditional kill — runs before any assertion can panic.
+    child.kill().await.ok();
+
     assert_eq!(
-        tools.len(),
-        3,
+        tool_count, 3,
         "serve --stdio tools/list must return 3 tools"
     );
-
-    // Terminate the child process cleanly.
-    child.kill().await.ok();
 }
