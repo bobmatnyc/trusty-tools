@@ -356,7 +356,8 @@ impl AnalyzerMcpServer {
 
     async fn handle_find_smells(&self, args: &Value) -> Result<Value, DispatchError> {
         let index_id = index_id_or_default(args);
-        self.get(&format!("/indexes/{index_id}/smells")).await
+        let q = build_query(args, &["limit", "offset", "omit_content"]);
+        self.get(&format!("/indexes/{index_id}/smells{q}")).await
     }
 
     async fn handle_analyze_quality(&self, args: &Value) -> Result<Value, DispatchError> {
@@ -369,7 +370,10 @@ impl AnalyzerMcpServer {
     /// static-analysis tools (clippy, ruff, biome, ...) on demand.
     async fn handle_run_diagnostics(&self, args: &Value) -> Result<Value, DispatchError> {
         let index_id = index_id_or_default(args);
-        let q = build_query(args, &["language", "tools"]);
+        let q = build_query(
+            args,
+            &["language", "tools", "limit", "offset", "omit_content"],
+        );
         self.get(&format!("/indexes/{index_id}/diagnostics{q}"))
             .await
     }
@@ -683,17 +687,33 @@ fn index_id_or_default(args: &Value) -> &str {
 }
 
 /// Build a `?key=val&...` query string from whichever of `keys` is present
-/// in `args` (skipping missing or non-string values). Returns an empty
-/// string if no keys were found.
+/// in `args`. Handles string, number (u64/f64), and bool values; skips keys
+/// that are absent or of an unsupported type. Returns an empty string if no
+/// keys were found.
+///
+/// Why: `find_smells` and `run_diagnostics` gained `limit` (number), `offset`
+/// (number), and `omit_content` (bool) params (#917/#918); extending this
+/// helper avoids duplicating query-string assembly in each handler.
+/// What: tries `as_str` first, then `as_u64`, then `as_f64`, then `as_bool`;
+/// uses the first match. Non-string values are formatted without URL encoding
+/// because they never contain reserved characters.
+/// Test: `build_query_handles_numeric_and_bool` below.
 fn build_query(args: &Value, keys: &[&str]) -> String {
     let mut q = String::new();
     for key in keys {
-        if let Some(v) = args.get(*key).and_then(Value::as_str) {
+        let node = args.get(*key);
+        let val: Option<String> = node
+            .and_then(Value::as_str)
+            .map(urlencode)
+            .or_else(|| node.and_then(Value::as_u64).map(|n| n.to_string()))
+            .or_else(|| node.and_then(Value::as_f64).map(|f| (f as u64).to_string()))
+            .or_else(|| node.and_then(Value::as_bool).map(|b| b.to_string()));
+        if let Some(v) = val {
             let sep = if q.is_empty() { '?' } else { '&' };
             q.push(sep);
             q.push_str(key);
             q.push('=');
-            q.push_str(&urlencode(v));
+            q.push_str(&v);
         }
     }
     q
@@ -762,6 +782,9 @@ pub fn tool_descriptors() -> Value {
     }
     tools
 }
+
+#[cfg(test)]
+mod helpers_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1024,49 +1047,6 @@ mod tests {
             }
             other => panic!("expected DispatchError::Transport, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn index_id_or_default_prefers_index_then_alias_then_default() {
-        let with_index = serde_json::json!({ "index": "primary" });
-        assert_eq!(index_id_or_default(&with_index), "primary");
-
-        let with_alias = serde_json::json!({ "index_id": "alias" });
-        assert_eq!(index_id_or_default(&with_alias), "alias");
-
-        let empty = serde_json::json!({});
-        assert_eq!(index_id_or_default(&empty), "default");
-    }
-
-    #[test]
-    fn build_query_skips_missing_keys() {
-        let args = serde_json::json!({ "subject": "fn auth", "object": "JWT" });
-        let q = build_query(&args, &["subject", "predicate", "object"]);
-        // urlencoded space → %20
-        assert!(q.starts_with('?'), "expected leading '?', got {q}");
-        assert!(q.contains("subject=fn%20auth"), "got {q}");
-        assert!(q.contains("object=JWT"), "got {q}");
-        assert!(!q.contains("predicate"), "got {q}");
-    }
-
-    /// Verify at compile time that the MCP client timeout is strictly greater
-    /// than OpenRouter's 120 s maximum so deep_analysis calls are never aborted
-    /// at the MCP transport layer before the daemon's own timeout fires.
-    ///
-    /// Why: issue #528 — a 30 s MCP timeout silently killed any LLM response
-    /// taking more than 30 s, even when the daemon and API key were correct.
-    /// What: compile-time assertion that `DEEP_ANALYSIS_MCP_TIMEOUT_SECS > 120`.
-    /// Test: this is the test — it fails to compile if the const regresses.
-    #[test]
-    fn mcp_client_timeout_exceeds_openrouter_ceiling() {
-        // The OpenRouter request timeout in trusty-common/src/chat.rs is 120 s.
-        // Our MCP client must allow more than that. Use const assertion so
-        // clippy does not flag `assertions_on_constants`.
-        const OPENROUTER_CEILING_SECS: u64 = 120;
-        const _: () = assert!(
-            DEEP_ANALYSIS_MCP_TIMEOUT_SECS > OPENROUTER_CEILING_SECS,
-            "DEEP_ANALYSIS_MCP_TIMEOUT_SECS must be > OpenRouter ceiling (120 s)"
-        );
     }
 
     #[tokio::test]

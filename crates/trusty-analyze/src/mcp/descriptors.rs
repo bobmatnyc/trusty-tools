@@ -39,12 +39,15 @@ pub fn base_tool_descriptors() -> Value {
         },
         {
             "name": "find_smells",
-            "description": "Chunks with at least one detected code smell",
+            "description": "Chunks with at least one detected code smell. Results are paginated (default limit 500) and content is omitted by default to keep responses bounded. Use limit/offset to page through large result sets; set omit_content=false to include raw source text.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "index": { "type": "string" },
-                    "index_id": { "type": "string" }
+                    "index_id": { "type": "string" },
+                    "limit": { "type": "number", "description": "Max results per page (default 500)" },
+                    "offset": { "type": "number", "description": "Zero-based page offset (default 0)" },
+                    "omit_content": { "type": "boolean", "description": "Strip raw source text from results (default true). Set false to include full content." }
                 }
             }
         },
@@ -61,14 +64,17 @@ pub fn base_tool_descriptors() -> Value {
         },
         {
             "name": "run_diagnostics",
-            "description": "Run available external static-analysis tools (clippy, ruff, biome, staticcheck, pmd, rubocop, phpstan, swiftlint, detekt, clang-tidy, roslyn) across the index corpus on demand. Tools are auto-discovered: only installed binaries run. Returns normalized diagnostics with file, line, severity, rule code, and message.",
+            "description": "Run available external static-analysis tools (clippy, ruff, biome, staticcheck, pmd, rubocop, phpstan, swiftlint, detekt, clang-tidy, roslyn) across the index corpus on demand. Tools are auto-discovered: only installed binaries run. Returns normalized diagnostics with file, line, severity, rule code, and message. Results are paginated (default limit 500) to keep MCP responses bounded.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "index":    { "type": "string" },
-                    "index_id": { "type": "string" },
-                    "language": { "type": "string", "description": "Optional: restrict to one language tag (rust, python, typescript, go, java, ruby, php, swift, kotlin, cpp, csharp)" },
-                    "tools":    { "type": "string", "description": "Optional: comma-separated list of tool names to run; defaults to all available" }
+                    "index":        { "type": "string" },
+                    "index_id":     { "type": "string" },
+                    "language":     { "type": "string", "description": "Optional: restrict to one language tag (rust, python, typescript, go, java, ruby, php, swift, kotlin, cpp, csharp)" },
+                    "tools":        { "type": "string", "description": "Optional: comma-separated list of tool names to run; defaults to all available" },
+                    "limit":        { "type": "number", "description": "Max results per page (default 500)" },
+                    "offset":       { "type": "number", "description": "Zero-based page offset (default 0)" },
+                    "omit_content": { "type": "boolean", "description": "Reserved for future use (default true)" }
                 }
             }
         },

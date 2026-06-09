@@ -19,11 +19,12 @@ use axum::{
     extract::{Path, Query, State},
     response::Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::core::complexity::{compute_complexity_for, detect_smells};
 use crate::core::{analyze_refactor, quality, RefactorSuggestion, Severity};
 use crate::service::events::{fetch_chunks, AnalyzerAppState, ApiError};
+use crate::types::CodeChunk;
 
 #[derive(Deserialize)]
 pub struct HotspotsParams {
@@ -33,6 +34,82 @@ pub struct HotspotsParams {
 
 fn default_top_n() -> usize {
     20
+}
+
+/// Default page size for smell/diagnostic results — chosen to keep MCP
+/// responses well under the 2 MB stdio limit even for large indexes.
+fn default_limit() -> usize {
+    500
+}
+
+fn default_offset() -> usize {
+    0
+}
+
+/// Default for `omit_content`: true. Stripping raw source text from each result
+/// is the safe default — it dramatically reduces payload size on large indexes
+/// while preserving all actionable metadata (file, line, rule, severity).
+fn default_omit_content() -> bool {
+    true
+}
+
+/// Query parameters for `GET /indexes/{id}/smells` and
+/// `GET /indexes/{id}/diagnostics` (shared struct; diagnostics extends it).
+///
+/// Why: #917 — unbounded payloads from these endpoints disconnect MCP sessions
+/// via `-32000` when they exceed the stdio host's payload ceiling.
+/// What: adds `limit`, `offset`, and `omit_content` so callers can paginate
+/// and opt out of redundant raw source text.
+/// Test: `smells_pagination_*` and `smells_omit_content_*` unit tests below.
+#[derive(Deserialize)]
+pub struct SmellsParams {
+    /// Maximum results to return per page (default 500).
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    /// Zero-based offset into the full result set for pagination (default 0).
+    #[serde(default = "default_offset")]
+    pub offset: usize,
+    /// When true (default), strip the raw `content` field from each result to
+    /// keep response size bounded. Set to false to include full source text.
+    #[serde(default = "default_omit_content")]
+    pub omit_content: bool,
+}
+
+/// A smell result with optionally-stripped content.
+///
+/// Why: serialises a `CodeChunk` for the smells endpoint while supporting the
+/// `omit_content` flag without mutating the shared `CodeChunk` type.
+/// What: mirrors `CodeChunk` fields; `content` is `None` when omitted.
+/// Test: `smells_omit_content_default_strips_content` asserts the field absent.
+#[derive(Debug, Serialize)]
+pub struct SmellItem {
+    pub id: String,
+    pub file: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function_name: Option<String>,
+    pub match_reason: String,
+}
+
+impl SmellItem {
+    fn from_chunk(chunk: &CodeChunk, include_content: bool) -> Self {
+        Self {
+            id: chunk.id.clone(),
+            file: chunk.file.clone(),
+            start_line: chunk.start_line,
+            end_line: chunk.end_line,
+            content: if include_content {
+                Some(chunk.content.clone())
+            } else {
+                None
+            },
+            function_name: chunk.function_name.clone(),
+            match_reason: chunk.match_reason.clone(),
+        }
+    }
 }
 
 pub async fn complexity_hotspots(
@@ -49,16 +126,41 @@ pub async fn complexity_hotspots(
     })))
 }
 
+/// `GET /indexes/{id}/smells` — return chunks with at least one detected smell.
+///
+/// Why: #917 — the unbounded result set (full `content` per chunk) caused MCP
+/// session-killing `-32000` disconnects on large indexes. Pagination + content
+/// stripping are now the safe defaults.
+/// What: fetches chunks, detects smells, applies offset+limit slicing, and
+/// optionally strips raw source text from each result. Returns a pagination
+/// envelope (`total`, `returned`, `truncated`) so callers know when to
+/// paginate.
+/// Test: `smells_pagination_*` and `smells_omit_content_*` unit tests below;
+/// integration coverage in `service/tests.rs`.
 pub async fn smells(
     State(state): State<Arc<AnalyzerAppState>>,
     Path(id): Path<String>,
+    Query(params): Query<SmellsParams>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let chunks = fetch_chunks(&state, &id).await?;
     let smelly = quality::smelly_chunks(&chunks);
+    let total = smelly.len();
+    let page: Vec<SmellItem> = smelly
+        .iter()
+        .skip(params.offset)
+        .take(params.limit)
+        .map(|c| SmellItem::from_chunk(c, !params.omit_content))
+        .collect();
+    let returned = page.len();
+    let truncated = (params.offset + returned) < total;
     Ok(Json(serde_json::json!({
         "index_id": id,
-        "count": smelly.len(),
-        "chunks": smelly,
+        "total": total,
+        "offset": params.offset,
+        "limit": params.limit,
+        "returned": returned,
+        "truncated": truncated,
+        "chunks": page,
     })))
 }
 
@@ -152,12 +254,30 @@ pub async fn quality_report(
 }
 
 /// Query parameters for the on-demand diagnostics endpoint.
+///
+/// Why: extends the base tool-filter params with the same pagination +
+/// content-strip controls as `SmellsParams` to fix #917/#918.
+/// What: adds `limit`, `offset`, and `omit_content` on top of `language`/`tools`.
+/// Test: `diagnostics_pagination_*` and `diagnostics_omit_content_*` below.
 #[derive(Deserialize)]
 pub struct DiagnosticsParams {
     /// Restrict analysis to a single language tag (`"rust"`, `"python"`, ...).
     pub language: Option<String>,
     /// Comma-separated list of tool names to run; defaults to all available.
     pub tools: Option<String>,
+    /// Maximum results to return per page (default 500).
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    /// Zero-based offset into the full result set (default 0).
+    #[serde(default = "default_offset")]
+    pub offset: usize,
+    /// When true (default), strip verbose fields from each diagnostic to keep
+    /// response size bounded. Currently a no-op placeholder — `ToolDiagnostic`
+    /// does not carry raw source text, so the field is reserved for future use
+    /// without breaking callers.
+    #[serde(default = "default_omit_content")]
+    #[allow(dead_code)]
+    pub omit_content: bool,
 }
 
 /// `GET /indexes/{id}/diagnostics` — run available external static-analysis
@@ -170,9 +290,11 @@ pub struct DiagnosticsParams {
 /// scratch dir as before.
 /// What: fetches the corpus, reconstructs whole-file content from chunks,
 /// fetches the index root_path (for project-scoped tools), then delegates all
-/// dispatch to `diagnostics_dispatch::run_diagnostics_blocking`.
+/// dispatch to `diagnostics_dispatch::run_diagnostics_blocking`. Results are
+/// sliced by `offset`+`limit` and returned with a pagination envelope.
 /// Test: `diagnostics_endpoint_returns_empty_when_no_tools` boots the router
-/// with a stub client and confirms a well-formed empty response.
+/// with a stub client and confirms a well-formed empty response; pagination
+/// behaviour is unit-tested in `diagnostics_pagination_*` below.
 pub async fn diagnostics_for_index(
     State(state): State<Arc<AnalyzerAppState>>,
     Path(id): Path<String>,
@@ -214,52 +336,38 @@ pub async fn diagnostics_for_index(
 
     // Heavy work (process spawns, blocking I/O) runs off the async runtime.
     let language_filter = params.language.clone();
-    let diagnostics: Vec<crate::core::ToolDiagnostic> = tokio::task::spawn_blocking(move || {
-        crate::service::diagnostics_dispatch::run_diagnostics_blocking(
-            by_file,
-            language_filter,
-            tool_filter,
-            root_path,
-        )
-    })
-    .await
-    .map_err(|e| ApiError::internal(format!("diagnostics task panicked: {e}")))?;
+    let all_diagnostics: Vec<crate::core::ToolDiagnostic> =
+        tokio::task::spawn_blocking(move || {
+            crate::service::diagnostics_dispatch::run_diagnostics_blocking(
+                by_file,
+                language_filter,
+                tool_filter,
+                root_path,
+            )
+        })
+        .await
+        .map_err(|e| ApiError::internal(format!("diagnostics task panicked: {e}")))?;
+
+    let total = all_diagnostics.len();
+    let page: Vec<&crate::core::ToolDiagnostic> = all_diagnostics
+        .iter()
+        .skip(params.offset)
+        .take(params.limit)
+        .collect();
+    let returned = page.len();
+    let truncated = (params.offset + returned) < total;
 
     Ok(Json(serde_json::json!({
         "index_id": id,
-        "count": diagnostics.len(),
-        "diagnostics": diagnostics,
+        "total": total,
+        "offset": params.offset,
+        "limit": params.limit,
+        "returned": returned,
+        "truncated": truncated,
+        "diagnostics": page,
     })))
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Why: Two files with identical basenames in different directories must
-    /// both receive diagnostic results. Before the fix, the second write
-    /// overwrote the first in the shared scratch directory, silently dropping
-    /// the first file's diagnostics.
-    /// What: calls `run_diagnostics_blocking` with two entries whose basenames
-    /// collide; verifies that both entries are processed (the loop reaches each
-    /// one without skipping).
-    /// Test: this test itself. Note: no tools are installed in CI, so the
-    /// actual `out` may be empty — the test validates that the function does
-    /// not skip or panic rather than asserting diagnostic content.
-    #[test]
-    fn run_diagnostics_blocking_two_files_same_basename() {
-        let mut by_file = HashMap::new();
-        // Two Rust files with the same basename `main.rs` but different
-        // directory paths — the classic collision case.
-        by_file.insert("src/a/main.rs".to_string(), "fn a() {}".to_string());
-        by_file.insert("src/b/main.rs".to_string(), "fn b() {}".to_string());
-        // This must not panic or skip files silently.
-        // We cannot assert on diagnostic counts (no tools in CI), but if the
-        // basename collision bug were still present this would panic on the
-        // second create_dir_all (or silently overwrite) — not crash-free.
-        let _result = crate::service::diagnostics_dispatch::run_diagnostics_blocking(
-            by_file, None, None, None,
-        );
-        // Reaching here without panic means the subdir isolation works.
-    }
-}
+#[path = "analysis_tests.rs"]
+mod tests;
