@@ -7,6 +7,61 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.6.0] — 2026-06-09
+
+### Added
+
+- **`limit` / `offset` / `omit_content` query parameters on smells + diagnostics
+  endpoints (#917/#918)** — `GET /indexes/:id/smells` and
+  `GET /indexes/:id/diagnostics` now accept:
+  - `limit` (default 500, max enforced server-side)
+  - `offset` (default 0, for cursor-style pagination)
+  - `omit_content` (default **`true`** — see Changed below)
+  The response body gains a pagination envelope:
+  `{ total, returned, truncated, items: [...] }`.
+  `find_smells` and `run_diagnostics` MCP tool input schemas are extended
+  with the same three parameters and wired through `build_query()`.
+
+- **MCP stdio size guard (#917)** — `guard_response_size()` in `mcp/stdio.rs`
+  checks the serialised response length against
+  `TRUSTY_MCP_MAX_RESPONSE_BYTES` (default **2 MB**, read at startup) before
+  `write_all`. Oversized payloads are replaced with a well-formed
+  `isError: true` truncation notice — the JSON-RPC `id` is preserved in the
+  notice so the caller can correlate it — so an over-limit response can never
+  kill the MCP session with `-32000`.
+
+- **`build_query()` numeric/bool value support** — the MCP dispatch helper now
+  parses JSON `Number` (u64) and `Boolean` values, not just strings, so
+  `limit`, `offset`, and `omit_content` fields from MCP tool calls are
+  forwarded correctly to the HTTP layer.
+
+### Changed
+
+- **`omit_content` defaults to `true` (behavior-affecting default change)** —
+  `SmellItem` serialisation omits the raw chunk `content` field by default.
+  This reduces typical smells payloads from multi-megabyte to tens of
+  kilobytes. Pass `omit_content=false` (HTTP) or `"omit_content": false` (MCP)
+  to restore the full text. **Callers that previously relied on `content`
+  being present in smells responses must add `omit_content=false`.**
+
+- **`omit_content` removed from `run_diagnostics` / `DiagnosticsParams`** —
+  `ToolDiagnostic` carries no raw source body, so the field was a no-op.
+  Removing it prevents callers from being misled into believing it affected
+  output.
+
+### Fixed
+
+- **#917 — over-limit smells/diagnostics responses crashed the MCP session** —
+  replaced unbounded `GET /smells` serialisation with the paginated,
+  omit-content-by-default path described above; the stdio size guard provides
+  an additional safety net at the transport layer.
+
+- **JSON-RPC `id` echoed in stdio size-guard truncation notice** — previously
+  the notice hardcoded `"id": null`, violating JSON-RPC 2.0 §5. The guard
+  now parses the id from the oversized bytes and echoes it.
+
+---
+
 ## [0.5.1] — 2026-06-07
 
 ### Added

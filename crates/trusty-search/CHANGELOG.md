@@ -7,6 +7,42 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.24.3] — 2026-06-09
+
+### Fixed
+
+- **#1006 — accept-loop starvation under embed backpressure**
+  — Two complementary mitigations close the liveness gap when the embed
+  thread pool saturates:
+
+  - **Worker-thread floor raised to 16** — the Tokio runtime is now built
+    with an explicit `Builder::new_multi_thread()` using
+    `max(available_parallelism, 16)` worker threads. On a 4-core host the
+    default `num_cpus` count (≈8) was too low: once eight slots were occupied
+    by 30-second sidecar-blocking embed calls the axum accept-loop stalled,
+    causing short-timeout `/health` and `/context` connections to fail.
+
+  - **Non-blocking `/health` handler** — `try_current_embedder()` (a new
+    `try_read()` accessor on `state_impl.rs`) replaces the previous
+    `current_embedder().await`; `sys_metrics.try_lock()` replaces the
+    `lock().await` for CPU/RSS sampling. Both fall back gracefully on lock
+    contention: embedder info is omitted, last-sampled RSS/CPU atomics are
+    returned instead of zeros. Eliminates the 30-second blocking window that
+    paralysed the handler when the write lock was held by an active embed run.
+
+  - **Health-metric cache** — `AtomicU64`/`AtomicU32` caches on
+    `SearchAppState` store the last-sampled `rss_mb` and `cpu_pct`; the
+    fallback path reads these instead of reporting zeros, preventing
+    false-alarm monitors that alert on `rss_mb=0` during the rare
+    contention window.
+
+  Unit tests added: `health_non_blocking_when_embedder_slot_write_locked`,
+  `health_includes_embedder_info_when_ready`,
+  `worker_thread_count_at_least_16` (non-tautological: asserts the floor
+  formula, not just `max(N,16)>=16`).
+
+---
+
 ## [0.24.1] — 2026-06-06
 
 ### Fixed
