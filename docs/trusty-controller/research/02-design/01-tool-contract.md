@@ -25,6 +25,14 @@ CLI-only tools, and for the Python claude-mpm orchestrator. The controller
 obtains the binary to invoke from the stack manifest (DOC-2), never by
 hard-coding.
 
+**Liveness is *answering*, not process existence.** A member is judged live by
+whether it **answers** the authoritative CLI/probe within the timeout — not by
+whether a process is running. A daemon with a stale PID lockfile or a bound port
+that does not answer `health`/`doctor` within the deadline is `down` for verdict
+purposes (the controller synthesizes the terminal envelope, stamping a `reason`
+discriminator so a wedged-but-running daemon is distinguished from a not-running
+one — cross-ref DOC-4 §1.3).
+
 ### D2 — `contract_version` semantics (A2)
 
 A **monotonic integer**, starting at `1`. Rationale (recorded verbatim):
@@ -112,6 +120,13 @@ silently misdeserializing a changed shape under a stale integer.
   broken" semantic.
 - health `status`: `running | degraded | down`.
 - The envelope's top-level `status` uses the vocabulary appropriate to the verb.
+- **One lattice, two source vocabularies.** These two vocabularies are not two
+  independent systems: at the stack level they both map into DOC-4 §2.0's single
+  four-value verdict lattice (`ready|degraded|pending|down`), where `health` and
+  `doctor` are the fast and deep probes of one total order. A synthesized terminal
+  envelope (DOC-4 §1.3) additionally carries a `reason` discriminator
+  (`timeout`/`wedged`/`unreachable`/`not_running`) so the same `down` verdict can
+  drive different remediation (restart vs start).
 
 ### D5 — Exit-code convention (A5)
 
@@ -257,15 +272,29 @@ Minimal by design (D4): the **envelope `status`** carries the
   "deps": [                              // ? dependency reachability (from trusty-review/analyze prior art)
     { "id": "trusty-search", "required": true, "reachable": true }
   ],
-  "detail": "store/recall round-trip ok"  // ? short triage phrase, esp. when degraded
+  "detail": "store/recall round-trip ok",  // ? short triage phrase; when up-but-not-ready set to "model loading"/"warming"/"restarting"
+  "reason": "wedged"                       // ? only on a controller-synthesized down envelope: "timeout"|"wedged"|"unreachable"|"not_running"
 }
 ```
 
-- `down` ⇒ the tool/daemon is not answering; the controller synthesizes a `down`
-  envelope (it still gets `tool`, `verb`, `status:"down"`, empty/partial `data`)
-  rather than the tool emitting it. `degraded` ⇒ up but a required dep is
+- `down` ⇒ the tool/daemon is not answering within the timeout (DOC-1 D1:
+  liveness = answering, not process existence); the controller synthesizes a
+  `down` envelope (it still gets `tool`, `verb`, `status:"down"`, empty/partial
+  `data`) rather than the tool emitting it. On a synthesized `down` the controller
+  stamps a `reason` discriminator — `not_running` (no process → remediation
+  **start**) vs `timeout`/`wedged`/`unreachable` (up but not answering →
+  remediation **restart**/investigate) — so a wedged daemon is distinguished from
+  a stopped one (cross-ref DOC-4 §1.3/§5.1). `degraded` ⇒ up but a required dep is
   unreachable or a self-probe failed (prior art: review `compute_status`, analyze
   `search_reachable`, memory round-trip probe).
+- **Up-but-not-ready ⇒ answer promptly, never hang.** A daemon that is up but not
+  yet ready — cold start, ONNX/model loading, warming, or mid-graceful-restart —
+  MUST answer `health` **promptly** with `status:"degraded"` (or `pending` at the
+  doctor layer) plus a `detail` naming the state (`"model loading"`,
+  `"restarting"`), rather than hanging until the probe deadline. This lets the
+  controller distinguish a healthy-but-warming daemon from a wedged one: warming
+  is reported as `degraded`/`pending`, not false-failed into a synthesized `down`
+  (DOC-4 §1.3; the restart window maps to `pending`, consistent with C5).
 
 **Worked example** (degraded — required dep down):
 

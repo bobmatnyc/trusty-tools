@@ -36,11 +36,11 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 | M3 | MAJOR | Cross-repo claude-mpm dependency is load-bearing in 4 places but never assessed as one systemic risk | DOC-6 §4, DOC-8 §4/§5, DOC-9 §3.4, DOC-10 §6 | — | 🔴 Open |
 | M4 | MAJOR | `config` verb is a breaking CLI change + a hole in the read-only guarantee | DOC-1 `config.data`, DOC-5 §1.2, DOC-6 §2.6, DOC-3 Q3 | ✅ code-verified | ✅ Resolved |
 | M5 | MAJOR | clap `external_subcommand` passthrough collides with first-class subcommands + controller-as-member recursion | DOC-5 §6/§1.1 | — | 🔴 Open |
-| M6 | MAJOR | CLI-as-authority (D1) under-specified for "daemon up but wedged" | DOC-1 D1, `health.data` | — | 🔴 Open |
+| M6 | MAJOR | CLI-as-authority (D1) under-specified for "daemon up but wedged" | DOC-1 D1, `health.data` | — | ✅ Resolved |
 | M7 | MAJOR | Concurrent "ensure every launch" race on a shared daemon | DOC-3 §4/§6/§8 | — | 🔴 Open |
-| M8 | MAJOR | Status-enum reconciliation is ambiguous | DOC-1 D4, DOC-4 §1.1/§4, DOC-3 §9 | — | 🔴 Open |
+| M8 | MAJOR | Status-enum reconciliation is ambiguous | DOC-1 D4, DOC-4 §1.1/§4, DOC-3 §9 | — | ✅ Resolved |
 | M9 | MAJOR | D8 secret redaction is unenforceable | DOC-1 D8, DOC-6 conformance clause 5 | — | 🔴 Open |
-| M10 | MAJOR | Timeouts (2s health / 10s doctor) false-fail cold / model-loading daemons | DOC-4 §1.3, Resolved-Q1 | — | 🔴 Open |
+| M10 | MAJOR | Timeouts (2s health / 10s doctor) false-fail cold / model-loading daemons | DOC-4 §1.3, Resolved-Q1 | — | ✅ Resolved |
 | M11 | MAJOR | `state.toml` stack-version tracking can silently desync; UI shows stale "clean" | DOC-9 §4.4, Resolved-Q3, DOC-7 §2.1 | — | 🔴 Open |
 | M12 | MAJOR | No auto-rollback + non-transactional installs can wedge a partial tuple | DOC-9 §6/§3.6, Resolved-Q5 | — | 🔴 Open |
 | M13 | MAJOR | Self-upgrade abandons in-flight UI op state | DOC-9 §8, DOC-7 §8/§3.2 | — | 🔴 Open |
@@ -196,9 +196,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** no timeout/`unknown` state — a hung daemon that connects but never responds is neither cleanly `down` nor `running`.
 - **Failure mode:** `tctl stack doctor` hangs or misreports a wedged daemon as running (PID lockfile exists).
 - **Fix direction:** mandatory per-verb invocation timeout + a `degraded`/`unknown` mapping for slow/no-response.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** Option A (cluster) — DOC-1 D1 clarified: **liveness = answering the authoritative probe within the timeout, not process existence**; a stale-PID/bound-port daemon that does not answer is `down`. A wedged/timeout daemon maps to `down` (four-value vocabulary preserved) with a `reason` discriminator (`timeout`/`wedged`/`unreachable` vs `not_running`) so remediation differs (restart vs start). No fifth `unknown` verdict (rejected: a wedged daemon is operationally unusable = `down`; the `reason` field carries the nuance).
+- **Follow-up:** DOC-1 D1 (liveness = answering) + `health.data` (`reason` field on the synthesized envelope). DOC-4 §1.3 (synthesized terminal envelope carries `reason`). Implementation follow-up: controller stamps `reason` on synthesized-`down` envelopes and routes remediation (restart vs start) off it.
 
 ### M7 — Concurrent "ensure every launch" race on a shared daemon
 
@@ -220,9 +220,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** `health{running|degraded|down}` vs `doctor{ok|warn|fail|pending|skipped}` have no defined total order; `stack health` and `stack doctor` can disagree in direction.
 - **Failure mode:** contradictory verdicts / CI exit-code ambiguity (both warn and degraded → exit 2).
 - **Fix direction:** define one total order across the union; frame health/doctor as fast/deep views of one lattice.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** Option A (cluster) — affirm DOC-4 §2.0's four-value verdict as the **single total-order lattice** both source vocabularies (`health`/`doctor`) map into (fast vs deep views of one order); add the both-envelopes reconciliation rule — when the rollup holds both a `health` and a `doctor` envelope for one member, the cell is the **worst-wins fold** of the two mapped verdicts, so they can never disagree in direction.
+- **Follow-up:** DOC-4 §2.0 (single-lattice framing + both-envelopes worst-wins fold), §4 (health/doctor as fast/deep of one lattice; the legitimate difference is scope-depth, not direction). DOC-1 D4 (note the four-value lattice + `reason` discriminator).
 
 ### M9 — D8 secret redaction is unenforceable
 
@@ -244,9 +244,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** ONNX model load, cold start, or graceful-shutdown window blow the fixed timeouts → synthesized `down`.
 - **Failure mode:** `tctl stack doctor` CI gate false-fails a healthy-but-slow cold stack; a gracefully-restarting daemon reads as down.
 - **Fix direction:** cold-start budget / warmup ping; ship per-member timeout overrides day one.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** Option A (cluster) — two parts: (1) an up-but-not-ready daemon (cold/model-loading/warming/mid-graceful-restart) MUST answer `health` **promptly** with `degraded`/`pending` + a `detail` rather than hanging, so warming is reported, not timed out into a false `down` (the restart window maps to `pending`, consistent with C5); the state lives in the tool, preserving zero-tool-specific-logic. (2) **Un-defer per-member timeout overrides** in the manifest day one (DOC-2 §3), precedence per-member > global `--timeout` > 2 s / 10 s defaults.
+- **Follow-up:** DOC-4 §1.3 (warming/restart not-`down`; per-member timeouts day-one; precedence). DOC-1 `health.data` (prompt warming/restarting reply requirement). DOC-2 §3 (per-member `timeout` field + trusty-search worked-example hint). Implementation follow-up: tools report warming/restarting health states promptly; controller honors per-member timeouts.
 
 ### M11 — `state.toml` stack-version tracking can silently desync; UI shows stale "clean"
 

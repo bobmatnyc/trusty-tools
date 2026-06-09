@@ -123,6 +123,7 @@ Each stack member is one `[[member]]` entry. Fields:
 | `ui` | no | UI-availability + discovery hint sub-table (see below). Drives DOC-7 (the controller UI links out to member UIs, never reimplements them — spec §56). Omit for members with no UI. |
 | `changelog` | yes | Changelog source descriptor (a sub-table — see §5). Drives DOC-9 headline extraction. |
 | `depends_on` | no | Array of member `id`s this member requires at runtime (e.g. `trusty-analyze` → `["trusty-search"]`). Informs DOC-4 rollup / ordering; does not duplicate DOC-1 health `deps`. |
+| `timeout` | no | Per-member probe-timeout override sub-table in seconds, e.g. `{ health = 2, doctor = 30 }`. Overrides the DOC-4 §1.3 defaults for slow-to-answer members — chiefly model-loading daemons (e.g. trusty-search cold ONNX/CoreML load) that need a larger cold-load budget. Precedence: **per-member `timeout` > global `--timeout` > the DOC-4 §1.3 2 s / 10 s defaults**. Omitted keys fall through to the next precedence tier. |
 | `enabled` | no | `true` (default) \| `false`. A system override file can disable a member without removing its registry entry. |
 
 **`install` sub-table** (tagged by `source`):
@@ -200,6 +201,7 @@ kind = "daemon"                       # two-layer: machine daemon + per-project 
 install = { source = "cargo", crate = "trusty-search" }
 version = "0.24.1"
 min_contract_version = 1
+timeout = { doctor = 30 }             # cold ONNX/CoreML model load needs a larger budget (DOC-4 §1.3)
 ui = { available = true, path = "/ui", port_source = "port_json" }
 changelog = { source = "git_tag", crate = "trusty-search", path = "CHANGELOG.md", format = "keepachangelog" }
 # NOTE: bundles trusty-embedderd sidecar via single-install — NOT a separate member.
