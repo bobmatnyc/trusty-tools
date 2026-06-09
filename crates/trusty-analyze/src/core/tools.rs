@@ -63,6 +63,21 @@ pub trait StaticTool: Send + Sync {
     /// (`"rust"`, `"python"`, `"typescript"`, ...).
     fn language(&self) -> &str;
 
+    /// Additional language buckets this tool should also be registered under,
+    /// beyond its primary [`language`](Self::language).
+    ///
+    /// Why: a single binary often lints several `LanguageDetector` tags — e.g.
+    /// biome lints both `"typescript"` and `"javascript"`. Without this, files
+    /// routed to the secondary tag find an empty bucket and are silently
+    /// skipped (the JS half of the #963 class of bug). Defaults to no aliases.
+    /// What: each returned tag gets its own registry entry pointing at this
+    /// tool, in addition to `language()`.
+    /// Test: `discover_registers_biome_under_javascript_alias` in
+    /// `tool_registry`.
+    fn aliases(&self) -> &[&str] {
+        &[]
+    }
+
     /// Cheap availability probe — confirms the backing binary is on `PATH`.
     fn is_available(&self) -> bool;
 
