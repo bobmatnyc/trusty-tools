@@ -130,7 +130,8 @@ fn run_diagnostics_blocking_skips_unknown_languages() {
     // diagnostics pipeline; it should simply be skipped.
     let mut by_file = HashMap::new();
     by_file.insert("notes.txt".to_string(), "hello world".to_string());
-    let diags = crate::service::handlers::analysis::run_diagnostics_blocking(by_file, None, None);
+    let diags =
+        crate::service::diagnostics_dispatch::run_diagnostics_blocking(by_file, None, None, None);
     assert!(diags.is_empty());
 }
 
@@ -140,9 +141,10 @@ fn run_diagnostics_blocking_respects_language_filter() {
     // installed, because the language filter excludes it.
     let mut by_file = HashMap::new();
     by_file.insert("main.rs".to_string(), "fn main() {}".to_string());
-    let diags = crate::service::handlers::analysis::run_diagnostics_blocking(
+    let diags = crate::service::diagnostics_dispatch::run_diagnostics_blocking(
         by_file,
         Some("python".to_string()),
+        None,
         None,
     );
     assert!(diags.is_empty());

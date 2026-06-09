@@ -218,14 +218,20 @@ mod tests {
             LanguageDetector::detect_file("foo.kts"),
             Some("kotlin".into())
         );
-        assert_eq!(LanguageDetector::detect_file("foo.java"), Some("java".into()));
+        assert_eq!(
+            LanguageDetector::detect_file("foo.java"),
+            Some("java".into())
+        );
         assert_eq!(
             LanguageDetector::detect_file("foo.swift"),
             Some("swift".into())
         );
         assert_eq!(LanguageDetector::detect_file("foo.rb"), Some("ruby".into()));
         assert_eq!(LanguageDetector::detect_file("foo.php"), Some("php".into()));
-        assert_eq!(LanguageDetector::detect_file("foo.py"), Some("python".into()));
+        assert_eq!(
+            LanguageDetector::detect_file("foo.py"),
+            Some("python".into())
+        );
     }
 
     #[test]
