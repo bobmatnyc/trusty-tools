@@ -971,13 +971,28 @@ enum IntentArg {
     Unknown,
 }
 
-#[tokio::main]
-async fn main() {
+/// Why (issue #1006): raise tokio worker floor to prevent accept-loop starvation.
+/// Embed-pool workers block on 30 s sidecar calls; with only num_cpus workers the
+/// axum accept loop starves under heavy CoreML/CUDA load → false "daemon down".
+/// What: `max(available_parallelism, 16)` workers. Blocking pool unchanged (512).
+/// Test: `worker_thread_count_at_least_16` in tests_health.
+fn main() {
+    let cpu_count = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let worker_threads = std::cmp::max(cpu_count, 16);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .enable_all()
+        .thread_name("trusty-search-worker")
+        .build()
+        .expect("failed to build tokio runtime");
+
     // Central error-printer + exit-code chooser. Why: command handlers are now
     // testable units that return `Result<()>` instead of calling `process::exit`
     // directly (issue #104). Print the chain compactly with the red ✗ prefix
     // operators already recognize, then exit 1.
-    if let Err(e) = run().await {
+    if let Err(e) = rt.block_on(run()) {
         let msg = format!("{:#}", e);
         if !msg.is_empty() {
             eprintln!("{} {}", "✗".red(), msg);

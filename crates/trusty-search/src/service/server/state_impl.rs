@@ -277,6 +277,31 @@ impl SearchAppState {
         slot.clone()
     }
 
+    /// Non-blocking snapshot of the currently-installed embedder.
+    ///
+    /// Why (issue #1006): `/health` must never `.await` the embedder `RwLock`
+    /// because a concurrent write-lock (e.g. `install_embedder` during init or
+    /// hot-swap) would block the health handler until the write completes —
+    /// potentially 30 s during a CoreML stall. Using `try_read()` returns
+    /// immediately with `None` when the lock is contended, which is safe for
+    /// the health endpoint because we already have `is_embedder_ready()` as the
+    /// authoritative readiness signal.
+    ///
+    /// What: calls `try_read()` on the embedder slot; returns `Some(embedder)`
+    /// when the lock is uncontested and the slot is populated, `None` otherwise.
+    /// Callers that receive `None` should fall back to the last-known status
+    /// (e.g. from `is_embedder_ready()`) rather than awaiting.
+    ///
+    /// Test: `health_non_blocking_when_embedder_slot_write_locked` — holds a
+    /// write lock on `embedder_slot` and asserts `try_current_embedder()`
+    /// returns `None` immediately (no deadlock/await).
+    pub fn try_current_embedder(&self) -> Option<Arc<dyn Embedder>> {
+        self.embedder_slot
+            .try_read()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
     /// Cheap, non-blocking readiness check. Returns `true` once the
     /// background embedder-init task has flipped the watch channel.
     pub fn is_embedder_ready(&self) -> bool {

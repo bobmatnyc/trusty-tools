@@ -154,7 +154,7 @@ crates/trusty-search/src/core/repo_config.rs	595
 crates/trusty-search/src/core/search/hierarchy.rs	658
 crates/trusty-search/src/core/store.rs	1275
 crates/trusty-search/src/core/symbol_graph.rs	1667
-crates/trusty-search/src/main.rs	1320
+crates/trusty-search/src/main.rs	1335
 crates/trusty-search/src/mcp/tools.rs	2187
 crates/trusty-search/src/service/call_chain.rs	954
 crates/trusty-search/src/service/daemon.rs	701
