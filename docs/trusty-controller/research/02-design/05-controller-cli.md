@@ -79,7 +79,7 @@ passthrough — see §1.4.
 | `tctl restart [m…]` | system | Bounce all daemon members **and the controller's own UI service** (lifecycle `restart`). | §7, DOC-1 |
 | `tctl stack health` | all | Fast liveness sweep → tools×scope matrix + stack verdict. | DOC-4 |
 | `tctl stack doctor [m]` | all | Deep diagnostic sweep → matrix + per-check drill-down + remediation. | DOC-4 |
-| `tctl config [m…]` | all | Render each member's effective merged config (read-only, secrets redacted). | DOC-3 §7 |
+| `tctl config [m…]` | all | Render each member's effective merged config (read-only, secrets redacted); takes only read selectors. Tool-native mutation is a separate non-contract verb (`tune`), not reachable via passthrough. | DOC-3 §7, DOC-6 §2.6 |
 | `tctl status` | all | One-line "stack 2026.06-1 — verdict: ready". | DOC-4 (sugar) |
 | `tctl port` | system | Print the controller's own bound port/address (clean stdout). | DOC-7 |
 | `tctl doctor --self-check <m>` | n/a | Validate one member conforms to the contract (envelope, vocab, redaction). | DOC-6 §8 |
@@ -230,6 +230,14 @@ from the manifest**; it always probes `version --json` at dispatch time:
 - **Verb not advertised** → the controller does not invoke it. For passthrough it
   errors with exit `3` ("`trusty-review` does not advertise verb `restart`"); for
   a stack verb the member's cell is `n/a` (DOC-4 §5.3) — never a failure.
+- **Passthrough is verb-aware, not a blind arg shell** → the controller forwards an
+  advertised contract verb with its **contract-defined arguments** and renders the
+  envelope; it does not blindly shell arbitrary trailing args at the member. A
+  non-advertised tool-native verb (e.g. trusty-search's mutating `tune`) is treated
+  exactly like an unadvertised verb above — it is **not forwarded**. Consequently the
+  read-only `config` verb (which takes only read selectors) is the only config
+  surface reachable via passthrough, so runtime config mutation is **not reachable
+  through the controller** in v1 (DOC-6 §2.6, DOC-1 `config.data`).
 - **Older but ≥-floor `contract_version`** (`[F, N)`) → invoke anyway, render only
   the fields that level guarantees, mark the cell `degraded` (DOC-4 §5.2). Never
   hard-fail. This is the canonical degradation rule DOC-1 owns and DOC-4/5
@@ -272,10 +280,14 @@ annotation).
 #### 3.3 Blast-radius warn-before-system-op (DOC-3 §5)
 
 Every selected operation carries a blast-radius tag **derived from its scope**
-(DOC-3 §5), so the gate is mechanical, not per-tool:
+(DOC-3 §5), so the gate is mechanical, not per-tool. **The gate is defined over the
+mutating-verb class, not an enumerated allowlist** — any mutating verb is
+confirmation-gated, so a future advertised mutating verb is covered automatically
+(defense-in-depth; no enumeration to forget to update). `install`, `upgrade`,
+`restart`, and `stop` are the **v1** members of that class:
 
-- **System-mutating ops** (`install`, `upgrade`, `restart`, `stop`) disrupt every
-  project/session on the box. Before executing, on an interactive TTY, `tctl`
+- **System-mutating ops** (in v1: `install`, `upgrade`, `restart`, `stop`) disrupt
+  every project/session on the box. Before executing, on an interactive TTY, `tctl`
   prints the radius and prompts:
 
   ```

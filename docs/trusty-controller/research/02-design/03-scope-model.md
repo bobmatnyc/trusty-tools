@@ -205,9 +205,11 @@ controller's scope-precedence rule is the cross-tool generalization of that
 pattern. **Note the spec non-goal** ("not a tool-internal config editor"): the
 controller's `config` verb is **read/report-only** — it surfaces effective values
 and their precedence. "Project overrides system" is a **read-time resolution
-rule**, not the controller mutating files. The controller MAY *dispatch* a tool's
-own `config`-write subcommand, but it **never edits a tool's internal config
-files directly** (RESOLVED — Resolved Decisions Q3, reconciling the spec
+rule**, not the controller mutating files. The controller does **not** expose
+tool-native config mutation in v1: the contract `config` verb is read-only,
+tool-native mutation lives in a non-contract verb (`tune`) the controller does not
+forward (DOC-6 §2.6, DOC-5 §2), and the controller **never edits a tool's internal
+config files directly** (RESOLVED — Resolved Decisions Q3, reconciling the spec
 non-goal).
 
 ### 8. Shared project-identity convention

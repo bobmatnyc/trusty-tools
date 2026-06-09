@@ -34,7 +34,7 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 | M1 | MAJOR | "Zero tool-specific logic" is oversold (relocated, not eliminated) | spec §83; DOC-2 §6, DOC-5 §1/§2.2, DOC-6 §4, DOC-3 §7, DOC-7 | — | 🔴 Open |
 | M2 | MAJOR | `stack_version` tuple will rot (no test owner, no CI gate, embedded in the binary) | DOC-2 §4, Resolved-Q5 | — | 🔴 Open |
 | M3 | MAJOR | Cross-repo claude-mpm dependency is load-bearing in 4 places but never assessed as one systemic risk | DOC-6 §4, DOC-8 §4/§5, DOC-9 §3.4, DOC-10 §6 | — | 🔴 Open |
-| M4 | MAJOR | `config` verb is a breaking CLI change + a hole in the read-only guarantee | DOC-1 `config.data`, DOC-5 §1.2, DOC-6 §2.6, DOC-3 Q3 | ✅ code-verified | 🔴 Open |
+| M4 | MAJOR | `config` verb is a breaking CLI change + a hole in the read-only guarantee | DOC-1 `config.data`, DOC-5 §1.2, DOC-6 §2.6, DOC-3 Q3 | ✅ code-verified | ✅ Resolved |
 | M5 | MAJOR | clap `external_subcommand` passthrough collides with first-class subcommands + controller-as-member recursion | DOC-5 §6/§1.1 | — | 🔴 Open |
 | M6 | MAJOR | CLI-as-authority (D1) under-specified for "daemon up but wedged" | DOC-1 D1, `health.data` | — | 🔴 Open |
 | M7 | MAJOR | Concurrent "ensure every launch" race on a shared daemon | DOC-3 §4/§6/§8 | — | 🔴 Open |
@@ -172,9 +172,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** overloading the contract's read-only `config` onto a tool that ships a mutating `config set` is semver-relevant; passthrough (`tctl <tool> config set`) forwards mutations through a "read-only config" controller.
 - **Failure mode:** a UI/agent mutates via passthrough despite the read-only posture.
 - **Fix direction:** rename the mutating verb (e.g. `tune`/`limits`); define passthrough's stance on mutating subcommands.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** Option A — make the read-only `config` guarantee true at the contract boundary. The contract `config` verb = read-only `ConfigData`, accepting only read selectors (`--scope`, optional single-key projection) and no mutating arguments. trusty-search's live memory-limit mutation moves to a separate, non-contract, non-advertised `tune` verb (canonical); `config set`/`config tune` are kept as deprecated tool-native back-compat aliases (trusty-search is 0.x — emit a deprecation note, no hard break). Passthrough is **verb-aware** — it forwards an advertised contract verb with its contract-defined arguments, not a blind arg shell — so mutation under the non-advertised `tune` verb is **NOT reachable through the controller** in v1 (read-only by construction). The DOC-5 §3 blast-radius gate is broadened from the enumerated four (`install`/`upgrade`/`restart`/`stop`) to the mutating-verb class as defense-in-depth, so any future advertised mutating verb is confirmation-gated. DOC-3 §7's contradictory "MAY dispatch a tool's `config`-write subcommand" permission is reconciled to "not exposed via the controller in v1." DOC-6 §2.6 already handled the naming half; this finishes it and closes the passthrough hole.
+- **Follow-up:** DOC-6 §2.1 config row + §2.6 (canonical non-contract `tune` verb + deprecated `config set`/`config tune` aliases, not advertised in `verbs[]`). DOC-1 `config.data` (read-only, read selectors only, mutation is non-contract). DOC-3 §7 (reconciled — no controller-exposed mutation in v1). DOC-5 §1.2 (read-selectors note), §2 (verb-aware passthrough; non-advertised verbs not forwarded), §3 (blast-radius gate over the mutating class). Implementation follow-up: trusty-search adds the `tune` verb + deprecation aliases on `config set`/`config tune`; controller passthrough forwards only contract-defined verb args.
 
 ### M5 — clap `external_subcommand` passthrough collides with first-class subcommands + controller-as-member recursion
 

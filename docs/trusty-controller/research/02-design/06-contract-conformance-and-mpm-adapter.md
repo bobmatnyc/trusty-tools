@@ -120,7 +120,7 @@ Sources: `crates/trusty-search/src/main.rs`, `src/commands/` (`doctor.rs`,
 | `version` | `⚠️` clap `--version` flag only; no `verbs[]` | Add a real `version` subcommand emitting `VersionData` with `verbs[]` + `contract_version` | `main.rs` (new `Version` variant), `commands/` |
 | `start`/`stop` | `⚠️` `start [...]`/`stop` — text | Emit `LifecycleData{action,previous_state,new_state,...}`; `--json` | `commands/start.rs`, `commands/stop.rs` |
 | `restart` | `❌` absent (operators use launchd `bootout`/`bootstrap`) | Net-new: compose stop→start (or `LaunchdConfig::bootout`+`bootstrap`); emit `LifecycleData` | new `commands/restart.rs` |
-| `config` | `⚠️` `config get\|set <key> [val]` — **live memory-limit mutation**, NOT effective merged config | Make the read-only effective-config verb (DOC-1 `config.data`) the **default `config`**; move the existing mutation behind `config set`/`config tune` (and `config get <key>` for a single value) — see §2.6 | `commands/config.rs` |
+| `config` | `⚠️` `config get\|set <key> [val]` — **live memory-limit mutation**, NOT effective merged config | The read-only effective-config (DOC-1 `config.data`) is the `config` **contract verb**; the live mutation moves to a **separate non-contract `tune` verb** (canonical, NOT advertised in `verbs[]`), with `config set`/`config tune` kept as **deprecated tool-native aliases** for back-compat — see §2.6 | `commands/config.rs`, new `commands/tune.rs` |
 | `version.verbs[]` | `❌` | advertised by the new `version` verb | as above |
 | envelope/`contract_version` | `❌` | provided by `trusty_common::contract::Dispatcher` | shared module (§3) |
 
@@ -213,15 +213,31 @@ project per D7), with secrets redacted (D8); editing is an explicit spec non-goa
 
 trusty-search already has a `config` subcommand — but it is a **live-mutating
 `get`/`set`** for daemon memory limits, a *different verb with the same name*.
-The retrofit MUST NOT overload it. **Decision (owner-approved):** the contract
-`config` (read-only effective merged view) becomes the **default `config` verb**;
-trusty-search's existing live-mutating behaviour moves behind explicit
-`config set` / `config tune` subcommands, with `config get <key>` reading a single
-value. The contract `config` (no subcommand / `--json`) returns `ConfigData`;
-`config get`/`config set`/`config tune` remain tool-internal subcommands the
-controller *may dispatch* but never treats as the contract verb. This is the only
-place the contract verb name collides with existing behaviour, and this
-disambiguation resolves it.
+The retrofit MUST NOT overload it. **Decision (owner-approved, Option A):** make
+the read-only guarantee true at the contract boundary, not merely a posture.
+
+- The contract `config` verb is **read-only**: it takes only **read selectors**
+  (`--scope`, optional single-key projection) — no subcommand, no mutating
+  arguments — and returns `ConfigData` (effective merged config, redacted). Invoked
+  bare or with `--json`.
+- The canonical mutating surface becomes a **separate, non-contract, non-advertised
+  verb** named `tune` (a `limits`-style runtime-knob verb). It is NOT a contract
+  verb and is NOT listed in `verbs[]`. trusty-search's live memory-limit mutation
+  lives here.
+- `config set` and `config tune` are retained as **deprecated tool-native
+  back-compat aliases** for direct users (trusty-search is 0.x — emit a deprecation
+  note pointing at `tune`) so existing scripts do not hard-break.
+- **Passthrough cannot reach mutation**: the controller's generic passthrough is
+  verb-aware — it forwards an advertised contract verb with its contract-defined
+  arguments and renders the envelope; it does not blindly shell arbitrary trailing
+  args. Because mutation lives in the non-advertised `tune` verb (outside the
+  advertised read-only `config` verb's read-selector-only arg space), runtime config
+  mutation is **not reachable through the controller in v1** — read-only **by
+  construction**, not by convention.
+
+This closes the passthrough hole: see DOC-5 §2 (verb-aware passthrough; non-advertised
+verbs not forwarded) and §3 (blast-radius gate broadened to the mutating-verb class),
+and DOC-3 §7 (the controller does not expose tool-native config mutation in v1).
 
 ### 3. Shared-vs-per-crate retrofit strategy
 

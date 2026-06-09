@@ -392,7 +392,12 @@ Exit code: `0`.
 ### `config.data`
 
 **Read-only** effective merged config (system + project per D7); editing is an
-explicit spec non-goal. Secrets redacted with the fixed marker (D8).
+explicit spec non-goal. Secrets redacted with the fixed marker (D8). The `config`
+contract verb accepts only read selectors (`--scope`, optional single-key
+projection) and never mutating arguments; tool-native runtime mutation (e.g.
+trusty-search memory limits) lives in a separate, non-contract verb (`tune`) that
+is NOT advertised in `verbs[]`, so the contract `config` surface is read-only by
+construction (cross-ref DOC-6 §2.6, DOC-5 §2/§3).
 
 ```json
 {
