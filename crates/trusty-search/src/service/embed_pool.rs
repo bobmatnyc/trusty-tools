@@ -25,6 +25,23 @@
 //!
 //! `TRUSTY_EMBED_WORKERS` overrides the autotune.
 //!
+//! ## Executor isolation (issue #1017 — root-cause fix)
+//!
+//! Worker tasks run on **dedicated OS threads with their own single-thread
+//! Tokio runtimes** — wholly separate from the HTTP-server runtime and its
+//! thread pool. Each embed worker is a `std::thread::spawn`'d OS thread that
+//! builds a `tokio::runtime::Builder::new_current_thread()` runtime and runs
+//! its `worker_loop` on it. Tokio `mpsc`/`oneshot` channels are runtime-
+//! agnostic, so the callers (on the HTTP runtime) can still send requests and
+//! await replies via the same channel API.
+//!
+//! Consequence: a 30 s CoreML/ANE stall blocks only the embed worker's own
+//! OS thread. The main Tokio runtime's thread pool remains fully available for
+//! the axum accept loop, `/health`, and all other HTTP handlers, regardless of
+//! how many embed workers are stalled (issue #1017 root-cause fix). The
+//! PR #1016 worker-floor bump becomes belt-and-suspenders rather than load-
+//! bearing.
+//!
 //! `TRUSTY_EMBED_POOL_REPLY_TIMEOUT_SECS` (default 60 s) bounds the
 //! `reply_rx.await` inside `embed()` so a worker panic or a stuck embedder
 //! never leaves the caller hanging indefinitely (issue #907 fix 4). This
@@ -33,9 +50,10 @@
 //! timeout always fires first and propagates a clean error through the worker's
 //! `reply.send`; the pool reply-timeout is a last-resort backstop.
 //!
-//! Test: see `tests` module at the bottom — covers worker count autotune,
+//! Test: see `embed_pool_tests` module (split into `embed_pool_tests.rs` to
+//! keep this file under the 500-line cap) — covers worker count autotune,
 //! priority ordering (interactive drains before background), shutdown, reply
-//! timeout, and error propagation.
+//! timeout, error propagation, and the isolation proof.
 
 use anyhow::{Context, Result};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -51,14 +69,14 @@ use tokio::sync::{mpsc, oneshot};
 /// last-resort catch for cases where the sidecar timeout cannot fire (e.g.
 /// the worker task itself panicked before calling `embed_batch`).
 /// What: 60 s. Override with `TRUSTY_EMBED_POOL_REPLY_TIMEOUT_SECS`.
-/// Test: `embed_pool_reply_rx_timeout_returns_error`.
+/// Test: `embed_pool_reply_rx_timeout_returns_error` in embed_pool_tests.rs.
 const DEFAULT_REPLY_TIMEOUT_SECS: u64 = 60;
 
 /// Read `TRUSTY_EMBED_POOL_REPLY_TIMEOUT_SECS` once and cache it.
 ///
 /// Why: avoids per-call env lookups while allowing tests to override.
 /// What: reads the env var, parses as u64, falls back to `DEFAULT_REPLY_TIMEOUT_SECS`.
-/// Test: `embed_pool_reply_rx_timeout_returns_error`.
+/// Test: `embed_pool_reply_rx_timeout_returns_error` in embed_pool_tests.rs.
 fn reply_timeout() -> std::time::Duration {
     static CACHED: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
@@ -80,7 +98,7 @@ use crate::core::embed::Embedder;
 /// Reindex is batch work that runs in the background and is tolerant of a few
 /// extra seconds.
 /// What: A two-variant enum used as the channel selector inside the pool.
-/// Test: `priority_ordering_interactive_drains_first`.
+/// Test: `priority_ordering_interactive_drains_first` in embed_pool_tests.rs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestPriority {
     /// Search queries — drained first.
@@ -104,10 +122,10 @@ const LANE_CAPACITY: usize = 64;
 /// What: Carries `texts`, the `reply` sender, and a priority tag (preserved
 /// purely for tracing — the channel the request arrived on already determines
 /// when the worker picks it up).
-struct EmbedRequest {
-    texts: Vec<String>,
-    reply: oneshot::Sender<Result<Vec<Vec<f32>>>>,
-    priority: RequestPriority,
+pub(crate) struct EmbedRequest {
+    pub(crate) texts: Vec<String>,
+    pub(crate) reply: oneshot::Sender<Result<Vec<Vec<f32>>>>,
+    pub(crate) priority: RequestPriority,
 }
 
 /// Process-wide embedder worker pool.
@@ -116,19 +134,32 @@ struct EmbedRequest {
 /// utilisation gauges), prioritisation (interactive over background), and
 /// back-pressure (bounded channels) live in one place rather than being
 /// re-implemented at each call site.
-/// What: Holds two `mpsc::Sender`s (one per priority lane) plus the worker
-/// count for `/metrics` reporting. Dropping the `EmbedPool` closes the
-/// senders, which causes every worker task to exit on the next iteration.
+/// What: Holds two `mpsc::Sender`s (one per priority lane), the worker
+/// count for `/metrics` reporting, and join handles for the N **dedicated OS
+/// threads** that own embed work (issue #1017 — executor isolation). Each OS
+/// thread runs its own single-thread Tokio runtime; a 30 s sidecar stall
+/// occupies only that thread, leaving the HTTP runtime's pool untouched.
+/// Dropping the `EmbedPool` closes the senders (workers exit their loops) and
+/// joins the OS threads.
 /// Test: `pool_creates_n_workers`, `embed_returns_vector_per_text`, and the
-/// priority ordering tests.
+/// priority ordering / isolation tests in embed_pool_tests.rs.
 pub struct EmbedPool {
-    interactive_tx: mpsc::Sender<EmbedRequest>,
-    background_tx: mpsc::Sender<EmbedRequest>,
+    pub(crate) interactive_tx: mpsc::Sender<EmbedRequest>,
+    pub(crate) background_tx: mpsc::Sender<EmbedRequest>,
     workers: usize,
     /// Live count of in-flight + queued embed requests. Updated on
     /// `embed()` entry/exit so `/metrics` can report
     /// `trusty_embed_pool_utilisation` without polling channel internals.
     in_flight: Arc<AtomicUsize>,
+    /// Join handles for the N dedicated embed OS threads (issue #1017).
+    ///
+    /// Why: held here so the threads are joined on drop. Each thread runs an
+    /// independent current-thread Tokio runtime that is free to block on the
+    /// sidecar for up to 30 s without affecting the main HTTP runtime.
+    /// What: dropped (and joined) when the pool is dropped. Channel closure
+    /// (from `interactive_tx`/`background_tx` drop) signals each worker to exit
+    /// its loop before the join completes.
+    _worker_threads: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl EmbedPool {
@@ -137,14 +168,13 @@ impl EmbedPool {
     ///
     /// Why: The pool owns its workers' lifetimes — once the returned
     /// `EmbedPool` is dropped, the underlying channels are closed and every
-    /// worker exits naturally.
-    /// What: Spawns `workers` tokio tasks. Each task calls `tokio::select!`
-    /// with `biased;` so the interactive receiver is polled first. Workers
-    /// share the two receivers via `Arc<Mutex<mpsc::Receiver<…>>>` —
-    /// `mpsc::Receiver` is not `Clone`, so we wrap once and serialise the
-    /// `.recv()` calls behind a `Mutex`. Contention is negligible because the
-    /// embedder itself is the bottleneck, not the dispatch.
-    /// Test: `pool_creates_n_workers`.
+    /// worker exits naturally. Workers run on dedicated OS threads with their
+    /// own Tokio runtimes (issue #1017 — executor isolation).
+    /// What: Spawns `workers` OS threads via `std::thread::spawn`. Each thread
+    /// builds a `new_current_thread` Tokio runtime and blocks on
+    /// `worker_loop`. The `mpsc` channels are runtime-agnostic so callers on
+    /// the HTTP runtime can send/await replies seamlessly.
+    /// Test: `pool_creates_n_workers` in embed_pool_tests.rs.
     pub fn new(workers: usize, embedder: Arc<dyn Embedder>) -> Self {
         let workers = workers.max(1);
         let (interactive_tx, interactive_rx) = mpsc::channel::<EmbedRequest>(LANE_CAPACITY);
@@ -157,13 +187,36 @@ impl EmbedPool {
         // per request inside `embed()`.
         metrics::gauge!("trusty_embed_pool_workers").set(workers as f64);
 
+        let mut worker_threads = Vec::with_capacity(workers);
+
         for worker_id in 0..workers {
             let interactive_rx = Arc::clone(&interactive_rx);
             let background_rx = Arc::clone(&background_rx);
             let embedder = Arc::clone(&embedder);
-            tokio::spawn(async move {
-                worker_loop(worker_id, interactive_rx, background_rx, embedder).await;
-            });
+
+            // Spawn a dedicated OS thread for this worker (issue #1017).
+            // The thread builds its own single-thread Tokio runtime so it can
+            // await the sidecar reply without occupying the HTTP runtime's
+            // threads. The runtime is created and dropped entirely within this
+            // thread — no runtime-drop-inside-async-context issue.
+            let handle = std::thread::Builder::new()
+                .name(format!("trusty-embed-{worker_id}"))
+                .spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .thread_name(format!("trusty-embed-io-{worker_id}"))
+                        .build()
+                        .expect("embed worker: failed to build tokio runtime");
+                    rt.block_on(worker_loop(
+                        worker_id,
+                        interactive_rx,
+                        background_rx,
+                        embedder,
+                    ));
+                })
+                .expect("embed worker: failed to spawn OS thread");
+
+            worker_threads.push(handle);
         }
 
         Self {
@@ -171,6 +224,7 @@ impl EmbedPool {
             background_tx,
             workers,
             in_flight,
+            _worker_threads: worker_threads,
         }
     }
 
@@ -180,10 +234,10 @@ impl EmbedPool {
     /// based on host RAM unless overridden by `TRUSTY_EMBED_WORKERS`.
     /// What: Resolves the worker count via [`autotune_workers`] and calls
     /// [`Self::new`].
-    /// Test: `pool_autotune_respects_env_override`.
+    /// Test: `pool_autotune_respects_env_override` in embed_pool_tests.rs.
     pub fn with_autotune(embedder: Arc<dyn Embedder>) -> Self {
         let workers = autotune_workers();
-        tracing::info!("embed pool: {} workers", workers);
+        tracing::info!("embed pool: {} workers (isolated OS threads)", workers);
         Self::new(workers, embedder)
     }
 
@@ -193,11 +247,14 @@ impl EmbedPool {
     /// through here so priority routing, back-pressure, and metrics happen
     /// consistently.
     /// What: Picks the correct lane based on `priority`, sends the request,
-    /// updates the in-flight gauge, and awaits the oneshot reply. Returns
-    /// `Err` when the pool has been dropped (channel closed) or the worker
-    /// task panicked (reply receiver dropped) — both are programming errors
-    /// in the daemon's normal lifecycle.
-    /// Test: `embed_returns_vector_per_text`, `priority_ordering_interactive_drains_first`.
+    /// updates the in-flight gauge, and awaits the oneshot reply. The actual
+    /// embed work runs on a dedicated OS-thread/runtime (issue #1017), so
+    /// this `await` only suspends the caller's Tokio task until the worker
+    /// sends the reply — the HTTP runtime's threads remain fully free.
+    /// Returns `Err` when the pool has been dropped (channel closed) or the
+    /// worker thread panicked (reply receiver dropped).
+    /// Test: `embed_returns_vector_per_text`,
+    /// `embed_pool_isolation_concurrent_task_not_blocked` in embed_pool_tests.rs.
     pub async fn embed(
         &self,
         texts: Vec<String>,
@@ -258,6 +315,12 @@ impl EmbedPool {
 
 /// Per-worker async loop: drain interactive lane first, fall back to
 /// background. Exits when both senders are dropped.
+///
+/// Why: Each worker runs on its own OS thread with a dedicated Tokio runtime
+/// (issue #1017). If `embed_batch` stalls for up to 30 s (CoreML/ANE), only
+/// this thread is blocked — the HTTP runtime's pool is completely unaffected.
+/// What: biased select on interactive-first; exits on channel close.
+/// Test: `dropping_pool_shuts_workers_down` in embed_pool_tests.rs.
 async fn worker_loop(
     worker_id: usize,
     interactive_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<EmbedRequest>>>,
@@ -269,13 +332,6 @@ async fn worker_loop(
         // self`, the lock must be held across the await. `biased;` makes the
         // select prefer the interactive lane whenever both have a message
         // ready, which is the whole point of priority lanes.
-        //
-        // Why the dual-lock dance: `tokio::sync::mpsc::Receiver` is not
-        // `Clone`, and we want every worker to share the *same* logical
-        // queue (so any free worker can pick up the next item). A `Mutex<…>`
-        // is the simplest correct sharing primitive — contention is bounded
-        // by the embedder itself (the model serialises internally), so the
-        // mutex never becomes the bottleneck.
         let req = {
             let mut interactive_guard = interactive_rx.lock().await;
             let mut background_guard = background_rx.lock().await;
@@ -295,9 +351,9 @@ async fn worker_loop(
             priority,
         } = req;
         let started = std::time::Instant::now();
-        // The shared embedder's `embed_batch` already uses `spawn_blocking`
-        // internally for the ORT call, so we just await it here. The pool's
-        // value-add is the priority queue + back-pressure, not extra blocking.
+        // This runs on the worker's own OS thread / Tokio runtime (issue #1017).
+        // A sidecar stall of up to 30 s blocks only this thread, never the
+        // HTTP runtime's thread pool.
         let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
         let result = embedder
             .embed_batch(&text_refs)
@@ -330,7 +386,8 @@ async fn worker_loop(
 ///     `<= 16 GB` -> 1; `17-32 GB` -> 2; `> 32 GB` -> 4.
 ///   - RAM detection failure -> 1 (safe default).
 ///
-/// Test: `autotune_worker_count_matches_table` and `pool_autotune_respects_env_override`.
+/// Test: `autotune_worker_count_matches_table` and `pool_autotune_respects_env_override`
+/// in embed_pool_tests.rs.
 pub fn autotune_workers() -> usize {
     if let Ok(raw) = std::env::var("TRUSTY_EMBED_WORKERS") {
         if let Ok(n) = raw.parse::<usize>() {
@@ -348,143 +405,8 @@ pub fn autotune_workers() -> usize {
     }
 }
 
+// Tests are in a sibling file to keep this file under the 500-line cap.
+// The submodule can access pub(crate) items via `super::` (Rust child-module rule).
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::embed::MockEmbedder;
-    use std::time::Duration;
-
-    fn make_pool(workers: usize) -> EmbedPool {
-        let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(384));
-        EmbedPool::new(workers, embedder)
-    }
-
-    #[tokio::test]
-    async fn embed_returns_vector_per_text() {
-        let pool = make_pool(2);
-        let out = pool
-            .embed(
-                vec!["hello".into(), "world".into()],
-                RequestPriority::Interactive,
-            )
-            .await
-            .expect("embed succeeds");
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].len(), 384);
-    }
-
-    #[tokio::test]
-    async fn embed_handles_empty_input() {
-        let pool = make_pool(1);
-        let out = pool
-            .embed(vec![], RequestPriority::Background)
-            .await
-            .expect("empty embed is a no-op");
-        assert!(out.is_empty());
-    }
-
-    #[tokio::test]
-    async fn pool_creates_n_workers() {
-        let pool = make_pool(3);
-        assert_eq!(pool.workers(), 3);
-    }
-
-    // Serialise the two autotune tests via `#[serial_test::serial(env_workers)]`
-    // because both touch the `TRUSTY_EMBED_WORKERS` env var and cargo runs
-    // tests in parallel by default — without serialisation the override test
-    // can race the autotune test and corrupt its observation.
-    #[tokio::test]
-    #[serial_test::serial(env_workers)]
-    async fn autotune_worker_count_matches_table() {
-        std::env::remove_var("TRUSTY_EMBED_WORKERS");
-        let n = autotune_workers();
-        assert!(
-            n == 1 || n == 2 || n == 4,
-            "autotune returned unexpected count: {n}"
-        );
-    }
-
-    #[tokio::test]
-    #[serial_test::serial(env_workers)]
-    async fn pool_autotune_respects_env_override() {
-        std::env::set_var("TRUSTY_EMBED_WORKERS", "7");
-        let n = autotune_workers();
-        std::env::remove_var("TRUSTY_EMBED_WORKERS");
-        assert_eq!(n, 7);
-    }
-
-    #[tokio::test]
-    async fn priority_ordering_interactive_drains_first() {
-        // One worker so ordering is deterministic. Submit one background
-        // request first, then an interactive one before the worker has had a
-        // chance to pull from the channel. The interactive should complete
-        // first because the worker's biased select prefers interactive.
-        //
-        // Note: with one worker there's no actual preemption — the worker
-        // will process whatever it picked up first. To make this test
-        // deterministic we submit both, then race their completions.
-        let pool = make_pool(1);
-
-        // Fire interactive first to give it the queue head. The test
-        // assertion is that the interactive completes successfully — the
-        // bias only matters when both lanes have queued work simultaneously,
-        // which is impossible to reliably trigger from a unit test.
-        let interactive = pool
-            .embed(vec!["i".into()], RequestPriority::Interactive)
-            .await
-            .expect("interactive embed succeeds");
-        let background = pool
-            .embed(vec!["b".into()], RequestPriority::Background)
-            .await
-            .expect("background embed succeeds");
-        assert_eq!(interactive.len(), 1);
-        assert_eq!(background.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn dropping_pool_shuts_workers_down() {
-        // Build a pool, drop it, and assert that the channel-closed branch in
-        // `embed` is unreachable (since we no longer hold the pool). This is
-        // really a compile-time / runtime-stability check: after the pool is
-        // dropped, the workers exit on their next iteration.
-        let pool = make_pool(1);
-        drop(pool);
-        // Give workers a tick to observe the closed channels.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        // No assertion: success is "no panic, no hang".
-    }
-
-    #[tokio::test]
-    async fn dropping_pool_after_send_returns_error() {
-        // Prove that after the pool senders are dropped `embed()` returns an
-        // error rather than hanging (issue #907 fix 4 — error propagation path).
-        //
-        // Why: when the pool is dropped its senders are closed; the worker
-        // exits; the reply_tx is dropped; `reply_rx.await` returns `Err`. The
-        // `tokio::time::timeout` wrapper must not prevent this from surfacing.
-        // What: manually construct pool components so we can drop the senders
-        // without dropping the receivers (which forces the "channel closed" path
-        // via `tx.send` before even waiting on `reply_rx`).
-        // Test: this test.
-        let (interactive_tx, _interactive_rx) = mpsc::channel::<EmbedRequest>(1);
-        let (_background_tx, _background_rx) = mpsc::channel::<EmbedRequest>(1);
-        // Drop the real receivers — the pool is now orphaned; any send will
-        // fail immediately with `SendError`.
-        drop(_interactive_rx);
-        drop(_background_rx);
-
-        let pool = EmbedPool {
-            interactive_tx,
-            background_tx: _background_tx,
-            workers: 0, // No workers; senders are orphaned.
-            in_flight: Arc::new(AtomicUsize::new(0)),
-        };
-        let result = pool
-            .embed(vec!["x".into()], RequestPriority::Interactive)
-            .await;
-        assert!(
-            result.is_err(),
-            "embed on a closed pool must return Err, not hang"
-        );
-    }
-}
+#[path = "embed_pool_tests.rs"]
+mod tests;
