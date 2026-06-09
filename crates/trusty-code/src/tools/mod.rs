@@ -10,12 +10,15 @@
 //! Test: Unit tests live in each submodule; integration tests use
 //! `DelegateToAgentTool` with a `MockAgentRunner`.
 
+pub mod bash;
 pub mod delegate;
 pub mod fs;
 pub mod registry;
 pub mod traits;
 
 // Flat re-exports for `crate::tools::*` convenience.
+#[allow(unused_imports)]
+pub use bash::BashTool;
 #[allow(unused_imports)]
 pub use delegate::DelegateToAgentTool;
 pub use fs::{EditTool, ReadFileTool, WriteFileTool};

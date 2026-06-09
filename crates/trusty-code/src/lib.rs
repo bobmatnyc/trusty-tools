@@ -130,6 +130,19 @@ pub mod rbac;
 
 // ── Phase 3 agents + LLM layer (per #642) ──
 
+/// Native OpenRouter LLM client.
+///
+/// Why: trusty-code agents need to invoke LLMs via the OpenRouter API without
+/// depending on third-party Rust SDK crates that pin us to specific provider
+/// contracts. A thin native client gives full control over the wire format,
+/// headers, and error handling.
+/// What: Exports `LlmClient`, `LlmClientConfig`, all request/response types
+/// (`ChatRequest`, `ChatResponse`, `ChatMessage`, `ToolDefinition`, …), and
+/// `LlmError`. The API key is injected at construction time.
+/// Test: `cargo test -p trusty-code` covers serialisation, deserialisation,
+/// and error-mapping unit tests. `--include-ignored` adds the live HTTP test.
+pub mod llm;
+
 /// Agent configuration loading.
 ///
 /// Why: Sub-agents are defined declaratively in TOML files under

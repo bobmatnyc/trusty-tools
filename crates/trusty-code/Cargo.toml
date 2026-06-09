@@ -45,8 +45,14 @@ async-trait = { workspace = true }
 # Phase 3: TOML config parsing for AgentConfig
 toml = { workspace = true }
 
-# Structured error types for library code (FsError, etc.)
+# Structured error types for library code (FsError, LlmError, etc.)
 thiserror = { workspace = true }
+
+# LLM client: HTTP + TLS for the OpenRouter chat-completions API
+reqwest = { workspace = true }
+
+# Bash tool: process-group kill on Unix (setsid / kill syscalls)
+libc = { workspace = true }
 
 [dev-dependencies]
 # Async test runtime (events, build_info, perf async tests, tools tests)
