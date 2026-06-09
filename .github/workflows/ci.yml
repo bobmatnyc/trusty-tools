@@ -17,6 +17,13 @@
 # pnpm when this env var is set. The committed ui-dist/ artefacts embedded
 # via include_dir!/include_str! are sufficient for compilation.
 #
+# FASTEMBED MODEL CACHE (issue #865): the test job pre-seeds the
+# AllMiniLML6V2Q ONNX model (Xenova/all-MiniLM-L6-v2, ~22 MB) into
+# ~/.cache/fastembed before cargo test runs, and preserves the populated
+# directory in the Actions cache keyed on Cargo.lock. This eliminates the
+# intermittent HTTP 429 failures from HuggingFace that were causing ~31
+# trusty-memory tests to fail spuriously on cold runners.
+#
 # The 7 env-sensitive trusty-memory tests (project_slug_returns_none_without_markers,
 # project_slug_at_returns_none_without_markers, cwd_palace_slug_falls_back_to_basename,
 # palace_slug_from_stdin_cwd_uses_stdin_path, resolve_palace_for_log_prefers_stdin_cwd,
@@ -129,11 +136,42 @@ jobs:
   # trusty-mpm-gui excluded: see clippy note above.
   # fetch-depth: 0 (full clone) required for trusty-agents git tests that inspect
   # local branch refs and search commit history.
+  #
+  # FASTEMBED MODEL CACHING (issue #865):
+  # trusty-memory tests initialise FastEmbedder which downloads the
+  # AllMiniLML6V2Q ONNX model from HuggingFace (Xenova/all-MiniLM-L6-v2,
+  # ~22 MB). Cold CI runners concurrently fetch this file and hit HF's
+  # HTTP 429 rate-limit, causing ~31 tests to fail spuriously.
+  #
+  # Fix: two-stage approach.
+  #   1. Restore the model from the Actions cache keyed on the fastembed
+  #      version (from Cargo.lock) + model repo IDs. On a cache hit the
+  #      runner never contacts HuggingFace at all.
+  #   2. On a cache miss, pre-seed the model BEFORE cargo test runs,
+  #      using a retried curl download with exponential backoff (5 attempts,
+  #      up to ~120 s total). One controlled download per cold runner is far
+  #      more reliable than N concurrent in-test downloads.
+  #
+  # The model is stored under FASTEMBED_CACHE_DIR (~/.cache/fastembed on the
+  # runner) using hf-hub's layout:
+  #   models--Xenova--all-MiniLM-L6-v2/
+  #     refs/main          <- snapshot hash pointer
+  #     snapshots/<hash>/  <- model files (onnx/, tokenizer.json, …)
+  #     blobs/<sha256>     <- actual content-addressed objects
+  #
+  # We cache the entire FASTEMBED_CACHE_DIR so any additional tokeniser /
+  # config files pulled by fastembed are also captured.
   # --------------------------------------------------------------------------
   test:
     name: Test
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # Point fastembed (and hf-hub) at a stable, writable path so the
+      # actions/cache key can target it precisely. This env var is honoured
+      # natively by fastembed-rs via get_cache_dir() and also by the
+      # resolve_fastembed_cache_dir() helper in trusty-common.
+      FASTEMBED_CACHE_DIR: /home/runner/.cache/fastembed
     steps:
       - uses: actions/checkout@v5
         with:
@@ -170,6 +208,108 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: test
+
+      # Restore the fastembed ONNX model cache (issue #865).
+      #
+      # Cache key: fastembed crate version (from Cargo.lock) + the two model
+      # repo IDs used by this workspace:
+      #   - Xenova/all-MiniLM-L6-v2  (AllMiniLML6V2Q — primary, ~22 MB)
+      #   - Qdrant/all-MiniLM-L6-v2-onnx (AllMiniLML6V2 — CPU fallback, ~86 MB)
+      # Changing any of these (e.g. upgrading fastembed) rotates the key so
+      # the old model blobs are not served to the new version.
+      - name: Restore fastembed model cache
+        id: fastembed-cache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.cache/fastembed
+          key: fastembed-v${{ hashFiles('Cargo.lock') }}-xenova-allminilm-l6-v2-qdrant-allminilm-l6-v2-onnx
+
+      # Pre-seed the model on a cache miss so tests never hit HuggingFace
+      # concurrently (the root cause of the HTTP 429 flake). Uses hf-hub's
+      # CLI-friendly URL pattern with exponential backoff: 5 attempts, waiting
+      # 5, 10, 20, 40 seconds between retries. After a successful download the
+      # actions/cache post-step saves the populated directory for future runs.
+      #
+      # Primary model: Xenova/all-MiniLM-L6-v2 at the pinned snapshot.
+      # The refs/main pointer, tokenizer files, and the quantized ONNX are
+      # all needed for fastembed initialisation.
+      - name: Pre-seed fastembed models (cache miss only)
+        if: steps.fastembed-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+
+          CACHE_DIR="${FASTEMBED_CACHE_DIR}"
+          mkdir -p "${CACHE_DIR}"
+
+          # ── Retry helper ──────────────────────────────────────────────────
+          # curl_retry <url> <dest>
+          # 5 attempts, starting with 5 s back-off, doubling each time.
+          curl_retry() {
+            local url="$1" dest="$2" attempt=1 max=5 wait=5
+            until curl -fsSL --retry 0 -o "${dest}" "${url}"; do
+              if [ "${attempt}" -ge "${max}" ]; then
+                echo "ERROR: download failed after ${max} attempts: ${url}" >&2
+                return 1
+              fi
+              echo "Download failed (attempt ${attempt}/${max}), retrying in ${wait}s …"
+              sleep "${wait}"
+              attempt=$(( attempt + 1 ))
+              wait=$(( wait * 2 ))
+            done
+          }
+
+          # ── Xenova/all-MiniLM-L6-v2 (AllMiniLML6V2Q — primary model) ────
+          # hf-hub resolves the model at the revision pinned in refs/main.
+          # We download the refs/main pointer first, then the exact snapshot.
+          HF_BASE="https://huggingface.co"
+          XENOVA_REPO="Xenova/all-MiniLM-L6-v2"
+          XENOVA_DIR="${CACHE_DIR}/models--Xenova--all-MiniLM-L6-v2"
+
+          mkdir -p "${XENOVA_DIR}/refs" "${XENOVA_DIR}/blobs"
+
+          # Resolve current HEAD commit for the model repo.
+          echo "Resolving Xenova/all-MiniLM-L6-v2 HEAD revision …"
+          XENOVA_REV=$(curl -fsSL \
+            "${HF_BASE}/${XENOVA_REPO}/resolve/main/onnx/model_quantized.onnx" \
+            -o /dev/null -w '%{url_effective}' | grep -oP '(?<=/resolve/)[^/]+' || true)
+
+          # Fallback: query the HF API for the main branch commit hash.
+          if [ -z "${XENOVA_REV}" ] || [ "${XENOVA_REV}" = "main" ]; then
+            XENOVA_REV=$(curl -fsSL \
+              "https://huggingface.co/api/models/${XENOVA_REPO}?full=false" \
+              | grep -oP '"sha":"[^"]{40}"' | head -1 | grep -oP '[0-9a-f]{40}' || true)
+          fi
+
+          # If we still have no revision, use the well-known pinned hash from
+          # the developer's local cache (matches fastembed 5.13.4).
+          XENOVA_REV="${XENOVA_REV:-751bff37182d3f1213fa05d7196b954e230abad9}"
+          echo "Using Xenova/all-MiniLM-L6-v2 revision: ${XENOVA_REV}"
+
+          echo "${XENOVA_REV}" > "${XENOVA_DIR}/refs/main"
+          SNAP_DIR="${XENOVA_DIR}/snapshots/${XENOVA_REV}"
+          mkdir -p "${SNAP_DIR}/onnx"
+
+          # Download required files for AllMiniLML6V2Q initialisation.
+          for FILE in tokenizer.json tokenizer_config.json special_tokens_map.json config.json; do
+            DEST="${SNAP_DIR}/${FILE}"
+            if [ ! -f "${DEST}" ]; then
+              echo "Downloading ${XENOVA_REPO}/${FILE} …"
+              curl_retry \
+                "${HF_BASE}/${XENOVA_REPO}/resolve/${XENOVA_REV}/${FILE}" \
+                "${DEST}"
+            fi
+          done
+
+          ONNX_DEST="${SNAP_DIR}/onnx/model_quantized.onnx"
+          if [ ! -f "${ONNX_DEST}" ]; then
+            echo "Downloading ${XENOVA_REPO}/onnx/model_quantized.onnx (~22 MB) …"
+            curl_retry \
+              "${HF_BASE}/${XENOVA_REPO}/resolve/${XENOVA_REV}/onnx/model_quantized.onnx" \
+              "${ONNX_DEST}"
+          fi
+
+          echo "fastembed model pre-seed complete."
+          du -sh "${CACHE_DIR}" || true
 
       - name: cargo test --workspace
         # Unset CI so trusty-common's update::check_throttled runs the
