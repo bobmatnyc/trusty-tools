@@ -255,10 +255,13 @@ pub async fn quality_report(
 
 /// Query parameters for the on-demand diagnostics endpoint.
 ///
-/// Why: extends the base tool-filter params with the same pagination +
-/// content-strip controls as `SmellsParams` to fix #917/#918.
-/// What: adds `limit`, `offset`, and `omit_content` on top of `language`/`tools`.
-/// Test: `diagnostics_pagination_*` and `diagnostics_omit_content_*` below.
+/// Why: extends the base tool-filter params with pagination controls to fix
+/// #917/#918. `omit_content` is intentionally absent — `ToolDiagnostic` carries
+/// no raw source body, so the flag would be a no-op that misleads callers into
+/// thinking content suppression is possible here.
+/// What: `language` and `tools` scope the linter run; `limit` / `offset` page
+/// the result set.
+/// Test: `diagnostics_pagination_*` below; integration in `service/tests.rs`.
 #[derive(Deserialize)]
 pub struct DiagnosticsParams {
     /// Restrict analysis to a single language tag (`"rust"`, `"python"`, ...).
@@ -271,13 +274,6 @@ pub struct DiagnosticsParams {
     /// Zero-based offset into the full result set (default 0).
     #[serde(default = "default_offset")]
     pub offset: usize,
-    /// When true (default), strip verbose fields from each diagnostic to keep
-    /// response size bounded. Currently a no-op placeholder — `ToolDiagnostic`
-    /// does not carry raw source text, so the field is reserved for future use
-    /// without breaking callers.
-    #[serde(default = "default_omit_content")]
-    #[allow(dead_code)]
-    pub omit_content: bool,
 }
 
 /// `GET /indexes/{id}/diagnostics` — run available external static-analysis

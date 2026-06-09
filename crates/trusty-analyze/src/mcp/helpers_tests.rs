@@ -51,6 +51,22 @@ fn build_query_handles_numeric_and_bool() {
     assert!(q.contains("omit_content=false"), "got {q}");
 }
 
+/// Why: integer-valued `limit` and `offset` come from JSON clients as JSON
+/// numbers, which `serde_json` parses as `u64` (when they fit). Removing the
+/// `as_f64` fallback must not break this common case.
+/// What: passes `limit` as a JSON integer (`200u64`) and asserts the query
+/// string contains `limit=200`, proving `as_u64` still handles the happy path.
+/// Test: this test.
+#[test]
+fn build_query_integer_limit_parses_correctly() {
+    let args = serde_json::json!({ "limit": 200u64 });
+    let q = build_query(&args, &["limit"]);
+    assert_eq!(
+        q, "?limit=200",
+        "integer limit must serialise as plain decimal"
+    );
+}
+
 /// Verify at compile time that the MCP client timeout is strictly greater
 /// than OpenRouter's 120 s maximum so deep_analysis calls are never aborted
 /// at the MCP transport layer before the daemon's own timeout fires.

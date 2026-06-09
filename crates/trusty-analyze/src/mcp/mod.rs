@@ -370,10 +370,7 @@ impl AnalyzerMcpServer {
     /// static-analysis tools (clippy, ruff, biome, ...) on demand.
     async fn handle_run_diagnostics(&self, args: &Value) -> Result<Value, DispatchError> {
         let index_id = index_id_or_default(args);
-        let q = build_query(
-            args,
-            &["language", "tools", "limit", "offset", "omit_content"],
-        );
+        let q = build_query(args, &["language", "tools", "limit", "offset"]);
         self.get(&format!("/indexes/{index_id}/diagnostics{q}"))
             .await
     }
@@ -687,17 +684,20 @@ fn index_id_or_default(args: &Value) -> &str {
 }
 
 /// Build a `?key=val&...` query string from whichever of `keys` is present
-/// in `args`. Handles string, number (u64/f64), and bool values; skips keys
+/// in `args`. Handles string, integer (u64), and bool values; skips keys
 /// that are absent or of an unsupported type. Returns an empty string if no
 /// keys were found.
 ///
 /// Why: `find_smells` and `run_diagnostics` gained `limit` (number), `offset`
 /// (number), and `omit_content` (bool) params (#917/#918); extending this
 /// helper avoids duplicating query-string assembly in each handler.
-/// What: tries `as_str` first, then `as_u64`, then `as_f64`, then `as_bool`;
-/// uses the first match. Non-string values are formatted without URL encoding
-/// because they never contain reserved characters.
-/// Test: `build_query_handles_numeric_and_bool` below.
+/// What: tries `as_str` first, then `as_u64`, then `as_bool`; uses the first
+/// match. The former `as_f64` fallback was removed because JSON integers are
+/// already covered by `as_u64`, and float→u64 truncation (e.g. `3.9 → 3`) is
+/// silently wrong. Non-string values are formatted without URL encoding because
+/// they never contain reserved characters.
+/// Test: `build_query_handles_numeric_and_bool` and
+/// `build_query_integer_limit_parses_correctly` in `helpers_tests.rs`.
 fn build_query(args: &Value, keys: &[&str]) -> String {
     let mut q = String::new();
     for key in keys {
@@ -706,7 +706,6 @@ fn build_query(args: &Value, keys: &[&str]) -> String {
             .and_then(Value::as_str)
             .map(urlencode)
             .or_else(|| node.and_then(Value::as_u64).map(|n| n.to_string()))
-            .or_else(|| node.and_then(Value::as_f64).map(|f| (f as u64).to_string()))
             .or_else(|| node.and_then(Value::as_bool).map(|b| b.to_string()));
         if let Some(v) = val {
             let sep = if q.is_empty() { '?' } else { '&' };

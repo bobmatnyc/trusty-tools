@@ -68,13 +68,12 @@ pub fn base_tool_descriptors() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "index":        { "type": "string" },
-                    "index_id":     { "type": "string" },
-                    "language":     { "type": "string", "description": "Optional: restrict to one language tag (rust, python, typescript, go, java, ruby, php, swift, kotlin, cpp, csharp)" },
-                    "tools":        { "type": "string", "description": "Optional: comma-separated list of tool names to run; defaults to all available" },
-                    "limit":        { "type": "number", "description": "Max results per page (default 500)" },
-                    "offset":       { "type": "number", "description": "Zero-based page offset (default 0)" },
-                    "omit_content": { "type": "boolean", "description": "Reserved for future use (default true)" }
+                    "index":    { "type": "string" },
+                    "index_id": { "type": "string" },
+                    "language": { "type": "string", "description": "Optional: restrict to one language tag (rust, python, typescript, go, java, ruby, php, swift, kotlin, cpp, csharp)" },
+                    "tools":    { "type": "string", "description": "Optional: comma-separated list of tool names to run; defaults to all available" },
+                    "limit":    { "type": "number", "description": "Max results per page (default 500)" },
+                    "offset":   { "type": "number", "description": "Zero-based page offset (default 0)" }
                 }
             }
         },
