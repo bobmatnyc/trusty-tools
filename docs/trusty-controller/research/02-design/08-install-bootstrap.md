@@ -351,11 +351,15 @@ project dir.
 claude-mpm is **external** (a different repo; DOC-6 §4 cross-repo note), so the
 hook must not require modifying claude-mpm's core. There is **strong in-tree
 precedent**: the trusty-memory/trusty-search `setup` already installs a
-**claude-mpm/Claude-Code startup hook** into the settings file
-(`merge_prompt_context_hook`, verified in `claude_config` + `setup.rs`) that runs
-on session start.
+**Claude Code `SessionStart` hook** into `~/.claude/settings.json`
+(`merge_prompt_context_hook`, verified in `claude_config` + `setup.rs`, which
+installs `SessionStart` + `UserPromptSubmit` Claude Code hooks specifically) that
+runs on session start. **claude-mpm is an orchestrator layered on the Claude Code
+CLI: it runs Claude Code underneath and merges into the user's
+`~/.claude/settings.json`, so a Claude Code `SessionStart` hook fires for
+claude-mpm sessions — claude-mpm needs no hook surface of its own.**
 
-- **Primary: a claude-mpm / Claude Code startup hook** that invokes
+- **Primary: a Claude Code `SessionStart` hook** that invokes
   `tctl ensure --scope project --yes` (non-interactive, backgrounded reindex per
   §3.3). The hook is installed **idempotently into the project `.mcp.json` /
   settings both during `tctl install`'s optional ensure step (§1.1 step 7) AND on
@@ -363,10 +367,12 @@ on session start.
   hook-merge primitives the per-tool `setup` already uses (idempotent either way).
   This makes the hook a *one-line shell-out to `tctl`*, so all the real logic stays
   in the controller (single source of truth) and the hook itself never needs to change.
-- **Fallback: a thin wrapper / alias.** Where a startup hook is unavailable, a
-  `claude-mpm` launch wrapper (or shell alias) that runs `tctl ensure` first, then
-  `exec`s the real orchestrator, achieves the same effect. This is the
-  lowest-coupling option and works regardless of claude-mpm internals.
+- **Fallback: a thin wrapper / alias.** Where the entry point is *not* a Claude
+  Code session (e.g. an orchestrator launched outside a Claude Code session, so the
+  `SessionStart` hook never fires), a `claude-mpm` launch wrapper (or shell alias)
+  that runs `tctl ensure` first, then `exec`s the real orchestrator, achieves the
+  same effect. This is the lowest-coupling option and works regardless of
+  claude-mpm internals.
 - **Not for v1: MCP-triggered ensure.** Triggering the pass from an MCP server call
   (e.g. on first tool use) couples auto-config to a specific tool's MCP lifecycle
   and muddies the "no hidden mutation" line DOC-5 drew. Keep ensure an explicit
@@ -389,8 +395,9 @@ Because the hook fires on **every** launch, its no-op cost must be negligible:
 
 #### 4.3 Cross-repo aspect
 
-The hook *content* is a one-line `tctl ensure` shell-out, so the only claude-mpm
-dependency is "it supports a startup hook (or can be wrapped)." All install/ensure
+The hook *content* is a one-line `tctl ensure` shell-out, so the only dependency
+is "Claude Code supports the `SessionStart` settings hook (which claude-mpm
+sessions inherit), or the launch can be wrapped." All install/ensure
 logic lives in `tctl` (this repo). When the orchestrator swaps claude-mpm →
 trusty-mpm (DOC-2 §7 / DOC-6 §6), the hook mechanism may change (trusty-mpm, being
 in-tree, could call `tctl ensure` natively), but the ensure-pass mechanics (§2)
@@ -634,7 +641,8 @@ Source-first audit, 2026-06-08 (trusty-search MCP search + Read against the tree
    Project-`pending` always exits 0. Locked for v1.
 
 4. **Launch-hook mechanism — primary startup hook + idempotent install timing (§4).** (Owner-approved)
-   Primary = a claude-mpm / Claude-Code **startup hook** that shells out to
+   Primary = a Claude Code **`SessionStart` hook** (which fires for claude-mpm
+   sessions, since claude-mpm runs on Claude Code) that shells out to
    `tctl ensure --scope project --yes` (installed idempotently via the existing
    `claude_config` hook-merge primitive, reusing the `merge_prompt_context_hook`
    precedent); fallback = a launch wrapper/alias. NOT MCP-triggered in v1. The hook

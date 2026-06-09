@@ -27,7 +27,7 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 | ID | Sev | Title | Affected docs | Verified? | Status |
 |---|---|---|---|---|---|
 | C1 | CRITICAL | `id_from_path` does not canonicalize; ADR-0008 "collision-free, symlink-safe" guarantee is false | ADR-0008, DOC-3 §8 | ✅ code-verified | ✅ Resolved |
-| C2 | CRITICAL | DOC-8 launch-hook precedent is misattributed; no claude-mpm startup hook verified to exist | DOC-8 §4.1/§4.3/Resolved-Decision-4 | ✅ code-verified | 🔴 Open |
+| C2 | CRITICAL | DOC-8 launch-hook precedent is misattributed; no claude-mpm startup hook verified to exist | DOC-8 §4.1/§4.3/Resolved-Decision-4 | ✅ code-verified | ✅ Resolved |
 | C3 | CRITICAL | `verbs[]` presence independent of `contract_version` opens an unversioned breaking-change channel | DOC-1 D3, ADR-0007 §3, DOC-1 ledger | — | 🔴 Open |
 | C4 | CRITICAL | DOC-4 dependency de-duplication needs root-cause inference the controller can't do generically | DOC-4 §5.4/§2.3/§8.2 | — | 🔴 Open |
 | C5 | CRITICAL | DOC-9 "new versions take effect via connection-safe restart" assumes a `restart` verb DOC-6 says is net-new on every tool | DOC-9 §5.1, DOC-6 §2.1–2.4 | — | 🔴 Open |
@@ -84,9 +84,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** the UUC1 "auto-config on every launch" mechanism rests on a claude-mpm hook surface the doc evidences only with a different product's feature.
 - **Failure mode:** if claude-mpm has no hook surface, the "fallback wrapper" is actually the only viable path — primary/fallback inverted.
 - **Fix direction:** re-ground §4 on claude-mpm's real launch surface, or state the hook lands in Claude Code settings and demote the unverified mechanism.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** Option (a) — minimal clarification, not a redesign. The reviewer's premise ("claude-mpm may have no hook surface → primary/fallback invert") is architecturally invalid: claude-mpm is an orchestrator layered on the Claude Code CLI, runs Claude Code underneath, and merges into `~/.claude/settings.json`, so the verified Claude Code `SessionStart` hook fires for claude-mpm sessions and claude-mpm needs no hook surface of its own. The mechanism is unchanged (primary = Claude Code `SessionStart` settings hook; fallback = launch wrapper/alias for non-Claude-Code entry points). Fix is a wording/attribution correction only.
+- **Follow-up:** DOC-8 §4.1/§4.3 + Resolved-Decision-4 reworded to correctly attribute the hook to Claude Code (`SessionStart`, verified in `setup.rs`), add the one-sentence "claude-mpm is layered on Claude Code, inherits its hook surface" clarification, and scope the wrapper fallback to non-Claude-Code entry points. No mechanism change.
 
 ### C3 — `verbs[]` presence independent of `contract_version` opens an unversioned breaking-change channel
 
