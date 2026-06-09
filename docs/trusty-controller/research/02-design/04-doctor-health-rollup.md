@@ -230,6 +230,14 @@ in `-v`, but do not fail a CI gate checking system health.
 | **per-tool-per-scope → per-tool** | a member's `{system, project}` cells | system cell drives the member verdict; project cell annotates (a member is `down` if its **system** cell is `down`, even if its project cell is `ready`) |
 | **per-tool → stack** | all members' **system** verdicts | §2.1 precedence over the system track; project track appended as per-repo annotation |
 
+> **A fourth, orthogonal fold — dependency clustering.** Beyond these three
+> verdict folds, the rollup runs a separate **cluster fold** that builds
+> dependency clusters via a transitive walk over the union graph G = manifest
+> `depends_on` ∪ runtime `health.data.deps[]` (§5.4). It is orthogonal to the
+> three folds above: it does **not** change any verdict count (each member is
+> counted exactly once, even when it appears in more than one cluster) — it only
+> annotates root-cause grouping so the controller can surface "fix the root."
+
 ### 3. The tools × scope matrix (primary rendered artifact)
 
 `tctl stack doctor` renders a matrix: **rows = manifest members**, **columns =
@@ -395,16 +403,68 @@ A naive rollup of "search is down" would paint **three** scary failures (search
   → fix the root: run `trusty-search start`   (resolves 2 dependent degradations)
   ```
 
+  This example collapses cleanly because **trusty-review depends *directly* on
+  trusty-search** (DOC-2's `review→[search,analyze]` edge), so its own
+  `health.data.deps[]` names the down root outright. The harder case is a
+  **transitive-only dependent** — one whose required dep is itself merely
+  `degraded` (not `down`) because *its* dep is the real root. There, the
+  dependent's proximate `deps[]` reports `reachable=true` against a `degraded`
+  intermediary, so a "dep unreachable AND dep's row is `down`" test would never
+  fire and the dependent would float free, unattributed. The cluster fold below
+  reaches the terminal root by **walking the union graph** rather than testing a
+  single edge.
+
 - **Single remediation.** The remediation surfaced for the cluster is the
   **root's** fix (start trusty-search), not three separate "fix the dependent"
   hints. This is the anti-double-counting rule: *N dependents of one dead root
-  produce one root failure + N annotated degradations, never N+1 failures.*
+  produce one root failure + N annotated degradations, never N+1 failures.* The
+  count holds even across **multiple clusters**: a member is counted **once** in
+  the `summary` regardless of how many root clusters it appears under (see the
+  multi-root case below).
 
-The rollup builds the dependency cluster from two sources, both contract/manifest
+**The cluster-construction algorithm (transitive fold over the union graph).**
+The rollup builds dependency clusters from two sources, both contract/manifest
 data (no tool-specific logic): the manifest `depends_on` (static edges, DOC-2 §3)
 and each tool's runtime `health.data.deps[]` (DOC-1; the `{id,required,reachable}`
-nodes). When a dependent reports a required dep unreachable AND that dep's own row
-is `down`, the controller collapses the dependent into the root's cluster.
+nodes). The fold is:
+
+1. **Build the graph.** Form the directed dependency graph G = manifest
+   `depends_on` (DOC-2 §3) ∪ runtime `health.data.deps[]` required edges
+   (DOC-1). Optional deps are not edges (they never degrade, per the grounding
+   `compute_status()` rule).
+2. **Identify root failures.** A **root** is a member whose **own** verdict is
+   `down`/`fail` for an **intrinsic** reason — i.e. it is broken on its own
+   merits, not merely because a dependency is unreachable. trusty-search with a
+   dead daemon is a root; a dependent that is only `degraded` because its dep is
+   down is *not* a root.
+3. **Walk to the terminal root(s) transitively.** For each dep-degraded member,
+   follow its **own proximate `because`/`deps[]` pointer** along required edges,
+   transitively, until reaching the terminal `down` root(s). Because each tool
+   already reports *its* `deps[]`, the controller simply **follows pointers**
+   member-to-member rather than re-deriving domain causality — preserving the
+   "zero tool-specific logic" property. A transitive-only dependent
+   (`review → analyze`, `analyze` merely `degraded`) is attributed to the real
+   root (`search`) by chaining `review`'s pointer → `analyze`'s pointer →
+   `search`.
+4. **Multi-root.** A dependent may belong to **more than one** cluster when the
+   transitive walk reaches two distinct `down` roots (e.g.
+   `review → [search, memory]` with both `down`). It appears under each root's
+   cluster, but the `summary` still counts it **exactly once** — the
+   anti-double-count rule holds at the *count* level, not the
+   *cluster-membership* level (§2.3, §8.2).
+5. **Attribution is a heuristic, verifiable via `-v`.** A member's `degraded`
+   may in truth be independent of the transitive root it gets attributed to (it
+   could be degraded for an unrelated reason that happens to coincide). The
+   `because`/cluster attribution is therefore a surfaced **hint**, not a proof;
+   the `-v` drill-down (§3.2) prints the raw per-member `deps[]` so the user can
+   confirm the chain rather than trust it blindly.
+
+**v1 note.** For the stack's *current* members every dependent has a **direct**
+edge to its root (trusty-review depends directly on trusty-search), so the simple
+direct-edge collapse already produces correct clusters today. This transitive
+specification is therefore primarily a **correctness-of-claim** fix (the prior
+rule was presented as generic but silently assumed transitive walking) plus
+**future-proofing and multi-root coverage** — not a v1 bug fix.
 
 ### 6. Remediation surfacing
 
@@ -524,7 +584,13 @@ Key machine fields: `verdict` + `exit_code` (the headline), `summary` counts,
 per-member `cells.{system,project}.{verdict,reason,because,remediation}`, the
 embedded per-member `checks[]`/`health` (verbatim DOC-1 payloads), and the
 `clusters[]` block that encodes the de-duplicated dependency root-cause grouping
-(§5.4) so the UI can render "fix the root" without re-deriving the graph.
+(§5.4) so the UI can render "fix the root" without re-deriving the graph. The
+`clusters[]` entries are derived by the §5.4 transitive cluster fold, so in a
+multi-root graph a single dependent **may appear under more than one `root`**
+(the JSON example above is a single-root illustration). The `summary` counts are
+**membership-independent**: each member is counted exactly once regardless of how
+many clusters it appears in, so cross-cluster membership never double-counts a
+member in the headline totals.
 
 DOC-7 renders this identically to the CLI matrix (it is a thin link-out control
 plane — spec §56 — so it consumes the rollup rather than recomputing it), and
