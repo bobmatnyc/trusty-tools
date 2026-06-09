@@ -124,7 +124,10 @@
     try {
       const res = await api.reindex(id);
       progress = { ...progress, [id]: { indexed: 0, total: 0 } };
-      const url = apiUrl(res?.stream_url || `/indexes/${encodeURIComponent(id)}/reindex/stream`);
+      const rawStreamUrl = res?.stream_url || `/indexes/${encodeURIComponent(id)}/reindex/stream`;
+      // Guard: if the daemon returned an absolute URL (http/https), use it as-is;
+      // otherwise rebase it through apiUrl so it resolves under the proxy sub-path.
+      const url = /^https?:\/\//.test(rawStreamUrl) ? rawStreamUrl : apiUrl(rawStreamUrl);
       closeStream(id);
       const src = new EventSource(url);
       streams[id] = src;
