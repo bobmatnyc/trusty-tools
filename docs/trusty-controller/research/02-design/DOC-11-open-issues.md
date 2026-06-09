@@ -26,7 +26,7 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 
 | ID | Sev | Title | Affected docs | Verified? | Status |
 |---|---|---|---|---|---|
-| C1 | CRITICAL | `id_from_path` does not canonicalize; ADR-0008 "collision-free, symlink-safe" guarantee is false | ADR-0008, DOC-3 §8 | ✅ code-verified | 🔴 Open |
+| C1 | CRITICAL | `id_from_path` does not canonicalize; ADR-0008 "collision-free, symlink-safe" guarantee is false | ADR-0008, DOC-3 §8 | ✅ code-verified | ✅ Resolved |
 | C2 | CRITICAL | DOC-8 launch-hook precedent is misattributed; no claude-mpm startup hook verified to exist | DOC-8 §4.1/§4.3/Resolved-Decision-4 | ✅ code-verified | 🔴 Open |
 | C3 | CRITICAL | `verbs[]` presence independent of `contract_version` opens an unversioned breaking-change channel | DOC-1 D3, ADR-0007 §3, DOC-1 ledger | — | 🔴 Open |
 | C4 | CRITICAL | DOC-4 dependency de-duplication needs root-cause inference the controller can't do generically | DOC-4 §5.4/§2.3/§8.2 | — | 🔴 Open |
@@ -72,9 +72,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** the canonical-id helper slugifies the raw path string with no `canonicalize()`, so symlinks / case-insensitive macOS APFS / moved checkouts produce divergent ids for the same directory — the exact collision class the ADR claims to eliminate.
 - **Failure mode:** `/Proj` vs `/proj` and symlinked/moved checkouts orphan or duplicate the index/palace.
 - **Fix direction:** make canonicalize-then-slug part of the contract; hoist into `trusty_common`; define behavior when `canonicalize()` fails.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** Option A — canonicalize-then-slug folded into a single `trusty_common::canonical_project_id` contract function (canonicalize internally, then slug; the slug never sees a raw path). Defines `canonicalize()`-failure fallback (lexical absolutize + `Fallback` warning, never refuse). Case-insensitive-volume divergence accepted as a named known limitation + tracked follow-up (case-fold only on case-insensitive volumes; deferred). Corrects the overstated "test-proven symlink-safe" claim — that test proves determinism + char-safety only; a symlink-equivalence test is a follow-up.
+- **Follow-up:** ADR-0008 updated (Decision §1 → canonicalize-then-slug; new failure-behavior decision point; Consequences/test-claim corrected; case-insensitivity limitation added). DOC-3 §8 updated (canonical rule → canonicalize-then-slug; edge-cases list gains a `canonicalize()`-failure bullet; case-insensitivity limitation noted; overstated test citation fixed). Implementation follow-ups: add symlink-equivalence test; optional case-fold-on-case-insensitive-volume (deferred).
 
 ### C2 — DOC-8 launch-hook precedent is misattributed; no claude-mpm startup hook is verified to exist
 

@@ -219,10 +219,15 @@ agree on it) and DOC-8 (install/bootstrap — the auto-config engine uses it).
 **Canonical rule (grounded in `detect_project()`; owner-approved, ADR-0008).**
 Walk up from the cwd and take the **nearest enclosing git repository root** (the
 first ancestor directory containing `.git`) as the project root. The **canonical
-stable project id is the full-path slug of that root** (the `id_from_path`
-scheme, e.g. `Users_mac_workspace_my-project`), used as both the trusty-search
-`IndexId` and the trusty-memory palace id, so a single identity keys all
-per-project state across tools. The git-root **basename is a display-only alias**.
+stable project id is the full-path slug of the *canonicalized* root**, computed
+by a single `trusty_common::canonical_project_id(path) -> Result<String>`
+contract function: it **`canonicalize()`s the root first** (resolving symlinks,
+`.`/`..`) and only then applies the `id_from_path` slug, so the slug step never
+sees a raw path (the contract is **canonicalize-then-slug**, not a bare slug).
+The resulting id (e.g. `Users_mac_workspace_my-project`) is used as both the
+trusty-search `IndexId` and the trusty-memory palace id, so a single identity
+keys all per-project state across tools. The git-root **basename is a
+display-only alias**.
 
 Detection precedence (matches the existing implemented walk):
 
@@ -245,16 +250,32 @@ The codebase currently has **two** id schemes that disagree:
 The live daemon registry shows **both forms registered for the same root** today
 (e.g. `trusty-tools` *and* `Users_mac_workspace_trusty-tools`), confirming the
 ambiguity is real, not hypothetical. **The full-path slug scheme wins** as the
-single canonical id (collision-free, stable across restarts, already proven
-`stable-and-safe` by `id_from_path`'s test); the basename is a display alias
-only. This reconciles the live `detect.rs`-vs-`fs_discovery.rs` inconsistency and
-is recorded as the authoritative decision in
+single canonical id (collision-free, stable across restarts), wrapped in the
+**canonicalize-then-slug** contract above so it is also symlink-safe. Note the
+proof scope precisely: `id_from_path`'s `stable-and-safe` test proves
+**determinism + character-safety only** — it does **not** prove
+symlink-equivalence; that needs a **new symlink-equivalence test** (a follow-up),
+so the existing test must not be cited as evidence of symlink-safety. The
+basename is a display alias only. This reconciles the live
+`detect.rs`-vs-`fs_discovery.rs` inconsistency and is recorded as the
+authoritative decision in
 [ADR-0008](../../../adr/0008-project-identity-convention.md).
+
+**Case-insensitivity — residual limitation.** On case-insensitive volumes
+(APFS), `canonicalize()` resolves symlinks and `.`/`..` but does not guarantee
+case-folding, so two differently-cased spellings of the same directory (`/Proj`
+vs `/proj`) may still produce divergent ids. This is a named known limitation;
+case-folding (scoped to case-insensitive volumes only) is a **deferred**
+follow-up, not done in v1 (see ADR-0008).
 
 **Edge cases the rule names (RESOLVED — see Resolved Decisions):**
 
 - **No git root and no marker** — id = **cwd path-slug + `Fallback` warning**
   (never refuse). (Q1.)
+- **`canonicalize()` failure** (path doesn't exist, broken symlink component,
+  permission error) — fall back to a **lexically-absolutized** path slug
+  (absolutize against cwd + normalize `.`/`..` **without** symlink resolution) and
+  emit a `Fallback` warning; **never refuse** (mirrors the no-git-root rule).
 - **Git worktrees** — each worktree gets its **own** id keyed on its
   working-directory path. (Q4.)
 - **Monorepo subdirs** — all subdirs share the **nearest enclosing git root's**
