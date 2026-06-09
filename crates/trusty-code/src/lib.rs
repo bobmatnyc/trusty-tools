@@ -156,6 +156,22 @@ pub mod identity;
 /// Test: `logging::tests::*`.
 pub mod logging;
 
+// ── Phase 4: LLM client layer (per #1020) ──
+
+/// Native OpenRouter chat-completions client.
+///
+/// Why: trusty-code agents need to call LLMs via OpenRouter without coupling to
+/// third-party SDK crates.  This module provides a thin, native HTTP client
+/// that speaks the OpenAI chat-completions schema and works with any
+/// OpenRouter-hosted model slug.
+/// What: `LlmClient`, `LlmClientConfig`, all request/response types, and
+/// `LlmError`.  The API key is injected at construction time so library
+/// helpers never read `std::env` themselves.
+/// Test: `llm::types::tests::*`, `llm::error::tests::*`,
+/// `llm::client::tests::*`; integration test `live_openrouter_call`
+/// (run with `--include-ignored`).
+pub mod llm;
+
 // ── Package-level re-exports ──
 
 /// Version string, re-exported so integration tests can assert it without

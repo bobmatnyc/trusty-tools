@@ -45,6 +45,10 @@ async-trait = { workspace = true }
 # Phase 3: TOML config parsing for AgentConfig
 toml = { workspace = true }
 
+# Phase 4: native OpenRouter LLM client (llm module, #1020)
+reqwest = { workspace = true }
+thiserror = { workspace = true }
+
 [dev-dependencies]
 # Async test runtime (events, build_info, perf async tests, tools tests)
 tokio = { workspace = true }
