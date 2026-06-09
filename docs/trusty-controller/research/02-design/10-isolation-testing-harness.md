@@ -151,6 +151,17 @@ construction, conformant for its advertised verbs, so the §2.1 oracle is readin
 trustworthy envelopes. The self-check is the bridge that lets DOC-10 "only validate
 conformant tools" (DOC-6 §Produces / "gates DOC-10").
 
+The pre-gate also validates each member's real `--json` envelope and per-verb
+`data` output against the **committed golden contract schema** exported from the
+`trusty_common` contract module (the same fixtures that gate the Rust
+golden-snapshot test — DOC-1 D3 / ADR-0007). This extends snapshot coverage to
+the **non-Rust claude-mpm shim**, which hand-rolls its JSON via the Python
+adapter and is therefore *not* gated by the Rust snapshot test: capturing its
+live output and asserting it against the golden schema holds it to the same
+`data`-shape contract as the Rust tools, closing the version-skew channel (a tool
+shipping a changed `data` shape under a stale `contract_version`) for the one
+member the in-workspace shared types cannot cover.
+
 ### 3. macOS isolation (PRIMARY, MUC2) — resolve the launchd-per-user problem
 
 macOS is the **primary** target (spec §172–173). The defining constraint is

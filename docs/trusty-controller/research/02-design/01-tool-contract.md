@@ -95,6 +95,16 @@ the controller **without a controller release**. First-class commands
 changes incompatibly — NOT when a verb is merely added. This keeps the integer
 slow-moving while the verb set stays freely extensible.
 
+This bump rule is **enforced mechanically by a golden-snapshot test in the
+`trusty_common` contract module**: any change to the serialized envelope or an
+existing verb's `data` shape fails CI unless `contract_version` is bumped and a
+ledger row added (see the ledger's "Rule" below). Rust tools are gated here, via
+the shared `data` types they compile against; non-Rust members (the claude-mpm
+Python adapter) are gated by DOC-10's captured-`--json`-output conformance
+fixture. This is what stops a skewed-version consumer — a controller and a tool
+`cargo install`ed against different `trusty_common` versions — from
+silently misdeserializing a changed shape under a stale integer.
+
 ### D4 — Status vocabularies (A4)
 
 - doctor check `status`: `ok | warn | fail | pending | skipped` — where
@@ -451,6 +461,14 @@ Home: a new `contract` module in `trusty-common` (D6), sibling to the existing
 not committed source — DOC-6's retrofits implement against them. Edition-2021
 safe (no let-chains) so every member crate can depend on it.
 
+The module also ships a **golden-snapshot conformance test**: it serializes a
+canonical instance of `Envelope<T>` and each per-verb `data` struct to JSON and
+asserts the result against committed fixtures, so any change to a serialized
+shape fails CI unless `CONTRACT_VERSION` is bumped and a ledger row added —
+coupling shape changes to the integer (see the ledger "Rule"). This gates the
+Rust tools; non-Rust members are held to the same shapes via DOC-10's
+captured-`--json` fixture.
+
 ```rust
 // trusty_common::contract  (new module; D6)
 
@@ -641,7 +659,9 @@ launch, **floor `F = 1`**.
 presence is advertised via `verbs[]` (a capability). Bump the integer **only**
 when the envelope shape or an existing verb's `data` schema changes in a way that
 is **not** a pure additive superset (i.e., would break an older consumer).
-Adding an **optional** field is additive and does NOT bump.
+Adding an **optional** field is additive and does NOT bump. This rule is
+CI-enforced via the `trusty_common` golden-snapshot test — the snapshot, the
+integer bump, and the ledger row move together — not by reviewer discipline.
 
 | `contract_version` | What it guarantees / what changed |
 |---|---|
