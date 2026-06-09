@@ -53,6 +53,7 @@ pub mod migrate_redb;
 pub mod migrate_storage;
 pub mod monitor;
 pub mod port;
+pub(crate) mod prior_index_count;
 pub mod prune_orphans;
 pub mod query;
 pub mod reindex;

@@ -345,6 +345,31 @@ The `[workspace.package]` table no longer carries a `version` field (see #343).
 When publishing, bump only the crates that actually changed — do not cascade
 version bumps to siblings with no functional changes.
 
+### macOS Full Disk Access must be re-granted after every `cargo install` (issue #873)
+
+On macOS, every `cargo install` of a binary writes a NEW file at
+`~/.cargo/bin/<binary>` with a new **cdhash** (code-signing hash). macOS TCC
+keys the **Full Disk Access** grant by cdhash, so the previously-granted FDA no
+longer applies to the freshly-installed binary. The launchd daemon then cannot
+read indexes on `/Volumes/…` and warm-boot collapses from ~102 indexes to
+**indexes:2** (only non-external-volume indexes load).
+
+**After every `cargo install trusty-search` (or any binary that accesses
+external/protected volumes as a launchd daemon), re-grant FDA:**
+
+1. Open **System Settings → Privacy & Security → Full Disk Access**.
+2. Remove `~/.cargo/bin/trusty-search` from the list.
+3. Re-add it (`+` button, navigate to `~/.cargo/bin/trusty-search`).
+4. Restart the daemon: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/<label>.plist && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist`.
+
+**Symptom:** `trusty-search status` shows `indexes:2` (or very few) immediately
+after a reinstall, with warm-boot logs showing `skipped: blocked-volume` or
+`tcc=57`. This is NOT data loss — all on-disk indexes are intact.
+
+The daemon now detects this automatically: when the loaded count drops below 80%
+of the prior-known count, `GET /health` returns `warm_boot_degraded: true` and
+the daemon logs an error with the actionable FDA re-grant hint.
+
 ### Connection-safe daemon restart convention (issue #534)
 
 As of trusty-common 0.10.0, all three HTTP daemons (trusty-memory, trusty-search,
@@ -359,6 +384,7 @@ with exponential backoff when the daemon restarts.
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
 cargo install --path crates/<dir> --locked
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
+# IMPORTANT on macOS: re-grant Full Disk Access after cargo install (see above)
 ```
 
 Prefer restarting between Claude Code sessions. See the cargo-publish skill

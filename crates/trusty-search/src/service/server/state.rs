@@ -266,4 +266,56 @@ pub struct SearchAppState {
     /// registered indexes loaded successfully.
     /// Test: `health_reports_warmboot_failures` in server tests.
     pub warmboot_failed_indexes: Arc<std::sync::atomic::AtomicUsize>,
+    /// Warm-boot summary surfaced on `GET /health` (issue #873).
+    ///
+    /// Why: when `cargo install` changes the binary cdhash, macOS TCC revokes
+    /// Full Disk Access and the daemon silently loads only ~2 indexes instead
+    /// of ~102. Operators have no machine-readable way to detect this without
+    /// tailing logs. `WarmBootSummary` gives `indexes_loaded`,
+    /// `indexes_skipped_tcc`, `indexes_skipped_timeout`, and a
+    /// `warm_boot_degraded` flag so monitoring or a simple `curl /health`
+    /// shows the regression immediately.
+    /// What: written once by `restore_indexes` in `start.rs` after warm-boot
+    /// completes; read by the health handler. Protected by `Mutex` because
+    /// `WarmBootSummary` contains non-atomic fields.
+    /// Test: `health_surfaces_warmboot_summary` in server tests.
+    pub warmboot_summary: Arc<std::sync::Mutex<WarmBootSummary>>,
+    /// Count of indexes registered on the PREVIOUS successful daemon start,
+    /// persisted to `daemon.env` (or a sibling file) so a fresh boot can
+    /// compare its `indexes_loaded` against the prior-known count (issue #873).
+    ///
+    /// Why: `cargo install` silently drops FDA after changing the cdhash;
+    /// without a prior-count baseline, the daemon has no way to know whether
+    /// loading only 2 of 102 indexes is expected or a regression.
+    /// What: an `AtomicUsize` loaded from `prior_index_count.txt` in
+    /// `daemon_dir()` at startup by `start.rs`, written by the same module
+    /// after warm-boot completes. `0` = no prior run known (first run).
+    /// Test: `health_emits_fda_hint_when_loaded_below_prior_count`.
+    pub prior_index_count: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Per-boot summary of warm-boot index loading, surfaced on `GET /health`.
+///
+/// Why (issue #873): `cargo install` changes the binary cdhash and silently
+/// revokes macOS TCC Full Disk Access, causing the daemon to load only 2 of
+/// ~102 indexes. Making this visible on `/health` turns a silent degradation
+/// into a loud, machine-readable signal.
+/// What: counts of loaded and skipped indexes split by skip reason; a boolean
+/// `warm_boot_degraded` flag set when at least one TCC-skip happened or when
+/// loaded < 80% of prior known count.
+/// Test: `health_surfaces_warmboot_summary` in server tests.
+#[derive(Clone, Default, serde::Serialize)]
+pub struct WarmBootSummary {
+    /// Number of indexes successfully loaded during warm-boot.
+    pub indexes_loaded: usize,
+    /// Number of indexes skipped because their volume was TCC-denied
+    /// (PermissionDenied error or probe timeout on an external volume).
+    pub indexes_skipped_tcc: usize,
+    /// Number of indexes skipped due to timeout (not TCC — slow or
+    /// network-backed filesystem).
+    pub indexes_skipped_timeout: usize,
+    /// `true` when `indexes_skipped_tcc > 0` OR when `indexes_loaded` is
+    /// less than 80% of the prior-known count (suggesting a large fraction
+    /// of indexes are missing, e.g. after FDA was revoked).
+    pub warm_boot_degraded: bool,
 }

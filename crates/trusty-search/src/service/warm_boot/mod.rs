@@ -21,7 +21,7 @@
 
 pub(super) mod probe;
 pub mod restore;
-mod scan;
+pub(crate) mod scan;
 
 pub use probe::leaked_probe_thread_count;
 

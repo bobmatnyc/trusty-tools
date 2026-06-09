@@ -159,7 +159,7 @@ crates/trusty-search/src/core/symbol_graph.rs	1667
 crates/trusty-search/src/main.rs	1320
 crates/trusty-search/src/mcp/tools.rs	2187
 crates/trusty-search/src/service/call_chain.rs	954
-crates/trusty-search/src/service/daemon.rs	774
+crates/trusty-search/src/service/daemon.rs	701
 crates/trusty-search/src/service/embedder_supervisor.rs	1020
 crates/trusty-search/src/service/grep.rs	827
 crates/trusty-search/src/service/persistence.rs	1017

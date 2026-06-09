@@ -49,7 +49,7 @@ pub use reindex_handlers::ReindexRequest;
 pub use router::{CreateIndexRequest, IndexFileRequest, RemoveFileRequest};
 pub use routing::SearchSimilarRequest;
 pub use search::GlobalSearchRequest;
-pub use state::{DaemonEvent, SearchAppState};
+pub use state::{DaemonEvent, SearchAppState, WarmBootSummary};
 
 use axum::{
     response::Redirect,

@@ -89,10 +89,12 @@ pub(super) fn scan_one_root(root: &std::path::Path) -> Vec<ColocatedDiscovery> {
 /// from merely slow NFS/SMB mounts. External volumes on macOS are conventionally
 /// mounted under `/Volumes/`; this is not authoritative but is correct for the
 /// common case (USB drives, Thunderbolt SSDs, network shares mounted as volumes).
+/// Used by both warm-boot (TCC-hint log messages) and shutdown flush
+/// (issue #874: skip external-volume indexes to avoid stalling graceful shutdown).
 /// What: checks whether the canonical form of `path` starts with `/Volumes/`.
 /// Falls back gracefully if canonicalization fails.
 /// Test: `is_likely_external_volume_detection` in this module.
-pub(super) fn is_likely_external_volume(path: &std::path::Path) -> bool {
+pub(crate) fn is_likely_external_volume(path: &std::path::Path) -> bool {
     // Fast path: string prefix check before canonicalize.
     if path.starts_with("/Volumes") {
         return true;

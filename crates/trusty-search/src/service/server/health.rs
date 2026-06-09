@@ -11,7 +11,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use super::state::SearchAppState;
+use super::state::{SearchAppState, WarmBootSummary};
 
 /// Response shape for `GET /health` (issue #34 + #35 + #38 + #282 + #537).
 #[derive(Serialize)]
@@ -34,6 +34,14 @@ pub(super) struct HealthResponse {
     pub(super) background_reindex_queue_depth: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) update_available: Option<String>,
+    /// Warm-boot summary: how many indexes loaded vs. skipped and by what
+    /// reason (issue #873). Always present after warm-boot completes; all
+    /// fields are `0`/`false` on a fresh start before warm-boot runs.
+    ///
+    /// Why: makes the "cargo install dropped FDA" symptom (`indexes:2` from
+    /// `~102`) immediately visible without tailing logs. The `warm_boot_degraded`
+    /// boolean is the machine-readable flag external monitors should poll.
+    pub(super) warmboot_summary: WarmBootSummary,
 }
 
 /// Embedding-model metadata surfaced by `GET /health` (issue #38).
@@ -120,6 +128,13 @@ pub(super) async fn health_handler(
         .current_embedderd_pid()
         .and_then(crate::core::memguard::current_rss_mb_for_pid);
     let update_available = state.update_available.lock().ok().and_then(|g| g.clone());
+    // Issue #873: surface the warm-boot summary so a post-`cargo install` FDA
+    // regression (`indexes:2` instead of `~102`) is visible without tailing logs.
+    let warmboot_summary = state
+        .warmboot_summary
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
 
     Json(HealthResponse {
         status: "ok",
@@ -138,6 +153,7 @@ pub(super) async fn health_handler(
         // watch the startup storm drain without reading daemon logs.
         background_reindex_queue_depth: crate::service::reindex::background_reindex_queue_depth(),
         update_available,
+        warmboot_summary,
     })
 }
 

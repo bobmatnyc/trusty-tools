@@ -520,83 +520,10 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
     Ok(())
 }
 
-/// Walk every registered index and persist its HNSW snapshot + chunk corpus
-/// to disk so the next daemon boot warm-starts (issue #85).
-///
-/// Why: called from `run_daemon` after the axum graceful-shutdown future
-/// resolves. By this point no new requests can come in, but any in-flight
-/// search handlers may still be holding read locks — we use the same
-/// `save_to` / `save_chunks_to_disk` paths the incremental persister uses,
-/// so they snapshot under read locks and never block writers indefinitely.
-/// What: iterates `state.registry.list()`, persisting each index sequentially
-/// (the daemon is exiting; we have no concurrency budget to protect).
-/// Test: covered by the integration test that boots the daemon, indexes a
-/// file, sends SIGTERM, then restarts and asserts the corpus survived.
-pub async fn flush_all_indexes_on_shutdown(state: &SearchAppState) {
-    let ids = state.registry.list();
-    if ids.is_empty() {
-        return;
-    }
-    tracing::info!(
-        "shutdown: flushing {} index snapshot(s) before exit",
-        ids.len()
-    );
-    for id in ids {
-        let Some(handle) = state.registry.get(&id) else {
-            continue;
-        };
-        // Issue #403: route HNSW + chunks paths to colocated or legacy storage
-        // based on whether the index has a `.trusty-search/` dir in its root.
-        let is_colocated =
-            crate::service::colocated_storage::has_colocated_storage(&handle.root_path);
-        let chunks_path = if is_colocated {
-            // Colocated indexes write their corpus to redb only (no JSON fallback).
-            // Provide a dummy path — `flush_corpus_to_disk` won't use it when a
-            // `CorpusStore` is wired; the redb file lives in `.trusty-search/`.
-            handle.root_path.join(".trusty-search").join("chunks.json")
-        } else {
-            match crate::service::persistence::chunks_path(&id.0) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!("shutdown: chunks path unresolvable for '{}': {e}", id.0);
-                    continue;
-                }
-            }
-        };
-        let hnsw_path = if is_colocated {
-            match crate::service::colocated_storage::colocated_hnsw_path(&handle.root_path) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(
-                        "shutdown: colocated hnsw path unresolvable for '{}': {e}",
-                        id.0
-                    );
-                    continue;
-                }
-            }
-        } else {
-            match crate::service::persistence::hnsw_path(&id.0) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!("shutdown: hnsw path unresolvable for '{}': {e}", id.0);
-                    continue;
-                }
-            }
-        };
-        let indexer = handle.indexer.read().await;
-        // Issue #28: `flush_corpus_to_disk` writes to redb when a `CorpusStore`
-        // is wired (final consistency sweep, no full JSON rewrite) and falls
-        // back to the legacy `chunks.json` snapshot otherwise.
-        if let Err(e) = indexer.flush_corpus_to_disk(&chunks_path).await {
-            tracing::warn!("shutdown: failed to flush chunk corpus for '{}': {e}", id.0);
-        }
-        match indexer.save_vector_store(&hnsw_path).await {
-            Ok(true) => tracing::debug!("shutdown: saved HNSW for '{}'", id.0),
-            Ok(false) => {} // no store wired (BM25-only mode)
-            Err(e) => tracing::warn!("shutdown: failed to save HNSW for '{}': {e}", id.0),
-        }
-    }
-}
+// Shutdown-flush helpers extracted to `service::shutdown_flush` (issue #874 split).
+pub use crate::service::shutdown_flush::{
+    flush_all_indexes_on_shutdown, shutdown_flush_timeout_secs,
+};
 
 /// Write the canonical `host:port` discovery line to `~/.trusty-search/http_addr`.
 ///

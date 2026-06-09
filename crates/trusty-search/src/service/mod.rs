@@ -23,6 +23,7 @@ pub mod query_timeout;
 pub mod reindex;
 pub mod roots_registry;
 pub mod server;
+pub mod shutdown_flush;
 pub mod ui;
 pub mod walker;
 pub mod warm_boot;

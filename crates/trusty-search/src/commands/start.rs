@@ -173,6 +173,10 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
     // the two ID schemes differ (basename vs. full-path-sanitized).
     let mut seen_root_paths: HashSet<std::path::PathBuf> = HashSet::new();
 
+    // Issue #873: TCC vs timeout skip counters for WarmBootSummary.
+    let mut total_skipped_tcc: usize = 0;
+    let mut total_skipped_timeout: usize = 0;
+
     if legacy_entries.is_empty() {
         tracing::warn!(
             "warm-boot: no legacy index entries (indexes.toml absent/empty). \
@@ -197,20 +201,13 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
             "warm-boot: restoring {} legacy index registration(s) from indexes.toml",
             total_legacy
         );
-        let mut legacy_ok: usize = 0;
-        let mut legacy_skipped: usize = 0;
+        let (mut legacy_ok, mut legacy_skipped_tcc, mut legacy_skipped_other) =
+            (0usize, 0usize, 0usize);
         for entry in legacy_entries {
             seen_ids.insert(entry.id.clone());
             // Issue #860: record the canonicalized root_path BEFORE the
             // inaccessible-volume guard so Phase 2 never duplicates this root
             // even if the legacy restore is skipped.
-            //
-            // Intentional: even when a legacy entry is skipped (inaccessible
-            // volume), the colocated scan is independently filtered by
-            // `inaccessible_volumes` (via `is_on_inaccessible_volume`), so a
-            // colocated entry for the same root would be skipped anyway. Inserting
-            // the root_path here is therefore safe — it cannot suppress a colocated
-            // entry that would otherwise succeed.
             seen_root_paths.insert(canonicalize_best_effort(&entry.root_path));
             if is_on_inaccessible_volume(&entry.root_path, &inaccessible_volumes) {
                 tracing::warn!(
@@ -218,7 +215,7 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
                     entry.id,
                     entry.root_path.display(),
                 );
-                legacy_skipped += 1;
+                legacy_skipped_tcc += 1;
                 continue;
             }
             let s = state.clone();
@@ -230,12 +227,15 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
             {
                 legacy_ok += 1;
             } else {
-                legacy_skipped += 1;
+                // Timeout or panic — volume was accessible but restore stalled.
+                legacy_skipped_other += 1;
             }
         }
+        total_skipped_tcc += legacy_skipped_tcc;
+        total_skipped_timeout += legacy_skipped_other;
         tracing::info!(
-            "warm-boot: legacy phase complete — {legacy_ok} of {total_legacy} index(es) \
-             restored ({legacy_skipped} skipped: timeout/denied/missing/blocked-volume)"
+            "warm-boot: legacy phase complete — {legacy_ok}/{total_legacy} \
+             (skipped tcc={legacy_skipped_tcc} timeout={legacy_skipped_other})"
         );
     }
 
@@ -270,9 +270,11 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
             "warm-boot: restoring {} colocated index registration(s) from tracked roots",
             total_colocated
         );
-        let mut colocated_ok: usize = 0;
-        let mut colocated_skipped: usize = 0;
+        let (mut colocated_ok, mut colocated_skipped_tcc, mut colocated_skipped_other) =
+            (0usize, 0usize, 0usize);
         for entry in colocated_entries {
+            let on_inaccessible =
+                is_on_inaccessible_volume(&entry.root_path, &colocated_inaccessible);
             let s = state.clone();
             let e = Arc::clone(embedder);
             if restore_one_index_bounded(entry, move |en| async move {
@@ -281,41 +283,34 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
             .await
             {
                 colocated_ok += 1;
+            } else if on_inaccessible {
+                colocated_skipped_tcc += 1;
             } else {
-                colocated_skipped += 1;
+                colocated_skipped_other += 1;
             }
         }
+        total_skipped_tcc += colocated_skipped_tcc;
+        total_skipped_timeout += colocated_skipped_other;
         tracing::info!(
-            "warm-boot: colocated phase complete — {colocated_ok} of {total_colocated} \
-             index(es) restored ({colocated_skipped} skipped: timeout/denied/missing)"
+            "warm-boot: colocated phase complete — {colocated_ok}/{total_colocated} \
+             (skipped tcc={colocated_skipped_tcc} timeout={colocated_skipped_other})"
         );
     }
 
     let total = state.registry.list().len();
     tracing::info!("warm-boot: complete — {total} total index(es) registered (legacy + colocated)");
 
+    // Issue #873: update WarmBootSummary, emit FDA warning, persist count.
+    record_warm_boot_result(state, total, total_skipped_tcc, total_skipped_timeout);
+
     // Issue #764: fail-loud warm-boot — tally total skipped/failed indexes and
     // store the count on AppState so `/health` can surface it without operators
-    // having to tail logs. A non-zero value means the daemon is serving fewer
-    // indexes than were registered on disk; operators should investigate
-    // (TCC denial on an external volume, redb-format mismatch, corrupt corpus).
-    //
-    // "Skipped" in both phases covers: timeout, TCC denial, missing root, and
-    // restore error. All of these leave the index unregistered on this boot.
-    // We re-derive the counts from the registry: any index that was in
-    // `indexes.toml` (or discovered colocated) but is NOT in the live registry
-    // after warm-boot is a failure. Rather than track exact per-phase counts
-    // (which would require plumbing through the counters), we read the final
-    // registry size and compare to the legacy+colocated totals we already logged.
-    // The `seen_ids` set was built from legacy entries (and colocated entries were
-    // discovered separately); the registry has whatever survived. Any gap is a
-    // warm-boot failure.
+    // having to tail logs.
     let registered_ids: std::collections::HashSet<String> =
         state.registry.list().into_iter().map(|id| id.0).collect();
     // TODO(#796): `seen_ids` covers only legacy entries from `indexes.toml`; colocated
     // index failures (Phase 2 above) are not counted here, so `failed_count` can
-    // under-report when colocated indexes time out or fail to restore.  Track
-    // colocated skipped counts and add them to this tally in a follow-up.
+    // under-report when colocated indexes time out or fail to restore.
     let failed_count: usize = seen_ids
         .iter()
         .filter(|id| !registered_ids.contains(*id))
@@ -324,8 +319,6 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
         state
             .warmboot_failed_indexes
             .store(failed_count, std::sync::atomic::Ordering::Relaxed);
-        // Issue #796 nit: pass `failed_count` only as a structured field, not
-        // also as a positional arg (which caused a duplicate in the log output).
         tracing::error!(
             failed_count,
             registered = total,
@@ -337,6 +330,9 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
         );
     }
 }
+
+// Prior-index-count helpers extracted to `commands::prior_index_count` (issue #873 split).
+use crate::commands::prior_index_count::{load_prior_index_count, record_warm_boot_result};
 
 /// Attempt to canonicalize `path` (resolving symlinks), returning the canonical
 /// form on success or the original path on failure.
@@ -1174,6 +1170,10 @@ pub async fn handle_start(
                 );
                 install_state.install_embed_pool(pool).await;
                 tracing::info!("embedder ready — vector lane online");
+                let prior = load_prior_index_count(); // Issue #873: FDA regression baseline.
+                install_state
+                    .prior_index_count
+                    .store(prior, std::sync::atomic::Ordering::Relaxed);
                 // Issue #85: restore every index recorded in `indexes.toml`
                 // now that we have a fully-wired hybrid pipeline.
                 restore_indexes(&install_state, &embedder).await;

@@ -63,6 +63,10 @@ impl SearchAppState {
             embedderd_pid_slot: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             update_available: Arc::new(std::sync::Mutex::new(None)),
             warmboot_failed_indexes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            warmboot_summary: Arc::new(std::sync::Mutex::new(
+                crate::service::server::state::WarmBootSummary::default(),
+            )),
+            prior_index_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
