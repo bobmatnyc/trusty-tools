@@ -47,12 +47,14 @@ pub fn shutdown_flush_timeout_secs() -> std::time::Duration {
 ///    continues to the next index. This guarantees shutdown completes in
 ///    bounded time even under external-volume I/O stalls.
 ///
-/// 2. **Drop read-lock before blocking I/O**: the paths needed for flush
-///    (chunks_path, hnsw_path) are derived inside a short read-lock scope on
-///    the handle, but the actual blocking I/O (`flush_corpus_to_disk`,
-///    `save_vector_store`) is performed AFTER releasing the indexer read lock.
-///    No concurrent writers exist once axum has drained gracefully, so releasing
-///    the lock early is safe and avoids lock-held-across-blocking-I/O.
+/// 2. **Short critical section for path derivation**: the flush paths
+///    (chunks_path, hnsw_path) are derived from handle metadata BEFORE
+///    acquiring the indexer read-lock. The indexer read-lock is then held
+///    across the `flush_corpus_to_disk` and `save_vector_store` calls because
+///    both are `&self` methods that require the guard to borrow `self`.
+///    This is safe: axum has drained all in-flight requests by this point so
+///    no concurrent writers can exist; the per-index timeout (fix #874 (1))
+///    bounds the lock-held duration even under I/O stalls.
 ///
 /// 3. **Skip external-volume indexes**: if an index's root is on an external
 ///    volume (detected via `is_likely_external_volume`), the shutdown skips its
@@ -135,16 +137,22 @@ pub async fn flush_all_indexes_on_shutdown(state: &SearchAppState) {
             }
         };
 
-        // Fix #874 (2): clone the Arcs the flush needs under a brief read-lock
-        // scope, drop the guard, then do blocking I/O lock-free.
+        // Fix #874 (2): derive paths inside a short read-lock scope above,
+        // then hold the indexer read-lock across the flush I/O below.
+        // `flush_corpus_to_disk` and `save_vector_store` are `&self` methods on
+        // `CodeIndexer` — they require the guard to borrow `self`. This is safe
+        // at shutdown because axum has already drained all in-flight requests
+        // (no concurrent writers exist), and the per-index timeout (fix #874 (1))
+        // bounds the worst-case lock-held duration even under I/O stalls.
         let indexer_arc = handle.indexer.clone();
 
         // Fix #874 (1): wrap the per-index flush in a timeout so a stalled
         // external volume or slow I/O cannot block the shutdown indefinitely.
         let index_id_for_log = id.0.clone();
         let flush_future = async move {
-            // Acquire the read lock only to borrow the indexer.
-            // We release it immediately after the flush calls complete.
+            // The read-guard is held across the flush I/O; this is intentional
+            // (see comment above). No write-lock contention is possible at this
+            // point in the shutdown sequence.
             let indexer = indexer_arc.read().await;
             // Issue #28: `flush_corpus_to_disk` writes to redb when a `CorpusStore`
             // is wired (final consistency sweep, no full JSON rewrite) and falls
@@ -196,12 +204,15 @@ mod tests {
     #[test]
     #[serial]
     fn shutdown_flush_timeout_parses_env_var() {
+        // SAFETY: tests are #[serial]; no other thread reads the environment
+        // concurrently during these single-threaded test bodies.
         unsafe { std::env::set_var("TRUSTY_SHUTDOWN_FLUSH_TIMEOUT_SECS", "5") };
         assert_eq!(
             shutdown_flush_timeout_secs(),
             std::time::Duration::from_secs(5),
             "must parse 5 from env var"
         );
+        // SAFETY: same serial guarantee as above.
         unsafe { std::env::remove_var("TRUSTY_SHUTDOWN_FLUSH_TIMEOUT_SECS") };
         assert_eq!(
             shutdown_flush_timeout_secs(),
@@ -227,12 +238,15 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn shutdown_flush_empty_registry_returns_immediately() {
+        // SAFETY: tests are #[serial]; no other thread reads the environment
+        // concurrently during these single-threaded test bodies.
         unsafe { std::env::set_var("TRUSTY_SHUTDOWN_FLUSH_TIMEOUT_SECS", "1") };
         let state = crate::service::server::SearchAppState::new(
             crate::core::registry::IndexRegistry::new(),
         );
         let start = std::time::Instant::now();
         flush_all_indexes_on_shutdown(&state).await;
+        // SAFETY: same serial guarantee as above.
         unsafe { std::env::remove_var("TRUSTY_SHUTDOWN_FLUSH_TIMEOUT_SECS") };
         assert!(
             start.elapsed() < std::time::Duration::from_secs(2),

@@ -82,6 +82,7 @@ pub(crate) fn record_warm_boot_result(
         .prior_index_count
         .load(std::sync::atomic::Ordering::Relaxed);
     let degraded_by_tcc = total_skipped_tcc > 0;
+    // Single source of truth for the 80%-of-prior threshold (issue #873 review nit).
     let degraded_by_count = prior_count > 0 && total < prior_count * 4 / 5;
     let warm_boot_degraded = degraded_by_tcc || degraded_by_count;
 
@@ -94,7 +95,7 @@ pub(crate) fn record_warm_boot_result(
         };
     }
 
-    if prior_count > 0 && total < prior_count * 4 / 5 {
+    if degraded_by_count {
         tracing::error!(
             loaded = total,
             prior = prior_count,

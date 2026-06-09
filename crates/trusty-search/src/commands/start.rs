@@ -273,8 +273,11 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
         let (mut colocated_ok, mut colocated_skipped_tcc, mut colocated_skipped_other) =
             (0usize, 0usize, 0usize);
         for entry in colocated_entries {
-            let on_inaccessible =
-                is_on_inaccessible_volume(&entry.root_path, &colocated_inaccessible);
+            // Issue #873: skip inaccessible vol. before restore so timeout ≠ tcc-skip.
+            if is_on_inaccessible_volume(&entry.root_path, &colocated_inaccessible) {
+                colocated_skipped_tcc += 1;
+                continue;
+            }
             let s = state.clone();
             let e = Arc::clone(embedder);
             if restore_one_index_bounded(entry, move |en| async move {
@@ -283,8 +286,6 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
             .await
             {
                 colocated_ok += 1;
-            } else if on_inaccessible {
-                colocated_skipped_tcc += 1;
             } else {
                 colocated_skipped_other += 1;
             }
