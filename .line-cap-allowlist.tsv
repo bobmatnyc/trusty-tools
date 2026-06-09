@@ -8,7 +8,7 @@ crates/trusty-agents/src/tm/manager.rs	570
 crates/trusty-agents/src/tools/memory/tests.rs	605
 crates/trusty-agents/src/tools/native_memory/tests.rs	507
 crates/trusty-analyze/src/core/complexity_ts.rs	883
-crates/trusty-analyze/src/core/explain.rs	794
+crates/trusty-analyze/src/core/explain.rs	523
 crates/trusty-analyze/src/core/review.rs	787
 crates/trusty-analyze/src/lang/adapters/cpp.rs	522
 crates/trusty-analyze/src/lang/adapters/go.rs	743
