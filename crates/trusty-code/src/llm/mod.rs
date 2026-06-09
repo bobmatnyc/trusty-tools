@@ -15,13 +15,16 @@
 
 mod client;
 mod error;
-mod types;
+mod message;
+mod request;
+mod response;
+mod usage;
 
 // ── Public API re-exports ─────────────────────────────────────────────────────
 
 pub use client::{LlmClient, LlmClientConfig};
 pub use error::LlmError;
-pub use types::{
-    AssistantMessage, ChatChoice, ChatMessage, ChatRequest, ChatResponse, FunctionCall,
-    FunctionDefinition, ToolCall, ToolDefinition, UsageBlock,
-};
+pub use message::ChatMessage;
+pub use request::{ChatRequest, FunctionCall, FunctionDefinition, ToolCall, ToolDefinition};
+pub use response::{AssistantMessage, ChatChoice, ChatResponse};
+pub use usage::UsageBlock;

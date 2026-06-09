@@ -14,10 +14,7 @@
 
 use reqwest::Client;
 
-use super::{
-    error::LlmError,
-    types::{ChatRequest, ChatResponse},
-};
+use super::{error::LlmError, request::ChatRequest, response::ChatResponse};
 
 /// Base URL for OpenRouter's chat-completions endpoint.
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -182,7 +179,7 @@ impl LlmClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::types::{ChatMessage, ChatRequest};
+    use crate::llm::{ChatMessage, ChatRequest};
 
     /// `LlmClientConfig::new` rejects an empty API key.
     ///
