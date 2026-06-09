@@ -93,8 +93,9 @@ fn main() {
 /// `release-prep` normally performs must happen inside build.rs so
 /// `include_dir!("$CARGO_MANIFEST_DIR/ui-dist")` still finds its assets.
 /// What: Recursively copies every file under `src` into `dst`, creating
-/// subdirectories as needed. Individual copy errors are silently skipped so
-/// a partial copy still produces a compilable (if incomplete) binary.
+/// subdirectories as needed. Per-file copy failures emit a `cargo:warning`
+/// so an incomplete ui-dist/ is surfaced at build time rather than silently
+/// producing a binary that serves broken assets.
 /// Test: Exercised by `cargo build` on a host without `make`; the
 /// `SKIP_UI_BUILD=1` path short-circuits before this function is reached.
 fn copy_dir_all(src: &Path, dst: &Path) {
@@ -107,8 +108,12 @@ fn copy_dir_all(src: &Path, dst: &Path) {
         let dst_path = dst.join(entry.file_name());
         if src_path.is_dir() {
             copy_dir_all(&src_path, &dst_path);
-        } else {
-            let _ = std::fs::copy(&src_path, &dst_path);
+        } else if let Err(e) = std::fs::copy(&src_path, &dst_path) {
+            println!(
+                "cargo:warning=trusty-search: failed to copy {} -> {}: {e}",
+                src_path.display(),
+                dst_path.display()
+            );
         }
     }
 }
@@ -157,8 +162,10 @@ fn build_svelte_ui(ui_dir: &Path, dist_dir: &Path, crate_name: &str) {
     };
 
     // Step 4a: install — prefer frozen lockfile when pnpm-lock.yaml exists.
+    // Only pass --frozen-lockfile when pnpm is the detected manager; npm does
+    // not support that flag (it uses --ci instead) and will error out.
     let mut install_args = vec!["install"];
-    if ui_dir.join("pnpm-lock.yaml").exists() {
+    if pm == "pnpm" && ui_dir.join("pnpm-lock.yaml").exists() {
         install_args.push("--frozen-lockfile");
     }
     let install_ok = Command::new(pm)

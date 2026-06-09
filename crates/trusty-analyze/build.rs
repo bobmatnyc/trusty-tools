@@ -79,8 +79,10 @@ fn build_svelte_ui(ui_dir: &Path, dist_dir: &Path, crate_name: &str) {
     };
 
     // Step 4a: install — prefer frozen lockfile when pnpm-lock.yaml exists.
+    // Only pass --frozen-lockfile when pnpm is the detected manager; npm does
+    // not support that flag (it uses --ci instead) and will error out.
     let mut install_args = vec!["install"];
-    if ui_dir.join("pnpm-lock.yaml").exists() {
+    if pm == "pnpm" && ui_dir.join("pnpm-lock.yaml").exists() {
         install_args.push("--frozen-lockfile");
     }
     let install_ok = Command::new(pm)
