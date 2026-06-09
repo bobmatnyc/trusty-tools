@@ -62,6 +62,7 @@ pub mod serve;
 pub mod service;
 pub mod setup;
 pub mod start;
+pub mod start_restore;
 pub mod status;
 pub mod stop;
 pub mod upgrade;
