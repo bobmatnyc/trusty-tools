@@ -41,10 +41,6 @@ impl ToolRegistry {
     /// `is_available()` is true, and buckets them by `language()`.
     /// Test: `discover_does_not_panic` ensures construction is total.
     pub fn discover() -> Self {
-        let registry = ToolRegistry {
-            tools: DashMap::new(),
-        };
-
         let all_tools: Vec<Arc<dyn StaticTool>> = vec![
             Arc::new(ClippyTool),
             Arc::new(RuffTool),
@@ -58,6 +54,23 @@ impl ToolRegistry {
             Arc::new(ClangtidyTool),
             Arc::new(RoslynTool),
         ];
+        Self::from_tools(all_tools)
+    }
+
+    /// Build a registry from an explicit tool list: keep the available ones and
+    /// bucket each under its primary [`language`](StaticTool::language) plus any
+    /// [`aliases`](StaticTool::aliases).
+    ///
+    /// Why: separating the fanout from the hardcoded tool list lets tests
+    /// exercise alias registration with a synthetic always-available tool,
+    /// without depending on which binaries happen to be installed on the host.
+    /// What: probes `is_available()`, then for each kept tool inserts an `Arc`
+    /// clone into every bucket it claims.
+    /// Test: `aliases_register_tool_under_every_bucket`.
+    fn from_tools(all_tools: Vec<Arc<dyn StaticTool>>) -> Self {
+        let registry = ToolRegistry {
+            tools: DashMap::new(),
+        };
 
         for tool in all_tools {
             if tool.is_available() {
@@ -66,11 +79,16 @@ impl ToolRegistry {
                     language = tool.language(),
                     "static tool available"
                 );
-                registry
-                    .tools
-                    .entry(tool.language().to_string())
-                    .or_default()
-                    .push(tool);
+                // Register under the primary language tag plus every alias, so
+                // a multi-language linter (e.g. biome → typescript + javascript)
+                // is reachable from each bucket its files route to.
+                for lang in std::iter::once(tool.language()).chain(tool.aliases().iter().copied()) {
+                    registry
+                        .tools
+                        .entry(lang.to_string())
+                        .or_default()
+                        .push(Arc::clone(&tool));
+                }
             } else {
                 tracing::debug!(tool = tool.name(), "static tool not available");
             }
@@ -179,5 +197,42 @@ mod tests {
         let a = global_registry() as *const ToolRegistry;
         let b = global_registry() as *const ToolRegistry;
         assert_eq!(a, b, "global registry must be a singleton");
+    }
+
+    /// A synthetic always-available tool that claims a primary language plus an
+    /// alias, so alias registration can be tested without any binary on PATH.
+    struct FakeAliasedTool;
+    impl StaticTool for FakeAliasedTool {
+        fn name(&self) -> &str {
+            "fake-aliased"
+        }
+        fn language(&self) -> &str {
+            "typescript"
+        }
+        fn aliases(&self) -> &[&str] {
+            &["javascript"]
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn run(&self, _file: &Path, _content: &str) -> anyhow::Result<Vec<ToolDiagnostic>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn aliases_register_tool_under_every_bucket() {
+        // Regression: a multi-language linter (biome → typescript + javascript)
+        // must be reachable from its alias bucket, or files routed to that tag
+        // are silently skipped (the JS half of the #963 class of bug).
+        let r = ToolRegistry::from_tools(vec![Arc::new(FakeAliasedTool)]);
+        assert_eq!(r.tools_for("typescript").len(), 1, "primary bucket");
+        assert_eq!(
+            r.tools_for("javascript").len(),
+            1,
+            "alias bucket must be reachable"
+        );
+        assert_eq!(r.tools_for("typescript")[0].name(), "fake-aliased");
+        assert_eq!(r.tools_for("javascript")[0].name(), "fake-aliased");
     }
 }

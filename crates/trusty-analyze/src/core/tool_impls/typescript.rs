@@ -25,6 +25,14 @@ impl StaticTool for BiomeTool {
         "typescript"
     }
 
+    /// Why: biome lints JavaScript as well as TypeScript, but the router maps
+    /// `.js/.jsx/.mjs/.cjs` to the `"javascript"` tag. Without this alias that
+    /// bucket holds no tool and every JS file is silently skipped — the JS half
+    /// of the #963 class of "routed-but-no-tool" bug.
+    fn aliases(&self) -> &[&str] {
+        &["javascript"]
+    }
+
     fn is_available(&self) -> bool {
         which::which("biome").is_ok()
     }
@@ -142,5 +150,14 @@ mod tests {
         assert_eq!(severity_from_str("warning"), Severity::Warning);
         assert_eq!(severity_from_str("information"), Severity::Info);
         assert_eq!(severity_from_str("other"), Severity::Hint);
+    }
+
+    #[test]
+    fn biome_covers_typescript_and_javascript() {
+        // biome lints both; the router maps .ts/.tsx → "typescript" and
+        // .js/.jsx/.mjs/.cjs → "javascript", so the tool must claim both or
+        // JS files are silently skipped.
+        assert_eq!(BiomeTool.language(), "typescript");
+        assert_eq!(BiomeTool.aliases(), &["javascript"]);
     }
 }
