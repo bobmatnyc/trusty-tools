@@ -1,6 +1,6 @@
 # DOC-9 — Upgrade Flow (UUC3)
 
-**Status:** Draft (drafted; open questions for owner)
+**Status:** Accepted (owner-approved)
 **Source spec:** ../01-spec/trusty-end-to-end-setup.md
 **Consumes:** [DOC-2](./02-stack-manifest-and-versioning.md) (Accepted), [DOC-1](./01-tool-contract.md) (Accepted), [DOC-3](./03-scope-model.md) (Accepted), [DOC-5](./05-controller-cli.md) (Accepted)
 **Cross-ref:** [DOC-4](./04-doctor-health-rollup.md) (Accepted), [DOC-6](./06-contract-conformance-and-mpm-adapter.md) (Accepted), [DOC-7](./07-controller-web-ui.md), [DOC-8](./08-install-bootstrap.md) (Accepted), [DOC-10](./10-isolation-testing-harness.md), [DOC-0](./00-naming-and-doc-charter.md)
@@ -85,7 +85,7 @@ and picks a safe default:
   strictly newer). This is the "bleeding edge" view for users who want the freshest
   published bits and accept that the combination is unvalidated.
 
-**Decision (recommend — Open Question 1):** `tctl updates` (and `tctl upgrade`)
+**Default "available" notion (owner-approved):** `tctl updates` (and `tctl upgrade`)
 default to the **known-good stack tuple**; `--latest` switches to the per-crate
 crates.io HEAD. Rationale: UUC3's promise is "an easy path to upgrade" for the
 average user (spec §25, §162) — that user should land on a tested stack, not a
@@ -110,8 +110,7 @@ detection diverges:
   orchestrator `version` pin (DOC-6 §5: "pin at implementation"). For `--latest`,
   the controller queries the Python index that `uv` resolves against
   (`uv tool upgrade --dry-run claude-mpm` style probe, or the package-index JSON);
-  **crates.io does not apply** to a Python package. (Open Question 2 — the exact
-  `--latest` probe for the Python member.) The actual move is always
+  **crates.io does not apply** to a Python package. (owner-approved) The actual move is always
   `uv tool upgrade claude-mpm`, never `cargo install`.
 
 #### 1.4 Output: the per-member updates table
@@ -419,7 +418,7 @@ for each enabled member m:
                 | check_crates_io(m.crate).latest            # --latest
     if installed < target:  delta = upgrade m: installed → target
     if installed == target: delta = no-op (already at target)
-    if installed > target:  delta = downgrade (Open Question 4 — refuse vs warn)
+    if installed > target:  delta = refuse downgrade + report drift (owner-approved)
 ```
 
 The delta set is exactly what §1.4 renders and §3 executes. There is no separate
@@ -435,12 +434,10 @@ active, so `tctl status` / `tctl version` / DOC-7 can report "you are on
 
 - **Clean tuple move** → record the target `stack_version` (e.g. `2026.07-1`) in
   controller state (the system-scope state dir,
-  `~/.config/trusty-controller/` per DOC-2 §2 location helpers). (Open Question 3
-  — exact persistence: a `state.toml` vs deriving it live from installed versions
-  vs the manifest's `stack_version`. Recommend: persist the last successfully
-  applied `stack_version` to a small `state.toml`, and reconcile against live
-  installed versions on `tctl status` so a manual `cargo install` of one member
-  surfaces as drift.)
+  `~/.config/trusty-controller/` per DOC-2 §2 location helpers). (owner-approved)
+  Persist the last successfully applied `stack_version` to a small `state.toml`,
+  and reconcile against live installed versions on `tctl status` so a manual
+  `cargo install` of one member surfaces as drift.
 - **`--latest` / partial move** → record a drift marker
   (`2026.06-1+latest` / `2026.06-1 (partial)`), never a clean label, so the user
   always knows whether they are on a tested tuple (§7).
@@ -545,11 +542,11 @@ continue+report) and DOC-4's rollup:
   member's final system verdict is `down`; `2` if any is `degraded` (e.g.
   older-but-≥-floor contract after upgrade); `0` if all reach target and run.
   A pure project-`pending` after restart is exit `0` (DOC-4 §7).
-- **Rollback stance (recommend — Open Question 5).** `cargo install` is **not
-  transactional** and there is **no automatic version rollback in v1.** Rationale:
-  rolling back would require the controller to capture and re-install each
-  member's prior version — itself a `cargo install <crate>@<old>` that can fail,
-  is not cdhash-distinct, and re-introduces a "now I'm on an untested tuple" state.
+- **Rollback stance (owner-approved).** `cargo install` is **not transactional**
+  and there is **no automatic version rollback in v1.** Rationale: rolling back
+  would require the controller to capture and re-install each member's prior
+  version — itself a `cargo install <crate>@<old>` that can fail, is not
+  cdhash-distinct, and re-introduces a "now I'm on an untested tuple" state.
   Instead DOC-9 relies on three safety properties that make rollback unnecessary
   for the common cases: (1) the **health-gate before restart** (§3.3) means a
   broken *new* binary is caught with the *old* binary still running and serving —
@@ -557,9 +554,6 @@ continue+report) and DOC-4's rollup:
   (3) the deterministic recovery path is **upgrade-forward** to a fixed version or
   **explicit downgrade** via `tctl upgrade <member> --version <old>` /
   `cargo install <crate>@<old> --locked` documented as the manual escape hatch.
-  (Open Question 5 asks the owner to confirm "no auto-rollback; forward-fix /
-  manual downgrade is the recovery model," or to scope a best-effort
-  prior-version capture.)
 - **Idempotent re-run is the recovery path.** Because detection is idempotent
   (already-at-target = no-op, §3.1 step 3) and the install primitive is
   re-runnable, the remediation for almost any partial failure is **re-run the same
@@ -581,7 +575,7 @@ DOC-5 §1.1 defines both `tctl upgrade` (all enabled members) and
   over a member subset, but ordered to respect `depends_on` for the selected set
   (a selected dependent still waits for a selected dependency).
 
-**Interaction with the stack-version notion (recommend — Open Question 6).**
+**Off-tuple drift warning on selective `--latest` upgrade (owner-approved).**
 Upgrading a *single* member to the BOM pin keeps the stack within the known-good
 tuple (it is just catching that member up). But upgrading one member **off** the
 tuple — e.g. `tctl upgrade trusty-search --latest` to a crates.io HEAD newer than
@@ -596,9 +590,8 @@ case:
 
 and records the active stack as drifted (§4.4). A selective upgrade that only
 moves members *up to* their BOM pins does **not** warn (it converges toward the
-tuple, not away from it). (Open Question 6 — confirm the drift-warn policy and
-whether a selective partial-tuple upgrade, e.g. only some members to the new
-tuple, should also be marked drifted until the rest catch up.)
+tuple, not away from it). A *partial* tuple move (only some members to the new
+tuple) is also marked drifted until the rest catch up.
 
 ### 8. Self-upgrade (upgrading `tctl` / `trusty-controller` itself)
 
@@ -608,8 +601,8 @@ binary is being overwritten). The manifest lists `trusty-controller` as a member
 (DOC-2 §3 worked example), so `tctl upgrade` *would* select it — DOC-9 handles it
 specially.
 
-**Recommendation (Open Question 7): cargo-install + supervised self-exit (re-exec
-via supervisor), else message-to-re-run.** This reuses
+**Self-upgrade of `tctl` (owner-approved).** cargo-install + supervised self-exit
+(re-exec via supervisor), else message-to-re-run. This reuses
 `trusty_common::update::upgrade_and_restart` exactly as designed (its self-exit
 path is the *intended* model for a process upgrading itself):
 
@@ -628,13 +621,11 @@ path is the *intended* model for a process upgrading itself):
   the new version`). Attempting an in-process re-exec mid-command is unnecessary
   for a CLI and risks confusing partial-state; the atomic install means the *next*
   `tctl` invocation is already the new version.
-- **Ordering:** in a whole-stack `tctl upgrade`, the controller upgrades the
-  *other* members first and the controller itself **last**, so a self-exit/respawn
-  never strands an in-flight member upgrade. (Open Question 7 — confirm the
-  self-exit-under-supervision vs message-to-re-run split, and whether `tctl
-  upgrade` should upgrade the controller at all by default or require an explicit
-  `tctl upgrade trusty-controller` / `tctl self-upgrade` to avoid surprising
-  self-restarts mid-sweep.)
+- **Ordering and inclusion:** in a whole-stack `tctl upgrade`, the controller
+  upgrades the *other* members first and the controller itself **last**, so a
+  self-exit/respawn never strands an in-flight member upgrade. `tctl upgrade`
+  (all) **includes the controller by default, always last**, with an
+  **`--exclude-self` escape hatch** to skip self-upgrade if needed.
 
 ---
 
@@ -746,9 +737,10 @@ upgrade, the changelog format) is **strongly reusable** and already in the tree.
       codes (§6)
 - [x] Specify selective vs whole-stack upgrade + off-tuple drift warning (§7)
 - [x] Specify self-upgrade of `tctl` (cargo install + supervised self-exit /
-      message-to-re-run; controller upgraded last) (§8)
-- [ ] **Owner: resolve the open questions below**
-- [ ] Team review → Accepted
+      message-to-re-run; controller upgraded last, included by default with
+      --exclude-self) (§8)
+- [x] **Owner: resolve the open questions → all 7 approved**
+- [x] Accepted (owner-approved)
 - [ ] *(implementation-time)* build the upgrade/updates orchestration in
       `crates/trusty-controller/src/` (dispatch per manifest; reuse
       `trusty_common::{update, launchd, shutdown, contract}`; the changelog parser)
@@ -759,58 +751,50 @@ upgrade, the changelog format) is **strongly reusable** and already in the tree.
 
 ---
 
-## Open Questions for Owner
+## Resolved Decisions
 
 1. **Default "available" notion — known-good stack tuple vs crates.io HEAD
-   (§1.2, §4.1).** Recommend: **default to the manifest's known-good
+   (§1.2, §4.1).** (owner-approved) **Default to the manifest's known-good
    `stack_version` tuple**; `--latest` opts into per-crate crates.io HEAD
-   (`check_crates_io`) for bleeding-edge. UUC3's "easy path to upgrade" should land
+   (`check_crates_io`) for bleeding-edge. UUC3's "easy path to upgrade" lands
    the average user on a *tested* stack, not an unvalidated assembly of latest
-   crates. Confirm this default and the `--latest` flag name.
+   crates.
 
 2. **`--latest` detection path for the orchestrator (claude-mpm) (§1.3).**
-   crates.io does not apply to a Python package. Recommend probing the Python index
-   `uv` resolves against (e.g. `uv tool upgrade --dry-run claude-mpm` or the
-   package-index JSON) for the orchestrator's `--latest` available version; the
-   default (stack-tuple) path uses the manifest's orchestrator `version` pin
-   (DOC-6 §5 "pin at implementation"). Confirm the probe mechanism, or scope
-   `--latest` to cargo members only in v1 (orchestrator always uses the pin).
+   (owner-approved) Probe the Python index `uv` resolves against (e.g.
+   `uv tool upgrade --dry-run claude-mpm` or the package-index JSON) for the
+   orchestrator's `--latest` available version; the default (stack-tuple) path
+   uses the manifest's orchestrator `version` pin (DOC-6 §5 "pin at
+   implementation").
 
-3. **Persisting the active stack version (§4.4).** Recommend: persist the last
-   successfully applied `stack_version` to a small system-scope `state.toml`
+3. **Persisting the active stack version (§4.4).** (owner-approved) Persist the
+   last successfully applied `stack_version` to a small system-scope `state.toml`
    (`~/.config/trusty-controller/`), and reconcile it against live installed
-   versions on `tctl status` so a manual `cargo install` of one member surfaces as
-   drift; record `--latest`/partial moves as a drift marker rather than a clean
-   label. Confirm: persist-and-reconcile (recommended) vs derive-live-only vs
-   trust-the-manifest's-`stack_version`.
+   versions on `tctl status` so a manual `cargo install` of one member surfaces
+   as drift; record `--latest`/partial moves as a drift marker rather than a
+   clean label.
 
-4. **Downgrade handling (§4.3).** When an installed member is **newer** than the
-   target (installed > target — possible after a `--latest` then a tuple move, or a
-   manual install), should `tctl upgrade` (a) refuse to downgrade and report drift,
-   (b) warn-and-downgrade to the tuple pin, or (c) skip that member as a no-op?
-   Recommend **(a) refuse + report drift** by default, with an explicit
-   `tctl upgrade <member> --version <v>` to force a specific (older) version. No
-   recommendation is strongly held — owner call.
+4. **Downgrade handling (§4.3).** (owner-approved) When an installed member is
+   **newer** than the target (installed > target), `tctl upgrade` **refuses to
+   downgrade and reports drift** by default; an explicit
+   `tctl upgrade <member> --version <v>` forces a specific (older) version.
 
-5. **Rollback scope (§6).** Recommend: **no automatic version rollback in v1.**
-   `cargo install` is not transactional; the health-gate-before-restart (§3.3)
-   already prevents restarting into a broken binary (the old binary keeps serving),
-   and idempotent re-run + forward-fix / explicit manual downgrade
-   (`cargo install <crate>@<old> --locked`) is the recovery model. Confirm
-   "no auto-rollback; forward-fix is the recovery path," or scope a best-effort
-   prior-version capture + restore-on-failed-verify.
+5. **Rollback scope (§6).** (owner-approved) **No automatic version rollback in
+   v1.** The health-gate-before-restart (§3.3) prevents restarting into a broken
+   binary (the old binary keeps serving), and idempotent re-run + forward-fix /
+   explicit manual downgrade (`cargo install <crate>@<old> --locked`) is the
+   recovery model.
 
-6. **Off-tuple drift warning on selective `--latest` upgrade (§7).** Recommend:
-   **warn + mark the stack drifted** when a selective `tctl upgrade <member>
-   --latest` moves a member *past* its known-good BOM pin (no longer a tested
-   combination); a selective upgrade that only moves members *up to* their BOM pins
-   does not warn. Also confirm whether a *partial* tuple move (only some members to
-   the new tuple) should be marked drifted until the rest catch up.
+6. **Off-tuple drift warning on selective `--latest` upgrade (§7).**
+   (owner-approved) **Warn + mark the stack drifted** when a selective
+   `tctl upgrade <member> --latest` moves a member *past* its known-good BOM pin
+   (no longer a tested combination); a selective upgrade that only moves members
+   *up to* their BOM pins does not warn. A *partial* tuple move (only some
+   members to the new tuple) is also marked drifted until the rest catch up.
 
-7. **Self-upgrade of `tctl` (§8).** Recommend: cargo-install + (if launchd-
-   supervised) **self-exit so the supervisor respawns the new binary**, else
-   **finish the current command and message-to-re-run** (the atomic install means
-   the next invocation is already new); upgrade the controller **last** in a
-   whole-stack sweep. Also confirm whether `tctl upgrade` (all) should include the
-   controller by default, or require an explicit `tctl upgrade trusty-controller` /
-   dedicated `tctl self-upgrade` to avoid a surprising mid-sweep self-restart.
+7. **Self-upgrade of `tctl` (§8).** (owner-approved) Cargo-install + (if
+   launchd-supervised) **self-exit so the supervisor respawns the new binary**,
+   else **finish the current command and message-to-re-run**; upgrade the
+   controller **last** in a whole-stack sweep. **`tctl upgrade` (all) includes
+   the controller by default, always last**, with an **`--exclude-self` escape
+   hatch** to skip self-upgrade if needed.
