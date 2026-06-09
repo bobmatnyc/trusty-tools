@@ -73,6 +73,9 @@ tctl install [<member>…]   [--yes]                     # system scope (forced)
 4. SUPERVISE DAEMON MEMBERS         for kind = "daemon": install + load the launch agent
         │                           (macOS: launchd; Linux: systemd-user / foreground — §6)
         │                           via each member's own `service install` contract surface.
+        │                           **Include the controller's own service-install** (the
+        │                           trusty-controller daemon itself, restarted last in any
+        │                           restart sweep for DOC-7 UI continuity — DOC-5 §7).
         ▼
 5. VERIFY EACH MEMBER               run the member's contract introspection verbs (DOC-4):
         │                             `<binary> version --json`  → contract_version ≥ floor (DOC-2)
@@ -612,7 +615,9 @@ Source-first audit, 2026-06-08 (trusty-search MCP search + Read against the tree
    UI-embedding crate (trusty-search, trusty-memory, trusty-controller) is exactly
    the set that needs the flag. An explicit `install.skip_ui_build` field may be
    added to DOC-2's `install` sub-table in a future version only if a member's
-   UI-presence diverges from its install-time build need. Locked for v1.
+   UI-presence diverges from its install-time build need. **The controller's own
+   service-install is included in step 4 of the UUC2 flow (§1.1), restarted last
+   in any stack restart to maintain DOC-7 UI continuity (DOC-5 §7).** Locked for v1.
 
 2. **claude-mpm pinned version for install/verify — unpinned in DOC-8 (§1.4).** (Owner-approved)
    DOC-8 install treats the orchestrator as "install latest via `uv tool install

@@ -1,6 +1,6 @@
 # DOC-7 — Controller Web UI (link-out control plane)
 
-**Status:** Draft (drafted; open questions for owner)
+**Status:** Accepted (owner-approved)
 **Source spec:** ../01-spec/trusty-end-to-end-setup.md
 **Consumes:** [DOC-1](./01-tool-contract.md) (Accepted), [DOC-2](./02-stack-manifest-and-versioning.md) (Accepted), [DOC-4](./04-doctor-health-rollup.md) (Accepted), [DOC-5](./05-controller-cli.md) (Accepted)
 **Cross-ref:** [DOC-6](./06-contract-conformance-and-mpm-adapter.md) (Accepted), [DOC-8](./08-install-bootstrap.md) (Accepted), [DOC-9](./09-upgrade-flow.md) (Accepted), [DOC-0](./00-naming-and-doc-charter.md)
@@ -356,6 +356,15 @@ DOC-2 §8; DOC-1 D8) forbids.
 - **No code execution from data.** Action POSTs map to the fixed DOC-5 verb set
   dispatched through the contract; the UI never composes a free-form command
   (DOC-2 §8 / DOC-9 security note).
+- **Same-origin guard on mutating `/api/v1/*` endpoints (v1 requirement).** The
+  controller daemon binds loopback only (no auth, parity with existing daemons),
+  but mutating endpoints are stricter: the action API requires both an explicit
+  `confirmed: true` flag on the POST body AND an Origin/same-site check that
+  rejects cross-origin requests to loopback. This lightweight guard (no auth
+  infrastructure, only a request header check) prevents malicious local pages from
+  silently triggering system-wide stack mutations (upgrade, restart, ensure) via
+  DNS rebinding or stale tabs — a known local-API class of issue. Included in v1,
+  not deferred.
 
 ### 7. Contract-version degradation in the UI
 
@@ -394,11 +403,10 @@ ties UI availability to the controller's own lifecycle:
   axum server, §5), so it is available whenever the controller daemon is running —
   there is no separate UI process to start (mirroring the existing daemons, where
   "each member's UI is embedded in its own daemon," DOC-5 §7). The controller
-  daemon is brought up by the install/bootstrap flow (DOC-8); once it is running,
-  `http://127.0.0.1:<tctl-port>/ui` is live. `tctl ui` opens it in a browser
-  (DOC-5 §1.1, §5 above). See Open Question 1 on whether v1 ships the controller
-  as a launchd-supervised daemon out of the box or whether `tctl ui` lazily
-  starts it.
+  daemon is **supervised by launchd** (macOS) / systemd (Linux) as part of the
+  install flow (DOC-8 §1.1 step 4), so the UI is always live and "available once
+  installed" — no lazy startup needed. `tctl ui` opens the already-running URL
+  in a browser (DOC-5 §1.1, §5 above).
 - **How it stays in sync.** The dashboard **polls `tctl stack health --json`** on
   an interval for the at-a-glance matrix (cheap, fast — DOC-4 §4 fast sweep), and
   the long-running-op screens use the **SSE op stream** (§3.2) for live progress.
@@ -501,8 +509,8 @@ and already in the tree.
       below-floor `down`, `n/a` for unadvertised) (§7)
 - [x] Define out-of-the-box availability + stay-in-sync (embedded in the daemon;
       poll rollup / SSE; restart-last) (§8)
-- [ ] **Owner: resolve the open questions** (see Open Questions for Owner below)
-- [ ] Team review → Accepted
+- [x] **Owner: resolve all 6 open questions** → **Resolved Decisions (all owner-approved)**
+- [ ] Team review → Ready
 - [ ] *(implementation-time)* build `crates/trusty-controller/src/` UI server
       (axum `/ui` + `/api/v1/*`), the Svelte sources + `ui-dist/`, and the SSE op
       stream, reusing `trusty_common` (`bind_with_auto_port`, the SSE/replay
@@ -510,63 +518,50 @@ and already in the tree.
 
 ---
 
-## Open Questions for Owner
+## Resolved Decisions
 
-1. **Out-of-the-box start model — supervised daemon vs lazy `tctl ui`.** The spec
-   says the UI is available "once installed and running" (§50). Two models:
-   (a) DOC-8 installs the controller as a **launchd-supervised daemon** that
-   starts at login, so the UI is always live (and `tctl restart` can bounce it,
-   DOC-5 §7); or (b) the controller daemon is **started lazily** by `tctl ui` /
-   the first command that needs it, and otherwise not resident.
-   *Recommendation:* **(a) launchd-supervised**, for true "available once
-   installed" behaviour and parity with the search/memory daemons; `tctl ui` then
-   just opens the already-live URL. This needs DOC-8 to own the controller's own
-   service-install step (currently DOC-8 installs *members*; the controller
-   installing *itself* as a service is implied by DOC-5 §7 / DOC-9 §8 but not yet
-   explicitly assigned). Confirm the start model and which doc owns the
-   controller's own service-install.
+1. **Out-of-the-box start model — launchd-supervised daemon (§8).** (Owner-approved)
+   The controller is **installed and supervised by launchd (macOS) / systemd
+   (Linux)** as a system member during `tctl install` (DOC-8 §1.1 step 4), so the
+   UI daemon is always resident and available once the system install completes —
+   true "available once installed" parity with search/memory daemons. `tctl ui`
+   opens the already-live URL. DOC-8 owns the controller's own service-install
+   (in addition to installing the other members). Locked for v1.
 
-2. **Confirmation parity for UI system ops — always-confirm vs a UI `--yes`
-   analogue.** The CLI has `--yes` to bypass the blast-radius prompt for
-   automation (DOC-5 §3.3). In the UI, a human click is itself a confirmation.
-   *Recommendation:* the UI **always shows the confirm dialog** for
-   system-mutating ops (no `--yes` analogue), and the action API requires an
-   explicit `confirmed: true` on mutating POSTs so a stray/CSRF request cannot
-   trigger a system op silently. Confirm there is no need for a "don't ask again"
-   toggle in v1.
+2. **Confirmation parity for UI system ops — always-confirm (§3.1).** (Owner-approved)
+   The UI **always shows the confirm dialog** for system-mutating operations
+   (upgrade / restart / start / stop). There is no "don't ask again" toggle in v1.
+   The action API requires an explicit `confirmed: true` flag on mutating POSTs so
+   a stray request (CSRF, old state, user error) cannot silently trigger a system
+   op. Locked for v1.
 
-3. **CSRF / same-origin guard on the loopback action API.** The daemons today are
-   loopback-only + no-auth + permissive CORS (§6). A mutating action API on
-   loopback is still reachable by any local process / a malicious web page making
-   a cross-origin request to `127.0.0.1` (a known DNS-rebinding / local-API class
-   of issue). *Recommendation:* keep no-auth (loopback parity) but add a
-   lightweight **Origin/same-site check + the `confirmed` flag** on mutating
-   `/api/v1/*` endpoints (reject cross-origin POSTs), since these endpoints
-   *mutate the whole machine's stack* — a stricter bar than the read-only daemon
-   APIs. Confirm whether this modest hardening is in-scope for v1 or deferred.
+3. **CSRF / same-origin guard on mutating `/api/v1/*` endpoints — included in v1 (§6).** (Owner-approved)
+   The action API **rejects cross-origin POSTs** via an Origin/same-site header
+   check on all system-mutating endpoints (upgrade, restart, ensure, start/stop),
+   combined with the mandatory `confirmed: true` flag in the request body. This
+   lightweight guard (no auth infrastructure, only a request header check) prevents
+   malicious local web pages from silently triggering system-wide stack mutations
+   via DNS rebinding or stale tabs — a known local-API threat. No-auth parity with
+   existing daemons (loopback-only bind), but stricter guards for endpoints that
+   *mutate the whole machine*. Included in v1, not deferred. Locked for v1.
 
-4. **Rollup polling cadence + push-vs-poll.** The dashboard stays in sync by
-   polling `tctl stack health --json` (§8). What interval, and should idle tabs
-   back off? *Recommendation:* poll `stack health` (the *fast* sweep, DOC-4 §4)
-   every ~10 s while the tab is focused, back off when hidden
-   (`visibilitychange`), and rely on the SSE op stream for live progress during
-   actions (no polling needed mid-op). A future push channel (SSE "stack changed"
-   events) is noted but not required in v1. Confirm the cadence / back-off policy.
+4. **Rollup polling cadence + back-off (§8).** (Owner-approved)
+   The dashboard polls `tctl stack health --json` (fast sweep, DOC-4 §4) every ~10 s
+   while the browser tab is focused, backs off to a longer interval when the tab is
+   hidden (`visibilitychange` event), and relies on the SSE op stream (§3.2) for
+   live per-member progress during long-running actions (upgrade, restart, ensure).
+   No polling is needed during an in-flight operation. A future push channel (SSE
+   "stack changed" events) is noted for post-v1. Locked for v1.
 
-5. **Stack-doctor cost from the UI (`tctl stack doctor` is the deep sweep).** The
-   dashboard uses the *fast* `stack health`; the deep `stack doctor` (10 s/tool
-   timeouts, DOC-4 §1.3) is heavier. Should "Run full doctor" be **explicit-only**
-   (a button), or should the UI auto-run it on load? *Recommendation:*
-   **explicit-only** — auto-run `stack health` (fast) on load for the matrix, and
-   make `stack doctor` (deep) a user-triggered action (button on the dashboard +
-   the dedicated stack-doctor screen, §2.4), to avoid a heavy multi-tool sweep on
-   every page open. Confirm.
+5. **Stack-doctor cost — explicit-only (`run full doctor` button).** (Owner-approved)
+   The dashboard auto-runs the *fast* `tctl stack health --json` on page load for
+   the at-a-glance matrix (sub-second per member). The deep `tctl stack doctor --json`
+   (10 s/tool timeouts, DOC-4 §1.3) is triggered explicitly by a "Run full doctor"
+   button on the dashboard + the dedicated stack-doctor screen (§2.4), avoiding a
+   heavy multi-tool sweep on every page open. Locked for v1.
 
-6. **Does the controller's own UI link to itself / show a "Open trusty-controller
-   UI" row?** The manifest lists `trusty-controller` as a member with
-   `ui.available = true` (DOC-2 §3 worked example). Rendering an "Open UI" link
-   that points at the page you are already on is redundant.
-   *Recommendation:* render the controller's own member **row** in the matrix
-   (its health/version are real and worth showing) but **suppress the self
-   "Open UI" link** (you are already in it). Confirm this self-row-but-no-self-link
-   treatment.
+6. **Controller's own row and self-link suppression (§1.1 & §2.1).** (Owner-approved)
+   The controller's member row is rendered in the matrix with real health/version
+   data (important for users to see the controller itself is ready). However, the
+   **self "Open trusty-controller UI" link is suppressed** since the user is
+   already in it — no redundant self-referential link. Locked for v1.
