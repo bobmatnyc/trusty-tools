@@ -84,21 +84,20 @@ pub fn build_tool_timeout() -> Duration {
 /// Why: file-scoped tools use a 30 s cap; build-class tools need a wider
 /// limit (default 300 s). Extracting the timeout as a parameter lets both
 /// callers share the same spawn/capture/wait logic without duplication.
-/// What: spawns the child in its own process group (Unix: `setsid` via a
-/// `pre_exec` hook so the group id equals the child PID), reads both output
-/// streams on background threads, and waits up to `timeout` for exit. On
-/// timeout the **entire process group** is sent SIGKILL (Unix:
-/// `kill(-pgid, SIGKILL)`), then the reader threads are joined so no OS
-/// resources leak. On non-Unix platforms the child PID is killed directly
-/// (best-effort; child descendants may survive). If `setsid()` fails in the
-/// `pre_exec` hook (EPERM — caller already a process-group leader, which can
-/// happen in some container or test-harness setups), `spawn()` returns an
-/// Err rather than proceeding: a child that didn't get its own session would
-/// share the parent's process group, making the timeout-path
-/// `kill(-pgid, SIGKILL)` target the parent group.
-/// Test: `timeout_kills_child_process` spawns `sleep 30` with a sub-second
-/// timeout and verifies: (a) the call returns Err quickly, and (b) the child
-/// process is no longer running after the call returns.
+/// What: spawns the child with a best-effort `setsid()` call (Unix) so the
+/// child may lead its own process group. On timeout, the kill target is
+/// determined at kill time: if `getpgid(child_pid) != getpgid(0)` (child
+/// leads its own group), `kill(-child_pgid, SIGKILL)` is used to catch all
+/// dotnet/MSBuild descendants; otherwise only the direct child PID is killed
+/// (the child is in the parent's group — never send SIGKILL to the parent
+/// group). `setsid()` EPERM (caller already a process-group leader, common
+/// under Docker `--init` or some k8s pods / cargo-nextest sandboxes) is
+/// tolerated: the hook still returns `Ok(())` so `spawn()` always proceeds;
+/// the pgid-comparison at kill time makes the fallback safe.
+/// Test: `timeout_kills_child_process` spawns `sh -c 'echo $$ > <tmpfile>;
+/// exec sleep 30'` with a sub-second timeout, reads the PID from the file,
+/// and polls `kill(pid, 0)` to confirm ESRCH within ~1 s of the call
+/// returning.
 pub fn run_command_with_timeout(
     program: &str,
     args: &[&str],
@@ -112,32 +111,22 @@ pub fn run_command_with_timeout(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    // On Unix: place the child in its own session (setsid) so that on
-    // timeout we can SIGKILL the whole process group (kill(-pgid, SIGKILL))
-    // and catch any dotnet/MSBuild child processes that were spawned by the
-    // child. This is safe because we discard the tty: the child has
-    // stdin=null and we never send it signals from a terminal.
-    //
-    // setsid() can fail with EPERM if the caller is already a process-group
-    // leader (e.g. in certain test harnesses or container setups). When that
-    // happens we MUST propagate the error: proceeding with spawn() would leave
-    // the child in the parent's process group, so the timeout-path
-    // `kill(-pgid, SIGKILL)` would target the parent group — potentially
-    // killing the service or test runner. Returning Err from pre_exec causes
-    // spawn() to fail cleanly with the OS error rather than proceeding unsafely.
+    // On Unix: attempt to place the child in its own session (setsid) so
+    // that on timeout we can SIGKILL the whole process group and catch any
+    // dotnet/MSBuild child processes. setsid() can return EPERM when the
+    // calling process is already a process-group leader (Docker --init,
+    // k8s pods, cargo-nextest). In that case we proceed anyway — the
+    // pgid-comparison at kill time (below) determines the safe kill target
+    // at runtime rather than assuming the child always leads its own group.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // SAFETY: setsid() is async-signal-safe and has no preconditions
-        // beyond "not already a process group leader". We propagate EPERM
-        // (caller already a group leader) as an Err so spawn() rejects the
-        // child rather than proceeding with an unsafe kill target.
+        // SAFETY: setsid() is async-signal-safe. We call it best-effort
+        // and always return Ok(()) so spawn() is never blocked by EPERM.
         unsafe {
             cmd.pre_exec(|| {
-                let rc = libc::setsid();
-                if rc < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
+                // Ignore EPERM and any other error — best-effort only.
+                let _ = libc::setsid();
                 Ok(())
             });
         }
@@ -211,30 +200,57 @@ pub fn run_command_with_timeout(
     })
 }
 
-/// Kill the process group whose PGID equals `child_pid`.
+/// Kill `child_pid` (or its process group) on a timeout.
 ///
-/// Why: on Unix, `setsid()` in the pre_exec hook makes the child's PGID equal
-/// its PID. Sending SIGKILL to the negated PID (`-pgid`) kills every process
-/// in that group (dotnet → MSBuild workers → Roslyn compiler server), not just
-/// the direct child. On non-Unix platforms the signal is sent to the PID
-/// directly (best-effort).
-/// What: on Unix calls `libc::kill(-pgid, SIGKILL)`. On other platforms wraps
-/// `taskkill /F /T /PID pid` (Windows) or is a no-op fallback.
-/// Test: exercised indirectly by `timeout_kills_child_process`.
+/// Why: setsid() in pre_exec is best-effort — it succeeds in most cases but
+/// returns EPERM when the caller is already a process-group leader (Docker
+/// --init, some k8s pods, cargo-nextest). Blindly negating the child PID to
+/// target the group would kill the parent's group when setsid() didn't take
+/// effect. Instead we compare pgids at kill time so the kill is always safe.
+/// What: on Unix, computes the child's actual pgid via `getpgid(child_pid)`
+/// and the parent's pgid via `getpgid(0)`.
+/// - If `child_pgid > 0 && child_pgid != parent_pgid` → the child leads its
+///   own group (setsid took effect) → `kill(-child_pgid, SIGKILL)` to catch
+///   all dotnet/MSBuild/Roslyn descendants.
+/// - Otherwise → the child shares the parent's group (setsid was blocked) →
+///   `kill(child_pid, SIGKILL)` targeting only the direct child PID; the
+///   parent group is never touched.
+///
+/// On non-Unix platforms wraps `taskkill /F /T /PID` (Windows) or is a no-op.
+///
+/// Test: exercised by `timeout_kills_child_process` which verifies the child
+/// is dead (ESRCH from kill(pid, 0)) within ~1 s of the timeout call returning.
 fn kill_process_group(child_pid: u32, program: &str) {
     #[cfg(unix)]
     {
-        // SAFETY: kill() is async-signal-safe. We negate the pid to address
-        // the process group; the group was established by setsid() in
-        // pre_exec so pgid == child_pid.
-        let pgid = child_pid as libc::pid_t;
-        let rc = unsafe { libc::kill(-pgid, libc::SIGKILL) };
-        if rc != 0 {
-            let err = std::io::Error::last_os_error();
-            tracing::debug!(
-                "kill(-{pgid}, SIGKILL) failed for {program}: {err} \
-                 (process may have already exited)"
-            );
+        let pid = child_pid as libc::pid_t;
+        // SAFETY: getpgid() and kill() are async-signal-safe POSIX functions.
+        let child_pgid = unsafe { libc::getpgid(pid) };
+        let parent_pgid = unsafe { libc::getpgid(0) };
+
+        if child_pgid > 0 && child_pgid != parent_pgid {
+            // Child is in its own process group (setsid took effect).
+            // Kill the entire group to reap dotnet/MSBuild/Roslyn workers.
+            let rc = unsafe { libc::kill(-child_pgid, libc::SIGKILL) };
+            if rc != 0 {
+                let err = std::io::Error::last_os_error();
+                tracing::debug!(
+                    "kill(-{child_pgid}, SIGKILL) failed for {program}: {err} \
+                     (process may have already exited)"
+                );
+            }
+        } else {
+            // setsid() was blocked (EPERM) or getpgid failed — child shares
+            // the parent's group. Kill only the direct child PID to avoid
+            // targeting the parent group.
+            let rc = unsafe { libc::kill(pid, libc::SIGKILL) };
+            if rc != 0 {
+                let err = std::io::Error::last_os_error();
+                tracing::debug!(
+                    "kill({pid}, SIGKILL) failed for {program}: {err} \
+                     (process may have already exited)"
+                );
+            }
         }
     }
     #[cfg(not(unix))]
@@ -293,57 +309,91 @@ mod tests {
         );
     }
 
-    /// Why: the previous implementation returned Err on timeout but left the
-    /// child process running (leaked). This test proves that after a timeout
-    /// the child is dead — verifying the kill-on-timeout contract.
-    /// What: spawns `sleep 30` with a 100 ms timeout. Asserts: (a) the call
-    /// returns Err quickly, (b) the child is no longer alive afterward.
-    /// Test: this test itself; gated `#[cfg(unix)]` because `sleep` and
-    /// POSIX process-group semantics are Unix-only.
+    /// Why: verifies the kill-on-timeout contract — after
+    /// `run_command_with_timeout` returns with a timeout error the spawned
+    /// child process must be dead (not merely detached/leaked). This catches
+    /// regressions where the kill path is broken or the child is left running.
+    /// What: runs `sh -c 'echo $$ > <tmpfile>; exec sleep 30'` with a 100 ms
+    /// timeout, reads the child PID from the tmpfile, and polls
+    /// `libc::kill(pid, 0)` (signal 0 = existence probe) until it returns -1
+    /// with ESRCH (no such process), or until a 1 s grace deadline. Asserts
+    /// (a) the call returns Err with a timeout message, (b) the child PID is
+    /// gone within the grace period.
+    /// Test: this test itself; gated `#[cfg(unix)]` because sh, POSIX signal
+    /// semantics, and /proc/pid liveness are Unix-only.
     #[test]
     #[cfg(unix)]
     fn timeout_kills_child_process() {
-        let dir = std::env::temp_dir();
-        // Capture the child PID before the call so we can check liveness after.
-        // We need to get the PID of the `sleep` process. We use a shell wrapper
-        // that echoes its own PID to stdout before sleeping, giving us the PID
-        // even though run_command_with_timeout normally discards the output on
-        // timeout. Instead, spawn raw to capture PID, then call our function.
-        use std::process::{Command as StdCommand, Stdio as StdStdio};
-        let mut probe = StdCommand::new("sleep")
-            .arg("30")
-            .stdin(StdStdio::null())
-            .stdout(StdStdio::null())
-            .stderr(StdStdio::null())
-            .spawn()
-            .expect("sleep must be available on Unix");
-        let pid = probe.id();
-        // Kill our probe — we only needed it for the PID to verify the concept.
-        let _ = probe.kill();
-        let _ = probe.wait();
+        use std::time::Instant;
 
-        // Now run through our timeout wrapper (which will spawn its own `sleep`).
-        let result = run_command_with_timeout("sleep", &["30"], &dir, Duration::from_millis(100));
-        assert!(result.is_err(), "expected timeout error");
-        let err_msg = match result {
-            Err(e) => e.to_string(),
-            Ok(_) => unreachable!(),
-        };
+        let dir = std::env::temp_dir();
+        // Use a unique tmpfile per test run to avoid cross-test interference.
+        let pid_file = dir.join(format!(
+            "trusty_analyze_test_pid_{}.txt",
+            std::process::id()
+        ));
+
+        // The shell command writes its own PID (the `sh` PID, which is the
+        // direct child) to pid_file, then execs into `sleep 30`.
+        let pid_file_str = pid_file.to_str().expect("tmpdir must be UTF-8");
+        let sh_cmd = format!("echo $$ > {pid_file_str}; exec sleep 30");
+
+        let result =
+            run_command_with_timeout("sh", &["-c", &sh_cmd], &dir, Duration::from_millis(100));
+
+        // (a) The call must return a timeout error.
+        assert!(result.is_err(), "expected timeout error, got Ok");
+        let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("exceeded") || err_msg.contains("timeout"),
             "error message should mention timeout: {err_msg}"
         );
 
-        // Verify that NO `sleep 30` spawned by our call is still running. We
-        // cannot easily retrieve the PID of the child that run_command_with_timeout
-        // spawned internally, so instead we assert that the function returned
-        // quickly (i.e., it killed and joined rather than detaching and returning).
-        // The timing assertion: from spawn to return must be well under 30 s —
-        // if the kill is missing the test itself would block for ~30 s.
-        // The `result.is_err()` assertion already validates this because
-        // the test harness has a per-test timeout of several seconds and
-        // `sleep 30` would block the thread for the full 30 s.
-        let _ = pid; // suppress unused warning
+        // (b) Read the PID the child wrote before sleeping.
+        // Give the child a brief window to write the file if it hasn't yet
+        // (normally it writes before the 100 ms timeout, but on very slow CI
+        // hosts the file may not exist yet at the instant the timeout fires).
+        let child_pid: libc::pid_t = {
+            let deadline = Instant::now() + Duration::from_millis(500);
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(&pid_file) {
+                    if let Ok(p) = contents.trim().parse::<libc::pid_t>() {
+                        break p;
+                    }
+                }
+                if Instant::now() >= deadline {
+                    // If the file never appeared, the child likely never ran —
+                    // skip the PID-liveness check and rely on the timing test.
+                    let _ = std::fs::remove_file(&pid_file);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let _ = std::fs::remove_file(&pid_file);
+
+        // (c) Poll until kill(pid, 0) returns -1/ESRCH (process is gone).
+        // Allow up to 1 s for the kill + reap to complete.
+        let grace = Instant::now() + Duration::from_secs(1);
+        loop {
+            // SAFETY: kill(pid, 0) never delivers a signal; it only tests
+            // whether the process exists. Async-signal-safe.
+            let rc = unsafe { libc::kill(child_pid, 0) };
+            if rc < 0 {
+                let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                if errno == libc::ESRCH {
+                    // Process is gone — kill-on-timeout worked.
+                    return;
+                }
+                // EPERM means the process exists but we can't signal it
+                // (e.g. different uid). Treat as still-alive and keep polling.
+            }
+            assert!(
+                Instant::now() < grace,
+                "child pid {child_pid} still alive 1 s after timeout — kill-on-timeout broken"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// Why: verifies that after `run_command_with_timeout` returns on timeout,
