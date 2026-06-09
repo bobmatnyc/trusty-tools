@@ -72,8 +72,8 @@ pub trait StaticTool: Send + Sync {
     /// skipped (the JS half of the #963 class of bug). Defaults to no aliases.
     /// What: each returned tag gets its own registry entry pointing at this
     /// tool, in addition to `language()`.
-    /// Test: `discover_registers_biome_under_javascript_alias` in
-    /// `tool_registry`.
+    /// Test: `aliases_register_tool_under_every_bucket` and
+    /// `biome_covers_typescript_and_javascript`.
     fn aliases(&self) -> &[&str] {
         &[]
     }
