@@ -316,6 +316,10 @@ jobs:
           # CPU device — explicit to avoid any GPU EP probe on the runner.
           TRUSTY_DEVICE: cpu
           RUST_LOG: "info"
+          # GitHub ubuntu-latest runners report ~15.6 GB RAM, just below the
+          # 16 GB startup floor. This smoke test only checks HTTP connectivity,
+          # not indexing or embedding, so the RAM floor adds no value here.
+          TRUSTY_SKIP_RAM_CHECK: "1"
         run: |
           mkdir -p /tmp/ts-smoke
           ./target/release/trusty-search start \
@@ -346,7 +350,8 @@ jobs:
 
       - name: Assert /health returns status=ok
         run: |
-          HEALTH_STATUS=$(python3 -c "import json,sys; d=json.load(open('/tmp/ts-smoke/health.json')); print(d.get('status',''))")
+          # jq is preinstalled on ubuntu-latest; use it instead of python3 for clarity.
+          HEALTH_STATUS=$(jq -r '.status // ""' /tmp/ts-smoke/health.json)
           echo "status field: ${HEALTH_STATUS}"
           if [ "${HEALTH_STATUS}" != "ok" ]; then
             echo "ERROR: /health did not return status=ok (got: ${HEALTH_STATUS})"
