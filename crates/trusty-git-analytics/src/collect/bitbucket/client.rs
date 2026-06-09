@@ -118,12 +118,19 @@ impl BitbucketClient {
                     )
                 })?
                 .to_string();
+            // Why: `app_password` may be written as `${MY_SECRET}` in YAML;
+            // without expansion the literal `${MY_SECRET}` is sent as the
+            // Basic-auth password, yielding a silent 401 (closes #842).
+            // What: expands `${VAR}` placeholders from the environment before
+            // trimming, then falls back to `BITBUCKET_APP_PASSWORD` env var —
+            // mirroring the identical treatment applied to `token` above.
+            // Test: `app_password_env_var_expanded` in this module.
             let password = config
                 .app_password
                 .as_deref()
-                .map(str::trim)
+                .map(crate::collect::env_expand::expand_env_var)
+                .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
-                .map(String::from)
                 .or_else(|| {
                     std::env::var("BITBUCKET_APP_PASSWORD")
                         .ok()
@@ -381,231 +388,11 @@ impl PrProvider for BitbucketClient {
     }
 }
 
+/// Why: keeps `client.rs` under the 500-line file cap; all Bitbucket client
+/// unit tests live in the sibling `tests.rs` file.
+/// What: `#[path]` overrides Rust's default resolution so a `mod tests;`
+/// inside a file module points to the sibling file rather than a subdirectory.
+/// Test: see `tests.rs` for the full suite.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Verify the paged envelope tolerates a fully-populated PR with author,
-    /// merge commit, and a `next` cursor.
-    #[test]
-    fn bb_paged_full_pr_deserializes() {
-        let json = r#"{
-            "values": [{
-                "id": 42,
-                "title": "Add foo widget",
-                "state": "MERGED",
-                "created_on": "2024-01-02T03:04:05+00:00",
-                "updated_on": "2024-01-03T00:00:00+00:00",
-                "author": {
-                    "display_name": "Ada Lovelace",
-                    "nickname": "ada",
-                    "uuid": "{abc}"
-                },
-                "merge_commit": {"hash": "deadbeefcafe"}
-            }],
-            "next": "https://api.bitbucket.org/2.0/repositories/w/r/pullrequests?page=2"
-        }"#;
-        let page: BbPaged<BbPullRequest> = serde_json::from_str(json).expect("parses");
-        assert_eq!(page.values.len(), 1);
-        assert!(page.next.is_some());
-
-        let mapped = map_pr(page.values.into_iter().next().unwrap(), "w/r");
-        assert_eq!(mapped.pr_number, 42);
-        assert_eq!(mapped.repository, "w/r");
-        assert_eq!(mapped.state, PrState::Merged);
-        assert_eq!(mapped.author, "ada");
-        assert!(mapped.commit_shas.contains("deadbeefcafe"));
-        assert!(mapped.merged_at.is_some());
-    }
-
-    /// A `DECLINED` PR with no merge commit should map to `Closed` and have
-    /// an empty `commit_shas` array, mirroring how GitHub stores unmerged PRs.
-    #[test]
-    fn bb_declined_pr_maps_to_closed_with_empty_shas() {
-        let json = r#"{
-            "id": 7,
-            "title": "abandoned",
-            "state": "DECLINED",
-            "created_on": "2024-05-01T12:00:00Z",
-            "author": {"display_name": "Bob"}
-        }"#;
-        let pr: BbPullRequest = serde_json::from_str(json).expect("parses");
-        let mapped = map_pr(pr, "w/r");
-        assert_eq!(mapped.pr_number, 7);
-        assert_eq!(mapped.state, PrState::Closed);
-        assert!(mapped.merged_at.is_none());
-        assert_eq!(mapped.commit_shas, "[]");
-        assert_eq!(mapped.author, "Bob");
-    }
-
-    /// `SUPERSEDED` should also collapse to `Closed`.
-    #[test]
-    fn bb_superseded_pr_maps_to_closed() {
-        let json = r#"{
-            "id": 8,
-            "title": "old version",
-            "state": "SUPERSEDED",
-            "created_on": "2024-05-01T12:00:00Z"
-        }"#;
-        let pr: BbPullRequest = serde_json::from_str(json).expect("parses");
-        let mapped = map_pr(pr, "w/r");
-        assert_eq!(mapped.state, PrState::Closed);
-        // No author block — `author` should be empty rather than panicking.
-        assert_eq!(mapped.author, "");
-    }
-
-    /// Author fallback: missing `nickname` → `display_name`; missing both →
-    /// `uuid`; missing all → empty string.
-    #[test]
-    fn bb_author_best_name_priority() {
-        use crate::collect::bitbucket::types::BbAuthor;
-        let a = BbAuthor {
-            display_name: Some("Ada Lovelace".into()),
-            nickname: Some("ada".into()),
-            uuid: Some("{abc}".into()),
-        };
-        assert_eq!(a.best_name(), "ada");
-
-        let a = BbAuthor {
-            display_name: Some("Ada Lovelace".into()),
-            nickname: None,
-            uuid: Some("{abc}".into()),
-        };
-        assert_eq!(a.best_name(), "Ada Lovelace");
-
-        let a = BbAuthor {
-            display_name: None,
-            nickname: Some("  ".into()),
-            uuid: Some("{abc}".into()),
-        };
-        assert_eq!(a.best_name(), "{abc}");
-
-        let a = BbAuthor {
-            display_name: None,
-            nickname: None,
-            uuid: None,
-        };
-        assert_eq!(a.best_name(), "");
-    }
-
-    /// Construct against a mock server and verify the client follows the
-    /// `next` cursor across two pages, returning the union.
-    ///
-    /// Why: cursor pagination is the single biggest semantic difference
-    /// from the GitHub client; if we ever fail to follow `next`, half the
-    /// PR history disappears silently.
-    #[tokio::test]
-    async fn fetch_pull_requests_follows_next_cursor() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        let base = server.uri();
-
-        // Page 2 (terminal) — declare first because page 1 references its URL.
-        let page2_url = format!("{base}/repositories/acme/widgets/pullrequests?page=2");
-        let page1 = serde_json::json!({
-            "values": [{
-                "id": 1,
-                "title": "first",
-                "state": "OPEN",
-                "created_on": "2024-01-01T00:00:00Z"
-            }],
-            "next": page2_url,
-        });
-        let page2 = serde_json::json!({
-            "values": [{
-                "id": 2,
-                "title": "second",
-                "state": "MERGED",
-                "created_on": "2024-02-01T00:00:00Z",
-                "updated_on": "2024-02-02T00:00:00Z",
-                "merge_commit": {"hash": "abc123"}
-            }]
-        });
-
-        Mock::given(method("GET"))
-            .and(path("/repositories/acme/widgets/pullrequests"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(page1.clone()))
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/repositories/acme/widgets/pullrequests"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(page2.clone()))
-            .mount(&server)
-            .await;
-
-        let client = BitbucketClient::new(&BitbucketConfig {
-            token: Some("dummy".into()),
-            workspace: Some("acme".into()),
-            repo_slug: Some("widgets".into()),
-            fetch_prs: true,
-            api_base_url: Some(base),
-            ..Default::default()
-        })
-        .expect("client builds");
-
-        let prs = client.fetch_pull_requests().await.expect("fetch");
-        assert_eq!(prs.len(), 2);
-        assert_eq!(prs[0].pr_number, 1);
-        assert_eq!(prs[0].state, PrState::Open);
-        assert_eq!(prs[1].pr_number, 2);
-        assert_eq!(prs[1].state, PrState::Merged);
-        assert!(prs[1].commit_shas.contains("abc123"));
-    }
-
-    /// Drop guard that snapshots an env var, removes it for the test, and
-    /// restores it (or re-removes it if originally absent) on drop. The Drop
-    /// impl runs during stack unwinding, so a panic inside the test body
-    /// still triggers env restore — unlike a closure-based save/run/restore
-    /// pattern, which silently leaks mutated state when the closure panics.
-    struct EnvVarGuard {
-        name: &'static str,
-        original: Option<String>,
-    }
-
-    impl EnvVarGuard {
-        fn remove(name: &'static str) -> Self {
-            let original = std::env::var(name).ok();
-            // SAFETY: 2024-edition env mutation; the guard is the sole writer
-            // for `name` within the test it covers, restored unconditionally
-            // on drop.
-            unsafe { std::env::remove_var(name) };
-            Self { name, original }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            // SAFETY: see [`EnvVarGuard::remove`].
-            unsafe {
-                match self.original.as_deref() {
-                    Some(v) => std::env::set_var(self.name, v),
-                    None => std::env::remove_var(self.name),
-                }
-            }
-        }
-    }
-
-    /// `new()` rejects a config that has neither token nor username+password.
-    #[test]
-    fn client_new_rejects_missing_auth() {
-        // Take care not to pick up a real env credential during this
-        // assertion; guards restore env even if the test below panics.
-        let _t = EnvVarGuard::remove("BITBUCKET_TOKEN");
-        let _p = EnvVarGuard::remove("BITBUCKET_APP_PASSWORD");
-
-        let result = BitbucketClient::new(&BitbucketConfig {
-            workspace: Some("acme".into()),
-            repo_slug: Some("widgets".into()),
-            fetch_prs: true,
-            ..Default::default()
-        });
-        match result {
-            Ok(_) => panic!("expected auth failure, got Ok(_)"),
-            Err(CollectError::Config(_)) => {}
-            Err(other) => panic!("unexpected error: {other:?}"),
-        }
-    }
-}
+#[path = "tests.rs"]
+mod tests;

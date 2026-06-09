@@ -72,7 +72,6 @@ crates/trusty-git-analytics/src/classify/tiers/llm.rs	1020
 crates/trusty-git-analytics/src/classify/tiers/weighted_sum.rs	962
 crates/trusty-git-analytics/src/collect/azdo/client.rs	2658
 crates/trusty-git-analytics/src/collect/azdo/pr_fetcher.rs	1707
-crates/trusty-git-analytics/src/collect/bitbucket/client.rs	611
 crates/trusty-git-analytics/src/collect/collector.rs	1181
 crates/trusty-git-analytics/src/collect/git/extractor.rs	1318
 crates/trusty-git-analytics/src/collect/git/reachability.rs	1432
