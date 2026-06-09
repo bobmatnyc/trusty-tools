@@ -234,3 +234,132 @@ jobs:
 
       - name: cargo check --workspace
         run: cargo check --workspace --exclude trusty-mpm-gui
+
+  # --------------------------------------------------------------------------
+  # search-daemon-smoke: build the trusty-search release binary and verify
+  # that the HTTP daemon starts and answers /health with status=ok.
+  #
+  # Design notes (issue #952):
+  #
+  # FLAKE AVOIDANCE — issue #865 documented fastembed/ONNX HTTP-429 flake
+  # when the model is downloaded at startup. This job avoids that by:
+  #   1. TRUSTY_NO_KG=1 — skip knowledge-graph init (no network calls needed).
+  #   2. The /health endpoint returns HTTP 200 with status="ok" immediately
+  #      once the axum server binds, even while the embedder is still
+  #      initialising in the background. The embedder field reports
+  #      "initialising" but the HTTP status is always 200 — the smoke check
+  #      only needs the server to be reachable, not for the model to be ready.
+  #   3. --no-auto-discover — skip the startup project-scan so the daemon does
+  #      not walk ~/Projects or ~/code on the ephemeral runner.
+  #   4. --data-dir /tmp/ts-smoke — fully isolated data directory so no
+  #      indexes.toml, lockfile, or port-file collides with any other process.
+  #
+  # OPTIONAL — this job is marked continue-on-error: true because:
+  #   • It requires a full release build of trusty-search (~15-20 min on cold
+  #     cache), which adds significant wall-clock cost on top of the existing
+  #     four jobs.
+  #   • A timeout/kill race in the ephemeral runner is unlikely but not zero.
+  #   • The functional correctness of the daemon is covered by unit + integration
+  #     tests in the `test` job; this job only checks that the binary starts and
+  #     the HTTP server binds.
+  #
+  # If flakiness is never observed in practice, remove continue-on-error to
+  # make it a hard gate.
+  #
+  # TEARDOWN — the daemon is killed at the end via the stored PID. This is
+  # correct CI behaviour: ephemeral runners are discarded after the job
+  # completes, but explicit teardown ensures the port is freed if a later step
+  # reuses the runner.
+  # --------------------------------------------------------------------------
+  search-daemon-smoke:
+    name: trusty-search daemon smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Free disk space
+        run: |
+          echo "Before:"; df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /usr/local/share/boost /usr/local/share/powershell \
+            /usr/share/swift "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
+          sudo docker image prune --all --force || true
+          echo "After:"; df -h /
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libssl-dev
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: search-daemon-smoke
+
+      # SKIP_UI_BUILD=1 is already set globally via env: at the workflow level.
+      # The committed ui-dist/ bundle is used as-is; pnpm is not required.
+      - name: Build trusty-search release binary
+        run: cargo build --release -p trusty-search
+
+      - name: Start trusty-search daemon (background)
+        env:
+          # Skip KG init — no network calls, no model downloads at startup.
+          TRUSTY_NO_KG: "1"
+          # CPU device — explicit to avoid any GPU EP probe on the runner.
+          TRUSTY_DEVICE: cpu
+          RUST_LOG: "info"
+        run: |
+          mkdir -p /tmp/ts-smoke
+          ./target/release/trusty-search start \
+            --foreground \
+            --port 7999 \
+            --data-dir /tmp/ts-smoke \
+            --no-auto-discover \
+            > /tmp/ts-smoke/daemon.log 2>&1 &
+          echo $! > /tmp/ts-smoke/daemon.pid
+          echo "Daemon PID: $(cat /tmp/ts-smoke/daemon.pid)"
+
+      - name: Wait for /health (poll up to 30 s)
+        run: |
+          PORT=7999
+          DEADLINE=$(( $(date +%s) + 30 ))
+          until curl -sf "http://127.0.0.1:${PORT}/health" > /tmp/ts-smoke/health.json 2>/dev/null; do
+            if [ "$(date +%s)" -ge "${DEADLINE}" ]; then
+              echo "--- daemon log ---"
+              cat /tmp/ts-smoke/daemon.log || true
+              echo "--- end daemon log ---"
+              echo "ERROR: /health did not respond within 30 s" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "Daemon is up. Health response:"
+          cat /tmp/ts-smoke/health.json
+
+      - name: Assert /health returns status=ok
+        run: |
+          HEALTH_STATUS=$(python3 -c "import json,sys; d=json.load(open('/tmp/ts-smoke/health.json')); print(d.get('status',''))")
+          echo "status field: ${HEALTH_STATUS}"
+          if [ "${HEALTH_STATUS}" != "ok" ]; then
+            echo "ERROR: /health did not return status=ok (got: ${HEALTH_STATUS})"
+            cat /tmp/ts-smoke/health.json
+            exit 1
+          fi
+          echo "OK: status=ok confirmed"
+
+      - name: Tear down daemon
+        if: always()
+        run: |
+          if [ -f /tmp/ts-smoke/daemon.pid ]; then
+            PID=$(cat /tmp/ts-smoke/daemon.pid)
+            echo "Killing daemon PID ${PID}"
+            kill "${PID}" 2>/dev/null || true
+          fi
