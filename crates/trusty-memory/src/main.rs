@@ -480,7 +480,7 @@ enum MonitorTarget {
 static HELP: std::sync::LazyLock<trusty_common::help::HelpConfig> =
     std::sync::LazyLock::new(|| {
         trusty_common::help::load_help(include_str!("../help.yaml"))
-            .expect("trusty-memory help.yaml is bundled and valid")
+            .expect("trusty-memory help.yaml is bundled and valid") // Why: include_str! guarantees presence at compile time; parse is validated in tests
     });
 
 #[tokio::main]

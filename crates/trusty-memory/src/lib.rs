@@ -1867,7 +1867,7 @@ pub(crate) async fn sse_handler(
         .header("Cache-Control", "no-cache")
         .header("X-Accel-Buffering", "no")
         .body(axum::body::Body::from_stream(stream))
-        .expect("valid SSE response")
+        .expect("valid SSE response") // Why: invariant — SSE headers are compile-time constants; builder cannot fail
 }
 
 #[cfg(test)]
