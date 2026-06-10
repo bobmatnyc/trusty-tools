@@ -637,40 +637,26 @@ async fn run_monitor(target: MonitorTarget) -> Result<()> {
     }
 }
 
-/// Dispatch `serve --stdio` to the direct stdio JSON-RPC MCP server.
+/// Dispatch `serve --stdio` to the pure daemon-bridge MCP server (issue #1078).
 ///
-/// Why: `--stdio` reinstates the direct stdio path removed in #150, now safe
-/// because the snapshot-based read-only fallback means the stdio process
-/// never deadlocks against a running HTTP daemon's exclusive redb lock.
+/// Why: the prior direct-store path opened redb in the stdio process, which
+/// collided with the HTTP daemon's exclusive write lock.  Reads fell back to
+/// a stale snapshot; writes failed with "palace is read-only".  The fix is to
+/// make the stdio process a pure proxy: it never touches redb.  Every JSON-RPC
+/// request is forwarded to `POST /rpc` on the running HTTP daemon; if the
+/// daemon is not running it is auto-started (detached, survives CLI exit).
 /// Stdout hygiene: no update-check banner, no HTTP bind announcement, no
 /// eprintln! — stdout is the JSON-RPC channel and must carry only protocol
 /// bytes.
-/// What: resolves the data dir (same guards as `run_serve`), then delegates
-/// to `commands::serve_stdio::run_stdio` which builds `AppState` and enters
-/// `trusty_common::mcp::run_stdio_loop`.
+/// What: delegates to `commands::serve_stdio_bridge::run_stdio_bridge` which
+/// (1) ensures the daemon is running (auto-start + 30 s health-poll), (2)
+/// builds a shared reqwest client, and (3) enters `run_stdio_loop` forwarding
+/// each request to `POST /rpc`.
 /// Test: `tests/serve_stdio_e2e.rs` spawns a real child, asserts bounded
-/// responses.
+/// responses.  The bridge-specific unit tests live in
+/// `commands/serve_stdio_bridge.rs`.
 async fn run_serve_stdio(palace: Option<String>) -> Result<()> {
-    let data_dir = trusty_common::resolve_data_dir("trusty-memory")?;
-    if !data_dir.is_absolute() {
-        anyhow::bail!(
-            "resolved trusty-memory data directory {:?} is not absolute; \
-             refusing to start stdio server",
-            data_dir
-        );
-    }
-    if data_dir == std::path::Path::new("/") {
-        anyhow::bail!(
-            "resolved trusty-memory data directory is the filesystem root (/); \
-             refusing to start stdio server",
-        );
-    }
-    let data_root = resolve_palace_registry_dir(data_dir);
-    // Apply one-shot idempotent migration (same as HTTP serve path).
-    if let Err(e) = trusty_memory::commands::migrations::migrate_default_palace_name(&data_root) {
-        tracing::warn!("default-palace name migration skipped: {e:#}");
-    }
-    trusty_memory::commands::serve_stdio::run_stdio(data_root, palace).await
+    trusty_memory::commands::serve_stdio_bridge::run_stdio_bridge(palace).await
 }
 
 /// Dispatch `serve` (HTTP path) to the HTTP server.
