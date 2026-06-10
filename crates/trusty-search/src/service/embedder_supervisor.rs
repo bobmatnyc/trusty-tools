@@ -261,6 +261,9 @@ pub struct LazyEmbedderHandle {
     /// Last time any embed request completed successfully (monotonic clock).
     /// Used by the idle-shutdown watchdog.
     last_use: Arc<Mutex<Option<Instant>>>,
+    /// Abort handle for the pid-slot forwarder task (issue #829 — task leak).
+    /// Why: old slots never reset to 0 — abort before each re-spawn.
+    pid_forwarder_handle: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 impl LazyEmbedderHandle {
@@ -288,6 +291,7 @@ impl LazyEmbedderHandle {
             state: Arc::new(Mutex::new(None)),
             app_pid_slot: Arc::new(AtomicU32::new(0)),
             last_use: Arc::new(Mutex::new(None)),
+            pid_forwarder_handle: Mutex::new(None),
         }
     }
 
@@ -342,6 +346,7 @@ impl LazyEmbedderHandle {
                     Arc::clone(&self.app_pid_slot),
                     Arc::clone(&self.state),
                     Arc::clone(&self.last_use),
+                    &self.pid_forwarder_handle,
                 )
                 .await
                 .map_err(|e| {
@@ -373,22 +378,20 @@ impl LazyEmbedderHandle {
     }
 }
 
-/// Spawn the sidecar, wire the supervisor, optionally arm the idle-shutdown
-/// watchdog, and return the `SpawnedState`.
+/// Spawn the sidecar, wire the supervisor, arm the idle-shutdown watchdog, and
+/// return `SpawnedState`. Aborts any previous pid-slot forwarder (issue #829).
 ///
-/// Why: extracted from `LazyEmbedderHandle::embed_via` so the spawn logic can
-/// be tested in isolation. Also resolves and forwards the ONNX batch size to
-/// the sidecar as `TRUSTY_EMBED_BATCH_SIZE` (issue #747 Fix C).
-/// What: calls `EmbedderSupervisor::spawn_stdio`, detaches the crash-restart
-/// loop, updates `app_pid_slot`, and arms the idle-shutdown watchdog when
-/// `idle_shutdown_secs > 0`.
-/// Test: `lazy_handle_defers_spawn` — the spawn is triggered inside `embed_via`.
+/// Why: extracted from `LazyEmbedderHandle::embed_via` so spawn logic can be
+/// tested in isolation. Also forwards ONNX batch size (issue #747 Fix C).
+/// What: calls `EmbedderSupervisor::spawn_stdio`, updates `app_pid_slot`.
+/// Test: `lazy_handle_defers_spawn` — spawn triggered inside `embed_via`.
 async fn do_spawn(
     binary_path: &Path,
     config: &SupervisorConfig,
     app_pid_slot: Arc<AtomicU32>,
     state_cell: Arc<Mutex<Option<SpawnedState>>>,
     last_use: Arc<Mutex<Option<Instant>>>,
+    pid_forwarder_handle: &Mutex<Option<tokio::task::AbortHandle>>,
 ) -> Result<SpawnedState> {
     tracing::info!(
         binary = %binary_path.display(),
@@ -396,22 +399,11 @@ async fn do_spawn(
     );
 
     // Fix C (issue #747): forward the auto-tuned batch size to the sidecar.
-    // Without this the sidecar always defaulted to 32 regardless of the
-    // parent's resolved value (e.g. 256 on Medium-tier + CoreML).
-    // CoreML cap: oversized batches inflate unified-memory RSS and trigger
-    // jetsam SIGKILL, so cap at coreml_cap on the CoreML path.
-    // CUDA cap (issue #763 Fix 2): tune_batch_size_for_provider sets
-    // TRUSTY_MAX_BATCH_SIZE=512 on CUDA, but forwarding 512 to the sidecar
-    // with INFLIGHT=2 causes two concurrent ORT sessions to saturate the T4
-    // BFCArena (re-triggers #600). Cap the sidecar at cuda_sidecar_batch_cap()
-    // (default 64, overridable via TRUSTY_CUDA_SIDECAR_BATCH_CAP) so the
-    // per-ORT-call batch stays within the VRAM budget.
-    //
-    // Why re-resolve on each (re)spawn: intentional. The batch size and CoreML
-    // cap can change between spawns if the operator updates daemon.env and
-    // SIGTERM-restarts the daemon, or if the idle-shutdown watchdog fires and
-    // the sidecar is re-spawned later. Re-resolving here means config changes
-    // take effect on the next spawn without requiring a full daemon restart.
+    // CoreML: cap at coreml_cap to avoid jetsam SIGKILL.
+    // CUDA (issue #763 Fix 2): cap at cuda_sidecar_batch_cap() to stay within
+    // VRAM budget (forwarding 512 with INFLIGHT=2 re-triggers #600).
+    // Re-resolve on each (re)spawn so config changes take effect without a
+    // full daemon restart.
     let predicted_provider = trusty_common::embedder::resolve_expected_provider();
     let is_coreml = matches!(
         predicted_provider,
@@ -458,13 +450,13 @@ async fn do_spawn(
     let initial_pid = child_pid_slot.load(AtomicOrdering::Acquire);
     app_pid_slot.store(initial_pid, AtomicOrdering::Release);
 
-    // Spawn a forwarder so the AppState's slot stays in sync with the
-    // supervisor's slot on crash-restarts (mirrors the logic in
-    // `install_embedderd_pid_slot` in server.rs).
+    // Issue #829: abort the previous forwarder before spawning a new one.
+    // On idle-shutdown cycles the old child_pid_slot never resets to 0, so
+    // the old forwarder loops forever without this cancellation.
     {
         let src = Arc::clone(&child_pid_slot);
         let dst = Arc::clone(&app_pid_slot);
-        tokio::spawn(async move {
+        let join = tokio::spawn(async move {
             loop {
                 let pid = src.load(AtomicOrdering::Acquire);
                 dst.store(pid, AtomicOrdering::Release);
@@ -474,6 +466,12 @@ async fn do_spawn(
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
         });
+        // Swap in the new handle, abort the old one.
+        let mut handle_guard = pid_forwarder_handle.lock().await;
+        if let Some(old) = handle_guard.take() {
+            old.abort();
+        }
+        *handle_guard = Some(join.abort_handle());
     }
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();

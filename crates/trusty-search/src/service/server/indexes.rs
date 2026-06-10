@@ -114,7 +114,9 @@ pub(super) async fn create_index_handler(
     // Without this, registering via `/Users/foo` when that's a symlink to
     // `/Volumes/Kemono/...` stored the symlink path and search queries from
     // the canonical mount returned zero hits.
-    let canonical_root = match validate_root_path(&req.root_path) {
+    // Issue #829: validate_root_path is now async (uses tokio::fs::canonicalize
+    // and tokio::fs::metadata to avoid blocking the executor thread).
+    let canonical_root = match validate_root_path(&req.root_path).await {
         Ok(p) => p,
         Err(resp) => return resp,
     };

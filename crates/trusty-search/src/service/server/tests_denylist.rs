@@ -83,14 +83,14 @@ async fn validate_root_path_denylist_rejects_ssh() {
 /// What: calls `validate_root_path` directly with the home directory and
 /// asserts an `Err` response.
 /// Test: this test.
-#[test]
-fn validate_root_path_denylist_rejects_home() {
+#[tokio::test]
+async fn validate_root_path_denylist_rejects_home() {
     let home = dirs::home_dir().expect("home dir required");
     // Home must exist as a directory on all CI machines.
     if !home.is_dir() {
         return;
     }
-    let result = super::helpers::validate_root_path(&home);
+    let result = super::helpers::validate_root_path(&home).await;
     assert!(
         result.is_err(),
         "$HOME itself must be rejected by validate_root_path"
@@ -160,8 +160,8 @@ fn validate_root_path_denylist_rejects_tmp_literal_paths() {
 /// What: finds a well-known non-sensitive directory that exists on this
 /// machine and asserts `validate_root_path` returns `Ok`.
 /// Test: this test.
-#[test]
-fn validate_root_path_accepts_safe_project_dir() {
+#[tokio::test]
+async fn validate_root_path_accepts_safe_project_dir() {
     // Strategy: find a directory that (a) exists, (b) is not sensitive.
     // On both macOS and Linux, /usr or /opt tend to be present and non-sensitive.
     // We skip on systems where neither exists.
@@ -176,7 +176,7 @@ fn validate_root_path_accepts_safe_project_dir() {
     .copied();
 
     if let Some(path) = candidate {
-        let result = super::helpers::validate_root_path(path);
+        let result = super::helpers::validate_root_path(path).await;
         assert!(
             result.is_ok(),
             "expected Ok for safe directory {:?}, got Err",
@@ -194,8 +194,8 @@ fn validate_root_path_accepts_safe_project_dir() {
 /// `validate_root_path` with the symlink path; asserts `Err`.
 /// Test: this test (Unix-only).
 #[cfg(unix)]
-#[test]
-fn validate_root_path_denylist_blocks_symlink_to_ssh() {
+#[tokio::test]
+async fn validate_root_path_denylist_blocks_symlink_to_ssh() {
     let home = dirs::home_dir().expect("home dir");
     let ssh = home.join(".ssh");
     if !ssh.is_dir() {
@@ -214,7 +214,7 @@ fn validate_root_path_denylist_blocks_symlink_to_ssh() {
     if std::os::unix::fs::symlink(&ssh, &link).is_err() {
         return; // Cannot create symlink — skip.
     }
-    let result = super::helpers::validate_root_path(&link);
+    let result = super::helpers::validate_root_path(&link).await;
     let _ = std::fs::remove_file(&link);
     assert!(
         result.is_err(),

@@ -15,7 +15,6 @@ use axum::{
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
 
 use super::state::SearchAppState;
@@ -74,19 +73,30 @@ pub(super) async fn logs_tail_handler(
 /// Why (issue #35): the admin UI and operators want a one-call way to stop
 /// the daemon without resolving its PID and sending a signal. The daemon is
 /// localhost-only and trusts every caller, so no auth is required.
-/// What: spawns a detached task that sleeps 200 ms (giving this HTTP response
-/// time to flush to the client) and then calls `std::process::exit(0)`.
-/// Returns `{ "ok": true, "message": "shutting down" }` immediately.
-/// Test: `admin_stop_returns_ok` asserts the response shape (it does not
-/// drive the real exit — that would terminate the test process).
+///
+/// Issue #829 (ungraceful admin_stop): the previous implementation called
+/// `std::process::exit(0)` from a detached task. `process::exit` bypasses all
+/// Rust destructors and the redb flush performed by `flush_all_indexes_on_shutdown`
+/// in `run_daemon`, which means an in-progress redb transaction can be left in an
+/// inconsistent state — corrupting the on-disk corpus. The fix: signal the
+/// in-process `watch` channel stored in `SearchAppState::shutdown_tx`; `run_daemon`
+/// polls that channel alongside the OS signal handler and initiates the same clean
+/// shutdown path (drain in-flight requests → flush indexes → delete port file →
+/// release lock) that SIGTERM normally triggers.
+///
+/// What: sends `true` on `state.shutdown_tx` to wake the `run_daemon` shutdown
+/// future. Returns `{ "ok": true, "message": "shutting down" }` immediately.
+/// Test: `admin_stop_triggers_graceful_shutdown` in `tests_state.rs` verifies
+/// that the channel fires without calling `process::exit`.
 pub(super) async fn admin_stop_handler(
-    State(_state): State<Arc<SearchAppState>>,
+    State(state): State<Arc<SearchAppState>>,
 ) -> Json<serde_json::Value> {
-    tracing::warn!("admin_stop: shutdown requested via POST /admin/stop");
-    tokio::spawn(async {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        std::process::exit(0);
-    });
+    tracing::warn!("admin_stop: graceful shutdown requested via POST /admin/stop");
+    // Signal run_daemon to begin the graceful-shutdown sequence (drain
+    // connections → flush indexes → clean up port/lock files). Errors are
+    // ignored: if the receiver has already been dropped (e.g. the daemon is
+    // mid-shutdown already), we still return the success response.
+    let _ = state.shutdown_tx.send(true);
     Json(serde_json::json!({ "ok": true, "message": "shutting down" }))
 }
 

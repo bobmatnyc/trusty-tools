@@ -244,6 +244,38 @@ pub struct SearchAppState {
     /// Test: `health_includes_embedderd_rss_field` in `server.rs#tests` verifies
     /// the field is present in the health response.
     pub embedderd_pid_slot: Arc<std::sync::atomic::AtomicU32>,
+    /// Handle of the currently-running pid-slot forwarder task (issue #829).
+    ///
+    /// Why: `install_embedderd_pid_slot` spawns a background task that copies
+    /// the sidecar PID from the supervisor's Arc to the AppState's slot every
+    /// 500 ms. Without tracking this handle, each sidecar restart (idle-shutdown
+    /// cycle) accumulates one leaked task because the previous slot's value
+    /// never resets to 0. The fix: store the last `AbortHandle` here so
+    /// `install_embedderd_pid_slot` can abort the old task before spawning a new
+    /// one, bounding the number of live forwarder tasks to exactly one.
+    /// What: `Arc<tokio::sync::Mutex<Option<AbortHandle>>>` so multiple clones of
+    /// `SearchAppState` (e.g. the flush clone in `run_daemon`) share the handle.
+    /// `None` until the first `install_embedderd_pid_slot` call.
+    /// Test: `pid_slot_forwarder_does_not_leak_tasks` in `tests_state.rs`.
+    pub embedderd_pid_forwarder_handle: Arc<tokio::sync::Mutex<Option<tokio::task::AbortHandle>>>,
+    /// In-process graceful-shutdown trigger (issue #829 — ungraceful admin_stop).
+    ///
+    /// Why: `POST /admin/stop` previously called `std::process::exit(0)` directly
+    /// from a detached task, which bypasses Rust destructors, the redb flush in
+    /// `flush_all_indexes_on_shutdown`, and axum's graceful-connection drain.
+    /// Hard-exiting mid-write can corrupt the redb corpus (the B-tree file is not
+    /// guaranteed to be in a consistent state if the write-half of a transaction
+    /// is aborted by SIGKILL-equivalent). Using a `watch` channel lets
+    /// `admin_stop_handler` signal `run_daemon` (which holds the send half wrapped
+    /// in `Arc`) to drop the axum server cleanly, flushing all data first.
+    ///
+    /// What: a `watch::Sender<bool>` whose receiver is polled by `run_daemon` as
+    /// an additional shutdown trigger alongside the OS SIGTERM/SIGINT handler.
+    /// When the value becomes `true`, the axum `with_graceful_shutdown` future
+    /// resolves and the normal post-serve flush path runs.
+    ///
+    /// Test: `admin_stop_triggers_graceful_shutdown` in `tests_state.rs`.
+    pub shutdown_tx: Arc<watch::Sender<bool>>,
     /// Cached result of the startup update check (issue #537).
     ///
     /// Why: `/health` should report `update_available` without hitting crates.io

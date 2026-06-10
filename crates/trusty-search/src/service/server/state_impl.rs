@@ -31,6 +31,9 @@ impl SearchAppState {
         // Production daemon boot overrides via `with_embedder_ready_channel`
         // so the background init task can flip readiness once the model loads.
         let (ready_tx, ready_rx) = watch::channel(false);
+        // Issue #829: in-process graceful shutdown channel. `false` = running;
+        // `true` = stop requested. The receiver is polled by `run_daemon`.
+        let (shutdown_tx, _) = watch::channel(false);
         Self {
             registry,
             reindex_progress: Arc::new(DashMap::new()),
@@ -61,6 +64,7 @@ impl SearchAppState {
             embed_pool: Arc::new(RwLock::new(None)),
             metrics: None,
             embedderd_pid_slot: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            embedderd_pid_forwarder_handle: Arc::new(tokio::sync::Mutex::new(None)),
             update_available: Arc::new(std::sync::Mutex::new(None)),
             warmboot_failed_indexes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             warmboot_summary: Arc::new(std::sync::Mutex::new(
@@ -69,6 +73,7 @@ impl SearchAppState {
             prior_index_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             last_rss_mb: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_cpu_pct_bits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            shutdown_tx: Arc::new(shutdown_tx),
         }
     }
 
@@ -318,30 +323,33 @@ impl SearchAppState {
     /// The supervisor loop updates the same Arc on every respawn and clears
     /// it to 0 on final exit, so the daemon always reads the current PID
     /// without holding any lock.
+    ///
+    /// Issue #829 (pid-slot task leak): each call previously spawned a NEW
+    /// forwarder task without cancelling the previous one. On idle-shutdown
+    /// cycles the old slot's PID never resets to 0 (the supervisor moves on
+    /// to a fresh slot), so the old forwarder runs forever, leaking one task
+    /// per embedder lifecycle. The fix: store the previous forwarder's
+    /// `AbortHandle` in an `Arc<Mutex<Option<AbortHandle>>>` field and abort
+    /// it before spawning the new task.
+    ///
     /// What: atomically copies the PID from the new slot into the field's
-    /// existing Arc, then replaces the field's Arc with the new slot so
-    /// future updates from the supervisor are visible directly.
-    /// Test: `health_includes_embedderd_rss_field` in this module.
+    /// existing Arc, then spawns exactly one forwarder that copies future
+    /// PID updates. Any previous forwarder is aborted first.
+    /// Test: `pid_slot_forwarder_does_not_leak_tasks` in `tests_state.rs`.
     pub async fn install_embedderd_pid_slot(&self, slot: Arc<std::sync::atomic::AtomicU32>) {
         use std::sync::atomic::Ordering;
-        // Overwrite the AppState's Arc with the supervisor-owned Arc so all
-        // subsequent reads — health handler, reindex poller — go through the
-        // same object the supervisor loop writes to.
-        // `Arc::swap` doesn't exist; use `AtomicU32` copy-then-pointer-replace via
-        // a shared wrapper. Since the field is `Arc<AtomicU32>` (not `AtomicArc`),
-        // we can't atomically replace the Arc pointer itself. The safest approach:
-        // copy the current PID into the existing slot so any reader that already
-        // holds a clone of the old Arc starts seeing the right value, AND then
-        // atomically propagate future updates via a tiny background task.
         let initial_pid = slot.load(Ordering::Acquire);
         self.embedderd_pid_slot
             .store(initial_pid, Ordering::Release);
-        // Keep in sync for future restarts: spawn a compact forwarder that
-        // copies from the supervisor's Arc to the AppState's Arc every tick.
-        // Uses 500 ms cadence — same as the reindex RSS poller.
+
+        // Issue #829: cancel any previously-running forwarder before spawning
+        // a new one. We keep the AbortHandle in a Mutex stored inside the same
+        // Arc so callers holding a clone of `SearchAppState` share the handle.
+        // On the first call the Mutex is empty and no abort is needed.
         let src = Arc::clone(&slot);
         let dst = Arc::clone(&self.embedderd_pid_slot);
-        tokio::spawn(async move {
+        let handle = Arc::clone(&self.embedderd_pid_forwarder_handle);
+        let join = tokio::spawn(async move {
             loop {
                 let pid = src.load(Ordering::Acquire);
                 dst.store(pid, Ordering::Release);
@@ -352,6 +360,13 @@ impl SearchAppState {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
         });
+        // Abort the OLD forwarder after the new one is already running so
+        // there is never a gap in forwarding.
+        let mut guard = handle.lock().await;
+        if let Some(old) = guard.take() {
+            old.abort();
+        }
+        *guard = Some(join.abort_handle());
     }
 
     /// Current OS PID of the embedderd sidecar, or `None` if no sidecar is

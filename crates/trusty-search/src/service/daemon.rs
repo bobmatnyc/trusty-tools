@@ -414,7 +414,8 @@ fn acquire_lock(lock_path: &PathBuf) -> Result<File, DaemonError> {
 use trusty_common::shutdown_signal;
 
 /// Start the daemon: acquire the lock, bind a port, write the port file,
-/// serve the axum router until SIGTERM/SIGINT, then clean up the port file.
+/// serve the axum router until SIGTERM/SIGINT or in-process admin stop, then
+/// clean up the port file.
 pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<(), DaemonError> {
     let lock_path = daemon_lock_path()?;
     let port_path = daemon_port_path()?;
@@ -433,15 +434,8 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
     // Atomically write the port file (write + rename).
     write_port_file(&port_path, port)?;
 
-    // Also write the canonical `~/.trusty-search/http_addr` discovery file
-    // (full `host:port` line) so `trusty-search dashboard` and other clients
-    // can locate the daemon without depending on the platform-specific
-    // data-local dir. Best-effort: a missing $HOME is not fatal — the legacy
-    // `daemon.port` file above is still authoritative for the local CLI.
-    //
-    // Note (issue #117): `write_http_addr_file` is unconditional and uses
-    // tmp+rename, so a freshly-booted daemon always corrects a stale file
-    // left behind by a crashed previous daemon or a SIGKILL'd `serve --http`.
+    // Write ~/.trusty-search/http_addr (host:port) for client discovery.
+    // Issue #117: unconditional write corrects stale files from crashed daemons.
     let http_addr_written = match http_addr_path() {
         Some(path) => match write_http_addr_file(&path, &addr) {
             Ok(()) => Some(path),
@@ -453,30 +447,24 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
         None => None,
     };
 
-    // Friendly startup banner (printed to stderr so it doesn't pollute stdout
-    // for callers consuming JSON-RPC over a pipe). Includes the version so
-    // users can confirm which binary is running when multiple are installed.
+    // Startup banner (stderr only — stdout is JSON-RPC transport).
     eprintln!(
         "trusty-search v{} — HTTP admin panel: http://{}",
         env!("CARGO_PKG_VERSION"),
         addr,
     );
 
-    // Why: The embedded UI needs to know the actual port at runtime so it
-    // can call back to the daemon (window.__DAEMON_PORT__). Stamp it onto
-    // the state right before building the router.
+    // Stamp port into state so the SPA knows window.__DAEMON_PORT__.
     let state = state.with_daemon_port(port);
-    // Issue #85: capture a clone *before* moving `state` into `build_router`
-    // so the post-shutdown flush can walk the registry. SearchAppState is
-    // cheap to clone (all internal fields are Arc/handle-like).
+    // Issue #85: clone before moving into build_router for post-shutdown flush.
     let flush_state = state.clone();
+    // Issue #829: subscribe before moving state into build_router.
+    let mut shutdown_rx = state.shutdown_tx.subscribe();
     let router = build_router(state);
 
     tracing::info!("daemon listening on {addr} (lock {})", lock_path.display());
 
-    // Log active memory limits so operators can confirm the correct values
-    // are in effect (especially important for launchd-managed restarts where
-    // env vars come from daemon.env rather than the user's shell).
+    // Log active memory limits (confirms launchd restarts inherit correct values).
     {
         use crate::core::memguard::{index_memory_limit_mb, memory_limit_mb};
         let max_chunks = std::env::var("TRUSTY_MAX_CHUNKS")
@@ -499,8 +487,16 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
         );
     }
 
+    // Issue #829: OS signal OR in-process admin_stop channel.
     let serve_result = axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            tokio::select! {
+                _ = shutdown_signal() => {}
+                _ = shutdown_rx.changed() => {
+                    tracing::warn!("daemon: in-process stop via admin_stop");
+                }
+            }
+        })
         .await;
 
     // Issue #85 — flush HNSW + chunk corpus for every registered index so

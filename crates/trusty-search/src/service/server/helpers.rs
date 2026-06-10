@@ -21,14 +21,26 @@ use axum::{
 /// `crate::allowlist::is_denied` is the authoritative gate; this function
 /// applies it **after** canonicalization so symlink tricks or `..` traversals
 /// cannot bypass the check.
-/// What: in order — (1) rejects empty/non-absolute/non-dir paths; (2)
-/// canonicalizes via `std::fs::canonicalize` to resolve symlinks; (3) calls
-/// `crate::allowlist::is_denied` on the canonical path and returns 400 with the
-/// denial reason when matched.
+///
+/// Issue #829 (blocking canonicalize): the previous sync version called
+/// `std::fs::canonicalize` and `path.is_dir()` directly on the tokio async
+/// thread. Both are blocking syscalls that park the executor thread for the
+/// duration of the kernel operation. Under load (many concurrent `POST /indexes`
+/// requests or a network-backed filesystem that is slow to respond) this starves
+/// the runtime. The fix: this function is now `async` and uses
+/// `tokio::fs::canonicalize` (non-blocking, runs on the blocking pool) and
+/// `tokio::fs::metadata` for the directory check.
+///
+/// What: in order — (1) rejects empty/non-absolute paths (no I/O); (2)
+/// checks `is_dir` via `tokio::fs::metadata`; (3) canonicalizes via
+/// `tokio::fs::canonicalize`; (4) calls `crate::allowlist::is_denied` on the
+/// canonical path and returns 400 with the denial reason when matched.
 /// Test: `validate_root_path_denylist_rejects_ssh`, `_rejects_home`,
-/// `_rejects_tmp`, `_accepts_project_dir` in `tests_index.rs`.
+/// `_rejects_tmp`, `_accepts_project_dir` in `tests_denylist.rs`.
 #[allow(clippy::result_large_err)]
-pub(super) fn validate_root_path(path: &std::path::Path) -> Result<std::path::PathBuf, Response> {
+pub(super) async fn validate_root_path(
+    path: &std::path::Path,
+) -> Result<std::path::PathBuf, Response> {
     if path.as_os_str().is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -52,7 +64,13 @@ pub(super) fn validate_root_path(path: &std::path::Path) -> Result<std::path::Pa
         )
             .into_response());
     }
-    if !path.is_dir() {
+    // Issue #829: use tokio::fs::metadata instead of path.is_dir() to avoid
+    // blocking the async executor on a potentially slow filesystem probe.
+    let is_dir = tokio::fs::metadata(path)
+        .await
+        .map(|m| m.is_dir())
+        .unwrap_or(false);
+    if !is_dir {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -64,14 +82,12 @@ pub(super) fn validate_root_path(path: &std::path::Path) -> Result<std::path::Pa
         )
             .into_response());
     }
-    // Resolve any symlink components so the registry, walker, and persistence
-    // layer all agree on the project's canonical identity. `is_dir()` returned
-    // true above, so `canonicalize` should succeed; on the off chance it fails
-    // (e.g. a TOCTOU unlink between the `is_dir` check and this call) we surface
-    // a 400 with the underlying I/O error rather than fall back to the
-    // un-canonicalized path — half-resolved paths are exactly what produced the
-    // mismatch in the first place.
-    let canonical = match std::fs::canonicalize(path) {
+    // Issue #829: use tokio::fs::canonicalize instead of std::fs::canonicalize.
+    // This resolves symlinks on the blocking pool without parking an async thread.
+    // `metadata` succeeded above so `canonicalize` should succeed; on the off
+    // chance it fails (e.g. TOCTOU unlink) we surface a 400 instead of
+    // falling back to the un-canonicalized path.
+    let canonical = match tokio::fs::canonicalize(path).await {
         Ok(p) => p,
         Err(e) => {
             return Err((
@@ -138,12 +154,22 @@ pub(super) fn file_is_within_root(file: &str, root: &std::path::Path) -> bool {
         // pay the `canonicalize` cost for absolute-path results that failed the
         // cheap check (so the hot path for relative-path chunks is unaffected).
         //
+        // Issue #829 (blocking canonicalize): `std::fs::canonicalize` is a
+        // blocking syscall. When called from an async handler (e.g. the search
+        // retain loop) it parks the tokio executor thread. We use
+        // `tokio::task::block_in_place` to move the blocking work off the
+        // async scheduler cooperatively — this is safe inside a multi-thread
+        // tokio runtime and avoids spawning a new OS thread for each call.
+        // The result is the same; only the scheduling is non-blocking.
+        //
         // Strategy: canonicalize the index root (resolves symlink aliases, macOS
         // /var ↔ /private/var, etc.), then check whether the stored file path
         // starts with that canonical root. We do NOT canonicalize the file path
         // itself because the file may have been deleted since indexing; we only
         // need the root to resolve correctly.
-        let canonical_root = match std::fs::canonicalize(root) {
+        let root_owned = root.to_path_buf();
+        let canonical_root = tokio::task::block_in_place(|| std::fs::canonicalize(root_owned));
+        let canonical_root = match canonical_root {
             Ok(r) => r,
             Err(_) => return false,
         };
