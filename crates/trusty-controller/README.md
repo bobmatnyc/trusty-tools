@@ -122,5 +122,5 @@ cargo clippy -p trusty-controller --all-targets -- -D warnings
 
 ## License
 
-Elastic License 2.0 (see `LICENSE`).  `publish = false` for the Phase-0 scaffold;
-will be set to `true` when the Phase-1 dispatch engine ships.
+MIT (workspace default; see root `Cargo.toml` and issue #898).  `publish = false`
+for the Phase-0 scaffold; will be set to `true` when the Phase-1 dispatch engine ships.

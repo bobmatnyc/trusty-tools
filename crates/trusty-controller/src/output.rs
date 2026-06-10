@@ -38,29 +38,24 @@ pub fn render_json<T: Serialize>(value: &T) -> Result<()> {
 /// return an opaque error — they must return a structured, discoverable result
 /// so the CLI surface is complete and testable (per task spec).
 ///
-/// What: When `json` is `true`, emits a JSON object
-/// `{"status":"not_yet_implemented","command":"<cmd>","phase":"0"}` to stdout.
-/// When `json` is `false`, prints a one-line human message to stdout.
+/// What: Constructs a `NotYetImplemented` value for `command`. When `json` is
+/// `true`, serialises it to stdout via `render_json`. When `json` is `false`,
+/// prints a one-line human message. Using `NotYetImplemented` as the canonical
+/// stub type ensures the JSON shape is consistent and testable in isolation.
 ///
 /// Test: Call with `json = true` and capture stdout; assert the JSON contains
-/// `"status":"not_yet_implemented"` and the correct `command` key.
+/// `"command"` and `"phase"` keys matching the constructed value.
 pub fn print_not_yet_implemented(command: &str, json: bool) {
+    let nyi = NotYetImplemented::new(command);
     if json {
-        let obj = serde_json::json!({
-            "status": "not_yet_implemented",
-            "command": command,
-            "phase": "0",
-            "message": format!(
-                "`tctl {command}` is scaffolded but not yet fully implemented (Phase 0). \
-                 See issue #920 for the roadmap."
-            )
-        });
-        // Safe: we just constructed valid JSON above.
-        println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
+        // Safe: `NotYetImplemented` is a well-typed struct; serialisation
+        // cannot fail. Falls back to empty string on the impossible error.
+        println!("{}", serde_json::to_string_pretty(&nyi).unwrap_or_default());
     } else {
         println!(
-            "tctl {command}: not yet implemented (Phase 0 scaffold). \
-             See https://github.com/bobmatnyc/trusty-tools/issues/920 for the roadmap."
+            "tctl {}: not yet implemented (Phase 0 scaffold). \
+             See https://github.com/bobmatnyc/trusty-tools/issues/920 for the roadmap.",
+            nyi.command
         );
     }
 }

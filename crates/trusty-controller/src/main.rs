@@ -52,6 +52,16 @@ fn dispatch(cli: Cli) {
     let json = cli.json;
     let yes = cli.yes;
 
+    // TODO(#920 / Phase 1): forward `cli.scope` to every handler so commands
+    // can honour the DOC-3 §3 scope contract.  In Phase 0 the field is parsed
+    // and validated by clap (keeping the CLI surface stable) but the resolved
+    // scope is not yet threaded into the stub handlers — that wiring lands when
+    // the manifest-driven probe loop is implemented.
+    //
+    // Hint for Phase 1: use `scope::resolve_scope(cli.scope, &std::env::current_dir()?)` here
+    // and pass the result as a parameter to each handler's `run(…)` signature.
+    let _ = cli.scope; // intentionally unused in Phase 0; see TODO above
+
     match cli.command {
         Commands::Version => {
             version::run(json);

@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Thin control plane for the claude-mpm stack: install, upgrade, restart, health, and config coordination across all trusty-* tools."
 readme = "README.md"
-# ADR-0006: Elastic-2.0 (workspace default via license-file, matching trusty-search convention).
-# SPDX-identifier form is rejected by crates.io; use license-file instead.
-license-file = "LICENSE"
+# Workspace default: MIT (see root Cargo.toml [workspace.package] license = "MIT",
+# #898 relicense, and sibling crates). Use license.workspace = true so the
+# authoritative value propagates from one place.
+license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 authors.workspace = true

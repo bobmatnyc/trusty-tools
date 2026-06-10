@@ -196,12 +196,27 @@ pub enum Commands {
     Status,
 
     /// Print the controller's own bound port/address — clean stdout. (DOC-7)
+    ///
+    /// Output format precedence (highest → lowest):
+    ///   1. `--json-port`  →  `{"addr":"…","port":N}` (DOC-7 / trusty-search port --json pattern)
+    ///   2. `--addr`       →  `host:port` string
+    ///   3. (default)      →  bare integer port
+    ///
+    /// The global `--json` flag and `--json-port` are *semantically* overlapping
+    /// (both produce JSON on stdout) but with different shapes.  When both appear
+    /// on the same invocation, `--json-port` takes precedence and `--json` is
+    /// ignored for this command.  This is enforced at runtime in `commands::port::run`
+    /// rather than by clap because `--json` is a `global = true` flag and clap's
+    /// `conflicts_with` does not fire across subcommand boundaries for global flags.
     Port {
         /// Emit host:port instead of the bare port number.
         #[arg(long)]
         addr: bool,
 
         /// Emit a JSON object `{"addr":"…","port":N}`.
+        ///
+        /// Precedence over the global `--json` flag: when both are provided,
+        /// `--json-port` wins and the port-specific JSON shape is emitted.
         #[arg(long)]
         json_port: bool,
     },
@@ -264,236 +279,7 @@ pub enum StackCmd {
 }
 
 // ── Unit tests ───────────────────────────────────────────────────────────────
-
+// Tests are in a sibling file to keep this definition file under the 500-line cap.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Parser;
-
-    /// Parse `tctl version` — must succeed and select `Commands::Version`.
-    #[test]
-    fn parse_version() {
-        let cli = Cli::try_parse_from(["tctl", "version"]).expect("version parses");
-        assert!(matches!(cli.command, Commands::Version));
-    }
-
-    /// Parse `tctl version --json` — global flag propagates into `Cli.json`.
-    #[test]
-    fn parse_version_json() {
-        let cli =
-            Cli::try_parse_from(["tctl", "version", "--json"]).expect("version --json parses");
-        assert!(cli.json);
-        assert!(matches!(cli.command, Commands::Version));
-    }
-
-    /// Parse `tctl stack health`.
-    #[test]
-    fn parse_stack_health() {
-        let cli = Cli::try_parse_from(["tctl", "stack", "health"]).expect("stack health parses");
-        assert!(matches!(cli.command, Commands::Stack(StackCmd::Health)));
-    }
-
-    /// Parse `tctl stack doctor`.
-    #[test]
-    fn parse_stack_doctor() {
-        let cli = Cli::try_parse_from(["tctl", "stack", "doctor"]).expect("stack doctor parses");
-        assert!(matches!(
-            cli.command,
-            Commands::Stack(StackCmd::Doctor { member: None })
-        ));
-    }
-
-    /// Parse `tctl stack doctor trusty-search`.
-    #[test]
-    fn parse_stack_doctor_member() {
-        let cli = Cli::try_parse_from(["tctl", "stack", "doctor", "trusty-search"])
-            .expect("stack doctor <m> parses");
-        assert!(matches!(
-            cli.command,
-            Commands::Stack(StackCmd::Doctor { member: Some(_) })
-        ));
-    }
-
-    /// Parse `tctl status`.
-    #[test]
-    fn parse_status() {
-        let cli = Cli::try_parse_from(["tctl", "status"]).expect("status parses");
-        assert!(matches!(cli.command, Commands::Status));
-    }
-
-    /// Parse `tctl updates`.
-    #[test]
-    fn parse_updates() {
-        let cli = Cli::try_parse_from(["tctl", "updates"]).expect("updates parses");
-        assert!(matches!(cli.command, Commands::Updates { latest: false }));
-    }
-
-    /// Parse `tctl updates --latest`.
-    #[test]
-    fn parse_updates_latest() {
-        let cli =
-            Cli::try_parse_from(["tctl", "updates", "--latest"]).expect("updates --latest parses");
-        assert!(matches!(cli.command, Commands::Updates { latest: true }));
-    }
-
-    /// Parse `tctl upgrade`.
-    #[test]
-    fn parse_upgrade() {
-        let cli = Cli::try_parse_from(["tctl", "upgrade"]).expect("upgrade parses");
-        assert!(matches!(cli.command, Commands::Upgrade { .. }));
-    }
-
-    /// `tctl update` is a visible alias of `upgrade`.
-    #[test]
-    fn parse_update_alias() {
-        let cli = Cli::try_parse_from(["tctl", "update"]).expect("update alias parses");
-        assert!(matches!(cli.command, Commands::Upgrade { .. }));
-    }
-
-    /// Parse `tctl upgrade --check`.
-    #[test]
-    fn parse_upgrade_check() {
-        let cli =
-            Cli::try_parse_from(["tctl", "upgrade", "--check"]).expect("upgrade --check parses");
-        assert!(matches!(cli.command, Commands::Upgrade { check: true, .. }));
-    }
-
-    /// Parse `tctl install`.
-    #[test]
-    fn parse_install() {
-        let cli = Cli::try_parse_from(["tctl", "install"]).expect("install parses");
-        assert!(matches!(cli.command, Commands::Install { .. }));
-    }
-
-    /// Parse `tctl install trusty-search trusty-memory`.
-    #[test]
-    fn parse_install_members() {
-        let cli = Cli::try_parse_from(["tctl", "install", "trusty-search", "trusty-memory"])
-            .expect("install members parses");
-        if let Commands::Install { members } = &cli.command {
-            assert_eq!(members, &["trusty-search", "trusty-memory"]);
-        } else {
-            panic!("expected Install");
-        }
-    }
-
-    /// Parse `tctl ensure`.
-    #[test]
-    fn parse_ensure() {
-        let cli = Cli::try_parse_from(["tctl", "ensure"]).expect("ensure parses");
-        assert!(matches!(cli.command, Commands::Ensure { wait: false }));
-    }
-
-    /// Parse `tctl ensure --wait`.
-    #[test]
-    fn parse_ensure_wait() {
-        let cli = Cli::try_parse_from(["tctl", "ensure", "--wait"]).expect("ensure --wait parses");
-        assert!(matches!(cli.command, Commands::Ensure { wait: true }));
-    }
-
-    /// Parse `tctl start`.
-    #[test]
-    fn parse_start() {
-        let cli = Cli::try_parse_from(["tctl", "start"]).expect("start parses");
-        assert!(matches!(cli.command, Commands::Start { .. }));
-    }
-
-    /// Parse `tctl stop`.
-    #[test]
-    fn parse_stop() {
-        let cli = Cli::try_parse_from(["tctl", "stop"]).expect("stop parses");
-        assert!(matches!(cli.command, Commands::Stop { .. }));
-    }
-
-    /// Parse `tctl restart`.
-    #[test]
-    fn parse_restart() {
-        let cli = Cli::try_parse_from(["tctl", "restart"]).expect("restart parses");
-        assert!(matches!(cli.command, Commands::Restart { .. }));
-    }
-
-    /// Parse `tctl config`.
-    #[test]
-    fn parse_config() {
-        let cli = Cli::try_parse_from(["tctl", "config"]).expect("config parses");
-        assert!(matches!(cli.command, Commands::Config { .. }));
-    }
-
-    /// Parse `tctl port`.
-    #[test]
-    fn parse_port() {
-        let cli = Cli::try_parse_from(["tctl", "port"]).expect("port parses");
-        assert!(matches!(cli.command, Commands::Port { .. }));
-    }
-
-    /// Parse `tctl port --addr`.
-    #[test]
-    fn parse_port_addr() {
-        let cli = Cli::try_parse_from(["tctl", "port", "--addr"]).expect("port --addr parses");
-        assert!(matches!(cli.command, Commands::Port { addr: true, .. }));
-    }
-
-    /// Parse `tctl doctor --self-check trusty-search`.
-    #[test]
-    fn parse_doctor_self_check() {
-        let cli = Cli::try_parse_from(["tctl", "doctor", "--self-check", "trusty-search"])
-            .expect("doctor --self-check parses");
-        assert!(matches!(
-            cli.command,
-            Commands::Doctor {
-                self_check: true,
-                member: Some(_)
-            }
-        ));
-    }
-
-    /// Parse `tctl ui`.
-    #[test]
-    fn parse_ui() {
-        let cli = Cli::try_parse_from(["tctl", "ui"]).expect("ui parses");
-        assert!(matches!(cli.command, Commands::Ui { .. }));
-    }
-
-    /// Generic passthrough: `tctl trusty-search doctor`.
-    #[test]
-    fn parse_passthrough() {
-        let cli =
-            Cli::try_parse_from(["tctl", "trusty-search", "doctor"]).expect("passthrough parses");
-        if let Commands::Passthrough(args) = &cli.command {
-            assert_eq!(args.as_slice(), &["trusty-search", "doctor"]);
-        } else {
-            panic!("expected Passthrough");
-        }
-    }
-
-    /// Bare `tctl` with no subcommand must fail (arg_required_else_help).
-    #[test]
-    fn bare_tctl_fails() {
-        assert!(Cli::try_parse_from(["tctl"]).is_err());
-    }
-
-    /// Global `--scope` propagates to nested subcommands.
-    #[test]
-    fn global_scope_propagates() {
-        let cli = Cli::try_parse_from(["tctl", "--scope", "project", "stack", "health"])
-            .expect("scope propagates");
-        assert_eq!(cli.scope, Some(ScopeArg::Project));
-    }
-
-    /// Global `--timeout` propagates to nested subcommands.
-    #[test]
-    fn global_timeout_propagates() {
-        let cli = Cli::try_parse_from(["tctl", "--timeout", "30", "version"])
-            .expect("timeout propagates");
-        assert_eq!(cli.timeout, Some(30));
-    }
-
-    /// `--yes` / `-y` are equivalent.
-    #[test]
-    fn yes_short_flag() {
-        let long = Cli::try_parse_from(["tctl", "--yes", "restart"]).expect("--yes parses");
-        let short = Cli::try_parse_from(["tctl", "-y", "restart"]).expect("-y parses");
-        assert!(long.yes);
-        assert!(short.yes);
-    }
-}
+#[path = "cli_tests.rs"]
+mod tests;
