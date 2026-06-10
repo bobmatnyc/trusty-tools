@@ -78,7 +78,7 @@ redb               = { workspace = true }
 dashmap            = { workspace = true }
 rust-embed         = { workspace = true }
 mime_guess         = { workspace = true }
-trusty-common      = { workspace = true, features = ["symgraph", "cli-help", "update-check", "bedrock"] }
+trusty-common      = { workspace = true, features = ["symgraph", "cli-help", "update-check", "bedrock", "mcp"] }
 tree-sitter            = { workspace = true }
 tree-sitter-rust       = { workspace = true }
 tree-sitter-typescript = { workspace = true }

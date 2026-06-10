@@ -16,9 +16,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+pub mod daemon_bridge;
 pub mod openrpc;
 pub mod service;
 
+pub use daemon_bridge::{DaemonBridgeConfig, ensure_daemon_up};
 pub use service::ServiceDescriptor;
 
 /// JSON-RPC 2.0 error codes.
