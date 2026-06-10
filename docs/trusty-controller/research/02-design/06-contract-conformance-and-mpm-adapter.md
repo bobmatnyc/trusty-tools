@@ -50,7 +50,12 @@ decision it derives from):
 5. **Redacts secrets** (DOC-1 D8) — all output (`config` effective values,
    `version.build`, `doctor` remediation hints, `health` detail) masks API keys,
    tokens, AWS credentials, and connection strings with the fixed marker
-   `"***redacted***"`.
+   `"***redacted***"`. Conformance here means redaction both **happens** (tools
+   redact at the source via the shared `redact_value` helper, §3) **and** is
+   **verified** by the negative CI conformance assertion (§8): no known secret
+   pattern appears unredacted in a member's captured envelope output. The
+   controller-side belt-and-suspenders redaction pass (DOC-1 D8) is the runtime
+   backstop; the negative assertion is the gate. Cross-ref DOC-1 D8 + §8.
 6. **Tags scope correctly** (DOC-1 D7 / DOC-3) — the `--scope project|system|all`
    flag is honored, the envelope `scope` reflects it, and each doctor/health check
    carries its own per-check `scope`. Single-layer (system-only) members simply
@@ -584,6 +589,17 @@ How the controller / test harness checks a member is conformant (feeds DOC-10):
      patterns — `*_api_key`, `*token*`, `AWS_*`, connection strings — asserting
      `***redacted***`);
    - unadvertised/unknown verbs are rejected with exit code `3`.
+
+   The redaction lint is a **negative secret-pattern assertion** (DOC-1 D8 /
+   M9): it scans the captured envelope output for high-confidence secret shapes —
+   `AKIA…` AWS access keys, `Bearer` / `Authorization` header values,
+   `scheme://user:pass@host` connection-string credentials, key prefixes `sk-` /
+   `ghp_` / `xox…`, and long high-entropy base64/hex blobs — and **any match
+   fails CI loudly**. This is the same assertion the captured-output conformance
+   fixtures carry (below), so it is asserted against **every member's** envelope
+   output, **including the claude-mpm shim** (whose §4/§4.1 human-text parsing is
+   the highest-risk leak path). It is the gate behind the controller-side
+   belt-and-suspenders redaction pass (DOC-1 D8), which is the runtime backstop.
 2. **Round-trip serde test in `trusty_common::contract`** — the shared module
    ships golden-JSON fixtures (DOC-1's worked examples) asserting every type
    round-trips, so a retrofit that drifts the shape fails CI in the shared crate.
@@ -593,6 +609,17 @@ How the controller / test harness checks a member is conformant (feeds DOC-10):
 4. **claude-mpm adapter test** — DOC-10's isolation harness installs the pinned
    claude-mpm (§5) and runs the shim, asserting the synthesized envelope is valid
    and `verbs[]` is exactly `["doctor","health","version"]`.
+
+The **captured-output conformance fixtures** in DOC-10's harness — the same
+fixtures added for C3 (golden-schema), M2 (stack-tuple), and M3 (shim
+drift) — carry the **negative secret-pattern assertion** (M9 / DOC-1 D8): they
+assert that **no known secret pattern** (`AKIA…`, `Bearer` / `Authorization`
+values, `scheme://user:pass@host`, key prefixes `sk-` / `ghp_` / `xox…`,
+high-entropy blobs) appears unredacted in **any member's** captured `--json`
+envelope output, **including the claude-mpm shim**. A match fails CI, so a
+redaction bug is caught pre-merge rather than in the live UI; the controller-side
+redaction pass (DOC-1 D8) remains the runtime backstop for anything the heuristic
+patterns miss.
 
 `tctl doctor --self-check` doubles as the DOC-10 acceptance gate: a member that
 passes it is, by construction, conformant for its advertised verbs.

@@ -155,6 +155,21 @@ All verb output (`config`, `version`, `doctor` remediation hints, etc.) MUST
 redact secrets — API keys, tokens, AWS credentials, connection strings — using
 the fixed marker `"***redacted***"`.
 
+Redaction is **layered (defense-in-depth)**, not a single trusted hop. Tools
+redact at the source via the shared `redact_value` helper (the canonical,
+mandatory path — see D6 / DOC-6 §3); this is the **primary line**. Because a tool
+self-reports already-redacted JSON and the controller cannot prove the tool did
+so, the controller **additionally** runs a belt-and-suspenders redaction pass
+over every envelope string value **before rendering** — on both the CLI output
+and the DOC-7 UI — masking high-confidence secret patterns (e.g. `AKIA…`,
+`Bearer` / `Authorization` values, `scheme://user:pass@host` credentials, key
+prefixes `sk-` / `ghp_` / `xox…`, long high-entropy blobs) with the same
+`***redacted***` marker, so a member (or the claude-mpm shim) that forgot to
+redact cannot leak a secret into the UI. This controller-side pass is
+**heuristic / pattern-based** — it cannot catch every secret shape — so it is
+defense-in-depth, **not a guarantee**: tool-side `redact_value` remains the
+primary line and a negative CI conformance assertion (DOC-6 §8) is the gate.
+
 ## Per-verb `data` schemas (`contract_version: 1`)
 
 Every verb returns the **uniform envelope** from D3; only `data` varies. The

@@ -39,7 +39,7 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 | M6 | MAJOR | CLI-as-authority (D1) under-specified for "daemon up but wedged" | DOC-1 D1, `health.data` | — | ✅ Resolved |
 | M7 | MAJOR | Concurrent "ensure every launch" race on a shared daemon | DOC-3 §4/§6/§8 | — | ✅ Resolved |
 | M8 | MAJOR | Status-enum reconciliation is ambiguous | DOC-1 D4, DOC-4 §1.1/§4, DOC-3 §9 | — | ✅ Resolved |
-| M9 | MAJOR | D8 secret redaction is unenforceable | DOC-1 D8, DOC-6 conformance clause 5 | — | 🔴 Open |
+| M9 | MAJOR | D8 secret redaction is unenforceable | DOC-1 D8, DOC-6 conformance clause 5 | — | ✅ Resolved |
 | M10 | MAJOR | Timeouts (2s health / 10s doctor) false-fail cold / model-loading daemons | DOC-4 §1.3, Resolved-Q1 | — | ✅ Resolved |
 | M11 | MAJOR | `state.toml` stack-version tracking can silently desync; UI shows stale "clean" | DOC-9 §4.4, Resolved-Q3, DOC-7 §2.1 | — | ✅ Resolved |
 | M12 | MAJOR | No auto-rollback + non-transactional installs can wedge a partial tuple | DOC-9 §6/§3.6, Resolved-Q5 | — | ✅ Resolved |
@@ -232,9 +232,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** tools self-report already-redacted JSON; controller can't verify; helper is opt-in; no CI gate.
 - **Failure mode:** one buggy tool (e.g. the shim) leaks a key/credential into the web UI.
 - **Fix direction:** defense-in-depth controller-side redaction pass over envelope strings before render.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** best recommendation — defense-in-depth, honestly scoped. Tool-side `redact_value` (DOC-1 D8 / DOC-6 §3) stays the **primary line**: tools redact at the source via the shared helper before emitting any envelope value. The controller adds a **belt-and-suspenders redaction pass** over **all** envelope string values **before render** — on both the CLI output and the DOC-7 UI — masking high-confidence secret patterns (`AKIA…` AWS access keys, `Bearer` / `Authorization` values, `scheme://user:pass@host` credentials, key prefixes `sk-` / `ghp_` / `xox…`, long high-entropy blobs) with `***redacted***`, so a tool or the claude-mpm shim that forgot to redact **cannot leak** a secret into the UI. A **negative CI conformance assertion** (DOC-6 §8 / DOC-10 captured-output fixtures, alongside the C3/M2/M3 fixtures) asserts that **no known secret pattern appears unredacted** in any member's captured envelope output — including the shim — and **fails CI loudly** if one does, so a redaction bug is caught pre-merge, not in the live UI. **Honestly scoped:** pattern matching is necessarily **heuristic** — it cannot catch every secret shape — so the controller-side pass is **defense-in-depth, not a guarantee**; tool-side `redact_value` remains the primary line and the negative CI assertion is the gate (a nod to M1's honesty principle).
+- **Follow-up:** DOC-1 D8 (layered/defense-in-depth redaction — tool-side `redact_value` primary + controller-side belt-and-suspenders pass over envelope strings on CLI + UI + the heuristic/not-a-guarantee caveat). DOC-6 §1 clause 5 (redaction both happens **and** is verified by the negative CI assertion; controller pass = runtime backstop) + §8 (negative secret-pattern assertion in the self-check redaction lint and the captured-output fixtures, claude-mpm shim included, consistent with the C3/M2/M3 fixture framing). Implementation follow-up: the controller-side redaction pass (CLI + UI) + the negative-assertion conformance test in the harness.
 
 ### M10 — Timeouts (2s health / 10s doctor) false-fail cold / model-loading daemons
 
