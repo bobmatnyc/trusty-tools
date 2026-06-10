@@ -356,9 +356,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** two `scope` fields with overlapping-but-different value sets in one JSON doc; provenance is an untyped string (`env` can't reuse the `Scope` enum).
 - **Failure mode:** authors conflate them; controller can't catch typos.
 - **Fix direction:** rename provenance to `origin` (`{env|project|system}`) with its own enum; one `scope` axis.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** Rename the config-provenance field `config.data` `sources[].scope` → `sources[].origin`, with its own enum `{env|project|system}` (a distinct, typed provenance vocabulary), leaving `scope` used **exclusively** for the D7 wire axis `{project|system|all}`. One `scope` axis + a separate typed `origin`, so authors cannot conflate the two axes and a typo in `origin` is catchable against its own enum rather than silently accepted as a stringly-typed `scope`.
+- **Follow-up:** DOC-1 `config.data` (rename `sources[].scope` → `sources[].origin` in the illustrative JSON + the worked example; rewrite the "Two distinct scope vocabularies" note as "`scope` = D7 wire axis; `origin` = config provenance") + D7 (one-line note that provenance is the separate `origin` field) + the `trusty_common::contract` API sketch (new `ConfigOrigin` enum + `ConfigSource.origin`). No code change beyond the rename.
 
 ### m5 — `enabled=false` vs the "no uninstall" non-goal is undefined for the ensure pass
 
