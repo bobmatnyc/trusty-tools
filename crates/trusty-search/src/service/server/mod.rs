@@ -16,6 +16,7 @@ mod files;
 mod health;
 mod helpers;
 mod indexes;
+mod indexes_relocate;
 mod reindex_handlers;
 mod router;
 mod routing;
@@ -26,6 +27,8 @@ mod status;
 mod tickers;
 
 // cfg(test) sub-modules — each < 500 lines
+#[cfg(test)]
+mod tests_1073;
 #[cfg(test)]
 mod tests_829;
 #[cfg(test)]
@@ -68,7 +71,7 @@ use admin::{
 };
 use files::{get_index_chunks_handler, index_file_handler, remove_file_handler};
 use health::health_handler;
-use indexes::{create_index_handler, list_indexes_handler};
+use indexes::{create_index_handler, list_indexes_handler, relocate_index_handler};
 use reindex_handlers::{reindex_handler, reindex_stream_handler};
 use routing::search_similar_handler;
 use search::{delete_index_handler, global_search_handler, search_handler};
@@ -151,7 +154,10 @@ pub fn build_router(state: SearchAppState) -> Router {
             "/indexes",
             get(list_indexes_handler).post(create_index_handler),
         )
-        .route("/indexes/{id}", delete(delete_index_handler))
+        .route(
+            "/indexes/{id}",
+            delete(delete_index_handler).patch(relocate_index_handler),
+        )
         .route("/ui", get(|| async { Redirect::permanent("/ui/") }))
         .route("/ui/", get(ui_index_handler))
         .route("/ui/{*path}", get(ui_asset_handler))

@@ -23,7 +23,7 @@ The workspace supports three installation channels per crate. Every distributabl
 
 1. **Prebuilt binaries** — GitHub Releases (macOS arm64, Linux x86_64)
 2. **Cargo install** — from git source with `--locked` flag
-3. **Homebrew** — planned; not yet available
+3. **Homebrew** — self-owned tap (live; all published crates available)
 
 ### Platform Support
 
@@ -87,19 +87,33 @@ To install a specific version:
 cargo install --git https://github.com/bobmatnyc/trusty-tools --tag {{CRATE}}-v{{VERSION}} {{CRATE}} --locked
 ```
 
-### With Homebrew (planned — not yet available)
+### With Homebrew
+
+Prebuilt bottles are available via the self-owned tap for fast, dependency-managed installation.
+
+First, add the tap (one-time setup):
 
 ```bash
 brew tap bobmatnyc/trusty
+```
+
+Then install:
+
+```bash
 brew install {{CRATE}}
 ```
 
-This installation method is under development. For now, use GitHub Releases or `cargo install`.
+To upgrade to the latest release:
 
-Once available, this will provide:
+```bash
+brew upgrade {{CRATE}}
+```
+
+This provides:
 - Automatic updates via `brew upgrade {{CRATE}}`
 - Standard macOS / Linux PATH integration
 - Optional dependency resolution (e.g., system libraries for ONNX Runtime)
+- Pre-built bottles for fast installation (no compilation needed)
 
 ### Prerequisites & Special Cases
 
@@ -324,57 +338,61 @@ This allows the daemon to run on newer systems where the bundled ORT library (gl
 
 ---
 
-## Homebrew Installation (Planned Future State)
+## Homebrew Installation (Live)
 
-### Design
+### Current Implementation
 
-Homebrew distribution will be provided via **one of two paths**, each with distinct tradeoffs:
+Homebrew distribution is provided via the **self-owned tap** (`bobmatnyc/homebrew-trusty`), which is now **live and actively maintained**. The tap provides:
 
-**Option A: Self-Owned Tap** (`bobmatnyc/homebrew-trusty`)
-- Full control over release timing, bottle curation, and dependencies.
-- Faster iteration for patch releases and platform-specific variants.
-- Users must explicitly `brew tap bobmatnyc/trusty` once, then `brew install` as normal.
-- **Likely the near-term pragmatic choice** for rapid cadence and experimental features.
+- **Full control** over release timing, bottle curation, and dependency management.
+- **Fast iteration** for patch releases and platform-specific variants.
+- **Public repository**: [bobmatnyc/homebrew-trusty](https://github.com/bobmatnyc/homebrew-trusty)
+- **Automatic bottle updates**: CI automation (`HOMEBREW_TAP_ENABLED=true`) in `.github/workflows/release.yml` bumps formulas and bottles on every real tag push (issues #896, #902).
 
-**Option B: Homebrew Core** (`homebrew/core`)
-- MIT is OSI-approved, so homebrew-core is now eligible (ELv2 blockage removed).
-- No user tap setup required — direct `brew install trusty-search` from core formulae.
-- Longer review latency (core maintainers vet all PRs); slower time-to-release for patches.
-- Higher visibility and discoverability; native macOS/Linux user expectation.
+### Published Formulas
 
-Both approaches use **bottles (prebuilt binaries)** so end users avoid compilation time. Fallback to building from source is included for unrepresented platforms.
+The following crates are available on the tap with auto-bumped, pre-built bottles for macOS arm64 and Linux x86_64:
 
-**Current direction**: A self-owned tap is planned first (Phase 2) for faster iteration and decoupling from core-review cycles. Migration to homebrew-core can follow once the tap is stable and the community demonstrates demand.
+- `trusty-search` (+ `trusty-embedderd`, `trusty-console` bundled)
+- `trusty-memory`
+- `trusty-analyze`
+- `trusty-mpm`
+- `trusty-review`
+- `trusty-git-analytics` (tga)
 
-### Intended UX (when available)
+**Note**: `trusty-code` (`tcode`) and `trusty-controller` (`tctl`) are not yet on the tap; they will be added as those crates reach release maturity.
+
+### Installation UX
 
 ```bash
 # One-time setup
 brew tap bobmatnyc/trusty
 
-# Install (uses prebuilt bottle if available)
+# Install (uses prebuilt bottle; no compilation needed)
 brew install trusty-search        # or trusty-memory, trusty-analyze, etc.
 
 # Update to latest release
 brew upgrade trusty-search
 
-# Show installed version
+# Show installed version and info
 brew info trusty-search
 
 # Uninstall
 brew uninstall trusty-search
 ```
 
-### Release Workflow Integration (Implementation Road Map)
+### Release Workflow Integration
 
-Once a chosen path is created, the release workflow will:
+When a new release tag is pushed (`<crate>-v<version>`):
 
-1. Build GitHub Release binaries (as today).
-2. Trigger a webhook or automated PR to the tap (self-owned or core) to bump the formula's version and bottle checksums.
-3. The tap's CI will build and test bottles for macOS (arm64) and Linux (x86_64).
-4. Users run `brew upgrade` to fetch the new bottle on next run.
+1. GitHub Actions builds release binaries for macOS arm64 and Linux x86_64.
+2. The `.github/workflows/release.yml` `homebrew-bump` job (gated by `HOMEBREW_TAP_ENABLED=true`) automatically:
+   - Creates a PR to `bobmatnyc/homebrew-trusty` with the updated formula version and bottle checksums.
+   - Uses `HOMEBREW_TAP_TOKEN` (GitHub personal access token) for authentication.
+3. The tap's CI validates and merges the formula update.
+4. Users fetch the new bottle on next `brew upgrade` or `brew install`.
 
-**Current status**: Planned for Phase 2. The GitHub Release infrastructure is ready; the Homebrew automation is not yet in place. The self-owned tap is the expected first implementation.
+**Future path**: Homebrew Core submission (`homebrew/core`) is unblocked by the MIT relicense (issue #898) and remains a possible longer-term path for higher discoverability, pending demand and maintainability assessment.
 
 ---
 
@@ -385,7 +403,7 @@ Use this checklist to verify a crate conforms to the INSTALL-CONVENTION:
 - [ ] **README.md has an "Installation" section** with the exact subsections in the canonical template order:
   - [ ] From GitHub Releases
   - [ ] From Source with Cargo
-  - [ ] With Homebrew (planned)
+  - [ ] With Homebrew
   - [ ] Prerequisites & Special Cases (crate-specific callout)
   - [ ] Verify Installation
 

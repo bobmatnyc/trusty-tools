@@ -1,9 +1,10 @@
-//! Index lifecycle handlers: list, create, delete.
+//! Index lifecycle handlers: list, create.
 //!
-//! Why: Groups the index CRUD endpoints (`GET /indexes`, `POST /indexes`,
-//! `DELETE /indexes/:id`) with their request/response types.
-//! What: `list_indexes_handler`, `create_index_handler`, and the types they
-//! use (`ListIndexesParams`, `IndexListResponse`, `IndexDetailEntry`).
+//! Why: Groups the core index registry endpoints (`GET /indexes`, `POST /indexes`)
+//! with their request/response types. The `PATCH /indexes/:id` relocate handler
+//! lives in `indexes_relocate` to keep this file under the 500-line cap.
+//! What: `list_indexes_handler`, `create_index_handler`, and the types they use
+//! (`ListIndexesParams`, `IndexListResponse`, `IndexDetailEntry`).
 //! Test: `create_index_rejects_relative_root_path` and related tests.
 use axum::{
     extract::{Query, State},
@@ -18,6 +19,8 @@ use super::helpers::{embedder_error_response, embedder_initializing_response, va
 use super::router::{CreateIndexRequest, IndexDetailEntry, IndexListResponse};
 use super::state::{DaemonEvent, SearchAppState};
 use super::status::index_disk_and_mtime;
+
+pub(super) use super::indexes_relocate::relocate_index_handler;
 
 /// Query parameters accepted by `GET /indexes`.
 ///

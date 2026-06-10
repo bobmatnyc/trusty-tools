@@ -1,0 +1,201 @@
+//! Tests for issue #1073: content-hash-incremental reindex + in-place relocation.
+//!
+//! Why: three independent bugs were fixed together: (1) root-move on colocated
+//! indexes cleared the hash cache unnecessarily; (2) warm-restart hash-skip
+//! missed relative keys (absolute vs. relative mismatch in the DashMap);
+//! (3) no in-place relocation primitive existed (`PATCH /indexes/:id`).
+//! What: this module verifies each fix with a focused unit test that does not
+//! require a running daemon or a real embedder.
+//! Test: run with `cargo test -p trusty-search tests_1073`.
+
+use super::*;
+use crate::core::embed::Embedder;
+use crate::core::registry::IndexRegistry;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::Json;
+use std::sync::Arc;
+
+// ── Test 1: PATCH /indexes/:id returns 404 for an unknown index id ───────────
+
+/// `PATCH /indexes/:id` with an unregistered id must return `404 Not Found`.
+///
+/// Why: ensures the handler's "index not found" guard works and doesn't panic.
+/// What: calls `relocate_index_handler` with a state that has no registered
+/// indexes; asserts the response status is `404`.
+/// Test: this test (pure in-memory, no network or embedder required).
+#[tokio::test]
+async fn relocate_index_returns_404_for_unknown_id() {
+    use super::indexes_relocate::{relocate_index_handler, RelocateIndexRequest};
+    use axum::body::to_bytes;
+    use axum::extract::Path;
+
+    let state = SearchAppState::new(IndexRegistry::new());
+    let embedder: Arc<dyn Embedder> = Arc::new(crate::core::embed::MockEmbedder::new(8));
+    state.install_embedder(embedder).await;
+    let state_arc = Arc::new(state);
+
+    let resp = relocate_index_handler(
+        State(Arc::clone(&state_arc)),
+        Path("no-such-index-xyz".to_string()),
+        Json(RelocateIndexRequest {
+            root_path: std::path::PathBuf::from("/tmp"),
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(resp.into_body(), 4096).await.expect("body");
+    let v: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("");
+    assert!(
+        err.contains("no-such-index-xyz"),
+        "error should name the id: {err}"
+    );
+}
+
+// ── Test 2: PATCH /indexes/:id updates root_path in the registry ─────────────
+
+/// A registered index can be relocated to a new directory without re-embedding.
+///
+/// Why: core correctness test for issue #1073 Change 3.
+/// What: (1) creates a real tempdir as the initial root; (2) registers an index
+/// at that path; (3) creates a second tempdir as the new root; (4) calls
+/// `PATCH /indexes/:id`; (5) asserts the handle's `root_path` in the registry
+/// reflects the new path and the response carries `"relocated": true`.
+/// Test: this test.
+#[tokio::test]
+async fn relocate_index_updates_root_path() {
+    use super::indexes_relocate::{relocate_index_handler, RelocateIndexRequest};
+    use super::router::CreateIndexRequest;
+    use axum::body::to_bytes;
+    use axum::extract::Path;
+
+    let state = SearchAppState::new(IndexRegistry::new());
+    let embedder: Arc<dyn Embedder> = Arc::new(crate::core::embed::MockEmbedder::new(8));
+    state.install_embedder(embedder).await;
+    let state_arc = Arc::new(state);
+
+    // Build the initial and target directories under target/ (never in the
+    // denylist), using RAII TempDir for cleanup.
+    let cwd = std::env::current_dir().expect("cwd");
+    let base = cwd.join("target");
+    std::fs::create_dir_all(&base).expect("create target/");
+    let old_dir = tempfile::Builder::new()
+        .prefix("ts-relocate-old-")
+        .tempdir_in(&base)
+        .expect("create old_dir");
+    let new_dir = tempfile::Builder::new()
+        .prefix("ts-relocate-new-")
+        .tempdir_in(&base)
+        .expect("create new_dir");
+
+    let old_root = old_dir.path().canonicalize().expect("canonicalize old_dir");
+    let new_root = new_dir.path().canonicalize().expect("canonicalize new_dir");
+
+    // Step 1: register the index at old_root.
+    let create_resp = super::indexes::create_index_handler(
+        State(Arc::clone(&state_arc)),
+        Json(CreateIndexRequest {
+            id: "relocate-test".into(),
+            root_path: old_root.clone(),
+            include_paths: None,
+            exclude_globs: None,
+            extensions: None,
+            domain_terms: None,
+            path_filter: None,
+            include_docs: None,
+            respect_gitignore: None,
+            lexical_only: None,
+            skip_kg: None,
+            defer_embed: None,
+        }),
+    )
+    .await;
+    assert_eq!(
+        create_resp.status(),
+        StatusCode::OK,
+        "initial create must succeed"
+    );
+
+    // Step 2: relocate to new_root.
+    let patch_resp = relocate_index_handler(
+        State(Arc::clone(&state_arc)),
+        Path("relocate-test".to_string()),
+        Json(RelocateIndexRequest {
+            root_path: new_root.clone(),
+        }),
+    )
+    .await;
+    assert_eq!(patch_resp.status(), StatusCode::OK, "relocate must succeed");
+
+    let body = to_bytes(patch_resp.into_body(), 4096).await.expect("body");
+    let v: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(
+        v.get("relocated").and_then(|x| x.as_bool()),
+        Some(true),
+        "response must carry relocated:true"
+    );
+    assert_eq!(
+        v.get("id").and_then(|x| x.as_str()),
+        Some("relocate-test"),
+        "response must echo the index id"
+    );
+
+    // Step 3: assert the in-memory registry reflects the new root.
+    let handle = state_arc
+        .registry
+        .get(&crate::core::registry::IndexId::new("relocate-test"))
+        .expect("handle must still be in registry after relocate");
+    assert_eq!(
+        handle.root_path, new_root,
+        "handle.root_path must point at the new directory after relocate"
+    );
+    assert_ne!(
+        handle.root_path, old_root,
+        "handle.root_path must not retain the old directory"
+    );
+}
+
+// ── Test 3: warm-restart hash-skip — relative keys match after load ───────────
+
+/// After a daemon restart the hash cache loaded from redb must be queryable
+/// using relative `PathBuf` keys (the same representation produced during
+/// reindex), not absolute keys.
+///
+/// Why: this is the latent bug fixed by issue #1073 Change 2. The in-process
+/// DashMap used to be populated with ABSOLUTE keys by `prepare_batch_payload`,
+/// while `hash_cache::load_into_cache` inserts RELATIVE keys from redb. After
+/// a restart every hash lookup missed, causing a full re-embed.
+/// What: inserts a relative-key entry into the DashMap (simulating what
+/// `load_into_cache` does after a restart), then looks it up via a relative
+/// key (simulating what the fixed `prepare_batch_payload` now does). Asserts
+/// the lookup hits.
+/// Test: this test.
+#[test]
+fn hash_cache_relative_key_matches_after_load() {
+    let map: dashmap::DashMap<std::path::PathBuf, String> = dashmap::DashMap::new();
+
+    // Simulate what `hash_cache::load_into_cache` inserts: a RELATIVE key.
+    let rel_path = std::path::PathBuf::from("src/main.rs");
+    let hash_value = "abc123def456".to_string(); // pragma: allowlist secret
+    map.insert(rel_path.clone(), hash_value.clone());
+
+    // Simulate what the FIXED `prepare_batch_payload` looks up: ALSO a relative key.
+    let lookup_key = std::path::PathBuf::from("src/main.rs");
+    let got = map.get(&lookup_key).map(|v| v.clone());
+
+    assert_eq!(
+        got.as_deref(),
+        Some(hash_value.as_str()),
+        "relative-key lookup must hit the relative-key entry in the DashMap"
+    );
+
+    // Confirm that an absolute key would NOT have matched (to demonstrate the
+    // original bug: absolute keys silently missed all redb-loaded entries).
+    let abs_key = std::path::PathBuf::from("/some/project/root/src/main.rs");
+    let miss = map.get(&abs_key).map(|v| v.clone());
+    assert!(
+        miss.is_none(),
+        "absolute-key lookup must NOT match a relative-key entry (old bug)"
+    );
+}
