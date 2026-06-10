@@ -157,6 +157,44 @@ existing id returns `created: false`, not an error), and incremental reindex
 **skips unchanged files** via sha2 content fingerprints. The controller composes
 these idempotent primitives; it does not add its own mutation state.
 
+**Concurrency: system-scope advisory lock.**
+
+Per-operation idempotency is necessary but not sufficient. The ensure pass runs
+on **every launch**, so two project launches can run their ensure passes
+simultaneously. Each pass's CHECK is idempotent in isolation, but the
+**system-rung** ACT has a time-of-check-to-time-of-use race: two passes both
+read "shared daemon down," and — with no system-scope lock — both proceed to
+`start` it (or both trigger an `install`/`upgrade` mid-pass). The failure mode is
+a double-`start`, port-bind / PID-lock contention, or an install/upgrade fired by
+a concurrent pass partway through another pass.
+
+To close this, the **system-rung** portion of the ensure pass — anything that
+mutates shared/system state: starting the shared daemon, `install`, `upgrade` —
+acquires a **system-scope advisory lock** before acting. The lock is a lockfile
+in the system state dir (e.g. `~/.config/trusty-controller/ensure.lock`) taken via
+the `fs4`/flock primitive the daemons already use for their PID lockfiles, so this
+reuses an existing, proven mechanism rather than inventing one.
+
+- **Loser behavior.** A concurrent ensure that cannot acquire the lock **waits**
+  (bounded timeout) for the holder to finish, then **re-runs its CHECK step**.
+  The holder has typically already brought the daemon up, so the loser's re-check
+  now passes and the loser **no-ops** — it does **not** independently `start`. If
+  the wait exceeds the bounded timeout, the loser degrades to a clear error rather
+  than racing into a second `start`.
+- **The lock is scoped precisely to the system rung.** The **project-rung** ensure
+  (per-project `.mcp.json` wiring, `POST /indexes` registration, per-project
+  reindex) does **not** take the system lock: those operations are already
+  idempotent and target **distinct per-project keys**, so concurrent project-rung
+  ensures for different projects do not contend. Only the system rung
+  (shared-daemon lifecycle / `install` / `upgrade`) needs the lock, because the
+  shared-state TOCTOU lives only there.
+- **Backstops.** The daemon's own PID lockfile is a secondary backstop — a second
+  `start` would fail the port-bind anyway — but the advisory lock makes the loser
+  a clean no-op rather than relying on bind-failure. This composes with the
+  verify-after gating ([DOC-11](DOC-11-open-issues.md) M12): the loser's
+  re-CHECK is precisely the verify step that confirms the holder's `start`
+  succeeded before the loser concludes the system rung is ready.
+
 ### 5. Blast radius
 
 Every operation carries a **blast-radius tag** derived from its scope, so the

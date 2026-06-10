@@ -37,7 +37,7 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 | M4 | MAJOR | `config` verb is a breaking CLI change + a hole in the read-only guarantee | DOC-1 `config.data`, DOC-5 §1.2, DOC-6 §2.6, DOC-3 Q3 | ✅ code-verified | ✅ Resolved |
 | M5 | MAJOR | clap `external_subcommand` passthrough collides with first-class subcommands + controller-as-member recursion | DOC-5 §6/§1.1 | — | ✅ Resolved |
 | M6 | MAJOR | CLI-as-authority (D1) under-specified for "daemon up but wedged" | DOC-1 D1, `health.data` | — | ✅ Resolved |
-| M7 | MAJOR | Concurrent "ensure every launch" race on a shared daemon | DOC-3 §4/§6/§8 | — | 🔴 Open |
+| M7 | MAJOR | Concurrent "ensure every launch" race on a shared daemon | DOC-3 §4/§6/§8 | — | ✅ Resolved |
 | M8 | MAJOR | Status-enum reconciliation is ambiguous | DOC-1 D4, DOC-4 §1.1/§4, DOC-3 §9 | — | ✅ Resolved |
 | M9 | MAJOR | D8 secret redaction is unenforceable | DOC-1 D8, DOC-6 conformance clause 5 | — | 🔴 Open |
 | M10 | MAJOR | Timeouts (2s health / 10s doctor) false-fail cold / model-loading daemons | DOC-4 §1.3, Resolved-Q1 | — | ✅ Resolved |
@@ -208,9 +208,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** two simultaneous project launches both see "daemon down" and both `start`; no system-scope lock (TOCTOU).
 - **Failure mode:** double-start, port-bind/lock contention, install/upgrade triggered mid-ensure.
 - **Fix direction:** system-scope advisory lock around the system-rung ensure; define loser behavior.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** best recommendation — a **system-scope advisory lock** (a lockfile in the system state dir, e.g. `~/.config/trusty-controller/ensure.lock`, via the `fs4`/flock primitive the daemons already use for their PID lockfiles) around **only** the system-rung ensure actions (shared-daemon `start`, `install`, `upgrade`). The loser waits (bounded) for the holder, then re-runs CHECK and no-ops (the holder has already started the daemon), degrading to a clear error on timeout — never an independent second `start`. The project-rung ensure stays lock-free: those ops are idempotent and key on distinct per-project ids, so concurrent project ensures do not contend. The daemon's PID lockfile is a secondary backstop; the advisory lock makes the loser a clean no-op rather than relying on port-bind failure; composes with M12 verify-after.
+- **Follow-up:** DOC-3 §4 (system-scope advisory-lock subsection: lock scope = system rung only, loser waits-then-rechecks-then-no-ops, project rung lock-free by distinct keys, PID-lock backstop + M12 cross-ref). Implementation follow-up: `fs4` advisory lock around system-rung ensure with bounded wait + re-check.
 
 ### M8 — Status-enum reconciliation is ambiguous
 
