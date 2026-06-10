@@ -125,15 +125,17 @@ jobs:
           CRATE="${{ steps.parse.outputs.crate }}"
 
           if [[ "$CRATE" == "trusty-search" ]]; then
-            # Binaries: trusty-search + bundled sidecar trusty-embedderd
-            # Both [[bin]] targets are declared in trusty-search/Cargo.toml.
+            # Binaries: trusty-search + trusty-embedderd + trusty-console
+            # All three [[bin]] targets are declared in trusty-search/Cargo.toml.
+            # trusty-console was added as part of the Single-Install Convention
+            # (epic #943) so `cargo install trusty-search` installs the dashboard.
             # UI-embedding crate: SKIP_UI_BUILD=1 required for cargo publish / build.
             # Default features: bundled-ort (static ORT, glibc ≥ 2.38 / macOS).
             # AL2023 variant: --no-default-features --features load-dynamic
             #   (trusty-search has a bare `load-dynamic` feature; there is NO
             #    `http-server` feature in this crate — confirmed from Cargo.toml).
             CARGO_PKG="trusty-search"
-            BINARIES="trusty-search trusty-embedderd"
+            BINARIES="trusty-search trusty-embedderd trusty-console"
             SKIP_UI_BUILD="true"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
@@ -142,14 +144,16 @@ jobs:
             AL2023_FEATURES="load-dynamic"
 
           elif [[ "$CRATE" == "trusty-memory" ]]; then
-            # Binaries: trusty-memory + trusty-memory-mcp-bridge + trusty-bm25-daemon
+            # Binaries: trusty-memory + trusty-bm25-daemon + trusty-console
             # All three [[bin]] targets confirmed in trusty-memory/Cargo.toml.
+            # trusty-memory-mcp-bridge was removed; trusty-console was added as
+            # part of the Single-Install Convention (epic #943).
             # trusty-memory bin has required-features=["axum-server"]; default
             # features include axum-server so all three build with default features.
             # UI-embedding crate: SKIP_UI_BUILD=1
             # No ORT bundling (BM25 sidecar, no ONNX): no AL2023 variant.
             CARGO_PKG="trusty-memory"
-            BINARIES="trusty-memory trusty-memory-mcp-bridge trusty-bm25-daemon"
+            BINARIES="trusty-memory trusty-bm25-daemon trusty-console"
             SKIP_UI_BUILD="true"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
@@ -158,15 +162,17 @@ jobs:
             AL2023_FEATURES=""
 
           elif [[ "$CRATE" == "trusty-analyze" ]]; then
-            # Binary: trusty-analyze
-            # Single [[bin]] confirmed in trusty-analyze/Cargo.toml.
+            # Binaries: trusty-analyze + trusty-console
+            # Both [[bin]] targets confirmed in trusty-analyze/Cargo.toml.
+            # trusty-console was added as part of the Single-Install Convention
+            # (epic #943) so `cargo install trusty-analyze` installs the dashboard.
             # required-features=["http-server"]; default = ["http-server","bundled-ort"].
             # UI-embedding crate: SKIP_UI_BUILD=1
             # ORT-bundling (bundled-ort default): AL2023 load-dynamic variant needed.
             # trusty-analyze DOES have an `http-server` feature (unlike trusty-search),
             # so the AL2023 flags are: --no-default-features --features http-server,load-dynamic.
             CARGO_PKG="trusty-analyze"
-            BINARIES="trusty-analyze"
+            BINARIES="trusty-analyze trusty-console"
             SKIP_UI_BUILD="true"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
@@ -175,12 +181,14 @@ jobs:
             AL2023_FEATURES="http-server,load-dynamic"
 
           elif [[ "$CRATE" == "trusty-review" ]]; then
-            # Binary: trusty-review
-            # Single [[bin]] confirmed in trusty-review/Cargo.toml; required-features=[].
-            # Default features = ["http-server","mcp"] — no ORT, no UI embedding.
-            # No SKIP_UI_BUILD, no AL2023 variant.
+            # Binaries: trusty-review + trusty-console
+            # Both [[bin]] targets confirmed in trusty-review/Cargo.toml.
+            # trusty-console was added as part of the Single-Install Convention
+            # (epic #943) so `cargo install trusty-review` installs the dashboard.
+            # required-features=[]. Default features = ["http-server","mcp"].
+            # No ORT, no UI embedding. No SKIP_UI_BUILD, no AL2023 variant.
             CARGO_PKG="trusty-review"
-            BINARIES="trusty-review"
+            BINARIES="trusty-review trusty-console"
             SKIP_UI_BUILD="false"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
@@ -189,18 +197,18 @@ jobs:
             AL2023_FEATURES=""
 
           elif [[ "$CRATE" == "trusty-mpm" ]]; then
-            # Binaries: tm, trusty-mpm
-            # trusty-mpm/Cargo.toml defines [[bin]] targets: tm, trusty-mpm, trusty-mpmd,
-            # trusty-mpm-tui, trusty-mpm-telegram, trusty-mpm-gui.
+            # Binaries: tm, trusty-mpm, trusty-console
+            # trusty-mpm/Cargo.toml defines [[bin]] targets: tm, trusty-mpm, trusty-console,
+            # plus shim binaries not shipped in the distribution (trusty-mpmd, trusty-mpm-tui,
+            # trusty-mpm-telegram) and Tauri GUI (trusty-mpm-gui, excluded — needs webview).
+            # trusty-console was added as part of the Single-Install Convention (epic #943).
             # The `cli` feature embeds daemon + tui + telegram as SUBCOMMANDS of tm/trusty-mpm;
-            # the shim binaries (trusty-mpmd, trusty-mpm-tui, trusty-mpm-telegram) are thin
-            # entry-point wrappers that are NOT part of the user-facing CLI distribution.
-            # trusty-mpm-gui requires Tauri + system webview — always excluded.
+            # the shim binaries are thin entry-point wrappers not part of the user-facing CLI.
             # Default features = ["cli","daemon"] which already implies daemon+tui+telegram
             # via the cli → daemon+tui+telegram dependency chain; no explicit --features needed.
             # No SKIP_UI_BUILD, no AL2023 variant.
             CARGO_PKG="trusty-mpm"
-            BINARIES="tm trusty-mpm"
+            BINARIES="tm trusty-mpm trusty-console"
             SKIP_UI_BUILD="false"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
@@ -366,6 +374,13 @@ jobs:
     needs: setup
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    # Why: AL2023 uses GCC 11 which rejects newer SIMD probe flags emitted by
+    # numkind (-mavx512fp16, -mamx-fp16, -mavx10.2-512, -mavxvnniint8; need
+    # GCC 12+). The AL2023 bottle is NOT required for Homebrew (Tier-1:
+    # macOS arm64 + linux x86_64-gnu). Allow it to fail without sinking the
+    # whole build matrix — the release job is conditioned to run when the
+    # Tier-1 legs succeed regardless of this leg's outcome.
+    continue-on-error: ${{ matrix.variant == 'al2023' }}
 
     strategy:
       fail-fast: false
@@ -617,7 +632,17 @@ jobs:
     name: Create / update GitHub Release
     needs: [setup, build]
     runs-on: ubuntu-latest
-    if: needs.setup.outputs.dry_run != 'true'
+    # Why: `build` may report result='failure' when the AL2023 leg fails even
+    # though continue-on-error prevents it from failing sibling legs — GitHub
+    # Actions marks a matrix job as failed when any non-continue-on-error entry
+    # fails, but here ALL non-continue-on-error entries succeed.  We explicitly
+    # allow result='failure' on `build` (AL2023 case) while still requiring
+    # it didn't get cancelled outright.  The Tier-1 artifacts (macOS arm64 +
+    # linux-gnu) will be present in the artifact store regardless.
+    if: >-
+      needs.setup.outputs.dry_run != 'true' &&
+      needs.build.result != 'cancelled' &&
+      needs.build.result != 'skipped'
     timeout-minutes: 15
 
     steps:
@@ -703,7 +728,12 @@ jobs:
     # HOMEBREW_TAP_ENABLED must be set to 'true' as a repository/org variable AND
     # HOMEBREW_TAP_TOKEN must be configured as a secret before this job does anything.
     # Until both are configured the job is skipped silently.
-    if: needs.setup.outputs.dry_run != 'true' && vars.HOMEBREW_TAP_ENABLED == 'true'
+    # release.result may be 'success' or 'failure' (if softprops errored); only
+    # skip on cancel/skip to avoid tap diverging from a partially-uploaded release.
+    if: >-
+      needs.setup.outputs.dry_run != 'true' &&
+      vars.HOMEBREW_TAP_ENABLED == 'true' &&
+      needs.release.result == 'success'
     timeout-minutes: 10
 
     steps:
@@ -821,12 +851,14 @@ jobs:
           # ── Determine binaries to install ──────────────────────────────────
           # Map known multi-binary crates; default is the crate name itself.
           case "${CRATE}" in
-            trusty-search)  INSTALL_BINS="trusty-search trusty-embedderd" ;;
-            trusty-memory)  INSTALL_BINS="trusty-memory trusty-memory-mcp-bridge trusty-bm25-daemon" ;;
-            trusty-mpm)     INSTALL_BINS="tm trusty-mpm" ;;
+            trusty-search)   INSTALL_BINS="trusty-search trusty-embedderd trusty-console" ;;
+            trusty-memory)   INSTALL_BINS="trusty-memory trusty-bm25-daemon trusty-console" ;;
+            trusty-analyze)  INSTALL_BINS="trusty-analyze trusty-console" ;;
+            trusty-review)   INSTALL_BINS="trusty-review trusty-console" ;;
+            trusty-mpm)      INSTALL_BINS="tm trusty-mpm trusty-console" ;;
             trusty-git-analytics) INSTALL_BINS="tga" ;;
-            trusty-code)    INSTALL_BINS="tcode" ;;
-            *)              INSTALL_BINS="${CRATE}" ;;
+            trusty-code)     INSTALL_BINS="tcode" ;;
+            *)               INSTALL_BINS="${CRATE}" ;;
           esac
 
           # Build the `bin.install` lines.
