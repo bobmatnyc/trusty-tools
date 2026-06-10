@@ -94,14 +94,14 @@ pub mod fd_metrics;
 pub mod chat;
 pub mod commands;
 pub mod discovery;
-/// Single-pass startup pin-file scanner (issue #470).
+/// Supervised `serve --foreground` entry point (issue #787).
 ///
-/// Why: builds the `palace_id → project_path` map at daemon startup without
-/// eager palace opens. One readdir sweep over the standard search roots is
-/// cheaper than the O(#palaces) per-id loop used by the doctor path and runs
-/// before the first HTTP request arrives.
-/// What: exports `scan_pin_map` and `default_search_dirs`.
-/// Test: see `startup_scan::tests`.
+/// Why: launchd supervisors need loud failure on port collision, not silent
+/// port-walking to 7071+. Extracted to stay under the 500-line ratchet cap.
+/// What: exports `bind_foreground_port` (Fix C — abort on EADDRINUSE) and
+/// `run_http_foreground` (Fix A lock + Fix B http_addr + Fix C combined).
+/// Test: `foreground::tests::bind_foreground_port_refuses_collision`;
+/// `daemon_lock` module tests cover the lock-file logic.
 pub mod foreground;
 pub mod hook_emit;
 pub mod kg_extract;
