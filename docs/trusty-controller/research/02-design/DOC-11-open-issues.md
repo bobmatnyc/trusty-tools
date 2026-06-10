@@ -35,7 +35,7 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 | M2 | MAJOR | `stack_version` tuple will rot (no test owner, no CI gate, embedded in the binary) | DOC-2 §4, Resolved-Q5 | — | ✅ Resolved |
 | M3 | MAJOR | Cross-repo claude-mpm dependency is load-bearing in 4 places but never assessed as one systemic risk | DOC-6 §4, DOC-8 §4/§5, DOC-9 §3.4, DOC-10 §6 | — | ✅ Resolved |
 | M4 | MAJOR | `config` verb is a breaking CLI change + a hole in the read-only guarantee | DOC-1 `config.data`, DOC-5 §1.2, DOC-6 §2.6, DOC-3 Q3 | ✅ code-verified | ✅ Resolved |
-| M5 | MAJOR | clap `external_subcommand` passthrough collides with first-class subcommands + controller-as-member recursion | DOC-5 §6/§1.1 | — | 🔴 Open |
+| M5 | MAJOR | clap `external_subcommand` passthrough collides with first-class subcommands + controller-as-member recursion | DOC-5 §6/§1.1 | — | ✅ Resolved |
 | M6 | MAJOR | CLI-as-authority (D1) under-specified for "daemon up but wedged" | DOC-1 D1, `health.data` | — | ✅ Resolved |
 | M7 | MAJOR | Concurrent "ensure every launch" race on a shared daemon | DOC-3 §4/§6/§8 | — | 🔴 Open |
 | M8 | MAJOR | Status-enum reconciliation is ambiguous | DOC-1 D4, DOC-4 §1.1/§4, DOC-3 §9 | — | ✅ Resolved |
@@ -184,9 +184,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** `tctl trusty-controller restart` routes passthrough → `tctl restart` (self); global flags after the verb get swallowed into forwarded args; "sugar over passthrough" under-specified.
 - **Failure mode:** recursive/ambiguous dispatch requiring name-special-casing (the thing the design forbids).
 - **Fix direction:** document controller-as-member exclusion + flag-position rule, or use explicit `tool/rest` positionals.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** best recommendation — keep the clap `external_subcommand` passthrough idiom and document three guardrails. (1) **Controller-as-member exclusion:** `tctl <controller-id> <verb>` (id = `trusty-controller`) is rejected with exit `3`; the controller's own lifecycle is the first-class `restart`/self-upgrade surface (DOC-9 §8), not a passthrough to itself — this prevents recursive self-dispatch, and the dispatcher recognizing its own id is self-identity, not per-tool branching. (2) **Flag-position rule:** controller global flags MUST precede the member token, since `external_subcommand` forwards everything after the member id verbatim to the member. (3) **Reserved-name manifest-validation:** member ids MUST NOT collide with the first-class command names (which clap resolves before `external_subcommand`), checked when the manifest is loaded. The explicit `tool/rest` positional redesign is **rejected** as unnecessary given the guardrails.
+- **Follow-up:** DOC-5 §6 Notes (three guardrail bullets — controller-as-member exclusion, flag-position, reserved-name validation) + §2 passthrough error rules (controller-id-not-a-target + flag-position). Implementation follow-up: the dispatcher rejects the controller's own id; the manifest loader validates member ids against the reserved first-class command names.
 
 ### M6 — CLI-as-authority (D1) under-specified for "daemon up but wedged"
 

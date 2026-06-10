@@ -247,6 +247,14 @@ from the manifest**; it always probes `version --json` at dispatch time:
   (DOC-9), *not* a controller-boundary exit `3` (DOC-4 §5.2 / Resolved Q4).
 - **Unknown/unadvertised verb requested via passthrough, or malformed args** →
   controller-boundary **exit `3`** (DOC-1 D5), produced before any member runs.
+- **Controller's own member id as passthrough target** → not a valid passthrough
+  target: `tctl <controller-id> <verb>` (id = `trusty-controller`) is rejected at
+  the controller boundary with **exit `3`**, because the controller's own
+  lifecycle is the first-class `restart`/self-upgrade surface (DOC-9 §8), never a
+  passthrough to itself. Global flags (`--json`, `--scope`, `--timeout`,
+  `--yes`/`-y`, `--manifest`, `-v`) MUST precede the member token, since
+  `external_subcommand` forwards everything after it verbatim to the member (§6
+  Notes).
 
 ### 3. Scope handling
 
@@ -542,6 +550,29 @@ Notes:
   "zero tool-specific logic" requirement. The dispatcher validates the first
   token against the manifest member ids and the second against the member's
   advertised `verbs[]` before invoking.
+- **Controller-as-member exclusion.** `tctl <controller-id> <verb>` — where the
+  first token is the controller's own member id (`trusty-controller`, a manifest
+  member per DOC-2's worked example) — is **rejected** by the passthrough
+  dispatcher (exit `3`, §2). The controller's own lifecycle is handled by the
+  first-class `restart` and self-upgrade (DOC-9 §8), never by passthrough to
+  itself; this prevents recursive/ambiguous self-dispatch. The dispatcher
+  knowing its *own* identity is a single self-recognition exclusion, not
+  per-tool branching.
+- **Flag-position rule.** Controller global flags (`--json`, `--scope`,
+  `--timeout`, `--yes`/`-y`, `--manifest`, `-v`) MUST precede the passthrough
+  member token (e.g. `tctl --json trusty-search search "foo"`), because
+  `external_subcommand` forwards everything *after* the member token verbatim to
+  `<binary> <verb> …`. The boundary: tokens before the member id are the
+  controller's; the member id and everything after it are forwarded to the
+  member. A flag placed after the member token is treated as a member argument,
+  by design (§2).
+- **Reserved-name validation.** Member ids MUST NOT collide with the reserved
+  first-class command names (`install`, `upgrade`, `stack`, `config`, `status`,
+  `port`, `doctor`, `ui`, `version`, `start`, `stop`, `restart`, `ensure`,
+  `updates`), because clap resolves declared subcommands before
+  `external_subcommand` — a colliding member id would be shadowed and unreachable
+  via bare passthrough. This is a **manifest validation rule**, checked when the
+  manifest is loaded; a colliding id is a manifest error (DOC-2).
 - `Scope` is **reused from `trusty_common::contract`** (DOC-1 D6) rather than
   redefined, keeping one wire vocabulary across the stack; `ScopeArg` is only the
   thin clap-facing mirror.
