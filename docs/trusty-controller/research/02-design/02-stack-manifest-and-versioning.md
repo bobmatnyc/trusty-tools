@@ -115,7 +115,7 @@ Each stack member is one `[[member]]` entry. Fields:
 | `id` | yes | Stable member id; the **manifest key** that matches DOC-1's envelope `tool` field and the DOC-3 project-identity keys. snake/kebab tool name, e.g. `trusty-search`. |
 | `display_name` | yes | Human label for UI/CLI, e.g. `"Trusty Search"`. |
 | `binary` | yes | Binary name on PATH the controller invokes, e.g. `trusty-search`, `tctl`. (May differ from `id` and from the crate name — cf. `tga`.) |
-| `kind` | yes | Member kind: `daemon` (two-layer, has system daemon) \| `cli` (CLI-only / system-only, no project layer) \| `orchestrator` (the pluggable orchestrator slot). Ties to DOC-3 §1 (single-layer vs two-layer) and §10 (orchestrator). |
+| `kind` | yes | Member kind: `daemon` (two-layer, has system daemon) \| `cli` (CLI-only / system-only, no project layer) \| `controller` (a supervised, system-only daemon that is the controller itself — launchd/systemd-supervised, no project layer, restarted last via self-exit per DOC-9 §8) \| `orchestrator` (the pluggable orchestrator slot). Ties to DOC-3 §1 (single-layer vs two-layer) and §10 (orchestrator). |
 | `install` | yes | Install source descriptor (a sub-table — see below). Drives DOC-8 install + DOC-9 upgrade. |
 | `version` | yes | The **pinned** version for this BOM (the lockfile pin). semver string, e.g. `"0.24.1"`. |
 | `min_contract_version` | yes | Lowest `contract_version` (DOC-1 D2) the controller will accept from this member. Integer ≥ 1. A member advertising below this is contract-incompatible (DOC-1 floor rule). |
@@ -124,7 +124,7 @@ Each stack member is one `[[member]]` entry. Fields:
 | `changelog` | yes | Changelog source descriptor (a sub-table — see §5). Drives DOC-9 headline extraction. |
 | `depends_on` | no | Array of member `id`s this member requires at runtime (e.g. `trusty-analyze` → `["trusty-search"]`). Informs DOC-4 rollup / ordering; does not duplicate DOC-1 health `deps`. |
 | `timeout` | no | Per-member probe-timeout override sub-table in seconds, e.g. `{ health = 2, doctor = 30 }`. Overrides the DOC-4 §1.3 defaults for slow-to-answer members — chiefly model-loading daemons (e.g. trusty-search cold ONNX/CoreML load) that need a larger cold-load budget. Precedence: **per-member `timeout` > global `--timeout` > the DOC-4 §1.3 2 s / 10 s defaults**. Omitted keys fall through to the next precedence tier. |
-| `enabled` | no | `true` (default) \| `false`. A system override file can disable a member without removing its registry entry. |
+| `enabled` | no | `true` (default) \| `false`. A system override file can disable a member without removing its registry entry. `enabled = false` ⇒ the ensure pass **skips** the member entirely — no install, config, start, or upgrade. Its existing per-project and system state is **left in place** (the no-uninstall non-goal: the controller never removes an index/palace/`.mcp.json` entry), and the member renders a `skipped` doctor check (note: "disabled in manifest") rather than `down`/`fail`. Known consequence: orphaned `.mcp.json` entries / per-project state from a previously-enabled member remain (no cleanup path, per no-uninstall) — manual removal is the user's path. |
 
 **`install` sub-table** (tagged by `source`):
 
@@ -186,7 +186,7 @@ contract_floor = 1                    # global controller contract floor (DOC-1)
 id = "trusty-controller"
 display_name = "Trusty Controller"
 binary = "tctl"
-kind = "cli"                          # the controller itself: system-only
+kind = "controller"                   # the supervised, system-only controller daemon (no project layer; restarted last via self-exit, DOC-9 §8)
 install = { source = "cargo", crate = "trusty-controller" }
 version = "0.1.0"
 min_contract_version = 1

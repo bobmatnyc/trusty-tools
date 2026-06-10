@@ -535,10 +535,12 @@ The spec requires restart to cover *"all demonized tools **and UI services**"*
   member's UI is embedded in its own daemon** (DOC-2 `ui = /ui` on the daemon
   port), so restarting the daemon restarts its UI — there is no separate UI
   process.
-- **The controller's own UI service** (DOC-7) → `tctl upgrade` of `tctl` (or an
-  upgrade that includes the controller) bounces the controller's own DOC-7 UI
-  **last** (DOC-5 §7 / Resolved Q4 — controller-UI restarted last to avoid
-  self-kill mid-sweep). For self-upgrade of the controller binary itself, see §8.
+- **The controller itself** (`kind = "controller"`, DOC-2 §3 — a supervised,
+  system-only daemon) → `tctl upgrade` of `tctl` (or an upgrade that includes the
+  controller) bounces the controller's own DOC-7 UI **last** (DOC-5 §7 / Resolved
+  Q4 — controller-UI restarted last via self-exit to avoid self-kill mid-sweep);
+  selected by `kind`, not by name. For self-upgrade of the controller binary
+  itself, see §8.
 - **The orchestrator** (claude-mpm) advertises no `restart` (DOC-6 §4) → skipped
   with the session-restart note (§3.4, §5.4).
 - **CLI-only members** (trusty-review) have no long-lived daemon unless in `serve`

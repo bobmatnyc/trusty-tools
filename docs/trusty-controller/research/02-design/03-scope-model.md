@@ -47,6 +47,11 @@ two-layer. (RESOLVED — Resolved Decisions Q2: such tools are modeled as
 **system-only** members with no project layer; project-scoped verbs report
 "unsupported" via DOC-1's `verbs[]` graceful-degrade.)
 
+The `controller` kind (DOC-2 §3 — the controller itself) is likewise a
+**system-only supervised daemon**: it has a system daemon like a two-layer
+member but no project layer, so the layer model covers it as a single-layer
+(system-only) member.
+
 **Status is composite.** A daemon can be `running`/`healthy` (system-ok) while a
 given project is `pending` (unindexed). The two layers are reported and
 remediated independently; a healthy system with a pending project is a normal,
@@ -139,6 +144,15 @@ the UUC1 auto-config engine:
   Every time claude-mpm launches in a project directory, the controller runs the
   ensure pass. When the project is already `ready`, the ensure pass changes
   nothing and returns quickly.
+
+**Disabled members are skipped.** A member with `enabled = false` (DOC-2 §3) is
+**skipped by the ensure pass**: its CHECK short-circuits, so there is no ACT — no
+install, config, start, or upgrade. Its existing per-project and system state is
+**left untouched** (the no-uninstall non-goal: the controller never removes an
+index/palace/`.mcp.json` entry), and the member reports a `skipped` doctor check
+rather than `down`/`fail`. Any orphaned per-project state from a previously-enabled
+member therefore remains — manual removal is the user's path (no cleanup path,
+per no-uninstall).
 
 **Shape of the ensure pass — check → act → verify:**
 

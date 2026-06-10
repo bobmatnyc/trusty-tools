@@ -50,9 +50,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 | m2 | MINOR | `pending` is gameable (no stall detection) | DOC-3 §2, DOC-1 `doctor.data`, Resolved-Q5 | — | ✅ Resolved |
 | m3 | MINOR | Project-scope `fail`/`down` exits 0, masking a real local outage | DOC-4 §2.2/§7, Resolved-Q3 | — | ✅ Resolved |
 | m4 | MINOR | `scope` vs config-provenance `scope` overload is leaky + stringly-typed | DOC-1 D7 + `config.data` (`ConfigSource.scope: String`) | — | ✅ Resolved |
-| m5 | MINOR | `enabled=false` vs the "no uninstall" non-goal is undefined for the ensure pass | DOC-2 (`enabled`), DOC-3 §4, spec §62 | — | 🔴 Open |
+| m5 | MINOR | `enabled=false` vs the "no uninstall" non-goal is undefined for the ensure pass | DOC-2 (`enabled`), DOC-3 §4, spec §62 | — | ✅ Resolved |
 | m6 | MINOR | UUC2's truly-vanilla user can't reach the first `tctl` invocation | DOC-8 §5, DOC-10 §3.3 | — | 🔴 Open |
-| m7 | MINOR | Controller is `kind=cli` in the manifest yet is a launchd-supervised daemon | DOC-2 (manifest example), DOC-7 §8, DOC-8 §1.1, DOC-5 §7, DOC-9 §5.2 | — | 🔴 Open |
+| m7 | MINOR | Controller is `kind=cli` in the manifest yet is a launchd-supervised daemon | DOC-2 (manifest example), DOC-7 §8, DOC-8 §1.1, DOC-5 §7, DOC-9 §5.2 | — | ✅ Resolved |
 | m8 | MINOR | UI link-out depends on the `port --json` + `/ui` convention (convention-deep, not contract-deep) | DOC-7 §1/§4.1 | — | 🔴 Open |
 | m9 | MINOR | DNS-rebind guard is sound for browsers but a local non-browser process can still bounce the stack | DOC-7 §6, Resolved-Decision-3 | — | 🔴 Open |
 | m10 | MINOR | `stack health`/`stack doctor` consistency guarantee is a cross-probe race | DOC-4 §4 | — | ✅ Resolved |
@@ -368,9 +368,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** no defined ensure behavior for a previously-ensured member now disabled.
 - **Failure mode:** orphaned `.mcp.json` entries + project state pointing at a disabled tool, with no cleanup path (no-uninstall).
 - **Fix direction:** define `enabled=false` ensure semantics (skip, leave state, `skipped` doctor check); note the no-uninstall tension.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** `enabled = false` ⇒ the ensure pass skips the member entirely (no install/config/start/upgrade); its existing per-project and system state is left in place (the no-uninstall non-goal — the controller never removes an index/palace/`.mcp.json` entry); the member renders a `skipped` doctor check (note: "disabled in manifest"), not `down`/`fail`. Known consequence acknowledged honestly: orphaned `.mcp.json` entries / per-project state from a previously-enabled member remain (no cleanup path, per no-uninstall); manual removal is the user's path.
+- **Follow-up:** DOC-2 §3 (`enabled` field semantics) + DOC-3 §4 ("Disabled members are skipped" in the ensure pass).
 
 ### m6 — UUC2's truly-vanilla user can't reach the first `tctl` invocation
 
@@ -392,9 +392,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** the `kind` enum (`daemon`/`cli`) has no slot for a system-only daemon; mislabeling forces name-special-casing in restart/supervision logic.
 - **Failure mode:** `kind=="daemon"` branches skip the controller, then docs special-case it by name (the forbidden tool-specific branching).
 - **Fix direction:** give the controller `kind=daemon`, or add a "system-only daemon" kind.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** add a new `kind` value `controller` — a supervised, system-only daemon that is the controller itself (launchd/systemd-supervised like a `daemon`, but no project layer like a `cli`, restarted last via self-exit per DOC-9 §8, never an external bootout because a process cannot bootout itself). The controller manifest entry changes from `kind = "cli"` to `kind = "controller"`. Restart/supervision logic now branches on `kind` (the `controller` kind is a supervised system-only daemon, restarted last) rather than special-casing the controller by name; the self-exit specifics remain the controller's legitimate self-recognition (it knows its own member id — the permitted single-self-exclusion from DOC-5 §2/§6 / M5), not per-tool branching. This closes both the `kind = "cli"` mislabel and the forbidden name-special-case.
+- **Follow-up:** DOC-2 §3 (kind enum gains `controller` + controller manifest entry → `kind = "controller"`); DOC-3 §1 (controller-kind = system-only supervised daemon layer note); DOC-5 §7 (restart set keys off `kind = "controller"`, not name); DOC-7 §8 + DOC-9 §5.2/§8 (corrected label, no behavior change).
 
 ### m8 — UI link-out depends on the `port --json` + `/ui` convention (convention-deep, not contract-deep)
 

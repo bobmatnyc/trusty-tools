@@ -432,8 +432,10 @@ ties UI availability to the controller's own lifecycle:
   After any action completes, the UI re-fetches the relevant `--json` rollup and
   re-renders — so the control plane always reflects live state without the user
   reloading. (Polling cadence is an Open Question, §4.)
-- **Restart inclusion.** `tctl restart` bounces the controller's own UI service
-  **last** (DOC-5 §7 / Resolved Q4), so a stack restart from the UI does not
+- **Restart inclusion.** The controller is `kind = "controller"` (DOC-2 §3 — a
+  supervised, system-only daemon), so `tctl restart` selects it by `kind` (not by
+  name) and bounces the controller's own UI service **last** (DOC-5 §7 / Resolved
+  Q4), via self-exit (DOC-9 §8), so a stack restart from the UI does not
   kill the page mid-sweep before other members are done; the UI surfaces a brief
   "controller restarting — reconnecting…" state and the SSE client reconnects
   (the `mcp_bridge`-style exponential-backoff reconnect convention, CLAUDE.md

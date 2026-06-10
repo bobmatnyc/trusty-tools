@@ -643,14 +643,20 @@ The spec requires `restart` to bounce *"all demonized tools **and UI services**"
   session-managed — restart your claude-mpm session manually." When trusty-mpm
   (Rust, supervised) replaces it (DOC-6 §6) it advertises `restart` and is bounced
   like any other daemon — no `tctl` change.
-- **The controller's own UI service** (DOC-7) → `tctl restart` also bounces
-  *itself*: the controller daemon hosting the DOC-7 web UI is restarted last (so
-  it does not kill itself mid-sweep). This is the only member where the controller
-  acts on its own process; DOC-7 owns the controller-UI lifecycle, DOC-5 only
-  names the entry point.
+- **The controller itself** (`kind = "controller"`: trusty-controller) → the
+  controller is selected by its `kind`, not special-cased by name: the `controller`
+  kind is a supervised, system-only daemon hosting the DOC-7 web UI, and
+  `tctl restart` bounces it **last** (so it does not kill itself mid-sweep), via
+  self-exit rather than an external bootout (DOC-9 §8 — a process cannot bootout
+  itself). This is the only member where the controller acts on its own process;
+  that is the controller's legitimate **self-recognition** (it knows its own member id — the
+  permitted single-self-exclusion of §2/§6), not per-tool branching of other tools.
+  Keying off `kind = "controller"` removes the earlier name-special-case
+  ([DOC-11](DOC-11-open-issues.md) m7). DOC-7 owns the controller-UI lifecycle,
+  DOC-5 only names the entry point.
 
-So `restart` = "every supervised daemon I can reach via the contract + my own UI
-service," computed from `kind` + advertised `verbs[]` — zero tool-specific
+So `restart` = "every supervised daemon I can reach via the contract + the
+controller itself," computed from `kind` + advertised `verbs[]` — zero tool-specific
 branching.
 
 ---
