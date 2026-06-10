@@ -324,6 +324,12 @@ follow-up, not done in v1 (see ADR-0008).
 - **Multiple projects sharing one daemon** — fine by design (the daemon is
   multi-index), *provided* ids are collision-free; this is the core argument for
   the path-slug scheme.
+- **Existing state across the basename→slug flip** — the one-time identity flip is
+  a **stateful re-key migration** (designed in DOC-6 §7.1), not a from-scratch
+  reindex: each registry entry is re-keyed by recomputing the canonical slug from
+  its `root_path` and the colocated index/palace data is reused in place. So
+  existing index/palace state is **not orphaned** — the first ensure after the flip
+  sees the project as `exists`/`fresh`, not `pending`. (DOC-11 M15.)
 
 ### 9. Rollup interplay (feeds DOC-4)
 

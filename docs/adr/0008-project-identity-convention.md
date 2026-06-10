@@ -131,8 +131,15 @@ We will adopt a single canonical project-identity rule:
 - **Migration required.** The basename users in
   `crates/trusty-search/src/detect.rs` must be migrated/reconciled to the
   path-slug scheme; the daemon registry currently holding both forms for one root
-  needs to converge on the slug. This is a one-time reconciliation tracked as
-  DOC-6/DOC-8 follow-up.
+  needs to converge on the slug. This is a one-time **stateful re-key migration**,
+  designed in DOC-6 §7.1: re-key each registry entry by recomputing the canonical
+  slug from its `root_path` and **reuse the colocated index data in place — NOT a
+  from-scratch reindex** (the data is `root_path`-addressed, so the id is only the
+  in-memory registry key); trusty-memory palaces get an alias/rename. It is carried
+  by trusty-search's existing forward-only `_meta` schema-migration framework
+  (`core::migration`, with a `schema_version` bump — idempotent and crash-safe), so
+  the first ensure after the flip sees the project as `exists`/`fresh`, not a
+  rebuilt `pending`.
 - **Canonical helpers hoisted into `trusty_common`.** The canonical
   project-identity helpers (`detect_project` plus the `canonical_project_id`
   contract function over the `id_from_path` slug) will be hoisted into

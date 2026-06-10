@@ -336,9 +336,12 @@ not the original "thin" framing:
    **version-coupled** (§4/§4.1) and **drift-tested** via the DOC-10 captured-output
    contract-test (§6/§2.2).
 7. **Stateful project-identity migration** — re-keys existing index/palace state from
-   the old id scheme to the canonical slug. **Counted here but NOT designed in this
-   doc** — its design is **deferred to M15** (a stateful data migration, not a refactor;
-   see DOC-11 M15). This item is the one that is *not* "just a mapping exercise."
+   the old id scheme to the canonical slug. **Designed in §7.1** — a stateful re-key
+   migration carried by trusty-search's existing `core::migration` `_meta` framework
+   (re-key the registry entry by recomputing the canonical slug from each index's
+   `root_path`, reuse the colocated data in place — **no reindex**; see DOC-11 M15).
+   Kept here as a distinct work-item/PR. This item is the one that is *not* "just a
+   mapping exercise."
 
 So the headline scope is: **N discrete PRs across 4 Rust tools + 1 Python shim + 1
 new shared module + 1 stateful migration** — not a single mechanical pass.
@@ -572,6 +575,42 @@ trusty-search retrofit and a precondition for any tool emitting `scope:"project"
 checks: `detect.rs` and `fs_discovery.rs` are reconciled by replacing both with the
 hoisted `trusty_common` helpers.
 
+#### 7.1 Stateful re-key migration (no reindex)
+
+The reconciliation above is a code refactor, but it has a **stateful** side that
+must not be left implicit: the basename→slug flip re-keys every existing index and
+palace. Both id forms (the basename and the divergent slug) are **currently live in
+the daemon registry for the same root**, so a naive flip would let the first
+`tctl ensure` after the change re-key everything and **re-index from scratch** — a
+multi-minute `pending` with storage doubling. This is the design for §3.1
+work-breakdown item 7; it is a re-key, **not** a rebuild.
+
+**Re-key, do NOT rebuild.** Colocated index *data* is already addressed by
+`root_path`, not by the id-string: the daemon stores
+`ColocatedIndexEntry { root_path, id }` and the on-disk `.trusty-search/` directory
+lives under the project root, not under the id. The id is therefore only the
+**in-memory registry key**. The migration recomputes the canonical slug from each
+existing index's `root_path` and **re-keys the registry entry** to that slug,
+reusing the existing redb/usearch data in place — **no re-embedding, no reindex**.
+The duplicate old-form registration (basename and/or divergent slug) for the same
+root is dropped/merged onto the canonical slug.
+
+**trusty-memory palaces.** Palace state that is id-keyed on disk gets an
+**alias/rename** mapping old-id → canonical-slug (or a re-key of the palace
+directory), on the same principle: reuse the existing data, no rebuild.
+
+**Idempotent + crash-safe.** The migration is carried as a forward-only migration
+in trusty-search's existing `core::migration` `_meta` framework (the
+`schema_version` table + idempotent, crash-safe migrations described in the
+trusty-search CLAUDE.md "Schema Versioning and Migrations"), with a `schema_version`
+bump. An already-migrated registry is a no-op; a crash mid-migration retries safely
+under the framework's existing guarantee.
+
+**Outcome.** After the flip, the first `tctl ensure` sees the project as
+`exists`/`fresh` — the re-keyed data is intact — **not** `pending` from a scratch
+reindex: no multi-minute stall, no storage doubling. This makes item 7 a decided
+design carried by trusty-search's existing migration framework, not a deferred one.
+
 ### 8. Conformance verification
 
 How the controller / test harness checks a member is conformant (feeds DOC-10):
@@ -734,9 +773,12 @@ worktree/PR). The implementation checklist below maps onto it:
       `trusty_common::contract::orchestrator`; pin the concrete claude-mpm version it
       is tested against (§5 — **BOM-pinned, not latest**) and wire `uv tool install`/
       `upgrade` into the install path. Add the loud-degrade runtime rule (§4.1).
-- [ ] *(implementation-time, §3.1 item 7 — design deferred to M15)* The **stateful
-      project-identity migration** (re-key existing index/palace state) is counted in
-      the work-breakdown but **designed under DOC-11 M15**, not here.
+- [ ] *(implementation-time, §3.1 item 7 — designed in §7.1)* The **stateful
+      project-identity migration** re-keys existing index/palace state by recomputing
+      the canonical slug from each index's `root_path` and reusing the colocated data
+      in place (**no reindex**); palaces get an alias/rename. Carried as a forward-only
+      idempotent migration in trusty-search's `core::migration` `_meta` framework with a
+      `schema_version` bump (see §7.1 and DOC-11 M15).
 - [ ] *(DOC-10-owned)* Wire `--self-check` into the isolation harness as the
       conformance acceptance gate; add the claude-mpm shim captured-output
       contract-test (§4.1, DOC-10 §6/§2.2).

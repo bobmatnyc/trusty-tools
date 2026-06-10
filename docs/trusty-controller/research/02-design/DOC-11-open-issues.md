@@ -45,7 +45,7 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 | M12 | MAJOR | No auto-rollback + non-transactional installs can wedge a partial tuple | DOC-9 §6/§3.6, Resolved-Q5 | — | ✅ Resolved |
 | M13 | MAJOR | Self-upgrade abandons in-flight UI op state | DOC-9 §8, DOC-7 §8/§3.2 | — | ✅ Resolved |
 | M14 | MAJOR | CI tests the wrong paths for the primary target | DOC-10 §4.1/§6b, DOC-8 §6, Resolved-Decision-5/6 | — | ✅ Resolved |
-| M15 | MAJOR | Project-identity migration orphans existing index/palace state | DOC-6 §7, DOC-3 §8, ADR-0008 | — | 🔴 Open |
+| M15 | MAJOR | Project-identity migration orphans existing index/palace state | DOC-6 §7, DOC-3 §8, ADR-0008 | — | ✅ Resolved |
 | m1 | MINOR | Aggregate exit code undefined for fan-out `stack doctor` | DOC-1 D5, DOC-4 | — | 🔴 Open |
 | m2 | MINOR | `pending` is gameable (no stall detection) | DOC-3 §2, DOC-1 `doctor.data`, Resolved-Q5 | — | 🔴 Open |
 | m3 | MINOR | Project-scope `fail`/`down` exits 0, masking a real local outage | DOC-4 §2.2/§7, Resolved-Q3 | — | 🔴 Open |
@@ -304,9 +304,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** the basename→slug flip re-keys every existing index/palace; DOC-6 treats it as a refactor, not a stateful data migration; both id forms are currently live in the daemon registry for the same root.
 - **Failure mode:** first `tctl ensure` re-indexes everything from scratch (multi-minute "pending", storage doubling).
 - **Fix direction:** explicit alias/re-key migration step in the trusty-search retrofit.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** best recommendation — an explicit, idempotent, crash-safe **re-key migration** carried by trusty-search's EXISTING forward-only `_meta` schema-migration framework (`core::migration`), **NOT** a from-scratch reindex. Because colocated index data is `root_path`-addressed (the daemon stores `ColocatedIndexEntry { root_path, id }` and the on-disk `.trusty-search/` lives under the root, so the id is only the in-memory registry key), the migration recomputes the canonical slug from each index's `root_path` and **re-keys the registry entry in place**, reusing the existing redb/usearch data (**no re-embed**), and drops the duplicate old-form registration (basename and/or divergent slug) for the same root; trusty-memory palaces get an **alias/rename** (old-id → canonical-slug). A `schema_version` bump carries it; an already-migrated registry is a no-op; a crash mid-migration retries safely under the framework's existing guarantee. Outcome: the first `tctl ensure` after the flip sees the project as `exists`/`fresh`, **not** a multi-minute `pending` rebuild with storage doubling. This closes the M3/m11 work-breakdown item 7 (previously "design deferred to M15").
+- **Follow-up:** DOC-6 §7.1 (new "Stateful re-key migration (no reindex)" subsection — re-key by `root_path`, reuse data in place, drop the duplicate old-form registration, palace alias/rename, carried by `core::migration` + a `schema_version` bump), DOC-6 §3.1 item 7 + Remaining-work checklist item 7 (now designed in §7.1, no longer deferred). ADR-0008 Consequences "Migration required" bullet (the migration is a stateful re-key, **not** a reindex). DOC-3 §8 edge-cases (new bullet: existing state is re-keyed, not orphaned). Implementation follow-up: the trusty-search re-key migration + the trusty-memory palace alias as part of the project-identity retrofit.
 
 ---
 
