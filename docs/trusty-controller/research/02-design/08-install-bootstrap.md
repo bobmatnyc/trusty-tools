@@ -463,8 +463,12 @@ otherwise dispatches each member's own `service`/lifecycle contract verb, which 
 where the per-OS knowledge already lives. **The deep platform matrix (exact
 systemd unit content, Linux port/data-dir conventions, container nuances) is
 deferred to DOC-10** (isolation harness, MUC1/MUC2), which must exercise both
-OSes; DOC-8 only fixes the *shape* of the divergence. (Resolved Decision 6: Linux v1
-target is systemd-user where available, foreground fallback.)
+OSes; DOC-8 only fixes the *shape* of the divergence. The **primary target** (macOS,
+including the cdhash caveat above) and the Linux **systemd-user product supervision
+path** are gated **per-PR** by DOC-10's minimal macOS smoke + per-PR
+systemd-user-runner legs (not only nightly), so primary-target supervision/restart and
+cdhash regressions are caught pre-merge (cross-ref DOC-10 §6b / §4.1). (Resolved
+Decision 6: Linux v1 target is systemd-user where available, foreground fallback.)
 
 ### 7. Failure / partial-install handling (Resolved Decision 7)
 
@@ -660,7 +664,11 @@ Source-first audit, 2026-06-08 (trusty-search MCP search + Read against the tree
    macOS uses launchd (grounded). Linux v1 installs a **systemd user unit** where
    `systemctl --user` is available, falling back to documented foreground/daemonless
    (`<binary> serve`) otherwise. The exact unit content and Linux path/port
-   conventions are deferred to DOC-10 (isolation harness). Locked for v1.
+   conventions are deferred to DOC-10 (isolation harness). The systemd-user product
+   path is exercised **per-PR on a standard ubuntu runner** (which has
+   `systemctl --user`), and the foreground/daemonless fallback is covered by the
+   per-PR container leg (DOC-10 §4.1 / §6b) — so both Linux supervision branches have
+   per-PR coverage. Locked for v1.
 
 7. **Partial-install behavior — continue and report (§7).** (Owner-approved)
    **Continue** on member failure (install all selected members, report failures in a

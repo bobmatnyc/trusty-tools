@@ -44,7 +44,7 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 | M11 | MAJOR | `state.toml` stack-version tracking can silently desync; UI shows stale "clean" | DOC-9 §4.4, Resolved-Q3, DOC-7 §2.1 | — | ✅ Resolved |
 | M12 | MAJOR | No auto-rollback + non-transactional installs can wedge a partial tuple | DOC-9 §6/§3.6, Resolved-Q5 | — | ✅ Resolved |
 | M13 | MAJOR | Self-upgrade abandons in-flight UI op state | DOC-9 §8, DOC-7 §8/§3.2 | — | ✅ Resolved |
-| M14 | MAJOR | CI tests the wrong paths for the primary target | DOC-10 §4.1/§6b, DOC-8 §6, Resolved-Decision-5/6 | — | 🔴 Open |
+| M14 | MAJOR | CI tests the wrong paths for the primary target | DOC-10 §4.1/§6b, DOC-8 §6, Resolved-Decision-5/6 | — | ✅ Resolved |
 | M15 | MAJOR | Project-identity migration orphans existing index/palace state | DOC-6 §7, DOC-3 §8, ADR-0008 | — | 🔴 Open |
 | m1 | MINOR | Aggregate exit code undefined for fan-out `stack doctor` | DOC-1 D5, DOC-4 | — | 🔴 Open |
 | m2 | MINOR | `pending` is gameable (no stall detection) | DOC-3 §2, DOC-1 `doctor.data`, Resolved-Q5 | — | 🔴 Open |
@@ -292,9 +292,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** every-PR Linux leg uses foreground `serve` (production = systemd-user, tested by no one per-PR); macOS is "primary" but its gate (incl. the cdhash SIGKILL trap) runs only nightly.
 - **Failure mode:** supervision/restart regressions and the macOS `cp`-into-PATH SIGKILL regress green and ship to nightly discovery.
 - **Fix direction:** minimal per-PR macOS smoke (install + health + cdhash assertion) + a systemd-user leg per-PR.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** Option A — rebalance the CI gate so the primary target's critical paths get per-PR signal at bounded cost (a minimal smoke, NOT the full §2 acceptance matrix). Add a **minimal per-PR macOS smoke** (`cargo install trusty-controller --locked` → daemon up under launchd → `health --json` == `running` → **cdhash assertion** that the on-PATH binary execs without SIGKILL via `cargo install`'s atomic-rename path and the forbidden `cp`-over path is NOT used → one `restart` via `bootout`→`bootstrap` → `health` again; NOT the full §2 scenario, which stays nightly) so the primary target + the silent cdhash/`cp`-SIGKILL trap are caught **pre-merge** instead of nightly post-merge. Add a **per-PR systemd-user leg on a standard ubuntu runner** (which has `systemctl --user`) so the real Linux v1 product supervision path (Resolved-Decision-6) is gated per-PR, with the foreground-container leg retained for the fallback branch. The full §2 macOS acceptance run + the M2 stack-tuple promotion gate stay **nightly/scheduled** (unchanged). Trade-off acknowledged: a few bounded macOS minutes per PR vs post-merge discovery of a silent-SIGKILL regression.
+- **Follow-up:** DOC-10 §6b (new per-PR macOS-smoke row + per-PR systemd-user-runner row; existing macOS row clarified as the nightly full §2 run; `isolation.yml` description updated to include the per-PR macOS-smoke + systemd-user-runner jobs), §4.1 (systemd-user product path now gated per-PR on a standard ubuntu runner, the container leg covering the foreground/fallback branch only, the VM leg becoming a deeper/optional nightly validation). DOC-8 §6 + Resolved-Decision-6 (primary target + systemd-user product path gated per-PR per DOC-10). Adjacency noted with [M2](#m2--stack_version-tuple-will-rot-no-test-owner-no-ci-gate-embedded-in-the-binary) (the M2 stack-tuple promotion gate stays nightly). Implementation follow-up: the `isolation.yml` per-PR macOS-smoke + systemd-user-runner jobs incl. the cdhash assertion.
 
 ### M15 — Project-identity migration orphans existing index/palace state
 
