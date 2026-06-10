@@ -7,6 +7,33 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.24.4] — 2026-06-09
+
+### Fixed
+
+- **Embed-pool sidecar calls isolated from the async executor to prevent
+  accept-loop starvation (#1017)** — `embed_batch` calls to the stdio sidecar
+  are now dispatched via `tokio::task::spawn_blocking` so they cannot occupy
+  async worker threads. Under sustained embed load the executor no longer
+  starves the axum accept-loop, eliminating the class of request-timeout
+  failures seen in issue #1017.
+
+- **Graceful `admin_stop` without corpus corruption (#829)** — the admin-stop
+  endpoint now flushes in-flight writes and closes redb handles before
+  signalling the daemon to exit. Previously a `POST /admin/stop` could race
+  with an ongoing reindex commit and leave the corpus in an inconsistent state.
+
+- **Non-blocking `canonicalize` in index registration path (#829)** —
+  `std::fs::canonicalize` is now wrapped in `tokio::task::spawn_blocking` so
+  a slow or unreachable filesystem path no longer stalls the async acceptor
+  while resolving symlinks.
+
+- **PID-slot reclamation (#829)** — stale PID lockfiles from previously crashed
+  daemon instances are now detected and removed at startup, preventing spurious
+  "daemon already running" errors after an unclean shutdown.
+
+---
+
 ## [0.24.3] — 2026-06-09
 
 ### Fixed

@@ -7,6 +7,47 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.7.0] — 2026-06-09
+
+### Added
+
+- **`tools_run` / `tools_unavailable` fields in `run_diagnostics` response
+  (#915)** — `DiagnosticsResponse` (HTTP) and the `run_diagnostics` MCP tool
+  result now include:
+  - `tools_run: Vec<String>` — names of analysis tools that executed
+    successfully.
+  - `tools_unavailable: Vec<String>` — names of tools that were requested but
+    could not run (binary missing, feature disabled, index has no data, etc.).
+  These are additive fields; no existing fields were removed or renamed.
+  Callers that previously used an empty `diagnostics` list to infer
+  "nothing ran" now get an explicit signal.
+
+- **Distinguish clean from tools-unavailable in `run_diagnostics` (#915)** —
+  `run_diagnostics` now correctly distinguishes between "all tools ran, no
+  issues found" (clean) and "tools were unavailable so nothing ran"
+  (degraded). Previously both cases returned an empty diagnostics list with
+  no indication of which had occurred.
+
+### Fixed
+
+- **CALLS edge targets resolved via qualified node-id scheme across all 13
+  language adapters (#913)** — the call-graph builder now uses the same
+  qualified `<language>/<path>/<symbol>` node-id scheme that the entity
+  linker uses when resolving callee targets. Previous adapters emitted bare
+  symbol names as CALLS targets, which never matched any node in the graph,
+  resulting in zero CALLS edges in `extract_graph` results. All 13 adapters
+  (Rust, Python, TypeScript, JavaScript, Java, Go, C, C++, C#, Kotlin, PHP,
+  Ruby, Scala) are fixed.
+
+### Note on behavior change
+
+The `omit_content` default changed to `true` in 0.6.0 (released same day).
+Callers that relied on `content` being present in smells responses must add
+`omit_content=false`. This bump to 0.7.0 (MINOR) is driven by the additive
+`tools_run`/`tools_unavailable` response envelope.
+
+---
+
 ## [0.6.0] — 2026-06-09
 
 ### Added

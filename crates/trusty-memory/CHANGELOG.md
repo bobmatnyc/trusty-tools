@@ -1,5 +1,32 @@
 # Changelog — trusty-memory
 
+## [0.15.2] — 2026-06-09
+
+### Fixed
+
+- **Lock TOCTOU hardening (#797)** — palace and store operations now acquire
+  the advisory lock before any stat/open sequence, eliminating the window in
+  which a concurrent writer could observe a partially-written file between the
+  existence check and the open.
+
+- **`libc::kill` replaces unsafe `set_var` in tests (#797)** — test helpers
+  that previously used `std::env::set_var` (unsound in multi-threaded tests)
+  now signal the daemon via `libc::kill`, making the test suite safe to run
+  with `--test-threads > 1`. Test isolation improved.
+
+- **Module documentation corrected (#797)** — doc comments that referenced
+  internal implementation details now reflect the current architecture.
+
+---
+
+## [0.15.1] — 2026-06-05
+
+### Fixed
+
+- Minor stability fixes after the redb 4.x migration; no user-visible API changes.
+
+---
+
 ## [0.15.0] — 2026-06-03
 
 ### Added

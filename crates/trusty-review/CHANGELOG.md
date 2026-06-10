@@ -6,6 +6,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.3.8] — 2026-06-09
+
+### Fixed
+
+- **Verdict calibration: stop Medium findings from over-escalating the rolled-up
+  verdict (#1015)** — advisory Medium findings no longer push the rolled-up
+  verdict above `APPROVE`. The severity-floor escalation that converts a
+  grade-derived verdict to `REQUEST_CHANGES` now only fires for High/Critical
+  findings; Medium findings preserve the grade verdict. Prevents mechanical
+  `REQUEST_CHANGES` on reviews where all findings are advisory Medium or lower.
+
+---
+
 ## [0.3.6] — 2026-06-07
 
 ### Added
