@@ -93,6 +93,8 @@ struct TomlFile {
     context: ContextFileConfig,
     #[serde(default)]
     voice: voice::VoiceFileConfig,
+    #[serde(default)]
+    coverage: crate::coverage::CoverageFileConfig,
 }
 
 /// Global service configuration for trusty-review.
@@ -228,6 +230,14 @@ pub struct ReviewConfig {
     /// (default-on per issue #756 spec: "universal/safe").
     /// The config file key is `[voice] principles = false`.
     pub voice_principles: bool,
+
+    // ── Coverage gating (issue #1014) ─────────────────────────────────────
+    /// Resolved coverage-gating policy.
+    ///
+    /// `TRUSTY_REVIEW_COVERAGE_ENABLED=true` enables coverage gating (off by
+    /// default).  All fields configurable via env vars or `[coverage]` TOML table.
+    /// When `enabled = false`, the coverage pipeline is a complete no-op.
+    pub coverage: crate::coverage::CoveragePolicy,
 }
 
 impl ReviewConfig {
@@ -252,6 +262,8 @@ impl ReviewConfig {
         let file_verification = toml_file.as_ref().map(|f| f.verification.clone());
         let file_context = toml_file.as_ref().map(|f| f.context.clone());
         let file_voice: Option<&voice::VoiceFileConfig> = toml_file.as_ref().map(|f| &f.voice);
+        let file_coverage: Option<&crate::coverage::CoverageFileConfig> =
+            toml_file.as_ref().map(|f| &f.coverage);
 
         let env = RoleEnv::from_env();
         let role_models = RoleModels::resolve(cli_overrides, &env, file_models.as_ref());
@@ -313,6 +325,7 @@ impl ReviewConfig {
             apex_path_prefixes: load_apex_path_prefixes(),
             voice_package: voice::load_voice_package(file_voice),
             voice_principles: voice::load_voice_principles(file_voice),
+            coverage: crate::coverage::CoveragePolicy::from_env_and_file(file_coverage),
         }
     }
 

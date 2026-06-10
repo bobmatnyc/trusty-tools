@@ -189,6 +189,7 @@ fn prompt_includes_context_blocks() {
             line: Some(20),
         }],
         apex_results: vec![],
+        coverage_contrib: None,
     };
 
     let req = build_review_prompt(

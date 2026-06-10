@@ -15,25 +15,20 @@ use std::sync::Arc;
 
 use tracing::{debug, info, warn};
 
+use super::runner_coverage::load_coverage_contrib;
+use super::runner_helpers::{abort_dry, apply_grade_and_floor, fetch_github_pr_meta, finalize_run};
 use crate::{
     config::ReviewConfig,
-    integrations::{
-        analyze_client::AnalyzeClient,
-        github::{AuthStrategy, GithubClient, GithubError, RunMode, fetch_pr_metadata},
-        search_client::SearchClient,
-    },
+    coverage::{CoverageVerdictContrib, apply_coverage_floor},
+    integrations::{analyze_client::AnalyzeClient, github::RunMode, search_client::SearchClient},
     llm::LlmProvider,
     models::{ReviewResult, ReviewStatus, Verdict},
     pipeline::{
         context_gate::{GateOutcome, degraded_banner, preflight_context},
         diff::{DiffSource, extract_changed_files, extract_identifiers, load_diff, truncate_diff},
         diff_analyzer::DiffAnalyzer, // noise filter (Stages A+B); #624
-        grade::derive_verdict_with_grade,
-        letter_grade::default_grade_for_verdict,
-        output::{print_review_result, write_review_log},
         parser::parse_review_response,
-        post::{PostContext, finalize_review},
-        prompt::{ReviewPrMeta, build_review_prompt},
+        prompt::{ReviewPrMeta, build_review_prompt_with_coverage},
         runner_context::{gather_context, gather_external_context_md},
         trigger::TriggerDecision,
         verify::maybe_verify,
@@ -257,7 +252,7 @@ pub async fn run_review(
     // config.apex_index: empty = disabled.
     let title = &pr_meta.title;
     let body = &pr_meta.body;
-    let (context, external_context) = tokio::join!(
+    let (mut context, external_context) = tokio::join!(
         gather_context(config, &deps, &identifiers, &changed_files, title, body),
         gather_external_context_md(
             config,
@@ -271,10 +266,21 @@ pub async fn run_review(
         ),
     );
 
+    // ── Step 5b: load coverage data and build coverage verdict contrib (#1014) ──
+    // Coverage is FAIL-OPEN and OFF by default.  When `config.coverage.enabled`
+    // is false (the default), `load_coverage_contrib` returns None and the entire
+    // coverage pipeline is skipped.  Failures (e.g. LCOV file missing) produce a
+    // warning and None — never an error that blocks the review.
+    let coverage_contrib: Option<CoverageVerdictContrib> =
+        load_coverage_contrib(config, &diff).await;
+
+    // Inject the coverage contrib into the context struct for prompt assembly.
+    context.coverage_contrib = coverage_contrib.clone();
+
     // ── Step 6: build prompt and call LLM ─────────────────────────────────
     // Build the 3-layer VoiceConfig (stock + principles + voice) from config.
     let voice_config = build_voice_config(config);
-    let llm_req = build_review_prompt(
+    let llm_req = build_review_prompt_with_coverage(
         &owner,
         &repo,
         &pr_meta,
@@ -283,6 +289,7 @@ pub async fn run_review(
         &external_context,
         &input.reviewer_model,
         &voice_config,
+        config.coverage.enabled,
     );
     debug!(model = %input.reviewer_model, "calling LLM reviewer");
 
@@ -327,7 +334,7 @@ pub async fn run_review(
         );
     }
 
-    // ── Step 7b–7d: grade derivation, verification, grade reconciliation ─────
+    // ── Step 7b–7e: grade derivation, coverage floor, verification, reconcile ─
     let (final_verdict, final_grade) = apply_grade_and_floor(&parsed);
     info!(
         verdict = %final_verdict,
@@ -335,6 +342,26 @@ pub async fn run_review(
         findings_count = parsed.findings.len(),
         "final verdict + grade after severity-anchored floor"
     );
+
+    // 7b-post: apply coverage floor AFTER severity derivation (#1014).
+    // Coverage can only TIGHTEN (REQUEST_CHANGES) — never soften a BLOCK.
+    // This is a no-op when coverage gating is disabled (the default).
+    let (final_verdict, final_grade) = if let Some(ref cov) = coverage_contrib {
+        let before = final_verdict.clone();
+        let (cv, cg) = apply_coverage_floor(final_verdict, final_grade, cov);
+        if cv != before {
+            info!(
+                before = %before,
+                after = %cv,
+                reason = %cov.summary,
+                "coverage floor tightened verdict"
+            );
+        }
+        (cv, cg)
+    } else {
+        (final_verdict, final_grade)
+    };
+
     let mut findings = parsed.findings;
     // 7c: verification round — re-derives verdict from surviving findings.
     result.verdict = maybe_verify(
@@ -353,145 +380,6 @@ pub async fn run_review(
     );
 
     finalize_run(result, config, &input, deps.dedup.as_ref()).await
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/// Derive (verdict, grade) from a `ParsedReview` using grade + severity floor.
-///
-/// Why: extracted to keep `run_review` under the line cap and make it testable.
-/// What: fail-safe → (APPROVE, default grade); normal → resolves LLM grade string
-/// (or default), calls `derive_verdict_with_grade` for max(grade, model) + floor.
-/// Test: covered by runner integration tests.
-fn apply_grade_and_floor(
-    parsed: &crate::pipeline::parser::ParsedReview,
-) -> (Verdict, crate::pipeline::letter_grade::Grade) {
-    if parsed.is_fail_safe {
-        let v = parsed.verdict.clone();
-        let g = default_grade_for_verdict(&v);
-        return (v, g);
-    }
-    let grade = parsed
-        .grade
-        .as_deref()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| {
-            let g = default_grade_for_verdict(&parsed.verdict);
-            warn!(
-                verdict = %parsed.verdict,
-                default_grade = %g,
-                "LLM grade absent or unparseable — using default for verdict"
-            );
-            g
-        });
-    derive_verdict_with_grade(parsed.verdict.clone(), grade, &parsed.findings)
-}
-
-/// Fetch PR metadata and return `(ReviewPrMeta, head_sha)`.
-///
-/// Why: centralises the GitHub API call and head-SHA surfacing so the runner
-/// can key the dedup store.
-/// What: resolves token via run_mode, calls `fetch_pr_metadata`.
-/// Test: tested indirectly via mock in integration tests.
-async fn fetch_github_pr_meta(
-    config: &ReviewConfig,
-    owner: &str,
-    repo: &str,
-    pr: u64,
-    run_mode: RunMode,
-) -> Result<(ReviewPrMeta, String), GithubError> {
-    let client = GithubClient::new()?;
-    let token = AuthStrategy::select(run_mode, None)
-        .resolve_token(&client, config, owner)
-        .await?;
-    let meta = fetch_pr_metadata(&client, owner, repo, pr, &token).await?;
-    let head_sha = meta.head.sha.clone();
-    Ok((
-        ReviewPrMeta {
-            title: meta.title,
-            // Fix 3 (#599): thread the PR description through so the external
-            // context sources can scan it for ticket keys + fold it into queries.
-            body: meta.body.unwrap_or_default(),
-            author: meta.user.login,
-            url: meta.html_url,
-        },
-        head_sha,
-    ))
-}
-
-/// Finalise an *aborted* review as dry-run only, releasing the dedup claim.
-///
-/// Why: a review that aborts before producing a real verdict (diff-load failure
-/// or LLM transport error) must never be posted live — it carries only a
-/// fail-safe APPROVE/UNKNOWN.  It must also *release* its dedup claim so a later
-/// retry (e.g. once the LLM recovers) can re-run instead of being suppressed.
-/// What: releases the in-progress dedup claim (fail-safe on error), writes the
-/// dry-run log so the failure is inspectable, prints when requested, and returns
-/// the result flagged `dry_run = true`.
-/// Test: `run_review_fail_safe_on_llm_error`, `run_review_missing_diff_file_sets_error`.
-fn abort_dry(
-    mut result: ReviewResult,
-    config: &ReviewConfig,
-    input: &ReviewInput,
-    deps: &ReviewDeps,
-) -> ReviewResult {
-    result.dry_run = true;
-    // Release the in-progress claim so a retry can re-run this head SHA.
-    if !result.head_sha.is_empty()
-        && let Some(store) = deps.dedup.as_ref()
-        && let Err(e) = store.release(
-            &result.owner,
-            &result.repo,
-            result.pr_number,
-            &result.head_sha,
-        )
-    {
-        warn!("dedup release() after abort failed (non-fatal): {e}");
-    }
-    if input.write_log {
-        write_review_log(&result, &config.log_dir);
-    }
-    if input.print_result {
-        print_review_result(&result);
-    }
-    result
-}
-
-/// Apply post-or-log finalisation (Phase 1, #582) for a completed review.
-///
-/// Why: single exit path so live/dry policy is applied exactly once.
-/// What: builds `PostContext` from result fields, delegates to `finalize_review`.
-/// Test: `post::tests` cover branch selection; runner tests assert dry-run.
-async fn finalize_run(
-    result: ReviewResult,
-    config: &ReviewConfig,
-    input: &ReviewInput,
-    dedup: Option<&Arc<DedupStore>>,
-) -> ReviewResult {
-    // Clone the dedup-key fields up front so `result` can be moved into
-    // `finalize_review` while `PostContext` borrows the owned copies.
-    let owner = result.owner.clone();
-    let repo = result.repo.clone();
-    let pr = result.pr_number;
-    let head_sha = result.head_sha.clone();
-    let post_ctx = PostContext {
-        owner: &owner,
-        repo: &repo,
-        pr,
-        head_sha: &head_sha,
-        run_mode: input.run_mode,
-        dedup,
-    };
-    finalize_review(
-        result,
-        config,
-        input.trigger,
-        input.allow_posting,
-        input.write_log,
-        input.print_result,
-        post_ctx,
-    )
-    .await
 }
 
 #[cfg(test)]

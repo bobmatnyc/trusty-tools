@@ -44,6 +44,18 @@ pub mod verify_prompt;
 // under the 500-line cap (#610).  Exposes `build_voice_config` for use by the
 // runner and for direct testing.
 pub mod voice_config;
+// Why: coverage data loading extracted from runner.rs to keep that file under
+// the 500-line cap (#610) after adding coverage-gating pipeline (#1014).
+pub mod runner_coverage;
+// Why: helper functions (apply_grade_and_floor, fetch_github_pr_meta, abort_dry,
+// finalize_run) extracted from runner.rs to keep it under the 500-line cap (#610).
+pub mod runner_helpers;
+// Why: system-prompt string constants extracted from prompt.rs to keep it under
+// the 500-line cap (#610) after the two coverage-gating variants were added (#1014).
+pub mod prompt_templates;
+// Why: user-message builder extracted from prompt.rs to keep it under the
+// 500-line cap (#610) — the function is 145 lines on its own.
+pub mod prompt_user_msg;
 
 pub use context_gate::{GateOutcome, degraded_banner, preflight_context};
 pub use diff::DiffSource;
@@ -55,7 +67,9 @@ pub use output::{log_json_path, print_review_result, write_review_log};
 pub use parser::{ParsedReview, parse_review_response};
 pub use post::{FinalizeAction, PostContext, decide_action, finalize_review};
 pub use prompt::{
-    ReviewContext, ReviewPrMeta, build_review_prompt, build_system_prompt, reviewer_system_prompt,
+    ReviewContext, ReviewPrMeta, build_review_prompt, build_review_prompt_with_coverage,
+    build_system_prompt, build_system_prompt_with_coverage, reviewer_system_prompt,
+    reviewer_system_prompt_with_coverage,
 };
 pub use runner::{ReviewDeps, ReviewInput, run_review};
 pub use trigger::{TriggerDecision, classify_review_request, effective_dry_run};

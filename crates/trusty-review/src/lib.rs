@@ -18,6 +18,11 @@ pub mod integrations;
 pub mod llm;
 pub mod models;
 pub mod pipeline;
+// Why: coverage ingestion and verdict-gating (issue #1014).  Always compiled —
+// no feature gate — because `CoveragePolicy` is a pure data type used by
+// `ReviewConfig` and the runner in all modes.  The feature is off by default
+// (opt-in via `TRUSTY_REVIEW_COVERAGE_ENABLED=true`).
+pub mod coverage;
 // Why: the voice module holds the 3-layer prompt composition types and logic
 // (stock → principles → voice).  Always compiled — no feature gate — because
 // VoiceConfig is a pure data type used by the prompt builder in all modes.

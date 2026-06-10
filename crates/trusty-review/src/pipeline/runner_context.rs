@@ -135,6 +135,9 @@ pub(crate) async fn gather_context(
         complexity_hotspots,
         smells,
         apex_results,
+        // Coverage contrib is populated by the runner AFTER context gathering
+        // (step 5b), once the diff is available for new-code extraction (#1014).
+        coverage_contrib: None,
     }
 }
 
