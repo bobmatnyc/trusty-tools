@@ -242,6 +242,16 @@ reuses for install/ensure progress.
 - On completion the UI re-fetches `tctl stack doctor --json` and re-renders the
   matrix, closing the loop ("usable now, indexing in progress" → `project:
   pending` is shown as positive-trajectory, not an error — DOC-4 §2.0 / DOC-3 §2).
+- **Caveat: an op that restarts the controller itself cannot be tracked across
+  the respawn.** The replay buffer lives **in-memory in the controller process**,
+  so a controller self-upgrade (DOC-9 §8 self-exit + launchd respawn) destroys
+  the op's replay buffer: the reconnecting browser subscribes to
+  `GET /api/v1/ops/<id>/stream`, the freshly-respawned process has no record of
+  op `<id>`, never emits `complete`, and the UI hangs "reconnecting…" for an op
+  that actually finished. Therefore **UI-initiated upgrades exclude the controller
+  self-step** (`--exclude-self`, DOC-9 §8) — the UI upgrades the *other* members
+  (their op state survives because the tracking controller does not restart
+  mid-stream) and hands the controller's own self-upgrade off to the CLI (§8).
 
 This is net-new wiring (the controller's own op stream) but **zero new protocol**:
 it is the same SSE+replay shape the daemons already implement.
@@ -428,6 +438,21 @@ ties UI availability to the controller's own lifecycle:
   "controller restarting — reconnecting…" state and the SSE client reconnects
   (the `mcp_bridge`-style exponential-backoff reconnect convention, CLAUDE.md
   #534, applies to the UI's stream client too).
+- **UI-initiated whole-stack upgrades use `--exclude-self`.** A controller
+  self-upgrade (DOC-9 §8) replaces the very process tracking the op, and that
+  op's SSE replay buffer is in-memory in the dying process (§3.2) — a self-exit
+  mid-stream strands the op (the browser never sees `complete` and hangs
+  "reconnecting…"). So a UI-initiated `tctl upgrade` (whole stack) passes
+  `--exclude-self` (DOC-9 §8): it upgrades the *other* members — whose op state
+  survives because the tracking controller does not restart mid-stream — and
+  surfaces "controller upgrade available — run `tctl upgrade` in a terminal to
+  finish" for the controller's own self-upgrade, rather than initiating a
+  self-exit that destroys the op's stream. **Root cause:** the process tracking
+  the op must not be the process that dies. Persisting op terminal-state across
+  respawn (so a respawned controller could replay the `complete` event to a
+  reconnecting browser) is the **deferred future enhancement** that would later
+  allow UI-initiated controller self-upgrade; until then the controller self-step
+  is CLI-only.
 
 ---
 

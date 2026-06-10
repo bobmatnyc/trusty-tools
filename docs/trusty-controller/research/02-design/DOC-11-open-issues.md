@@ -42,8 +42,8 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 | M9 | MAJOR | D8 secret redaction is unenforceable | DOC-1 D8, DOC-6 conformance clause 5 | — | 🔴 Open |
 | M10 | MAJOR | Timeouts (2s health / 10s doctor) false-fail cold / model-loading daemons | DOC-4 §1.3, Resolved-Q1 | — | ✅ Resolved |
 | M11 | MAJOR | `state.toml` stack-version tracking can silently desync; UI shows stale "clean" | DOC-9 §4.4, Resolved-Q3, DOC-7 §2.1 | — | ✅ Resolved |
-| M12 | MAJOR | No auto-rollback + non-transactional installs can wedge a partial tuple | DOC-9 §6/§3.6, Resolved-Q5 | — | 🔴 Open |
-| M13 | MAJOR | Self-upgrade abandons in-flight UI op state | DOC-9 §8, DOC-7 §8/§3.2 | — | 🔴 Open |
+| M12 | MAJOR | No auto-rollback + non-transactional installs can wedge a partial tuple | DOC-9 §6/§3.6, Resolved-Q5 | — | ✅ Resolved |
+| M13 | MAJOR | Self-upgrade abandons in-flight UI op state | DOC-9 §8, DOC-7 §8/§3.2 | — | ✅ Resolved |
 | M14 | MAJOR | CI tests the wrong paths for the primary target | DOC-10 §4.1/§6b, DOC-8 §6, Resolved-Decision-5/6 | — | 🔴 Open |
 | M15 | MAJOR | Project-identity migration orphans existing index/palace state | DOC-6 §7, DOC-3 §8, ADR-0008 | — | 🔴 Open |
 | m1 | MINOR | Aggregate exit code undefined for fan-out `stack doctor` | DOC-1 D5, DOC-4 | — | 🔴 Open |
@@ -268,9 +268,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** per-member health-gate defends the single-member case, not the cross-member case (new-search + old-analyze = untested tuple; no tuple-level gate).
 - **Failure mode:** drifted, untested, partially-new stack; recovery is manual `cargo install @old` (defeats zero-knowledge).
 - **Fix direction:** gate dependent restarts on the dependency's verify-after; make "drifted/partial-tuple" a first-class outcome with one-command pin-back.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** Option A (cluster) — gate dependent restarts on the dependency's verify-after: a dependent is only upgraded/restarted after its dependency reaches target *and* verifies healthy, and a **failed** dependency holds its dependents at the last known-good combination, reported `blocked-by` the root (this extends §6's dependency exception from "dep down" to "dep upgrade incomplete"), so an untested new + old pair cannot form silently. Make drifted/partial-tuple a **first-class outcome** (reusing the M11 partial `state.toml` marker) surfaced as a distinct DOC-4 *partial tuple — not a tested combination* verdict, with **one-command pin-back** to the last known-good tested tuple (`tctl upgrade --to <last-good-stack_version>`, the whole-tuple form extending the existing per-member `--version` downgrade + §4.2 stack-move surface). This is **NOT** auto-rollback (Resolved Decision 5 unchanged) — a zero-knowledge-friendly **manual** pin-back replacing the per-crate `cargo install <crate>@<old>` incantation; the known-good tuple is the M2 tested BOM.
+- **Follow-up:** DOC-9 §3.6 (verify-after gating in ordering), §6 (cross-member gap + drifted/partial-tuple first-class + one-command pin-back), Resolved-Decision-5 (no-auto-rollback retained but partial-tuple recovery is now one-command pin-back). Cross-ref [M2](#m2--stack_version-tuple-will-rot-no-test-owner-no-ci-gate-embedded-in-the-binary) (tested tuple) + [M11](#m11--statetoml-stack-version-tracking-can-silently-desync-ui-shows-stale-clean) (partial marker). Implementation follow-up: verify-after gate between dependency and dependents; `tctl upgrade --to <stack_version>` whole-tuple pin-back; surface the partial-tuple verdict.
 
 ### M13 — Self-upgrade abandons in-flight UI op state
 
@@ -280,9 +280,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** the SSE replay buffer lives in the dying process's memory; respawn has no replay for the pre-restart op.
 - **Failure mode:** browser sees a gap with no `complete` event; UI stuck "reconnecting…" for an op that finished.
 - **Fix direction:** persist op terminal-state, or make self-upgrade CLI-only in v1.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** Option A (cluster) — UI-initiated upgrades **exclude the controller self-step in v1** (reuse the existing `--exclude-self`, DOC-9 §8): the UI upgrades the *other* members (their op state survives because the tracking controller does not restart mid-stream) and hands the controller's own self-upgrade off to the CLI with a "run `tctl upgrade` in a terminal" message, rather than a self-exit that destroys the in-memory SSE replay buffer and strands the op (browser never sees `complete`, hangs reconnecting). **Root cause:** the process tracking the op must not be the process that dies. Persisting op terminal-state across respawn (Option B) is **deferred** as the future path to UI-initiated self-upgrade.
+- **Follow-up:** DOC-7 §3.2 (self-restart op cannot be tracked across respawn → UI excludes self), §8 (UI uses `--exclude-self`, CLI handoff for controller self-upgrade, persist-op-state deferred). DOC-9 §8 reuse of the existing `--exclude-self` escape hatch. Implementation follow-up: UI upgrade flow passes `--exclude-self` + CLI-handoff messaging; (deferred) persist op terminal state for UI self-upgrade.
 
 ### M14 — CI tests the wrong paths for the primary target
 

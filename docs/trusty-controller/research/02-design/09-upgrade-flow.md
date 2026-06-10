@@ -366,6 +366,14 @@ sequencing is the net-new orchestration layered on top.
 - **Install order = `depends_on` topological** (DOC-2 §3): a dependency is
   upgraded before its dependents (search → analyze → review), so a dependent is
   never running new code against an older-than-expected dependency mid-upgrade.
+- **Dependent upgrade/restart is gated on the dependency's verify-after.** A
+  dependent is only upgraded/restarted **after** its dependency has reached its
+  target version *and* verified healthy (the §7 verify-after step). If a
+  dependency's upgrade **fails** (build error, health-gate fail, failed
+  verify-after), its dependents are **not** upgraded onto a half-upgraded base —
+  they are held at the last known-good combination and reported `blocked-by` the
+  root (§6). This is what prevents an untested new-dependency + old-dependent (or
+  new-dependent + old-dependency) pair forming silently mid-sweep.
 - **Restart order = same topological order, daemons after their install, the
   controller's own UI service last** (§5.2 / DOC-5 §7) so the controller does not
   kill itself mid-sweep.
@@ -586,6 +594,34 @@ continue+report) and DOC-4's rollup:
     (`depends_on`) failed to upgrade or is now `down`, its dependents are reported
     `blocked-by` the root (one remediation: fix the root) rather than each
     independently failing/restarting.
+- **Cross-member gap: the health-gate is per-member, not per-tuple.** The §3.3
+  health-gate (and the §7 verify-after) catch "the new binary is broken on its
+  own"; they do **not** catch the cross-member case. With topological ordering
+  (search → analyze), a partial upgrade where search moves to new but analyze's
+  upgrade fails and stays old leaves new-search + old-analyze running together —
+  each individually healthy, but the *pair* is an untested tuple (the BOM tested
+  the all-new `2026.07-1` and the prior all-old `2026.06-1`; new + old is
+  neither). DOC-9 closes this with two parts:
+  - **(a) Verify-after gating prevents the untested pair forming silently.** Per
+    §3.6, a dependent is only upgraded/restarted after its dependency reaches
+    target *and* verifies healthy; a failed dependency holds its dependents at the
+    last known-good combination, reported `blocked-by` the root. This **extends
+    the dependency exception above** from "dep is down" to "dep upgrade
+    incomplete" — so the controller does not stack a new dependent onto a
+    half-upgraded base and call the result done.
+  - **(b) A partial/failed tuple is a first-class drifted/partial-tuple
+    outcome.** A partial upgrade is recorded as a partial/drift state (reusing the
+    in-progress/partial `state.toml` marker, §4.4 / M11) and surfaced as a
+    distinct *partial tuple — not a tested combination* verdict in the DOC-4
+    matrix — never silently "done." Recovery is **one command to pin back to the
+    last known-good tested tuple**: a whole-tuple form of the §4.2 stack-move /
+    Resolved Decision 4 downgrade, e.g. `tctl upgrade --to <last-good-stack_version>`,
+    which re-installs the known-good pins for the drifted members. This is **not**
+    automatic rollback (no-auto-rollback stays owner-approved, Resolved
+    Decision 5) — it is a one-command **manual** pin-back to a tested tuple,
+    replacing the per-crate `cargo install <crate>@<old> --locked` incantation
+    that defeats zero-knowledge. The known-good tuple is the tested BOM (M2); the
+    partial marker and live-reconciled drift verdict are M11.
 - **Non-zero exit on any system failure.** `tctl upgrade` exits `1` if any
   member's final system verdict is `down`; `2` if any is `degraded` (e.g.
   older-but-≥-floor contract after upgrade); `0` if all reach target and run.
@@ -838,9 +874,16 @@ upgrade, the changelog format) is **strongly reusable** and already in the tree.
 
 5. **Rollback scope (§6).** (owner-approved) **No automatic version rollback in
    v1.** The health-gate-before-restart (§3.3) prevents restarting into a broken
-   binary (the old binary keeps serving), and idempotent re-run + forward-fix /
-   explicit manual downgrade (`cargo install <crate>@<old> --locked`) is the
-   recovery model.
+   binary (the old binary keeps serving), and idempotent re-run + forward-fix is
+   the recovery model. **A partial/drifted tuple is now a first-class outcome**
+   (§6, reusing the §4.4 / M11 partial `state.toml` marker), surfaced as a
+   distinct DOC-4 verdict: recovery is a **one-command manual pin-back** to the
+   last known-good `stack_version` (`tctl upgrade --to <last-good-stack_version>`,
+   the whole-tuple form of the §4.2 stack-move / Resolved Decision 4 downgrade),
+   no longer a raw per-crate `cargo install <crate>@<old> --locked` incantation.
+   This stays **manual / owner-driven** — the no-auto-rollback stance is
+   unchanged; the pin-back is just the zero-knowledge-friendly recovery surface,
+   not an automatic revert.
 
 6. **Off-tuple drift warning on selective `--latest` upgrade (§7).**
    (owner-approved) **Warn + mark the stack drifted** when a selective
