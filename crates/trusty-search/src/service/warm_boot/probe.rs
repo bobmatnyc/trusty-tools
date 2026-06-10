@@ -43,11 +43,14 @@
 //! of N; each blocked volume still leaks exactly one OS thread (invariant
 //! unchanged).
 //!
-//! Leaked-thread visibility (review #727 finding 3): every timed-out probe
-//! increments `LEAKED_PROBE_THREAD_COUNT`, a process-global `AtomicUsize`.
-//! The daemon's `/health` endpoint exposes this count as
-//! `warmboot_leaked_probe_threads` so operators monitoring a launchd-managed
+//! Probe-thread-failure visibility (review #727 finding 3, renamed in #822):
+//! every timed-out probe increments `PROBE_THREAD_FAILURES`, a process-global
+//! `AtomicUsize`. The daemon's `/health` endpoint exposes this count as
+//! `warmboot_probe_thread_failures` so operators monitoring a launchd-managed
 //! daemon that restarts repeatedly can detect accumulation before it matters.
+//! (The counter was previously named `PROBE_THREAD_FAILURES` / accessor
+//! `leaked_probe_thread_count`; renamed in #822 to avoid implying memory leaks.
+//! The old public name is kept as a deprecated alias for one release cycle.)
 //!
 //! Test: `volume_key_boot_volume`, `volume_key_external_volume`,
 //!       `probe_volume_accessible_tempdir`,
@@ -61,34 +64,50 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-// ── Process-global leaked-probe-thread counter (review #727 finding 3) ───────
+// ── Process-global probe-thread-failure counter (review #727 finding 3) ──────
 
 /// Running count of OS probe threads that were abandoned due to a deadline
-/// timeout (review #727 finding 3).
+/// timeout (review #727 finding 3, renamed from `PROBE_THREAD_FAILURES`
+/// in issue #822).
 ///
-/// Why: each timed-out probe leaks exactly one OS thread (the bare-OS thread
-/// we spawn so a frozen `stat()` cannot consume a tokio pool slot). On a
-/// launchd-managed daemon that restarts repeatedly these can accumulate.
+/// Why: each timed-out probe abandons exactly one OS thread (the bare-OS
+/// thread we spawn so a frozen `stat()` cannot consume a tokio pool slot).
+/// On a launchd-managed daemon that restarts repeatedly these can accumulate.
 /// Making the count visible in `/health` lets operators detect accumulation
 /// before it becomes a problem.
+/// "Failures" is more accurate than "leaked" — the thread OS resource is
+/// eventually reclaimed when the process exits; what we are counting is the
+/// number of probe attempts that did not return a result within the deadline.
 ///
 /// What: a process-global `AtomicUsize`, incremented by `probe_all_volumes`
 /// (and by `probe_volume` when called directly from tests) whenever a probe
-/// hits the deadline. Exposed via `leaked_probe_thread_count()`.
+/// hits the deadline. Exposed via `probe_thread_failures()`.
 ///
-/// Test: `probe_timeout_increments_leaked_thread_count` below.
-static LEAKED_PROBE_THREAD_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Test: `probe_timeout_increments_probe_thread_failures` below.
+static PROBE_THREAD_FAILURES: AtomicUsize = AtomicUsize::new(0);
 
-/// Read the current count of abandoned (timed-out) probe threads.
+/// Read the current count of timed-out (abandoned) probe threads.
 ///
-/// Why: `GET /health` surfaces this as `warmboot_leaked_probe_threads` so
-/// operators can detect leaked thread accumulation across daemon restarts.
-/// What: loads `LEAKED_PROBE_THREAD_COUNT` with `Relaxed` ordering; a
-/// slightly stale value is acceptable for an observability field.
-/// Test: `probe_timeout_increments_leaked_thread_count` verifies the counter
-/// is incremented; the health endpoint test verifies it appears in responses.
+/// Why: `GET /health` surfaces this as `warmboot_probe_thread_failures` so
+/// operators can detect deadline-timeout accumulation across daemon restarts.
+/// What: loads `PROBE_THREAD_FAILURES` with `Relaxed` ordering; a slightly
+/// stale value is acceptable for an observability field.
+/// Test: `probe_timeout_increments_probe_thread_failures` verifies the
+/// counter is incremented; the health endpoint test verifies it appears in
+/// responses.
+pub fn probe_thread_failures() -> usize {
+    PROBE_THREAD_FAILURES.load(Ordering::Relaxed)
+}
+
+/// Deprecated alias for `probe_thread_failures`.
+///
+/// Why: kept for one release cycle after the rename in #822 so that any
+/// downstream code referencing the old name compiles without changes.
+/// What: forwards to `probe_thread_failures()`.
+/// Test: same as `probe_thread_failures`.
+#[deprecated(since = "0.3.23", note = "use probe_thread_failures() instead")]
 pub fn leaked_probe_thread_count() -> usize {
-    LEAKED_PROBE_THREAD_COUNT.load(Ordering::Relaxed)
+    probe_thread_failures()
 }
 
 // ── Types used only in tests (probe_volume is a test helper) ─────────────────
@@ -168,6 +187,11 @@ pub(super) fn volume_key(path: &Path) -> PathBuf {
     }
     // Everything else: boot volume, Linux, Windows, or non-standard macOS
     // path — probe the root.
+    //
+    // Non-macOS note (#740): on Linux/Windows every path returns "/" because
+    // the `/Volumes/<label>` convention is macOS-only. This means all indexes
+    // on a Linux host share a single probe result, which is correct — Linux
+    // does not use TCC and its filesystems do not hang on `stat` the same way.
     PathBuf::from("/")
 }
 
@@ -210,7 +234,7 @@ pub(super) fn volume_probe_timeout() -> Duration {
 /// The JoinHandle is dropped immediately (thread is detached). The caller
 /// waits with `recv_timeout(remaining)` where `remaining` is recomputed after
 /// the spawn so any time consumed by thread creation is also counted. On
-/// timeout: increments `LEAKED_PROBE_THREAD_COUNT`, emits a `tracing::warn!`,
+/// timeout: increments `PROBE_THREAD_FAILURES`, emits a `tracing::warn!`,
 /// and returns `Inaccessible`. On receive: returns `Accessible` regardless of
 /// the `metadata` result (ENOENT / EACCES means the kernel answered — no hang).
 ///
@@ -264,11 +288,11 @@ pub(super) fn probe_volume(
     // a disconnected-without-send case is unusual but also an unreported probe
     // so we count it toward the leaked total for operator visibility.
     if remaining.is_zero() {
-        let prev = LEAKED_PROBE_THREAD_COUNT.fetch_add(1, Ordering::Relaxed);
+        let prev = PROBE_THREAD_FAILURES.fetch_add(1, Ordering::Relaxed);
         tracing::warn!(
             "warm-boot: probe thread for volume {} (probing {}) timed out (deadline \
              already elapsed at recv) and was abandoned \
-             (leaked_probe_threads total: {}). (issue #723, review #727, #738, #810)",
+             (probe_thread_failures total: {}). (issue #723, review #727, #738, #810)",
             volume_root.display(),
             probe_path.display(),
             prev + 1,
@@ -279,10 +303,10 @@ pub(super) fn probe_volume(
     match rx.recv_timeout(remaining) {
         Ok(()) => VolumeAccessibility::Accessible,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            let prev = LEAKED_PROBE_THREAD_COUNT.fetch_add(1, Ordering::Relaxed);
+            let prev = PROBE_THREAD_FAILURES.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
                 "warm-boot: probe thread for volume {} (probing {}) timed out after {:?} \
-                 and was abandoned (leaked_probe_threads total: {}). \
+                 and was abandoned (probe_thread_failures total: {}). \
                  (issue #723, review #727, #738)",
                 volume_root.display(),
                 probe_path.display(),
@@ -297,11 +321,11 @@ pub(super) fn probe_volume(
             // This is NOT a deadline timeout but the probe still did not answer, so
             // the volume must be treated as inaccessible and the leaked counter is
             // incremented once for operator visibility.
-            let prev = LEAKED_PROBE_THREAD_COUNT.fetch_add(1, Ordering::Relaxed);
+            let prev = PROBE_THREAD_FAILURES.fetch_add(1, Ordering::Relaxed);
             tracing::debug!(
                 "warm-boot: probe channel for volume {} (probing {}) disconnected without \
                  a result — probe thread ended unexpectedly \
-                 (leaked_probe_threads total: {}). (issue #738)",
+                 (probe_thread_failures total: {}). (issue #738)",
                 volume_root.display(),
                 probe_path.display(),
                 prev + 1,
@@ -337,7 +361,7 @@ pub(super) fn probe_volume(
 /// (earliest-to-finish first) rather than spawn order, so a fast volume is
 /// never penalised for being ordered behind a slow one. Total wait ≈ ONE
 /// deadline regardless of N volumes; each blocked volume still leaks exactly
-/// one OS thread, and `LEAKED_PROBE_THREAD_COUNT` is incremented once per
+/// one OS thread, and `PROBE_THREAD_FAILURES` is incremented once per
 /// timed-out volume (same invariant as before).
 ///
 /// Probe target (review #727 finding 2): each volume is probed via its
@@ -472,10 +496,10 @@ pub(super) fn probe_all_volumes(
             .get(vol_key)
             .map(|p| p.as_path())
             .unwrap_or(vol_key.as_path());
-        let prev = LEAKED_PROBE_THREAD_COUNT.fetch_add(1, Ordering::Relaxed);
+        let prev = PROBE_THREAD_FAILURES.fetch_add(1, Ordering::Relaxed);
         tracing::warn!(
             "warm-boot: probe thread for volume {} (probing {}) timed out and was \
-             abandoned (leaked_probe_threads total: {}). (issue #723, review #727)",
+             abandoned (probe_thread_failures total: {}). (issue #723, review #727)",
             vol_key.display(),
             sample_path.display(),
             prev + 1,

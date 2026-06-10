@@ -41,6 +41,25 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, Mutex, Semaphore};
 
+/// Process-global flag: has the in-process (non-sidecar) embedder completed
+/// at least one batch successfully?
+///
+/// Why (issue #827): the `needs_embedder_init` heuristic fires on
+/// `first_batch_ever` (indexed == 0) for in-process embed mode, which is
+/// correct for the very first reindex after daemon start (model is loading).
+/// But it incorrectly fires on every subsequent reindex's first batch too,
+/// causing the CLI to flash "Loading model…" on a daemon whose model is
+/// already warm. Checking this flag lets us suppress the init events on
+/// warm daemons.
+///
+/// What: flipped from `false` → `true` once after the first in-process
+/// `embedder_ready` event is emitted. Set on the first successful
+/// `parse_and_embed_files` call in in-process mode.
+///
+/// Test: `needs_embedder_init` unit tests in this module verify the flag
+/// suppresses re-emission on the second reindex.
+static INPROCESS_EMBEDDER_EVER_READY: AtomicBool = AtomicBool::new(false);
+
 /// Interactive (user-initiated) reindex semaphore (issue #458).
 ///
 /// Why: Startup auto-discover can queue 40+ background reindex tasks, all of
@@ -937,6 +956,14 @@ async fn prepare_and_parse_batch(ctx: &BatchCtx, batch: &[PathBuf]) -> Option<Pa
     // We only emit once: after the first embedding call returns successfully,
     // we emit `embedder_ready`. Subsequent batches have indexed > 0 so this
     // branch is skipped. `lexical_only` indexes never embed.
+    //
+    // Issue #827: for the in-process path also gate on
+    // `INPROCESS_EMBEDDER_EVER_READY`. On the very first reindex after daemon
+    // start the flag is false → we emit init/ready so the operator sees
+    // "Loading model…". Once `embedder_ready` has been emitted, the flag is
+    // flipped to true below; on all subsequent reindexes `first_batch_ever`
+    // would otherwise re-fire this event even though the model is already warm,
+    // causing a spurious "Loading model…" flash. The flag prevents that.
     let first_batch_ever = ctx.progress.indexed.load(AtomicOrdering::Acquire) == 0;
     let needs_embedder_init = !ctx.lexical_only
         && !ctx.defer_embed
@@ -947,7 +974,9 @@ async fn prepare_and_parse_batch(ctx: &BatchCtx, batch: &[PathBuf]) -> Option<Pa
             // In-process (or any other non-sidecar) mode: fire on the very
             // first batch so the CLI gets an embedder_ready signal after the
             // first embed, even if model load is fast.
-            first_batch_ever
+            // Issue #827: suppress if the model has already been used at least
+            // once in this process lifetime (warm daemon, second+ reindex).
+            first_batch_ever && !INPROCESS_EMBEDDER_EVER_READY.load(AtomicOrdering::Acquire)
         };
 
     if needs_embedder_init {
@@ -1025,6 +1054,11 @@ async fn prepare_and_parse_batch(ctx: &BatchCtx, batch: &[PathBuf]) -> Option<Pa
                 "index_id": ctx.index_id.0,
             }))
             .await;
+        // Issue #827: for in-process mode, flip the global flag so subsequent
+        // reindexes on this daemon don't show the "Loading model…" flash again.
+        if ctx.embedder_pid_slot.is_none() {
+            INPROCESS_EMBEDDER_EVER_READY.store(true, AtomicOrdering::Release);
+        }
     }
 
     // Problem 2 UX fix: emit a lightweight `chunk_progress` event immediately
@@ -1123,16 +1157,40 @@ async fn commit_parsed_and_finalize(ctx: &BatchCtx, ready: ParsedReadyBatch) -> 
         // `commit_parsed_batch` so the two operations are atomic from the
         // perspective of concurrent readers (a search holding the READ lock
         // will either see the full old set or the full new set, never a mix).
+        //
+        // Issue #1002: track files whose pre-commit remove failed. Inserting
+        // new chunks for those files on top of surviving old chunks would
+        // produce duplicate results — guard the batch by recording the failed
+        // files so `commit_parsed_batch`'s `parsed` payload can be filtered.
+        // In practice the remove path is infallible for fresh indexes (no prior
+        // chunks) and very rare for existing ones, but we must handle it
+        // correctly when it does fail.
+        let mut remove_failed_files: std::collections::HashSet<&str> =
+            std::collections::HashSet::new();
+        let mut remove_failures: usize = 0;
         for file_path in &changed_corpus_paths {
             if let Err(e) = indexer.remove_file_no_kg_rebuild(file_path).await {
+                remove_failed_files.insert(file_path.as_str());
+                remove_failures += 1;
                 tracing::warn!(
-                    "reindex[{}]: #855 pre-commit remove failed for {} ({e}) \
-                     — stale chunks may persist until next --force reindex",
-                    ctx.index_id.0,
-                    file_path,
+                    index_id = %ctx.index_id.0,
+                    file = %file_path,
+                    error = %e,
+                    remove_failures,
+                    "reindex: #855 pre-commit remove failed — skipping insert for \
+                     this file to avoid duplicate chunks (issue #1002); stale \
+                     chunks will persist until next --force reindex"
                 );
             }
         }
+        // Filter the parsed batch to exclude files whose remove failed.
+        // We rebuild `parsed` in-place — only retain chunks whose `file`
+        // field is NOT in `remove_failed_files`.
+        let parsed = if remove_failures > 0 {
+            parsed.retain_files(|f| !remove_failed_files.contains(f))
+        } else {
+            parsed
+        };
 
         match indexer.commit_parsed_batch(parsed, true).await {
             Ok(c) => c,
@@ -1198,8 +1256,11 @@ async fn prepare_batch_payload(ctx: &BatchCtx, batch: &[PathBuf]) -> BatchPayloa
     // Issue #855: track the corpus-relative path of every file being
     // re-indexed so `commit_parsed_and_finalize` can remove the prior
     // chunks before inserting the new set (delete-then-insert per changed
-    // file). Only changed files (hash-miss) reach this list; unchanged and
-    // error files are skipped before the push below.
+    // file). Both changed files (hash-miss) and brand-new files (not yet in
+    // the corpus) reach this list; only hash-hit (unchanged) and error files
+    // are excluded — they are skipped before the push below.
+    // Issue #845: corrected comment — previously said "only changed files"
+    // but new files (first-time indexing) also reach this path.
     let mut changed_corpus_paths: Vec<String> = Vec::with_capacity(batch.len());
     for (path, content_res) in read_results {
         // Use the shared canonical normalisation from `prune` so every
@@ -1562,7 +1623,7 @@ async fn emit_complete_event(
 /// corpus is still intact; the staging tmp is discarded, never promoted).
 /// Test: `incremental_reindex_no_durable_data_loss` and
 /// `incremental_reindex_carryover_failure_aborts` in `service::reindex::tests`.
-async fn begin_force_corpus_swap(
+async fn begin_staged_corpus_swap(
     handle: &IndexHandle,
     index_id: &IndexId,
     force: bool,
@@ -1592,7 +1653,7 @@ async fn begin_force_corpus_swap(
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(
-                    "force reindex: cannot resolve colocated staging corpus path for '{}' ({e}) — \
+                    "staged corpus swap: cannot resolve colocated staging corpus path for '{}' ({e}) — \
                      reindex will write directly to the live corpus",
                     index_id.0
                 );
@@ -1604,7 +1665,7 @@ async fn begin_force_corpus_swap(
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(
-                    "force reindex: cannot resolve staging corpus path for '{}' ({e}) — \
+                    "staged corpus swap: cannot resolve staging corpus path for '{}' ({e}) — \
                      reindex will write directly to the live corpus",
                     index_id.0
                 );
@@ -1659,13 +1720,25 @@ async fn begin_force_corpus_swap(
                     index_id.0
                 );
                 // Best-effort removal of the orphaned staging tmp before aborting.
-                let _ = std::fs::remove_file(&tmp_path);
+                // Issue #845: log a warning if the removal fails so operators
+                // can manually clean up the stale file. Failure here is not
+                // fatal — the live corpus is still intact.
+                if let Err(rm_err) = std::fs::remove_file(&tmp_path) {
+                    tracing::warn!(
+                        path = %tmp_path.display(),
+                        error = %rm_err,
+                        "reindex[{}]: could not remove orphaned staging tmp after \
+                         carryover copy failure — stale file may remain until next \
+                         daemon restart (issue #845)",
+                        index_id.0
+                    );
+                }
                 return Err(e);
             }
             // For a force reindex (no carryover), failure to open/populate staging
             // is non-fatal: fall through to direct-write mode.
             tracing::warn!(
-                "force reindex: could not open staging corpus for '{}' ({e}) — \
+                "staged corpus swap: could not open staging corpus for '{}' ({e}) — \
                  reindex will write directly to the live corpus",
                 index_id.0
             );
@@ -1673,7 +1746,7 @@ async fn begin_force_corpus_swap(
         }
         Err(e) => {
             tracing::warn!(
-                "force reindex: staging corpus open task panicked for '{}': {e}",
+                "staged corpus swap: staging corpus open task panicked for '{}': {e}",
                 index_id.0
             );
             return Ok(None);
@@ -1687,7 +1760,7 @@ async fn begin_force_corpus_swap(
     let _prev = indexer.swap_corpus_store(Arc::new(staged));
     drop(indexer);
     tracing::info!(
-        "force reindex: staging rebuilt corpus for '{}' in {}",
+        "staged corpus swap: staging corpus opened for '{}' at {}",
         index_id.0,
         tmp_path.display()
     );
@@ -1707,7 +1780,7 @@ async fn begin_force_corpus_swap(
 /// re-opens a `CorpusStore` on the swapped-in file, and installs it on the
 /// indexer. Any failure leaves the previous live corpus in place and logs at
 /// `warn` — a botched swap must not crash the daemon.
-async fn commit_force_corpus_swap(handle: &IndexHandle, index_id: &IndexId, tmp_path: &Path) {
+async fn commit_staged_corpus_swap(handle: &IndexHandle, index_id: &IndexId, tmp_path: &Path) {
     // Issue #403: route live corpus path to colocated or legacy storage.
     let live_path = if crate::service::colocated_storage::has_colocated_storage(&handle.root_path) {
         match crate::service::colocated_storage::colocated_redb_path(&handle.root_path) {
@@ -1797,7 +1870,7 @@ async fn commit_force_corpus_swap(handle: &IndexHandle, index_id: &IndexId, tmp_
 /// What: takes the staging store out of the indexer, drops its `Arc`, deletes
 /// `index.redb.tmp`, then re-opens and re-installs the live `index.redb` store
 /// so the indexer's durable corpus points back at the untouched original.
-async fn abort_force_corpus_swap(handle: &IndexHandle, index_id: &IndexId, tmp_path: &Path) {
+async fn abort_staged_corpus_swap(handle: &IndexHandle, index_id: &IndexId, tmp_path: &Path) {
     {
         let mut indexer = handle.indexer.write().await;
         let _ = indexer.take_corpus_store();
@@ -2198,13 +2271,13 @@ pub fn spawn_reindex_with_cleanup(
         // path) — in that case commits write directly to the live corpus.
         //
         // Hardened carryover failure path (issue #839 follow-up): if the
-        // incremental `copy_all_from` fails, `begin_force_corpus_swap` returns
+        // incremental `copy_all_from` fails, `begin_staged_corpus_swap` returns
         // `Err`.  Continuing with an empty staging store would produce exactly
         // the pre-fix data loss (unchanged files lost on promote).  We abort
         // the reindex instead and leave the live corpus intact.
         let corpus_swap_tmp: Option<PathBuf> =
             if staging::should_stage(handle.indexer.read().await.has_corpus_store()) {
-                match begin_force_corpus_swap(&handle, &index_id, force).await {
+                match begin_staged_corpus_swap(&handle, &index_id, force).await {
                     Ok(path) => path,
                     Err(e) => {
                         // copy_all_from failed on an incremental reindex.
@@ -2551,7 +2624,7 @@ pub fn spawn_reindex_with_cleanup(
         // regardless of how the rebuild fares.
         if let Some(tmp_path) = &corpus_swap_tmp {
             if staging_resolution.is_commit() {
-                commit_force_corpus_swap(&handle, &index_id, tmp_path).await;
+                commit_staged_corpus_swap(&handle, &index_id, tmp_path).await;
                 // #602: record the canonical root the promoted corpus is now
                 // relativized against so a future run can detect a move.
                 if let Err(e) = handle.write_indexed_root(&canonical_root).await {
@@ -2569,7 +2642,7 @@ pub fn spawn_reindex_with_cleanup(
                         index_id.0,
                     );
                 }
-                abort_force_corpus_swap(&handle, &index_id, tmp_path).await;
+                abort_staged_corpus_swap(&handle, &index_id, tmp_path).await;
             }
         } else if reindex_outcome.is_ready() && !memory_aborted {
             // No staging (BM25-only / unresolvable temp): the live corpus was

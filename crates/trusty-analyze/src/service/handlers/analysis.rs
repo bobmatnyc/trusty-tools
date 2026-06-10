@@ -285,9 +285,10 @@ pub struct DiagnosticsParams {
 /// receive real on-disk paths via `root_path`; file-scoped tools write to a
 /// scratch dir as before.
 /// What: fetches the corpus, reconstructs whole-file content from chunks,
-/// fetches the index root_path (for project-scoped tools), then delegates all
-/// dispatch to `diagnostics_dispatch::run_diagnostics_blocking`. Results are
-/// sliced by `offset`+`limit` and returned with a pagination envelope.
+/// fetches the index root_path via `GET /indexes/:id/status` (O(1) single-index
+/// lookup — issue #1013), then delegates all dispatch to
+/// `diagnostics_dispatch::run_diagnostics_blocking`. Results are sliced by
+/// `offset`+`limit` and returned with a pagination envelope.
 /// Test: `diagnostics_endpoint_returns_empty_when_no_tools` boots the router
 /// with a stub client and confirms a well-formed empty response; pagination
 /// behaviour is unit-tested in `diagnostics_pagination_*` below.
@@ -315,20 +316,17 @@ pub async fn diagnostics_for_index(
         }
     }
 
-    // Fetch index details (including root_path) for project-scoped tools.
+    // Fetch root_path for this specific index via the single-index status
+    // endpoint (issue #1013: previously called index_details() which fetched
+    // ALL indexes and did an O(n) linear scan for the matching id).
     // Errors are non-fatal: project-scoped tools will gracefully skip if
     // root_path is unavailable, while file-scoped tools are unaffected.
-    //
-    // TODO(follow-up): replace this full-index-list round-trip with a
-    // per-index lookup once `GET /indexes/:id/status` exposes `root_path`.
-    // The current call fetches ALL indexes and linear-scans for the matching
-    // id on every request, which is wasteful for large deployments.
     let root_path = state
         .search
-        .index_details()
+        .index_status_root_path(&id)
         .await
         .ok()
-        .and_then(|v| v.into_iter().find(|s| s.id == id).and_then(|s| s.root_path));
+        .flatten();
 
     // Heavy work (process spawns, blocking I/O) runs off the async runtime.
     let language_filter = params.language.clone();
