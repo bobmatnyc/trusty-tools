@@ -284,6 +284,21 @@ For each member with `ui = { available = true, path = "/ui", port_source =
 The manifest only ever says "this member has a UI and here is *how to find* its
 URL" (`port_source`), never a pinned port — keeping link-out dynamic per DOC-2 §3.
 
+**Convention-bounded genericity (honest scope).** Link-out is generic *only* for
+members whose manifest declares the `port_source = "port_json"` + `path = "/ui"`
+convention — runtime port via `port --json`, UI route at `/ui`. It is **not**
+generic for *any* tool whatsoever: a member with a different UI-discovery
+mechanism (a port file at some other path, an env var, a fixed port) would not be
+reachable by this code. The manifest `port_source` field is the **extension
+point** for that case — a tool with a different discovery mechanism adds a *new*
+`port_source` value (the discovery branch keys off `port_source`, never off the
+tool's name). That is a **bounded, manifest-declared tool-class assumption**, not
+per-tool controller branching: the `/ui` + `port --json` convention is enumerated
+as exactly such an assumption in DOC-5 §2.2.1 (M1's bounded tool-class table). So
+the accurate framing is "mechanical for members declaring the convention; a new
+discovery mechanism is a bounded, manifest-declared extension," not "works for any
+tool" — link-out genericity is **convention-deep, not contract-deep**.
+
 #### 4.2 A tool that is down
 
 If a member's `system` verdict is `down`/`unreachable` (DOC-4 §5.1), its `port
@@ -362,8 +377,10 @@ DOC-2 §8; DOC-1 D8) forbids.
   "Authentication: none. The daemon is localhost-only and trusts every caller"),
   the controller UI has no auth layer in v1. This is acceptable *only because* of
   the loopback bind; the action API MUST NOT widen this — it binds the same
-  loopback interface, never a routable one (see Open Question 3 on whether
-  mutating endpoints warrant a CSRF/origin guard even on loopback).
+  loopback interface, never a routable one (the CSRF/origin-guard question for
+  mutating endpoints is settled below + in Resolved Decision 3: baseline
+  loopback + Origin + `confirmed`, opt-in `0600` capability token for multi-user
+  hardening).
 - **Permissive CORS for the local browser** (the existing daemons set permissive
   CORS for browser admin UIs — verified trusty-search CLAUDE.md), scoped to the
   same loopback-only reachability.
@@ -384,6 +401,27 @@ DOC-2 §8; DOC-1 D8) forbids.
   silently triggering system-wide stack mutations (upgrade, restart, ensure) via
   DNS rebinding or stale tabs — a known local-API class of issue. Included in v1,
   not deferred.
+- **Residual threat: a local non-browser process (the v1 posture's accepted
+  gap).** The Origin + `confirmed` guard above defends against *browser-driven*
+  attacks (DNS-rebind, stale tabs) — a malicious web page cannot forge a trusted
+  Origin. It does **not** defend against a local **non-browser** process: another
+  user (or malware) on a multi-user macOS box can POST `confirmed: true` with a
+  forged or absent Origin straight to the loopback endpoint, because v1 has no
+  auth and no per-process identity. The blast radius is high (stack-wide
+  `upgrade`/`restart`/`ensure`) though the probability is low (it requires a
+  hostile local account). **Loopback trust is the v1 posture** — this residual is
+  explicitly accepted for the single-user box.
+- **Opt-in capability token for multi-user hardening (defense-in-depth).** For
+  shared/multi-user hosts, the controller offers an **opt-in** capability token on
+  mutating endpoints: a one-time **CLI-minted token** written to a **user-owned
+  config file with `0600` permissions**, which the controller UI reads
+  (same-origin, same user) and includes on mutating POSTs. A local process owned by
+  a *different* user — or any process without read access to that `0600` file —
+  cannot mint a valid mutating request, closing the residual non-browser hole on a
+  shared box. This is kept **opt-in and lightweight** for v1: the loopback +
+  Origin + `confirmed` guard is the **baseline**; the `0600` capability token is
+  **defense-in-depth** layered on top for multi-user/shared hosts, not a mandatory
+  auth layer (which would break no-auth parity with the existing daemons).
 
 ### 7. Contract-version degradation in the UI
 
@@ -580,6 +618,17 @@ and already in the tree.
    via DNS rebinding or stale tabs — a known local-API threat. No-auth parity with
    existing daemons (loopback-only bind), but stricter guards for endpoints that
    *mutate the whole machine*. Included in v1, not deferred. Locked for v1.
+   **Residual + opt-in hardening (resolves the §6 question, DOC-11 m9):** the
+   Origin + `confirmed` guard defends *browser-driven* attacks but **not** a local
+   *non-browser* process on a multi-user box (it can forge a `confirmed: true` POST
+   with no/forged Origin — no auth, no per-process identity); **loopback trust is
+   the v1 posture**, and that single-user-box residual is **explicitly accepted**.
+   For multi-user/shared hosts the controller adds an **opt-in capability token**:
+   a CLI-minted token in a **user-owned `0600` config file** the UI reads
+   (same-origin, same user) and sends on mutating POSTs — a different-user / no-read
+   process cannot mint one. **Settled:** baseline = loopback + Origin + `confirmed`;
+   opt-in = the `0600` capability token for multi-user hardening; residual =
+   single-user-box loopback trust, accepted for v1.
 
 4. **Rollup polling cadence + back-off (§8).** (Owner-approved)
    The dashboard polls `tctl stack health --json` (fast sweep, DOC-4 §4) every ~10 s

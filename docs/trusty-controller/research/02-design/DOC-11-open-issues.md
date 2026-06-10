@@ -53,8 +53,8 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 | m5 | MINOR | `enabled=false` vs the "no uninstall" non-goal is undefined for the ensure pass | DOC-2 (`enabled`), DOC-3 §4, spec §62 | — | ✅ Resolved |
 | m6 | MINOR | UUC2's truly-vanilla user can't reach the first `tctl` invocation | DOC-8 §5, DOC-10 §3.3 | — | 🔴 Open |
 | m7 | MINOR | Controller is `kind=cli` in the manifest yet is a launchd-supervised daemon | DOC-2 (manifest example), DOC-7 §8, DOC-8 §1.1, DOC-5 §7, DOC-9 §5.2 | — | ✅ Resolved |
-| m8 | MINOR | UI link-out depends on the `port --json` + `/ui` convention (convention-deep, not contract-deep) | DOC-7 §1/§4.1 | — | 🔴 Open |
-| m9 | MINOR | DNS-rebind guard is sound for browsers but a local non-browser process can still bounce the stack | DOC-7 §6, Resolved-Decision-3 | — | 🔴 Open |
+| m8 | MINOR | UI link-out depends on the `port --json` + `/ui` convention (convention-deep, not contract-deep) | DOC-7 §1/§4.1 | — | ✅ Resolved |
+| m9 | MINOR | DNS-rebind guard is sound for browsers but a local non-browser process can still bounce the stack | DOC-7 §6, Resolved-Decision-3 | — | ✅ Resolved |
 | m10 | MINOR | `stack health`/`stack doctor` consistency guarantee is a cross-probe race | DOC-4 §4 | — | ✅ Resolved |
 | m11 | MINOR | Effort/scope realism: the "thin coordinator" understates the retrofit | DOC-6 §2–§3/§7 | — | ✅ Resolved |
 
@@ -404,9 +404,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** genericity holds only for tools matching the search/memory convention; a differently-discovered port needs controller code.
 - **Failure mode:** low; oversells "mechanical, not per-tool."
 - **Fix direction:** acknowledge the convention as a 4th dependency, or fold port-discovery into the contract verb set.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** acknowledge the `/ui` + `port --json` convention as an **explicit bounded dependency**, consistent with M1's bounded tool-class enumeration (DOC-5 §2.2.1 already lists this convention as a tool-class assumption and cross-refs this very item). Link-out is generic **only** for members declaring `port_source = "port_json"` + `path = "/ui"`; the manifest `port_source` field is the **extension point** for a different discovery mechanism — a tool with another mechanism adds a *new* `port_source` value (the discovery branch keys off `port_source`, never the tool's name). That is a **bounded, manifest-declared tool-class assumption, not per-tool controller branching**. So "mechanical, not per-tool" is honestly reframed as **convention-deep, not contract-deep**: mechanical for members following the convention; a new discovery mechanism is a bounded, manifest-declared extension — not "works for any tool whatsoever."
+- **Follow-up:** DOC-7 §4.1 (new convention-bounded-genericity note — link-out generic only for `port_source = "port_json"` + `/ui`; `port_source` as the extension point for a different mechanism; cross-ref DOC-5 §2.2.1 / M1's tool-class table; "convention-deep, not contract-deep" framing). No code change. (DOC-5 §2.2.1 already enumerates this convention as a tool-class assumption — no further edit needed there.)
 
 ### m9 — DNS-rebind guard is sound for browsers but a local non-browser process can still bounce the stack
 
@@ -416,9 +416,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** Origin check + `confirmed` closes the browser hole, but any local non-browser caller (other user/malware on a multi-user macOS box) can POST `confirmed:true` (no auth, no per-process identity).
 - **Failure mode:** low-probability, high-blast-radius local stack-wide restart/upgrade.
 - **Fix direction:** note the residual threat; consider a one-time CLI-minted token (user-owned config file) for mutating endpoints.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** (1) **note the residual threat explicitly** — the Origin + `confirmed` guard defends against browser-driven DNS-rebind/stale-tab attacks, but a local **non-browser** process on a multi-user box can still forge a mutating POST (`confirmed: true` with a forged/absent Origin; no auth, no per-process identity); **loopback trust is the v1 posture** and the single-user-box residual is explicitly accepted. (2) Add an **opt-in capability token** for mutating endpoints: a one-time **CLI-minted token** stored in a **user-owned `0600` config file** that the controller UI reads (same-origin, same user) and includes on mutating POSTs — a process owned by a *different* user, or without read access to that file, cannot mint a valid mutating request, closing the non-browser hole on a shared box. Kept **opt-in / lightweight** for v1: baseline = loopback + Origin + `confirmed`; the `0600` capability token is **defense-in-depth** for multi-user/shared hosts (not a mandatory auth layer — preserves no-auth parity with the existing daemons). **Resolves the §6 question (Resolved Decision 3):** baseline = loopback + Origin + `confirmed`; opt-in = `0600` CLI-minted capability token for multi-user hardening; residual = single-user-box loopback trust, accepted for v1.
+- **Follow-up:** DOC-7 §6 (new residual-threat bullet — local non-browser process can forge a mutating POST despite Origin + `confirmed`; loopback trust = v1 posture — plus the opt-in capability-token bullet: CLI-minted, `0600` user-owned file, UI sends it same-origin on mutating POSTs) + Resolved Decision 3 reworded to record the residual + opt-in token + accepted single-user residual. No code change beyond the opt-in token at implementation time.
 
 ### m10 — `stack health`/`stack doctor` consistency guarantee is a cross-probe race
 
