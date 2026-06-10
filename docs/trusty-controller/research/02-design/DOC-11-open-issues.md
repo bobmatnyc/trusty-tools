@@ -31,7 +31,7 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 | C3 | CRITICAL | `verbs[]` presence independent of `contract_version` opens an unversioned breaking-change channel | DOC-1 D3, ADR-0007 §3, DOC-1 ledger | — | ✅ Resolved |
 | C4 | CRITICAL | DOC-4 dependency de-duplication needs root-cause inference the controller can't do generically | DOC-4 §5.4/§2.3/§8.2 | — | ✅ Resolved |
 | C5 | CRITICAL | DOC-9 "new versions take effect via connection-safe restart" assumes a `restart` verb DOC-6 says is net-new on every tool | DOC-9 §5.1, DOC-6 §2.1–2.4 | — | ✅ Resolved |
-| M1 | MAJOR | "Zero tool-specific logic" is oversold (relocated, not eliminated) | spec §83; DOC-2 §6, DOC-5 §1/§2.2, DOC-6 §4, DOC-3 §7, DOC-7 | — | 🔴 Open |
+| M1 | MAJOR | "Zero tool-specific logic" is oversold (relocated, not eliminated) | spec §83; DOC-2 §6, DOC-5 §1/§2.2, DOC-6 §4, DOC-3 §7, DOC-7 | — | ✅ Resolved |
 | M2 | MAJOR | `stack_version` tuple will rot (no test owner, no CI gate, embedded in the binary) | DOC-2 §4, Resolved-Q5 | — | ✅ Resolved |
 | M3 | MAJOR | Cross-repo claude-mpm dependency is load-bearing in 4 places but never assessed as one systemic risk | DOC-6 §4, DOC-8 §4/§5, DOC-9 §3.4, DOC-10 §6 | — | ✅ Resolved |
 | M4 | MAJOR | `config` verb is a breaking CLI change + a hole in the read-only guarantee | DOC-1 `config.data`, DOC-5 §1.2, DOC-6 §2.6, DOC-3 Q3 | ✅ code-verified | ✅ Resolved |
@@ -136,9 +136,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** hard-coded install-source templates, the claude-mpm shim, `SKIP_UI_BUILD` derivation, `/ui`+`port --json` convention, and `config` precedence are tool-class knowledge in the shipped artifact.
 - **Failure mode:** misleads maintainers into thinking any conformant tool "just works."
 - **Fix direction:** reword to "zero tool-specific *verb-dispatch* logic" + enumerate the bounded tool-class assumptions.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** best recommendation — reframe the property precisely as **"zero per-tool verb-dispatch logic"** (no per-named-tool branching; the controller hard-codes no tool identity and discovers capabilities at runtime via `verbs[]`), and add ONE canonical enumeration (DOC-5 §2.2.1) of the bounded tool-CLASS assumptions the shipped artifact does carry — install-source templates (`install.source` = `cargo` / `python` / `uv`), the orchestrator shim (keyed off `kind`, not the name claude-mpm), the `SKIP_UI_BUILD` / `ui.available` derivation, the `/ui` + `port --json` UI convention, and config precedence — each keyed off a **manifest field or `kind`**, never a tool identity. A definitional-anchor sentence (DOC-5 §2.2.2) governs the ~20 other shorthand occurrences across the set (no 25-line churn); the two load-bearing headline claims (DOC-5 intro, README) are reworded with a cross-ref. Honest framing: the *dispatch engine* is genuinely generic (no per-named-tool branching); tool-class knowledge was **relocated** into manifest-keyed templates/conventions, **not eliminated** — so adding or swapping a *named* tool needs zero controller code, but a new tool *class* (e.g. a new `install.source`) is the bounded exception. Per-verb `data_version`-style alternatives and a 25-occurrence rewrite were not pursued; the anchor governs the rest.
+- **Follow-up:** DOC-5 §2.2 (heading + opening claim sharpened to "zero per-tool verb-dispatch logic"; proof table kept) + new §2.2.1 (bounded tool-class-assumptions enumeration, each keyed off a manifest field / `kind`) + new §2.2.2 (definitional-anchor sentence governing the stack-wide shorthand). DOC-5 intro + README headline claims reworded with a cross-ref to DOC-5 §2.2. The ~20 other shorthand occurrences across the set are governed by the §2.2.2 anchor, **not** individually edited. No code change.
 
 ### M2 — `stack_version` tuple will rot (no test owner, no CI gate, embedded in the binary)
 

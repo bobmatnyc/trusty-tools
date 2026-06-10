@@ -14,8 +14,10 @@ manifest-driven dispatch that fans verbs out to the stack's tools.
 over one mechanical loop — *read the manifest (DOC-2) → for each relevant member,
 invoke its contract verb (DOC-1) at the right scope (DOC-3) → collect the
 envelopes → roll them up / render (DOC-4)*. This document specifies that command
-surface, proves the dispatch engine contains **zero tool-specific logic** (spec
-§83), and pins the clap structure that implements it. It owns the **command entry
+surface, proves the dispatch engine contains **zero per-tool verb-dispatch
+logic** (no per-named-tool branching; spec §83 — see §2.2 for the precise
+property + the bounded tool-class assumptions), and pins the clap structure that
+implements it. It owns the **command entry
 points**; the *mechanics* of the heavyweight flows live in DOC-8 (install) and
 DOC-9 (upgrade), and the rollup math lives in DOC-4.
 
@@ -199,10 +201,14 @@ For a heavyweight first-class command (`install`, `upgrade`, `restart`) steps
 envelope render — but the *shape* is identical (load manifest → per-member action
 → collect results → render). See §5.
 
-#### 2.2 Proof of "zero tool-specific logic"
+#### 2.2 Proof of "zero per-tool verb-dispatch logic"
 
-The dispatch engine is generic by construction; the proof is that **every input
-to every step is either a manifest field or a contract field**:
+The dispatch engine is generic by construction: it carries **no per-tool
+verb-dispatch logic** — no per-*named-tool* branching, no compiled-in tool
+identity, no tool name, binary path, verb list, or output shape. It reads
+`verbs[]` at runtime (§2.3) and discovers every capability from the manifest
+(DOC-2) and the contract (DOC-1). The proof is that **every input to every step
+is either a manifest field or a contract field**:
 
 | Step | Reads only | Never reads |
 |---|---|---|
@@ -221,6 +227,42 @@ code change. A new verb is usable via passthrough **without a `tctl` release**
 sees `kind = "orchestrator"`, routes its calls through the DOC-6 shim, and
 otherwise treats it identically (DOC-6 §6 swap = single manifest edit). This is
 the structural payoff the whole design set is organized around.
+
+##### 2.2.1 Bounded tool-class assumptions (honest scope)
+
+The property proven above is precise: the *dispatch engine* has **zero per-tool
+verb-dispatch logic**. It is **not** the stronger claim that the shipped
+controller carries *no* knowledge of the tools at all. That stronger property was
+*relocated, not eliminated* — the shipped artifact does carry a small, bounded set
+of **tool-CLASS** assumptions, each keyed off a **manifest field or `kind`**,
+never off a tool identity:
+
+| Tool-class assumption | Keyed off | Owner doc |
+|---|---|---|
+| Install-source templates (`install.source` = `cargo` / `python` / `uv`) | the manifest `install.source` field | DOC-2, DOC-8 |
+| The orchestrator shim (`kind = "orchestrator"` → DOC-6 §4 shim) | the manifest `kind` field, **not** the name claude-mpm | DOC-6 §4 |
+| The `SKIP_UI_BUILD` / `ui.available` derivation | the manifest `ui` sub-table | DOC-8 Resolved-Decision-1 |
+| The `/ui` + `port --json` UI-discovery convention | a stack-wide convention (acknowledged as a dependency, cf. DOC-11 m8) | DOC-7 |
+| Config precedence (project > system > default) | the scope model, not a tool | DOC-3 §7 |
+
+These are **tool-class**, not tool-identity: each keys off a manifest field or
+`kind`. So adding or swapping a *named* tool still needs **zero controller code**
+— a new `cargo` daemon, a replacement orchestrator (claude-mpm → trusty-mpm), or a
+fifth member is a manifest edit. The bounded exception is a new tool *class* — a
+new `install.source` (say a `brew` template), a new `kind`, or a tool that does
+not follow the `/ui` + `port --json` convention — which is the one case that
+needs controller code. That exception is small, enumerated, and manifest/`kind`-
+keyed; it is not per-named-tool branching.
+
+##### 2.2.2 Definitional anchor for the stack-wide shorthand
+
+The phrase **"zero tool-specific logic"** used throughout this design set (spec
+§83 and ~20 occurrences across DOC-0..DOC-10) is **shorthand** for the precise
+property defined here: *zero per-tool verb-dispatch branching* (the controller
+hard-codes no tool identity and discovers capabilities at runtime via `verbs[]`)
+**plus** the bounded, manifest/`kind`-keyed tool-class assumptions enumerated in
+§2.2.1. Every other occurrence of the shorthand across the set is governed by
+this definition; they are not each reworded.
 
 #### 2.3 Capability negotiation & graceful degrade (older-contract behaviour)
 
