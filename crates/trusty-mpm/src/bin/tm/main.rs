@@ -20,6 +20,7 @@ use commands::{
     launch::{connect, launch},
     misc::{attach_cmd, coordinator, doctor, hook, optimizer, overseer, status},
     project::project,
+    repair::repair_deploy,
     services::services,
     session::session,
     telegram::telegram,
@@ -226,5 +227,11 @@ async fn main() -> anyhow::Result<()> {
         Command::Overseer { action } => overseer(&client, &url, action).await,
         Command::Coordinator { message } => coordinator(&url, message).await,
         Command::Services { action } => services(action),
+        Command::Repair { action } => {
+            use cli::RepairAction;
+            match action {
+                RepairAction::Deploy { force } => repair_deploy(force),
+            }
+        }
     }
 }

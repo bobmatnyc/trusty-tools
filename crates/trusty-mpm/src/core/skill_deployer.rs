@@ -16,7 +16,7 @@
 
 use std::path::Path;
 
-use crate::core::agent_manifest::checksum;
+use crate::core::agent_manifest::{atomic_write, checksum};
 use crate::core::error::Error;
 use crate::core::skill_manifest::{SkillManifest, SkillManifestEntry};
 
@@ -127,10 +127,12 @@ pub fn deploy_skills(source: &Path, dest: &Path) -> Result<DeployStats, Error> {
             }
         }
 
-        // Write (new file, or safe refresh of a managed file).
-        // Create <dest>/<name>/ if needed, then write SKILL.md inside it.
+        // Write (new file, or safe refresh of a managed file) atomically.
+        // Create <dest>/<name>/ if needed, then write SKILL.md via
+        // write-temp-then-rename so a crash between the content write and the
+        // subsequent manifest save leaves the old file intact.
         std::fs::create_dir_all(&skill_dir)?;
-        std::fs::write(&target_path, &content)?;
+        atomic_write(&target_path, &content)?;
         manifest.managed.insert(
             stem.clone(),
             SkillManifestEntry {

@@ -187,6 +187,52 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: ServicesAction,
     },
+
+    /// Recover from corrupt or inconsistent deploy state.
+    ///
+    /// Why: a crash between writing a content file and updating the manifest
+    /// can leave stale `.tmp` orphans; a disk-full or interrupted write can
+    /// leave the manifest itself corrupt. `tm repair` detects these conditions
+    /// and offers targeted remediation without touching user-owned files.
+    /// What: `tm repair deploy` removes stale `.tmp` orphans from
+    /// `~/.claude/agents/` and `~/.claude/skills/`, validates both manifests,
+    /// and prints actionable guidance when corruption is found. A `--force`
+    /// flag resets a corrupt agent manifest to empty (which triggers a full
+    /// re-deploy on the next `tm install`).
+    /// Test: `cli_parses_repair_deploy`.
+    Repair {
+        /// Repair action to perform.
+        #[command(subcommand)]
+        action: RepairAction,
+    },
+}
+
+/// Actions for the `repair` subcommand.
+///
+/// Why: scoped sub-actions keep `tm repair` extensible — future variants can
+/// cover other deploy artefacts without changing the top-level command surface.
+/// What: currently only `Deploy` is defined; it covers agent and skill manifests.
+/// Test: `cli_parses_repair_deploy`.
+#[derive(Debug, Subcommand)]
+pub(crate) enum RepairAction {
+    /// Repair the agent/skill deploy state in `~/.claude/`.
+    ///
+    /// Why: a crash during `tm install` or `tm session start` may leave stale
+    /// `.tmp` staging files in `~/.claude/agents/` or `~/.claude/skills/`, or
+    /// leave either manifest corrupt. This command removes the orphans and
+    /// validates both manifests.
+    /// What: for each target directory (`~/.claude/agents/`, skill subdirs under
+    /// `~/.claude/skills/`), removes `*.tmp` orphans and validates the manifest.
+    /// With `--force`, resets a corrupt agent manifest to empty so the next
+    /// `tm install` performs a fresh full deploy.
+    /// Test: `cli_parses_repair_deploy`.
+    Deploy {
+        /// Reset a corrupt manifest to empty (triggers full re-deploy on next
+        /// `tm install`). Without this flag, a corrupt manifest is reported
+        /// but not modified.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// Actions for the `telegram` subcommand.

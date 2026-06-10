@@ -13,6 +13,7 @@ pub(crate) mod install;
 pub(crate) mod launch;
 pub(crate) mod misc;
 pub(crate) mod project;
+pub(crate) mod repair;
 pub(crate) mod services;
 pub(crate) mod session;
 pub(crate) mod telegram;

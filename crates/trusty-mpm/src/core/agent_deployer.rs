@@ -6,14 +6,20 @@
 //! hand-edited.
 //! What: [`deploy_agents`] composes every source agent, consults the
 //! [`AgentManifest`] to classify each target file, and writes only the files
-//! it safely may. It returns a [`DeployResult`] summarising what happened.
+//! it safely may. It uses atomic write-temp-then-rename for both content files
+//! and the manifest. Corrupt manifests are detected and surfaced as errors
+//! rather than silently reset to empty. Returns a [`DeployResult`] summarising
+//! what happened.
 //! Test: `cargo test -p trusty-mpm-core agent_deployer` covers a new deploy, a
-//! skipped user-modified file, an unchanged file, and a user-owned file.
+//! skipped user-modified file, an unchanged file, a user-owned file, atomic
+//! writes, and corrupt manifest detection.
 
 use std::path::Path;
 
 use crate::core::agent_builder::{AgentBuildError, compose_agent, source_chain};
-use crate::core::agent_manifest::{AgentManifest, ManifestEntry, Origin, checksum};
+use crate::core::agent_manifest::{
+    AgentManifest, ManifestEntry, ManifestLoad, Origin, atomic_write, checksum,
+};
 
 /// Summary of one [`deploy_agents`] run.
 ///
@@ -51,9 +57,16 @@ fn is_agent_file(name: &str) -> bool {
 ///   - Not in manifest → user-owned → skip silently
 ///   - In manifest, checksum matches → overwrite (safe)
 ///   - In manifest, checksum differs → user-modified → warn + skip
-///   - New trusty-mpm agent → compose + write + add to manifest
+///   - New trusty-mpm agent → compose + write (atomic) + add to manifest
+///   - Corrupt manifest → error (never silently reset, which would reclassify
+///     managed files as user-owned and skip re-deploying them)
 ///
-/// Test: `deploy_new_agent`, `deploy_skips_user_modified`, `deploy_unchanged_no_write`
+/// Atomic safety: every content file is written via write-temp-then-rename
+/// so a crash between writes leaves the old file intact. The manifest is also
+/// written atomically via [`AgentManifest::save`].
+///
+/// Test: `deploy_new_agent`, `deploy_skips_user_modified`, `deploy_unchanged_no_write`,
+///       `deploy_aborts_on_corrupt_manifest`, `deploy_content_file_is_atomic`.
 pub fn deploy_agents(
     source_dir: &Path,
     target_dir: &Path,
@@ -66,7 +79,18 @@ pub fn deploy_agents(
         return Ok(result);
     }
 
-    let mut manifest = AgentManifest::load(target_dir);
+    // Detect manifest corruption before touching any file. A corrupt manifest
+    // must surface as an error — resetting to empty would reclassify all
+    // managed files as user-owned and silently skip the entire deploy.
+    let mut manifest = match AgentManifest::load_checked(target_dir) {
+        ManifestLoad::Ok(m) => m,
+        ManifestLoad::Corrupt(detail) => {
+            return Err(AgentBuildError::FrontmatterParse(format!(
+                "agent manifest is corrupt and cannot be safely loaded; \
+                 run `tm repair deploy` to recover. Detail: {detail}"
+            )));
+        }
+    };
     let now = chrono::Utc::now().to_rfc3339();
 
     // Collect agent names deterministically so output and tests are stable.
@@ -110,9 +134,15 @@ pub fn deploy_agents(
             }
         }
 
-        // Write (new file, or safe refresh of a managed file).
+        // Write (new file, or safe refresh of a managed file) atomically.
+        // Using write-temp-then-rename guarantees that a crash between the
+        // content write and the subsequent manifest save leaves the old content
+        // file intact — never a half-written one.
         std::fs::create_dir_all(target_dir)?;
-        std::fs::write(&target_path, &composed)?;
+        atomic_write(&target_path, &composed).map_err(|e| match e {
+            crate::core::error::Error::Io(io) => AgentBuildError::Io(io),
+            other => AgentBuildError::FrontmatterParse(other.to_string()),
+        })?;
         manifest.managed.insert(
             filename.clone(),
             ManifestEntry {
@@ -265,5 +295,54 @@ mod tests {
         let result =
             deploy_agents(Path::new("/nonexistent/trusty-mpm/agents"), tgt.path()).unwrap();
         assert_eq!(result, DeployResult::default());
+    }
+
+    #[test]
+    fn deploy_aborts_on_corrupt_manifest() {
+        // A corrupt manifest file must cause deploy_agents to return an error
+        // instead of silently resetting to empty and reclassifying managed
+        // files as user-owned.
+        let src = TempDir::new().unwrap();
+        let tgt = TempDir::new().unwrap();
+        write_sources(src.path());
+
+        // Write a malformed manifest to the target directory.
+        fs::write(
+            tgt.path().join(crate::core::agent_manifest::MANIFEST_FILE),
+            b"not valid json{{{",
+        )
+        .unwrap();
+
+        let result = deploy_agents(src.path(), tgt.path());
+        assert!(
+            result.is_err(),
+            "corrupt manifest must cause an error, not a silent reset to empty"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("corrupt") || err_msg.contains("repair"),
+            "error message must mention corruption and repair: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn deploy_content_file_is_atomic() {
+        // After a successful deploy no stale .tmp file should remain in the
+        // target directory — the atomic rename must have completed.
+        let src = TempDir::new().unwrap();
+        let tgt = TempDir::new().unwrap();
+        write_sources(src.path());
+
+        deploy_agents(src.path(), tgt.path()).unwrap();
+
+        for entry in fs::read_dir(tgt.path()).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            assert!(
+                !name_str.ends_with(".tmp"),
+                "stale .tmp file found after deploy: {name_str}"
+            );
+        }
     }
 }

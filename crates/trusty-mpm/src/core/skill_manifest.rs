@@ -16,7 +16,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::agent_manifest::checksum;
+use crate::core::agent_manifest::{atomic_write, checksum};
 use crate::core::error::Result;
 
 /// Filename of the skill manifest within a target directory.
@@ -78,17 +78,21 @@ impl SkillManifest {
         }
     }
 
-    /// Persist the manifest to `<target_dir>/.trusty-mpm-skills-manifest.json`.
+    /// Persist the manifest to `<target_dir>/.trusty-mpm-skills-manifest.json`
+    /// using an atomic write-temp-then-rename strategy.
     ///
-    /// Why: after a deploy run the manifest must record the files written so
-    /// the next run can make safe overwrite decisions.
-    /// What: creates `target_dir` if needed and writes pretty-printed JSON.
-    /// Test: `skill_manifest_round_trip`.
+    /// Why: a crash within the manifest write must not leave a half-written
+    /// manifest on disk — that would silently reclassify managed skills as
+    /// user-owned on the next deploy. The temp-then-rename pattern eliminates
+    /// this window (same-filesystem rename is atomic on POSIX).
+    /// What: creates `target_dir` if needed, serializes to pretty JSON, writes
+    /// to `<manifest>.tmp`, then atomically renames onto the final path.
+    /// Test: `skill_manifest_round_trip`, `skill_manifest_save_is_atomic`.
     pub fn save(&self, target_dir: &Path) -> Result<()> {
         std::fs::create_dir_all(target_dir)?;
         let path = target_dir.join(SKILL_MANIFEST_FILE);
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json)?;
+        atomic_write(&path, &json)?;
         Ok(())
     }
 

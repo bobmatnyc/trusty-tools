@@ -1,16 +1,18 @@
 //! CLI parse tests: attach, connect, daemon flags, services subcommands,
-//! and regression tests for issue #382 (compose_session_instructions).
+//! repair subcommands, and regression tests for issue #382
+//! (compose_session_instructions).
 //!
 //! Why: companion to `tests_behavior_a.rs`; extracting the second half of
 //! the behavioral suite keeps both files well under the 500-line cap.
 //! What: `cli_parses_attach_*`, `cli_parses_connect_*`,
 //! `cli_parses_daemon_custom_addr`, services subcommand parse tests,
-//! and three `compose_session_instructions_*` regression tests.
+//! `cli_parses_repair_deploy`, and three `compose_session_instructions_*`
+//! regression tests.
 //! Test: `cargo test -p trusty-mpm` runs the full suite.
 
 use clap::Parser;
 
-use crate::cli::{Cli, Command, ServicesAction};
+use crate::cli::{Cli, Command, RepairAction, ServicesAction};
 use crate::commands::session::compose_session_instructions;
 
 #[test]
@@ -310,5 +312,33 @@ fn cli_parses_daemon_mcp() {
     match cli.command {
         Command::Daemon { mcp, .. } => assert!(mcp),
         other => panic!("expected Daemon, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_repair_deploy() {
+    // `tm repair deploy` must parse to Command::Repair { action: RepairAction::Deploy { force: false } }.
+    let cli = Cli::try_parse_from(["trusty-mpm", "repair", "deploy"]).unwrap();
+    match cli.command {
+        Command::Repair {
+            action: RepairAction::Deploy { force },
+        } => {
+            assert!(!force, "force must default to false");
+        }
+        other => panic!("expected Repair {{ Deploy }}, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_repair_deploy_force() {
+    // `tm repair deploy --force` must parse with force=true.
+    let cli = Cli::try_parse_from(["trusty-mpm", "repair", "deploy", "--force"]).unwrap();
+    match cli.command {
+        Command::Repair {
+            action: RepairAction::Deploy { force },
+        } => {
+            assert!(force, "force must be true with --force flag");
+        }
+        other => panic!("expected Repair {{ Deploy {{ force: true }} }}, got {other:?}"),
     }
 }

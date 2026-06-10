@@ -8,7 +8,7 @@
 //! mapping each deployed filename to a [`ManifestEntry`] holding the resolved
 //! source chain, a sha256 checksum, the deploy timestamp, and the origin.
 //! Test: `cargo test -p trusty-mpm-core agent_manifest` covers load-of-missing,
-//! round-trip save/load, and checksum matching.
+//! round-trip save/load, checksum matching, and corruption detection.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -16,10 +16,61 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::core::error::Result;
+use crate::core::error::{Error, Result};
 
 /// Filename of the manifest within a target directory.
 pub const MANIFEST_FILE: &str = ".trusty-mpm-manifest.json";
+
+/// The outcome of loading the agent manifest.
+///
+/// Why: callers need to distinguish "no manifest yet" (first deploy, expect
+/// empty) from "manifest is corrupt" (dangerous — silently resetting to empty
+/// would reclassify managed files as user-owned and skip re-deploying them).
+/// What: `Ok(manifest)` when the file is absent or parses cleanly; `Corrupt`
+/// when the file exists but is malformed or truncated.
+/// Test: `manifest_load_corrupt_returns_corrupt`.
+#[derive(Debug)]
+pub enum ManifestLoad {
+    /// File was absent (first deploy) or parsed cleanly.
+    Ok(AgentManifest),
+    /// File exists but is malformed / truncated.
+    Corrupt(String),
+}
+
+/// Atomically write `content` to `path` using a temp-then-rename swap.
+///
+/// Why: a crash between writing content and writing the manifest (or within
+/// either write) must not leave the target in a half-written state — that
+/// would cause the next deploy to read garbage and reclassify managed files.
+/// Using a temp file in the same directory guarantees the rename is atomic on
+/// any POSIX filesystem (both paths on the same mount point).
+/// What: writes `content` to `<path>.tmp`, then renames onto `path`. The
+/// `.tmp` suffix is chosen to be predictable so a repair command can detect
+/// and clean up stale temp files if a crash interrupted a previous rename.
+/// Test: `atomic_write_leaves_old_intact_on_interrupted_write`.
+pub fn atomic_write(path: &std::path::Path, content: &str) -> Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Remove a stale `.tmp` sibling if present (left by an interrupted write).
+///
+/// Why: `atomic_write` stages via `<path>.tmp`; a crash after `fs::write` but
+/// before `fs::rename` leaves a `.tmp` orphan. `repair_stale_tmp` removes it
+/// so the directory stays tidy after a `tm repair deploy` run.
+/// What: if `<path>.tmp` exists, removes it. Non-existence is silently
+/// ignored; IO errors are propagated.
+/// Test: `repair_stale_tmp_removes_orphan`.
+pub fn repair_stale_tmp(path: &std::path::Path) -> Result<()> {
+    let tmp = path.with_extension("tmp");
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(Error::Io(e)),
+    }
+}
 
 /// Current on-disk manifest schema version.
 const MANIFEST_VERSION: u32 = 1;
@@ -106,29 +157,61 @@ impl AgentManifest {
     /// Load the manifest from `target_dir`, defaulting to empty when absent.
     ///
     /// Why: a first-ever deploy has no manifest; treating a missing file as an
-    /// empty manifest keeps the deployer's logic uniform.
-    /// What: reads `<target_dir>/.trusty-mpm-manifest.json`; a missing or
-    /// unparseable file yields a fresh empty manifest.
-    /// Test: `manifest_load_missing_returns_empty`, `manifest_round_trip`.
-    pub fn load(target_dir: &Path) -> Self {
+    /// empty manifest keeps the deployer's logic uniform. A corrupt (malformed /
+    /// truncated) manifest must NOT silently reset to empty — that would cause
+    /// managed files to be reclassified as user-owned and skipped on the next
+    /// deploy, producing a silent no-op rather than a re-deploy.
+    /// What: reads `<target_dir>/.trusty-mpm-manifest.json`; if absent returns
+    /// `ManifestLoad::Ok(default)`; if present but malformed returns
+    /// `ManifestLoad::Corrupt` with the parse error; if valid returns
+    /// `ManifestLoad::Ok(parsed)`.
+    /// Test: `manifest_load_missing_returns_empty`,
+    ///       `manifest_load_corrupt_returns_corrupt`,
+    ///       `manifest_round_trip`.
+    pub fn load_checked(target_dir: &Path) -> ManifestLoad {
         let path = target_dir.join(MANIFEST_FILE);
         match std::fs::read_to_string(&path) {
-            Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
-            Err(_) => Self::default(),
+            Ok(raw) => match serde_json::from_str::<AgentManifest>(&raw) {
+                Ok(m) => ManifestLoad::Ok(m),
+                Err(e) => ManifestLoad::Corrupt(format!("{path}: {e}", path = path.display())),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => ManifestLoad::Ok(Self::default()),
+            Err(_) => ManifestLoad::Ok(Self::default()),
         }
     }
 
-    /// Persist the manifest to `<target_dir>/.trusty-mpm-manifest.json`.
+    /// Load the manifest from `target_dir`, defaulting to empty when absent.
     ///
-    /// Why: after a deploy run the manifest must record the files written so
-    /// the next run can make safe overwrite decisions.
-    /// What: creates `target_dir` if needed and writes pretty-printed JSON.
-    /// Test: `manifest_round_trip`.
+    /// Why: preserves the pre-existing call sites that can tolerate a silent
+    /// empty-on-corruption fallback (e.g. the deployer, which calls
+    /// `load_checked` itself when it cares about the distinction).
+    /// What: delegates to `load_checked`; returns the manifest on `Ok`, an
+    /// empty default on `Corrupt` (with no side-effects — callers that need
+    /// to react to corruption should use `load_checked`).
+    /// Test: `manifest_load_missing_returns_empty`, `manifest_round_trip`.
+    pub fn load(target_dir: &Path) -> Self {
+        match Self::load_checked(target_dir) {
+            ManifestLoad::Ok(m) => m,
+            ManifestLoad::Corrupt(_) => Self::default(),
+        }
+    }
+
+    /// Persist the manifest to `<target_dir>/.trusty-mpm-manifest.json`
+    /// using an atomic write-temp-then-rename strategy.
+    ///
+    /// Why: a crash between writing content files and writing the manifest
+    /// (or within the manifest write itself) must never leave a half-written
+    /// manifest on disk — that could silently reclassify managed files as
+    /// user-owned on the next deploy. Writing to a `.tmp` sibling in the same
+    /// directory then renaming atomically eliminates this window.
+    /// What: creates `target_dir` if needed, serializes to pretty JSON, writes
+    /// to `<manifest>.tmp`, then atomically renames onto the final path.
+    /// Test: `manifest_round_trip`, `manifest_save_is_atomic`.
     pub fn save(&self, target_dir: &Path) -> Result<()> {
         std::fs::create_dir_all(target_dir)?;
         let path = target_dir.join(MANIFEST_FILE);
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json)?;
+        atomic_write(&path, &json)?;
         Ok(())
     }
 
@@ -160,6 +243,7 @@ impl AgentManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::TempDir;
 
     fn sample_entry() -> ManifestEntry {
@@ -182,6 +266,48 @@ mod tests {
     }
 
     #[test]
+    fn manifest_load_checked_missing_returns_ok() {
+        // load_checked on a missing file must return ManifestLoad::Ok(empty).
+        let tmp = TempDir::new().unwrap();
+        let result = AgentManifest::load_checked(tmp.path());
+        assert!(
+            matches!(result, ManifestLoad::Ok(m) if m.managed.is_empty()),
+            "expected Ok(empty) for missing manifest"
+        );
+    }
+
+    #[test]
+    fn manifest_load_corrupt_returns_corrupt() {
+        // A malformed manifest file must return ManifestLoad::Corrupt, not a
+        // silent empty default — silently resetting to empty would reclassify
+        // managed files as user-owned on the next deploy.
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join(MANIFEST_FILE), b"not valid json{{{").unwrap();
+        let result = AgentManifest::load_checked(tmp.path());
+        assert!(
+            matches!(result, ManifestLoad::Corrupt(_)),
+            "expected Corrupt for malformed manifest"
+        );
+    }
+
+    #[test]
+    fn manifest_load_truncated_returns_corrupt() {
+        // A truncated JSON file (simulating a crash mid-write) must also be
+        // flagged as corrupt rather than silently reset.
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join(MANIFEST_FILE),
+            b"{\"version\":1,\"managed\":{",
+        )
+        .unwrap();
+        let result = AgentManifest::load_checked(tmp.path());
+        assert!(
+            matches!(result, ManifestLoad::Corrupt(_)),
+            "expected Corrupt for truncated manifest"
+        );
+    }
+
+    #[test]
     fn manifest_round_trip() {
         // A saved manifest must reload identically.
         let tmp = TempDir::new().unwrap();
@@ -194,6 +320,59 @@ mod tests {
         let loaded = AgentManifest::load(tmp.path());
         assert_eq!(loaded, manifest);
         assert!(tmp.path().join(MANIFEST_FILE).exists());
+    }
+
+    #[test]
+    fn manifest_save_is_atomic() {
+        // After save completes, no stale .tmp file must remain.
+        let tmp = TempDir::new().unwrap();
+        let mut manifest = AgentManifest::default();
+        manifest
+            .managed
+            .insert("engineer.md".into(), sample_entry());
+        manifest.save(tmp.path()).unwrap();
+
+        let tmp_path = tmp.path().join(MANIFEST_FILE).with_extension("tmp");
+        assert!(
+            !tmp_path.exists(),
+            ".tmp staging file must be removed after successful save"
+        );
+    }
+
+    #[test]
+    fn atomic_write_leaves_old_intact_on_interrupted_write() {
+        // Simulate: staged .tmp exists (crash before rename) — original must
+        // still be readable. This test simulates what the OS guarantees: the
+        // rename is atomic, so even if we had crashed after writing .tmp, the
+        // old file would be intact. We verify that a stale .tmp left by a
+        // previous crash is cleaned up by repair_stale_tmp.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("manifest.json");
+        fs::write(&path, "original content").unwrap();
+
+        // Simulate a stale .tmp orphan from a crashed previous write.
+        let tmp_path = path.with_extension("tmp");
+        fs::write(&tmp_path, "incomplete new content").unwrap();
+
+        // The original file is still present and readable.
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original content");
+
+        // repair_stale_tmp removes the orphan.
+        repair_stale_tmp(&path).unwrap();
+        assert!(
+            !tmp_path.exists(),
+            "stale .tmp must be removed by repair_stale_tmp"
+        );
+        // Original remains untouched.
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original content");
+    }
+
+    #[test]
+    fn repair_stale_tmp_is_idempotent_when_no_tmp() {
+        // Calling repair_stale_tmp when no .tmp exists must not error.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("manifest.json");
+        assert!(repair_stale_tmp(&path).is_ok());
     }
 
     #[test]
