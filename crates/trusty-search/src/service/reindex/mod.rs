@@ -1231,9 +1231,16 @@ async fn prepare_batch_payload(ctx: &BatchCtx, batch: &[PathBuf]) -> BatchPayloa
             continue;
         }
         let h = hash_content(&content);
+        // Issue #1073: use the corpus-RELATIVE PathBuf as the DashMap key so
+        // the in-process cache and the redb-persisted cache (loaded by
+        // `hash_cache::load_into_cache` which also inserts relative keys) use
+        // the SAME key space. Before this fix the walker produced absolute paths
+        // here but `load_into_cache` inserted relative keys — so after a daemon
+        // restart the lookup always missed and every file was re-embedded.
+        let rel_path = PathBuf::from(&rel);
         if ctx
             .hashes
-            .get(&path)
+            .get(&rel_path)
             .map(|prev| *prev == h)
             .unwrap_or(false)
         {
@@ -1251,7 +1258,9 @@ async fn prepare_batch_payload(ctx: &BatchCtx, batch: &[PathBuf]) -> BatchPayloa
         let path_str = rel.clone();
         to_index.push((path_str, content));
         to_index_paths.push(path.clone());
-        new_hashes.push((path, h));
+        // Issue #1073: use the relative path as the hash-map key so the
+        // in-process DashMap is keyed identically to the redb-persisted table.
+        new_hashes.push((rel_path, h));
         // Issue #855: record the corpus-relative path so the commit phase
         // can remove prior (stale) chunks for this file before inserting the
         // new set.  `rel` is the canonical corpus key — same string written
@@ -2052,18 +2061,36 @@ pub fn spawn_reindex_with_cleanup(
         // `start` event so `hashes_loaded` is available for the event payload.
         let hashes = hashes_for(&index_id);
         // Issue #602: detect a root move against the corpus's persisted
-        // `indexed_root` and clear the hash cache so every file is re-written
-        // relative to the new canonical root (live-path analogue of M002/M003).
+        // `indexed_root` and, for legacy (non-colocated) indexes, clear the
+        // hash cache so every file is re-written relative to the new canonical
+        // root (live-path analogue of M002/M003).
+        //
+        // Issue #1073: for colocated indexes the chunk and hash keys are stored
+        // ROOT-RELATIVE (issue #402), so they are valid at any root location —
+        // a pure move changes the root prefix only. Do NOT clear the hash cache
+        // on a root move for colocated indexes; instead just update the stored
+        // `indexed_root` so the next run does not fire root-move detection again.
+        // Unchanged files will hash-match and be skipped; genuinely changed files
+        // will hash-miss and re-embed naturally. This eliminates the full
+        // re-embed cost after a volume remount or machine migration.
         let prior_indexed_root = handle.read_indexed_root().await.unwrap_or(None);
         let root_moved =
             validate::needs_path_relativization(prior_indexed_root.as_deref(), &canonical_root);
+        // Detect colocated storage: all indexes created with `trusty-search index`
+        // since issue #403 use colocated storage (`.trusty-search/` inside the
+        // project root). For these indexes chunk/hash keys survive a root move.
+        let is_colocated =
+            crate::service::colocated_storage::has_colocated_storage(&canonical_root);
         let hashes_loaded: usize = if force {
             hashes.clear();
             hash_cache::clear_persisted(&handle).await; // #662: clear redb too
             0
-        } else if root_moved {
+        } else if root_moved && !is_colocated {
+            // Legacy (non-colocated) index moved: chunk paths may be absolute
+            // or rooted at the old root — force a full re-relativize by
+            // discarding the stale cache.
             tracing::warn!(
-                "reindex[{}]: index root moved from {:?} to {} — clearing hash \
+                "reindex[{}]: legacy index root moved from {:?} to {} — clearing hash \
                  cache to re-relativize all chunk paths against the new root",
                 index_id.0,
                 prior_indexed_root,
@@ -2072,6 +2099,26 @@ pub fn spawn_reindex_with_cleanup(
             hashes.clear();
             hash_cache::clear_persisted(&handle).await; // #662: clear redb too
             0
+        } else if root_moved {
+            // Issue #1073: colocated index moved — keys are root-relative and
+            // survive the move. Update `indexed_root` immediately so the next
+            // reindex does not see a root-move again, then load the hash cache
+            // as normal. The hash-skip logic will reuse all unchanged files.
+            tracing::info!(
+                "reindex[{}]: colocated index root moved from {:?} to {} — \
+                 keys are root-relative (#402); preserving hash cache (no re-embed)",
+                index_id.0,
+                prior_indexed_root,
+                canonical_root.display(),
+            );
+            if let Err(e) = handle.write_indexed_root(&canonical_root).await {
+                tracing::warn!(
+                    "reindex[{}]: failed to update indexed_root after colocated \
+                     root move ({e}) — next reindex will re-detect the move",
+                    index_id.0,
+                );
+            }
+            hash_cache::load_into_cache(&handle, &hashes).await
         } else {
             // #662: warm cache from redb; #840 Part 2: capture count for SSE.
             hash_cache::load_into_cache(&handle, &hashes).await

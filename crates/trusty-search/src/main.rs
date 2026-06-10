@@ -914,6 +914,28 @@ enum IndexAction {
         #[arg(long)]
         json: bool,
     },
+
+    /// Relocate an index to a new root directory (issue #1073)
+    ///
+    /// Updates the daemon registration and on-disk `indexes.toml` to point at
+    /// the new root. Because all chunk/hash keys are root-relative (issue #402),
+    /// the existing embedded data is reused as-is — no re-embedding occurs.
+    ///
+    /// The index being relocated is resolved using the same precedence as other
+    /// subcommands: the `-i` / `--index` flag first, then auto-detect from CWD.
+    ///
+    /// AGENT USAGE: run this when a project directory has been moved on disk.
+    /// Follow with `trusty-search index` (without `--force`) to incrementally
+    /// re-embed only files that have genuinely changed.
+    ///
+    /// Examples:
+    ///   trusty-search index relocate --to ~/Projects/new-location
+    ///   trusty-search index relocate --to /abs/path/to/repo
+    Relocate {
+        /// New root directory for the index
+        #[arg(long = "to")]
+        to: std::path::PathBuf,
+    },
 }
 
 /// Target surface for the `monitor` subcommand.
@@ -1134,6 +1156,9 @@ async fn run() -> Result<()> {
             }
             Some(IndexAction::List { json }) => {
                 commands::index_allowlist::handle_allowlist_list(json).await?;
+            }
+            Some(IndexAction::Relocate { to }) => {
+                commands::index_relocate::handle_index_relocate(&cli.index, to).await?;
             }
             None => {
                 commands::index::handle_index(
