@@ -343,6 +343,21 @@ pub struct SearchAppState {
     /// it via `f32::from_bits()` on contention.
     /// Test: `health_rss_fallback_on_contention` in tests_state.rs.
     pub last_cpu_pct_bits: Arc<std::sync::atomic::AtomicU32>,
+    /// Embedder functional-health tracker (issue #1003).
+    ///
+    /// Why: the sidecar process can be alive (so `is_embedder_ready()` returns
+    /// `true`) but stalled — returning zero embed results for tens of minutes
+    /// during an ANE/CoreML session freeze. Without this tracker `/health`
+    /// silently reports `"embedder":"ready"` while BM25-only fallback is in
+    /// effect. `EmbedderStallTracker` records success/timeout events from the
+    /// actual embed call path so `/health` can surface `"stalled"` with
+    /// `embedder_last_ok_secs_ago` and `embedder_recent_timeout_count`.
+    ///
+    /// What: an `Arc<EmbedderStallTracker>` written by `EmbedPool::embed()` and
+    /// read by `health_handler`. The Arc is cloned into the embed pool on
+    /// construction via `install_embed_pool`.
+    /// Test: `health_reports_stalled_embedder` in tests_health.rs.
+    pub embedder_stall_tracker: Arc<crate::service::stall_tracker::EmbedderStallTracker>,
 }
 
 /// Per-boot summary of warm-boot index loading, surfaced on `GET /health`.

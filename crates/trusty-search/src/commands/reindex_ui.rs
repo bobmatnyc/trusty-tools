@@ -601,13 +601,12 @@ pub fn format_timing_breakdown(
                     .bold(),
             ));
         } else if !defer_embed {
+            let msg = "SKIPPED (embedder unresponsive or unreachable \u{2014} \
+                 sidecar may be stalled or not running; BM25-only until re-indexed)";
             out.push_str(&format!(
                 "    {} {}\n",
                 "embed  ".dimmed(),
-                "SKIPPED (embedder sidecar not running/unreachable \u{2014} \
-                 index is BM25-only until re-indexed)"
-                    .yellow()
-                    .bold(),
+                msg.yellow().bold(),
             ));
         }
         // defer_embed=true → suppress; background note covers this case.

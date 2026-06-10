@@ -73,6 +73,9 @@ impl SearchAppState {
             prior_index_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             last_rss_mb: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_cpu_pct_bits: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            embedder_stall_tracker: Arc::new(
+                crate::service::stall_tracker::EmbedderStallTracker::new(),
+            ),
             shutdown_tx: Arc::new(shutdown_tx),
         }
     }

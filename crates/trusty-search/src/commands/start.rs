@@ -1159,16 +1159,12 @@ pub async fn handle_start(
                     install_state.install_embedderd_pid_slot(slot).await;
                 }
                 install_state.install_embedder(Arc::clone(&embedder)).await;
-                // Issue #41 Phase 1: build the embedder worker pool now that
-                // the model is loaded. The pool shares the same `Arc<dyn
-                // Embedder>` so it does not double the model memory; what
-                // it adds is priority-aware dispatch (interactive search
-                // queries jump ahead of background reindex batches) and
-                // a bounded queue depth that protects the daemon from
-                // unbounded fan-out.
-                let pool = std::sync::Arc::new(
-                    crate::service::embed_pool::EmbedPool::with_autotune(Arc::clone(&embedder)),
-                );
+                // Issue #41: worker pool — priority-aware dispatch, bounded queue.
+                // Issue #1003: stall tracker wired so health_handler can detect ANE stalls.
+                let tracker = Arc::clone(&install_state.embedder_stall_tracker);
+                use crate::service::embed_pool::EmbedPool;
+                let base = EmbedPool::with_autotune(Arc::clone(&embedder));
+                let pool = std::sync::Arc::new(base.with_stall_tracker(tracker));
                 install_state.install_embed_pool(pool).await;
                 tracing::info!("embedder ready — vector lane online");
                 let prior = load_prior_index_count(); // Issue #873: FDA regression baseline.

@@ -160,6 +160,15 @@ pub struct EmbedPool {
     /// (from `interactive_tx`/`background_tx` drop) signals each worker to exit
     /// its loop before the join completes.
     _worker_threads: Vec<std::thread::JoinHandle<()>>,
+    /// Embedder stall tracker shared with AppState and surfaced on `/health`
+    /// (issue #1003).
+    ///
+    /// Why: `embed()` is the single choke-point for all embedding calls;
+    /// recording success/timeout here keeps the tracking logic in one place
+    /// and avoids threading a callback through the `Embedder` trait.
+    /// What: `record_success()` on `Ok`, `record_timeout()` on `Err`.
+    /// `None` in unit tests that construct `EmbedPool` without a tracker.
+    stall_tracker: Option<Arc<crate::service::stall_tracker::EmbedderStallTracker>>,
 }
 
 impl EmbedPool {
@@ -225,7 +234,24 @@ impl EmbedPool {
             workers,
             in_flight,
             _worker_threads: worker_threads,
+            stall_tracker: None,
         }
+    }
+
+    /// Attach a stall tracker that `embed()` will update on each call
+    /// (issue #1003).
+    ///
+    /// Why: wiring the tracker here keeps `embed()` as the single choke-point
+    /// while allowing tests that build `EmbedPool` directly to skip the tracker.
+    /// What: stores an `Arc` clone; `embed()` calls `record_success()` or
+    /// `record_timeout()` after each call returns.
+    /// Test: indirectly covered by the AppState plumbing + health endpoint tests.
+    pub fn with_stall_tracker(
+        mut self,
+        tracker: Arc<crate::service::stall_tracker::EmbedderStallTracker>,
+    ) -> Self {
+        self.stall_tracker = Some(tracker);
+        self
     }
 
     /// Construct a pool using the autotuned worker count.
@@ -302,6 +328,16 @@ impl EmbedPool {
         self.in_flight.fetch_sub(1, Ordering::Relaxed);
         metrics::gauge!("trusty_embed_pool_utilisation")
             .set(self.in_flight.load(Ordering::Relaxed) as f64);
+
+        // Issue #1003: update the stall tracker so /health can surface
+        // "stalled" vs "ready" when the sidecar is alive but unresponsive.
+        if let Some(tracker) = &self.stall_tracker {
+            if result.is_ok() {
+                tracker.record_success();
+            } else {
+                tracker.record_timeout();
+            }
+        }
 
         result
     }

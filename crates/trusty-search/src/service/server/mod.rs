@@ -41,6 +41,8 @@ mod tests_list;
 #[cfg(test)]
 mod tests_search;
 #[cfg(test)]
+mod tests_stall;
+#[cfg(test)]
 mod tests_state;
 
 // Re-export the public surface that was previously at `crate::service::server::*`.

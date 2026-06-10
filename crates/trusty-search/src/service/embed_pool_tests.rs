@@ -148,6 +148,7 @@ async fn dropping_pool_after_send_returns_error() {
         workers: 0,
         in_flight: Arc::new(AtomicUsize::new(0)),
         _worker_threads: vec![],
+        stall_tracker: None,
     };
     let result = closed_pool
         .embed(vec!["x".into()], RequestPriority::Interactive)

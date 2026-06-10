@@ -24,6 +24,7 @@ pub mod reindex;
 pub mod roots_registry;
 pub mod server;
 pub mod shutdown_flush;
+pub mod stall_tracker;
 pub mod ui;
 pub mod walker;
 pub mod warm_boot;

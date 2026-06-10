@@ -13,16 +13,34 @@ use std::sync::Arc;
 
 use super::state::{SearchAppState, WarmBootSummary};
 
-/// Response shape for `GET /health` (issue #34 + #35 + #38 + #282 + #537).
+/// Response shape for `GET /health` (issue #34 + #35 + #38 + #282 + #537 +
+/// #1003).
 #[derive(Serialize)]
 pub(super) struct HealthResponse {
     pub(super) status: &'static str,
     pub(super) version: &'static str,
     pub(super) indexes: usize,
     pub(super) uptime_secs: u64,
+    /// Embedder functional status (issue #1003).
+    ///
+    /// Values:
+    /// - `"ready"` — embedder loaded and recent embed calls succeeded.
+    /// - `"stalled"` — sidecar alive but recent embed calls timed out; daemon
+    ///   falls back to BM25-only until the sidecar recovers. Distinguished from
+    ///   "down/unreachable" (process missing) and "error" (init failure).
+    /// - `"initializing"` — embedder model still loading.
+    /// - `"error"` — embedder init task failed or timed out.
     pub(super) embedder: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) embedder_error: Option<String>,
+    /// Seconds since the last successful embed call (issue #1003).
+    /// Absent when the embedder has never produced a successful result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) embedder_last_ok_secs_ago: Option<u64>,
+    /// Count of consecutive/recent embed timeouts since the last success
+    /// (issue #1003). Non-zero indicates the sidecar is alive but stalled.
+    /// Resets to 0 when the next embed call succeeds.
+    pub(super) embedder_recent_timeout_count: u32,
     /// Process RSS in MB. On `try_lock` contention returns the last
     /// successfully-sampled value; `0` only before the very first sample.
     pub(super) rss_mb: u64,
@@ -92,8 +110,24 @@ pub(super) async fn health_handler(
     // watch-based `is_embedder_ready()` (no lock) or `try_read()` / `try_lock()`
     // (returns immediately rather than parking the handler).
     let embedder_error = state.current_embedder_error();
+    // Issue #1003: read stall state for the functional health check.
+    // These reads are lock-free (AtomicU64/U32) — safe to call from the
+    // health handler without risking the 30 s stall that blocked #1006.
+    let embedder_last_ok_secs_ago = state.embedder_stall_tracker.last_ok_secs_ago();
+    let embedder_recent_timeout_count = state.embedder_stall_tracker.recent_timeout_count();
     let embedder_status = if state.is_embedder_ready() {
-        "ready"
+        // The sidecar is alive and the slot is populated — but is it actually
+        // responding? Issue #1003: if recent timeouts > 0 and the last ok was
+        // more than 30 s ago, the sidecar is stalled (alive but unresponsive).
+        // Threshold: > 0 timeouts with no success yet (last_ok_secs_ago = None)
+        // OR timeout count >= 1 and no recovery. We use >= 1 to be sensitive —
+        // a single 30 s timeout on an interactive query is already disruptive.
+        let stalled = embedder_recent_timeout_count > 0;
+        if stalled {
+            "stalled"
+        } else {
+            "ready"
+        }
     } else if state.embedder.is_some()
         || state
             .embedder_slot
@@ -187,6 +221,9 @@ pub(super) async fn health_handler(
         uptime_secs: state.started_at.elapsed().as_secs(),
         embedder: embedder_status,
         embedder_error,
+        // Issue #1003: stall-observability fields.
+        embedder_last_ok_secs_ago,
+        embedder_recent_timeout_count,
         rss_mb,
         rss_limit_mb,
         disk_bytes,
