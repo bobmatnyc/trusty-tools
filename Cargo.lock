@@ -10900,6 +10900,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-controller"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "trusty-common",
+]
+
+[[package]]
 name = "trusty-cto-db"
 version = "0.1.3"
 dependencies = [
