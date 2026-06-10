@@ -870,15 +870,25 @@ pub async fn run_reindex_with(
                 // the in-flight preview so the ticker shows committed chunks
                 // rather than the (now stale) embedding preview.
                 chunks_embed_preview.store(0, Ordering::Release);
-                // Issue #823 Bug 1: advance BOTH bars.
+                // Advance the active phase bar and the Embed bar (slot 2).
                 // Chunk bar (slot 1) = files parsed; Embed bar (slot 2) = files
                 // committed/embedded. Both use `indexed` (files processed so far)
                 // as a proxy — Chunk should lead, but without a separate "files
                 // parsed" event from the daemon, `indexed` is the best we have.
                 // The visual gap comes from chunk_progress advancing the Chunk
                 // bar between batch events (parsed but not yet committed).
+                //
+                // Issue #827: guard advance_embed_bar so it only runs when the
+                // ACTIVE phase is NOT already slot 2 (Embed). When phase==Embed,
+                // set_position() already advances slot 2 via the active-slot path;
+                // calling advance_embed_bar() as well would double-advance it,
+                // causing the Embed bar to jump ahead by 2× the actual progress.
                 ui.set_position(indexed); // advances active phase's bar (Chunk or Embed)
-                ui.advance_embed_bar(indexed); // always advance slot 2 (Embed)
+                if !ui.active_phase_is_embed() {
+                    // Only advance slot 2 independently when it is NOT the active bar;
+                    // when it IS active, set_position() above already advanced it.
+                    ui.advance_embed_bar(indexed);
+                }
                 ui.update_stats(
                     indexed,
                     new_chunks,
@@ -993,8 +1003,13 @@ pub async fn run_reindex_with(
 
                 // Snap both Chunk and Embed bars to full position.
                 // Chunk bar (slot 1) may still be Active if kg_start was never received.
+                // Issue #827: guard advance_embed_bar here too — if the active phase
+                // is already Embed, set_position advances slot 2; calling
+                // advance_embed_bar additionally would double-advance it.
                 ui.set_position(outcome.indexed);
-                ui.advance_embed_bar(outcome.indexed);
+                if !ui.active_phase_is_embed() {
+                    ui.advance_embed_bar(outcome.indexed);
+                }
 
                 // Mark Embed bar done if it wasn't marked by kg_start (old daemon
                 // or lexical_only index).

@@ -129,21 +129,47 @@ impl CodeIndexer {
             // bounding peak allocation.
             (kg_cap.saturating_mul(2)).min(chunks.len())
         };
-        let mut tuples: Vec<ChunkTuple> = Vec::with_capacity(snapshot_cap);
-        for c in chunks.values() {
-            if tuples.len() >= snapshot_cap {
-                break;
-            }
-            tuples.push((
-                c.id.clone(),
-                c.file.clone(),
-                c.function_name.clone(),
-                c.calls.clone(),
-                c.inherits_from.clone(),
-                c.chunk_type.clone(),
-            ));
-        }
+        // Issue #824: iterate in deterministic (file, id) order before
+        // truncating so the same symbols are always included across restarts.
+        // Without sorting, HashMap/DashMap iteration order is arbitrary —
+        // on a large repo the N chunks that fall into the dropped half change
+        // between daemon restarts, making call-chain results non-reproducible
+        // and confusing to diagnose. Sorting by (file, id) is stable and
+        // cheap relative to the string clone cost.
+        let mut all_tuples: Vec<ChunkTuple> = chunks
+            .values()
+            .map(|c| {
+                (
+                    c.id.clone(),
+                    c.file.clone(),
+                    c.function_name.clone(),
+                    c.calls.clone(),
+                    c.inherits_from.clone(),
+                    c.chunk_type.clone(),
+                )
+            })
+            .collect();
         drop(chunks);
+
+        // Sort by (file, chunk_id) for deterministic truncation. The sort key
+        // is (field 1 = file, field 0 = id) — both are the first-class identity
+        // fields we want to be stable across runs.
+        all_tuples.sort_unstable_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+
+        if snapshot_cap < all_tuples.len() {
+            tracing::warn!(
+                index_id = %self.index_id,
+                total_chunks = all_tuples.len(),
+                snapshot_cap,
+                "kg: snapshot truncated to {} chunks (2×MAX_KG_NODES={}); \
+                 symbols in the dropped portion will have no KG edges this boot. \
+                 Raise TRUSTY_MAX_KG_NODES or run --force reindex to rebuild the \
+                 graph at full size. (issue #824)",
+                snapshot_cap,
+                snapshot_cap / 2,
+            );
+        }
+        let tuples: Vec<ChunkTuple> = all_tuples.into_iter().take(snapshot_cap).collect();
 
         // Issue #41 phase 2: include per-file entity lists so Phase B/C edges
         // (`TestedBy`, `CoOccursInTest`, `Documents`, `ReferencesConcept`)

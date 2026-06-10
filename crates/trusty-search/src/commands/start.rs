@@ -161,7 +161,7 @@ pub(crate) fn derive_warm_boot_stages(inputs: WarmBootInputs) -> IndexStages {
 async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core::Embedder>) {
     use crate::service::warm_boot::{
         collect_colocated_entries, collect_legacy_entries, is_on_inaccessible_volume,
-        probe_warmboot_volumes, restore_one_index_bounded,
+        probe_warmboot_volumes, probe_warmboot_volumes_from_paths, restore_one_index_bounded,
     };
     use std::collections::HashSet;
 
@@ -241,18 +241,18 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
 
     // ── Phase 2: colocated indexes (roots.toml + fs scan) ──────────────────
     // Issue #723: probe colocated roots before the async scan.
+    // Issues #736 / #737: load roots once and reuse the paths for the probe
+    // (fixes the double `load_roots()` call that was previously present), and
+    // probe the actual root paths directly rather than building throwaway
+    // `PersistedIndex { ..Default::default() }` structs whose `root_path`
+    // would default to empty when a root lacked a filesystem path.
     let colocated_inaccessible = {
         use crate::service::roots_registry::load_roots;
         match load_roots() {
             Ok(roots) => {
-                let entries: Vec<crate::service::persistence::PersistedIndex> = roots
-                    .into_iter()
-                    .map(|r| crate::service::persistence::PersistedIndex {
-                        root_path: r.path,
-                        ..Default::default()
-                    })
-                    .collect();
-                probe_warmboot_volumes(&entries)
+                let root_paths: Vec<std::path::PathBuf> =
+                    roots.into_iter().map(|r| r.path).collect();
+                probe_warmboot_volumes_from_paths(&root_paths)
             }
             Err(_) => std::collections::HashSet::new(),
         }

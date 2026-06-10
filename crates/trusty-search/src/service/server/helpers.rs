@@ -105,7 +105,18 @@ pub(super) async fn validate_root_path(
     };
     // Hard denylist check on the canonical path — symlinks and `..` traversals
     // are already resolved above, so no bypass is possible.
+    // Note (issue #822): this is the authoritative guard. The CLI-side
+    // `is_denied` call in `commands/index.rs` is defense-in-depth that gives
+    // a friendly early error before the daemon is contacted, but this check
+    // enforces the policy for direct HTTP callers, MCP tool invocations, and
+    // scripts that bypass the CLI. Both checks are intentional — neither is
+    // redundant.
     if let Some(reason) = crate::allowlist::is_denied(&canonical) {
+        tracing::warn!(
+            path = %canonical.display(),
+            %reason,
+            "indexing refused: path matched hard denylist (issue #822)"
+        );
         return Err((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({

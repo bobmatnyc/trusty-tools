@@ -84,6 +84,17 @@ pub struct SymbolGraph {
     by_symbol: HashMap<String, NodeIndex>,
     /// chunk_id → symbol name, so callers can resolve a search hit to its node.
     chunk_to_symbol: HashMap<String, String>,
+    /// Count of edges dropped during `load_from_corpus` due to unrecognized
+    /// kind tags (issue #816).
+    ///
+    /// Why: when a newer extractor or an upgraded daemon stores edge tags that
+    /// an older daemon's `edge_kind_from_tag` does not recognize, those edges
+    /// are silently dropped. Tracking the drop count here surfaces the version
+    /// skew so operators can detect it via `GET /indexes/:id/graph/stats` before
+    /// it affects search quality.
+    /// What: incremented once per edge with an unknown tag during warm-boot
+    /// `load_from_corpus`. Zero in freshly-built graphs (no persistence involved).
+    pub(crate) unknown_edge_tags_dropped: usize,
 }
 
 impl SymbolGraph {
@@ -360,11 +371,33 @@ impl SymbolGraph {
                     continue;
                 };
                 let Some(kind) = edge_kind_from_tag(&kind_tag) else {
-                    tracing::warn!("kg: skipping persisted edge with unknown kind '{kind_tag}'");
+                    // Issue #816: count dropped edges with unrecognized kind tags
+                    // so operators can detect daemon/corpus version skew via
+                    // GET /indexes/:id/graph/stats → unknown_edge_tags_dropped.
+                    // A non-zero count means a newer extractor stored a tag this
+                    // daemon does not recognize — those edges are skipped until
+                    // the daemon is upgraded.
+                    g.unknown_edge_tags_dropped += 1;
+                    tracing::warn!(
+                        index_id = tracing::field::Empty,
+                        tag = %kind_tag,
+                        action = "skipped",
+                        "kg: warm-boot dropped edge with unrecognized kind tag \
+                         (possible daemon/corpus version skew, issue #816)"
+                    );
                     continue;
                 };
                 g.graph.add_edge(src_idx, tgt_idx, kind);
             }
+        }
+        if g.unknown_edge_tags_dropped > 0 {
+            tracing::warn!(
+                dropped = g.unknown_edge_tags_dropped,
+                "kg: load_from_corpus dropped {} edge(s) with unrecognized kind tags; \
+                 check GET /indexes/:id/graph/stats → unknown_edge_tags_dropped \
+                 and consider upgrading the daemon (issue #816)",
+                g.unknown_edge_tags_dropped,
+            );
         }
         Ok(Some(g))
     }
@@ -748,6 +781,18 @@ impl SymbolGraph {
     /// Number of call edges in the graph.
     pub fn edge_count(&self) -> usize {
         self.graph.edge_count()
+    }
+
+    /// Count of edges dropped during warm-boot `load_from_corpus` due to
+    /// unrecognized kind tags (issue #816).
+    ///
+    /// Why: lets `GET /indexes/:id/graph/stats` surface version skew between
+    /// the daemon and the stored corpus without requiring log scraping.
+    /// What: returns the count accumulated by `load_from_corpus`; zero for
+    /// freshly-built graphs (no persistence round-trip involved).
+    /// Test: `test_load_from_corpus_counts_unknown_edge_tags` in `tests`.
+    pub fn unknown_edge_tags_dropped(&self) -> usize {
+        self.unknown_edge_tags_dropped
     }
 
     /// Look up the defining symbol for a chunk_id, if any.

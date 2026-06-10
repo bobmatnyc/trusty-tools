@@ -1076,6 +1076,20 @@ impl CorpusStore {
     pub(crate) fn copy_all_from(&self, source: &CorpusStore) -> Result<()> {
         use crate::core::migration::{META_KEY_INDEXED_ROOT, META_KEY_SCHEMA_VERSION, META_TABLE};
 
+        // Issue #845: guard against self-copy — if source and self point at the
+        // same redb file, opening both a read and a write transaction against the
+        // same database would deadlock (redb allows only one concurrent writer).
+        // In practice this cannot happen through normal code paths (staging always
+        // opens a FRESH .tmp file that differs from the live path), but a
+        // defensive assert catches any future regression immediately.
+        debug_assert_ne!(
+            self.path(),
+            source.path(),
+            "corpus: copy_all_from called with self == source (same path {:?}); \
+             this would deadlock on the redb write lock — programming error",
+            self.path()
+        );
+
         // Single read transaction on the source — consistent snapshot.
         let src_txn = source.db.begin_read().context("begin source read txn")?;
 
@@ -1145,9 +1159,14 @@ impl CorpusStore {
             }
         }
         dst_txn.commit().context("commit staging copy txn")?;
+        // Issue #845: log the SOURCE count (how many chunks we copied FROM the
+        // live corpus) not self.chunk_count() (which counts the DESTINATION
+        // staging corpus after the write). Both numbers should match when the
+        // staging store was empty before the copy, but logging the source count
+        // is semantically correct ("copied N chunks from live corpus").
         tracing::info!(
             "corpus: copied {} chunks from live corpus into staging",
-            self.chunk_count().unwrap_or(0),
+            source.chunk_count().unwrap_or(0),
         );
         Ok(())
     }
