@@ -51,7 +51,7 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 | m3 | MINOR | Project-scope `fail`/`down` exits 0, masking a real local outage | DOC-4 §2.2/§7, Resolved-Q3 | — | ✅ Resolved |
 | m4 | MINOR | `scope` vs config-provenance `scope` overload is leaky + stringly-typed | DOC-1 D7 + `config.data` (`ConfigSource.scope: String`) | — | ✅ Resolved |
 | m5 | MINOR | `enabled=false` vs the "no uninstall" non-goal is undefined for the ensure pass | DOC-2 (`enabled`), DOC-3 §4, spec §62 | — | ✅ Resolved |
-| m6 | MINOR | UUC2's truly-vanilla user can't reach the first `tctl` invocation | DOC-8 §5, DOC-10 §3.3 | — | 🔴 Open |
+| m6 | MINOR | UUC2's truly-vanilla user can't reach the first `tctl` invocation | DOC-8 §5, DOC-10 §3.3 | — | ✅ Resolved |
 | m7 | MINOR | Controller is `kind=cli` in the manifest yet is a launchd-supervised daemon | DOC-2 (manifest example), DOC-7 §8, DOC-8 §1.1, DOC-5 §7, DOC-9 §5.2 | — | ✅ Resolved |
 | m8 | MINOR | UI link-out depends on the `port --json` + `/ui` convention (convention-deep, not contract-deep) | DOC-7 §1/§4.1 | — | ✅ Resolved |
 | m9 | MINOR | DNS-rebind guard is sound for browsers but a local non-browser process can still bounce the stack | DOC-7 §6, Resolved-Decision-3 | — | ✅ Resolved |
@@ -380,9 +380,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** guide-and-abort fires only after `tctl` runs, but `tctl` itself needs cargo to install; the pre-`tctl` rust+cargo bootstrap lives only in the DOC-10 harness, not the product flow.
 - **Failure mode:** the zero-knowledge persona can't get started.
 - **Fix direction:** document the pre-`tctl` bootstrap one-liner (install rust → `cargo install trusty-controller`) as the UUC2 entry point.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** document the pre-`tctl` bootstrap as the explicit UUC2 product on-ramp in DOC-8 — **STEP 0:** install Rust (official rustup one-liner) → `cargo install trusty-controller` → then `tctl install`. The §5 guide-and-abort fires only once `tctl` exists (covering remaining hard deps like `uv`), so the rust→cargo-install step is the genuine zero-knowledge entry point and belongs in the product doc, not only the DOC-10 harness. Consistent with the no-auto-install-toolchains stance (STEP 0 is documented user guidance, not a `tctl` action). DOC-10 §3.3's rustup+uv first step is aligned as the executable mirror of STEP 0.
+- **Follow-up:** DOC-8 §1.1 (STEP 0 pre-`tctl` bootstrap one-liner) + §5 (back-ref to STEP 0). DOC-10 §3.3 (note the harness first-step mirrors STEP 0).
 
 ### m7 — Controller is `kind=cli` in the manifest yet is a launchd-supervised daemon
 

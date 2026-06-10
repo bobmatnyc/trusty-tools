@@ -43,6 +43,28 @@ names; the mechanics below are DOC-8's.
 
 #### 1.1 The end-to-end flow (vanilla machine → ready stack)
 
+**STEP 0 — get `tctl` onto a vanilla machine (the UUC2 on-ramp).** Before any of
+the flow below can run, `tctl` must exist on the machine, and `tctl` itself is a
+Rust binary installed via `cargo`. On a truly-vanilla machine (no Rust toolchain
+yet) the zero-knowledge user first installs the Rust toolchain via the official
+rustup one-liner, then installs the controller with `cargo install`:
+
+```sh
+# STEP 0 — bootstrap the toolchain, then install tctl (run once, by the user):
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # installs rustup + cargo
+cargo install trusty-controller                                  # installs the tctl binary
+tctl install                                                     # NOW the flow below runs
+```
+
+This STEP 0 is the genuine zero-knowledge entry point: it is **documented
+guidance the user runs by hand**, not something `tctl` does for them — consistent
+with §5's stance that the controller does not auto-install toolchains. It
+**precedes and is distinct from** the §5 guide-and-abort: the §5 guide-and-abort
+can only fire once `tctl` already exists, so it covers the *remaining* hard
+dependencies discovered after `tctl` is installed (notably `uv` for the
+orchestrator member). The flow below begins at the first `tctl install`
+invocation:
+
 ```
 tctl install [<member>…]   [--yes]                     # system scope (forced)
         │
@@ -415,6 +437,12 @@ tool-chain is installed and functioning correctly. e.g. we need 'cargo' to
 bootstrap"*). The controller itself was installed via `cargo install
 trusty-controller`, so by the time `tctl` runs, cargo was present *at least once* —
 but it may have been removed, or `uv` may be absent for the orchestrator.
+
+The pre-`tctl` rust+cargo bootstrap is **STEP 0** of the §1.1 flow (install Rust
+via the rustup one-liner, then `cargo install trusty-controller`): a reader sees
+that on-ramp before this guide-and-abort. The guide-and-abort below covers the
+hard dependencies discovered *after* `tctl` already exists — it cannot fire until
+`tctl` is installed.
 
 **Detection (preflight, §1.1 step 0):**
 

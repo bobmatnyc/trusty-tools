@@ -241,6 +241,12 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y   # carg
 curl -LsSf https://astral.sh/uv/install.sh | sh                          # uv
 ```
 
+This rustup+uv first step is the **executable mirror of DOC-8 §1.1's STEP 0**
+product on-ramp (install Rust via the rustup one-liner, then `cargo install
+trusty-controller`): the harness is the executable expression of the same
+vanilla-machine bootstrap, so the product flow is no longer harness-only and the
+two are aligned.
+
 This is deliberate: by *starting* without cargo/uv, the harness can **first**
 assert DOC-8 §5's guide-and-abort UX (§5 assertion A0) — run `tctl …` with the
 toolchain absent and confirm exit `3` + the copy-paste remediation — and **then**
