@@ -49,6 +49,50 @@ pub struct ToolDiagnostic {
     pub message: String,
 }
 
+/// Result envelope for the `run_diagnostics` endpoint and `run_diagnostics_blocking` function.
+///
+/// Why: callers cannot distinguish "no linters installed" from "code is clean"
+/// when the result is only `Vec<ToolDiagnostic>`. Recording which tools were
+/// actually invoked vs. which were absent from `PATH` lets callers surface
+/// "tools unavailable" as a distinct signal rather than silently empty results.
+/// (#915)
+///
+/// What: carries the full diagnostics list together with two disjoint name
+/// lists — `tools_run` (invoked successfully) and `tools_unavailable` (known
+/// but not on `PATH`). Both lists contain deduplicated tool names. A fully
+/// clean run has `tools_run` non-empty and `tools_unavailable` empty; a fully
+/// unconfigured host has `tools_run` empty and `tools_unavailable` non-empty.
+///
+/// Test: `diagnostics_report_marks_unavailable_tool` and
+/// `diagnostics_report_clean_run` in `diagnostics_dispatch` tests.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DiagnosticsReport {
+    /// Tool names that were discovered on `PATH` and invoked during this run.
+    pub tools_run: Vec<String>,
+    /// Tool names that are known to the registry but whose binary was not
+    /// found on `PATH` at daemon startup and therefore could not be invoked.
+    pub tools_unavailable: Vec<String>,
+    /// All findings emitted by the tools that ran.
+    pub diagnostics: Vec<ToolDiagnostic>,
+}
+
+impl DiagnosticsReport {
+    /// Construct an empty report with no tools run and no diagnostics.
+    ///
+    /// Why: callers that encounter an early-exit condition (empty corpus,
+    /// scratch-dir failure) need a well-formed empty report rather than
+    /// having to construct one manually.
+    /// What: returns a `DiagnosticsReport` with all vectors empty.
+    /// Test: exercised implicitly by all failure-path tests.
+    pub fn empty() -> Self {
+        Self {
+            tools_run: Vec::new(),
+            tools_unavailable: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+}
+
 /// Plugin interface for an external static-analysis tool.
 ///
 /// Implementations shell out to a binary (clippy, ruff, ...), parse its

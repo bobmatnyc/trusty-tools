@@ -25,10 +25,21 @@ use crate::core::tool_impls::{
 use crate::core::tools::{StaticTool, ToolDiagnostic};
 
 /// Holds the set of available external static-analysis tools, indexed by the
-/// language tag each one analyzes.
+/// language tag each one analyzes, plus the names of tools that were probed
+/// but not found on `PATH`.
+///
+/// Why: storing unavailable tool names alongside available ones lets callers
+/// distinguish "no tools configured" from "ran tools, found nothing" (#915).
+/// What: `tools` maps language tags to available tools; `unavailable_names`
+/// records the `name()` of every tool whose `is_available()` returned false
+/// at `discover()` / `from_tools()` time.
+/// Test: `discover_records_unavailable_tools` and
+/// `from_tools_records_all_unavailable`.
 pub struct ToolRegistry {
     /// Language tag → list of available tools for that language.
     tools: DashMap<String, Vec<Arc<dyn StaticTool>>>,
+    /// Names of tools that were probed but not available on `PATH`.
+    unavailable_names: Vec<String>,
 }
 
 impl ToolRegistry {
@@ -74,18 +85,20 @@ impl ToolRegistry {
 
     /// Build a registry from an explicit tool list: keep the available ones and
     /// bucket each under its primary [`language`](StaticTool::language) plus any
-    /// [`aliases`](StaticTool::aliases).
+    /// [`aliases`](StaticTool::aliases). Records the names of unavailable tools.
     ///
     /// Why: separating the fanout from the hardcoded tool list lets tests
     /// exercise alias registration with a synthetic always-available tool,
     /// without depending on which binaries happen to be installed on the host.
-    /// What: probes `is_available()`, then for each kept tool inserts an `Arc`
-    /// clone into every bucket it claims.
-    /// Test: `aliases_register_tool_under_every_bucket`.
+    /// Recording unavailable names supports the #915 signal (callers can
+    /// distinguish "ran but clean" from "tools not installed").
+    /// What: probes `is_available()`, keeps available tools in buckets, and
+    /// records the `name()` of each unavailable tool in `unavailable_names`.
+    /// Test: `aliases_register_tool_under_every_bucket`,
+    /// `from_tools_records_all_unavailable`.
     fn from_tools(all_tools: Vec<Arc<dyn StaticTool>>) -> Self {
-        let registry = ToolRegistry {
-            tools: DashMap::new(),
-        };
+        let mut unavailable_names = Vec::new();
+        let registry_tools = DashMap::new();
 
         for tool in all_tools {
             if tool.is_available() {
@@ -98,18 +111,21 @@ impl ToolRegistry {
                 // a multi-language linter (e.g. biome → typescript + javascript)
                 // is reachable from each bucket its files route to.
                 for lang in std::iter::once(tool.language()).chain(tool.aliases().iter().copied()) {
-                    registry
-                        .tools
+                    registry_tools
                         .entry(lang.to_string())
-                        .or_default()
+                        .or_insert_with(Vec::new)
                         .push(Arc::clone(&tool));
                 }
             } else {
                 tracing::debug!(tool = tool.name(), "static tool not available");
+                unavailable_names.push(tool.name().to_string());
             }
         }
 
-        registry
+        ToolRegistry {
+            tools: registry_tools,
+            unavailable_names,
+        }
     }
 
     /// All available tools registered for `lang`. Empty if none.
@@ -123,6 +139,19 @@ impl ToolRegistry {
     /// All language tags that have at least one available tool.
     pub fn languages(&self) -> Vec<String> {
         self.tools.iter().map(|e| e.key().clone()).collect()
+    }
+
+    /// Names of tools that were probed at registry construction time but whose
+    /// backing binary was not found on `PATH`.
+    ///
+    /// Why: exposes the "tools not installed" signal (#915) so callers can
+    /// distinguish "ran tools, found nothing" from "no tools available at all".
+    /// What: returns a reference to the stored unavailable-name list. The list
+    /// contains one entry per tool whose `is_available()` returned false during
+    /// `from_tools()`.
+    /// Test: `from_tools_records_all_unavailable` in this module's tests.
+    pub fn unavailable_names(&self) -> &[String] {
+        &self.unavailable_names
     }
 
     /// Run every available file-scoped tool for `lang` against `file` and
@@ -286,6 +315,97 @@ mod tests {
         fn run(&self, _file: &Path, _content: &str) -> anyhow::Result<Vec<ToolDiagnostic>> {
             Ok(Vec::new())
         }
+    }
+
+    /// Unavailable tools must be recorded under `unavailable_names()` so
+    /// callers can distinguish "no tools configured" from "ran, found nothing".
+    ///
+    /// Why: #915 — an all-unavailable host returns zero diagnostics with no
+    /// signal, indistinguishable from "code is clean." Recording unavailable
+    /// names is the fix.
+    /// What: builds a registry from one always-available and one always-absent
+    /// tool. Asserts `unavailable_names()` contains exactly the absent tool.
+    /// Test: this test.
+    #[test]
+    fn from_tools_records_all_unavailable() {
+        struct AlwaysAvailable;
+        impl StaticTool for AlwaysAvailable {
+            fn name(&self) -> &str {
+                "always-on"
+            }
+            fn language(&self) -> &str {
+                "rust"
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn run(&self, _: &Path, _: &str) -> anyhow::Result<Vec<ToolDiagnostic>> {
+                Ok(Vec::new())
+            }
+        }
+
+        struct NeverAvailable;
+        impl StaticTool for NeverAvailable {
+            fn name(&self) -> &str {
+                "never-on"
+            }
+            fn language(&self) -> &str {
+                "python"
+            }
+            fn is_available(&self) -> bool {
+                false
+            }
+            fn run(&self, _: &Path, _: &str) -> anyhow::Result<Vec<ToolDiagnostic>> {
+                Ok(Vec::new())
+            }
+        }
+
+        let r = ToolRegistry::from_tools(vec![Arc::new(AlwaysAvailable), Arc::new(NeverAvailable)]);
+
+        assert_eq!(r.unavailable_names(), &["never-on"]);
+        // The available tool is NOT in unavailable_names.
+        assert!(
+            !r.unavailable_names().contains(&"always-on".to_string()),
+            "available tool must not appear in unavailable_names"
+        );
+        // The available tool is still reachable in the tools bucket.
+        assert_eq!(r.tools_for("rust").len(), 1);
+        // The absent tool has no bucket.
+        assert!(r.tools_for("python").is_empty());
+    }
+
+    /// A fully-discovered registry on a host with no linters still reports an
+    /// empty `unavailable_names` if all known tools are found (the happy-path
+    /// sanity check).
+    ///
+    /// Why: ensures `unavailable_names()` doesn't accidentally leak available
+    /// tools when all are installed.
+    /// What: builds a registry with only always-available tools; asserts
+    /// `unavailable_names()` is empty.
+    /// Test: this test.
+    #[test]
+    fn from_tools_available_only_has_empty_unavailable() {
+        struct OnlyAvailable;
+        impl StaticTool for OnlyAvailable {
+            fn name(&self) -> &str {
+                "on-tool"
+            }
+            fn language(&self) -> &str {
+                "go"
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn run(&self, _: &Path, _: &str) -> anyhow::Result<Vec<ToolDiagnostic>> {
+                Ok(Vec::new())
+            }
+        }
+        let r = ToolRegistry::from_tools(vec![Arc::new(OnlyAvailable)]);
+        assert!(
+            r.unavailable_names().is_empty(),
+            "no unavailable tools expected, got: {:?}",
+            r.unavailable_names()
+        );
     }
 
     #[test]

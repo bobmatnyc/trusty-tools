@@ -56,7 +56,7 @@ pub use review::{
 };
 pub use scip::{extract_kg_from_scip, index_to_graph as scip_index_to_graph, ScipIngestSummary};
 pub use tool_registry::{global_registry, ToolRegistry};
-pub use tools::{Severity as DiagnosticSeverity, StaticTool, ToolDiagnostic};
+pub use tools::{DiagnosticsReport, Severity as DiagnosticSeverity, StaticTool, ToolDiagnostic};
 
 #[cfg(test)]
 mod integration_tests;

@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::core::ToolDiagnostic;
+use crate::core::{DiagnosticsReport, ToolDiagnostic};
 
 /// Abs-to-rel mapping: given the absolute on-disk path of a diagnostic and
 /// the `(rel, real)` pairs for the current language bucket, return the
@@ -34,9 +34,12 @@ use crate::core::ToolDiagnostic;
 /// absolute (which it always is — it is `Path::new(root).join(rel)`), so any
 /// case where exact equality fails (symlink resolution, case differences on a
 /// case-insensitive FS like macOS) silently drops all diagnostics.
-/// Test: `abs_to_rel_exact`, `abs_to_rel_suffix_match`, and
-/// `abs_to_rel_case_insensitive_returns_none` below.
-fn abs_to_rel<'a>(abs_diag_file: &str, rel_real_pairs: &'a [(String, String)]) -> Option<&'a str> {
+/// Test: `abs_to_rel_exact_match`, `abs_to_rel_suffix_match_absolute_real`,
+/// and `abs_to_rel_no_match_returns_none` in `diagnostics_dispatch_tests.rs`.
+pub(crate) fn abs_to_rel<'a>(
+    abs_diag_file: &str,
+    rel_real_pairs: &'a [(String, String)],
+) -> Option<&'a str> {
     for (rel, real) in rel_real_pairs {
         // Exact match — the common production path.
         if abs_diag_file == real.as_str() || abs_diag_file == rel.as_str() {
@@ -62,8 +65,9 @@ fn abs_to_rel<'a>(abs_diag_file: &str, rel_real_pairs: &'a [(String, String)]) -
 /// tool registry.
 ///
 /// Why: the production call site uses the global (lazily-discovered) registry
-/// of whatever tools are installed on the host. This wrapper keeps the
-/// existing call signature unchanged so no callers need updating.
+/// of whatever tools are installed on the host. Returns a `DiagnosticsReport`
+/// so callers can distinguish "ran tools, found nothing" from "no tools
+/// available" (#915).
 /// What: delegates to `run_diagnostics_blocking_with_registry` with
 /// `global_registry()`.
 /// Test: `run_diagnostics_blocking_skips_unknown_languages`,
@@ -73,7 +77,7 @@ pub fn run_diagnostics_blocking(
     language_filter: Option<String>,
     tool_filter: Option<Vec<String>>,
     root_path: Option<String>,
-) -> Vec<ToolDiagnostic> {
+) -> DiagnosticsReport {
     use crate::core::global_registry;
     run_diagnostics_blocking_with_registry(
         by_file,
@@ -89,7 +93,8 @@ pub fn run_diagnostics_blocking(
 /// Why: tests need to inject a synthetic `ToolRegistry` (containing fake
 /// project-scoped tools that count `run_project` invocations) to assert the
 /// skip-when-no-root contract is actually enforced rather than just not
-/// panicking.
+/// panicking. Returns `DiagnosticsReport` to distinguish "ran tools, found
+/// nothing" from "no tools available" (#915).
 /// What: same dispatch logic as the production path, but accepts any
 /// `&ToolRegistry` instead of always using `global_registry()`.
 ///   1. Groups `by_file` entries by language (honouring `language_filter`).
@@ -107,26 +112,36 @@ pub fn run_diagnostics_blocking(
 ///      `diag.file` (absolute) back to the index-relative rel via
 ///      `abs_to_rel`. Drop diagnostics that don't map to any indexed file.
 ///      When `root_path` is `None`, log at info and skip (graceful degradation).
-///   5. Returns the merged `Vec<ToolDiagnostic>`.
+///   5. Returns a `DiagnosticsReport` with `tools_run`, `tools_unavailable`,
+///      and `diagnostics` populated.
 ///
 /// Test: `run_diagnostics_blocking_project_scoped_skips_when_no_root` uses
 /// this directly with a `FakeProjectScopedTool` registry.
 /// `run_diagnostics_blocking_with_registry_two_files_same_basename` (below)
 /// proves the per-file subdir isolation prevents basename collisions.
+/// `report_marks_unavailable_tool` proves that tools absent from PATH are
+/// reported under `tools_unavailable`.
 pub fn run_diagnostics_blocking_with_registry(
     by_file: HashMap<String, String>,
     language_filter: Option<String>,
     tool_filter: Option<Vec<String>>,
     root_path: Option<String>,
     registry: &crate::core::tool_registry::ToolRegistry,
-) -> Vec<ToolDiagnostic> {
+) -> DiagnosticsReport {
     use crate::lang::LanguageDetector;
+
+    // Collect unavailable tool names from the registry upfront.
+    let tools_unavailable: Vec<String> = registry.unavailable_names().to_vec();
 
     let scratch = match tempfile::tempdir() {
         Ok(d) => d,
         Err(e) => {
             tracing::warn!("failed to create scratch dir for diagnostics: {e}");
-            return Vec::new();
+            return DiagnosticsReport {
+                tools_run: Vec::new(),
+                tools_unavailable,
+                diagnostics: Vec::new(),
+            };
         }
     };
 
@@ -144,7 +159,9 @@ pub fn run_diagnostics_blocking_with_registry(
         by_lang.entry(lang).or_default().push((file, content));
     }
 
-    let mut out = Vec::new();
+    let mut out: Vec<ToolDiagnostic> = Vec::new();
+    // Deduplicated set of tool names that were actually invoked.
+    let mut tools_run_set: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for (lang, file_pairs) in &by_lang {
         let tools = registry.tools_for(lang);
@@ -194,6 +211,7 @@ pub fn run_diagnostics_blocking_with_registry(
                     continue;
                 }
                 for tool in &file_tools {
+                    tools_run_set.insert(tool.name().to_string());
                     let result = tool.run(&path, content);
                     match result {
                         Ok(mut diags) => {
@@ -255,6 +273,7 @@ pub fn run_diagnostics_blocking_with_registry(
             .collect();
 
         for tool in &proj_tools {
+            tools_run_set.insert(tool.name().to_string());
             match tool.run_project(&real_paths) {
                 Ok(diags) => {
                     for mut diag in diags {
@@ -280,181 +299,16 @@ pub fn run_diagnostics_blocking_with_registry(
         }
     }
 
-    out
+    let mut tools_run: Vec<String> = tools_run_set.into_iter().collect();
+    tools_run.sort();
+
+    DiagnosticsReport {
+        tools_run,
+        tools_unavailable,
+        diagnostics: out,
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Why: two files with identical basenames in different index directories
-    /// must each produce diagnostics independently; the basename-collision bug
-    /// (writing `scratch/main.rs` twice) silently drops the first file's
-    /// diagnostics. This test FAILS against `scratch.path().join(&name)` (the
-    /// old code) and PASSES after the per-file `scratch/<idx>/name` fix.
-    ///
-    /// What: injects a `FakeFileScopedTool` that records every `(path, content)`
-    /// it receives. Passes two same-basename Rust files. Asserts: (a) the fake
-    /// tool was called twice, (b) the two paths are distinct, (c) neither
-    /// rel_file mapping is lost (both appear in the output).
-    ///
-    /// Test: this test itself. Does not require any external linter.
-    #[test]
-    fn run_diagnostics_blocking_with_registry_two_files_same_basename() {
-        use crate::core::tool_registry::ToolRegistry;
-        use crate::core::tools::{StaticTool, ToolDiagnostic};
-        use std::path::{Path, PathBuf};
-        use std::sync::{Arc, Mutex};
-
-        /// A fake file-scoped tool that records the (path, content) passed to
-        /// each `run` call and returns a single dummy diagnostic so the caller
-        /// can assert both files' diagnostics survive the pipeline.
-        #[derive(Clone)]
-        struct FakeFileScopedTool {
-            calls: Arc<Mutex<Vec<(PathBuf, String)>>>,
-        }
-        impl StaticTool for FakeFileScopedTool {
-            fn name(&self) -> &str {
-                "fake-file-scoped"
-            }
-            fn language(&self) -> &str {
-                "rust"
-            }
-            fn is_available(&self) -> bool {
-                true
-            }
-            fn is_project_scoped(&self) -> bool {
-                false
-            }
-            fn run(&self, file: &Path, content: &str) -> anyhow::Result<Vec<ToolDiagnostic>> {
-                self.calls
-                    .lock()
-                    .unwrap()
-                    .push((file.to_path_buf(), content.to_string()));
-                // Return one diagnostic so the caller can assert it maps back
-                // to the correct index-relative path.
-                Ok(vec![ToolDiagnostic {
-                    file: file.to_string_lossy().into_owned(),
-                    line: 1,
-                    col: 1,
-                    message: "fake".into(),
-                    severity: crate::core::tools::Severity::Warning,
-                    tool: "fake-file-scoped".into(),
-                    code: None,
-                }])
-            }
-            fn run_project(&self, _files: &[PathBuf]) -> anyhow::Result<Vec<ToolDiagnostic>> {
-                Ok(Vec::new())
-            }
-        }
-
-        let calls = Arc::new(Mutex::new(Vec::<(PathBuf, String)>::new()));
-        let tool = FakeFileScopedTool {
-            calls: Arc::clone(&calls),
-        };
-        let registry = ToolRegistry::from_tools_for_test(vec![Arc::new(tool)]);
-
-        let mut by_file = HashMap::new();
-        by_file.insert("src/a/main.rs".to_string(), "fn a() {}".to_string());
-        by_file.insert("src/b/main.rs".to_string(), "fn b() {}".to_string());
-
-        let diags = run_diagnostics_blocking_with_registry(
-            by_file, None, // language_filter
-            None, // tool_filter
-            None, // root_path
-            &registry,
-        );
-
-        let recorded = calls.lock().unwrap();
-        // Both files must have been sent to the tool.
-        assert_eq!(
-            recorded.len(),
-            2,
-            "expected 2 tool invocations (one per file), got {}; \
-             basename collision likely dropped one",
-            recorded.len()
-        );
-        // The two scratch paths must be distinct — collision means same path.
-        let path0 = &recorded[0].0;
-        let path1 = &recorded[1].0;
-        assert_ne!(
-            path0, path1,
-            "the two files were written to the same scratch path ({path0:?}); \
-             per-file subdir isolation is broken"
-        );
-        // Both diagnostics must survive back-mapping (neither was lost).
-        assert_eq!(
-            diags.len(),
-            2,
-            "expected 2 diagnostics in output (one per file), got {}; \
-             one file's diagnostics were silently dropped",
-            diags.len()
-        );
-        // Verify both index-relative paths appear in the output.
-        let files: Vec<&str> = diags.iter().map(|d| d.file.as_str()).collect();
-        assert!(
-            files.contains(&"src/a/main.rs"),
-            "src/a/main.rs missing from output: {files:?}"
-        );
-        assert!(
-            files.contains(&"src/b/main.rs"),
-            "src/b/main.rs missing from output: {files:?}"
-        );
-    }
-
-    #[test]
-    fn abs_to_rel_exact_match() {
-        // Exact equality on the `real` path (the most common production case).
-        let pairs = vec![(
-            "src/Foo.cs".to_string(),
-            "/home/user/proj/src/Foo.cs".to_string(),
-        )];
-        assert_eq!(
-            abs_to_rel("/home/user/proj/src/Foo.cs", &pairs),
-            Some("src/Foo.cs")
-        );
-    }
-
-    #[test]
-    fn abs_to_rel_suffix_match_absolute_real() {
-        // The suffix branch must work even when `real` is an absolute path.
-        // Previously, forming `"/{real}"` produced `"//home/…"` — an
-        // impossible match for any absolute Roslyn-emitted path. With the
-        // `trim_start_matches('/')` fix, the format string becomes
-        // `"/home/user/proj/src/Bar.cs"` and suffix matching works correctly.
-        let pairs = vec![(
-            "src/Bar.cs".to_string(),
-            "/home/user/proj/src/Bar.cs".to_string(),
-        )];
-        // A path that shares the full suffix of `real` (e.g. a different
-        // mount-point prefix) should match via the component-anchored suffix.
-        // real_suffix = "home/user/proj/src/Bar.cs"
-        // format = "/home/user/proj/src/Bar.cs"
-        // abs ends_with "/home/user/proj/src/Bar.cs" → true
-        assert_eq!(
-            abs_to_rel("/symlink-root/home/user/proj/src/Bar.cs", &pairs),
-            Some("src/Bar.cs"),
-        );
-        // A path with no component overlap at all must not match.
-        assert_eq!(abs_to_rel("/completely/different/Qux.cs", &pairs), None);
-    }
-
-    #[test]
-    fn abs_to_rel_no_match_returns_none() {
-        let pairs = vec![(
-            "src/Baz.cs".to_string(),
-            "/home/user/proj/src/Baz.cs".to_string(),
-        )];
-        assert_eq!(abs_to_rel("/completely/different/path.cs", &pairs), None);
-    }
-
-    #[test]
-    fn abs_to_rel_rel_exact_match() {
-        // When the diagnostic file is already a relative path matching `rel`.
-        let pairs = vec![(
-            "src/Qux.cs".to_string(),
-            "/home/user/proj/src/Qux.cs".to_string(),
-        )];
-        assert_eq!(abs_to_rel("src/Qux.cs", &pairs), Some("src/Qux.cs"));
-    }
-}
+#[path = "diagnostics_dispatch_tests.rs"]
+mod tests;

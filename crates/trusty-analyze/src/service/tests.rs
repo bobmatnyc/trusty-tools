@@ -130,9 +130,11 @@ fn run_diagnostics_blocking_skips_unknown_languages() {
     // diagnostics pipeline; it should simply be skipped.
     let mut by_file = HashMap::new();
     by_file.insert("notes.txt".to_string(), "hello world".to_string());
-    let diags =
+    let report =
         crate::service::diagnostics_dispatch::run_diagnostics_blocking(by_file, None, None, None);
-    assert!(diags.is_empty());
+    assert!(report.diagnostics.is_empty());
+    // tools_run must be empty when no language-matched tools ran.
+    assert!(report.tools_run.is_empty());
 }
 
 #[test]
@@ -141,13 +143,13 @@ fn run_diagnostics_blocking_respects_language_filter() {
     // installed, because the language filter excludes it.
     let mut by_file = HashMap::new();
     by_file.insert("main.rs".to_string(), "fn main() {}".to_string());
-    let diags = crate::service::diagnostics_dispatch::run_diagnostics_blocking(
+    let report = crate::service::diagnostics_dispatch::run_diagnostics_blocking(
         by_file,
         Some("python".to_string()),
         None,
         None,
     );
-    assert!(diags.is_empty());
+    assert!(report.diagnostics.is_empty());
 }
 
 /// Why: project-scoped tools (e.g. Roslyn) must be completely skipped — not
@@ -206,7 +208,7 @@ fn run_diagnostics_blocking_project_scoped_skips_when_no_root() {
     let mut by_file = std::collections::HashMap::new();
     by_file.insert("src/Foo.cs".to_string(), "class Foo {}".to_string());
 
-    let diags = crate::service::diagnostics_dispatch::run_diagnostics_blocking_with_registry(
+    let report = crate::service::diagnostics_dispatch::run_diagnostics_blocking_with_registry(
         by_file, None, // language_filter
         None, // tool_filter
         None, // root_path — the None case we are testing
@@ -215,8 +217,9 @@ fn run_diagnostics_blocking_project_scoped_skips_when_no_root() {
 
     // Contract: result is empty (no diagnostics produced without a root path).
     assert!(
-        diags.is_empty(),
-        "expected no diagnostics when root_path is None, got: {diags:?}"
+        report.diagnostics.is_empty(),
+        "expected no diagnostics when root_path is None, got: {:?}",
+        report.diagnostics
     );
     // Contract: run_project was never called.
     let calls = *counter.lock().unwrap();

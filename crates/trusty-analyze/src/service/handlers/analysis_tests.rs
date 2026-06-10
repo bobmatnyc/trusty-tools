@@ -50,7 +50,7 @@ fn run_diagnostics_blocking_two_files_same_basename() {
     // We cannot assert on diagnostic counts (no tools in CI), but if the
     // basename collision bug were still present this would panic on the
     // second create_dir_all (or silently overwrite) — not crash-free.
-    let _result = diagnostics_dispatch::run_diagnostics_blocking(by_file, None, None, None);
+    let _report = diagnostics_dispatch::run_diagnostics_blocking(by_file, None, None, None);
     // Reaching here without panic means the subdir isolation works.
 }
 

@@ -332,20 +332,20 @@ pub async fn diagnostics_for_index(
 
     // Heavy work (process spawns, blocking I/O) runs off the async runtime.
     let language_filter = params.language.clone();
-    let all_diagnostics: Vec<crate::core::ToolDiagnostic> =
-        tokio::task::spawn_blocking(move || {
-            crate::service::diagnostics_dispatch::run_diagnostics_blocking(
-                by_file,
-                language_filter,
-                tool_filter,
-                root_path,
-            )
-        })
-        .await
-        .map_err(|e| ApiError::internal(format!("diagnostics task panicked: {e}")))?;
+    let report: crate::core::DiagnosticsReport = tokio::task::spawn_blocking(move || {
+        crate::service::diagnostics_dispatch::run_diagnostics_blocking(
+            by_file,
+            language_filter,
+            tool_filter,
+            root_path,
+        )
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("diagnostics task panicked: {e}")))?;
 
-    let total = all_diagnostics.len();
-    let page: Vec<&crate::core::ToolDiagnostic> = all_diagnostics
+    let total = report.diagnostics.len();
+    let page: Vec<&crate::core::ToolDiagnostic> = report
+        .diagnostics
         .iter()
         .skip(params.offset)
         .take(params.limit)
@@ -360,6 +360,8 @@ pub async fn diagnostics_for_index(
         "limit": params.limit,
         "returned": returned,
         "truncated": truncated,
+        "tools_run": report.tools_run,
+        "tools_unavailable": report.tools_unavailable,
         "diagnostics": page,
     })))
 }
