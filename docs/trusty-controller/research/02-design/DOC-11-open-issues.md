@@ -33,7 +33,7 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 | C5 | CRITICAL | DOC-9 "new versions take effect via connection-safe restart" assumes a `restart` verb DOC-6 says is net-new on every tool | DOC-9 §5.1, DOC-6 §2.1–2.4 | — | ✅ Resolved |
 | M1 | MAJOR | "Zero tool-specific logic" is oversold (relocated, not eliminated) | spec §83; DOC-2 §6, DOC-5 §1/§2.2, DOC-6 §4, DOC-3 §7, DOC-7 | — | 🔴 Open |
 | M2 | MAJOR | `stack_version` tuple will rot (no test owner, no CI gate, embedded in the binary) | DOC-2 §4, Resolved-Q5 | — | ✅ Resolved |
-| M3 | MAJOR | Cross-repo claude-mpm dependency is load-bearing in 4 places but never assessed as one systemic risk | DOC-6 §4, DOC-8 §4/§5, DOC-9 §3.4, DOC-10 §6 | — | 🔴 Open |
+| M3 | MAJOR | Cross-repo claude-mpm dependency is load-bearing in 4 places but never assessed as one systemic risk | DOC-6 §4, DOC-8 §4/§5, DOC-9 §3.4, DOC-10 §6 | — | ✅ Resolved |
 | M4 | MAJOR | `config` verb is a breaking CLI change + a hole in the read-only guarantee | DOC-1 `config.data`, DOC-5 §1.2, DOC-6 §2.6, DOC-3 Q3 | ✅ code-verified | ✅ Resolved |
 | M5 | MAJOR | clap `external_subcommand` passthrough collides with first-class subcommands + controller-as-member recursion | DOC-5 §6/§1.1 | — | 🔴 Open |
 | M6 | MAJOR | CLI-as-authority (D1) under-specified for "daemon up but wedged" | DOC-1 D1, `health.data` | — | ✅ Resolved |
@@ -56,7 +56,7 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 | m8 | MINOR | UI link-out depends on the `port --json` + `/ui` convention (convention-deep, not contract-deep) | DOC-7 §1/§4.1 | — | 🔴 Open |
 | m9 | MINOR | DNS-rebind guard is sound for browsers but a local non-browser process can still bounce the stack | DOC-7 §6, Resolved-Decision-3 | — | 🔴 Open |
 | m10 | MINOR | `stack health`/`stack doctor` consistency guarantee is a cross-probe race | DOC-4 §4 | — | 🔴 Open |
-| m11 | MINOR | Effort/scope realism: the "thin coordinator" understates the retrofit | DOC-6 §2–§3/§7 | — | 🔴 Open |
+| m11 | MINOR | Effort/scope realism: the "thin coordinator" understates the retrofit | DOC-6 §2–§3/§7 | — | ✅ Resolved |
 
 **Item count:** 5 CRITICAL + 15 MAJOR + 11 MINOR = **31**.
 
@@ -160,9 +160,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** uv install + launch hook + output-parsing shim + version pin all couple to an external evolving repo; the shim parses *human* `mpm-doctor` text while install floats to *latest* (unpinned) — a contradiction; best-effort parsing degrades silently.
 - **Failure mode:** an upstream cosmetic change misclassifies orchestrator health and the every-PR CI (frozen pin) won't catch it.
 - **Fix direction:** a single cross-cutting "claude-mpm external-dependency risk" section + a shim contract-test that fails loudly on drift; reconcile unpinned-install vs version-coupled-parser.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** Option A (cluster) — add a single **consolidated claude-mpm external-dependency risk** section (DOC-6 §4.1) enumerating the **4 coupling points** (`uv` install/upgrade, launch hook, output-parsing shim, version pin) + blast radius + mitigation, framing them as **one systemic risk** with the **output-parsing shim as the most fragile point**. Reconcile the unpinned-install-vs-version-coupled-parser **contradiction**: the orchestrator installs the **BOM-pinned** version (NOT latest, exactly like every other cargo member installs its BOM `version`) since the shim's parsing is version-coupled, so install and shim move in **lockstep**; `--latest` becomes an **opt-in** move that marks the stack **drifted** (M2/M11 framing). This fixes DOC-8 §1.4 + Resolved-Decision-2's prior "install latest" framing. Add a shim **captured-output contract-test** (DOC-10 §6.1/§2.2, alongside the C3/M2 fixtures) that **fails loudly in CI** on a claude-mpm CLI-format drift, plus a **loud-degrade runtime rule**: unrecognized claude-mpm output → `degraded` with a clear message ("claude-mpm output format unrecognized — shim may be stale vs the installed version"), **never** a confident-but-wrong health verdict. So drift surfaces loudly (CI failure or visible `degraded`) instead of silently misclassifying orchestrator health.
+- **Follow-up:** DOC-6 §4.1 (new consolidated external-dependency-risk section — 4 coupling points + blast radius + mitigation + loud-degrade runtime rule), §5 (BOM-pinned install reconciled — not latest; lockstep with shim; `--latest` = opt-in drift). DOC-8 §1.4 + Resolved-Decision-2 (install the BOM-pinned version, not latest). DOC-10 §6.1 (new shim captured-output contract-test) + §2.2 (existing captured-`--json` conformance pre-gate cross-referenced). Implementation follow-up: build the shim drift contract-test + the loud-degrade behavior; BOM-pin the orchestrator install (`uv tool install claude-mpm==<pin>`).
 
 ### M4 — `config` verb is a breaking CLI change + a hole in the read-only guarantee
 
@@ -440,6 +440,6 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** net-new `trusty_common::contract` module + `restart`/`version`/read-only-`config` on every tool + the entire trusty-review verb surface + the Python shim + the stateful identity migration (see M15).
 - **Failure mode:** timeline/risk under-budgeted; "draw the rest of the owl" steps.
 - **Fix direction:** re-scope DOC-6 as "4 tool retrofits + 1 shim + 1 new crate + 1 stateful migration," each its own worktree/PR.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** Option A (cluster) — re-scope DOC-6 §3 as an **honest, enumerated work-breakdown** (DOC-6 §3.1), each item its own worktree/PR: (1) net-new `trusty_common::contract` module + `Dispatcher` (+ the **C3** golden-snapshot conformance test), (2) trusty-search retrofit (+ the **M4** `config`→`tune` split + the §7 project-identity reconciliation), (3) trusty-memory retrofit, (4) trusty-analyze retrofit, (5) trusty-review retrofit (the laggard — net-new `doctor`/`version`/`config`/`restart`), (6) the claude-mpm Python shim (version-coupled, drift-tested), (7) the stateful project-identity migration (re-keys index/palace state; **design deferred to M15** — counted here, not designed). Qualify the "thin coordinator" claim: the *controller* is a thin coordinator (zero per-tool verb-dispatch logic), but the *contract retrofit it depends on* is **substantial** — N discrete PRs across **4 Rust tools + 1 shim + 1 new shared module + 1 stateful migration**. Note that recent decisions added **net-new surface** to this exact retrofit (the **C3** snapshot test, **C5**'s `restart` verb ×4 daemons, **M4**'s `tune`-verb split), so the breakdown reflects the current decided state. M15 is **not** designed here — it is only counted as a work-item.
+- **Follow-up:** DOC-6 §3.1 (new enumerated 7-item work-breakdown + the thin-coordinator qualifier + the C3/C5/M4 net-new-surface note) + Remaining-work checklist (mapped onto the 7 items, item 7 design deferred). Cross-ref [M15](#m15--project-identity-migration-orphans-existing-indexpalace-state) (the migration's design). No effort change to the controller itself; the breakdown is **documentation of existing scope**, not new scope.

@@ -302,6 +302,49 @@ This matches DOC-1's "highest-leverage work, in order" and respects the
 parallel-worktree discipline: each tool retrofit is an independent worktree once
 the shared module is published.
 
+#### 3.1 Honest work-breakdown (scope realism)
+
+The per-tool retrofit above reads as "mostly a mapping exercise," and **per verb**
+that is true — but the **total** scope is substantial and easy to under-budget. To
+keep the estimate honest, the contract retrofit is enumerated here as **discrete,
+independently-sized work-items**, each its own worktree/PR (per the parallel-worktree
+discipline). Recent decisions have **added net-new surface** to this exact retrofit:
+C3's golden-snapshot conformance test, C5's net-new `restart` verb on every daemon,
+and M4's `tune`-verb split — so the breakdown reflects the **current decided state**,
+not the original "thin" framing:
+
+1. **Net-new `trusty_common::contract` module + `Dispatcher`** — the envelope, per-verb
+   `data` structs, enums, `ContractTool` trait, `redact_value`, plus the **C3
+   golden-snapshot conformance test** (none exists today; the DOC-1 sketch is the
+   build target). Precondition for everything else.
+2. **trusty-search retrofit** — the pattern-setter, and the heaviest of the Rust
+   members by net-new surface: includes the **M4 `tune`-verb split** (§2.6) and the
+   **§7 project-identity reconciliation** (hoist `id_from_path`/`detect_project`;
+   reconcile `detect.rs` basename vs `fs_discovery.rs` slug).
+3. **trusty-memory retrofit** — `GET /health` already speaks `degraded`; net-new CLI
+   `health`/`config`/`restart` + `version`.
+4. **trusty-analyze retrofit** — `health` CLI verb exists; net-new `config`/`restart`
+   + `version`; map `search_reachable` → `deps[]`.
+5. **trusty-review retrofit** — **the laggard**: net-new `doctor`/`version`/`config`/
+   `restart` (it implements *none* of the seven verbs at the CLI today).
+6. **claude-mpm Python shim** — synthesizes `doctor`/`health`/`version`;
+   **version-coupled** (§4/§4.1) and **drift-tested** via the DOC-10 captured-output
+   contract-test (§6/§2.2).
+7. **Stateful project-identity migration** — re-keys existing index/palace state from
+   the old id scheme to the canonical slug. **Counted here but NOT designed in this
+   doc** — its design is **deferred to M15** (a stateful data migration, not a refactor;
+   see DOC-11 M15). This item is the one that is *not* "just a mapping exercise."
+
+So the headline scope is: **N discrete PRs across 4 Rust tools + 1 Python shim + 1
+new shared module + 1 stateful migration** — not a single mechanical pass.
+
+**"Thin coordinator" qualifier.** The *controller* (`tctl`) is genuinely a thin
+coordinator — it adds **zero** per-tool verb-dispatch logic and grows no scope from
+this list. But the **contract retrofit it depends on** is substantial: items 1–7
+above are the price of making the members conformant *before* the thin coordinator
+can talk to them. The thinness is a property of the controller, not of the
+end-to-end effort.
+
 ### 4. claude-mpm Python adapter (the core net-new design)
 
 claude-mpm is **external Python**, pluggable per ADR-0006 / DOC-0 A4, with **no
@@ -390,6 +433,42 @@ resolution.
   cross-repo upstream work is pursued. The shim suffices until trusty-mpm retires
   it (§6), so there is no upstream-ownership question to resolve in v1.
 
+#### 4.1 claude-mpm external-dependency risk (consolidated)
+
+claude-mpm is the **one** stack member that lives in a repo we do not own and
+evolves on a cadence we do not control. The coupling to it is **load-bearing in
+four distinct places**, scattered across the design set. They are individually
+small but collectively constitute **one systemic risk**, so they are enumerated
+here as a single surface rather than left implicit per-doc:
+
+| # | Coupling point | Where | Blast radius if claude-mpm drifts | Mitigation |
+|---|---|---|---|---|
+| 1 | **`uv` install/upgrade** | §5 (this doc), DOC-8 §1.4/§5 | A renamed/removed package or an incompatible upstream release breaks install/upgrade of the orchestrator member. | The orchestrator installs the **BOM-pinned** version (§5), not whatever floats to latest, so an upstream release cannot silently change the installed bits under a green stack. |
+| 2 | **launch hook** | DOC-8 §4 (a Claude Code `SessionStart` hook) | If claude-mpm's launch surface changes, the "auto-config on every launch" path (`tctl ensure`) stops firing. | The hook is attached to **Claude Code** (`SessionStart`, verified — see C2), which claude-mpm is layered on, so it does not depend on a claude-mpm-owned hook surface. |
+| 3 | **output-parsing shim** | §4 (this doc) | The shim parses claude-mpm's **human** `mpm-doctor` / version / liveness **text** into the contract envelope. A cosmetic upstream format change makes the shim **misparse → misclassify orchestrator health** — a confident-but-wrong verdict. **This is the most fragile point.** | A captured-output **contract-test** gates the shim against the pinned version (DOC-10 §6/§2.2), plus a **loud-degrade runtime rule** (below). |
+| 4 | **version pin** | §5 (this doc), DOC-10 §6 | If the installed claude-mpm and the version the shim was tested against diverge, the shim parses an output shape it never validated. | Install and shim move in **lockstep** (§5): the BOM pin is exactly the version DOC-10's harness froze the shim against. |
+
+**The most fragile point is the output-parsing shim (#3), and it is coupled to
+the version pin (#4).** The two together carried a latent **contradiction** the
+rest of this cluster resolves: an unpinned "install latest" (formerly DOC-8
+Resolved-Decision-2) against a **version-coupled** parser means an upstream
+`mpm-doctor` format change can land on a user's machine without the BOM moving,
+and the every-PR CI — which runs against the **frozen** pin — would not catch it.
+The shim would then misparse and the orchestrator would be **silently
+misclassified**. §5 reconciles this: the orchestrator installs the **BOM-pinned**
+version (not latest), exactly like every cargo member installs its BOM `version`.
+
+**Loud-degrade runtime rule (mitigation for #3).** Beyond the install-time pin,
+the shim degrades **loudly** at runtime: if it encounters claude-mpm output it
+does **not** recognize (an unexpected shape from a drifted upstream), it MUST emit
+`degraded` with a clear message — `"claude-mpm output format unrecognized — shim
+may be stale vs the installed version"` — **never** a confident-but-wrong health
+verdict. So a format drift that slips past the pin surfaces as a visible
+`degraded` (operator sees "shim may be stale") instead of a silent
+misclassification. This pairs the install-time gate (the captured-output
+contract-test, DOC-10 §6/§2.2 — fails CI loudly on drift) with a runtime
+backstop (loud `degraded`, never silently wrong).
+
 ### 5. Resolving DOC-2 Q6 (claude-mpm package/version/changelog pins)
 
 DOC-2 deferred Q6 (the canonical claude-mpm package name, pinned version, and
@@ -406,13 +485,25 @@ authoritative `CHANGELOG.md` URL) to DOC-6. All three are now resolved
   `claude-mpm`, installed and upgraded via `uv` per the bullet above
   (`uv tool install claude-mpm`).
 
-- **Pinned version — pin at implementation.** DOC-2's worked example uses the
-  placeholder `version = "0.0.0"`; the design keeps a placeholder for the manifest
-  orchestrator entry. The **concrete version is pinned when the shim is built and
-  tested against a specific claude-mpm release** (the shim's parsing is
-  version-coupled, §4). When the shim lands, set the BOM pin to whatever claude-mpm
-  version DOC-10's isolation test installs and validates, and bump it in lockstep
-  with shim updates.
+- **Pinned version — pin at implementation; the orchestrator installs the
+  BOM-pinned version, NOT latest.** DOC-2's worked example uses the placeholder
+  `version = "0.0.0"`; the design keeps a placeholder for the manifest orchestrator
+  entry. The **concrete version is pinned when the shim is built and tested against
+  a specific claude-mpm release** (the shim's parsing is version-coupled, §4). When
+  the shim lands, set the BOM pin to whatever claude-mpm version DOC-10's isolation
+  test installs and validates.
+
+  Because the shim's output-parsing is **version-coupled** (§4/§4.1), the installed
+  claude-mpm MUST match the version the shim was tested against **exactly** — just
+  like every cargo member installs its BOM `version`, the orchestrator installs the
+  **BOM-pinned** claude-mpm version, not whatever floats to latest. The BOM pin and
+  the shim move in **lockstep**: when the shim is updated for a newer claude-mpm,
+  DOC-10 re-captures and the pin advances together with it. Installing **latest** is
+  an opt-in `--latest` move that **marks the stack drifted** (the M2/M11 drift
+  framing — "current" only as of the tested tuple), not the default install path.
+  This reconciles DOC-8 §1.4 + Resolved-Decision-2, which previously framed install
+  as unpinned/latest: the default is the BOM pin (owned here in §5); `--latest` is
+  opt-in drift.
 
 - **Authoritative `CHANGELOG.md` URL —**
   `https://raw.githubusercontent.com/bobmatnyc/claude-mpm/main/CHANGELOG.md`. This
@@ -600,19 +691,28 @@ Source-first re-audit, 2026-06-08 (clap command enums + axum health handlers +
 
 **Implementation-time (remaining):**
 
-- [ ] *(implementation-time)* Build `trusty_common::contract` + Dispatcher (envelope
-      + data structs + enums + `ContractTool` trait + `redact_value`), and hoist the
-      canonical `id_from_path` + `detect_project` into `trusty_common` (Q9). Bump
-      `trusty-common`.
-- [ ] *(implementation-time)* Per-tool retrofits, in order: trusty-search (incl.
-      reconciling `detect.rs`/`fs_discovery.rs` onto the hoisted helpers and the
-      `config` default-verb split) → trusty-memory & trusty-analyze → trusty-review.
-- [ ] *(implementation-time)* Build the claude-mpm shim in
+The honest, enumerated work-breakdown is §3.1 (7 discrete work-items, each its own
+worktree/PR). The implementation checklist below maps onto it:
+
+- [ ] *(implementation-time, §3.1 item 1)* Build `trusty_common::contract` + Dispatcher
+      (envelope + data structs + enums + `ContractTool` trait + `redact_value` + the
+      **C3 golden-snapshot conformance test**), and hoist the canonical `id_from_path`
+      + `detect_project` into `trusty_common` (Q9). Bump `trusty-common`.
+- [ ] *(implementation-time, §3.1 items 2–5)* Per-tool retrofits, in order: trusty-search
+      (incl. reconciling `detect.rs`/`fs_discovery.rs` onto the hoisted helpers, the M4
+      `config`→`tune` split, and the net-new C5 `restart` verb) → trusty-memory &
+      trusty-analyze → trusty-review (the laggard). Each daemon gains the net-new
+      `restart` verb (C5).
+- [ ] *(implementation-time, §3.1 item 6)* Build the claude-mpm shim in
       `trusty_common::contract::orchestrator`; pin the concrete claude-mpm version it
-      is tested against (§5) and wire `uv tool install`/`upgrade` into the install
-      path.
+      is tested against (§5 — **BOM-pinned, not latest**) and wire `uv tool install`/
+      `upgrade` into the install path. Add the loud-degrade runtime rule (§4.1).
+- [ ] *(implementation-time, §3.1 item 7 — design deferred to M15)* The **stateful
+      project-identity migration** (re-key existing index/palace state) is counted in
+      the work-breakdown but **designed under DOC-11 M15**, not here.
 - [ ] *(DOC-10-owned)* Wire `--self-check` into the isolation harness as the
-      conformance acceptance gate.
+      conformance acceptance gate; add the claude-mpm shim captured-output
+      contract-test (§4.1, DOC-10 §6/§2.2).
 
 ## Resolved Decisions
 

@@ -405,6 +405,27 @@ Cross-repo caveat: claude-mpm is an external repo (DOC-6 §4). **If the owner wa
 specific claude-mpm version chosen up front** (rather than "whatever `uv` resolves
 the first time the harness runs"), that is an owner decision — see Open Question 3.
 
+#### 6.1 Shim captured-output contract-test (drift fails loudly)
+
+The version pin above protects the *installed bits*; this test protects the *shim's
+parsing* against the **input** it consumes. The DOC-6 shim parses claude-mpm's
+**human** `mpm-doctor` / version / liveness **text** (not JSON) into the contract
+envelope (DOC-6 §4 — the most fragile coupling point, §4.1). So the harness commits a
+**golden fixture of the pinned claude-mpm version's raw `mpm-doctor`/version/liveness
+output** and asserts the shim against it: feed the captured text in, assert the
+synthesized envelope matches. This sits **alongside the existing C3/M2 captured-`--json`
+conformance fixtures** of §2.2 — those gate the shim's *output* shape against the
+golden schema; this gates the shim's *input* parsing against a frozen sample of what
+claude-mpm actually printed at the pinned version.
+
+The payoff is **loud failure on drift**: if a claude-mpm CLI-format change shifts the
+`mpm-doctor`/version/liveness text, the captured-output test **fails in CI** rather
+than the shim **silently misparsing at runtime** and misclassifying orchestrator
+health. Re-capture the fixture whenever the pin advances (lockstep with the shim
+update, DOC-6 §5). This is the install-time half of the M3 mitigation; the runtime
+half is the shim's loud-degrade rule (unrecognized output → `degraded` with a clear
+message, never a confident-but-wrong verdict — DOC-6 §4.1).
+
 ### 6b. CI integration vs maintainer-run
 
 The harness must serve **both** the maintainer (MUC1, run-on-demand in a VM) and

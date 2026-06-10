@@ -157,8 +157,13 @@ way it does for cargo (§5).
 The orchestrator's *contract surface* is synthesized by the DOC-6 shim
 (`trusty_common::contract::orchestrator`), so step-5 verification of claude-mpm
 routes through the shim (`doctor`/`health`/`version` only — its advertised `verbs[]`).
-DOC-8 performs an unpinned `uv tool install claude-mpm` and verifies via the shim;
-the concrete pinned version is owned by DOC-6/DOC-10. (Resolved Decision 2: locked for v1.)
+DOC-8 installs the **BOM-pinned** claude-mpm version (`uv tool install
+claude-mpm==<pin>`) and verifies via the shim. The pin is **owned by DOC-6 §5** (and
+frozen by DOC-10 §6): because the shim's output-parsing is **version-coupled** (DOC-6
+§4/§4.1), the installed claude-mpm must match the version the shim was tested against
+— exactly like every cargo member installs its BOM `version`. Installing **latest**
+is an opt-in `--latest` move that **marks the stack drifted** (the M2/M11 drift
+framing), not the default. (Resolved Decision 2: locked for v1.)
 
 #### 1.5 Idempotency (DOC-3 §4: install runs once)
 
@@ -630,12 +635,17 @@ Source-first audit, 2026-06-08 (trusty-search MCP search + Read against the tree
    service-install is included in step 4 of the UUC2 flow (§1.1), restarted last
    in any stack restart to maintain DOC-7 UI continuity (DOC-5 §7).** Locked for v1.
 
-2. **claude-mpm pinned version for install/verify — unpinned in DOC-8 (§1.4).** (Owner-approved)
-   DOC-8 install treats the orchestrator as "install latest via `uv tool install
-   claude-mpm`, then verify via the shim" in v1. The concrete pinned version is
-   owned by DOC-6/DOC-10, not DOC-8. When DOC-10 pins a tested release, that
-   version flows into the manifest's `version` field; DOC-8 does not carry a separate
-   pin. Locked for v1.
+2. **claude-mpm pinned version for install/verify — install the BOM-pinned version (§1.4).** (Owner-approved)
+   DOC-8 installs the orchestrator at the **BOM-pinned** claude-mpm version (`uv tool
+   install claude-mpm==<pin>`), then verifies via the shim, in v1 — **not** "install
+   latest." This is the M3 reconciliation: because the shim's output-parsing is
+   **version-coupled** (DOC-6 §4/§4.1), install and shim move in **lockstep**, so the
+   orchestrator installs a known-tested version exactly like every cargo member
+   installs its BOM `version`. The concrete pin is **owned by DOC-6/DOC-10**, not
+   DOC-8 — DOC-8 does not carry a separate pin; the version flows into the manifest's
+   `version` field once DOC-10 freezes a tested release. Installing **latest** is an
+   opt-in `--latest` move that **marks the stack drifted** (M2/M11), not the default.
+   Locked for v1.
 
 3. **Default blocking behavior of `tctl ensure` — return at usable-now + `--wait` opt-in (§3.3).** (Owner-approved)
    Interactive `tctl ensure` (TTY) returns at *usable-now* (project configured +
