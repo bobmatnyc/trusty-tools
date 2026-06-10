@@ -32,7 +32,7 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 | C4 | CRITICAL | DOC-4 dependency de-duplication needs root-cause inference the controller can't do generically | DOC-4 §5.4/§2.3/§8.2 | — | ✅ Resolved |
 | C5 | CRITICAL | DOC-9 "new versions take effect via connection-safe restart" assumes a `restart` verb DOC-6 says is net-new on every tool | DOC-9 §5.1, DOC-6 §2.1–2.4 | — | ✅ Resolved |
 | M1 | MAJOR | "Zero tool-specific logic" is oversold (relocated, not eliminated) | spec §83; DOC-2 §6, DOC-5 §1/§2.2, DOC-6 §4, DOC-3 §7, DOC-7 | — | 🔴 Open |
-| M2 | MAJOR | `stack_version` tuple will rot (no test owner, no CI gate, embedded in the binary) | DOC-2 §4, Resolved-Q5 | — | 🔴 Open |
+| M2 | MAJOR | `stack_version` tuple will rot (no test owner, no CI gate, embedded in the binary) | DOC-2 §4, Resolved-Q5 | — | ✅ Resolved |
 | M3 | MAJOR | Cross-repo claude-mpm dependency is load-bearing in 4 places but never assessed as one systemic risk | DOC-6 §4, DOC-8 §4/§5, DOC-9 §3.4, DOC-10 §6 | — | 🔴 Open |
 | M4 | MAJOR | `config` verb is a breaking CLI change + a hole in the read-only guarantee | DOC-1 `config.data`, DOC-5 §1.2, DOC-6 §2.6, DOC-3 Q3 | ✅ code-verified | ✅ Resolved |
 | M5 | MAJOR | clap `external_subcommand` passthrough collides with first-class subcommands + controller-as-member recursion | DOC-5 §6/§1.1 | — | 🔴 Open |
@@ -41,7 +41,7 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 | M8 | MAJOR | Status-enum reconciliation is ambiguous | DOC-1 D4, DOC-4 §1.1/§4, DOC-3 §9 | — | ✅ Resolved |
 | M9 | MAJOR | D8 secret redaction is unenforceable | DOC-1 D8, DOC-6 conformance clause 5 | — | 🔴 Open |
 | M10 | MAJOR | Timeouts (2s health / 10s doctor) false-fail cold / model-loading daemons | DOC-4 §1.3, Resolved-Q1 | — | ✅ Resolved |
-| M11 | MAJOR | `state.toml` stack-version tracking can silently desync; UI shows stale "clean" | DOC-9 §4.4, Resolved-Q3, DOC-7 §2.1 | — | 🔴 Open |
+| M11 | MAJOR | `state.toml` stack-version tracking can silently desync; UI shows stale "clean" | DOC-9 §4.4, Resolved-Q3, DOC-7 §2.1 | — | ✅ Resolved |
 | M12 | MAJOR | No auto-rollback + non-transactional installs can wedge a partial tuple | DOC-9 §6/§3.6, Resolved-Q5 | — | 🔴 Open |
 | M13 | MAJOR | Self-upgrade abandons in-flight UI op state | DOC-9 §8, DOC-7 §8/§3.2 | — | 🔴 Open |
 | M14 | MAJOR | CI tests the wrong paths for the primary target | DOC-10 §4.1/§6b, DOC-8 §6, Resolved-Decision-5/6 | — | 🔴 Open |
@@ -148,9 +148,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** no mechanism/owner/CI to materialize-and-test a candidate tuple; per-#343 independent versioning staleness; the BOM is compiled into `tctl` so new pins require a controller release.
 - **Failure mode:** "keep current with minimal effort" silently degrades to "current as of last tctl release."
 - **Fix direction:** a stack-integration CI matrix that tests candidate tuples; consider decoupling the BOM from the binary (the deferred remote channel).
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** Option A (cluster) — anchor "tested tuple" to a green DOC-10 acceptance run against that exact pin set (the harness already IS the end-to-end tuple test, so no separate stack-integration matrix is net-new). Name the owner/cadence as a scheduled + `workflow_dispatch` CI job that materializes a candidate tuple (latest-published per crate, or a curated set), runs the harness, and on green promotes a new `stack_version`. Acknowledge the BOM-in-binary staleness explicitly ("current" = as of the last `tctl` release); the system-override `manifest.toml` is the interim pin; the **remote BOM channel stays deferred for v1** (DOC-2 §8) but is named as the eventual decoupling so a freshly-tested tuple can ship without a `tctl` rebuild; "no tested tuple yet for the newest crates" is surfaced as **drift, not failure**. Remote-channel-now (Option B) **rejected** for v1 — a hosted fetch plus its trust/signature surface is exactly the DOC-2 §8 deferral.
+- **Follow-up:** DOC-2 §4 (new "How a tested tuple is materialized (owner + gate)" subsection — harness as the tested-tuple gate, scheduled + `workflow_dispatch` owner/cadence, BOM-staleness + interim system-override + deferred remote-channel framing). DOC-10 §6b (new table row: harness as the stack-tuple promotion gate on a scheduled + `workflow_dispatch` cadence). Adjacency noted with [M14](#m14--ci-tests-the-wrong-paths-for-the-primary-target) (CI path coverage). Implementation follow-up: the candidate-tuple CI job + promotion flow.
 
 ### M3 — Cross-repo claude-mpm dependency is load-bearing in 4 places but never assessed as one systemic risk
 
@@ -256,9 +256,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** crash mid-upgrade, no locking (UI polls every 10s while CLI upgrades), lazy reconcile only on `tctl status`.
 - **Failure mode:** UI shows "on 2026.07-1 ✓" while two members are still old.
 - **Fix direction:** derive displayed version live from `version --json` (state.toml = cache only); write atomically + advisory-locked.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** Option A (cluster) — make the cache-only + live-reconcile design **normative and universal**: the clean/drift verdict is ALWAYS derived live (compare each member's `version --json` against the labeled tuple's pins), never from the persisted label, on **all surfaces** (the CLI *and* the DOC-7 UI). `state.toml` is a label cache only; writes are **atomic (temp-file + rename) + advisory-locked** so a UI poll mid-upgrade never reads a torn label and concurrent writers cannot corrupt it; an **in-progress/partial marker** is written during an upgrade so a crash mid-upgrade cannot leave a falsely-"clean" cached label. The `tctl version --json` / `tctl stack health --json` payloads carry the live-reconciled drift verdict the UI renders.
+- **Follow-up:** DOC-9 §4.4 + Resolved-Decision-3 (normative live-derivation across all surfaces, atomic + advisory-locked `state.toml` writes, in-progress/partial marker). DOC-7 §2.1 (the dashboard renders the live-reconciled `stack_version` verdict from `version --json` / `stack health --json`, never the raw persisted label). Adjacency noted with [M12](#m12--no-auto-rollback--non-transactional-installs-can-wedge-a-partial-tuple) (partial-tuple as a first-class outcome). Implementation follow-up: atomic + advisory-locked `state.toml` writes + in-progress marker + live-reconcile in the version/health payloads.
 
 ### M12 — No auto-rollback + non-transactional installs can wedge a partial tuple
 

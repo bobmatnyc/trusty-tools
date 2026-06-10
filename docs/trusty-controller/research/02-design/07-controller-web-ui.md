@@ -97,6 +97,15 @@ and an upgrade chip when an update is available.
   to colour but never re-derives them. The de-duplicated dependency clusters
   (DOC-4 §5.4 `clusters[]`) drive a "root cause" callout so the UI shows one root
   failure + N annotated dependents, never N+1 scary failures.
+- **Rendering rule (stack-version verdict):** the active `stack_version` and its
+  clean/drift verdict the dashboard displays are the **live-reconciled** ones
+  carried in `tctl version --json` / `tctl stack health --json` — which compare
+  each member's live `version --json` against the pinned tuple (DOC-9 §4.4) —
+  **never the raw persisted `state.toml` label**. So the dashboard renders a
+  clean-tuple banner only when the live members actually match the labeled tuple,
+  and shows drift / partial otherwise; it can never display a stale "✓ clean"
+  during or after a drifted or mid-upgrade state (the in-progress marker and
+  live derivation, DOC-9 §4.4, make this guarantee hold).
 
 #### 2.2 (b) Per-tool detail
 

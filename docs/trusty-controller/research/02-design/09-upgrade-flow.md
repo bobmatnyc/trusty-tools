@@ -435,9 +435,7 @@ active, so `tctl status` / `tctl version` / DOC-7 can report "you are on
 - **Clean tuple move** → record the target `stack_version` (e.g. `2026.07-1`) in
   controller state (the system-scope state dir,
   `~/.config/trusty-controller/` per DOC-2 §2 location helpers). (owner-approved)
-  Persist the last successfully applied `stack_version` to a small `state.toml`,
-  and reconcile against live installed versions on `tctl status` so a manual
-  `cargo install` of one member surfaces as drift.
+  Persist the last successfully applied `stack_version` to a small `state.toml`.
 - **`--latest` / partial move** → record a drift marker
   (`2026.06-1+latest` / `2026.06-1 (partial)`), never a clean label, so the user
   always knows whether they are on a tested tuple (§7).
@@ -446,6 +444,31 @@ The per-crate version pins themselves are *not* stored by the controller — the
 are read live from each binary (DOC-2 §6: the manifest says what *should* be
 installed; `version --json` says what *is*). Only the human-facing
 `stack_version` label is persisted.
+
+**The clean/drift verdict is always derived live — `state.toml` is a label
+cache, never the verdict.** This rule is **normative and universal**: every
+surface (the CLI *and* the DOC-7 UI) derives clean-vs-drift by comparing each
+member's live `version --json` against the labeled tuple's BOM pins, and never
+by trusting the persisted label. `state.toml` caches the human-facing
+`stack_version` string only — it is a *hint* of the last-applied label, surfaced
+verbatim, but never the source of the verdict. So a manual `cargo install` of one
+member (or any divergence from the pinned tuple) surfaces as drift on the *next*
+read regardless of what the cached label says. The
+`tctl version --json` / `tctl stack health --json` payloads carry this
+live-reconciled drift verdict, which is exactly what DOC-7 §2.1 renders.
+
+To keep the cached label honest and concurrency-safe:
+
+- **Atomic + advisory-locked writes.** `state.toml` is written via temp-file +
+  rename (atomic) under an advisory lock, so a DOC-7 UI poll (every ~10 s, §8)
+  that lands mid-upgrade never reads a torn / half-written label and two
+  concurrent writers cannot corrupt it.
+- **In-progress / partial marker during an upgrade.** While an upgrade is
+  running the controller writes a partial/in-progress marker, so even the cached
+  label cannot read falsely "clean" after a crash mid-upgrade. (The live
+  reconcile above would catch the drift anyway — the marker makes the *cached*
+  value honest too, rather than leaving a stale "clean" string behind a dead
+  process.)
 
 ### 5. "New versions take effect" (the explicit UUC3 requirement)
 
@@ -794,10 +817,19 @@ upgrade, the changelog format) is **strongly reusable** and already in the tree.
 
 3. **Persisting the active stack version (§4.4).** (owner-approved) Persist the
    last successfully applied `stack_version` to a small system-scope `state.toml`
-   (`~/.config/trusty-controller/`), and reconcile it against live installed
-   versions on `tctl status` so a manual `cargo install` of one member surfaces
-   as drift; record `--latest`/partial moves as a drift marker rather than a
-   clean label.
+   (`~/.config/trusty-controller/`) **as a label cache only** — record
+   `--latest`/partial moves as a drift marker rather than a clean label. The
+   clean/drift verdict is **always derived live and universally**: every surface
+   (the CLI *and* the DOC-7 UI) compares each member's live `version --json`
+   against the labeled tuple's pins and **never trusts the persisted label**, so
+   a manual `cargo install` of one member surfaces as drift on the next read
+   regardless of the cached string. `state.toml` writes are **atomic (temp-file +
+   rename) and advisory-locked** so a UI poll mid-upgrade never reads a torn
+   label and concurrent writers cannot corrupt it; an **in-progress/partial
+   marker** is written during an upgrade so a crash mid-upgrade cannot leave a
+   falsely-"clean" cached label. The live-reconciled verdict rides in the
+   `tctl version --json` / `tctl stack health --json` payloads that DOC-7 §2.1
+   renders.
 
 4. **Downgrade handling (§4.3).** (owner-approved) When an installed member is
    **newer** than the target (installed > target), `tctl upgrade` **refuses to

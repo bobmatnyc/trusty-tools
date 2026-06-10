@@ -289,6 +289,31 @@ without taking it away:
     `2026.06-1`; `2026.07-1` is available") even though the underlying crates
     moved independently.
 
+- **How a tested tuple is materialized (owner + gate):** the unifying principle
+  is that per-crate versions (read live from each member's `version --json`) are
+  the source of truth; the `stack_version` label is a *derived artifact* — a
+  *tested snapshot* of those independent versions. So a candidate `stack_version`
+  is *tested* precisely when **a DOC-10 acceptance run passes against that exact
+  pin set** — the isolation harness's §2 oracle already IS the end-to-end tuple
+  test, so green = promotable to a released BOM (no net-new test mechanism is
+  needed).
+  - *Owner / cadence:* a CI job — scheduled plus on-demand `workflow_dispatch` —
+    materializes a candidate tuple (e.g. the latest published version per crate,
+    or a hand-curated set), runs the harness against it, and on green proposes /
+    promotes a new `stack_version` (cross-ref [DOC-10](./10-isolation-testing-harness.md)
+    §6b, which already carries the scheduled + `workflow_dispatch` legs). This is
+    the owner/mechanism the "cut later, when the combination is tested" language
+    above refers to.
+  - *BOM-in-binary staleness (explicit):* the embedded default BOM updates only
+    on a `tctl` release, so "current" means *current as of the last `tctl`
+    release*. The system-override `manifest.toml` is the interim pin a user drops
+    to move ahead of the embedded default. A **remote BOM channel remains deferred
+    for v1** (§8) but is named here as the eventual decoupling — so a freshly-tested
+    tuple can ship without a `tctl` rebuild.
+  - *Drift, not failure:* "no tested tuple yet exists for the newest crate
+    versions" is a normal, surfaced **drift** state (the live `version --json`
+    set runs ahead of the pinned BOM, per DOC-9 §4.4), not a failure.
+
 ### 5. Structured changelog format
 
 The spec requires **"changelog headlines for each tool between current and newest
