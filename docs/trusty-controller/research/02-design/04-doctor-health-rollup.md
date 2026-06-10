@@ -146,7 +146,7 @@ see the both-envelopes fold rule below.
 | Stack verdict | Meaning | Sources that map here |
 |---|---|---|
 | **`ready`** | Everything the stack needs is present, healthy, and version-ok. | doctor `ok`; health `running` |
-| **`degraded`** | Usable but impaired — a warning, a non-fatal dependency problem, or an older-but-acceptable contract. The stack works; something wants attention. | doctor `warn`; health `degraded`; older-but-≥-floor `contract_version`; a *required dep* unreachable that the owning tool already surfaced as `degraded` |
+| **`degraded`** | Usable but impaired — a warning, a non-fatal dependency problem, or an older-but-acceptable contract. The stack works; something wants attention. | doctor `warn`; health `degraded`; older-but-≥-floor `contract_version`; a *required dep* unreachable that the owning tool already surfaced as `degraded`; a `pending` check stalled past the staleness budget (§5.5) |
 | **`pending`** | Setup in progress / not-yet-done **but not broken** — the DOC-3 "unindexed = system-ready, project-pending, NOT broken" state. Only ever arises from **project-scope** signals. | doctor `pending` (project scope) |
 | **`down`** | Broken — a system check failed or a daemon is not answering. The stack (for the affected member) is unusable. | doctor `fail`; health `down`; below-floor / contract-incompatible member (renders with `reason: "contract_incompatible"` + upgrade remediation) |
 
@@ -531,6 +531,27 @@ direct-edge collapse already produces correct clusters today. This transitive
 specification is therefore primarily a **correctness-of-claim** fix (the prior
 rule was presented as generic but silently assumed transitive walking) plus
 **future-proofing and multi-root coverage** — not a v1 bug fix.
+
+#### 5.5 Stalled `pending` → time-escalated to `degraded`
+
+`pending` is tool-self-reported and never worsens the rollup (§2.0/§2.1), so a
+crash-looping or stalled indexer could otherwise report `pending` forever while
+the stack stays green-ish. To bound this **without** inspecting any index
+internals (the controller cannot — freshness stays tool-reported, DOC-3 Q5), the
+rollup escalates **purely by elapsed time**:
+
+- A `pending` doctor check carries an optional `pending_since` timestamp (DOC-1
+  `doctor.data`). When the controller holds a `pending` check whose
+  `pending_since` is older than a **bounded staleness budget**, it escalates that
+  check's contribution to **`degraded`** (a stalled-pending verdict), so a
+  stalled indexer eventually rolls up as `degraded`, not perpetually `pending`.
+- The escalation is **elapsed-time-based only** — it compares `pending_since`
+  against the budget and never looks inside the index, preserving the zero-
+  tool-specific-logic property. The optional `progress_pct` is advisory display
+  only and never drives the escalation.
+- If a check omits `pending_since`, the controller **cannot** time-escalate it
+  and it stays `pending` (degrades to current behavior — no regression for tools
+  that do not yet emit the timestamp).
 
 ### 6. Remediation surfacing
 

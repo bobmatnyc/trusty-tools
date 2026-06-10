@@ -47,9 +47,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 | M14 | MAJOR | CI tests the wrong paths for the primary target | DOC-10 §4.1/§6b, DOC-8 §6, Resolved-Decision-5/6 | — | ✅ Resolved |
 | M15 | MAJOR | Project-identity migration orphans existing index/palace state | DOC-6 §7, DOC-3 §8, ADR-0008 | — | ✅ Resolved |
 | m1 | MINOR | Aggregate exit code undefined for fan-out `stack doctor` | DOC-1 D5, DOC-4 | — | ✅ Resolved |
-| m2 | MINOR | `pending` is gameable (no stall detection) | DOC-3 §2, DOC-1 `doctor.data`, Resolved-Q5 | — | 🔴 Open |
+| m2 | MINOR | `pending` is gameable (no stall detection) | DOC-3 §2, DOC-1 `doctor.data`, Resolved-Q5 | — | ✅ Resolved |
 | m3 | MINOR | Project-scope `fail`/`down` exits 0, masking a real local outage | DOC-4 §2.2/§7, Resolved-Q3 | — | ✅ Resolved |
-| m4 | MINOR | `scope` vs config-provenance `scope` overload is leaky + stringly-typed | DOC-1 D7 + `config.data` (`ConfigSource.scope: String`) | — | 🔴 Open |
+| m4 | MINOR | `scope` vs config-provenance `scope` overload is leaky + stringly-typed | DOC-1 D7 + `config.data` (`ConfigSource.scope: String`) | — | ✅ Resolved |
 | m5 | MINOR | `enabled=false` vs the "no uninstall" non-goal is undefined for the ensure pass | DOC-2 (`enabled`), DOC-3 §4, spec §62 | — | 🔴 Open |
 | m6 | MINOR | UUC2's truly-vanilla user can't reach the first `tctl` invocation | DOC-8 §5, DOC-10 §3.3 | — | 🔴 Open |
 | m7 | MINOR | Controller is `kind=cli` in the manifest yet is a launchd-supervised daemon | DOC-2 (manifest example), DOC-7 §8, DOC-8 §1.1, DOC-5 §7, DOC-9 §5.2 | — | 🔴 Open |
@@ -332,9 +332,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** freshness is tool-self-reported and `pending` never worsens the rollup; a crash-looping indexer can report `pending` forever.
 - **Failure mode:** "usable now, ready in ~Ns" becomes permanently pending while doctor stays green-ish.
 - **Fix direction:** require `pending` to carry `pending_since`/`progress_pct`; controller escalates a long-stalled `pending` to `warn` by elapsed time (without inspecting the index).
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** a `pending` doctor check carries an optional `pending_since` (an ISO-8601/epoch timestamp of when the pending state began) plus an optional advisory `progress_pct` (`0`–`100`, display only). The controller (DOC-4) escalates a `pending` whose `pending_since` is older than a **bounded elapsed-time staleness budget** to `degraded`, **purely time-based** with no index introspection (freshness stays tool-reported, DOC-3 Q5) — so a crash-looping or stalled indexer is no longer perpetually green-ish but rolls up as `degraded` (stalled). `progress_pct` is advisory and never drives the verdict. If a check omits `pending_since`, the controller cannot time-escalate it and it stays `pending` (degrades to current behavior — no regression).
+- **Follow-up:** DOC-1 `doctor.data` (optional `pending_since`/`progress_pct` on the check schema, JSON block, field notes, worked example, and the `DoctorCheck` sketch). DOC-4 §5.5 (new "Stalled `pending` → time-escalated to `degraded`" subsection — elapsed-time-only escalation, no introspection, absent-`pending_since` fallback) + §2.0 verdict table (stalled-`pending` listed as a `degraded` source). Implementation follow-up: tools emit `pending_since`; the controller time-escalates stalled `pending` against the staleness budget.
 
 ### m3 — Project-scope `fail`/`down` exits 0, masking a real local outage
 

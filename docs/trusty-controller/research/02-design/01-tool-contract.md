@@ -152,7 +152,10 @@ via its own adapter — see DOC-6.)
 `--scope project|system|all` on verbs; default `all` in a project directory,
 else `system`. Each `doctor`/`health` check carries its own `scope` field. DOC-1
 owns the **wire format**; DOC-3 owns the **behavioral model** (bidirectional
-edge).
+edge). The config-provenance axis (*where a config value originated*) is the
+**separate `origin` field** on `config.data` `sources[]` (enum
+`{env|project|system}`), **not** `scope` — so `scope` is unambiguously the single
+D7 wire axis `{project|system|all}` everywhere it appears.
 
 ### D8 — Security / secret redaction (A8)
 
@@ -226,7 +229,9 @@ respect D8 redaction (`***redacted***`).
       "scope": "system",                 // "project" | "system"  (per-check; D7)
       "status": "ok",                    // "ok" | "warn" | "fail" | "pending" | "skipped"
       "detail": "Daemon running at 127.0.0.1:7879 (v0.12.3)",  // human detail; redacted
-      "remediation": "Run `trusty-search start`."              // optional fix hint; null when none / status ok
+      "remediation": "Run `trusty-search start`.",             // optional fix hint; null when none / status ok
+      "pending_since": "2026-06-10T14:03:21Z", // ? ISO-8601 (or epoch) when this pending state began; present only when status == "pending"
+      "progress_pct": 42                 // ? optional 0–100 advisory progress; display only, never drives a verdict
     }
   ],
   "summary": {                           // aggregate counts over checks[]
@@ -239,6 +244,15 @@ respect D8 redaction (`***redacted***`).
 - `pending` carries the spec's *"unindexed = system-ready, project-pending, NOT
   broken"* semantic (D4): a project-scope check that cannot run yet but is not a
   failure. `skipped` = deliberately not run (e.g. platform N/A).
+- `pending_since` is an **optional** ISO-8601 (or epoch) timestamp recording when
+  the `pending` state began; tools SHOULD emit it whenever `status == "pending"`.
+  It is the sole input the controller (DOC-4) uses to **time-escalate a stalled
+  `pending` to `degraded`** purely by elapsed time, without ever inspecting the
+  index internals (it cannot — freshness stays tool-reported). If a tool omits
+  `pending_since`, the controller cannot time-escalate and the check stays
+  `pending` (current behavior). See DOC-4 §5.5.
+- `progress_pct` is an **optional** advisory `0`–`100` value for display only; it
+  never drives a verdict or the time-escalation.
 - Envelope `status` rollup: any `fail` → `fail`; else any `warn` → `warn`; else
   `ok`. (`pending`/`skipped` never worsen the rollup.) This rollup rule is the
   per-tool input DOC-4 consumes for the stack-wide rollup.
@@ -268,7 +282,8 @@ respect D8 redaction (`***redacted***`).
         "remediation": "Run `trusty-search doctor --fix` to install newsyslog rotation." },
       { "id": "project_index", "title": "Project index present", "scope": "project",
         "status": "pending", "detail": "No index registered for this project yet (system is ready).",
-        "remediation": "Run `trusty-search index` in the project root." }
+        "remediation": "Run `trusty-search index` in the project root.",
+        "pending_since": "2026-06-10T14:03:21Z", "progress_pct": 42 }
     ],
     "summary": { "ok": 4, "warn": 1, "fail": 0, "pending": 1, "skipped": 0, "total": 6 }
   },
@@ -457,9 +472,9 @@ construction (cross-ref DOC-6 §2.6, DOC-5 §2/§3).
     "port": 7879
   },
   "sources": [                           // ? provenance, lowest→highest precedence; values redacted too
-    { "scope": "system",  "path": "~/.config/trusty-search/config.yaml", "keys": ["memory_limit_mb", "embedder"] },
-    { "scope": "project", "path": "./trusty-search.yaml",               "keys": ["port"] },
-    { "scope": "env",     "path": null, "keys": ["openrouter_api_key"] }
+    { "origin": "system",  "path": "~/.config/trusty-search/config.yaml", "keys": ["memory_limit_mb", "embedder"] },
+    { "origin": "project", "path": "./trusty-search.yaml",               "keys": ["port"] },
+    { "origin": "env",     "path": null, "keys": ["openrouter_api_key"] } // origin enum: env | project | system (NOT the D7 scope axis)
   ],
   "redacted_keys": ["openrouter_api_key"] // ? convenience list of which keys were masked
 }
@@ -467,16 +482,18 @@ construction (cross-ref DOC-6 §2.6, DOC-5 §2/§3).
 
 - The precedence model that produces `effective` is the tool's own; DOC-1 only
   fixes the *shape*.
-- **Two distinct scope vocabularies (keep these separate).** The `--scope` flag
-  and every per-check `scope` field use the **D7 wire vocabulary
-  `{project|system|all}`** — *which layer a verb or check addresses*. The
-  config-provenance `sources[].scope` field is a **separate, related
-  sub-vocabulary `{env|project|system}`** — *where a config value originated*
-  (an environment variable vs a project config file vs a system default). These
-  are not the same axis: `all` is meaningful for `--scope` but never appears as a
-  provenance origin, and `env` is a provenance origin but never a `--scope`
-  value. Documenting the distinction explicitly keeps D7's wire format clean —
-  `sources[].scope` is a config-provenance label, not a D7 scope.
+- **One `scope` axis + a separate typed `origin` (keep these distinct).**
+  `scope` = the **D7 wire axis** `{project|system|all}` — *which layer a verb or
+  check addresses* — and it is the **only** field named `scope` anywhere in an
+  envelope (the `--scope` flag, the envelope `scope`, and every per-check
+  `scope`). `origin` = **config provenance** `{env|project|system}` on
+  `config.data` `sources[]` — *where a config value originated* (an environment
+  variable vs a project config file vs a system default). They are distinct axes
+  with distinct value sets: `all` is meaningful for `scope` but never an
+  `origin`, and `env` is an `origin` but never a `scope` value. Giving provenance
+  its own field name **and its own enum** means authors cannot conflate the two,
+  and a typo in `origin` is catchable against its own enum rather than silently
+  accepted as a stringly-typed `scope`.
 
 **Worked example:**
 
@@ -496,9 +513,9 @@ construction (cross-ref DOC-6 §2.6, DOC-5 §2/§3).
       "port": 7879
     },
     "sources": [
-      { "scope": "system",  "path": "~/.config/trusty-search/config.yaml", "keys": ["memory_limit_mb", "embedder"] },
-      { "scope": "project", "path": "./trusty-search.yaml",               "keys": ["port"] },
-      { "scope": "env",     "path": null,                                  "keys": ["openrouter_api_key"] }
+      { "origin": "system",  "path": "~/.config/trusty-search/config.yaml", "keys": ["memory_limit_mb", "embedder"] },
+      { "origin": "project", "path": "./trusty-search.yaml",               "keys": ["port"] },
+      { "origin": "env",     "path": null,                                  "keys": ["openrouter_api_key"] }
     ],
     "redacted_keys": ["openrouter_api_key"]
   },
@@ -592,6 +609,13 @@ pub struct DoctorCheck {
     pub detail: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remediation: Option<String>,
+    /// When this `pending` state began (DOC-4 §5.5 time-escalation input);
+    /// present only when `status == Pending`. ISO-8601/RFC-3339 string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_since: Option<String>,
+    /// Advisory 0–100 progress; display only, never drives a verdict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress_pct: Option<u8>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -643,8 +667,14 @@ pub struct LifecycleData {
     #[serde(default)] pub noop: bool,
 }
 
+/// Config provenance (NOT the D7 wire `Scope`): a separate, typed axis so a
+/// bad provenance value is catchable against its own enum, never a stray string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigOrigin { Env, Project, System }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConfigSource { pub scope: String, pub path: Option<String>, pub keys: Vec<String> }
+pub struct ConfigSource { pub origin: ConfigOrigin, pub path: Option<String>, pub keys: Vec<String> }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigData {
@@ -884,7 +914,7 @@ other contract-conformant member.
 - [x] Write the contract-version ADR (charter B2) — [ADR-0007](../../../adr/0007-tool-contract-versioning-and-verb-model.md) (now Accepted)
 - [x] Coordinate `scope` fields with DOC-3 (DOC-3 Accepted; D7 wire vocabulary
       `{project|system|all}` documented as distinct from the config-provenance
-      `sources[].scope` sub-vocabulary `{env|project|system}`)
+      `sources[].origin` axis `{env|project|system}`)
 - [x] Team review → Accepted (owner-approved)
 
 > **Deferred (not design-time):** claude-mpm's concrete `verbs[]` advertisement
