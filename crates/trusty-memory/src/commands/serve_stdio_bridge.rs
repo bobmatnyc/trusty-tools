@@ -137,7 +137,12 @@ pub(crate) async fn ensure_daemon_up_for_stdio() -> Result<String> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map_err(|e| anyhow!("could not spawn `{} serve --foreground --http 127.0.0.1:0`: {e}", exe.display()))?;
+        .map_err(|e| {
+            anyhow!(
+                "could not spawn `{} serve --foreground --http 127.0.0.1:0`: {e}",
+                exe.display()
+            )
+        })?;
     // Poll, re-reading the address file each iteration (dynamic port support).
     let deadline = Instant::now() + DAEMON_START_TIMEOUT;
     loop {
@@ -352,7 +357,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // inject_default_palace
     // -----------------------------------------------------------------------
-
     /// Why: the default palace must be injected when params is a JSON object
     /// with no existing `palace` key.
     /// What: builds a request with object params, injects, asserts `palace`
@@ -418,7 +422,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // value_to_mcp_response
     // -----------------------------------------------------------------------
-
     /// Why: ok/err/malformed/null-id responses must map correctly.
     /// Test: this test.
     #[test]
@@ -444,7 +447,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // is_notification
     // -----------------------------------------------------------------------
-
     /// Why: notifications must be suppressed so the bridge never emits a
     /// response for them — that would corrupt the MCP stdio channel.
     /// Test: this test.
@@ -479,7 +481,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // forward_rpc
     // -----------------------------------------------------------------------
-
     /// Why: `forward_rpc` against a refused port must return `Err`, not hang.
     /// Test: this test.
     #[tokio::test]
