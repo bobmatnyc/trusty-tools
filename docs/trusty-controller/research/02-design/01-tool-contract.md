@@ -134,6 +134,11 @@ silently misdeserializing a changed shape under a stale integer.
 JSON `status` is authoritative; the exit code mirrors it (for scriptable
 `stack doctor` in CI).
 
+The **stack** aggregate exit code (across N members in a fan-out stack
+doctor / stack health) is the **worst member code** under the precedence
+`3 ≻ 1 ≻ 2 ≻ 0` (worst-wins; see DOC-4 §7), where a contract-incompatible member
+contributes `3` — distinct from a runtime `down`, which is `1`.
+
 ### D6 — Contract types home (A6)
 
 A shared **`trusty_common` contract module**: serde structs for the envelope +

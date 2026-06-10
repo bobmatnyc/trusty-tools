@@ -254,7 +254,25 @@ reason the stack verdict is worse than `ready`. A genuine project-scope
 the global verdict, because its blast radius is one repo. The exit code stays
 system-track-driven — a broken index in one checkout is not a machine-level
 stack failure. Surface such failures prominently in the project column and
-in `-v`, but do not fail a CI gate checking system health.
+in `-v`, but do not fail a CI gate checking system health by default.
+
+**A project `fail`/`down` is a real local problem — not the `pending` case.** A
+project-scope `fail`/`down` (e.g. a corrupt index for this repo) is a genuine
+local outage and MUST NOT be folded into the "pending is not broken" framing
+above: `pending` means *setup in progress on a healthy daemon* (positive
+trajectory, normal), whereas a project `fail`/`down` means *this repo's state is
+broken* (negative, actionable). The two are distinct verdicts and the rollup keeps
+them distinct. To stop a real local outage from hiding behind a buried glyph, the
+rollup:
+
+- **Surfaces a louder summary line** for a project `fail`/`down` — a distinct,
+  prominent line in the verdict summary (not merely a cell glyph), naming the
+  member, the project, and the remediation.
+- **Honors an opt-in `--fail-on-project` flag** (§7) that makes a genuine project
+  `fail`/`down` (NOT `pending`) drive a non-zero exit. The default stays exit `0`
+  (system-track-driven — a project problem's blast radius is one repo, so a
+  scripted machine-health gate should not fail on it), but `--fail-on-project`
+  lets a per-repo gate opt into failing on a local outage.
 
 #### 2.3 The three folds (summary)
 
@@ -354,12 +372,20 @@ difference at different scopes** (system liveness vs a project-scope check), **n
 a direction disagreement**: the two probes never rank the *same* signal on opposite
 sides of the lattice.
 
-**Consistency guarantee.** For a given member, `stack health` and `stack doctor`
-must not contradict on the **system** track: if `health` says `down`, `doctor`'s
-system column must also be `down` (a dead daemon fails its system checks).
-DOC-10's harness asserts this (the self-check, DOC-6 §8). The two may legitimately
-*differ in depth* (doctor surfaces `degraded` for a non-fatal warning that
-liveness doesn't probe), but never in direction.
+**Consistency guarantee (scoped to a single collection pass).** The invariant —
+health `down` ⇒ doctor's system column also `down` (a dead daemon fails its system
+checks) — holds **within one collection pass**: a single combined probe that
+gathers both the `health` and `doctor` signals in the same sweep. It is **not** an
+invariant across two separately-timed CLI invocations. Running `stack health` and
+then `stack doctor` as two separate commands probes the stack at two different
+moments with two different timeouts, so a daemon whose state changes **between**
+the two sweeps (e.g. it crashes after `health` answered `running` and before
+`doctor` runs) can legitimately make the two disagree — that is a **race**, not a
+contract violation. DOC-10's harness therefore asserts the invariant over **one
+collection pass** (the combined probe), never by diffing two independent CLI runs.
+Within that single pass the two may still legitimately *differ in depth* (doctor
+surfaces `degraded` for a non-fatal warning that liveness doesn't probe), but never
+in direction.
 
 ### 5. Degenerate / edge states (each has a defined rollup treatment)
 
@@ -553,10 +579,50 @@ project-local distinction.
 | controller/usage error (bad flag, unknown member, manifest unreadable) | **3** | DOC-1 D5 `3` — produced at the controller boundary, not from a verdict |
 
 **The exit code reflects the SYSTEM track**, by the same logic as §2.2: a project
-`pending` (or even a project-scope `fail` per Open Question 3) does not by itself
-make a CI gate fail, because its blast radius is one repo, while a system `down`
-must. This makes `tctl stack doctor` a sound CI gate for "is the *machine's* stack
-healthy" without false-failing on a not-yet-indexed checkout.
+`pending` does not by itself make a CI gate fail, because its blast radius is one
+repo, while a system `down` must. This makes `tctl stack doctor` a sound CI gate
+for "is the *machine's* stack healthy" without false-failing on a not-yet-indexed
+checkout.
+
+**Aggregate exit code across N members (fan-out `stack doctor`/`stack health`).**
+The verdict→code table above maps a single stack verdict; the **aggregate** exit
+code across the N members of a fan-out is the **worst** member code under the
+precedence
+
+```
+3  ≻  1  ≻  2  ≻  0        (worst-wins)
+```
+
+That is: if **any** member is contract-incompatible / below-floor, or the run hits
+a controller/usage problem, the aggregate code is `3`; else if any member is
+`down` (a runtime daemon-down) the code is `1`; else if any member is `degraded`
+the code is `2`; else `0`. A project `pending` stays `0` (per the table above and
+§2.2).
+
+This deliberately promotes a contract/install problem **above** a runtime
+daemon-down so the two are distinguishable from the exit code alone: a
+mis-installed / contract-broken stack exits `3` (an install/contract problem →
+**install**/**upgrade** remediation), whereas a runtime daemon-down exits `1` (→
+**start**/**restart** remediation). The verdict **lattice** for *rendering* is
+unchanged — a contract-incompatible member's cell still renders as `down` (it is
+unusable, per the §5 edge-states table) — but the aggregate **exit code** promotes
+that member's contract/usage problem to `3`. So the rendering verdict and the
+scriptable exit code can legitimately differ for a contract-incompatible member:
+cell `down` for the human, code `3` for the script.
+
+**`--fail-on-project` (opt-in; resolves Open Question 3).** By default a genuine
+project-scope `fail`/`down` (distinct from `pending`) keeps the aggregate exit
+**`0`** — the exit code is system-track-driven, and a broken index in one checkout
+is not a machine-level stack failure (§2.2). The opt-in **`--fail-on-project`**
+flag changes this for per-repo gates: with it set, a genuine project `fail`/`down`
+(NOT `pending`) folds into the aggregate precedence above (contributing `1` for a
+project `down`, `2` for a project `degraded`), so a scripted per-repo gate can fail
+on a local outage. Whether or not the flag is set, a project `fail`/`down` always
+gets a **louder summary line** (§2.2) so it is never hidden behind a buried glyph.
+**Open Question 3 is resolved this way:** default exit `0` (system-track-driven),
+plus the `--fail-on-project` opt-in and the louder project-`fail` summary; a
+project `fail`/`down` is no longer folded into the "pending is not broken"
+framing.
 
 ### 8. Output formats
 

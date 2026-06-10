@@ -46,16 +46,16 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 | M13 | MAJOR | Self-upgrade abandons in-flight UI op state | DOC-9 §8, DOC-7 §8/§3.2 | — | ✅ Resolved |
 | M14 | MAJOR | CI tests the wrong paths for the primary target | DOC-10 §4.1/§6b, DOC-8 §6, Resolved-Decision-5/6 | — | ✅ Resolved |
 | M15 | MAJOR | Project-identity migration orphans existing index/palace state | DOC-6 §7, DOC-3 §8, ADR-0008 | — | ✅ Resolved |
-| m1 | MINOR | Aggregate exit code undefined for fan-out `stack doctor` | DOC-1 D5, DOC-4 | — | 🔴 Open |
+| m1 | MINOR | Aggregate exit code undefined for fan-out `stack doctor` | DOC-1 D5, DOC-4 | — | ✅ Resolved |
 | m2 | MINOR | `pending` is gameable (no stall detection) | DOC-3 §2, DOC-1 `doctor.data`, Resolved-Q5 | — | 🔴 Open |
-| m3 | MINOR | Project-scope `fail`/`down` exits 0, masking a real local outage | DOC-4 §2.2/§7, Resolved-Q3 | — | 🔴 Open |
+| m3 | MINOR | Project-scope `fail`/`down` exits 0, masking a real local outage | DOC-4 §2.2/§7, Resolved-Q3 | — | ✅ Resolved |
 | m4 | MINOR | `scope` vs config-provenance `scope` overload is leaky + stringly-typed | DOC-1 D7 + `config.data` (`ConfigSource.scope: String`) | — | 🔴 Open |
 | m5 | MINOR | `enabled=false` vs the "no uninstall" non-goal is undefined for the ensure pass | DOC-2 (`enabled`), DOC-3 §4, spec §62 | — | 🔴 Open |
 | m6 | MINOR | UUC2's truly-vanilla user can't reach the first `tctl` invocation | DOC-8 §5, DOC-10 §3.3 | — | 🔴 Open |
 | m7 | MINOR | Controller is `kind=cli` in the manifest yet is a launchd-supervised daemon | DOC-2 (manifest example), DOC-7 §8, DOC-8 §1.1, DOC-5 §7, DOC-9 §5.2 | — | 🔴 Open |
 | m8 | MINOR | UI link-out depends on the `port --json` + `/ui` convention (convention-deep, not contract-deep) | DOC-7 §1/§4.1 | — | 🔴 Open |
 | m9 | MINOR | DNS-rebind guard is sound for browsers but a local non-browser process can still bounce the stack | DOC-7 §6, Resolved-Decision-3 | — | 🔴 Open |
-| m10 | MINOR | `stack health`/`stack doctor` consistency guarantee is a cross-probe race | DOC-4 §4 | — | 🔴 Open |
+| m10 | MINOR | `stack health`/`stack doctor` consistency guarantee is a cross-probe race | DOC-4 §4 | — | ✅ Resolved |
 | m11 | MINOR | Effort/scope realism: the "thin coordinator" understates the retrofit | DOC-6 §2–§3/§7 | — | ✅ Resolved |
 
 **Item count:** 5 CRITICAL + 15 MAJOR + 11 MINOR = **31**.
@@ -320,9 +320,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** single-member exit codes defined, but the controller's own aggregate code across N members (mix of 3/1/2/0) isn't.
 - **Failure mode:** CI scripts get inconsistent signals; contract-incompatible (install problem) indistinguishable from fail (runtime).
 - **Fix direction:** define aggregate precedence (e.g. `3 > 1 > 2 > 0`) in DOC-1 D5 / DOC-4.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** define the aggregate exit-code precedence `3 ≻ 1 ≻ 2 ≻ 0` (worst-wins across the N members of a fan-out): any contract-incompatible / below-floor member (or a controller/usage problem) → `3`; else any runtime `down` → `1`; else any `degraded` → `2`; else `0`. Project `pending` stays `0`. This promotes a contract/install problem **above** a runtime daemon-down so the two are distinguishable from the exit code alone — a contract-incompatible member contributes `3` (install/upgrade remediation), distinct from a runtime `down`=`1` (start/restart remediation). The verdict **lattice** for rendering is unchanged (a contract-incompatible member's cell still renders `down`, since it is unusable); only the **exit code** promotes contract/usage problems to `3`.
+- **Follow-up:** DOC-4 §7 (aggregate exit-code precedence subsection added) + DOC-1 D5 (one-line note that the stack aggregate exit code is the worst member code by `3 ≻ 1 ≻ 2 ≻ 0`, where a contract-incompatible member contributes `3`, distinct from runtime `down`=`1`). Implementation follow-up: the controller computes the fan-out exit code by this precedence.
 
 ### m2 — `pending` is gameable (no stall detection)
 
@@ -344,9 +344,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** a genuine project `fail` (not `pending`) keeps exit 0 (system-track-driven), same code as a healthy stack.
 - **Failure mode:** a corrupt index in this checkout never blocks a scripted launch; only signal is a buried glyph.
 - **Fix direction:** opt-in `--fail-on-project` or a louder summary; stop folding `fail` into the `pending`-is-not-broken framing.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** keep the **default exit `0`** for a genuine project `fail`/`down` (system-track-driven — a project problem's blast radius is one repo, so a scripted machine-health gate should not fail on it), plus three changes: (1) add an opt-in **`--fail-on-project`** flag that makes a genuine project `fail`/`down` (NOT `pending`) drive a non-zero exit; (2) surface a **louder summary line** for a project `fail`/`down`, distinct from a buried glyph; (3) stop folding a project `fail` into the "pending is not broken" framing — a corrupt-index `fail` is a real local problem, distinct from a not-yet-indexed `pending`. This resolves Open Question 3.
+- **Follow-up:** DOC-4 §2.2 (project-`fail`-vs-`pending` distinction + louder summary + `--fail-on-project` opt-in) + §7 (`--fail-on-project` opt-in folded into the aggregate precedence; Open Question 3 resolved: default exit `0`, opt-in `--fail-on-project`, louder project-`fail` summary). Implementation follow-up: the `--fail-on-project` flag + the louder project-`fail` summary line in the controller renderer.
 
 ### m4 — `scope` vs config-provenance `scope` overload is leaky + stringly-typed
 
@@ -428,9 +428,9 @@ that the follow-up is needed and, once done, that it is `✅ Resolved`).
 - **The flaw:** the two commands run at different times/timeouts; a daemon crashing between sweeps makes them disagree (not a contract violation, a race).
 - **Failure mode:** DOC-10's asserted invariant flakes; readers over-trust health and skip doctor.
 - **Fix direction:** weaken to "within a single combined probe"; harness asserts over one collection.
-- **Status:** 🔴 Open
-- **Decision:** _(owner fills this in)_
-- **Follow-up:** _(doc/ADR edits to make once decided)_
+- **Status:** ✅ Resolved
+- **Decision:** weaken the consistency guarantee to hold **within a single combined probe/collection**. Across two separately-timed invocations (`stack health` then `stack doctor`) a daemon state change between the two sweeps can legitimately make them differ — that is a **race**, not a contract violation. The invariant (health `down` ⇒ doctor's system column `down`) holds within **one collection pass** (a single combined probe that gathers both the health and doctor signals in the same sweep), and DOC-10's harness asserts it over **one collection**, not by diffing two separate CLI runs.
+- **Follow-up:** DOC-4 §4 ("Consistency guarantee" reworded — scoped to a single combined probe/collection; cross-invocation differences framed as a race, not a violation; harness asserts over one collection). Implementation follow-up: the combined-probe collection path + the harness assertion over one pass.
 
 ### m11 — Effort/scope realism: the "thin coordinator" understates the retrofit
 
