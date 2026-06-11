@@ -78,6 +78,9 @@ impl SearchAppState {
                 crate::service::stall_tracker::EmbedderStallTracker::new(),
             ),
             shutdown_tx: Arc::new(shutdown_tx),
+            // PR #1103: in-memory rate-limit gate replacing the sync disk read
+            // that `search_handler` previously did on every warm query.
+            last_queried_write_cache: Arc::new(DashMap::new()),
         }
     }
 

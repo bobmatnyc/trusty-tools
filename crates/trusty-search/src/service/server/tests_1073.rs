@@ -260,7 +260,79 @@ fn colocated_fallback_is_false_when_disk_entry_absent() {
     );
 }
 
-// ── Test 5: cross-index PATCH does not strip manually-added fields ────────────
+// ── Test 5: PATCH preserves LRU timestamps (PR #1103 fix) ────────────────────
+
+/// `PATCH /indexes/:id` must preserve `last_queried_unix` and `last_indexed_unix`
+/// from the on-disk entry so relocation does not silently demote a
+/// heavily-used index to the cold-store tail on the next selective warm-boot.
+///
+/// Why (PR #1103 review finding): the handler set both fields to `None` even
+/// though the comment said "preserve them". Zero-ing the LRU sort key for an
+/// actively-queried index would cause `TRUSTY_WARMBOOT_MAX_INDEXES` to deprioritize
+/// it on the next restart.
+/// What: writes an entry with non-None timestamps to indexes.toml, then verifies
+/// that the `on_disk_last_queried` / `on_disk_last_indexed` reading logic
+/// recovers the correct values.
+/// Test: this test.
+#[test]
+fn relocate_preserves_lru_timestamps() {
+    use crate::service::persistence::{
+        load_index_registry_at, upsert_index_registry_entry_at, PersistedIndex,
+    };
+    use std::path::PathBuf;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let toml_path = tmp.path().join("indexes.toml");
+
+    // Write an entry with known timestamps.
+    let entry = PersistedIndex {
+        id: "lru-relocate-test".to_string(),
+        root_path: PathBuf::from("/projects/lru-relocate-test"),
+        last_queried_unix: Some(1_700_000_000),
+        last_indexed_unix: Some(1_699_000_000),
+        ..PersistedIndex::default()
+    };
+    upsert_index_registry_entry_at(&toml_path, entry).expect("write entry");
+
+    // Simulate the handler's "load once, extract fields" pattern.
+    let on_disk = load_index_registry_at(&toml_path)
+        .ok()
+        .and_then(|entries| entries.into_iter().find(|e| e.id == "lru-relocate-test"));
+
+    let on_disk_last_queried = on_disk.as_ref().and_then(|e| e.last_queried_unix);
+    let on_disk_last_indexed = on_disk.as_ref().and_then(|e| e.last_indexed_unix);
+
+    assert_eq!(
+        on_disk_last_queried,
+        Some(1_700_000_000),
+        "last_queried_unix must be preserved after a PATCH (PR #1103)"
+    );
+    assert_eq!(
+        on_disk_last_indexed,
+        Some(1_699_000_000),
+        "last_indexed_unix must be preserved after a PATCH (PR #1103)"
+    );
+
+    // Also verify None timestamps are handled gracefully.
+    let entry_no_ts = PersistedIndex {
+        id: "lru-no-ts-test".to_string(),
+        root_path: PathBuf::from("/projects/lru-no-ts"),
+        ..PersistedIndex::default()
+    };
+    upsert_index_registry_entry_at(&toml_path, entry_no_ts).expect("write entry-no-ts");
+    let on_disk2 = load_index_registry_at(&toml_path)
+        .ok()
+        .and_then(|entries| entries.into_iter().find(|e| e.id == "lru-no-ts-test"));
+    assert!(
+        on_disk2
+            .as_ref()
+            .and_then(|e| e.last_queried_unix)
+            .is_none(),
+        "None timestamps must remain None after round-trip"
+    );
+}
+
+// ── Test 6: cross-index PATCH does not strip manually-added fields ────────────
 
 /// A PATCH to index A must NOT strip manually-edited fields (e.g.
 /// `exclude_globs`) from index B's on-disk entry.

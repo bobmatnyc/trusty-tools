@@ -119,6 +119,24 @@ impl ColdIndexStore {
         self.entries.is_empty()
     }
 
+    /// Count how many cold entries are in the provided id set.
+    ///
+    /// Why: `global_search_handler` (PR #1103) needs to count cold indexes
+    /// that a restricted fan-out caller requested but that were skipped because
+    /// they are not yet hot. Providing a method here keeps the caller from
+    /// iterating `entries` directly and coupling to the internal DashMap type.
+    /// What: O(|ids|) DashMap lookups.
+    /// Test: exercised by `test_global_search_surfaces_cold_indexes_skipped`.
+    pub fn count_matching<I>(&self, ids: I) -> usize
+    where
+        I: IntoIterator,
+        I::Item: AsRef<str>,
+    {
+        ids.into_iter()
+            .filter(|s| self.entries.contains_key(&IndexId::new(s.as_ref())))
+            .count()
+    }
+
     /// Remove a cold entry after it has been successfully loaded into the hot registry.
     ///
     /// Why: once the index is in `IndexRegistry`, future `get_or_load_index` calls

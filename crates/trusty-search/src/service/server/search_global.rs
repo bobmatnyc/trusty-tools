@@ -73,9 +73,20 @@ fn default_global_top_k() -> usize {
 /// (each index treated as an equally-weighted lane) and returns the top-k
 /// merged results. Indexes that error during search are skipped (logged) so
 /// one bad index doesn't take down the whole fan-out.
+///
+/// PR #1103 correctness: with selective warm-boot, `registry.list()` returns
+/// only HOT (eagerly loaded) indexes. Cold indexes parked in `ColdIndexStore`
+/// are NOT searched, and the response now carries `cold_indexes_skipped` so
+/// callers know the fan-out is incomplete. Lazy-loading all cold indexes during
+/// fan-out is deliberately avoided (too expensive); callers that need full
+/// coverage should trigger per-index loads first or wait for selective warm-boot
+/// to complete. A follow-up issue should track "opt-in load-all on global
+/// search" as a deeper semantic decision.
+///
 /// Test: `test_global_search_fans_out_and_merges` registers two indexes,
 /// indexes a file into each, and asserts both contribute results tagged with
-/// the right `index_id`.
+/// the right `index_id`. `test_global_search_surfaces_cold_indexes_skipped`
+/// asserts the count is > 0 when cold indexes exist.
 pub(super) async fn global_search_handler(
     State(state): State<Arc<SearchAppState>>,
     Json(req): Json<GlobalSearchRequest>,
@@ -89,6 +100,19 @@ pub(super) async fn global_search_handler(
     }
 
     use crate::core::search::rrf::{rrf_fuse, RRF_K};
+
+    // PR #1103: `registry.list()` returns only HOT indexes. Cold indexes parked
+    // in `cold_store` are NOT searched. Count them so callers know the fan-out
+    // may be incomplete when `cold_indexes_skipped > 0`.
+    let cold_indexes_skipped: usize = if let Some(requested) = req.indexes.as_ref() {
+        // Restricted fan-out: count cold entries whose id was requested.
+        state
+            .cold_store
+            .count_matching(requested.iter().map(|s| s.as_str()))
+    } else {
+        // Global fan-out: every cold entry is implicitly requested but skipped.
+        state.cold_store.len()
+    };
 
     let all_ids = state.registry.list();
     // Issue #110: when caller supplies `indexes`, restrict fan-out to that
@@ -110,6 +134,7 @@ pub(super) async fn global_search_handler(
             "results": Vec::<crate::core::indexer::CodeChunk>::new(),
             "indexes_searched": Vec::<String>::new(),
             "total_indexes": 0_usize,
+            "cold_indexes_skipped": cold_indexes_skipped,
             "latency_ms": 0_u64,
             "intent": format!("{:?}", QueryClassifier::classify(&req.query)),
         })));
@@ -298,6 +323,12 @@ pub(super) async fn global_search_handler(
         "results": results,
         "indexes_searched": indexes_searched,
         "total_indexes": total_indexes,
+        // PR #1103: callers must check this field — when > 0, the fan-out is
+        // incomplete because selective warm-boot has not yet loaded all indexes.
+        // Cold indexes are NOT lazy-loaded during fan-out (too expensive). Use
+        // per-index `POST /indexes/:id/search` to trigger a cold-index load, or
+        // wait until the index appears in `registry.list()`.
+        "cold_indexes_skipped": cold_indexes_skipped,
         "latency_ms": latency_ms,
         "intent": format!("{:?}", intent),
         "routing": routing_label,

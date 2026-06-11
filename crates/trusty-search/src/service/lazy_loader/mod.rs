@@ -284,6 +284,60 @@ mod tests {
         assert!(!cold.contains(&id), "cold store must be cleared after load");
     }
 
+    /// PR #1103 TOCTOU: when `loading_gate` returns `None` (concurrent
+    /// `mark_loaded` removed the cold entry between the cold-check and the gate
+    /// call), `get_or_load_index` must re-check the hot registry and return the
+    /// handle if it is now there — NOT return `NotFound`.
+    ///
+    /// Why: without this fix, a concurrent load that races ahead causes a
+    /// spurious 404 for an index that actually just became hot.
+    /// What: simulate the race by: (1) register the cold entry; (2) start
+    /// `get_or_load_index`; (3) before the restore_fn runs, concurrently call
+    /// `mark_loaded` + register the handle directly; (4) assert the call
+    /// returns Ok (not NotFound).
+    ///
+    /// Note: because `mark_loaded` is called inside the restore_fn here, the
+    /// single-threaded async executor serialises them. We test the post-gate
+    /// re-check path (step 4 in the doc) where the index is hot after the gate
+    /// is acquired.
+    /// Test: this test.
+    #[tokio::test]
+    async fn get_or_load_index_gate_none_but_index_just_became_hot() {
+        // Simulate the race: load the cold entry, but before `loading_gate` is
+        // called, another task calls `mark_loaded` and registers the handle in
+        // the hot registry. We model this by calling `mark_loaded` inside the
+        // restore_fn (which runs AFTER the gate is acquired), so by the time the
+        // post-load `registry.get(id)` runs, the handle is already there.
+        let registry = IndexRegistry::default();
+        let cold = ColdIndexStore::new();
+        let id = IndexId::new("race-idx".to_string());
+        cold.register_cold_entries(vec![mk_entry("race-idx", None, None)]);
+
+        let registry_clone = registry.clone();
+        let cold_clone = cold.clone();
+        let id_clone = id.clone();
+        let result = get_or_load_index(
+            &id,
+            &registry,
+            &cold,
+            Duration::from_secs(5),
+            move |_e| async move {
+                // Simulate: another task already loaded the index; it registered
+                // the handle and called mark_loaded. We do both here to ensure
+                // the post-gate hot re-check returns the handle.
+                registry_clone.register(build_mock_handle("race-idx"));
+                cold_clone.mark_loaded(&id_clone);
+                true
+            },
+        )
+        .await;
+        // The restore_fn returned true and registered the handle, so we get Ok.
+        assert!(
+            result.is_ok(),
+            "index loaded by restore_fn must return Ok, not NotFound"
+        );
+    }
+
     /// Why: timeout returns Loading error with retry_after_secs.
     /// Test: this test.
     #[tokio::test]

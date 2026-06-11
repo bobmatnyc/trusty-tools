@@ -151,19 +151,34 @@ pub(super) async fn search_handler(
             }
         }
     };
-    // Issue #993: rate-limited write of last_queried_unix (max once per 60 s)
-    // so the LRU sort key stays current for future selective warm-boots without
-    // hammering indexes.toml on every query.
+    // Issue #993: rate-limited write of last_queried_unix (max once per
+    // LAST_QUERIED_WRITE_INTERVAL_SECS) so the LRU sort key stays current for
+    // future selective warm-boots without hammering indexes.toml on every query.
+    //
+    // PR #1103 PERF: the previous code called `persistence::read_last_queried_unix`
+    // here, which opens + parses indexes.toml synchronously on the async handler
+    // for EVERY query to a warm index. Replace with the in-memory
+    // `last_queried_write_cache` DashMap so the hot path does zero disk I/O.
+    // The background write task below updates the map after a successful write so
+    // the rate-limit semantics are fully preserved.
     {
         let now_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let stale = crate::service::persistence::read_last_queried_unix(&index_id.0)
-            .map(|prev| now_unix.saturating_sub(prev) >= LAST_QUERIED_WRITE_INTERVAL_SECS)
-            .unwrap_or(true);
+        // Consult the in-memory cache — no disk read.
+        let stale = state
+            .last_queried_write_cache
+            .get(&index_id)
+            .map(|prev| now_unix.saturating_sub(*prev) >= LAST_QUERIED_WRITE_INTERVAL_SECS)
+            .unwrap_or(true); // absent = never written for this session → write now
         if stale {
             let id_str = index_id.0.clone();
+            // Update the in-memory cache immediately so concurrent queries within
+            // the same interval don't all race to spawn a write task.
+            state
+                .last_queried_write_cache
+                .insert(index_id.clone(), now_unix);
             tokio::spawn(async move {
                 if let Err(e) =
                     crate::service::persistence::update_last_queried_unix(&id_str, now_unix)

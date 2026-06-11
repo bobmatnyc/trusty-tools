@@ -356,6 +356,20 @@ pub struct SearchAppState {
     /// it via `f32::from_bits()` on contention.
     /// Test: `health_rss_fallback_on_contention` in tests_state.rs.
     pub last_cpu_pct_bits: Arc<std::sync::atomic::AtomicU32>,
+    /// In-memory cache of the last Unix timestamp written to `last_queried_unix`
+    /// for each index (PR #1103 — eliminate sync disk read on query hot path).
+    ///
+    /// Why: the search handler calls `persistence::read_last_queried_unix` on
+    /// every query to enforce the 60-second write rate-limit. That function opens
+    /// and parses `indexes.toml` synchronously inside an async handler, adding
+    /// O(disk I/O) to every warm query. This map is the in-memory substitute: the
+    /// hot path reads from here (no disk I/O); the background write task updates
+    /// both this map and `indexes.toml` after a successful write.
+    /// What: `DashMap<IndexId, u64>` keyed by index id; value is the last Unix
+    /// second that was successfully written. `None` (absent key) means the write
+    /// interval has elapsed or the field was never written.
+    /// Test: `last_queried_cache_rate_limits_disk_writes` in `tests_search.rs`.
+    pub last_queried_write_cache: Arc<DashMap<crate::core::registry::IndexId, u64>>,
     /// Embedder functional-health tracker (issue #1003).
     ///
     /// Why: the sidecar process can be alive (so `is_embedder_ready()` returns

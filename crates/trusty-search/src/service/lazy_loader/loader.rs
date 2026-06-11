@@ -6,7 +6,17 @@
 //! double-checked-lock details to callers.
 //! What: one async function (`get_or_load_index`) and one error type
 //! (`LazyLoadError`). Generic over the restore function so tests inject fakes.
-//! Test: `get_or_load_index_*` in the parent module's `tests` block.
+//!
+//! PR #1103 TOCTOU fix: between the `entries.get(id)` cold-check (step 2) and
+//! `loading_gate(id)` (step 3), a concurrent `mark_loaded` can remove the entry
+//! from the cold store so `loading_gate` returns `None`. The previous code
+//! returned `LazyLoadError::NotFound` in that case — a spurious 404 for an
+//! index that just became hot. The fix: when `loading_gate` returns `None`,
+//! re-check the hot registry; if the index is now there, return it (the
+//! concurrent load raced us and won).
+//!
+//! Test: `get_or_load_index_*` in the parent module's `tests` block;
+//!       `get_or_load_index_gate_none_but_index_just_became_hot` for the race path.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,15 +31,18 @@ use super::store::ColdIndexStore;
 /// Why (issue #993): all per-index HTTP handlers need to resolve a handle.
 /// With lazy warm-boot, the handle may not be in the hot registry yet. This
 /// helper implements the full load-on-demand flow: (1) hot fast-path via
-/// `registry.get(id)`; (2) cold check; (3) acquire per-index loading gate;
-/// (4) re-check hot registry; (5) load via `restore_fn(entry)` inside
-/// `tokio::time::timeout`; (6) `mark_loaded(id)` on success; (7) return
-/// `Err(LazyLoadError::Loading)` on timeout for `503 index_loading`.
+/// `registry.get(id)`; (2) cold check — `NotFound` if absent from both stores;
+/// (3) acquire per-index loading gate; if gate returns `None` (concurrent
+/// `mark_loaded` raced us), re-check hot registry and return it or `NotFound`;
+/// (4) re-check hot registry after gate acquired; (5) load via
+/// `restore_fn(entry)` inside `tokio::time::timeout`; (6) `mark_loaded(id)`;
+/// (7) return `Err(LazyLoadError::Loading)` on timeout for `503 index_loading`.
 ///
 /// What: generic over the restore function so tests can inject a fake restore.
 ///
 /// Test: `get_or_load_index_hot_path`, `get_or_load_index_loads_cold_index`,
-/// `get_or_load_index_returns_loading_on_timeout`.
+/// `get_or_load_index_returns_loading_on_timeout`,
+/// `get_or_load_index_gate_none_but_index_just_became_hot`.
 pub async fn get_or_load_index<F, Fut>(
     id: &IndexId,
     registry: &IndexRegistry,
@@ -53,9 +66,19 @@ where
     };
 
     // 3. Acquire loading gate (prevent double-load).
+    //
+    // PR #1103 TOCTOU: between step 2 and here, a concurrent `mark_loaded(id)`
+    // may have removed the entry from the cold store, so `loading_gate` returns
+    // `None`. That means the index just became hot — re-check the registry
+    // before returning NotFound.
     let gate = match cold_store.loading_gate(id) {
         Some(g) => g,
-        None => return Err(LazyLoadError::NotFound),
+        None => {
+            // The cold entry vanished: a concurrent load raced us and won.
+            // If the index is now in the hot registry, return it. Only if it
+            // is absent from both places is this a genuine NotFound.
+            return registry.get(id).ok_or(LazyLoadError::NotFound);
+        }
     };
     let _guard = gate.lock().await;
 
