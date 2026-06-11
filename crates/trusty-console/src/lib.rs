@@ -18,9 +18,13 @@ use clap::{Parser, Subcommand};
 use tracing::info;
 use trusty_common::{init_tracing, shutdown_signal, write_daemon_addr};
 
+use crate::mcp_handle::McpServiceHandle;
+
 pub mod bind;
 pub mod connector;
 pub mod detect;
+pub mod mcp_handle;
+pub mod metrics_poller;
 pub mod poller;
 pub mod proxy;
 pub mod server;
@@ -158,6 +162,25 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         state.connectors(),
         Duration::from_secs(args.poll_interval),
     );
+
+    // ── metrics MCP poll (trusty-analyze) ───────────────────────────────────
+    // Spawn a supervised stdio MCP connection to trusty-analyze and poll its
+    // console_metrics tool every poll_interval seconds. The poller writes
+    // into state.metrics_cache(), which the route handler reads directly.
+    // On machines where trusty-analyze is absent the McpServiceHandle marks
+    // it Absent immediately — every poll returns Err, the cache stays None,
+    // and /api/console/metrics/analyze returns 503 (graceful degradation).
+    {
+        let handle = McpServiceHandle::new(
+            "trusty-analyze",
+            vec!["serve".to_string(), "--mcp".to_string()],
+        );
+        metrics_poller::start(
+            handle,
+            state.metrics_cache().clone(),
+            Duration::from_secs(args.poll_interval),
+        );
+    }
 
     let router = server::build_router(state.clone());
 

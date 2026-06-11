@@ -40,6 +40,9 @@ pub mod descriptors;
 #[cfg(feature = "review")]
 pub mod review;
 
+// Why (#1104 Phase 0b): console_metrics tool for trusty-console dashboard polling.
+pub mod console_metrics;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -334,6 +337,8 @@ impl AnalyzerMcpServer {
             "review_diff" => self.handle_review_diff(args).await,
             "review_github_pr" => self.handle_review_github_pr(args).await,
             "deep_analysis" => self.handle_deep_analysis(args).await,
+            // Why (#1104 Phase 0b): console_metrics — trusty-console dashboard poll.
+            "console_metrics" => console_metrics::handle_console_metrics(self).await,
             // Why (#630): the `tr_review_*` LLM tools delegate into the embedded
             // trusty-review pipeline. Gated behind the `review` feature; when
             // off these names fall through to the `_ => UnknownTool` arm.
@@ -761,22 +766,16 @@ fn wrap_tool_error(msg: &str) -> Value {
 
 /// Assemble the full `tools/list` descriptor array.
 ///
-/// Why: the base descriptor set lives in `descriptors.rs` to keep this file
-/// within its line-cap budget (#610). When the optional `review` feature is on
-/// (#630), the three `tr_review_*` descriptors are appended so `tools/list`
-/// advertises exactly the tools the dispatcher can route.
-/// What: starts from `descriptors::base_tool_descriptors()` and, under
-/// `feature = "review"`, pushes `review::review_tool_descriptors()` onto the
-/// array. Returns a `serde_json::Value` array.
-/// Test: `tools_list_contains_full_surface` (base names) and, feature-gated,
-/// `tools_list_includes_tr_review_tools` (the three `tr_` names).
+/// Why: base descriptors live in `descriptors.rs` (line-cap budget, #610);
+/// `console_metrics` (#1104) is always appended; `tr_review_*` (#630) are
+/// appended only under `feature = "review"`.
+/// What: returns a `serde_json::Value` array.
+/// Test: `tools_list_contains_full_surface` (base names).
 pub fn tool_descriptors() -> Value {
-    // `mut` is only needed when the `review` feature appends descriptors; the
-    // attribute keeps the feature-off build free of an `unused_mut` warning.
-    #[cfg_attr(not(feature = "review"), allow(unused_mut))]
     let mut tools = descriptors::base_tool_descriptors();
-    #[cfg(feature = "review")]
     if let Some(arr) = tools.as_array_mut() {
+        arr.push(console_metrics::descriptor());
+        #[cfg(feature = "review")]
         arr.extend(review::review_tool_descriptors());
     }
     tools
