@@ -91,51 +91,45 @@ impl EntityType {
 
 /// Canonical KG edge-kind vocabulary for the trusty-* toolchain (issue #815, ADR-0010).
 ///
-/// Why: The trusty-* toolchain formerly had three diverged EdgeKind enums at
-/// different abstraction levels (contracts, graph, KgEdgeKind). Any new relation
-/// required changes in multiple places with inconsistent scoring semantics — a
-/// maintenance trap. ADR-0010 Option C converges all three into this single
-/// canonical enum so there is one vocabulary, one place to add variants, and one
-/// `score_multiplier` table.
+/// Why: Three formerly diverged enums (contracts, graph, KgEdgeKind) created a
+/// maintenance trap. ADR-0010 Option C converges them so there is one vocabulary
+/// and one `score_multiplier` table. Phase D adds data-flow variants (#817).
 ///
-/// **Previously separate enums — now type aliases to this type:**
-///   - `crate::symgraph::graph::EdgeKind` (3 coarse variants: `Calls`, `Imports`,
-///     `Contains`; used as petgraph edge weight for the in-memory `SymbolGraph`,
-///     gated behind the `symgraph-parser` feature).
-///   - `trusty_analyze::KgEdgeKind` (11 variants; language-neutral structural
-///     analysis KG for trusty-analyze's tree-sitter adapters).
+/// **Adapter guidance:** language adapters in trusty-analyze should emit `Calls`
+/// (coarse, no reverse index). `CallsFunction` is reserved for the trusty-search
+/// `EntityExtractor` which also maintains the `CalledByFunction` reverse index.
+/// Similarly, `Tests` is the forward direction (test → production symbol) and
+/// `TestedBy` is the reverse — emit the one that matches your traversal direction.
+/// `Implements` was present in Phase A (contracts) before convergence; it is NOT
+/// a new addition from `KgEdgeKind`.
 ///
-/// **Persistence back-compat:** for the 16 Phase A/B/C variants that were
-/// previously stored in trusty-search's redb warm-boot index, the on-disk tag
-/// strings are UNCHANGED. The new variants added from `KgEdgeKind` / `graph::EdgeKind`
-/// (`Calls`, `Contains`, `Imports`, `Exports`, `Extends`, `References`, `Tests`,
-/// `DependsOn`, `GeneratedFrom`, `RuntimeObservationFor`) are new tags; existing
-/// indexes will never contain them.
+/// **score_multiplier wildcard (0.70):** variants without an explicit arm fall
+/// through to `_ => 0.70`. This is intentional — add an arm only when pilot data
+/// justifies deviating from the conservative baseline.
 ///
-/// When adding a new variant here, also add the matching string tag in
-/// `trusty_search::core::symbol_graph::edge_kind_tag` /
-/// `edge_kind_from_tag` to preserve warm-boot compatibility.
+/// Phase A/B/C = original trusty-search KG (16 variants, on-disk tags immutable)
+/// Phase D = data-flow (issue #817): `Reads` 0.80, `Writes` 0.90, `AccessesResource` 0.75
+/// Phase KG = language-neutral structural (formerly `KgEdgeKind` — 10 variants)
+/// Phase SG = symbol-graph coarse (formerly `graph::EdgeKind`; covered by Calls/Imports/Contains)
 ///
-/// Phase A = structural (tree-sitter derived)
-/// Phase B = test-relation
-/// Phase C = doc/concept
-/// Phase KG = language-neutral structural (formerly KgEdgeKind)
-/// Phase SG = symbol-graph coarse (formerly graph::EdgeKind)
+/// When adding a new variant, also add its tag in
+/// `trusty_search::core::symbol_graph::edge_kind_tag` / `edge_kind_from_tag`.
 ///
 /// Test: `edge_kind_score_multiplier_known_values` (this file);
-/// `edge_kind_serde_round_trip` (this file);
-/// `edge_kind_union_coverage` (this file — asserts canonical set covers prior union);
+/// `edge_kind_serde_round_trip`; `edge_kind_union_coverage`;
 /// `edge_kind_tag_round_trip` in `trusty_search::core::symbol_graph::tests`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum EdgeKind {
     // ── trusty-search KG (Phase A/B/C — 16 variants) ──────────────────────
     // Call graph
-    /// Caller → callee. On-disk tag: `"CallsFunction"`.
+    /// Caller → callee. On-disk tag: `"CallsFunction"`. Emitted by the
+    /// trusty-search `EntityExtractor`; use `Calls` in language adapters.
     CallsFunction,
     /// Callee → caller (reverse index of `CallsFunction`). On-disk tag: `"CalledByFunction"`.
     CalledByFunction,
     // Phase A — structural
-    /// Class implements interface / struct implements trait.
+    /// Class implements interface / struct implements trait. Present in Phase A
+    /// since the original `contracts::EdgeKind` — NOT a convergence addition.
     Implements,
     /// Symbol uses a named type.
     UsesType,
@@ -150,7 +144,7 @@ pub enum EdgeKind {
     /// Symbol configures another (dependency injection, builder pattern).
     Configures,
     // Phase B — test relations
-    /// Production symbol is covered by a test.
+    /// Production symbol is covered by a test (reverse of `Tests`).
     TestedBy,
     /// Test uses a shared fixture.
     TestUsesFixture,
@@ -178,8 +172,7 @@ pub enum EdgeKind {
     Exports,
     /// Function A calls function B (language-adapter coarse call edge).
     /// Formerly `KgEdgeKind::Calls` and `graph::EdgeKind::Calls`.
-    /// Distinct from `CallsFunction` which is the trusty-search entity-KG
-    /// call edge with reverse-index support (`CalledByFunction`).
+    /// Distinct from `CallsFunction`: emitted by language adapters, no reverse index.
     Calls,
     /// Class or interface inherits from another.
     /// Formerly `KgEdgeKind::Extends`.
@@ -200,6 +193,17 @@ pub enum EdgeKind {
     /// Profiler measurement attached to a static symbol.
     /// Formerly `KgEdgeKind::RuntimeObservationFor`.
     RuntimeObservationFor,
+
+    // ── Data-flow (Phase D — issue #817) ───────────────────────────────────
+    /// Source reads from a global, config, cache, or shared state (0.80).
+    /// Answers "what reads this?" Language-agnostic (SQL SELECT, config reads).
+    Reads,
+    /// Source writes to (mutates) shared state (0.90 — highest data-flow weight).
+    /// Answers "what mutates this?" — primary impact-analysis query.
+    Writes,
+    /// Source accesses an external resource: HTTP endpoint, queue topic, DB table
+    /// (0.75). Answers "what touches this endpoint/queue/table?".
+    AccessesResource,
 }
 
 impl EdgeKind {
@@ -222,9 +226,14 @@ impl EdgeKind {
             EdgeKind::TestedBy => 0.80,
             EdgeKind::Documents => 0.65,
             EdgeKind::ReferencesConcept => 0.60,
-            // All remaining edges (Phase A/B/C legacy + new structural variants)
-            // use the conservative flat KG-expansion multiplier. Tuning for
-            // individual structural variants is tracked in issue #817.
+            // Phase D data-flow variants (issue #817): tuned starting values.
+            // Writes ranks highest because mutation drives impact cascades.
+            EdgeKind::Writes => 0.90,
+            EdgeKind::Reads => 0.80,
+            EdgeKind::AccessesResource => 0.75,
+            // All remaining edges (Phase A/B/C/KG/SG) use the conservative
+            // flat multiplier (0.70). This wildcard default is intentional —
+            // add an explicit arm only when pilot data justifies a deviation.
             _ => 0.70,
         }
     }
@@ -331,8 +340,13 @@ mod tests {
         assert!((EdgeKind::TestedBy.score_multiplier() - 0.80).abs() < 1e-6);
         assert!((EdgeKind::Documents.score_multiplier() - 0.65).abs() < 1e-6);
         assert!((EdgeKind::ReferencesConcept.score_multiplier() - 0.60).abs() < 1e-6);
-        // Default branch.
+        // Phase D data-flow variants (issue #817).
+        assert!((EdgeKind::Writes.score_multiplier() - 0.90).abs() < 1e-6);
+        assert!((EdgeKind::Reads.score_multiplier() - 0.80).abs() < 1e-6);
+        assert!((EdgeKind::AccessesResource.score_multiplier() - 0.75).abs() < 1e-6);
+        // Default wildcard branch (0.70 is intentional for untuned variants).
         assert!((EdgeKind::CallsFunction.score_multiplier() - 0.70).abs() < 1e-6);
+        assert!((EdgeKind::Calls.score_multiplier() - 0.70).abs() < 1e-6);
     }
 
     /// Verify that every `contracts::EdgeKind` variant round-trips through
@@ -375,6 +389,10 @@ mod tests {
             EdgeKind::DependsOn,
             EdgeKind::GeneratedFrom,
             EdgeKind::RuntimeObservationFor,
+            // Phase D data-flow variants (issue #817)
+            EdgeKind::Reads,
+            EdgeKind::Writes,
+            EdgeKind::AccessesResource,
         ];
         for v in variants {
             let json = serde_json::to_string(&v).expect("serialize EdgeKind");
@@ -420,6 +438,10 @@ mod tests {
         let _ = EdgeKind::GeneratedFrom;
         let _ = EdgeKind::RuntimeObservationFor;
         // graph::EdgeKind coarse variants are covered by Calls, Imports, Contains above.
+        // Phase D data-flow variants (issue #817)
+        let _ = EdgeKind::Reads;
+        let _ = EdgeKind::Writes;
+        let _ = EdgeKind::AccessesResource;
     }
 
     #[test]

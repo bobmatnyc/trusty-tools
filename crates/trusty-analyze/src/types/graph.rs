@@ -110,13 +110,26 @@ pub struct KgNode {
 /// `trusty_common::symgraph::contracts` now covers all use cases across the
 /// toolchain (issue #815, ADR-0010 Option C). This type is a **re-export alias**
 /// to that canonical enum so existing call sites continue to compile without
-/// change. All 11 former variants are present in the canonical enum with the
-/// same names and serde representation.
+/// change.
 ///
 /// What: type alias to `trusty_common::symgraph::contracts::EdgeKind`.
-/// All former `KgEdgeKind` variants (`Contains`, `Imports`, `Exports`, `Calls`,
+/// The 11 former `KgEdgeKind` variants (`Contains`, `Imports`, `Exports`, `Calls`,
 /// `Implements`, `Extends`, `References`, `Tests`, `DependsOn`, `GeneratedFrom`,
 /// `RuntimeObservationFor`) are present in the canonical enum.
+/// Note: `Implements` was already in the canonical `contracts::EdgeKind` from
+/// Phase A (structural tree-sitter variants) before the convergence — it is NOT
+/// a new addition from `KgEdgeKind`. The two formerly diverged variants are now
+/// unified into one.
+/// Phase D data-flow variants (`Reads`, `Writes`, `AccessesResource`) added in
+/// issue #817 are also available here; C# and SQL adapter emission is planned.
+///
+/// ## Adapter guidance: `Calls` vs `CallsFunction`
+///
+/// Language adapters in this crate should emit `KgEdgeKind::Calls` (the coarse,
+/// language-neutral call edge). `CallsFunction` is for the trusty-search
+/// `EntityExtractor`'s entity-KG layer, which also maintains a reverse index
+/// via `CalledByFunction`. Emitting `CallsFunction` from a language adapter
+/// would create orphaned reverse-index entries.
 ///
 /// Test: `kg_edge_kind_serde_round_trip` in this module confirms every former
 /// `KgEdgeKind` variant still round-trips through `serde_json`.
@@ -281,6 +294,10 @@ mod tests {
             KgEdgeKind::DependsOn,
             KgEdgeKind::GeneratedFrom,
             KgEdgeKind::RuntimeObservationFor,
+            // Phase D data-flow variants (issue #817)
+            KgEdgeKind::Reads,
+            KgEdgeKind::Writes,
+            KgEdgeKind::AccessesResource,
         ];
         for v in &variants {
             let json = serde_json::to_string(v).expect("serialize KgEdgeKind");

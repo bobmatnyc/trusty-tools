@@ -333,18 +333,12 @@ impl SymbolGraph {
         corpus.save_kg_graph(&nodes, &adj_fwd, &adj_rev)
     }
 
-    /// Load the persisted graph from the supplied [`CorpusStore`]
-    /// (issue #41 phase 2).
+    /// Load the persisted graph from the supplied [`CorpusStore`] (issue #41).
     ///
-    /// Why: warm-boot wants to skip the full `build_from_chunks` rebuild when
-    /// a previously-saved graph is available. Restoring the persisted graph
-    /// directly preserves Phase B/C edges that were computed at ingest time.
-    /// What: reads the three KG tables, reconstructs the `petgraph::DiGraph`,
-    /// and returns `Ok(Some(graph))`. Returns `Ok(None)` when the persisted
-    /// node table is empty (fresh database / not yet saved). Forward edges are
-    /// canonical; the reverse table is consulted to recover edges whose
-    /// source node was filtered out of the forward index (should not normally
-    /// happen but guards against an inconsistent persisted state).
+    /// Why: warm-boot skips full `build_from_chunks` when a saved graph exists,
+    /// preserving Phase B/C edges computed at ingest time.
+    /// What: reads three KG tables, reconstructs the `petgraph::DiGraph`. Returns
+    /// `Ok(None)` when the node table is empty (fresh DB / not yet saved).
     /// Test: `test_save_load_round_trip_preserves_graph`.
     pub fn load_from_corpus(corpus: &CorpusStore) -> anyhow::Result<Option<Self>> {
         let (nodes, adj_fwd, _adj_rev) = corpus.load_kg_graph()?;
@@ -402,14 +396,10 @@ impl SymbolGraph {
         Ok(Some(g))
     }
 
-    /// Edge-kind counts per `EdgeKind` variant present in the graph
-    /// (issue #41 phase 2).
+    /// Edge-kind counts per variant present in the graph (issue #41 phase 2).
     ///
-    /// Why: the `GET /indexes/{id}/graph/stats` endpoint surfaces these
-    /// counts so operators (and agents) can verify graph health without
-    /// scraping Prometheus.
-    /// What: returns a `Vec<(edge_kind_tag, count)>` sorted by tag for stable
-    /// JSON output.
+    /// Why: `GET /indexes/{id}/graph/stats` needs counts by kind for health checks.
+    /// What: `Vec<(tag, count)>` sorted by tag for stable JSON output.
     /// Test: `test_edge_kind_breakdown_counts_by_variant`.
     pub fn edge_kind_breakdown(&self) -> Vec<(String, usize)> {
         let mut counts: HashMap<String, usize> = HashMap::new();
@@ -427,9 +417,8 @@ impl SymbolGraph {
 /// Stable string tag for an `EdgeKind` used for redb persistence and `/graph/stats`.
 ///
 /// Why: funnelling all persistence hops through this helper keeps tags stable
-/// across serde-format changes. Tags for the 16 Phase A/B/C variants are
-/// on-disk and MUST NOT be renamed; the 10 convergence variants are new.
-/// What: returns the variant name string. Test: `edge_kind_tag_round_trip`.
+/// across serde-format changes. The 16 Phase A/B/C tags are on-disk and MUST
+/// NOT be renamed. Test: `edge_kind_tag_round_trip`.
 fn edge_kind_tag(kind: &EdgeKind) -> &'static str {
     match kind {
         EdgeKind::CallsFunction => "CallsFunction",
@@ -458,6 +447,9 @@ fn edge_kind_tag(kind: &EdgeKind) -> &'static str {
         EdgeKind::DependsOn => "DependsOn",
         EdgeKind::GeneratedFrom => "GeneratedFrom",
         EdgeKind::RuntimeObservationFor => "RuntimeObservationFor",
+        EdgeKind::Reads => "Reads",
+        EdgeKind::Writes => "Writes",
+        EdgeKind::AccessesResource => "AccessesResource",
     }
 }
 
@@ -494,6 +486,9 @@ fn edge_kind_from_tag(tag: &str) -> Option<EdgeKind> {
         "DependsOn" => EdgeKind::DependsOn,
         "GeneratedFrom" => EdgeKind::GeneratedFrom,
         "RuntimeObservationFor" => EdgeKind::RuntimeObservationFor,
+        "Reads" => EdgeKind::Reads,
+        "Writes" => EdgeKind::Writes,
+        "AccessesResource" => EdgeKind::AccessesResource,
         _ => return None,
     })
 }
@@ -1668,9 +1663,9 @@ mod tests {
         assert!(g.callers_of("beta", 1).is_empty(), "stale caller edge");
     }
 
-    /// All 26 `EdgeKind` variants (16 legacy + 10 convergence) must survive the
-    /// `edge_kind_tag` → `edge_kind_from_tag` round-trip (issue #815). Also
-    /// asserts legacy tag strings are bit-for-bit unchanged (on-disk back-compat).
+    /// All 29 `EdgeKind` variants (16 legacy + 10 convergence + 3 Phase D
+    /// data-flow) survive `edge_kind_tag` → `edge_kind_from_tag` (issues #815,
+    /// #817). Also asserts legacy tag strings are bit-for-bit stable on-disk.
     #[test]
     fn edge_kind_tag_round_trip() {
         let variants = [
@@ -1700,6 +1695,10 @@ mod tests {
             EdgeKind::DependsOn,
             EdgeKind::GeneratedFrom,
             EdgeKind::RuntimeObservationFor,
+            // Phase D data-flow — 3 new (issue #817)
+            EdgeKind::Reads,
+            EdgeKind::Writes,
+            EdgeKind::AccessesResource,
         ];
         for v in variants {
             let tag = edge_kind_tag(&v);
