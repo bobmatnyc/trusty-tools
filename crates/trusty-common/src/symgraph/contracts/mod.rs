@@ -148,25 +148,31 @@ impl RawEntity {
 /// derive compact, collision-resistant entity IDs from opaque symbol strings.
 ///
 /// Why: SCIP symbol strings (e.g. `"rust-analyzer cargo crate/Foo#"`) are
-/// long and noisy. Hashing them produces a compact suffix safe to embed in
-/// entity ids and redb keys.
-/// What: hashes `s` with `std::collections::hash_map::DefaultHasher` and
-/// formats as 8-char (minimum) lowercase hex.
+/// long and noisy. Hashing them produces a compact 8-character suffix safe
+/// to embed in entity ids and redb keys. SHA-256 guarantees stable output
+/// across all Rust toolchain versions and process restarts, unlike the
+/// formerly-used `DefaultHasher` (SipHash, non-stable across std versions).
 ///
-/// **Stability caveat:** `DefaultHasher` is NOT guaranteed stable across Rust
-/// versions or process restarts (the standard library may change its
-/// implementation). The output is deterministic within a single process run
-/// but MUST NOT be relied upon for cross-version persistence stability.
-/// Tracked as a separate durability issue — do not change the algorithm here
-/// without a coordinated migration plan, as existing persisted entity IDs
-/// were derived with this hash.
+/// What: hashes `s` with SHA-256 and returns the first 8 lowercase hex
+/// characters (4 bytes of the digest). Output is always exactly 8 characters.
 ///
-/// Test: `fact_hash_str_is_deterministic`.
+/// **Migration note (issue #1116):** this function previously used
+/// `std::collections::hash_map::DefaultHasher`. The switch to SHA-256 changes
+/// all output values. Any previously persisted KG entity IDs derived from this
+/// function are now invalid. A one-time KG rebuild / reindex is required
+/// after upgrading to the version of `trusty-common` that includes this change.
+///
+/// Test: `fact_hash_str_is_deterministic`, `fact_hash_str_pinned_values`,
+/// `fact_hash_str_output_shape`.
 pub fn fact_hash_str(s: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    s.hash(&mut h);
-    format!("{:08x}", h.finish())
+    let digest = Sha256::digest(s.as_bytes());
+    // Take the first 4 bytes (8 hex chars) — same suffix width as the former
+    // DefaultHasher-based implementation, keeping downstream key formats unchanged
+    // in structure. SHA-256 is infallible so no error handling is needed.
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}",
+        digest[0], digest[1], digest[2], digest[3]
+    )
 }
 
 #[cfg(test)]
@@ -196,13 +202,44 @@ mod tests {
 
     #[test]
     fn fact_hash_str_is_deterministic() {
+        // Same input always yields the same output — both within a call and
+        // across repeated calls in the same process.
         let a = fact_hash_str("rust-analyzer cargo crate/Foo#");
         let b = fact_hash_str("rust-analyzer cargo crate/Foo#");
         assert_eq!(a, b);
-        // u64 in lowercase hex; `{:08x}` is the *min* width, so output is
-        // up to 16 characters (and always at least 8 due to zero-padding).
-        assert!(a.len() >= 8 && a.len() <= 16);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn fact_hash_str_output_shape() {
+        // Output is always exactly 8 lowercase hex characters (4 bytes of
+        // SHA-256 digest), matching the prior DefaultHasher suffix width.
+        for input in &["", "a", "hello", "rust-analyzer cargo crate/Foo#"] {
+            let h = fact_hash_str(input);
+            assert_eq!(
+                h.len(),
+                8,
+                "expected 8 hex chars for {:?}, got {:?}",
+                input,
+                h
+            );
+            assert!(
+                h.chars().all(|c| c.is_ascii_hexdigit()),
+                "non-hex char in output for {:?}: {:?}",
+                input,
+                h
+            );
+        }
+    }
+
+    #[test]
+    fn fact_hash_str_pinned_values() {
+        // PIN the SHA-256 algorithm: any accidental algorithm swap will break
+        // this test. Expected values are the first 8 hex chars of SHA-256.
+        // Computed with: echo -n "<input>" | sha256sum
+        assert_eq!(fact_hash_str("rust-analyzer cargo crate/Foo#"), "51557b36");
+        assert_eq!(fact_hash_str(""), "e3b0c442");
+        assert_eq!(fact_hash_str("hello"), "2cf24dba");
+        assert_eq!(fact_hash_str("a"), "ca978112");
     }
 
     #[test]
