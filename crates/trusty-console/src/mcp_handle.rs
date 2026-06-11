@@ -156,10 +156,8 @@ mod tests {
     /// Test: This test.
     #[tokio::test]
     async fn mcp_handle_absent_binary_returns_error() {
-        let handle = McpServiceHandle::new(
-            "/nonexistent/trusty-analyze-xyzzy",
-            vec!["serve".to_string(), "--mcp".to_string()],
-        );
+        let handle =
+            McpServiceHandle::new("/nonexistent/trusty-analyze-xyzzy", vec!["mcp".to_string()]);
         let result = handle.poll_metrics().await;
         assert!(result.is_err(), "absent binary must return Err");
     }
@@ -170,12 +168,9 @@ mod tests {
     /// Test: This test (checks construction is cheap/sync-compatible).
     #[test]
     fn mcp_handle_constructs_without_io() {
-        let handle = McpServiceHandle::new(
-            "trusty-analyze",
-            vec!["serve".to_string(), "--mcp".to_string()],
-        );
+        let handle = McpServiceHandle::new("trusty-analyze", vec!["mcp".to_string()]);
         // The binary field must be stored correctly.
         assert_eq!(handle.binary, "trusty-analyze");
-        assert_eq!(handle.args, vec!["serve", "--mcp"]);
+        assert_eq!(handle.args, vec!["mcp"]);
     }
 }

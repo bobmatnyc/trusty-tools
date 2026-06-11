@@ -8,8 +8,10 @@
 //!
 //! What: Exposes `handle_console_metrics` — an async function that calls
 //! `GET /health` on the analyzer HTTP daemon (same as `analyzer_health`) to
-//! determine `search_reachable`, then builds and serialises a
-//! `ConsoleMetricsReport` via the shared helpers. The tool takes no arguments.
+//! determine `search_reachable`, then builds a `ConsoleMetricsReport` and
+//! returns it as a raw `serde_json::Value`. The MCP dispatcher wraps it once
+//! via `wrap_tool_result`; `trusty-console`'s `parse_report` unwraps it once.
+//! The tool takes no arguments.
 //!
 //! `metrics` payload schema (schema_version = 1):
 //! ```json
@@ -18,12 +20,12 @@
 //! }
 //! ```
 //!
-//! Test: `console_metrics_tool_returns_mcp_envelope` in this module verifies
-//! the response is a valid MCP content envelope; `parse_report_round_trip`
-//! verifies the console can decode it via `parse_report`.
+//! Test: `parse_report_round_trip` in this module verifies the full
+//! dispatch→parse round-trip through the `wrap_tool_result` + `parse_report`
+//! path that `trusty-console` uses at runtime.
 
 use serde_json::Value;
-use trusty_common::console_metrics::{make_report, serialise_report, ServiceHealth};
+use trusty_common::console_metrics::{make_report, ServiceHealth};
 
 use super::DispatchError;
 
@@ -61,10 +63,12 @@ pub(super) fn descriptor() -> Value {
 /// Builds a `ConsoleMetricsReport` with `service_id = "trusty-analyze"`,
 /// `display_name = "Trusty Analyze"`, version from `CARGO_PKG_VERSION`,
 /// `status = Ok | Degraded` based on `search_reachable`, and a `metrics`
-/// payload `{ "search_reachable": bool }`. Serialises with `serialise_report`
-/// which wraps the report in the MCP `content[0].text` envelope.
-/// Test: `console_metrics_tool_returns_mcp_envelope` and
-/// `parse_report_round_trip` in this module.
+/// payload `{ "search_reachable": bool }`. Returns the raw report as a
+/// `serde_json::Value` — the MCP dispatcher's `wrap_tool_result` applies the
+/// single `content[0].text` envelope that `parse_report` in `trusty-console`
+/// expects. Do NOT call `serialise_report` here — that would double-wrap.
+/// Test: `parse_report_round_trip` in this module verifies the full
+/// dispatch→parse round-trip through `wrap_tool_result` + `parse_report`.
 pub(super) async fn handle_console_metrics(
     server: &super::AnalyzerMcpServer,
 ) -> Result<Value, DispatchError> {
@@ -96,9 +100,8 @@ pub(super) async fn handle_console_metrics(
         1, // metrics_schema_version = 1; bump when the metrics object shape changes
     );
 
-    serialise_report(&report).map_err(|e| {
-        DispatchError::Transport(format!("console_metrics: serialise_report failed: {e}"))
-    })
+    serde_json::to_value(&report)
+        .map_err(|e| DispatchError::Transport(format!("console_metrics: to_value failed: {e}")))
 }
 
 #[cfg(test)]
@@ -121,11 +124,15 @@ mod tests {
         );
     }
 
-    /// Why: The MCP envelope must be well-formed so the console's `parse_report`
-    /// call succeeds without going through the HTTP daemon (pure function test).
-    /// What: Directly call `serialise_report` with a synthetic report and assert
-    /// `parse_report` round-trips it correctly.
-    /// Test: This test (no daemon required).
+    /// Why: The MCP dispatch path wraps tool results exactly once via
+    /// `wrap_tool_result` → `{"content":[{"type":"text","text":"<json>"}],"isError":false}`.
+    /// `handle_console_metrics` must return the raw report Value (no pre-wrapping
+    /// via `serialise_report`) so `wrap_tool_result` + `parse_report` complete
+    /// a successful round-trip. This test simulates the full dispatch path
+    /// without an HTTP daemon.
+    /// What: Build a raw report Value, apply the same `wrap_tool_result` the
+    /// dispatcher uses, then assert `parse_report` decodes it correctly.
+    /// Test: This test (no daemon required; mirrors actual dispatch→console path).
     #[test]
     fn parse_report_round_trip() {
         let report = make_report(
@@ -136,8 +143,19 @@ mod tests {
             serde_json::json!({ "search_reachable": false }),
             1,
         );
-        let envelope = serialise_report(&report).expect("serialise must succeed");
-        let decoded = parse_report(&envelope).expect("parse must succeed");
+        // Simulate what `handle_console_metrics` now returns (raw Value, no
+        // serialise_report wrapping) and what `wrap_tool_result` in `mod.rs`
+        // adds before the MCP client receives it.
+        let raw_value = serde_json::to_value(&report).expect("to_value must succeed");
+        let wrapped = serde_json::json!({
+            "content": [{
+                "type": "text",
+                "text": serde_json::to_string_pretty(&raw_value)
+                    .expect("to_string_pretty must succeed"),
+            }],
+            "isError": false,
+        });
+        let decoded = parse_report(&wrapped).expect("parse must succeed");
 
         assert_eq!(decoded.service_id, "trusty-analyze");
         assert_eq!(decoded.display_name, "Trusty Analyze");
