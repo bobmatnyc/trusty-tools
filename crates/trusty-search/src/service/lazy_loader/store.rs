@@ -61,16 +61,35 @@ pub fn select_warmboot_entries(
 /// startup. On first access via `get_or_load_index`, one background task loads
 /// the index into the hot `IndexRegistry`. The per-index `Mutex<()>` prevents
 /// concurrent double-loads.
-/// What: a `DashMap<IndexId, PersistedIndex>` for the metadata, and a matching
-/// `DashMap<IndexId, Arc<tokio::sync::Mutex<()>>>` for the per-index loading
-/// gate (double-checked-lock pattern).
-/// Test: `cold_store_*` tests in the parent module's `tests` block.
+///
+/// Why (issue #1106): when `restore_fn` returns `false` (blocked volume,
+/// missing root_path), the entry must be moved out of `entries` into
+/// `failed_entries` so that (a) `indexes_lazy` only counts genuinely-restorable
+/// pending indexes, (b) repeated queries for the same permanently-failed index
+/// skip the expensive restore path and return a fast error, and (c) callers can
+/// distinguish "not yet loaded" from "restore permanently failed".
+///
+/// What: three `DashMap`s — one for pending metadata (`entries`), one for
+/// per-index loading gates, and one for permanently-failed index ids
+/// (`failed_entries`). `len()` counts only `entries` (pending). `failed_len()`
+/// counts `failed_entries`.
+/// Test: `cold_store_*` tests in the parent module's `tests` block;
+///       `cold_store_mark_failed_*` tests for the issue #1106 paths.
 #[derive(Clone, Default)]
 pub struct ColdIndexStore {
     /// Persisted metadata for each cold index, keyed by `IndexId`.
     pub(crate) entries: Arc<DashMap<IndexId, PersistedIndex>>,
     /// Per-index mutex preventing concurrent double-loads.
     loading_gates: Arc<DashMap<IndexId, Arc<tokio::sync::Mutex<()>>>>,
+    /// Permanently-failed entries (issue #1106): indexes whose `restore_fn`
+    /// returned `false`. These are evicted from `entries` so `len()` and
+    /// `indexes_lazy` stay honest. Presence here signals "do not retry".
+    ///
+    /// Why: the value is `()` — we only need set semantics (O(1) membership
+    /// test). A `DashMap<IndexId, ()>` gives that without an extra `HashSet`.
+    /// What: populated by `mark_failed`; checked by `is_failed`.
+    /// Test: `cold_store_mark_failed_*` unit tests.
+    failed_entries: Arc<DashMap<IndexId, ()>>,
 }
 
 impl ColdIndexStore {
@@ -97,26 +116,53 @@ impl ColdIndexStore {
     /// True when `id` is in the cold store (registered but not yet loaded).
     ///
     /// Why: `get_or_load_index` uses this to decide whether a 404 is a genuine
-    /// unknown index or a not-yet-loaded cold index.
-    /// What: O(1) DashMap lookup.
+    /// unknown index or a not-yet-loaded cold index. Returns `false` for
+    /// permanently-failed entries (issue #1106) so callers do not re-enter the
+    /// expensive restore path.
+    /// What: O(1) DashMap lookup on `entries` only (not `failed_entries`).
     /// Test: `cold_store_register_and_contains`.
     pub fn contains(&self, id: &IndexId) -> bool {
         self.entries.contains_key(id)
     }
 
+    /// True when `id` has previously failed to restore (issue #1106).
+    ///
+    /// Why: distinguishes "not registered at all" from "registered but
+    /// permanently unrestorable". Callers use this to return a fast 503
+    /// (`index_restore_failed`) without re-entering the expensive restore path.
+    /// What: O(1) DashMap lookup on `failed_entries`.
+    /// Test: `cold_store_mark_failed_is_failed` unit test.
+    pub fn is_failed(&self, id: &IndexId) -> bool {
+        self.failed_entries.contains_key(id)
+    }
+
     /// Total number of cold (not-yet-loaded) entries.
     ///
     /// Why: reported on `GET /health` as `indexes_lazy` so operators can see how
-    /// many indexes are still pending their first load.
-    /// What: `DashMap::len()`.
+    /// many indexes are still pending their first load. Does NOT include
+    /// permanently-failed entries (issue #1106) — those are counted separately
+    /// by `failed_len()` so the metric stays honest.
+    /// What: `DashMap::len()` on `entries` only.
     /// Test: `cold_store_len`.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// True when no cold entries remain (all have been lazily loaded).
+    /// True when no cold entries remain (all have been lazily loaded or failed).
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Number of indexes that permanently failed to restore (issue #1106).
+    ///
+    /// Why: reported on `GET /health` as `indexes_failed` so operators can
+    /// distinguish "pending lazy load" from "restore permanently failed" —
+    /// e.g. blocked volume or deleted root_path. Before this fix both appeared
+    /// as "lazy pending", making the metric misleading.
+    /// What: `DashMap::len()` on `failed_entries`.
+    /// Test: `cold_store_mark_failed_failed_len` unit test.
+    pub fn failed_len(&self) -> usize {
+        self.failed_entries.len()
     }
 
     /// Count how many cold entries are in the provided id set.
@@ -146,6 +192,31 @@ impl ColdIndexStore {
     pub fn mark_loaded(&self, id: &IndexId) {
         self.entries.remove(id);
         self.loading_gates.remove(id);
+    }
+
+    /// Record that a cold index permanently failed to restore (issue #1106).
+    ///
+    /// Why: when `restore_fn` returns `false` (blocked volume, deleted
+    /// root_path, or panic→false), the entry must be evicted from `entries`
+    /// so that (a) `len()` / `indexes_lazy` decrements and stays honest, (b)
+    /// the search handler's `cold_store.contains()` returns `false` preventing
+    /// it from re-entering the expensive restore path, and (c) callers can
+    /// detect the failure via `is_failed()` and return a fast, accurate 503.
+    ///
+    /// Policy: failure is permanent for the daemon's lifetime. If the underlying
+    /// cause is transient (e.g. a volume that was temporarily unmounted), the
+    /// operator should restart the daemon or use `POST /indexes` to re-register
+    /// the index. This is conservative but safe: it prevents unbounded restore
+    /// retry storms on every query.
+    ///
+    /// What: moves the id from `entries` to `failed_entries`; also removes the
+    /// loading gate so it can be reclaimed.
+    /// Test: `cold_store_mark_failed_*` and
+    ///       `get_or_load_index_restore_false_marks_failed` unit tests.
+    pub fn mark_failed(&self, id: &IndexId) {
+        self.entries.remove(id);
+        self.loading_gates.remove(id);
+        self.failed_entries.insert(id.clone(), ());
     }
 
     /// Acquire or create the per-index loading gate.

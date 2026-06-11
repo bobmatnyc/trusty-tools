@@ -98,6 +98,23 @@ pub(super) async fn search_handler(
         // Try hot path first — avoids the embedder check for warm indexes.
         if let Some(h) = state.registry.get(&index_id) {
             h
+        } else if state.cold_store.is_failed(&index_id) {
+            // Issue #1106: index was attempted but restore permanently failed
+            // (blocked volume, missing root_path). Return 503 so the caller
+            // knows the index exists but cannot be served — distinct from a
+            // genuine 404 for an unknown index. The operator must restart the
+            // daemon or re-register the index to clear the failed state.
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "index_restore_failed",
+                    "message": format!(
+                        "index '{}' previously failed to restore (blocked volume or \
+                         missing root_path) — restart the daemon or re-register to retry",
+                        index_id.0
+                    ),
+                })),
+            ));
         } else if !state.cold_store.contains(&index_id) {
             return Err((
                 StatusCode::NOT_FOUND,
@@ -145,6 +162,24 @@ pub(super) async fn search_handler(
                         Json(serde_json::json!({
                             "error": "index_loading",
                             "retry_after_secs": retry_after_secs,
+                        })),
+                    ));
+                }
+                // Issue #1106: `restore_fn` returned false — permanently
+                // failed. The entry has been moved to `failed_entries` so
+                // subsequent queries hit the `is_failed` guard above (fast
+                // path) and never re-enter this branch.
+                Err(LazyLoadError::RestoreFailed) => {
+                    return Err((
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({
+                            "error": "index_restore_failed",
+                            "message": format!(
+                                "index '{}' failed to restore (blocked volume or \
+                                 missing root_path) — restart the daemon or \
+                                 re-register to retry",
+                                index_id.0
+                            ),
                         })),
                     ));
                 }

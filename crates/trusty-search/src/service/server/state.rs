@@ -436,4 +436,17 @@ pub struct WarmBootSummary {
     /// What: reported on every `GET /health` response; read from `ColdIndexStore::len`.
     /// Test: `health_surfaces_warmboot_summary` in server tests.
     pub indexes_lazy: usize,
+    /// Number of cold indexes that permanently failed to restore (issue #1106).
+    ///
+    /// Why: before #1106, a cold index whose `restore_fn` returned `false`
+    /// (blocked volume, missing root_path) stayed in `entries` forever, so
+    /// `indexes_lazy` never decreased and every query re-entered the expensive
+    /// restore path. After the fix, such entries are moved to `failed_entries`
+    /// and this counter reflects the distinct "permanently failed" state so
+    /// operators can see at a glance that some indexes need intervention (daemon
+    /// restart or re-registration) rather than assuming they are merely pending.
+    /// What: reported on every `GET /health` response; read from
+    /// `ColdIndexStore::failed_len`. `0` is the normal steady-state value.
+    /// Test: `health_failed_index_reported` in server tests.
+    pub indexes_failed: usize,
 }

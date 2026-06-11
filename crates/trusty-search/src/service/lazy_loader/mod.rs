@@ -363,4 +363,130 @@ mod tests {
             "timeout must return Loading error"
         );
     }
+
+    // ── issue #1106: mark_failed / is_failed / failed_len ───────────────────
+
+    /// Why: `mark_failed` must remove the entry from `entries` so `len()` and
+    /// `contains()` return the honest state after a failed restore.
+    /// Test: this test.
+    #[test]
+    fn cold_store_mark_failed_evicts_from_entries() {
+        let store = ColdIndexStore::new();
+        store.register_cold_entries(vec![mk_entry("f1", None, None)]);
+        let id = IndexId::new("f1".to_string());
+
+        assert!(store.contains(&id), "must be in entries before mark_failed");
+        assert_eq!(store.len(), 1);
+        assert!(!store.is_failed(&id));
+
+        store.mark_failed(&id);
+
+        assert!(
+            !store.contains(&id),
+            "must NOT be in entries after mark_failed"
+        );
+        assert_eq!(store.len(), 0, "entries len must decrease to 0");
+        assert!(store.is_failed(&id), "must appear in failed_entries");
+    }
+
+    /// Why: `failed_len()` must count permanently-failed entries separately
+    /// from `len()` (pending) so the health metric is honest.
+    /// Test: this test.
+    #[test]
+    fn cold_store_mark_failed_failed_len() {
+        let store = ColdIndexStore::new();
+        store.register_cold_entries(vec![mk_entry("fa", None, None), mk_entry("fb", None, None)]);
+        assert_eq!(store.failed_len(), 0);
+        assert_eq!(store.len(), 2);
+
+        store.mark_failed(&IndexId::new("fa".to_string()));
+        assert_eq!(store.failed_len(), 1);
+        assert_eq!(store.len(), 1);
+
+        store.mark_failed(&IndexId::new("fb".to_string()));
+        assert_eq!(store.failed_len(), 2);
+        assert_eq!(store.len(), 0);
+    }
+
+    /// Why: when `restore_fn` returns `false`, `get_or_load_index` must (a)
+    /// return `RestoreFailed`, (b) move the entry to `failed_entries` so
+    /// `len()` decreases and `is_failed()` returns `true`, and (c) NOT leave
+    /// the entry in `entries` (which would cause the next call to re-enter the
+    /// expensive restore path — the bug described in issue #1106).
+    /// Test: this test.
+    #[tokio::test]
+    async fn get_or_load_index_restore_false_marks_failed() {
+        let registry = IndexRegistry::default();
+        let cold = ColdIndexStore::new();
+        let id = IndexId::new("fail-idx".to_string());
+        cold.register_cold_entries(vec![mk_entry("fail-idx", None, None)]);
+
+        // First call: restore_fn returns false.
+        let result = get_or_load_index(&id, &registry, &cold, Duration::from_secs(5), |_e| async {
+            false
+        })
+        .await;
+
+        assert!(
+            matches!(result, Err(LazyLoadError::RestoreFailed)),
+            "restore_fn=false must return RestoreFailed"
+        );
+        assert!(
+            !cold.contains(&id),
+            "entry must be evicted from entries after restore failure"
+        );
+        assert!(
+            cold.is_failed(&id),
+            "entry must appear in failed_entries after restore failure"
+        );
+        assert_eq!(
+            cold.len(),
+            0,
+            "indexes_lazy must be 0 after restore failure"
+        );
+        assert_eq!(cold.failed_len(), 1, "indexes_failed must be 1");
+    }
+
+    /// Why: after a restore failure, subsequent calls must not re-attempt the
+    /// expensive restore path. `cold_store.contains()` returns `false` so
+    /// `get_or_load_index` returns `NotFound` immediately (the caller's
+    /// `is_failed` check in the search handler catches this before calling
+    /// `get_or_load_index`). This test verifies the loader's own behavior: the
+    /// second call sees neither `entries` nor a gate, so it returns `NotFound`
+    /// rather than calling restore_fn again.
+    /// Test: this test.
+    #[tokio::test]
+    async fn get_or_load_index_second_call_after_failure_does_not_retry() {
+        let registry = IndexRegistry::default();
+        let cold = ColdIndexStore::new();
+        let id = IndexId::new("fail-idx2".to_string());
+        cold.register_cold_entries(vec![mk_entry("fail-idx2", None, None)]);
+
+        let mut restore_call_count = 0u32;
+
+        // First call — restore fails.
+        let _ = get_or_load_index(&id, &registry, &cold, Duration::from_secs(5), |_e| {
+            restore_call_count += 1;
+            async { false }
+        })
+        .await;
+
+        // Second call — entry is no longer in cold store; restore_fn must NOT
+        // be called again. The result is NotFound because `is_failed` is not
+        // checked inside `get_or_load_index` (that's the search handler's job).
+        let result2 = get_or_load_index(&id, &registry, &cold, Duration::from_secs(5), |_e| {
+            restore_call_count += 1;
+            async { false }
+        })
+        .await;
+
+        assert!(
+            matches!(result2, Err(LazyLoadError::NotFound)),
+            "second call after failure must return NotFound (not re-attempt restore)"
+        );
+        assert_eq!(
+            restore_call_count, 1,
+            "restore_fn must be called exactly once (not re-attempted after failure)"
+        );
+    }
 }

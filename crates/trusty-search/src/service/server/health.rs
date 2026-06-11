@@ -210,12 +210,15 @@ pub(super) async fn health_handler(
     // regression (`indexes:2` instead of `~102`) is visible without tailing logs.
     // Issue #993: populate `indexes_lazy` live from the cold store so it reflects
     // the current number of not-yet-loaded indexes (decreases as lazy loads occur).
+    // Issue #1106: populate `indexes_failed` from the cold store's failed-entries
+    // set so operators can distinguish "pending lazy load" from "restore failed".
     let mut warmboot_summary = state
         .warmboot_summary
         .lock()
         .map(|g| g.clone())
         .unwrap_or_default();
     warmboot_summary.indexes_lazy = state.cold_store.len();
+    warmboot_summary.indexes_failed = state.cold_store.failed_len();
 
     Json(HealthResponse {
         status: "ok",

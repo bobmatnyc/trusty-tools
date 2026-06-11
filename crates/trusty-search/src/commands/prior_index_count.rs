@@ -102,6 +102,10 @@ pub(crate) fn record_warm_boot_result(
             // Issue #993: stored at boot-completion; health handler re-reads
             // from cold_store.len() live so it decreases as lazy loads happen.
             indexes_lazy,
+            // Issue #1106: stored at boot-completion as 0; health handler
+            // re-reads from cold_store.failed_len() live so it increases as
+            // restore failures are recorded during the daemon's lifetime.
+            indexes_failed: 0,
         };
     }
 

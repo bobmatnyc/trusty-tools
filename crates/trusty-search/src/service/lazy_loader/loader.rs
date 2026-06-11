@@ -38,11 +38,23 @@ use super::store::ColdIndexStore;
 /// `restore_fn(entry)` inside `tokio::time::timeout`; (6) `mark_loaded(id)`;
 /// (7) return `Err(LazyLoadError::Loading)` on timeout for `503 index_loading`.
 ///
+/// Issue #1106: when `restore_fn` returns `false` (blocked volume, missing
+/// root_path), call `cold_store.mark_failed(id)` to evict the entry from
+/// `entries` (so `indexes_lazy` decreases and `contains()` returns `false`)
+/// and return `LazyLoadError::RestoreFailed` instead of re-returning `Loading`.
+/// Subsequent calls for the same id go through the `cold_store.contains()`
+/// guard in the search handler, which returns `false` for failed entries,
+/// causing the handler to return 404 (which is acceptable — the index exists
+/// in the registry sense but cannot be served). Callers that need to
+/// distinguish "truly unknown" from "restore failed" should additionally check
+/// `cold_store.is_failed(id)`.
+///
 /// What: generic over the restore function so tests can inject a fake restore.
 ///
 /// Test: `get_or_load_index_hot_path`, `get_or_load_index_loads_cold_index`,
 /// `get_or_load_index_returns_loading_on_timeout`,
-/// `get_or_load_index_gate_none_but_index_just_became_hot`.
+/// `get_or_load_index_gate_none_but_index_just_became_hot`,
+/// `get_or_load_index_restore_false_marks_failed`.
 pub async fn get_or_load_index<F, Fut>(
     id: &IndexId,
     registry: &IndexRegistry,
@@ -107,14 +119,22 @@ where
     };
 
     if !loaded {
+        // Issue #1106: evict the entry from the cold store immediately so that
+        // (a) `indexes_lazy` decreases and stays honest, (b) subsequent queries
+        // skip the expensive restore path, and (c) the health metric correctly
+        // reflects this as a failed index rather than a pending one.
+        //
+        // Policy: failure is permanent for the daemon's lifetime — the operator
+        // must restart the daemon or re-register the index to retry. This avoids
+        // unbounded restore storms caused by a blocked volume or missing root_path.
+        cold_store.mark_failed(id);
         tracing::warn!(
-            "lazy-load: index '{}' restore returned false (blocked volume or panic) \
-             — returning 503 (issue #993)",
+            "lazy-load: index '{}' restore returned false (blocked volume, \
+             missing root_path, or panic) — marking permanently failed and \
+             returning 503 (issue #1106)",
             id.0
         );
-        return Err(LazyLoadError::Loading {
-            retry_after_secs: timeout.as_secs(),
-        });
+        return Err(LazyLoadError::RestoreFailed);
     }
 
     // 6. Mark loaded and return handle.
@@ -126,14 +146,25 @@ where
 /// Error returned by [`get_or_load_index`].
 ///
 /// Why: callers need to distinguish a genuine 404 (unknown id) from a
-/// transient 503 (cold index still loading / timed out).
-/// What: two variants — `NotFound` (emit 404) and `Loading` (emit 503 with
-/// `retry_after_secs`).
+/// transient 503 (cold index still loading / timed out) and a permanent 503
+/// (cold index restore failed — issue #1106).
+/// What: three variants — `NotFound` (emit 404), `Loading` (emit 503 with
+/// `retry_after_secs` — transient), and `RestoreFailed` (emit 503 — permanent,
+/// `restore_fn` returned `false`; operator must restart or re-register).
 /// Test: variant-level assertions in `get_or_load_index_*` tests.
 #[derive(Debug)]
 pub enum LazyLoadError {
-    /// The index id is not in the hot registry and not in the cold store.
+    /// The index id is not in the hot registry, not in the cold store, and not
+    /// in the failed-entries set. Genuine unknown index — emit 404.
     NotFound,
-    /// The index was found in the cold store but timed out or failed to load.
+    /// The index was found in the cold store but timed out before loading.
+    /// Transient: the caller may retry after `retry_after_secs`.
     Loading { retry_after_secs: u64 },
+    /// The index was found in the cold store but `restore_fn` returned `false`
+    /// (blocked volume, deleted root_path, or panic — issue #1106).
+    /// Permanent for the daemon's lifetime: the operator must restart the
+    /// daemon or re-register the index. The cold store entry has already been
+    /// moved to `failed_entries` so this variant is returned on subsequent
+    /// calls without re-attempting the restore.
+    RestoreFailed,
 }
