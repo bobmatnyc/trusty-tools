@@ -366,10 +366,17 @@ pub struct SearchAppState {
 /// revokes macOS TCC Full Disk Access, causing the daemon to load only 2 of
 /// ~102 indexes. Making this visible on `/health` turns a silent degradation
 /// into a loud, machine-readable signal.
+/// Why (issue #1091): scan timeouts silently produce 0-chunk indexes
+/// indistinguishable from healthy empty indexes; adding `indexes_skipped_timeout`
+/// to the `warm_boot_degraded` gate makes this a distinct, machine-readable
+/// signal on `/health` so monitors and `trusty-search health` can alert without
+/// tailing logs.
 /// What: counts of loaded and skipped indexes split by skip reason; a boolean
-/// `warm_boot_degraded` flag set when at least one TCC-skip happened or when
-/// loaded < 80% of prior known count.
-/// Test: `health_surfaces_warmboot_summary` in server tests.
+/// `warm_boot_degraded` flag set when at least one TCC-skip or scan-timeout
+/// happened, or when loaded < 80% of prior known count.
+/// Test: `health_surfaces_warmboot_summary` in server tests;
+///       `warmboot_summary_timeout_sets_degraded_flag` unit test in
+///       `commands/prior_index_count.rs`.
 #[derive(Clone, Default, serde::Serialize)]
 pub struct WarmBootSummary {
     /// Number of indexes successfully loaded during warm-boot.
@@ -377,11 +384,19 @@ pub struct WarmBootSummary {
     /// Number of indexes skipped because their volume was TCC-denied
     /// (PermissionDenied error or probe timeout on an external volume).
     pub indexes_skipped_tcc: usize,
-    /// Number of indexes skipped due to timeout (not TCC — slow or
-    /// network-backed filesystem).
+    /// Number of indexes skipped due to scan timeout (not TCC — slow or
+    /// network-backed filesystem). Issue #1091: these are counted in
+    /// `warm_boot_degraded` so monitors can detect scan-timeout degradation
+    /// without tailing logs, distinguishing it from a healthy empty index.
     pub indexes_skipped_timeout: usize,
-    /// `true` when `indexes_skipped_tcc > 0` OR when `indexes_loaded` is
-    /// less than 80% of the prior-known count (suggesting a large fraction
-    /// of indexes are missing, e.g. after FDA was revoked).
+    /// `true` when any of the following hold:
+    /// - `indexes_skipped_tcc > 0` (TCC / FDA denial)
+    /// - `indexes_skipped_timeout > 0` (scan timeout — issue #1091)
+    /// - `indexes_loaded` is less than 80% of the prior-known count
+    ///   (suggesting a large fraction of indexes are missing, e.g. after
+    ///   FDA was revoked)
+    ///
+    /// External monitors should poll this boolean as the single machine-readable
+    /// warm-boot health signal; the individual counters carry the root cause.
     pub warm_boot_degraded: bool,
 }

@@ -82,9 +82,12 @@ pub(crate) fn record_warm_boot_result(
         .prior_index_count
         .load(std::sync::atomic::Ordering::Relaxed);
     let degraded_by_tcc = total_skipped_tcc > 0;
+    // Issue #1091: scan timeouts must also set warm_boot_degraded so monitors
+    // can distinguish "timed-out index (0 chunks)" from "healthy empty index".
+    let degraded_by_timeout = total_skipped_timeout > 0;
     // Single source of truth for the 80%-of-prior threshold (issue #873 review nit).
     let degraded_by_count = prior_count > 0 && total < prior_count * 4 / 5;
-    let warm_boot_degraded = degraded_by_tcc || degraded_by_count;
+    let warm_boot_degraded = degraded_by_tcc || degraded_by_timeout || degraded_by_count;
 
     if let Ok(mut summary) = state.warmboot_summary.lock() {
         *summary = crate::service::server::WarmBootSummary {
@@ -93,6 +96,23 @@ pub(crate) fn record_warm_boot_result(
             indexes_skipped_timeout: total_skipped_timeout,
             warm_boot_degraded,
         };
+    }
+
+    // Issue #1091: emit error! (not just warn!) when scan timeouts occurred so
+    // this is visible without trace-level logging. The individual per-index
+    // warn! logs in `restore_one_index_bounded` identify which indexes timed out;
+    // this error! surfaces the aggregate on /health and in log aggregators.
+    if degraded_by_timeout {
+        tracing::error!(
+            loaded = total,
+            skipped_timeout = total_skipped_timeout,
+            "warm-boot DEGRADED: {total_skipped_timeout} index(es) TIMED OUT during restore \
+             and were NOT loaded. These indexes are missing from search results and /health. \
+             The skipped indexes may have been on a slow or temporarily inaccessible filesystem. \
+             Increase TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS (default 10s) if the filesystem is \
+             legitimately slow, or investigate the per-index warn! logs above for root causes. \
+             (issue #1091)"
+        );
     }
 
     if degraded_by_count {
@@ -115,5 +135,101 @@ pub(crate) fn record_warm_boot_result(
         state
             .prior_index_count
             .store(total, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression tests for WarmBootSummary degraded-flag logic (issues #873, #1091).
+    //!
+    //! Why: `record_warm_boot_result` is the single source of truth for the
+    //! `warm_boot_degraded` flag. These tests pin the flag semantics so
+    //! refactors cannot accidentally drop the timeout-degrades-flag behaviour
+    //! added for issue #1091.
+    //! Test: run with `cargo test -p trusty-search -- prior_index_count::tests`.
+
+    use super::*;
+    use crate::core::registry::IndexRegistry;
+    use crate::service::SearchAppState;
+
+    fn make_state() -> SearchAppState {
+        SearchAppState::new(IndexRegistry::new())
+    }
+
+    /// Why (issue #1091): `warm_boot_degraded` must be `true` when at least one
+    /// index timed out during restore, even when no TCC denials occurred and
+    /// `indexes_loaded` is above 80% of prior. Previously the flag was only set
+    /// for TCC skips and count drops, so a pure-timeout scenario produced
+    /// `warm_boot_degraded: false` — indistinguishable from a clean boot.
+    /// What: call `record_warm_boot_result` with 1 timeout and 0 TCC skips;
+    /// assert `warm_boot_degraded = true` and `indexes_skipped_timeout = 1`.
+    /// Test: this test.
+    #[test]
+    fn warmboot_summary_timeout_sets_degraded_flag() {
+        let state = make_state();
+        // 5 loaded, 1 timed out, 0 TCC denials, prior count = 0 (first run).
+        record_warm_boot_result(&state, 5, 0, 1);
+        let summary = state.warmboot_summary.lock().unwrap().clone();
+        assert_eq!(summary.indexes_loaded, 5, "loaded count must be recorded");
+        assert_eq!(
+            summary.indexes_skipped_timeout, 1,
+            "timeout count must be recorded"
+        );
+        assert_eq!(summary.indexes_skipped_tcc, 0, "tcc count must be 0");
+        assert!(
+            summary.warm_boot_degraded,
+            "warm_boot_degraded must be true when at least one index timed out (issue #1091)"
+        );
+    }
+
+    /// Why (regression for issue #873): `warm_boot_degraded` must be `true`
+    /// when `indexes_skipped_tcc > 0`, even if no timeouts or count drops occurred.
+    /// What: call with 1 TCC skip, 0 timeouts, prior = 0; assert degraded = true.
+    /// Test: this test.
+    #[test]
+    fn warmboot_summary_tcc_skip_sets_degraded_flag() {
+        let state = make_state();
+        record_warm_boot_result(&state, 5, 1, 0);
+        let summary = state.warmboot_summary.lock().unwrap().clone();
+        assert!(
+            summary.warm_boot_degraded,
+            "warm_boot_degraded must be true when TCC skips occurred"
+        );
+    }
+
+    /// Why: when all indexes load cleanly (0 TCC, 0 timeout, count above 80% of
+    /// prior), `warm_boot_degraded` must be `false` — no false alarms.
+    /// What: call with 5 loaded, 0 skipped, prior = 5; assert degraded = false.
+    /// Test: this test.
+    #[test]
+    fn warmboot_summary_clean_boot_not_degraded() {
+        let state = make_state();
+        state
+            .prior_index_count
+            .store(5, std::sync::atomic::Ordering::Relaxed);
+        record_warm_boot_result(&state, 5, 0, 0);
+        let summary = state.warmboot_summary.lock().unwrap().clone();
+        assert!(
+            !summary.warm_boot_degraded,
+            "warm_boot_degraded must be false on a clean boot with no skips"
+        );
+    }
+
+    /// Why (regression for issue #873): count-drop (loaded < 80% of prior) must
+    /// trigger `warm_boot_degraded` even with zero TCC skips and zero timeouts.
+    /// What: set prior = 10, load only 7 (70%), call with 0 skips; assert degraded.
+    /// Test: this test.
+    #[test]
+    fn warmboot_summary_count_drop_sets_degraded_flag() {
+        let state = make_state();
+        state
+            .prior_index_count
+            .store(10, std::sync::atomic::Ordering::Relaxed);
+        record_warm_boot_result(&state, 7, 0, 0);
+        let summary = state.warmboot_summary.lock().unwrap().clone();
+        assert!(
+            summary.warm_boot_degraded,
+            "warm_boot_degraded must be true when loaded < 80% of prior count"
+        );
     }
 }
