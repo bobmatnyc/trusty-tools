@@ -87,7 +87,6 @@ crates/trusty-search/src/core/classifier.rs	684
 crates/trusty-search/src/core/corpus.rs	998
 crates/trusty-search/src/core/indexer/ingest.rs	714
 crates/trusty-search/src/core/indexer/search.rs	564
-crates/trusty-search/src/core/indexer/tests.rs	2472
 crates/trusty-search/src/core/memory_policy.rs	690
 crates/trusty-search/src/core/store.rs	808
 crates/trusty-search/src/mcp/tools.rs	998
@@ -95,7 +94,6 @@ crates/trusty-search/src/service/call_chain.rs	738
 crates/trusty-search/src/service/embedder_supervisor.rs	521
 crates/trusty-search/src/service/persistence.rs	579
 crates/trusty-search/src/service/reindex/mod.rs	1658
-crates/trusty-search/src/service/reindex/tests.rs	1113
 crates/trusty-search/tests/benchmark_harness.rs	544
 crates/trusty-search/tests/benchmark_open_mpm_kg.rs	665
 crates/trusty-search/tests/benchmark_open_mpm.rs	568
