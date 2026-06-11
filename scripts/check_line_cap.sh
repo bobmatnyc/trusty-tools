@@ -111,7 +111,8 @@ BEGIN { in_block = 0; sloc = 0 }
     # Inside a block comment: look for the closing */
     pos = index(line, "*/")
     if (pos > 0) {
-      # Remainder after */ may have code — continue processing it
+      # Remainder after */ may have code — fall through to the while loop
+      # below which will re-scan it for further /* ... */ pairs.
       in_block = 0
       line = substr(line, pos + 2)
     } else {
@@ -119,15 +120,24 @@ BEGIN { in_block = 0; sloc = 0 }
       next
     }
   }
-  # Strip complete /* ... */ pairs on the same line (may be multiple)
+  # Strip complete /* ... */ pairs on the same line (may be multiple).
+  # Guard: a stray */ that appears BEFORE the first /* (e.g. `foo */ bar /* baz`)
+  # must not be mistaken for the closer of the opener.  We find the closing */
+  # by searching only in the substring that starts AFTER the opener (two chars),
+  # so a pre-existing stray */ is invisible to that search.
   while (1) {
     blk_open = index(line, "/*")
     if (blk_open == 0) break
-    blk_close = index(line, "*/")
-    if (blk_close > blk_open) {
+    # Search for */ only in the portion after the opener to avoid matching a
+    # stray */ that appears earlier in the line.
+    after_open = substr(line, blk_open + 2)
+    rel_close = index(after_open, "*/")
+    if (rel_close > 0) {
+      # rel_close is 1-based within after_open; absolute position in line:
+      blk_close = blk_open + 1 + rel_close   # +1 for the two chars of /*
       line = substr(line, 1, blk_open - 1) substr(line, blk_close + 2)
     } else {
-      # /* opened but no */ on this line — rest is a block comment
+      # /* opened but no */ on this line — remainder is a block comment
       line = substr(line, 1, blk_open - 1)
       in_block = 1
       break

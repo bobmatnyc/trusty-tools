@@ -277,7 +277,7 @@ landed — all three former monoliths are now under the 500-SLOC cap):
 
 The largest remaining files in `trusty-agents` (none tied to an open ticket) are
 `tools/memory/tests.rs` and `tm/manager.rs` — file a fresh refactor ticket before
-growing those further.
+growing those further. Current per-file SLOC budgets live in `.line-cap-allowlist.tsv`.
 
 🔴 **`thiserror` for libraries, `anyhow` for binaries** — library crates
 (`trusty-common`, `trusty-embedderd`, `trusty-bm25-daemon`, etc.) define structured error enums with
