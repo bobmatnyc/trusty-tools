@@ -63,19 +63,23 @@ To install a specific version:
 cargo install --git https://github.com/bobmatnyc/trusty-tools --tag trusty-search-v0.24.1 trusty-search --locked
 ```
 
-### With Homebrew (planned — not yet available)
+### With Homebrew (recommended)
 
 ```bash
 brew tap bobmatnyc/trusty
 brew install trusty-search
 ```
 
-This installation method is under development. For now, use GitHub Releases or `cargo install`.
+Or install directly without tapping:
 
-Once available, this will provide:
+```bash
+brew install bobmatnyc/trusty/trusty-search
+```
+
+Homebrew provides:
 - Automatic updates via `brew upgrade trusty-search`
 - Standard macOS / Linux PATH integration
-- Optional dependency resolution (e.g., system libraries for ONNX Runtime)
+- Easy dependency management
 
 ### Prerequisites & Special Cases
 
