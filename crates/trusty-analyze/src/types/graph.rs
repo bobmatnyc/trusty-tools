@@ -11,6 +11,16 @@
 //!
 //! Test: round-trip serialize/deserialize a small graph and verify
 //! `KgGraph::merge` deduplicates by node id.
+//!
+//! ## KgEdgeKind convergence (issue #815, ADR-0010 Option C)
+//!
+//! `KgEdgeKind` is now a **type alias** to
+//! `trusty_common::symgraph::contracts::EdgeKind` (the single canonical enum).
+//! All call sites using `KgEdgeKind::Calls`, `KgEdgeKind::Contains`, etc.
+//! continue to work unchanged — the variant names in the canonical enum match
+//! the former `KgEdgeKind` names exactly. The serde wire format is preserved:
+//! `"Calls"` still deserializes to the `Calls` variant, `"Implements"` to
+//! `Implements`, etc.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -96,63 +106,21 @@ pub struct KgNode {
 /// Language-neutral structural edge taxonomy for trusty-analyze's analysis KG.
 ///
 /// Why: trusty-analyze extracts a per-file/per-language structural graph from
-/// tree-sitter ASTs across 15+ languages. This graph covers whole-codebase
-/// structural relationships (containment, inheritance, dependency, runtime
-/// observations) that feed the analysis sidecar's complexity, quality, and
-/// graph-extraction endpoints. A language-neutral vocabulary lets all
-/// per-language adapters emit into the same schema without a language-specific
-/// type hierarchy.
+/// tree-sitter ASTs across 15+ languages. The single canonical `EdgeKind` in
+/// `trusty_common::symgraph::contracts` now covers all use cases across the
+/// toolchain (issue #815, ADR-0010 Option C). This type is a **re-export alias**
+/// to that canonical enum so existing call sites continue to compile without
+/// change. All 11 former variants are present in the canonical enum with the
+/// same names and serde representation.
 ///
-/// **Intentionally separate from `trusty_common::symgraph::contracts::EdgeKind`**
-/// (17 variants). That type is the persisted, scored vocabulary for the
-/// trusty-search entity KG, which runs in a separate daemon and is not
-/// connected to this graph at runtime. The two graphs serve different consumers:
-///   - `contracts::EdgeKind` — entity/concept search ranking in trusty-search
-///   - `KgEdgeKind` (this type) — structural analysis output consumed by
-///     trusty-analyze's HTTP/MCP API (`extract_graph`, `suggest_refactors`,
-///     `deep_analysis`, etc.)
+/// What: type alias to `trusty_common::symgraph::contracts::EdgeKind`.
+/// All former `KgEdgeKind` variants (`Contains`, `Imports`, `Exports`, `Calls`,
+/// `Implements`, `Extends`, `References`, `Tests`, `DependsOn`, `GeneratedFrom`,
+/// `RuntimeObservationFor`) are present in the canonical enum.
 ///
-/// **Intentionally separate from `crate::symgraph::graph::EdgeKind`**
-/// (3-variant petgraph weight in trusty-common). That type is the edge weight
-/// for the in-memory `SymbolGraph` used by the tree-sitter parser path; this
-/// type is a higher-level schema for the analysis output layer.
-///
-/// Future merger with `contracts::EdgeKind` is an open question (epic #814,
-/// Q2). Until that decision is made and the two graphs are connected at
-/// runtime, the separation is correct — merging prematurely would couple
-/// two independently deployed daemons through their type system.
-///
-/// When adding a variant here, update the `serde` round-trip test below.
-///
-/// What: 11 variants covering structural (contains, imports, exports),
-/// call-graph (calls), OOP (implements, extends), general reference,
-/// test provenance, dependency, and runtime-observation edges.
-/// Test: `kg_edge_kind_serde_round_trip` in this module.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum KgEdgeKind {
-    /// Parent structurally contains child (file → function, module → class, etc.).
-    Contains,
-    /// File or module imports another.
-    Imports,
-    /// Symbol exported from a module.
-    Exports,
-    /// Function A calls function B (static or runtime-observed).
-    Calls,
-    /// Class implements interface / struct implements trait.
-    Implements,
-    /// Class or interface inherits from another.
-    Extends,
-    /// Symbol references another symbol.
-    References,
-    /// Test function exercises a production symbol.
-    Tests,
-    /// Package depends on an external package/crate/library.
-    DependsOn,
-    /// Runtime observation derived from a static analysis node.
-    GeneratedFrom,
-    /// Profiler measurement attached to a static symbol.
-    RuntimeObservationFor,
-}
+/// Test: `kg_edge_kind_serde_round_trip` in this module confirms every former
+/// `KgEdgeKind` variant still round-trips through `serde_json`.
+pub type KgEdgeKind = trusty_common::symgraph::contracts::EdgeKind;
 
 /// One edge between two nodes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -209,10 +177,10 @@ impl KgGraph {
         let mut seen_edges: HashSet<(String, String, KgEdgeKind)> = self
             .edges
             .iter()
-            .map(|e| (e.from.clone(), e.to.clone(), e.kind.clone()))
+            .map(|e| (e.from.clone(), e.to.clone(), e.kind))
             .collect();
         for e in other.edges {
-            let k = (e.from.clone(), e.to.clone(), e.kind.clone());
+            let k = (e.from.clone(), e.to.clone(), e.kind);
             if seen_edges.insert(k) {
                 self.edges.push(e);
             }

@@ -58,10 +58,12 @@ pub mod server;
 // Public re-exports — mirrors the legacy `trusty_symgraph` crate root so
 // downstream consumers can adopt the module by changing one path.
 //
-// Note: `contracts::EdgeKind` (entity knowledge-graph edges) is *not*
-// re-exported at module root because the name collides with
-// `graph::EdgeKind` (symbol-graph structural edges). Access it via
-// `trusty_common::symgraph::contracts::EdgeKind`.
+// Note: `contracts::EdgeKind` IS now re-exported through `graph::EdgeKind`
+// (issue #815 convergence). `graph::EdgeKind` is a type alias to
+// `contracts::EdgeKind`, so both paths refer to the same type.
+// The canonical path is `trusty_common::symgraph::contracts::EdgeKind`;
+// access via `trusty_common::symgraph::EdgeKind` also works
+// (re-exported below via `graph::EdgeKind`).
 pub use contracts::{EntityType, RawEntity, fact_hash_str};
 
 #[cfg(feature = "symgraph-parser")]

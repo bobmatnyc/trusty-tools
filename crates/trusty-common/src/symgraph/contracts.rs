@@ -13,6 +13,25 @@
 //!
 //! Test: see `#[cfg(test)]` in this file — covers `RawEntity::new` id
 //! stability, `EdgeKind::score_multiplier`, and `fact_hash_str` determinism.
+//!
+//! ## EdgeKind convergence (issue #815, ADR-0010 Option C)
+//!
+//! `contracts::EdgeKind` is now the **single canonical enum** for all KG edge
+//! kinds across the trusty-* toolchain. It replaces the three formerly diverged
+//! enums:
+//!   - `contracts::EdgeKind` (this type) — the persisted, scored vocabulary for
+//!     the trusty-search entity KG (16 Phase A/B/C variants).
+//!   - `trusty_analyze::KgEdgeKind` — language-neutral structural analysis KG
+//!     for trusty-analyze's tree-sitter adapters (11 variants). Now a type alias
+//!     to this enum.
+//!   - `crate::symgraph::graph::EdgeKind` — coarse petgraph edge weight for the
+//!     in-memory `SymbolGraph` (3 variants: Calls, Imports, Contains). Now a
+//!     type alias to this enum.
+//!
+//! The union contains all 26 formerly separate variants. Back-compatibility for
+//! existing on-disk redb tags is preserved: `edge_kind_tag`/`edge_kind_from_tag`
+//! in `trusty_search::core::symbol_graph` map every existing tag string to its
+//! canonical variant without change.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -70,33 +89,28 @@ impl EntityType {
     }
 }
 
-/// Relationship taxonomy for the trusty-search entity knowledge graph.
+/// Canonical KG edge-kind vocabulary for the trusty-* toolchain (issue #815, ADR-0010).
 ///
-/// Why: trusty-search's KG layer needs richer semantic fidelity than a plain
-/// call-graph — it must express trait/type relationships, test provenance,
-/// doc-concept links, and reverse indexes so that KG-expansion scoring can
-/// favour high-signal edges via per-variant `score_multiplier` values
-/// (issue #18). This enum is the single vocabulary for all those edge types.
+/// Why: The trusty-* toolchain formerly had three diverged EdgeKind enums at
+/// different abstraction levels (contracts, graph, KgEdgeKind). Any new relation
+/// required changes in multiple places with inconsistent scoring semantics — a
+/// maintenance trap. ADR-0010 Option C converges all three into this single
+/// canonical enum so there is one vocabulary, one place to add variants, and one
+/// `score_multiplier` table.
 ///
-/// **Intentionally separate from `crate::symgraph::graph::EdgeKind`**
-/// (the 3-variant structural enum used by `SymbolGraph`'s petgraph substrate,
-/// gated behind the `symgraph-parser` feature). The two enums serve different
-/// layers:
-///   - `graph::EdgeKind` — petgraph edge weight for the in-memory `SymbolGraph`
-///     used by the tree-sitter parser path. Three coarse variants (`Calls`,
-///     `Imports`, `Contains`) are sufficient for the local name-resolution
-///     queries that path performs.
-///   - `contracts::EdgeKind` (this type) — the persisted, scored vocabulary for
-///     the trusty-search entity KG. Seventeen variants with per-edge
-///     `score_multiplier` values, serialised to stable string tags and stored
-///     in the warm-boot index via `edge_kind_tag` / `edge_kind_from_tag` in
-///     `trusty_search::core::symbol_graph`.
+/// **Previously separate enums — now type aliases to this type:**
+///   - `crate::symgraph::graph::EdgeKind` (3 coarse variants: `Calls`, `Imports`,
+///     `Contains`; used as petgraph edge weight for the in-memory `SymbolGraph`,
+///     gated behind the `symgraph-parser` feature).
+///   - `trusty_analyze::KgEdgeKind` (11 variants; language-neutral structural
+///     analysis KG for trusty-analyze's tree-sitter adapters).
 ///
-/// **Intentionally separate from `trusty_analyze::KgEdgeKind`** (11 variants).
-/// That type is trusty-analyze's independent language-neutral KG for static
-/// analysis output (tree-sitter adapters emit into it). It is not connected to
-/// the trusty-search KG at runtime and carries a vocabulary suited to
-/// whole-codebase structural analysis rather than entity/concept search.
+/// **Persistence back-compat:** for the 16 Phase A/B/C variants that were
+/// previously stored in trusty-search's redb warm-boot index, the on-disk tag
+/// strings are UNCHANGED. The new variants added from `KgEdgeKind` / `graph::EdgeKind`
+/// (`Calls`, `Contains`, `Imports`, `Exports`, `Extends`, `References`, `Tests`,
+/// `DependsOn`, `GeneratedFrom`, `RuntimeObservationFor`) are new tags; existing
+/// indexes will never contain them.
 ///
 /// When adding a new variant here, also add the matching string tag in
 /// `trusty_search::core::symbol_graph::edge_kind_tag` /
@@ -105,43 +119,98 @@ impl EntityType {
 /// Phase A = structural (tree-sitter derived)
 /// Phase B = test-relation
 /// Phase C = doc/concept
+/// Phase KG = language-neutral structural (formerly KgEdgeKind)
+/// Phase SG = symbol-graph coarse (formerly graph::EdgeKind)
 ///
 /// Test: `edge_kind_score_multiplier_known_values` (this file);
 /// `edge_kind_serde_round_trip` (this file);
+/// `edge_kind_union_coverage` (this file — asserts canonical set covers prior union);
 /// `edge_kind_tag_round_trip` in `trusty_search::core::symbol_graph::tests`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum EdgeKind {
+    // ── trusty-search KG (Phase A/B/C — 16 variants) ──────────────────────
     // Call graph
-    /// Caller → callee.
+    /// Caller → callee. On-disk tag: `"CallsFunction"`.
     CallsFunction,
-    /// Callee → caller (reverse index of `CallsFunction`).
+    /// Callee → caller (reverse index of `CallsFunction`). On-disk tag: `"CalledByFunction"`.
     CalledByFunction,
     // Phase A — structural
+    /// Class implements interface / struct implements trait.
     Implements,
+    /// Symbol uses a named type.
     UsesType,
+    /// `#[derive(…)]` relationship.
     Derives,
+    /// Module structurally contains a child symbol.
     ModuleContains,
+    /// Symbol re-exported from a module (`pub use`).
     ReExports,
+    /// Function or macro raises / propagates an error variant.
     RaisesError,
+    /// Symbol configures another (dependency injection, builder pattern).
     Configures,
     // Phase B — test relations
+    /// Production symbol is covered by a test.
     TestedBy,
+    /// Test uses a shared fixture.
     TestUsesFixture,
+    /// Two symbols co-occur in the same test body.
     CoOccursInTest,
     // Phase C — docs / concepts
+    /// Doc comment documents a symbol.
     Documents,
+    /// Symbol references a concept extracted from documentation.
     ReferencesConcept,
+    /// `type Foo = Bar` alias relationship.
     Aliases,
+    /// Error variant described by a doc comment.
     ErrorDescribes,
+
+    // ── Language-neutral structural (formerly KgEdgeKind — 10 variants) ───
+    /// Parent structurally contains child (file → function, module → class, etc.).
+    /// Formerly `KgEdgeKind::Contains` and `graph::EdgeKind::Contains`.
+    Contains,
+    /// File or module imports another.
+    /// Formerly `KgEdgeKind::Imports` and `graph::EdgeKind::Imports`.
+    Imports,
+    /// Symbol exported from a module.
+    /// Formerly `KgEdgeKind::Exports`.
+    Exports,
+    /// Function A calls function B (language-adapter coarse call edge).
+    /// Formerly `KgEdgeKind::Calls` and `graph::EdgeKind::Calls`.
+    /// Distinct from `CallsFunction` which is the trusty-search entity-KG
+    /// call edge with reverse-index support (`CalledByFunction`).
+    Calls,
+    /// Class or interface inherits from another.
+    /// Formerly `KgEdgeKind::Extends`.
+    Extends,
+    /// Symbol references another symbol (general, non-call reference).
+    /// Formerly `KgEdgeKind::References`.
+    References,
+    /// Test function exercises a production symbol (forward direction).
+    /// Distinct from `TestedBy` which is the reverse (production → test).
+    /// Formerly `KgEdgeKind::Tests`.
+    Tests,
+    /// Package depends on an external package/crate/library.
+    /// Formerly `KgEdgeKind::DependsOn`.
+    DependsOn,
+    /// Runtime observation derived from a static analysis node.
+    /// Formerly `KgEdgeKind::GeneratedFrom`.
+    GeneratedFrom,
+    /// Profiler measurement attached to a static symbol.
+    /// Formerly `KgEdgeKind::RuntimeObservationFor`.
+    RuntimeObservationFor,
 }
 
 impl EdgeKind {
-    /// Relevance weight for KG neighbourhood expansion.
+    /// Relevance weight for KG neighbourhood expansion in trusty-search.
     ///
     /// Why: Different edge types carry different levels of semantic relevance
     /// to a search query. Weighting edges (rather than treating all as equal)
     /// lets the ranking layer boost strongly-related symbols (trait implementations,
-    /// tested-by links) over weaker associations (concept co-occurrence).
+    /// tested-by links) over weaker associations (concept co-occurrence). The new
+    /// structural variants from the former `KgEdgeKind` use the conservative
+    /// default (0.70) until pilot data informs tuned values (issue #817).
     /// What: Returns a multiplier in (0, 1] applied to the base relevance
     /// score of a KG neighbour when this edge was traversed to reach it.
     /// Higher values mean the neighbour is ranked more prominently.
@@ -153,7 +222,9 @@ impl EdgeKind {
             EdgeKind::TestedBy => 0.80,
             EdgeKind::Documents => 0.65,
             EdgeKind::ReferencesConcept => 0.60,
-            // Remaining edges use the legacy flat KG-expansion multiplier.
+            // All remaining edges (Phase A/B/C legacy + new structural variants)
+            // use the conservative flat KG-expansion multiplier. Tuning for
+            // individual structural variants is tracked in issue #817.
             _ => 0.70,
         }
     }
@@ -270,9 +341,13 @@ mod tests {
     /// annotation would still survive this round-trip (serde uses the variant
     /// name by default), but changing an existing variant name without a rename
     /// would break it.
+    ///
+    /// This also covers the union of all formerly-separate enums (issue #815):
+    /// all 26 canonical variants must survive round-trip.
     #[test]
     fn edge_kind_serde_round_trip() {
         let variants = [
+            // Phase A/B/C — trusty-search KG (16 legacy variants)
             EdgeKind::CallsFunction,
             EdgeKind::CalledByFunction,
             EdgeKind::Implements,
@@ -289,12 +364,62 @@ mod tests {
             EdgeKind::ReferencesConcept,
             EdgeKind::Aliases,
             EdgeKind::ErrorDescribes,
+            // Language-neutral structural (10 variants from former KgEdgeKind + graph::EdgeKind)
+            EdgeKind::Contains,
+            EdgeKind::Imports,
+            EdgeKind::Exports,
+            EdgeKind::Calls,
+            EdgeKind::Extends,
+            EdgeKind::References,
+            EdgeKind::Tests,
+            EdgeKind::DependsOn,
+            EdgeKind::GeneratedFrom,
+            EdgeKind::RuntimeObservationFor,
         ];
         for v in variants {
             let json = serde_json::to_string(&v).expect("serialize EdgeKind");
             let back: EdgeKind = serde_json::from_str(&json).expect("deserialize EdgeKind");
             assert_eq!(v, back, "round-trip failed for {json}");
         }
+    }
+
+    /// Assert that the canonical enum covers the full prior union of the three
+    /// formerly-separate enums (issue #815 acceptance criterion).
+    ///
+    /// Why: ensures no variant was accidentally omitted during convergence.
+    /// What: exhaustive list of all 26 variants expected in the unified enum.
+    /// Test: this is the test — it fails at compile time if any variant is missing.
+    #[test]
+    fn edge_kind_union_coverage() {
+        // Former contracts::EdgeKind variants (Phase A/B/C)
+        let _ = EdgeKind::CallsFunction;
+        let _ = EdgeKind::CalledByFunction;
+        let _ = EdgeKind::Implements;
+        let _ = EdgeKind::UsesType;
+        let _ = EdgeKind::Derives;
+        let _ = EdgeKind::ModuleContains;
+        let _ = EdgeKind::ReExports;
+        let _ = EdgeKind::RaisesError;
+        let _ = EdgeKind::Configures;
+        let _ = EdgeKind::TestedBy;
+        let _ = EdgeKind::TestUsesFixture;
+        let _ = EdgeKind::CoOccursInTest;
+        let _ = EdgeKind::Documents;
+        let _ = EdgeKind::ReferencesConcept;
+        let _ = EdgeKind::Aliases;
+        let _ = EdgeKind::ErrorDescribes;
+        // Former KgEdgeKind variants (structural / language-neutral)
+        let _ = EdgeKind::Contains;
+        let _ = EdgeKind::Imports;
+        let _ = EdgeKind::Exports;
+        let _ = EdgeKind::Calls;
+        let _ = EdgeKind::Extends;
+        let _ = EdgeKind::References;
+        let _ = EdgeKind::Tests;
+        let _ = EdgeKind::DependsOn;
+        let _ = EdgeKind::GeneratedFrom;
+        let _ = EdgeKind::RuntimeObservationFor;
+        // graph::EdgeKind coarse variants are covered by Calls, Imports, Contains above.
     }
 
     #[test]

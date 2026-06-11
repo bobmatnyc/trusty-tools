@@ -282,7 +282,7 @@ impl SymbolGraph {
                     if *src_idx == target_idx {
                         continue;
                     }
-                    self.graph.add_edge(*src_idx, target_idx, kind.clone());
+                    self.graph.add_edge(*src_idx, target_idx, kind);
                 }
             }
         }
@@ -424,15 +424,12 @@ impl SymbolGraph {
     }
 }
 
-/// Stable string tag for an `EdgeKind`, used as the persisted edge label and
-/// the JSON key in `/graph/stats` (issue #41 phase 2).
+/// Stable string tag for an `EdgeKind` used for redb persistence and `/graph/stats`.
 ///
-/// Why: persisting an enum directly couples the on-disk format to a particular
-/// `serde` representation. Funnelling every persistence + API hop through this
-/// helper keeps the tag stable across rust-version / serde-format changes and
-/// makes the round-trip easy to reason about.
-/// What: returns the matching variant name (`Debug`-style spelling).
-/// Test: covered transitively by `test_save_load_round_trip_preserves_graph`.
+/// Why: funnelling all persistence hops through this helper keeps tags stable
+/// across serde-format changes. Tags for the 16 Phase A/B/C variants are
+/// on-disk and MUST NOT be renamed; the 10 convergence variants are new.
+/// What: returns the variant name string. Test: `edge_kind_tag_round_trip`.
 fn edge_kind_tag(kind: &EdgeKind) -> &'static str {
     match kind {
         EdgeKind::CallsFunction => "CallsFunction",
@@ -451,20 +448,24 @@ fn edge_kind_tag(kind: &EdgeKind) -> &'static str {
         EdgeKind::ReferencesConcept => "ReferencesConcept",
         EdgeKind::Aliases => "Aliases",
         EdgeKind::ErrorDescribes => "ErrorDescribes",
+        EdgeKind::Contains => "Contains",
+        EdgeKind::Imports => "Imports",
+        EdgeKind::Exports => "Exports",
+        EdgeKind::Calls => "Calls",
+        EdgeKind::Extends => "Extends",
+        EdgeKind::References => "References",
+        EdgeKind::Tests => "Tests",
+        EdgeKind::DependsOn => "DependsOn",
+        EdgeKind::GeneratedFrom => "GeneratedFrom",
+        EdgeKind::RuntimeObservationFor => "RuntimeObservationFor",
     }
 }
 
-/// Inverse of [`edge_kind_tag`]: parse a persisted edge tag back into the
-/// `EdgeKind` variant (issue #41 phase 2).
+/// Inverse of [`edge_kind_tag`]: parse a persisted redb tag back to `EdgeKind`.
 ///
-/// Why: warm-boot reads edge tags back from redb; if the tag is unrecognised
-/// (e.g. written by a newer daemon that has variants this build does not know),
-/// returning `None` lets the caller silently drop the edge (issue #816) rather
-/// than crashing or corrupting the graph.
-/// What: exhaustive match over all known string tags; returns `None` for any
-/// unrecognised tag so callers can count and log drops.
-/// Test: `edge_kind_tag_round_trip` below — asserts every variant survives
-/// `edge_kind_tag` → `edge_kind_from_tag` without loss.
+/// Why: warm-boot reads tags from redb; unrecognised tags (written by a newer
+/// daemon) return `None` so callers can count drops (issue #816) instead of
+/// crashing. Test: `edge_kind_tag_round_trip`.
 fn edge_kind_from_tag(tag: &str) -> Option<EdgeKind> {
     Some(match tag {
         "CallsFunction" => EdgeKind::CallsFunction,
@@ -483,6 +484,16 @@ fn edge_kind_from_tag(tag: &str) -> Option<EdgeKind> {
         "ReferencesConcept" => EdgeKind::ReferencesConcept,
         "Aliases" => EdgeKind::Aliases,
         "ErrorDescribes" => EdgeKind::ErrorDescribes,
+        "Contains" => EdgeKind::Contains,
+        "Imports" => EdgeKind::Imports,
+        "Exports" => EdgeKind::Exports,
+        "Calls" => EdgeKind::Calls,
+        "Extends" => EdgeKind::Extends,
+        "References" => EdgeKind::References,
+        "Tests" => EdgeKind::Tests,
+        "DependsOn" => EdgeKind::DependsOn,
+        "GeneratedFrom" => EdgeKind::GeneratedFrom,
+        "RuntimeObservationFor" => EdgeKind::RuntimeObservationFor,
         _ => return None,
     })
 }
@@ -508,16 +519,12 @@ impl SymbolGraph {
         }
     }
 
-    /// Register a single chunk's symbol, honouring the node cap and
-    /// first-write-wins semantics.
+    /// Register one chunk's symbol, honouring the node cap and first-write-wins.
     ///
-    /// Why: keeps `register_symbol_nodes` flat — each branch (skip, alias an
-    /// existing symbol, hit the cap, or insert a new node) lives in one place
-    /// rather than as nested `continue` arms.
-    /// What: returns nothing; mutates `self` and toggles `cap_warned` the first
-    /// time the cap is hit.
-    /// Test: covered transitively by `test_build_simple_graph` and
-    /// `test_chunk_with_no_function_name_is_skipped`.
+    /// Why: keeps `register_symbol_nodes` flat; each branch lives here rather
+    /// than as nested `continue` arms.
+    /// What: mutates `self`; toggles `cap_warned` on first cap hit.
+    /// Test: `test_build_simple_graph`, `test_chunk_with_no_function_name_is_skipped`.
     fn register_one_symbol(
         &mut self,
         chunk_id: &str,
@@ -550,23 +557,17 @@ impl SymbolGraph {
             .insert(chunk_id.to_string(), name.to_string());
     }
 
-    /// Returns true when a non-zero cap has been reached.
-    ///
-    /// Why: isolates the `cap > 0` sentinel so call sites read as a simple
-    /// boolean predicate.
-    /// What: `false` if the cap is disabled (`0`), else `current >= cap`.
-    /// Test: indirectly exercised by `register_one_symbol`'s callers.
+    /// `true` when a non-zero cap has been reached.
+    /// Why: isolates the sentinel so call sites read as a boolean predicate.
+    /// What: `false` if cap is `0` (disabled), else `current >= cap`.
+    /// Test: indirectly via `register_one_symbol`.
     fn cap_exceeded(cap: usize, current: usize) -> bool {
         cap > 0 && current >= cap
     }
 
     /// Emit the node-cap warning exactly once per build.
-    ///
-    /// Why: `register_one_symbol` is called per chunk, and we don't want a
-    /// log line for every overflow.
-    /// What: logs at warn level and flips `cap_warned` on first invocation.
-    /// Test: behavioural — verified indirectly by builds completing without
-    /// log spam under the cap.
+    /// Why: avoid per-chunk log spam when the cap is reached.
+    /// What: warn-logs once and flips `cap_warned`. Test: indirectly via build.
     fn warn_cap_once(cap: usize, cap_warned: &mut bool) {
         if !*cap_warned {
             tracing::warn!(
@@ -645,7 +646,7 @@ impl SymbolGraph {
             if from == to {
                 continue;
             }
-            self.graph.add_edge(from, to, kind.clone());
+            self.graph.add_edge(from, to, kind);
         }
     }
 
@@ -696,12 +697,9 @@ impl SymbolGraph {
     }
 
     /// Wire one `ModuleContains` edge per non-self sibling.
-    ///
-    /// Why: keeps the inner loop free of the self-edge / same-name filter so
-    /// the iteration intent is obvious.
-    /// What: walks `siblings`, skipping the container itself, and appends a
-    /// `ModuleContains` edge from `from` to every other registered symbol.
-    /// Test: covered by `test_module_contains_edges_from_container_chunks`.
+    /// Why: keeps the inner loop free of the self-edge filter.
+    /// What: walks `siblings`, skips `from` itself, appends `ModuleContains` edges.
+    /// Test: `test_module_contains_edges_from_container_chunks`.
     fn add_sibling_edges(&mut self, from: NodeIndex, owner: &str, siblings: &[(&str, NodeIndex)]) {
         for (sib_name, sib_idx) in siblings {
             if *sib_idx == from || *sib_name == owner {
@@ -712,26 +710,19 @@ impl SymbolGraph {
         }
     }
 
-    /// Returns true if any chunk is a container (Impl/Class/Struct/Module) with a name.
-    ///
-    /// Why: pass 3 builds a `by_file` map that's expensive to materialize for
-    /// codebases without any container chunks (e.g. pure-function corpora).
-    /// What: short-circuits the first qualifying chunk.
-    /// Test: indirectly covered — when no container exists, pass 3 is a no-op
-    /// (see `test_build_simple_graph`).
+    /// `true` if any chunk is a named container (Impl/Class/Struct/Module).
+    /// Why: avoids materializing `by_file` for pure-function corpora.
+    /// What: short-circuits on first qualifying chunk. Test: `test_build_simple_graph`.
     fn has_any_container(chunks: &[ChunkTuple]) -> bool {
         chunks
             .iter()
             .any(|(_, _, name, _, _, ct)| name.is_some() && Self::is_container(ct))
     }
 
-    /// Returns true if a chunk type owns sibling symbols (impl/class/struct/module).
-    ///
-    /// Why: the same `matches!` predicate appeared twice in pass 3; extracting
-    /// it removes a duplicated branching expression.
+    /// `true` when a chunk type owns sibling symbols (impl/class/struct/module).
+    /// Why: consolidates a duplicated `matches!` predicate from pass 3.
     /// What: pattern-matches the four container variants.
-    /// Test: indirectly covered by
-    /// `test_module_contains_edges_from_container_chunks`.
+    /// Test: `test_module_contains_edges_from_container_chunks`.
     fn is_container(ct: &ChunkType) -> bool {
         matches!(
             ct,
@@ -739,14 +730,10 @@ impl SymbolGraph {
         )
     }
 
-    /// Group all defined symbols by their source file.
-    ///
-    /// Why: pass 3 needs O(1) "what else is in this file?" lookups; building
-    /// the map once is cheaper than re-scanning the corpus per container.
-    /// What: returns `file → [(symbol, NodeIndex)]` covering every chunk whose
-    /// `function_name` resolves to a registered node.
-    /// Test: indirectly covered by
-    /// `test_module_contains_edges_from_container_chunks` (cross-file leak check).
+    /// Group all defined symbols by source file for O(1) "file siblings" lookups.
+    /// Why: building the map once is cheaper than re-scanning per container.
+    /// What: `file → [(symbol, NodeIndex)]` for chunks with a registered node.
+    /// Test: `test_module_contains_edges_from_container_chunks`.
     fn group_symbols_by_file<'a>(
         &self,
         chunks: &'a [ChunkTuple],
@@ -860,7 +847,7 @@ impl SymbolGraph {
             .filter_map(|e| {
                 let src = self.graph.node_weight(e.source())?;
                 let tgt = self.graph.node_weight(e.target())?;
-                Some((src.symbol.clone(), tgt.symbol.clone(), e.weight().clone()))
+                Some((src.symbol.clone(), tgt.symbol.clone(), *e.weight()))
             })
             .collect()
     }
@@ -905,11 +892,7 @@ impl SymbolGraph {
             &[Direction::Outgoing, Direction::Incoming],
             |edge| allowed.contains(edge.weight()),
             |node, edge| {
-                out.push((
-                    node.symbol.clone(),
-                    node.chunk_id.clone(),
-                    edge.weight().clone(),
-                ));
+                out.push((node.symbol.clone(), node.chunk_id.clone(), *edge.weight()));
             },
         );
         out
@@ -1685,13 +1668,9 @@ mod tests {
         assert!(g.callers_of("beta", 1).is_empty(), "stale caller edge");
     }
 
-    /// Issue #41 phase 2: `edge_kind_breakdown` returns one entry per
-    /// `EdgeKind` variant present in the graph, sorted by tag.
-    /// Every `contracts::EdgeKind` variant must survive the
-    /// `edge_kind_tag` → `edge_kind_from_tag` round-trip without loss.
-    /// This guards the warm-boot serialisation path: a variant present in the
-    /// tag function but absent from the parse function (or vice-versa) would
-    /// silently drop edges from persisted indexes on warm boot.
+    /// All 26 `EdgeKind` variants (16 legacy + 10 convergence) must survive the
+    /// `edge_kind_tag` → `edge_kind_from_tag` round-trip (issue #815). Also
+    /// asserts legacy tag strings are bit-for-bit unchanged (on-disk back-compat).
     #[test]
     fn edge_kind_tag_round_trip() {
         let variants = [
@@ -1711,6 +1690,16 @@ mod tests {
             EdgeKind::ReferencesConcept,
             EdgeKind::Aliases,
             EdgeKind::ErrorDescribes,
+            EdgeKind::Contains,
+            EdgeKind::Imports,
+            EdgeKind::Exports,
+            EdgeKind::Calls,
+            EdgeKind::Extends,
+            EdgeKind::References,
+            EdgeKind::Tests,
+            EdgeKind::DependsOn,
+            EdgeKind::GeneratedFrom,
+            EdgeKind::RuntimeObservationFor,
         ];
         for v in variants {
             let tag = edge_kind_tag(&v);
@@ -1718,8 +1707,18 @@ mod tests {
                 edge_kind_from_tag(tag).unwrap_or_else(|| panic!("no parse for tag {tag:?}"));
             assert_eq!(v, back, "round-trip failed for {tag}");
         }
-        // Unknown tags must parse to None (no panic, no fallback).
         assert!(edge_kind_from_tag("UnknownFuturEdge").is_none());
+        // Legacy tag strings must be stable (on-disk redb back-compat).
+        for (variant, expected) in [
+            (EdgeKind::CallsFunction, "CallsFunction"),
+            (EdgeKind::CalledByFunction, "CalledByFunction"),
+            (EdgeKind::Implements, "Implements"),
+            (EdgeKind::TestedBy, "TestedBy"),
+            (EdgeKind::Documents, "Documents"),
+            (EdgeKind::ReferencesConcept, "ReferencesConcept"),
+        ] {
+            assert_eq!(edge_kind_tag(&variant), expected);
+        }
     }
 
     #[test]
