@@ -28,6 +28,10 @@ pub(super) async fn delete_index_handler(
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
     let index_id = IndexId::new(id.clone());
+    // Capture the root_path BEFORE unregistering so we can clean up roots.toml.
+    // Issue #1090: roots.toml must be updated on delete so warm-boot does not
+    // rediscover the `.trusty-search/` directory and resurrect the pruned index.
+    let root_path_for_cleanup = state.registry.get(&index_id).map(|h| h.root_path.clone());
     let removed = state.registry.unregister(&index_id);
     state.reindex_progress.remove(&index_id);
     if removed {
@@ -38,6 +42,24 @@ pub(super) async fn delete_index_handler(
         }
         if let Err(e) = crate::service::persistence::remove_index_data_dir(&id) {
             tracing::warn!("could not remove on-disk data for '{id}': {e}");
+        }
+        // Issue #1090: remove the root from roots.toml so the warm-boot
+        // colocated scan does not rediscover this root and resurrect the index.
+        // Without this, roots.toml retains the entry and warm-boot re-registers
+        // the deleted index from the leftover `.trusty-search/` data dir.
+        if let Some(ref root) = root_path_for_cleanup {
+            if let Err(e) = crate::service::roots_registry::remove_root(root) {
+                tracing::warn!(
+                    "could not remove '{id}' root {} from roots.toml: {e} \
+                     (warm-boot may rediscover this index — issue #1090)",
+                    root.display()
+                );
+            } else {
+                tracing::debug!(
+                    "delete[{id}]: removed root {} from roots.toml",
+                    root.display()
+                );
+            }
         }
         // Push event so connected dashboards drop the row without refresh.
         state.emit(DaemonEvent::IndexRemoved { id: id.clone() });
