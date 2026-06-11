@@ -26,7 +26,7 @@
 //! full definition.
 
 mod edge_kind;
-pub use edge_kind::EdgeKind;
+pub use edge_kind::{EdgeKind, EdgeKindError};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -144,13 +144,23 @@ impl RawEntity {
     }
 }
 
-/// Short, stable hex hash of a string. Used by ingest sources (e.g. SCIP) to
-/// derive readable, collision-resistant entity IDs from opaque symbol strings.
+/// Short hex hash of a string. Used by ingest sources (e.g. SCIP) to
+/// derive compact, collision-resistant entity IDs from opaque symbol strings.
 ///
 /// Why: SCIP symbol strings (e.g. `"rust-analyzer cargo crate/Foo#"`) are
-/// long and noisy. Hashing them produces a compact, stable suffix safe to
-/// embed in entity ids and redb keys.
-/// What: hashes `s` with `DefaultHasher` and formats as 8-char lowercase hex.
+/// long and noisy. Hashing them produces a compact suffix safe to embed in
+/// entity ids and redb keys.
+/// What: hashes `s` with `std::collections::hash_map::DefaultHasher` and
+/// formats as 8-char (minimum) lowercase hex.
+///
+/// **Stability caveat:** `DefaultHasher` is NOT guaranteed stable across Rust
+/// versions or process restarts (the standard library may change its
+/// implementation). The output is deterministic within a single process run
+/// but MUST NOT be relied upon for cross-version persistence stability.
+/// Tracked as a separate durability issue — do not change the algorithm here
+/// without a coordinated migration plan, as existing persisted entity IDs
+/// were derived with this hash.
+///
 /// Test: `fact_hash_str_is_deterministic`.
 pub fn fact_hash_str(s: &str) -> String {
     use std::hash::{Hash, Hasher};

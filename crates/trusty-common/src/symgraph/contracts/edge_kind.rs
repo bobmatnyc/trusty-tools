@@ -3,13 +3,34 @@
 //! Why: extracted from `contracts.rs` to stay under the 500-line cap while
 //! adding `Custom(String)` (issue #818), doc notes for `Writes`/`AccessesResource`
 //! per the #1111 review, and tag/from_tag helpers that return `Cow<'static, str>`.
-//! What: defines `EdgeKind`, `score_multiplier`, `tag`, `from_tag`, and
-//! `from_static_tag`. Re-exported via `contracts::EdgeKind`.
+//! What: defines `EdgeKind`, `EdgeKindError`, `score_multiplier`, `tag`,
+//! `from_tag`, `from_static_tag`, and the validated `EdgeKind::custom` constructor.
+//! Re-exported via `contracts::EdgeKind`.
 //! Test: see `#[cfg(test)]` block at the bottom.
 
 use std::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Error returned by the validated [`EdgeKind::custom`] constructor.
+///
+/// Why: enforcing invariants at the construction site prevents malformed
+/// `Custom` labels from reaching the persistence layer where they would
+/// silently produce double-prefixed on-disk tags (e.g. `"custom:custom:foo"`).
+/// What: covers the two rejection cases — empty labels and labels that
+/// contain a `':'` character.
+/// Test: `edge_kind_custom_constructor_rejects_invalid` in this module.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum EdgeKindError {
+    /// The custom label must not be empty.
+    #[error("Custom EdgeKind label must not be empty")]
+    EmptyLabel,
+    /// The custom label must not contain `':'` (would produce a double-prefix
+    /// on-disk tag, e.g. `"custom:custom:foo"` from `Custom("custom:foo")`).
+    #[error("Custom EdgeKind label must not contain ':' (got {0:?})")]
+    LabelContainsColon(String),
+}
 
 /// Canonical KG edge-kind vocabulary for the trusty-* toolchain (issue #815, ADR-0010).
 ///
@@ -152,12 +173,51 @@ pub enum EdgeKind {
     /// What: carries the relation label as a `String` (e.g. `"reads_table"`). On
     /// disk the tag is `"custom:<s>"` — the `"custom:"` prefix is permanently
     /// reserved and never collides with future PascalCase named variants.
-    /// Test: `edge_kind_custom_tag_round_trip` (this file) and
+    ///
+    /// **Label invariants (enforced by [`EdgeKind::custom`]):**
+    /// - The label **must not be empty** — an empty label produces the tag
+    ///   `"custom:"` which would parse back as `Custom("")`, a degenerate edge
+    ///   that carries no semantic information.
+    /// - The label **must not contain `':'`** — a colon produces a double-prefix
+    ///   on-disk tag (e.g. `Custom("custom:foo")` → `"custom:custom:foo"`) that
+    ///   cannot round-trip correctly via [`EdgeKind::from_tag`].
+    ///
+    /// Use [`EdgeKind::custom`] as the checked constructor; direct construction
+    /// `EdgeKind::Custom("…".into())` is intentionally left public for
+    /// deserialization compatibility, but callers should prefer the constructor.
+    ///
+    /// **`from_tag` parsing of `"custom:"`-prefixed tags:** if the remaining
+    /// label after stripping the prefix is empty or contains `':'`, the tag is
+    /// treated as malformed and `from_tag` returns `None` (the edge is dropped
+    /// and counted in `unknown_edge_tags_dropped`).
+    ///
+    /// Test: `edge_kind_custom_tag_round_trip` (this file),
+    /// `edge_kind_custom_constructor_rejects_invalid` (this file), and
     /// `edge_kind_custom_survives_warm_boot` in `trusty_search::core::symbol_graph::tests`.
     Custom(String),
 }
 
 impl EdgeKind {
+    /// Validated constructor for the `Custom` variant.
+    ///
+    /// Why: prevents malformed labels from reaching the persistence layer where
+    /// an empty label or a colon-containing label would produce an on-disk tag
+    /// that either carries no semantic information or cannot round-trip via
+    /// `from_tag` (double-prefix: `"custom:custom:foo"`).
+    /// What: accepts any `Into<String>`, rejects empty labels and labels
+    /// containing `':'`, returns an `EdgeKind::Custom` on success.
+    /// Test: `edge_kind_custom_constructor_rejects_invalid` in this module.
+    pub fn custom(label: impl Into<String>) -> Result<Self, EdgeKindError> {
+        let s = label.into();
+        if s.is_empty() {
+            return Err(EdgeKindError::EmptyLabel);
+        }
+        if s.contains(':') {
+            return Err(EdgeKindError::LabelContainsColon(s));
+        }
+        Ok(EdgeKind::Custom(s))
+    }
+
     /// Relevance weight for KG neighbourhood expansion in trusty-search.
     ///
     /// Why: Different edge types carry different levels of semantic relevance.
@@ -204,14 +264,25 @@ impl EdgeKind {
     /// Parse an on-disk tag back into an `EdgeKind`.
     ///
     /// Why: warm-boot reads tags from redb; this is the single point that maps
-    /// string tags to enum variants. `"custom:"`-prefixed tags always parse to
-    /// `Custom(s)` (round-trip guaranteed per ADR-0010 Option H). Bare
-    /// unrecognized tags return `None` so callers can count drops (issue #816).
-    /// What: `Some(Custom(s))` for `"custom:<s>"`, `Some(v)` for known named
-    /// tags, `None` for bare unknown tags.
-    /// Test: `edge_kind_unknown_bare_tag_returns_none` (this file).
+    /// string tags to enum variants. `"custom:"`-prefixed tags parse to `Custom(s)`
+    /// (round-trip guaranteed per ADR-0010 Option H). Bare unrecognized tags and
+    /// malformed `"custom:"`-prefixed tags (empty suffix, or suffix containing
+    /// `':'`) return `None` so callers can count drops (issue #816).
+    /// What: `Some(Custom(s))` for a valid `"custom:<s>"` where `s` is non-empty
+    /// and colon-free; `Some(v)` for known named tags; `None` for bare unknown
+    /// tags or malformed custom tags (these contribute to `unknown_edge_tags_dropped`
+    /// on the caller side).
+    /// Test: `edge_kind_unknown_bare_tag_returns_none` (this file),
+    /// `edge_kind_from_tag_rejects_malformed_custom` (this file).
     pub fn from_tag(tag: &str) -> Option<Self> {
         if let Some(suffix) = tag.strip_prefix("custom:") {
+            // Reject malformed custom tags: empty suffix or suffix with ':'.
+            // An empty suffix produces `Custom("")` (no semantic content) and
+            // a colon in the suffix cannot have been produced by a valid
+            // `Custom` label (invariant enforced by `EdgeKind::custom`).
+            if suffix.is_empty() || suffix.contains(':') {
+                return None;
+            }
             return Some(EdgeKind::Custom(suffix.to_owned()));
         }
         Self::from_static_tag(tag)
@@ -262,7 +333,8 @@ impl EdgeKind {
     ///
     /// Why: backing helper for `tag()` — avoids allocating a `String` for the
     /// common named-variant case.
-    /// What: panics on `Custom(_)` (callers must branch before calling this).
+    /// What: `unreachable!` on `Custom(_)` because `tag()` always branches before
+    /// calling this, so reaching the Custom arm would be a programmer error.
     /// Test: covered by `edge_kind_custom_tag_round_trip`.
     fn static_tag(&self) -> &'static str {
         match self {
@@ -296,139 +368,12 @@ impl EdgeKind {
             EdgeKind::Writes => "Writes",
             EdgeKind::AccessesResource => "AccessesResource",
             EdgeKind::Custom(_) => {
-                panic!("static_tag called on Custom variant — use tag() instead")
+                unreachable!("static_tag called on Custom — use tag() instead")
             }
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn edge_kind_score_multiplier_known_values() {
-        assert!((EdgeKind::Implements.score_multiplier() - 0.85).abs() < 1e-6);
-        assert!((EdgeKind::UsesType.score_multiplier() - 0.75).abs() < 1e-6);
-        assert!((EdgeKind::TestedBy.score_multiplier() - 0.80).abs() < 1e-6);
-        assert!((EdgeKind::Documents.score_multiplier() - 0.65).abs() < 1e-6);
-        assert!((EdgeKind::ReferencesConcept.score_multiplier() - 0.60).abs() < 1e-6);
-        // Phase D data-flow variants (issue #817).
-        assert!((EdgeKind::Writes.score_multiplier() - 0.90).abs() < 1e-6);
-        assert!((EdgeKind::Reads.score_multiplier() - 0.80).abs() < 1e-6);
-        assert!((EdgeKind::AccessesResource.score_multiplier() - 0.75).abs() < 1e-6);
-        // Default wildcard branch (0.70 is intentional for untuned variants).
-        assert!((EdgeKind::CallsFunction.score_multiplier() - 0.70).abs() < 1e-6);
-        assert!((EdgeKind::Calls.score_multiplier() - 0.70).abs() < 1e-6);
-        // Phase E escape hatch (issue #818): Custom uses conservative 0.70.
-        assert!((EdgeKind::Custom("foo".to_string()).score_multiplier() - 0.70).abs() < 1e-6);
-    }
-
-    /// `Custom("foo")` ⇄ `"custom:foo"` round-trip (issue #818).
-    #[test]
-    fn edge_kind_custom_tag_round_trip() {
-        let v = EdgeKind::Custom("foo".to_string());
-        let tag = v.tag();
-        assert_eq!(tag.as_ref(), "custom:foo");
-        let back = EdgeKind::from_tag(&tag).expect("Custom should parse from custom: tag");
-        assert_eq!(back, v);
-    }
-
-    /// A bare unrecognized PascalCase tag does NOT become Custom (issue #818,
-    /// Option H: only `"custom:"`-prefixed tags round-trip).
-    #[test]
-    fn edge_kind_unknown_bare_tag_returns_none() {
-        assert!(EdgeKind::from_tag("UnknownFutureEdge").is_none());
-        assert!(EdgeKind::from_tag("SomeTypo").is_none());
-    }
-
-    /// Named tags do NOT get confused with the `custom:` prefix.
-    #[test]
-    fn edge_kind_named_tag_not_treated_as_custom() {
-        let tag = EdgeKind::CallsFunction.tag();
-        assert_eq!(tag.as_ref(), "CallsFunction");
-        let back = EdgeKind::from_tag(&tag).expect("named tag round-trips");
-        assert_eq!(back, EdgeKind::CallsFunction);
-    }
-
-    /// Every variant round-trips through `serde_json` (guards the on-disk format).
-    #[test]
-    fn edge_kind_serde_round_trip() {
-        let variants = vec![
-            // Phase A/B/C
-            EdgeKind::CallsFunction,
-            EdgeKind::CalledByFunction,
-            EdgeKind::Implements,
-            EdgeKind::UsesType,
-            EdgeKind::Derives,
-            EdgeKind::ModuleContains,
-            EdgeKind::ReExports,
-            EdgeKind::RaisesError,
-            EdgeKind::Configures,
-            EdgeKind::TestedBy,
-            EdgeKind::TestUsesFixture,
-            EdgeKind::CoOccursInTest,
-            EdgeKind::Documents,
-            EdgeKind::ReferencesConcept,
-            EdgeKind::Aliases,
-            EdgeKind::ErrorDescribes,
-            // Language-neutral structural (former KgEdgeKind + graph::EdgeKind)
-            EdgeKind::Contains,
-            EdgeKind::Imports,
-            EdgeKind::Exports,
-            EdgeKind::Calls,
-            EdgeKind::Extends,
-            EdgeKind::References,
-            EdgeKind::Tests,
-            EdgeKind::DependsOn,
-            EdgeKind::GeneratedFrom,
-            EdgeKind::RuntimeObservationFor,
-            // Phase D data-flow (issue #817)
-            EdgeKind::Reads,
-            EdgeKind::Writes,
-            EdgeKind::AccessesResource,
-            // Phase E escape hatch (issue #818)
-            EdgeKind::Custom("reads_table".to_string()),
-        ];
-        for v in &variants {
-            let json = serde_json::to_string(v).expect("serialize EdgeKind");
-            let back: EdgeKind = serde_json::from_str(&json).expect("deserialize EdgeKind");
-            assert_eq!(*v, back, "round-trip failed for {json}");
-        }
-    }
-
-    /// Assert that the canonical enum covers the full prior union (issue #815).
-    #[test]
-    fn edge_kind_union_coverage() {
-        let _ = EdgeKind::CallsFunction;
-        let _ = EdgeKind::CalledByFunction;
-        let _ = EdgeKind::Implements;
-        let _ = EdgeKind::UsesType;
-        let _ = EdgeKind::Derives;
-        let _ = EdgeKind::ModuleContains;
-        let _ = EdgeKind::ReExports;
-        let _ = EdgeKind::RaisesError;
-        let _ = EdgeKind::Configures;
-        let _ = EdgeKind::TestedBy;
-        let _ = EdgeKind::TestUsesFixture;
-        let _ = EdgeKind::CoOccursInTest;
-        let _ = EdgeKind::Documents;
-        let _ = EdgeKind::ReferencesConcept;
-        let _ = EdgeKind::Aliases;
-        let _ = EdgeKind::ErrorDescribes;
-        let _ = EdgeKind::Contains;
-        let _ = EdgeKind::Imports;
-        let _ = EdgeKind::Exports;
-        let _ = EdgeKind::Calls;
-        let _ = EdgeKind::Extends;
-        let _ = EdgeKind::References;
-        let _ = EdgeKind::Tests;
-        let _ = EdgeKind::DependsOn;
-        let _ = EdgeKind::GeneratedFrom;
-        let _ = EdgeKind::RuntimeObservationFor;
-        let _ = EdgeKind::Reads;
-        let _ = EdgeKind::Writes;
-        let _ = EdgeKind::AccessesResource;
-        let _ = EdgeKind::Custom("any".to_string());
-    }
-}
+#[path = "edge_kind_tests.rs"]
+mod tests;

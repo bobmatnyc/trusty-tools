@@ -64,7 +64,7 @@ pub mod server;
 // The canonical path is `trusty_common::symgraph::contracts::EdgeKind`;
 // access via `trusty_common::symgraph::EdgeKind` also works
 // (re-exported below via `graph::EdgeKind`).
-pub use contracts::{EntityType, RawEntity, fact_hash_str};
+pub use contracts::{EdgeKindError, EntityType, RawEntity, fact_hash_str};
 
 #[cfg(feature = "symgraph-parser")]
 pub use registry::{SymbolEntry, SymbolId, SymbolRegistry};

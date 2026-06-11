@@ -22,12 +22,24 @@ use super::graph::{SymbolGraph, SymbolNode};
 impl SymbolGraph {
     /// BFS up to `hops` levels: symbols that (transitively) call `symbol`.
     /// Returns `Vec<(symbol, chunk_id)>` excluding `symbol` itself.
+    ///
+    /// **Design note:** traverses only [`EdgeKind::CallsFunction`] edges by
+    /// design (via `bfs_neighbors`). `Custom`, `Reads`, `Writes`, and all other
+    /// non-call edge kinds are invisible to this method. Use
+    /// [`SymbolGraph::neighbors_by_edge`] to traverse a specific non-call edge
+    /// kind, or [`SymbolGraph::all_edges`] to enumerate all edges directly.
     pub fn callers_of(&self, symbol: &str, hops: usize) -> Vec<(String, String)> {
         self.bfs_neighbors(symbol, hops, Direction::Incoming)
     }
 
     /// BFS up to `hops` levels: symbols (transitively) called by `symbol`.
     /// Returns `Vec<(symbol, chunk_id)>` excluding `symbol` itself.
+    ///
+    /// **Design note:** traverses only [`EdgeKind::CallsFunction`] edges by
+    /// design (via `bfs_neighbors`). `Custom`, `Reads`, `Writes`, and all other
+    /// non-call edge kinds are invisible to this method. Use
+    /// [`SymbolGraph::neighbors_by_edge`] to traverse a specific non-call edge
+    /// kind, or [`SymbolGraph::all_edges`] to enumerate all edges directly.
     pub fn callees_of(&self, symbol: &str, hops: usize) -> Vec<(String, String)> {
         self.bfs_neighbors(symbol, hops, Direction::Outgoing)
     }

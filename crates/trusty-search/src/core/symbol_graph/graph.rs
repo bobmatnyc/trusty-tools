@@ -165,10 +165,9 @@ impl SymbolGraph {
         if g.unknown_edge_tags_dropped > 0 {
             tracing::warn!(
                 dropped = g.unknown_edge_tags_dropped,
-                "kg: load_from_corpus dropped {} edge(s) with unrecognized kind tags; \
+                "kg: load_from_corpus dropped edge(s) with unrecognized kind tags; \
                  check GET /indexes/:id/graph/stats → unknown_edge_tags_dropped \
                  and consider upgrading the daemon (issue #816)",
-                g.unknown_edge_tags_dropped,
             );
         }
         Ok(Some(g))
