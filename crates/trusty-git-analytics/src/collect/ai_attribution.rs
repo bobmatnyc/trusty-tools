@@ -97,18 +97,20 @@ struct AiPatterns {
     x_ai_model: Regex,
 }
 
-/// Why: `(?i)\bCursor\b` would match "Alice Cursor-Williams" (false positive).
-/// Rust's `regex` crate has no lookahead, so the hyphen guard is code-level.
-/// What: returns `true` when the cursor pattern fires AND the match is NOT
-/// followed by `-` (hyphenated surname) in `trailer_value`.
-/// Test: `tests::detect_agentic_mode_cursor_in_human_name_is_not_ide_assisted`.
+/// Why: `(?i)\bCursor\b` alone would match "Alice Cursor-Williams" (false
+/// positive); Rust's `regex` crate has no lookahead, so the guard is code-level.
+/// What: returns `true` when the cursor pattern fires AND `m.as_str()` contains
+/// `@` (email-domain form) OR the match is NOT followed by `-` (word form,
+/// rejects hyphenated surnames like "Cursor-Williams").
+/// Test: `tests::detect_agentic_mode_cursor_in_human_name_is_not_ide_assisted`
+/// and `tests::is_cursor_match_email_domain_form`.
 fn is_cursor_match(p: &AiPatterns, trailer_value: &str) -> bool {
     if let Some(m) = p.cursor.find(trailer_value) {
-        if trailer_value[m.start()..].starts_with('@') {
+        if m.as_str().contains('@') {
             return true; // email-domain form: @cursor.sh
         }
         let after = trailer_value.get(m.end()..).unwrap_or("");
-        !after.starts_with('-') // reject hyphenated surnames
+        !after.starts_with('-') // word form: reject hyphenated surnames
     } else {
         false
     }
@@ -468,23 +470,22 @@ mod tests {
         assert_eq!(detect_agentic_mode(msg), AgenticMode::None);
     }
 
-    /// Why: tightened cursor pattern must not fire on "Alice Cursor-Williams".
-    /// What: "Cursor" in a hyphenated surname → None, not ide_assisted.
+    /// Why: hyphen guard must reject "Cursor" in a surname like "Cursor-Williams".
+    /// What: "Cursor" followed by `-` in a trailer → None, not ide_assisted.
     #[test]
     fn detect_agentic_mode_cursor_in_human_name_is_not_ide_assisted() {
-        // "Cursor-Williams" has "Cursor" followed by a hyphen — must NOT match.
         let msg = "feat: auth\n\nCo-Authored-By: Alice Cursor-Williams <alice@example.com>";
-        assert_eq!(
-            detect_agentic_mode(msg),
-            AgenticMode::None,
-            "a human surname containing 'Cursor' must not classify as IdeAssisted"
-        );
-        // Verify detect_ai_tool also returns None for the same message.
-        assert_eq!(
-            detect_ai_tool(msg),
-            None,
-            "detect_ai_tool must not match 'Cursor' in a hyphenated human surname"
-        );
+        assert_eq!(detect_agentic_mode(msg), AgenticMode::None);
+        assert_eq!(detect_ai_tool(msg), None);
+    }
+
+    /// Why/What: `m.as_str().contains('@')` guard accepts `@cursor.sh` even
+    /// when no word `Cursor` precedes it → `IdeAssisted` / `"cursor"`.
+    #[test]
+    fn is_cursor_match_email_domain_form() {
+        let msg = "fix: npe\n\nCo-Authored-By: AI Bot <ai@cursor.sh>";
+        assert_eq!(detect_agentic_mode(msg), AgenticMode::IdeAssisted);
+        assert_eq!(detect_ai_tool(msg), Some("cursor"));
     }
 
     /// Why: Claude must win over Cursor when both trailers present.

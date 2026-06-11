@@ -62,7 +62,14 @@ fn computed_at_secs() -> i64 {
 /// reflect the corrected ticketed logic from migration v17.
 /// What: UPSERTs one row per [`crate::report::models::WeeklyActivity`] into
 /// `fact_weekly_quality`, batching in chunks of 500. Rows whose ISO week label
-/// cannot be parsed are skipped with a warning.
+/// cannot be parsed are skipped with a warning. Rows whose author display name
+/// cannot be resolved to a canonical email are also skipped with a `warn!` — the
+/// same policy as [`persist_weekly_engineer`]. This ensures both fact tables
+/// share an identical grain key (author_email, iso_year, iso_week, repository)
+/// so downstream joins between them are always consistent. Never write a display
+/// name into the email-keyed column: doing so would produce rows that can never
+/// join with other tables and would silently corrupt aggregate queries.
+/// To fix unmapped identities run `tga aliases list` and add the missing mapping.
 /// Test: `report::tests::persist_weekly_quality_upserts_rows`.
 ///
 /// # Errors
@@ -125,12 +132,29 @@ pub fn persist_weekly_quality(db: &Database, data: &ReportData) -> Result<usize>
                 )
                 .map_err(crate::core::TgaError::from)?;
             for (author_display, iso_year, iso_week, repo, qs, qt, rc, bc, tc, cc, ca) in chunk {
-                // Resolve display name → canonical email; fall back to display
-                // name for uncommitted / alias-unresolved identities.
-                let author_email = name_to_email
-                    .get(author_display)
-                    .cloned()
-                    .unwrap_or_else(|| author_display.clone());
+                // Resolve display name → canonical email.
+                // POLICY: skip rows that cannot be resolved rather than
+                // falling back to the display name. Both fact tables
+                // (fact_weekly_quality and fact_weekly_engineer) share the
+                // grain key (author_email, iso_year, iso_week, repository).
+                // Writing a display name into the email-keyed column would
+                // produce rows that never join with the other table and
+                // silently corrupt downstream aggregates. Run `tga aliases
+                // list` to review and add unmapped identities.
+                let author_email = match name_to_email.get(author_display) {
+                    Some(e) => e.clone(),
+                    None => {
+                        warn!(
+                            author = %author_display,
+                            iso_year = iso_year,
+                            iso_week = iso_week,
+                            "persist_weekly_quality: no email mapping for author; \
+                             skipping row to avoid corrupting the grain key. \
+                             Run `tga aliases list` to review unmapped identities."
+                        );
+                        continue;
+                    }
+                };
                 stmt.execute(rusqlite::params![
                     author_email,
                     iso_year,
@@ -160,10 +184,12 @@ pub fn persist_weekly_quality(db: &Database, data: &ReportData) -> Result<usize>
 /// ISO week without re-running the aggregator (issue #1113). Mirrors the
 /// `fact_weekly_quality` pattern from issue #445 batch B.
 /// What: UPSERTs one row per [`crate::report::models::WeeklyActivity`] into
-/// `fact_weekly_engineer`. `net_commits` = `commit_count - revert_count`.
-/// `agentic_pct` = `agentic_count / net * 100` (full-agentic only — excludes
-/// `ide_assisted_count`, per the #1113 spec). Rows with unresolvable author
-/// emails are skipped with a `warn!` to preserve grain-key integrity.
+/// `fact_weekly_engineer`. `net_commits` = `commit_count - revert_count`;
+/// merge commits are **included** in the denominator (only reverts are
+/// subtracted), per the #1113 spec. `agentic_pct` = `agentic_count / net *
+/// 100` (full-agentic only — excludes `ide_assisted_count`). Rows with
+/// unresolvable author emails are skipped with a `warn!` to preserve
+/// grain-key integrity.
 /// Test: `report::tests::persist_weekly_engineer_upserts_rows`.
 ///
 /// # Errors
@@ -181,6 +207,11 @@ pub fn persist_weekly_engineer(db: &Database, data: &ReportData) -> Result<usize
         .iter()
         .filter_map(|wa| {
             let (iso_year, iso_week) = parse_week_label_to_parts(&wa.week)?;
+            // net_commits = commit_count - revert_count. Merge commits are
+            // intentionally INCLUDED in this denominator (per #1113 spec) —
+            // only reverts are subtracted. Future specs that wish to also
+            // exclude merge commits must update both this formula and the
+            // column description in the DB schema docs.
             let net = wa.commit_count.saturating_sub(wa.revert_count) as i64;
             // agentic_pct = agentic_count / net * 100 — intentionally
             // EXCLUDES ide_assisted_count (full-agentic only, per #1113 spec).
