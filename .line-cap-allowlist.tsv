@@ -107,7 +107,6 @@ crates/trusty-memory/src/prompt_log.rs	851
 crates/trusty-memory/src/service.rs	1704
 crates/trusty-memory/src/tools.rs	3808
 crates/trusty-memory/src/transport/rpc.rs	571
-crates/trusty-memory/src/web.rs	5421
 crates/trusty-memory/tests/concurrent_perf.rs	811
 crates/trusty-memory/tests/mcp_stdio_tools.rs	1003
 crates/trusty-mpm/src/client/executor.rs	935
@@ -148,7 +147,7 @@ crates/trusty-search/src/core/indexer/search.rs	1109
 crates/trusty-search/src/core/indexer/tests.rs	3426
 crates/trusty-search/src/core/memory_policy.rs	1264
 crates/trusty-search/src/core/migration/mod.rs	649
-crates/trusty-search/src/core/registry.rs	753
+crates/trusty-search/src/core/registry.rs	752
 crates/trusty-search/src/core/repo_config.rs	595
 crates/trusty-search/src/core/search/hierarchy.rs	658
 crates/trusty-search/src/core/store.rs	1275
