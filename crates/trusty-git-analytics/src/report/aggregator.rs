@@ -11,6 +11,7 @@ use chrono::{DateTime, Datelike, Utc};
 use regex::Regex;
 use tracing::{debug, warn};
 
+use crate::collect::ai_attribution::AgenticMode;
 use crate::core::config::Config;
 use crate::core::db::Database;
 use crate::core::quality::QUALITY_FORMULA_VERSION;
@@ -52,6 +53,8 @@ struct CommitRow {
     /// (issue #445 batch B, request #6). `None` for non-LLM classifications
     /// or commits without a classification row.
     complexity: Option<i64>,
+    /// Canonical agentic mode (issue #1113): full_agentic / ide_assisted / none.
+    agentic_mode: AgenticMode,
 }
 
 /// Minimal PR row used by velocity / DORA computations and (issue #377)
@@ -236,6 +239,24 @@ impl Aggregator {
             }
         }
 
+        // Issue #1113: persist per-engineer-per-week agentic counts to
+        // `fact_weekly_engineer`. Same non-fatal pattern as quality above.
+        match Self::persist_weekly_engineer(db, &data) {
+            Ok(n) => {
+                tracing::debug!(
+                    rows = n,
+                    "persisted weekly engineer rows to fact_weekly_engineer"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "WARNING: could not persist to fact_weekly_engineer; \
+                     report generation continues."
+                );
+            }
+        }
+
         if unresolved_db > 0 {
             tracing::warn!(
                 count = unresolved_db,
@@ -370,12 +391,14 @@ impl Aggregator {
         // to the raw `c.author_email` field.
         // Issue #445 batch B (request #6): include cl.complexity so the weekly
         // aggregator can surface avg_complexity without a second DB scan.
+        // Issue #1113: include c.agentic_mode for per-week agentic-% aggregation.
         let sql_base = "SELECT c.sha, \
                         COALESCE(a.canonical_name,  c.author_name)  AS author_name, \
                         COALESCE(NULLIF(a.canonical_email, ''), c.author_email) AS author_email, \
                         c.timestamp, c.repository, \
                         c.insertions, c.deletions, c.files_changed, cl.category, \
-                        c.message, c.ticketed, c.is_ai_assisted, cl.complexity \
+                        c.message, c.ticketed, c.is_ai_assisted, cl.complexity, \
+                        COALESCE(c.agentic_mode, 'none') AS agentic_mode \
                  FROM commits c \
                  LEFT JOIN authors a ON a.id = c.author_id \
                  LEFT JOIN classifications cl ON cl.id = c.classification_id";
@@ -392,6 +415,13 @@ impl Aggregator {
             // Issue #445 batch B (request #6): complexity from classifications.
             // NULL for non-LLM tiers; pre-migration rows also return NULL.
             let complexity: Option<i64> = row.get(12).unwrap_or(None);
+            // Issue #1113: agentic_mode TEXT; defaults to 'none' for pre-v21 rows.
+            let agentic_mode_str: String = row.get(13).unwrap_or_else(|_| "none".to_string());
+            let agentic_mode = match agentic_mode_str.as_str() {
+                "full_agentic" => AgenticMode::FullAgentic,
+                "ide_assisted" => AgenticMode::IdeAssisted,
+                _ => AgenticMode::None,
+            };
             Ok(CommitRow {
                 sha: row.get(0)?,
                 author_name: row.get(1)?,
@@ -406,6 +436,7 @@ impl Aggregator {
                 ticketed: ticketed != 0,
                 is_ai_assisted: is_ai_assisted != 0,
                 complexity,
+                agentic_mode,
             })
         };
 
@@ -684,6 +715,103 @@ impl Aggregator {
         }
         Ok(written)
     }
+
+    /// Persist per-engineer-per-week agentic counts to `fact_weekly_engineer`.
+    ///
+    /// Why: downstream warehouses (cto-reports) need agentic % per engineer per
+    /// ISO week without re-running the aggregator (issue #1113). Storing it here
+    /// mirrors the `fact_weekly_quality` pattern from issue #445 batch B.
+    /// What: UPSERTs one row per [`WeeklyActivity`] into `fact_weekly_engineer`.
+    /// `net_commits` = `commit_count - revert_count` (matches the denominator
+    /// for agentic %). `agentic_pct` = `agentic_count / net_commits * 100.0`
+    /// clamped at 0.0 when `net_commits` is zero. Non-fatal: a write failure is
+    /// logged but does not abort report generation.
+    /// Test: `report::tests::persist_weekly_engineer_upserts_rows`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReportError::Core`] if any SQLite operation fails.
+    pub fn persist_weekly_engineer(db: &Database, data: &ReportData) -> Result<usize> {
+        if data.weekly_activity.is_empty() {
+            return Ok(0);
+        }
+        let computed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let name_to_email: std::collections::HashMap<String, String> = data
+            .authors
+            .iter()
+            .map(|a| (a.name.clone(), a.email.clone()))
+            .collect();
+
+        let rows: Vec<_> = data
+            .weekly_activity
+            .iter()
+            .filter_map(|wa| {
+                let (iso_year, iso_week) = parse_week_label_to_parts(&wa.week)?;
+                let net = wa.commit_count.saturating_sub(wa.revert_count) as i64;
+                let agentic_pct = if net > 0 {
+                    (wa.agentic_count as f64) / (net as f64) * 100.0
+                } else {
+                    0.0
+                };
+                Some((
+                    wa.author.clone(),
+                    iso_year,
+                    iso_week,
+                    wa.repository.clone(),
+                    net,
+                    wa.agentic_count as i64,
+                    wa.ide_assisted_count as i64,
+                    agentic_pct,
+                    computed_at,
+                ))
+            })
+            .collect();
+
+        let mut written = 0usize;
+        for chunk in rows.chunks(500) {
+            let conn = db.connection();
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(crate::core::TgaError::from)?;
+            {
+                let mut stmt = tx
+                    .prepare(
+                        "INSERT OR REPLACE INTO fact_weekly_engineer \
+                         (author_email, iso_year, iso_week, repository, \
+                          net_commits, agentic_count, ide_assisted_count, agentic_pct, \
+                          formula_version, computed_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    )
+                    .map_err(crate::core::TgaError::from)?;
+                for (author_display, iso_year, iso_week, repo, net, ac, ic, pct, ca) in chunk {
+                    let author_email = name_to_email
+                        .get(author_display)
+                        .cloned()
+                        .unwrap_or_else(|| author_display.clone());
+                    stmt.execute(rusqlite::params![
+                        author_email,
+                        iso_year,
+                        iso_week,
+                        repo,
+                        net,
+                        ac,
+                        ic,
+                        pct,
+                        "v1",
+                        ca,
+                    ])
+                    .map_err(crate::core::TgaError::from)?;
+                    written += 1;
+                }
+            }
+            tx.commit().map_err(crate::core::TgaError::from)?;
+        }
+        Ok(written)
+    }
 }
 
 /// Parse an ISO week label `"YYYY-Www"` into `(iso_year, iso_week)`.
@@ -789,6 +917,10 @@ struct WeekAcc {
     complexity_sum: i64,
     /// Number of commits in this bucket with a non-null complexity score.
     complexity_count: usize,
+    /// Full-agentic commits (issue #1113: `agentic_mode = 'full_agentic'`).
+    agentic_count: usize,
+    /// IDE-assisted commits (issue #1113: `agentic_mode = 'ide_assisted'`).
+    ide_assisted_count: usize,
 }
 
 /// Cross-developer per-week running totals during accumulation.
@@ -915,6 +1047,8 @@ fn accumulate_rows(rows: &[CommitRow], flags: &RowFlags) -> Accumulators {
             ai_assisted: 0,
             complexity_sum: 0,
             complexity_count: 0,
+            agentic_count: 0,
+            ide_assisted_count: 0,
         });
         w.commits += 1;
         w.insertions += row.insertions;
@@ -939,6 +1073,12 @@ fn accumulate_rows(rows: &[CommitRow], flags: &RowFlags) -> Accumulators {
         // so the weekly activity report can surface AI-adoption rates.
         if row.is_ai_assisted {
             w.ai_assisted += 1;
+        }
+        // Issue #1113: count agentic/IDE-assisted commits per bucket.
+        match row.agentic_mode {
+            AgenticMode::FullAgentic => w.agentic_count += 1,
+            AgenticMode::IdeAssisted => w.ide_assisted_count += 1,
+            AgenticMode::None => {}
         }
         // Issue #445 batch B (request #6): accumulate complexity sum so
         // materialize_weekly_activity can compute avg_complexity without a
@@ -1118,6 +1258,9 @@ fn materialize_weekly_activity(
                 // Issue #445: AI-assisted commits in this (week, engineer, repo) bucket.
                 ai_assisted_count: w.ai_assisted,
                 avg_complexity,
+                // Issue #1113: agentic-mode commit counts.
+                agentic_count: w.agentic_count,
+                ide_assisted_count: w.ide_assisted_count,
             }
         })
         .collect()

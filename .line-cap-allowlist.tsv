@@ -22,7 +22,7 @@ crates/trusty-analyze/src/lang/adapters/scala.rs	583
 crates/trusty-analyze/src/lang/adapters/swift.rs	531
 crates/trusty-analyze/src/lang/adapters/typescript.rs	674
 crates/trusty-analyze/src/main.rs	870
-crates/trusty-analyze/src/mcp/mod.rs	1157
+crates/trusty-analyze/src/mcp/mod.rs	1156
 crates/trusty-analyze/tests/stdio_harness.rs	639
 crates/trusty-common/src/bm25_client.rs	503
 crates/trusty-common/src/bm25.rs	645
@@ -72,7 +72,7 @@ crates/trusty-git-analytics/src/classify/tiers/weighted_sum.rs	962
 crates/trusty-git-analytics/src/collect/azdo/client.rs	2658
 crates/trusty-git-analytics/src/collect/azdo/pr_fetcher.rs	1707
 crates/trusty-git-analytics/src/collect/collector.rs	1181
-crates/trusty-git-analytics/src/collect/git/extractor.rs	1318
+crates/trusty-git-analytics/src/collect/git/extractor.rs	1321
 crates/trusty-git-analytics/src/collect/git/reachability.rs	1432
 crates/trusty-git-analytics/src/collect/github/client.rs	1225
 crates/trusty-git-analytics/src/collect/identity/resolver.rs	781
@@ -84,7 +84,7 @@ crates/trusty-git-analytics/src/commands/incidents.rs	828
 crates/trusty-git-analytics/src/core/config/mod.rs	1624
 crates/trusty-git-analytics/src/core/config/validator.rs	816
 crates/trusty-git-analytics/src/core/effort_percentile.rs	531
-crates/trusty-git-analytics/src/report/aggregator.rs	1707
+crates/trusty-git-analytics/src/report/aggregator.rs	1850
 crates/trusty-git-analytics/src/report/drilldown.rs	1010
 crates/trusty-git-analytics/src/report/mod.rs	916
 crates/trusty-gworkspace/src/tools.rs	598
@@ -151,6 +151,7 @@ crates/trusty-search/src/core/registry.rs	752
 crates/trusty-search/src/core/repo_config.rs	595
 crates/trusty-search/src/core/search/hierarchy.rs	658
 crates/trusty-search/src/core/store.rs	1275
+crates/trusty-search/src/core/symbol_graph.rs	1754
 crates/trusty-search/src/main.rs	1360
 crates/trusty-search/src/mcp/tools.rs	2187
 crates/trusty-search/src/service/call_chain.rs	954
