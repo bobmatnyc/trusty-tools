@@ -9,7 +9,30 @@
 //! What: `RelocateIndexRequest` + `relocate_index_handler` — the handler
 //! validates the new path, rebuilds the `IndexHandle`, persists the change, and
 //! updates `indexed_root` in the corpus `_meta` table.
-//! Test: `relocate_index_updates_root_path` in `tests_index.rs`.
+//!
+//! Issue #1089: the handler previously hardcoded `colocated: true` when building
+//! the `PersistedIndex` to persist. This caused two problems:
+//!   1. It would rewrite the on-disk entry with `colocated = true` even if the
+//!      stored entry had `colocated = false` (legacy central-store layout).
+//!   2. Because `upsert_index_registry_entry` overwrites the whole record,
+//!      other indexes' entries in `indexes.toml` retained their values — but
+//!      the PATCHED index's `colocated` field was forcibly toggled.
+//!
+//! Fix: load the existing `PersistedIndex` from `indexes.toml` first and
+//! preserve its `colocated` flag (along with all other persisted fields not
+//! supplied by the PATCH request).
+//!
+//! Issue #1088: colocated-flag flips wiped central-store data. Root cause is
+//! the same `colocated: true` hardcode — when a user manually edited
+//! `indexes.toml` to set `colocated = false` (to match reality) and the daemon
+//! restarted, `create_index_handler` or this PATCH handler would restore
+//! `colocated = true`, and `build_indexer_from_entry` would create a fresh
+//! `.trusty-search/` dir that shadowed the real central-store data. Fix: read
+//! the persisted `colocated` value and refuse to silently toggle it — see
+//! the guard added below.
+//!
+//! Test: `relocate_index_updates_root_path` in `tests_index.rs`;
+//!       `relocate_preserves_colocated_flag` in `tests_index.rs`.
 
 use axum::{
     extract::{Path, State},
@@ -95,6 +118,23 @@ pub(super) async fn relocate_index_handler(
         return embedder_initializing_response();
     };
 
+    // Load the existing on-disk entry from indexes.toml so we can preserve its
+    // persisted fields — especially `colocated`. Issue #1088/#1089: the previous
+    // code hardcoded `colocated: true` here, which would silently toggle an
+    // entry that was legitimately `colocated = false` (central-store layout) and
+    // overwrite the disk entry with the wrong flag on the next save.
+    //
+    // Precedence: disk entry wins for `colocated` (the user's manual edit must
+    // be honoured). All other fields come from the in-memory handle (which may
+    // have been updated by a previous PATCH or a live reindex).
+    let on_disk_colocated = crate::service::persistence::load_index_registry()
+        .ok()
+        .and_then(|entries| entries.into_iter().find(|e| e.id == id))
+        .map(|e| e.colocated)
+        // Fall back to the in-memory handle's colocated status if the disk
+        // entry is missing (e.g. first-time persist after daemon start).
+        .unwrap_or(true);
+
     // Build a PersistedIndex from the existing handle's metadata, substituting
     // the new root path. We preserve all other settings (filters, extensions,
     // lexical_only, etc.) so the handle stays consistent.
@@ -115,7 +155,10 @@ pub(super) async fn relocate_index_handler(
         lexical_only: existing.lexical_only,
         skip_kg: existing.skip_kg,
         defer_embed: existing.defer_embed,
-        colocated: true,
+        // Issue #1088/#1089: preserve the persisted colocated flag rather than
+        // hardcoding true. Toggling this flag silently would route the indexer
+        // to a different data directory and could destroy central-store data.
+        colocated: on_disk_colocated,
     };
 
     // Rebuild the indexer from the new entry so the colocated HNSW/redb at
