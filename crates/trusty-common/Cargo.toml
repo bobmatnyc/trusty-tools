@@ -168,6 +168,9 @@ optional = true
 [dev-dependencies]
 toml = "0.8"
 tempfile = { workspace = true }
+# serial_test: run env-mutating tests serially to prevent env-var races across
+# parallel test threads (e.g. supervisor_tests.rs).
+serial_test = { workspace = true }
 
 [features]
 default = []
@@ -376,3 +379,23 @@ bug-capture = ["dep:sha2"]
 # Without this feature, `BedrockProvider::new` returns a clear error message
 # instructing the operator to rebuild with `--features bedrock`.
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-types"]
+
+# Promotes `StdioMcpClient` (JSON-RPC 2.0 over child stdio) to a shared module
+# in `trusty-common`. Originally lived in `trusty-agents/src/plugins/stdio_mcp`;
+# promoted here in epic #1104 Phase 0a so `trusty-console` and other local
+# services can use it without a dependency on `trusty-agents`. Uses only deps
+# already required by the crate (`tokio` with `process` + `io-util`, `serde_json`,
+# `tracing`, `anyhow`) -- adds no new transitive dependencies. The `tokio`
+# workspace dep already enables `process` and `io-util` via the `full` feature;
+# this feature flag gates module compilation only.
+stdio-mcp-client = []
+
+# Defines the shared "console metrics" contract (epic #1104 Phase 0a):
+# `CONSOLE_METRICS_METHOD` tool-name constant, `ConsoleMetricsReport` response
+# type, `ServiceHealth` enum, and `make_report` / `parse_report` helpers. Any
+# local service that wants to expose metrics to `trusty-console` enables this
+# feature, implements the `console_metrics` MCP tool, and returns a serialised
+# `ConsoleMetricsReport`. The console side enables it too and calls `parse_report`
+# to decode. Implies `stdio-mcp-client` so the console can poll via the shared
+# client without a separate feature declaration.
+console-metrics = ["stdio-mcp-client"]

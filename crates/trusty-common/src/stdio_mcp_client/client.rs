@@ -3,11 +3,12 @@
 //! Why: The spawn flow and per-method JSON-RPC request/response handling are
 //! the bulk of the client; isolating them from the struct/types/Drop in
 //! `mod.rs` keeps both files under the 500-line cap.
-//! What: `StdioMcpClient::new`, `initialize`, `list_tools`, `call_tool`, and
-//! the low-level send/recv helpers — dispatching through `build_initialize_request`
-//! / `extract_result` defined in `mod.rs`.
-//! Test: JSON-RPC framing is unit-tested in `stdio_mcp::tests`; the full spawn
-//! flow has an `#[ignore]`d integration test.
+//! What: `StdioMcpClient::spawn`, `initialize`, `list_tools`, `call_tool`,
+//! `ping`, `is_alive`, `respawn`, `ensure_alive` — and the low-level
+//! `send`/`recv` helpers — dispatching through `build_initialize_request` /
+//! `extract_result` defined in `mod.rs`.
+//! Test: JSON-RPC framing is unit-tested in `stdio_mcp_client::tests`; the
+//! full spawn flow has an `#[ignore]`d integration test.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -24,17 +25,29 @@ use super::{
 };
 
 impl StdioMcpClient {
-    /// Spawn `binary` with `args`, piping stdin/stdout (stderr is inherited
-    /// so server logs surface in the parent's terminal).
+    /// Spawn `binary` with `args`, piping stdin/stdout (stderr is redirected
+    /// to a per-plugin log file so server logs don't pollute the parent's
+    /// terminal or MCP stdout stream).
     ///
-    /// Why: The MCP transport requires clean JSON on stdout, so logs MUST
-    /// go to stderr. Inheriting stderr keeps debugging simple — server
-    /// output appears in the same console as the harness.
+    /// Why: The MCP transport requires clean JSON on stdout, so plugin logs
+    /// MUST go to stderr. Redirecting stderr to a named file keeps the parent
+    /// console clean while still preserving logs for debugging. The
+    /// `client_name` parameter is caller-supplied so each consumer
+    /// (trusty-agents, trusty-console, etc.) advertises its own identity in
+    /// `clientInfo.name` during the `initialize` handshake — hard-coding the
+    /// library name here would mislead MCP server logs and any server-side
+    /// logic keyed on that field.
     /// What: Returns an unconnected client with the handshake NOT yet sent.
-    /// Call `initialize` next.
+    /// Call `initialize` next to complete the MCP handshake.
     /// Test: Indirectly via `#[ignore]`d e2e test; unit-test failure is
-    /// covered by `spawn_missing_binary_errors` below.
-    pub async fn spawn(binary: &str, args: &[&str]) -> Result<Self> {
+    /// covered by `spawn_missing_binary_errors` in `mod.rs`. The
+    /// `initialize_envelope_is_well_formed` test verifies the supplied name
+    /// propagates to `clientInfo.name`.
+    pub async fn spawn(
+        binary: &str,
+        args: &[&str],
+        client_name: impl Into<String>,
+    ) -> Result<Self> {
         let mut child = Command::new(binary)
             .args(args)
             .stdin(std::process::Stdio::piped())
@@ -60,6 +73,7 @@ impl StdioMcpClient {
             next_id: AtomicU64::new(1),
             binary: binary.to_string(),
             args: args.iter().map(|s| s.to_string()).collect(),
+            client_name: client_name.into(),
         })
     }
 
@@ -69,8 +83,8 @@ impl StdioMcpClient {
     /// caller writes to its stdin, the write blocks until the 30s timeout —
     /// causing 15-60s query latency. Probing `try_wait()` lets callers detect
     /// the dead child cheaply and respawn before writing. (See issue #421.)
-    /// What: Returns `true` if `try_wait()` reports `Ok(None)` (still running);
-    /// `false` if the process has exited or `try_wait()` errored.
+    /// What: Returns `true` if `try_wait()` reports `Ok(None)` (still
+    /// running); `false` if the process has exited or `try_wait()` errored.
     /// Test: `is_alive_returns_false_after_child_exits` verifies the false
     /// path against a child that exits immediately; `ids_are_monotonic`
     /// exercises the true path implicitly.
@@ -116,6 +130,7 @@ impl StdioMcpClient {
         self.child = new_child;
         self.stdin = BufWriter::new(stdin);
         self.stdout = BufReader::new(stdout);
+        // client_name is retained from the original spawn — no update needed.
         self.next_id.store(1, Ordering::Relaxed);
 
         self.initialize()
@@ -140,6 +155,14 @@ impl StdioMcpClient {
     }
 
     /// Allocate the next JSON-RPC request id. Monotonic, starts at 1.
+    ///
+    /// Why: JSON-RPC 2.0 requires each request to carry a unique id so
+    /// responses can be correlated. The atomic counter provides this without
+    /// locks.
+    /// What: Atomically increments and returns the previous value using
+    /// `Relaxed` ordering (ordering across threads is not required for id
+    /// uniqueness within a single connection).
+    /// Test: `ids_are_monotonic` verifies the strict ordering property.
     pub(super) fn alloc_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
@@ -156,7 +179,7 @@ impl StdioMcpClient {
     /// e2e in the ignored integration test.
     pub async fn initialize(&mut self) -> Result<ServerInfo> {
         let id = self.alloc_id();
-        let req = build_initialize_request(id);
+        let req = build_initialize_request(id, &self.client_name);
         let resp = self.request(&req).await?;
         let result = extract_result(resp)?;
 
@@ -194,6 +217,12 @@ impl StdioMcpClient {
     }
 
     /// Call `tools/list` and return the advertised tool descriptors.
+    ///
+    /// Why: The console poller must enumerate available tools to verify the
+    /// service exposes the expected metrics tool before polling.
+    /// What: Sends `tools/list`, parses the `tools` array, and returns a
+    /// `Vec<McpTool>`. Calls `ensure_alive` first to auto-respawn dead children.
+    /// Test: End-to-end in trusty-agents integration tests.
     pub async fn list_tools(&mut self) -> Result<Vec<McpTool>> {
         self.ensure_alive().await?;
         let id = self.alloc_id();
@@ -231,6 +260,12 @@ impl StdioMcpClient {
     }
 
     /// Invoke `tools/call` with `name` and the given `params` as `arguments`.
+    ///
+    /// Why: The primary method for a console or agent to invoke a service's
+    /// tools (e.g., `console_metrics` for health data).
+    /// What: Sends `tools/call`, parses the result, and returns the raw JSON
+    /// value for the caller to interpret. Calls `ensure_alive` first.
+    /// Test: End-to-end in trusty-agents integration tests.
     pub async fn call_tool(&mut self, name: &str, params: Value) -> Result<Value> {
         self.ensure_alive().await?;
         let id = self.alloc_id();
@@ -245,6 +280,12 @@ impl StdioMcpClient {
     }
 
     /// Send a `ping` request — useful for liveness checks.
+    ///
+    /// Why: Operators and supervisors need a cheap way to verify the child is
+    /// alive and responsive without triggering side effects.
+    /// What: Sends a `ping` request and discards the response. Calls
+    /// `ensure_alive` first to respawn if needed.
+    /// Test: Liveness check in integration tests.
     pub async fn ping(&mut self) -> Result<()> {
         self.ensure_alive().await?;
         let id = self.alloc_id();
@@ -258,6 +299,13 @@ impl StdioMcpClient {
     }
 
     /// Write one JSON value followed by a newline, then flush.
+    ///
+    /// Why: MCP uses newline-delimited JSON framing; every write must end with
+    /// `\n` so the server's line reader sees a complete frame. Flushing
+    /// ensures the bytes leave the buffer immediately.
+    /// What: Serialises `value` to bytes, writes them and a `\n`, then flushes
+    /// the buffered writer.
+    /// Test: Covered indirectly by all request tests.
     async fn write_line(&mut self, value: &Value) -> Result<()> {
         let bytes = serde_json::to_vec(value).context("serializing JSON-RPC frame")?;
         self.stdin.write_all(&bytes).await?;
@@ -300,6 +348,14 @@ impl StdioMcpClient {
 
     /// Send `req` and read responses until one matches the expected id.
     /// Server-initiated notifications (no `id`) are ignored.
+    ///
+    /// Why: JSON-RPC allows servers to send notifications (no id) at any time.
+    /// A simple read-one-frame approach would misinterpret a notification as
+    /// a response. This loop discards notifications and out-of-order ids
+    /// (rare) until the matching response arrives.
+    /// What: Wraps the round-trip in a 30s timeout. Returns Err if the timeout
+    /// fires or if the frame cannot be parsed.
+    /// Test: Covered by every method that calls `request`.
     async fn request(&mut self, req: &Value) -> Result<Value> {
         let expected_id = req
             .get("id")

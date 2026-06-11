@@ -11,8 +11,22 @@
 //! helper. No async, no tokio, no tree-sitter. The tree-sitter–based
 //! extraction code lives in sibling modules / downstream crates.
 //!
+//! `EdgeKind` is extracted into `edge_kind.rs` to stay under the 500-line
+//! cap (it grew with Phase D/E variants and doc notes). Re-exported here so
+//! all existing import paths (`contracts::EdgeKind`) continue to compile.
+//!
 //! Test: see `#[cfg(test)]` in this file — covers `RawEntity::new` id
-//! stability, `EdgeKind::score_multiplier`, and `fact_hash_str` determinism.
+//! stability, `fact_hash_str` determinism, and `EntityType::as_str`.
+//!
+//! ## EdgeKind convergence (issue #815, ADR-0010 Option C / Phase E #818)
+//!
+//! `contracts::EdgeKind` is the **single canonical enum** for all KG edge
+//! kinds across the trusty-* toolchain. Phase E adds `Custom(String)` (#818)
+//! and drops `Copy` (String is heap-allocated). See `edge_kind.rs` for the
+//! full definition.
+
+mod edge_kind;
+pub use edge_kind::{EdgeKind, EdgeKindError};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -70,95 +84,6 @@ impl EntityType {
     }
 }
 
-/// Relationship taxonomy for the trusty-search entity knowledge graph.
-///
-/// Why: trusty-search's KG layer needs richer semantic fidelity than a plain
-/// call-graph — it must express trait/type relationships, test provenance,
-/// doc-concept links, and reverse indexes so that KG-expansion scoring can
-/// favour high-signal edges via per-variant `score_multiplier` values
-/// (issue #18). This enum is the single vocabulary for all those edge types.
-///
-/// **Intentionally separate from `crate::symgraph::graph::EdgeKind`**
-/// (the 3-variant structural enum used by `SymbolGraph`'s petgraph substrate,
-/// gated behind the `symgraph-parser` feature). The two enums serve different
-/// layers:
-///   - `graph::EdgeKind` — petgraph edge weight for the in-memory `SymbolGraph`
-///     used by the tree-sitter parser path. Three coarse variants (`Calls`,
-///     `Imports`, `Contains`) are sufficient for the local name-resolution
-///     queries that path performs.
-///   - `contracts::EdgeKind` (this type) — the persisted, scored vocabulary for
-///     the trusty-search entity KG. Seventeen variants with per-edge
-///     `score_multiplier` values, serialised to stable string tags and stored
-///     in the warm-boot index via `edge_kind_tag` / `edge_kind_from_tag` in
-///     `trusty_search::core::symbol_graph`.
-///
-/// **Intentionally separate from `trusty_analyze::KgEdgeKind`** (11 variants).
-/// That type is trusty-analyze's independent language-neutral KG for static
-/// analysis output (tree-sitter adapters emit into it). It is not connected to
-/// the trusty-search KG at runtime and carries a vocabulary suited to
-/// whole-codebase structural analysis rather than entity/concept search.
-///
-/// When adding a new variant here, also add the matching string tag in
-/// `trusty_search::core::symbol_graph::edge_kind_tag` /
-/// `edge_kind_from_tag` to preserve warm-boot compatibility.
-///
-/// Phase A = structural (tree-sitter derived)
-/// Phase B = test-relation
-/// Phase C = doc/concept
-///
-/// Test: `edge_kind_score_multiplier_known_values` (this file);
-/// `edge_kind_serde_round_trip` (this file);
-/// `edge_kind_tag_round_trip` in `trusty_search::core::symbol_graph::tests`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum EdgeKind {
-    // Call graph
-    /// Caller → callee.
-    CallsFunction,
-    /// Callee → caller (reverse index of `CallsFunction`).
-    CalledByFunction,
-    // Phase A — structural
-    Implements,
-    UsesType,
-    Derives,
-    ModuleContains,
-    ReExports,
-    RaisesError,
-    Configures,
-    // Phase B — test relations
-    TestedBy,
-    TestUsesFixture,
-    CoOccursInTest,
-    // Phase C — docs / concepts
-    Documents,
-    ReferencesConcept,
-    Aliases,
-    ErrorDescribes,
-}
-
-impl EdgeKind {
-    /// Relevance weight for KG neighbourhood expansion.
-    ///
-    /// Why: Different edge types carry different levels of semantic relevance
-    /// to a search query. Weighting edges (rather than treating all as equal)
-    /// lets the ranking layer boost strongly-related symbols (trait implementations,
-    /// tested-by links) over weaker associations (concept co-occurrence).
-    /// What: Returns a multiplier in (0, 1] applied to the base relevance
-    /// score of a KG neighbour when this edge was traversed to reach it.
-    /// Higher values mean the neighbour is ranked more prominently.
-    /// Test: `edge_kind_score_multiplier_known_values` in this module.
-    pub fn score_multiplier(&self) -> f32 {
-        match self {
-            EdgeKind::Implements => 0.85,
-            EdgeKind::UsesType => 0.75,
-            EdgeKind::TestedBy => 0.80,
-            EdgeKind::Documents => 0.65,
-            EdgeKind::ReferencesConcept => 0.60,
-            // Remaining edges use the legacy flat KG-expansion multiplier.
-            _ => 0.70,
-        }
-    }
-}
-
 /// redb table name constants for entity storage.
 pub mod tables {
     /// `entity_id (str) -> RawEntity (bincode/json)`
@@ -188,6 +113,12 @@ impl RawEntity {
     /// `(entity_type, text, file)`. Same inputs always yield the same id, so
     /// re-extraction over identical source produces stable references for the
     /// KG layer.
+    ///
+    /// Why: stable ids allow incremental re-extraction to reuse existing KG
+    /// nodes rather than creating duplicates when span or line changes.
+    /// What: hashes `(entity_type, text, file)` with SHA-256; span/line are
+    /// stored but excluded from the hash.
+    /// Test: `raw_entity_id_is_stable`, `raw_entity_id_changes_with_type`.
     pub fn new(
         entity_type: EntityType,
         text: String,
@@ -213,13 +144,23 @@ impl RawEntity {
     }
 }
 
-/// Short, stable hex hash of a string. Used by ingest sources (e.g. SCIP) to
-/// derive readable, collision-resistant entity IDs from opaque symbol strings.
+/// Short hex hash of a string. Used by ingest sources (e.g. SCIP) to
+/// derive compact, collision-resistant entity IDs from opaque symbol strings.
 ///
 /// Why: SCIP symbol strings (e.g. `"rust-analyzer cargo crate/Foo#"`) are
-/// long and noisy. Hashing them produces a compact, stable suffix safe to
-/// embed in entity ids and redb keys.
-/// What: hashes `s` with `DefaultHasher` and formats as 8-char lowercase hex.
+/// long and noisy. Hashing them produces a compact suffix safe to embed in
+/// entity ids and redb keys.
+/// What: hashes `s` with `std::collections::hash_map::DefaultHasher` and
+/// formats as 8-char (minimum) lowercase hex.
+///
+/// **Stability caveat:** `DefaultHasher` is NOT guaranteed stable across Rust
+/// versions or process restarts (the standard library may change its
+/// implementation). The output is deterministic within a single process run
+/// but MUST NOT be relied upon for cross-version persistence stability.
+/// Tracked as a separate durability issue — do not change the algorithm here
+/// without a coordinated migration plan, as existing persisted entity IDs
+/// were derived with this hash.
+///
 /// Test: `fact_hash_str_is_deterministic`.
 pub fn fact_hash_str(s: &str) -> String {
     use std::hash::{Hash, Hasher};
@@ -251,50 +192,6 @@ mod tests {
         let a = RawEntity::new(EntityType::NamedType, "Foo".into(), (0, 3), "src/x.rs", 1);
         let b = RawEntity::new(EntityType::ModulePath, "Foo".into(), (0, 3), "src/x.rs", 1);
         assert_ne!(a.id, b.id);
-    }
-
-    #[test]
-    fn edge_kind_score_multiplier_known_values() {
-        assert!((EdgeKind::Implements.score_multiplier() - 0.85).abs() < 1e-6);
-        assert!((EdgeKind::UsesType.score_multiplier() - 0.75).abs() < 1e-6);
-        assert!((EdgeKind::TestedBy.score_multiplier() - 0.80).abs() < 1e-6);
-        assert!((EdgeKind::Documents.score_multiplier() - 0.65).abs() < 1e-6);
-        assert!((EdgeKind::ReferencesConcept.score_multiplier() - 0.60).abs() < 1e-6);
-        // Default branch.
-        assert!((EdgeKind::CallsFunction.score_multiplier() - 0.70).abs() < 1e-6);
-    }
-
-    /// Verify that every `contracts::EdgeKind` variant round-trips through
-    /// `serde_json` without loss. This guards the on-disk KG serialisation
-    /// format: a variant added here but missing a `#[serde(rename = "…")]`
-    /// annotation would still survive this round-trip (serde uses the variant
-    /// name by default), but changing an existing variant name without a rename
-    /// would break it.
-    #[test]
-    fn edge_kind_serde_round_trip() {
-        let variants = [
-            EdgeKind::CallsFunction,
-            EdgeKind::CalledByFunction,
-            EdgeKind::Implements,
-            EdgeKind::UsesType,
-            EdgeKind::Derives,
-            EdgeKind::ModuleContains,
-            EdgeKind::ReExports,
-            EdgeKind::RaisesError,
-            EdgeKind::Configures,
-            EdgeKind::TestedBy,
-            EdgeKind::TestUsesFixture,
-            EdgeKind::CoOccursInTest,
-            EdgeKind::Documents,
-            EdgeKind::ReferencesConcept,
-            EdgeKind::Aliases,
-            EdgeKind::ErrorDescribes,
-        ];
-        for v in variants {
-            let json = serde_json::to_string(&v).expect("serialize EdgeKind");
-            let back: EdgeKind = serde_json::from_str(&json).expect("deserialize EdgeKind");
-            assert_eq!(v, back, "round-trip failed for {json}");
-        }
     }
 
     #[test]
