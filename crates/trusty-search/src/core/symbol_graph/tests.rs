@@ -178,16 +178,19 @@ fn test_neighbors_by_edge_filters_by_kind() {
         symbol: "a".into(),
         chunk_id: "a:1".into(),
         file: "a.rs".into(),
+        kind: None,
     });
     let b = g.graph.add_node(SymbolNode {
         symbol: "b".into(),
         chunk_id: "b:1".into(),
         file: "b.rs".into(),
+        kind: None,
     });
     let c = g.graph.add_node(SymbolNode {
         symbol: "c".into(),
         chunk_id: "c:1".into(),
         file: "c.rs".into(),
+        kind: None,
     });
     g.by_symbol.insert("a".into(), a);
     g.by_symbol.insert("b".into(), b);

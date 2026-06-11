@@ -149,6 +149,7 @@ impl SymbolGraph {
             symbol: name.to_string(),
             chunk_id: chunk_id.to_string(),
             file: file.to_string(),
+            kind: None,
         });
         self.by_symbol.insert(name.to_string(), idx);
         self.chunk_to_symbol

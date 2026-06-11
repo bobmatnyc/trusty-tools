@@ -84,8 +84,8 @@ crates/trusty-search/src/commands/reindex_ui.rs	820
 crates/trusty-search/src/commands/start.rs	1085
 crates/trusty-search/src/core/chunker/mod.rs	1534
 crates/trusty-search/src/core/classifier.rs	684
-crates/trusty-search/src/core/corpus.rs	998
-crates/trusty-search/src/core/indexer/ingest.rs	714
+crates/trusty-search/src/core/corpus.rs	949
+crates/trusty-search/src/core/indexer/ingest.rs	706
 crates/trusty-search/src/core/indexer/search.rs	564
 crates/trusty-search/src/core/indexer/tests.rs	2472
 crates/trusty-search/src/core/memory_policy.rs	690

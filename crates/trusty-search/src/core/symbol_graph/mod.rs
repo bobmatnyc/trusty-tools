@@ -18,13 +18,18 @@
 //! unknown-tag drop counting (#816).
 
 mod build;
+mod contrib;
 mod graph;
 mod traverse;
 
 #[cfg(test)]
+mod contrib_tests;
+#[cfg(test)]
 mod persist_tests;
 #[cfg(test)]
 mod tests;
+
+pub use contrib::{save_then_merge_contrib, ContribMergeStats};
 
 // Public type aliases shared across submodules.
 use crate::core::chunker::ChunkType;

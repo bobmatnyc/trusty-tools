@@ -31,6 +31,12 @@ pub struct SymbolNode {
     pub chunk_id: String,
     /// Source file path (for debugging / display).
     pub file: String,
+    /// Node kind for contributed (non-code-symbol) nodes — e.g. `table`,
+    /// `proc`, `view`, `csharp_method` (ADR-0009). `None` for chunk-derived
+    /// code symbols. In-RAM only: derived persistence (`PersistedKgNode`)
+    /// does not carry it; contributed persistence stores its own kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// A petgraph-backed directed call graph: edge `A → B` means "A calls B".
@@ -132,6 +138,7 @@ impl SymbolGraph {
                 symbol: symbol.clone(),
                 chunk_id: persisted.chunk_id.clone(),
                 file: persisted.file.clone(),
+                kind: None,
             });
             g.by_symbol.insert(symbol, idx);
             g.chunk_to_symbol
@@ -169,6 +176,22 @@ impl SymbolGraph {
                  check GET /indexes/:id/graph/stats → unknown_edge_tags_dropped \
                  and consider upgrading the daemon (issue #816)",
             );
+        }
+        // Contributed overlay (ADR-0009): fold every stored producer
+        // contribution into the warm-booted graph. Best-effort — a contrib
+        // load failure degrades to the derived-only graph with a warning.
+        match corpus.load_contrib_graphs() {
+            Ok(contribs) if !contribs.is_empty() => {
+                let stats = g.merge_contrib(&contribs);
+                tracing::info!(
+                    "kg: warm-boot merged {} contributed graph(s): +{} nodes, +{} edges",
+                    contribs.len(),
+                    stats.nodes_added,
+                    stats.edges_added,
+                );
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("kg: contrib load failed at warm-boot ({e}) — merge skipped"),
         }
         Ok(Some(g))
     }

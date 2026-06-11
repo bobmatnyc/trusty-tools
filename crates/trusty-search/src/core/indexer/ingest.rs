@@ -190,25 +190,18 @@ impl CodeIndexer {
         drop(tuples);
         drop(entities_snapshot);
 
-        // Issue #41 phase 2: persist the freshly rebuilt graph alongside the
-        // chunk corpus so warm-boot can skip the rebuild on restart. Best
-        // effort — a persistence failure is logged at `warn` and never aborts
-        // the in-memory swap (search keeps working with a stale on-disk graph
-        // until the next successful save).
-        if let Some(corpus) = &self.corpus {
-            let corpus = Arc::clone(corpus);
-            let graph_for_save = Arc::clone(&new_graph);
-            let index_id = self.index_id.clone();
-            let join =
-                tokio::task::spawn_blocking(move || graph_for_save.save_to_corpus(&corpus)).await;
-            match join {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => tracing::warn!(
-                    "index '{index_id}': kg persist failed ({e}) — graph stays in memory"
-                ),
-                Err(e) => tracing::warn!("index '{index_id}': kg persist task panicked ({e})"),
-            }
-        }
+        // Issue #41 phase 2 + ADR-0009: persist the freshly rebuilt *derived*
+        // graph (best-effort, pre-merge so the derived kg_* tables never
+        // absorb contributed rows), then fold the stored contributed overlay
+        // back in — a reindex must not evict contributed edges from the
+        // serving graph. Both redb-bound steps run on one blocking worker;
+        // failures degrade with warnings (see `save_then_merge_contrib`).
+        let new_graph = crate::core::symbol_graph::save_then_merge_contrib(
+            new_graph,
+            self.corpus.clone(),
+            self.index_id.clone(),
+        )
+        .await;
 
         *self.symbol_graph.write().await = new_graph;
     }

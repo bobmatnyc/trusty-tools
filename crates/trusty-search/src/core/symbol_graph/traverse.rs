@@ -83,6 +83,49 @@ impl SymbolGraph {
         out
     }
 
+    /// Direction-aware, kind-filtered BFS for the `graph/neighbors` endpoint
+    /// (ADR-0009).
+    ///
+    /// Why: contributed cross-tier queries need all three of: direction
+    /// control ("what writes table X" = inbound only), edge-kind filtering
+    /// ("only `Writes`"), and multi-hop reach ("method → proc → table") —
+    /// none of the existing helpers exposes all three at once.
+    /// What: BFS up to `hops` levels across `dirs`; when `edge_kinds` is
+    /// `Some`, only edges whose kind is in the slice are walked (`None` walks
+    /// every kind). Returns `(symbol, chunk_id, node_kind, edge_tag)` per
+    /// newly-discovered neighbour — `node_kind` is `Some` for contributed
+    /// resource nodes (`table`, `proc`, …), `None` for derived code symbols.
+    /// Test: `contrib_neighbors_direction_and_kind_filter` in `contrib_tests`.
+    #[allow(clippy::type_complexity)]
+    pub fn graph_neighbors(
+        &self,
+        symbol: &str,
+        dirs: &[Direction],
+        edge_kinds: Option<&[EdgeKind]>,
+        hops: usize,
+    ) -> Vec<(String, String, Option<String>, String)> {
+        let Some(start) = self.start_index(symbol, hops) else {
+            return Vec::new();
+        };
+        let allowed: Option<HashSet<&EdgeKind>> = edge_kinds.map(|ks| ks.iter().collect());
+        let mut out: Vec<(String, String, Option<String>, String)> = Vec::new();
+        self.bfs_walk(
+            start,
+            hops,
+            dirs,
+            |edge| allowed.as_ref().is_none_or(|a| a.contains(edge.weight())),
+            |node, edge| {
+                out.push((
+                    node.symbol.clone(),
+                    node.chunk_id.clone(),
+                    node.kind.clone(),
+                    edge.weight().tag().to_string(),
+                ));
+            },
+        );
+        out
+    }
+
     fn bfs_neighbors(&self, symbol: &str, hops: usize, dir: Direction) -> Vec<(String, String)> {
         let Some(start) = self.start_index(symbol, hops) else {
             return Vec::new();

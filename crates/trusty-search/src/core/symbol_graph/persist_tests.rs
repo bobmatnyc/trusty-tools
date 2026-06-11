@@ -228,11 +228,13 @@ fn test_custom_edge_survives_warm_boot() {
         symbol: "alpha".into(),
         chunk_id: "a:1".into(),
         file: "a.rs".into(),
+        kind: None,
     });
     let b = g.graph.add_node(SymbolNode {
         symbol: "beta".into(),
         chunk_id: "b:1".into(),
         file: "b.rs".into(),
+        kind: None,
     });
     g.by_symbol.insert("alpha".into(), a);
     g.by_symbol.insert("beta".into(), b);

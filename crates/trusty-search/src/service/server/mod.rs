@@ -12,6 +12,7 @@
 //! registry and exercises each endpoint.
 
 mod admin;
+mod contrib_graph;
 mod files;
 mod health;
 mod helpers;
@@ -32,6 +33,8 @@ mod tickers;
 mod tests_1073;
 #[cfg(test)]
 mod tests_829;
+#[cfg(test)]
+mod tests_contrib_graph;
 #[cfg(test)]
 mod tests_denylist;
 #[cfg(test)]
@@ -70,6 +73,7 @@ use admin::{
     admin_stop_handler, get_config_handler, logs_tail_handler, patch_config_handler,
     status_stream_handler,
 };
+use contrib_graph::{graph_neighbors_handler, ingest_graph_handler};
 use files::{get_index_chunks_handler, index_file_handler, remove_file_handler};
 use health::health_handler;
 use indexes::{create_index_handler, list_indexes_handler, relocate_index_handler};
@@ -139,6 +143,14 @@ pub fn build_router(state: SearchAppState) -> Router {
         .route("/indexes/{id}/index-file", post(index_file_handler))
         .route("/indexes/{id}/remove-file", post(remove_file_handler))
         .route("/indexes/{id}/reindex", post(reindex_handler))
+        // Contributed-graph ingest (ADR-0009): bulk lane (store + graph
+        // rebuild can run for seconds); raised body limit — full contributed
+        // documents from large codebases run to tens of MB.
+        .route(
+            "/indexes/{id}/graph",
+            post(ingest_graph_handler)
+                .layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024)),
+        )
         .route_layer(axum::middleware::from_fn(
             crate::service::concurrency::apply_limiter,
         ))
@@ -167,6 +179,10 @@ pub fn build_router(state: SearchAppState) -> Router {
         .route("/indexes/{id}/status", get(index_status_handler))
         .route("/indexes/{id}/graph", get(graph_handler))
         .route("/indexes/{id}/graph/stats", get(graph_stats_handler))
+        .route(
+            "/indexes/{id}/graph/neighbors",
+            get(graph_neighbors_handler),
+        )
         .route("/indexes/{id}/reindex/stream", get(reindex_stream_handler))
         .route("/indexes/{id}/chunks", get(get_index_chunks_handler))
         .route("/indexes/{id}/call_chain", get(call_chain_handler))
