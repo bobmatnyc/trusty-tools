@@ -48,8 +48,7 @@ pub(super) fn descriptor() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {},
-            "additionalProperties": false,
-            "required": []
+            "additionalProperties": false
         }
     })
 }
