@@ -52,7 +52,7 @@ crates/trusty-common/src/monitor/memory_tui.rs	4054
 crates/trusty-common/src/monitor/search_client.rs	749
 crates/trusty-common/src/monitor/search_tui.rs	2308
 crates/trusty-common/src/monitor/tui_common.rs	616
-crates/trusty-common/src/symgraph/graph.rs	551
+crates/trusty-common/src/symgraph/graph.rs	576
 crates/trusty-common/src/tickets/api/backends/github.rs	792
 crates/trusty-common/src/tickets/api/backends/jira.rs	827
 crates/trusty-common/src/tickets/api/backends/linear.rs	760
@@ -100,7 +100,7 @@ crates/trusty-memory/src/commands/setup.rs	539
 crates/trusty-memory/src/discovery.rs	884
 crates/trusty-memory/src/kg_extract.rs	608
 crates/trusty-memory/src/lib.rs	3000
-crates/trusty-memory/src/main.rs	1083
+crates/trusty-memory/src/main.rs	1069
 crates/trusty-memory/src/messaging.rs	843
 crates/trusty-memory/src/project_root.rs	980
 crates/trusty-memory/src/prompt_log.rs	851
@@ -153,7 +153,7 @@ crates/trusty-search/src/core/registry.rs	732
 crates/trusty-search/src/core/repo_config.rs	595
 crates/trusty-search/src/core/search/hierarchy.rs	658
 crates/trusty-search/src/core/store.rs	1275
-crates/trusty-search/src/core/symbol_graph.rs	1712
+crates/trusty-search/src/core/symbol_graph.rs	1756
 crates/trusty-search/src/main.rs	1360
 crates/trusty-search/src/mcp/tools.rs	2187
 crates/trusty-search/src/service/call_chain.rs	954

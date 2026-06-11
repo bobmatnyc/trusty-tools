@@ -34,11 +34,36 @@ pub struct SymbolNode {
     pub start_line: usize,
 }
 
-/// Relationship between two symbols (by name).
+/// Coarse structural relationship between two symbols in the in-memory
+/// `SymbolGraph` petgraph substrate.
+///
+/// Why: The `SymbolGraph` (petgraph `StableGraph<SymbolNode, EdgeKind>`) needs
+/// edge weights for its BFS/SCC/toposort queries. Three coarse variants
+/// (`Calls`, `Imports`, `Contains`) are sufficient for the local
+/// name-resolution and call-graph queries the tree-sitter parser path performs.
+///
+/// **Intentionally separate from `crate::symgraph::contracts::EdgeKind`**
+/// (17 variants with per-edge `score_multiplier` values). That type is the
+/// persisted, scored vocabulary for the trusty-search entity KG; this type is
+/// the lightweight petgraph edge weight for the in-memory structural graph.
+/// The name collision is why `contracts::EdgeKind` is *not* re-exported at
+/// the `symgraph` module root — access it as
+/// `trusty_common::symgraph::contracts::EdgeKind`.
+///
+/// **Intentionally separate from `trusty_analyze::KgEdgeKind`** (11 variants).
+/// That type is trusty-analyze's language-neutral analysis KG, which is not
+/// connected to either this struct or the trusty-search entity KG at runtime.
+///
+/// What: Three variants covering the relationships the tree-sitter-based
+/// extraction pass can reliably infer from AST structure alone.
+/// Test: `kg_calls_edge_between_two_functions` (this module's tests section).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EdgeKind {
+    /// Function/method call: caller → callee.
     Calls,
+    /// Module import: importer → imported.
     Imports,
+    /// Structural containment: parent → child (module → function, etc.).
     Contains,
 }
 
