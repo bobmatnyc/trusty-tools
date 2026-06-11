@@ -1,10 +1,12 @@
-# .line-cap-allowlist.tsv — grandfathered files over the 500-SLOC cap (issue #610).
+# .line-cap-allowlist.tsv — grandfathered files over the SLOC cap (issue #610).
 # Format: <relative/path><TAB><budget>  (budget = frozen max SLOC count; code lines only).
+# Dual cap: production source = 500 SLOC; test/benchmark files = 1500 SLOC.
+# Test/benchmark = basename is tests.rs, ends with _test.rs or _tests.rs,
+#   or path contains /tests/ or /benches/ segment. All others = production.
 # SLOC excludes blank lines, // line comments, /// doc comments, //! inner-doc comments,
 # and /* ... */ block comments (including multi-line spans). Trailing-comment lines count.
-# Ratchet: budgets may only DECREASE; when a file drops <= 500 SLOC remove it.
+# Ratchet: budgets may only DECREASE; when a file drops <= its applicable cap, remove it.
 # Regenerate with: scripts/check_line_cap.sh --update  (use --seed only to bootstrap).
-crates/trusty-agents/src/tools/memory/tests.rs	510
 crates/trusty-analyze/src/core/review.rs	555
 crates/trusty-analyze/src/lang/adapters/go.rs	610
 crates/trusty-analyze/src/lang/adapters/php.rs	642
@@ -18,7 +20,6 @@ crates/trusty-common/src/embedder/mod.rs	753
 crates/trusty-common/src/memory_core/analytics.rs	623
 crates/trusty-common/src/memory_core/dream.rs	1199
 crates/trusty-common/src/memory_core/retrieval/mod.rs	830
-crates/trusty-common/src/memory_core/retrieval/tests.rs	875
 crates/trusty-common/src/memory_core/semantic_consolidation.rs	615
 crates/trusty-common/src/memory_core/store/chat_sessions.rs	690
 crates/trusty-common/src/memory_core/store/kg_redb.rs	1442
@@ -63,12 +64,9 @@ crates/trusty-memory/src/project_root.rs	501
 crates/trusty-memory/src/prompt_log.rs	542
 crates/trusty-memory/src/service.rs	1075
 crates/trusty-memory/src/tools.rs	2599
-crates/trusty-memory/tests/concurrent_perf.rs	569
-crates/trusty-memory/tests/mcp_stdio_tools.rs	683
 crates/trusty-mpm/src/client/executor.rs	666
 crates/trusty-mpm/src/client/http_client.rs	897
 crates/trusty-mpm/src/core/session_launch.rs	705
-crates/trusty-mpm/src/daemon/api_tests.rs	1046
 crates/trusty-mpm/src/daemon/bug_report/scrubber.rs	565
 crates/trusty-mpm/src/daemon/claude_config.rs	894
 crates/trusty-mpm/src/daemon/state.rs	770
@@ -77,7 +75,6 @@ crates/trusty-mpm/src/telegram/formatter.rs	504
 crates/trusty-mpm/src/tui/dashboard.rs	696
 crates/trusty-mpm/src/tui/health.rs	2200
 crates/trusty-mpm/src/tui/mod.rs	520
-crates/trusty-review/src/pipeline/runner_tests.rs	598
 crates/trusty-search/src/commands/doctor_checks.rs	503
 crates/trusty-search/src/commands/reindex_ui.rs	820
 crates/trusty-search/src/commands/start.rs	1085
@@ -94,7 +91,3 @@ crates/trusty-search/src/service/call_chain.rs	738
 crates/trusty-search/src/service/embedder_supervisor.rs	521
 crates/trusty-search/src/service/persistence.rs	579
 crates/trusty-search/src/service/reindex/mod.rs	1658
-crates/trusty-search/src/service/reindex/tests.rs	1113
-crates/trusty-search/tests/benchmark_harness.rs	544
-crates/trusty-search/tests/benchmark_open_mpm_kg.rs	665
-crates/trusty-search/tests/benchmark_open_mpm.rs	568

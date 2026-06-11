@@ -219,15 +219,30 @@ application/binary code and `thiserror` for library error types. Reserve
 `expect()` only for cases that are genuinely programmer errors (invariants that
 can never occur at runtime).
 
-🔴 **500-SLOC file size hard cap (MECHANICALLY ENFORCED)** — no source file
-(`.rs`) should exceed 500 lines of code (SLOC). As of issue #610 this is no
-longer advice: it is gated by `scripts/check_line_cap.sh`, wired into CI
-(`.github/workflows/line-cap.yml`) and the local pre-commit hook (`line-cap`).
-A new tracked `.rs` file over 500 SLOC **cannot merge**. Files approaching this
-limit are a signal to split into focused submodules before the next feature
-lands on them. When splitting, prefer: one public module per logical concept, a
-thin `mod.rs` that re-exports, and sibling files with clear single
-responsibilities.
+🔴 **SLOC file size hard cap (MECHANICALLY ENFORCED, dual-cap since #1131):**
+
+| File type | SLOC cap |
+|---|---|
+| Production source files | **500 SLOC** |
+| Test / benchmark files | **1500 SLOC** |
+
+A file is classified as a **test/benchmark file** when ANY of these match:
+- basename is exactly `tests.rs`
+- basename ends with `_test.rs` or `_tests.rs`
+- path contains a `/tests/` directory segment (covers `crates/*/tests/*.rs`
+  integration tests AND any `src/**/tests/*.rs` inline test modules)
+- path contains a `/benches/` directory segment
+
+All other tracked `.rs` files are **production files**, capped at 500 SLOC.
+
+As of issue #610 the production cap is no longer advice: it is gated by
+`scripts/check_line_cap.sh`, wired into CI (`.github/workflows/line-cap.yml`)
+and the local pre-commit hook (`line-cap`). A new tracked production `.rs` file
+over 500 SLOC **cannot merge**; a new test/benchmark `.rs` file over 1500 SLOC
+**cannot merge**. Files approaching their limit are a signal to split into
+focused submodules before the next feature lands on them. When splitting, prefer:
+one public module per logical concept, a thin `mod.rs` that re-exports, and
+sibling files with clear single responsibilities.
 
 **SLOC definition:** a line counts only when it contains non-whitespace source
 code after all comment matter is stripped. These are **excluded** from the count:
@@ -242,15 +257,16 @@ has code. The counter is a pragmatic awk heuristic that errs toward leniency:
 edge cases (e.g. `//` inside a string literal) may undercount SLOC but will
 never falsely fail a legitimate file.
 
-**The ratchet (allowlist that can only shrink):** grandfathered files over the
-cap are listed in `.line-cap-allowlist.tsv` (one `relative/path<TAB>budget` line
-each, where `budget` is that file's frozen max SLOC count). The gate enforces:
+**The ratchet (allowlist that can only shrink):** grandfathered files over their
+applicable cap are listed in `.line-cap-allowlist.tsv` (one
+`relative/path<TAB>budget` line each, where `budget` is that file's frozen max
+SLOC count). The gate enforces per-applicable-cap ratchet semantics:
 
-- a file ≤ 500 SLOC and **not** allowlisted → OK;
-- a file > 500 SLOC and **not** allowlisted → **FAIL** (new oversized file — split it);
-- an allowlisted file whose current SLOC **exceeds its budget** → **FAIL** (it grew — split it);
-- an allowlisted file now **≤ 500 SLOC** → **FAIL** (it dropped under cap — remove its allowlist entry; this is the ratchet-down forcing function);
-- an allowlisted file with `500 < SLOC ≤ budget` → OK (grandfathered, not growing).
+- SLOC ≤ applicable cap and **not** allowlisted → OK;
+- SLOC > applicable cap and **not** allowlisted → **FAIL** (new oversized file — split it);
+- allowlisted, current SLOC **exceeds its budget** → **FAIL** (it grew — split it);
+- allowlisted, current SLOC **≤ applicable cap** → **FAIL** (drop the entry; ratchet-down forcing function);
+- allowlisted, `applicable_cap < SLOC ≤ budget` → OK (grandfathered, not growing).
 
 So allowlisted files may only shrink, and no new oversized file may be added.
 As the #607 sweep and per-crate refactors land, the allowlist ratchets down
@@ -259,9 +275,9 @@ toward empty.
 **Run it locally:** `bash scripts/check_line_cap.sh` (exit 0 = clean). After you
 intentionally split a file (or a file otherwise drops below its budget), refresh
 the frozen budgets with `scripts/check_line_cap.sh --update` — this only *lowers*
-budgets or *removes* entries that fell ≤ 500 SLOC; it **refuses** to add a new
-oversized file or raise a budget unless you pass `--seed` (initial bootstrap) or
-`--force-add` (rare, intentional bump). Commit the regenerated
+budgets or *removes* entries that fell ≤ their applicable cap; it **refuses** to
+add a new oversized file or raise a budget unless you pass `--seed` (initial
+bootstrap) or `--force-add` (rare, intentional bump). Commit the regenerated
 `.line-cap-allowlist.tsv` alongside your split.
 
 Past violations (refactor tickets #170/#171/#172 are CLOSED and the splits have
@@ -275,9 +291,9 @@ landed — all three former monoliths are now under the 500-SLOC cap):
   `engine.rs` was split into an `engine/` module; every submodule is now under
   the cap (largest is `engine/executor/run.rs` at ~485 lines).
 
-The largest remaining files in `trusty-agents` (none tied to an open ticket) are
-`tools/memory/tests.rs` and `tm/manager.rs` — file a fresh refactor ticket before
-growing those further. Current per-file SLOC budgets live in `.line-cap-allowlist.tsv`.
+The largest remaining production file in `trusty-agents` (not tied to an open
+ticket) is `tm/manager.rs` — file a fresh refactor ticket before growing it
+further. Current per-file SLOC budgets live in `.line-cap-allowlist.tsv`.
 
 🔴 **`thiserror` for libraries, `anyhow` for binaries** — library crates
 (`trusty-common`, `trusty-embedderd`, `trusty-bm25-daemon`, etc.) define structured error enums with
@@ -670,15 +686,17 @@ installed, the build script fails loudly. Install pnpm or set
 `[patch]` tables inside individual crate `Cargo.toml` files; Cargo ignores
 them. All patches must live in the root `Cargo.toml`.
 
-🔴 **Growing a file past 500 SLOC instead of splitting** — the compiler does not
-stop you, but continued feature additions to a 1,000+ SLOC file make the module
-harder to review, reason about, and test. Split proactively. The cap counts code
-lines only (SLOC): blank lines, `//` comments, `///` doc comments, `//!`
-inner-doc comments, and `/* ... */` block comments (including multi-line spans)
-are all excluded from the count. The trusty-agents `ctrl/`, `runtime/`, and
-`workflow/engine/` modules (#170, #171, #172) were the canonical examples of
-files that grew past the cap; all three have since been split into focused
-submodules and now serve as the worked examples of a clean split.
+🔴 **Growing a file past its SLOC cap instead of splitting** — the compiler does
+not stop you, but continued feature additions make the module harder to review,
+reason about, and test. Split proactively. The applicable cap is **500 SLOC for
+production files** and **1500 SLOC for test/benchmark files** (see the Key
+Conventions section for the exact classification rules). SLOC counts code lines
+only: blank lines, `//` comments, `///` doc comments, `//!` inner-doc comments,
+and `/* ... */` block comments (including multi-line spans) are all excluded.
+The trusty-agents `ctrl/`, `runtime/`, and `workflow/engine/` modules (#170,
+#171, #172) were the canonical examples of files that grew past the prod cap;
+all three have since been split into focused submodules and now serve as the
+worked examples of a clean split.
 
 🟢 **MSRV drift** — the workspace pins `rust-version = "1.91"`. Running
 `rustup update` and picking up a new nightly may introduce syntax that
