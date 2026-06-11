@@ -1,7 +1,13 @@
 # 0010. KG Edge-Kind Extensibility — First-Class Data-Flow Variants + Custom Escape Hatch
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-10
+- **Accepted:** 2026-06-11
+- **Decision Log:**
+  - **Q1 (convergence scope)** → **Option C (full convergence first).** Converge `contracts::EdgeKind`, `KgEdgeKind`, and `graph::EdgeKind` into a single canonical enum in `trusty-common::symgraph::contracts` BEFORE adding new variants. Phase 0 is a real refactor (#815); Phases 1–3 build on this unified foundation.
+  - **Q2 (unknown-tag handling)** → **Option H (hybrid).** `"custom:"`-prefixed tags round-trip as `Custom(s)`; bare unrecognized tags are dropped with counter + observable in `/graph/stats` (version-skew guard). Fully resolves #816 for custom-contributed edges and detects accidental tag corruption.
+  - **Q3 (long-term direction)** → **RESOLVED: Yes, converge to single canonical enum.** Q1's Option C commits to exactly this. Q3 is no longer open.
+  - **Q4 (community T-SQL/C# extractor)** → **DEFERRED.** Wire contract is defined by this ADR and ADR-0009; accept-vs-document decision deferred for later judgment on maintenance burden.
 - **Scope:** Workspace-wide (`trusty-common::symgraph::contracts`, `trusty-search` persistence + query surface, `trusty-analyze::types::graph`)
 - **Supersedes / Superseded by:** —
 - **Decided in:** epic [#814](https://github.com/bobmatnyc/trusty-tools/issues/814), children [#817](https://github.com/bobmatnyc/trusty-tools/issues/817), [#818](https://github.com/bobmatnyc/trusty-tools/issues/818); source Discussion #580
@@ -9,53 +15,40 @@
 
 ---
 
-## OPEN QUESTIONS — NEED HUMAN DECISION BEFORE IMPLEMENTATION
+## DECISIONS MADE (Accepted 2026-06-11)
 
-> The following questions must be resolved before any child issue is assigned.
-> They are listed in priority order; Q1 blocks Q2–Q4.
+> These questions were resolved and the decisions are now baked into the ADR scope.
 
-**Q1 — Convergence scope for the three diverged EdgeKind enums (prerequisite to #817/#818, gates #815):**
+**Q1 — Convergence scope for the three diverged EdgeKind enums (DECIDED: Option C)**
+
 The issue inventory found three diverged `EdgeKind` enums at different abstraction levels:
 - `trusty-common::symgraph::contracts::EdgeKind` — 17 variants, the load-bearing KG in trusty-search with score multipliers and redb persistence.
 - `trusty-analyze::types::graph::KgEdgeKind` — 11 variants, trusty-analyze's independent KG (no traversal, no shared storage); different naming convention (`Calls` vs `CallsFunction`, no `TestedBy` family).
 - `trusty-common::symgraph::graph::EdgeKind` — 3 variants (`Calls`/`Imports`/`Contains`), the basic SymbolGraph used for caller/callee queries.
 
-**Option A — Add `Reads`/`Writes`/`AccessesResource` only to `contracts::EdgeKind`** (minimal scope: trusty-search's load-bearing enum is the one that matters for persistence and ADR-0009's ingest surface; postpone convergence with trusty-analyze). Low risk, fast.
+**Decision: Option C — Full convergence first (#815), then add variants.**
+Unify the three enums into a single canonical `enum EdgeKind` in `trusty-common::symgraph::contracts` before adding `Reads`, `Writes`, `AccessesResource`. This eliminates future drift and establishes a stable vocabulary for ADR-0009's ingest contract. Phase 0 is a real refactor; Phases 1–3 build on this unified foundation. Migration/back-compat for existing persisted graphs is documented in Phase 0.
 
-**Option B — Extend both `contracts::EdgeKind` and `KgEdgeKind`** (matching variants in trusty-analyze's graph type so future language adapters can emit `Reads`/`Writes` natively). Increases scope of #817 and couples trusty-common and trusty-analyze changes.
+**Q2 — Permissive vs. allowlist for unknown `Custom` tags (DECIDED: Option H)**
 
-**Option C — Full convergence first (#815) then add variants** (one canonical enum, remove the divergence). Cleanest long-term; largest immediate scope.
-
-Decision needed: Which option? The ADR proposes Option A for velocity, with Option B as a documented follow-up, but this is the most consequential choice of the epic.
-
----
-
-**Q2 — Permissive vs. allowlist for unknown `Custom` tags (gates #818, also fixes #816's warm-boot drop bug):**
 When `edge_kind_from_tag` encounters a tag it does not recognize in the redb corpus (version skew from a future release, a typo from a buggy external extractor):
 
-**Option P — Permissive:** any unknown tag → `Custom(tag)`. Fixes the warm-boot drop bug (#816) as a side-effect. Simpler; no configuration. Risk: corrupted/typo'd tags from buggy tools silently survive in the graph.
+**Decision: Option H — Hybrid unknown-tag handling.**
+- `"custom:"`-prefixed tags parse to `Custom(s)` and round-trip perfectly (extractor-contributed edges persist).
+- Bare unrecognized tags are dropped with counter and made observable in `/graph/stats` (version-skew guard + typo detection).
 
-**Option L — Per-index allowlist:** unknown tags → drop (with counter, surfaced in `/graph/stats`) unless they appear in a per-index `custom_edge_kinds: ["reads_table", ...]` configuration. Version-skew for known future variants still drops, which may surprise operators after a downgrade.
+This fully resolves #816 for custom-contributed edges and distinguishes intentional custom kinds from accidental corruption.
 
-**Option H — Hybrid (proposed):** permissive for `"custom:"`-prefixed tags (the ADR-0009 ingest surface controls these); drop for unrecognized bare tags (version-skew guard stays). This separates extractor-contributed custom kinds from accidental tag corruption.
+**Q3 — Long-term relationship between `contracts::EdgeKind` and `KgEdgeKind` (RESOLVED)**
 
-Decision needed: Which option? The distinction matters for the redb table compatibility section and whether #816 is fully resolved or partially resolved by #818.
+Issue #814 asks whether the two enums should converge.
 
----
+**Decision: YES, converge to a single canonical enum in `trusty-common`.**
+This is exactly what Q1's Option C commits to. The unified enum eliminates drift, provides a stable vocabulary for ADR-0009's ingest contract, and makes trusty-analyze's KG API coherent with trusty-search's persistence layer. Phase 0 implements this convergence.
 
-**Q3 — Long-term relationship between `contracts::EdgeKind` and `KgEdgeKind` (informs Q1 option C):**
-Issue #814 asks whether the two enums should converge. Options:
+**Q4 — Accept GrowthCurve community PR for the T-SQL/C# extractor (DEFERRED)**
 
-**Option S — Keep separate, document divergence.** `contracts::EdgeKind` is trusty-search's persistence-layer vocabulary; `KgEdgeKind` is trusty-analyze's in-memory analysis vocabulary. They can coexist as long as each has a clear owner and the boundary is documented.
-
-**Option M — Merge into a single canonical enum in `trusty-common`** (behind a feature flag or in the `symgraph` module). Eliminates drift; requires trusty-analyze to take a `symgraph` feature dep on trusty-common. Affects the `KgEdge.kind: KgEdgeKind` field in the public JSON API surface of trusty-analyze.
-
-Decision needed: Guidance on direction helps size #815 and determines whether it is a prerequisite blocker or a nice-to-have cleanup.
-
----
-
-**Q4 — Accept GrowthCurve community PR for the T-SQL/C# extractor (#814 Q5)?**
-The extractor is MIT-licensed, externally maintained, and the emit format will be defined by this ADR and ADR-0009. The question is whether to accept it as a community contribution into this repo or document the wire contract and let it live in a separate repo. No blocking dependency on this answer for the core work.
+The extractor is MIT-licensed, externally maintained, and the emit format will be defined by this ADR and ADR-0009. The question of accept-vs-document is deferred for later judgment on maintenance burden and community direction. No blocking dependency on this answer for the core work; the wire contract is defined by ADR-0009.
 
 ---
 
@@ -129,20 +122,23 @@ all three enums.
 
 ## Decision
 
-> **This ADR is Proposed. Sections marked "[OPEN QUESTION]" are placeholders
-> pending human resolution of Q1–Q4 above before implementation.**
+We establish an extensible edge-kind vocabulary by converging three diverged enums into a single canonical enum in `trusty-common`, then adding new data-flow variants and a custom escape hatch:
 
-We will make the following changes to establish an extensible edge-kind
-vocabulary:
+### Phase 0: Converge the three EdgeKind enums into a single canonical enum (issue #815)
 
-### 1. Add `Reads`, `Writes`, `AccessesResource` as first-class variants in `contracts::EdgeKind`
+Issue #815 merges `contracts::EdgeKind`, `KgEdgeKind`, and `graph::EdgeKind` into a unified `enum EdgeKind` in `trusty-common::symgraph::contracts`. This is a prerequisite to Phases 1–3. The new canonical enum:
+- Unifies naming conventions (resolve `Calls` vs `CallsFunction` inconsistencies).
+- Establishes a stable vocabulary for ADR-0009's ingest contract.
+- Eliminates future drift between trusty-search persistence and trusty-analyze analysis.
+- Handles back-compat for existing persisted graphs during convergence (redb tag mapping).
 
-These three variants are added to `trusty-common::symgraph::contracts::EdgeKind`
-unconditionally (no feature flag). **[OPEN QUESTION Q1: whether to also add
-matching variants to `KgEdgeKind` in trusty-analyze is deferred — see Q1 options
-above.]**
+Estimated effort: **M** (1–2 days). Acceptance: three former enums consolidated, existing indexes still load (back-compat verified), `cargo test -p trusty-common -p trusty-search -p trusty-analyze` green.
 
-Proposed initial `score_multiplier` values (to be tuned after pilot data):
+### Phase 1: Add `Reads`, `Writes`, `AccessesResource` as first-class variants (issue #817)
+
+These three variants are added to the unified canonical `enum EdgeKind` unconditionally:
+
+Initial `score_multiplier` values (to be tuned after pilot data):
 
 | Variant | Multiplier | Rationale |
 |---|---|---|
@@ -152,37 +148,33 @@ Proposed initial `score_multiplier` values (to be tuned after pilot data):
 
 Persistence: `edge_kind_tag()` returns `"Reads"`, `"Writes"`, `"AccessesResource"` (PascalCase, matching existing convention). `edge_kind_from_tag()` recognises all three. Existing indexes with none of these tags are unaffected.
 
-### 2. Add `Custom(String)` escape hatch variant
+Estimated effort: **M** (1–2 days). Changes: `trusty-common` + `trusty-search` + `trusty-analyze` (to use the unified canonical enum). Acceptance: three variants present, round-trip test green, `/graph/stats` updated, `cargo test -p trusty-common -p trusty-search -p trusty-analyze` green, clippy clean, line-cap exit 0.
 
-`contracts::EdgeKind` gains a `Custom(String)` variant.
+### Phase 2: Add `Custom(String)` escape hatch + fix warm-boot edge-drop (issues #818, #816)
+
+`EdgeKind` gains a `Custom(String)` variant to let external extractors contribute relations as data without requiring a core PR per new relation type.
 
 **Serialization (on-disk and wire):**
 - `edge_kind_tag(Custom(s))` returns a `String` with prefix `"custom:"` + `s` (e.g. `"custom:reads_table"`, `"custom:calls_stored_proc"`). The `"custom:"` prefix is a permanent reserved namespace that guarantees no collision with future named variants (which will always be PascalCase without a colon).
-- `edge_kind_from_tag(tag)`: if `tag.starts_with("custom:")` → `Custom(tag["custom:".len()..].to_owned())`. **[OPEN QUESTION Q2: handling of unrecognized bare tags — see Q2 options above.]** Under the proposed Option H, bare unrecognized tags are counted and dropped (surfaced in `/graph/stats` as `unknown_edge_kinds_dropped: N`); only `"custom:"`-prefixed tags round-trip as `Custom`.
+- `edge_kind_from_tag(tag)`: if `tag.starts_with("custom:")` → `Custom(tag["custom:".len()..].to_owned())`. Under Option H (hybrid), bare unrecognized tags are counted and dropped (surfaced in `/graph/stats` as `unknown_edge_kinds_dropped: N`); only `"custom:"`-prefixed tags round-trip as `Custom`.
 - `score_multiplier(Custom(_))` = 0.70 (conservative default; custom relations earn a named variant to get a tuned multiplier).
 - `Custom(String)` derives `Hash`/`Eq` on the String payload so it works in `HashSet<(String, String, EdgeKind)>` dedup.
 
-**Back-compat for existing indexes:** No existing on-disk tag starts with `"custom:"` (the prefix did not exist before). Existing indexes are unaffected; warm-boot reads them identically. Custom edges written by this release will be preserved across restarts. Downgrade path: a binary that does not know `Custom` will hit the unknown-tag warn-and-drop path for any `"custom:*"` edges (#816's counter, if implemented, makes the drop visible).
+**Back-compat for existing indexes:** No existing on-disk tag starts with `"custom:"` (the prefix did not exist before). Existing indexes are unaffected; warm-boot reads them identically. Custom edges written by this release will be preserved across restarts. Downgrade path: a binary that does not know `Custom` will hit the unknown-tag warn-and-drop path for any `"custom:*"` edges; the counter makes the drop visible.
 
 **API surface:** `GET /indexes/{id}/graph/stats` groups custom edge kinds by their full string label, e.g. `{ "custom:reads_table": 142, "custom:calls_sproc": 37 }`. Filter parameters in `GET /indexes/{id}/graph` accept the full `"custom:reads_table"` string as an edge-kind filter value.
 
-### 3. Fix warm-boot edge-drop for unrecognized tags (#816)
-
-**[OPEN QUESTION Q2 governs the full fix vs. partial fix.]**
-
-Under the proposed Option H, the fix is:
+**Warm-boot fix (Option H):**
 - `"custom:"`-prefixed unknown tags → `Custom(s)` (fully preserved, round-trips correctly).
-- Bare unrecognized tags → drop with `tracing::warn!` AND increment an `unknown_edge_kinds_dropped` counter (per-load, surfaced in `/graph/stats` and `GET /health`). This is a version-skew guard; it also catches typos from buggy external tools.
+- Bare unrecognized tags → drop with `tracing::warn!` AND increment an `unknown_edge_kinds_dropped` counter (per-load, surfaced in `/graph/stats` and `GET /health`). This is a version-skew guard; it also catches typos from buggy external tools. Fully resolves #816 for custom-contributed edges.
 
-Under Option P (full permissive), all unknown tags become `Custom(tag)` — simpler, #816 fully resolved.
+Estimated effort: **M** (1–2 days). Changes: `trusty-common` + `trusty-search`. Acceptance: `Custom("foo")` round-trips; custom kinds appear in `/graph/stats` by label; unknown tag counter is observable; clippy clean; line-cap exit 0.
 
-Under Option L (allowlist), configuration is needed and the fix is conditional on configuration.
-
-### 4. Proposed Rust type design
+### Rust type design
 
 ```rust
 // crates/trusty-common/src/symgraph/contracts.rs
-// (additions only; existing variants unchanged)
+// Unified canonical enum: consolidates contracts::EdgeKind, KgEdgeKind (trusty-analyze), and graph::EdgeKind.
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum EdgeKind {
@@ -244,16 +236,15 @@ fn edge_kind_tag(kind: &EdgeKind) -> Cow<'static, str> {
 
 fn edge_kind_from_tag(tag: &str) -> Option<EdgeKind> {
     match tag {
-        // ... existing 17 variants ...
+        // ... existing variants unified from all three former enums ...
         "Reads" => Some(EdgeKind::Reads),
         "Writes" => Some(EdgeKind::Writes),
         "AccessesResource" => Some(EdgeKind::AccessesResource),
         s if s.starts_with("custom:") => {
             Some(EdgeKind::Custom(s["custom:".len()..].to_owned()))
         }
-        // [OPEN QUESTION Q2]: Option P would add:
-        //   unknown => Some(EdgeKind::Custom(unknown.to_owned()))
-        // Option H (proposed) keeps the None branch here with a warn + counter.
+        // Option H (hybrid): bare unrecognized tags are dropped with counter + observable.
+        // "custom:"-prefixed tags always round-trip as Custom(s).
         _ => None,
     }
 }
@@ -261,53 +252,65 @@ fn edge_kind_from_tag(tag: &str) -> Option<EdgeKind> {
 
 **Impact on `edge_kind_tag` return type:** the current `edge_kind_tag` returns `&'static str`, which is incompatible with `Custom`'s owned string. The return type must change to `Cow<'static, str>`. All call sites that used the returned value as `&str` continue to work via `Deref`; call sites that stored it as `&'static str` (there are none in the current codebase — all callers call `.to_string()`) are unaffected. This is the only non-additive signature change.
 
-**redb persistence impact:** edge rows are stored as `(src_symbol, kind_tag_string, tgt_symbol)`. The `kind_tag_string` column is an untyped `String`; no schema change is needed. A redb migration is NOT required for the additive variants. The `"custom:"` prefix namespace is reserved going forward and should be documented in the migration comments.
+**redb persistence impact:** edge rows are stored as `(src_symbol, kind_tag_string, tgt_symbol)`. The `kind_tag_string` column is an untyped `String`; no schema change is needed. A redb migration is NOT required for the additive variants. The `"custom:"` prefix namespace is reserved going forward and should be documented in the migration comments. During Phase 0 convergence, back-compat for existing persisted graphs is handled via redb tag mapping (existing tags from the three former enums are preserved on load; new unified enum serializes consistently going forward).
 
-**`trusty-analyze::KgEdgeKind` impact:** **[OPEN QUESTION Q1].** Under Option A (proposed default), no changes are made to `KgEdgeKind` in this ADR. Trusty-analyze's in-memory `KgGraph` does not share storage with trusty-search's persisted KG, so there is no compatibility coupling. A follow-up ticket adds `Reads`/`Writes`/`AccessesResource` to `KgEdgeKind` when language adapters are ready to emit them.
+**`trusty-analyze` impact:** Phase 0 converges `KgEdgeKind` into the unified canonical enum as well. This makes trusty-analyze's in-memory `KgGraph` share the same vocabulary as trusty-search's persisted KG, eliminating future drift and enabling ADR-0009's ingest contract to work across both crates coherently.
 
 ---
 
 ## Phased Implementation Plan
 
-The implementation sequence respects issue dependencies:
+The implementation sequence respects issue dependencies and implements decisions Q1=Option C (converge first) + Q2=Option H (hybrid unknown handling) + Q3=converge (unified in trusty-common):
 
-**Phase 0: Convergence decision (prerequisite — Q1 and Q3)**
-Issue: #815. Complete the three-enum inventory, document the boundary between
-`contracts::EdgeKind` (trusty-search persistence vocabulary), `KgEdgeKind`
-(trusty-analyze analysis vocabulary), and `graph::EdgeKind` (basic SymbolGraph).
-No code change required under Option A; a clear decision record suffices.
-Dependency: none. Unblocks #817 and #818.
+**Phase 0: Enum convergence — unify three EdgeKind enums (issue #815)**
 
-**Phase 1: First-class data-flow variants (#817)**
-Add `Reads`, `Writes`, `AccessesResource` to `contracts::EdgeKind` with
-`score_multiplier`, `edge_kind_tag`, and `edge_kind_from_tag` entries.
-Add save→load round-trip test. Update `/graph/stats` to include the new kinds.
-Dependency: Phase 0 decision.
-Estimated effort: M (1–2 days). Changes: `trusty-common` + `trusty-search`.
-Acceptance: three variants present, round-trip test green, `graph/stats` updated,
-`cargo test -p trusty-common -p trusty-search` green, clippy clean, line-cap exit 0.
+Merge `trusty-common::symgraph::contracts::EdgeKind` (17 variants), `trusty-analyze::types::graph::KgEdgeKind` (11 variants), and `trusty-common::symgraph::graph::EdgeKind` (3 variants) into a single canonical `enum EdgeKind` in `trusty-common::symgraph::contracts`. This consolidation:
+- Resolves naming conflicts (e.g., `Calls` vs `CallsFunction`).
+- Unifies the vocabulary for ADR-0009's ingest contract.
+- Eliminates long-term drift between trusty-search persistence and trusty-analyze analysis.
+- Updates trusty-analyze to use the unified enum in its `KgGraph` and JSON API.
 
-**Phase 2: Custom escape hatch + warm-boot fix (#818, #816)**
-Add `Custom(String)` variant; widen `edge_kind_tag` to `Cow<'static, str>`;
-implement `"custom:"` prefix serialization; fix (or partially fix, per Q2
-resolution) the warm-boot drop bug; add `unknown_edge_kinds_dropped` counter
-to `/graph/stats`. Add round-trip test for `Custom("foo")`.
-Dependency: Phase 1 (variant naming convention established).
-Estimated effort: M (1–2 days). Changes: `trusty-common` + `trusty-search`.
-Acceptance: `Custom("foo")` round-trips; custom kinds appear in `/graph/stats`
-by label; Q2 decision reflected in warm-boot behaviour; clippy clean; line-cap
-exit 0.
+**Dependency:** none. **Unblocks:** Phases 1, 2, 3.
 
-**Phase 3: External-extractor ingest contract (ADR-0009, #819)**
-`POST /indexes/{id}/graph` endpoint + MCP tool. Requires Phase 1 and Phase 2
-vocabulary to be in place. See ADR-0009 (PR #1082) for the storage design
-(contributed overlay tables), identity model, and API schema.
-Dependency: Phase 2 complete; ADR-0009 accepted.
+**Effort:** M (1–2 days). **Changes:** `trusty-common`, `trusty-search`, `trusty-analyze`.
 
-**Optional follow-up: `KgEdgeKind` matching variants (depends on Q1/Q3)**
-Add `Reads`/`Writes`/`AccessesResource` to `trusty-analyze::types::graph::KgEdgeKind`
-so language adapters can emit them natively. Tracked as a new child issue if
-Option B or C is chosen for Q1.
+**Acceptance:** all three former enums consolidated into one; existing indexes still load (back-compat verified); existing persisted tags still parse (redb mapping); `cargo test -p trusty-common -p trusty-search -p trusty-analyze` green; clippy clean; line-cap exit 0.
+
+---
+
+**Phase 1: First-class data-flow variants (issue #817)**
+
+Add `Reads`, `Writes`, `AccessesResource` as first-class variants to the unified canonical `enum EdgeKind` with:
+- Tuned `score_multiplier` values (Writes=0.90, Reads=0.80, AccessesResource=0.75).
+- `edge_kind_tag` / `edge_kind_from_tag` entries.
+- Round-trip save→load tests.
+- Updated `/graph/stats` to include new-kind counts.
+
+**Dependency:** Phase 0 complete. **Effort:** M (1–2 days). **Changes:** `trusty-common` + `trusty-search`.
+
+**Acceptance:** three new variants present; round-trip test green; `/graph/stats` reports counts per kind; `cargo test -p trusty-common -p trusty-search` green; clippy clean; line-cap exit 0.
+
+---
+
+**Phase 2: Custom escape hatch + warm-boot edge-drop fix (issues #818, #816)**
+
+Add `Custom(String)` variant to the unified enum; widen `edge_kind_tag` to `Cow<'static, str>`; implement `"custom:"` prefix serialization and Option H hybrid unknown-tag handling:
+- `"custom:"`-prefixed tags round-trip as `Custom(s)`.
+- Bare unrecognized tags are dropped with counter, made observable in `/graph/stats` and `GET /health` (version-skew guard + typo detection).
+- `score_multiplier(Custom(_))` = 0.70 (conservative default).
+- Add round-trip test for `Custom("foo")`.
+
+**Dependency:** Phase 1 complete (variant naming convention established). **Effort:** M (1–2 days). **Changes:** `trusty-common` + `trusty-search`.
+
+**Acceptance:** `Custom("foo")` round-trips through persistence; custom kinds appear in `/graph/stats` grouped by label; unknown-tag counter is observable; Option H behaviour confirmed (custom: round-trips, bare unknown dropped); clippy clean; line-cap exit 0.
+
+---
+
+**Phase 3: External-extractor ingest contract (ADR-0009, issue #819)**
+
+Implement `POST /indexes/{id}/graph` endpoint + MCP tool. Requires Phases 1 and 2 vocabulary to be in place. See ADR-0009 (PR #1082) for the storage design (contributed overlay tables), identity model, and API schema.
+
+**Dependency:** Phase 2 complete; ADR-0009 accepted. **Effort:** L (2–3 days). **Changes:** `trusty-search`.
 
 ---
 
