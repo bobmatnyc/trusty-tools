@@ -268,6 +268,12 @@ pub mod help;
 #[cfg(feature = "monitor-tui")]
 pub mod monitor;
 
+// epic #1104: stdio MCP client + console metrics contract (feature-gated).
+#[cfg(feature = "console-metrics")]
+pub mod console_metrics;
+#[cfg(feature = "stdio-mcp-client")]
+pub mod stdio_mcp_client;
+
 /// Throttled crates.io update-notification helper.
 ///
 /// Why: User-facing CLIs should nudge operators when a newer release is
