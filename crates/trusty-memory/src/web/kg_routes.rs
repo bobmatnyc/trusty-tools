@@ -222,19 +222,36 @@ const TRIPLE_ID_SEPARATOR: u8 = 0x00;
 ///
 /// Why: Produces a single opaque string that can travel as a URL path segment
 /// without percent-encoding. The null-byte separator ensures the encoding is
-/// injective (no two distinct pairs can produce the same encoded string).
-/// What: `base64url(subject_bytes + "\0" + predicate_bytes)`, no padding.
-/// Test: `decode_triple_id_round_trips`.
-// Only used in tests (for round-trip assertions); suppress the dead_code lint
-// that fires in non-test builds because `pub(crate)` alone doesn't silence it.
+/// injective (no two distinct pairs can produce the same encoded string) —
+/// but only when neither component itself contains a null byte. Prior to
+/// issue #1102 the function silently produced an ambiguous (corrupt) id when
+/// the subject or predicate contained `\0`; now it returns an error so
+/// callers cannot persist an undecodable id.
+/// What: Validates that neither `subject` nor `predicate` contains
+/// `TRIPLE_ID_SEPARATOR` (`\0`). On success returns
+/// `Ok(base64url(subject_bytes + "\0" + predicate_bytes))`, no padding.
+/// On validation failure returns `Err` with a descriptive message.
+/// Test: `decode_triple_id_round_trips`, `encode_triple_id_rejects_null_byte`.
+// Only called from tests (round-trip + null-byte rejection); suppress the
+// dead_code lint that fires in non-test builds.
 #[allow(dead_code)]
-pub(crate) fn encode_triple_id(subject: &str, predicate: &str) -> String {
+pub(crate) fn encode_triple_id(subject: &str, predicate: &str) -> Result<String, String> {
     use base64::Engine as _;
+    if subject.as_bytes().contains(&TRIPLE_ID_SEPARATOR) {
+        return Err(format!(
+            "subject must not contain the null-byte separator (\\0); got {subject:?}"
+        ));
+    }
+    if predicate.as_bytes().contains(&TRIPLE_ID_SEPARATOR) {
+        return Err(format!(
+            "predicate must not contain the null-byte separator (\\0); got {predicate:?}"
+        ));
+    }
     let mut buf = Vec::with_capacity(subject.len() + 1 + predicate.len());
     buf.extend_from_slice(subject.as_bytes());
     buf.push(TRIPLE_ID_SEPARATOR);
     buf.extend_from_slice(predicate.as_bytes());
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&buf)
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&buf))
 }
 
 /// Decode a URL-safe base64 triple ID back to `(subject, predicate)`.

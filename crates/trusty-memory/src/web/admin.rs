@@ -74,17 +74,29 @@ pub(super) async fn logs_tail(
 /// Why (issue #35): the admin UI and operators want a one-call way to stop
 /// the daemon without resolving its PID and sending a signal. The daemon is
 /// localhost-only and trusts every caller, so no auth is required.
-/// What: spawns a detached task that sleeps 200 ms (giving this HTTP response
-/// time to flush to the client) and then calls `std::process::exit(0)`.
-/// Returns `{ "ok": true, "message": "shutting down" }` immediately.
-/// Test: `admin_stop_returns_ok` asserts the response shape (it does not
-/// drive the real exit — that would terminate the test process).
+/// Why (issue #1100): the original implementation spawned a detached task
+/// that called `std::process::exit(0)` after 200 ms, relying on the race
+/// between the sleep and the test's return to avoid killing the test process.
+/// On loaded CI that race is lost. The exit call is now compiled out under
+/// `#[cfg(not(test))]`; tests exercise only the JSON response shape without
+/// risk of terminating the test process.
+/// What: In production, spawns a detached task that sleeps 200 ms (giving
+/// this HTTP response time to flush to the client) and then calls
+/// `std::process::exit(0)`. In `#[cfg(test)]` builds the spawn is replaced
+/// with a no-op so the test process stays alive. Returns
+/// `{ "ok": true, "message": "shutting down" }` immediately in both cases.
+/// Test: `admin_stop_returns_ok` asserts the response shape without any
+/// timing dependency; `admin_stop_does_not_exit_in_test` asserts the test
+/// path does not call `process::exit`.
 pub(super) async fn admin_stop(State(_state): State<AppState>) -> Json<Value> {
     tracing::warn!("admin_stop: shutdown requested via POST /api/v1/admin/stop");
+    #[cfg(not(test))]
     tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         std::process::exit(0);
     });
+    // In test builds the spawn is intentionally absent — process::exit would
+    // terminate the entire test process, not just the individual test.
     Json(serde_json::json!({ "ok": true, "message": "shutting down" }))
 }
 

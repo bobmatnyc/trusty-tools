@@ -1,16 +1,21 @@
-//! `GET /health` handler — liveness probe with store/recall smoke test.
+//! `GET /health` handler — liveness probe with optional store/recall smoke test.
 //!
 //! Why: Provides an unauthenticated round-trip check for operator and
 //! orchestrator polling. Issues #35, #71, and #185 progressively enriched
 //! the endpoint with metrics, round-trip semantics, and a dedicated probe
-//! palace.
-//! What: `health()` axum handler, `HealthResponse` wire struct,
-//! `HealthProbeError`, `ensure_health_probe_palace`, `run_health_round_trip`,
-//! and the testable `run_health_round_trip_inner` helper.
+//! palace. Issue #1101 makes the expensive ONNX round-trip opt-in (via
+//! `?probe=true`) so the default path remains cheap enough for 1 s LB polling.
+//! What: `health()` axum handler, `HealthQuery` params struct,
+//! `HealthResponse` wire struct, `HealthProbeError`,
+//! `ensure_health_probe_palace`, `run_health_round_trip`, and the testable
+//! `run_health_round_trip_inner` helper.
 //! Test: `health_endpoint_*` and `health_probe_*` tests in
 //! `web::tests::health_tests`.
 
-use axum::{extract::State, Json};
+use axum::{
+    extract::{Query, State},
+    Json,
+};
 use trusty_common::memory_core::palace::{Palace, PalaceId, RoomType};
 use trusty_common::memory_core::retrieval::recall_with_default_embedder;
 use uuid::Uuid;
@@ -18,6 +23,35 @@ use uuid::Uuid;
 use crate::AppState;
 
 use super::HEALTH_PROBE_PALACE;
+
+/// Query parameters for `GET /health`.
+///
+/// Why (issue #1101): the default `/health` path must be cheap enough for
+/// 1-second load-balancer polling. The expensive remember/recall/forget
+/// round-trip (ONNX embedder calls) is now opt-in: callers that genuinely
+/// want to probe the data plane pass `?probe=true` (or `?deep=true` for
+/// symmetry with other endpoints).
+/// What: both `probe` and `deep` default to `false`. When either is `true`
+/// the handler runs the full `run_health_round_trip`; otherwise it returns
+/// a lightweight liveness response without touching the memory store.
+/// Test: `health_endpoint_cheap_by_default` and
+/// `health_endpoint_probe_param_triggers_round_trip`.
+#[derive(serde::Deserialize)]
+pub(super) struct HealthQuery {
+    /// When `true`, run the full remember/recall/forget round-trip.
+    #[serde(default)]
+    probe: bool,
+    /// Alias for `probe` (matches the `deep=` convention on other endpoints).
+    #[serde(default)]
+    deep: bool,
+}
+
+impl HealthQuery {
+    /// Returns `true` if either the `probe` or `deep` flag is set.
+    fn wants_deep_probe(&self) -> bool {
+        self.probe || self.deep
+    }
+}
 
 /// Liveness/version payload for `GET /health`.
 ///
@@ -96,7 +130,8 @@ pub(super) struct HealthResponse {
     pub(super) daemon_state: String,
 }
 
-/// `GET /health` — unauthenticated liveness probe with store/recall smoke test.
+/// `GET /health[?probe=true]` — unauthenticated liveness probe with optional
+/// store/recall smoke test.
 ///
 /// Why: Gives `daemon_probe` and external monitors a cheap way to confirm port
 /// ownership without touching palace state. Issue #35 additionally reports
@@ -108,25 +143,30 @@ pub(super) struct HealthResponse {
 /// the probe never leaks drawers into a real user palace even on recall
 /// failures. The fd-exhaustion fix adds `open_fds` and `fd_soft_limit` so
 /// operators can catch "approaching ceiling" before EMFILE hits.
+/// Issue #1101: the expensive ONNX round-trip is now OPT-IN. Pass `?probe=true`
+/// (or `?deep=true`) to run the full store/recall/forget cycle and report
+/// `"ok"` or `"degraded"`. Without that flag the handler returns
+/// `status: "ok"` immediately after sampling the cheap resource metrics —
+/// suitable for 1-second LB polling without ONNX overhead.
 /// What: Returns HTTP 200 with `{status, version, rss_mb, disk_bytes,
-/// cpu_pct, uptime_secs, open_fds?, fd_soft_limit?, detail?}`. RSS + CPU are
-/// sampled live; `disk_bytes` is read from the background ticker;
-/// `uptime_secs` is elapsed since `state.started_at`; `open_fds` and
-/// `fd_soft_limit` are sampled best-effort (absent when the platform does not
-/// expose them cheaply). The handler provisions the dedicated probe palace if
-/// missing and then attempts a full remember/recall/forget cycle — `status`
-/// is `"ok"` on success, `"degraded"` with a `detail` string explaining the
-/// failing stage otherwise. The probe never returns non-200 so monitors
-/// keyed on HTTP status still see the daemon as up.
+/// cpu_pct, uptime_secs, open_fds?, fd_soft_limit?, detail?}`. Without
+/// `?probe=true`, `status` is always `"ok"` (daemon is alive). With
+/// `?probe=true`, `status` is `"ok"` or `"degraded"` based on the
+/// remember/recall/forget cycle. The handler never returns non-200 so
+/// monitors keyed on HTTP status still see the daemon as up.
 /// Test: `health_endpoint_returns_ok`,
 /// `health_endpoint_includes_resource_fields`,
 /// `health_endpoint_includes_fd_gauge`,
+/// `health_endpoint_cheap_by_default`,
 /// `health_endpoint_round_trip_on_fresh_install_is_ok`,
 /// `health_endpoint_round_trip_with_palace_is_ok`,
 /// `health_probe_palace_is_invisible`,
 /// `health_probe_cleans_up_on_success`,
 /// `health_probe_cleans_up_on_recall_miss`.
-pub(super) async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+pub(super) async fn health(
+    State(state): State<AppState>,
+    Query(query): Query<HealthQuery>,
+) -> Json<HealthResponse> {
     let (rss_mb, cpu_pct) = {
         let mut metrics = state.sys_metrics.lock().await;
         metrics.sample()
@@ -141,12 +181,20 @@ pub(super) async fn health(State(state): State<AppState>) -> Json<HealthResponse
     let open_fds = crate::fd_metrics::count_open_fds();
     let fd_soft_limit = crate::fd_metrics::fd_soft_limit();
 
-    let (status, detail) = match run_health_round_trip(&state).await {
-        Ok(()) => ("ok".to_string(), None),
-        Err(err) => {
-            tracing::warn!("/health round-trip degraded: {err}");
-            ("degraded".to_string(), Some(err.to_string()))
+    // Issue #1101: the expensive ONNX round-trip only runs when the caller
+    // explicitly requests it via ?probe=true or ?deep=true. Without either
+    // flag the handler returns "ok" immediately — cheap enough for 1 s LB
+    // polling without ONNX embedder calls.
+    let (status, detail) = if query.wants_deep_probe() {
+        match run_health_round_trip(&state).await {
+            Ok(()) => ("ok".to_string(), None),
+            Err(err) => {
+                tracing::warn!("/health round-trip degraded: {err}");
+                ("degraded".to_string(), Some(err.to_string()))
+            }
         }
+    } else {
+        ("ok".to_string(), None)
     };
 
     let update_available = state.update_available.lock().ok().and_then(|g| g.clone());

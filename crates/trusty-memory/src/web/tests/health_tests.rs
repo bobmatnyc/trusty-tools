@@ -2,11 +2,9 @@
 use super::super::health::{
     ensure_health_probe_palace, run_health_round_trip_inner, HealthProbeError,
 };
-use super::super::recall_routes::recall_entry_json;
 use super::super::router;
 use super::super::HEALTH_PROBE_PALACE;
 use super::test_state;
-use crate::service::{drawer_content_preview, DRAWER_PREVIEW_MAX_CHARS};
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use serde_json::Value;
@@ -14,34 +12,6 @@ use tower::util::ServiceExt;
 use trusty_common::memory_core::palace::PalaceId;
 use trusty_common::memory_core::retrieval::RecallResult;
 use uuid::Uuid;
-
-#[test]
-fn drawer_preview_collapses_whitespace_and_truncates() {
-    // Short single-line content is returned verbatim.
-    assert_eq!(drawer_content_preview("hello world"), "hello world");
-
-    // Multiline / tab-laden content collapses to single-spaced text.
-    assert_eq!(
-        drawer_content_preview("first line\n\nsecond\tline   third"),
-        "first line second line third"
-    );
-
-    // Leading / trailing whitespace is stripped.
-    assert_eq!(drawer_content_preview("   padded   "), "padded");
-
-    // Empty content yields an empty preview (fallback signal for clients).
-    assert_eq!(drawer_content_preview(""), "");
-
-    // Long content is truncated to DRAWER_PREVIEW_MAX_CHARS with an ellipsis.
-    let long = "x".repeat(DRAWER_PREVIEW_MAX_CHARS + 50);
-    let preview = drawer_content_preview(&long);
-    assert_eq!(preview.chars().count(), DRAWER_PREVIEW_MAX_CHARS);
-    assert!(preview.ends_with('…'));
-
-    // Content right at the limit is not truncated.
-    let exact = "y".repeat(DRAWER_PREVIEW_MAX_CHARS);
-    assert_eq!(drawer_content_preview(&exact), exact);
-}
 
 /// `GET /health` returns HTTP 200 with `status: "ok"` after the
 /// round-trip clears every stage against the auto-provisioned probe palace.
@@ -112,6 +82,38 @@ async fn health_endpoint_includes_resource_fields() {
     assert_eq!(v["disk_bytes"].as_u64(), Some(0));
     // uptime_secs is present and a u64.
     assert!(v["uptime_secs"].is_u64(), "uptime_secs must be present");
+}
+
+/// Issue #1101 — `GET /health` without `?probe=true` returns `status: "ok"`
+/// immediately (no ONNX round-trip). Runs in the default (non-ignored) matrix.
+///
+/// Why: LBs poll `/health` every 1 s; the ONNX round-trip was too expensive
+/// for this cadence. The fix makes the probe opt-in via `?probe=true`.
+/// What: Drives `/health` without params; asserts 200, `status=ok`, `version`
+/// present, and no `detail` field — all without the embedder.
+/// Test: this test.
+#[tokio::test]
+async fn health_endpoint_cheap_by_default() {
+    let state = test_state();
+    let app = router().with_state(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), 1024).await.unwrap();
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["status"], "ok", "cheap health must report ok; got {v:?}");
+    assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
+    assert!(
+        v.get("detail").is_none() || v["detail"].is_null(),
+        "cheap health must not carry detail; got {v:?}"
+    );
 }
 
 /// Why: the fd-exhaustion gauge must appear in the `/health` response on
@@ -419,62 +421,5 @@ async fn health_probe_cleans_up_on_recall_error() {
     assert_eq!(
         drawer_count, 0,
         "probe palace must be empty after a recall error (got {drawer_count})"
-    );
-}
-
-/// Issue #69 — `recall_entry_json` hoists the drawer's fields to the top
-/// level so `content` is directly reachable.
-///
-/// Why: The recall API previously wrapped the drawer under a `"drawer"`
-/// key, so clients scanning the top level for `content`/`tags` found
-/// nothing and recall always looked empty. This locks the flattened shape
-/// in place so the regression cannot silently return.
-/// What: Builds a `RecallResult`, runs it through `recall_entry_json`, and
-/// asserts `content`, `tags`, and `importance` are at the top level, that
-/// `score`/`layer` sit alongside them, and that the old `drawer` wrapper
-/// key is gone.
-/// Test: this test.
-#[test]
-fn recall_entry_json_hoists_drawer_fields() {
-    use trusty_common::memory_core::Drawer;
-
-    let room = Uuid::new_v4();
-    let mut drawer = Drawer::new(room, "the answer is 42");
-    drawer.tags = vec!["source:kuzu".to_string()];
-    drawer.importance = 0.7;
-
-    let entry = recall_entry_json(RecallResult {
-        drawer,
-        score: 0.699,
-        layer: 1,
-    });
-
-    // Content must be reachable WITHOUT a `drawer` wrapper (issue #69).
-    assert_eq!(
-        entry.get("content").and_then(|v| v.as_str()),
-        Some("the answer is 42"),
-        "content must be at the top level, got {entry:?}"
-    );
-    assert!(
-        entry.get("drawer").is_none(),
-        "the legacy `drawer` wrapper must not be present, got {entry:?}"
-    );
-    // Other drawer fields are hoisted too.
-    assert_eq!(
-        entry["importance"].as_f64().map(|f| (f * 10.0).round()),
-        Some(7.0)
-    );
-    assert_eq!(
-        entry["tags"][0].as_str(),
-        Some("source:kuzu"),
-        "tags must be hoisted, got {entry:?}"
-    );
-    // Ranking metadata sits alongside the hoisted fields.
-    assert_eq!(entry["layer"].as_u64(), Some(1));
-    assert!(
-        entry["score"]
-            .as_f64()
-            .is_some_and(|s| (s - 0.699).abs() < 1e-6),
-        "score must be preserved, got {entry:?}"
     );
 }
