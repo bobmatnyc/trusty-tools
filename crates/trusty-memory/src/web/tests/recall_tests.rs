@@ -97,49 +97,104 @@ fn encode_triple_id_rejects_null_byte() {
     );
 }
 
-/// Issue #1102 — `GET /api/v1/recall` must surface a non-empty `errors`
-/// array as a 500 rather than passing it through as 200 OK.
+/// Issue #1102 — `extract_partial_error` pure-function unit tests.
 ///
-/// Why: If `recall_all` returns a partial-success envelope
-/// `{errors:[...], results:[...]}`, the caller currently receives 200 OK
-/// with an opaque object — silent data loss from the caller's perspective.
-/// Surfacing the error as a 500 gives callers a clear failure signal.
-/// What: Injects a mock recall_all response with a non-empty `errors` key
-/// by calling the handler directly with a pre-built state, and confirms
-/// the handler converts it to a 500 response.
-/// Test: This test (unit-level, drives `recall_all_handler` logic inline).
-#[tokio::test]
-async fn recall_all_handler_surfaces_partial_errors_array() {
-    use super::super::router;
-    use axum::http::StatusCode;
-    use tower::util::ServiceExt;
+/// Why: The helper was added to guard against partial-success envelopes being
+/// silently passed through as 200 OK, but the original test never reached that
+/// branch. These tests call the pure function directly with synthetic
+/// `serde_json::Value`s and pin every branch: (1) non-empty string errors
+/// array, (2) non-empty `{"message":"..."}` object array, (3) empty array,
+/// (4) no `errors` key.
+/// What: Four focused `#[test]` functions below.
+/// Test: These tests.
+#[test]
+fn extract_partial_error_string_array_returns_first_error() {
+    use super::super::recall_routes::extract_partial_error;
 
-    // This test exercises the handler's error-detection logic by constructing
-    // a request against a state that has no palaces. With zero palaces,
-    // recall_all returns an empty array `[]` — not an errors envelope. The
-    // errors-array guard is therefore tested with a synthetic check below
-    // (the service layer does not currently emit an errors array, so we
-    // verify the guard code path compiles and routes correctly by checking
-    // the value-inspection logic directly).
-    //
-    // For the full handler path we verify the existing `{"error":"..."}` case
-    // does surface as 500, which exercises the same guard chain.
-    let state = super::test_state();
-    let app = router().with_state(state);
-    // With no palaces and a valid query, recall_all returns `[]` → 200.
-    let resp = app
-        .oneshot(
-            axum::http::Request::builder()
-                .uri("/api/v1/recall?q=test")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "empty fan-out must still return 200"
+    // (1) Non-empty errors array of plain strings.
+    let v = json!({
+        "errors": ["palace alpha timed out", "palace beta unreachable"],
+        "results": []
+    });
+    let msg = extract_partial_error(&v);
+    assert!(msg.is_some(), "non-empty string errors must yield Some");
+    let msg = msg.unwrap();
+    assert!(
+        msg.contains("palace alpha timed out"),
+        "message must include the first error string; got {msg:?}"
+    );
+    assert!(
+        msg.contains("2 error(s)"),
+        "message must include the error count; got {msg:?}"
+    );
+}
+
+/// Why: Same as above but for the `{"message":"..."}` object shape that some
+/// future partial-success envelopes may use.
+/// What: Calls `extract_partial_error` with an `errors` array of objects
+/// carrying a `"message"` field and asserts the text is extracted correctly.
+/// Test: This test.
+#[test]
+fn extract_partial_error_object_array_extracts_message_field() {
+    use super::super::recall_routes::extract_partial_error;
+
+    // (2) Non-empty errors array of {"message": "..."} objects.
+    let v = json!({
+        "errors": [
+            {"message": "KG query failed", "code": 503},
+            {"message": "BM25 timeout"}
+        ]
+    });
+    let msg = extract_partial_error(&v);
+    assert!(msg.is_some(), "object errors must yield Some");
+    let msg = msg.unwrap();
+    assert!(
+        msg.contains("KG query failed"),
+        "message must include the first object's message; got {msg:?}"
+    );
+    assert!(
+        msg.contains("2 error(s)"),
+        "message must include the error count; got {msg:?}"
+    );
+}
+
+/// Why: An empty `errors` array means no failure occurred; the guard must
+/// not convert a healthy envelope into an error.
+/// What: Calls `extract_partial_error` with `errors: []` and asserts None.
+/// Test: This test.
+#[test]
+fn extract_partial_error_empty_array_returns_none() {
+    use super::super::recall_routes::extract_partial_error;
+
+    // (3) Empty errors array → no failure.
+    let v = json!({ "errors": [], "results": [{"content": "ok"}] });
+    assert!(
+        extract_partial_error(&v).is_none(),
+        "empty errors array must return None"
+    );
+}
+
+/// Why: Successful recall returns a JSON array (not an object), so
+/// `get("errors")` returns None. The guard must handle this gracefully.
+/// What: Calls `extract_partial_error` with a JSON array and with an object
+/// that has no `"errors"` key; asserts None in both cases.
+/// Test: This test.
+#[test]
+fn extract_partial_error_no_errors_key_returns_none() {
+    use super::super::recall_routes::extract_partial_error;
+
+    // (4a) Plain JSON array (the success shape from recall_all).
+    let v = json!([{"content": "hello", "score": 0.9}]);
+    assert!(
+        extract_partial_error(&v).is_none(),
+        "JSON array input must return None"
+    );
+
+    // (4b) Object without an errors key.
+    let v = json!({ "results": [{"content": "world"}] });
+    assert!(
+        extract_partial_error(&v).is_none(),
+        "object without errors key must return None"
     );
 }
 
