@@ -285,6 +285,9 @@ pub(super) async fn create_index_handler(
             skip_kg,
             defer_embed,
             colocated,
+            // Issue #993: new indexes have no query/index history yet.
+            last_queried_unix: None,
+            last_indexed_unix: None,
         },
     ) {
         tracing::warn!("could not persist index registry for {}: {e}", req.id);

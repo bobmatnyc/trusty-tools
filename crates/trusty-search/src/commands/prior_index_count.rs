@@ -63,7 +63,7 @@ pub(crate) fn load_prior_index_count() -> usize {
 
 /// Write the WarmBootSummary onto `state`, emit a loud FDA re-grant warning
 /// when the loaded count dropped below 80% of the prior count, and persist
-/// the new count for the next boot (issue #873).
+/// the new count for the next boot (issues #873, #993).
 ///
 /// Why: factored out of `restore_indexes` in `commands/start.rs` to keep that
 /// file under the line-cap allowlist budget. Gathers the three counter-update
@@ -71,12 +71,16 @@ pub(crate) fn load_prior_index_count() -> usize {
 /// What: writes `WarmBootSummary` to `state.warmboot_summary`, emits
 /// `tracing::error!` with FDA hint when `total < prior * 80%`, persists
 /// `total` via `save_prior_index_count`, and updates `state.prior_index_count`.
+/// `indexes_lazy` is stored in the summary and reflects the count at warm-boot
+/// completion; the health handler re-reads from `cold_store.len()` live so the
+/// value decreases as lazy loads occur.
 /// Test: covered indirectly by the warm-boot integration tests in `start.rs`.
 pub(crate) fn record_warm_boot_result(
     state: &crate::service::SearchAppState,
     total: usize,
     total_skipped_tcc: usize,
     total_skipped_timeout: usize,
+    indexes_lazy: usize,
 ) {
     let prior_count = state
         .prior_index_count
@@ -95,6 +99,9 @@ pub(crate) fn record_warm_boot_result(
             indexes_skipped_tcc: total_skipped_tcc,
             indexes_skipped_timeout: total_skipped_timeout,
             warm_boot_degraded,
+            // Issue #993: stored at boot-completion; health handler re-reads
+            // from cold_store.len() live so it decreases as lazy loads happen.
+            indexes_lazy,
         };
     }
 
@@ -168,7 +175,7 @@ mod tests {
     fn warmboot_summary_timeout_sets_degraded_flag() {
         let state = make_state();
         // 5 loaded, 1 timed out, 0 TCC denials, prior count = 0 (first run).
-        record_warm_boot_result(&state, 5, 0, 1);
+        record_warm_boot_result(&state, 5, 0, 1, 0);
         let summary = state.warmboot_summary.lock().unwrap().clone();
         assert_eq!(summary.indexes_loaded, 5, "loaded count must be recorded");
         assert_eq!(
@@ -189,7 +196,7 @@ mod tests {
     #[test]
     fn warmboot_summary_tcc_skip_sets_degraded_flag() {
         let state = make_state();
-        record_warm_boot_result(&state, 5, 1, 0);
+        record_warm_boot_result(&state, 5, 1, 0, 0);
         let summary = state.warmboot_summary.lock().unwrap().clone();
         assert!(
             summary.warm_boot_degraded,
@@ -207,7 +214,7 @@ mod tests {
         state
             .prior_index_count
             .store(5, std::sync::atomic::Ordering::Relaxed);
-        record_warm_boot_result(&state, 5, 0, 0);
+        record_warm_boot_result(&state, 5, 0, 0, 0);
         let summary = state.warmboot_summary.lock().unwrap().clone();
         assert!(
             !summary.warm_boot_degraded,
@@ -225,7 +232,7 @@ mod tests {
         state
             .prior_index_count
             .store(10, std::sync::atomic::Ordering::Relaxed);
-        record_warm_boot_result(&state, 7, 0, 0);
+        record_warm_boot_result(&state, 7, 0, 0, 0);
         let summary = state.warmboot_summary.lock().unwrap().clone();
         assert!(
             summary.warm_boot_degraded,

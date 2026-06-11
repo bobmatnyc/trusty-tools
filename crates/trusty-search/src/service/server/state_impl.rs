@@ -36,6 +36,7 @@ impl SearchAppState {
         let (shutdown_tx, _) = watch::channel(false);
         Self {
             registry,
+            cold_store: Arc::new(crate::service::lazy_loader::ColdIndexStore::new()),
             reindex_progress: Arc::new(DashMap::new()),
             last_reindex_aborted_at: Arc::new(DashMap::new()),
             embedder: None,

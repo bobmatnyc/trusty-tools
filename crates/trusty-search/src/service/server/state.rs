@@ -17,6 +17,7 @@ use crate::core::{
     embed::Embedder,
     registry::{IndexId, IndexRegistry},
 };
+use crate::service::lazy_loader::ColdIndexStore;
 use crate::service::reindex::ReindexProgress;
 
 /// Live daemon events pushed to dashboard subscribers via the `/status/stream`
@@ -65,6 +66,18 @@ pub enum DaemonEvent {
 #[derive(Clone)]
 pub struct SearchAppState {
     pub registry: IndexRegistry,
+    /// Cold index store for lazy warm-boot (issue #993).
+    ///
+    /// Why: when `TRUSTY_WARMBOOT_MAX_INDEXES` limits eager warm-boot, the
+    /// remaining indexes are parked here instead of being loaded at startup.
+    /// `get_or_load_index` checks this store on any 404 from the hot registry;
+    /// a hit triggers an on-demand restore within `cold_reload_timeout()`.
+    /// What: empty (default) until `restore_indexes` populates it from the
+    /// "cold" slice of `select_warmboot_entries`. Backed by `DashMap` so
+    /// concurrent access from multiple handlers is safe.
+    /// Test: `cold_store_register_and_contains` in `lazy_loader` unit tests;
+    /// `health_surfaces_warmboot_summary` verifies `indexes_lazy` is reported.
+    pub cold_store: Arc<ColdIndexStore>,
     /// Per-index reindex progress (live counters + SSE replay buffer). Started
     /// by `POST /indexes/:id/reindex`, consumed by
     /// `GET /indexes/:id/reindex/stream`. Lazily populated.
@@ -399,4 +412,14 @@ pub struct WarmBootSummary {
     /// External monitors should poll this boolean as the single machine-readable
     /// warm-boot health signal; the individual counters carry the root cause.
     pub warm_boot_degraded: bool,
+    /// Number of indexes registered but deferred to lazy-load (issue #993).
+    ///
+    /// Why: when `TRUSTY_WARMBOOT_MAX_INDEXES` caps the eager warm-boot, the
+    /// remaining indexes are parked in the cold store. This counter shows how
+    /// many are still waiting for their first query to trigger an on-demand load.
+    /// It decreases as indexes are lazily loaded during the daemon's lifetime.
+    /// `0` when `TRUSTY_WARMBOOT_MAX_INDEXES` is unset (all indexes eagerly loaded).
+    /// What: reported on every `GET /health` response; read from `ColdIndexStore::len`.
+    /// Test: `health_surfaces_warmboot_summary` in server tests.
+    pub indexes_lazy: usize,
 }

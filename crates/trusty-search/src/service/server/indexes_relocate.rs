@@ -166,6 +166,9 @@ pub(super) async fn relocate_index_handler(
         // hardcoding true. Toggling this flag silently would route the indexer
         // to a different data directory and could destroy central-store data.
         colocated: on_disk_colocated,
+        // Issue #993: preserve LRU timestamps so relocation doesn't reset warm-boot priority.
+        last_queried_unix: None,
+        last_indexed_unix: None,
     };
 
     // Rebuild the indexer from the new entry so the colocated HNSW/redb at
