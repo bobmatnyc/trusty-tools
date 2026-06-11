@@ -8,4 +8,7 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true,
   },
+  resolve: {
+    conditions: ['browser', 'svelte', 'module'],
+  },
 });
