@@ -14,7 +14,6 @@ use tracing::{debug, warn};
 use crate::collect::ai_attribution::AgenticMode;
 use crate::core::config::Config;
 use crate::core::db::Database;
-use crate::core::quality::QUALITY_FORMULA_VERSION;
 use crate::report::errors::{ReportError, Result};
 use crate::report::models::{
     ActivityWeights, AuthorSummary, DeveloperActivitySummary, DoraMetrics, QualitySummary,
@@ -417,11 +416,9 @@ impl Aggregator {
             let complexity: Option<i64> = row.get(12).unwrap_or(None);
             // Issue #1113: agentic_mode TEXT; defaults to 'none' for pre-v21 rows.
             let agentic_mode_str: String = row.get(13).unwrap_or_else(|_| "none".to_string());
-            let agentic_mode = match agentic_mode_str.as_str() {
-                "full_agentic" => AgenticMode::FullAgentic,
-                "ide_assisted" => AgenticMode::IdeAssisted,
-                _ => AgenticMode::None,
-            };
+            let agentic_mode = agentic_mode_str
+                .parse::<AgenticMode>()
+                .unwrap_or(AgenticMode::None);
             Ok(CommitRow {
                 sha: row.get(0)?,
                 author_name: row.get(1)?,
@@ -596,235 +593,25 @@ impl Aggregator {
 
     /// Persist per-engineer-per-week quality scores to `fact_weekly_quality`.
     ///
-    /// Why: downstream warehouses read `tga.db` directly; storing quality rows
-    /// avoids requiring consumers to re-implement the scoring formula in SQL.
-    /// This is called immediately after the aggregation so the stored values
-    /// always reflect the corrected ticketed logic from batch A (migration v17).
-    /// What: UPSERTs one row per [`WeeklyActivity`] into `fact_weekly_quality`,
-    /// batching in chunks of 500. The grain key (author_email, iso_year,
-    /// iso_week, repository) matches the aggregator's weekly bucket exactly.
-    /// Rows whose ISO week label cannot be parsed are skipped with a warning.
-    /// Test: `report::tests::persist_weekly_quality_upserts_rows` (seed the
-    /// aggregator, call persist, assert rows appear in the table + idempotent).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ReportError::Core`] if any SQLite operation fails.
+    /// Why: callers (CLI pipeline, tests) use `Aggregator::persist_weekly_quality`;
+    /// the implementation lives in [`crate::report::persist`] to keep this file
+    /// within the 500-line cap.
+    /// What: delegates to [`crate::report::persist::persist_weekly_quality`].
+    /// Test: `report::tests::persist_weekly_quality_upserts_rows`.
     pub fn persist_weekly_quality(db: &Database, data: &ReportData) -> Result<usize> {
-        if data.weekly_activity.is_empty() {
-            return Ok(0);
-        }
-        let computed_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-
-        let rows: Vec<_> = data
-            .weekly_activity
-            .iter()
-            .filter_map(|wa| {
-                let (iso_year, iso_week) = match parse_week_label_to_parts(&wa.week) {
-                    Some(p) => p,
-                    None => {
-                        tracing::warn!(
-                            week = %wa.week,
-                            "persist_weekly_quality: cannot parse week label; skipping row"
-                        );
-                        return None;
-                    }
-                };
-                // Derive quality_tshirt integer from the string ("1".."5").
-                let quality_tshirt: i64 = wa.quality_tshirt.parse().unwrap_or(
-                    crate::core::quality::size_for_quality_score(wa.quality_score) as i64,
-                );
-                Some((
-                    wa.author.clone(), // Note: this is the display name; use email below.
-                    iso_year,
-                    iso_week,
-                    wa.repository.clone(),
-                    wa.quality_score,
-                    quality_tshirt,
-                    wa.revert_count as i64,
-                    wa.bugfix_count as i64,
-                    wa.ticketed_count as i64,
-                    wa.commit_count as i64,
-                    computed_at,
-                ))
-            })
-            .collect();
-
-        // We need author email, not display name — rebuild a lookup from
-        // ReportData.authors (email → display_name is available; we need the
-        // reverse). Since author identity in weekly_activity is keyed by email
-        // in the aggregator and resolved to display_name at materialisation,
-        // we persist the display name as the author_email key when emails are
-        // not directly available in WeeklyActivity. For now we use the author
-        // field directly as the stable key because the aggregator resolves
-        // canonical emails to display names. To keep the grain key correct,
-        // use a display_name→email map derived from author_summaries.
-        let name_to_email: std::collections::HashMap<String, String> = data
-            .authors
-            .iter()
-            .map(|a| (a.name.clone(), a.email.clone()))
-            .collect();
-
-        let mut written = 0usize;
-        for chunk in rows.chunks(500) {
-            let conn = db.connection();
-            let tx = conn
-                .unchecked_transaction()
-                .map_err(crate::core::TgaError::from)?;
-            {
-                let mut stmt = tx
-                    .prepare(
-                        "INSERT OR REPLACE INTO fact_weekly_quality \
-                         (author_email, iso_year, iso_week, repository, quality_score, \
-                          quality_tshirt, revert_count, bugfix_count, ticketed_count, \
-                          commit_count, formula_version, computed_at) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                    )
-                    .map_err(crate::core::TgaError::from)?;
-                for (author_display, iso_year, iso_week, repo, qs, qt, rc, bc, tc, cc, ca) in chunk
-                {
-                    // Resolve the canonical email from the display name; fall
-                    // back to the display name itself when no match exists (can
-                    // happen for uncommitted / alias-unresolved identities).
-                    let author_email = name_to_email
-                        .get(author_display)
-                        .cloned()
-                        .unwrap_or_else(|| author_display.clone());
-                    stmt.execute(rusqlite::params![
-                        author_email,
-                        iso_year,
-                        iso_week,
-                        repo,
-                        qs,
-                        qt,
-                        rc,
-                        bc,
-                        tc,
-                        cc,
-                        QUALITY_FORMULA_VERSION,
-                        ca,
-                    ])
-                    .map_err(crate::core::TgaError::from)?;
-                    written += 1;
-                }
-            }
-            tx.commit().map_err(crate::core::TgaError::from)?;
-        }
-        Ok(written)
+        crate::report::persist::persist_weekly_quality(db, data)
     }
 
     /// Persist per-engineer-per-week agentic counts to `fact_weekly_engineer`.
     ///
-    /// Why: downstream warehouses (cto-reports) need agentic % per engineer per
-    /// ISO week without re-running the aggregator (issue #1113). Storing it here
-    /// mirrors the `fact_weekly_quality` pattern from issue #445 batch B.
-    /// What: UPSERTs one row per [`WeeklyActivity`] into `fact_weekly_engineer`.
-    /// `net_commits` = `commit_count - revert_count` (matches the denominator
-    /// for agentic %). `agentic_pct` = `agentic_count / net_commits * 100.0`
-    /// clamped at 0.0 when `net_commits` is zero. Non-fatal: a write failure is
-    /// logged but does not abort report generation.
+    /// Why: callers (CLI pipeline, tests) use `Aggregator::persist_weekly_engineer`;
+    /// the implementation lives in [`crate::report::persist`] to keep this file
+    /// within the 500-line cap.
+    /// What: delegates to [`crate::report::persist::persist_weekly_engineer`].
     /// Test: `report::tests::persist_weekly_engineer_upserts_rows`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ReportError::Core`] if any SQLite operation fails.
     pub fn persist_weekly_engineer(db: &Database, data: &ReportData) -> Result<usize> {
-        if data.weekly_activity.is_empty() {
-            return Ok(0);
-        }
-        let computed_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-
-        let name_to_email: std::collections::HashMap<String, String> = data
-            .authors
-            .iter()
-            .map(|a| (a.name.clone(), a.email.clone()))
-            .collect();
-
-        let rows: Vec<_> = data
-            .weekly_activity
-            .iter()
-            .filter_map(|wa| {
-                let (iso_year, iso_week) = parse_week_label_to_parts(&wa.week)?;
-                let net = wa.commit_count.saturating_sub(wa.revert_count) as i64;
-                let agentic_pct = if net > 0 {
-                    (wa.agentic_count as f64) / (net as f64) * 100.0
-                } else {
-                    0.0
-                };
-                Some((
-                    wa.author.clone(),
-                    iso_year,
-                    iso_week,
-                    wa.repository.clone(),
-                    net,
-                    wa.agentic_count as i64,
-                    wa.ide_assisted_count as i64,
-                    agentic_pct,
-                    computed_at,
-                ))
-            })
-            .collect();
-
-        let mut written = 0usize;
-        for chunk in rows.chunks(500) {
-            let conn = db.connection();
-            let tx = conn
-                .unchecked_transaction()
-                .map_err(crate::core::TgaError::from)?;
-            {
-                let mut stmt = tx
-                    .prepare(
-                        "INSERT OR REPLACE INTO fact_weekly_engineer \
-                         (author_email, iso_year, iso_week, repository, \
-                          net_commits, agentic_count, ide_assisted_count, agentic_pct, \
-                          formula_version, computed_at) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                    )
-                    .map_err(crate::core::TgaError::from)?;
-                for (author_display, iso_year, iso_week, repo, net, ac, ic, pct, ca) in chunk {
-                    let author_email = name_to_email
-                        .get(author_display)
-                        .cloned()
-                        .unwrap_or_else(|| author_display.clone());
-                    stmt.execute(rusqlite::params![
-                        author_email,
-                        iso_year,
-                        iso_week,
-                        repo,
-                        net,
-                        ac,
-                        ic,
-                        pct,
-                        "v1",
-                        ca,
-                    ])
-                    .map_err(crate::core::TgaError::from)?;
-                    written += 1;
-                }
-            }
-            tx.commit().map_err(crate::core::TgaError::from)?;
-        }
-        Ok(written)
+        crate::report::persist::persist_weekly_engineer(db, data)
     }
-}
-
-/// Parse an ISO week label `"YYYY-Www"` into `(iso_year, iso_week)`.
-///
-/// Why: `fact_weekly_quality` stores year and week as separate INTEGER columns
-/// so warehouse tools can filter by year or week number without string parsing.
-/// What: splits on `-W`, parses both halves as integers.
-/// Test: exercised by `persist_weekly_quality` via the report tests.
-fn parse_week_label_to_parts(label: &str) -> Option<(i64, i64)> {
-    let (y, w) = label.split_once("-W")?;
-    let year: i64 = y.parse().ok()?;
-    let week: i64 = w.parse().ok()?;
-    Some((year, week))
 }
 
 // ===========================================================================

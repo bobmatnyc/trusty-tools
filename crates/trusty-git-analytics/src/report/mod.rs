@@ -3,20 +3,20 @@
 //!
 //! ## Submodules
 //!
-//! - [`aggregator`] — DB → in-memory [`ReportData`]
+//! - [`aggregator`]+[`persist`] — DB → in-memory [`ReportData`]; fact-table UPSERTs
 //! - [`formatters`] — CSV / JSON / Markdown output
 //! - [`templates`] — embedded Tera template strings
 //! - [`pipeline`] — [`ReportPipeline`] orchestrator
 //! - [`errors`] — [`ReportError`] / [`Result`]
 //! - [`models`] — aggregated data structures
 //! - [`period_trends`] — N-week period roll-up for contributor profiles (#558)
-
 pub mod aggregator;
 pub mod drilldown;
 pub mod errors;
 pub mod formatters;
 pub mod models;
 pub mod period_trends;
+pub mod persist;
 pub mod pipeline;
 pub mod templates;
 pub mod ticketed_stats;

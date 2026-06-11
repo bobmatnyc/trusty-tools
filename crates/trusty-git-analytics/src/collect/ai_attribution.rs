@@ -60,6 +60,23 @@ impl AgenticMode {
     }
 }
 
+impl std::str::FromStr for AgenticMode {
+    type Err = ();
+
+    /// Why: centralises the string↔enum mapping so callers use the same
+    /// strings as `as_str()` without a hand-rolled `match`. Unknown → `Err(())`.
+    /// What: inverse of `as_str()`; unrecognised strings return `Err(())`.
+    /// Test: `tests::agentic_mode_from_str_round_trips`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "full_agentic" => Ok(AgenticMode::FullAgentic),
+            "ide_assisted" => Ok(AgenticMode::IdeAssisted),
+            "none" => Ok(AgenticMode::None),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Compiled AI-tool detection patterns.
 struct AiPatterns {
     /// Matches the full `Co-Authored-By:` or `Co-authored-by:` trailer line.
@@ -68,7 +85,9 @@ struct AiPatterns {
     claude: Regex,
     /// Matches "github copilot" (GitHub Copilot assistant).
     copilot: Regex,
-    /// Matches "cursor" (Cursor AI assistant).
+    /// Matches Cursor AI assistant by email domain (`@cursor.sh`) or standalone
+    /// tool name (`\bCursor\b`). The hyphen-suffix false-positive guard (e.g.
+    /// "Alice Cursor-Williams") is applied in [`is_cursor_match`], not here.
     cursor: Regex,
     /// Matches "Generated with Claude Code" in commit body (issue #1113).
     generated_with_claude_code: Regex,
@@ -76,6 +95,23 @@ struct AiPatterns {
     x_ai_tokens: Regex,
     /// Matches `X-AI-Model:` trailer (commit_cost_tracker).
     x_ai_model: Regex,
+}
+
+/// Why: `(?i)\bCursor\b` would match "Alice Cursor-Williams" (false positive).
+/// Rust's `regex` crate has no lookahead, so the hyphen guard is code-level.
+/// What: returns `true` when the cursor pattern fires AND the match is NOT
+/// followed by `-` (hyphenated surname) in `trailer_value`.
+/// Test: `tests::detect_agentic_mode_cursor_in_human_name_is_not_ide_assisted`.
+fn is_cursor_match(p: &AiPatterns, trailer_value: &str) -> bool {
+    if let Some(m) = p.cursor.find(trailer_value) {
+        if trailer_value[m.start()..].starts_with('@') {
+            return true; // email-domain form: @cursor.sh
+        }
+        let after = trailer_value.get(m.end()..).unwrap_or("");
+        !after.starts_with('-') // reject hyphenated surnames
+    } else {
+        false
+    }
 }
 
 /// Global, lazily-initialized pattern set.
@@ -93,7 +129,12 @@ fn ai_patterns() -> &'static AiPatterns {
             .expect("trailer_line pattern compiles"),
         claude: Regex::new(r"(?i)\bclaude\b").expect("claude pattern compiles"),
         copilot: Regex::new(r"(?i)\bcopilot\b|GitHub\s+Copilot").expect("copilot pattern compiles"),
-        cursor: Regex::new(r"(?i)\bcursor\b").expect("cursor pattern compiles"),
+        // Match Cursor by either the canonical email domain OR the standalone
+        // tool name. The word-boundary `\bCursor\b` alone would also match
+        // human surnames like "Alice Cursor-Williams"; the hyphen guard is
+        // enforced in the calling code (see `is_cursor_match`) since Rust's
+        // regex crate does not support lookahead assertions.
+        cursor: Regex::new(r"(?i)@cursor\.sh|\bCursor\b").expect("cursor pattern compiles"),
         // "Generated with Claude Code" may appear anywhere in the message body
         // (e.g. inside a Markdown link that Claude Code appends to PR descriptions
         // or commit messages via its --message template). Case-insensitive.
@@ -150,7 +191,7 @@ pub fn detect_ai_tool(message: &str) -> Option<&'static str> {
         if p.copilot.is_match(trailer_value) {
             return Some("copilot");
         }
-        if p.cursor.is_match(trailer_value) {
+        if is_cursor_match(p, trailer_value) {
             return Some("cursor");
         }
     }
@@ -201,7 +242,7 @@ pub fn detect_agentic_mode(message: &str) -> AgenticMode {
         if p.claude.is_match(trailer_value) {
             return AgenticMode::FullAgentic;
         }
-        if p.copilot.is_match(trailer_value) || p.cursor.is_match(trailer_value) {
+        if p.copilot.is_match(trailer_value) || is_cursor_match(p, trailer_value) {
             has_ide = true;
         }
     }
@@ -234,9 +275,8 @@ mod tests {
         let _ = ai_patterns();
     }
 
-    /// Why: Claude is the primary AI tool in this codebase; must be detected.
-    /// What: message with a Claude co-author trailer returns `"claude"`.
-    /// Test: this test itself.
+    /// Why: Claude is the primary AI tool; must be detected.
+    /// What: Claude co-author trailer → `"claude"`.
     #[test]
     fn detect_ai_tool_detects_claude() {
         let msg =
@@ -245,8 +285,7 @@ mod tests {
     }
 
     /// Why: case-insensitive trailer key must be accepted.
-    /// What: lowercase `co-authored-by:` is recognised.
-    /// Test: this test itself.
+    /// What: lowercase `co-authored-by:` → `"claude"`.
     #[test]
     fn detect_ai_tool_case_insensitive_key() {
         let msg = "fix: bug\n\nco-authored-by: Claude Sonnet 4 <noreply@anthropic.com>";
@@ -254,26 +293,23 @@ mod tests {
     }
 
     /// Why: Copilot must be detected by keyword.
-    /// What: `"GitHub Copilot"` in trailer value returns `"copilot"`.
-    /// Test: this test itself.
+    /// What: `"GitHub Copilot"` trailer → `"copilot"`.
     #[test]
     fn detect_ai_tool_detects_copilot() {
         let msg = "feat: autocomplete\n\nCo-Authored-By: GitHub Copilot <copilot@github.com>";
         assert_eq!(detect_ai_tool(msg), Some("copilot"));
     }
 
-    /// Why: Copilot detection must also match just "copilot" (bare keyword).
-    /// What: `"copilot"` anywhere in the trailer value returns `"copilot"`.
-    /// Test: this test itself.
+    /// Why: bare "copilot" keyword must also be detected.
+    /// What: `"copilot"` trailer → `"copilot"`.
     #[test]
     fn detect_ai_tool_detects_copilot_bare() {
         let msg = "fix: npe\n\nCo-Authored-By: copilot <noreply@github.com>";
         assert_eq!(detect_ai_tool(msg), Some("copilot"));
     }
 
-    /// Why: Cursor must be detected by keyword.
-    /// What: `"Cursor"` in trailer value returns `"cursor"`.
-    /// Test: this test itself.
+    /// Why: Cursor tool must be detected.
+    /// What: `"Cursor"` trailer → `"cursor"`.
     #[test]
     fn detect_ai_tool_detects_cursor() {
         let msg = "chore: refactor\n\nCo-Authored-By: Cursor <noreply@cursor.sh>";
@@ -281,27 +317,23 @@ mod tests {
     }
 
     /// Why: human co-authors must not be detected as AI.
-    /// What: ordinary `Co-Authored-By:` with a human name returns `None`.
-    /// Test: this test itself.
+    /// What: human `Co-Authored-By:` → `None`.
     #[test]
     fn detect_ai_tool_returns_none_for_human() {
         let msg = "feat: auth\n\nCo-Authored-By: Alice Smith <alice@example.com>";
         assert_eq!(detect_ai_tool(msg), None);
     }
 
-    /// Why: commits without any trailer must return `None`.
-    /// What: plain commit message with no `Co-Authored-By:` returns `None`.
-    /// Test: this test itself.
+    /// Why: no trailer → no AI tool.
+    /// What: plain message with no `Co-Authored-By:` → `None`.
     #[test]
     fn detect_ai_tool_returns_none_for_no_trailer() {
         assert_eq!(detect_ai_tool("feat: add feature"), None);
         assert_eq!(detect_ai_tool(""), None);
     }
 
-    /// Why: multiple trailers — Claude takes priority over Copilot in the
-    /// priority order (Claude → Copilot → Cursor).
-    /// What: message with both Claude and Copilot trailers returns `"claude"`.
-    /// Test: this test itself.
+    /// Why: priority order Claude → Copilot → Cursor must be respected.
+    /// What: both Claude and Copilot trailers present → `"claude"`.
     #[test]
     fn detect_ai_tool_priority_claude_before_copilot() {
         let msg = "pair session\n\n\
@@ -310,9 +342,8 @@ mod tests {
         assert_eq!(detect_ai_tool(msg), Some("claude"));
     }
 
-    /// Why: priority order — Copilot before Cursor when both present.
-    /// What: Copilot trailer appears before Cursor; returns `"copilot"`.
-    /// Test: this test itself.
+    /// Why: Copilot before Cursor in priority order.
+    /// What: both Copilot and Cursor present → `"copilot"`.
     #[test]
     fn detect_ai_tool_priority_copilot_before_cursor() {
         let msg = "pair session\n\n\
@@ -325,9 +356,8 @@ mod tests {
     // Issue #1113 — AgenticMode tests
     // -------------------------------------------------------------------------
 
-    /// Why: `as_str` must return stable string constants for DB persistence.
-    /// What: checks all three variants against the spec values.
-    /// Test: this test itself.
+    /// Why: stable strings needed for DB persistence and SQL filtering.
+    /// What: all three variants map to their spec strings.
     #[test]
     fn agentic_mode_as_str() {
         assert_eq!(AgenticMode::FullAgentic.as_str(), "full_agentic");
@@ -335,9 +365,26 @@ mod tests {
         assert_eq!(AgenticMode::None.as_str(), "none");
     }
 
-    /// Why: Claude Co-Authored-By trailer → full_agentic (primary signal).
-    /// What: a standard Claude Code commit message classifies as FullAgentic.
-    /// Test: this test itself.
+    /// Why: `FromStr` must invert `as_str` for lossless DB round-trips.
+    /// What: parses all canonical strings; unknown string → `Err`.
+    #[test]
+    fn agentic_mode_from_str_round_trips() {
+        use std::str::FromStr;
+        assert_eq!(
+            AgenticMode::from_str("full_agentic"),
+            Ok(AgenticMode::FullAgentic)
+        );
+        assert_eq!(
+            AgenticMode::from_str("ide_assisted"),
+            Ok(AgenticMode::IdeAssisted)
+        );
+        assert_eq!(AgenticMode::from_str("none"), Ok(AgenticMode::None));
+        assert!(AgenticMode::from_str("unknown_value").is_err());
+        assert!(AgenticMode::from_str("").is_err());
+    }
+
+    /// Why: Claude Co-Authored-By is the primary full-agentic signal.
+    /// What: Claude trailer → `FullAgentic`.
     #[test]
     fn detect_agentic_mode_claude_coauthor_is_full_agentic() {
         let msg = "feat: add feature\n\n\
@@ -345,10 +392,8 @@ mod tests {
         assert_eq!(detect_agentic_mode(msg), AgenticMode::FullAgentic);
     }
 
-    /// Why: "Generated with Claude Code" body signal → full_agentic.
-    /// What: the phrase anywhere in the message marks this as full-agentic
-    ///   even without a Co-Authored-By trailer.
-    /// Test: this test itself.
+    /// Why: "Generated with Claude Code" is a full-agentic body signal.
+    /// What: phrase anywhere in message → `FullAgentic`.
     #[test]
     fn detect_agentic_mode_generated_with_claude_code_is_full_agentic() {
         let msg = "fix: resolve timeout\n\n\
@@ -357,19 +402,16 @@ mod tests {
         assert_eq!(detect_agentic_mode(msg), AgenticMode::FullAgentic);
     }
 
-    /// Why: "Generated with Claude Code" alone (no co-author) → full_agentic.
-    /// What: body signal without any trailer still classifies correctly.
-    /// Test: this test itself.
+    /// Why: body signal alone (no co-author trailer) must suffice.
+    /// What: no trailer, just body phrase → `FullAgentic`.
     #[test]
     fn detect_agentic_mode_generated_body_only_is_full_agentic() {
         let msg = "chore: update deps\n\nGenerated with Claude Code";
         assert_eq!(detect_agentic_mode(msg), AgenticMode::FullAgentic);
     }
 
-    /// Why: X-AI-Tokens trailers written by commit_cost_tracker → full_agentic.
-    /// What: presence of X-AI-Tokens-In or X-AI-Tokens-Out classifies the
-    ///   commit as full-agentic regardless of other signals.
-    /// Test: this test itself.
+    /// Why: X-AI-Tokens trailers from commit_cost_tracker → full_agentic.
+    /// What: X-AI-Tokens-In or X-AI-Tokens-Out → `FullAgentic`.
     #[test]
     fn detect_agentic_mode_x_ai_tokens_is_full_agentic() {
         let msg = "feat: implement search\n\n\
@@ -378,64 +420,75 @@ mod tests {
         assert_eq!(detect_agentic_mode(msg), AgenticMode::FullAgentic);
     }
 
-    /// Why: X-AI-Model trailer → full_agentic.
-    /// What: the model trailer alone marks the commit as full-agentic.
-    /// Test: this test itself.
+    /// Why: X-AI-Model trailer alone must trigger full_agentic.
+    /// What: X-AI-Model present → `FullAgentic`.
     #[test]
     fn detect_agentic_mode_x_ai_model_is_full_agentic() {
         let msg = "refactor: extract helper\n\nX-AI-Model: claude-sonnet-4-6";
         assert_eq!(detect_agentic_mode(msg), AgenticMode::FullAgentic);
     }
 
-    /// Why: Cursor Co-Authored-By → ide_assisted.
-    /// What: Cursor inline-completion commits classify as IdeAssisted.
-    /// Test: this test itself.
+    /// Why: Cursor IDE trailer must be ide_assisted, not full_agentic.
+    /// What: Cursor `Co-Authored-By` → `IdeAssisted`.
     #[test]
     fn detect_agentic_mode_cursor_is_ide_assisted() {
         let msg = "fix: null check\n\nCo-Authored-By: Cursor <noreply@cursor.sh>";
         assert_eq!(detect_agentic_mode(msg), AgenticMode::IdeAssisted);
     }
 
-    /// Why: GitHub Copilot Co-Authored-By → ide_assisted.
-    /// What: Copilot inline-completion commits classify as IdeAssisted.
-    /// Test: this test itself.
+    /// Why: Copilot IDE trailer must be ide_assisted, not full_agentic.
+    /// What: Copilot `Co-Authored-By` → `IdeAssisted`.
     #[test]
     fn detect_agentic_mode_copilot_is_ide_assisted() {
         let msg = "feat: autocomplete\n\nCo-Authored-By: GitHub Copilot <copilot@github.com>";
         assert_eq!(detect_agentic_mode(msg), AgenticMode::IdeAssisted);
     }
 
-    /// Why: bare copilot keyword → ide_assisted.
-    /// What: `copilot` anywhere in the Co-Authored-By value classifies as IDE.
-    /// Test: this test itself.
+    /// Why: bare "copilot" keyword must also classify as ide_assisted.
+    /// What: `copilot` trailer → `IdeAssisted`.
     #[test]
     fn detect_agentic_mode_copilot_bare_is_ide_assisted() {
         let msg = "fix: npe\n\nCo-Authored-By: copilot <noreply@github.com>";
         assert_eq!(detect_agentic_mode(msg), AgenticMode::IdeAssisted);
     }
 
-    /// Why: plain human commit → none.
-    /// What: a commit with no AI signals classifies as None.
-    /// Test: this test itself.
+    /// Why: no AI signals must yield None (not a false positive).
+    /// What: plain commit → `None`.
     #[test]
     fn detect_agentic_mode_plain_commit_is_none() {
         assert_eq!(detect_agentic_mode("feat: add button"), AgenticMode::None);
         assert_eq!(detect_agentic_mode(""), AgenticMode::None);
     }
 
-    /// Why: human co-author trailer must NOT classify as AI.
-    /// What: Co-Authored-By with a human name is None, not ide_assisted.
-    /// Test: this test itself.
+    /// Why: human co-author trailer must not trigger any AI classification.
+    /// What: human `Co-Authored-By` → `None`.
     #[test]
     fn detect_agentic_mode_human_coauthor_is_none() {
         let msg = "feat: pair program\n\nCo-Authored-By: Alice Smith <alice@example.com>";
         assert_eq!(detect_agentic_mode(msg), AgenticMode::None);
     }
 
-    /// Why: when both Claude and Cursor trailers exist, Claude (full_agentic)
-    ///   wins because it is checked first in the priority order.
-    /// What: mixed trailer scenario returns FullAgentic.
-    /// Test: this test itself.
+    /// Why: tightened cursor pattern must not fire on "Alice Cursor-Williams".
+    /// What: "Cursor" in a hyphenated surname → None, not ide_assisted.
+    #[test]
+    fn detect_agentic_mode_cursor_in_human_name_is_not_ide_assisted() {
+        // "Cursor-Williams" has "Cursor" followed by a hyphen — must NOT match.
+        let msg = "feat: auth\n\nCo-Authored-By: Alice Cursor-Williams <alice@example.com>";
+        assert_eq!(
+            detect_agentic_mode(msg),
+            AgenticMode::None,
+            "a human surname containing 'Cursor' must not classify as IdeAssisted"
+        );
+        // Verify detect_ai_tool also returns None for the same message.
+        assert_eq!(
+            detect_ai_tool(msg),
+            None,
+            "detect_ai_tool must not match 'Cursor' in a hyphenated human surname"
+        );
+    }
+
+    /// Why: Claude must win over Cursor when both trailers present.
+    /// What: Claude + Cursor trailers → `FullAgentic`.
     #[test]
     fn detect_agentic_mode_claude_wins_over_cursor() {
         let msg = "pair: fix auth\n\n\

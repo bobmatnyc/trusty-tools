@@ -1,3 +1,11 @@
+-- =============================================================================
+-- DOCUMENTATION / REFERENCE ONLY — this file is NOT executed by the migration
+-- runner. The live migration is implemented in migrations/v21.rs (which uses
+-- a PRAGMA table_info guard because SQLite has no ALTER TABLE … ADD COLUMN IF
+-- NOT EXISTS). Keeping this file preserves a human-readable schema reference
+-- and diff history alongside the other versioned SQL files.
+-- =============================================================================
+
 -- Migration v21: agentic_mode column for issue #1113.
 --
 -- Adds a canonical TEXT column `agentic_mode` to `commits` distinguishing

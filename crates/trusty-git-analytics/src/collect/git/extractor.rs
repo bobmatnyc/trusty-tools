@@ -509,16 +509,12 @@ impl GitCollector {
             let sha_str = oid.to_string();
 
             let ticketed = is_ticketed(&message);
-            // Issue #316: extract the ticket ID at insert time so
-            // `commits.ticket_id` is populated without a separate
-            // `tga backfill ticket-ids` run.
+            // Issue #316: extract ticket ID at insert time (no backfill needed).
             let ticket_id = extract_ticket_id(&message);
-            // Issue #445: detect AI co-authorship from `Co-Authored-By:` trailers.
+            // Issue #445/#1113: AI co-authorship and canonical agentic-mode.
             let ai_tool = detect_ai_tool(&message);
             let is_ai_assisted = ai_tool.is_some();
-            // Issue #1113: canonical agentic-mode classification.
             let agentic_mode = detect_agentic_mode(&message);
-
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO commits \
                  (sha, author_name, author_email, timestamp, message, repository, \
