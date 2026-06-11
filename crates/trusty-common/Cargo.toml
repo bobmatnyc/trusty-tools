@@ -168,6 +168,9 @@ optional = true
 [dev-dependencies]
 toml = "0.8"
 tempfile = { workspace = true }
+# serial_test: run env-mutating tests serially to prevent env-var races across
+# parallel test threads (e.g. supervisor_tests.rs).
+serial_test = { workspace = true }
 
 [features]
 default = []
