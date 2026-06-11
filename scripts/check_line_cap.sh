@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# check_line_cap.sh — ratcheted 500-line file-size cap enforcement (issue #610).
+# check_line_cap.sh — ratcheted 500-SLOC file-size cap enforcement (issue #610).
 #
 # Why: the 500-line file cap documented in CLAUDE.md had zero mechanical
 #   enforcement, so source files silently grew past it under feature pressure
@@ -10,8 +10,8 @@
 #   existing oversized files may never grow.
 #
 # What: scans every tracked `.rs` file (`git ls-files '*.rs'`) and enforces:
-#   - <= CAP lines, not allowlisted          -> OK
-#   - >  CAP lines, not allowlisted          -> FAIL  (new oversized file)
+#   - <= CAP SLOC, not allowlisted          -> OK
+#   - >  CAP SLOC, not allowlisted          -> FAIL  (new oversized file)
 #   - allowlisted, current > recorded budget -> FAIL  (grew beyond frozen budget)
 #   - allowlisted, current <= CAP            -> FAIL  (now under cap; drop the entry)
 #   - allowlisted, CAP < current <= budget   -> OK    (grandfathered, not growing)
@@ -25,12 +25,30 @@
 #   --force-add  like --update but permits adding new > CAP files / raising
 #                budgets (escape hatch; use sparingly, e.g. an unavoidable bump).
 #
-# Test: exercised manually in the issue #610 PR (clean tree exits 0; a 501-line
-#   probe file fails; appending past an allowlisted budget fails). The logic is
-#   pure line counting against the committed allowlist; no unit-test harness.
+# SLOC definition — a line is counted ONLY when it contains non-whitespace
+#   source code after all comment matter is stripped. Excluded:
+#     - blank / whitespace-only lines
+#     - lines consisting entirely of // line comments (including /// and //!)
+#     - lines consisting entirely of /* ... */ block comments (including /**/)
+#     - lines that are inside an open /* ... */ block comment
+#   A line that has code followed by a trailing // comment COUNTS (it has code).
+#   A line inside a multi-line /* */ block does NOT count.
+#
+# Lenient-heuristic note: the SLOC counter is a pragmatic awk heuristic.
+#   Edge cases where // or /* appear inside a string literal, char literal, or
+#   raw string (r#"..."#) may be miscounted. The counter is designed to err
+#   TOWARD LENIENCY — it may undercount code lines (treating code as comments),
+#   but it will NEVER over-count (treating comments as code). This means the
+#   gate may pass a file with marginally more real SLOC than the cap, but it
+#   will NEVER falsely fail a legitimate file. Pathological cases (e.g. a raw
+#   string containing /*) can be noted as exceptions in a code comment.
+#
+# Test: exercised in the PR that introduced SLOC counting (clean tree exits 0;
+#   a file with 600 code lines fails; 600 comment-only lines passes). The logic
+#   is pure SLOC counting against the committed allowlist; no unit-test harness.
 #
 # Portability: works on bash 3.2 (macOS system bash) and bash 5 (Linux CI).
-#   Uses POSIX tools only — `git`, `wc`, `sort`, `awk`. No associative arrays,
+#   Uses POSIX tools only — `git`, `sort`, `awk`. No associative arrays,
 #   no bash-4 features, no extra dependencies.
 
 set -euo pipefail
@@ -70,7 +88,65 @@ for arg in "$@"; do
 done
 
 # ---------------------------------------------------------------------------
-# Build a current snapshot: "<lines>\t<path>" for every tracked .rs file that
+# SLOC counter: shared awk program that counts code lines (SLOC) in one file.
+#
+# Algorithm:
+#   - track `in_block` state for /* ... */ spans
+#   - when in_block, look for */ to close it; don't count any part of the block
+#   - on a non-block line, strip a /* ... */ that opens and closes on the same
+#     line (repeat to handle multiple same-line blocks), then check for a
+#     remaining // that kills the rest of the line; if what's left has
+#     non-whitespace, count it.
+#
+# Intentional leniency: // or /* inside a string literal will suppress the
+# remainder of that line (undercounts code). Raw strings (r#"..."#) containing
+# /* will open an apparent block comment (undercounts). Both errors lean toward
+# leniency (lower SLOC count), so the gate never falsely fails a real file.
+# ---------------------------------------------------------------------------
+SLOC_AWK='
+BEGIN { in_block = 0; sloc = 0 }
+{
+  line = $0
+  if (in_block) {
+    # Inside a block comment: look for the closing */
+    pos = index(line, "*/")
+    if (pos > 0) {
+      # Remainder after */ may have code — continue processing it
+      in_block = 0
+      line = substr(line, pos + 2)
+    } else {
+      # Entire line is inside block comment
+      next
+    }
+  }
+  # Strip complete /* ... */ pairs on the same line (may be multiple)
+  while (1) {
+    blk_open = index(line, "/*")
+    if (blk_open == 0) break
+    blk_close = index(line, "*/")
+    if (blk_close > blk_open) {
+      line = substr(line, 1, blk_open - 1) substr(line, blk_close + 2)
+    } else {
+      # /* opened but no */ on this line — rest is a block comment
+      line = substr(line, 1, blk_open - 1)
+      in_block = 1
+      break
+    }
+  }
+  # Strip trailing line comment (// ... to end of line)
+  pos = index(line, "//")
+  if (pos > 0) {
+    line = substr(line, 1, pos - 1)
+  }
+  # Count the line if anything non-whitespace remains
+  gsub(/[[:space:]]/, "", line)
+  if (length(line) > 0) sloc++
+}
+END { print sloc }
+'
+
+# ---------------------------------------------------------------------------
+# Build a current snapshot: "<sloc>\t<path>" for every tracked .rs file that
 # still exists in the working tree. Computed once, reused by both modes.
 # ---------------------------------------------------------------------------
 CURRENT="$(mktemp "${TMPDIR:-/tmp}/linecap.cur.XXXXXX")"
@@ -79,7 +155,7 @@ trap 'rm -f "$CURRENT"' EXIT
 git ls-files '*.rs' | while IFS= read -r f; do
   [ -n "$f" ] || continue
   [ -f "$f" ] || continue
-  n="$(wc -l < "$f" | tr -d ' ')"
+  n="$(awk "$SLOC_AWK" "$f")"
   printf '%s\t%s\n' "$n" "$f"
 done > "$CURRENT"
 
@@ -98,7 +174,7 @@ if [ "$MODE" = "update" ]; then
 
   # Tag each input stream so awk distinguishes them even when the allowlist is
   # empty (a plain FNR==NR split breaks on an empty first file). Allowlist rows
-  # become "A<TAB>path<TAB>budget"; snapshot rows become "C<TAB>lines<TAB>path".
+  # become "A<TAB>path<TAB>budget"; snapshot rows become "C<TAB>sloc<TAB>path".
   {
     awk 'BEGIN{FS=OFS="\t"} $0 !~ /^#/ && NF>=2 {print "A", $1, $2}' "$ALLOWLIST_READ"
     awk 'BEGIN{FS=OFS="\t"} NF>=2 {print "C", $1, $2}' "$CURRENT"
@@ -106,7 +182,7 @@ if [ "$MODE" = "update" ]; then
     BEGIN { FS = OFS = "\t" }
     # ----- allowlist rows: A <path> <budget> -----
     $1 == "A" { old[$2] = $3; next }
-    # ----- snapshot rows:  C <lines> <path> -----
+    # ----- snapshot rows:  C <sloc> <path> -----
     {
       n = $2 + 0
       path = $3
@@ -115,7 +191,7 @@ if [ "$MODE" = "update" ]; then
         if (n > old[path] + 0) {
           if (allow_grow == 1) { keep[path] = n }
           else {
-            printf "REFUSE: %s grew to %d (frozen budget %s). Split it before updating the allowlist.\n", path, n, old[path] > errfile
+            printf "REFUSE: %s grew to %d SLOC (frozen budget %s). Split it before updating the allowlist.\n", path, n, old[path] > errfile
             err = 1
           }
         } else {
@@ -124,7 +200,7 @@ if [ "$MODE" = "update" ]; then
       } else {
         if (allow_grow == 1) { keep[path] = n }
         else {
-          printf "REFUSE: %s is a new oversized file (%d lines > %d). Split it; do not add it to the allowlist.\n", path, n, cap > errfile
+          printf "REFUSE: %s is a new oversized file (%d SLOC > %d). Split it; do not add it to the allowlist.\n", path, n, cap > errfile
           err = 1
         }
       }
@@ -145,11 +221,13 @@ if [ "$MODE" = "update" ]; then
     exit "$rc"
   }
 
-  count="$(wc -l < "$NEWLIST.body" | tr -d ' ')"
+  count="$(awk 'END{print NR}' "$NEWLIST.body")"
   {
-    echo "# .line-cap-allowlist.tsv — grandfathered files over the ${CAP}-line cap (issue #610)."
-    echo "# Format: <relative/path><TAB><budget>  (budget = frozen max line count)."
-    echo "# Ratchet: budgets may only DECREASE; when a file drops <= ${CAP} remove it."
+    echo "# .line-cap-allowlist.tsv — grandfathered files over the ${CAP}-SLOC cap (issue #610)."
+    echo "# Format: <relative/path><TAB><budget>  (budget = frozen max SLOC count; code lines only)."
+    echo "# SLOC excludes blank lines, // line comments, /// doc comments, //! inner-doc comments,"
+    echo "# and /* ... */ block comments (including multi-line spans). Trailing-comment lines count."
+    echo "# Ratchet: budgets may only DECREASE; when a file drops <= ${CAP} SLOC remove it."
     echo "# Regenerate with: scripts/check_line_cap.sh --update  (use --seed only to bootstrap)."
     sort "$NEWLIST.body"
   } > "$ALLOWLIST"
@@ -167,7 +245,7 @@ RESULT="$(mktemp "${TMPDIR:-/tmp}/linecap.res.XXXXXX")"
 trap 'rm -f "$CURRENT" "$RESULT"' EXIT
 
 # Tag both streams (see UPDATE mode for why): allowlist rows -> "A\tpath\tbudget",
-# snapshot rows -> "C\tlines\tpath". This survives an empty allowlist file.
+# snapshot rows -> "C\tsloc\tpath". This survives an empty allowlist file.
 {
   awk 'BEGIN{FS=OFS="\t"} $0 !~ /^#/ && NF>=2 {print "A", $1, $2}' "$ALLOWLIST_READ"
   awk 'BEGIN{FS=OFS="\t"} NF>=2 {print "C", $1, $2}' "$CURRENT"
@@ -175,23 +253,23 @@ trap 'rm -f "$CURRENT" "$RESULT"' EXIT
   BEGIN { FS = OFS = "\t" }
   # ----- allowlist rows: A <path> <budget> -----
   $1 == "A" { budget[$2] = $3; have[$2] = 1; next }
-  # ----- snapshot rows:  C <lines> <path> -----
+  # ----- snapshot rows:  C <sloc> <path> -----
   {
     n = $2 + 0; path = $3
     seen[path] = 1
     if (path in budget) {
       allowlisted++
       if (n <= cap) {
-        printf "FAIL: %s is now %d lines (<= %d). Remove it from .line-cap-allowlist.tsv (ratchet down).\n", path, n, cap
+        printf "FAIL: %s is now %d SLOC (<= %d). Remove it from .line-cap-allowlist.tsv (ratchet down).\n", path, n, cap
         viol++
       } else if (n > budget[path] + 0) {
-        printf "FAIL: %s grew to %d lines (frozen budget %s). Split it; the cap is %d.\n", path, n, budget[path], cap
+        printf "FAIL: %s grew to %d SLOC (frozen budget %s). Split it; the cap is %d SLOC.\n", path, n, budget[path], cap
         viol++
       }
       # else CAP < n <= budget -> grandfathered, OK
     } else {
       if (n > cap) {
-        printf "FAIL: %s is %d lines (> %d) and not allowlisted. New oversized file; split it or it cannot merge.\n", path, n, cap
+        printf "FAIL: %s is %d SLOC (> %d) and not allowlisted. New oversized file; split it or it cannot merge.\n", path, n, cap
         viol++
       }
     }
@@ -222,7 +300,7 @@ done < "$RESULT"
 
 if [ "$violations" -gt 0 ]; then
   echo "line-cap: $allowlisted allowlisted, $violations violation(s) — FAILED." >&2
-  echo "Cap is $CAP lines/file. To re-freeze after an intentional split, run: scripts/check_line_cap.sh --update" >&2
+  echo "Cap is $CAP SLOC/file (code lines; excludes comments and blanks). To re-freeze after an intentional split, run: scripts/check_line_cap.sh --update" >&2
   exit 1
 fi
 

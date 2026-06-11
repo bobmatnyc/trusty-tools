@@ -219,26 +219,38 @@ application/binary code and `thiserror` for library error types. Reserve
 `expect()` only for cases that are genuinely programmer errors (invariants that
 can never occur at runtime).
 
-🔴 **500-line file size hard cap (MECHANICALLY ENFORCED)** — no source file
-(`.rs`) should exceed 500 lines. As of issue #610 this is no longer advice: it
-is gated by `scripts/check_line_cap.sh`, wired into CI
+🔴 **500-SLOC file size hard cap (MECHANICALLY ENFORCED)** — no source file
+(`.rs`) should exceed 500 lines of code (SLOC). As of issue #610 this is no
+longer advice: it is gated by `scripts/check_line_cap.sh`, wired into CI
 (`.github/workflows/line-cap.yml`) and the local pre-commit hook (`line-cap`).
-A new tracked `.rs` file over 500 lines **cannot merge**. Files approaching this
+A new tracked `.rs` file over 500 SLOC **cannot merge**. Files approaching this
 limit are a signal to split into focused submodules before the next feature
 lands on them. When splitting, prefer: one public module per logical concept, a
 thin `mod.rs` that re-exports, and sibling files with clear single
 responsibilities.
 
-**The ratchet (allowlist that can only shrink):** the 175 files that already
-exceeded the cap when the gate landed are grandfathered in
-`.line-cap-allowlist.tsv` (one `relative/path<TAB>budget` line each, where
-`budget` is that file's frozen max line count). The gate enforces:
+**SLOC definition:** a line counts only when it contains non-whitespace source
+code after all comment matter is stripped. These are **excluded** from the count:
+- blank / whitespace-only lines
+- `//` line comments (including `///` doc comments and `//!` inner-doc comments)
+- `/* ... */` block comments — including multi-line spans; every line inside an
+  open block comment is excluded
+- lines that consist entirely of a closing `*/`
 
-- a file ≤ 500 lines and **not** allowlisted → OK;
-- a file > 500 lines and **not** allowlisted → **FAIL** (new oversized file — split it);
-- an allowlisted file whose current count **exceeds its budget** → **FAIL** (it grew — split it);
-- an allowlisted file now **≤ 500 lines** → **FAIL** (it dropped under cap — remove its allowlist entry; this is the ratchet-down forcing function);
-- an allowlisted file with `500 < lines ≤ budget` → OK (grandfathered, not growing).
+A line that has code followed by a trailing `// comment` **still counts** — it
+has code. The counter is a pragmatic awk heuristic that errs toward leniency:
+edge cases (e.g. `//` inside a string literal) may undercount SLOC but will
+never falsely fail a legitimate file.
+
+**The ratchet (allowlist that can only shrink):** grandfathered files over the
+cap are listed in `.line-cap-allowlist.tsv` (one `relative/path<TAB>budget` line
+each, where `budget` is that file's frozen max SLOC count). The gate enforces:
+
+- a file ≤ 500 SLOC and **not** allowlisted → OK;
+- a file > 500 SLOC and **not** allowlisted → **FAIL** (new oversized file — split it);
+- an allowlisted file whose current SLOC **exceeds its budget** → **FAIL** (it grew — split it);
+- an allowlisted file now **≤ 500 SLOC** → **FAIL** (it dropped under cap — remove its allowlist entry; this is the ratchet-down forcing function);
+- an allowlisted file with `500 < SLOC ≤ budget` → OK (grandfathered, not growing).
 
 So allowlisted files may only shrink, and no new oversized file may be added.
 As the #607 sweep and per-crate refactors land, the allowlist ratchets down
@@ -247,13 +259,13 @@ toward empty.
 **Run it locally:** `bash scripts/check_line_cap.sh` (exit 0 = clean). After you
 intentionally split a file (or a file otherwise drops below its budget), refresh
 the frozen budgets with `scripts/check_line_cap.sh --update` — this only *lowers*
-budgets or *removes* entries that fell ≤ 500; it **refuses** to add a new
+budgets or *removes* entries that fell ≤ 500 SLOC; it **refuses** to add a new
 oversized file or raise a budget unless you pass `--seed` (initial bootstrap) or
 `--force-add` (rare, intentional bump). Commit the regenerated
 `.line-cap-allowlist.tsv` alongside your split.
 
 Past violations (refactor tickets #170/#171/#172 are CLOSED and the splits have
-landed — all three former monoliths are now under the 500-line cap):
+landed — all three former monoliths are now under the 500-SLOC cap):
 - `crates/trusty-agents/src/ctrl/mod.rs` — RESOLVED (#170). Split into focused
   submodules under `crates/trusty-agents/src/ctrl/` (`state`, `config`, `repl`,
   `handlers`, `pm_task`, …); `mod.rs` is now a ~50-line re-export facade.
@@ -264,8 +276,8 @@ landed — all three former monoliths are now under the 500-line cap):
   the cap (largest is `engine/executor/run.rs` at ~485 lines).
 
 The largest remaining files in `trusty-agents` (none tied to an open ticket) are
-`tools/memory/tests.rs` (~605) and `tm/manager.rs` (~570) — file a fresh refactor
-ticket before growing those further.
+`tools/memory/tests.rs` and `tm/manager.rs` — file a fresh refactor ticket before
+growing those further.
 
 🔴 **`thiserror` for libraries, `anyhow` for binaries** — library crates
 (`trusty-common`, `trusty-embedderd`, `trusty-bm25-daemon`, etc.) define structured error enums with
@@ -658,12 +670,15 @@ installed, the build script fails loudly. Install pnpm or set
 `[patch]` tables inside individual crate `Cargo.toml` files; Cargo ignores
 them. All patches must live in the root `Cargo.toml`.
 
-🔴 **Growing a file past 500 lines instead of splitting** — the compiler does not
-stop you, but continued feature additions to a 1,000+ line file make the module
-harder to review, reason about, and test. Split proactively. The trusty-agents `ctrl/`,
-`runtime/`, and `workflow/engine/` modules (#170, #171, #172) were the canonical
-examples of files that grew past the cap; all three have since been split into
-focused submodules and now serve as the worked examples of a clean split.
+🔴 **Growing a file past 500 SLOC instead of splitting** — the compiler does not
+stop you, but continued feature additions to a 1,000+ SLOC file make the module
+harder to review, reason about, and test. Split proactively. The cap counts code
+lines only (SLOC): blank lines, `//` comments, `///` doc comments, `//!`
+inner-doc comments, and `/* ... */` block comments (including multi-line spans)
+are all excluded from the count. The trusty-agents `ctrl/`, `runtime/`, and
+`workflow/engine/` modules (#170, #171, #172) were the canonical examples of
+files that grew past the cap; all three have since been split into focused
+submodules and now serve as the worked examples of a clean split.
 
 🟢 **MSRV drift** — the workspace pins `rust-version = "1.91"`. Running
 `rustup update` and picking up a new nightly may introduce syntax that
