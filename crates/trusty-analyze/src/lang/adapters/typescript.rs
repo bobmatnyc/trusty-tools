@@ -390,7 +390,7 @@ fn emit_class_heritage(
                 graph.edges.push(KgEdge {
                     from: class_id.to_string(),
                     to: to_id,
-                    kind: edge_kind,
+                    kind: edge_kind.clone(),
                     weight: 1.0,
                 });
             }

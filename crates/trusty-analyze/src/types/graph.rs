@@ -190,10 +190,10 @@ impl KgGraph {
         let mut seen_edges: HashSet<(String, String, KgEdgeKind)> = self
             .edges
             .iter()
-            .map(|e| (e.from.clone(), e.to.clone(), e.kind))
+            .map(|e| (e.from.clone(), e.to.clone(), e.kind.clone()))
             .collect();
         for e in other.edges {
-            let k = (e.from.clone(), e.to.clone(), e.kind);
+            let k = (e.from.clone(), e.to.clone(), e.kind.clone());
             if seen_edges.insert(k) {
                 self.edges.push(e);
             }

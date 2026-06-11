@@ -52,7 +52,7 @@ crates/trusty-common/src/monitor/memory_tui.rs	4054
 crates/trusty-common/src/monitor/search_client.rs	749
 crates/trusty-common/src/monitor/search_tui.rs	2308
 crates/trusty-common/src/monitor/tui_common.rs	616
-crates/trusty-common/src/symgraph/graph.rs	576
+crates/trusty-common/src/symgraph/graph.rs	563
 crates/trusty-common/src/tickets/api/backends/github.rs	792
 crates/trusty-common/src/tickets/api/backends/jira.rs	827
 crates/trusty-common/src/tickets/api/backends/linear.rs	760
@@ -151,7 +151,6 @@ crates/trusty-search/src/core/registry.rs	752
 crates/trusty-search/src/core/repo_config.rs	595
 crates/trusty-search/src/core/search/hierarchy.rs	658
 crates/trusty-search/src/core/store.rs	1275
-crates/trusty-search/src/core/symbol_graph.rs	1756
 crates/trusty-search/src/main.rs	1360
 crates/trusty-search/src/mcp/tools.rs	2187
 crates/trusty-search/src/service/call_chain.rs	954

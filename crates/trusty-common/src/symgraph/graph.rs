@@ -141,7 +141,7 @@ impl SymbolGraph {
                 SymbolEdge {
                     from,
                     to,
-                    kind: *er.weight(),
+                    kind: er.weight().clone(),
                 }
             })
             .collect()
