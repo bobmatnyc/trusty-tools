@@ -387,3 +387,69 @@ fn worker_thread_count_at_least_16() {
     // rt is intentionally dropped immediately — we only needed to verify it builds.
     drop(rt);
 }
+
+// ── issue #1097 / #1090 atomicity: IndexRegistry::remove_and_get ──────────
+
+/// `IndexRegistry::remove_and_get` returns the `Arc<IndexHandle>` and `true`
+/// in one atomic DashMap operation, and the entry is gone afterward.
+///
+/// Why: the DELETE handler needs root_path for roots.toml cleanup AND must
+/// unregister the handle in one step to avoid a TOCTOU race with concurrent
+/// PATCH. This test is the unit proof that `remove_and_get` satisfies both
+/// requirements simultaneously.
+///
+/// What: registers a bare handle, calls `remove_and_get`, asserts the
+/// returned handle carries the expected `root_path`, and verifies that a
+/// subsequent `get` returns `None`.
+///
+/// Test: this test (issue #1097 atomicity fix).
+#[test]
+fn registry_remove_and_get_returns_handle_atomically() {
+    use crate::core::{
+        indexer::CodeIndexer,
+        registry::{IndexHandle, IndexId, IndexRegistry},
+    };
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    let registry = IndexRegistry::new();
+    let id = IndexId::new("atomic-test");
+    let root = PathBuf::from("/projects/atomic-test");
+    registry.register(IndexHandle::bare(
+        id.clone(),
+        Arc::new(RwLock::new(CodeIndexer::new("atomic-test", &root))),
+        root.clone(),
+    ));
+
+    let (removed, handle_opt) = registry.remove_and_get(&id);
+    assert!(removed, "remove_and_get must report the entry existed");
+    let h = handle_opt.expect("remove_and_get must return the handle when entry exists");
+    assert_eq!(
+        h.root_path, root,
+        "returned handle must carry the correct root_path"
+    );
+    // After removal the entry must be gone.
+    assert!(
+        registry.get(&id).is_none(),
+        "registry must not contain the entry after remove_and_get"
+    );
+}
+
+/// `IndexRegistry::remove_and_get` on an unknown id returns `(false, None)`
+/// without panicking.
+///
+/// Why: DELETE of a non-registered id must degrade gracefully.
+/// Test: this test.
+#[test]
+fn registry_remove_and_get_returns_none_for_missing_id() {
+    use crate::core::registry::{IndexId, IndexRegistry};
+
+    let registry = IndexRegistry::new();
+    let (removed, got) = registry.remove_and_get(&IndexId::new("ghost-index"));
+    assert!(!removed, "remove_and_get must return false for unknown id");
+    assert!(
+        got.is_none(),
+        "remove_and_get must return None for unknown id"
+    );
+}

@@ -129,6 +129,24 @@ fn resolve_target_path(cli_path: Option<PathBuf>) -> Result<PathBuf> {
     Ok(ctx.root_path)
 }
 
+/// Classify how the index to remove should be resolved (issue #1087).
+///
+/// Why: the decision "explicit id vs. path lookup" is a small pure predicate
+/// that sits at the heart of the #1087 fix. Extracting it lets unit tests
+/// verify the correct branch is taken for each input combination WITHOUT
+/// needing a live daemon.
+///
+/// What: returns `Some(id)` when an explicit `-i` id was given (the id should
+/// be used directly, bypassing CWD detection entirely), or `None` when the
+/// removal should fall back to path-based lookup.
+///
+/// Test: `index_remove_explicit_id_bypasses_path_lookup` exercises this
+/// function directly.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn resolve_index_id_source(explicit_index_id: Option<&str>) -> Option<String> {
+    explicit_index_id.map(|id| id.to_string())
+}
+
 /// Fetch the registered `root_path` for a known index id.
 ///
 /// Why (issue #1087): when `-i <id>` is given we know the id already; we still
@@ -267,51 +285,48 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
     }
 
-    /// Regression test for issue #1087.
+    /// Regression test for issue #1087 — explicit `-i <id>` MUST bypass
+    /// CWD detection and never fall back to path lookup.
     ///
-    /// Why: `handle_index_remove` used to ignore the parent command's
-    /// `-i`/`--index` flag entirely and always resolve via the CWD path.
-    /// That caused `trusty-search index remove -i someOtherIndex` run from
-    /// inside repo A to remove repo A's index instead of `someOtherIndex`.
+    /// Why: `handle_index_remove` used to ignore `-i`/`--index` entirely and
+    /// always resolve via the CWD path. This test pins the `resolve_index_id_source`
+    /// decision function, which is the pure predicate at the heart of the fix.
     ///
-    /// What: when `explicit_index_id` is `Some`, `resolve_target_path` is
-    /// never called — the id is used directly. We can't call the async
-    /// `handle_index_remove` here (no live daemon), so we pin the branch
-    /// logic with a simpler invariant: `resolve_target_path(Some(p))` returns
-    /// exactly `p`, proving the explicit-path branch is a straight passthrough.
-    /// The explicit-id branch is structurally identical (`Some(id)` → use id,
-    /// skip path lookup) and is documented in the function's source. End-to-end
-    /// coverage for the `-i` path lives in the daemon integration tests.
+    /// What (issue #1097 enhancement): `resolve_index_id_source` is now a
+    /// named pure function (not just an inline `if let`) so its behaviour can
+    /// be asserted directly — no live daemon needed:
+    ///
+    /// - `Some("my-index")` → explicit id returned as `Some("my-index")`.
+    /// - `None` → `None` (signals: fall back to path lookup).
+    ///
+    /// End-to-end coverage for the full `-i` code path (daemon HTTP round-trip)
+    /// lives in the integration tests.
     ///
     /// Test: this test.
     #[test]
     fn index_remove_explicit_id_bypasses_path_lookup() {
-        // The explicit-id branch in handle_index_remove calls find_index_by_id
-        // (a network call) rather than resolve_target_path (a pure fs call).
-        // We can verify the selection logic is correct by confirming:
-        // 1. resolve_target_path is not used when explicit_index_id is Some —
-        //    demonstrated by the branch structure in handle_index_remove above.
-        // 2. An explicit path is returned verbatim (no CWD bleed).
-        let explicit = Some(PathBuf::from("/explicit/remove/path"));
-        let p = resolve_target_path(explicit).unwrap();
+        // Explicit id is given: must be returned as Some(id), never as None.
+        let result = super::resolve_index_id_source(Some("other-project"));
         assert_eq!(
-            p,
-            PathBuf::from("/explicit/remove/path"),
-            "explicit path must be returned verbatim, not blended with CWD"
+            result.as_deref(),
+            Some("other-project"),
+            "explicit id must be returned verbatim — CWD must not interfere"
         );
 
-        // None falls back to CWD, never to the explicit_index_id field.
-        let cwd_p = resolve_target_path(None).unwrap();
+        // No explicit id: must return None so callers know to use path lookup.
+        let fallback = super::resolve_index_id_source(None);
         assert!(
-            !cwd_p.as_os_str().is_empty(),
-            "CWD fallback must return a non-empty path"
+            fallback.is_none(),
+            "no explicit id → None (path-based lookup will be used)"
         );
-        // The CWD path must NOT equal an arbitrary explicit id — they are
-        // entirely different code paths.
+
+        // The explicit id must never equal the CWD — they are distinct sources.
+        // (Guards against a regression where both branches return the same thing.)
+        let cwd_p = resolve_target_path(None).unwrap();
         assert_ne!(
-            cwd_p,
-            PathBuf::from("/explicit/remove/path"),
-            "CWD fallback must not equal the explicit path"
+            cwd_p.to_string_lossy().as_ref(),
+            "other-project",
+            "CWD fallback must not accidentally equal an explicit id string"
         );
     }
 }

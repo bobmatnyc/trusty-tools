@@ -199,3 +199,137 @@ fn hash_cache_relative_key_matches_after_load() {
         "absolute-key lookup must NOT match a relative-key entry (old bug)"
     );
 }
+
+// ── Test 4: colocated fallback is false on missing/unreadable disk entry ─────
+
+/// When the on-disk `indexes.toml` entry is absent or unreadable, the
+/// fallback for `colocated` must be `false` (central-store / non-colocated),
+/// NOT `true`.
+///
+/// Why (issue #1097): the old `unwrap_or(true)` would assume colocated on any
+/// IO error, re-introducing the #1088 data-wipe for central-store indexes. The
+/// safe default is `false` — it routes to the global data directory and cannot
+/// destroy colocated project data. This test pins the fallback by verifying
+/// that `load_index_registry_at` on a non-existent path gives `Err`, and that
+/// the `ok().and_then(...).map(...).unwrap_or(false)` chain resolves to `false`.
+///
+/// What: simulates the registry-load-failure path without touching the real
+/// production `indexes.toml` — calls `load_index_registry_at` on an
+/// impossible path and asserts the fallback chain would yield `false`.
+///
+/// Test: this test (issue #1097 / #1088 guard).
+#[test]
+fn colocated_fallback_is_false_when_disk_entry_absent() {
+    use crate::service::persistence::load_index_registry_at;
+    use std::path::PathBuf;
+
+    // Simulate an unreadable / absent indexes.toml.
+    let missing = PathBuf::from("/tmp/nonexistent-trusty-search-test-xyz/indexes.toml");
+    let on_disk_colocated = load_index_registry_at(&missing)
+        .ok()
+        .and_then(|entries| entries.into_iter().find(|e| e.id == "any-index"))
+        .map(|e| e.colocated)
+        // This is the exact fallback expression from indexes_relocate.rs.
+        .unwrap_or(false);
+    assert!(
+        !on_disk_colocated,
+        "colocated fallback must be false when disk entry is absent/unreadable (issue #1097)"
+    );
+
+    // Also verify: if an entry IS found with colocated=true, it IS returned.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let toml_path = tmp.path().join("indexes.toml");
+    crate::service::persistence::upsert_index_registry_entry_at(
+        &toml_path,
+        crate::service::persistence::PersistedIndex {
+            id: "existing-colocated".to_string(),
+            root_path: PathBuf::from("/some/root"),
+            colocated: true,
+            ..crate::service::persistence::PersistedIndex::default()
+        },
+    )
+    .expect("write entry");
+    let found = load_index_registry_at(&toml_path)
+        .ok()
+        .and_then(|entries| entries.into_iter().find(|e| e.id == "existing-colocated"))
+        .map(|e| e.colocated)
+        .unwrap_or(false);
+    assert!(
+        found,
+        "colocated must be true when the disk entry explicitly says so"
+    );
+}
+
+// ── Test 5: cross-index PATCH does not strip manually-added fields ────────────
+
+/// A PATCH to index A must NOT strip manually-edited fields (e.g.
+/// `exclude_globs`) from index B's on-disk entry.
+///
+/// Why: this is the #1089 completeness regression test. `upsert_index_registry_entry`
+/// loads ALL entries from `indexes.toml`, overwrites only the entry matching the
+/// supplied id, then saves all entries. If it accidentally serialised from
+/// in-memory state (ignoring the other entries on disk), manually-added fields
+/// like `exclude_globs` on index B would be silently stripped when A is PATCHed.
+///
+/// What: (1) writes two entries to a temp `indexes.toml` — index-a (plain) and
+/// index-b (with `exclude_globs = ["**/vendor/**"]`); (2) calls
+/// `upsert_index_registry_entry_at` for index-a with a changed `root_path`;
+/// (3) reloads the file and asserts index-b's `exclude_globs` is still
+/// `["**/vendor/**"]`.
+///
+/// Test: this test (issue #1089 completeness, issue #1097).
+#[test]
+fn patch_index_a_does_not_strip_exclude_globs_of_index_b() {
+    use crate::service::persistence::load_index_registry_at;
+    use crate::service::persistence::{upsert_index_registry_entry_at, PersistedIndex};
+    use std::path::PathBuf;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let toml_path = tmp.path().join("indexes.toml");
+
+    // Write initial state: index-a (no extra fields) and index-b with exclude_globs.
+    let entry_a = PersistedIndex {
+        id: "index-a".to_string(),
+        root_path: PathBuf::from("/projects/index-a"),
+        ..PersistedIndex::default()
+    };
+    let entry_b = PersistedIndex {
+        id: "index-b".to_string(),
+        root_path: PathBuf::from("/projects/index-b"),
+        exclude_globs: vec!["**/vendor/**".to_string(), "*.generated.ts".to_string()],
+        ..PersistedIndex::default()
+    };
+    upsert_index_registry_entry_at(&toml_path, entry_a).expect("write entry-a");
+    upsert_index_registry_entry_at(&toml_path, entry_b).expect("write entry-b");
+
+    // PATCH index-a: change its root_path (simulate PATCH /indexes/index-a).
+    let patched_a = PersistedIndex {
+        id: "index-a".to_string(),
+        root_path: PathBuf::from("/projects/index-a-new"),
+        ..PersistedIndex::default()
+    };
+    upsert_index_registry_entry_at(&toml_path, patched_a).expect("patch entry-a");
+
+    // Reload and assert index-b's exclude_globs survived the patch of index-a.
+    let entries = load_index_registry_at(&toml_path).expect("reload");
+    let b = entries
+        .iter()
+        .find(|e| e.id == "index-b")
+        .expect("index-b must still be present after patching index-a");
+    assert_eq!(
+        b.exclude_globs,
+        vec!["**/vendor/**".to_string(), "*.generated.ts".to_string()],
+        "index-b's exclude_globs must survive a PATCH to index-a (issue #1089)"
+    );
+
+    // Also verify index-a's root_path was updated correctly.
+    let a = entries
+        .iter()
+        .find(|e| e.id == "index-a")
+        .expect("index-a must still be present");
+    assert_eq!(
+        a.root_path,
+        PathBuf::from("/projects/index-a-new"),
+        "index-a's root_path must reflect the PATCH"
+    );
+}

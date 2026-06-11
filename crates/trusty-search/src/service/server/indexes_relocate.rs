@@ -127,13 +127,20 @@ pub(super) async fn relocate_index_handler(
     // Precedence: disk entry wins for `colocated` (the user's manual edit must
     // be honoured). All other fields come from the in-memory handle (which may
     // have been updated by a previous PATCH or a live reindex).
+    //
+    // Issue #1097: fall back to `false` (central-store / non-colocated) when
+    // the disk entry is missing or unreadable. `false` is the safe choice:
+    // a central-store index stays in the global data dir — no data wipe risk.
+    // The old `unwrap_or(true)` would assume colocated=true on a transient IO
+    // error, re-introducing the #1088 wipe for central-store indexes.
     let on_disk_colocated = crate::service::persistence::load_index_registry()
         .ok()
         .and_then(|entries| entries.into_iter().find(|e| e.id == id))
         .map(|e| e.colocated)
-        // Fall back to the in-memory handle's colocated status if the disk
-        // entry is missing (e.g. first-time persist after daemon start).
-        .unwrap_or(true);
+        // Fall back to false (non-colocated / central-store) on IO error or
+        // missing entry. This is safe: it keeps the index routed to the global
+        // data directory rather than the project tree, avoiding any data wipe.
+        .unwrap_or(false);
 
     // Build a PersistedIndex from the existing handle's metadata, substituting
     // the new root path. We preserve all other settings (filters, extensions,

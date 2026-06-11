@@ -148,7 +148,7 @@ crates/trusty-search/src/core/indexer/search.rs	1109
 crates/trusty-search/src/core/indexer/tests.rs	3426
 crates/trusty-search/src/core/memory_policy.rs	1264
 crates/trusty-search/src/core/migration/mod.rs	649
-crates/trusty-search/src/core/registry.rs	732
+crates/trusty-search/src/core/registry.rs	753
 crates/trusty-search/src/core/repo_config.rs	595
 crates/trusty-search/src/core/search/hierarchy.rs	658
 crates/trusty-search/src/core/store.rs	1275

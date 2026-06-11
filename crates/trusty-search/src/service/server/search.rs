@@ -28,11 +28,11 @@ pub(super) async fn delete_index_handler(
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
     let index_id = IndexId::new(id.clone());
-    // Capture the root_path BEFORE unregistering so we can clean up roots.toml.
-    // Issue #1090: roots.toml must be updated on delete so warm-boot does not
-    // rediscover the `.trusty-search/` directory and resurrect the pruned index.
-    let root_path_for_cleanup = state.registry.get(&index_id).map(|h| h.root_path.clone());
-    let removed = state.registry.unregister(&index_id);
+    // Issue #1090 / #1097 atomicity: capture root_path and unregister in a
+    // single DashMap `remove` so a concurrent PATCH cannot make the captured
+    // root_path stale before the roots.toml cleanup below.
+    let (removed, removed_handle) = state.registry.remove_and_get(&index_id);
+    let root_path_for_cleanup = removed_handle.map(|h| h.root_path.clone());
     state.reindex_progress.remove(&index_id);
     if removed {
         // Issue #85: drop the on-disk footprint so the index doesn't come
