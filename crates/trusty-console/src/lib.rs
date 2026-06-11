@@ -20,6 +20,7 @@ use trusty_common::{init_tracing, shutdown_signal, write_daemon_addr};
 
 pub mod connector;
 pub mod detect;
+pub mod metrics;
 pub mod poller;
 pub mod proxy;
 pub mod server;

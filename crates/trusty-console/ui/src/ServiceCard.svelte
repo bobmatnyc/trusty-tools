@@ -1,6 +1,9 @@
 <script>
-  /** @type {{ service: { id: string, display_name: string, status: string, version?: string, url?: string } }} */
-  let { service } = $props();
+  /**
+   * @typedef {{ id: string, display_name: string, status: string, version?: string, url?: string }} Service
+   * @type {{ service: Service, onViewDetails?: (id: string) => void }}
+   */
+  let { service, onViewDetails } = $props();
 
   const STATUS_LABELS = {
     running: 'Running',
@@ -14,27 +17,21 @@
     absent: '#64748b',
   };
 
-  // Short daemon keys used by the proxy routes (/proxy/{key}/).
-  const DAEMON_KEYS = {
-    'trusty-search': 'search',
-    'trusty-memory': 'memory',
-    'trusty-analyze': 'analyze',
-    'trusty-review': 'review',
-  };
+  // Known services that have a details tab in the console.
+  const TABBED_SERVICES = new Set([
+    'trusty-search',
+    'trusty-memory',
+    'trusty-analyze',
+    'trusty-review',
+  ]);
 
   let statusLabel = $derived(STATUS_LABELS[service.status] ?? service.status);
   let statusColor = $derived(STATUS_COLORS[service.status] ?? '#94a3b8');
+  let hasTab = $derived(TABBED_SERVICES.has(service.id));
 
-  /**
-   * Proxy base path for this daemon, available only when it is running and
-   * has a known daemon key.  The console SPA opens the daemon UI through the
-   * proxy so operators never need to remember per-daemon ports.
-   */
-  let proxyPath = $derived(
-    service.status === 'running' && DAEMON_KEYS[service.id]
-      ? `/proxy/${DAEMON_KEYS[service.id]}/`
-      : null
-  );
+  function handleViewDetails() {
+    onViewDetails?.(service.id);
+  }
 </script>
 
 <div class="card">
@@ -51,21 +48,15 @@
     {#if service.version}
       <p class="version">Version: <code>{service.version}</code></p>
     {/if}
-    {#if proxyPath}
-      <p class="proxy-link">
-        <a href="{proxyPath}" target="_blank" rel="noopener noreferrer">
-          Open UI via console proxy →
-        </a>
-      </p>
-    {:else if service.url}
-      <p class="url">
-        <a href="{service.url}" target="_blank" rel="noopener noreferrer">{service.url}</a>
-      </p>
-    {/if}
     {#if service.status === 'absent'}
       <p class="hint">Install with <code>cargo install {service.id}</code></p>
     {:else if service.status === 'available'}
       <p class="hint">Binary found but daemon is not running.</p>
+    {/if}
+    {#if hasTab && onViewDetails}
+      <button class="details-btn" onclick={handleViewDetails}>
+        View details →
+      </button>
     {/if}
   </div>
 </div>
@@ -123,18 +114,23 @@
     border-radius: 0.25rem;
     color: #e2e8f0;
   }
-  a {
-    color: #7c3aed;
-    text-decoration: none;
-  }
-  a:hover {
-    text-decoration: underline;
-  }
   .hint {
     font-style: italic;
   }
-  .proxy-link a {
-    color: #2563eb;
+  .details-btn {
+    margin-top: 0.75rem;
+    background: none;
+    border: 1px solid #3d4568;
+    border-radius: 0.4rem;
+    color: #7c3aed;
+    cursor: pointer;
+    font-size: 0.8rem;
     font-weight: 500;
+    padding: 0.3rem 0.75rem;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .details-btn:hover {
+    background: #7c3aed18;
+    border-color: #7c3aed;
   }
 </style>

@@ -6,6 +6,7 @@
 //! What: Builds an axum `Router` with:
 //!   - `GET /health` — liveness probe.
 //!   - `GET /api/console/services` — return cached snapshot (background poll).
+//!   - `GET /api/console/metrics/analyze` — live analyze metrics (see `metrics`).
 //!   - `ANY /proxy/{daemon}/{*path}` — reverse-proxy to live daemon.
 //!   - `GET /` and `GET /ui/*path` — serve the embedded Svelte SPA.
 //!
@@ -30,6 +31,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::connector::ServiceConnector;
+use crate::metrics::metrics_analyze_handler;
 use crate::poller::PollerCache;
 
 // ─── embedded UI ─────────────────────────────────────────────────────────────
@@ -122,6 +124,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/api/console/services", get(services_handler))
+        .route("/api/console/metrics/analyze", get(metrics_analyze_handler))
         // Reverse-proxy: /proxy/{daemon}/{*path}
         .route("/proxy/{daemon}/{*path}", any(crate::proxy::proxy_handler))
         .route("/", get(spa_index_handler))
@@ -451,5 +454,27 @@ mod tests {
             .expect("request");
         let resp = router.oneshot(req).await.expect("response");
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Why: when trusty-analyze is absent (no URL in the service snapshot), the
+    /// metrics endpoint must return 200 with `{"reachable":false}` so the UI
+    /// can render an appropriate absent state rather than an error page.
+    /// What: builds the router with stub connectors (none have a URL for
+    /// trusty-analyze), issues GET /api/console/metrics/analyze, parses the body.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn test_metrics_analyze_absent() {
+        let router = build_router(make_test_state());
+
+        let req = Request::builder()
+            .uri("/api/console/metrics/analyze")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = get_bytes(resp).await;
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
+        assert_eq!(body["reachable"], false);
     }
 }
