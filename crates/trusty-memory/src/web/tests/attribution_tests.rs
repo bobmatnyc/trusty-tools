@@ -90,7 +90,6 @@ async fn hook_fired_activity_emit_smoke() {
 async fn drawer_creator_attribution_http_default() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
     let state = AppState::new(root);
     let palace = trusty_common::memory_core::Palace {
         id: PalaceId::new("cred-default"),
@@ -173,7 +172,6 @@ async fn drawer_creator_attribution_http_default() {
 async fn drawer_creator_attribution_http_header() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
-    std::mem::forget(tmp);
     let state = AppState::new(root);
     let palace = trusty_common::memory_core::Palace {
         id: PalaceId::new("cred-header"),
