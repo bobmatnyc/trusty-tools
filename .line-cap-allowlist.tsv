@@ -141,7 +141,6 @@ crates/trusty-search/src/commands/start.rs	1889
 crates/trusty-search/src/core/chunker/mod.rs	1883
 crates/trusty-search/src/core/classifier.rs	1032
 crates/trusty-search/src/core/corpus.rs	1685
-crates/trusty-search/src/core/indexer/mod.rs	656
 crates/trusty-search/src/core/indexer/tests.rs	3426
 crates/trusty-search/src/core/memory_policy.rs	1264
 crates/trusty-search/src/core/migration/mod.rs	649
