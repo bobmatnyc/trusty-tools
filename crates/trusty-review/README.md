@@ -36,6 +36,24 @@ cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-review --lo
 
 This builds and installs the `trusty-review` binary from the latest `main` branch.
 
+### With Homebrew (recommended)
+
+```bash
+brew tap bobmatnyc/trusty
+brew install trusty-review
+```
+
+Or install directly without tapping:
+
+```bash
+brew install bobmatnyc/trusty/trusty-review
+```
+
+Homebrew provides:
+- Automatic updates via `brew upgrade trusty-review`
+- Standard macOS / Linux PATH integration
+- Easy dependency management
+
 ### Prerequisites
 
 > **Required:** A GitHub token (`GITHUB_TOKEN`) or GitHub App credentials for PR
