@@ -31,7 +31,7 @@ crates/trusty-common/src/claude_config.rs	526
 crates/trusty-common/src/embedder_client/supervisor.rs	624
 crates/trusty-common/src/embedder/mod.rs	1333
 crates/trusty-common/src/help.rs	690
-crates/trusty-common/src/lib.rs	1467
+crates/trusty-common/src/lib.rs	1473
 crates/trusty-common/src/memory_core/analytics.rs	860
 crates/trusty-common/src/memory_core/dream.rs	1820
 crates/trusty-common/src/memory_core/git.rs	568

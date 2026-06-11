@@ -11,8 +11,10 @@
 //! Test: `cargo test -p trusty-common --features embedder-client,embedder-bundled-ort`
 
 use super::*;
+use serial_test::serial;
 
 #[test]
+#[serial]
 fn from_env_uses_defaults_when_no_vars_set() {
     // Why: validate that unset env vars produce the documented defaults.
     // What: construct from env (no vars set in test process by default)
@@ -52,6 +54,7 @@ fn from_env_uses_defaults_when_no_vars_set() {
 }
 
 #[test]
+#[serial]
 fn parse_env_uses_override() {
     // Why: verify that a valid env-var value overrides the default.
     // What: set the var to "99", call `from_env`, check the field.
@@ -197,6 +200,7 @@ fn sidecar_batch_size_coreml_takes_priority_over_cuda() {
 }
 
 #[test]
+#[serial]
 fn locate_binary_respects_explicit_override() {
     // Why: `TRUSTY_EMBEDDERD_BIN` must take priority over all discovery.
     // What: set `TRUSTY_EMBEDDERD_BIN` to a non-existent path — the

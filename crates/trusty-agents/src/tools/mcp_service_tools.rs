@@ -70,7 +70,8 @@ impl ServiceClient {
         self.cell
             .get_or_try_init(|| async {
                 let arg_refs: Vec<&str> = self.args.iter().map(String::as_str).collect();
-                let mut client = StdioMcpClient::spawn(&self.command, &arg_refs).await?;
+                let mut client =
+                    StdioMcpClient::spawn(&self.command, &arg_refs, "trusty-agents").await?;
                 client.initialize().await?;
                 tracing::debug!(service = %self.name, "MCP service client spawned");
                 Ok::<_, anyhow::Error>(Arc::new(Mutex::new(client)))
