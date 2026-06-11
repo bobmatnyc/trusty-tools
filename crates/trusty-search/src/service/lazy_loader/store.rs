@@ -148,7 +148,17 @@ impl ColdIndexStore {
         self.entries.len()
     }
 
-    /// True when no cold entries remain (all have been lazily loaded or failed).
+    /// True when no entries remain PENDING their first load.
+    ///
+    /// Why: cheap O(1) check used by callers that want to know whether the cold
+    /// store has been drained of pending entries.
+    /// What: checks only `entries` (pending). Does NOT account for permanently-
+    /// failed entries — those are absent from `entries` and already counted
+    /// separately by `failed_len()`. In other words, `is_empty()` returning
+    /// `true` does NOT imply `failed_len() == 0`; it only means every registered
+    /// cold entry has either been successfully loaded (via `mark_loaded`) or
+    /// permanently failed (via `mark_failed`).
+    /// Test: `cold_store_register_and_contains` and `cold_store_mark_failed_*`.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

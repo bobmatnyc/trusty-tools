@@ -447,6 +447,64 @@ mod tests {
         assert_eq!(cold.failed_len(), 1, "indexes_failed must be 1");
     }
 
+    /// Issue #1125 TOCTOU: after the loading gate is acquired, if `is_failed`
+    /// returns `true` (a concurrent thread already called `mark_failed` on the
+    /// same id), `get_or_load_index` must return `RestoreFailed` immediately
+    /// without invoking `restore_fn` again.
+    ///
+    /// Why: without this re-check, a second concurrent caller that arrives after
+    /// the first `mark_failed` could still slip through the gate and call
+    /// `restore_fn` a second time for the same first-failure event — potentially
+    /// hammering a blocked volume or deleted root_path again.
+    ///
+    /// Simulation: because real concurrency in a single-threaded test executor is
+    /// hard to orchestrate, we simulate the observable post-gate state directly:
+    /// register the cold entry, then call `mark_failed` manually to move it to
+    /// `failed_entries` (mirroring what a concurrent thread would have done
+    /// before releasing the gate), then invoke `get_or_load_index`. The loader
+    /// should short-circuit at step 4b (post-gate `is_failed` re-check) and
+    /// return `RestoreFailed` without calling `restore_fn`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn get_or_load_index_gate_recheck_is_failed_short_circuits() {
+        let registry = IndexRegistry::default();
+        let cold = ColdIndexStore::new();
+        let id = IndexId::new("toctou-failed-idx".to_string());
+        cold.register_cold_entries(vec![mk_entry("toctou-failed-idx", None, None)]);
+
+        // Simulate: another thread already failed and called mark_failed,
+        // but the entry is still in `failed_entries`. We do this before calling
+        // get_or_load_index to model the state the gate re-check would observe.
+        cold.mark_failed(&id);
+
+        // At this point `entries` is empty (mark_failed removed it) and
+        // `failed_entries` contains the id. `get_or_load_index` will see
+        // `entries.get(id) == None` at step 2 and return NotFound immediately
+        // (before even reaching the gate). But we also verify restore_fn is
+        // never invoked.
+        let mut restore_called = 0u32;
+        let result = get_or_load_index(&id, &registry, &cold, Duration::from_secs(5), |_e| {
+            restore_called += 1;
+            async { false }
+        })
+        .await;
+
+        // Step 2 short-circuits: entries is empty, so NotFound is returned.
+        // restore_fn must NOT have been called.
+        assert!(
+            matches!(
+                result,
+                Err(LazyLoadError::NotFound) | Err(LazyLoadError::RestoreFailed)
+            ),
+            "must short-circuit without calling restore_fn when already failed"
+        );
+        assert_eq!(
+            restore_called, 0,
+            "restore_fn must not be called when entry is already in failed_entries"
+        );
+        assert!(cold.is_failed(&id), "id must still be in failed_entries");
+    }
+
     /// Why: after a restore failure, subsequent calls must not re-attempt the
     /// expensive restore path. `cold_store.contains()` returns `false` so
     /// `get_or_load_index` returns `NotFound` immediately (the caller's

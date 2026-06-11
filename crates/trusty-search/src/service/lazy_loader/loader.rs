@@ -34,8 +34,11 @@ use super::store::ColdIndexStore;
 /// `registry.get(id)`; (2) cold check — `NotFound` if absent from both stores;
 /// (3) acquire per-index loading gate; if gate returns `None` (concurrent
 /// `mark_loaded` raced us), re-check hot registry and return it or `NotFound`;
-/// (4) re-check hot registry after gate acquired; (5) load via
-/// `restore_fn(entry)` inside `tokio::time::timeout`; (6) `mark_loaded(id)`;
+/// (4a) re-check hot registry after gate acquired; (4b) re-check `is_failed`
+/// after gate acquired — if a concurrent thread just called `mark_failed(id)`,
+/// short-circuit with `RestoreFailed` instead of calling `restore_fn` a second
+/// time for the same first-failure event (TOCTOU fix, issue #1125); (5) load
+/// via `restore_fn(entry)` inside `tokio::time::timeout`; (6) `mark_loaded(id)`;
 /// (7) return `Err(LazyLoadError::Loading)` on timeout for `503 index_loading`.
 ///
 /// Issue #1106: when `restore_fn` returns `false` (blocked volume, missing
@@ -54,7 +57,8 @@ use super::store::ColdIndexStore;
 /// Test: `get_or_load_index_hot_path`, `get_or_load_index_loads_cold_index`,
 /// `get_or_load_index_returns_loading_on_timeout`,
 /// `get_or_load_index_gate_none_but_index_just_became_hot`,
-/// `get_or_load_index_restore_false_marks_failed`.
+/// `get_or_load_index_restore_false_marks_failed`,
+/// `get_or_load_index_gate_recheck_is_failed_short_circuits`.
 pub async fn get_or_load_index<F, Fut>(
     id: &IndexId,
     registry: &IndexRegistry,
@@ -94,9 +98,23 @@ where
     };
     let _guard = gate.lock().await;
 
-    // 4. Re-check hot registry after acquiring the gate.
+    // 4a. Re-check hot registry after acquiring the gate.
     if let Some(handle) = registry.get(id) {
         return Ok(handle);
+    }
+
+    // 4b. Re-check failed set after acquiring the gate.
+    //
+    // TOCTOU fix (issue #1125): between step 2 (cold-store lookup) and here,
+    // a concurrent thread may have been inside `restore_fn`, had it return
+    // `false`, and called `mark_failed(id)`. That thread now holds the gate
+    // before us (step 3 serializes them), and by the time we acquire it the
+    // entry has already been moved to `failed_entries`. Without this re-check
+    // we would call `restore_fn` a second time for the same first-failure
+    // event — potentially hitting a blocked volume or deleted root_path twice.
+    // Mirroring the hot-registry re-check in step 4a, we short-circuit here.
+    if cold_store.is_failed(id) {
+        return Err(LazyLoadError::RestoreFailed);
     }
 
     // 5. Load with timeout.
