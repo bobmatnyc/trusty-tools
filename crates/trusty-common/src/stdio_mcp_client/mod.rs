@@ -208,6 +208,10 @@ pub struct StdioMcpClient {
     pub(super) binary: String,
     /// Original args used at spawn time, retained for respawn.
     pub(super) args: Vec<String>,
+    /// The `clientInfo.name` field advertised during the MCP `initialize`
+    /// handshake. Caller-supplied so each consumer (trusty-agents, console,
+    /// etc.) can identify itself accurately to the MCP server.
+    pub(super) client_name: String,
 }
 
 impl Drop for StdioMcpClient {
@@ -222,12 +226,17 @@ impl Drop for StdioMcpClient {
 /// Construct the canonical `initialize` request envelope.
 ///
 /// Why: Pulling this out makes it unit-testable without spawning a child
-/// (the network of fields is easy to typo).
+/// (the network of fields is easy to typo). The `client_name` parameter is
+/// caller-supplied so each consumer (trusty-agents, trusty-console, etc.)
+/// can advertise its own identity in the MCP handshake instead of the
+/// generic "trusty-common" library name, which would confuse MCP server
+/// logs and any server-side allowlists keyed on `clientInfo.name`.
 /// What: Builds a JSON-RPC 2.0 request with `method: "initialize"`,
-/// `protocolVersion`, `capabilities: {}`, and `clientInfo` with `name:
-/// "trusty-common"` and the crate's version.
-/// Test: `initialize_envelope_is_well_formed` asserts all required fields.
-pub(super) fn build_initialize_request(id: u64) -> Value {
+/// `protocolVersion`, `capabilities: {}`, and `clientInfo` with the
+/// supplied `client_name` and the crate's version.
+/// Test: `initialize_envelope_is_well_formed` asserts all required fields
+/// and verifies the supplied name propagates to `clientInfo.name`.
+pub(super) fn build_initialize_request(id: u64, client_name: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -236,7 +245,7 @@ pub(super) fn build_initialize_request(id: u64) -> Value {
             "protocolVersion": MCP_PROTOCOL_VERSION,
             "capabilities": {},
             "clientInfo": {
-                "name": "trusty-common",
+                "name": client_name,
                 "version": env!("CARGO_PKG_VERSION"),
             }
         }
@@ -272,19 +281,24 @@ mod tests {
     use super::*;
 
     /// Why: The initialize envelope is exact-shape-sensitive; verify all
-    /// required fields are present so we don't break the handshake.
-    /// What: Builds an initialize request and asserts protocolVersion, id,
-    /// and clientInfo.name match the contract.
+    /// required fields are present and that the caller-supplied name
+    /// propagates to `clientInfo.name` exactly.
+    /// What: Builds initialize requests with two different caller names and
+    /// asserts protocolVersion, id, and clientInfo.name match the contract.
     /// Test: This test.
     #[test]
     fn initialize_envelope_is_well_formed() {
-        let req = build_initialize_request(7);
+        let req = build_initialize_request(7, "trusty-agents");
         assert_eq!(req["jsonrpc"], "2.0");
         assert_eq!(req["id"], 7);
         assert_eq!(req["method"], "initialize");
         assert_eq!(req["params"]["protocolVersion"], MCP_PROTOCOL_VERSION);
-        assert_eq!(req["params"]["clientInfo"]["name"], "trusty-common");
+        assert_eq!(req["params"]["clientInfo"]["name"], "trusty-agents");
         assert!(req["params"]["capabilities"].is_object());
+
+        // Verify a different caller name also propagates correctly.
+        let req2 = build_initialize_request(42, "trusty-console");
+        assert_eq!(req2["params"]["clientInfo"]["name"], "trusty-console");
     }
 
     /// Why: An error response must surface as an Err with the code and
@@ -338,7 +352,7 @@ mod tests {
     /// Test: This test.
     #[tokio::test]
     async fn spawn_missing_binary_errors() {
-        let r = StdioMcpClient::spawn("/nonexistent/mcp/binary/xyzzy", &[]).await;
+        let r = StdioMcpClient::spawn("/nonexistent/mcp/binary/xyzzy", &[], "test-client").await;
         assert!(r.is_err());
     }
 
@@ -351,7 +365,7 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn is_alive_returns_false_after_child_exits() {
-        let mut client = StdioMcpClient::spawn("sh", &["-c", "exit 0"])
+        let mut client = StdioMcpClient::spawn("sh", &["-c", "exit 0"], "test-client")
             .await
             .unwrap();
         // Give the OS a moment to mark the child as exited.
@@ -377,7 +391,7 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn call_tool_errors_when_respawn_unavailable() {
-        let mut client = StdioMcpClient::spawn("sh", &["-c", "exit 0"])
+        let mut client = StdioMcpClient::spawn("sh", &["-c", "exit 0"], "test-client")
             .await
             .unwrap();
         // Point respawn at a binary that definitely won't exist.
@@ -413,7 +427,9 @@ mod tests {
     #[cfg(unix)]
     async fn read_line_skips_non_json_prefix_lines() {
         let script = r#"printf 'trusty-memory v0.1.14 — HTTP admin panel: http://127.0.0.1:9999\n{"jsonrpc":"2.0","id":1,"result":{"ok":true}}\n'; sleep 1"#;
-        let mut client = StdioMcpClient::spawn("sh", &["-c", script]).await.unwrap();
+        let mut client = StdioMcpClient::spawn("sh", &["-c", script], "test-client")
+            .await
+            .unwrap();
         let frame = client.read_line().await.unwrap();
         assert_eq!(frame["jsonrpc"], "2.0");
         assert_eq!(frame["id"], 1);
@@ -428,7 +444,9 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn ids_are_monotonic() {
-        let client = StdioMcpClient::spawn("cat", &[]).await.unwrap();
+        let client = StdioMcpClient::spawn("cat", &[], "test-client")
+            .await
+            .unwrap();
         let a = client.alloc_id();
         let b = client.alloc_id();
         let c = client.alloc_id();

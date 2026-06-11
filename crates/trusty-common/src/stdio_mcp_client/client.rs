@@ -31,12 +31,23 @@ impl StdioMcpClient {
     ///
     /// Why: The MCP transport requires clean JSON on stdout, so plugin logs
     /// MUST go to stderr. Redirecting stderr to a named file keeps the parent
-    /// console clean while still preserving logs for debugging.
+    /// console clean while still preserving logs for debugging. The
+    /// `client_name` parameter is caller-supplied so each consumer
+    /// (trusty-agents, trusty-console, etc.) advertises its own identity in
+    /// `clientInfo.name` during the `initialize` handshake — hard-coding the
+    /// library name here would mislead MCP server logs and any server-side
+    /// logic keyed on that field.
     /// What: Returns an unconnected client with the handshake NOT yet sent.
     /// Call `initialize` next to complete the MCP handshake.
     /// Test: Indirectly via `#[ignore]`d e2e test; unit-test failure is
-    /// covered by `spawn_missing_binary_errors` in `mod.rs`.
-    pub async fn spawn(binary: &str, args: &[&str]) -> Result<Self> {
+    /// covered by `spawn_missing_binary_errors` in `mod.rs`. The
+    /// `initialize_envelope_is_well_formed` test verifies the supplied name
+    /// propagates to `clientInfo.name`.
+    pub async fn spawn(
+        binary: &str,
+        args: &[&str],
+        client_name: impl Into<String>,
+    ) -> Result<Self> {
         let mut child = Command::new(binary)
             .args(args)
             .stdin(std::process::Stdio::piped())
@@ -62,6 +73,7 @@ impl StdioMcpClient {
             next_id: AtomicU64::new(1),
             binary: binary.to_string(),
             args: args.iter().map(|s| s.to_string()).collect(),
+            client_name: client_name.into(),
         })
     }
 
@@ -118,6 +130,7 @@ impl StdioMcpClient {
         self.child = new_child;
         self.stdin = BufWriter::new(stdin);
         self.stdout = BufReader::new(stdout);
+        // client_name is retained from the original spawn — no update needed.
         self.next_id.store(1, Ordering::Relaxed);
 
         self.initialize()
@@ -166,7 +179,7 @@ impl StdioMcpClient {
     /// e2e in the ignored integration test.
     pub async fn initialize(&mut self) -> Result<ServerInfo> {
         let id = self.alloc_id();
-        let req = build_initialize_request(id);
+        let req = build_initialize_request(id, &self.client_name);
         let resp = self.request(&req).await?;
         let result = extract_result(resp)?;
 
