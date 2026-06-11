@@ -8,144 +8,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::commands::start_restore::restore_one_index;
-use crate::core::registry::{IndexStages, StageState, StageStatus};
 use crate::service::SearchAppState;
 
-/// Inputs to [`derive_warm_boot_stages`] — every signal the pure stage
-/// classifier needs in one struct so the call site can build it once and the
-/// tests can drive it without filesystem fixtures.
-///
-/// Why (issue #135): the warm-boot path was instantiating every restored
-/// handle with `stages = Pending` and never consulting the on-disk artifacts.
-/// Searches against existing indexes silently dropped the semantic + graph
-/// lanes because `search_capabilities` is derived from `stages`. Extracting
-/// the classification into a pure function lets the call site keep its single
-/// disk-inspection sweep and lets the unit tests pin every transition.
-/// What: a small data carrier — no `Default` impl, no methods. Construction
-/// is intentionally explicit so a future caller cannot forget to wire one of
-/// the four signals.
-/// Test: every `warm_boot_*` test in the colocated `mod tests` constructs one
-/// of these inputs directly and asserts the resulting [`IndexStages`].
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct WarmBootInputs {
-    /// Number of chunks the durable corpus reports (`CorpusStore::chunk_count`).
-    /// Zero means the corpus is genuinely empty OR a previous reindex died
-    /// mid-flight before the first batch committed.
-    pub chunk_count: usize,
-    /// `true` when `<data_dir>/indexes/<id>/hnsw.usearch` exists on disk AND
-    /// was successfully restored into the indexer's vector store with a
-    /// dimension matching the embedder. We deliberately do not re-open the
-    /// file here: `build_indexer_with_persisted_state` already validates the
-    /// snapshot and falls back to a fresh store on any mismatch, so this flag
-    /// captures "we have a usable HNSW lane after warm-boot".
-    pub hnsw_snapshot_ready: bool,
-    /// Number of nodes in the symbol graph that
-    /// `build_indexer_with_persisted_state` rehydrated (via redb +
-    /// `load_or_rebuild_symbol_graph`). Zero means the graph is empty either
-    /// because the corpus is empty or because the build never produced any
-    /// callers/callees relationships (rare for non-trivial code).
-    pub graph_node_count: usize,
-    /// `lexical_only` flag persisted on the registry entry — when `true`,
-    /// semantic + graph stages are forced to `Skipped` regardless of what is
-    /// on disk. Defensive: a flapping operator could have an old HNSW snapshot
-    /// from a prior non-lexical-only life lying around; the staged pipeline
-    /// must not surface it.
-    pub lexical_only: bool,
-
-    /// `skip_kg` flag (issue #313): when `true`, the graph stage is forced to
-    /// `Skipped` regardless of on-disk state. Independent of `lexical_only`.
-    /// Why: a `skip_kg` index that happened to have a graph on disk (e.g. from
-    /// a prior full-pipeline reindex) must not advertise the KG lane on
-    /// warm-boot — the `skip_kg` config intent wins unconditionally.
-    /// Test: `warm_boot_respects_skip_kg_flag` in this module.
-    pub skip_kg: bool,
-}
-
-/// Pure classifier: given the four warm-boot signals, decide where each of
-/// the three stages should land on the restored handle's [`IndexStages`].
-///
-/// Why (issue #135): see [`WarmBootInputs`]. This is the function the unit
-/// tests exercise — separating it from the disk-walking caller keeps the
-/// tests deterministic and the production path a thin wrapper.
-/// What: applies the rules from the ticket spec, in this order:
-///   1. `lexical_only == true` → semantic + graph are `Skipped`.
-///   2. `chunk_count > 0` → lexical is `Ready` (BM25 + redb both restored
-///      cleanly by the loader).
-///   3. `chunk_count == 0` → lexical is `InProgress` (mid-reindex recovery
-///      — the next reindex will resume via the hash-skip path).
-///   4. `hnsw_snapshot_ready` (and not lexical-only) → semantic is `Ready`.
-///   5. `graph_node_count > 0` (and not lexical-only) → graph is `Ready`.
-///
-/// Test: `warm_boot_*` tests in this module's `tests` submodule.
-pub(crate) fn derive_warm_boot_stages(inputs: WarmBootInputs) -> IndexStages {
-    // Lexical stage.
-    //
-    // Why: `chunk_count > 0` means the redb corpus restored cleanly AND
-    // `build_indexer_with_persisted_state::restore_corpus` rebuilt BM25 as a
-    // side effect of `load_chunks_from_redb`'s four-phase publish — so the
-    // lexical lane is queryable as soon as we register the handle. The
-    // `last_indexed` proxy lives outside this struct (the registry handle
-    // does not carry a timestamp; freshness is computed from
-    // `index.redb` mtime by `index_disk_and_mtime`), so we leave
-    // `completed_at` as `None` and rely on the existing freshness reporting
-    // for the wall-clock signal. A future ticket can plumb mtime through if
-    // operators need stage-level timestamps after warm-boot.
-    let lexical = if inputs.chunk_count > 0 {
-        StageState {
-            status: StageStatus::Ready,
-            ..Default::default()
-        }
-    } else {
-        // Mid-reindex recovery: redb is empty but the index is registered.
-        // Mark lexical `InProgress` so the search handler does not advertise
-        // BM25 as ready, and the next reindex (triggered manually or by the
-        // file watcher) will resume via the hash-skip path in
-        // `commit_parsed_batch`.
-        StageState {
-            status: StageStatus::InProgress,
-            ..Default::default()
-        }
-    };
-
-    // Semantic + graph: forced to `Skipped` for `lexical_only` indexes
-    // regardless of on-disk state. Otherwise read directly from the
-    // inspection signals.
-    //
-    // Issue #313: `skip_kg` forces the graph stage to `Skipped` independently
-    // of `lexical_only`. A `skip_kg` index that happened to have a graph on
-    // disk (from a prior full-pipeline reindex) must not advertise the KG lane
-    // — the config flag wins unconditionally.
-    let (semantic, graph) = if inputs.lexical_only {
-        (StageState::skipped(), StageState::skipped())
-    } else {
-        let semantic = if inputs.hnsw_snapshot_ready {
-            StageState {
-                status: StageStatus::Ready,
-                ..Default::default()
-            }
-        } else {
-            StageState::pending()
-        };
-        let graph = if inputs.skip_kg {
-            // skip_kg: graph is permanently Skipped regardless of on-disk state.
-            StageState::skipped()
-        } else if inputs.graph_node_count > 0 {
-            StageState {
-                status: StageStatus::Ready,
-                ..Default::default()
-            }
-        } else {
-            StageState::pending()
-        };
-        (semantic, graph)
-    };
-
-    IndexStages {
-        lexical,
-        semantic,
-        graph,
-    }
-}
+// Issue #993: `WarmBootInputs` and `derive_warm_boot_stages` moved to
+// `service::warm_boot::stages` so the lazy-restore path in the service layer
+// can call them. Re-exported here so the `mod tests` block below (which uses
+// `use super::*`) can access them without changing the test call sites.
+#[allow(unused_imports)]
+pub(crate) use crate::service::warm_boot::{derive_warm_boot_stages, WarmBootInputs};
 
 /// Restore every index recorded in `indexes.toml` and in colocated roots by
 /// re-registering it on the in-memory registry.
@@ -155,36 +25,109 @@ pub(crate) fn derive_warm_boot_stages(inputs: WarmBootInputs) -> IndexStages {
 /// `spawn_blocking` + timeout. #723 adds probe-per-volume: each distinct
 /// volume is probed ONCE on a bare OS thread before any redb opens so a
 /// TCC-blocked volume costs at most one leaked thread (not one-per-index).
-/// What: Phase 1 reads legacy entries from `indexes.toml`; Phase 2 scans
-/// tracked roots. Each entry is restored via `restore_one_index_bounded`.
+/// What: collects all entries (legacy + colocated), applies selective warm-boot
+/// (issue #993) to split into eager/cold slices, then restores only the eager
+/// slice via `restore_one_index_bounded`. Cold entries are registered into
+/// `state.cold_store` for lazy on-demand loading.
 /// Test: integration test in `tests/integration_tests.rs`.
 async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core::Embedder>) {
+    use crate::service::lazy_loader::{select_warmboot_entries, warmboot_max_indexes};
     use crate::service::warm_boot::{
         collect_colocated_entries, collect_legacy_entries, is_on_inaccessible_volume,
         probe_warmboot_volumes, probe_warmboot_volumes_from_paths, restore_one_index_bounded,
     };
     use std::collections::HashSet;
 
-    // ── Phase 1: legacy indexes (indexes.toml) ─────────────────────────────
+    // Issue #993: read TRUSTY_WARMBOOT_MAX_INDEXES once before collecting.
+    let max_warmboot = warmboot_max_indexes();
+    if let Some(n) = max_warmboot {
+        tracing::info!(
+            "warm-boot: TRUSTY_WARMBOOT_MAX_INDEXES={n} — will eager-load top-{n} \
+             by recency, defer the rest to cold store (issue #993)"
+        );
+    }
+
+    // ── Collect: legacy + colocated entries ──────────────────────────────────
     let legacy_entries = collect_legacy_entries();
     let mut seen_ids: HashSet<String> = HashSet::new();
     // Issue #860: track canonicalized root_paths from legacy entries so that
-    // Phase 2 can suppress colocated entries for the same root even when
-    // the two ID schemes differ (basename vs. full-path-sanitized).
+    // colocated scan suppresses entries for the same root.
     let mut seen_root_paths: HashSet<std::path::PathBuf> = HashSet::new();
-
-    // Issue #873: TCC vs timeout skip counters for WarmBootSummary.
-    let mut total_skipped_tcc: usize = 0;
-    let mut total_skipped_timeout: usize = 0;
+    for e in &legacy_entries {
+        seen_ids.insert(e.id.clone());
+        seen_root_paths.insert(canonicalize_best_effort(&e.root_path));
+    }
 
     if legacy_entries.is_empty() {
         tracing::warn!(
             "warm-boot: no legacy index entries (indexes.toml absent/empty). \
              Under launchd, set TRUSTY_DATA_DIR to an absolute path (issue #718)."
         );
-    } else {
-        // Issue #723: probe each distinct volume once before any redb opens.
-        let inaccessible_volumes = probe_warmboot_volumes(&legacy_entries);
+    }
+
+    let colocated_inaccessible = {
+        use crate::service::roots_registry::load_roots;
+        match load_roots() {
+            Ok(roots) => {
+                let root_paths: Vec<std::path::PathBuf> =
+                    roots.into_iter().map(|r| r.path).collect();
+                probe_warmboot_volumes_from_paths(&root_paths)
+            }
+            Err(_) => std::collections::HashSet::new(),
+        }
+    };
+    let colocated_entries =
+        collect_colocated_entries(&seen_ids, &seen_root_paths, &colocated_inaccessible).await;
+
+    // Merge into a single pool then apply selective warm-boot split (issue #993).
+    // Legacy entries carry LRU metadata from `indexes.toml`; colocated entries
+    // typically have no `last_queried_unix` so they sort below any recently-used
+    // legacy entry, which is the desired tie-break.
+    let all_entries: Vec<_> = legacy_entries
+        .into_iter()
+        .chain(colocated_entries)
+        .collect();
+    let total_discovered = all_entries.len();
+
+    let (eager_entries, cold_entries) = select_warmboot_entries(all_entries, max_warmboot);
+    let indexes_lazy = cold_entries.len();
+
+    if indexes_lazy > 0 {
+        tracing::info!(
+            "warm-boot: parking {indexes_lazy}/{total_discovered} index(es) in cold store \
+             (lazy-load on first query, issue #993)"
+        );
+        state.cold_store.register_cold_entries(cold_entries);
+    }
+
+    // ── Restore: eager entries only ──────────────────────────────────────────
+    // Re-build seen_ids for the fail-loud check below — it must cover all
+    // legacy entries that were originally discovered (including those that went cold).
+    let mut seen_legacy_ids: HashSet<String> = HashSet::new();
+
+    // Issue #873: TCC vs timeout skip counters for WarmBootSummary.
+    let mut total_skipped_tcc: usize = 0;
+    let mut total_skipped_timeout: usize = 0;
+    let mut total_ok: usize = 0;
+
+    // Split eager entries by source so we can probe volumes per-batch.
+    // We need separate probes because legacy and colocated use different probe helpers.
+    // Re-partition by checking the `colocated` field: colocated entries use the
+    // colocated probe set; legacy entries use the legacy probe (by path).
+    let legacy_eager: Vec<_> = eager_entries
+        .iter()
+        .filter(|e| !e.colocated)
+        .cloned()
+        .collect();
+    let colocated_eager: Vec<_> = eager_entries
+        .iter()
+        .filter(|e| e.colocated)
+        .cloned()
+        .collect();
+
+    // ── Eager: legacy entries ────────────────────────────────────────────────
+    if !legacy_eager.is_empty() {
+        let inaccessible_volumes = probe_warmboot_volumes(&legacy_eager);
         if !inaccessible_volumes.is_empty() {
             tracing::warn!(
                 "warm-boot: {} volume(s) inaccessible (issue #723): {}",
@@ -196,19 +139,12 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
                     .join(", ")
             );
         }
-        let total_legacy = legacy_entries.len();
-        tracing::info!(
-            "warm-boot: restoring {} legacy index registration(s) from indexes.toml",
-            total_legacy
-        );
+        let total_legacy = legacy_eager.len();
+        tracing::info!("warm-boot: restoring {total_legacy} legacy index(es) from indexes.toml");
         let (mut legacy_ok, mut legacy_skipped_tcc, mut legacy_skipped_other) =
             (0usize, 0usize, 0usize);
-        for entry in legacy_entries {
-            seen_ids.insert(entry.id.clone());
-            // Issue #860: record the canonicalized root_path BEFORE the
-            // inaccessible-volume guard so Phase 2 never duplicates this root
-            // even if the legacy restore is skipped.
-            seen_root_paths.insert(canonicalize_best_effort(&entry.root_path));
+        for entry in legacy_eager {
+            seen_legacy_ids.insert(entry.id.clone());
             if is_on_inaccessible_volume(&entry.root_path, &inaccessible_volumes) {
                 tracing::warn!(
                     "warm-boot: skipping index '{}' — volume {} inaccessible (issue #723)",
@@ -227,53 +163,27 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
             {
                 legacy_ok += 1;
             } else {
-                // Timeout or panic — volume was accessible but restore stalled.
                 legacy_skipped_other += 1;
             }
         }
         total_skipped_tcc += legacy_skipped_tcc;
         total_skipped_timeout += legacy_skipped_other;
+        total_ok += legacy_ok;
         tracing::info!(
             "warm-boot: legacy phase complete — {legacy_ok}/{total_legacy} \
              (skipped tcc={legacy_skipped_tcc} timeout={legacy_skipped_other})"
         );
     }
 
-    // ── Phase 2: colocated indexes (roots.toml + fs scan) ──────────────────
-    // Issue #723: probe colocated roots before the async scan.
-    // Issues #736 / #737: load roots once and reuse the paths for the probe
-    // (fixes the double `load_roots()` call that was previously present), and
-    // probe the actual root paths directly rather than building throwaway
-    // `PersistedIndex { ..Default::default() }` structs whose `root_path`
-    // would default to empty when a root lacked a filesystem path.
-    let colocated_inaccessible = {
-        use crate::service::roots_registry::load_roots;
-        match load_roots() {
-            Ok(roots) => {
-                let root_paths: Vec<std::path::PathBuf> =
-                    roots.into_iter().map(|r| r.path).collect();
-                probe_warmboot_volumes_from_paths(&root_paths)
-            }
-            Err(_) => std::collections::HashSet::new(),
-        }
-    };
-    // Issue #860: pass seen_root_paths so the colocated scan suppresses ghost
-    // entries whose root is already owned by a legacy entry (even if the IDs differ).
-    let colocated_entries =
-        collect_colocated_entries(&seen_ids, &seen_root_paths, &colocated_inaccessible).await;
-
-    if colocated_entries.is_empty() {
-        tracing::debug!("warm-boot: no additional colocated indexes discovered");
-    } else {
-        let total_colocated = colocated_entries.len();
+    // ── Eager: colocated entries ─────────────────────────────────────────────
+    if !colocated_eager.is_empty() {
+        let total_colocated = colocated_eager.len();
         tracing::info!(
-            "warm-boot: restoring {} colocated index registration(s) from tracked roots",
-            total_colocated
+            "warm-boot: restoring {total_colocated} colocated index(es) from tracked roots"
         );
         let (mut colocated_ok, mut colocated_skipped_tcc, mut colocated_skipped_other) =
             (0usize, 0usize, 0usize);
-        for entry in colocated_entries {
-            // Issue #873: skip inaccessible vol. before restore so timeout ≠ tcc-skip.
+        for entry in colocated_eager {
             if is_on_inaccessible_volume(&entry.root_path, &colocated_inaccessible) {
                 colocated_skipped_tcc += 1;
                 continue;
@@ -292,6 +202,7 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
         }
         total_skipped_tcc += colocated_skipped_tcc;
         total_skipped_timeout += colocated_skipped_other;
+        total_ok += colocated_ok;
         tracing::info!(
             "warm-boot: colocated phase complete — {colocated_ok}/{total_colocated} \
              (skipped tcc={colocated_skipped_tcc} timeout={colocated_skipped_other})"
@@ -299,20 +210,29 @@ async fn restore_indexes(state: &SearchAppState, embedder: &Arc<dyn crate::core:
     }
 
     let total = state.registry.list().len();
-    tracing::info!("warm-boot: complete — {total} total index(es) registered (legacy + colocated)");
+    tracing::info!(
+        "warm-boot: complete — {total} loaded, {indexes_lazy} cold (lazy), \
+         {total_ok} eager successful (legacy + colocated)"
+    );
 
     // Issue #873: update WarmBootSummary, emit FDA warning, persist count.
-    record_warm_boot_result(state, total, total_skipped_tcc, total_skipped_timeout);
+    record_warm_boot_result(
+        state,
+        total,
+        total_skipped_tcc,
+        total_skipped_timeout,
+        indexes_lazy,
+    );
 
     // Issue #764: fail-loud warm-boot — tally total skipped/failed indexes and
     // store the count on AppState so `/health` can surface it without operators
     // having to tail logs.
     let registered_ids: std::collections::HashSet<String> =
         state.registry.list().into_iter().map(|id| id.0).collect();
-    // TODO(#796): `seen_ids` covers only legacy entries from `indexes.toml`; colocated
-    // index failures (Phase 2 above) are not counted here, so `failed_count` can
-    // under-report when colocated indexes time out or fail to restore.
-    let failed_count: usize = seen_ids
+    // TODO(#796): covers only non-cold legacy entries; colocated failures can
+    // under-report. Cold entries are excluded from this count intentionally —
+    // they are deferred, not failed.
+    let failed_count: usize = seen_legacy_ids
         .iter()
         .filter(|id| !registered_ids.contains(*id))
         .count();

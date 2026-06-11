@@ -21,6 +21,7 @@ mod reindex_handlers;
 mod router;
 mod routing;
 mod search;
+mod search_global;
 mod state;
 mod state_impl;
 mod status;
@@ -55,7 +56,7 @@ pub use files::ChunksParams;
 pub use reindex_handlers::ReindexRequest;
 pub use router::{CreateIndexRequest, IndexFileRequest, RemoveFileRequest};
 pub use routing::SearchSimilarRequest;
-pub use search::GlobalSearchRequest;
+pub use search_global::GlobalSearchRequest;
 pub use state::{DaemonEvent, SearchAppState, WarmBootSummary};
 
 use axum::{

@@ -456,6 +456,15 @@ fn edge_kind_tag(kind: &EdgeKind) -> &'static str {
 
 /// Inverse of [`edge_kind_tag`]: parse a persisted edge tag back into the
 /// `EdgeKind` variant (issue #41 phase 2).
+///
+/// Why: warm-boot reads edge tags back from redb; if the tag is unrecognised
+/// (e.g. written by a newer daemon that has variants this build does not know),
+/// returning `None` lets the caller silently drop the edge (issue #816) rather
+/// than crashing or corrupting the graph.
+/// What: exhaustive match over all known string tags; returns `None` for any
+/// unrecognised tag so callers can count and log drops.
+/// Test: `edge_kind_tag_round_trip` below — asserts every variant survives
+/// `edge_kind_tag` → `edge_kind_from_tag` without loss.
 fn edge_kind_from_tag(tag: &str) -> Option<EdgeKind> {
     Some(match tag {
         "CallsFunction" => EdgeKind::CallsFunction,
@@ -1678,6 +1687,41 @@ mod tests {
 
     /// Issue #41 phase 2: `edge_kind_breakdown` returns one entry per
     /// `EdgeKind` variant present in the graph, sorted by tag.
+    /// Every `contracts::EdgeKind` variant must survive the
+    /// `edge_kind_tag` → `edge_kind_from_tag` round-trip without loss.
+    /// This guards the warm-boot serialisation path: a variant present in the
+    /// tag function but absent from the parse function (or vice-versa) would
+    /// silently drop edges from persisted indexes on warm boot.
+    #[test]
+    fn edge_kind_tag_round_trip() {
+        let variants = [
+            EdgeKind::CallsFunction,
+            EdgeKind::CalledByFunction,
+            EdgeKind::Implements,
+            EdgeKind::UsesType,
+            EdgeKind::Derives,
+            EdgeKind::ModuleContains,
+            EdgeKind::ReExports,
+            EdgeKind::RaisesError,
+            EdgeKind::Configures,
+            EdgeKind::TestedBy,
+            EdgeKind::TestUsesFixture,
+            EdgeKind::CoOccursInTest,
+            EdgeKind::Documents,
+            EdgeKind::ReferencesConcept,
+            EdgeKind::Aliases,
+            EdgeKind::ErrorDescribes,
+        ];
+        for v in variants {
+            let tag = edge_kind_tag(&v);
+            let back =
+                edge_kind_from_tag(tag).unwrap_or_else(|| panic!("no parse for tag {tag:?}"));
+            assert_eq!(v, back, "round-trip failed for {tag}");
+        }
+        // Unknown tags must parse to None (no panic, no fallback).
+        assert!(edge_kind_from_tag("UnknownFuturEdge").is_none());
+    }
+
     #[test]
     fn test_edge_kind_breakdown_counts_by_variant() {
         let chunks = vec![

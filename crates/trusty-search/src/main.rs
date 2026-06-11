@@ -1146,7 +1146,7 @@ async fn run() -> Result<()> {
             action,
         } => match action {
             Some(IndexAction::Remove { path: rm_path }) => {
-                commands::index_remove::handle_index_remove(rm_path).await?;
+                commands::index_remove::handle_index_remove(rm_path, cli.index).await?;
             }
             Some(IndexAction::Add {
                 path: add_path,

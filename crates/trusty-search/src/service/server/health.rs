@@ -208,11 +208,14 @@ pub(super) async fn health_handler(
     let update_available = state.update_available.lock().ok().and_then(|g| g.clone());
     // Issue #873: surface the warm-boot summary so a post-`cargo install` FDA
     // regression (`indexes:2` instead of `~102`) is visible without tailing logs.
-    let warmboot_summary = state
+    // Issue #993: populate `indexes_lazy` live from the cold store so it reflects
+    // the current number of not-yet-loaded indexes (decreases as lazy loads occur).
+    let mut warmboot_summary = state
         .warmboot_summary
         .lock()
         .map(|g| g.clone())
         .unwrap_or_default();
+    warmboot_summary.indexes_lazy = state.cold_store.len();
 
     Json(HealthResponse {
         status: "ok",

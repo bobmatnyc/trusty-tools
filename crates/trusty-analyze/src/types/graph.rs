@@ -93,22 +93,64 @@ pub struct KgNode {
     pub extra: serde_json::Value,
 }
 
-/// Edge taxonomy in the knowledge graph.
+/// Language-neutral structural edge taxonomy for trusty-analyze's analysis KG.
+///
+/// Why: trusty-analyze extracts a per-file/per-language structural graph from
+/// tree-sitter ASTs across 15+ languages. This graph covers whole-codebase
+/// structural relationships (containment, inheritance, dependency, runtime
+/// observations) that feed the analysis sidecar's complexity, quality, and
+/// graph-extraction endpoints. A language-neutral vocabulary lets all
+/// per-language adapters emit into the same schema without a language-specific
+/// type hierarchy.
+///
+/// **Intentionally separate from `trusty_common::symgraph::contracts::EdgeKind`**
+/// (17 variants). That type is the persisted, scored vocabulary for the
+/// trusty-search entity KG, which runs in a separate daemon and is not
+/// connected to this graph at runtime. The two graphs serve different consumers:
+///   - `contracts::EdgeKind` — entity/concept search ranking in trusty-search
+///   - `KgEdgeKind` (this type) — structural analysis output consumed by
+///     trusty-analyze's HTTP/MCP API (`extract_graph`, `suggest_refactors`,
+///     `deep_analysis`, etc.)
+///
+/// **Intentionally separate from `crate::symgraph::graph::EdgeKind`**
+/// (3-variant petgraph weight in trusty-common). That type is the edge weight
+/// for the in-memory `SymbolGraph` used by the tree-sitter parser path; this
+/// type is a higher-level schema for the analysis output layer.
+///
+/// Future merger with `contracts::EdgeKind` is an open question (epic #814,
+/// Q2). Until that decision is made and the two graphs are connected at
+/// runtime, the separation is correct — merging prematurely would couple
+/// two independently deployed daemons through their type system.
+///
+/// When adding a variant here, update the `serde` round-trip test below.
+///
+/// What: 11 variants covering structural (contains, imports, exports),
+/// call-graph (calls), OOP (implements, extends), general reference,
+/// test provenance, dependency, and runtime-observation edges.
+/// Test: `kg_edge_kind_serde_round_trip` in this module.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum KgEdgeKind {
+    /// Parent structurally contains child (file → function, module → class, etc.).
     Contains,
+    /// File or module imports another.
     Imports,
+    /// Symbol exported from a module.
     Exports,
+    /// Function A calls function B (static or runtime-observed).
     Calls,
-    /// struct impl trait / class implements interface
+    /// Class implements interface / struct implements trait.
     Implements,
-    /// inheritance
+    /// Class or interface inherits from another.
     Extends,
+    /// Symbol references another symbol.
     References,
-    /// test fn → function under test
+    /// Test function exercises a production symbol.
     Tests,
+    /// Package depends on an external package/crate/library.
     DependsOn,
+    /// Runtime observation derived from a static analysis node.
     GeneratedFrom,
+    /// Profiler measurement attached to a static symbol.
     RuntimeObservationFor,
 }
 
@@ -251,5 +293,31 @@ mod tests {
         let back: KgGraph = serde_json::from_str(&s).unwrap();
         assert_eq!(back.node_count(), 1);
         assert_eq!(back.edge_count(), 1);
+    }
+
+    /// Every `KgEdgeKind` variant must survive a `serde_json` round-trip.
+    /// This guards the persisted analysis-output format: renaming a variant
+    /// without a `#[serde(rename = "…")]` annotation would break deserialization
+    /// of previously stored graphs.
+    #[test]
+    fn kg_edge_kind_serde_round_trip() {
+        let variants = [
+            KgEdgeKind::Contains,
+            KgEdgeKind::Imports,
+            KgEdgeKind::Exports,
+            KgEdgeKind::Calls,
+            KgEdgeKind::Implements,
+            KgEdgeKind::Extends,
+            KgEdgeKind::References,
+            KgEdgeKind::Tests,
+            KgEdgeKind::DependsOn,
+            KgEdgeKind::GeneratedFrom,
+            KgEdgeKind::RuntimeObservationFor,
+        ];
+        for v in &variants {
+            let json = serde_json::to_string(v).expect("serialize KgEdgeKind");
+            let back: KgEdgeKind = serde_json::from_str(&json).expect("deserialize KgEdgeKind");
+            assert_eq!(v, &back, "round-trip failed for {json}");
+        }
     }
 }

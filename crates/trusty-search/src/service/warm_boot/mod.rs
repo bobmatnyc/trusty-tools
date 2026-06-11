@@ -22,6 +22,7 @@
 pub(super) mod probe;
 pub mod restore;
 pub(crate) mod scan;
+pub mod stages;
 
 #[allow(deprecated)]
 pub use probe::leaked_probe_thread_count; // deprecated alias for probe_thread_failures (#822)
@@ -33,6 +34,7 @@ use std::time::Duration;
 
 use crate::service::persistence::PersistedIndex;
 pub use restore::restore_one_index_bounded;
+pub use stages::{derive_warm_boot_stages, WarmBootInputs};
 
 /// Attempt to canonicalize `path` (resolving symlinks), returning the canonical
 /// form on success or the original path on failure.
