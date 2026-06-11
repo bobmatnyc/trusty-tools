@@ -47,7 +47,9 @@ pub(super) fn descriptor() -> Value {
             a metrics object containing search_reachable.",
         "inputSchema": {
             "type": "object",
-            "properties": {}
+            "properties": {},
+            "additionalProperties": false,
+            "required": []
         }
     })
 }

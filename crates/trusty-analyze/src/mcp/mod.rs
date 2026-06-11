@@ -41,7 +41,10 @@ pub mod descriptors;
 pub mod review;
 
 // Why (#1104 Phase 0b): console_metrics tool for trusty-console dashboard polling.
-pub mod console_metrics;
+// pub(crate): no cross-crate consumer exists (verified by workspace grep for
+// `trusty_analyze::mcp::console_metrics`). The module is an internal
+// implementation detail of the MCP dispatcher.
+pub(crate) mod console_metrics;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

@@ -95,7 +95,12 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = false)]
     pub open: bool,
 
-    /// Background health-poll interval in seconds (default: 15).
+    /// Background poll interval in seconds (default: 15).
+    ///
+    /// Controls BOTH the health poller (`poller::start`) AND the metrics
+    /// poller (`metrics_poller::start`). Increasing this value reduces the
+    /// frequency of both the HTTP health checks against each connector AND
+    /// the stdio MCP `console_metrics` tool calls against trusty-analyze.
     #[arg(long, default_value_t = 15u64)]
     pub poll_interval: u64,
 }
