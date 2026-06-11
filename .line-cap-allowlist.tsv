@@ -15,7 +15,6 @@ crates/trusty-analyze/src/main.rs	567
 crates/trusty-analyze/src/mcp/mod.rs	890
 crates/trusty-common/src/chat/openai_compat.rs	523
 crates/trusty-common/src/embedder/mod.rs	753
-crates/trusty-common/src/lib.rs	764
 crates/trusty-common/src/memory_core/analytics.rs	623
 crates/trusty-common/src/memory_core/dream.rs	1199
 crates/trusty-common/src/memory_core/retrieval/mod.rs	830
