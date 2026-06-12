@@ -218,12 +218,19 @@ mod tests {
 
     /// Why: `probe_once` against an unbound localhost port must return `false`
     /// without panicking, within a generous wall-clock bound.
-    /// What: probes port 65535 (never bound in the test environment).
+    /// What: binds a `TcpListener` to port 0 to let the OS assign a free
+    /// ephemeral port, reads that port, drops the listener to free it, then
+    /// probes the now-guaranteed-unbound address. This avoids hard-coding port
+    /// 65535 which can be bound on busy CI hosts.
     /// Test: this test.
     #[tokio::test]
     async fn probe_once_returns_false_for_refused_port() {
+        // Bind port 0 to get a free OS-assigned port, then release it.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
         let started = Instant::now();
-        let ok = probe_once("http://127.0.0.1:65535/health").await;
+        let ok = probe_once(&format!("http://127.0.0.1:{port}/health")).await;
         assert!(!ok, "probe must fail against an unbound port");
         assert!(
             started.elapsed() < Duration::from_secs(6),
@@ -282,12 +289,21 @@ mod tests {
 
     /// Why: when the daemon never starts, `spin_until_ready` must return `Err`
     /// after the timeout rather than looping forever.
-    /// What: uses a very short timeout and a definitely-free port.
+    /// What: binds a `TcpListener` to port 0 to get a free OS-assigned port,
+    /// drops the listener to free it, then spins against that now-unbound port
+    /// with a very short timeout. This avoids using privileged port 1 which
+    /// produces ETIMEDOUT instead of ECONNREFUSED on some macOS/BSD configs and
+    /// can cause the test to stall for the full `PROBE_TIMEOUT` rather than
+    /// returning immediately.
     /// Test: this test.
     #[tokio::test]
     async fn spin_until_ready_times_out_for_down_daemon() {
+        // Bind port 0 to get a free OS-assigned port, then release it.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
         let cfg = DaemonGuardConfig {
-            health_url: "http://127.0.0.1:1/health".to_string(),
+            health_url: format!("http://127.0.0.1:{port}/health"),
             service_name: "test-daemon".to_string(),
             startup_timeout: Duration::from_millis(200),
             poll_interval: Duration::from_millis(50),
