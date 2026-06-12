@@ -252,6 +252,46 @@ impl McpServiceHandle {
         }
     }
 
+    /// Prime this handle to the `Degraded` state — test helper only.
+    ///
+    /// Why: Integration tests in sibling modules (`server.rs`) need to drive the
+    /// handle into `Degraded` without performing a real MCP spawn. Making
+    /// `HandleState` pub(crate) just to enable test setup leaks internal state
+    /// machine details; a targeted `#[cfg(test)]` helper keeps the internals
+    /// opaque while giving tests a precise seam.
+    /// What: Acquires the outer state lock and sets `state_opt =
+    /// Some(HandleState::Degraded)`.
+    /// Test: Used by `server::tests::test_services_route_handle_degraded_overlay`.
+    #[cfg(test)]
+    pub async fn prime_degraded_for_test(&self) {
+        let mut guard = self.state.lock().await;
+        let (state_opt, _) = &mut *guard;
+        *state_opt = Some(HandleState::Degraded);
+    }
+
+    /// Return the degraded hint string if the handle is in the `Degraded` state.
+    ///
+    /// Why: The services route needs to overlay the connector-reported status with
+    /// the handle's known state so `GET /api/console/services` reflects whether
+    /// the `tools/list` probe found `console_metrics` missing. Returning
+    /// `Option<String>` lets the handler set both `status = Degraded` and
+    /// `hint` in one call without importing the private `DEGRADED_HINT` constant
+    /// or performing any I/O.
+    /// What: Acquires the outer state lock briefly; returns
+    /// `Some(DEGRADED_HINT.to_string())` when the state is
+    /// `HandleState::Degraded`, `None` for every other state (`None` uninit,
+    /// `Absent`, `Connected`).
+    /// Test: `test_degraded_hint_returns_some_when_degraded` in this module.
+    pub async fn degraded_hint(&self) -> Option<String> {
+        let guard = self.state.lock().await;
+        let (state_opt, _) = &*guard;
+        if matches!(state_opt, Some(HandleState::Degraded)) {
+            Some(DEGRADED_HINT.to_string())
+        } else {
+            None
+        }
+    }
+
     /// Poll the service's `console_metrics` tool and return a decoded report.
     ///
     /// Why: The background poller calls this every ~15 s to refresh the cached
@@ -759,6 +799,48 @@ mod tests {
             }
             other => panic!("expected McpHandleError::Degraded, got: {other}"),
         }
+    }
+
+    /// Why: `degraded_hint()` must return `Some(hint)` only for the `Degraded`
+    /// state, so the services handler can both set `status = Degraded` and
+    /// populate the `hint` field in one call.
+    /// What: primes three different states (Degraded / None / Absent) and
+    /// asserts the expected `Option<String>` for each.
+    /// Test: this test.
+    #[tokio::test]
+    async fn test_degraded_hint_returns_some_when_degraded() {
+        // Degraded → Some(hint containing "console_metrics")
+        let handle = McpServiceHandle::new("trusty-analyze", vec!["mcp".to_string()]);
+        {
+            let mut guard = handle.state.lock().await;
+            let (state_opt, _) = &mut *guard;
+            *state_opt = Some(HandleState::Degraded);
+        }
+        let hint = handle.degraded_hint().await;
+        assert!(hint.is_some(), "Degraded state must return Some(hint)");
+        assert!(
+            hint.unwrap().contains("console_metrics"),
+            "hint must mention console_metrics"
+        );
+
+        // None (uninitialised) → None
+        let h2 = McpServiceHandle::new("trusty-analyze", vec!["mcp".to_string()]);
+        assert!(
+            h2.degraded_hint().await.is_none(),
+            "None state must return None"
+        );
+
+        // Absent → None
+        let h3 = McpServiceHandle::new("trusty-analyze", vec!["mcp".to_string()]);
+        {
+            let mut guard = h3.state.lock().await;
+            let (state_opt, _) = &mut *guard;
+            *state_opt = Some(HandleState::Absent);
+        }
+        assert!(
+            h3.degraded_hint().await.is_none(),
+            "Absent state must return None"
+        );
     }
 
     /// Why: After a `call_tool` / respawn failure on an already-connected handle,

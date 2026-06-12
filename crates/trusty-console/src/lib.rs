@@ -19,8 +19,6 @@ use clap::{Parser, Subcommand};
 use tracing::info;
 use trusty_common::{init_tracing, shutdown_signal, write_daemon_addr};
 
-use crate::mcp_handle::McpServiceHandle;
-
 pub mod bind;
 pub mod connector;
 pub mod detect;
@@ -195,27 +193,38 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     // auto-starts it if absent. On machines without trusty-memory the handle
     // marks it Absent immediately; the cache stays None;
     // /api/console/metrics/memory returns 503 (graceful degradation).
-    metrics_poller::start(
-        Arc::new(McpServiceHandle::new(
-            "trusty-memory",
-            vec!["serve".to_string(), "--stdio".to_string()],
-        )),
-        state.memory_metrics_cache().clone(),
-        Duration::from_secs(args.poll_interval),
-    );
+    //
+    // The handle comes from AppState::mcp_handles so the services route and
+    // the metrics poller share the same McpServiceHandle (and thus the same
+    // tools/list probe result — once the probe marks the handle Degraded,
+    // that state is visible to both paths without a second probe).
+    {
+        let handles = state.mcp_handles();
+        if let Some(h) = handles.get("trusty-memory") {
+            metrics_poller::start(
+                Arc::clone(h),
+                state.memory_metrics_cache().clone(),
+                Duration::from_secs(args.poll_interval),
+            );
+        }
+    }
 
     // ── metrics MCP poll (trusty-search) ────────────────────────────────────
     // trusty-search's stdio MCP mode is `serve` (see serve_stdio in main.rs).
     // On machines without trusty-search the handle marks it Absent immediately;
     // the cache stays None; /api/console/metrics/search returns 503.
-    metrics_poller::start(
-        Arc::new(McpServiceHandle::new(
-            "trusty-search",
-            vec!["serve".to_string()],
-        )),
-        state.search_metrics_cache().clone(),
-        Duration::from_secs(args.poll_interval),
-    );
+    //
+    // Same shared-handle pattern as trusty-memory above.
+    {
+        let handles = state.mcp_handles();
+        if let Some(h) = handles.get("trusty-search") {
+            metrics_poller::start(
+                Arc::clone(h),
+                state.search_metrics_cache().clone(),
+                Duration::from_secs(args.poll_interval),
+            );
+        }
+    }
 
     let router = server::build_router(state.clone());
 

@@ -16,6 +16,7 @@
 //!
 //! Test: The `tests` module starts the router in a real axum test client.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,7 +34,7 @@ use serde_json::json;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::connector::ServiceConnector;
+use crate::connector::{ServiceConnector, ServiceInfo, ServiceStatus};
 use crate::mcp_handle::{McpHandleError, McpServiceHandle};
 use crate::metrics_poller::MetricsCache;
 use crate::poller::PollerCache;
@@ -62,8 +63,12 @@ struct UiAssets;
 /// independently and served without coupling. `analyze_handle` is held in Arc
 /// so the on-demand visualize/index routes can call the analyze stdio MCP
 /// without going through the /proxy path.
+/// `mcp_handles` maps each service id to its `McpServiceHandle` so the
+/// services route can overlay the connector-reported status with the actual
+/// tools/list probe result (Degraded when `console_metrics` is absent).
 /// What: Wraps the connector list, poller cache, per-service metrics caches,
-/// reqwest client, and the analyze MCP handle in `Arc`s for cheap cloning.
+/// reqwest client, the analyze MCP handle, and the full handle map in `Arc`s
+/// for cheap cloning.
 /// Test: Constructed in `build_router`; exercised by the integration tests.
 #[derive(Clone)]
 pub struct AppState {
@@ -76,6 +81,14 @@ pub struct AppState {
     /// Analyze stdio MCP handle — shared with the metrics poller so both the
     /// background poll and on-demand route calls reuse the same child process.
     analyze_handle: Arc<McpServiceHandle>,
+    /// All per-service MCP handles keyed by service id.
+    ///
+    /// Why: The services route reads each handle's degraded state to override
+    /// the connector-reported status when a reachable service is missing
+    /// `console_metrics`. Using a HashMap avoids adding individual Arc fields
+    /// for every future service.
+    /// What: Populated by `AppState::new`; read by `apply_handle_overrides`.
+    mcp_handles: Arc<HashMap<String, Arc<McpServiceHandle>>>,
 }
 
 impl AppState {
@@ -86,12 +99,30 @@ impl AppState {
     /// three `MetricsCache` instances (analyze / memory / search), and a
     /// default `reqwest::Client`. Creates the analyze stdio MCP handle that is
     /// shared between the background metrics poller and on-demand routes.
+    /// Populates `mcp_handles` with all three per-service handles so the
+    /// services route can read their degraded state.
     /// Test: Used in `build_router` and directly in `tests`.
     pub fn new(connectors: Vec<Box<dyn ServiceConnector>>) -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .expect("reqwest client init");
+        let analyze_handle = Arc::new(McpServiceHandle::new(
+            "trusty-analyze",
+            vec!["mcp".to_string()],
+        ));
+        let memory_handle = Arc::new(McpServiceHandle::new(
+            "trusty-memory",
+            vec!["serve".to_string(), "--stdio".to_string()],
+        ));
+        let search_handle = Arc::new(McpServiceHandle::new(
+            "trusty-search",
+            vec!["serve".to_string()],
+        ));
+        let mut handles: HashMap<String, Arc<McpServiceHandle>> = HashMap::new();
+        handles.insert("trusty-analyze".to_string(), Arc::clone(&analyze_handle));
+        handles.insert("trusty-memory".to_string(), Arc::clone(&memory_handle));
+        handles.insert("trusty-search".to_string(), Arc::clone(&search_handle));
         Self {
             connectors: Arc::new(connectors),
             poller_cache: PollerCache::new(),
@@ -99,11 +130,19 @@ impl AppState {
             memory_metrics_cache: MetricsCache::new(),
             search_metrics_cache: MetricsCache::new(),
             http_client: Arc::new(client),
-            analyze_handle: Arc::new(McpServiceHandle::new(
-                "trusty-analyze",
-                vec!["mcp".to_string()],
-            )),
+            analyze_handle,
+            mcp_handles: Arc::new(handles),
         }
+    }
+
+    /// Access the per-service MCP handle map.
+    ///
+    /// Why: The services route reads handles from this map to overlay connector
+    /// statuses with the tools/list probe result.
+    /// What: Returns a clone of the `Arc<HashMap>` (cheap).
+    /// Test: Used by `apply_handle_overrides` and the services handler.
+    pub fn mcp_handles(&self) -> Arc<HashMap<String, Arc<McpServiceHandle>>> {
+        Arc::clone(&self.mcp_handles)
     }
 
     /// Access the shared analyze MCP handle.
@@ -229,6 +268,38 @@ async fn health_handler() -> impl IntoResponse {
     }))
 }
 
+/// Apply per-service MCP handle degraded state on top of connector-reported statuses.
+///
+/// Why: The connector `detect()` path (TCP probe / `which`) can only report
+/// `Running`, `Available`, or `Absent`. It has no knowledge of the MCP
+/// `tools/list` probe result.  When a service is reachable but the
+/// `console_metrics` tool is absent (`HandleState::Degraded`), the connector
+/// still reports `Running` or `Available` — the UI incorrectly shows a healthy
+/// badge. This function overlays the handle's known state: if a handle is
+/// Degraded, the corresponding `ServiceInfo` is updated in-place to
+/// `status = Degraded` and `hint = DEGRADED_HINT`.
+/// What: Iterates `infos` in place; for each entry looks up the matching handle
+/// by `id`; if `handle.degraded_hint()` returns `Some(hint)` and the current
+/// status is NOT already `Absent`, sets `status = Degraded` and `hint = Some`.
+/// A process-down (`Absent`) service is never overridden — only reachable ones.
+/// Test: `test_services_route_handle_degraded_overlay` below.
+async fn apply_handle_overrides(
+    infos: &mut [ServiceInfo],
+    handles: &HashMap<String, Arc<McpServiceHandle>>,
+) {
+    for info in infos.iter_mut() {
+        if info.status == ServiceStatus::Absent {
+            continue;
+        }
+        if let Some(handle) = handles.get(&info.id)
+            && let Some(hint) = handle.degraded_hint().await
+        {
+            info.status = ServiceStatus::Degraded;
+            info.hint = Some(hint);
+        }
+    }
+}
+
 /// `GET /api/console/services` — return cached snapshot of all services.
 ///
 /// Why: The Svelte SPA fetches this endpoint on load to render service cards.
@@ -239,11 +310,19 @@ async fn health_handler() -> impl IntoResponse {
 /// so the UI always gets data (the first-boot latency is acceptable; after that
 /// every response is cache-backed).  A panic in the fallback blocking task
 /// surfaces as HTTP 500 rather than an empty 200.
-/// Test: `test_services_route_returns_json` and
-/// `test_services_handler_returns_500_on_panic` below.
+/// After obtaining the base service list (from cache or fallback), applies
+/// per-service handle degraded overrides via `apply_handle_overrides` so
+/// reachable services missing `console_metrics` surface as `status: degraded`.
+/// Test: `test_services_route_returns_json`,
+/// `test_services_handler_returns_500_on_panic`, and
+/// `test_services_route_handle_degraded_overlay` below.
 async fn services_handler(State(state): State<AppState>) -> axum::response::Response {
+    let handles = state.mcp_handles();
+
     if let Some(snap) = state.poller_cache().snapshot().await {
-        return axum::Json(snap.services).into_response();
+        let mut services = snap.services;
+        apply_handle_overrides(&mut services, &handles).await;
+        return axum::Json(services).into_response();
     }
 
     // First-boot fallback: run a one-shot detection synchronously.
@@ -253,7 +332,10 @@ async fn services_handler(State(state): State<AppState>) -> axum::response::Resp
     })
     .await
     {
-        Ok(infos) => axum::Json(infos).into_response(),
+        Ok(mut infos) => {
+            apply_handle_overrides(&mut infos, &handles).await;
+            axum::Json(infos).into_response()
+        }
         Err(e) => {
             tracing::error!("service detection task panicked: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -843,6 +925,94 @@ mod tests {
         assert!(
             body.get("error").is_some(),
             "expected error field, got: {body}"
+        );
+    }
+
+    /// Why: This is the key regression test for the UAT gap: the connector
+    /// `detect()` path reports `Running` or `Available` because it only does a
+    /// TCP/which probe and knows nothing about `tools/list`. When the actual
+    /// `McpServiceHandle` is in `Degraded` state (tools/list succeeded but
+    /// `console_metrics` absent), `GET /api/console/services` MUST override that
+    /// connector result to `degraded` with the remediation hint.
+    /// What: Builds state whose connector returns `Running` for trusty-search,
+    /// manually primes the trusty-search `McpServiceHandle` to `Degraded`, then
+    /// issues GET /api/console/services and asserts `status == "degraded"` with
+    /// a non-empty `hint`.  A connector that was `Absent` must NOT be overridden
+    /// (only reachable services can be Degraded by the tools/list probe).
+    /// This test intentionally does NOT use a hand-stubbed DegradedConnector —
+    /// it exercises the real `apply_handle_overrides` bridge from
+    /// `McpServiceHandle.state` → route response.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn test_services_route_handle_degraded_overlay() {
+        // Build state with:
+        //  - trusty-search connector returning Running (TCP probe passed)
+        //  - trusty-analyze connector returning Absent (binary not found)
+        let state = AppState::new(vec![
+            Box::new(StubConnector {
+                id: "trusty-search",
+                display_name: "Trusty Search",
+                status: ServiceStatus::Running,
+            }),
+            Box::new(StubConnector {
+                id: "trusty-analyze",
+                display_name: "Trusty Analyze",
+                status: ServiceStatus::Absent,
+            }),
+        ]);
+
+        // Prime the trusty-search handle to Degraded state (tools/list passed
+        // but console_metrics was absent).  This simulates the real-world
+        // situation on a machine where the daemon lacks console_metrics.
+        {
+            let handles = state.mcp_handles();
+            let search_handle = handles
+                .get("trusty-search")
+                .expect("search handle must exist");
+            search_handle.prime_degraded_for_test().await;
+        }
+
+        let router = build_router(state);
+        let req = Request::builder()
+            .uri("/api/console/services")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = get_bytes(resp).await;
+        let body: Vec<serde_json::Value> = serde_json::from_slice(&bytes).expect("parse json");
+        assert_eq!(body.len(), 2);
+
+        // trusty-search was Running via connector but Degraded via handle →
+        // must be overridden to degraded with a hint.
+        let search = body
+            .iter()
+            .find(|s| s["id"] == "trusty-search")
+            .expect("search entry");
+        assert_eq!(
+            search["status"], "degraded",
+            "Running service whose handle is Degraded must report degraded, got: {search}"
+        );
+        let hint = search["hint"].as_str().unwrap_or("");
+        assert!(
+            !hint.is_empty(),
+            "degraded service must include a non-empty hint"
+        );
+        assert!(
+            hint.contains("console_metrics"),
+            "hint must mention console_metrics, got: {hint}"
+        );
+
+        // trusty-analyze was Absent via connector — Absent must NOT be overridden
+        // even if the handle were somehow Degraded (process-down ≠ degraded).
+        let analyze = body
+            .iter()
+            .find(|s| s["id"] == "trusty-analyze")
+            .expect("analyze entry");
+        assert_eq!(
+            analyze["status"], "absent",
+            "Absent service must not be overridden to degraded"
         );
     }
 }
