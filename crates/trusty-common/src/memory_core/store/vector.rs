@@ -30,8 +30,11 @@ use async_trait::async_trait;
 use redb::Database;
 use uuid::Uuid;
 
-use crate::memory_core::store::concurrent_open::{OpenMode, SnapshotGuard, try_open_or_snapshot};
+use crate::memory_core::store::concurrent_open::{
+    OpenIntent, OpenMode, SnapshotGuard, backoff_sleep_ms, try_open_or_snapshot,
+};
 use crate::memory_core::store::hnsw_store::HnswStore;
+use crate::memory_core::store::kg_redb::READ_ONLY_ERROR_MSG;
 
 /// Bundle of state shared between every `UsearchStore` clone that points
 /// at the same canonical path.
@@ -81,30 +84,70 @@ fn canonical_key(path: &Path) -> PathBuf {
 /// fresh one if no live handle exists. The returned state carries the
 /// open mode so callers can switch the HNSW store into read-only mode
 /// when the live file was locked.
+///
+/// Why: mirrors `KgStoreRedb::open` with the same TOCTOU retry strategy
+/// (issue #1152 / issue #59). See that function for the full rationale.
+/// What: Cache-check → `try_open_or_snapshot(ReadOnlyClient)` → up to 4
+/// retries with exponential backoff (2/10/50/100 ms) on in-process TOCTOU
+/// races. Cross-process lock conflicts fall back to a read-only snapshot;
+/// writes against that snapshot are rejected via `READ_ONLY_ERROR_MSG`.
+/// Test: Indirectly via `trusty-memory`'s
+/// `default_palace_used_when_arg_omitted`.
 fn open_or_get_cached_db(path: &Path) -> Result<Arc<VectorDbState>> {
-    {
-        let mut cache = vector_db_cache().lock().expect("vector_db_cache poisoned");
-        let key = canonical_key(path);
-        if let Some(weak) = cache.get(&key)
-            && let Some(state) = weak.upgrade()
-        {
-            return Ok(state);
-        }
-        cache.remove(&key);
-    }
+    const RETRIES: u8 = 4;
+    const RETRY_SLEEP_MS: [u64; 4] = [2, 10, 50, 100];
 
-    let (db, snapshot_guard, mode) = try_open_or_snapshot(path)
-        .with_context(|| format!("open vector redb at {}", path.display()))?;
-    let state = Arc::new(VectorDbState {
-        db,
-        mode,
-        _snapshot_guard: snapshot_guard,
-    });
-    {
-        let mut cache = vector_db_cache().lock().expect("vector_db_cache poisoned");
-        cache.insert(canonical_key(path), Arc::downgrade(&state));
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 0..=RETRIES {
+        {
+            let mut cache = vector_db_cache().lock().expect("vector_db_cache poisoned");
+            let key = canonical_key(path);
+            if let Some(weak) = cache.get(&key)
+                && let Some(state) = weak.upgrade()
+            {
+                return Ok(state);
+            }
+            cache.remove(&key);
+        }
+
+        // ReadOnlyClient: cross-process lock conflicts fall back to a
+        // read-only snapshot (issue #59 behaviour). Writes are rejected
+        // via the `READ_ONLY_ERROR_MSG` guard. In-process TOCTOU races
+        // (async `KgWriter` abort) are resolved by the retry loop.
+        match try_open_or_snapshot(path, OpenIntent::ReadOnlyClient)
+            .with_context(|| format!("open vector redb at {}", path.display()))
+        {
+            Ok((db, snapshot_guard, mode)) => {
+                let state = Arc::new(VectorDbState {
+                    db,
+                    mode,
+                    _snapshot_guard: snapshot_guard,
+                });
+                {
+                    let mut cache = vector_db_cache().lock().expect("vector_db_cache poisoned");
+                    cache.insert(canonical_key(path), Arc::downgrade(&state));
+                }
+                return Ok(state);
+            }
+            Err(e) => {
+                last_err = Some(e);
+                if attempt < RETRIES {
+                    // Exponential backoff: let any concurrent in-process
+                    // `Database::drop` (or async `KgWriter` abort) finish
+                    // releasing the OS file lock before retrying.
+                    //
+                    // `open_or_get_cached_db` is sync but may be called from
+                    // async contexts (via `UsearchStore::new` from `PalaceHandle::open`).
+                    // `backoff_sleep_ms` uses `block_in_place` on multi-thread
+                    // Tokio runtimes so the executor can schedule other tasks
+                    // while this thread waits, preventing worker-thread starvation.
+                    let sleep_ms = RETRY_SLEEP_MS[attempt as usize];
+                    backoff_sleep_ms(sleep_ms);
+                }
+            }
+        }
     }
-    Ok(state)
+    Err(last_err.expect("at least one attempt was made"))
 }
 
 /// A single nearest-neighbour result.
@@ -400,6 +443,11 @@ impl UsearchStore {
 #[async_trait]
 impl VectorStore for UsearchStore {
     async fn upsert(&self, id: Uuid, embedding: Vec<f32>) -> Result<()> {
+        // Surface read-only errors before spawn_blocking so the anyhow context
+        // chain doesn't bury the actionable sentinel message (issue #59).
+        if self.is_read_only() {
+            anyhow::bail!(READ_ONLY_ERROR_MSG);
+        }
         let inner = self.inner.clone();
         let key = id.to_string();
         tokio::task::spawn_blocking(move || -> Result<()> {
@@ -447,6 +495,11 @@ impl VectorStore for UsearchStore {
     }
 
     async fn remove(&self, id: Uuid) -> Result<()> {
+        // Surface read-only errors before spawn_blocking so the anyhow context
+        // chain doesn't bury the actionable sentinel message (issue #59).
+        if self.is_read_only() {
+            anyhow::bail!(READ_ONLY_ERROR_MSG);
+        }
         let inner = self.inner.clone();
         let key = id.to_string();
         tokio::task::spawn_blocking(move || -> Result<()> {
@@ -640,84 +693,143 @@ mod tests {
         assert!(hits.is_empty(), "search after reset should be empty");
     }
 
-    // -- Issue #59: read-only snapshot fallback ----------------------------
+    // -- Issue #59 / #1152: cross-process lock + snapshot fallback -------------
+    // `UsearchStore::new` uses `OpenIntent::ReadOnlyClient` so that when another
+    // process holds the redb exclusive lock, we fall back to a read-only snapshot
+    // (issue #59 behaviour). Writes against that snapshot are rejected via
+    // `READ_ONLY_ERROR_MSG`. The issue #1152 guard is enforced at the daemon
+    // level (`single_instance_check` in main.rs), not at the storage layer.
 
-    /// Why: When the redb file backing the vector index is locked by
-    /// another process (the HTTP daemon), `UsearchStore::new` must fall
-    /// back to a snapshot copy and report `is_read_only()`.
-    /// What: Seeds the vector file with one row, holds the redb file lock
-    /// via a raw `redb::Database`, then opens a second `UsearchStore`
-    /// against the same logical path. Asserts read-only + that the
-    /// snapshot can still serve a search hit.
+    /// Why (issue #59 / #1152): `UsearchStore::new` uses
+    /// `OpenIntent::ReadOnlyClient` — when a cross-process lock conflict occurs
+    /// (another daemon holds the file), the caller gets a read-only snapshot
+    /// handle rather than an error. Writes are rejected via `READ_ONLY_ERROR_MSG`
+    /// so silent divergence is impossible.
+    /// What: Seeds the vector file, drops the store so the cache expires, holds
+    /// the redb file lock with a raw handle, then asserts the second
+    /// `UsearchStore::new` SUCCEEDS in snapshot (read-only) mode.
     /// Test: this test.
+    #[tokio::test]
+    async fn vector_open_on_locked_file_returns_snapshot_handle() {
+        let dir = tempdir().unwrap();
+        let logical = dir.path().join("test.usearch");
+
+        // Populate and drop so the cache entry expires.
+        {
+            let primary = UsearchStore::new(logical.clone(), 384).unwrap();
+            primary
+                .upsert(Uuid::new_v4(), unit_vec(384, 1))
+                .await
+                .unwrap();
+        }
+
+        // Hold the redb file lock with a raw `Database::create`.
+        let redb_path = redb_path_for(&logical);
+        let _live = redb::Database::create(&redb_path).expect("lock vector redb");
+
+        // ReadOnlyClient open must succeed via snapshot fallback.
+        let result = UsearchStore::new(logical.clone(), 384);
+        assert!(
+            result.is_ok(),
+            "ReadOnlyClient open on locked vector redb must succeed via snapshot fallback"
+        );
+        let snap = result.expect("should be Ok");
+        assert!(
+            snap.is_read_only(),
+            "snapshot store must report is_read_only()"
+        );
+    }
+
+    /// Why (issue #59): `upsert` and `remove` on a snapshot handle must
+    /// return an error that includes the read-only sentinel text so callers
+    /// see actionable guidance. This tests the storage-layer write guard
+    /// independently of the daemon-level `single_instance_check`.
+    /// What: Seeds a vector file, drops the store so the cache expires,
+    /// holds the lock, opens a snapshot handle, then asserts both write
+    /// methods Err with the expected message.
+    /// Test: this test — `vector_writes_rejected_on_snapshot`.
     #[tokio::test]
     async fn vector_writes_rejected_on_snapshot() {
         let dir = tempdir().unwrap();
         let logical = dir.path().join("test.usearch");
-        let id = Uuid::new_v4();
-        let v = unit_vec(384, 91);
 
-        // Populate the live file via the normal store API, then drop the
-        // store so the in-process cache entry expires before we try to
-        // re-acquire the redb file lock with a raw handle.
+        // Populate and drop so the cache entry expires.
+        {
+            let primary = UsearchStore::new(logical.clone(), 384).unwrap();
+            primary
+                .upsert(Uuid::new_v4(), unit_vec(384, 1))
+                .await
+                .unwrap();
+        }
+
+        // Hold the lock so the next open takes the snapshot path.
+        let redb_path = redb_path_for(&logical);
+        let _live = redb::Database::create(&redb_path).expect("lock vector redb");
+
+        let snap = UsearchStore::new(logical.clone(), 384).expect("snapshot open must succeed");
+        assert!(snap.is_read_only());
+
+        // upsert must fail with read-only guidance.
+        let err = snap
+            .upsert(Uuid::new_v4(), unit_vec(384, 99))
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("read-only"),
+            "upsert on snapshot must mention read-only, got: {msg}"
+        );
+
+        // remove must fail with read-only guidance.
+        let err = snap.remove(Uuid::new_v4()).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("read-only"),
+            "remove on snapshot must mention read-only, got: {msg}"
+        );
+    }
+
+    /// Why (issue #59): reads must succeed on a snapshot handle — the
+    /// snapshot is a point-in-time copy of the live file and must be
+    /// searchable.
+    /// What: Seeds one vector, drops, acquires lock, opens snapshot,
+    /// searches, and asserts the seeded id is returned at rank 0.
+    /// Test: this test — `vector_remove_rejected_on_snapshot` (search
+    /// path — the symmetric read-succeeds counterpart).
+    #[tokio::test]
+    async fn vector_remove_rejected_on_snapshot() {
+        let dir = tempdir().unwrap();
+        let logical = dir.path().join("test.usearch");
+        let id = Uuid::new_v4();
+        let v = unit_vec(384, 5);
+
+        // Seed then drop so cache expires.
         {
             let primary = UsearchStore::new(logical.clone(), 384).unwrap();
             primary.upsert(id, v.clone()).await.unwrap();
         }
 
-        // Hold the redb file lock with a raw `Database::create` (bypasses
-        // the in-process cache). This must succeed because the previous
-        // store was dropped above.
+        // Hold the lock.
         let redb_path = redb_path_for(&logical);
         let _live = redb::Database::create(&redb_path).expect("lock vector redb");
 
-        let snapshot =
-            UsearchStore::new(logical.clone(), 384).expect("snapshot fallback must succeed");
-        assert!(snapshot.is_read_only(), "snapshot must report read-only");
+        let snap = UsearchStore::new(logical.clone(), 384).expect("snapshot open must succeed");
+        assert!(snap.is_read_only());
 
-        // Reads still work against the snapshot.
-        let hits = snapshot.search(&v, 1).await.expect("search on snapshot");
-        assert!(
-            !hits.is_empty(),
-            "snapshot must surface vectors seeded into the live file"
+        // Search (read) must succeed and return the seeded vector.
+        let hits = snap.search(&v, 1).await.unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "search on snapshot must return seeded vector"
         );
+        assert_eq!(hits[0].drawer_id, id);
 
-        // Writes against the snapshot must fail with a read-only error.
-        let write = snapshot.upsert(Uuid::new_v4(), unit_vec(384, 2)).await;
-        let err = write.expect_err("upsert must fail in snapshot mode");
-        let msg = format!("{err:#}");
+        // remove must be rejected.
+        let err = snap.remove(id).await.unwrap_err();
         assert!(
-            msg.contains("read-only") || msg.contains("read_only"),
-            "expected read-only error, got: {msg}"
+            err.to_string().contains("read-only"),
+            "remove on snapshot must be rejected"
         );
-    }
-
-    /// Why: Writes that race with another process must surface a clear
-    /// error without panicking — `remove` is on the same write surface as
-    /// `upsert` so it must reject under the same conditions.
-    /// What: Holds the redb file lock with a raw handle, opens an
-    /// `UsearchStore` against the same logical path, and asserts `remove`
-    /// fails.
-    /// Test: this test.
-    #[tokio::test]
-    async fn vector_remove_rejected_on_snapshot() {
-        let dir = tempdir().unwrap();
-        let logical = dir.path().join("test.usearch");
-        // Seed and drop so the cache entry expires.
-        {
-            let primary = UsearchStore::new(logical.clone(), 384).unwrap();
-            primary
-                .upsert(Uuid::new_v4(), unit_vec(384, 5))
-                .await
-                .unwrap();
-        }
-        let redb_path = redb_path_for(&logical);
-        let _live = redb::Database::create(&redb_path).expect("lock vector redb");
-
-        let snapshot = UsearchStore::new(logical, 384).expect("snapshot fallback");
-        assert!(snapshot.is_read_only());
-
-        let res = snapshot.remove(Uuid::new_v4()).await;
-        assert!(res.is_err(), "remove must fail in snapshot mode");
     }
 }

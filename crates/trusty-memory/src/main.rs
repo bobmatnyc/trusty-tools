@@ -699,14 +699,13 @@ async fn run_serve(
     // spawned by launchd and those spawned manually — so the guard is always
     // active regardless of how the daemon was launched.
     {
-        use trusty_memory::commands::single_instance::{single_instance_check, StartupAction};
+        use trusty_memory::commands::single_instance as si;
         let addr_file = trusty_memory::http_addr_path();
-        let action = single_instance_check(addr_file.as_deref()).await;
+        // Issue #1152, Tier 3: 3 probes × 200 ms catches a mid-boot daemon.
+        let action = si::single_instance_check_retried(addr_file.as_deref(), 2, 200).await;
         match action {
-            StartupAction::Proceed => {
-                // Normal path: no live daemon detected, continue to bind.
-            }
-            StartupAction::ExitAlreadyRunning => {
+            si::StartupAction::Proceed => {}
+            si::StartupAction::ExitAlreadyRunning => {
                 tracing::info!(
                     "single-instance guard: another trusty-memory instance is \
                      already running; exiting 0 to stop launchd respawn storm"
@@ -717,7 +716,7 @@ async fn run_serve(
                 );
                 std::process::exit(0);
             }
-            StartupAction::Fail(msg) => {
+            si::StartupAction::Fail(msg) => {
                 anyhow::bail!("single-instance check failed unexpectedly: {msg}");
             }
         }

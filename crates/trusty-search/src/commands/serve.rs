@@ -102,6 +102,7 @@ async fn ensure_search_daemon_up() -> Result<String> {
         }),
         startup_timeout: None,
         poll_interval: None,
+        no_spawn: false, // trusty-search bridge may auto-start its daemon
     };
     trusty_common::mcp::ensure_daemon_up(&config).await
 }

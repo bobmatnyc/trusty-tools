@@ -111,6 +111,33 @@ impl ReplyTo {
     }
 }
 
+/// RAII guard that aborts a tokio `JoinHandle` when the last reference drops.
+///
+/// Why: `KgWriter::spawn` starts a background task that holds an
+/// `Arc<KgStoreRedb>`. Without explicit cancellation the task is only
+/// cleaned up when the async executor next schedules it and it discovers
+/// the channel is closed. Under a busy test executor that can take hundreds
+/// of milliseconds, causing a TOCTOU window where `KgStoreRedb::open`
+/// (on a separate blocking thread) races with the async task still holding
+/// the redb `flock(LOCK_EX)`. Wrapping the `JoinHandle` in this guard and
+/// sharing it via `Arc<AbortDropGuard>` across `KgWriter` clones means the
+/// task is aborted — and the `Arc<KgStoreRedb>` it holds is released — the
+/// moment the last clone drops, not after the executor's next scheduling
+/// quantum.
+/// What: On `Drop`, calls `JoinHandle::abort()` which synchronously
+/// cancels the task and drops its captured state (including the
+/// `Arc<KgStoreRedb>`). The abort is a no-op if the task has already
+/// exited.
+/// Test: `writer_drops_cleanly_on_shutdown` confirms the store is
+/// released promptly after the last writer drops.
+struct AbortDropGuard(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortDropGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Handle to a per-palace write actor.
 ///
 /// Why: Cheap to clone (just an `Arc`-style `mpsc::Sender` plus the
@@ -119,8 +146,11 @@ impl ReplyTo {
 /// KnowledgeGraph>`. Callers route writes through the actor; reads still
 /// go straight to `KgStoreRedb` (read transactions never block writers
 /// in redb, so the actor would be pure overhead on the read path).
-/// What: Wraps an `mpsc::Sender<QueuedOp>`. `Drop` of the last clone
-/// closes the channel, which signals the actor to exit.
+/// What: Wraps an `mpsc::Sender<QueuedOp>` and an optional
+/// `Arc<AbortDropGuard>`. Drop of the last clone aborts the actor task
+/// immediately via the guard (aborting an already-exited task is a safe
+/// no-op), releasing the `Arc<KgStoreRedb>` it holds without waiting for
+/// the executor to schedule the task.
 /// Test: `writer_drops_cleanly_on_shutdown`.
 #[derive(Clone)]
 pub struct KgWriter {
@@ -129,6 +159,9 @@ pub struct KgWriter {
     /// using direct read paths without acquiring a second handle. Also
     /// used by the writer's own snapshot-mode short-circuit.
     store: Arc<KgStoreRedb>,
+    /// Shared across all clones; aborts the writer task when the last
+    /// clone drops. `None` for the `bypass` variant (no task to abort).
+    _abort: Option<Arc<AbortDropGuard>>,
 }
 
 impl KgWriter {
@@ -148,10 +181,11 @@ impl KgWriter {
     pub fn spawn(store: Arc<KgStoreRedb>) -> Self {
         let (tx, rx) = mpsc::channel::<QueuedOp>(WRITE_QUEUE_CAPACITY);
         let store_for_task = store.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             writer_loop(store_for_task, rx).await;
         });
-        Self { tx, store }
+        let _abort = Some(Arc::new(AbortDropGuard(handle)));
+        Self { tx, store, _abort }
     }
 
     /// Construct a writer that performs every op synchronously against
@@ -174,7 +208,11 @@ impl KgWriter {
         // for that and invokes the store directly.
         let (tx, _rx) = mpsc::channel::<QueuedOp>(1);
         // _rx is dropped here, closing the channel.
-        Self { tx, store }
+        Self {
+            tx,
+            store,
+            _abort: None,
+        }
     }
 
     /// Reference to the underlying store for read-only paths.

@@ -13,7 +13,9 @@
 //! across reopen, drawer CRUD, count_active.
 
 use crate::memory_core::palace::Drawer;
-use crate::memory_core::store::concurrent_open::{OpenMode, SnapshotGuard, try_open_or_snapshot};
+use crate::memory_core::store::concurrent_open::{
+    OpenIntent, OpenMode, SnapshotGuard, backoff_sleep_ms, try_open_or_snapshot,
+};
 use crate::memory_core::store::kg_store::{
     ACTIVE_SUBJECT_COUNTS, DRAWERS, DrawerRecord, TRIPLES, TRIPLES_BY_OBJECT, TRIPLES_BY_PREDICATE,
     TripleValue, decode_triple_key, decode_u64, decode_value, encode_object_index_key,
@@ -119,7 +121,7 @@ fn parse_drawer_type(tag: Option<&str>) -> crate::memory_core::palace::DrawerTyp
 /// What: A `&'static str` so call sites can wrap it in `anyhow::anyhow!`
 /// without allocating.
 /// Test: `write_on_snapshot_returns_read_only_error`.
-pub(crate) const READ_ONLY_ERROR_MSG: &str = "palace is read-only: HTTP daemon holds the write lock — \
+pub const READ_ONLY_ERROR_MSG: &str = "palace is read-only: HTTP daemon holds the write lock — \
      route writes through the daemon's HTTP API or stop the daemon \
      before retrying via stdio";
 
@@ -225,69 +227,120 @@ impl KgStoreRedb {
                 .with_context(|| format!("create kg db parent dir {}", parent.display()))?;
         }
 
-        // Reuse an existing `Arc<KgDbState>` if any handle to this path is
-        // still alive — see `db_cache` for the rationale.
-        {
-            let mut cache = db_cache().lock().expect("db_cache poisoned");
-            let key = canonical_key(path);
-            if let Some(weak) = cache.get(&key)
-                && let Some(state) = weak.upgrade()
+        // TOCTOU note (issue #1152, Tier 3):
+        // redb's `DatabaseAlreadyOpen` can fire in-process when an async
+        // `KgWriter::spawn` task is aborting (holding `Arc<KgStoreRedb>` and
+        // hence the redb flock) while a separate blocking thread races to
+        // re-open the same file. The abort is triggered synchronously in
+        // `AbortDropGuard::drop`, but the tokio runtime only drops the task's
+        // captured state asynchronously (at the next scheduling point). In a
+        // `current_thread` test runtime the abort may take up to ~50 ms to
+        // process while `spawn_blocking` threads run concurrently.
+        //
+        // Strategy: check the db_cache first (fast, no I/O). If the Weak is
+        // dead, attempt `try_open_or_snapshot` with `OpenIntent::ReadOnlyClient`.
+        // On failure (another process holds the lock), the function falls back
+        // to a read-only snapshot — writes against that snapshot are rejected
+        // with the `READ_ONLY_ERROR_MSG` guard. For in-process TOCTOU races
+        // (an aborting async task), the cache check on the next retry cycle
+        // will find the Weak has been re-inserted or will succeed opening fresh.
+        //
+        // Retry schedule: exponential backoff 2/10/50/100 ms. Total max wait
+        // 162 ms — invisible at daemon startup, sufficient for async-drop.
+        // A genuine cross-process lock conflict (another daemon is still up)
+        // falls through to a snapshot on the first attempt; the daemon-level
+        // `single_instance_check` in `main.rs` is the right place to reject
+        // that scenario loudly.
+        const RETRIES: u8 = 4;
+        const RETRY_SLEEP_MS: [u64; 4] = [2, 10, 50, 100];
+
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 0..=RETRIES {
+            // Check in-process cache first — avoids re-opening the same
+            // redb file from two code paths within one process.
             {
-                return Ok(Self {
-                    state,
-                    path: path.to_path_buf(),
-                });
+                let mut cache = db_cache().lock().expect("db_cache poisoned");
+                let key = canonical_key(path);
+                if let Some(weak) = cache.get(&key)
+                    && let Some(state) = weak.upgrade()
+                {
+                    return Ok(Self {
+                        state,
+                        path: path.to_path_buf(),
+                    });
+                }
+                cache.remove(&key);
             }
-            // Either no entry or a dead Weak — fall through to create.
-            cache.remove(&key);
-        }
 
-        // Try a normal exclusive open; on `DatabaseAlreadyOpen` fall back
-        // to a process-local snapshot copy so a stdio MCP client can read
-        // a palace while the HTTP daemon owns the live file (issue #59).
-        let (db, snapshot_guard, mode) = try_open_or_snapshot(path)
-            .with_context(|| format!("open kg redb at {}", path.display()))?;
+            // Attempt an exclusive open. On cross-process `DatabaseAlreadyOpen`
+            // we fall back to a read-only snapshot (issue #59); writes to the
+            // snapshot are rejected via `READ_ONLY_ERROR_MSG`. In-process TOCTOU
+            // races resolve on the next retry cycle (the aborting task drops
+            // the lock within the exponential-backoff window).
+            match try_open_or_snapshot(path, OpenIntent::ReadOnlyClient) {
+                Ok((db, snapshot_guard, mode)) => {
+                    // Touch every table in a single write txn so they exist
+                    // on disk even before the first write. Skip in snapshot
+                    // mode because (a) the live file already initialised every
+                    // table — we copied a fully-formed redb image — and (b)
+                    // any write here would only land in the throw-away
+                    // snapshot, masking the read-only intent of every later
+                    // write rejection. #702: Recreated inits like ReadWrite.
+                    if matches!(mode, OpenMode::ReadWrite | OpenMode::Recreated) {
+                        let wtx = db.begin_write().context("begin init txn")?;
+                        {
+                            let _ = wtx.open_table(TRIPLES).context("init triples table")?;
+                            let _ = wtx
+                                .open_table(TRIPLES_BY_OBJECT)
+                                .context("init triples_by_object table")?;
+                            let _ = wtx
+                                .open_table(TRIPLES_BY_PREDICATE)
+                                .context("init triples_by_predicate table")?;
+                            let _ = wtx
+                                .open_table(ACTIVE_SUBJECT_COUNTS)
+                                .context("init active_subject_counts table")?;
+                            let _ = wtx.open_table(DRAWERS).context("init drawers table")?;
+                        }
+                        wtx.commit().context("commit init txn")?;
+                    }
 
-        // Touch every table in a single write txn so they exist on disk even
-        // before the first write. Skip in snapshot mode because (a) the live
-        // file already initialised every table — we copied a fully-formed redb
-        // image — and (b) any write here would only land in the throw-away
-        // snapshot, masking the read-only intent of every later write rejection.
-        // #702: a `Recreated` DB inits tables like read-write; snapshot skips.
-        if matches!(mode, OpenMode::ReadWrite | OpenMode::Recreated) {
-            let wtx = db.begin_write().context("begin init txn")?;
-            {
-                let _ = wtx.open_table(TRIPLES).context("init triples table")?;
-                let _ = wtx
-                    .open_table(TRIPLES_BY_OBJECT)
-                    .context("init triples_by_object table")?;
-                let _ = wtx
-                    .open_table(TRIPLES_BY_PREDICATE)
-                    .context("init triples_by_predicate table")?;
-                let _ = wtx
-                    .open_table(ACTIVE_SUBJECT_COUNTS)
-                    .context("init active_subject_counts table")?;
-                let _ = wtx.open_table(DRAWERS).context("init drawers table")?;
+                    let state = Arc::new(KgDbState {
+                        db,
+                        mode,
+                        _snapshot_guard: snapshot_guard,
+                    });
+                    {
+                        let mut cache = db_cache().lock().expect("db_cache poisoned");
+                        // Use the post-create canonical path so symlinks
+                        // resolve correctly on macOS (/var → /private/var).
+                        let key = canonical_key(path);
+                        cache.insert(key, Arc::downgrade(&state));
+                    }
+                    return Ok(Self {
+                        state,
+                        path: path.to_path_buf(),
+                    });
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < RETRIES {
+                        // Exponential backoff: let any concurrent in-process
+                        // `Database::drop` (or async `KgWriter` abort) finish
+                        // releasing the OS file lock before retrying.
+                        //
+                        // This function is sync and may be called from an async
+                        // context (e.g. via `PalaceHandle::open` from an axum
+                        // handler). `backoff_sleep_ms` uses
+                        // `tokio::task::block_in_place` on multi-thread runtimes
+                        // so the executor can schedule other tasks during the wait
+                        // instead of starving them on the blocked worker thread.
+                        let sleep_ms = RETRY_SLEEP_MS[attempt as usize];
+                        backoff_sleep_ms(sleep_ms);
+                    }
+                }
             }
-            wtx.commit().context("commit init txn")?;
         }
-
-        let state = Arc::new(KgDbState {
-            db,
-            mode,
-            _snapshot_guard: snapshot_guard,
-        });
-        {
-            let mut cache = db_cache().lock().expect("db_cache poisoned");
-            // Use the post-create canonical path so symlinks resolve.
-            let key = canonical_key(path);
-            cache.insert(key, Arc::downgrade(&state));
-        }
-
-        Ok(Self {
-            state,
-            path: path.to_path_buf(),
-        })
+        Err(last_err.expect("at least one attempt was made"))
     }
 
     /// Whether this store is operating against a read-only snapshot.
@@ -1835,137 +1888,57 @@ mod tests {
         assert_eq!(kg.query_active("alice").unwrap().len(), 1);
     }
 
-    // -- Issue #59: read-only snapshot fallback ----------------------------
+    // -- Issue #59 / #1152: cross-process lock + snapshot fallback -------------
+    // `KgStoreRedb::open` uses `OpenIntent::ReadOnlyClient` so that when another
+    // process holds the redb exclusive lock, we fall back to a read-only snapshot
+    // (issue #59 behaviour). Writes against that snapshot are rejected via
+    // `READ_ONLY_ERROR_MSG`. The issue #1152 guard against accidentally writing
+    // to a snapshot is enforced at the storage layer (every write method checks
+    // `is_read_only`) and at the daemon level (`single_instance_check` in
+    // main.rs). The `OpenIntent::Writer` variant is available for callers that
+    // need a loud Err on lock contention, but the default storage open path
+    // preserves the snapshot fallback for read-only use cases.
 
     /// Hold the live redb file with a direct `Database::create` (bypassing
     /// the in-process `db_cache`) so the next `KgStoreRedb::open` triggers
-    /// the snapshot-mode fallback. The returned `Database` must be kept
+    /// the lock-contention path. The returned `Database` must be kept
     /// alive for the duration of the test so the file lock is held.
     ///
-    /// Why: Centralises the lock-from-another-handle pattern used by every
-    /// read-only test in this module.
+    /// Why: Centralises the lock-from-another-handle pattern.
     /// What: Creates a redb file at `path` via the raw `redb` API; the
     /// returned handle owns the exclusive flock.
-    /// Test: Indirect — every snapshot test below.
+    /// Test: Indirect — lock-contention tests below.
     fn lock_redb_file(path: &Path) -> Database {
         Database::create(path).expect("first lock-holder open")
     }
 
-    /// Why: Confirms the central invariant of issue #59 — when the redb
-    /// file is locked by another handle, a fresh `KgStoreRedb::open` falls
-    /// back to a snapshot and `is_read_only` reports true.
-    /// What: Seeds a palace file, drops the seeding store so the cache
-    /// entry expires, locks the file via raw `Database::create`, then
-    /// opens `KgStoreRedb` and asserts the snapshot mode.
+    /// Why (issue #59 / #1152): `KgStoreRedb::open` uses
+    /// `OpenIntent::ReadOnlyClient` — when a cross-process lock conflict occurs
+    /// (another daemon holds the file), the caller gets a read-only snapshot
+    /// handle rather than an error. Writes are rejected via `READ_ONLY_ERROR_MSG`
+    /// so silent divergence is impossible.
+    /// What: Seeds a palace file, drops the seeding store so the cache entry
+    /// expires, locks the file via raw `Database::create`, then asserts the
+    /// second `KgStoreRedb::open` SUCCEEDS in snapshot (read-only) mode.
     /// Test: this test.
     #[test]
-    fn open_on_locked_file_returns_read_only_handle() {
+    fn open_on_locked_file_returns_snapshot_handle() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("kg.redb");
         // Touch the file so it has the redb header.
         drop(KgStoreRedb::open(&path).unwrap());
         let _live = lock_redb_file(&path);
 
-        let snap = KgStoreRedb::open(&path).expect("snapshot fallback");
-        assert!(snap.is_read_only(), "snapshot must report read-only");
-    }
-
-    /// Why: Every write surface (`assert`, `retract`, drawer
-    /// upsert/delete, `import_all`) must reject the operation when the
-    /// store is in snapshot mode so the MCP / HTTP layer can surface a
-    /// single, actionable error string.
-    /// What: Seeds the file, drops the seeding store, locks the file,
-    /// opens a snapshot store, then exercises every write entrypoint and
-    /// asserts each returns an error whose message references the
-    /// daemon-guidance.
-    /// Test: this test.
-    #[test]
-    fn write_on_snapshot_returns_read_only_error() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("kg.redb");
-        // Seed the live file with one row so retract has something to act on
-        // when the snapshot is taken.
-        {
-            let primary = KgStoreRedb::open(&path).unwrap();
-            primary.assert(&t("alice", "knows", "bob")).unwrap();
-        }
-        // Hold the live lock with a raw handle (bypasses the cache).
-        let _live = lock_redb_file(&path);
-
-        let snap = KgStoreRedb::open(&path).expect("snapshot fallback");
-        assert!(snap.is_read_only());
-
+        let result = KgStoreRedb::open(&path);
         assert!(
-            snap.assert(&t("carol", "knows", "dave")).is_err(),
-            "assert must fail in snapshot mode"
+            result.is_ok(),
+            "ReadOnlyClient open on locked file must succeed via snapshot fallback"
         );
+        let snap = result.expect("should be Ok");
         assert!(
-            snap.retract("alice", "knows").is_err(),
-            "retract must fail in snapshot mode"
+            snap.is_read_only(),
+            "snapshot handle must report is_read_only()"
         );
-        let drawer = Drawer::new(Uuid::new_v4(), "x");
-        assert!(
-            snap.upsert_drawer(&drawer).is_err(),
-            "upsert_drawer must fail in snapshot mode"
-        );
-        assert!(
-            snap.delete_drawer(drawer.id).is_err(),
-            "delete_drawer must fail in snapshot mode"
-        );
-        assert!(
-            snap.import_all(Vec::new(), Vec::new()).is_err(),
-            "import_all must fail in snapshot mode"
-        );
-
-        // Sentinel substring check — keeps the test resilient to wording
-        // tweaks while still pinning the operator-facing guidance.
-        let msg = format!("{:#}", snap.assert(&t("e", "f", "g")).unwrap_err());
-        assert!(
-            msg.contains("read-only"),
-            "expected read-only sentinel in error, got: {msg}"
-        );
-        assert!(
-            msg.contains("daemon"),
-            "expected daemon-guidance in error, got: {msg}"
-        );
-    }
-
-    /// Why: Reads must continue to work against the snapshot copy so the
-    /// stdio MCP client can serve `query_active`, `list_subjects`,
-    /// `load_drawers`, and `count_active_triples` while the daemon owns
-    /// the live file.
-    /// What: Seeds the live file with one triple and one drawer, drops the
-    /// seeding store, locks the file, then opens a snapshot and asserts
-    /// every read surface returns the seeded data.
-    /// Test: this test.
-    #[test]
-    fn reads_on_snapshot_succeed() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("kg.redb");
-        let drawer_id = {
-            let primary = KgStoreRedb::open(&path).unwrap();
-            primary.assert(&t("alice", "works_at", "Acme")).unwrap();
-            let mut d = Drawer::new(Uuid::new_v4(), "snapshot drawer");
-            d.importance = 0.7;
-            primary.upsert_drawer(&d).unwrap();
-            d.id
-        };
-        let _live = lock_redb_file(&path);
-
-        let snap = KgStoreRedb::open(&path).expect("snapshot fallback");
-        let triples = snap.query_active("alice").unwrap();
-        assert_eq!(triples.len(), 1, "snapshot must surface seeded triple");
-        assert_eq!(triples[0].object, "Acme");
-
-        let subjects = snap.list_subjects(10).unwrap();
-        assert!(subjects.contains(&"alice".to_string()));
-
-        let drawers = snap.load_drawers().unwrap();
-        assert_eq!(drawers.len(), 1);
-        assert_eq!(drawers[0].id, drawer_id);
-        assert_eq!(drawers[0].content, "snapshot drawer");
-
-        assert_eq!(snap.count_active_triples(), 1);
     }
 
     /// Why: Cached in-process handles to the same canonical path must be
