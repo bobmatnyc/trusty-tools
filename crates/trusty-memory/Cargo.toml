@@ -160,6 +160,7 @@ open = "5"
 [dev-dependencies]
 tempfile = { workspace = true }
 tower = { workspace = true }
+serial_test = { workspace = true }
 
 [features]
 # Why (issue #226): library consumers that only need `MemoryMcpService` for

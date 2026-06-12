@@ -373,6 +373,17 @@ async fn analyze_visualize_handler(
     let handle = state.analyze_handle();
     let args = serde_json::json!({ "index_id": index_id });
 
+    // NOTE: although `tokio::join!` normally drives all three futures
+    // concurrently, these three `call_tool_raw` calls share a single stdio
+    // child process behind `McpServiceHandle`'s inner `Arc<Mutex<StdioMcpClient>>`.
+    // Each call acquires that inner mutex for the full duration of its
+    // JSON-RPC round trip, so the three futures effectively serialize behind
+    // the lock — `join!` does not provide real I/O parallelism here. The
+    // `join!` form is retained for code readability (all three results
+    // collected symmetrically) and because the serialization is transparent
+    // to callers. If the analyze MCP child ever supports multiplexed requests
+    // (separate stdin/stdout framing per call), this join would gain true
+    // concurrency automatically without changing the call sites.
     let (graph_res, entities_res, clusters_res) = tokio::join!(
         handle.call_tool_raw("extract_graph", args.clone()),
         handle.call_tool_raw("list_entities", args.clone()),

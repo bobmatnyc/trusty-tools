@@ -120,7 +120,7 @@
   );
 
   /** Group entities by kind for a compact summary bar. */
-  let kindCounts = $derived(() => {
+  let kindCounts = $derived.by(() => {
     const counts = {};
     for (const e of entities) {
       const k = e.kind ?? 'Unknown';
@@ -133,7 +133,7 @@
   const SVG_W = 700;
   const SVG_H = 420;
 
-  let vizNodes = $derived(() => {
+  let vizNodes = $derived.by(() => {
     // clusters is ClusterResponse: { k, clusters: [{id, label, members, size, cohesion}] }
     const clusterItems = clusters?.clusters ?? [];
     if (!clusterItems.length && !entities.length) return { nodes: [], edges: [] };
@@ -247,9 +247,9 @@
       <div class="not-available">{vizError}</div>
     {:else}
       <!-- Kind summary bar -->
-      {#if kindCounts().length > 0}
+      {#if kindCounts.length > 0}
         <div class="kind-bar">
-          {#each kindCounts().slice(0, 8) as [kind, count] (kind)}
+          {#each kindCounts.slice(0, 8) as [kind, count] (kind)}
             <span class="kind-badge" style="background: {kindColor(kind)}22; color: {kindColor(kind)}; border-color: {kindColor(kind)}44;">
               {kind}: {count}
             </span>
@@ -258,13 +258,13 @@
       {/if}
 
       <!-- SVG node map -->
-      {#if vizNodes().nodes.length > 0}
+      {#if vizNodes.nodes.length > 0}
         <h3 class="sub-title">
-          {clusters?.clusters?.length ? 'Cluster Labels' : 'Top Entities'} — {vizNodes().nodes.length} nodes
+          {clusters?.clusters?.length ? 'Cluster Labels' : 'Top Entities'} — {vizNodes.nodes.length} nodes
         </h3>
         <div class="svg-wrap">
           <svg width={SVG_W} height={SVG_H} viewBox="0 0 {SVG_W} {SVG_H}" role="img" aria-label="Entity node map">
-            {#each vizNodes().nodes as node (node.id)}
+            {#each vizNodes.nodes as node (node.id)}
               <g class="viz-node" transform="translate({node.x},{node.y})">
                 <circle r="10" fill={kindColor(node.kind)} fill-opacity="0.85" stroke="#2d3348" stroke-width="1.5"/>
                 <text

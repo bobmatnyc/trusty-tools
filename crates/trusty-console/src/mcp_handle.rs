@@ -426,6 +426,28 @@ impl McpServiceHandle {
     /// backoff window.
     /// What: Acquires the outer lock briefly, calls `backoff.record_failure()`,
     /// and sets `state_opt = None`.
+    ///
+    /// ## Known TOCTOU behaviour (accepted, benign)
+    ///
+    /// Between `ensure_connected` returning the `Arc<Mutex<StdioMcpClient>>`
+    /// and `on_call_failure` resetting `state_opt` back to `None`, a concurrent
+    /// caller can observe the `Connected` state and increment the same connection's
+    /// reference count. When `on_call_failure` then resets the state to `None`,
+    /// that concurrent caller still holds a valid `Arc` to the old (possibly dead)
+    /// client and may receive its own `call_tool` error — which itself calls
+    /// `on_call_failure` again, resetting the state a second time and discarding
+    /// any newer connection that a third concurrent caller may have just
+    /// established in the intervening `ensure_connected` call.
+    ///
+    /// **Why this is accepted:** the extra reset is harmless — the state ends up
+    /// `None` and `backoff.failure_count` is incremented by at most one extra
+    /// count. The next successful `ensure_connected` + spawn resets the backoff
+    /// entirely (`SpawnBackoff::reset`). The worst case is one unnecessary
+    /// respawn cycle (the cost is a brief backoff window), not data loss or
+    /// permanent failure. A generation-counter guard would prevent the redundant
+    /// reset but adds complexity disproportionate to the benefit; deferring for
+    /// a future refactor.
+    ///
     /// Test: `mcp_handle_respawn_failure_applies_backoff`.
     async fn on_call_failure(&self) {
         let mut guard = self.state.lock().await;

@@ -220,16 +220,19 @@ mod tests {
     /// `handle_console_metrics`, and asserts all required JSON fields are present
     /// and the aggregate counts are zero.
     ///
-    /// The test uses `current_thread` flavor and sets the skip-enforcement flag
-    /// before constructing `AppState` to avoid the palace-slug check without
-    /// relying on a process-global env mutation that would race with other
-    /// parallel tests.
+    /// The test uses `#[serial]` to ensure it runs exclusively relative to
+    /// other tests that mutate `TRUSTY_SKIP_PALACE_ENFORCEMENT`, eliminating
+    /// the env-var data race that made the previous `unsafe { set_var }` +
+    /// `current_thread` approach unsound (cargo test runs test *functions*
+    /// in parallel across OS threads in the same process; a single-threaded
+    /// executor only serialises tasks within this test's runtime, not other
+    /// test threads that read the env).
     /// Test: This test.
-    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    #[tokio::test]
     async fn handle_console_metrics_returns_valid_report() {
-        // SAFETY: single-threaded executor (current_thread flavor); no other
-        // thread is reading or writing TRUSTY_SKIP_PALACE_ENFORCEMENT
-        // concurrently within this test binary's run of this test.
+        // SAFETY: `#[serial]` ensures no other test thread reads or writes
+        // TRUSTY_SKIP_PALACE_ENFORCEMENT concurrently with this test.
         unsafe {
             std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
         }
