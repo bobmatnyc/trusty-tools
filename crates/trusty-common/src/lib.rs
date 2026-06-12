@@ -328,6 +328,18 @@ pub mod port;
 /// Test: `cargo test -p trusty-common -- data_dir::tests`.
 pub mod data_dir;
 
+/// Shared CLI daemon-guard helper (probe + spinner + spawn).
+///
+/// Why: trusty-search, trusty-memory, and trusty-analyze each had an identical
+/// probe-spawn-poll-spinner loop in their `commands/daemon_guard.rs` files.
+/// Centralising it here (issue #985) removes the divergence risk and gives
+/// the three crates a single tested implementation to delegate to.
+/// What: Exposes [`daemon_guard::DaemonGuardConfig`],
+/// [`daemon_guard::probe_once`], [`daemon_guard::spin_until_ready`], and
+/// [`daemon_guard::spawn_current_exe`].
+/// Test: `cargo test -p trusty-common -- daemon_guard::tests`.
+pub mod daemon_guard;
+
 /// Daemon HTTP-address file helpers.
 ///
 /// Why: Both trusty-search and trusty-memory persist their bound `host:port`
