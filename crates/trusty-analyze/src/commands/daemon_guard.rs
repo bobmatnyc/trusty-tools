@@ -23,9 +23,9 @@
 
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use colored::Colorize;
-use trusty_common::daemon_guard::{DaemonGuardConfig, probe_once, spin_until_ready};
+use trusty_common::daemon_guard::{probe_once, spin_until_ready, DaemonGuardConfig};
 
 /// Probe `GET http://127.0.0.1:{port}/health`. Returns `true` on any 2xx response.
 ///
@@ -91,9 +91,7 @@ pub async fn ensure_daemon_running(port: u16) -> Result<()> {
         service_name: "trusty-analyze".to_string(),
         startup_timeout: Duration::from_secs(30),
         poll_interval: Duration::from_millis(500),
-        timeout_hint: format!(
-            "try `trusty-analyze serve --port {port}` manually to see the error"
-        ),
+        timeout_hint: format!("try `trusty-analyze serve --port {port}` manually to see the error"),
     };
     spin_until_ready(&cfg).await
 }
@@ -129,8 +127,8 @@ pub async fn ensure_mcp_daemon_up(analyzer_url: &str) -> anyhow::Result<String> 
             vec!["serve".to_string(), "--port".to_string(), port.to_string()]
         },
         health_path: "/health".to_string(),
-        base_url_fn: Box::new(move || {
-            match trusty_common::read_daemon_addr("trusty-analyze") {
+        base_url_fn: Box::new(
+            move || match trusty_common::read_daemon_addr("trusty-analyze") {
                 Ok(Some(addr)) if !addr.is_empty() => {
                     if addr.starts_with("http://") || addr.starts_with("https://") {
                         addr
@@ -139,8 +137,8 @@ pub async fn ensure_mcp_daemon_up(analyzer_url: &str) -> anyhow::Result<String> 
                     }
                 }
                 _ => base_url_clone.clone(),
-            }
-        }),
+            },
+        ),
         startup_timeout: None,
         poll_interval: None,
     };

@@ -21,9 +21,9 @@
 //! `monitor web`). Commands like `start`, `stop`, `serve`, `service`, and
 //! `setup` deliberately do not call this guard.
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use colored::Colorize;
-use trusty_common::daemon_guard::{DaemonGuardConfig, probe_once, spin_until_ready};
+use trusty_common::daemon_guard::{probe_once, spin_until_ready, DaemonGuardConfig};
 
 /// Probe `GET {base}/api/v1/health`. Returns `true` on any 2xx response.
 ///

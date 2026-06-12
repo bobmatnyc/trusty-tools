@@ -24,10 +24,10 @@
 //! like `start`, `stop`, `serve`, `service`, `init`, and `completions`
 //! deliberately do not call this guard.
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use colored::Colorize;
 use std::time::Duration;
-use trusty_common::daemon_guard::{DaemonGuardConfig, probe_once, spin_until_ready};
+use trusty_common::daemon_guard::{probe_once, spin_until_ready, DaemonGuardConfig};
 
 /// Total wall-clock budget for the daemon to become ready after we spawn it.
 ///
@@ -138,9 +138,7 @@ pub async fn ensure_daemon_running_with_device(base: &str, device: Option<&str>)
         service_name: "trusty-search".to_string(),
         startup_timeout: READY_TIMEOUT,
         poll_interval: Duration::from_millis(500),
-        timeout_hint: format!(
-            "try `trusty-search start` manually to see the error"
-        ),
+        timeout_hint: "try `trusty-search start` manually to see the error".to_string(),
     };
     spin_until_ready(&cfg).await
 }

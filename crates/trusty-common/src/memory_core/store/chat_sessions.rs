@@ -708,5 +708,4 @@ mod tests {
         assert_eq!(s.history.len(), 1);
         assert_eq!(s.history[0].content, "remember me");
     }
-
 }

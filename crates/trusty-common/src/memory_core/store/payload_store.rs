@@ -781,5 +781,4 @@ mod tests {
             redb_path.display()
         );
     }
-
 }

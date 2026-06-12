@@ -86,7 +86,11 @@ impl DaemonGuardConfig {
     /// What: fills `startup_timeout` and `poll_interval` with the module
     /// defaults; callers can override those fields afterwards if needed.
     /// Test: exercised by every test that constructs a `DaemonGuardConfig`.
-    pub fn new(health_url: impl Into<String>, service_name: impl Into<String>, timeout_hint: impl Into<String>) -> Self {
+    pub fn new(
+        health_url: impl Into<String>,
+        service_name: impl Into<String>,
+        timeout_hint: impl Into<String>,
+    ) -> Self {
         Self {
             health_url: health_url.into(),
             service_name: service_name.into(),
@@ -133,8 +137,7 @@ pub async fn probe_once(health_url: &str) -> bool {
 /// Test: compile-only (spawning a real process in unit tests risks port/FS
 /// side-effects; the live path is exercised by integration tests).
 pub fn spawn_current_exe(args: &[&str]) -> Result<u32> {
-    let exe = std::env::current_exe()
-        .map_err(|e| anyhow!("could not resolve current_exe: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| anyhow!("could not resolve current_exe: {e}"))?;
     let child = std::process::Command::new(&exe)
         .args(args)
         .stdin(std::process::Stdio::null())
@@ -271,7 +274,10 @@ mod tests {
             timeout_hint: "run `test-daemon start` to debug".to_string(),
         };
         let result = spin_until_ready(&cfg).await;
-        assert!(result.is_ok(), "spin_until_ready must succeed when daemon is up: {result:?}");
+        assert!(
+            result.is_ok(),
+            "spin_until_ready must succeed when daemon is up: {result:?}"
+        );
     }
 
     /// Why: when the daemon never starts, `spin_until_ready` must return `Err`
@@ -288,7 +294,10 @@ mod tests {
             timeout_hint: "run `test-daemon start` to debug".to_string(),
         };
         let result = spin_until_ready(&cfg).await;
-        assert!(result.is_err(), "spin_until_ready must fail when daemon never starts");
+        assert!(
+            result.is_err(),
+            "spin_until_ready must fail when daemon never starts"
+        );
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("test-daemon"),
