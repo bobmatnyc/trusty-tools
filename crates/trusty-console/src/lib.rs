@@ -193,6 +193,37 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         );
     }
 
+    // ── metrics MCP poll (trusty-memory) ────────────────────────────────────
+    // trusty-memory's stdio MCP mode is `serve --stdio` (see main.rs).
+    // The bridge forwards all JSON-RPC calls to the running HTTP daemon and
+    // auto-starts it if absent. On machines without trusty-memory the handle
+    // marks it Absent immediately; the cache stays None;
+    // /api/console/metrics/memory returns 503 (graceful degradation).
+    {
+        let handle = McpServiceHandle::new(
+            "trusty-memory",
+            vec!["serve".to_string(), "--stdio".to_string()],
+        );
+        metrics_poller::start(
+            handle,
+            state.memory_metrics_cache().clone(),
+            Duration::from_secs(args.poll_interval),
+        );
+    }
+
+    // ── metrics MCP poll (trusty-search) ────────────────────────────────────
+    // trusty-search's stdio MCP mode is `serve` (see serve_stdio in main.rs).
+    // On machines without trusty-search the handle marks it Absent immediately;
+    // the cache stays None; /api/console/metrics/search returns 503.
+    {
+        let handle = McpServiceHandle::new("trusty-search", vec!["serve".to_string()]);
+        metrics_poller::start(
+            handle,
+            state.search_metrics_cache().clone(),
+            Duration::from_secs(args.poll_interval),
+        );
+    }
+
     let router = server::build_router(state.clone());
 
     // ── bind primary listener ───────────────────────────────────────────────

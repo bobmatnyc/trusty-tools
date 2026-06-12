@@ -93,6 +93,7 @@ pub mod fd_metrics;
 #[cfg(feature = "axum-server")]
 pub mod chat;
 pub mod commands;
+pub mod console_metrics;
 pub mod discovery;
 /// Supervised `serve --foreground` entry point (issue #787).
 ///
@@ -1957,8 +1958,9 @@ mod tests {
         let tools = resp["result"]["tools"].as_array().expect("tools array");
         // Issue #99 added `memory_send_message`; issue #180 added
         // `palace_delete`; the #180 follow-up adds `palace_update` on top
-        // of the 22-tool baseline; issue #537 adds `upgrade`.
-        assert_eq!(tools.len(), 24);
+        // of the 22-tool baseline; issue #537 adds `upgrade`;
+        // issue #1104 adds `console_metrics`.
+        assert_eq!(tools.len(), 25);
     }
 
     #[tokio::test]

@@ -510,6 +510,7 @@ impl McpServer {
                 let body = serde_json::json!({ "check": check, "confirm": confirm });
                 self.post("/upgrade", &body).await
             }
+            "console_metrics" => self.handle_console_metrics().await,
             _ => Err(DispatchError::UnknownTool),
         }
     }
@@ -619,6 +620,68 @@ impl McpServer {
             )));
         }
         Ok(body)
+    }
+
+    /// `console_metrics` handler — build and return a `ConsoleMetricsReport`.
+    ///
+    /// Why: The trusty-console metrics poller calls this tool via a supervised
+    /// stdio MCP connection every poll_interval seconds to refresh the
+    /// `/api/console/metrics/search` dashboard panel (epic #1104).
+    /// What: Probes `GET /health` for daemon liveness, index count, and
+    /// warm_boot_degraded status; also calls `GET /indexes?details=true` for
+    /// the per-index list. Builds a `ConsoleMetricsReport` via `make_report()`.
+    /// Returns a raw `serde_json::Value` (not the MCP content envelope) —
+    /// the dispatcher's `wrap_tool_result()` applies the envelope.
+    /// Test: The dispatcher routes `"console_metrics"` to this method;
+    /// covered by the tool-name routing tests in this module.
+    async fn handle_console_metrics(&self) -> Result<Value, DispatchError> {
+        use trusty_common::console_metrics::{make_report, ServiceHealth};
+
+        // Probe /health — determines status and index_count.
+        let (status, index_count, warm_boot_degraded) = match self.get("/health").await {
+            Ok(health) => {
+                let idx = health.get("indexes").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let degraded = health
+                    .get("warmboot_summary")
+                    .and_then(|s| s.get("warm_boot_degraded"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                (ServiceHealth::Ok, idx, degraded)
+            }
+            Err(_) => (ServiceHealth::Error, 0usize, false),
+        };
+
+        // Fetch per-index details (id, root_path, size_bytes).
+        let indexes: Vec<Value> = match self.get("/indexes?details=true").await {
+            Ok(Value::Array(arr)) => arr
+                .into_iter()
+                .map(|entry| {
+                    serde_json::json!({
+                        "id":        entry.get("id").cloned().unwrap_or(Value::Null),
+                        "root_path": entry.get("root_path").cloned().unwrap_or(Value::Null),
+                        "size_bytes":entry.get("size_bytes").cloned().unwrap_or(Value::Null),
+                    })
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        let metrics = serde_json::json!({
+            "index_count": index_count,
+            "warm_boot_degraded": warm_boot_degraded,
+            "indexes": indexes,
+        });
+
+        let report = make_report(
+            "trusty-search",
+            "Trusty Search",
+            env!("CARGO_PKG_VERSION"),
+            status,
+            metrics,
+            1,
+        );
+
+        serde_json::to_value(&report).map_err(|e| DispatchError::Transport(e.to_string()))
     }
 
     /// Common dispatcher for the four per-lane search tools introduced in
@@ -1311,6 +1374,17 @@ pub fn tool_descriptors() -> Value {
                     "check":   { "type": "boolean", "description": "Report versions only, no install (default when confirm absent)", "default": true },
                     "confirm": { "type": "boolean", "description": "Set to true to install the new version. Must be explicit — never assumed.", "default": false }
                 },
+                "required": []
+            }
+        },
+        {
+            "name": "console_metrics",
+            "description": "Return a ConsoleMetricsReport with daemon health and index aggregate \
+                            statistics (index_count, warm_boot_degraded, index list with id/root_path/size_bytes). \
+                            Used by the trusty-console dashboard metrics poller (epic #1104).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
                 "required": []
             }
         }

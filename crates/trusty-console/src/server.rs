@@ -50,26 +50,31 @@ struct UiAssets;
 
 /// Shared application state injected into every route handler.
 ///
-/// Why: Connectors, the poller cache, metrics cache, and HTTP client are created
-/// once at startup and reused for every request so there is no per-request
-/// allocation.
-/// What: Wraps the connector list, poller cache, metrics cache, and reqwest
-/// client in `Arc`s for cheap cloning.
-/// Test: Constructed in `build_router`; exercised by the integration test.
+/// Why: Connectors, the poller cache, metrics caches, and HTTP client are
+/// created once at startup and reused for every request so there is no per-
+/// request allocation. A separate `MetricsCache` is maintained for each
+/// stdio-MCP-polled service (analyze, memory, search) so they can be updated
+/// independently and served without coupling.
+/// What: Wraps the connector list, poller cache, per-service metrics caches,
+/// and reqwest client in `Arc`s for cheap cloning.
+/// Test: Constructed in `build_router`; exercised by the integration tests.
 #[derive(Clone)]
 pub struct AppState {
     connectors: Arc<Vec<Box<dyn ServiceConnector>>>,
     poller_cache: PollerCache,
     metrics_cache: MetricsCache,
+    memory_metrics_cache: MetricsCache,
+    search_metrics_cache: MetricsCache,
     http_client: Arc<reqwest::Client>,
 }
 
 impl AppState {
     /// Create a new `AppState` from a list of connectors.
     ///
-    /// Why: Lets tests inject a custom connector list and a fresh cache.
-    /// What: Wraps `connectors` in `Arc`; initialises an empty `PollerCache`
-    /// and a default `reqwest::Client`.
+    /// Why: Lets tests inject a custom connector list and fresh caches.
+    /// What: Wraps `connectors` in `Arc`; initialises empty `PollerCache`,
+    /// three `MetricsCache` instances (analyze / memory / search), and a
+    /// default `reqwest::Client`.
     /// Test: Used in `build_router` and directly in `tests`.
     pub fn new(connectors: Vec<Box<dyn ServiceConnector>>) -> Self {
         let client = reqwest::Client::builder()
@@ -80,6 +85,8 @@ impl AppState {
             connectors: Arc::new(connectors),
             poller_cache: PollerCache::new(),
             metrics_cache: MetricsCache::new(),
+            memory_metrics_cache: MetricsCache::new(),
+            search_metrics_cache: MetricsCache::new(),
             http_client: Arc::new(client),
         }
     }
@@ -103,7 +110,7 @@ impl AppState {
         &self.poller_cache
     }
 
-    /// Access the metrics cache for stdio-MCP-polled services.
+    /// Access the metrics cache for the trusty-analyze stdio MCP poller.
     ///
     /// Why: The metrics poller writes `ConsoleMetricsReport`s here; the
     /// `/api/console/metrics/analyze` route reads from it.
@@ -111,6 +118,26 @@ impl AppState {
     /// Test: `test_metrics_analyze_route_cold_cache_returns_503`.
     pub fn metrics_cache(&self) -> &MetricsCache {
         &self.metrics_cache
+    }
+
+    /// Access the metrics cache for the trusty-memory stdio MCP poller.
+    ///
+    /// Why: Separate cache per service so memory and analyze reports can be
+    /// updated and served independently.
+    /// What: Returns a reference to the `MetricsCache` handle for memory.
+    /// Test: `test_metrics_memory_route_cold_cache_returns_503`.
+    pub fn memory_metrics_cache(&self) -> &MetricsCache {
+        &self.memory_metrics_cache
+    }
+
+    /// Access the metrics cache for the trusty-search stdio MCP poller.
+    ///
+    /// Why: Separate cache per service so search and analyze reports can be
+    /// updated and served independently.
+    /// What: Returns a reference to the `MetricsCache` handle for search.
+    /// Test: `test_metrics_search_route_cold_cache_returns_503`.
+    pub fn search_metrics_cache(&self) -> &MetricsCache {
+        &self.search_metrics_cache
     }
 
     /// Access the shared `reqwest::Client`.
@@ -137,6 +164,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health", get(health_handler))
         .route("/api/console/services", get(services_handler))
         .route("/api/console/metrics/analyze", get(metrics_analyze_handler))
+        .route("/api/console/metrics/memory", get(metrics_memory_handler))
+        .route("/api/console/metrics/search", get(metrics_search_handler))
         // Reverse-proxy: /proxy/{daemon}/{*path}
         .route("/proxy/{daemon}/{*path}", any(crate::proxy::proxy_handler))
         .route("/", get(spa_index_handler))
@@ -205,6 +234,34 @@ async fn services_handler(State(state): State<AppState>) -> axum::response::Resp
 /// Test: `test_metrics_analyze_route_cold_cache_returns_503` below.
 async fn metrics_analyze_handler(State(state): State<AppState>) -> axum::response::Response {
     match state.metrics_cache().get().await {
+        Some(report) => axum::Json(report).into_response(),
+        None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+/// `GET /api/console/metrics/memory` — return the latest memory metrics report.
+///
+/// Why: Surfaces trusty-memory health/metrics to the SPA without per-request
+/// MCP calls (the background poller keeps the cache warm).
+/// What: Returns the cached `ConsoleMetricsReport` as JSON (200) or 503 when
+/// no poll has completed yet (binary absent or first boot).
+/// Test: `test_metrics_memory_route_cold_cache_returns_503` below.
+async fn metrics_memory_handler(State(state): State<AppState>) -> axum::response::Response {
+    match state.memory_metrics_cache().get().await {
+        Some(report) => axum::Json(report).into_response(),
+        None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+/// `GET /api/console/metrics/search` — return the latest search metrics report.
+///
+/// Why: Surfaces trusty-search health/metrics to the SPA without per-request
+/// MCP calls (the background poller keeps the cache warm).
+/// What: Returns the cached `ConsoleMetricsReport` as JSON (200) or 503 when
+/// no poll has completed yet (binary absent or first boot).
+/// Test: `test_metrics_search_route_cold_cache_returns_503` below.
+async fn metrics_search_handler(State(state): State<AppState>) -> axum::response::Response {
+    match state.search_metrics_cache().get().await {
         Some(report) => axum::Json(report).into_response(),
         None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
@@ -492,6 +549,36 @@ mod tests {
 
         let req = Request::builder()
             .uri("/proxy/search/health")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Why: with an empty memory metrics cache the route must return 503 so the
+    /// UI can show a "not yet available" state rather than empty JSON.
+    /// What: issues GET /api/console/metrics/memory on a fresh state, asserts 503.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn test_metrics_memory_route_cold_cache_returns_503() {
+        let router = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/console/metrics/memory")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Why: with an empty search metrics cache the route must return 503 so the
+    /// UI can show a "not yet available" state rather than empty JSON.
+    /// What: issues GET /api/console/metrics/search on a fresh state, asserts 503.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn test_metrics_search_route_cold_cache_returns_503() {
+        let router = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/console/metrics/search")
             .body(Body::empty())
             .expect("request");
         let resp = router.oneshot(req).await.expect("response");
