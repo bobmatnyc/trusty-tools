@@ -145,11 +145,9 @@ pub trait VectorStore: Send + Sync {
 
 /// Suffix appended to the legacy `.usearch` index path when migration
 /// completes — guarantees the migration runs exactly once per palace.
+/// Retained as a constant (unused since #989 removed `usearch-migrate`) so
+/// any on-disk `.migrated` marker files are still recognisable by operators.
 const MIGRATED_SUFFIX: &str = ".migrated";
-
-/// Suffix appended to the legacy keymap sidecar after a successful drain.
-#[cfg(feature = "usearch-migrate")]
-const KEYMAP_SIDECAR: &str = ".keymap.json";
 
 /// Translate the legacy `.usearch` index path into the redb file that holds
 /// the new HNSW vectors. Keeping the redb file co-located (just with a
@@ -479,134 +477,21 @@ impl VectorStore for UsearchStore {
 /// sidecar we cannot recover full UUIDs and we skip the migration with a
 /// warning rather than corrupt the new index with zero-padded UUIDs.
 /// What: When the legacy file exists and the `.migrated` marker does
-/// not, opens the usearch index + the keymap sidecar, reads every vector
-/// by `u64` key, looks up the corresponding `Uuid`, and calls
-/// `HnswStore::upsert`. Renames the legacy file (and the sidecar, if
-/// present) to `*.migrated` on success. Gated behind the
-/// `usearch-migrate` feature so the default build drops the usearch
-/// dependency entirely.
-/// Test: `legacy_usearch_index_is_migrated` (only compiled with the
-/// `usearch-migrate` feature).
-#[cfg(feature = "usearch-migrate")]
-fn migrate_legacy_usearch_if_present(
-    legacy_path: &Path,
-    inner: &Arc<HnswStore>,
-    dim: usize,
-) -> Result<()> {
-    use std::collections::HashMap;
-    use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
-
-    if !legacy_path.exists() {
-        return Ok(());
-    }
-
-    let mut migrated_marker = legacy_path.as_os_str().to_owned();
-    migrated_marker.push(MIGRATED_SUFFIX);
-    let migrated_marker = PathBuf::from(migrated_marker);
-    if migrated_marker.exists() {
-        // Migration already ran; leave the legacy file alone.
-        return Ok(());
-    }
-
-    // Load the keymap sidecar (full Uuids keyed by u64 usearch key).
-    let mut sidecar_path = legacy_path.as_os_str().to_owned();
-    sidecar_path.push(KEYMAP_SIDECAR);
-    let sidecar_path = PathBuf::from(sidecar_path);
-    let keymap: HashMap<u64, Uuid> = match std::fs::read(&sidecar_path) {
-        Ok(bytes) => match serde_json::from_slice::<Vec<(u64, Uuid)>>(&bytes) {
-            Ok(entries) => entries.into_iter().collect(),
-            Err(e) => {
-                tracing::warn!(
-                    path = %sidecar_path.display(),
-                    "usearch-migrate: keymap sidecar parse failed; skipping migration: {e}"
-                );
-                return Ok(());
-            }
-        },
-        Err(_) => {
-            tracing::warn!(
-                path = %sidecar_path.display(),
-                "usearch-migrate: no keymap sidecar — cannot recover full UUIDs; skipping migration"
-            );
-            return Ok(());
-        }
-    };
-
-    let options = IndexOptions {
-        dimensions: dim,
-        metric: MetricKind::Cos,
-        quantization: ScalarKind::F32,
-        ..Default::default()
-    };
-    let index =
-        Index::new(&options).map_err(|e| anyhow::anyhow!("usearch-migrate: create index: {e}"))?;
-    let path_str = legacy_path
-        .to_str()
-        .with_context(|| format!("usearch path not UTF-8: {legacy_path:?}"))?;
-    index
-        .load(path_str)
-        .map_err(|e| anyhow::anyhow!("usearch-migrate: load index: {e}"))?;
-
-    let mut migrated = 0usize;
-    for (key, uuid) in &keymap {
-        let mut buf = vec![0f32; dim];
-        match index.get(*key, &mut buf) {
-            Ok(n) if n > 0 => {
-                inner
-                    .upsert(&uuid.to_string(), &buf)
-                    .with_context(|| format!("usearch-migrate: upsert {uuid}"))?;
-                migrated += 1;
-            }
-            Ok(_) => {
-                tracing::warn!(?uuid, "usearch-migrate: empty vector for keymap entry");
-            }
-            Err(e) => {
-                tracing::warn!(?uuid, "usearch-migrate: get vector failed: {e}");
-            }
-        }
-    }
-    drop(index);
-
-    std::fs::rename(legacy_path, &migrated_marker).with_context(|| {
-        format!(
-            "usearch-migrate: rename {} -> {}",
-            legacy_path.display(),
-            migrated_marker.display()
-        )
-    })?;
-    // Best-effort rename for the sidecar so a re-open doesn't double-migrate.
-    if sidecar_path.exists() {
-        let mut sidecar_marker = sidecar_path.as_os_str().to_owned();
-        sidecar_marker.push(MIGRATED_SUFFIX);
-        let sidecar_marker = PathBuf::from(sidecar_marker);
-        if let Err(e) = std::fs::rename(&sidecar_path, &sidecar_marker) {
-            tracing::warn!(
-                path = %sidecar_path.display(),
-                "usearch-migrate: sidecar rename failed (non-fatal): {e}"
-            );
-        }
-    }
-    tracing::info!(
-        migrated,
-        legacy = %legacy_path.display(),
-        "usearch-migrate: completed legacy index drain"
-    );
-    Ok(())
-}
-
-/// No-op migration stub when the `usearch-migrate` feature is off.
+/// No-op: the `usearch-migrate` feature has been removed (issue #989).
 ///
-/// Why: Keeps the call site in `new()` unconditional so the migration
-/// gate is isolated to one place.
-/// What: Returns `Ok(())` immediately.
-/// Test: Compiled in the default build — exercised by every test below.
-#[cfg(not(feature = "usearch-migrate"))]
+/// Why: All production palaces were confirmed migrated from the legacy
+/// `.usearch` C++ FFI backend to the pure-Rust `hnsw_rs` + redb backend
+/// before this feature was deleted. Keeping this unconditional no-op
+/// preserves the call site in `new()` without requiring a cfg-gate.
+/// What: Returns `Ok(())` immediately. Suppresses the unused-constant
+/// warning for `MIGRATED_SUFFIX` so operators can still recognise on-disk
+/// `*.migrated` marker files.
+/// Test: Exercised by every test in this module (all use the default build).
 fn migrate_legacy_usearch_if_present(
     _legacy_path: &Path,
     _inner: &Arc<HnswStore>,
     _dim: usize,
 ) -> Result<()> {
-    // Suppress "unused suffix" when the migration feature is off.
     let _ = MIGRATED_SUFFIX;
     Ok(())
 }

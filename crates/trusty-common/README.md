@@ -48,7 +48,6 @@ trusty-common = { version = "0.8", features = ["axum-server", "mcp", "rpc", "emb
 | `bm25-client` | UDS JSON-RPC client for the per-palace `trusty-bm25-daemon` subprocess |
 | `memory-core` | Memory Palace storage engine — HNSW (usearch), SQLite metadata + KG, dream cycle (formerly `trusty-memory-core`) |
 | `memory-core-kuzu` | Read-only Kùzu graph-DB integration on top of `memory-core` |
-| `usearch-migrate` | One-shot usearch index migration helper (implies `memory-core`) |
 | `tickets` | Unified ticketing MCP server (GitHub / JIRA / Linear backends; formerly `trusty-tickets`) |
 | `monitor-tui` | ratatui + crossterm dashboard TUI for the trusty-search/trusty-memory daemons (formerly `trusty-monitor-tui`) |
 | `cli-help` | Declarative help-config parsing (serde_yaml + strsim + indexmap) |

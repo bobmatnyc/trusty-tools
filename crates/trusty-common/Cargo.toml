@@ -102,16 +102,8 @@ genco = { version = "0.19", optional = true }
 # fastembed embeddings, git-history extraction, dream/decay analytics.
 # Heavy deps gated behind the feature so downstream crates that only
 # want chat / mcp / symgraph pay zero cost.
-#
-# `usearch` is only pulled in by the opt-in `usearch-migrate` feature
-# (issue #51) for the one-shot drain of legacy `.usearch` index files.
-# Default builds no longer link the C++ FFI dependency.
-usearch = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
 hnsw_rs = { workspace = true, optional = true }
-rusqlite = { workspace = true, optional = true }
-r2d2 = { workspace = true, optional = true }
-r2d2_sqlite = { workspace = true, optional = true }
 git2 = { workspace = true, optional = true }
 dashmap = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
@@ -287,7 +279,8 @@ symgraph-server = ["symgraph-parser", "axum-server"]
 #
 # Issue #47: rusqlite / r2d2 / r2d2_sqlite are no longer pulled in by this
 # feature — all stores migrated to redb (#44, #45, #46, #56, #57). The
-# `sqlite-kg` feature still pulls them in for the legacy migration helpers.
+# migration-era `usearch-migrate` and `sqlite-kg` features have been removed
+# (issue #989) — all production palaces are confirmed migrated to redb.
 memory-core = [
     "dep:hnsw_rs",
     "dep:git2",
@@ -309,22 +302,6 @@ memory-core = [
 # feature. Pulls in the `kuzu` crate. Off by default because kuzu adds a
 # large native dependency.
 memory-core-kuzu = ["memory-core", "dep:kuzu"]
-# Issue #51: one-shot drain of legacy `.usearch` index files on palace
-# open. Pulls in the `usearch` C++ FFI crate temporarily so operators
-# upgrading from the pre-redb backend can migrate without losing data.
-# After all production palaces have been upgraded this feature (and the
-# `usearch` dep) can be removed entirely.
-usearch-migrate = ["memory-core", "dep:usearch"]
-# Legacy SQLite KG read path (the pre-#44 backend). Kept compilable so the
-# one-shot SQLite → redb migration tool can read old `kg.db` / `recall.db`
-# / `payloads.db` / `chat_sessions.db` files. Pulls in rusqlite + r2d2 +
-# r2d2_sqlite which are otherwise no longer needed by `memory-core` (#47).
-sqlite-kg = [
-    "memory-core",
-    "dep:rusqlite",
-    "dep:r2d2",
-    "dep:r2d2_sqlite",
-]
 # Enables the `monitor` module: the unified ratatui dashboard for the
 # trusty-search and trusty-memory daemons (formerly the `trusty-monitor-tui`
 # crate, and before that the standalone `trusty-monitor` binary). Pulls in

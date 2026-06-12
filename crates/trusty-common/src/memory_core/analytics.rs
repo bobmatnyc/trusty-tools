@@ -8,17 +8,13 @@
 //! the rest of the Memory Palace (`kg_redb.rs`, payload_store). The public
 //! `RecallLog` API is unchanged — callers that previously pointed at
 //! `<data_dir>/recall.db` keep working; the file on disk becomes
-//! `<data_dir>/recall.redb`, with a one-shot SQLite → redb migration on first
-//! open when the `sqlite-kg` feature is enabled.
+//! `<data_dir>/recall.redb`. The one-shot SQLite → redb migration path was
+//! removed in issue #989 (all palaces confirmed migrated).
 //! NLP: Query normalization via stop-word removal + FNV-1a hash. Zero inference.
 //! Test: record then hit_count, miss_rate 1.0 when all miss, top_drawers ordering,
-//! plus reopen round-trip (events survive across reopens) and (gated on
-//! `sqlite-kg`) one-shot migration from a legacy `recall.db` SQLite file.
+//! plus reopen round-trip (events survive across reopens).
 
 use anyhow::{Context, Result};
-// `anyhow!` is only used inside the `sqlite-kg`-gated legacy-migration path.
-#[cfg(feature = "sqlite-kg")]
-use anyhow::anyhow;
 use chrono::{DateTime, Utc};
 use redb::{Database, ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
@@ -122,8 +118,7 @@ pub struct RecallEvent {
 /// scan the whole table (the log is bounded by retention windows / palace
 /// sizes; if it ever grows enough to matter we'll add secondary indexes).
 /// Test: see the `tests` module below — round-trip persistence, hit/miss/
-/// drawer/missed-query queries, and (gated on `sqlite-kg`) the one-shot
-/// migration from a legacy `recall.db` SQLite file.
+/// drawer/missed-query queries.
 pub struct RecallLog {
     db: Arc<Database>,
     path: PathBuf,
@@ -138,17 +133,13 @@ impl RecallLog {
     /// Why: Sharing the palace directory keeps everything in one place. The
     /// legacy SQLite path (`recall.db`) is silently rewritten to `recall.redb`
     /// so retrieval.rs's existing call site (`<data_dir>/recall.db`) keeps
-    /// working without churn. When the `sqlite-kg` feature is enabled and a
-    /// legacy `recall.db` is present, its rows are copied across in a one-shot
-    /// migration and the SQLite file is renamed `recall.db.migrated` so the
-    /// next open is a no-op.
-    /// What: Resolves the redb path, creates parent dirs, runs the migration
-    /// (feature-gated), opens the redb database, touches the RECALL_LOG table
-    /// so range scans on a fresh file succeed, then seeds the `next_id`
-    /// counter from the highest existing key so monotonicity holds across
-    /// reopens.
-    /// Test: `record_then_hit_count`, `roundtrip_persists_across_reopen`,
-    /// `migrates_legacy_sqlite_rows` (gated).
+    /// working without churn. The one-shot SQLite → redb migration was removed
+    /// in issue #989 (all palaces confirmed migrated).
+    /// What: Resolves the redb path, creates parent dirs, opens the redb
+    /// database, touches the RECALL_LOG table so range scans on a fresh file
+    /// succeed, then seeds the `next_id` counter from the highest existing key
+    /// so monotonicity holds across reopens.
+    /// Test: `record_then_hit_count`, `roundtrip_persists_across_reopen`.
     pub fn open(path: &Path) -> Result<Self> {
         let redb_path = resolve_redb_path(path);
 
@@ -163,10 +154,9 @@ impl RecallLog {
             })?;
         }
 
-        // One-shot migration must run *before* we open the long-lived db
-        // handle — the migrator opens redb itself.
-        #[cfg(feature = "sqlite-kg")]
-        migrate_from_sqlite_if_present(path, &redb_path)?;
+        // Note: the one-shot SQLite → redb migration (formerly gated behind
+        // `sqlite-kg`) was removed in issue #989 — all palaces are confirmed
+        // migrated. No migration step runs here.
 
         let db = super::store::open_or_recreate(&redb_path).with_context(|| {
             format!("failed to open redb recall log at {}", redb_path.display())
@@ -429,155 +419,6 @@ fn resolve_redb_path(path: &Path) -> PathBuf {
     }
 }
 
-/// One-shot migration from a legacy SQLite `recall.db` event log.
-///
-/// Why: Issue #57 — existing deployments have a `recall.db` populated by the
-/// pre-redb store. We copy every row across on the first redb open, then
-/// rename the legacy file so subsequent opens are a no-op.
-/// What: Opens the SQLite file read-only, dumps every `recall_events` row,
-/// writes them into the redb RECALL_LOG table under a single write txn, then
-/// renames `recall.db` → `recall.db.migrated`. No-op if the SQLite file is
-/// absent or its `recall_events` table is missing.
-/// Test: `migrates_legacy_sqlite_rows` (gated on the `sqlite-kg` feature).
-#[cfg(feature = "sqlite-kg")]
-fn migrate_from_sqlite_if_present(orig_path: &Path, redb_path: &Path) -> Result<()> {
-    let sqlite_path = if orig_path.extension().is_some_and(|e| e == "db") {
-        orig_path.to_path_buf()
-    } else {
-        // Caller passed the redb path directly — look for a sibling
-        // `recall.db` to migrate.
-        let parent = redb_path.parent().unwrap_or(Path::new("."));
-        parent.join("recall.db")
-    };
-
-    if !sqlite_path.exists() {
-        return Ok(());
-    }
-
-    let migrated_marker = sqlite_path.with_extension("db.migrated");
-    if migrated_marker.exists() && !sqlite_path.exists() {
-        return Ok(());
-    }
-
-    use rusqlite::Connection;
-
-    let conn = Connection::open_with_flags(
-        &sqlite_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-    )
-    .with_context(|| {
-        format!(
-            "open legacy sqlite recall log read-only: {}",
-            sqlite_path.display()
-        )
-    })?;
-
-    let table_exists: bool = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='recall_events'",
-            [],
-            |_| Ok(true),
-        )
-        .unwrap_or(false);
-    if !table_exists {
-        let _ = std::fs::rename(&sqlite_path, &migrated_marker);
-        return Ok(());
-    }
-
-    let mut stmt = conn
-        .prepare(
-            "SELECT palace_id, query_hash, layer, drawer_id, score, occurred_at \
-             FROM recall_events ORDER BY id ASC",
-        )
-        .context("prepare legacy recall_events select")?;
-    let rows_iter = stmt
-        .query_map([], |row| {
-            let palace_id: String = row.get(0)?;
-            let query_hash_i: i64 = row.get(1)?;
-            let layer_i: i64 = row.get(2)?;
-            let drawer_id: Option<String> = row.get(3)?;
-            let score: f64 = row.get(4)?;
-            let occurred_at: String = row.get(5)?;
-            Ok((
-                palace_id,
-                query_hash_i,
-                layer_i,
-                drawer_id,
-                score,
-                occurred_at,
-            ))
-        })
-        .context("query legacy recall_events rows")?;
-
-    let mut staged: Vec<RecallEvent> = Vec::new();
-    for row in rows_iter {
-        let (palace_id, qh_i, layer_i, drawer_id_str, score, occurred_at_s) =
-            row.context("read legacy recall_events row")?;
-        let drawer_id = match drawer_id_str {
-            Some(s) => Some(
-                Uuid::parse_str(&s)
-                    .map_err(|e| anyhow!("invalid uuid in legacy recall row: {e}"))?,
-            ),
-            None => None,
-        };
-        let occurred_at = DateTime::parse_from_rfc3339(&occurred_at_s)
-            .map_err(|e| anyhow!("invalid occurred_at in legacy recall row: {e}"))?
-            .with_timezone(&Utc);
-        staged.push(RecallEvent {
-            palace_id,
-            query_hash: qh_i as u64,
-            layer: layer_i as u8,
-            drawer_id,
-            score: score as f32,
-            occurred_at,
-        });
-    }
-
-    // Drop the prepared statement / connection before renaming so SQLite
-    // releases the file handle.
-    drop(stmt);
-    drop(conn);
-
-    // Open redb separately so the write happens before we register the long-
-    // lived `Database` handle in `open`.
-    let db = Database::create(redb_path).with_context(|| {
-        format!(
-            "open redb recall log for migration write: {}",
-            redb_path.display()
-        )
-    })?;
-    let wtx = db
-        .begin_write()
-        .context("begin_write redb for recall migration")?;
-    {
-        let mut table = wtx
-            .open_table(RECALL_LOG)
-            .context("open RECALL_LOG table for migration")?;
-        // Use sequential ids starting at 1 so the migrated rows sort in their
-        // original insertion order regardless of clock skew.
-        for (i, ev) in staged.iter().enumerate() {
-            let id = (i as u64).saturating_add(1);
-            let bytes =
-                postcard::to_allocvec(ev).context("postcard encode migrated RecallEvent")?;
-            table
-                .insert(id, bytes.as_slice())
-                .context("insert migrated RecallEvent row")?;
-        }
-    }
-    wtx.commit().context("commit migrated recall rows")?;
-    drop(db);
-
-    std::fs::rename(&sqlite_path, &migrated_marker).with_context(|| {
-        format!(
-            "rename legacy recall db {} -> {}",
-            sqlite_path.display(),
-            migrated_marker.display()
-        )
-    })?;
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -782,79 +623,4 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "sqlite-kg")]
-    #[tokio::test]
-    async fn migrates_legacy_sqlite_rows() {
-        use rusqlite::params;
-
-        let dir = tempdir().unwrap();
-        let legacy = dir.path().join("recall.db");
-        let drawer_a = Uuid::new_v4();
-
-        // Build a legacy SQLite recall log with two rows (one hit, one miss).
-        {
-            let conn = rusqlite::Connection::open(&legacy).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE recall_events (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    palace_id   TEXT    NOT NULL,
-                    query_hash  INTEGER NOT NULL,
-                    layer       INTEGER NOT NULL,
-                    drawer_id   TEXT,
-                    score       REAL    NOT NULL,
-                    occurred_at TEXT    NOT NULL
-                );",
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO recall_events
-                    (palace_id, query_hash, layer, drawer_id, score, occurred_at)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    "test",
-                    123_i64,
-                    2_i64,
-                    drawer_a.to_string(),
-                    0.9_f64,
-                    Utc::now().to_rfc3339(),
-                ],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO recall_events
-                    (palace_id, query_hash, layer, drawer_id, score, occurred_at)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    "test",
-                    456_i64,
-                    3_i64,
-                    Option::<String>::None,
-                    0.0_f64,
-                    Utc::now().to_rfc3339(),
-                ],
-            )
-            .unwrap();
-        }
-
-        // Open the redb-backed log at the legacy path — migration must run.
-        let log = RecallLog::open(&legacy).unwrap();
-
-        // The hit row should be queryable.
-        assert_eq!(log.hit_count(drawer_a).await.unwrap(), 1);
-        // The miss row should drive miss_rate > 0 (1 miss query, 2 total).
-        let rate = log.miss_rate("test", 7).await.unwrap();
-        assert!(rate > 0.0, "expected non-zero miss rate, got {rate}");
-
-        // Legacy file should be renamed.
-        assert!(!legacy.exists(), "legacy recall.db should be renamed");
-        assert!(
-            dir.path().join("recall.db.migrated").exists(),
-            "expected migration marker file"
-        );
-
-        // Reopen — must be a no-op (no duplicate rows).
-        drop(log);
-        let log2 = RecallLog::open(&legacy).unwrap();
-        assert_eq!(log2.hit_count(drawer_a).await.unwrap(), 1);
-    }
 }

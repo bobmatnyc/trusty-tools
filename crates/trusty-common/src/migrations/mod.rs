@@ -2,9 +2,8 @@
 //!
 //! Why: every long-lived trusty-* store ships its own ad-hoc "is this schema
 //! version N or N-1?" branch. `trusty-search` migrated `chunks.json → redb`,
-//! `trusty-memory` lazy-upgrades legacy drawer rows, the vector-store lane
-//! drains `.usearch` files behind a `usearch-migrate` feature, and the palace
-//! store stamps a `schema_version` field that nothing ever reads. The code is
+//! `trusty-memory` lazy-upgrades legacy drawer rows, and the palace store
+//! stamps a `schema_version` field that nothing ever reads. The code is
 //! correct in isolation but drifts subtly across crates and the next migration
 //! starts from scratch every time. This module is the single shared kernel:
 //! a `SchemaVersion` stamp, a `Migration` trait, and a `MigrationRunner` that

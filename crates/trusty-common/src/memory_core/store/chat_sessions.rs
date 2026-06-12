@@ -19,8 +19,8 @@
 //!
 //! Test: `create_then_get_session_round_trips`, `list_sessions_returns_meta`,
 //! `delete_session_removes_row`, `upsert_session_overwrites_history`,
-//! `roundtrip_persists_across_reopen`, and (gated on `sqlite-kg`)
-//! `migrates_legacy_sqlite_rows`.
+//! `roundtrip_persists_across_reopen`. The one-shot SQLite → redb migration
+//! was removed in issue #989 (all palaces confirmed migrated).
 
 use chrono::{DateTime, Utc};
 use redb::{ReadableDatabase, ReadableTable};
@@ -103,7 +103,7 @@ struct ChatSessionRecord {
 /// operator. `NotFound` is a value not an error path — missing rows surface
 /// as `Ok(None)` instead.
 /// What: Wraps the error sources (redb storage, transaction, table, postcard,
-/// JSON, timestamp parsing, migration).
+/// JSON, timestamp parsing).
 /// Test: Covered indirectly by the round-trip and missing-row tests.
 //
 // Why (boxing): redb's error types are large enums; box them so the parent
@@ -163,8 +163,6 @@ pub enum ChatSessionStoreError {
         #[source]
         source: chrono::ParseError,
     },
-    #[error("chat session store migration error at {path}: {message}")]
-    Migration { path: PathBuf, message: String },
 }
 
 type Result<T> = std::result::Result<T, ChatSessionStoreError>;
@@ -189,22 +187,19 @@ impl ChatSessionStore {
     ///
     /// Why: Each palace gets one chat database; this constructor is idempotent
     /// so it's safe to call on every cold start. Historical callers passed
-    /// `<palace>/chat_sessions.db` (the legacy SQLite name); we rewrite that
-    /// to `chat_sessions.redb` and, when the `sqlite-kg` feature is enabled,
-    /// migrate any legacy rows on first open.
+    /// `<palace>/chat_sessions.db`; we rewrite that to `chat_sessions.redb`
+    /// transparently. The one-shot SQLite → redb migration was removed in
+    /// issue #989 (all palaces confirmed migrated).
     /// What:
     /// 1. Resolves the redb path. `chat_sessions.db` is rewritten to
     ///    `chat_sessions.redb` next to it; other extensions are kept as-is.
     /// 2. Creates parent directories if missing.
-    /// 3. (sqlite-kg only) Runs the one-shot SQLite → redb migration before
-    ///    we open the long-lived `Database` handle, so the migrator's own
-    ///    write transaction doesn't deadlock against ours.
-    /// 4. Opens (or creates) the redb database and touches the SESSIONS
+    /// 3. Opens (or creates) the redb database and touches the SESSIONS
     ///    table in a write transaction so range scans on a fresh file
     ///    succeed.
     ///
     /// Test: `create_then_get_session_round_trips`,
-    /// `roundtrip_persists_across_reopen`, `migrates_legacy_sqlite_rows`.
+    /// `roundtrip_persists_across_reopen`.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         Self::open_inner(path).map_err(anyhow::Error::from)
     }
@@ -221,10 +216,9 @@ impl ChatSessionStore {
             })?;
         }
 
-        // One-shot migration must run *before* we open the redb db so the
-        // migrator can open redb itself with its own write transaction.
-        #[cfg(feature = "sqlite-kg")]
-        migrate_from_sqlite_if_present(path, &redb_path)?;
+        // Note: the one-shot SQLite → redb migration (formerly gated behind
+        // `sqlite-kg`) was removed in issue #989 — all palaces are confirmed
+        // migrated.
 
         let db =
             super::open_or_recreate(&redb_path).map_err(|e| ChatSessionStoreError::Database {
@@ -549,143 +543,6 @@ fn parse_timestamp(s: &str, field: &'static str) -> Result<DateTime<Utc>> {
         .map_err(|source| ChatSessionStoreError::Timestamp { field, source })
 }
 
-/// One-shot migration from a legacy SQLite `chat_sessions.db` file.
-///
-/// Why: Issue #56 — existing palaces have a `chat_sessions.db` written by the
-/// pre-redb store. Copy every row across on first redb open, then rename the
-/// legacy file so subsequent starts are no-ops.
-/// What: Opens the SQLite file read-only, dumps every row from
-/// `chat_sessions`, writes them into the redb SESSIONS table inside one
-/// write txn, then renames `chat_sessions.db` → `chat_sessions.db.migrated`.
-/// No-op if the SQLite file is absent or if the table doesn't exist.
-/// Test: `migrates_legacy_sqlite_rows` (gated on the `sqlite-kg` feature).
-#[cfg(feature = "sqlite-kg")]
-fn migrate_from_sqlite_if_present(orig_path: &Path, redb_path: &Path) -> Result<()> {
-    let sqlite_path = if orig_path.extension().is_some_and(|e| e == "db") {
-        orig_path.to_path_buf()
-    } else {
-        let parent = redb_path.parent().unwrap_or(Path::new("."));
-        parent.join("chat_sessions.db")
-    };
-
-    if !sqlite_path.exists() {
-        return Ok(());
-    }
-
-    let migrated_marker = sqlite_path.with_extension("db.migrated");
-    if migrated_marker.exists() && !sqlite_path.exists() {
-        return Ok(());
-    }
-
-    use rusqlite::Connection;
-
-    let conn = Connection::open_with_flags(
-        &sqlite_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-    )
-    .map_err(|e| ChatSessionStoreError::Migration {
-        path: sqlite_path.clone(),
-        message: format!("open legacy sqlite db read-only: {e}"),
-    })?;
-
-    let table_exists: bool = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chat_sessions'",
-            [],
-            |_| Ok(true),
-        )
-        .unwrap_or(false);
-    if !table_exists {
-        let _ = std::fs::rename(&sqlite_path, &migrated_marker);
-        return Ok(());
-    }
-
-    let mut stmt = conn
-        .prepare("SELECT id, title, created_at, updated_at, history FROM chat_sessions")
-        .map_err(|e| ChatSessionStoreError::Migration {
-            path: sqlite_path.clone(),
-            message: format!("prepare legacy select: {e}"),
-        })?;
-    let rows_iter = stmt
-        .query_map([], |row| {
-            let id: String = row.get(0)?;
-            let title: Option<String> = row.get(1)?;
-            let created_at: String = row.get(2)?;
-            let updated_at: String = row.get(3)?;
-            let history: String = row.get(4)?;
-            Ok((id, title, created_at, updated_at, history))
-        })
-        .map_err(|e| ChatSessionStoreError::Migration {
-            path: sqlite_path.clone(),
-            message: format!("query legacy rows: {e}"),
-        })?;
-
-    let mut staged: Vec<(String, ChatSessionRecord)> = Vec::new();
-    for row in rows_iter {
-        let (id, title, created_at, updated_at, history) =
-            row.map_err(|e| ChatSessionStoreError::Migration {
-                path: sqlite_path.clone(),
-                message: format!("read legacy row: {e}"),
-            })?;
-        staged.push((
-            id,
-            ChatSessionRecord {
-                title,
-                created_at,
-                updated_at,
-                history,
-            },
-        ));
-    }
-
-    // Open redb separately so the write happens before the long-lived
-    // `Database` handle is registered in `open`. Drop it at the end of this
-    // scope to release the file lock.
-    let db = redb::Database::create(redb_path).map_err(|e| ChatSessionStoreError::Database {
-        path: redb_path.to_path_buf(),
-        source: Box::new(e),
-    })?;
-    let wtx = db
-        .begin_write()
-        .map_err(|e| ChatSessionStoreError::Transaction {
-            path: redb_path.to_path_buf(),
-            source: Box::new(e),
-        })?;
-    {
-        let mut table = wtx
-            .open_table(SESSIONS)
-            .map_err(|e| ChatSessionStoreError::Table {
-                path: redb_path.to_path_buf(),
-                source: Box::new(e),
-            })?;
-        for (id, record) in staged {
-            let value_bytes = postcard::to_allocvec(&record)
-                .map_err(|e| ChatSessionStoreError::Postcard { source: e })?;
-            table
-                .insert(id.as_str(), value_bytes.as_slice())
-                .map_err(|e| ChatSessionStoreError::Storage {
-                    path: redb_path.to_path_buf(),
-                    source: Box::new(e),
-                })?;
-        }
-    }
-    wtx.commit().map_err(|e| ChatSessionStoreError::Commit {
-        path: redb_path.to_path_buf(),
-        source: Box::new(e),
-    })?;
-    drop(db);
-
-    drop(stmt);
-    drop(conn);
-
-    std::fs::rename(&sqlite_path, &migrated_marker).map_err(|e| ChatSessionStoreError::Io {
-        path: sqlite_path,
-        source: e,
-    })?;
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -852,79 +709,4 @@ mod tests {
         assert_eq!(s.history[0].content, "remember me");
     }
 
-    #[cfg(feature = "sqlite-kg")]
-    #[test]
-    fn migrates_legacy_sqlite_rows() {
-        use rusqlite::params;
-
-        let dir = tempdir().unwrap();
-        let legacy = dir.path().join("chat_sessions.db");
-
-        // Build a legacy SQLite chat_sessions file with two rows.
-        {
-            let conn = rusqlite::Connection::open(&legacy).unwrap();
-            conn.execute_batch(
-                r#"
-                CREATE TABLE chat_sessions (
-                    id          TEXT PRIMARY KEY,
-                    title       TEXT,
-                    created_at  TEXT NOT NULL,
-                    updated_at  TEXT NOT NULL,
-                    history     TEXT NOT NULL
-                );
-                "#,
-            )
-            .unwrap();
-            let now = Utc::now().to_rfc3339();
-            conn.execute(
-                "INSERT INTO chat_sessions (id, title, created_at, updated_at, history) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params!["sess-1", Some::<String>("Legacy A".into()), now, now, "[]"],
-            )
-            .unwrap();
-            let history = serde_json::to_string(&vec![ChatMessage {
-                role: "user".into(),
-                content: "hello world".into(),
-            }])
-            .unwrap();
-            conn.execute(
-                "INSERT INTO chat_sessions (id, title, created_at, updated_at, history) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params!["sess-2", None::<String>, now, now, history],
-            )
-            .unwrap();
-        }
-
-        // Open the new redb store at the same legacy path — migration must
-        // run automatically.
-        let store = ChatSessionStore::open(&legacy).unwrap();
-
-        let a = store
-            .get_session("sess-1")
-            .unwrap()
-            .expect("sess-1 migrated");
-        assert_eq!(a.title.as_deref(), Some("Legacy A"));
-        assert!(a.history.is_empty());
-
-        let b = store
-            .get_session("sess-2")
-            .unwrap()
-            .expect("sess-2 migrated");
-        assert_eq!(b.title, None);
-        assert_eq!(b.history.len(), 1);
-        assert_eq!(b.history[0].content, "hello world");
-
-        assert!(
-            !legacy.exists(),
-            "legacy chat_sessions.db should be renamed"
-        );
-        assert!(
-            dir.path().join("chat_sessions.db.migrated").exists(),
-            "expected marker file"
-        );
-
-        // Reopen — must be a no-op (no panic, no duplicate rows).
-        drop(store);
-        let store2 = ChatSessionStore::open(&legacy).unwrap();
-        let metas = store2.list_sessions().unwrap();
-        assert_eq!(metas.len(), 2);
-    }
 }

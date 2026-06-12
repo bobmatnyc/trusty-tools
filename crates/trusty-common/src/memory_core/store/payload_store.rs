@@ -29,8 +29,8 @@
 //!
 //! Test: This module's `tests` exercise the full CRUD path plus a reopen
 //! round-trip (the load-all method must return every row written by a prior
-//! process), and — when the `sqlite-kg` feature is enabled — the one-shot
-//! migration from the legacy `payloads.db` sidecar.
+//! process). The one-shot migration from the legacy `payloads.db` SQLite
+//! sidecar was removed in issue #989 (all palaces confirmed migrated).
 
 use redb::{Database, ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
@@ -110,8 +110,6 @@ pub enum PayloadStoreError {
         #[source]
         source: Box<serde_json::Error>,
     },
-    #[error("payload store migration error at {path}: {message}")]
-    Migration { path: PathBuf, message: String },
 }
 
 type Result<T> = std::result::Result<T, PayloadStoreError>;
@@ -150,9 +148,8 @@ struct PayloadRecord {
 ///
 /// Why: Provides the durable half of `TrustyBackedMemoryStore`'s in-memory
 /// hashmap so adapter restarts don't lose payload data. As of #46 this is the
-/// redb backend; the SQLite implementation it replaces is now only consulted
-/// when the `sqlite-kg` feature is enabled, exclusively for the one-shot
-/// migration step on first open.
+/// redb backend; the legacy SQLite migration path was removed in issue #989
+/// (all palaces confirmed migrated).
 /// What: Owns an `Arc<redb::Database>` over a single `payloads.redb` file. All
 /// reads run in `begin_read` transactions; writes serialize through
 /// `begin_write` since the PAYLOADS table is the only thing this store
@@ -171,22 +168,18 @@ impl PayloadStore {
     /// Open or create the redb-backed payload store at `path`.
     ///
     /// Why: Single entry point so callers don't have to know about the redb
-    /// schema or the one-shot migration from the legacy `payloads.db` SQLite
-    /// sidecar. Callers historically passed `<data_root>/payloads.db`; we
-    /// rewrite that to a `payloads.redb` sibling and (when the `sqlite-kg`
-    /// feature is enabled) copy any legacy rows over before returning.
+    /// schema. Callers historically passed `<data_root>/payloads.db`; we
+    /// rewrite that to a `payloads.redb` sibling transparently. The one-shot
+    /// SQLite → redb migration was removed in issue #989 (all palaces
+    /// confirmed migrated).
     /// What:
     /// 1. Resolves the redb path. Callers that still pass `payloads.db` get
     ///    `payloads.redb` next to it; other extensions are kept as-is.
     /// 2. Creates parent directories if missing.
     /// 3. Opens (or creates) the redb database and touches the PAYLOADS table
     ///    in a write transaction so range scans on a fresh file succeed.
-    /// 4. Runs the one-shot SQLite → redb migration when the `sqlite-kg`
-    ///    feature is enabled and a `payloads.db` is present.
     ///
-    /// Test: `roundtrip_persists_across_reopen` opens the same path twice;
-    /// `migrates_legacy_sqlite_rows` (gated on `sqlite-kg`) exercises the
-    /// one-shot copy.
+    /// Test: `roundtrip_persists_across_reopen` opens the same path twice.
     pub fn open(path: &Path) -> Result<Self> {
         let redb_path = resolve_redb_path(path);
 
@@ -199,11 +192,9 @@ impl PayloadStore {
             })?;
         }
 
-        // One-shot migration must run *before* we open the redb db, because the
-        // migrator opens redb itself to write rows; running it on an already-
-        // open handle would deadlock on the file lock.
-        #[cfg(feature = "sqlite-kg")]
-        migrate_from_sqlite_if_present(path, &redb_path)?;
+        // Note: the one-shot SQLite → redb migration (formerly gated behind
+        // `sqlite-kg`) was removed in issue #989 — all palaces are confirmed
+        // migrated.
 
         let db = super::open_or_recreate(&redb_path).map_err(|e| PayloadStoreError::Database {
             path: redb_path.clone(),
@@ -643,156 +634,6 @@ fn resolve_redb_path(path: &Path) -> PathBuf {
     }
 }
 
-/// One-shot migration from a legacy SQLite `payloads.db` sidecar.
-///
-/// Why: Issue #46 — existing deployments have a `payloads.db` populated by the
-/// pre-redb store. We copy every row across on the first redb open, then
-/// rename the legacy file so the next start is a no-op.
-/// What: Opens the SQLite file read-only, dumps `(segment, id, uuid, payload)`
-/// rows, writes them into the redb PAYLOADS table inside a single write txn,
-/// then renames `payloads.db` → `payloads.db.migrated`. No-op if the SQLite
-/// file is absent.
-/// Test: `migrates_legacy_sqlite_rows` (gated on the `sqlite-kg` feature).
-#[cfg(feature = "sqlite-kg")]
-fn migrate_from_sqlite_if_present(orig_path: &Path, redb_path: &Path) -> Result<()> {
-    // The legacy SQLite file is whatever the caller originally pointed at
-    // (typically `<data_root>/payloads.db`). If that file is missing, nothing
-    // to do.
-    let sqlite_path = if orig_path.extension().is_some_and(|e| e == "db") {
-        orig_path.to_path_buf()
-    } else {
-        // Caller passed the redb path directly — look for a sibling
-        // `payloads.db` to migrate.
-        let parent = redb_path.parent().unwrap_or(Path::new("."));
-        parent.join("payloads.db")
-    };
-
-    if !sqlite_path.exists() {
-        return Ok(());
-    }
-
-    // If we already migrated previously the marker file is what's on disk;
-    // skip silently.
-    let migrated_marker = sqlite_path.with_extension("db.migrated");
-    if migrated_marker.exists() && !sqlite_path.exists() {
-        return Ok(());
-    }
-
-    use rusqlite::Connection;
-
-    let conn = Connection::open_with_flags(
-        &sqlite_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-    )
-    .map_err(|e| PayloadStoreError::Migration {
-        path: sqlite_path.clone(),
-        message: format!("open legacy sqlite db read-only: {e}"),
-    })?;
-
-    // Schema check: if the `payloads` table is missing assume an empty/legacy
-    // file and skip without touching it.
-    let table_exists: bool = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='payloads'",
-            [],
-            |_| Ok(true),
-        )
-        .unwrap_or(false);
-    if !table_exists {
-        // Nothing to copy — rename so we don't retry every open.
-        let _ = std::fs::rename(&sqlite_path, &migrated_marker);
-        return Ok(());
-    }
-
-    let mut stmt = conn
-        .prepare("SELECT segment, id, uuid, payload FROM payloads")
-        .map_err(|e| PayloadStoreError::Migration {
-            path: sqlite_path.clone(),
-            message: format!("prepare legacy select: {e}"),
-        })?;
-    let rows_iter = stmt
-        .query_map([], |row| {
-            let segment: String = row.get(0)?;
-            let id: String = row.get(1)?;
-            let uuid_str: String = row.get(2)?;
-            let payload: String = row.get(3)?;
-            Ok((segment, id, uuid_str, payload))
-        })
-        .map_err(|e| PayloadStoreError::Migration {
-            path: sqlite_path.clone(),
-            message: format!("query legacy rows: {e}"),
-        })?;
-
-    // Stage rows in memory so we can open the redb db once and write them all
-    // in a single transaction.
-    let mut staged: Vec<(String, String, [u8; 16], String)> = Vec::new();
-    for row in rows_iter {
-        let (segment, id, uuid_str, payload) = row.map_err(|e| PayloadStoreError::Migration {
-            path: sqlite_path.clone(),
-            message: format!("read legacy row: {e}"),
-        })?;
-        let uuid = Uuid::parse_str(&uuid_str).map_err(|e| PayloadStoreError::Migration {
-            path: sqlite_path.clone(),
-            message: format!("invalid uuid in legacy row id={id}: {e}"),
-        })?;
-        staged.push((segment, id, *uuid.as_bytes(), payload));
-    }
-
-    // Open redb separately so the write happens before we register the long-
-    // lived `Database` handle in `open`. We close it again by dropping `db` at
-    // the end of this scope.
-    let db = Database::create(redb_path).map_err(|e| PayloadStoreError::Database {
-        path: redb_path.to_path_buf(),
-        source: Box::new(e),
-    })?;
-    let wtx = db
-        .begin_write()
-        .map_err(|e| PayloadStoreError::Transaction {
-            path: redb_path.to_path_buf(),
-            source: Box::new(e),
-        })?;
-    {
-        let mut table = wtx
-            .open_table(PAYLOADS)
-            .map_err(|e| PayloadStoreError::Table {
-                path: redb_path.to_path_buf(),
-                source: Box::new(e),
-            })?;
-        for (segment, id, uuid_bytes, payload_json) in staged {
-            let record = PayloadRecord {
-                uuid: uuid_bytes,
-                payload: payload_json,
-            };
-            let value_bytes = postcard::to_allocvec(&record)
-                .map_err(|e| PayloadStoreError::Postcard { source: e })?;
-            let key = encode_payload_key(&segment, id.as_bytes());
-            table
-                .insert(key.as_slice(), value_bytes.as_slice())
-                .map_err(|e| PayloadStoreError::Storage {
-                    path: redb_path.to_path_buf(),
-                    source: Box::new(e),
-                })?;
-        }
-    }
-    wtx.commit().map_err(|e| PayloadStoreError::Commit {
-        path: redb_path.to_path_buf(),
-        source: Box::new(e),
-    })?;
-    drop(db);
-
-    // Drop the prepared statement / connection before renaming so SQLite
-    // releases the file handle.
-    drop(stmt);
-    drop(conn);
-
-    std::fs::rename(&sqlite_path, &migrated_marker).map_err(|e| PayloadStoreError::Io {
-        path: sqlite_path,
-        source: e,
-    })?;
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -941,71 +782,4 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "sqlite-kg")]
-    #[test]
-    fn migrates_legacy_sqlite_rows() {
-        use rusqlite::params;
-
-        let dir = tempdir().unwrap();
-        let legacy = dir.path().join("payloads.db");
-
-        // Build a legacy SQLite payloads file with two rows.
-        {
-            let conn = rusqlite::Connection::open(&legacy).unwrap();
-            conn.execute_batch(
-                r#"
-                CREATE TABLE payloads (
-                    segment TEXT NOT NULL,
-                    id TEXT NOT NULL,
-                    uuid TEXT NOT NULL,
-                    payload TEXT NOT NULL,
-                    PRIMARY KEY (segment, id)
-                );
-                "#,
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO payloads (segment, id, uuid, payload) VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    "seg-a",
-                    "rec-1",
-                    fixture_uuid(1).to_string(),
-                    serde_json::to_string(&json!({"hello": "world"})).unwrap(),
-                ],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO payloads (segment, id, uuid, payload) VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    "seg-b",
-                    "rec-2",
-                    fixture_uuid(2).to_string(),
-                    serde_json::to_string(&json!({"n": 42})).unwrap(),
-                ],
-            )
-            .unwrap();
-        }
-
-        // Open the new redb store at the same legacy path — migration must run
-        // automatically.
-        let store = PayloadStore::open(&legacy).unwrap();
-
-        let a = store.get("seg-a", "rec-1").unwrap();
-        assert_eq!(a, Some((fixture_uuid(1), json!({"hello": "world"}))));
-        let b = store.get("seg-b", "rec-2").unwrap();
-        assert_eq!(b, Some((fixture_uuid(2), json!({"n": 42}))));
-
-        // Legacy file should be renamed.
-        assert!(!legacy.exists(), "legacy payloads.db should be renamed");
-        assert!(
-            dir.path().join("payloads.db.migrated").exists(),
-            "expected marker file"
-        );
-
-        // Reopen — must be a no-op (no panic, no duplicate rows).
-        drop(store);
-        let store2 = PayloadStore::open(&legacy).unwrap();
-        let all = store2.load_all(None).unwrap();
-        assert_eq!(all.len(), 2);
-    }
 }
