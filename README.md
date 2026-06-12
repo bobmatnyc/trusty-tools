@@ -175,7 +175,58 @@ documentation.
 └───────────────────────────────────────────────────────────────┘
 ```
 
-## Quick Start — All Crates
+## Installation
+
+### With Homebrew (recommended for end users)
+
+The easiest way to install any trusty-* binary. First, add the tap:
+
+```bash
+brew tap bobmatnyc/trusty
+```
+
+Then install any of the six published binaries:
+
+```bash
+brew install trusty-search
+brew install trusty-memory
+brew install trusty-analyze
+brew install trusty-review
+brew install trusty-mpm
+brew install trusty-git-analytics
+```
+
+Or combine into a single command:
+
+```bash
+brew install bobmatnyc/trusty/trusty-search \
+             bobmatnyc/trusty/trusty-memory \
+             bobmatnyc/trusty/trusty-analyze \
+             bobmatnyc/trusty/trusty-review \
+             bobmatnyc/trusty/trusty-mpm \
+             bobmatnyc/trusty/trusty-git-analytics
+```
+
+### From Source with Cargo
+
+If you prefer to build from the latest source or need a crate not distributed via Homebrew:
+
+```bash
+git clone https://github.com/bobmatnyc/trusty-tools
+cd trusty-tools
+
+# Build all crates
+cargo build --release
+
+# Run all tests
+cargo test
+
+# Install the CLI tools
+cargo install --path crates/trusty-search --locked
+# More tools available via: cargo install --path crates/<crate>
+```
+
+## Quick Start — All Crates (Source Build)
 
 ```bash
 git clone https://github.com/bobmatnyc/trusty-tools

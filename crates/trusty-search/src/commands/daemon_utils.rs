@@ -1,52 +1,61 @@
 //! Daemon discovery + reachability helpers shared across CLI subcommands.
 //!
 //! Why: every subcommand that talks to the running daemon needs the same
-//! "where is it listening?" logic — preferring the canonical
-//! `~/.trusty-search/http_addr` file, falling back to the legacy port lockfile,
-//! and finally to the compiled-in default port. Centralising it removes
-//! duplication and gives `main.rs` a thinner footprint.
+//! "where is it listening?" logic -- preferring the canonical
+//! `{data_dir}/trusty-search/http_addr` file (written via
+//! `trusty_common::write_daemon_addr`), falling back to the legacy port
+//! lockfile, and finally to the compiled-in default port. Centralising it
+//! removes duplication and gives `main.rs` a thinner footprint.
+//!
+//! Issue #984: `read_http_addr_file()` / `http_addr_path()` have been replaced
+//! with `trusty_common::read_daemon_addr("trusty-search")` /
+//! `trusty_common::write_daemon_addr("trusty-search", ...)` so that the CLI
+//! reads the same file the daemon writes, regardless of platform data-dir
+//! layout. The old `~/.trusty-search/http_addr` path was only correct on
+//! platforms where `dirs::home_dir()` happens to equal the data dir fallback;
+//! on macOS the canonical path is
+//! `~/Library/Application Support/trusty-search/http_addr`.
+//!
 //! What: pure path resolvers and one async TCP probe.
 //! Test: covered indirectly by every CLI subcommand that calls into the
-//! daemon — `status`, `index`, `query`, `doctor`, etc.
+//! daemon -- `status`, `index`, `query`, `doctor`, etc.
 
 use std::time::Duration;
 
 /// Resolve the daemon's base URL.
 ///
 /// Why: stdio MCP servers and CLI subcommands need to find the running daemon
-/// without configuration. We check the canonical `~/.trusty-search/http_addr`
-/// first (the new address-discovery contract, aligned with trusty-memory),
-/// then fall back to the legacy port file
-/// (`~/.local/share/trusty-search/daemon.port`) for backward compatibility,
-/// and finally to `127.0.0.1:7878` if neither exists.
+/// without configuration. We check the canonical address-discovery file
+/// (via `trusty_common::read_daemon_addr`, issue #984) first, then fall back
+/// to the legacy port file (`daemon.port`) for backward compatibility, and
+/// finally to `127.0.0.1:7878` if neither exists.
 ///
-/// Defensive TCP probe (issue #117): if `http_addr` points at a dead address
-/// (e.g. left behind by a SIGKILL'd `serve --http` that used to share this
-/// file, or by a stopped daemon whose cleanup didn't run), we fall back to
-/// `daemon.port` and overwrite `http_addr` with the live address so future
-/// callers are fast. The probe is 200 ms — short enough to keep CLI startup
-/// snappy when the file is current, long enough to tolerate a busy machine.
+/// Defensive TCP probe (issue #117): if the discovery file points at a dead
+/// address (e.g. left behind by a SIGKILL'd `serve --http`, or by a stopped
+/// daemon whose cleanup did not run), we fall back to `daemon.port` and
+/// overwrite the discovery file with the live address so future callers are
+/// fast. The probe is 200 ms -- short enough to keep CLI startup snappy when
+/// the file is current, long enough to tolerate a busy machine.
 ///
 /// What: returns `http://{host}:{port}` (no trailing slash).
+/// Test: `daemon_base_url_falls_back_when_http_addr_dead` exercises this path.
 pub fn daemon_base_url() -> String {
-    if let Some(addr) = read_http_addr_file() {
-        // Quick reachability check so a stale file doesn't strand callers in
-        // a 60s probe loop downstream (issue #117).
-        if address_reachable_blocking(&addr) {
+    if let Ok(Some(addr)) = trusty_common::read_daemon_addr("trusty-search") {
+        if !addr.is_empty() && address_reachable_blocking(&addr) {
             return format!("http://{addr}");
         }
-        // Stale file — fall through to the port-file fallback and refresh.
+        // Stale file -- fall through to the port-file fallback and refresh.
     }
     let port = daemon_port_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| s.trim().parse::<u16>().ok())
         .unwrap_or(trusty_search::service::DEFAULT_PORT);
 
-    // Refresh `http_addr` so subsequent calls skip the TCP probe entirely.
+    // Refresh the discovery file so subsequent calls skip the TCP probe.
     // Best-effort: a write failure (no $HOME, read-only fs) is non-fatal.
     let live_addr = format!("127.0.0.1:{port}");
     if address_reachable_blocking(&live_addr) {
-        let _ = refresh_http_addr_file(&live_addr);
+        let _ = trusty_common::write_daemon_addr("trusty-search", &live_addr);
     }
     format!("http://{live_addr}")
 }
@@ -55,11 +64,11 @@ pub fn daemon_base_url() -> String {
 ///
 /// Why: `daemon_base_url()` is called from sync contexts (e.g. main.rs CLI
 /// dispatch) and cannot easily `.await`. A blocking `TcpStream::connect_timeout`
-/// is the simplest correct primitive — 200 ms is well below the perceptual
+/// is the simplest correct primitive -- 200 ms is well below the perceptual
 /// threshold for CLI startup.
 /// What: parses `host:port`, attempts a TCP connect with a 200 ms deadline,
 /// returns true on success. Any parse or connect error returns false.
-/// Test: `daemon_base_url_falls_back_when_http_addr_dead` exercises the path.
+/// Test: `address_reachable_returns_false_for_dead_port` unit test below.
 fn address_reachable_blocking(host_port: &str) -> bool {
     use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
     let Ok(mut iter) = host_port.to_socket_addrs() else {
@@ -71,63 +80,20 @@ fn address_reachable_blocking(host_port: &str) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
 }
 
-/// Overwrite `~/.trusty-search/http_addr` with `host_port`.
-///
-/// Why: when `daemon_base_url()` discovers a stale `http_addr` and recovers via
-/// the port file, we update the discovery file in place so the next caller hits
-/// the fast path. Atomic via tmp+rename to avoid partial reads.
-/// What: writes `host_port` followed by a newline, then renames over the target.
-/// Test: indirectly via `daemon_base_url_falls_back_when_http_addr_dead`.
-fn refresh_http_addr_file(host_port: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    let Some(path) = http_addr_path() else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "no $HOME",
-        ));
-    };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("addr.tmp");
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        writeln!(f, "{host_port}")?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
-}
-
-/// Read the canonical address-discovery file. Returns `Some("host:port")`
-/// when the daemon has written it; `None` otherwise.
-pub fn read_http_addr_file() -> Option<String> {
-    let path = http_addr_path()?;
-    let raw = std::fs::read_to_string(&path).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-/// Path to `~/.trusty-search/http_addr` — the canonical address-discovery
-/// file. Mirrors `crate::service::daemon::http_addr_path` so the CLI doesn't
-/// need to depend on the service crate for path resolution.
-pub fn http_addr_path() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join(".trusty-search").join("http_addr"))
-}
-
-/// Path to `~/.trusty-search/mcp_http_addr` — the MCP HTTP/SSE listener's
+/// Path to `~/.trusty-search/mcp_http_addr` -- the MCP HTTP/SSE listener's
 /// address-discovery file, written by `trusty-search serve --http`.
 ///
-/// Why: distinct from the daemon's `http_addr` so two unrelated processes
-/// (the daemon and a `serve --http` MCP transport) cannot clobber each other.
-/// Before issue #117 both wrote the same file; a SIGKILL'd `serve --http`
-/// would leave a dead-address `http_addr` behind, stranding subsequent
+/// Why: distinct from the daemon's `http_addr` (written via
+/// `trusty_common::write_daemon_addr`) so two unrelated processes (the daemon
+/// and a `serve --http` MCP transport) cannot clobber each other. Before
+/// issue #117 both wrote the same file; a SIGKILL'd `serve --http` would
+/// leave a dead-address file behind, stranding subsequent
 /// `trusty-search dash`/`status` calls in a 60s timeout loop.
-/// What: returns `$HOME/.trusty-search/mcp_http_addr`.
+/// What: returns `$HOME/.trusty-search/mcp_http_addr`. This is intentionally
+/// in `$HOME/.trusty-search/` (not the platform data dir) because it is a
+/// per-session file that must be discovered by both the MCP client process and
+/// the `serve` process across a potential `$TRUSTY_DATA_DIR_OVERRIDE` boundary.
+/// Test: `mcp_http_addr_path_is_home_relative` unit test below.
 pub fn mcp_http_addr_path() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".trusty-search").join("mcp_http_addr"))
 }
@@ -169,9 +135,9 @@ mod tests {
 
     #[test]
     fn address_reachable_returns_false_for_dead_port() {
-        // Why: regression coverage for issue #117 — `daemon_base_url()` must
-        // detect a dead address read from `http_addr` so it can fall back to
-        // the port file instead of returning a URL nobody can connect to.
+        // Why: regression coverage for issue #117 -- `daemon_base_url()` must
+        // detect a dead address read from the discovery file so it can fall back
+        // to the port file instead of returning a URL nobody can connect to.
         // What: port 1 is reserved and unbound on every developer machine.
         // Test: the probe returns false in well under the 200 ms deadline.
         let start = std::time::Instant::now();
@@ -185,7 +151,7 @@ mod tests {
 
     #[test]
     fn address_reachable_returns_false_for_garbage_input() {
-        // Why: defence-in-depth — a corrupted `http_addr` (zero bytes,
+        // Why: defence-in-depth -- a corrupted discovery file (zero bytes,
         // partial write, hand-edited typo) must not panic the resolver.
         assert!(!address_reachable_blocking("not-a-host:port"));
         assert!(!address_reachable_blocking(""));
@@ -194,7 +160,7 @@ mod tests {
 
     #[test]
     fn address_reachable_returns_true_for_live_listener() {
-        // Why: positive control — a real bound port must register as reachable
+        // Why: positive control -- a real bound port must register as reachable
         // so we don't fall back unnecessarily.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -202,16 +168,13 @@ mod tests {
     }
 
     #[test]
-    fn http_addr_and_mcp_http_addr_paths_are_distinct() {
-        // Why: the entire issue #117 fix hinges on these two files being
-        // separate. A regression that re-unifies them would re-introduce the
-        // 60s timeout bug.
-        let http = http_addr_path();
-        let mcp = mcp_http_addr_path();
-        if let (Some(h), Some(m)) = (http, mcp) {
-            assert_ne!(h, m);
-            assert!(h.ends_with("http_addr"));
-            assert!(m.ends_with("mcp_http_addr"));
+    fn mcp_http_addr_path_is_home_relative() {
+        // Why: the MCP HTTP/SSE file must live in `$HOME/.trusty-search/` (not
+        // the platform data dir) so it is accessible to both the `serve` and
+        // the MCP client processes regardless of `TRUSTY_DATA_DIR_OVERRIDE`.
+        // Test: verify the path ends with the expected basename.
+        if let Some(p) = mcp_http_addr_path() {
+            assert!(p.ends_with(".trusty-search/mcp_http_addr"));
         }
     }
 }

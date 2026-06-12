@@ -1,0 +1,44 @@
+[package]
+name = "trusty-controller"
+version = "0.1.0"
+edition = "2021"
+description = "Thin control plane for the claude-mpm stack: install, upgrade, restart, health, and config coordination across all trusty-* tools."
+readme = "README.md"
+# Workspace default: MIT (see root Cargo.toml [workspace.package] license = "MIT",
+# #898 relicense, and sibling crates). Use license.workspace = true so the
+# authoritative value propagates from one place.
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+# Phase-0 scaffold — not ready to publish yet.
+publish = false
+
+[lib]
+name = "trusty_controller"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tctl"
+path = "src/main.rs"
+
+[dependencies]
+# Binary error handling
+anyhow = { workspace = true }
+# Argument parsing (derive API, matching repo convention in trusty-search/trusty-analyze)
+clap = { workspace = true }
+# Serialisation for --json output (DOC-5 §4.2)
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Async runtime for parallel member probes (DOC-5 §2, DOC-4 §1.3)
+tokio = { workspace = true }
+# Structured logging to stderr (CLAUDE.md: logs → stderr, stdout = data)
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# Shared update primitives (check_crates_io, perform_upgrade, verify_installed_binary,
+# is_launchd_supervised, upgrade_and_restart) reused by tctl updates/upgrade.
+trusty-common = { workspace = true }
+
+[dev-dependencies]
+# Temporary directory helpers for integration test isolation
+tempfile = { workspace = true }

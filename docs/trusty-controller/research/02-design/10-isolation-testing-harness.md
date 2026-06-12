@@ -151,6 +151,17 @@ construction, conformant for its advertised verbs, so the §2.1 oracle is readin
 trustworthy envelopes. The self-check is the bridge that lets DOC-10 "only validate
 conformant tools" (DOC-6 §Produces / "gates DOC-10").
 
+The pre-gate also validates each member's real `--json` envelope and per-verb
+`data` output against the **committed golden contract schema** exported from the
+`trusty_common` contract module (the same fixtures that gate the Rust
+golden-snapshot test — DOC-1 D3 / ADR-0007). This extends snapshot coverage to
+the **non-Rust claude-mpm shim**, which hand-rolls its JSON via the Python
+adapter and is therefore *not* gated by the Rust snapshot test: capturing its
+live output and asserting it against the golden schema holds it to the same
+`data`-shape contract as the Rust tools, closing the version-skew channel (a tool
+shipping a changed `data` shape under a stale `contract_version`) for the one
+member the in-workspace shared types cannot cover.
+
 ### 3. macOS isolation (PRIMARY, MUC2) — resolve the launchd-per-user problem
 
 macOS is the **primary** target (spec §172–173). The defining constraint is
@@ -230,6 +241,12 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y   # carg
 curl -LsSf https://astral.sh/uv/install.sh | sh                          # uv
 ```
 
+This rustup+uv first step is the **executable mirror of DOC-8 §1.1's STEP 0**
+product on-ramp (install Rust via the rustup one-liner, then `cargo install
+trusty-controller`): the harness is the executable expression of the same
+vanilla-machine bootstrap, so the product flow is no longer harness-only and the
+two are aligned.
+
 This is deliberate: by *starting* without cargo/uv, the harness can **first**
 assert DOC-8 §5's guide-and-abort UX (§5 assertion A0) — run `tctl …` with the
 toolchain absent and confirm exit `3` + the copy-paste remediation — and **then**
@@ -285,13 +302,21 @@ and explicitly deferred the harness-level choice to DOC-10. The resolution:
     (DOC-8 §6: "daemonless / foreground"), which the harness must support driving
     non-interactively. `tctl restart` on this branch is stop+start of the foreground
     process (DOC-9 §5.1), not `systemctl --user restart`.
-- **systemd-user is validated separately (not on every-PR container).** The
-  *systemd-user* product path (DOC-8 §6 primary Linux branch) is best exercised on a
-  **full Linux VM** (lima/cloud VM/self-hosted) that has a real user session and
-  `systemctl --user`, run **manually/nightly**, not in the every-PR Docker job. The
-  container leg proves "install → ready → upgrade → still-ready" under foreground
-  supervision; the VM leg additionally proves the systemd-user unit content. (See
-  Open Question 2 — whether v1 ships the systemd-user VM leg at all, or defers it.)
+- **systemd-user is validated separately from the foreground container leg — and now
+  gated per-PR on a standard ubuntu runner.** A stock Docker container has no systemd
+  (the reason above), so the *systemd-user* product path (DOC-8 §6 primary Linux
+  branch) cannot run inside the every-PR container. But a **standard GitHub-hosted
+  ubuntu runner is a real login session and has `systemctl --user`**, so the
+  systemd-user product path is now gated **per-PR on that runner** (path-filtered,
+  alongside the foreground-container leg) — no privileged systemd-in-container or full
+  VM is needed. So per-PR Linux coverage is **both** legs: the systemd-less container
+  proves the foreground/fallback branch ("install → ready → upgrade → still-ready"
+  under foreground supervision), and the ubuntu-runner leg proves the real systemd-user
+  product path including the unit content + a `systemctl --user restart`. The **full
+  Linux VM** (lima/cloud VM/self-hosted) becomes a deeper/optional **nightly**
+  validation atop the per-PR runner leg, not the sole systemd-user gate. (See Open
+  Question 2 — whether v1 ships the systemd-user VM leg at all, or defers it now that
+  the runner leg covers the product path on every PR.)
 
 #### 4.2 Container base image + first-step toolchain
 
@@ -386,6 +411,27 @@ Cross-repo caveat: claude-mpm is an external repo (DOC-6 §4). **If the owner wa
 specific claude-mpm version chosen up front** (rather than "whatever `uv` resolves
 the first time the harness runs"), that is an owner decision — see Open Question 3.
 
+#### 6.1 Shim captured-output contract-test (drift fails loudly)
+
+The version pin above protects the *installed bits*; this test protects the *shim's
+parsing* against the **input** it consumes. The DOC-6 shim parses claude-mpm's
+**human** `mpm-doctor` / version / liveness **text** (not JSON) into the contract
+envelope (DOC-6 §4 — the most fragile coupling point, §4.1). So the harness commits a
+**golden fixture of the pinned claude-mpm version's raw `mpm-doctor`/version/liveness
+output** and asserts the shim against it: feed the captured text in, assert the
+synthesized envelope matches. This sits **alongside the existing C3/M2 captured-`--json`
+conformance fixtures** of §2.2 — those gate the shim's *output* shape against the
+golden schema; this gates the shim's *input* parsing against a frozen sample of what
+claude-mpm actually printed at the pinned version.
+
+The payoff is **loud failure on drift**: if a claude-mpm CLI-format change shifts the
+`mpm-doctor`/version/liveness text, the captured-output test **fails in CI** rather
+than the shim **silently misparsing at runtime** and misclassifying orchestrator
+health. Re-capture the fixture whenever the pin advances (lockstep with the shim
+update, DOC-6 §5). This is the install-time half of the M3 mitigation; the runtime
+half is the shim's loud-degrade rule (unrecognized output → `degraded` with a clear
+message, never a confident-but-wrong verdict — DOC-6 §4.1).
+
 ### 6b. CI integration vs maintainer-run
 
 The harness must serve **both** the maintainer (MUC1, run-on-demand in a VM) and
@@ -395,16 +441,24 @@ recommendation, fitting alongside the existing workflows (`ci.yml`, `release.yml
 
 | Leg | Where | When | Rationale |
 |---|---|---|---|
-| **Linux container** (foreground supervision, §4) | GitHub Actions, `container:` or a `services`-less Ubuntu job (mirrors `al2023-build.yml`/`ci.yml`) | **every PR** (path-filtered to `crates/trusty-controller/**` + the harness + the BOM) | cheap Linux minutes; catches install/upgrade regressions on every change |
-| **macOS** (the primary MUC2 leg, §3) | GitHub-hosted `macos-14` runner (the runner *is* the isolation host, §3.2) **or** self-hosted tart | **nightly + manual `workflow_dispatch`** (NOT every PR) | macOS minutes are costly; nightly catches macOS-specific regressions (launchd, cdhash) without taxing every PR |
+| **Linux container** (foreground supervision, §4) | GitHub Actions, `container:` or a `services`-less Ubuntu job (mirrors `al2023-build.yml`/`ci.yml`) | **every PR** (path-filtered to `crates/trusty-controller/**` + the harness + the BOM) | cheap Linux minutes; catches install/upgrade regressions on the **foreground/fallback** branch on every change |
+| **systemd-user (per-PR)** (the real Linux v1 product path, §4.1) | a **standard GitHub-hosted ubuntu runner** (a real login session — it has `systemctl --user`, no privileged systemd-in-container or VM needed) | **every PR** (path-filtered, same filter as the container leg) | the real Linux v1 product supervision path (DOC-8 Resolved-Decision-6 is systemd-user) must be gated per-PR, not only on the nightly VM; the foreground-container leg above covers only the fallback branch |
+| **macOS smoke (per-PR)** (minimal primary-target gate, §3) | GitHub-hosted `macos-14` runner | **every PR** (path-filtered, same filter as the Linux legs) | macOS is the primary target (spec §172–173) and the cdhash `cp`-into-PATH SIGKILL trap is the nastiest, hardest-to-diagnose failure — both need per-PR signal. A SMALL smoke: `cargo install trusty-controller --locked` → daemon comes up under launchd → `health --json` == `running` → **cdhash assertion** (the on-PATH binary execs without SIGKILL via `cargo install`'s atomic-rename path; the forbidden `cp`-over path is NOT used) → one `restart` (`bootout`→`bootstrap`) → `health` again. NOT the full §2 acceptance scenario (which stays nightly, next row). Costs a few bounded macOS minutes per PR — the trade-off is catching a silent cdhash/supervision regression pre-merge instead of discovering it nightly post-merge. |
+| **macOS** (the full §2 MUC2 acceptance run, §3) | GitHub-hosted `macos-14` runner (the runner *is* the isolation host, §3.2) **or** self-hosted tart | **nightly + manual `workflow_dispatch`** (NOT every PR) | macOS minutes are costly; the nightly run is the **full §2 acceptance scenario + teardown** — distinct from the minimal per-PR smoke above — catching the deeper macOS-specific regressions without taxing every PR |
 | **Maintainer local** (MUC1) | `tart` VM on the maintainer's Mac; Docker for Linux | **on demand** (a `make` target / script the maintainer invokes) | the spec's MUC1 — test before cutting a stack version, without touching the real machine |
-| **systemd-user VM** (optional, §4.1) | full Linux VM (lima/cloud), manual | **manual/nightly if shipped in v1** | validates the systemd-user product path the container leg skips (Open Question 2) |
+| **systemd-user VM** (optional deeper validation, §4.1) | full Linux VM (lima/cloud), manual | **manual/nightly if shipped in v1** | an **additional** deeper validation atop the per-PR systemd-user-runner leg above; the runner leg already covers the product path on every PR, so the VM leg is now optional (Open Question 2) rather than the sole systemd-user gate |
+| **stack-tuple promotion gate** (the §2 acceptance oracle run against a *candidate* tuple) | GitHub Actions, reusing the macOS + Linux legs above | **scheduled (nightly/weekly) + `workflow_dispatch`** | this is the owner/mechanism [DOC-2](./02-stack-manifest-and-versioning.md) §4 references: a candidate tuple (latest-published per crate, or a curated set) is materialized and run through §2; **green promotes it to a released `stack_version`/BOM**. The harness already IS the end-to-end tuple test, so a tuple is "tested" precisely when this run is green — no separate stack-integration matrix is needed. |
 
 Concretely: a new GitHub Actions workflow (e.g. `.github/workflows/isolation.yml`)
-with a `linux-container` job triggered on PR (path-filtered) and a `macos` job
-gated behind `schedule:` (nightly cron) + `workflow_dispatch`. This mirrors
+with, triggered on PR (path-filtered), a `linux-container` job (foreground/fallback
+branch), a `systemd-user-runner` job (on a standard ubuntu runner with
+`systemctl --user`, exercising the real Linux product supervision path), and a
+`macos-smoke` job (the minimal install + launchd-up + `health` == running + cdhash
+assertion + one `restart`); plus a full `macos` job gated behind `schedule:`
+(nightly cron) + `workflow_dispatch` (the full §2 acceptance run). This mirrors
 `al2023-build.yml`'s "expensive job, path-filtered + `workflow_dispatch`, not every
-push" precedent exactly. The maintainer entry point is a single invocation (e.g.
+push" precedent exactly for the deep macOS run, while the bounded per-PR smoke gives
+the primary target pre-merge signal. The maintainer entry point is a single invocation (e.g.
 `make isolation-macos` / `make isolation-linux`, or
 `tctl-isolation-harness --target macos|linux`) that provisions, runs the §2
 scenario, asserts the §5 battery, and tears down.

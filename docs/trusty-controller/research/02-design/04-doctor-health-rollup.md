@@ -90,17 +90,34 @@ The rollup MUST be **resilient to a single slow/hung member**:
   concurrently (a bounded `tokio` join set). The stack rollup latency is
   therefore ≈ the slowest single member, not the sum. This matters because
   `stack health` is meant to be a *fast* liveness sweep (§4).
-- **Per-tool timeout → synthesized `down`/`unreachable` envelope.** Each probe
-  has its own deadline with **defaults: 2 s for `health`, 10 s for `doctor`** —
-  doctor does deeper work. These defaults are overridable via a single controller
-  flag **`--timeout=<secs>`** in v1; per-member manifest timeouts are deferred.
-  On timeout (or a process spawn error, a non-zero exit with no parseable
-  envelope, or unparseable output) the controller **synthesizes a terminal
-  envelope** for that member rather than blocking or propagating the hang.
-  DOC-1 already specifies this for `health` ("the controller synthesizes a `down`
+- **Per-tool timeout → synthesized `down` envelope carrying a `reason`.** Each
+  probe has its own deadline with **defaults: 2 s for `health`, 10 s for
+  `doctor`** — doctor does deeper work. Liveness is defined by *answering* within
+  this deadline, not by process existence (DOC-1 D1): a daemon with a stale PID
+  lockfile or a bound port that does not answer in time is `down`. On timeout (or
+  a process spawn error, a non-zero exit with no parseable envelope, or
+  unparseable output) the controller **synthesizes a terminal envelope** for that
+  member — verdict `down` (no new verdict value) — and stamps a `reason`
+  discriminator so remediation can differ: `reason: "not_running"` (no process →
+  suggest **start**) vs `reason: "timeout"` / `"wedged"` / `"unreachable"` (up but
+  not answering → suggest **restart**/investigate). DOC-1 already specifies the
+  synthesized `down` for `health` ("the controller synthesizes a `down`
   envelope" when the tool is not answering); DOC-4 generalizes it to all
   introspection verbs and distinguishes the *reason* (§5.1: missing vs down vs
   unreachable/timeout).
+- **Warming / restarting is reported, not timed out.** A daemon that is **up but
+  not yet ready** — cold start, ONNX/model loading, warming, OR mid-graceful-restart
+  — MUST answer `health` **promptly** with `degraded`/`pending` plus a `detail`
+  string ("model loading", "warming", "restarting") rather than hanging until the
+  deadline. So a healthy-but-cold daemon is reported as warming, **not** false-failed
+  into a `down`. The mid-graceful-restart window maps to `pending` (consistent with
+  C5 / DOC-9 §5.3), never `down`. Because this state lives in the tool's own
+  `health` reply, the controller keeps zero tool-specific logic.
+- **Per-member timeout overrides ship day one.** The fixed 2 s / 10 s defaults
+  remain, but a member may override its probe timeouts in the manifest (DOC-2 §3)
+  — needed for model-loading members (e.g. trusty-search cold ONNX/CoreML load)
+  that legitimately need a larger cold-load budget. Precedence: **per-member
+  manifest timeout > global `--timeout` > the 2 s / 10 s defaults**.
 - **No partial blocking.** A member that never returns is recorded as
   `unreachable` (with its timeout as the detail) and the matrix renders the rest
   of the stack immediately. The stack verdict is computed over the envelopes
@@ -119,10 +136,17 @@ The two source vocabularies — doctor `ok|warn|fail|pending|skipped` and health
 vocabulary the matrix cells, the stack verdict, and the exit code all speak.
 DOC-4 proposes a **four-value stack-verdict vocabulary**:
 
+This four-value verdict is **the single total-order lattice** both source
+vocabularies map into — not two competing status systems. `health` (the fast
+probe) and `doctor` (the deep probe) are two **views of one order**, each mapping
+into the same `ready`/`degraded`/`pending`/`down` ranks (see §4 for the fast/deep
+framing). Because they share one lattice, they cannot disagree *in direction* —
+see the both-envelopes fold rule below.
+
 | Stack verdict | Meaning | Sources that map here |
 |---|---|---|
 | **`ready`** | Everything the stack needs is present, healthy, and version-ok. | doctor `ok`; health `running` |
-| **`degraded`** | Usable but impaired — a warning, a non-fatal dependency problem, or an older-but-acceptable contract. The stack works; something wants attention. | doctor `warn`; health `degraded`; older-but-≥-floor `contract_version`; a *required dep* unreachable that the owning tool already surfaced as `degraded` |
+| **`degraded`** | Usable but impaired — a warning, a non-fatal dependency problem, or an older-but-acceptable contract. The stack works; something wants attention. | doctor `warn`; health `degraded`; older-but-≥-floor `contract_version`; a *required dep* unreachable that the owning tool already surfaced as `degraded`; a `pending` check stalled past the staleness budget (§5.5) |
 | **`pending`** | Setup in progress / not-yet-done **but not broken** — the DOC-3 "unindexed = system-ready, project-pending, NOT broken" state. Only ever arises from **project-scope** signals. | doctor `pending` (project scope) |
 | **`down`** | Broken — a system check failed or a daemon is not answering. The stack (for the affected member) is unusable. | doctor `fail`; health `down`; below-floor / contract-incompatible member (renders with `reason: "contract_incompatible"` + upgrade remediation) |
 
@@ -154,6 +178,16 @@ doctor check status → verdict:        health envelope status → verdict:
   pending → pending
   skipped → (absorbed; contributes nothing)
 ```
+
+**Both-envelopes rule (the §1.1 "one or both envelopes" reconciliation).** When
+the rollup holds **both** a `health` and a `doctor` envelope for the same member,
+the member's cell verdict is the **worst-wins fold** (§2.1 lattice) of the two
+mapped verdicts. Because both map into the one total order, they can never
+disagree *in direction*: a surface disagreement — health `running` but doctor
+`fail`, or health `down` but a stale doctor `ok` — simply resolves to the worse
+verdict (here `down`). This is the rule §1.1 left undefined when it said the
+rollup gathers "one or both" envelopes per member; the fast and deep probes are
+combined, never pitted against each other.
 
 #### 2.1 Precedence (the combine lattice)
 
@@ -220,7 +254,25 @@ reason the stack verdict is worse than `ready`. A genuine project-scope
 the global verdict, because its blast radius is one repo. The exit code stays
 system-track-driven — a broken index in one checkout is not a machine-level
 stack failure. Surface such failures prominently in the project column and
-in `-v`, but do not fail a CI gate checking system health.
+in `-v`, but do not fail a CI gate checking system health by default.
+
+**A project `fail`/`down` is a real local problem — not the `pending` case.** A
+project-scope `fail`/`down` (e.g. a corrupt index for this repo) is a genuine
+local outage and MUST NOT be folded into the "pending is not broken" framing
+above: `pending` means *setup in progress on a healthy daemon* (positive
+trajectory, normal), whereas a project `fail`/`down` means *this repo's state is
+broken* (negative, actionable). The two are distinct verdicts and the rollup keeps
+them distinct. To stop a real local outage from hiding behind a buried glyph, the
+rollup:
+
+- **Surfaces a louder summary line** for a project `fail`/`down` — a distinct,
+  prominent line in the verdict summary (not merely a cell glyph), naming the
+  member, the project, and the remediation.
+- **Honors an opt-in `--fail-on-project` flag** (§7) that makes a genuine project
+  `fail`/`down` (NOT `pending`) drive a non-zero exit. The default stays exit `0`
+  (system-track-driven — a project problem's blast radius is one repo, so a
+  scripted machine-health gate should not fail on it), but `--fail-on-project`
+  lets a per-repo gate opt into failing on a local outage.
 
 #### 2.3 The three folds (summary)
 
@@ -229,6 +281,14 @@ in `-v`, but do not fail a CI gate checking system health.
 | **per-check → per-tool-per-scope** | the `scope:"X"` checks of one member's `doctor` (or that member's `health` envelope for column X) | §2.1 precedence over those checks |
 | **per-tool-per-scope → per-tool** | a member's `{system, project}` cells | system cell drives the member verdict; project cell annotates (a member is `down` if its **system** cell is `down`, even if its project cell is `ready`) |
 | **per-tool → stack** | all members' **system** verdicts | §2.1 precedence over the system track; project track appended as per-repo annotation |
+
+> **A fourth, orthogonal fold — dependency clustering.** Beyond these three
+> verdict folds, the rollup runs a separate **cluster fold** that builds
+> dependency clusters via a transitive walk over the union graph G = manifest
+> `depends_on` ∪ runtime `health.data.deps[]` (§5.4). It is orthogonal to the
+> three folds above: it does **not** change any verdict count (each member is
+> counted exactly once, even when it appears in more than one cluster) — it only
+> annotates root-cause grouping so the controller can surface "fix the root."
 
 ### 3. The tools × scope matrix (primary rendered artifact)
 
@@ -297,21 +357,35 @@ defines two stack commands over them and reconciles both into the single
 | Project layer | reports per-project *state* status where the verb is project-aware | full project-scope checks (`pending` etc.) |
 | Use | the cheap pre-flight / "should I route traffic / start a session?" | the diagnostic / "what's wrong and how do I fix it?" |
 
-**Reconciliation.** Both commands fold into the §2.0 vocabulary using the §2.0
-mapping. `stack health` can only ever produce `ready`/`degraded`/`down` (health
-has no `pending` — liveness is binary-ish), while `stack doctor` can additionally
-produce `pending` (it sees project-scope `pending` checks). This is intentional:
-*liveness has no notion of "setup in progress"; only the deep doctor does.* So a
-freshly-installed daemon with no project index shows `stack health: ready` (the
-daemon is up) and `stack doctor: project pending` (the project isn't indexed yet)
-— both correct, at their respective depths.
+**Reconciliation.** `health` and `doctor` are the **fast** and **deep** probes of
+the **same §2.0 lattice**, not two disagreeing systems: both fold into the §2.0
+vocabulary using the §2.0 mapping, and when both are collected for one member the
+cell is the **worst-wins fold** of the two mapped verdicts (§2.0 both-envelopes
+rule, §2.1 precedence). `stack health` can only ever produce `ready`/`degraded`/`down`
+(health has no `pending` — liveness is binary-ish), while `stack doctor` can
+additionally produce `pending` (it sees project-scope `pending` checks). This is
+intentional: *liveness has no notion of "setup in progress"; only the deep doctor
+does.* So a freshly-installed daemon with no project index shows `stack health: ready`
+(the daemon is up) and `stack doctor: project pending` (the project isn't indexed
+yet) — both correct, at their respective depths. That difference is a **scope-depth
+difference at different scopes** (system liveness vs a project-scope check), **not
+a direction disagreement**: the two probes never rank the *same* signal on opposite
+sides of the lattice.
 
-**Consistency guarantee.** For a given member, `stack health` and `stack doctor`
-must not contradict on the **system** track: if `health` says `down`, `doctor`'s
-system column must also be `down` (a dead daemon fails its system checks).
-DOC-10's harness asserts this (the self-check, DOC-6 §8). The two may legitimately
-*differ in depth* (doctor surfaces `degraded` for a non-fatal warning that
-liveness doesn't probe), but never in direction.
+**Consistency guarantee (scoped to a single collection pass).** The invariant —
+health `down` ⇒ doctor's system column also `down` (a dead daemon fails its system
+checks) — holds **within one collection pass**: a single combined probe that
+gathers both the `health` and `doctor` signals in the same sweep. It is **not** an
+invariant across two separately-timed CLI invocations. Running `stack health` and
+then `stack doctor` as two separate commands probes the stack at two different
+moments with two different timeouts, so a daemon whose state changes **between**
+the two sweeps (e.g. it crashes after `health` answered `running` and before
+`doctor` runs) can legitimately make the two disagree — that is a **race**, not a
+contract violation. DOC-10's harness therefore asserts the invariant over **one
+collection pass** (the combined probe), never by diffing two independent CLI runs.
+Within that single pass the two may still legitimately *differ in depth* (doctor
+surfaces `degraded` for a non-fatal warning that liveness doesn't probe), but never
+in direction.
 
 ### 5. Degenerate / edge states (each has a defined rollup treatment)
 
@@ -395,16 +469,89 @@ A naive rollup of "search is down" would paint **three** scary failures (search
   → fix the root: run `trusty-search start`   (resolves 2 dependent degradations)
   ```
 
+  This example collapses cleanly because **trusty-review depends *directly* on
+  trusty-search** (DOC-2's `review→[search,analyze]` edge), so its own
+  `health.data.deps[]` names the down root outright. The harder case is a
+  **transitive-only dependent** — one whose required dep is itself merely
+  `degraded` (not `down`) because *its* dep is the real root. There, the
+  dependent's proximate `deps[]` reports `reachable=true` against a `degraded`
+  intermediary, so a "dep unreachable AND dep's row is `down`" test would never
+  fire and the dependent would float free, unattributed. The cluster fold below
+  reaches the terminal root by **walking the union graph** rather than testing a
+  single edge.
+
 - **Single remediation.** The remediation surfaced for the cluster is the
   **root's** fix (start trusty-search), not three separate "fix the dependent"
   hints. This is the anti-double-counting rule: *N dependents of one dead root
-  produce one root failure + N annotated degradations, never N+1 failures.*
+  produce one root failure + N annotated degradations, never N+1 failures.* The
+  count holds even across **multiple clusters**: a member is counted **once** in
+  the `summary` regardless of how many root clusters it appears under (see the
+  multi-root case below).
 
-The rollup builds the dependency cluster from two sources, both contract/manifest
+**The cluster-construction algorithm (transitive fold over the union graph).**
+The rollup builds dependency clusters from two sources, both contract/manifest
 data (no tool-specific logic): the manifest `depends_on` (static edges, DOC-2 §3)
 and each tool's runtime `health.data.deps[]` (DOC-1; the `{id,required,reachable}`
-nodes). When a dependent reports a required dep unreachable AND that dep's own row
-is `down`, the controller collapses the dependent into the root's cluster.
+nodes). The fold is:
+
+1. **Build the graph.** Form the directed dependency graph G = manifest
+   `depends_on` (DOC-2 §3) ∪ runtime `health.data.deps[]` required edges
+   (DOC-1). Optional deps are not edges (they never degrade, per the grounding
+   `compute_status()` rule).
+2. **Identify root failures.** A **root** is a member whose **own** verdict is
+   `down`/`fail` for an **intrinsic** reason — i.e. it is broken on its own
+   merits, not merely because a dependency is unreachable. trusty-search with a
+   dead daemon is a root; a dependent that is only `degraded` because its dep is
+   down is *not* a root.
+3. **Walk to the terminal root(s) transitively.** For each dep-degraded member,
+   follow its **own proximate `because`/`deps[]` pointer** along required edges,
+   transitively, until reaching the terminal `down` root(s). Because each tool
+   already reports *its* `deps[]`, the controller simply **follows pointers**
+   member-to-member rather than re-deriving domain causality — preserving the
+   "zero tool-specific logic" property. A transitive-only dependent
+   (`review → analyze`, `analyze` merely `degraded`) is attributed to the real
+   root (`search`) by chaining `review`'s pointer → `analyze`'s pointer →
+   `search`.
+4. **Multi-root.** A dependent may belong to **more than one** cluster when the
+   transitive walk reaches two distinct `down` roots (e.g.
+   `review → [search, memory]` with both `down`). It appears under each root's
+   cluster, but the `summary` still counts it **exactly once** — the
+   anti-double-count rule holds at the *count* level, not the
+   *cluster-membership* level (§2.3, §8.2).
+5. **Attribution is a heuristic, verifiable via `-v`.** A member's `degraded`
+   may in truth be independent of the transitive root it gets attributed to (it
+   could be degraded for an unrelated reason that happens to coincide). The
+   `because`/cluster attribution is therefore a surfaced **hint**, not a proof;
+   the `-v` drill-down (§3.2) prints the raw per-member `deps[]` so the user can
+   confirm the chain rather than trust it blindly.
+
+**v1 note.** For the stack's *current* members every dependent has a **direct**
+edge to its root (trusty-review depends directly on trusty-search), so the simple
+direct-edge collapse already produces correct clusters today. This transitive
+specification is therefore primarily a **correctness-of-claim** fix (the prior
+rule was presented as generic but silently assumed transitive walking) plus
+**future-proofing and multi-root coverage** — not a v1 bug fix.
+
+#### 5.5 Stalled `pending` → time-escalated to `degraded`
+
+`pending` is tool-self-reported and never worsens the rollup (§2.0/§2.1), so a
+crash-looping or stalled indexer could otherwise report `pending` forever while
+the stack stays green-ish. To bound this **without** inspecting any index
+internals (the controller cannot — freshness stays tool-reported, DOC-3 Q5), the
+rollup escalates **purely by elapsed time**:
+
+- A `pending` doctor check carries an optional `pending_since` timestamp (DOC-1
+  `doctor.data`). When the controller holds a `pending` check whose
+  `pending_since` is older than a **bounded staleness budget**, it escalates that
+  check's contribution to **`degraded`** (a stalled-pending verdict), so a
+  stalled indexer eventually rolls up as `degraded`, not perpetually `pending`.
+- The escalation is **elapsed-time-based only** — it compares `pending_since`
+  against the budget and never looks inside the index, preserving the zero-
+  tool-specific-logic property. The optional `progress_pct` is advisory display
+  only and never drives the escalation.
+- If a check omits `pending_since`, the controller **cannot** time-escalate it
+  and it stays `pending` (degrades to current behavior — no regression for tools
+  that do not yet emit the timestamp).
 
 ### 6. Remediation surfacing
 
@@ -453,10 +600,50 @@ project-local distinction.
 | controller/usage error (bad flag, unknown member, manifest unreadable) | **3** | DOC-1 D5 `3` — produced at the controller boundary, not from a verdict |
 
 **The exit code reflects the SYSTEM track**, by the same logic as §2.2: a project
-`pending` (or even a project-scope `fail` per Open Question 3) does not by itself
-make a CI gate fail, because its blast radius is one repo, while a system `down`
-must. This makes `tctl stack doctor` a sound CI gate for "is the *machine's* stack
-healthy" without false-failing on a not-yet-indexed checkout.
+`pending` does not by itself make a CI gate fail, because its blast radius is one
+repo, while a system `down` must. This makes `tctl stack doctor` a sound CI gate
+for "is the *machine's* stack healthy" without false-failing on a not-yet-indexed
+checkout.
+
+**Aggregate exit code across N members (fan-out `stack doctor`/`stack health`).**
+The verdict→code table above maps a single stack verdict; the **aggregate** exit
+code across the N members of a fan-out is the **worst** member code under the
+precedence
+
+```
+3  ≻  1  ≻  2  ≻  0        (worst-wins)
+```
+
+That is: if **any** member is contract-incompatible / below-floor, or the run hits
+a controller/usage problem, the aggregate code is `3`; else if any member is
+`down` (a runtime daemon-down) the code is `1`; else if any member is `degraded`
+the code is `2`; else `0`. A project `pending` stays `0` (per the table above and
+§2.2).
+
+This deliberately promotes a contract/install problem **above** a runtime
+daemon-down so the two are distinguishable from the exit code alone: a
+mis-installed / contract-broken stack exits `3` (an install/contract problem →
+**install**/**upgrade** remediation), whereas a runtime daemon-down exits `1` (→
+**start**/**restart** remediation). The verdict **lattice** for *rendering* is
+unchanged — a contract-incompatible member's cell still renders as `down` (it is
+unusable, per the §5 edge-states table) — but the aggregate **exit code** promotes
+that member's contract/usage problem to `3`. So the rendering verdict and the
+scriptable exit code can legitimately differ for a contract-incompatible member:
+cell `down` for the human, code `3` for the script.
+
+**`--fail-on-project` (opt-in; resolves Open Question 3).** By default a genuine
+project-scope `fail`/`down` (distinct from `pending`) keeps the aggregate exit
+**`0`** — the exit code is system-track-driven, and a broken index in one checkout
+is not a machine-level stack failure (§2.2). The opt-in **`--fail-on-project`**
+flag changes this for per-repo gates: with it set, a genuine project `fail`/`down`
+(NOT `pending`) folds into the aggregate precedence above (contributing `1` for a
+project `down`, `2` for a project `degraded`), so a scripted per-repo gate can fail
+on a local outage. Whether or not the flag is set, a project `fail`/`down` always
+gets a **louder summary line** (§2.2) so it is never hidden behind a buried glyph.
+**Open Question 3 is resolved this way:** default exit `0` (system-track-driven),
+plus the `--fail-on-project` opt-in and the louder project-`fail` summary; a
+project `fail`/`down` is no longer folded into the "pending is not broken"
+framing.
 
 ### 8. Output formats
 
@@ -524,7 +711,13 @@ Key machine fields: `verdict` + `exit_code` (the headline), `summary` counts,
 per-member `cells.{system,project}.{verdict,reason,because,remediation}`, the
 embedded per-member `checks[]`/`health` (verbatim DOC-1 payloads), and the
 `clusters[]` block that encodes the de-duplicated dependency root-cause grouping
-(§5.4) so the UI can render "fix the root" without re-deriving the graph.
+(§5.4) so the UI can render "fix the root" without re-deriving the graph. The
+`clusters[]` entries are derived by the §5.4 transitive cluster fold, so in a
+multi-root graph a single dependent **may appear under more than one `root`**
+(the JSON example above is a single-root illustration). The `summary` counts are
+**membership-independent**: each member is counted exactly once regardless of how
+many clusters it appears in, so cross-cluster membership never double-counts a
+member in the headline totals.
 
 DOC-7 renders this identically to the CLI matrix (it is a thin link-out control
 plane — spec §56 — so it consumes the rollup rather than recomputing it), and

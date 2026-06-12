@@ -691,8 +691,8 @@ async fn main() -> Result<()> {
             PortFormat::Port
         }),
         Cmd::Mcp { analyzer_url } => {
-            let server = AnalyzerMcpServer::new(analyzer_url);
-            trusty_analyze::mcp::stdio::run(server).await
+            let url = commands::daemon_guard::ensure_mcp_daemon_up(&analyzer_url).await?;
+            trusty_analyze::mcp::stdio::run(AnalyzerMcpServer::new(url)).await
         }
         Cmd::Dashboard { port } => {
             // Auto-start the daemon when it is not yet reachable.

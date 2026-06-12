@@ -82,6 +82,16 @@ model** in which **verb presence is decoupled from `contract_version`**.
    changes in a way that is not a pure additive superset. Missing verbs →
    graceful degrade; unknown verbs → ignored by older controllers.
 
+   The mandatory-bump rule is **machine-enforced**, not left to reviewer
+   vigilance: a **golden-snapshot conformance test in the `trusty_common`
+   contract module** serializes a canonical instance of the envelope and every
+   per-verb `data` struct and gates CI so any change to a serialized shape fails
+   unless the snapshot is regenerated **and** `contract_version` is bumped **and**
+   a ledger row is added (the test asserts the three move together). This closes
+   the gap where a tool could ship a changed `data` shape under a stale
+   `contract_version`; a skewed-version consumer then reliably observes the
+   bumped integer rather than silently misdeserializing.
+
 The serde types for the envelope, the per-verb `data` structs, the status enums,
 and the trait each Rust tool implements live in a shared `trusty_common`
 contract module (ADR-context for DOC-6). The Python claude-mpm orchestrator
@@ -116,8 +126,18 @@ format, not a Rust API, so a non-Rust member can conform.
   extensible — but it is one more runtime step than a single version gate.)
 - An **additive-only** discipline is required for the integer to mean what it
   says: any non-additive change to the envelope or an existing verb's `data` is a
-  mandatory bump. Reviewers must catch accidental breaking changes that "forgot"
-  to bump.
+  mandatory bump. Enforcement is a **golden-snapshot CI test in `trusty_common`**
+  (it fails any serialized-shape change not accompanied by a `contract_version`
+  bump + ledger row); reviewers are a backstop, not the gate. The real failure
+  mode this guards against is **version skew across independently-installed
+  crates** — within one workspace build producer and consumer compile against the
+  same shared `data` structs and cannot diverge, but `cargo install`-ing tools
+  per-crate at different `trusty_common` versions can pair a controller built
+  against one shape with a tool that changed the shape without bumping. The
+  cross-language coverage splits in two: **Rust tools** are gated here, at the
+  shared-types snapshot test; **non-Rust members** (the claude-mpm Python adapter,
+  which hand-rolls the JSON and can diverge freely) are gated by a captured
+  `--json`-output conformance fixture in DOC-10's harness.
 - Every Rust tool must implement the shared trait and wire the subcommands
   (DOC-6 retrofit); `trusty-review` (the current laggard) needs the most work.
 - claude-mpm needs a Python adapter to emit the JSON shapes; there is no machine
@@ -134,3 +154,8 @@ format, not a Rust API, so a non-Rust member can conform.
 - Secret redaction (fixed marker `***redacted***`) applies to all verb output and
   is specified in DOC-1; the shared redaction helper is introduced in the
   `trusty_common` contract module (none exists today).
+- The golden-snapshot conformance test lands in the `trusty_common` contract
+  module (its home, DOC-1 D6) and is wired into CI so that any change to a
+  serialized envelope/`data` shape couples to a `contract_version` bump + ledger
+  row. DOC-10 extends the same coverage to non-Rust members by validating each
+  member's captured `--json` output against the committed golden schema.

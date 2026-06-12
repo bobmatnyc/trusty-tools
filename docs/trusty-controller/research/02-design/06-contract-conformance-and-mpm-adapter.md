@@ -50,7 +50,12 @@ decision it derives from):
 5. **Redacts secrets** (DOC-1 D8) — all output (`config` effective values,
    `version.build`, `doctor` remediation hints, `health` detail) masks API keys,
    tokens, AWS credentials, and connection strings with the fixed marker
-   `"***redacted***"`.
+   `"***redacted***"`. Conformance here means redaction both **happens** (tools
+   redact at the source via the shared `redact_value` helper, §3) **and** is
+   **verified** by the negative CI conformance assertion (§8): no known secret
+   pattern appears unredacted in a member's captured envelope output. The
+   controller-side belt-and-suspenders redaction pass (DOC-1 D8) is the runtime
+   backstop; the negative assertion is the gate. Cross-ref DOC-1 D8 + §8.
 6. **Tags scope correctly** (DOC-1 D7 / DOC-3) — the `--scope project|system|all`
    flag is honored, the envelope `scope` reflects it, and each doctor/health check
    carries its own per-check `scope`. Single-layer (system-only) members simply
@@ -120,7 +125,7 @@ Sources: `crates/trusty-search/src/main.rs`, `src/commands/` (`doctor.rs`,
 | `version` | `⚠️` clap `--version` flag only; no `verbs[]` | Add a real `version` subcommand emitting `VersionData` with `verbs[]` + `contract_version` | `main.rs` (new `Version` variant), `commands/` |
 | `start`/`stop` | `⚠️` `start [...]`/`stop` — text | Emit `LifecycleData{action,previous_state,new_state,...}`; `--json` | `commands/start.rs`, `commands/stop.rs` |
 | `restart` | `❌` absent (operators use launchd `bootout`/`bootstrap`) | Net-new: compose stop→start (or `LaunchdConfig::bootout`+`bootstrap`); emit `LifecycleData` | new `commands/restart.rs` |
-| `config` | `⚠️` `config get\|set <key> [val]` — **live memory-limit mutation**, NOT effective merged config | Make the read-only effective-config verb (DOC-1 `config.data`) the **default `config`**; move the existing mutation behind `config set`/`config tune` (and `config get <key>` for a single value) — see §2.6 | `commands/config.rs` |
+| `config` | `⚠️` `config get\|set <key> [val]` — **live memory-limit mutation**, NOT effective merged config | The read-only effective-config (DOC-1 `config.data`) is the `config` **contract verb**; the live mutation moves to a **separate non-contract `tune` verb** (canonical, NOT advertised in `verbs[]`), with `config set`/`config tune` kept as **deprecated tool-native aliases** for back-compat — see §2.6 | `commands/config.rs`, new `commands/tune.rs` |
 | `version.verbs[]` | `❌` | advertised by the new `version` verb | as above |
 | envelope/`contract_version` | `❌` | provided by `trusty_common::contract::Dispatcher` | shared module (§3) |
 
@@ -213,15 +218,31 @@ project per D7), with secrets redacted (D8); editing is an explicit spec non-goa
 
 trusty-search already has a `config` subcommand — but it is a **live-mutating
 `get`/`set`** for daemon memory limits, a *different verb with the same name*.
-The retrofit MUST NOT overload it. **Decision (owner-approved):** the contract
-`config` (read-only effective merged view) becomes the **default `config` verb**;
-trusty-search's existing live-mutating behaviour moves behind explicit
-`config set` / `config tune` subcommands, with `config get <key>` reading a single
-value. The contract `config` (no subcommand / `--json`) returns `ConfigData`;
-`config get`/`config set`/`config tune` remain tool-internal subcommands the
-controller *may dispatch* but never treats as the contract verb. This is the only
-place the contract verb name collides with existing behaviour, and this
-disambiguation resolves it.
+The retrofit MUST NOT overload it. **Decision (owner-approved, Option A):** make
+the read-only guarantee true at the contract boundary, not merely a posture.
+
+- The contract `config` verb is **read-only**: it takes only **read selectors**
+  (`--scope`, optional single-key projection) — no subcommand, no mutating
+  arguments — and returns `ConfigData` (effective merged config, redacted). Invoked
+  bare or with `--json`.
+- The canonical mutating surface becomes a **separate, non-contract, non-advertised
+  verb** named `tune` (a `limits`-style runtime-knob verb). It is NOT a contract
+  verb and is NOT listed in `verbs[]`. trusty-search's live memory-limit mutation
+  lives here.
+- `config set` and `config tune` are retained as **deprecated tool-native
+  back-compat aliases** for direct users (trusty-search is 0.x — emit a deprecation
+  note pointing at `tune`) so existing scripts do not hard-break.
+- **Passthrough cannot reach mutation**: the controller's generic passthrough is
+  verb-aware — it forwards an advertised contract verb with its contract-defined
+  arguments and renders the envelope; it does not blindly shell arbitrary trailing
+  args. Because mutation lives in the non-advertised `tune` verb (outside the
+  advertised read-only `config` verb's read-selector-only arg space), runtime config
+  mutation is **not reachable through the controller in v1** — read-only **by
+  construction**, not by convention.
+
+This closes the passthrough hole: see DOC-5 §2 (verb-aware passthrough; non-advertised
+verbs not forwarded) and §3 (blast-radius gate broadened to the mutating-verb class),
+and DOC-3 §7 (the controller does not expose tool-native config mutation in v1).
 
 ### 3. Shared-vs-per-crate retrofit strategy
 
@@ -285,6 +306,52 @@ retrofits then reduce to a mechanical, repeatable shape.
 This matches DOC-1's "highest-leverage work, in order" and respects the
 parallel-worktree discipline: each tool retrofit is an independent worktree once
 the shared module is published.
+
+#### 3.1 Honest work-breakdown (scope realism)
+
+The per-tool retrofit above reads as "mostly a mapping exercise," and **per verb**
+that is true — but the **total** scope is substantial and easy to under-budget. To
+keep the estimate honest, the contract retrofit is enumerated here as **discrete,
+independently-sized work-items**, each its own worktree/PR (per the parallel-worktree
+discipline). Recent decisions have **added net-new surface** to this exact retrofit:
+C3's golden-snapshot conformance test, C5's net-new `restart` verb on every daemon,
+and M4's `tune`-verb split — so the breakdown reflects the **current decided state**,
+not the original "thin" framing:
+
+1. **Net-new `trusty_common::contract` module + `Dispatcher`** — the envelope, per-verb
+   `data` structs, enums, `ContractTool` trait, `redact_value`, plus the **C3
+   golden-snapshot conformance test** (none exists today; the DOC-1 sketch is the
+   build target). Precondition for everything else.
+2. **trusty-search retrofit** — the pattern-setter, and the heaviest of the Rust
+   members by net-new surface: includes the **M4 `tune`-verb split** (§2.6) and the
+   **§7 project-identity reconciliation** (hoist `id_from_path`/`detect_project`;
+   reconcile `detect.rs` basename vs `fs_discovery.rs` slug).
+3. **trusty-memory retrofit** — `GET /health` already speaks `degraded`; net-new CLI
+   `health`/`config`/`restart` + `version`.
+4. **trusty-analyze retrofit** — `health` CLI verb exists; net-new `config`/`restart`
+   + `version`; map `search_reachable` → `deps[]`.
+5. **trusty-review retrofit** — **the laggard**: net-new `doctor`/`version`/`config`/
+   `restart` (it implements *none* of the seven verbs at the CLI today).
+6. **claude-mpm Python shim** — synthesizes `doctor`/`health`/`version`;
+   **version-coupled** (§4/§4.1) and **drift-tested** via the DOC-10 captured-output
+   contract-test (§6/§2.2).
+7. **Stateful project-identity migration** — re-keys existing index/palace state from
+   the old id scheme to the canonical slug. **Designed in §7.1** — a stateful re-key
+   migration carried by trusty-search's existing `core::migration` `_meta` framework
+   (re-key the registry entry by recomputing the canonical slug from each index's
+   `root_path`, reuse the colocated data in place — **no reindex**; see DOC-11 M15).
+   Kept here as a distinct work-item/PR. This item is the one that is *not* "just a
+   mapping exercise."
+
+So the headline scope is: **N discrete PRs across 4 Rust tools + 1 Python shim + 1
+new shared module + 1 stateful migration** — not a single mechanical pass.
+
+**"Thin coordinator" qualifier.** The *controller* (`tctl`) is genuinely a thin
+coordinator — it adds **zero** per-tool verb-dispatch logic and grows no scope from
+this list. But the **contract retrofit it depends on** is substantial: items 1–7
+above are the price of making the members conformant *before* the thin coordinator
+can talk to them. The thinness is a property of the controller, not of the
+end-to-end effort.
 
 ### 4. claude-mpm Python adapter (the core net-new design)
 
@@ -374,6 +441,42 @@ resolution.
   cross-repo upstream work is pursued. The shim suffices until trusty-mpm retires
   it (§6), so there is no upstream-ownership question to resolve in v1.
 
+#### 4.1 claude-mpm external-dependency risk (consolidated)
+
+claude-mpm is the **one** stack member that lives in a repo we do not own and
+evolves on a cadence we do not control. The coupling to it is **load-bearing in
+four distinct places**, scattered across the design set. They are individually
+small but collectively constitute **one systemic risk**, so they are enumerated
+here as a single surface rather than left implicit per-doc:
+
+| # | Coupling point | Where | Blast radius if claude-mpm drifts | Mitigation |
+|---|---|---|---|---|
+| 1 | **`uv` install/upgrade** | §5 (this doc), DOC-8 §1.4/§5 | A renamed/removed package or an incompatible upstream release breaks install/upgrade of the orchestrator member. | The orchestrator installs the **BOM-pinned** version (§5), not whatever floats to latest, so an upstream release cannot silently change the installed bits under a green stack. |
+| 2 | **launch hook** | DOC-8 §4 (a Claude Code `SessionStart` hook) | If claude-mpm's launch surface changes, the "auto-config on every launch" path (`tctl ensure`) stops firing. | The hook is attached to **Claude Code** (`SessionStart`, verified — see C2), which claude-mpm is layered on, so it does not depend on a claude-mpm-owned hook surface. |
+| 3 | **output-parsing shim** | §4 (this doc) | The shim parses claude-mpm's **human** `mpm-doctor` / version / liveness **text** into the contract envelope. A cosmetic upstream format change makes the shim **misparse → misclassify orchestrator health** — a confident-but-wrong verdict. **This is the most fragile point.** | A captured-output **contract-test** gates the shim against the pinned version (DOC-10 §6/§2.2), plus a **loud-degrade runtime rule** (below). |
+| 4 | **version pin** | §5 (this doc), DOC-10 §6 | If the installed claude-mpm and the version the shim was tested against diverge, the shim parses an output shape it never validated. | Install and shim move in **lockstep** (§5): the BOM pin is exactly the version DOC-10's harness froze the shim against. |
+
+**The most fragile point is the output-parsing shim (#3), and it is coupled to
+the version pin (#4).** The two together carried a latent **contradiction** the
+rest of this cluster resolves: an unpinned "install latest" (formerly DOC-8
+Resolved-Decision-2) against a **version-coupled** parser means an upstream
+`mpm-doctor` format change can land on a user's machine without the BOM moving,
+and the every-PR CI — which runs against the **frozen** pin — would not catch it.
+The shim would then misparse and the orchestrator would be **silently
+misclassified**. §5 reconciles this: the orchestrator installs the **BOM-pinned**
+version (not latest), exactly like every cargo member installs its BOM `version`.
+
+**Loud-degrade runtime rule (mitigation for #3).** Beyond the install-time pin,
+the shim degrades **loudly** at runtime: if it encounters claude-mpm output it
+does **not** recognize (an unexpected shape from a drifted upstream), it MUST emit
+`degraded` with a clear message — `"claude-mpm output format unrecognized — shim
+may be stale vs the installed version"` — **never** a confident-but-wrong health
+verdict. So a format drift that slips past the pin surfaces as a visible
+`degraded` (operator sees "shim may be stale") instead of a silent
+misclassification. This pairs the install-time gate (the captured-output
+contract-test, DOC-10 §6/§2.2 — fails CI loudly on drift) with a runtime
+backstop (loud `degraded`, never silently wrong).
+
 ### 5. Resolving DOC-2 Q6 (claude-mpm package/version/changelog pins)
 
 DOC-2 deferred Q6 (the canonical claude-mpm package name, pinned version, and
@@ -390,13 +493,25 @@ authoritative `CHANGELOG.md` URL) to DOC-6. All three are now resolved
   `claude-mpm`, installed and upgraded via `uv` per the bullet above
   (`uv tool install claude-mpm`).
 
-- **Pinned version — pin at implementation.** DOC-2's worked example uses the
-  placeholder `version = "0.0.0"`; the design keeps a placeholder for the manifest
-  orchestrator entry. The **concrete version is pinned when the shim is built and
-  tested against a specific claude-mpm release** (the shim's parsing is
-  version-coupled, §4). When the shim lands, set the BOM pin to whatever claude-mpm
-  version DOC-10's isolation test installs and validates, and bump it in lockstep
-  with shim updates.
+- **Pinned version — pin at implementation; the orchestrator installs the
+  BOM-pinned version, NOT latest.** DOC-2's worked example uses the placeholder
+  `version = "0.0.0"`; the design keeps a placeholder for the manifest orchestrator
+  entry. The **concrete version is pinned when the shim is built and tested against
+  a specific claude-mpm release** (the shim's parsing is version-coupled, §4). When
+  the shim lands, set the BOM pin to whatever claude-mpm version DOC-10's isolation
+  test installs and validates.
+
+  Because the shim's output-parsing is **version-coupled** (§4/§4.1), the installed
+  claude-mpm MUST match the version the shim was tested against **exactly** — just
+  like every cargo member installs its BOM `version`, the orchestrator installs the
+  **BOM-pinned** claude-mpm version, not whatever floats to latest. The BOM pin and
+  the shim move in **lockstep**: when the shim is updated for a newer claude-mpm,
+  DOC-10 re-captures and the pin advances together with it. Installing **latest** is
+  an opt-in `--latest` move that **marks the stack drifted** (the M2/M11 drift
+  framing — "current" only as of the tested tuple), not the default install path.
+  This reconciles DOC-8 §1.4 + Resolved-Decision-2, which previously framed install
+  as unpinned/latest: the default is the BOM pin (owned here in §5); `--latest` is
+  opt-in drift.
 
 - **Authoritative `CHANGELOG.md` URL —**
   `https://raw.githubusercontent.com/bobmatnyc/claude-mpm/main/CHANGELOG.md`. This
@@ -460,6 +575,42 @@ trusty-search retrofit and a precondition for any tool emitting `scope:"project"
 checks: `detect.rs` and `fs_discovery.rs` are reconciled by replacing both with the
 hoisted `trusty_common` helpers.
 
+#### 7.1 Stateful re-key migration (no reindex)
+
+The reconciliation above is a code refactor, but it has a **stateful** side that
+must not be left implicit: the basename→slug flip re-keys every existing index and
+palace. Both id forms (the basename and the divergent slug) are **currently live in
+the daemon registry for the same root**, so a naive flip would let the first
+`tctl ensure` after the change re-key everything and **re-index from scratch** — a
+multi-minute `pending` with storage doubling. This is the design for §3.1
+work-breakdown item 7; it is a re-key, **not** a rebuild.
+
+**Re-key, do NOT rebuild.** Colocated index *data* is already addressed by
+`root_path`, not by the id-string: the daemon stores
+`ColocatedIndexEntry { root_path, id }` and the on-disk `.trusty-search/` directory
+lives under the project root, not under the id. The id is therefore only the
+**in-memory registry key**. The migration recomputes the canonical slug from each
+existing index's `root_path` and **re-keys the registry entry** to that slug,
+reusing the existing redb/usearch data in place — **no re-embedding, no reindex**.
+The duplicate old-form registration (basename and/or divergent slug) for the same
+root is dropped/merged onto the canonical slug.
+
+**trusty-memory palaces.** Palace state that is id-keyed on disk gets an
+**alias/rename** mapping old-id → canonical-slug (or a re-key of the palace
+directory), on the same principle: reuse the existing data, no rebuild.
+
+**Idempotent + crash-safe.** The migration is carried as a forward-only migration
+in trusty-search's existing `core::migration` `_meta` framework (the
+`schema_version` table + idempotent, crash-safe migrations described in the
+trusty-search CLAUDE.md "Schema Versioning and Migrations"), with a `schema_version`
+bump. An already-migrated registry is a no-op; a crash mid-migration retries safely
+under the framework's existing guarantee.
+
+**Outcome.** After the flip, the first `tctl ensure` sees the project as
+`exists`/`fresh` — the re-keyed data is intact — **not** `pending` from a scratch
+reindex: no multi-minute stall, no storage doubling. This makes item 7 a decided
+design carried by trusty-search's existing migration framework, not a deferred one.
+
 ### 8. Conformance verification
 
 How the controller / test harness checks a member is conformant (feeds DOC-10):
@@ -477,6 +628,17 @@ How the controller / test harness checks a member is conformant (feeds DOC-10):
      patterns — `*_api_key`, `*token*`, `AWS_*`, connection strings — asserting
      `***redacted***`);
    - unadvertised/unknown verbs are rejected with exit code `3`.
+
+   The redaction lint is a **negative secret-pattern assertion** (DOC-1 D8 /
+   M9): it scans the captured envelope output for high-confidence secret shapes —
+   `AKIA…` AWS access keys, `Bearer` / `Authorization` header values,
+   `scheme://user:pass@host` connection-string credentials, key prefixes `sk-` /
+   `ghp_` / `xox…`, and long high-entropy base64/hex blobs — and **any match
+   fails CI loudly**. This is the same assertion the captured-output conformance
+   fixtures carry (below), so it is asserted against **every member's** envelope
+   output, **including the claude-mpm shim** (whose §4/§4.1 human-text parsing is
+   the highest-risk leak path). It is the gate behind the controller-side
+   belt-and-suspenders redaction pass (DOC-1 D8), which is the runtime backstop.
 2. **Round-trip serde test in `trusty_common::contract`** — the shared module
    ships golden-JSON fixtures (DOC-1's worked examples) asserting every type
    round-trips, so a retrofit that drifts the shape fails CI in the shared crate.
@@ -486,6 +648,17 @@ How the controller / test harness checks a member is conformant (feeds DOC-10):
 4. **claude-mpm adapter test** — DOC-10's isolation harness installs the pinned
    claude-mpm (§5) and runs the shim, asserting the synthesized envelope is valid
    and `verbs[]` is exactly `["doctor","health","version"]`.
+
+The **captured-output conformance fixtures** in DOC-10's harness — the same
+fixtures added for C3 (golden-schema), M2 (stack-tuple), and M3 (shim
+drift) — carry the **negative secret-pattern assertion** (M9 / DOC-1 D8): they
+assert that **no known secret pattern** (`AKIA…`, `Bearer` / `Authorization`
+values, `scheme://user:pass@host`, key prefixes `sk-` / `ghp_` / `xox…`,
+high-entropy blobs) appears unredacted in **any member's** captured `--json`
+envelope output, **including the claude-mpm shim**. A match fails CI, so a
+redaction bug is caught pre-merge rather than in the live UI; the controller-side
+redaction pass (DOC-1 D8) remains the runtime backstop for anything the heuristic
+patterns miss.
 
 `tctl doctor --self-check` doubles as the DOC-10 acceptance gate: a member that
 passes it is, by construction, conformant for its advertised verbs.
@@ -584,19 +757,31 @@ Source-first re-audit, 2026-06-08 (clap command enums + axum health handlers +
 
 **Implementation-time (remaining):**
 
-- [ ] *(implementation-time)* Build `trusty_common::contract` + Dispatcher (envelope
-      + data structs + enums + `ContractTool` trait + `redact_value`), and hoist the
-      canonical `id_from_path` + `detect_project` into `trusty_common` (Q9). Bump
-      `trusty-common`.
-- [ ] *(implementation-time)* Per-tool retrofits, in order: trusty-search (incl.
-      reconciling `detect.rs`/`fs_discovery.rs` onto the hoisted helpers and the
-      `config` default-verb split) → trusty-memory & trusty-analyze → trusty-review.
-- [ ] *(implementation-time)* Build the claude-mpm shim in
+The honest, enumerated work-breakdown is §3.1 (7 discrete work-items, each its own
+worktree/PR). The implementation checklist below maps onto it:
+
+- [ ] *(implementation-time, §3.1 item 1)* Build `trusty_common::contract` + Dispatcher
+      (envelope + data structs + enums + `ContractTool` trait + `redact_value` + the
+      **C3 golden-snapshot conformance test**), and hoist the canonical `id_from_path`
+      + `detect_project` into `trusty_common` (Q9). Bump `trusty-common`.
+- [ ] *(implementation-time, §3.1 items 2–5)* Per-tool retrofits, in order: trusty-search
+      (incl. reconciling `detect.rs`/`fs_discovery.rs` onto the hoisted helpers, the M4
+      `config`→`tune` split, and the net-new C5 `restart` verb) → trusty-memory &
+      trusty-analyze → trusty-review (the laggard). Each daemon gains the net-new
+      `restart` verb (C5).
+- [ ] *(implementation-time, §3.1 item 6)* Build the claude-mpm shim in
       `trusty_common::contract::orchestrator`; pin the concrete claude-mpm version it
-      is tested against (§5) and wire `uv tool install`/`upgrade` into the install
-      path.
+      is tested against (§5 — **BOM-pinned, not latest**) and wire `uv tool install`/
+      `upgrade` into the install path. Add the loud-degrade runtime rule (§4.1).
+- [ ] *(implementation-time, §3.1 item 7 — designed in §7.1)* The **stateful
+      project-identity migration** re-keys existing index/palace state by recomputing
+      the canonical slug from each index's `root_path` and reusing the colocated data
+      in place (**no reindex**); palaces get an alias/rename. Carried as a forward-only
+      idempotent migration in trusty-search's `core::migration` `_meta` framework with a
+      `schema_version` bump (see §7.1 and DOC-11 M15).
 - [ ] *(DOC-10-owned)* Wire `--self-check` into the isolation harness as the
-      conformance acceptance gate.
+      conformance acceptance gate; add the claude-mpm shim captured-output
+      contract-test (§4.1, DOC-10 §6/§2.2).
 
 ## Resolved Decisions
 

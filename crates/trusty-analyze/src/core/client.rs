@@ -142,6 +142,40 @@ impl TrustySearchClient {
         Ok(body.indexes)
     }
 
+    /// `GET /indexes/:id/status` — fetch the status of a single index, including `root_path`.
+    ///
+    /// Why: the diagnostics path previously called `index_details()` which fetches
+    /// ALL indexes and then linearly scans for the matching id just to obtain
+    /// `root_path`. This is O(n) per request (issue #1013). This method calls the
+    /// per-index status endpoint directly, making the lookup O(1) regardless of
+    /// how many indexes are registered.
+    /// What: GETs `{base}/indexes/{id}/status`, extracts the `root_path` string
+    /// field, and returns `Ok(Some(path))` when present, `Ok(None)` when the field
+    /// is absent or null, and `Err` when the HTTP call fails or the index is not
+    /// found (404).
+    /// Test: `index_status_deserializes_root_path` tests the serde extraction
+    /// without a live server by parsing a hand-built JSON string.
+    pub async fn index_status_root_path(&self, index_id: &str) -> Result<Option<String>> {
+        #[derive(Deserialize)]
+        struct StatusBody {
+            #[serde(default)]
+            root_path: Option<String>,
+        }
+        let url = format!("{}/indexes/{}/status", self.base_url, index_id);
+        let body: StatusBody = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?
+            .error_for_status()
+            .with_context(|| format!("non-2xx from {url}"))?
+            .json()
+            .await
+            .with_context(|| format!("decode {url}"))?;
+        Ok(body.root_path)
+    }
+
     /// `GET /indexes/:id/chunks` — bulk export of every chunk for `index_id`.
     /// Trusty-search must expose this endpoint (added as part of issue #40).
     ///
@@ -255,5 +289,27 @@ mod tests {
         assert_eq!(listing.indexes[0].root_path.as_deref(), Some("/src/myapp"));
         assert_eq!(listing.indexes[1].id, "idx2");
         assert!(listing.indexes[1].root_path.is_none());
+    }
+
+    #[test]
+    fn index_status_deserializes_root_path() {
+        // Simulate the JSON body returned by GET /indexes/:id/status.
+        // The status endpoint returns a richer object; only root_path is needed here.
+
+        // With root_path present (the common production case).
+        #[derive(serde::Deserialize)]
+        struct StatusBody {
+            #[serde(default)]
+            root_path: Option<String>,
+        }
+        let json_with = r#"{"index_id":"myproj","root_path":"/home/user/myproj","chunk_count":42}"#;
+        let s: StatusBody = serde_json::from_str(json_with).expect("parse status with root_path");
+        assert_eq!(s.root_path.as_deref(), Some("/home/user/myproj"));
+
+        // Without root_path (e.g. a future schema change or a test stub).
+        let json_without = r#"{"index_id":"myproj","chunk_count":0}"#;
+        let s2: StatusBody =
+            serde_json::from_str(json_without).expect("parse status without root_path");
+        assert!(s2.root_path.is_none());
     }
 }

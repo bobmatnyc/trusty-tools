@@ -33,3 +33,9 @@ pub use service::SearchMcpService;
 pub fn worker_thread_count(cpu_count: usize) -> usize {
     std::cmp::max(cpu_count, 16)
 }
+
+// Regression tests for persistence data-integrity fixes (#1088, #1089, #1090).
+// Extracted from persistence.rs to keep that file under its line-cap budget.
+#[cfg(test)]
+#[path = "service/persistence_tests_1088.rs"]
+mod persistence_tests_1088;

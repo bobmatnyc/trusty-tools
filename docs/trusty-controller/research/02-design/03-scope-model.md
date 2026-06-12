@@ -47,6 +47,11 @@ two-layer. (RESOLVED — Resolved Decisions Q2: such tools are modeled as
 **system-only** members with no project layer; project-scoped verbs report
 "unsupported" via DOC-1's `verbs[]` graceful-degrade.)
 
+The `controller` kind (DOC-2 §3 — the controller itself) is likewise a
+**system-only supervised daemon**: it has a system daemon like a two-layer
+member but no project layer, so the layer model covers it as a single-layer
+(system-only) member.
+
 **Status is composite.** A daemon can be `running`/`healthy` (system-ok) while a
 given project is `pending` (unindexed). The two layers are reported and
 remediated independently; a healthy system with a pending project is a normal,
@@ -140,6 +145,15 @@ the UUC1 auto-config engine:
   ensure pass. When the project is already `ready`, the ensure pass changes
   nothing and returns quickly.
 
+**Disabled members are skipped.** A member with `enabled = false` (DOC-2 §3) is
+**skipped by the ensure pass**: its CHECK short-circuits, so there is no ACT — no
+install, config, start, or upgrade. Its existing per-project and system state is
+**left untouched** (the no-uninstall non-goal: the controller never removes an
+index/palace/`.mcp.json` entry), and the member reports a `skipped` doctor check
+rather than `down`/`fail`. Any orphaned per-project state from a previously-enabled
+member therefore remains — manual removal is the user's path (no cleanup path,
+per no-uninstall).
+
 **Shape of the ensure pass — check → act → verify:**
 
 1. **Check** — read current readiness without mutating: is the system layer
@@ -156,6 +170,44 @@ trusty-search's `POST /indexes` is explicitly idempotent (re-registering an
 existing id returns `created: false`, not an error), and incremental reindex
 **skips unchanged files** via sha2 content fingerprints. The controller composes
 these idempotent primitives; it does not add its own mutation state.
+
+**Concurrency: system-scope advisory lock.**
+
+Per-operation idempotency is necessary but not sufficient. The ensure pass runs
+on **every launch**, so two project launches can run their ensure passes
+simultaneously. Each pass's CHECK is idempotent in isolation, but the
+**system-rung** ACT has a time-of-check-to-time-of-use race: two passes both
+read "shared daemon down," and — with no system-scope lock — both proceed to
+`start` it (or both trigger an `install`/`upgrade` mid-pass). The failure mode is
+a double-`start`, port-bind / PID-lock contention, or an install/upgrade fired by
+a concurrent pass partway through another pass.
+
+To close this, the **system-rung** portion of the ensure pass — anything that
+mutates shared/system state: starting the shared daemon, `install`, `upgrade` —
+acquires a **system-scope advisory lock** before acting. The lock is a lockfile
+in the system state dir (e.g. `~/.config/trusty-controller/ensure.lock`) taken via
+the `fs4`/flock primitive the daemons already use for their PID lockfiles, so this
+reuses an existing, proven mechanism rather than inventing one.
+
+- **Loser behavior.** A concurrent ensure that cannot acquire the lock **waits**
+  (bounded timeout) for the holder to finish, then **re-runs its CHECK step**.
+  The holder has typically already brought the daemon up, so the loser's re-check
+  now passes and the loser **no-ops** — it does **not** independently `start`. If
+  the wait exceeds the bounded timeout, the loser degrades to a clear error rather
+  than racing into a second `start`.
+- **The lock is scoped precisely to the system rung.** The **project-rung** ensure
+  (per-project `.mcp.json` wiring, `POST /indexes` registration, per-project
+  reindex) does **not** take the system lock: those operations are already
+  idempotent and target **distinct per-project keys**, so concurrent project-rung
+  ensures for different projects do not contend. Only the system rung
+  (shared-daemon lifecycle / `install` / `upgrade`) needs the lock, because the
+  shared-state TOCTOU lives only there.
+- **Backstops.** The daemon's own PID lockfile is a secondary backstop — a second
+  `start` would fail the port-bind anyway — but the advisory lock makes the loser
+  a clean no-op rather than relying on bind-failure. This composes with the
+  verify-after gating ([DOC-11](DOC-11-open-issues.md) M12): the loser's
+  re-CHECK is precisely the verify step that confirms the holder's `start`
+  succeeded before the loser concludes the system rung is ready.
 
 ### 5. Blast radius
 
@@ -205,9 +257,11 @@ controller's scope-precedence rule is the cross-tool generalization of that
 pattern. **Note the spec non-goal** ("not a tool-internal config editor"): the
 controller's `config` verb is **read/report-only** — it surfaces effective values
 and their precedence. "Project overrides system" is a **read-time resolution
-rule**, not the controller mutating files. The controller MAY *dispatch* a tool's
-own `config`-write subcommand, but it **never edits a tool's internal config
-files directly** (RESOLVED — Resolved Decisions Q3, reconciling the spec
+rule**, not the controller mutating files. The controller does **not** expose
+tool-native config mutation in v1: the contract `config` verb is read-only,
+tool-native mutation lives in a non-contract verb (`tune`) the controller does not
+forward (DOC-6 §2.6, DOC-5 §2), and the controller **never edits a tool's internal
+config files directly** (RESOLVED — Resolved Decisions Q3, reconciling the spec
 non-goal).
 
 ### 8. Shared project-identity convention
@@ -219,10 +273,15 @@ agree on it) and DOC-8 (install/bootstrap — the auto-config engine uses it).
 **Canonical rule (grounded in `detect_project()`; owner-approved, ADR-0008).**
 Walk up from the cwd and take the **nearest enclosing git repository root** (the
 first ancestor directory containing `.git`) as the project root. The **canonical
-stable project id is the full-path slug of that root** (the `id_from_path`
-scheme, e.g. `Users_mac_workspace_my-project`), used as both the trusty-search
-`IndexId` and the trusty-memory palace id, so a single identity keys all
-per-project state across tools. The git-root **basename is a display-only alias**.
+stable project id is the full-path slug of the *canonicalized* root**, computed
+by a single `trusty_common::canonical_project_id(path) -> Result<String>`
+contract function: it **`canonicalize()`s the root first** (resolving symlinks,
+`.`/`..`) and only then applies the `id_from_path` slug, so the slug step never
+sees a raw path (the contract is **canonicalize-then-slug**, not a bare slug).
+The resulting id (e.g. `Users_mac_workspace_my-project`) is used as both the
+trusty-search `IndexId` and the trusty-memory palace id, so a single identity
+keys all per-project state across tools. The git-root **basename is a
+display-only alias**.
 
 Detection precedence (matches the existing implemented walk):
 
@@ -245,16 +304,32 @@ The codebase currently has **two** id schemes that disagree:
 The live daemon registry shows **both forms registered for the same root** today
 (e.g. `trusty-tools` *and* `Users_mac_workspace_trusty-tools`), confirming the
 ambiguity is real, not hypothetical. **The full-path slug scheme wins** as the
-single canonical id (collision-free, stable across restarts, already proven
-`stable-and-safe` by `id_from_path`'s test); the basename is a display alias
-only. This reconciles the live `detect.rs`-vs-`fs_discovery.rs` inconsistency and
-is recorded as the authoritative decision in
+single canonical id (collision-free, stable across restarts), wrapped in the
+**canonicalize-then-slug** contract above so it is also symlink-safe. Note the
+proof scope precisely: `id_from_path`'s `stable-and-safe` test proves
+**determinism + character-safety only** — it does **not** prove
+symlink-equivalence; that needs a **new symlink-equivalence test** (a follow-up),
+so the existing test must not be cited as evidence of symlink-safety. The
+basename is a display alias only. This reconciles the live
+`detect.rs`-vs-`fs_discovery.rs` inconsistency and is recorded as the
+authoritative decision in
 [ADR-0008](../../../adr/0008-project-identity-convention.md).
+
+**Case-insensitivity — residual limitation.** On case-insensitive volumes
+(APFS), `canonicalize()` resolves symlinks and `.`/`..` but does not guarantee
+case-folding, so two differently-cased spellings of the same directory (`/Proj`
+vs `/proj`) may still produce divergent ids. This is a named known limitation;
+case-folding (scoped to case-insensitive volumes only) is a **deferred**
+follow-up, not done in v1 (see ADR-0008).
 
 **Edge cases the rule names (RESOLVED — see Resolved Decisions):**
 
 - **No git root and no marker** — id = **cwd path-slug + `Fallback` warning**
   (never refuse). (Q1.)
+- **`canonicalize()` failure** (path doesn't exist, broken symlink component,
+  permission error) — fall back to a **lexically-absolutized** path slug
+  (absolutize against cwd + normalize `.`/`..` **without** symlink resolution) and
+  emit a `Fallback` warning; **never refuse** (mirrors the no-git-root rule).
 - **Git worktrees** — each worktree gets its **own** id keyed on its
   working-directory path. (Q4.)
 - **Monorepo subdirs** — all subdirs share the **nearest enclosing git root's**
@@ -263,6 +338,12 @@ is recorded as the authoritative decision in
 - **Multiple projects sharing one daemon** — fine by design (the daemon is
   multi-index), *provided* ids are collision-free; this is the core argument for
   the path-slug scheme.
+- **Existing state across the basename→slug flip** — the one-time identity flip is
+  a **stateful re-key migration** (designed in DOC-6 §7.1), not a from-scratch
+  reindex: each registry entry is re-keyed by recomputing the canonical slug from
+  its `root_path` and the colocated index/palace data is reused in place. So
+  existing index/palace state is **not orphaned** — the first ensure after the flip
+  sees the project as `exists`/`fresh`, not `pending`. (DOC-11 M15.)
 
 ### 9. Rollup interplay (feeds DOC-4)
 

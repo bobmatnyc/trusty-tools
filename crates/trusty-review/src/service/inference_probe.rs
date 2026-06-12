@@ -16,16 +16,38 @@
 //! `InferenceStatus` maps provider errors to the four states: `ok`,
 //! `unreachable`, `auth_error`, `unknown`.
 //!
+//! Consecutive-unknown degradation (#820): a permanently hung or misconfigured
+//! endpoint would otherwise report `inference: "unknown"` indefinitely while the
+//! top-level `status` stays `"ok"` (because `Unknown` is non-degrading per #739).
+//! To surface stuck endpoints, `InferenceProbe` tracks a consecutive-unknown
+//! counter.  Once `CONSECUTIVE_UNKNOWN_DEGRADATION_THRESHOLD` (default 3)
+//! consecutive probes all return `Unknown`, `effective_status()` returns
+//! `Unreachable` instead — which `compute_status` then maps to `"degraded"`.
+//! The counter resets on any non-Unknown probe result.
+//!
 //! Test: `probe_status_*` unit tests in this module inject stub providers and
 //! verify each status transition. Live credential tests are separate (ignored).
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU32, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, warn};
 
 // ─── Configurable timeout helper ─────────────────────────────────────────────
+
+/// After this many consecutive `Unknown` probe results, `InferenceProbe` reports
+/// `Unreachable` to signal a stuck or misconfigured endpoint (#820).
+///
+/// Why: a single `Unknown` (probe timed out) must not degrade health — it may be
+/// a normal Bedrock cold-start (#739).  But N consecutive `Unknown` results
+/// indicate a permanently hung endpoint that would otherwise stay invisible.
+/// What: used by `InferenceProbe::effective_status` to decide when to escalate.
+/// Test: `consecutive_unknown_degrades_after_threshold` in the tests module.
+pub(crate) const CONSECUTIVE_UNKNOWN_DEGRADATION_THRESHOLD: u32 = 3;
 
 /// Return the per-probe hard timeout, consulting `TRUSTY_REVIEW_HEALTH_TIMEOUT_SECS`.
 ///
@@ -41,7 +63,7 @@ use tracing::debug;
 /// Test: `health_probe_timeout_default`, `health_probe_timeout_env_override`,
 /// `health_probe_timeout_env_invalid_falls_back`,
 /// `health_probe_timeout_env_zero_falls_back` in the `tests` module.
-pub fn health_probe_timeout() -> Duration {
+pub(crate) fn health_probe_timeout() -> Duration {
     const DEFAULT_HEALTH_TIMEOUT_SECS: u64 = 10;
     const ENV_VAR: &str = "TRUSTY_REVIEW_HEALTH_TIMEOUT_SECS";
 
@@ -129,24 +151,34 @@ pub fn map_llm_error(err: &LlmError) -> InferenceStatus {
 
 // ─── Cached probe ─────────────────────────────────────────────────────────────
 
-/// Cached inference-reachability probe.
+/// Cached inference-reachability probe with consecutive-unknown degradation (#820).
 ///
 /// Why: running a live LLM call on every `/health` hit is expensive and slow.
 /// The cache amortises the probe cost across a configurable TTL window (default
 /// 10 s) so repeated health polls don't hammer the provider.
-/// What: holds a `Mutex`-guarded `Option<(InferenceStatus, Instant)>`.  `probe`
-/// returns the cached value if it is younger than `ttl`; otherwise it runs a
-/// fresh probe (with a short per-call timeout) and updates the cache.
-/// Test: `probe_cache_ttl_*` tests use a mock provider to verify that the cache
-/// is populated on the first call and reused until expiry.
+/// A single `Unknown` result (probe timed out) is non-degrading (#739) to
+/// accommodate Bedrock cold-starts, but a permanently hung endpoint would stay
+/// invisible indefinitely.  The consecutive-unknown counter catches that case:
+/// after `CONSECUTIVE_UNKNOWN_DEGRADATION_THRESHOLD` consecutive `Unknown` results
+/// `effective_status()` returns `Unreachable`, which `compute_status` maps to
+/// `"degraded"`.  The counter resets on any non-Unknown result.
+/// What: holds a `Mutex`-guarded `Option<(InferenceStatus, Instant)>` for the
+/// cache, and an `AtomicU32` for the consecutive-unknown streak.  `probe` returns
+/// the cached value (or runs a fresh probe); `effective_status` applies the
+/// degradation rule before returning to callers.
+/// Test: `probe_cache_ttl_*`, `consecutive_unknown_degrades_after_threshold`,
+/// `consecutive_unknown_resets_on_ok`.
 #[derive(Clone)]
 pub struct InferenceProbe {
     /// Cached result: `None` = never probed.
     cached: Arc<Mutex<Option<(InferenceStatus, Instant)>>>,
     /// Probe TTL.  Results younger than this are returned directly from cache.
     ttl: Duration,
-    /// Per-probe hard timeout.  A probe that exceeds this → `Unreachable`.
+    /// Per-probe hard timeout.  A probe that exceeds this → `Unknown`.
     probe_timeout: Duration,
+    /// How many consecutive `Unknown` results have been observed.
+    /// Resets to 0 on any non-Unknown result.
+    consecutive_unknown: Arc<AtomicU32>,
 }
 
 impl Default for InferenceProbe {
@@ -170,13 +202,15 @@ impl InferenceProbe {
     ///
     /// Why: allows tests to inject very short TTLs to exercise cache expiry
     /// without sleeping 10 s in CI.
-    /// What: builds an empty cache and stores the two durations.
+    /// What: builds an empty cache, zeroes the consecutive-unknown counter,
+    /// and stores the two durations.
     /// Test: `probe_cache_ttl_zero_always_reprobes`.
     pub fn new(ttl: Duration, probe_timeout: Duration) -> Self {
         Self {
             cached: Arc::new(Mutex::new(None)),
             ttl,
             probe_timeout,
+            consecutive_unknown: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -187,8 +221,11 @@ impl InferenceProbe {
     /// What: reads the cache under the mutex first.  If the result is still
     /// within TTL, returns it without any async work.  Otherwise releases the
     /// mutex, runs a fresh probe (with timeout), re-acquires the mutex, stores
-    /// the new result, and returns it.
-    /// Test: `probe_returns_ok_on_success`, `probe_returns_unreachable_on_transport`.
+    /// the new result, updates the consecutive-unknown counter, and returns the
+    /// effective status (which may escalate to `Unreachable` if the counter
+    /// exceeds `CONSECUTIVE_UNKNOWN_DEGRADATION_THRESHOLD`).
+    /// Test: `probe_returns_ok_on_success`, `probe_returns_unreachable_on_transport`,
+    /// `consecutive_unknown_degrades_after_threshold`.
     pub async fn probe(&self, llm: &Arc<dyn LlmProvider>, model: &str) -> InferenceStatus {
         // ── Read cache ────────────────────────────────────────────────────────
         {
@@ -197,7 +234,10 @@ impl InferenceProbe {
                 && ts.elapsed() < self.ttl
             {
                 debug!(status = %status, "inference probe: cache hit");
-                return status;
+                // Return the effective status (applying the consecutive-unknown
+                // escalation) even for cache hits so callers always see the
+                // degraded signal once the threshold is crossed.
+                return self.effective_status(status);
             }
         }
 
@@ -205,13 +245,50 @@ impl InferenceProbe {
         let status = run_probe(llm, model, self.probe_timeout).await;
         debug!(status = %status, "inference probe: fresh result");
 
+        // ── Update consecutive-unknown counter ────────────────────────────────
+        if status == InferenceStatus::Unknown {
+            let streak = self.consecutive_unknown.fetch_add(1, Ordering::Relaxed) + 1;
+            if streak >= CONSECUTIVE_UNKNOWN_DEGRADATION_THRESHOLD {
+                warn!(
+                    streak,
+                    threshold = CONSECUTIVE_UNKNOWN_DEGRADATION_THRESHOLD,
+                    "inference probe: consecutive Unknown streak reached threshold — \
+                     escalating to Unreachable (#820)"
+                );
+            }
+        } else {
+            // Any non-Unknown result resets the streak.
+            self.consecutive_unknown.store(0, Ordering::Relaxed);
+        }
+
         // ── Update cache ──────────────────────────────────────────────────────
         {
             let mut guard = self.cached.lock().unwrap_or_else(|p| p.into_inner());
             *guard = Some((status, Instant::now()));
         }
 
-        status
+        self.effective_status(status)
+    }
+
+    /// Apply the consecutive-unknown degradation rule to a raw probe status.
+    ///
+    /// Why: a single `Unknown` (probe timed out) is non-degrading (#739), but
+    /// N consecutive `Unknown` results indicate a permanently stuck endpoint
+    /// that would otherwise stay invisible (#820).
+    /// What: returns `Unreachable` when the raw status is `Unknown` AND the
+    /// consecutive-unknown counter has reached
+    /// `CONSECUTIVE_UNKNOWN_DEGRADATION_THRESHOLD`; otherwise returns the raw
+    /// status unchanged.
+    /// Test: `consecutive_unknown_degrades_after_threshold`,
+    /// `consecutive_unknown_resets_on_ok`.
+    fn effective_status(&self, raw: InferenceStatus) -> InferenceStatus {
+        if raw == InferenceStatus::Unknown {
+            let streak = self.consecutive_unknown.load(Ordering::Relaxed);
+            if streak >= CONSECUTIVE_UNKNOWN_DEGRADATION_THRESHOLD {
+                return InferenceStatus::Unreachable;
+            }
+        }
+        raw
     }
 }
 
