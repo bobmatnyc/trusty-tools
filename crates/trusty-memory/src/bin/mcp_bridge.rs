@@ -13,7 +13,10 @@
 //!   `"command": "trusty-memory-mcp-bridge", "args": []`
 //! with:
 //!   `"command": "trusty-memory", "args": ["serve", "--stdio"]`
-//! Run `trusty-memory migrate kuzu-memory` for an automated rewrite.
+//! There is no automated command for this specific config update; the manual
+//! edit above is the only migration path.  (`trusty-memory migrate kuzu-memory`
+//! is for users switching from the separate kuzu-memory server — it looks for
+//! `kuzu-memory` / `kuzu_memory` keys, not `trusty-memory-mcp-bridge`.)
 //!
 //! What: emits one deprecation warning to stderr (never stdout — MCP JSON-RPC
 //! framing owns stdout), then re-execs `trusty-memory serve --stdio` using
@@ -34,7 +37,7 @@ fn main() -> ExitCode {
     eprintln!(
         "[DEPRECATED] trusty-memory-mcp-bridge is deprecated and will be removed in a future version.\n\
          Update your MCP config to use: \"command\": \"trusty-memory\", \"args\": [\"serve\", \"--stdio\"]\n\
-         Run `trusty-memory migrate kuzu-memory` for an automated config rewrite.\n\
+         (No automated command exists for this config update — edit your .mcp.json manually.)\n\
          Forwarding to `trusty-memory serve --stdio` now…"
     );
 
@@ -47,6 +50,11 @@ fn main() -> ExitCode {
         .and_then(|p| p.parent().map(|d| d.join("trusty-memory")))
         .filter(|p| p.exists())
         .unwrap_or_else(|| std::path::PathBuf::from("trusty-memory"));
+
+    // Emit the delegation target to stderr before exec/spawn so PATH-resolution
+    // issues are visible in logs without needing a debugger.  Never to stdout —
+    // stdout is the JSON-RPC channel.
+    eprintln!("trusty-memory-mcp-bridge: delegating to {}", exe.display());
 
     // Re-exec as `trusty-memory serve --stdio`.
     // On Unix, `exec` replaces this process entirely so no extra zombie stays
@@ -63,19 +71,26 @@ fn main() -> ExitCode {
     }
 
     // Non-Unix fallback: spawn a child, forward stdio, propagate exit status.
+    // Explicit stdio inheritance is listed for self-documentation: the child
+    // must own the same stdin/stdout/stderr file descriptors so the JSON-RPC
+    // framing and error output reach the MCP client and Claude Code logs
+    // without any extra pipe layer.
     #[cfg(not(unix))]
     {
+        use std::process::Stdio;
         let status = std::process::Command::new(&exe)
             .arg("serve")
             .arg("--stdio")
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
             .status();
         match status {
             Ok(s) => {
-                if s.success() {
-                    ExitCode::SUCCESS
-                } else {
-                    ExitCode::FAILURE
-                }
+                // Propagate the child's real exit code so supervisors and
+                // healthcheck scripts see the actual status rather than a
+                // collapsed FAILURE for every non-zero exit.
+                std::process::exit(s.code().unwrap_or(1));
             }
             Err(e) => {
                 eprintln!("trusty-memory-mcp-bridge: spawn failed: {e}");

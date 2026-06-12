@@ -16,8 +16,9 @@ involved.
 A DEPRECATED `trusty-memory-mcp-bridge` shim binary is also installed by
 `cargo install trusty-memory` so that existing `.mcp.json` configs that still
 reference the old bridge name keep working without per-project changes.
-Run `trusty-memory migrate kuzu-memory` to rewrite configs to the canonical
-form automatically.
+To update your config, manually set the `trusty-memory` entry to
+`"command": "trusty-memory", "args": ["serve", "--stdio"]` in your `.mcp.json`
+or `~/.claude/mcp.json`.
 
 Integrates with Claude Code and any other MCP-aware client as a first-class
 long-term memory backend.
@@ -202,16 +203,32 @@ verbatim. No Unix domain socket is involved. The stdio process never opens
 the redb write-lock directly, so it co-exists safely with the running HTTP
 daemon.
 
-Run `trusty-memory migrate kuzu-memory` to rewrite all Claude settings files
-to the canonical form automatically.
+If you are switching from the legacy `kuzu-memory` server, run
+`trusty-memory migrate kuzu-memory` to rewrite all Claude settings files
+automatically (see [Migrating from kuzu-memory](#from-kuzu-memory-mcp-config-issue-278) below).
 
 ### Compatibility shim (for existing installations)
 
 If your `.mcp.json` still references `trusty-memory-mcp-bridge`, the shim
 binary (installed alongside `trusty-memory` since 0.15.3) forwards to
 `serve --stdio` automatically. You will see a one-line deprecation warning
-on stderr (which Claude Code ignores). Update your config at your
-convenience — the shim will be removed in a future minor version.
+on stderr (which Claude Code ignores). To update your config manually, set
+the `trusty-memory` entry to:
+
+```json
+{
+  "mcpServers": {
+    "trusty-memory": {
+      "command": "trusty-memory",
+      "args": ["serve", "--stdio"]
+    }
+  }
+}
+```
+
+There is no automated command to rewrite `trusty-memory-mcp-bridge` entries
+(unlike the kuzu-memory migration). The shim will be removed in a future
+minor version.
 
 Claude Code auto-discovers `.mcp.json` on project open. The daemon must be
 running (started either by `trusty-memory setup`'s LaunchAgent or by

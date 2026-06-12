@@ -55,7 +55,7 @@ path = "src/bin/bm25_daemon.rs"
 #      restores the binary so existing configs stop breaking without requiring
 #      per-project config edits. It emits a one-line deprecation notice to stderr
 #      then re-execs `trusty-memory serve --stdio` (the canonical path since PR1).
-#      The shim is intentionally thin (~70 lines, no library imports beyond std)
+#      The shim is intentionally thin (no library imports beyond std)
 #      to minimise maintenance surface. Users should migrate to
 #      `"command": "trusty-memory", "args": ["serve", "--stdio"]` at their
 #      convenience; this shim will be removed in a future minor version.
