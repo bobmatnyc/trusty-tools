@@ -293,6 +293,31 @@ pub fn try_open_or_snapshot(
     }
 }
 
+/// Sleep for `ms` milliseconds in a way that is safe from both sync and async
+/// Tokio contexts.
+///
+/// Why: `KgStoreRedb::open` and `open_or_get_cached_db` are sync fns but are
+/// called from async HTTP handlers (via `PalaceHandle::open`). A bare
+/// `std::thread::sleep` blocks the Tokio worker thread, starving other tasks.
+/// `tokio::task::block_in_place` signals the multi-thread scheduler to
+/// move pending tasks to other workers while this thread sleeps. On a
+/// `current_thread` scheduler (used in some unit tests) `block_in_place` panics,
+/// so we fall back to plain `std::thread::sleep` in that case. No-op when
+/// called outside any Tokio runtime.
+/// What: Detects the active runtime flavor; uses `block_in_place` on
+/// `MultiThread`, falls back to `std::thread::sleep` elsewhere.
+/// Test: Indirectly exercised by every retry-backoff test in `kg_redb` and
+/// `vector` (both sync and async test configurations).
+pub(crate) fn backoff_sleep_ms(ms: u64) {
+    let dur = std::time::Duration::from_millis(ms);
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| std::thread::sleep(dur));
+        }
+        _ => std::thread::sleep(dur),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

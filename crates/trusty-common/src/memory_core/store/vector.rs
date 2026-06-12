@@ -31,9 +31,10 @@ use redb::Database;
 use uuid::Uuid;
 
 use crate::memory_core::store::concurrent_open::{
-    OpenIntent, OpenMode, SnapshotGuard, try_open_or_snapshot,
+    OpenIntent, OpenMode, SnapshotGuard, backoff_sleep_ms, try_open_or_snapshot,
 };
 use crate::memory_core::store::hnsw_store::HnswStore;
+use crate::memory_core::store::kg_redb::READ_ONLY_ERROR_MSG;
 
 /// Bundle of state shared between every `UsearchStore` clone that points
 /// at the same canonical path.
@@ -134,8 +135,14 @@ fn open_or_get_cached_db(path: &Path) -> Result<Arc<VectorDbState>> {
                     // Exponential backoff: let any concurrent in-process
                     // `Database::drop` (or async `KgWriter` abort) finish
                     // releasing the OS file lock before retrying.
+                    //
+                    // `open_or_get_cached_db` is sync but may be called from
+                    // async contexts (via `UsearchStore::new` from `PalaceHandle::open`).
+                    // `backoff_sleep_ms` uses `block_in_place` on multi-thread
+                    // Tokio runtimes so the executor can schedule other tasks
+                    // while this thread waits, preventing worker-thread starvation.
                     let sleep_ms = RETRY_SLEEP_MS[attempt as usize];
-                    std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+                    backoff_sleep_ms(sleep_ms);
                 }
             }
         }
@@ -436,6 +443,11 @@ impl UsearchStore {
 #[async_trait]
 impl VectorStore for UsearchStore {
     async fn upsert(&self, id: Uuid, embedding: Vec<f32>) -> Result<()> {
+        // Surface read-only errors before spawn_blocking so the anyhow context
+        // chain doesn't bury the actionable sentinel message (issue #59).
+        if self.is_read_only() {
+            anyhow::bail!(READ_ONLY_ERROR_MSG);
+        }
         let inner = self.inner.clone();
         let key = id.to_string();
         tokio::task::spawn_blocking(move || -> Result<()> {
@@ -483,6 +495,11 @@ impl VectorStore for UsearchStore {
     }
 
     async fn remove(&self, id: Uuid) -> Result<()> {
+        // Surface read-only errors before spawn_blocking so the anyhow context
+        // chain doesn't bury the actionable sentinel message (issue #59).
+        if self.is_read_only() {
+            anyhow::bail!(READ_ONLY_ERROR_MSG);
+        }
         let inner = self.inner.clone();
         let key = id.to_string();
         tokio::task::spawn_blocking(move || -> Result<()> {
@@ -720,6 +737,99 @@ mod tests {
         assert!(
             snap.is_read_only(),
             "snapshot store must report is_read_only()"
+        );
+    }
+
+    /// Why (issue #59): `upsert` and `remove` on a snapshot handle must
+    /// return an error that includes the read-only sentinel text so callers
+    /// see actionable guidance. This tests the storage-layer write guard
+    /// independently of the daemon-level `single_instance_check`.
+    /// What: Seeds a vector file, drops the store so the cache expires,
+    /// holds the lock, opens a snapshot handle, then asserts both write
+    /// methods Err with the expected message.
+    /// Test: this test — `vector_writes_rejected_on_snapshot`.
+    #[tokio::test]
+    async fn vector_writes_rejected_on_snapshot() {
+        let dir = tempdir().unwrap();
+        let logical = dir.path().join("test.usearch");
+
+        // Populate and drop so the cache entry expires.
+        {
+            let primary = UsearchStore::new(logical.clone(), 384).unwrap();
+            primary
+                .upsert(Uuid::new_v4(), unit_vec(384, 1))
+                .await
+                .unwrap();
+        }
+
+        // Hold the lock so the next open takes the snapshot path.
+        let redb_path = redb_path_for(&logical);
+        let _live = redb::Database::create(&redb_path).expect("lock vector redb");
+
+        let snap = UsearchStore::new(logical.clone(), 384).expect("snapshot open must succeed");
+        assert!(snap.is_read_only());
+
+        // upsert must fail with read-only guidance.
+        let err = snap
+            .upsert(Uuid::new_v4(), unit_vec(384, 99))
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("read-only"),
+            "upsert on snapshot must mention read-only, got: {msg}"
+        );
+
+        // remove must fail with read-only guidance.
+        let err = snap.remove(Uuid::new_v4()).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("read-only"),
+            "remove on snapshot must mention read-only, got: {msg}"
+        );
+    }
+
+    /// Why (issue #59): reads must succeed on a snapshot handle — the
+    /// snapshot is a point-in-time copy of the live file and must be
+    /// searchable.
+    /// What: Seeds one vector, drops, acquires lock, opens snapshot,
+    /// searches, and asserts the seeded id is returned at rank 0.
+    /// Test: this test — `vector_remove_rejected_on_snapshot` (search
+    /// path — the symmetric read-succeeds counterpart).
+    #[tokio::test]
+    async fn vector_remove_rejected_on_snapshot() {
+        let dir = tempdir().unwrap();
+        let logical = dir.path().join("test.usearch");
+        let id = Uuid::new_v4();
+        let v = unit_vec(384, 5);
+
+        // Seed then drop so cache expires.
+        {
+            let primary = UsearchStore::new(logical.clone(), 384).unwrap();
+            primary.upsert(id, v.clone()).await.unwrap();
+        }
+
+        // Hold the lock.
+        let redb_path = redb_path_for(&logical);
+        let _live = redb::Database::create(&redb_path).expect("lock vector redb");
+
+        let snap = UsearchStore::new(logical.clone(), 384).expect("snapshot open must succeed");
+        assert!(snap.is_read_only());
+
+        // Search (read) must succeed and return the seeded vector.
+        let hits = snap.search(&v, 1).await.unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "search on snapshot must return seeded vector"
+        );
+        assert_eq!(hits[0].drawer_id, id);
+
+        // remove must be rejected.
+        let err = snap.remove(id).await.unwrap_err();
+        assert!(
+            err.to_string().contains("read-only"),
+            "remove on snapshot must be rejected"
         );
     }
 }

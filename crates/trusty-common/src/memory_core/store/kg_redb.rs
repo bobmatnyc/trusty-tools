@@ -14,7 +14,7 @@
 
 use crate::memory_core::palace::Drawer;
 use crate::memory_core::store::concurrent_open::{
-    OpenIntent, OpenMode, SnapshotGuard, try_open_or_snapshot,
+    OpenIntent, OpenMode, SnapshotGuard, backoff_sleep_ms, try_open_or_snapshot,
 };
 use crate::memory_core::store::kg_store::{
     ACTIVE_SUBJECT_COUNTS, DRAWERS, DrawerRecord, TRIPLES, TRIPLES_BY_OBJECT, TRIPLES_BY_PREDICATE,
@@ -121,7 +121,7 @@ fn parse_drawer_type(tag: Option<&str>) -> crate::memory_core::palace::DrawerTyp
 /// What: A `&'static str` so call sites can wrap it in `anyhow::anyhow!`
 /// without allocating.
 /// Test: `write_on_snapshot_returns_read_only_error`.
-pub(crate) const READ_ONLY_ERROR_MSG: &str = "palace is read-only: HTTP daemon holds the write lock — \
+pub const READ_ONLY_ERROR_MSG: &str = "palace is read-only: HTTP daemon holds the write lock — \
      route writes through the daemon's HTTP API or stop the daemon \
      before retrying via stdio";
 
@@ -327,8 +327,15 @@ impl KgStoreRedb {
                         // Exponential backoff: let any concurrent in-process
                         // `Database::drop` (or async `KgWriter` abort) finish
                         // releasing the OS file lock before retrying.
+                        //
+                        // This function is sync and may be called from an async
+                        // context (e.g. via `PalaceHandle::open` from an axum
+                        // handler). `backoff_sleep_ms` uses
+                        // `tokio::task::block_in_place` on multi-thread runtimes
+                        // so the executor can schedule other tasks during the wait
+                        // instead of starving them on the blocked worker thread.
                         let sleep_ms = RETRY_SLEEP_MS[attempt as usize];
-                        std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+                        backoff_sleep_ms(sleep_ms);
                     }
                 }
             }

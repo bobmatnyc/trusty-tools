@@ -163,6 +163,14 @@ tempfile = { workspace = true }
 # serial_test: run env-mutating tests serially to prevent env-var races across
 # parallel test threads (e.g. supervisor_tests.rs).
 serial_test = { workspace = true }
+# uuid: used by kg_store_snapshot_tests (integration tests for snapshot write-rejection).
+uuid = { workspace = true }
+# redb: used by kg_store_snapshot_tests to hold the exclusive flock.
+redb = { workspace = true }
+# chrono: used by kg_store_snapshot_tests to construct triples.
+chrono = { workspace = true }
+# tokio: used by kg_store_snapshot_tests async test harness.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [features]
 default = []
