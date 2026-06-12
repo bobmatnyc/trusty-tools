@@ -27,6 +27,7 @@ pub mod port;
 pub mod prompt_context;
 pub mod send_message;
 pub mod serve_stdio;
+pub mod serve_stdio_bridge;
 pub mod service;
 pub mod setup;
 pub mod single_instance;

@@ -104,6 +104,15 @@ pub struct WeeklyActivity {
     /// sources or no classification at all).
     #[serde(default)]
     pub avg_complexity: Option<f64>,
+    /// Full-agentic commits in this bucket (issue #1113: `agentic_mode =
+    /// 'full_agentic'`). Counts autonomous CLI-tool commits (Claude Code, etc.).
+    /// Downstream agentic % = `agentic_count / (commit_count - revert_count)`.
+    #[serde(default)]
+    pub agentic_count: usize,
+    /// IDE-assisted commits (issue #1113: `agentic_mode = 'ide_assisted'`).
+    /// Counts inline-completion commits (Cursor, GitHub Copilot).
+    #[serde(default)]
+    pub ide_assisted_count: usize,
 }
 
 /// Per-week aggregated metrics across all developers and repositories.

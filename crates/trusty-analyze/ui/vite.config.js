@@ -10,6 +10,12 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 export default defineConfig({
   plugins: [svelte()],
   base: './',
+  // Why: Svelte 5 exports map 'browser' → real client runtime and 'default' →
+  // throwing SSR stub. Without pinning 'browser', Vite resolves to the SSR
+  // stub and mount() throws "lifecycle_function_unavailable" at runtime.
+  resolve: {
+    conditions: ['browser', 'module', 'import', 'default'],
+  },
   build: {
     outDir: 'dist',
     emptyOutDir: true,

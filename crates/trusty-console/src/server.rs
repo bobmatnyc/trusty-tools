@@ -30,6 +30,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::connector::ServiceConnector;
+use crate::metrics_poller::MetricsCache;
 use crate::poller::PollerCache;
 
 // ─── embedded UI ─────────────────────────────────────────────────────────────
@@ -49,15 +50,17 @@ struct UiAssets;
 
 /// Shared application state injected into every route handler.
 ///
-/// Why: Connectors, the poller cache, and the HTTP client are created once at
-/// startup and reused for every request so there is no per-request allocation.
-/// What: Wraps the connector list, poller cache, and reqwest client in `Arc`s
-/// for cheap cloning.
+/// Why: Connectors, the poller cache, metrics cache, and HTTP client are created
+/// once at startup and reused for every request so there is no per-request
+/// allocation.
+/// What: Wraps the connector list, poller cache, metrics cache, and reqwest
+/// client in `Arc`s for cheap cloning.
 /// Test: Constructed in `build_router`; exercised by the integration test.
 #[derive(Clone)]
 pub struct AppState {
     connectors: Arc<Vec<Box<dyn ServiceConnector>>>,
     poller_cache: PollerCache,
+    metrics_cache: MetricsCache,
     http_client: Arc<reqwest::Client>,
 }
 
@@ -76,6 +79,7 @@ impl AppState {
         Self {
             connectors: Arc::new(connectors),
             poller_cache: PollerCache::new(),
+            metrics_cache: MetricsCache::new(),
             http_client: Arc::new(client),
         }
     }
@@ -97,6 +101,16 @@ impl AppState {
     /// Test: Used by `services_handler` and `proxy_handler`.
     pub fn poller_cache(&self) -> &PollerCache {
         &self.poller_cache
+    }
+
+    /// Access the metrics cache for stdio-MCP-polled services.
+    ///
+    /// Why: The metrics poller writes `ConsoleMetricsReport`s here; the
+    /// `/api/console/metrics/analyze` route reads from it.
+    /// What: Returns a reference to the `MetricsCache` handle.
+    /// Test: `test_metrics_analyze_route_cold_cache_returns_503`.
+    pub fn metrics_cache(&self) -> &MetricsCache {
+        &self.metrics_cache
     }
 
     /// Access the shared `reqwest::Client`.
@@ -122,6 +136,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/api/console/services", get(services_handler))
+        .route("/api/console/metrics/analyze", get(metrics_analyze_handler))
         // Reverse-proxy: /proxy/{daemon}/{*path}
         .route("/proxy/{daemon}/{*path}", any(crate::proxy::proxy_handler))
         .route("/", get(spa_index_handler))
@@ -178,6 +193,20 @@ async fn services_handler(State(state): State<AppState>) -> axum::response::Resp
             tracing::error!("service detection task panicked: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
+    }
+}
+
+/// `GET /api/console/metrics/analyze` — return the latest metrics report.
+///
+/// Why: Surfaces trusty-analyze health/metrics to the SPA without per-request
+/// MCP calls (the background poller keeps the cache warm).
+/// What: Returns the cached `ConsoleMetricsReport` as JSON (200) or 503 when
+/// no poll has completed yet (binary absent or first boot).
+/// Test: `test_metrics_analyze_route_cold_cache_returns_503` below.
+async fn metrics_analyze_handler(State(state): State<AppState>) -> axum::response::Response {
+    match state.metrics_cache().get().await {
+        Some(report) => axum::Json(report).into_response(),
+        None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
 }
 
@@ -419,6 +448,22 @@ mod tests {
             .expect("request");
         let resp = router.oneshot(req).await.expect("response");
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// Why: with an empty metrics cache the route must return 503 so the UI
+    /// can show a "not yet available" state rather than empty JSON.
+    /// What: issues GET /api/console/metrics/analyze on a fresh state,
+    /// asserts 503.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn test_metrics_analyze_route_cold_cache_returns_503() {
+        let router = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/console/metrics/analyze")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     /// Why: the proxy route for an unknown daemon key must return 400.

@@ -24,9 +24,12 @@
 The spec proposes **trusty-controller**: a single, thin coordinator that manages
 install, upgrade, restart, configuration, doctor, and health across the whole
 claude-mpm stack (claude-mpm + trusty-tools) at both the **system** and
-**project** scope. The controller contains *zero tool-specific logic* — it
-operates entirely through a **versioned per-tool contract** (DOC-1) and a **stack
-manifest/BOM** that doubles as its tool registry (DOC-2).
+**project** scope. The controller's dispatch engine contains *zero per-tool
+verb-dispatch logic* (no per-named-tool branching; the precise property and the
+bounded tool-class assumptions it does carry are defined in
+[DOC-5 §2.2](./05-controller-cli.md)) — it operates entirely through a **versioned
+per-tool contract** (DOC-1) and a **stack manifest/BOM** that doubles as its tool
+registry (DOC-2).
 
 This design set decomposes that vision into 11 focused, mutually-consistent
 design docs. Each refines one concern of the spec into an implementable design.
@@ -97,6 +100,7 @@ All 11 docs are **Accepted (owner-approved)**.
 | [**DOC-8**](./08-install-bootstrap.md) | Install/Bootstrap Flow (UUC1, UUC2) | Zero-knowledge install + per-project auto-config on claude-mpm launch. | Accepted | — |
 | [**DOC-9**](./09-upgrade-flow.md) | Upgrade Flow (UUC3) | Cross-tool update detection, changelog headlines, upgrade + take-effect restart. | Accepted | — |
 | [**DOC-10**](./10-isolation-testing-harness.md) | Isolation Testing Harness (MUC1, MUC2) | Test stack install/upgrade in a vanilla container/VM without contaminating the host. | Accepted | — |
+| [**DOC-11**](./DOC-11-open-issues.md) | Open Issues & Adversarial-Review Tracker | Living tracker of open issues raised against the Accepted design set; iterated per item. | Active tracker | — |
 
 ## Implementation order
 

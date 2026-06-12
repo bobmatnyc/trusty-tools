@@ -6,8 +6,8 @@
 //! 2. `probe_volume` probes the SAMPLE PATH (not the volume root), so a
 //!    volume whose mount-root is accessible but whose inner path is not is
 //!    correctly classified as inaccessible (review #727 finding 2).
-//! 3. `probe_volume` increments `LEAKED_PROBE_THREAD_COUNT` on timeout
-//!    (review #727 finding 3).
+//! 3. `probe_volume` increments `PROBE_THREAD_FAILURES` on timeout
+//!    (review #727 finding 3, renamed from `LEAKED_PROBE_THREAD_COUNT` in #822).
 //! 4. `probe_all_volumes` deduplicates by volume key.
 //!
 //! We cannot reproduce the TCC-hang in unit tests, so the `Inaccessible`
@@ -179,8 +179,8 @@ fn probe_uses_sample_path_not_volume_root() {
 }
 
 /// Why (review #727 finding 3): a timed-out probe must increment the
-/// `LEAKED_PROBE_THREAD_COUNT` counter so `/health` can surface the
-/// accumulation.
+/// `PROBE_THREAD_FAILURES` counter so `/health` can surface the accumulation.
+/// (Counter was renamed from `LEAKED_PROBE_THREAD_COUNT` in issue #822.)
 /// What: record the counter before calling `probe_volume` with a 0ns
 /// deadline (guaranteed timeout on any real path). Assert `after > before`
 /// (review #727 finding 2 fix: we assert monotone growth and do NOT
@@ -191,15 +191,15 @@ fn probe_uses_sample_path_not_volume_root() {
 /// Test: this test.
 #[test]
 #[serial_test::serial]
-fn probe_timeout_increments_leaked_thread_count() {
-    let before = LEAKED_PROBE_THREAD_COUNT.load(Ordering::Relaxed);
+fn probe_timeout_increments_probe_thread_failures() {
+    let before = PROBE_THREAD_FAILURES.load(Ordering::Relaxed);
 
     // Use a zero-duration deadline — the recv_timeout fires before the
     // probe thread can even schedule.
     let tmp = tempfile::tempdir().unwrap();
     let result = probe_volume(tmp.path(), tmp.path(), Duration::ZERO);
 
-    let after = LEAKED_PROBE_THREAD_COUNT.load(Ordering::Relaxed);
+    let after = PROBE_THREAD_FAILURES.load(Ordering::Relaxed);
 
     // The result must be Inaccessible (timed out).
     assert_eq!(
@@ -214,7 +214,7 @@ fn probe_timeout_increments_leaked_thread_count() {
     // by design; asserting after > before is correct. (review #727 finding 2)
     assert!(
         after > before,
-        "LEAKED_PROBE_THREAD_COUNT must increment on timeout; before={before} after={after}"
+        "PROBE_THREAD_FAILURES must increment on timeout; before={before} after={after}"
     );
 }
 
@@ -304,7 +304,7 @@ fn probe_all_volumes_parallel_bounded_time() {
 /// What: given `(vol_key, sample_path, probe_delay)` triples, spawns one bare
 /// OS thread per entry that sleeps for `probe_delay` then sends into a shared
 /// `mpsc::channel`, identical to `probe_all_volumes`.  Increments
-/// `LEAKED_PROBE_THREAD_COUNT` once per timed-out volume (same invariant).
+/// `PROBE_THREAD_FAILURES` once per timed-out volume (same invariant).
 ///
 /// Test: `probe_all_volumes_multi_volume_no_fast_starvation`.
 fn probe_with_injected_delays(
@@ -366,7 +366,7 @@ fn probe_with_injected_delays(
             .get(vol_key)
             .map(|p| p.as_path())
             .unwrap_or(vol_key.as_path());
-        LEAKED_PROBE_THREAD_COUNT.fetch_add(1, Ordering::Relaxed);
+        PROBE_THREAD_FAILURES.fetch_add(1, Ordering::Relaxed);
         inaccessible.insert(vol_key.clone());
     }
     inaccessible
@@ -383,9 +383,9 @@ fn probe_with_injected_delays(
 ///   - only the slow volume is in the inaccessible set,
 ///   - the two fast volumes are NOT in the inaccessible set (not starved),
 ///   - total elapsed < 2 × deadline (≈100 ms), proving ONE-deadline behaviour,
-///   - `LEAKED_PROBE_THREAD_COUNT` increased by exactly 1 (one blocked volume).
+///   - `PROBE_THREAD_FAILURES` increased by exactly 1 (one blocked volume).
 ///
-/// Note: `serial` because this test reads/writes `LEAKED_PROBE_THREAD_COUNT`.
+/// Note: `serial` because this test reads/writes `PROBE_THREAD_FAILURES`.
 /// Test: this test.
 #[test]
 #[serial_test::serial]
@@ -407,13 +407,13 @@ fn probe_all_volumes_multi_volume_no_fast_starvation() {
         (slow_vol.clone(), slow_vol.clone(), slow_delay),
     ];
 
-    let before_leaked = LEAKED_PROBE_THREAD_COUNT.load(Ordering::Relaxed);
+    let before_leaked = PROBE_THREAD_FAILURES.load(Ordering::Relaxed);
     let start = std::time::Instant::now();
 
     let inaccessible = probe_with_injected_delays(entries, deadline);
 
     let elapsed = start.elapsed();
-    let after_leaked = LEAKED_PROBE_THREAD_COUNT.load(Ordering::Relaxed);
+    let after_leaked = PROBE_THREAD_FAILURES.load(Ordering::Relaxed);
 
     // Only the slow volume should be inaccessible.
     assert!(
@@ -443,11 +443,11 @@ fn probe_all_volumes_multi_volume_no_fast_starvation() {
          (shared-channel should NOT stall for each volume sequentially)"
     );
 
-    // Leaked-thread counter must increment by exactly 1 (one blocked volume).
+    // PROBE_THREAD_FAILURES counter must increment by exactly 1 (one blocked volume).
     assert_eq!(
         after_leaked,
         before_leaked + 1,
-        "LEAKED_PROBE_THREAD_COUNT must increase by exactly 1 for the one blocked volume; \
+        "PROBE_THREAD_FAILURES must increase by exactly 1 for the one blocked volume; \
          before={before_leaked} after={after_leaked}"
     );
 }

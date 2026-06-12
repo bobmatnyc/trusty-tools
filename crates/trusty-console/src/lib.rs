@@ -18,8 +18,13 @@ use clap::{Parser, Subcommand};
 use tracing::info;
 use trusty_common::{init_tracing, shutdown_signal, write_daemon_addr};
 
+use crate::mcp_handle::McpServiceHandle;
+
+pub mod bind;
 pub mod connector;
 pub mod detect;
+pub mod mcp_handle;
+pub mod metrics_poller;
 pub mod poller;
 pub mod proxy;
 pub mod server;
@@ -58,21 +63,44 @@ pub enum Commands {
 ///
 /// Why: The bind address must be configurable so users can change the port when
 /// 7788 is taken; `--open` is a convenience for developers; `--poll-interval`
-/// lets operators tune the background health-poll frequency.
-/// What: Optional `--http` (default `127.0.0.1:7788`), `--open`, and
-/// `--poll-interval` flags.
+/// lets operators tune the background health-poll frequency; `--tailscale`
+/// enables durable tailnet exposure without requiring `--http 0.0.0.0`.
+/// What: Optional `--http` (default `127.0.0.1:7788`), `--open`,
+/// `--poll-interval`, and `--tailscale` flags.
+/// Env overrides: `TRUSTY_CONSOLE_BIND` sets the default bind mode so a
+/// supervised/relaunched daemon stays tailnet-reachable without extra flags.
 /// Test: Default address tested in `test_serve_args_defaults` below.
 #[derive(Debug, Parser)]
 pub struct ServeArgs {
     /// Address to listen on (default: 127.0.0.1:7788).
+    ///
+    /// Takes precedence over --tailscale and TRUSTY_CONSOLE_BIND when set to a
+    /// non-default value.
     #[arg(long, default_value = "127.0.0.1:7788")]
     pub http: String,
+
+    /// Expose the console on both 127.0.0.1 and the machine's Tailscale IPv4,
+    /// enabling tailnet clients to reach the console without LAN exposure.
+    ///
+    /// The Tailscale IP is detected via `tailscale ip -4`. If Tailscale is not
+    /// running, prints a warning and falls back to localhost-only.
+    ///
+    /// Can also be set persistently via the TRUSTY_CONSOLE_BIND=tailscale env
+    /// var so a supervised/relaunched console stays tailnet-reachable without
+    /// manually passing this flag.
+    #[arg(long, default_value_t = false)]
+    pub tailscale: bool,
 
     /// Open the console in the default browser after starting.
     #[arg(long, default_value_t = false)]
     pub open: bool,
 
-    /// Background health-poll interval in seconds (default: 15).
+    /// Background poll interval in seconds (default: 15).
+    ///
+    /// Controls BOTH the health poller (`poller::start`) AND the metrics
+    /// poller (`metrics_poller::start`). Increasing this value reduces the
+    /// frequency of both the HTTP health checks against each connector AND
+    /// the stdio MCP `console_metrics` tool calls against trusty-analyze.
     #[arg(long, default_value_t = 15u64)]
     pub poll_interval: u64,
 }
@@ -104,12 +132,23 @@ pub async fn run() -> Result<()> {
 ///
 /// Why: Separating the serve logic from `run()` keeps `run()` thin and allows
 /// this function to be called from integration tests.
-/// What: Builds the router, binds the TCP listener, writes the discovery file,
-/// starts the background health-poll task, optionally opens a browser, then
-/// serves until SIGTERM/SIGINT with graceful shutdown.
+/// What: Resolves bind addresses (respecting `--tailscale`, `--http`, and
+/// `TRUSTY_CONSOLE_BIND`), builds the router, binds TCP listener(s), writes
+/// the discovery file, starts the background health-poll task, optionally opens
+/// a browser, then serves until SIGTERM/SIGINT with graceful shutdown.
+/// Additional addresses beyond the primary get their own spawned `axum::serve`
+/// task that runs concurrently until the shared shutdown signal fires.
 /// Test: Server integration tests in `server.rs` cover the router directly
 /// without exercising this function (to avoid real TCP binding in unit tests).
 pub async fn run_serve(args: ServeArgs) -> Result<()> {
+    const DEFAULT_HTTP: &str = "127.0.0.1:7788";
+
+    // ── resolve bind mode ───────────────────────────────────────────────────
+    let mode = bind::BindMode::from_env_and_flags(&args.http, DEFAULT_HTTP, args.tailscale);
+    let port = bind::port_from_addr(&args.http, 7788);
+    let addrs = bind::resolve_bind_addrs(&mode, port, bind::detect_tailscale_ipv4);
+
+    // ── service setup ───────────────────────────────────────────────────────
     let connectors = detect::all_connectors();
     let state = server::AppState::new(connectors);
 
@@ -129,23 +168,66 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         Duration::from_secs(args.poll_interval),
     );
 
+    // ── metrics MCP poll (trusty-analyze) ───────────────────────────────────
+    // Spawn a supervised stdio MCP connection to trusty-analyze and poll its
+    // console_metrics tool every poll_interval seconds. The poller writes
+    // into state.metrics_cache(), which the route handler reads directly.
+    // On machines where trusty-analyze is absent the McpServiceHandle marks
+    // it Absent immediately — every poll returns Err, the cache stays None,
+    // and /api/console/metrics/analyze returns 503 (graceful degradation).
+    //
+    // Why "mcp" not "serve --mcp":
+    // `serve --mcp` starts BOTH the HTTP daemon and an MCP stdio loop; it
+    // requires trusty-search to be reachable at startup and tries to open the
+    // redb facts store (which may already be locked by the running daemon).
+    // `mcp` only runs a pure stdio bridge pointing at the running HTTP daemon;
+    // if the HTTP daemon is not yet up, `ensure_mcp_daemon_up` in analyze's
+    // `mcp` subcommand starts it automatically. This is the correct invocation
+    // for a lightweight stdio-only console_metrics child.
+    {
+        let handle = McpServiceHandle::new("trusty-analyze", vec!["mcp".to_string()]);
+        metrics_poller::start(
+            handle,
+            state.metrics_cache().clone(),
+            Duration::from_secs(args.poll_interval),
+        );
+    }
+
     let router = server::build_router(state.clone());
 
-    let listener = tokio::net::TcpListener::bind(&args.http)
-        .await
-        .with_context(|| format!("failed to bind {}", args.http))?;
+    // ── bind primary listener ───────────────────────────────────────────────
+    let primary_addr = *addrs.first().context("bind address list is empty")?;
+    let primary_listener = bind::bind_listener(primary_addr).await?;
+    let primary_local = primary_listener.local_addr().context("get local addr")?;
+    let addr_string = primary_local.to_string();
+    info!("trusty-console listening on http://{primary_local}");
 
-    let addr = listener.local_addr().context("get local addr")?;
-    let addr_string = addr.to_string();
-    info!("trusty-console listening on http://{addr}");
+    // ── bind additional listeners (Tailscale mode: secondary addr) ──────────
+    for &extra_addr in addrs.get(1..).unwrap_or(&[]) {
+        let extra_listener = bind::bind_listener(extra_addr).await?;
+        let extra_local = extra_listener
+            .local_addr()
+            .context("get extra local addr")?;
+        info!("trusty-console also listening on http://{extra_local}");
+        eprintln!("trusty-console (tailnet): http://{extra_local}");
+        let r = router.clone();
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(extra_listener, r)
+                .with_graceful_shutdown(trusty_common::shutdown_signal())
+                .await
+            {
+                tracing::warn!("extra listener {extra_local} exited: {e}");
+            }
+        });
+    }
 
-    // Write the discovery file so CLI commands and other services can find us.
+    // ── write discovery file (primary address) ──────────────────────────────
     // Best-effort: log a warning on failure but do not abort the serve.
     if let Err(e) = write_daemon_addr("trusty-console", &addr_string) {
         tracing::warn!("could not write trusty-console discovery file: {e}");
     }
 
-    let console_url = format!("http://{addr}");
+    let console_url = format!("http://{primary_local}");
     eprintln!("trusty-console: {console_url}");
 
     if args.open {
@@ -153,7 +235,7 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         let _ = open::that(&console_url);
     }
 
-    axum::serve(listener, router)
+    axum::serve(primary_listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server error")?;
@@ -184,8 +266,8 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// Why: default http address must be 127.0.0.1:7788.
-    /// What: parses `serve` with no flags and checks the default.
+    /// Why: default http address must be 127.0.0.1:7788 and tailscale off.
+    /// What: parses `serve` with no flags and checks all defaults.
     /// Test: this test itself.
     #[test]
     fn test_serve_args_defaults() {
@@ -194,7 +276,22 @@ mod tests {
             Commands::Serve(args) => {
                 assert_eq!(args.http, "127.0.0.1:7788");
                 assert!(!args.open);
+                assert!(!args.tailscale);
                 assert_eq!(args.poll_interval, 15);
+            }
+        }
+    }
+
+    /// Why: --tailscale flag must be parsed correctly.
+    /// What: parses `serve --tailscale`; asserts tailscale=true.
+    /// Test: this test itself.
+    #[test]
+    fn test_serve_args_tailscale_flag() {
+        let cli = Cli::parse_from(["trusty-console", "serve", "--tailscale"]);
+        match cli.command {
+            Commands::Serve(args) => {
+                assert!(args.tailscale);
+                assert_eq!(args.http, "127.0.0.1:7788");
             }
         }
     }

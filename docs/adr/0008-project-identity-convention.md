@@ -19,7 +19,9 @@ and the trusty-memory palace id, so the controller can ensure, reference, and
 report a project's state consistently across the stack.
 
 Today **two** id-derivation schemes coexist in the live codebase and they
-**disagree**:
+**disagree** (a third, basename-based scheme also exists in
+`crates/trusty-agents/src/ctrl/socket.rs::project_id_from_path` — outside the
+controller's direct scope, but worth acknowledging the count):
 
 - `crates/trusty-search/src/detect.rs` derives the id from the **basename** of
   the detected root (`my-project`). It is short and human-friendly but
@@ -27,8 +29,11 @@ Today **two** id-derivation schemes coexist in the live codebase and they
   `~/personal/api` both resolve to `api`).
 - `crates/trusty-search/src/service/fs_discovery.rs::id_from_path` derives the id
   from a **full-path slug** (`Users_mac_workspace_my-project`). It is
-  collision-free and stable across restarts (proven by its `stable-and-safe`
-  test) but is not human-friendly.
+  collision-free and stable across restarts, but it is a **pure string slug** —
+  its doc comment states a **precondition** that the caller pass a canonical
+  (symlink-resolved) path; it does **not** call `canonicalize()` itself. So
+  symlink-safety today is a caller convention, not part of the
+  id-derivation contract. It is also not human-friendly.
 
 Both forms are **live in the daemon registry** at the same time: the registry has
 been observed holding *both* `trusty-tools` and `Users_mac_workspace_trusty-tools`
@@ -51,10 +56,15 @@ across the whole stack. That clears the repo's ADR bar
 
 We will adopt a single canonical project-identity rule:
 
-1. **Canonical id = the full-path slug of the nearest enclosing git root.** Walk
-   up from the cwd to the first ancestor containing `.git`; the canonical project
-   id is the path-slug of that root (the `id_from_path` scheme,
-   e.g. `Users_mac_workspace_my-project`). The full-path slug **wins** over the
+1. **Canonical id = the full-path slug of the *canonicalized* nearest enclosing
+   git root.** Walk up from the cwd to the first ancestor containing `.git`, then
+   **`canonicalize()` that root path first** (resolving symlinks, `.`/`..`) and
+   only then apply the path-slug. The contract is **canonicalize-then-slug**, not
+   a bare slug: identity is a single `trusty_common::canonical_project_id(path)
+   -> Result<String>` function that canonicalizes internally before slugging, so
+   the slug step **never receives a raw path** and callers cannot forget the
+   canonicalization step. The result is still a full-path slug
+   (e.g. `Users_mac_workspace_my-project`). The full-path slug **wins** over the
    basename scheme; the divergent `detect.rs` basename usage is the loser and
    must be reconciled to this rule.
 
@@ -81,13 +91,28 @@ We will adopt a single canonical project-identity rule:
    an explicit per-subdir marker (e.g. trusty-search's existing
    `trusty-search.yaml` multi-index file), never implicitly.
 
+6. **`canonicalize()` failure → lexical-absolutize slug + `Fallback` warning.**
+   `canonicalize()` is `realpath(3)`: it requires the path to **exist** and can
+   fail on a broken symlink component or a permission error. When it fails,
+   `canonical_project_id` falls back to slugging a **lexically-absolutized** path
+   (absolutize against the cwd and normalize `.`/`..` **without** symlink
+   resolution) and emits a `Fallback`/degraded warning. This mirrors the
+   "no git root and no marker → cwd path-slug + `Fallback` warning" rule in §3:
+   the controller **never refuses** to operate; it degrades to a usable (if less
+   stable) identity and surfaces the warning.
+
 ## Consequences
 
 **Easier / positive:**
 
 - **Collision-free and stable.** The full-path slug cannot collide across repos
-  sharing a basename and is stable across daemon restarts (already test-proven by
-  `id_from_path`).
+  sharing a basename and is stable across daemon restarts. Note the scope of the
+  existing proof precisely: `id_from_path`'s `stable-and-safe` unit test proves
+  **determinism + character-safety only** — it does **not** exercise
+  symlink/canonicalization equivalence. Symlink-safety follows from the
+  canonicalize-then-slug contract (Decision §1), and proving it requires a
+  **new symlink-equivalence test** (a follow-up); the existing test must not be
+  cited as evidence of symlink-safety.
 - **One identity across tools.** A single id keys trusty-search indexes and
   trusty-memory palaces alike, giving DOC-6 the cross-tool agreement it requires
   and DOC-8 a stable auto-config key. The controller can ensure/report a
@@ -106,14 +131,35 @@ We will adopt a single canonical project-identity rule:
 - **Migration required.** The basename users in
   `crates/trusty-search/src/detect.rs` must be migrated/reconciled to the
   path-slug scheme; the daemon registry currently holding both forms for one root
-  needs to converge on the slug. This is a one-time reconciliation tracked as
-  DOC-6/DOC-8 follow-up.
+  needs to converge on the slug. This is a one-time **stateful re-key migration**,
+  designed in DOC-6 §7.1: re-key each registry entry by recomputing the canonical
+  slug from its `root_path` and **reuse the colocated index data in place — NOT a
+  from-scratch reindex** (the data is `root_path`-addressed, so the id is only the
+  in-memory registry key); trusty-memory palaces get an alias/rename. It is carried
+  by trusty-search's existing forward-only `_meta` schema-migration framework
+  (`core::migration`, with a `schema_version` bump — idempotent and crash-safe), so
+  the first ensure after the flip sees the project as `exists`/`fresh`, not a
+  rebuilt `pending`.
 - **Canonical helpers hoisted into `trusty_common`.** The canonical
-  project-identity helpers (`id_from_path`, `detect_project`) will be hoisted into
+  project-identity helpers (`detect_project` plus the `canonical_project_id`
+  contract function over the `id_from_path` slug) will be hoisted into
   `trusty_common` as the single shared implementation (decided in DOC-6 Q9), so all
   tools consume one slug implementation rather than each carrying its own.
+  Crucially, the hoisted `canonical_project_id` **canonicalizes internally** (per
+  Decision §1) rather than hoisting the bare slug — so no call site can forget the
+  `canonicalize()` step. This avoids the footgun of exposing `id_from_path`'s
+  caller-side canonicalization precondition as a per-call-site responsibility.
 - **Slug ergonomics.** The canonical id is not human-friendly; all human-facing
   surfaces must deliberately use the display alias rather than the slug.
 - **Marker discipline for sub-projects.** Teams wanting per-subdir identities in
   a monorepo must opt in with an explicit marker; this is intentional but is one
   more thing to document for those users.
+- **Case-insensitive volumes — residual limitation.** On case-insensitive volumes
+  (APFS), `canonicalize()` resolves symlinks and `.`/`..` but does **not**
+  guarantee case-folding of the final path components, so two differently-cased
+  spellings of the same directory (`/Proj` vs `/proj`) **may** still produce
+  divergent ids. This is a named known limitation, not a solved case. Case-folding
+  is a **deferred follow-up** scoped to case-insensitive volumes only: a blanket
+  lowercasing would change every id and risks wrongly merging genuinely
+  case-distinct directories on case-sensitive volumes, so it is intentionally
+  **not** done in v1.

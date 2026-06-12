@@ -115,6 +115,24 @@ cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-analyze \
 
 The installed binary is named `trusty-analyze`.
 
+### With Homebrew (recommended)
+
+```bash
+brew tap bobmatnyc/trusty
+brew install trusty-analyze
+```
+
+Or install directly without tapping:
+
+```bash
+brew install bobmatnyc/trusty/trusty-analyze
+```
+
+Homebrew provides:
+- Automatic updates via `brew upgrade trusty-analyze`
+- Standard macOS / Linux PATH integration
+- Easy dependency management
+
 ## Quick Start
 
 ```bash

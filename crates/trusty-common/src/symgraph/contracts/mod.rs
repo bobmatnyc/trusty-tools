@@ -11,8 +11,22 @@
 //! helper. No async, no tokio, no tree-sitter. The tree-sitter–based
 //! extraction code lives in sibling modules / downstream crates.
 //!
+//! `EdgeKind` is extracted into `edge_kind.rs` to stay under the 500-line
+//! cap (it grew with Phase D/E variants and doc notes). Re-exported here so
+//! all existing import paths (`contracts::EdgeKind`) continue to compile.
+//!
 //! Test: see `#[cfg(test)]` in this file — covers `RawEntity::new` id
-//! stability, `EdgeKind::score_multiplier`, and `fact_hash_str` determinism.
+//! stability, `fact_hash_str` determinism, and `EntityType::as_str`.
+//!
+//! ## EdgeKind convergence (issue #815, ADR-0010 Option C / Phase E #818)
+//!
+//! `contracts::EdgeKind` is the **single canonical enum** for all KG edge
+//! kinds across the trusty-* toolchain. Phase E adds `Custom(String)` (#818)
+//! and drops `Copy` (String is heap-allocated). See `edge_kind.rs` for the
+//! full definition.
+
+mod edge_kind;
+pub use edge_kind::{EdgeKind, EdgeKindError};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -70,55 +84,6 @@ impl EntityType {
     }
 }
 
-/// Edge kinds for the entity knowledge graph (distinct from the
-/// `SymbolGraph` structural edges in `crate::symgraph::graph::EdgeKind`, which is
-/// only present when the `parser` feature is enabled).
-///
-/// Phase A = structural (tree-sitter derived)
-/// Phase B = test-relation
-/// Phase C = doc/concept
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum EdgeKind {
-    // Call graph
-    /// Caller → callee.
-    CallsFunction,
-    /// Callee → caller (reverse index of `CallsFunction`).
-    CalledByFunction,
-    // Phase A — structural
-    Implements,
-    UsesType,
-    Derives,
-    ModuleContains,
-    ReExports,
-    RaisesError,
-    Configures,
-    // Phase B — test relations
-    TestedBy,
-    TestUsesFixture,
-    CoOccursInTest,
-    // Phase C — docs / concepts
-    Documents,
-    ReferencesConcept,
-    Aliases,
-    ErrorDescribes,
-}
-
-impl EdgeKind {
-    /// Score multiplier for KG expansion. Higher = more relevant when ranking
-    /// neighbours discovered by walking this edge.
-    pub fn score_multiplier(&self) -> f32 {
-        match self {
-            EdgeKind::Implements => 0.85,
-            EdgeKind::UsesType => 0.75,
-            EdgeKind::TestedBy => 0.80,
-            EdgeKind::Documents => 0.65,
-            EdgeKind::ReferencesConcept => 0.60,
-            // Remaining edges use the legacy flat KG-expansion multiplier.
-            _ => 0.70,
-        }
-    }
-}
-
 /// redb table name constants for entity storage.
 pub mod tables {
     /// `entity_id (str) -> RawEntity (bincode/json)`
@@ -148,6 +113,12 @@ impl RawEntity {
     /// `(entity_type, text, file)`. Same inputs always yield the same id, so
     /// re-extraction over identical source produces stable references for the
     /// KG layer.
+    ///
+    /// Why: stable ids allow incremental re-extraction to reuse existing KG
+    /// nodes rather than creating duplicates when span or line changes.
+    /// What: hashes `(entity_type, text, file)` with SHA-256; span/line are
+    /// stored but excluded from the hash.
+    /// Test: `raw_entity_id_is_stable`, `raw_entity_id_changes_with_type`.
     pub fn new(
         entity_type: EntityType,
         text: String,
@@ -173,19 +144,35 @@ impl RawEntity {
     }
 }
 
-/// Short, stable hex hash of a string. Used by ingest sources (e.g. SCIP) to
-/// derive readable, collision-resistant entity IDs from opaque symbol strings.
+/// Short hex hash of a string. Used by ingest sources (e.g. SCIP) to
+/// derive compact, collision-resistant entity IDs from opaque symbol strings.
 ///
 /// Why: SCIP symbol strings (e.g. `"rust-analyzer cargo crate/Foo#"`) are
-/// long and noisy. Hashing them produces a compact, stable suffix safe to
-/// embed in entity ids and redb keys.
-/// What: hashes `s` with `DefaultHasher` and formats as 8-char lowercase hex.
-/// Test: `fact_hash_str_is_deterministic`.
+/// long and noisy. Hashing them produces a compact 8-character suffix safe
+/// to embed in entity ids and redb keys. SHA-256 guarantees stable output
+/// across all Rust toolchain versions and process restarts, unlike the
+/// formerly-used `DefaultHasher` (SipHash, non-stable across std versions).
+///
+/// What: hashes `s` with SHA-256 and returns the first 8 lowercase hex
+/// characters (4 bytes of the digest). Output is always exactly 8 characters.
+///
+/// **Migration note (issue #1116):** this function previously used
+/// `std::collections::hash_map::DefaultHasher`. The switch to SHA-256 changes
+/// all output values. Any previously persisted KG entity IDs derived from this
+/// function are now invalid. A one-time KG rebuild / reindex is required
+/// after upgrading to the version of `trusty-common` that includes this change.
+///
+/// Test: `fact_hash_str_is_deterministic`, `fact_hash_str_pinned_values`,
+/// `fact_hash_str_output_shape`.
 pub fn fact_hash_str(s: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    s.hash(&mut h);
-    format!("{:08x}", h.finish())
+    let digest = Sha256::digest(s.as_bytes());
+    // Take the first 4 bytes (8 hex chars) — same suffix width as the former
+    // DefaultHasher-based implementation, keeping downstream key formats unchanged
+    // in structure. SHA-256 is infallible so no error handling is needed.
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}",
+        digest[0], digest[1], digest[2], digest[3]
+    )
 }
 
 #[cfg(test)]
@@ -214,25 +201,45 @@ mod tests {
     }
 
     #[test]
-    fn edge_kind_score_multiplier_known_values() {
-        assert!((EdgeKind::Implements.score_multiplier() - 0.85).abs() < 1e-6);
-        assert!((EdgeKind::UsesType.score_multiplier() - 0.75).abs() < 1e-6);
-        assert!((EdgeKind::TestedBy.score_multiplier() - 0.80).abs() < 1e-6);
-        assert!((EdgeKind::Documents.score_multiplier() - 0.65).abs() < 1e-6);
-        assert!((EdgeKind::ReferencesConcept.score_multiplier() - 0.60).abs() < 1e-6);
-        // Default branch.
-        assert!((EdgeKind::CallsFunction.score_multiplier() - 0.70).abs() < 1e-6);
-    }
-
-    #[test]
     fn fact_hash_str_is_deterministic() {
+        // Same input always yields the same output — both within a call and
+        // across repeated calls in the same process.
         let a = fact_hash_str("rust-analyzer cargo crate/Foo#");
         let b = fact_hash_str("rust-analyzer cargo crate/Foo#");
         assert_eq!(a, b);
-        // u64 in lowercase hex; `{:08x}` is the *min* width, so output is
-        // up to 16 characters (and always at least 8 due to zero-padding).
-        assert!(a.len() >= 8 && a.len() <= 16);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn fact_hash_str_output_shape() {
+        // Output is always exactly 8 lowercase hex characters (4 bytes of
+        // SHA-256 digest), matching the prior DefaultHasher suffix width.
+        for input in &["", "a", "hello", "rust-analyzer cargo crate/Foo#"] {
+            let h = fact_hash_str(input);
+            assert_eq!(
+                h.len(),
+                8,
+                "expected 8 hex chars for {:?}, got {:?}",
+                input,
+                h
+            );
+            assert!(
+                h.chars().all(|c| c.is_ascii_hexdigit()),
+                "non-hex char in output for {:?}: {:?}",
+                input,
+                h
+            );
+        }
+    }
+
+    #[test]
+    fn fact_hash_str_pinned_values() {
+        // PIN the SHA-256 algorithm: any accidental algorithm swap will break
+        // this test. Expected values are the first 8 hex chars of SHA-256.
+        // Computed with: echo -n "<input>" | sha256sum
+        assert_eq!(fact_hash_str("rust-analyzer cargo crate/Foo#"), "51557b36");
+        assert_eq!(fact_hash_str(""), "e3b0c442");
+        assert_eq!(fact_hash_str("hello"), "2cf24dba");
+        assert_eq!(fact_hash_str("a"), "ca978112");
     }
 
     #[test]

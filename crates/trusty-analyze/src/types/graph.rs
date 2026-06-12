@@ -11,6 +11,16 @@
 //!
 //! Test: round-trip serialize/deserialize a small graph and verify
 //! `KgGraph::merge` deduplicates by node id.
+//!
+//! ## KgEdgeKind convergence (issue #815, ADR-0010 Option C)
+//!
+//! `KgEdgeKind` is now a **type alias** to
+//! `trusty_common::symgraph::contracts::EdgeKind` (the single canonical enum).
+//! All call sites using `KgEdgeKind::Calls`, `KgEdgeKind::Contains`, etc.
+//! continue to work unchanged — the variant names in the canonical enum match
+//! the former `KgEdgeKind` names exactly. The serde wire format is preserved:
+//! `"Calls"` still deserializes to the `Calls` variant, `"Implements"` to
+//! `Implements`, etc.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -93,24 +103,37 @@ pub struct KgNode {
     pub extra: serde_json::Value,
 }
 
-/// Edge taxonomy in the knowledge graph.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum KgEdgeKind {
-    Contains,
-    Imports,
-    Exports,
-    Calls,
-    /// struct impl trait / class implements interface
-    Implements,
-    /// inheritance
-    Extends,
-    References,
-    /// test fn → function under test
-    Tests,
-    DependsOn,
-    GeneratedFrom,
-    RuntimeObservationFor,
-}
+/// Language-neutral structural edge taxonomy for trusty-analyze's analysis KG.
+///
+/// Why: trusty-analyze extracts a per-file/per-language structural graph from
+/// tree-sitter ASTs across 15+ languages. The single canonical `EdgeKind` in
+/// `trusty_common::symgraph::contracts` now covers all use cases across the
+/// toolchain (issue #815, ADR-0010 Option C). This type is a **re-export alias**
+/// to that canonical enum so existing call sites continue to compile without
+/// change.
+///
+/// What: type alias to `trusty_common::symgraph::contracts::EdgeKind`.
+/// The 11 former `KgEdgeKind` variants (`Contains`, `Imports`, `Exports`, `Calls`,
+/// `Implements`, `Extends`, `References`, `Tests`, `DependsOn`, `GeneratedFrom`,
+/// `RuntimeObservationFor`) are present in the canonical enum.
+/// Note: `Implements` was already in the canonical `contracts::EdgeKind` from
+/// Phase A (structural tree-sitter variants) before the convergence — it is NOT
+/// a new addition from `KgEdgeKind`. The two formerly diverged variants are now
+/// unified into one.
+/// Phase D data-flow variants (`Reads`, `Writes`, `AccessesResource`) added in
+/// issue #817 are also available here; C# and SQL adapter emission is planned.
+///
+/// ## Adapter guidance: `Calls` vs `CallsFunction`
+///
+/// Language adapters in this crate should emit `KgEdgeKind::Calls` (the coarse,
+/// language-neutral call edge). `CallsFunction` is for the trusty-search
+/// `EntityExtractor`'s entity-KG layer, which also maintains a reverse index
+/// via `CalledByFunction`. Emitting `CallsFunction` from a language adapter
+/// would create orphaned reverse-index entries.
+///
+/// Test: `kg_edge_kind_serde_round_trip` in this module confirms every former
+/// `KgEdgeKind` variant still round-trips through `serde_json`.
+pub type KgEdgeKind = trusty_common::symgraph::contracts::EdgeKind;
 
 /// One edge between two nodes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -251,5 +274,35 @@ mod tests {
         let back: KgGraph = serde_json::from_str(&s).unwrap();
         assert_eq!(back.node_count(), 1);
         assert_eq!(back.edge_count(), 1);
+    }
+
+    /// Every `KgEdgeKind` variant must survive a `serde_json` round-trip.
+    /// This guards the persisted analysis-output format: renaming a variant
+    /// without a `#[serde(rename = "…")]` annotation would break deserialization
+    /// of previously stored graphs.
+    #[test]
+    fn kg_edge_kind_serde_round_trip() {
+        let variants = [
+            KgEdgeKind::Contains,
+            KgEdgeKind::Imports,
+            KgEdgeKind::Exports,
+            KgEdgeKind::Calls,
+            KgEdgeKind::Implements,
+            KgEdgeKind::Extends,
+            KgEdgeKind::References,
+            KgEdgeKind::Tests,
+            KgEdgeKind::DependsOn,
+            KgEdgeKind::GeneratedFrom,
+            KgEdgeKind::RuntimeObservationFor,
+            // Phase D data-flow variants (issue #817)
+            KgEdgeKind::Reads,
+            KgEdgeKind::Writes,
+            KgEdgeKind::AccessesResource,
+        ];
+        for v in &variants {
+            let json = serde_json::to_string(v).expect("serialize KgEdgeKind");
+            let back: KgEdgeKind = serde_json::from_str(&json).expect("deserialize KgEdgeKind");
+            assert_eq!(v, &back, "round-trip failed for {json}");
+        }
     }
 }

@@ -46,29 +46,72 @@ impl CodeIndexer {
     /// Test: every test that calls `add_chunk` or `index_file` exercises the
     /// rebuild path indirectly.
     pub(super) async fn rebuild_symbol_graph(&self) {
+        // Issue (180GB RSS fix): the temporary `Vec<ChunkTuple>` snapshot clones
+        // every chunk's strings (id, file, function_name, calls, inherits_from)
+        // and can hit 1-2 GB on a 1M-chunk corpus. We can't avoid the snapshot
+        // entirely (build_from_chunks needs a slice, and we don't want to hold
+        // the chunks read lock across `add_node`), but we cap snapshot size to
+        // the same KG node cap so we don't allocate more than we'll actually
+        // use. Chunks past the cap can't contribute new symbols anyway.
         let kg_cap = crate::core::symbol_graph::max_kg_nodes();
         let chunks = self.chunks.read().await;
+        // Pre-size for the worst case. When `kg_cap == 0` (unlimited) fall back
+        // to corpus size. Multiplied by 2 because the cap is on unique symbols
+        // and a single function might be defined across a handful of duplicates.
         let snapshot_cap = if kg_cap == 0 {
             chunks.len()
         } else {
+            // Heuristic: most chunks have a function name; cap snapshot at
+            // 2× the KG node cap to leave headroom for duplicates while still
+            // bounding peak allocation.
             (kg_cap.saturating_mul(2)).min(chunks.len())
         };
-        let mut tuples: Vec<ChunkTuple> = Vec::with_capacity(snapshot_cap);
-        for c in chunks.values() {
-            if tuples.len() >= snapshot_cap {
-                break;
-            }
-            tuples.push((
-                c.id.clone(),
-                c.file.clone(),
-                c.function_name.clone(),
-                c.calls.clone(),
-                c.inherits_from.clone(),
-                c.chunk_type.clone(),
-            ));
-        }
+        // Issue #824: iterate in deterministic (file, id) order before
+        // truncating so the same symbols are always included across restarts.
+        // Without sorting, HashMap/DashMap iteration order is arbitrary —
+        // on a large repo the N chunks that fall into the dropped half change
+        // between daemon restarts, making call-chain results non-reproducible
+        // and confusing to diagnose. Sorting by (file, id) is stable and
+        // cheap relative to the string clone cost.
+        let mut all_tuples: Vec<ChunkTuple> = chunks
+            .values()
+            .map(|c| {
+                (
+                    c.id.clone(),
+                    c.file.clone(),
+                    c.function_name.clone(),
+                    c.calls.clone(),
+                    c.inherits_from.clone(),
+                    c.chunk_type.clone(),
+                )
+            })
+            .collect();
         drop(chunks);
 
+        // Sort by (file, chunk_id) for deterministic truncation. The sort key
+        // is (field 1 = file, field 0 = id) — both are the first-class identity
+        // fields we want to be stable across runs.
+        all_tuples.sort_unstable_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+
+        if snapshot_cap < all_tuples.len() {
+            tracing::warn!(
+                index_id = %self.index_id,
+                total_chunks = all_tuples.len(),
+                snapshot_cap,
+                "kg: snapshot truncated to {} chunks (2×MAX_KG_NODES={}); \
+                 symbols in the dropped portion will have no KG edges this boot. \
+                 Raise TRUSTY_MAX_KG_NODES or run --force reindex to rebuild the \
+                 graph at full size. (issue #824)",
+                snapshot_cap,
+                snapshot_cap / 2,
+            );
+        }
+        let tuples: Vec<ChunkTuple> = all_tuples.into_iter().take(snapshot_cap).collect();
+
+        // Issue #41 phase 2: include per-file entity lists so Phase B/C edges
+        // (`TestedBy`, `CoOccursInTest`, `Documents`, `ReferencesConcept`)
+        // are wired into the graph. The clones are cheap relative to the
+        // chunk snapshot above.
         let entities_snapshot: Vec<(String, Vec<crate::core::entity::RawEntity>)> = {
             let ents = self.entities.read().await;
             ents.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
@@ -78,23 +121,24 @@ impl CodeIndexer {
             &tuples,
             &entities_snapshot,
         ));
+        // Free the snapshots immediately — they are the second-largest
+        // allocations in this function and we don't need them past
+        // `build_from_chunks_with_entities`.
         drop(tuples);
         drop(entities_snapshot);
 
-        if let Some(corpus) = &self.corpus {
-            let corpus = std::sync::Arc::clone(corpus);
-            let graph_for_save = std::sync::Arc::clone(&new_graph);
-            let index_id = self.index_id.clone();
-            let join =
-                tokio::task::spawn_blocking(move || graph_for_save.save_to_corpus(&corpus)).await;
-            match join {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => tracing::warn!(
-                    "index '{index_id}': kg persist failed ({e}) — graph stays in memory"
-                ),
-                Err(e) => tracing::warn!("index '{index_id}': kg persist task panicked ({e})"),
-            }
-        }
+        // Issue #41 phase 2 + ADR-0009: persist the freshly rebuilt *derived*
+        // graph (best-effort, pre-merge so the derived kg_* tables never
+        // absorb contributed rows), then fold the stored contributed overlay
+        // back in — a reindex must not evict contributed edges from the
+        // serving graph. Both redb-bound steps run on one blocking worker;
+        // failures degrade with warnings (see `save_then_merge_contrib`).
+        let new_graph = crate::core::symbol_graph::save_then_merge_contrib(
+            new_graph,
+            self.corpus.clone(),
+            self.index_id.clone(),
+        )
+        .await;
 
         *self.symbol_graph.write().await = new_graph;
     }

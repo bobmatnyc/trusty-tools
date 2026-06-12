@@ -14,8 +14,10 @@ manifest-driven dispatch that fans verbs out to the stack's tools.
 over one mechanical loop — *read the manifest (DOC-2) → for each relevant member,
 invoke its contract verb (DOC-1) at the right scope (DOC-3) → collect the
 envelopes → roll them up / render (DOC-4)*. This document specifies that command
-surface, proves the dispatch engine contains **zero tool-specific logic** (spec
-§83), and pins the clap structure that implements it. It owns the **command entry
+surface, proves the dispatch engine contains **zero per-tool verb-dispatch
+logic** (no per-named-tool branching; spec §83 — see §2.2 for the precise
+property + the bounded tool-class assumptions), and pins the clap structure that
+implements it. It owns the **command entry
 points**; the *mechanics* of the heavyweight flows live in DOC-8 (install) and
 DOC-9 (upgrade), and the rollup math lives in DOC-4.
 
@@ -79,7 +81,7 @@ passthrough — see §1.4.
 | `tctl restart [m…]` | system | Bounce all daemon members **and the controller's own UI service** (lifecycle `restart`). | §7, DOC-1 |
 | `tctl stack health` | all | Fast liveness sweep → tools×scope matrix + stack verdict. | DOC-4 |
 | `tctl stack doctor [m]` | all | Deep diagnostic sweep → matrix + per-check drill-down + remediation. | DOC-4 |
-| `tctl config [m…]` | all | Render each member's effective merged config (read-only, secrets redacted). | DOC-3 §7 |
+| `tctl config [m…]` | all | Render each member's effective merged config (read-only, secrets redacted); takes only read selectors. Tool-native mutation is a separate non-contract verb (`tune`), not reachable via passthrough. | DOC-3 §7, DOC-6 §2.6 |
 | `tctl status` | all | One-line "stack 2026.06-1 — verdict: ready". | DOC-4 (sugar) |
 | `tctl port` | system | Print the controller's own bound port/address (clean stdout). | DOC-7 |
 | `tctl doctor --self-check <m>` | n/a | Validate one member conforms to the contract (envelope, vocab, redaction). | DOC-6 §8 |
@@ -199,10 +201,14 @@ For a heavyweight first-class command (`install`, `upgrade`, `restart`) steps
 envelope render — but the *shape* is identical (load manifest → per-member action
 → collect results → render). See §5.
 
-#### 2.2 Proof of "zero tool-specific logic"
+#### 2.2 Proof of "zero per-tool verb-dispatch logic"
 
-The dispatch engine is generic by construction; the proof is that **every input
-to every step is either a manifest field or a contract field**:
+The dispatch engine is generic by construction: it carries **no per-tool
+verb-dispatch logic** — no per-*named-tool* branching, no compiled-in tool
+identity, no tool name, binary path, verb list, or output shape. It reads
+`verbs[]` at runtime (§2.3) and discovers every capability from the manifest
+(DOC-2) and the contract (DOC-1). The proof is that **every input to every step
+is either a manifest field or a contract field**:
 
 | Step | Reads only | Never reads |
 |---|---|---|
@@ -222,6 +228,42 @@ sees `kind = "orchestrator"`, routes its calls through the DOC-6 shim, and
 otherwise treats it identically (DOC-6 §6 swap = single manifest edit). This is
 the structural payoff the whole design set is organized around.
 
+##### 2.2.1 Bounded tool-class assumptions (honest scope)
+
+The property proven above is precise: the *dispatch engine* has **zero per-tool
+verb-dispatch logic**. It is **not** the stronger claim that the shipped
+controller carries *no* knowledge of the tools at all. That stronger property was
+*relocated, not eliminated* — the shipped artifact does carry a small, bounded set
+of **tool-CLASS** assumptions, each keyed off a **manifest field or `kind`**,
+never off a tool identity:
+
+| Tool-class assumption | Keyed off | Owner doc |
+|---|---|---|
+| Install-source templates (`install.source` = `cargo` / `python` / `uv`) | the manifest `install.source` field | DOC-2, DOC-8 |
+| The orchestrator shim (`kind = "orchestrator"` → DOC-6 §4 shim) | the manifest `kind` field, **not** the name claude-mpm | DOC-6 §4 |
+| The `SKIP_UI_BUILD` / `ui.available` derivation | the manifest `ui` sub-table | DOC-8 Resolved-Decision-1 |
+| The `/ui` + `port --json` UI-discovery convention | a stack-wide convention (acknowledged as a dependency, cf. DOC-11 m8) | DOC-7 |
+| Config precedence (project > system > default) | the scope model, not a tool | DOC-3 §7 |
+
+These are **tool-class**, not tool-identity: each keys off a manifest field or
+`kind`. So adding or swapping a *named* tool still needs **zero controller code**
+— a new `cargo` daemon, a replacement orchestrator (claude-mpm → trusty-mpm), or a
+fifth member is a manifest edit. The bounded exception is a new tool *class* — a
+new `install.source` (say a `brew` template), a new `kind`, or a tool that does
+not follow the `/ui` + `port --json` convention — which is the one case that
+needs controller code. That exception is small, enumerated, and manifest/`kind`-
+keyed; it is not per-named-tool branching.
+
+##### 2.2.2 Definitional anchor for the stack-wide shorthand
+
+The phrase **"zero tool-specific logic"** used throughout this design set (spec
+§83 and ~20 occurrences across DOC-0..DOC-10) is **shorthand** for the precise
+property defined here: *zero per-tool verb-dispatch branching* (the controller
+hard-codes no tool identity and discovers capabilities at runtime via `verbs[]`)
+**plus** the bounded, manifest/`kind`-keyed tool-class assumptions enumerated in
+§2.2.1. Every other occurrence of the shorthand across the set is governed by
+this definition; they are not each reworded.
+
 #### 2.3 Capability negotiation & graceful degrade (older-contract behaviour)
 
 Per DOC-1 D2 and the DOC-2 §6 discovery rule, `tctl` **never infers capabilities
@@ -230,6 +272,14 @@ from the manifest**; it always probes `version --json` at dispatch time:
 - **Verb not advertised** → the controller does not invoke it. For passthrough it
   errors with exit `3` ("`trusty-review` does not advertise verb `restart`"); for
   a stack verb the member's cell is `n/a` (DOC-4 §5.3) — never a failure.
+- **Passthrough is verb-aware, not a blind arg shell** → the controller forwards an
+  advertised contract verb with its **contract-defined arguments** and renders the
+  envelope; it does not blindly shell arbitrary trailing args at the member. A
+  non-advertised tool-native verb (e.g. trusty-search's mutating `tune`) is treated
+  exactly like an unadvertised verb above — it is **not forwarded**. Consequently the
+  read-only `config` verb (which takes only read selectors) is the only config
+  surface reachable via passthrough, so runtime config mutation is **not reachable
+  through the controller** in v1 (DOC-6 §2.6, DOC-1 `config.data`).
 - **Older but ≥-floor `contract_version`** (`[F, N)`) → invoke anyway, render only
   the fields that level guarantees, mark the cell `degraded` (DOC-4 §5.2). Never
   hard-fail. This is the canonical degradation rule DOC-1 owns and DOC-4/5
@@ -239,6 +289,14 @@ from the manifest**; it always probes `version --json` at dispatch time:
   (DOC-9), *not* a controller-boundary exit `3` (DOC-4 §5.2 / Resolved Q4).
 - **Unknown/unadvertised verb requested via passthrough, or malformed args** →
   controller-boundary **exit `3`** (DOC-1 D5), produced before any member runs.
+- **Controller's own member id as passthrough target** → not a valid passthrough
+  target: `tctl <controller-id> <verb>` (id = `trusty-controller`) is rejected at
+  the controller boundary with **exit `3`**, because the controller's own
+  lifecycle is the first-class `restart`/self-upgrade surface (DOC-9 §8), never a
+  passthrough to itself. Global flags (`--json`, `--scope`, `--timeout`,
+  `--yes`/`-y`, `--manifest`, `-v`) MUST precede the member token, since
+  `external_subcommand` forwards everything after it verbatim to the member (§6
+  Notes).
 
 ### 3. Scope handling
 
@@ -272,10 +330,14 @@ annotation).
 #### 3.3 Blast-radius warn-before-system-op (DOC-3 §5)
 
 Every selected operation carries a blast-radius tag **derived from its scope**
-(DOC-3 §5), so the gate is mechanical, not per-tool:
+(DOC-3 §5), so the gate is mechanical, not per-tool. **The gate is defined over the
+mutating-verb class, not an enumerated allowlist** — any mutating verb is
+confirmation-gated, so a future advertised mutating verb is covered automatically
+(defense-in-depth; no enumeration to forget to update). `install`, `upgrade`,
+`restart`, and `stop` are the **v1** members of that class:
 
-- **System-mutating ops** (`install`, `upgrade`, `restart`, `stop`) disrupt every
-  project/session on the box. Before executing, on an interactive TTY, `tctl`
+- **System-mutating ops** (in v1: `install`, `upgrade`, `restart`, `stop`) disrupt
+  every project/session on the box. Before executing, on an interactive TTY, `tctl`
   prints the radius and prompts:
 
   ```
@@ -530,6 +592,29 @@ Notes:
   "zero tool-specific logic" requirement. The dispatcher validates the first
   token against the manifest member ids and the second against the member's
   advertised `verbs[]` before invoking.
+- **Controller-as-member exclusion.** `tctl <controller-id> <verb>` — where the
+  first token is the controller's own member id (`trusty-controller`, a manifest
+  member per DOC-2's worked example) — is **rejected** by the passthrough
+  dispatcher (exit `3`, §2). The controller's own lifecycle is handled by the
+  first-class `restart` and self-upgrade (DOC-9 §8), never by passthrough to
+  itself; this prevents recursive/ambiguous self-dispatch. The dispatcher
+  knowing its *own* identity is a single self-recognition exclusion, not
+  per-tool branching.
+- **Flag-position rule.** Controller global flags (`--json`, `--scope`,
+  `--timeout`, `--yes`/`-y`, `--manifest`, `-v`) MUST precede the passthrough
+  member token (e.g. `tctl --json trusty-search search "foo"`), because
+  `external_subcommand` forwards everything *after* the member token verbatim to
+  `<binary> <verb> …`. The boundary: tokens before the member id are the
+  controller's; the member id and everything after it are forwarded to the
+  member. A flag placed after the member token is treated as a member argument,
+  by design (§2).
+- **Reserved-name validation.** Member ids MUST NOT collide with the reserved
+  first-class command names (`install`, `upgrade`, `stack`, `config`, `status`,
+  `port`, `doctor`, `ui`, `version`, `start`, `stop`, `restart`, `ensure`,
+  `updates`), because clap resolves declared subcommands before
+  `external_subcommand` — a colliding member id would be shadowed and unreachable
+  via bare passthrough. This is a **manifest validation rule**, checked when the
+  manifest is loaded; a colliding id is a manifest error (DOC-2).
 - `Scope` is **reused from `trusty_common::contract`** (DOC-1 D6) rather than
   redefined, keeping one wire vocabulary across the stack; `ScopeArg` is only the
   thin clap-facing mirror.
@@ -558,14 +643,20 @@ The spec requires `restart` to bounce *"all demonized tools **and UI services**"
   session-managed — restart your claude-mpm session manually." When trusty-mpm
   (Rust, supervised) replaces it (DOC-6 §6) it advertises `restart` and is bounced
   like any other daemon — no `tctl` change.
-- **The controller's own UI service** (DOC-7) → `tctl restart` also bounces
-  *itself*: the controller daemon hosting the DOC-7 web UI is restarted last (so
-  it does not kill itself mid-sweep). This is the only member where the controller
-  acts on its own process; DOC-7 owns the controller-UI lifecycle, DOC-5 only
-  names the entry point.
+- **The controller itself** (`kind = "controller"`: trusty-controller) → the
+  controller is selected by its `kind`, not special-cased by name: the `controller`
+  kind is a supervised, system-only daemon hosting the DOC-7 web UI, and
+  `tctl restart` bounces it **last** (so it does not kill itself mid-sweep), via
+  self-exit rather than an external bootout (DOC-9 §8 — a process cannot bootout
+  itself). This is the only member where the controller acts on its own process;
+  that is the controller's legitimate **self-recognition** (it knows its own member id — the
+  permitted single-self-exclusion of §2/§6), not per-tool branching of other tools.
+  Keying off `kind = "controller"` removes the earlier name-special-case
+  ([DOC-11](DOC-11-open-issues.md) m7). DOC-7 owns the controller-UI lifecycle,
+  DOC-5 only names the entry point.
 
-So `restart` = "every supervised daemon I can reach via the contract + my own UI
-service," computed from `kind` + advertised `verbs[]` — zero tool-specific
+So `restart` = "every supervised daemon I can reach via the contract + the
+controller itself," computed from `kind` + advertised `verbs[]` — zero tool-specific
 branching.
 
 ---

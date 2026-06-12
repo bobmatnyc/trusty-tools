@@ -15,11 +15,12 @@
 
 use std::sync::Arc;
 
-use crate::commands::start::{derive_warm_boot_stages, WarmBootInputs};
 use crate::core::registry::{IndexHandle, IndexId};
 use crate::service::persistence::PersistedIndex;
 use crate::service::persistence_loader::build_indexer_from_entry;
-use crate::service::warm_boot::canonicalize_best_effort;
+use crate::service::warm_boot::{
+    canonicalize_best_effort, derive_warm_boot_stages, WarmBootInputs,
+};
 use crate::service::SearchAppState;
 
 /// Attempt to locate a moved project root for a colocated index (issue #484).
