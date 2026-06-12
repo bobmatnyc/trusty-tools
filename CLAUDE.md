@@ -158,45 +158,13 @@ trusty-tools/               # workspace root
 > `tickets`, `mcp`, `embedder`, `memory-core`, and `monitor-tui` feature flags
 > respectively. Enable the relevant feature to pull in the corresponding module.
 
-For the source layout of any crate, read its `README.md` or browse
-`crates/<name>/src/`. Each crate owns its own `README.md` covering purpose,
-usage, and design notes.
+For the source layout of any crate, read its `README.md` or browse `crates/<name>/src/`. Each crate owns its own `README.md` covering purpose, usage, and design notes. For a quick reference to all crates and their locations, see [docs/reference/crate-map.md](docs/reference/crate-map.md).
 
 ## Documentation Layout
 
-Documentation is organized by **published crate**, not by topic. Each crate gets
-a directory under `docs/` containing three standard subdirectories:
+Documentation is organized by **published crate**, not by topic. Each crate gets a directory under `docs/` with three standard subdirectories: `regression-testing/` (versioned snapshots), `research/` (investigations), and `sessions/` (engineering narratives).
 
-```
-docs/
-├── trusty-search/              # See here for the worked example
-│   ├── regression-testing/     # Versioned snapshots: v{VERSION}-{DATE}.md
-│   ├── research/               # Investigation & decision docs: *-{DATE}.md or *-decision-{DATE}.md
-│   └── sessions/               # Engineering session summaries: SESSION-{DATE}-{topic}.md
-├── trusty-memory/              # Follows the same three-subdir convention
-├── trusty-common/              # (and all other published crates)
-├── trusty-mpm/                 # covers all 8 trusty-mpm-* binaries
-├── trusty-agents/
-├── trusty-analyze/
-└── trusty-git-analytics/
-```
-
-**Purpose of each subdir**:
-- **`regression-testing/`** — Performance snapshots tied to releases. One `.md`
-  file per measured release named `v{VERSION}-{YYYY-MM-DD}.md`; alternate-corpus
-  baselines (e.g., synthetic, trusty-agents) live alongside; `current.md` is a
-  symlink to the latest snapshot.
-- **`research/`** — Investigation outcomes, audits, decision documents. Named
-  `{topic}-{YYYY-MM-DD}.md` or `{topic}-decision-{YYYY-MM-DD}.md`.
-- **`sessions/`** — Engineering-session narratives. Named
-  `SESSION-{YYYY-MM-DD}-{topic}.md`.
-
-Each subdir has a `README.md` explaining its purpose, file naming, and indexing
-conventions. **See `docs/trusty-search/` as the authoritative worked example.**
-
-For **cross-release performance tracking**, see GitHub issue
-[#129](https://github.com/bobmatnyc/trusty-tools/issues/129): it accumulates
-benchmark deltas across all measured versions.
+See **`docs/trusty-search/`** as the authoritative worked example, and read [docs/reference/documentation-layout.md](docs/reference/documentation-layout.md) for the full convention and cross-release tracking details.
 
 ## Key Conventions
 
@@ -485,22 +453,7 @@ refs, never working trees.
 
 ## Per-Crate Reference
 
-Detailed implementation information for each crate lives in its own documentation:
-
-- **trusty-common** — see `crates/trusty-common/README.md` and `docs/trusty-common/`
-- **trusty-embedderd** — see `crates/trusty-embedderd/README.md` and `docs/trusty-embedderd/` (fastembed sidecar daemon)
-- **trusty-bm25-daemon** — see `crates/trusty-bm25-daemon/README.md` and `docs/trusty-bm25-daemon/` (BM25 index sidecar)
-- **trusty-memory** — see `crates/trusty-memory/README.md` and `docs/trusty-memory/` (licensed MIT, not Elastic-2.0; storage engine lives in `trusty-common`'s `memory-core` feature)
-- **trusty-search** — see `crates/trusty-search/README.md` and **`docs/trusty-search/`** (primary worked example with regression testing, research, sessions)
-- **trusty-analyze** — see `crates/trusty-analyze/README.md` and `docs/trusty-analyze/` (licensed MIT, not Elastic-2.0)
-- **trusty-mpm** — see `crates/trusty-mpm/README.md` and `docs/trusty-mpm/` (unified platform: CLI binaries `tm`/`trusty-mpm`, daemon, MCP server, TUI, Telegram)
-- **trusty-mpm-gui** — see `crates/trusty-mpm-gui/README.md` (Tauri desktop GUI, publish=false)
-- **trusty-agents** — see `crates/trusty-agents/README.md` and `docs/trusty-agents/` (agent orchestration platform, bin: `tagent`)
-- **trusty-agents-common** — see `crates/trusty-agents-common/README.md` (common API types for trusty-agents, publish=false)
-- **trusty-agents-local** — see `crates/trusty-agents-local/README.md` (local execution engine for trusty-agents, publish=false)
-- **trusty-git-analytics** — see `crates/trusty-git-analytics/README.md` and `docs/trusty-git-analytics/`
-
-For license details, check each crate's `Cargo.toml`: most are **Elastic License 2.0**, but `trusty-memory`, `trusty-analyze`, and a few others are **MIT**.
+See [docs/reference/crate-map.md](docs/reference/crate-map.md) for a full map of each crate's location, licensing, and documentation links.
 
 ## Abbreviations & Aliases
 
@@ -536,93 +489,15 @@ These abbreviations apply everywhere: ticket descriptions, build commands, refer
 
 ### Environment Variables
 
-| Variable | Required by | Purpose |
-|---|---|---|
-| `OPENROUTER_API_KEY` | `trusty-search` `/chat`, `trusty-common` chat helpers, `trusty-analyze` deep pass (OpenRouter path) | LLM chat via OpenRouter. Pass as argument to library helpers; never read from env inside library crates. Required for `POST /analyze/deep` unless a `bedrock/<model-id>` model is selected. |
-| `TRUSTY_LLM_MODEL` | `trusty-analyze` deep pass | LLM model id for the deep-analysis narrative pass. Default: `openai/gpt-4o-mini` (OpenRouter). Set to `bedrock/<bedrock-model-id>` (e.g. `bedrock/us.anthropic.claude-sonnet-4-6`) to route through AWS Bedrock instead of OpenRouter. The `bedrock/` prefix selects the Bedrock provider; anything else routes to OpenRouter. Claude Sonnet 4.6 uses the short form without date stamp or `-v1:0` suffix. |
-| `TRUSTY_AWS_REGION` | `trusty-analyze` (Bedrock deep pass) | AWS region for Bedrock `Converse` calls. Takes priority over `AWS_REGION`. Default: `us-east-1`. |
-| `AWS_REGION` | `trusty-analyze` (Bedrock deep pass) | Fallback AWS region for Bedrock calls. Overridden by `TRUSTY_AWS_REGION`. |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | `trusty-analyze` (Bedrock deep pass) | Standard AWS credentials for Bedrock access. The full AWS credential chain (env vars, `~/.aws/credentials` profiles, IAM roles, SSO) is supported. No API key is needed when using a `bedrock/` model. |
-| `RUST_LOG` | all daemons | Tracing filter, e.g. `RUST_LOG=debug` or `RUST_LOG=trusty_search=debug,warn`. |
-| `TRUSTY_MEMORY_LIMIT_MB` | `trusty-search` | Soft RSS ceiling for indexing pipeline. Auto-tuned from system RAM; override only when needed. |
-| `TRUSTY_MAX_CHUNKS` | `trusty-search` | Hard cap on chunks per index. Auto-tuned; rarely set manually. |
-| `TRUSTY_MAX_BATCH_SIZE` | `trusty-search` | ONNX embedding batch size. Auto-tuned; set if OOM during reindex. |
-| `TRUSTY_EMBEDDING_CACHE` | `trusty-search` | LRU embedding cache capacity (entries). |
-| `TRUSTY_COREML_TRIPWIRE_MB` | `trusty-search` (Apple Silicon) | RSS-delta ceiling per CoreML batch (default 4 GB). If exceeded, batch size is halved automatically. Override for hosts with different memory pressure characteristics. |
-| `TRUSTY_GPU_MEM_LIMIT_BYTES` | `trusty-search` / `trusty-embedderd` (CUDA EP, issue #600) | Exact CUDA `gpu_mem_limit` in bytes, applied alongside `arena_extend_strategy=kSameAsRequested` to stop ORT's BFCArena over-reserving VRAM and OOMing a 16 GB Tesla T4. Default 12 GiB (`12884901888`). Takes precedence over `TRUSTY_GPU_MEM_LIMIT_MB`; a malformed or `0` value is ignored. Removes the need for the old `TRUSTY_MAX_BATCH_SIZE=32` workaround. |
-| `TRUSTY_GPU_MEM_LIMIT_MB` | `trusty-search` / `trusty-embedderd` (CUDA EP, issue #600) | CUDA `gpu_mem_limit` in megabytes (scaled by 1024²). Used only when `TRUSTY_GPU_MEM_LIMIT_BYTES` is unset/invalid. E.g. `6144` for an 8 GB card. |
-| `ORT_DYLIB_PATH` | `trusty-search` (CUDA, glibc < 2.38); `trusty-analyze` (`load-dynamic`, `cuda` features) | Path to `libonnxruntime.so` on hosts with glibc < 2.38 and CUDA builds. For trusty-analyze, install with `--no-default-features --features http-server,load-dynamic` and set this var to the system libonnxruntime path. |
-| `SKIP_UI_BUILD` | `trusty-search` `build.rs` | Set to `1` to skip the Svelte UI build step (CI publish flows). |
-| `TRUSTY_NO_KG` | `trusty-search` daemon | Machine-wide default for `skip_kg`. When set to `1`, `true`, or `yes`, every new index created via `POST /indexes` (or `trusty-search index`) has `skip_kg=true` applied automatically unless the caller explicitly sets `skip_kg: false`. Useful for CI machines or resource-constrained hosts where KG is never needed. |
+Full environment-variable reference: see [docs/reference/environment-variables.md](docs/reference/environment-variables.md).
 
 ### Recommended IDE Setup
 
-**VS Code / Cursor**:
-- Install `rust-analyzer` extension.
-- Install `Even Better TOML` for `Cargo.toml` editing.
-- Workspace-level `rust-analyzer` picks up the root `Cargo.toml` automatically;
-  no per-crate `.vscode/settings.json` needed.
-- Recommended settings in `.vscode/settings.json`:
-  ```json
-  {
-    "rust-analyzer.cargo.features": "all",
-    "rust-analyzer.checkOnSave.command": "clippy"
-  }
-  ```
-
-**RustRover**: open the repo root; it detects the workspace automatically.
+See [docs/reference/ide-setup.md](docs/reference/ide-setup.md) for VS Code/Cursor and RustRover configuration.
 
 ### Running Individual MCP Servers Locally
 
-Each MCP server reads from stdin / writes to stdout (JSON-RPC 2.0 framing).
-All daemons log to **stderr** — never stdout.
-
-```bash
-# trusty-search daemon (HTTP + MCP stdio)
-RUST_LOG=info cargo run -p trusty-search -- start
-# Query via CLI
-cargo run -p trusty-search -- query "fn authenticate" --index <id>
-# MCP stdio mode (used by Claude Code via .mcp.json)
-cargo run -p trusty-search -- serve
-
-# MPM daemon
-RUST_LOG=info cargo run -p trusty-mpm --bin trusty-mpmd
-
-# MPM CLI (tm / trusty-mpm)
-cargo run -p trusty-mpm -- --help
-
-# trusty-memory (MCP server + embedded Svelte UI)
-RUST_LOG=info cargo run -p trusty-memory
-
-# Report the daemon's listening port (stdout is clean — safe for shell substitution):
-trusty-search port                                   # bare port: 7879
-trusty-search port --addr                            # host:port: 127.0.0.1:7879
-trusty-search port --json                            # {"addr":"127.0.0.1","port":7879}
-# Shell substitution idiom — queries the daemon without guessing the port:
-curl http://127.0.0.1:$(trusty-search port)/health
-
-trusty-memory port                                   # bare port: 7070
-trusty-memory port --addr                            # host:port: 127.0.0.1:7070
-trusty-memory port --json                            # {"addr":"127.0.0.1","port":7070}
-curl http://127.0.0.1:$(trusty-memory port)/health
-
-# Fire-and-forget memory note from any agent (no MCP tool needed):
-# Sub-agents spawned via Claude Code's Agent tool do not inherit MCP
-# connections, so they cannot call `mcp__trusty-memory__memory_remember`
-# directly. The `note` subcommand POSTs to the daemon's HTTP endpoint
-# (`POST /api/v1/remember`) and returns immediately — the dispatch runs
-# on a detached `tokio::spawn`. Failures degrade to stderr + zero exit.
-trusty-memory note "key fact here" --palace my-project
-trusty-memory note "another fact" --palace my-project --tag style --tag preferences
-
-# Build a specific binary in release mode
-cargo build --release -p trusty-search
-./target/release/trusty-search start
-```
-
-To wire a locally-built binary into Claude Code, update your project's
-`.mcp.json` or `~/.claude/mcp.json` to point `command` at the absolute path
-of the built binary (e.g. `target/release/trusty-search`).
+See [docs/reference/running-mcp-servers.md](docs/reference/running-mcp-servers.md) for commands, port discovery, and wiring binaries into Claude Code.
 
 ## Common Pitfalls
 
@@ -673,15 +548,4 @@ work in edition 2024. Do not copy let-chain patterns into edition-2021 crates.
 
 ## Former Repos Reference
 
-These repos were merged into this monorepo. Use this table when reading old
-PRs, issues, or commit messages that reference the former repo names.
-
-| Former repo | Now lives in |
-|---|---|
-| `bobmatnyc/trusty-common` | `crates/trusty-common` + 8 library crates |
-| `bobmatnyc/trusty-search` | `crates/trusty-search` |
-| `bobmatnyc/trusty-memory` | `crates/trusty-common` (`memory-core` feature — storage engine) + `crates/trusty-memory` (MCP frontend) |
-| `bobmatnyc/trusty-analyze` | `crates/trusty-analyze` |
-| `bobmatnyc/trusty-git-analytics` | `crates/trusty-git-analytics` |
-| `bobmatnyc/trusty-mpm` | `crates/trusty-mpm/` (unified crate) + `crates/trusty-mpm-gui/` |
-| `bobmatnyc/open-mpm` | `crates/trusty-agents` (renamed from `open-mpm` in #831) |
+See [docs/reference/former-repos.md](docs/reference/former-repos.md) to map old repo names to their current locations in the monorepo.
