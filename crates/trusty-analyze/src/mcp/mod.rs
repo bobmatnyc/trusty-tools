@@ -333,6 +333,8 @@ impl AnalyzerMcpServer {
             "extract_graph" => self.handle_extract_graph(args).await,
             "list_entities" => self.handle_list_entities(args).await,
             "cluster_concepts" => self.handle_cluster_concepts(args).await,
+            // Why (#1104 rework): proxies GET /indexes for the console dashboard.
+            "list_analyze_indexes" => self.get("/indexes").await,
             "analyzer_health" => self.handle_analyzer_health(args).await,
             "ingest_scip" => self.handle_ingest_scip(args).await,
             "extract_ner" => self.handle_extract_ner(args).await,
@@ -823,6 +825,7 @@ mod tests {
             "delete_fact",
             "analyzer_health",
             "ingest_scip",
+            "list_analyze_indexes",
         ] {
             assert!(
                 names.contains(&required),

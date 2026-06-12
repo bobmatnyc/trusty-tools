@@ -55,7 +55,7 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         // Read-only / query
         "memory_recall" | "memory_recall_deep" | "memory_recall_all" | "memory_list"
         | "palace_list" | "palace_info" | "kg_query" | "kg_gaps" | "list_prompt_facts"
-        | "get_prompt_context" => &[MEMORY_READ],
+        | "get_prompt_context" | "console_metrics" => &[MEMORY_READ],
 
         // Mutating
         "memory_remember"
