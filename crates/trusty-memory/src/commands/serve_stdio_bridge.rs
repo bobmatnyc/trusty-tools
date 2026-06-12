@@ -78,33 +78,35 @@ pub(crate) async fn forward_rpc(
 
 /// Build the `DaemonBridgeConfig` for the trusty-memory stdio bridge.
 ///
-/// Why: the shared `ensure_daemon_up` helper is parameterised by a config
-/// struct so it can serve trusty-memory, trusty-search, and trusty-analyze
-/// without duplication. This function encapsulates the trusty-memory-specific
-/// values: health path `/health`, spawn args `serve --foreground --http
-/// 127.0.0.1:0` (dynamic port, avoids EADDRINUSE against the real daemon),
-/// and a `base_url_fn` that re-reads the `http_addr` file on every call.
-/// What: returns a `DaemonBridgeConfig` ready for `ensure_daemon_up`.
-/// Test: `ensure_daemon_up` unit tests in `trusty_common::mcp::daemon_bridge`.
+/// Why (issue #1152): the stdio bridge is a pure proxy — it must NEVER spawn
+/// an unmanaged daemon.  The previous config used `spawn_args = ["serve",
+/// "--foreground", "--http", "127.0.0.1:0"]`, which auto-started a background
+/// process on a random OS-assigned port whenever the health probe to the
+/// launchd daemon at :7070 failed transiently.  That spawned daemon opened the
+/// production palace redb files and squatted the exclusive write lock, starving
+/// the real daemon and causing all writes to fail with "DatabaseAlreadyOpen".
+/// Setting `no_spawn: true` converts the spawn-on-miss path into a clear `Err`
+/// so the user is told to run `trusty-memory start` rather than silently
+/// spawning a write-lock squatter.
+/// What: returns a `DaemonBridgeConfig` with `no_spawn: true` and empty
+/// `spawn_args` (unused when `no_spawn` is set) that is ready for
+/// `ensure_daemon_up`.
+/// Test: `ensure_daemon_up` unit tests in `trusty_common::mcp::daemon_bridge`;
+/// `no_spawn_returns_err_without_spawning` specifically covers this path.
 fn build_bridge_config() -> DaemonBridgeConfig {
     DaemonBridgeConfig {
         service_name: "trusty-memory".to_string(),
-        // `--foreground` skips the self-spawn shortcut in the daemon entry
-        // point. `--http 127.0.0.1:0` lets the OS pick a free port, avoiding
-        // EADDRINUSE when the real daemon holds :7070. The daemon writes the
-        // OS-assigned port to its `http_addr` file; our `base_url_fn` re-reads
-        // that file on each poll iteration so the bridge discovers the port
-        // as soon as it is available.
-        spawn_args: vec![
-            "serve".to_string(),
-            "--foreground".to_string(),
-            "--http".to_string(),
-            "127.0.0.1:0".to_string(),
-        ],
+        // spawn_args is unused because no_spawn = true: the bridge never
+        // spawns a daemon.  Left empty rather than deleted so DaemonBridgeConfig
+        // consumers that iterate spawn_args don't need a None-check.
+        spawn_args: vec![],
         health_path: "/health".to_string(),
         base_url_fn: Box::new(daemon_base_url),
         startup_timeout: None, // use the shared 30s default
         poll_interval: None,   // use the shared 500ms default
+        // Issue #1152: NEVER spawn an unmanaged daemon from the stdio bridge.
+        // If the launchd daemon at :7070 is not reachable, fail loudly.
+        no_spawn: true,
     }
 }
 

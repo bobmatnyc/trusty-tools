@@ -1,22 +1,20 @@
 //! End-to-end never-hang proof for `trusty-memory serve --stdio` (issue #914).
 //!
-//! Why: the core invariant of the direct stdio JSON-RPC server is that every
+//! Why: the core invariant of the daemon-bridge stdio server is that every
 //! request resolves within a wall-clock deadline — success or explicit error,
 //! never a hang.  Unit tests cover individual pieces (adapter conversion,
 //! readiness preflight); these tests prove the full spawn → request → response
-//! round-trip.
+//! round-trip.  Updated for issue #1152: the bridge now uses `no_spawn: true`
+//! and refuses to auto-start a daemon. Each test helper provisions its own
+//! isolated HTTP daemon first, then spawns the bridge against the same data dir.
 //!
 //! What:
-//!   - `stdio_serve_tools_list_bounded`: spawns `serve --stdio` as a child,
+//!   - `stdio_serve_tools_list_bounded`: provisions a daemon, spawns the bridge,
 //!     sends `initialize`, `notifications/initialized`, and `tools/list`, asserts
-//!     each response arrives within a 15-second wall-clock deadline and contains
-//!     valid JSON-RPC.
+//!     each response arrives within `RESPONSE_DEADLINE` and contains valid JSON-RPC.
 //!   - `stdio_serve_remember_and_recall_bounded`: exercises `memory_remember`
-//!     and `memory_recall` via the stdio server with a deadline guard.
-//!   - `stdio_serve_recall_all_bounded`: exercises `memory_recall_all` — the
-//!     handler whose readiness preflight was missing before #914.  While the
-//!     daemon is Warming (no embedder ready yet) it must return the fast
-//!     "warming up" error within the deadline rather than hanging.
+//!     and `memory_recall` via the bridge with a deadline guard.
+//!   - `stdio_serve_recall_all_bounded`: exercises `memory_recall_all`.
 //!   - `stdio_serve_stdout_is_only_json`: asserts that every byte written to
 //!     stdout before the first response is valid JSON (no banner noise).
 //!
@@ -43,48 +41,96 @@ use tokio::time::timeout;
 
 /// Wall-clock deadline for each request/response pair.
 ///
-/// Why: the bridge architecture auto-starts the HTTP daemon if absent.
-/// On a cold machine daemon startup takes ~5–10 s; with 4 concurrent test
-/// processes each spawning a daemon the worst case is ~25 s.  60 s gives
-/// ample headroom without being so loose that a genuine hang goes undetected.
+/// Why: the bridge proxies to the HTTP daemon; on a warm machine the first
+/// request completes quickly but a cold-start tool call can take several
+/// seconds. 60 s gives ample headroom without masking genuine hangs.
 pub(crate) const RESPONSE_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Deadline for the child process to exit after stdin EOF.
 pub(crate) const EXIT_DEADLINE: Duration = Duration::from_secs(15);
 
+/// Polling interval for the daemon readiness file.
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Maximum time to wait for the daemon to write its `http_addr` file.
+///
+/// Why: 30 s covers slow CI runners; typical daemon boot is < 1 s.
+const DAEMON_BOOT_TIMEOUT: Duration = Duration::from_secs(30);
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Path to the trusty-memory binary built by Cargo.
+/// Path to the `trusty-memory` binary built by Cargo.
 pub(crate) fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_trusty-memory"))
 }
 
 /// Spawned child wrapper with its stdio pipes attached.
 ///
-/// Why: each test gets a private palace directory and a matching child process;
-/// this struct keeps them alive together so tempdir cleanup happens after the
-/// child exits.
-/// What: bundles the child handle, its stdin pipe, and its stdout reader.
+/// Why: each test gets a private palace directory, a matching HTTP daemon, and
+/// a bridge child process; this struct keeps all three alive together so
+/// tempdir cleanup happens after the children exit.
+/// What: bundles the bridge child handle, its stdin pipe, its stdout reader,
+/// the daemon child handle, and the data-dir tempdir.
 /// Test: indirect — every test uses `StdioChild::spawn`.
 pub(crate) struct StdioChild {
     pub(crate) child: Child,
     pub(crate) stdin: ChildStdin,
     pub(crate) reader: BufReader<ChildStdout>,
+    daemon: std::process::Child,
     _data_dir: TempDir,
 }
 
 impl StdioChild {
-    /// Spawn `trusty-memory serve --stdio` with an isolated data directory.
+    /// Provision an isolated HTTP daemon and spawn a `serve --stdio` bridge.
     ///
-    /// Why: each test must be isolated from the user's real data.
-    /// What: creates a tempdir, sets `TRUSTY_DATA_DIR_OVERRIDE`, spawns the
-    /// binary with piped stdin/stdout and stderr forwarded to the test's
-    /// stderr (so failures are visible without polluting stdout).
-    /// Test: indirectly.
+    /// Why: `serve --stdio` uses `no_spawn: true` (issue #1152) and refuses to
+    /// auto-start a daemon. Every test must provision its own daemon first.
+    /// Using `--http 127.0.0.1:0` lets the OS pick a free port so concurrent
+    /// test runs cannot collide. `TRUSTY_DATA_DIR_OVERRIDE` confines all state
+    /// (http_addr, palaces) to an isolated temp dir — never touches the user's
+    /// real palace.
+    /// What: creates a tempdir, spawns `serve --foreground --http 127.0.0.1:0`
+    /// (the daemon), polls for `{tempdir}/trusty-memory/http_addr`, then spawns
+    /// `serve --stdio` (the bridge) pointing at the same tempdir. The bridge
+    /// discovers the daemon address from the http_addr file.
+    /// Test: indirectly by every test in this file.
     pub(crate) async fn spawn(palace: Option<&str>) -> Self {
         let data_dir = tempfile::tempdir().expect("tempdir");
+
+        // Step 1: provision the HTTP daemon.
+        let daemon = std::process::Command::new(binary())
+            .arg("serve")
+            .arg("--foreground")
+            .arg("--http")
+            .arg("127.0.0.1:0")
+            .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir.path())
+            .env("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1")
+            .env("RUST_LOG", "warn")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn daemon");
+
+        // Step 2: wait for the daemon's readiness signal.
+        let readiness_file = data_dir.path().join("trusty-memory").join("http_addr");
+        let deadline = std::time::Instant::now() + DAEMON_BOOT_TIMEOUT;
+        loop {
+            if readiness_file.exists() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "daemon did not write http_addr within {:?}; expected at {}",
+                DAEMON_BOOT_TIMEOUT,
+                readiness_file.display()
+            );
+            std::thread::sleep(POLL_INTERVAL);
+        }
+
+        // Step 3: spawn the bridge pointing at the same data dir.
         // TRUSTY_SKIP_PALACE_ENFORCEMENT lets the test use arbitrary palace names
         // without a `.trusty-tools/trusty-memory.yaml` pin file.
         let mut cmd = tokio::process::Command::new(binary());
@@ -110,6 +156,7 @@ impl StdioChild {
             child,
             stdin,
             reader: BufReader::new(stdout),
+            daemon,
             _data_dir: data_dir,
         }
     }
@@ -161,13 +208,16 @@ impl StdioChild {
         serde_json::from_str(&raw).expect("response must be valid JSON")
     }
 
-    /// Close stdin (EOF) and wait for the child to exit within `EXIT_DEADLINE`.
+    /// Close the bridge stdin (EOF), wait for the bridge to exit, then kill
+    /// the daemon child.
     pub(crate) async fn close(mut self) {
         drop(self.stdin);
         timeout(EXIT_DEADLINE, self.child.wait())
             .await
-            .expect("child must exit after stdin EOF")
-            .expect("child wait");
+            .expect("bridge child must exit after stdin EOF")
+            .expect("bridge child wait");
+        let _ = self.daemon.kill();
+        let _ = self.daemon.wait();
     }
 }
 
@@ -178,8 +228,9 @@ impl StdioChild {
 /// Why: establishes that `serve --stdio` can successfully handle the MCP
 /// lifecycle handshake (`initialize`, `notifications/initialized`) and a
 /// `tools/list` request — all within a wall-clock deadline.
-/// What: spawns the server, sends the three requests, asserts each response
-/// is valid JSON-RPC and that `tools/list` returns a non-empty tools array.
+/// What: provisions a daemon and bridge, sends the three requests, asserts
+/// each response is valid JSON-RPC and that `tools/list` returns a non-empty
+/// tools array.
 /// Critically: `notifications/initialized` must produce NO stdout line —
 /// if the server were to leak a response for it, `recv()` on the next call
 /// would consume the notification reply instead of the `tools/list` result
@@ -251,14 +302,11 @@ async fn stdio_serve_tools_list_bounded() {
         "tools/list must return at least one tool"
     );
 
-    // Verify stdout contains only JSON (no banner noise before first response).
-    // The `init_resp` we already parsed is JSON — we checked it above.
-
     child.close().await;
 }
 
 /// Why: proves that `memory_remember` and `memory_recall` work end-to-end
-/// through the stdio server and that both complete within the deadline.
+/// through the bridge server and that both complete within the deadline.
 /// The daemon starts in `Warming` state (no background embedder warm-up
 /// completes before the test sends requests), so these calls may return the
 /// fast "warming up" error OR succeed if the embedder completes quickly.
@@ -357,9 +405,9 @@ async fn stdio_serve_remember_and_recall_bounded() {
 /// readiness preflight (issue #914 Part A fix).  This test proves that even
 /// before the embedder is warm, `memory_recall_all` returns a bounded explicit
 /// response — not a hang.
-/// What: sends `memory_recall_all` immediately after `initialize` (before any
-/// embedder warm-up could complete) and asserts the response arrives within
-/// `RESPONSE_DEADLINE`.
+/// What: provisions daemon + bridge, sends `memory_recall_all` immediately
+/// after `initialize` (before any embedder warm-up could complete) and asserts
+/// the response arrives within `RESPONSE_DEADLINE`.
 /// Test: `cargo test -p trusty-memory --test serve_stdio_e2e -- stdio_serve_recall_all_bounded`.
 #[tokio::test]
 async fn stdio_serve_recall_all_bounded() {
@@ -408,10 +456,10 @@ async fn stdio_serve_recall_all_bounded() {
 
 /// Why: the stdio channel is the JSON-RPC transport — stdout must not carry
 /// any non-protocol bytes (no update-check banners, no bind announcements).
-/// What: sends a single `tools/list` request, reads the response, and asserts
-/// the raw response line is valid JSON-RPC.  Since `recv()` parses JSON and
-/// panics on failure, any banner noise would cause the test to fail rather
-/// than silently pass.
+/// What: provisions daemon + bridge, sends a single `initialize`, reads the
+/// response, and asserts the raw response line is valid JSON-RPC. Since
+/// `recv()` parses JSON and panics on failure, any banner noise would cause
+/// the test to fail rather than silently pass.
 /// Test: `cargo test -p trusty-memory --test serve_stdio_e2e -- stdio_serve_stdout_is_only_json`.
 #[tokio::test]
 async fn stdio_serve_stdout_is_only_json() {

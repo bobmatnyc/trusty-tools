@@ -5,6 +5,10 @@
 //! the endpoint with metrics, round-trip semantics, and a dedicated probe
 //! palace. Issue #1101 makes the expensive ONNX round-trip opt-in (via
 //! `?probe=true`) so the default path remains cheap enough for 1 s LB polling.
+//! Issue #1142 adds self-healing: `ensure_health_probe_palace` now seeds a
+//! persistent sentinel drawer when the probe palace is empty (e.g. after a
+//! redb v2→v3 migration wipes the vector store) so the palace re-populates
+//! itself on the next deep-probe request without operator intervention.
 //! What: `health()` axum handler, `HealthQuery` params struct,
 //! `HealthResponse` wire struct, `HealthProbeError`,
 //! `ensure_health_probe_palace`, `run_health_round_trip`, and the testable
@@ -19,6 +23,19 @@ use axum::{
 use trusty_common::memory_core::palace::{Palace, PalaceId, RoomType};
 use trusty_common::memory_core::retrieval::recall_with_default_embedder;
 use uuid::Uuid;
+
+/// Persistent content stored in the probe palace as an always-present
+/// sentinel (issue #1142). A migration (e.g. redb v2→v3) may wipe the
+/// vector store but leave the palace directory intact. The sentinel is
+/// re-seeded automatically on the first deep probe after such an event.
+///
+/// Why: gives `ensure_health_probe_palace` a drawer it can check for
+/// existence to determine whether the palace data was lost — and, if lost,
+/// to re-plant it so the next probe round-trip has a healthy baseline.
+/// What: a fixed string that is recognisable in drawer dumps / logs.
+/// Test: `health_probe_self_heals_after_migration_wipe` (issue #1142).
+pub(crate) const PROBE_SENTINEL_CONTENT: &str =
+    "__trusty_memory_health_sentinel__ issue-#1142 self-heal probe";
 
 use crate::AppState;
 
@@ -264,7 +281,8 @@ pub(crate) enum HealthProbeError {
 /// flags its purpose. Either path returns success when the palace is ready
 /// for the round-trip; failures propagate as `HealthProbeError::EnsureProbePalace`.
 /// Test: `health_probe_palace_is_invisible`, `health_probe_cleans_up_on_success`,
-/// `health_probe_cleans_up_on_recall_miss`.
+/// `health_probe_cleans_up_on_recall_miss`,
+/// `health_probe_self_heals_after_migration_wipe` (issue #1142).
 pub(crate) fn ensure_health_probe_palace(state: &AppState) -> Result<(), HealthProbeError> {
     let id = PalaceId::new(HEALTH_PROBE_PALACE);
 
@@ -299,6 +317,61 @@ pub(crate) fn ensure_health_probe_palace(state: &AppState) -> Result<(), HealthP
     Ok(())
 }
 
+/// Seed or re-seed the persistent sentinel drawer in the probe palace.
+///
+/// Why (issue #1142): after a redb v2→v3 migration the probe palace
+/// directory and `palace.json` survive but the internal vector/drawer stores
+/// are wiped. The first deep-probe after migration finds an empty palace,
+/// stores an ephemeral probe drawer, then runs recall — but the vector index
+/// was just reset and may not return the just-stored item, producing a
+/// spurious `ProbeMissing` on every probe. The fix: seed a *persistent*
+/// sentinel drawer that outlives ephemeral round-trip drawers. On the first
+/// deep probe after any migration event, if the sentinel is absent the
+/// current call seeds it and returns `Ok(())` immediately (skipping the
+/// full round-trip) — the palace is healthy, it just lost its sentinel.
+/// On the next probe the sentinel will be present and the normal round-trip
+/// executes.
+/// What: Checks `handle.drawers` for [`PROBE_SENTINEL_CONTENT`]. If absent,
+/// calls `handle.remember_with_options` with `force = true` to bypass the
+/// token-length gate and store the sentinel. Returns `true` when seeding
+/// occurred (caller should skip the normal round-trip for this request to
+/// avoid a false ProbeMissing from the freshly-seeded vector), `false` when
+/// the sentinel was already present.
+/// Test: `health_probe_self_heals_after_migration_wipe` (issue #1142).
+pub(crate) async fn seed_probe_sentinel_if_absent(
+    handle: &std::sync::Arc<trusty_common::memory_core::PalaceHandle>,
+) -> Result<bool, HealthProbeError> {
+    let sentinel_present = handle
+        .drawers
+        .read()
+        .iter()
+        .any(|d| d.content == PROBE_SENTINEL_CONTENT);
+
+    if sentinel_present {
+        return Ok(false);
+    }
+
+    use trusty_common::memory_core::retrieval::RememberOptions;
+    handle
+        .remember_with_options(
+            PROBE_SENTINEL_CONTENT.to_string(),
+            RoomType::General,
+            vec!["healthcheck".to_string(), "sentinel".to_string()],
+            0.0,
+            RememberOptions {
+                force: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| HealthProbeError::EnsureProbePalace(format!("seed sentinel: {e:#}")))?;
+    tracing::info!(
+        "health probe: seeded sentinel drawer in {} (issue #1142 self-heal)",
+        HEALTH_PROBE_PALACE
+    );
+    Ok(true)
+}
+
 /// Execute a remember/recall/forget cycle against the dedicated probe palace.
 ///
 /// Why: `/health` used to return `status: "ok"` even when `POST /drawers` or
@@ -329,6 +402,16 @@ pub(crate) async fn run_health_round_trip(state: &AppState) -> Result<(), Health
         .registry
         .open_palace(&state.data_root, &probe_id)
         .map_err(|e| HealthProbeError::OpenPalace(format!("{e:#}")))?;
+
+    // Issue #1142: self-heal the sentinel when the palace is empty (e.g. after
+    // a redb migration wipes the vector/drawer stores). If the sentinel was
+    // absent and we just seeded it, skip the normal round-trip for THIS request
+    // — the vector index on a just-seeded single item may not return it yet,
+    // and the palace is clearly healthy (remember just succeeded). The next
+    // probe will find the sentinel and exercise the full round-trip.
+    if seed_probe_sentinel_if_absent(&handle).await? {
+        return Ok(());
+    }
 
     // Delegate the cleanup-ordering logic to the testable helper so unit tests
     // can substitute the recall implementation. The real handler always uses
