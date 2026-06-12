@@ -104,14 +104,16 @@ async fn poll_once(handle: &McpServiceHandle, cache: &MetricsCache) {
 ///
 /// Why: This is the single place where the poll interval and error-logging
 /// policy are set for the metrics poller, mirroring the services `poller::start`.
+/// Accepts `Arc<McpServiceHandle>` so the caller (lib.rs::run_serve) can share
+/// the same handle with on-demand routes (e.g. the analyze visualize route)
+/// without starting a second child process for the same binary.
 /// What: Spawns a tokio task that immediately calls `poll_once`, then repeats
 /// every `interval`. The spawned task logs `error!` if the loop ever exits
 /// (panic-safe: the outer `tokio::spawn` will not propagate the panic to the
 /// caller).
 /// Test: Not tested directly (requires a live binary); the cache and handle
 /// logic are tested in their respective modules.
-pub fn start(handle: McpServiceHandle, cache: MetricsCache, interval: Duration) {
-    let handle = Arc::new(handle);
+pub fn start(handle: Arc<McpServiceHandle>, cache: MetricsCache, interval: Duration) {
     tokio::spawn(async move {
         info!(
             "metrics_poller: starting (interval={}s)",

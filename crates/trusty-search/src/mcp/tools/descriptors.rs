@@ -343,6 +343,17 @@ pub fn tool_descriptors() -> Value {
                 },
                 "required": []
             }
+        },
+        {
+            "name": "console_metrics",
+            "description": "Return a ConsoleMetricsReport with daemon health and index aggregate \
+                            statistics (index_count, warm_boot_degraded, index list with id/root_path/size_bytes). \
+                            Used by the trusty-console dashboard metrics poller (epic #1104).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
         }
     ])
 }

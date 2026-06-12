@@ -611,7 +611,8 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                     },
                     "required": []
                 }
-            }
+            },
+            crate::console_metrics::descriptor()
         ]
     })
 }
@@ -1920,6 +1921,7 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
         "kg_bootstrap" => handle_kg_bootstrap(state, args).await,
         "memory_send_message" => handle_memory_send_message(state, args).await,
         "upgrade" => handle_upgrade_tool(state, args).await,
+        "console_metrics" => crate::console_metrics::handle_console_metrics(state, args).await,
         other => anyhow::bail!("unknown tool: {other}"),
     }
 }
@@ -2448,7 +2450,7 @@ mod tests {
             .get("tools")
             .and_then(|t| t.as_array())
             .expect("tools array");
-        assert_eq!(tools.len(), 24);
+        assert_eq!(tools.len(), 25);
         let names: Vec<&str> = tools
             .iter()
             .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
@@ -2478,6 +2480,7 @@ mod tests {
             "kg_bootstrap",
             "memory_send_message",
             "upgrade",
+            "console_metrics",
         ] {
             assert!(names.contains(&expected), "missing tool: {expected}");
         }

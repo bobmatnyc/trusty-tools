@@ -11,6 +11,7 @@
 //! Test: `cargo test -p trusty-console` exercises the CLI parsing tests defined
 //! in the submodules.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -169,12 +170,10 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     );
 
     // ── metrics MCP poll (trusty-analyze) ───────────────────────────────────
-    // Spawn a supervised stdio MCP connection to trusty-analyze and poll its
-    // console_metrics tool every poll_interval seconds. The poller writes
-    // into state.metrics_cache(), which the route handler reads directly.
-    // On machines where trusty-analyze is absent the McpServiceHandle marks
-    // it Absent immediately — every poll returns Err, the cache stays None,
-    // and /api/console/metrics/analyze returns 503 (graceful degradation).
+    // The analyze handle is stored in AppState so on-demand routes
+    // (/api/console/metrics/analyze/indexes, /api/console/metrics/analyze/visualize)
+    // share the same child process. Here we hand a clone of that Arc to the
+    // background metrics poller so both paths reuse one stdio connection.
     //
     // Why "mcp" not "serve --mcp":
     // `serve --mcp` starts BOTH the HTTP daemon and an MCP stdio loop; it
@@ -184,14 +183,39 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     // if the HTTP daemon is not yet up, `ensure_mcp_daemon_up` in analyze's
     // `mcp` subcommand starts it automatically. This is the correct invocation
     // for a lightweight stdio-only console_metrics child.
-    {
-        let handle = McpServiceHandle::new("trusty-analyze", vec!["mcp".to_string()]);
-        metrics_poller::start(
-            handle,
-            state.metrics_cache().clone(),
-            Duration::from_secs(args.poll_interval),
-        );
-    }
+    metrics_poller::start(
+        state.analyze_handle(),
+        state.metrics_cache().clone(),
+        Duration::from_secs(args.poll_interval),
+    );
+
+    // ── metrics MCP poll (trusty-memory) ────────────────────────────────────
+    // trusty-memory's stdio MCP mode is `serve --stdio` (see main.rs).
+    // The bridge forwards all JSON-RPC calls to the running HTTP daemon and
+    // auto-starts it if absent. On machines without trusty-memory the handle
+    // marks it Absent immediately; the cache stays None;
+    // /api/console/metrics/memory returns 503 (graceful degradation).
+    metrics_poller::start(
+        Arc::new(McpServiceHandle::new(
+            "trusty-memory",
+            vec!["serve".to_string(), "--stdio".to_string()],
+        )),
+        state.memory_metrics_cache().clone(),
+        Duration::from_secs(args.poll_interval),
+    );
+
+    // ── metrics MCP poll (trusty-search) ────────────────────────────────────
+    // trusty-search's stdio MCP mode is `serve` (see serve_stdio in main.rs).
+    // On machines without trusty-search the handle marks it Absent immediately;
+    // the cache stays None; /api/console/metrics/search returns 503.
+    metrics_poller::start(
+        Arc::new(McpServiceHandle::new(
+            "trusty-search",
+            vec!["serve".to_string()],
+        )),
+        state.search_metrics_cache().clone(),
+        Duration::from_secs(args.poll_interval),
+    );
 
     let router = server::build_router(state.clone());
 

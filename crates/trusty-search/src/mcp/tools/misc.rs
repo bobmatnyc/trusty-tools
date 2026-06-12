@@ -1,7 +1,7 @@
 //! Miscellaneous tool arms: `search_health`, `chat`, `grep`, `get_call_chain`,
-//! and `upgrade`.
+//! `upgrade`, and `console_metrics`.
 //!
-//! Why: these five tools share no common theme with the search or index groups
+//! Why: these tools share no common theme with the search or index groups
 //! but each is too small to justify its own file. Grouping them here keeps
 //! the module hierarchy flat while still freeing `mod.rs` from 500+ lines.
 //! What: exports `dispatch_misc_tool`, called from `call_tool` in `mod.rs`.
@@ -161,6 +161,75 @@ pub(super) async fn dispatch_misc_tool(
             let body = serde_json::json!({ "check": check, "confirm": confirm });
             Some(server.post("/upgrade", &body).await)
         }
+        "console_metrics" => Some(handle_console_metrics(server).await),
         _ => None,
     }
+}
+
+/// `console_metrics` handler — build and return a `ConsoleMetricsReport`.
+///
+/// Why: The trusty-console metrics poller calls this tool via a supervised
+/// stdio MCP connection every poll_interval seconds to refresh the
+/// `/api/console/metrics/search` dashboard panel (epic #1104).
+/// What: Probes `GET /health` for daemon liveness, index count, and
+/// warm_boot_degraded status; also calls `GET /indexes?details=true` for
+/// the per-index list. Builds a `ConsoleMetricsReport` via `make_report()`.
+/// Returns a raw `serde_json::Value` (not the MCP content envelope) —
+/// the dispatcher's `wrap_tool_result()` applies the envelope.
+/// Test: The dispatcher routes `"console_metrics"` to this arm; covered by
+/// the tool-name routing tests in `tests.rs`.
+async fn handle_console_metrics(server: &McpServer) -> Result<Value, DispatchError> {
+    use trusty_common::console_metrics::{make_report, ServiceHealth};
+
+    // Probe /health — determines status and index_count.
+    let (status, index_count, warm_boot_degraded) = match server.get("/health").await {
+        Ok(health) => {
+            let idx = health.get("indexes").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let degraded = health
+                .get("warmboot_summary")
+                .and_then(|s| s.get("warm_boot_degraded"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            (ServiceHealth::Ok, idx, degraded)
+        }
+        Err(_) => (ServiceHealth::Error, 0usize, false),
+    };
+
+    // GET /indexes?details=true returns {"indexes":[{…}]}, not a bare array.
+    let raw = server
+        .get("/indexes?details=true")
+        .await
+        .unwrap_or_default();
+    let indexes: Vec<Value> = raw
+        .get("indexes")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "id":        e.get("id").cloned().unwrap_or(Value::Null),
+                        "root_path": e.get("root_path").cloned().unwrap_or(Value::Null),
+                        "size_bytes":e.get("size_bytes").cloned().unwrap_or(Value::Null),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let metrics = serde_json::json!({
+        "index_count": index_count,
+        "warm_boot_degraded": warm_boot_degraded,
+        "indexes": indexes,
+    });
+
+    let report = make_report(
+        "trusty-search",
+        "Trusty Search",
+        env!("CARGO_PKG_VERSION"),
+        status,
+        metrics,
+        1,
+    );
+
+    serde_json::to_value(&report).map_err(|e| DispatchError::Transport(e.to_string()))
 }
