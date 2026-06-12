@@ -3,16 +3,21 @@
 [![crates.io](https://img.shields.io/crates/v/trusty-memory.svg)](https://crates.io/crates/trusty-memory)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Memory palace MCP server (HTTP/SSE + Unix domain socket) backed by `usearch`
-vector store, SQLite metadata, and `fastembed` embeddings. Stores and retrieves
-natural-language memories organized into named "palaces" (namespaces), with an
-optional knowledge-graph layer for structured triples.
+Memory palace MCP server (HTTP/SSE) backed by `usearch` vector store, SQLite
+metadata, and `fastembed` embeddings. Stores and retrieves natural-language
+memories organized into named "palaces" (namespaces), with an optional
+knowledge-graph layer for structured triples.
 
-Claude Code integration uses the companion `trusty-memory-mcp-bridge` binary
-which speaks stdio MCP and pipes it over the daemon's Unix domain socket.
-The legacy in-process `serve --stdio` flag was removed in issue #150 because
-it deadlocked on redb's exclusive write lock whenever a long-lived daemon
-was already running.
+Claude Code integration uses `trusty-memory serve --stdio` — a direct
+stdio JSON-RPC MCP server that forwards every request to the running HTTP
+daemon and returns daemon responses verbatim. No Unix domain socket is
+involved.
+
+A DEPRECATED `trusty-memory-mcp-bridge` shim binary is also installed by
+`cargo install trusty-memory` so that existing `.mcp.json` configs that still
+reference the old bridge name keep working without per-project changes.
+Run `trusty-memory migrate kuzu-memory` to rewrite configs to the canonical
+form automatically.
 
 Integrates with Claude Code and any other MCP-aware client as a first-class
 long-term memory backend.
@@ -60,7 +65,7 @@ cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-memory --lo
 
 This builds from the latest commit on `main` and installs the binary to `~/.cargo/bin/`. Make sure `~/.cargo/bin/` is on your PATH.
 
-Installing `trusty-memory` produces three binaries in one command: `trusty-memory`, `trusty-memory-mcp-bridge`, and `trusty-bm25-daemon`.
+Installing `trusty-memory` produces four binaries in one command: `trusty-memory`, `trusty-memory-mcp-bridge` (deprecated shim — forwards to `serve --stdio`), `trusty-bm25-daemon`, and `trusty-console`.
 
 To install a specific version:
 ```bash
@@ -172,27 +177,43 @@ call.
 
 Run `trusty-memory setup` once — it installs the launchd LaunchAgent
 (macOS), pre-warms the embedder cache, and patches every Claude settings
-file it finds with the canonical MCP server entry. The MCP entry points
-at `trusty-memory-mcp-bridge`, a thin stdio-to-UDS pipe (PR #149) that
-Claude Code spawns as a child process. The bridge then connects to the
-long-lived daemon over the Unix domain socket the daemon owns.
+file it finds with the canonical MCP server entry.
 
-If you prefer to edit `.mcp.json` (or `~/.claude/mcp.json`) by hand:
+### Canonical MCP config (0.15.3+)
+
+The recommended entry in `.mcp.json` or `~/.claude/mcp.json` is:
 
 ```json
 {
   "mcpServers": {
     "trusty-memory": {
-      "command": "trusty-memory-mcp-bridge",
-      "args": [],
+      "command": "trusty-memory",
+      "args": ["serve", "--stdio"],
       "env": {}
     }
   }
 }
 ```
 
-Claude Code auto-discovers `.mcp.json` on project open. The
-`trusty-memory-mcp-bridge` binary must be on `PATH` and the daemon must be
+`trusty-memory serve --stdio` is a pure daemon-bridge proxy: it ensures the
+HTTP daemon is running (auto-starting it if absent), then forwards every
+JSON-RPC request to `POST /rpc` on the daemon and returns the response
+verbatim. No Unix domain socket is involved. The stdio process never opens
+the redb write-lock directly, so it co-exists safely with the running HTTP
+daemon.
+
+Run `trusty-memory migrate kuzu-memory` to rewrite all Claude settings files
+to the canonical form automatically.
+
+### Compatibility shim (for existing installations)
+
+If your `.mcp.json` still references `trusty-memory-mcp-bridge`, the shim
+binary (installed alongside `trusty-memory` since 0.15.3) forwards to
+`serve --stdio` automatically. You will see a one-line deprecation warning
+on stderr (which Claude Code ignores). Update your config at your
+convenience — the shim will be removed in a future minor version.
+
+Claude Code auto-discovers `.mcp.json` on project open. The daemon must be
 running (started either by `trusty-memory setup`'s LaunchAgent or by
 `trusty-memory start` / `trusty-memory serve`).
 
@@ -201,10 +222,10 @@ running (started either by `trusty-memory setup`'s LaunchAgent or by
 The MCP server registers **23 tools** (authoritative source:
 `src/tools.rs` `tool_definitions`, asserted by the
 `tool_definitions_lists_all_tools` test). All are exposed via both the MCP
-protocol (over the `trusty-memory-mcp-bridge` → UDS path) and the HTTP API
-(`/api/v1/`). The `palace` argument is required unless the server was started
-with `--palace <name>`. The tables below cover the primary surface; the full
-roster also includes `memory_note`, `memory_recall_all`, `palace_delete`,
+protocol (over the `serve --stdio` path) and the HTTP API (`/api/v1/`). The
+`palace` argument is required unless the server was started with `--palace
+<name>`. The tables below cover the primary surface; the full roster also
+includes `memory_note`, `memory_recall_all`, `palace_delete`,
 `palace_update`, `palace_compact`, `kg_gaps`, `kg_bootstrap`, `add_alias`,
 `discover_aliases`, `list_prompt_facts`, `remove_prompt_fact`, and
 `get_prompt_context`.

@@ -48,6 +48,24 @@ name = "trusty-bm25-daemon"
 path = "src/bin/bm25_daemon.rs"
 
 [[bin]]
+# Why: Compatibility shim for users who installed trusty-memory before the #914
+#      PR3 epic (commit ba60e0c3) deleted the original byte-pipe bridge + UDS
+#      transport. Those users have `trusty-memory-mcp-bridge` in their .mcp.json
+#      and receive JSON-RPC -32000 because the binary no longer ships. This shim
+#      restores the binary so existing configs stop breaking without requiring
+#      per-project config edits. It emits a one-line deprecation notice to stderr
+#      then re-execs `trusty-memory serve --stdio` (the canonical path since PR1).
+#      The shim is intentionally thin (~70 lines, no library imports beyond std)
+#      to minimise maintenance surface. Users should migrate to
+#      `"command": "trusty-memory", "args": ["serve", "--stdio"]` at their
+#      convenience; this shim will be removed in a future minor version.
+# What: standalone binary at src/bin/mcp_bridge.rs; no required-features (no
+#      axum, no redb — this binary never opens a database).
+# Test: `cargo run --bin trusty-memory-mcp-bridge -- 2>&1 | grep DEPRECATED`
+name = "trusty-memory-mcp-bridge"
+path = "src/bin/mcp_bridge.rs"
+
+[[bin]]
 # Why: Bundle trusty-console into trusty-memory's install surface so
 #      `cargo install trusty-memory` also installs the web dashboard
 #      (Single-Install Convention, epic #943). All dashboard logic lives in

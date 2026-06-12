@@ -403,8 +403,10 @@ the daemon logs an error with the actionable FDA re-grant hint.
 
 As of trusty-common 0.10.0, all three HTTP daemons (trusty-memory, trusty-search,
 trusty-analyze) implement graceful shutdown: they drain in-flight requests before
-exiting when they receive SIGTERM. The `mcp_bridge` binary reconnects automatically
-with exponential backoff when the daemon restarts.
+exiting when they receive SIGTERM. The `serve --stdio` proxy reconnects automatically
+with exponential backoff when the daemon restarts (the `trusty-memory-mcp-bridge`
+binary is a deprecated shim that forwards to `serve --stdio`; update your
+`.mcp.json` to `"command": "trusty-memory", "args": ["serve", "--stdio"]`).
 
 **Use `launchctl bootout` (SIGTERM), not `launchctl kickstart -k` (SIGKILL):**
 
