@@ -37,6 +37,7 @@ use crate::connector::ServiceConnector;
 /// search, memory, analyze.
 /// Test: `test_all_connectors_returns_three` below.
 pub fn all_connectors() -> Vec<Box<dyn ServiceConnector>> {
+    // trusty-review is intentionally excluded from probing per decision #1069.
     vec![
         Box::new(SearchConnector::new()),
         Box::new(MemoryConnector::new()),

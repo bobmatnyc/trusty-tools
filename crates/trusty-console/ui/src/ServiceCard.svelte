@@ -1,6 +1,6 @@
 <script>
   /**
-   * @typedef {{ id: string, display_name: string, status: string, version?: string, url?: string }} Service
+   * @typedef {{ id: string, display_name: string, status: string, version?: string, url?: string, hint?: string }} Service
    * @type {{ service: Service, onViewDetails?: (id: string) => void }}
    */
   let { service, onViewDetails } = $props();
@@ -9,12 +9,16 @@
     running: 'Running',
     available: 'Available',
     absent: 'Absent',
+    degraded: 'Degraded',
   };
 
   const STATUS_COLORS = {
     running: '#22c55e',
     available: '#f59e0b',
     absent: '#64748b',
+    // Degraded uses amber-orange to indicate partial impairment (reachable but
+    // console_metrics tool missing). Distinct from the yellow "Available" state.
+    degraded: '#f97316',
   };
 
   // Known services that have a details tab in the console.
@@ -52,6 +56,8 @@
       <p class="hint">Install with <code>cargo install {service.id}</code></p>
     {:else if service.status === 'available'}
       <p class="hint">Binary found but daemon is not running.</p>
+    {:else if service.status === 'degraded'}
+      <p class="hint degraded-hint">{service.hint ?? 'Service reachable but its metrics tool is unavailable.'}</p>
     {/if}
     {#if hasTab && onViewDetails}
       <button class="details-btn" onclick={handleViewDetails}>
@@ -116,6 +122,9 @@
   }
   .hint {
     font-style: italic;
+  }
+  .degraded-hint {
+    color: #f97316;
   }
   .details-btn {
     margin-top: 0.75rem;

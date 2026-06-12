@@ -13,11 +13,11 @@ use serde::{Deserialize, Serialize};
 
 /// Runtime status of one detected service.
 ///
-/// Why: Three states capture everything the console needs for P0 — whether
-/// the binary exists, whether a daemon is currently running, and whether
-/// neither is present on this machine.
+/// Why: Four states capture everything the console needs — whether the binary
+/// exists, whether a daemon is running, whether the MCP handshake succeeded but
+/// the expected tool is missing (Degraded), and whether the binary is absent.
 /// What: Serialises to a lowercase string for the JSON API.
-/// Test: Asserted by unit tests in `detect.rs`.
+/// Test: Asserted by unit tests in `detect.rs` and `server.rs`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceStatus {
@@ -27,6 +27,10 @@ pub enum ServiceStatus {
     Available,
     /// Binary not found on PATH.
     Absent,
+    /// Process is reachable (MCP handshake succeeded) but the expected
+    /// `console_metrics` tool was not listed in `tools/list` — check that
+    /// the daemon is started in `serve --stdio` mode with the correct wiring.
+    Degraded,
 }
 
 /// All facts gathered about a service in one detection pass.
@@ -36,7 +40,8 @@ pub enum ServiceStatus {
 /// What: `id` is the stable machine identifier; `display_name` is human-
 /// readable; `status` is the current runtime state; `version` is the version
 /// string from `/health` when the daemon is running (absent otherwise);
-/// `url` is the daemon base URL when reachable.
+/// `url` is the daemon base URL when reachable; `hint` is an optional
+/// actionable remediation message surfaced when `status` is `Degraded`.
 /// Test: Tested via the server integration test in `server.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceInfo {
@@ -52,6 +57,11 @@ pub struct ServiceInfo {
     /// Base URL of the running daemon (e.g. `"http://127.0.0.1:7879"`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Actionable remediation hint — present when `status` is `Degraded`.
+    /// Example: "reachable but `console_metrics` tool not registered — check
+    /// `serve --stdio` wiring / restart the daemon".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 /// Per-service adapter contract.
@@ -87,4 +97,41 @@ pub trait ServiceConnector: Send + Sync {
     /// optional `url`. Never returns an error; degrades gracefully to `Absent`.
     /// Test: Unit tests in `detect.rs` inject a temp home dir and fake files.
     fn detect(&self) -> ServiceInfo;
+}
+
+// ─── tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Why: The JSON API contract requires `ServiceStatus` variants to serialise
+    /// to exact lowercase strings. A missing or mismatched `#[serde(rename_all)]`
+    /// attribute would silently change the wire format and break the Svelte UI.
+    /// What: Serialises each variant via `serde_json::to_value` and asserts the
+    /// exact expected string so any future rename is caught at test time.
+    /// Test: This test.
+    #[test]
+    fn service_status_serialises_to_lowercase_strings() {
+        assert_eq!(
+            serde_json::to_value(ServiceStatus::Running).unwrap(),
+            serde_json::json!("running"),
+            "Running must serialise to \"running\""
+        );
+        assert_eq!(
+            serde_json::to_value(ServiceStatus::Available).unwrap(),
+            serde_json::json!("available"),
+            "Available must serialise to \"available\""
+        );
+        assert_eq!(
+            serde_json::to_value(ServiceStatus::Absent).unwrap(),
+            serde_json::json!("absent"),
+            "Absent must serialise to \"absent\""
+        );
+        assert_eq!(
+            serde_json::to_value(ServiceStatus::Degraded).unwrap(),
+            serde_json::json!("degraded"),
+            "Degraded must serialise to \"degraded\""
+        );
+    }
 }
