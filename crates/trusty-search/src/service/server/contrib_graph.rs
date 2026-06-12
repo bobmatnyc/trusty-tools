@@ -23,6 +23,7 @@ use std::sync::Arc;
 use crate::core::corpus::contrib::{ContribEdge, ContribGraph, ContribNode};
 use crate::core::entity::EdgeKind;
 use crate::core::registry::IndexId;
+use crate::core::symbol_graph::parse_kind_token;
 
 use super::state::SearchAppState;
 
@@ -119,16 +120,10 @@ pub(super) async fn ingest_graph_handler(
                 "index has no durable corpus store — contributed graphs require one".into(),
             ));
         };
-        let producer = contrib.producer.clone();
-        let join = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
-            let replaced = corpus
-                .load_contrib_graphs()?
-                .iter()
-                .any(|g| g.producer == producer);
-            corpus.save_contrib_graph(&contrib)?;
-            Ok(replaced)
-        })
-        .await;
+        // `save_contrib_graph` reports the replacement from the insert
+        // itself, so the flag is exact under concurrent same-producer
+        // ingest (PR #1129 review, finding 4).
+        let join = tokio::task::spawn_blocking(move || corpus.save_contrib_graph(&contrib)).await;
         match join {
             Ok(Ok(replaced)) => replaced,
             Ok(Err(e)) => {
@@ -196,24 +191,6 @@ pub(super) struct NeighborEntry {
     pub edge: String,
 }
 
-/// Map one comma-separated `edge_kinds` token to an `EdgeKind`.
-///
-/// Why: the query surface accepts the same vocabulary the ingest accepts, so
-/// a client can filter on exactly what it contributed.
-/// What: coarse lowercase names first, then `EdgeKind::from_tag` (static
-/// PascalCase tags and `custom:*`). `None` = unrecognized token (400).
-/// Test: `neighbors_rejects_unknown_edge_kind` in `tests_contrib_graph`.
-fn parse_edge_kind(token: &str) -> Option<EdgeKind> {
-    match token {
-        "reads" => Some(EdgeKind::Reads),
-        "writes" => Some(EdgeKind::Writes),
-        "references" => Some(EdgeKind::References),
-        "calls_function" | "calls_proc" => Some(EdgeKind::CallsFunction),
-        "accesses_resource" => Some(EdgeKind::AccessesResource),
-        other => EdgeKind::from_tag(other),
-    }
-}
-
 /// `GET /indexes/{id}/graph/neighbors` — bounded BFS over the merged graph.
 ///
 /// Why: the single traversal primitive of ADR-0009 — answers "what writes
@@ -252,7 +229,7 @@ pub(super) async fn graph_neighbors_handler(
         Some(csv) => {
             let mut out = Vec::new();
             for token in csv.split(',').map(str::trim).filter(|t| !t.is_empty()) {
-                let Some(kind) = parse_edge_kind(token) else {
+                let Some(kind) = parse_kind_token(token) else {
                     return Err(err(
                         StatusCode::BAD_REQUEST,
                         format!("unknown edge kind '{token}'"),

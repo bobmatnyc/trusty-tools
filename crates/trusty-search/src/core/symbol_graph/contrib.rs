@@ -55,23 +55,32 @@ pub struct ContribMergeStats {
 /// `None` when nothing resolves (caller counts it as dropped, #816-style).
 /// Test: `contrib_edge_kind_resolution` in `super::tests`.
 pub(crate) fn resolve_edge_kind(edge: &ContribEdge) -> Option<EdgeKind> {
-    if let Some(kind) = edge.kind.as_deref() {
-        let coarse = match kind {
-            "reads" => Some(EdgeKind::Reads),
-            "writes" => Some(EdgeKind::Writes),
-            "references" => Some(EdgeKind::References),
-            "calls_function" | "calls_proc" => Some(EdgeKind::CallsFunction),
-            "accesses_resource" => Some(EdgeKind::AccessesResource),
-            _ => None,
-        };
-        if let Some(k) = coarse {
-            return Some(k);
-        }
-        if let Some(k) = EdgeKind::from_tag(kind) {
-            return Some(k);
-        }
+    if let Some(k) = edge.kind.as_deref().and_then(parse_kind_token) {
+        return Some(k);
     }
     edge.tag.as_deref().and_then(EdgeKind::from_tag)
+}
+
+/// Parse one edge-kind token from the contributed vocabulary.
+///
+/// Why: the ingest path (`resolve_edge_kind`) and the `graph/neighbors`
+/// query filter must accept the exact same vocabulary — a kind added to one
+/// but not the other would silently diverge ingest vs query (PR #1129
+/// review, finding 3). This is the single shared table.
+/// What: coarse lowercase wire names map onto the #817 first-class variants;
+/// anything else falls through to `EdgeKind::from_tag` (PascalCase static
+/// tags and `custom:<label>`). `None` = unrecognized token.
+/// Test: `contrib_edge_kind_resolution` in `contrib_tests`;
+/// `neighbors_rejects_unknown_edge_kind` in `tests_contrib_graph`.
+pub(crate) fn parse_kind_token(token: &str) -> Option<EdgeKind> {
+    match token {
+        "reads" => Some(EdgeKind::Reads),
+        "writes" => Some(EdgeKind::Writes),
+        "references" => Some(EdgeKind::References),
+        "calls_function" | "calls_proc" => Some(EdgeKind::CallsFunction),
+        "accesses_resource" => Some(EdgeKind::AccessesResource),
+        other => EdgeKind::from_tag(other),
+    }
 }
 
 impl SymbolGraph {
@@ -188,14 +197,13 @@ pub async fn save_then_merge_contrib(
         if contribs.is_empty() {
             return graph;
         }
-        // Sole owner here: the save closure above borrowed, never cloned.
-        let mut g = match Arc::try_unwrap(graph) {
-            Ok(g) => g,
-            Err(shared) => {
-                tracing::warn!("index '{index_id}': graph Arc shared — contrib merge skipped");
-                return shared;
-            }
-        };
+        // Usually the sole owner (the save above only borrowed). If a
+        // concurrent `snapshot_symbol_graph` raced us and holds a clone of
+        // the Arc, clone the inner graph rather than skip the merge — the
+        // serving graph must never silently lack contributed edges
+        // (PR #1129 review, finding 1). Clone cost is proportional to the
+        // just-built graph and only paid on the racy path.
+        let mut g = Arc::try_unwrap(graph).unwrap_or_else(|shared| (*shared).clone());
         let stats = g.merge_contrib(&contribs);
         tracing::info!(
             "index '{index_id}': merged {} contributed graph(s): +{} nodes, +{} edges \

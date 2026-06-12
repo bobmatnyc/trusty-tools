@@ -236,6 +236,39 @@ async fn contrib_rebuild_path_merges_after_save() {
 }
 
 #[tokio::test]
+async fn contrib_merge_happens_even_when_arc_is_shared() {
+    // PR #1129 review, finding 1: a concurrent snapshot holding a clone of
+    // the graph Arc must NOT cause the contrib merge to be skipped — the
+    // finalizer clones the inner graph instead.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let corpus = Arc::new(CorpusStore::open(&dir.path().join("c.redb")).expect("open"));
+    corpus
+        .save_contrib_graph(&contrib(
+            "navigatsql",
+            vec![node("dbo.usp_x", "proc"), node("dbo.orders", "table")],
+            vec![edge("dbo.usp_x", "dbo.orders", "writes")],
+        ))
+        .expect("save contrib");
+
+    let graph = Arc::new(SymbolGraph::new());
+    let concurrent_snapshot = Arc::clone(&graph); // simulates snapshot_symbol_graph
+    let merged = super::contrib::save_then_merge_contrib(
+        graph,
+        Some(Arc::clone(&corpus)),
+        "test-idx".into(),
+    )
+    .await;
+    assert_eq!(
+        merged.node_kind("dbo.orders"),
+        Some("table"),
+        "merge must happen despite the shared Arc"
+    );
+    // The concurrently-held snapshot still sees the pre-merge graph (clone
+    // semantics) — it is simply stale, never corrupted.
+    assert_eq!(concurrent_snapshot.node_count(), 0);
+}
+
+#[tokio::test]
 async fn contrib_replace_per_producer_after_remerge() {
     // End-to-end replace semantics: ingest v2 from the same producer, rebuild,
     // and confirm v1's edges are gone from the serving graph.
