@@ -91,21 +91,27 @@ impl CorpusStore {
     /// rows must not linger (a proc deleted from the codebase would otherwise
     /// keep its edges forever).
     /// What: serializes the whole [`ContribGraph`] and inserts it under the
-    /// producer key in one write txn (atomic replace).
-    /// Test: `contrib_replace_per_producer_drops_old_rows`.
-    pub fn save_contrib_graph(&self, graph: &ContribGraph) -> anyhow::Result<()> {
+    /// producer key in one write txn (atomic replace). Returns whether a
+    /// prior contribution was replaced — read from the same insert, so the
+    /// flag is race-free under concurrent same-producer ingest (PR #1129
+    /// review, finding 4).
+    /// Test: `contrib_replace_per_producer_drops_old_rows` (asserts the
+    /// returned flag flips false → true).
+    pub fn save_contrib_graph(&self, graph: &ContribGraph) -> anyhow::Result<bool> {
         let bytes = serde_json::to_vec(graph).context("serialize contrib graph")?;
         let txn = self.db.begin_write().context("begin contrib write txn")?;
+        let replaced;
         {
             let mut table = txn
                 .open_table(KG_CONTRIB_TABLE)
                 .context("open kg_contrib table")?;
-            table
+            replaced = table
                 .insert(graph.producer.as_str(), bytes.as_slice())
-                .context("insert contrib graph")?;
+                .context("insert contrib graph")?
+                .is_some();
         }
         txn.commit().context("commit contrib write txn")?;
-        Ok(())
+        Ok(replaced)
     }
 
     /// Load every producer's contribution, sorted by producer id.
@@ -211,12 +217,14 @@ mod tests {
     #[test]
     fn contrib_replace_per_producer_drops_old_rows() {
         let (_dir, store) = store();
-        store
+        let replaced = store
             .save_contrib_graph(&sample("navigatsql", "dbo.orders"))
             .expect("save v1");
+        assert!(!replaced, "first save must not report a replacement");
         // Second ingest from the same producer: completely replaces the first.
         let v2 = sample("navigatsql", "dbo.customers");
-        store.save_contrib_graph(&v2).expect("save v2");
+        let replaced = store.save_contrib_graph(&v2).expect("save v2");
+        assert!(replaced, "second save must report the replacement");
         let loaded = store.load_contrib_graphs().expect("load");
         assert_eq!(loaded, vec![v2]);
         assert!(!loaded[0].edges.iter().any(|e| e.to == "dbo.orders"));

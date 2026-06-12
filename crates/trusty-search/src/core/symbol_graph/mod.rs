@@ -29,6 +29,7 @@ mod persist_tests;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use contrib::parse_kind_token;
 pub use contrib::{save_then_merge_contrib, ContribMergeStats};
 
 // Public type aliases shared across submodules.

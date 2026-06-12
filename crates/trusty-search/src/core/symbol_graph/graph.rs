@@ -44,7 +44,12 @@ pub struct SymbolNode {
 /// Built from a slice of `(chunk_id, file, function_name, calls)` tuples; the
 /// chunker (`chunk_ast`) is responsible for populating the `function_name` and
 /// `calls` fields per chunk, so the graph just stitches them together.
-#[derive(Debug, Default)]
+///
+/// `Clone` exists for the contributed-overlay merge path: when the rebuild
+/// finalizer cannot take sole ownership of the freshly-built graph (a
+/// concurrent snapshot holds a clone of the `Arc`), it clones the inner
+/// graph so the merge always happens (PR #1129 review, finding 1).
+#[derive(Debug, Default, Clone)]
 pub struct SymbolGraph {
     pub(crate) graph: DiGraph<SymbolNode, EdgeKind>,
     /// Symbol name → node index. Holds the *first* definition seen if a symbol

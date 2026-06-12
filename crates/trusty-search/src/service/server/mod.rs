@@ -144,12 +144,15 @@ pub fn build_router(state: SearchAppState) -> Router {
         .route("/indexes/{id}/remove-file", post(remove_file_handler))
         .route("/indexes/{id}/reindex", post(reindex_handler))
         // Contributed-graph ingest (ADR-0009): bulk lane (store + graph
-        // rebuild can run for seconds); raised body limit — full contributed
-        // documents from large codebases run to tens of MB.
+        // rebuild can run for seconds). Body limit 64 MiB — observed maxima
+        // from large pilot corpora are ~20 MB, so this is ~3x headroom while
+        // bounding the per-request RAM/DoS surface (PR #1129 review,
+        // finding 2); revisit with a streaming ingest path if producers
+        // outgrow it.
         .route(
             "/indexes/{id}/graph",
             post(ingest_graph_handler)
-                .layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024)),
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
         )
         .route_layer(axum::middleware::from_fn(
             crate::service::concurrency::apply_limiter,
