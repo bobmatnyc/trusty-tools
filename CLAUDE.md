@@ -122,83 +122,6 @@ Most match (e.g. `crates/trusty-search/` → `-p trusty-search`) but note these 
 
 Always verify the `name` field in the crate's `Cargo.toml` if you get a "package not found" error.
 
-## Code Structure
-
-```
-trusty-tools/               # workspace root
-├── Cargo.toml              # workspace manifest — glob members = ["crates/*"]
-├── Cargo.lock
-├── crates/                 # 20 members (matches `ls crates/`)
-│   ├── trusty-common/       # shared utilities, tracing, OpenRouter chat; hosts the
-│   │                        # consolidated mcp/rpc/embedder/symgraph/memory-core/
-│   │                        # tickets/monitor-tui modules behind feature flags
-│   ├── trusty-embedderd/    # fastembed wrapper — sidecar daemon for trusty-search
-│   ├── trusty-bm25-daemon/  # BM25 index daemon — sidecar for trusty-memory
-│   ├── trusty-gworkspace/   # Google Workspace client (Calendar, Tasks, Drive)
-│   ├── trusty-cto-db/       # SQLite CTO database (rusqlite-backed)
-│   ├── tc-services/         # service-layer adapters: CTO DB, Granola, GWorkspace
-│   ├── trusty-search/       # hybrid BM25 + vector + KG search daemon + MCP server
-│   ├── trusty-memory/       # MCP server frontend for memory (includes Svelte UI)
-│   ├── trusty-analyze/      # code analysis daemon + MCP server
-│   ├── trusty-mpm/          # unified MPM platform: CLI (tm/trusty-mpm), daemon, MCP, TUI, Telegram
-│   ├── trusty-mpm-gui/      # MPM desktop GUI (Tauri, publish=false)
-│   ├── cto-assistant/       # CTO assistant CLI (publish=false)
-│   ├── trusty-git-analytics/ # developer productivity analytics (tga)
-│   ├── trusty-agents/       # agent orchestration platform (publish=false)
-│   ├── trusty-agents-common/ # trusty-agents common API types (publish=false)
-│   ├── trusty-agents-local/ # trusty-agents local execution (publish=false)
-│   ├── trusty-code/         # per-project Claude-Code-compatible MPM orchestration harness (bin: tcode); Phase 0 scaffold; extraction tracked in #587
-│   └── trusty-controller/   # thin control plane for the claude-mpm stack (bin: tctl); Phase 0 scaffold; RFC tracked in #920
-└── .gitignore
-```
-
-> **Consolidation note:** the formerly separate `trusty-symgraph`, `trusty-rpc`,
-> `trusty-tickets`, `trusty-mcp-core`, `trusty-embedder`, `trusty-memory-core`,
-> and `trusty-monitor-tui` crates no longer exist as standalone directories —
-> they were absorbed into `trusty-common` behind the `symgraph`, `rpc`,
-> `tickets`, `mcp`, `embedder`, `memory-core`, and `monitor-tui` feature flags
-> respectively. Enable the relevant feature to pull in the corresponding module.
-
-For the source layout of any crate, read its `README.md` or browse
-`crates/<name>/src/`. Each crate owns its own `README.md` covering purpose,
-usage, and design notes.
-
-## Documentation Layout
-
-Documentation is organized by **published crate**, not by topic. Each crate gets
-a directory under `docs/` containing three standard subdirectories:
-
-```
-docs/
-├── trusty-search/              # See here for the worked example
-│   ├── regression-testing/     # Versioned snapshots: v{VERSION}-{DATE}.md
-│   ├── research/               # Investigation & decision docs: *-{DATE}.md or *-decision-{DATE}.md
-│   └── sessions/               # Engineering session summaries: SESSION-{DATE}-{topic}.md
-├── trusty-memory/              # Follows the same three-subdir convention
-├── trusty-common/              # (and all other published crates)
-├── trusty-mpm/                 # covers all 8 trusty-mpm-* binaries
-├── trusty-agents/
-├── trusty-analyze/
-└── trusty-git-analytics/
-```
-
-**Purpose of each subdir**:
-- **`regression-testing/`** — Performance snapshots tied to releases. One `.md`
-  file per measured release named `v{VERSION}-{YYYY-MM-DD}.md`; alternate-corpus
-  baselines (e.g., synthetic, trusty-agents) live alongside; `current.md` is a
-  symlink to the latest snapshot.
-- **`research/`** — Investigation outcomes, audits, decision documents. Named
-  `{topic}-{YYYY-MM-DD}.md` or `{topic}-decision-{YYYY-MM-DD}.md`.
-- **`sessions/`** — Engineering-session narratives. Named
-  `SESSION-{YYYY-MM-DD}-{topic}.md`.
-
-Each subdir has a `README.md` explaining its purpose, file naming, and indexing
-conventions. **See `docs/trusty-search/` as the authoritative worked example.**
-
-For **cross-release performance tracking**, see GitHub issue
-[#129](https://github.com/bobmatnyc/trusty-tools/issues/129): it accumulates
-benchmark deltas across all measured versions.
-
 ## Key Conventions
 
 🔴 **Why/What/Test doc pattern** — every public item (function, struct, trait,
@@ -336,43 +259,20 @@ versions by version number.
 
 ## Git Tag / Release Convention
 
-Each crate is tagged independently using the pattern `<crate-name>-v<version>`,
-e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
+> **Full release workflow and macOS critical notes:** see [docs/reference/release-workflow.md](docs/reference/release-workflow.md).
 
-Release workflow:
+### Quick Release Steps
+
 1. Bump the crate version in `crates/<name>/Cargo.toml`.
 2. Update any dependent crates that pin that version.
 3. Run `cargo test -p <name>` and `cargo clippy --workspace -- -D warnings`.
 4. Commit the version bump.
 5. Create the tag: `git tag <crate-name>-v<version>`.
 6. Push the tag: `git push origin <crate-name>-v<version>`.
-7. Publish: `cargo publish -p <crate-name>`.
-   - **UI-embedding crates** (trusty-search, trusty-memory, trusty-analyze): prefix with `SKIP_UI_BUILD=1`:
-     ```bash
-     SKIP_UI_BUILD=1 cargo publish -p <crate-name>
-     ```
-     The committed `ui-dist/` bundle is already in the repo; without this flag, `build.rs` will attempt to invoke `pnpm` inside cargo's verification tarball, which fails because it tries to modify files outside `OUT_DIR`.
-8. Build the release binary (if not already fresh): `cargo build --release -p <crate-name>`.
-9. Install the binary locally with `cargo install --path crates/<dir> --locked`
-   (for crates with binaries, e.g. trusty-search, trusty-mpm). This ensures the
-   binary on PATH is always the version that was just released.
+7. Publish: `cargo publish -p <crate-name>` (or `SKIP_UI_BUILD=1 cargo publish` for UI-embedding crates).
+8. Build and install: `cargo install --path crates/<dir> --locked`.
 
-   🔴 **Never `cp target/release/<binary> ~/.cargo/bin/<binary>` on macOS.**
-   `cargo build` ad-hoc ("linker-signed") signs every release binary, and the
-   kernel's code-signing cache is keyed by the executable's `cdhash`. A plain
-   `cp` over an existing on-PATH binary can leave the kernel with a stale
-   cached identity, so the next exec is SIGKILL'd with
-   `EXC_CRASH / CODESIGNING — Taskgated Invalid Signature` **before any code
-   runs** — the process dies with `zsh: killed` and zero output, which looks
-   exactly like an OOM kill but is not. `cargo install` writes to a temp path
-   and renames atomically, which keeps the cache consistent. If you must copy
-   manually, follow it with `codesign --force --sign - ~/.cargo/bin/<binary>`
-   to regenerate the ad-hoc signature against the final file.
-
-Every crate manages its own version independently in its own `Cargo.toml`.
-The `[workspace.package]` table no longer carries a `version` field (see #343).
-When publishing, bump only the crates that actually changed — do not cascade
-version bumps to siblings with no functional changes.
+🔴 **CRITICAL macOS note:** Never use `cp` to install release binaries on macOS — always use `cargo install`. See release workflow reference for the detailed explanation.
 
 ### macOS Full Disk Access must be re-granted after every `cargo install` (issue #873)
 
@@ -442,18 +342,13 @@ When publishing a crate to crates.io:
 
 ## Parallel Worktree Discipline
 
-Multiple Claude Code sessions and subagents may share this repo concurrently.
-The main checkout often holds another session's uncommitted work. To prevent
-one session from stomping on another's edits, the following rules apply to
-every session and every dispatched subagent.
+**CRITICAL RULES FOR CONCURRENT SESSIONS:**
 
 🔴 **The main checkout is inspection-only.** From the repo root
-(`/path/to/trusty-tools/` — wherever the repo lives on disk), the only
-allowed operations are read-only: `git status`, `git log`, `git diff`,
-`git show`, file reads. **Forbidden in the main checkout's working tree**:
-edits, `git reset --hard`, `git checkout .`, `git stash`, `git restore .`,
-`cargo build`/`cargo test` (write to `target/`), `sed`/`awk`/`patch`, or
-any command that mutates the working tree, the index, or `target/`.
+(`/path/to/trusty-tools/`), the only allowed operations are read-only: `git status`,
+`git log`, `git diff`, `git show`, file reads. **FORBIDDEN**: edits, `git reset --hard`,
+`git checkout .`, `git stash`, `git restore .`, `cargo build`/`cargo test`,
+`sed`/`awk`/`patch`, or any command that mutates the working tree, index, or `target/`.
 
 🔴 **All write-side work happens in a dedicated git worktree branched off
 `origin/main`.** Provision one before starting any edit, build, or test:
@@ -496,43 +391,19 @@ which keeps the macOS kernel's cdhash cache consistent (see the
 release-workflow note above). The main checkout never needs to be involved.
 
 🟢 **Subagents inherit these rules.** Every `Agent`/`Task` dispatch prompt
-**must**:
-- name the exact worktree path the agent should operate from
-- explicitly forbid leaving that worktree into the main checkout
-- forbid `git reset --hard`, `git checkout .`, and `git stash` against the
-  main checkout
-- forbid touching files outside the assigned worktree
+**must** name the exact worktree path the agent should operate from and forbid
+leaving that worktree into the main checkout, `git reset --hard`, `git checkout .`,
+and `git stash` against the main checkout, and touching files outside the assigned worktree.
 
-The pattern of instructing an agent to "operate from the main checkout" is
-banned. QA agents get their own worktree
-(`.claude/worktrees/qa-<ticket-or-pass>`) just like engineering agents.
+The pattern of instructing an agent to "operate from the main checkout" is banned.
+QA agents get their own worktree (`.claude/worktrees/qa-<ticket-or-pass>`) just
+like engineering agents.
 
 🟢 **Worktree cleanup is safe.** `git worktree remove --force <path>` deletes
-the worktree directory but never the main checkout. After a squash-merge the
-local feature branch will appear "unmerged" to git because the squashed
-commit on `main` has a different hash — use `git branch -D <branch>` and
-`git push origin --delete <branch>` to clean up. These operations touch only
-refs, never working trees.
+the worktree directory but never the main checkout. Use `git branch -D <branch>`
+and `git push origin --delete <branch>` to clean up refs after a squash-merge.
 
-## Per-Crate Reference
-
-Detailed implementation information for each crate lives in its own documentation:
-
-- **trusty-common** — see `crates/trusty-common/README.md` and `docs/trusty-common/`
-- **trusty-embedderd** — see `crates/trusty-embedderd/README.md` and `docs/trusty-embedderd/` (fastembed sidecar daemon)
-- **trusty-bm25-daemon** — see `crates/trusty-bm25-daemon/README.md` and `docs/trusty-bm25-daemon/` (BM25 index sidecar)
-- **trusty-memory** — see `crates/trusty-memory/README.md` and `docs/trusty-memory/` (licensed MIT, not Elastic-2.0; storage engine lives in `trusty-common`'s `memory-core` feature)
-- **trusty-search** — see `crates/trusty-search/README.md` and **`docs/trusty-search/`** (primary worked example with regression testing, research, sessions)
-- **trusty-analyze** — see `crates/trusty-analyze/README.md` and `docs/trusty-analyze/` (licensed MIT, not Elastic-2.0)
-- **trusty-mpm** — see `crates/trusty-mpm/README.md` and `docs/trusty-mpm/` (unified platform: CLI binaries `tm`/`trusty-mpm`, daemon, MCP server, TUI, Telegram)
-- **trusty-mpm-gui** — see `crates/trusty-mpm-gui/README.md` (Tauri desktop GUI, publish=false)
-- **trusty-agents** — see `crates/trusty-agents/README.md` and `docs/trusty-agents/` (agent orchestration platform, bin: `tagent`)
-- **trusty-agents-common** — see `crates/trusty-agents-common/README.md` (common API types for trusty-agents, publish=false)
-- **trusty-agents-local** — see `crates/trusty-agents-local/README.md` (local execution engine for trusty-agents, publish=false)
-- **trusty-git-analytics** — see `crates/trusty-git-analytics/README.md` and `docs/trusty-git-analytics/`
-- **trusty-controller** — see `crates/trusty-controller/README.md` and `docs/trusty-controller/` (Phase 0 scaffold, bin: `tctl`; publish=false until Phase 1+; RFC #920)
-
-For license details, check each crate's `Cargo.toml`: most are **Elastic License 2.0**, but `trusty-memory`, `trusty-analyze`, and a few others are **MIT**.
+> **Extended discipline rationale and cleanup details:** see [docs/reference/worktree-discipline.md](docs/reference/worktree-discipline.md).
 
 ## Abbreviations & Aliases
 
@@ -568,157 +439,51 @@ These abbreviations apply everywhere: ticket descriptions, build commands, refer
 
 ### Environment Variables
 
-| Variable | Required by | Purpose |
-|---|---|---|
-| `OPENROUTER_API_KEY` | `trusty-search` `/chat`, `trusty-common` chat helpers, `trusty-analyze` deep pass (OpenRouter path) | LLM chat via OpenRouter. Pass as argument to library helpers; never read from env inside library crates. Required for `POST /analyze/deep` unless a `bedrock/<model-id>` model is selected. |
-| `TRUSTY_LLM_MODEL` | `trusty-analyze` deep pass | LLM model id for the deep-analysis narrative pass. Default: `openai/gpt-4o-mini` (OpenRouter). Set to `bedrock/<bedrock-model-id>` (e.g. `bedrock/us.anthropic.claude-sonnet-4-6`) to route through AWS Bedrock instead of OpenRouter. The `bedrock/` prefix selects the Bedrock provider; anything else routes to OpenRouter. Claude Sonnet 4.6 uses the short form without date stamp or `-v1:0` suffix. |
-| `TRUSTY_AWS_REGION` | `trusty-analyze` (Bedrock deep pass) | AWS region for Bedrock `Converse` calls. Takes priority over `AWS_REGION`. Default: `us-east-1`. |
-| `AWS_REGION` | `trusty-analyze` (Bedrock deep pass) | Fallback AWS region for Bedrock calls. Overridden by `TRUSTY_AWS_REGION`. |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | `trusty-analyze` (Bedrock deep pass) | Standard AWS credentials for Bedrock access. The full AWS credential chain (env vars, `~/.aws/credentials` profiles, IAM roles, SSO) is supported. No API key is needed when using a `bedrock/` model. |
-| `RUST_LOG` | all daemons | Tracing filter, e.g. `RUST_LOG=debug` or `RUST_LOG=trusty_search=debug,warn`. |
-| `TRUSTY_MEMORY_LIMIT_MB` | `trusty-search` | Soft RSS ceiling for indexing pipeline. Auto-tuned from system RAM; override only when needed. |
-| `TRUSTY_MAX_CHUNKS` | `trusty-search` | Hard cap on chunks per index. Auto-tuned; rarely set manually. |
-| `TRUSTY_MAX_BATCH_SIZE` | `trusty-search` | ONNX embedding batch size. Auto-tuned; set if OOM during reindex. |
-| `TRUSTY_EMBEDDING_CACHE` | `trusty-search` | LRU embedding cache capacity (entries). |
-| `TRUSTY_COREML_TRIPWIRE_MB` | `trusty-search` (Apple Silicon) | RSS-delta ceiling per CoreML batch (default 4 GB). If exceeded, batch size is halved automatically. Override for hosts with different memory pressure characteristics. |
-| `TRUSTY_GPU_MEM_LIMIT_BYTES` | `trusty-search` / `trusty-embedderd` (CUDA EP, issue #600) | Exact CUDA `gpu_mem_limit` in bytes, applied alongside `arena_extend_strategy=kSameAsRequested` to stop ORT's BFCArena over-reserving VRAM and OOMing a 16 GB Tesla T4. Default 12 GiB (`12884901888`). Takes precedence over `TRUSTY_GPU_MEM_LIMIT_MB`; a malformed or `0` value is ignored. Removes the need for the old `TRUSTY_MAX_BATCH_SIZE=32` workaround. |
-| `TRUSTY_GPU_MEM_LIMIT_MB` | `trusty-search` / `trusty-embedderd` (CUDA EP, issue #600) | CUDA `gpu_mem_limit` in megabytes (scaled by 1024²). Used only when `TRUSTY_GPU_MEM_LIMIT_BYTES` is unset/invalid. E.g. `6144` for an 8 GB card. |
-| `ORT_DYLIB_PATH` | `trusty-search` (CUDA, glibc < 2.38); `trusty-analyze` (`load-dynamic`, `cuda` features) | Path to `libonnxruntime.so` on hosts with glibc < 2.38 and CUDA builds. For trusty-analyze, install with `--no-default-features --features http-server,load-dynamic` and set this var to the system libonnxruntime path. |
-| `SKIP_UI_BUILD` | `trusty-search` `build.rs` | Set to `1` to skip the Svelte UI build step (CI publish flows). |
-| `TRUSTY_NO_KG` | `trusty-search` daemon | Machine-wide default for `skip_kg`. When set to `1`, `true`, or `yes`, every new index created via `POST /indexes` (or `trusty-search index`) has `skip_kg=true` applied automatically unless the caller explicitly sets `skip_kg: false`. Useful for CI machines or resource-constrained hosts where KG is never needed. |
+> **Full environment-variable reference:** see [docs/reference/environment-variables.md](docs/reference/environment-variables.md).
 
-### Recommended IDE Setup
+Key variables:
+- `OPENROUTER_API_KEY` — LLM chat via OpenRouter
+- `TRUSTY_LLM_MODEL` — LLM model for deep-analysis pass (default: `openai/gpt-4o-mini`)
+- `RUST_LOG` — Tracing filter (e.g., `RUST_LOG=debug`)
+- `SKIP_UI_BUILD` — Set to `1` to skip Svelte UI build in `build.rs`
+- `TRUSTY_NO_KG` — Set to `1` to skip knowledge-graph construction by default
 
-**VS Code / Cursor**:
-- Install `rust-analyzer` extension.
-- Install `Even Better TOML` for `Cargo.toml` editing.
-- Workspace-level `rust-analyzer` picks up the root `Cargo.toml` automatically;
-  no per-crate `.vscode/settings.json` needed.
-- Recommended settings in `.vscode/settings.json`:
-  ```json
-  {
-    "rust-analyzer.cargo.features": "all",
-    "rust-analyzer.checkOnSave.command": "clippy"
-  }
-  ```
+### IDE Setup
 
-**RustRover**: open the repo root; it detects the workspace automatically.
+> **Full IDE setup reference:** see [docs/reference/ide-setup.md](docs/reference/ide-setup.md).
+
+Quick: VS Code needs `rust-analyzer` + `Even Better TOML` extensions; RustRover auto-detects the workspace.
 
 ### Running Individual MCP Servers Locally
 
-Each MCP server reads from stdin / writes to stdout (JSON-RPC 2.0 framing).
-All daemons log to **stderr** — never stdout.
+> **Detailed MCP server examples and wiring:** see [docs/reference/running-mcp-servers.md](docs/reference/running-mcp-servers.md).
 
-```bash
-# trusty-search daemon (HTTP + MCP stdio)
-RUST_LOG=info cargo run -p trusty-search -- start
-# Query via CLI
-cargo run -p trusty-search -- query "fn authenticate" --index <id>
-# MCP stdio mode (used by Claude Code via .mcp.json)
-cargo run -p trusty-search -- serve
+Quick: `RUST_LOG=info cargo run -p trusty-search -- start` (daemon), `cargo run -p trusty-search -- serve` (MCP stdio mode).
 
-# MPM daemon
-RUST_LOG=info cargo run -p trusty-mpm --bin trusty-mpmd
+## Common Pitfalls — Quick Checklist
 
-# MPM CLI (tm / trusty-mpm)
-cargo run -p trusty-mpm -- --help
+For extended explanations, see [docs/reference/common-pitfalls.md](docs/reference/common-pitfalls.md).
 
-# trusty-memory (MCP server + embedded Svelte UI)
-RUST_LOG=info cargo run -p trusty-memory
+- **Library error handling:** use `thiserror`, not `unwrap()` in libraries
+- **Daemon stdout:** never log to stdout in daemons or MCP servers
+- **Axum in libraries:** gate behind `axum-server` feature flag
+- **Shared crate changes:** always run `cargo check` + tests for all dependents
+- **SLOC cap:** respect 500/1500 SLOC limits (prod/test); use `bash scripts/check_line_cap.sh`
+- **UI build:** install pnpm or set `SKIP_UI_BUILD=1` before `cargo build`
+- **Patch tables:** put all `[patch.crates-io]` in root `Cargo.toml` only
+- **MSRV drift:** prefer stable channel toolchains; don't break `rust-version = "1.91"`
+- **Edition mismatch:** 2024 crates (mpm, agents, mpm-gui, agents-common, agents-local) may use let-chains; 2021 crates cannot
 
-# Report the daemon's listening port (stdout is clean — safe for shell substitution):
-trusty-search port                                   # bare port: 7879
-trusty-search port --addr                            # host:port: 127.0.0.1:7879
-trusty-search port --json                            # {"addr":"127.0.0.1","port":7879}
-# Shell substitution idiom — queries the daemon without guessing the port:
-curl http://127.0.0.1:$(trusty-search port)/health
+## Reference Documentation
 
-trusty-memory port                                   # bare port: 7070
-trusty-memory port --addr                            # host:port: 127.0.0.1:7070
-trusty-memory port --json                            # {"addr":"127.0.0.1","port":7070}
-curl http://127.0.0.1:$(trusty-memory port)/health
+Full-length reference materials for less-frequent lookups:
 
-# Fire-and-forget memory note from any agent (no MCP tool needed):
-# Sub-agents spawned via Claude Code's Agent tool do not inherit MCP
-# connections, so they cannot call `mcp__trusty-memory__memory_remember`
-# directly. The `note` subcommand POSTs to the daemon's HTTP endpoint
-# (`POST /api/v1/remember`) and returns immediately — the dispatch runs
-# on a detached `tokio::spawn`. Failures degrade to stderr + zero exit.
-trusty-memory note "key fact here" --palace my-project
-trusty-memory note "another fact" --palace my-project --tag style --tag preferences
-
-# Build a specific binary in release mode
-cargo build --release -p trusty-search
-./target/release/trusty-search start
-```
-
-To wire a locally-built binary into Claude Code, update your project's
-`.mcp.json` or `~/.claude/mcp.json` to point `command` at the absolute path
-of the built binary (e.g. `target/release/trusty-search`).
-
-## Common Pitfalls
-
-🔴 **Using `unwrap()` in library crates** — the compiler does not stop you, but
-it violates the project's hard rule. Use `?` with `thiserror` error types in
-libraries. `expect()` is allowed only for invariants that genuinely cannot
-occur at runtime (not for "I think this will always be Some").
-
-🔴 **Logging to stdout in a daemon or MCP server** — MCP JSON-RPC framing uses
-stdout as the transport channel. A stray `println!` corrupts the protocol.
-Always use `tracing::info!` / `tracing::debug!` etc. (which write to stderr).
-
-🔴 **Adding `axum` as an unconditional dependency in a library crate** — put it
-behind the `axum-server` feature flag, matching the pattern in `trusty-common`.
-Otherwise every library consumer pulls in the full axum + tower stack.
-
-🟡 **Editing a shared crate without propagating changes** — modifying
-`trusty-common` (or its consolidated `symgraph` / `embedder` / `mcp` modules),
-`trusty-embedderd`, or `trusty-bm25-daemon` can silently break dependents. Always run `cargo check` (workspace-wide) and
-`cargo test -p <consumer>` for every crate that imports the edited library.
-
-🟡 **Forgetting the Why/What/Test doc pattern on new public items** — clippy
-does not enforce this. Review public APIs manually before committing.
-
-🟡 **Building the Svelte UI manually before `cargo build`** — `trusty-search`
-uses `build.rs` to invoke pnpm if `ui-dist/` is stale. If pnpm is not
-installed, the build script fails loudly. Install pnpm or set
-`SKIP_UI_BUILD=1` if you are not changing the UI.
-
-🟡 **`[patch.crates-io]` only works at the workspace root** — do not add
-`[patch]` tables inside individual crate `Cargo.toml` files; Cargo ignores
-them. All patches must live in the root `Cargo.toml`.
-
-🔴 **Growing a file past its SLOC cap instead of splitting** — the compiler does
-not stop you, but continued feature additions make the module harder to review,
-reason about, and test. Split proactively. The applicable cap is **500 SLOC for
-production files** and **1500 SLOC for test/benchmark files** (see the Key
-Conventions section for the exact classification rules). SLOC counts code lines
-only: blank lines, `//` comments, `///` doc comments, `//!` inner-doc comments,
-and `/* ... */` block comments (including multi-line spans) are all excluded.
-The trusty-agents `ctrl/`, `runtime/`, and `workflow/engine/` modules (#170,
-#171, #172) were the canonical examples of files that grew past the prod cap;
-all three have since been split into focused submodules and now serve as the
-worked examples of a clean split.
-
-🟢 **MSRV drift** — the workspace pins `rust-version = "1.91"`. Running
-`rustup update` and picking up a new nightly may introduce syntax that
-compiles locally but fails on CI. Prefer stable channel toolchains.
-
-🟢 **Edition mismatch** — `trusty-mpm`, `trusty-mpm-gui`, `trusty-agents`, `trusty-agents-common`, and `trusty-agents-local` use edition 2024;
-all other crates use edition 2021. Let-chains (`if let … && let …`) only
-work in edition 2024. Do not copy let-chain patterns into edition-2021 crates.
-
-## Former Repos Reference
-
-These repos were merged into this monorepo. Use this table when reading old
-PRs, issues, or commit messages that reference the former repo names.
-
-| Former repo | Now lives in |
-|---|---|
-| `bobmatnyc/trusty-common` | `crates/trusty-common` + 8 library crates |
-| `bobmatnyc/trusty-search` | `crates/trusty-search` |
-| `bobmatnyc/trusty-memory` | `crates/trusty-common` (`memory-core` feature — storage engine) + `crates/trusty-memory` (MCP frontend) |
-| `bobmatnyc/trusty-analyze` | `crates/trusty-analyze` |
-| `bobmatnyc/trusty-git-analytics` | `crates/trusty-git-analytics` |
-| `bobmatnyc/trusty-mpm` | `crates/trusty-mpm/` (unified crate) + `crates/trusty-mpm-gui/` |
-| `bobmatnyc/open-mpm` | `crates/trusty-agents` (renamed from `open-mpm` in #831) |
+- **Code structure & crate map:** [docs/reference/crate-map.md](docs/reference/crate-map.md)
+- **Documentation layout conventions:** [docs/reference/documentation-layout.md](docs/reference/documentation-layout.md)
+- **Former repos (monorepo history):** [docs/reference/former-repos.md](docs/reference/former-repos.md)
+- **Release workflow (with macOS signing details):** [docs/reference/release-workflow.md](docs/reference/release-workflow.md)
+- **Worktree discipline (extended rationale):** [docs/reference/worktree-discipline.md](docs/reference/worktree-discipline.md)
+- **Common pitfalls (detailed explanations):** [docs/reference/common-pitfalls.md](docs/reference/common-pitfalls.md)
+- **Environment variables (full table):** [docs/reference/environment-variables.md](docs/reference/environment-variables.md)
+- **IDE setup (detailed):** [docs/reference/ide-setup.md](docs/reference/ide-setup.md)
+- **Running MCP servers (examples & wiring):** [docs/reference/running-mcp-servers.md](docs/reference/running-mcp-servers.md)
