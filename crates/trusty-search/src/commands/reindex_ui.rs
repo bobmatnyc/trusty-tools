@@ -391,6 +391,17 @@ impl ReindexUi {
         }
     }
 
+    /// Return `true` when the currently active phase maps to slot 2 (the Embed bar).
+    ///
+    /// Why (issue #827): callers that want to advance the Embed bar independently
+    /// must skip the `advance_embed_bar` call when `set_position` already targeted
+    /// slot 2, otherwise the bar is advanced twice per event.
+    /// What: checks whether `phase_to_bar_slot(self.phase) == Some(2)`.
+    /// Test: `tests::active_phase_is_embed_returns_true_for_embedding_phases`.
+    pub(crate) fn active_phase_is_embed(&self) -> bool {
+        phase_to_bar_slot(self.phase) == Some(2)
+    }
+
     /// Advance the currently active stage bar to `pos`.
     ///
     /// Why: called on every `batch` or `skip` SSE event to keep the active bar

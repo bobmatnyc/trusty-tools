@@ -17,6 +17,7 @@ use crate::core::{
     embed::Embedder,
     registry::{IndexId, IndexRegistry},
 };
+use crate::service::lazy_loader::ColdIndexStore;
 use crate::service::reindex::ReindexProgress;
 
 /// Live daemon events pushed to dashboard subscribers via the `/status/stream`
@@ -65,6 +66,18 @@ pub enum DaemonEvent {
 #[derive(Clone)]
 pub struct SearchAppState {
     pub registry: IndexRegistry,
+    /// Cold index store for lazy warm-boot (issue #993).
+    ///
+    /// Why: when `TRUSTY_WARMBOOT_MAX_INDEXES` limits eager warm-boot, the
+    /// remaining indexes are parked here instead of being loaded at startup.
+    /// `get_or_load_index` checks this store on any 404 from the hot registry;
+    /// a hit triggers an on-demand restore within `cold_reload_timeout()`.
+    /// What: empty (default) until `restore_indexes` populates it from the
+    /// "cold" slice of `select_warmboot_entries`. Backed by `DashMap` so
+    /// concurrent access from multiple handlers is safe.
+    /// Test: `cold_store_register_and_contains` in `lazy_loader` unit tests;
+    /// `health_surfaces_warmboot_summary` verifies `indexes_lazy` is reported.
+    pub cold_store: Arc<ColdIndexStore>,
     /// Per-index reindex progress (live counters + SSE replay buffer). Started
     /// by `POST /indexes/:id/reindex`, consumed by
     /// `GET /indexes/:id/reindex/stream`. Lazily populated.
@@ -343,6 +356,20 @@ pub struct SearchAppState {
     /// it via `f32::from_bits()` on contention.
     /// Test: `health_rss_fallback_on_contention` in tests_state.rs.
     pub last_cpu_pct_bits: Arc<std::sync::atomic::AtomicU32>,
+    /// In-memory cache of the last Unix timestamp written to `last_queried_unix`
+    /// for each index (PR #1103 — eliminate sync disk read on query hot path).
+    ///
+    /// Why: the search handler calls `persistence::read_last_queried_unix` on
+    /// every query to enforce the 60-second write rate-limit. That function opens
+    /// and parses `indexes.toml` synchronously inside an async handler, adding
+    /// O(disk I/O) to every warm query. This map is the in-memory substitute: the
+    /// hot path reads from here (no disk I/O); the background write task updates
+    /// both this map and `indexes.toml` after a successful write.
+    /// What: `DashMap<IndexId, u64>` keyed by index id; value is the last Unix
+    /// second that was successfully written. `None` (absent key) means the write
+    /// interval has elapsed or the field was never written.
+    /// Test: `last_queried_cache_rate_limits_disk_writes` in `tests_search.rs`.
+    pub last_queried_write_cache: Arc<DashMap<crate::core::registry::IndexId, u64>>,
     /// Embedder functional-health tracker (issue #1003).
     ///
     /// Why: the sidecar process can be alive (so `is_embedder_ready()` returns
@@ -366,10 +393,17 @@ pub struct SearchAppState {
 /// revokes macOS TCC Full Disk Access, causing the daemon to load only 2 of
 /// ~102 indexes. Making this visible on `/health` turns a silent degradation
 /// into a loud, machine-readable signal.
+/// Why (issue #1091): scan timeouts silently produce 0-chunk indexes
+/// indistinguishable from healthy empty indexes; adding `indexes_skipped_timeout`
+/// to the `warm_boot_degraded` gate makes this a distinct, machine-readable
+/// signal on `/health` so monitors and `trusty-search health` can alert without
+/// tailing logs.
 /// What: counts of loaded and skipped indexes split by skip reason; a boolean
-/// `warm_boot_degraded` flag set when at least one TCC-skip happened or when
-/// loaded < 80% of prior known count.
-/// Test: `health_surfaces_warmboot_summary` in server tests.
+/// `warm_boot_degraded` flag set when at least one TCC-skip or scan-timeout
+/// happened, or when loaded < 80% of prior known count.
+/// Test: `health_surfaces_warmboot_summary` in server tests;
+///       `warmboot_summary_timeout_sets_degraded_flag` unit test in
+///       `commands/prior_index_count.rs`.
 #[derive(Clone, Default, serde::Serialize)]
 pub struct WarmBootSummary {
     /// Number of indexes successfully loaded during warm-boot.
@@ -377,11 +411,42 @@ pub struct WarmBootSummary {
     /// Number of indexes skipped because their volume was TCC-denied
     /// (PermissionDenied error or probe timeout on an external volume).
     pub indexes_skipped_tcc: usize,
-    /// Number of indexes skipped due to timeout (not TCC — slow or
-    /// network-backed filesystem).
+    /// Number of indexes skipped due to scan timeout (not TCC — slow or
+    /// network-backed filesystem). Issue #1091: these are counted in
+    /// `warm_boot_degraded` so monitors can detect scan-timeout degradation
+    /// without tailing logs, distinguishing it from a healthy empty index.
     pub indexes_skipped_timeout: usize,
-    /// `true` when `indexes_skipped_tcc > 0` OR when `indexes_loaded` is
-    /// less than 80% of the prior-known count (suggesting a large fraction
-    /// of indexes are missing, e.g. after FDA was revoked).
+    /// `true` when any of the following hold:
+    /// - `indexes_skipped_tcc > 0` (TCC / FDA denial)
+    /// - `indexes_skipped_timeout > 0` (scan timeout — issue #1091)
+    /// - `indexes_loaded` is less than 80% of the prior-known count
+    ///   (suggesting a large fraction of indexes are missing, e.g. after
+    ///   FDA was revoked)
+    ///
+    /// External monitors should poll this boolean as the single machine-readable
+    /// warm-boot health signal; the individual counters carry the root cause.
     pub warm_boot_degraded: bool,
+    /// Number of indexes registered but deferred to lazy-load (issue #993).
+    ///
+    /// Why: when `TRUSTY_WARMBOOT_MAX_INDEXES` caps the eager warm-boot, the
+    /// remaining indexes are parked in the cold store. This counter shows how
+    /// many are still waiting for their first query to trigger an on-demand load.
+    /// It decreases as indexes are lazily loaded during the daemon's lifetime.
+    /// `0` when `TRUSTY_WARMBOOT_MAX_INDEXES` is unset (all indexes eagerly loaded).
+    /// What: reported on every `GET /health` response; read from `ColdIndexStore::len`.
+    /// Test: `health_surfaces_warmboot_summary` in server tests.
+    pub indexes_lazy: usize,
+    /// Number of cold indexes that permanently failed to restore (issue #1106).
+    ///
+    /// Why: before #1106, a cold index whose `restore_fn` returned `false`
+    /// (blocked volume, missing root_path) stayed in `entries` forever, so
+    /// `indexes_lazy` never decreased and every query re-entered the expensive
+    /// restore path. After the fix, such entries are moved to `failed_entries`
+    /// and this counter reflects the distinct "permanently failed" state so
+    /// operators can see at a glance that some indexes need intervention (daemon
+    /// restart or re-registration) rather than assuming they are merely pending.
+    /// What: reported on every `GET /health` response; read from
+    /// `ColdIndexStore::failed_len`. `0` is the normal steady-state value.
+    /// Test: `health_failed_index_reported` in server tests.
+    pub indexes_failed: usize,
 }

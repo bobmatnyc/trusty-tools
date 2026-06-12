@@ -120,6 +120,11 @@ pub fn base_tool_descriptors() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "list_analyze_indexes",
+            "description": "List all indexes known to the trusty-analyze daemon. Used by the trusty-console dashboard so the browser calls the console's /api route instead of the daemon HTTP directly.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "extract_graph",
             "description": "Build the multi-language knowledge graph (nodes + edges) for an index",
             "inputSchema": {

@@ -267,6 +267,20 @@ cargo test -p trusty-common --features axum-server,mcp,rpc,symgraph
 cargo test -p trusty-common --features embedder -- --include-ignored
 ```
 
+## Migration Notes
+
+### 0.15.0 — `fact_hash_str` algorithm change (issue #1116)
+
+**Breaking: persisted KG entity IDs will change.** `fact_hash_str` previously
+derived entity ID suffixes with `std::collections::hash_map::DefaultHasher`
+(SipHash), which is not guaranteed stable across Rust toolchain versions. As
+of 0.15.0, it uses SHA-256 (first 4 bytes / 8 hex chars), which is fully
+stable across toolchains and process restarts.
+
+**Required action:** after upgrading to trusty-common 0.15.0, rebuild (reindex)
+any KG that stored entity IDs derived from `fact_hash_str`. The output shape
+(8-character lowercase hex suffix) is unchanged; only the hash values differ.
+
 ## License
 
 Licensed under the [MIT License](https://opensource.org/licenses/MIT).

@@ -41,7 +41,7 @@ trusty-code = { workspace = true }
 # (absorbed from the former `trusty-symgraph` crate in #5 phase 2c).
 # The `memory-core` feature pulls in the Memory Palace storage engine
 # (absorbed from the former `trusty-memory-core` crate in #5 phase 2d).
-trusty-common = { workspace = true, features = ["mcp", "symgraph-parser", "memory-core", "cli-help"] }
+trusty-common = { workspace = true, features = ["mcp", "symgraph-parser", "memory-core", "cli-help", "stdio-mcp-client"] }
 # Why (issue #226): trusty-agents only links `trusty_memory::MemoryMcpService` for
 #      in-process `rpc.discover` merging; it does not need the axum HTTP/SSE
 #      surface (it owns its own axum stack for the orchestrator's UI). Setting

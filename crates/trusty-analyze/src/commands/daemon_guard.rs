@@ -169,6 +169,62 @@ pub async fn ensure_daemon_running(port: u16) -> Result<()> {
     }
 }
 
+/// Ensure the trusty-analyze daemon is reachable for the MCP stdio bridge.
+///
+/// Why: the `mcp` subcommand acts as a stdio bridge that forwards every tool
+/// call to the daemon's REST API.  If the daemon is down, every tool call
+/// fails with a connection error -- a poor UX that also confuses MCP clients.
+/// Auto-starting matches the pattern established by trusty-memory and
+/// trusty-search (issue #1078) so all three daemon-backed MCP servers behave
+/// consistently.
+/// What: uses the shared `trusty_common::mcp::DaemonBridgeConfig` to probe the
+/// health endpoint derived from `analyzer_url`.  On miss, spawns
+/// `<current_exe> serve --port <port>` detached and polls until ready (30s
+/// budget).  The live base URL is returned so the caller can construct the
+/// `AnalyzerMcpServer` with the confirmed-reachable address.
+/// Test: covered by the `trusty_common::mcp::daemon_bridge` unit tests; the
+/// live path is exercised by `cargo run -- mcp` with no daemon running.
+pub async fn ensure_mcp_daemon_up(analyzer_url: &str) -> anyhow::Result<String> {
+    use trusty_common::mcp::DaemonBridgeConfig;
+
+    let base_url = analyzer_url.to_string();
+    // Re-read the daemon's address file on every poll so a dynamic-port
+    // daemon is discovered as soon as it writes the file.
+    let base_url_clone = base_url.clone();
+    let config = DaemonBridgeConfig {
+        service_name: "trusty-analyze".to_string(),
+        // spawn args: current_exe serve --port <port> (foreground mode)
+        spawn_args: {
+            let port = analyzer_url
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .rsplit(':')
+                .next()
+                .and_then(|s| s.parse::<u16>().ok())
+                .unwrap_or(trusty_analyze::service::DEFAULT_PORT);
+            vec!["serve".to_string(), "--port".to_string(), port.to_string()]
+        },
+        health_path: "/health".to_string(),
+        base_url_fn: Box::new(move || {
+            // Re-read the persisted address file on each iteration so a
+            // dynamic-port daemon is discovered once it writes the file.
+            match trusty_common::read_daemon_addr("trusty-analyze") {
+                Ok(Some(addr)) if !addr.is_empty() => {
+                    if addr.starts_with("http://") || addr.starts_with("https://") {
+                        addr
+                    } else {
+                        format!("http://{addr}")
+                    }
+                }
+                _ => base_url_clone.clone(),
+            }
+        }),
+        startup_timeout: None,
+        poll_interval: None,
+    };
+    trusty_common::mcp::ensure_daemon_up(&config).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

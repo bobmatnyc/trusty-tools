@@ -36,6 +36,7 @@ impl SearchAppState {
         let (shutdown_tx, _) = watch::channel(false);
         Self {
             registry,
+            cold_store: Arc::new(crate::service::lazy_loader::ColdIndexStore::new()),
             reindex_progress: Arc::new(DashMap::new()),
             last_reindex_aborted_at: Arc::new(DashMap::new()),
             embedder: None,
@@ -77,6 +78,9 @@ impl SearchAppState {
                 crate::service::stall_tracker::EmbedderStallTracker::new(),
             ),
             shutdown_tx: Arc::new(shutdown_tx),
+            // PR #1103: in-memory rate-limit gate replacing the sync disk read
+            // that `search_handler` previously did on every warm query.
+            last_queried_write_cache: Arc::new(DashMap::new()),
         }
     }
 

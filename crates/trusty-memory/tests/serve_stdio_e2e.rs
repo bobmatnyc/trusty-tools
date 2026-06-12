@@ -41,13 +41,16 @@ use tokio::time::timeout;
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Wall-clock deadline for each request/response pair.  Generous enough for
-/// slow CI hosts (embedder warm-up can take seconds on first run); tight
-/// enough to catch a hang.
-pub(crate) const RESPONSE_DEADLINE: Duration = Duration::from_secs(30);
+/// Wall-clock deadline for each request/response pair.
+///
+/// Why: the bridge architecture auto-starts the HTTP daemon if absent.
+/// On a cold machine daemon startup takes ~5–10 s; with 4 concurrent test
+/// processes each spawning a daemon the worst case is ~25 s.  60 s gives
+/// ample headroom without being so loose that a genuine hang goes undetected.
+pub(crate) const RESPONSE_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Deadline for the child process to exit after stdin EOF.
-pub(crate) const EXIT_DEADLINE: Duration = Duration::from_secs(10);
+pub(crate) const EXIT_DEADLINE: Duration = Duration::from_secs(15);
 
 // ---------------------------------------------------------------------------
 // Helpers

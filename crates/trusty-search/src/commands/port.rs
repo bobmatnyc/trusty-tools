@@ -7,7 +7,8 @@
 //! first-class, machine-parsable CLI surface.
 //!
 //! What: reads the daemon's persisted address via `trusty_common::read_daemon_addr`
-//! (which mirrors the `daemon_utils::read_http_addr_file` path) and prints one of
+//! (issue #984: `daemon_utils::read_http_addr_file` was replaced by this shared helper)
+//! and prints one of
 //! three formats to stdout based on the caller's flags:
 //!   - default: bare port number  →  `7879\n`
 //!   - `--addr`: `host:port`      →  `127.0.0.1:7879\n`

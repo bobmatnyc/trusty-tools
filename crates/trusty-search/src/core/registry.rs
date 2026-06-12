@@ -723,6 +723,26 @@ impl IndexRegistry {
         self.indexes.remove(id).is_some()
     }
 
+    /// Atomically remove an index and return its handle in one shard-locked
+    /// DashMap operation.
+    ///
+    /// Why (issue #1097 / #1090 atomicity): the old two-step `get()` +
+    /// `unregister()` held two separate shard locks, leaving a TOCTOU window
+    /// where a concurrent PATCH could replace the handle and cause DELETE to
+    /// clean up the wrong root from roots.toml. `DashMap::remove` holds the
+    /// shard lock across both lookup and removal, eliminating the race.
+    ///
+    /// What: wraps `DashMap::remove`; returns `(true, Some(handle))` when the
+    /// id was present, `(false, None)` otherwise.
+    /// Test: `registry_remove_and_get_returns_handle_atomically` in
+    /// `service::server::tests_state`.
+    pub fn remove_and_get(&self, id: &IndexId) -> (bool, Option<Arc<IndexHandle>>) {
+        match self.indexes.remove(id) {
+            Some((_k, handle)) => (true, Some(handle)),
+            None => (false, None),
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.indexes.len()
     }

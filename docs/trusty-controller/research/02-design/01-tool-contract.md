@@ -25,6 +25,14 @@ CLI-only tools, and for the Python claude-mpm orchestrator. The controller
 obtains the binary to invoke from the stack manifest (DOC-2), never by
 hard-coding.
 
+**Liveness is *answering*, not process existence.** A member is judged live by
+whether it **answers** the authoritative CLI/probe within the timeout — not by
+whether a process is running. A daemon with a stale PID lockfile or a bound port
+that does not answer `health`/`doctor` within the deadline is `down` for verdict
+purposes (the controller synthesizes the terminal envelope, stamping a `reason`
+discriminator so a wedged-but-running daemon is distinguished from a not-running
+one — cross-ref DOC-4 §1.3).
+
 ### D2 — `contract_version` semantics (A2)
 
 A **monotonic integer**, starting at `1`. Rationale (recorded verbatim):
@@ -95,6 +103,16 @@ the controller **without a controller release**. First-class commands
 changes incompatibly — NOT when a verb is merely added. This keeps the integer
 slow-moving while the verb set stays freely extensible.
 
+This bump rule is **enforced mechanically by a golden-snapshot test in the
+`trusty_common` contract module**: any change to the serialized envelope or an
+existing verb's `data` shape fails CI unless `contract_version` is bumped and a
+ledger row added (see the ledger's "Rule" below). Rust tools are gated here, via
+the shared `data` types they compile against; non-Rust members (the claude-mpm
+Python adapter) are gated by DOC-10's captured-`--json`-output conformance
+fixture. This is what stops a skewed-version consumer — a controller and a tool
+`cargo install`ed against different `trusty_common` versions — from
+silently misdeserializing a changed shape under a stale integer.
+
 ### D4 — Status vocabularies (A4)
 
 - doctor check `status`: `ok | warn | fail | pending | skipped` — where
@@ -102,12 +120,24 @@ slow-moving while the verb set stays freely extensible.
   broken" semantic.
 - health `status`: `running | degraded | down`.
 - The envelope's top-level `status` uses the vocabulary appropriate to the verb.
+- **One lattice, two source vocabularies.** These two vocabularies are not two
+  independent systems: at the stack level they both map into DOC-4 §2.0's single
+  four-value verdict lattice (`ready|degraded|pending|down`), where `health` and
+  `doctor` are the fast and deep probes of one total order. A synthesized terminal
+  envelope (DOC-4 §1.3) additionally carries a `reason` discriminator
+  (`timeout`/`wedged`/`unreachable`/`not_running`) so the same `down` verdict can
+  drive different remediation (restart vs start).
 
 ### D5 — Exit-code convention (A5)
 
 `0` ok · `1` fail/down · `2` degraded/warn · `3` contract-or-usage error. The
 JSON `status` is authoritative; the exit code mirrors it (for scriptable
 `stack doctor` in CI).
+
+The **stack** aggregate exit code (across N members in a fan-out stack
+doctor / stack health) is the **worst member code** under the precedence
+`3 ≻ 1 ≻ 2 ≻ 0` (worst-wins; see DOC-4 §7), where a contract-incompatible member
+contributes `3` — distinct from a runtime `down`, which is `1`.
 
 ### D6 — Contract types home (A6)
 
@@ -122,13 +152,31 @@ via its own adapter — see DOC-6.)
 `--scope project|system|all` on verbs; default `all` in a project directory,
 else `system`. Each `doctor`/`health` check carries its own `scope` field. DOC-1
 owns the **wire format**; DOC-3 owns the **behavioral model** (bidirectional
-edge).
+edge). The config-provenance axis (*where a config value originated*) is the
+**separate `origin` field** on `config.data` `sources[]` (enum
+`{env|project|system}`), **not** `scope` — so `scope` is unambiguously the single
+D7 wire axis `{project|system|all}` everywhere it appears.
 
 ### D8 — Security / secret redaction (A8)
 
 All verb output (`config`, `version`, `doctor` remediation hints, etc.) MUST
 redact secrets — API keys, tokens, AWS credentials, connection strings — using
 the fixed marker `"***redacted***"`.
+
+Redaction is **layered (defense-in-depth)**, not a single trusted hop. Tools
+redact at the source via the shared `redact_value` helper (the canonical,
+mandatory path — see D6 / DOC-6 §3); this is the **primary line**. Because a tool
+self-reports already-redacted JSON and the controller cannot prove the tool did
+so, the controller **additionally** runs a belt-and-suspenders redaction pass
+over every envelope string value **before rendering** — on both the CLI output
+and the DOC-7 UI — masking high-confidence secret patterns (e.g. `AKIA…`,
+`Bearer` / `Authorization` values, `scheme://user:pass@host` credentials, key
+prefixes `sk-` / `ghp_` / `xox…`, long high-entropy blobs) with the same
+`***redacted***` marker, so a member (or the claude-mpm shim) that forgot to
+redact cannot leak a secret into the UI. This controller-side pass is
+**heuristic / pattern-based** — it cannot catch every secret shape — so it is
+defense-in-depth, **not a guarantee**: tool-side `redact_value` remains the
+primary line and a negative CI conformance assertion (DOC-6 §8) is the gate.
 
 ## Per-verb `data` schemas (`contract_version: 1`)
 
@@ -181,7 +229,9 @@ respect D8 redaction (`***redacted***`).
       "scope": "system",                 // "project" | "system"  (per-check; D7)
       "status": "ok",                    // "ok" | "warn" | "fail" | "pending" | "skipped"
       "detail": "Daemon running at 127.0.0.1:7879 (v0.12.3)",  // human detail; redacted
-      "remediation": "Run `trusty-search start`."              // optional fix hint; null when none / status ok
+      "remediation": "Run `trusty-search start`.",             // optional fix hint; null when none / status ok
+      "pending_since": "2026-06-10T14:03:21Z", // ? ISO-8601 (or epoch) when this pending state began; present only when status == "pending"
+      "progress_pct": 42                 // ? optional 0–100 advisory progress; display only, never drives a verdict
     }
   ],
   "summary": {                           // aggregate counts over checks[]
@@ -194,6 +244,15 @@ respect D8 redaction (`***redacted***`).
 - `pending` carries the spec's *"unindexed = system-ready, project-pending, NOT
   broken"* semantic (D4): a project-scope check that cannot run yet but is not a
   failure. `skipped` = deliberately not run (e.g. platform N/A).
+- `pending_since` is an **optional** ISO-8601 (or epoch) timestamp recording when
+  the `pending` state began; tools SHOULD emit it whenever `status == "pending"`.
+  It is the sole input the controller (DOC-4) uses to **time-escalate a stalled
+  `pending` to `degraded`** purely by elapsed time, without ever inspecting the
+  index internals (it cannot — freshness stays tool-reported). If a tool omits
+  `pending_since`, the controller cannot time-escalate and the check stays
+  `pending` (current behavior). See DOC-4 §5.5.
+- `progress_pct` is an **optional** advisory `0`–`100` value for display only; it
+  never drives a verdict or the time-escalation.
 - Envelope `status` rollup: any `fail` → `fail`; else any `warn` → `warn`; else
   `ok`. (`pending`/`skipped` never worsen the rollup.) This rollup rule is the
   per-tool input DOC-4 consumes for the stack-wide rollup.
@@ -223,7 +282,8 @@ respect D8 redaction (`***redacted***`).
         "remediation": "Run `trusty-search doctor --fix` to install newsyslog rotation." },
       { "id": "project_index", "title": "Project index present", "scope": "project",
         "status": "pending", "detail": "No index registered for this project yet (system is ready).",
-        "remediation": "Run `trusty-search index` in the project root." }
+        "remediation": "Run `trusty-search index` in the project root.",
+        "pending_since": "2026-06-10T14:03:21Z", "progress_pct": 42 }
     ],
     "summary": { "ok": 4, "warn": 1, "fail": 0, "pending": 1, "skipped": 0, "total": 6 }
   },
@@ -247,15 +307,29 @@ Minimal by design (D4): the **envelope `status`** carries the
   "deps": [                              // ? dependency reachability (from trusty-review/analyze prior art)
     { "id": "trusty-search", "required": true, "reachable": true }
   ],
-  "detail": "store/recall round-trip ok"  // ? short triage phrase, esp. when degraded
+  "detail": "store/recall round-trip ok",  // ? short triage phrase; when up-but-not-ready set to "model loading"/"warming"/"restarting"
+  "reason": "wedged"                       // ? only on a controller-synthesized down envelope: "timeout"|"wedged"|"unreachable"|"not_running"
 }
 ```
 
-- `down` ⇒ the tool/daemon is not answering; the controller synthesizes a `down`
-  envelope (it still gets `tool`, `verb`, `status:"down"`, empty/partial `data`)
-  rather than the tool emitting it. `degraded` ⇒ up but a required dep is
+- `down` ⇒ the tool/daemon is not answering within the timeout (DOC-1 D1:
+  liveness = answering, not process existence); the controller synthesizes a
+  `down` envelope (it still gets `tool`, `verb`, `status:"down"`, empty/partial
+  `data`) rather than the tool emitting it. On a synthesized `down` the controller
+  stamps a `reason` discriminator — `not_running` (no process → remediation
+  **start**) vs `timeout`/`wedged`/`unreachable` (up but not answering →
+  remediation **restart**/investigate) — so a wedged daemon is distinguished from
+  a stopped one (cross-ref DOC-4 §1.3/§5.1). `degraded` ⇒ up but a required dep is
   unreachable or a self-probe failed (prior art: review `compute_status`, analyze
   `search_reachable`, memory round-trip probe).
+- **Up-but-not-ready ⇒ answer promptly, never hang.** A daemon that is up but not
+  yet ready — cold start, ONNX/model loading, warming, or mid-graceful-restart —
+  MUST answer `health` **promptly** with `status:"degraded"` (or `pending` at the
+  doctor layer) plus a `detail` naming the state (`"model loading"`,
+  `"restarting"`), rather than hanging until the probe deadline. This lets the
+  controller distinguish a healthy-but-warming daemon from a wedged one: warming
+  is reported as `degraded`/`pending`, not false-failed into a synthesized `down`
+  (DOC-4 §1.3; the restart window maps to `pending`, consistent with C5).
 
 **Worked example** (degraded — required dep down):
 
@@ -382,7 +456,12 @@ Exit code: `0`.
 ### `config.data`
 
 **Read-only** effective merged config (system + project per D7); editing is an
-explicit spec non-goal. Secrets redacted with the fixed marker (D8).
+explicit spec non-goal. Secrets redacted with the fixed marker (D8). The `config`
+contract verb accepts only read selectors (`--scope`, optional single-key
+projection) and never mutating arguments; tool-native runtime mutation (e.g.
+trusty-search memory limits) lives in a separate, non-contract verb (`tune`) that
+is NOT advertised in `verbs[]`, so the contract `config` surface is read-only by
+construction (cross-ref DOC-6 §2.6, DOC-5 §2/§3).
 
 ```json
 {
@@ -393,9 +472,9 @@ explicit spec non-goal. Secrets redacted with the fixed marker (D8).
     "port": 7879
   },
   "sources": [                           // ? provenance, lowest→highest precedence; values redacted too
-    { "scope": "system",  "path": "~/.config/trusty-search/config.yaml", "keys": ["memory_limit_mb", "embedder"] },
-    { "scope": "project", "path": "./trusty-search.yaml",               "keys": ["port"] },
-    { "scope": "env",     "path": null, "keys": ["openrouter_api_key"] }
+    { "origin": "system",  "path": "~/.config/trusty-search/config.yaml", "keys": ["memory_limit_mb", "embedder"] },
+    { "origin": "project", "path": "./trusty-search.yaml",               "keys": ["port"] },
+    { "origin": "env",     "path": null, "keys": ["openrouter_api_key"] } // origin enum: env | project | system (NOT the D7 scope axis)
   ],
   "redacted_keys": ["openrouter_api_key"] // ? convenience list of which keys were masked
 }
@@ -403,16 +482,18 @@ explicit spec non-goal. Secrets redacted with the fixed marker (D8).
 
 - The precedence model that produces `effective` is the tool's own; DOC-1 only
   fixes the *shape*.
-- **Two distinct scope vocabularies (keep these separate).** The `--scope` flag
-  and every per-check `scope` field use the **D7 wire vocabulary
-  `{project|system|all}`** — *which layer a verb or check addresses*. The
-  config-provenance `sources[].scope` field is a **separate, related
-  sub-vocabulary `{env|project|system}`** — *where a config value originated*
-  (an environment variable vs a project config file vs a system default). These
-  are not the same axis: `all` is meaningful for `--scope` but never appears as a
-  provenance origin, and `env` is a provenance origin but never a `--scope`
-  value. Documenting the distinction explicitly keeps D7's wire format clean —
-  `sources[].scope` is a config-provenance label, not a D7 scope.
+- **One `scope` axis + a separate typed `origin` (keep these distinct).**
+  `scope` = the **D7 wire axis** `{project|system|all}` — *which layer a verb or
+  check addresses* — and it is the **only** field named `scope` anywhere in an
+  envelope (the `--scope` flag, the envelope `scope`, and every per-check
+  `scope`). `origin` = **config provenance** `{env|project|system}` on
+  `config.data` `sources[]` — *where a config value originated* (an environment
+  variable vs a project config file vs a system default). They are distinct axes
+  with distinct value sets: `all` is meaningful for `scope` but never an
+  `origin`, and `env` is an `origin` but never a `scope` value. Giving provenance
+  its own field name **and its own enum** means authors cannot conflate the two,
+  and a typo in `origin` is catchable against its own enum rather than silently
+  accepted as a stringly-typed `scope`.
 
 **Worked example:**
 
@@ -432,9 +513,9 @@ explicit spec non-goal. Secrets redacted with the fixed marker (D8).
       "port": 7879
     },
     "sources": [
-      { "scope": "system",  "path": "~/.config/trusty-search/config.yaml", "keys": ["memory_limit_mb", "embedder"] },
-      { "scope": "project", "path": "./trusty-search.yaml",               "keys": ["port"] },
-      { "scope": "env",     "path": null,                                  "keys": ["openrouter_api_key"] }
+      { "origin": "system",  "path": "~/.config/trusty-search/config.yaml", "keys": ["memory_limit_mb", "embedder"] },
+      { "origin": "project", "path": "./trusty-search.yaml",               "keys": ["port"] },
+      { "origin": "env",     "path": null,                                  "keys": ["openrouter_api_key"] }
     ],
     "redacted_keys": ["openrouter_api_key"]
   },
@@ -450,6 +531,14 @@ Home: a new `contract` module in `trusty-common` (D6), sibling to the existing
 `mcp` / `rpc` / `launchd` modules. The Rust types below are a **design sketch**,
 not committed source — DOC-6's retrofits implement against them. Edition-2021
 safe (no let-chains) so every member crate can depend on it.
+
+The module also ships a **golden-snapshot conformance test**: it serializes a
+canonical instance of `Envelope<T>` and each per-verb `data` struct to JSON and
+asserts the result against committed fixtures, so any change to a serialized
+shape fails CI unless `CONTRACT_VERSION` is bumped and a ledger row added —
+coupling shape changes to the integer (see the ledger "Rule"). This gates the
+Rust tools; non-Rust members are held to the same shapes via DOC-10's
+captured-`--json` fixture.
 
 ```rust
 // trusty_common::contract  (new module; D6)
@@ -520,6 +609,13 @@ pub struct DoctorCheck {
     pub detail: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remediation: Option<String>,
+    /// When this `pending` state began (DOC-4 §5.5 time-escalation input);
+    /// present only when `status == Pending`. ISO-8601/RFC-3339 string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_since: Option<String>,
+    /// Advisory 0–100 progress; display only, never drives a verdict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress_pct: Option<u8>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -571,8 +667,14 @@ pub struct LifecycleData {
     #[serde(default)] pub noop: bool,
 }
 
+/// Config provenance (NOT the D7 wire `Scope`): a separate, typed axis so a
+/// bad provenance value is catchable against its own enum, never a stray string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigOrigin { Env, Project, System }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConfigSource { pub scope: String, pub path: Option<String>, pub keys: Vec<String> }
+pub struct ConfigSource { pub origin: ConfigOrigin, pub path: Option<String>, pub keys: Vec<String> }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigData {
@@ -641,7 +743,9 @@ launch, **floor `F = 1`**.
 presence is advertised via `verbs[]` (a capability). Bump the integer **only**
 when the envelope shape or an existing verb's `data` schema changes in a way that
 is **not** a pure additive superset (i.e., would break an older consumer).
-Adding an **optional** field is additive and does NOT bump.
+Adding an **optional** field is additive and does NOT bump. This rule is
+CI-enforced via the `trusty_common` golden-snapshot test — the snapshot, the
+integer bump, and the ledger row move together — not by reviewer discipline.
 
 | `contract_version` | What it guarantees / what changed |
 |---|---|
@@ -810,7 +914,7 @@ other contract-conformant member.
 - [x] Write the contract-version ADR (charter B2) — [ADR-0007](../../../adr/0007-tool-contract-versioning-and-verb-model.md) (now Accepted)
 - [x] Coordinate `scope` fields with DOC-3 (DOC-3 Accepted; D7 wire vocabulary
       `{project|system|all}` documented as distinct from the config-provenance
-      `sources[].scope` sub-vocabulary `{env|project|system}`)
+      `sources[].origin` axis `{env|project|system}`)
 - [x] Team review → Accepted (owner-approved)
 
 > **Deferred (not design-time):** claude-mpm's concrete `verbs[]` advertisement

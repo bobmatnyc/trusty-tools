@@ -1,23 +1,27 @@
 <script>
   import { onMount } from 'svelte';
-  import OverviewTab from './OverviewTab.svelte';
+  import ServiceCard from './ServiceCard.svelte';
+  import MemoryTab from './MemoryTab.svelte';
+  import SearchTab from './SearchTab.svelte';
   import AnalyzeTab from './AnalyzeTab.svelte';
   import StubTab from './StubTab.svelte';
+
+  // ── state ────────────────────────────────────────────────────────────────
 
   let services = $state([]);
   let loading = $state(true);
   let error = $state(null);
-
-  // activeTab: 'overview' | service id string
   let activeTab = $state('overview');
 
-  // Map service id -> tab label for the four known services
-  const SERVICE_TABS = [
-    { id: 'trusty-search',  label: 'Search' },
-    { id: 'trusty-memory',  label: 'Memory' },
-    { id: 'trusty-analyze', label: 'Analyze' },
-    { id: 'trusty-review',  label: 'Review' },
+  const TABS = [
+    { id: 'overview', label: 'Overview' },
+    { id: 'search',   label: 'Search' },
+    { id: 'memory',   label: 'Memory' },
+    { id: 'analyze',  label: 'Analyze' },
+    { id: 'review',   label: 'Review' },
   ];
+
+  // ── data fetch ───────────────────────────────────────────────────────────
 
   onMount(async () => {
     try {
@@ -30,60 +34,51 @@
       loading = false;
     }
   });
-
-  function serviceById(id) {
-    return services.find((s) => s.id === id) ?? null;
-  }
-
-  function switchTab(id) {
-    activeTab = id;
-  }
 </script>
 
 <main>
   <header>
     <h1>Trusty Console</h1>
-    <p class="subtitle">Service status overview</p>
+    <p class="subtitle">Unified service dashboard</p>
   </header>
 
-  {#if !loading && !error}
-    <div class="tabs" role="tablist">
+  <!-- Tab bar -->
+  <div class="tabs" role="tablist">
+    {#each TABS as tab (tab.id)}
       <button
         role="tab"
-        aria-selected={activeTab === 'overview'}
         class="tab-btn"
-        class:active={activeTab === 'overview'}
-        onclick={() => switchTab('overview')}
+        class:active={activeTab === tab.id}
+        aria-selected={activeTab === tab.id}
+        onclick={() => activeTab = tab.id}
       >
-        Overview
+        {tab.label}
       </button>
-      {#each SERVICE_TABS as tab (tab.id)}
-        <button
-          role="tab"
-          aria-selected={activeTab === tab.id}
-          class="tab-btn"
-          class:active={activeTab === tab.id}
-          onclick={() => switchTab(tab.id)}
-        >
-          {tab.label}
-        </button>
-      {/each}
-    </div>
-  {/if}
+    {/each}
+  </div>
 
-  <div class="tab-content">
-    {#if loading}
-      <div class="loading">Detecting services…</div>
-    {:else if error}
-      <div class="error">Failed to load services: {error}</div>
-    {:else if activeTab === 'overview'}
-      <OverviewTab {services} onSelectService={switchTab} />
-    {:else if activeTab === 'trusty-analyze'}
-      <AnalyzeTab service={serviceById('trusty-analyze')} />
-    {:else}
-      {@const svc = serviceById(activeTab)}
-      {@const tabMeta = SERVICE_TABS.find((t) => t.id === activeTab)}
-      <StubTab service={svc} label={tabMeta?.label ?? activeTab} />
+  <!-- Tab panels -->
+  <div class="panel">
+    {#if activeTab === 'overview'}
+      {#if loading}
+        <div class="loading">Detecting services…</div>
+      {:else if error}
+        <div class="error">Failed to load services: {error}</div>
+      {:else}
+        <div class="cards">
+          {#each services as service (service.id)}
+            <ServiceCard {service} />
+          {/each}
+        </div>
+      {/if}
+    {:else if activeTab === 'search'}
+      <SearchTab />
+    {:else if activeTab === 'memory'}
+      <MemoryTab />
+    {:else if activeTab === 'analyze'}
+      <AnalyzeTab />
+    {:else if activeTab === 'review'}
+      <StubTab name="Review" endpoint={null} />
     {/if}
   </div>
 </main>
@@ -100,7 +95,7 @@
     min-height: 100vh;
   }
   main {
-    max-width: 1040px;
+    max-width: 1100px;
     margin: 0 auto;
     padding: 2rem 1rem;
   }
@@ -120,34 +115,42 @@
     color: #94a3b8;
     margin: 0;
   }
-  .tabs {
+
+  /* Tab bar */
+  div.tabs {
     display: flex;
     gap: 0.25rem;
     border-bottom: 1px solid #2d3348;
     margin-bottom: 1.5rem;
-    padding-bottom: 0;
   }
   .tab-btn {
     background: none;
     border: none;
     border-bottom: 2px solid transparent;
+    padding: 0.6rem 1.2rem;
     color: #94a3b8;
-    cursor: pointer;
     font-size: 0.9rem;
     font-weight: 500;
-    padding: 0.6rem 1rem;
-    margin-bottom: -1px;
+    cursor: pointer;
     transition: color 0.15s, border-color 0.15s;
+    margin-bottom: -1px;
   }
   .tab-btn:hover {
     color: #e2e8f0;
   }
   .tab-btn.active {
-    color: #e2e8f0;
+    color: #7c3aed;
     border-bottom-color: #7c3aed;
   }
-  .tab-content {
-    min-height: 12rem;
+
+  /* Panel */
+  .panel {
+    min-height: 200px;
+  }
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1rem;
   }
   .loading,
   .error {

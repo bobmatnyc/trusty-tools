@@ -115,7 +115,7 @@ Each stack member is one `[[member]]` entry. Fields:
 | `id` | yes | Stable member id; the **manifest key** that matches DOC-1's envelope `tool` field and the DOC-3 project-identity keys. snake/kebab tool name, e.g. `trusty-search`. |
 | `display_name` | yes | Human label for UI/CLI, e.g. `"Trusty Search"`. |
 | `binary` | yes | Binary name on PATH the controller invokes, e.g. `trusty-search`, `tctl`. (May differ from `id` and from the crate name — cf. `tga`.) |
-| `kind` | yes | Member kind: `daemon` (two-layer, has system daemon) \| `cli` (CLI-only / system-only, no project layer) \| `orchestrator` (the pluggable orchestrator slot). Ties to DOC-3 §1 (single-layer vs two-layer) and §10 (orchestrator). |
+| `kind` | yes | Member kind: `daemon` (two-layer, has system daemon) \| `cli` (CLI-only / system-only, no project layer) \| `controller` (a supervised, system-only daemon that is the controller itself — launchd/systemd-supervised, no project layer, restarted last via self-exit per DOC-9 §8) \| `orchestrator` (the pluggable orchestrator slot). Ties to DOC-3 §1 (single-layer vs two-layer) and §10 (orchestrator). |
 | `install` | yes | Install source descriptor (a sub-table — see below). Drives DOC-8 install + DOC-9 upgrade. |
 | `version` | yes | The **pinned** version for this BOM (the lockfile pin). semver string, e.g. `"0.24.1"`. |
 | `min_contract_version` | yes | Lowest `contract_version` (DOC-1 D2) the controller will accept from this member. Integer ≥ 1. A member advertising below this is contract-incompatible (DOC-1 floor rule). |
@@ -123,7 +123,8 @@ Each stack member is one `[[member]]` entry. Fields:
 | `ui` | no | UI-availability + discovery hint sub-table (see below). Drives DOC-7 (the controller UI links out to member UIs, never reimplements them — spec §56). Omit for members with no UI. |
 | `changelog` | yes | Changelog source descriptor (a sub-table — see §5). Drives DOC-9 headline extraction. |
 | `depends_on` | no | Array of member `id`s this member requires at runtime (e.g. `trusty-analyze` → `["trusty-search"]`). Informs DOC-4 rollup / ordering; does not duplicate DOC-1 health `deps`. |
-| `enabled` | no | `true` (default) \| `false`. A system override file can disable a member without removing its registry entry. |
+| `timeout` | no | Per-member probe-timeout override sub-table in seconds, e.g. `{ health = 2, doctor = 30 }`. Overrides the DOC-4 §1.3 defaults for slow-to-answer members — chiefly model-loading daemons (e.g. trusty-search cold ONNX/CoreML load) that need a larger cold-load budget. Precedence: **per-member `timeout` > global `--timeout` > the DOC-4 §1.3 2 s / 10 s defaults**. Omitted keys fall through to the next precedence tier. |
+| `enabled` | no | `true` (default) \| `false`. A system override file can disable a member without removing its registry entry. `enabled = false` ⇒ the ensure pass **skips** the member entirely — no install, config, start, or upgrade. Its existing per-project and system state is **left in place** (the no-uninstall non-goal: the controller never removes an index/palace/`.mcp.json` entry), and the member renders a `skipped` doctor check (note: "disabled in manifest") rather than `down`/`fail`. Known consequence: orphaned `.mcp.json` entries / per-project state from a previously-enabled member remain (no cleanup path, per no-uninstall) — manual removal is the user's path. |
 
 **`install` sub-table** (tagged by `source`):
 
@@ -185,7 +186,7 @@ contract_floor = 1                    # global controller contract floor (DOC-1)
 id = "trusty-controller"
 display_name = "Trusty Controller"
 binary = "tctl"
-kind = "cli"                          # the controller itself: system-only
+kind = "controller"                   # the supervised, system-only controller daemon (no project layer; restarted last via self-exit, DOC-9 §8)
 install = { source = "cargo", crate = "trusty-controller" }
 version = "0.1.0"
 min_contract_version = 1
@@ -200,6 +201,7 @@ kind = "daemon"                       # two-layer: machine daemon + per-project 
 install = { source = "cargo", crate = "trusty-search" }
 version = "0.24.1"
 min_contract_version = 1
+timeout = { doctor = 30 }             # cold ONNX/CoreML model load needs a larger budget (DOC-4 §1.3)
 ui = { available = true, path = "/ui", port_source = "port_json" }
 changelog = { source = "git_tag", crate = "trusty-search", path = "CHANGELOG.md", format = "keepachangelog" }
 # NOTE: bundles trusty-embedderd sidecar via single-install — NOT a separate member.
@@ -286,6 +288,31 @@ without taking it away:
   - The stack version is therefore the unit a user reasons about ("I'm on
     `2026.06-1`; `2026.07-1` is available") even though the underlying crates
     moved independently.
+
+- **How a tested tuple is materialized (owner + gate):** the unifying principle
+  is that per-crate versions (read live from each member's `version --json`) are
+  the source of truth; the `stack_version` label is a *derived artifact* — a
+  *tested snapshot* of those independent versions. So a candidate `stack_version`
+  is *tested* precisely when **a DOC-10 acceptance run passes against that exact
+  pin set** — the isolation harness's §2 oracle already IS the end-to-end tuple
+  test, so green = promotable to a released BOM (no net-new test mechanism is
+  needed).
+  - *Owner / cadence:* a CI job — scheduled plus on-demand `workflow_dispatch` —
+    materializes a candidate tuple (e.g. the latest published version per crate,
+    or a hand-curated set), runs the harness against it, and on green proposes /
+    promotes a new `stack_version` (cross-ref [DOC-10](./10-isolation-testing-harness.md)
+    §6b, which already carries the scheduled + `workflow_dispatch` legs). This is
+    the owner/mechanism the "cut later, when the combination is tested" language
+    above refers to.
+  - *BOM-in-binary staleness (explicit):* the embedded default BOM updates only
+    on a `tctl` release, so "current" means *current as of the last `tctl`
+    release*. The system-override `manifest.toml` is the interim pin a user drops
+    to move ahead of the embedded default. A **remote BOM channel remains deferred
+    for v1** (§8) but is named here as the eventual decoupling — so a freshly-tested
+    tuple can ship without a `tctl` rebuild.
+  - *Drift, not failure:* "no tested tuple yet exists for the newest crate
+    versions" is a normal, surfaced **drift** state (the live `version --json`
+    set runs ahead of the pinned BOM, per DOC-9 §4.4), not a failure.
 
 ### 5. Structured changelog format
 

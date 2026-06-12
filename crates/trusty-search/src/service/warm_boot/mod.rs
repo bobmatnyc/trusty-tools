@@ -22,8 +22,11 @@
 pub(super) mod probe;
 pub mod restore;
 pub(crate) mod scan;
+pub mod stages;
 
-pub use probe::leaked_probe_thread_count;
+#[allow(deprecated)]
+pub use probe::leaked_probe_thread_count; // deprecated alias for probe_thread_failures (#822)
+pub use probe::probe_thread_failures;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -31,6 +34,7 @@ use std::time::Duration;
 
 use crate::service::persistence::PersistedIndex;
 pub use restore::restore_one_index_bounded;
+pub use stages::{derive_warm_boot_stages, WarmBootInputs};
 
 /// Attempt to canonicalize `path` (resolving symlinks), returning the canonical
 /// form on success or the original path on failure.
@@ -123,6 +127,31 @@ pub fn probe_warmboot_volumes(entries: &[PersistedIndex]) -> HashSet<PathBuf> {
     let paths: Vec<PathBuf> = entries.iter().map(|e| e.root_path.clone()).collect();
     let deadline = probe::volume_probe_timeout();
     probe::probe_all_volumes(&paths, deadline)
+}
+
+/// Probe the volumes backing a list of root paths and return a set of
+/// inaccessible volume keys.
+///
+/// Why (issues #736 / #737): the colocated warm-boot phase previously
+/// constructed dummy `PersistedIndex { ..Default::default() }` values solely
+/// to pass to `probe_warmboot_volumes`. That construction was wasteful and
+/// fragile (a root without a filesystem path defaulted `root_path` to empty,
+/// making the probe target `/`). This path-based variant lets callers pass
+/// the actual root `PathBuf` slices directly without any dummy struct
+/// overhead. Both warm-boot phases (legacy and colocated) share the same
+/// underlying `probe::probe_all_volumes` implementation.
+///
+/// What: delegates to `probe::probe_all_volumes` with the supplied `paths`
+/// slice and the configured volume-probe timeout.
+///
+/// Test: both call sites in `start.rs` — existing probe_tests cover the
+/// underlying `probe_all_volumes` behaviour.
+pub fn probe_warmboot_volumes_from_paths(paths: &[PathBuf]) -> HashSet<PathBuf> {
+    if paths.is_empty() {
+        return HashSet::new();
+    }
+    let deadline = probe::volume_probe_timeout();
+    probe::probe_all_volumes(paths, deadline)
 }
 
 /// Returns `true` if `root_path` is on an inaccessible volume.

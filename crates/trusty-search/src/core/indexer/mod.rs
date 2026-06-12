@@ -813,6 +813,38 @@ pub struct ParsedBatch {
     pub vector_count: usize,
 }
 
+impl ParsedBatch {
+    /// Filter out all chunks (and their paired embeddings and entity lists) for
+    /// files that match the `exclude` predicate, returning the reduced batch.
+    ///
+    /// Why (issue #1002): when a pre-commit `remove_file_no_kg_rebuild` call
+    /// fails, inserting the new chunks for that file on top of the surviving
+    /// stale chunks would produce duplicate search results. Calling this method
+    /// before `commit_parsed_batch` skips those files entirely — the insert
+    /// is deferred to the next `--force` reindex when the remove can succeed.
+    /// What: retains only (chunk, embedding) pairs where `keep(&chunk.file)` is
+    /// true; filters `entities_by_file` with the same predicate. Timing fields
+    /// are left unchanged (they reflect actual work done, not committed chunks).
+    /// Test: `retain_files_filters_chunks_and_entities` in `indexer::tests`.
+    pub(crate) fn retain_files<F: Fn(&str) -> bool>(mut self, keep: F) -> Self {
+        // `chunks` and `embeddings` are parallel vecs of the same length.
+        // Iterate with indices so we can collect the matching pairs in one pass.
+        let mut new_chunks = Vec::with_capacity(self.chunks.len());
+        let mut new_embeddings = Vec::with_capacity(self.embeddings.len());
+        for (chunk, embedding) in self.chunks.drain(..).zip(self.embeddings.drain(..)) {
+            if keep(&chunk.file) {
+                new_chunks.push(chunk);
+                new_embeddings.push(embedding);
+            }
+        }
+        self.chunks = new_chunks;
+        self.embeddings = new_embeddings;
+        self.entities_by_file
+            .retain(|(file, _)| keep(file.as_str()));
+        self
+    }
+}
+
 /// Per-batch timings emitted by [`CodeIndexer::commit_parsed_batch`]. Captures
 /// the cost of the commit-phase work (BM25 ingest, vector upsert, KG rebuild).
 ///

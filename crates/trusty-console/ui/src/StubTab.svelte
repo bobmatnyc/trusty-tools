@@ -1,157 +1,85 @@
 <script>
-  /**
-   * Placeholder tab for services whose metrics endpoints are not yet wired
-   * (trusty-search — Phase 1, trusty-memory — Phase 2, trusty-review).
-   *
-   * Shows the current service status/version from /api/console/services and a
-   * clear "coming soon" notice.  Never calls daemon HTTP directly.
-   *
-   * @typedef {{ id: string, display_name: string, status: string, version?: string, url?: string }} Service
-   * @type {{ service: Service | null, label: string }}
-   */
-  let { service, label } = $props();
+  import { onMount } from 'svelte';
 
-  // Phase labels so the notice is accurate per service.
-  const PHASE_NOTES = {
-    'trusty-search':  'Phase 1 of #1104',
-    'trusty-memory':  'Phase 2 of #1104',
-    'trusty-review':  'a future phase of #1104',
-  };
+  /** @type {{ name: string, endpoint: string | null }} */
+  let { name, endpoint } = $props();
 
-  let phaseNote = $derived(
-    service ? (PHASE_NOTES[service.id] ?? 'a future phase') : 'a future phase'
-  );
+  let report = $state(null);
+  let loading = $state(true);
+  let error = $state(null);
 
-  let statusLabel = $derived(
-    service?.status === 'running' ? 'Running'
-    : service?.status === 'available' ? 'Available'
-    : 'Absent'
-  );
+  onMount(async () => {
+    if (!endpoint) {
+      loading = false;
+      return;
+    }
+    try {
+      const resp = await fetch(endpoint);
+      if (resp.status === 503) {
+        error = `${name} metrics not yet available (daemon absent or first boot).`;
+        return;
+      }
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      report = await resp.json();
+    } catch (e) {
+      error = e.message;
+    } finally {
+      loading = false;
+    }
+  });
+
   let statusColor = $derived(
-    service?.status === 'running' ? '#22c55e'
-    : service?.status === 'available' ? '#f59e0b'
-    : '#64748b'
+    report?.status === 'ok'         ? '#22c55e'
+    : report?.status === 'degraded' ? '#f59e0b'
+    : '#ef4444'
   );
 </script>
 
-<div class="tab">
-  <h2 class="tab-title">{label}</h2>
+<div class="tab-content">
+  <h2 class="section-title">Trusty {name}</h2>
 
-  <!-- Current status from /api/console/services (always available) -->
-  <section class="section">
-    <h3 class="section-title">Service Status</h3>
-    {#if service}
-      <div class="stat-row">
-        <span class="stat-label">Status</span>
-        <span class="badge" style="background: {statusColor}22; color: {statusColor}; border-color: {statusColor}44;">
-          <span class="dot" style="background: {statusColor};"></span>
-          {statusLabel}
-        </span>
-      </div>
-      {#if service.version}
-        <div class="stat-row">
-          <span class="stat-label">Version</span>
-          <code>{service.version}</code>
-        </div>
-      {/if}
-    {:else}
-      <p class="muted">Service not detected on this machine.</p>
-    {/if}
-  </section>
-
-  <!-- Coming-soon notice -->
-  <section class="section stub-notice">
-    <p class="notice-text">
-      Native metrics for {label} are coming in {phaseNote}.
-    </p>
-    <p class="notice-sub">
-      This tab will surface live metrics fetched via the console's own
-      <code>/api/console/metrics/*</code> endpoints — no direct daemon HTTP
-      calls from the browser.
-    </p>
-  </section>
+  {#if !endpoint}
+    <div class="placeholder">Dashboard coming soon for {name}.</div>
+  {:else if loading}
+    <div class="placeholder">Loading {name} metrics…</div>
+  {:else if error}
+    <div class="not-available">{error}</div>
+  {:else if report}
+    <div class="meta-row">
+      <span class="badge" style="background: {statusColor}22; color: {statusColor}; border-color: {statusColor}44;">
+        <span class="dot" style="background: {statusColor};"></span>
+        {report.status}
+      </span>
+      <span class="version">v{report.version}</span>
+    </div>
+    <pre class="metrics-dump">{JSON.stringify(report.metrics, null, 2)}</pre>
+  {/if}
 </div>
 
 <style>
-  .tab {
-    padding: 0;
-  }
-  .tab-title {
-    font-size: 1.3rem;
-    font-weight: 700;
-    margin: 0 0 1.25rem;
-    color: #e2e8f0;
-  }
-  .section {
-    background: #1e2130;
-    border: 1px solid #2d3348;
-    border-radius: 0.75rem;
-    padding: 1.25rem;
-    margin-bottom: 1rem;
-  }
+  .tab-content { padding: 0.25rem 0; }
   .section-title {
-    font-size: 0.8rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.07em;
-    color: #64748b;
-    margin: 0 0 0.85rem;
+    font-size: 1.25rem; font-weight: 600; margin: 0 0 1rem; color: #e2e8f0;
   }
-  .stat-row {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    margin-bottom: 0.5rem;
-    font-size: 0.85rem;
+  .placeholder, .not-available {
+    background: #1e2130; border-radius: 0.5rem;
+    padding: 1.25rem; color: #94a3b8; font-size: 0.9rem;
   }
-  .stat-label {
-    color: #94a3b8;
-    min-width: 5rem;
+  .not-available { color: #f59e0b; }
+  .meta-row {
+    display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.25rem;
   }
   .badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-    font-size: 0.75rem;
-    font-weight: 600;
-    padding: 0.2rem 0.6rem;
-    border-radius: 9999px;
-    border: 1px solid;
-    white-space: nowrap;
+    display: inline-flex; align-items: center; gap: 0.35rem;
+    font-size: 0.75rem; font-weight: 600; padding: 0.2rem 0.6rem;
+    border-radius: 9999px; border: 1px solid;
   }
-  .dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-  code {
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
-    font-size: 0.8rem;
-    background: #0f1117;
-    padding: 0.1rem 0.35rem;
-    border-radius: 0.25rem;
-    color: #e2e8f0;
-  }
-  .muted {
-    color: #64748b;
-    font-size: 0.85rem;
-    margin: 0;
-  }
-  .stub-notice {
-    border-style: dashed;
-    border-color: #3d4568;
-  }
-  .notice-text {
-    font-size: 0.9rem;
-    font-weight: 500;
-    color: #94a3b8;
-    margin: 0 0 0.5rem;
-  }
-  .notice-sub {
-    font-size: 0.8rem;
-    color: #64748b;
-    margin: 0;
-    line-height: 1.5;
+  .dot { width: 6px; height: 6px; border-radius: 50%; }
+  .version { color: #94a3b8; font-size: 0.85rem; }
+  .metrics-dump {
+    background: #1e2130; border: 1px solid #2d3348; border-radius: 0.5rem;
+    padding: 1rem; font-size: 0.8rem; color: #94a3b8;
+    overflow: auto; max-height: 400px;
+    font-family: 'JetBrains Mono', monospace;
   }
 </style>

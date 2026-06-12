@@ -34,7 +34,7 @@ impl TrustyMemoryPlugin {
         if !binary_on_path("trusty-memory") {
             return None;
         }
-        let mut client = StdioMcpClient::spawn("trusty-memory", &["serve"])
+        let mut client = StdioMcpClient::spawn("trusty-memory", &["serve"], "trusty-agents")
             .await
             .ok()?;
         client.initialize().await.ok()?;

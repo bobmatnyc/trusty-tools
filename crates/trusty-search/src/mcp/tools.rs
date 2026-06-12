@@ -299,21 +299,11 @@ impl McpServer {
                 // Mirror the daemon's per-query INFO log (issue #125) so the
                 // MCP transport surfaces the same query/intent/latency line.
                 let query_text = body.get("text").and_then(Value::as_str).unwrap_or_default();
-                let log_intent = resp
-                    .get("intent")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Unknown");
-                let log_latency = resp.get("latency_ms").and_then(Value::as_u64).unwrap_or(0);
-                let log_results = resp
-                    .get("results")
-                    .and_then(Value::as_array)
-                    .map(Vec::len)
-                    .unwrap_or(0);
                 tracing::info!(
                     index_id = %index_id,
-                    intent = %log_intent,
-                    latency_ms = log_latency,
-                    results = log_results,
+                    intent = %resp.get("intent").and_then(|v| v.as_str()).unwrap_or("Unknown"),
+                    latency_ms = resp.get("latency_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+                    results = resp.get("results").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
                     query = %&query_text[..query_text.len().min(80)],
                     "search"
                 );
@@ -510,6 +500,7 @@ impl McpServer {
                 let body = serde_json::json!({ "check": check, "confirm": confirm });
                 self.post("/upgrade", &body).await
             }
+            "console_metrics" => self.handle_console_metrics().await,
             _ => Err(DispatchError::UnknownTool),
         }
     }
@@ -619,6 +610,71 @@ impl McpServer {
             )));
         }
         Ok(body)
+    }
+
+    /// `console_metrics` handler — build and return a `ConsoleMetricsReport`.
+    ///
+    /// Why: The trusty-console metrics poller calls this tool via a supervised
+    /// stdio MCP connection every poll_interval seconds to refresh the
+    /// `/api/console/metrics/search` dashboard panel (epic #1104).
+    /// What: Probes `GET /health` for daemon liveness, index count, and
+    /// warm_boot_degraded status; also calls `GET /indexes?details=true` for
+    /// the per-index list. Builds a `ConsoleMetricsReport` via `make_report()`.
+    /// Returns a raw `serde_json::Value` (not the MCP content envelope) —
+    /// the dispatcher's `wrap_tool_result()` applies the envelope.
+    /// Test: The dispatcher routes `"console_metrics"` to this method;
+    /// covered by the tool-name routing tests in this module.
+    async fn handle_console_metrics(&self) -> Result<Value, DispatchError> {
+        use trusty_common::console_metrics::{make_report, ServiceHealth};
+
+        // Probe /health — determines status and index_count.
+        let (status, index_count, warm_boot_degraded) = match self.get("/health").await {
+            Ok(health) => {
+                let idx = health.get("indexes").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let degraded = health
+                    .get("warmboot_summary")
+                    .and_then(|s| s.get("warm_boot_degraded"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                (ServiceHealth::Ok, idx, degraded)
+            }
+            Err(_) => (ServiceHealth::Error, 0usize, false),
+        };
+
+        // GET /indexes?details=true returns {"indexes":[{…}]}, not a bare array.
+        let raw = self.get("/indexes?details=true").await.unwrap_or_default();
+        let indexes: Vec<Value> = raw
+            .get("indexes")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "id":        e.get("id").cloned().unwrap_or(Value::Null),
+                            "root_path": e.get("root_path").cloned().unwrap_or(Value::Null),
+                            "size_bytes":e.get("size_bytes").cloned().unwrap_or(Value::Null),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let metrics = serde_json::json!({
+            "index_count": index_count,
+            "warm_boot_degraded": warm_boot_degraded,
+            "indexes": indexes,
+        });
+
+        let report = make_report(
+            "trusty-search",
+            "Trusty Search",
+            env!("CARGO_PKG_VERSION"),
+            status,
+            metrics,
+            1,
+        );
+
+        serde_json::to_value(&report).map_err(|e| DispatchError::Transport(e.to_string()))
     }
 
     /// Common dispatcher for the four per-lane search tools introduced in
@@ -1313,6 +1369,17 @@ pub fn tool_descriptors() -> Value {
                 },
                 "required": []
             }
+        },
+        {
+            "name": "console_metrics",
+            "description": "Return a ConsoleMetricsReport with daemon health and index aggregate \
+                            statistics (index_count, warm_boot_degraded, index list with id/root_path/size_bytes). \
+                            Used by the trusty-console dashboard metrics poller (epic #1104).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
         }
     ])
 }
@@ -1752,12 +1819,7 @@ mod tests {
                 "tools/list missing '{required}' (got {names:?})"
             );
         }
-        // Spec: exactly five "search*" tools (the four new + legacy).
-        let search_tools: Vec<&str> = names
-            .iter()
-            .copied()
-            .filter(|n| *n == "search" || n.starts_with("search_"))
-            .collect();
+        // Spec: exactly five lane-related search tools (the four new + legacy `search`).
         // `search_similar` and `search_health` also start with "search_"
         // but are distinct surfaces; assert only on the lane-related ones.
         let lane_tools: Vec<&str> = names
@@ -1773,7 +1835,7 @@ mod tests {
         assert_eq!(
             lane_tools.len(),
             5,
-            "expected exactly 5 lane-related search tools, got {lane_tools:?} (all: {search_tools:?})"
+            "expected exactly 5 lane-related search tools, got {lane_tools:?} (all: {names:?})"
         );
     }
 
