@@ -42,15 +42,23 @@
   async function fetchIndexes() {
     indexesLoading = true;
     try {
-      const resp = await fetch('/proxy/analyze/indexes');
-      if (!resp.ok) {
-        // Analyze not running or proxy error — non-fatal
-        indexesError = resp.status === 502
-          ? 'trusty-analyze daemon not reachable.'
-          : `Index list error: HTTP ${resp.status}`;
+      // Use the console's own API route — the console calls trusty-analyze over
+      // stdio MCP internally. The browser never contacts the analyze daemon HTTP
+      // directly (architecture: console is a stdio MCP client only, per #1104).
+      const resp = await fetch('/api/console/metrics/analyze/indexes');
+      if (resp.status === 503) {
+        // Analyze binary absent or in backoff — non-fatal.
+        indexesError = 'trusty-analyze not available (binary absent or starting up).';
         return;
       }
-      indexes = await resp.json();
+      if (!resp.ok) {
+        indexesError = `Index list error: HTTP ${resp.status}`;
+        return;
+      }
+      const data = await resp.json();
+      // The analyze daemon returns [{id: "..."}, ...] — handle both array and
+      // direct value.
+      indexes = Array.isArray(data) ? data : (data?.indexes ?? []);
       // Auto-select first index for the visualizer.
       if (indexes.length > 0) {
         selectedIndex = indexes[0].id;
@@ -70,15 +78,27 @@
     entities = [];
     clusters = [];
     try {
-      const [entResp, cluResp] = await Promise.all([
-        fetch(`/proxy/analyze/indexes/${encodeURIComponent(indexId)}/entities`),
-        fetch(`/proxy/analyze/indexes/${encodeURIComponent(indexId)}/clusters?k=8`),
-      ]);
-      if (entResp.ok) entities = await entResp.json();
-      if (cluResp.ok) clusters = await cluResp.json();
-      if (!entResp.ok && !cluResp.ok) {
-        vizError = `Failed to load visualization data (entities: ${entResp.status}, clusters: ${cluResp.status}).`;
+      // Use the console's own API route — the console calls trusty-analyze over
+      // stdio MCP internally. No /proxy/analyze usage from the browser (#1104).
+      const resp = await fetch(
+        `/api/console/metrics/analyze/visualize?index=${encodeURIComponent(indexId)}`
+      );
+      if (resp.status === 503) {
+        vizError = 'trusty-analyze not available (binary absent or starting up).';
+        return;
       }
+      if (!resp.ok) {
+        vizError = `Failed to load visualization data: HTTP ${resp.status}`;
+        return;
+      }
+      const data = await resp.json();
+      if (data.error) {
+        vizError = data.error;
+        return;
+      }
+      // Combined response: { graph, entities, clusters }
+      entities = Array.isArray(data.entities) ? data.entities : [];
+      clusters = data.clusters ?? null;
     } catch (e) {
       vizError = e.message;
     } finally {

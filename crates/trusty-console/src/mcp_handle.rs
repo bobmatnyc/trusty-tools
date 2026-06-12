@@ -14,6 +14,7 @@
 //!   (1 s → 2 s → 4 s … cap 60 s) via `SpawnBackoff` so a consistently-failing
 //!   binary does not spam the logs on every poll cycle
 //! - `poll_metrics()` calls `console_metrics` tool and returns a parsed report
+//! - `call_tool_raw()` calls any named tool and returns the raw JSON Value
 //!
 //! ## Division of responsibility: `McpServiceHandle` vs. `StdioMcpClient`
 //!
@@ -39,7 +40,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 use trusty_common::console_metrics::{CONSOLE_METRICS_METHOD, ConsoleMetricsReport, parse_report};
@@ -279,6 +280,145 @@ impl McpServiceHandle {
             None => unreachable!("guard must be Some after init block"),
         }
     }
+
+    /// Call any named MCP tool and return the unwrapped data `Value`.
+    ///
+    /// Why: The console's on-demand routes (e.g. `/api/console/metrics/analyze/indexes`,
+    /// `/api/console/metrics/analyze/visualize`) need to invoke arbitrary tools
+    /// (like `list_analyze_indexes`, `extract_graph`, `list_entities`,
+    /// `cluster_concepts`) without going through the browser → /proxy path.
+    /// This is the mechanism that lets the console be a pure stdio MCP client
+    /// for all analyze data, honouring the #1104 architecture principle.
+    /// What: Shares the exact same lazy-init and backoff machinery as
+    /// `poll_metrics` — re-uses an open connection when available, spawns or
+    /// respawns on failure, gates retries behind `SpawnBackoff`. Unwraps the
+    /// MCP content envelope (`{"content":[{"type":"text","text":"..."}]}`) so
+    /// callers receive the payload `Value` directly.
+    /// Test: `call_tool_raw_absent_binary_returns_error` covers the absent path;
+    /// the on-demand route integration tests exercise the live path.
+    pub async fn call_tool_raw(&self, tool: &str, args: Value) -> Result<Value> {
+        let mut guard = self.state.lock().await;
+        let (state_opt, backoff) = &mut *guard;
+
+        if state_opt.is_none() {
+            let resolved = which::which(&self.binary).ok();
+            if resolved.is_none() {
+                warn!(
+                    binary = %self.binary,
+                    "McpServiceHandle: binary not found on PATH — marking as Absent"
+                );
+                *state_opt = Some(HandleState::Absent);
+            } else {
+                if !backoff.should_attempt() {
+                    return Err(anyhow::anyhow!(
+                        "McpServiceHandle: spawn of {} is in backoff (failure #{}); \
+                         next attempt in {:?}",
+                        self.binary,
+                        backoff.failure_count,
+                        backoff
+                            .next_attempt
+                            .saturating_duration_since(Instant::now()),
+                    ));
+                }
+
+                debug!(binary = %self.binary, "McpServiceHandle: spawning MCP child (call_tool_raw)");
+                let args_ref: Vec<&str> = self.args.iter().map(String::as_str).collect();
+                match StdioMcpClient::spawn(&self.binary, &args_ref, "trusty-console").await {
+                    Ok(mut client) => {
+                        client.initialize().await.with_context(|| {
+                            format!(
+                                "McpServiceHandle: MCP initialize failed for {}",
+                                self.binary
+                            )
+                        })?;
+                        backoff.reset();
+                        *state_opt = Some(HandleState::Connected(Box::new(client)));
+                    }
+                    Err(e) => {
+                        backoff.record_failure();
+                        warn!(
+                            binary = %self.binary,
+                            failure_count = backoff.failure_count,
+                            next_attempt_secs = ?backoff.next_attempt.saturating_duration_since(Instant::now()),
+                            error = %e,
+                            "McpServiceHandle: spawn failed (call_tool_raw) — will retry after backoff"
+                        );
+                        return Err(e.context(format!(
+                            "McpServiceHandle: failed to spawn {} (failure #{})",
+                            self.binary, backoff.failure_count
+                        )));
+                    }
+                }
+            }
+        }
+
+        match state_opt.as_mut() {
+            Some(HandleState::Absent) => anyhow::bail!(
+                "McpServiceHandle: {} is not installed on this machine",
+                self.binary
+            ),
+            Some(HandleState::Connected(client)) => {
+                let result = client.call_tool(tool, args).await.with_context(|| {
+                    format!(
+                        "McpServiceHandle: {} tool call failed for {}",
+                        tool, self.binary
+                    )
+                });
+
+                match result {
+                    Ok(raw) => {
+                        backoff.reset();
+                        Ok(unwrap_mcp_content(raw))
+                    }
+                    Err(e) => {
+                        backoff.record_failure();
+                        *state_opt = None;
+                        warn!(
+                            binary = %self.binary,
+                            tool = %tool,
+                            failure_count = backoff.failure_count,
+                            error = %e,
+                            "McpServiceHandle: tool call/respawn failed — resetting to None"
+                        );
+                        Err(e)
+                    }
+                }
+            }
+            None => unreachable!("guard must be Some after init block"),
+        }
+    }
+}
+
+// ── MCP content envelope helper ──────────────────────────────────────────────
+
+/// Unwrap the MCP tool-call response envelope to return the payload value.
+///
+/// Why: `StdioMcpClient::call_tool` returns the full MCP response object
+/// `{"content":[{"type":"text","text":"<JSON-string>"}],"isError":false}`.
+/// Route handlers need the inner payload, not the envelope, so they can
+/// return clean JSON to the browser without the MCP framing.
+/// What: Extracts `content[0].text`, tries to parse it as JSON. If the
+/// text is not valid JSON (or the envelope shape is unexpected), returns the
+/// raw Value unchanged so the caller always gets *something*.
+/// Test: Inline unit test `unwrap_mcp_content_extracts_text_json` below.
+fn unwrap_mcp_content(raw: Value) -> Value {
+    // Expected shape: {"content":[{"type":"text","text":"..."}],"isError":false}
+    if let Some(text) = raw
+        .get("content")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|item| item.get("text"))
+        .and_then(|t| t.as_str())
+    {
+        // Try to parse the inner text as JSON. If it parses, return the
+        // parsed value. If not, return the raw string as a JSON string value.
+        match serde_json::from_str::<Value>(text) {
+            Ok(inner) => return inner,
+            Err(_) => return Value::String(text.to_string()),
+        }
+    }
+    // Envelope shape was not as expected — return raw.
+    raw
 }
 
 // ── Pure backoff helper (testable without async) ─────────────────────────────
@@ -312,6 +452,46 @@ pub fn compute_backoff_delay(attempt: u32, base_ms: u64, cap_ms: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── MCP content envelope helper tests ────────────────────────────────────
+
+    /// Why: The MCP envelope must be stripped so route handlers return clean JSON.
+    /// What: pass a well-formed envelope and assert the inner array is returned.
+    /// Test: this test.
+    #[test]
+    fn unwrap_mcp_content_extracts_text_json() {
+        let envelope = json!({
+            "content": [{"type": "text", "text": "[{\"id\":\"foo\"}]"}],
+            "isError": false
+        });
+        let result = unwrap_mcp_content(envelope);
+        assert!(result.is_array(), "expected array, got: {result}");
+        assert_eq!(result[0]["id"], "foo");
+    }
+
+    /// Why: a non-JSON text payload must be returned as a JSON string, not crash.
+    /// What: pass an envelope with plain-text content, assert a string Value.
+    /// Test: this test.
+    #[test]
+    fn unwrap_mcp_content_non_json_text_returns_string() {
+        let envelope = json!({
+            "content": [{"type": "text", "text": "plain text, not json"}],
+            "isError": false
+        });
+        let result = unwrap_mcp_content(envelope);
+        assert!(result.is_string(), "expected string for non-JSON text");
+    }
+
+    /// Why: if the envelope shape is unexpected (no content key), the raw value
+    /// must be returned unchanged so callers always get something useful.
+    /// What: pass a value without a content key, assert it is returned as-is.
+    /// Test: this test.
+    #[test]
+    fn unwrap_mcp_content_passthrough_on_unknown_shape() {
+        let raw = json!({"data": [1, 2, 3]});
+        let result = unwrap_mcp_content(raw.clone());
+        assert_eq!(result, raw);
+    }
 
     // ── Pure backoff function tests ───────────────────────────────────────────
 

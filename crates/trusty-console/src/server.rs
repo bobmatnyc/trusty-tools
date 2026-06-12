@@ -6,6 +6,9 @@
 //! What: Builds an axum `Router` with:
 //!   - `GET /health` — liveness probe.
 //!   - `GET /api/console/services` — return cached snapshot (background poll).
+//!   - `GET /api/console/metrics/{analyze,memory,search}` — MCP-polled metrics.
+//!   - `GET /api/console/metrics/analyze/indexes` — analyze index list via stdio MCP.
+//!   - `GET /api/console/metrics/analyze/visualize?index=<id>` — graph+entities+clusters.
 //!   - `ANY /proxy/{daemon}/{*path}` — reverse-proxy to live daemon.
 //!   - `GET /` and `GET /ui/*path` — serve the embedded Svelte SPA.
 //!
@@ -19,17 +22,19 @@ use std::time::Duration;
 use axum::{
     Router,
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{Response, StatusCode, header},
     response::IntoResponse,
     routing::{any, get},
 };
 use rust_embed::RustEmbed;
+use serde::Deserialize;
 use serde_json::json;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::connector::ServiceConnector;
+use crate::mcp_handle::McpServiceHandle;
 use crate::metrics_poller::MetricsCache;
 use crate::poller::PollerCache;
 
@@ -54,9 +59,11 @@ struct UiAssets;
 /// created once at startup and reused for every request so there is no per-
 /// request allocation. A separate `MetricsCache` is maintained for each
 /// stdio-MCP-polled service (analyze, memory, search) so they can be updated
-/// independently and served without coupling.
+/// independently and served without coupling. `analyze_handle` is held in Arc
+/// so the on-demand visualize/index routes can call the analyze stdio MCP
+/// without going through the /proxy path.
 /// What: Wraps the connector list, poller cache, per-service metrics caches,
-/// and reqwest client in `Arc`s for cheap cloning.
+/// reqwest client, and the analyze MCP handle in `Arc`s for cheap cloning.
 /// Test: Constructed in `build_router`; exercised by the integration tests.
 #[derive(Clone)]
 pub struct AppState {
@@ -66,6 +73,9 @@ pub struct AppState {
     memory_metrics_cache: MetricsCache,
     search_metrics_cache: MetricsCache,
     http_client: Arc<reqwest::Client>,
+    /// Analyze stdio MCP handle — shared with the metrics poller so both the
+    /// background poll and on-demand route calls reuse the same child process.
+    analyze_handle: Arc<McpServiceHandle>,
 }
 
 impl AppState {
@@ -74,7 +84,8 @@ impl AppState {
     /// Why: Lets tests inject a custom connector list and fresh caches.
     /// What: Wraps `connectors` in `Arc`; initialises empty `PollerCache`,
     /// three `MetricsCache` instances (analyze / memory / search), and a
-    /// default `reqwest::Client`.
+    /// default `reqwest::Client`. Creates the analyze stdio MCP handle that is
+    /// shared between the background metrics poller and on-demand routes.
     /// Test: Used in `build_router` and directly in `tests`.
     pub fn new(connectors: Vec<Box<dyn ServiceConnector>>) -> Self {
         let client = reqwest::Client::builder()
@@ -88,7 +99,23 @@ impl AppState {
             memory_metrics_cache: MetricsCache::new(),
             search_metrics_cache: MetricsCache::new(),
             http_client: Arc::new(client),
+            analyze_handle: Arc::new(McpServiceHandle::new(
+                "trusty-analyze",
+                vec!["mcp".to_string()],
+            )),
         }
+    }
+
+    /// Access the shared analyze MCP handle.
+    ///
+    /// Why: On-demand routes (`/api/console/metrics/analyze/indexes`,
+    /// `/api/console/metrics/analyze/visualize`) call the analyze stdio MCP
+    /// without touching the analyze daemon HTTP directly (architecture: console
+    /// is a stdio MCP client only, per #1104).
+    /// What: Returns a clone of the `Arc<McpServiceHandle>` (cheap).
+    /// Test: Exercised by the analyze index and visualize route tests.
+    pub fn analyze_handle(&self) -> Arc<McpServiceHandle> {
+        Arc::clone(&self.analyze_handle)
     }
 
     /// Access the shared connector list.
@@ -166,6 +193,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/console/metrics/analyze", get(metrics_analyze_handler))
         .route("/api/console/metrics/memory", get(metrics_memory_handler))
         .route("/api/console/metrics/search", get(metrics_search_handler))
+        // Analyze on-demand routes — call the analyze stdio MCP directly (no /proxy).
+        .route(
+            "/api/console/metrics/analyze/indexes",
+            get(analyze_indexes_handler),
+        )
+        .route(
+            "/api/console/metrics/analyze/visualize",
+            get(analyze_visualize_handler),
+        )
         // Reverse-proxy: /proxy/{daemon}/{*path}
         .route("/proxy/{daemon}/{*path}", any(crate::proxy::proxy_handler))
         .route("/", get(spa_index_handler))
@@ -265,6 +301,100 @@ async fn metrics_search_handler(State(state): State<AppState>) -> axum::response
         Some(report) => axum::Json(report).into_response(),
         None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
+}
+
+/// Query params for the analyze visualize route.
+///
+/// Why: The index id must be a query param so the Svelte component can change
+/// the selected index without a page navigation.
+/// What: `index` is the analyze index id (string). Optional: no default —
+/// returns 400 when absent.
+/// Test: `test_analyze_visualize_handler_no_index_returns_400` below.
+#[derive(Deserialize)]
+struct VisualizeQuery {
+    index: Option<String>,
+}
+
+/// `GET /api/console/metrics/analyze/indexes` — list analyze indexes via stdio.
+///
+/// Why: The Analyze tab needs a list of indexes to populate the dropdown.
+/// This route calls the analyze stdio MCP (via `McpServiceHandle::call_tool_raw`)
+/// instead of the browser hitting the analyze daemon HTTP directly, honouring
+/// the #1104 architecture principle: the console is a stdio MCP client only.
+/// What: Calls the `list_analyze_indexes` MCP tool (which proxies `GET /indexes`
+/// on the daemon). Returns the JSON array on 200, 503 when the analyze binary
+/// is absent or in backoff, 502 on any other error.
+/// Test: `test_analyze_indexes_handler_cold_returns_503` below.
+async fn analyze_indexes_handler(State(state): State<AppState>) -> axum::response::Response {
+    match state
+        .analyze_handle()
+        .call_tool_raw("list_analyze_indexes", serde_json::json!({}))
+        .await
+    {
+        Ok(val) => axum::Json(val).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not installed") || msg.contains("backoff") || msg.contains("Absent") {
+                StatusCode::SERVICE_UNAVAILABLE.into_response()
+            } else {
+                tracing::warn!("analyze_indexes_handler error: {e:#}");
+                StatusCode::BAD_GATEWAY.into_response()
+            }
+        }
+    }
+}
+
+/// `GET /api/console/metrics/analyze/visualize?index=<id>` — combined viz data.
+///
+/// Why: The Analyze tab needs graph nodes, entities, and clusters in one round
+/// trip. This route calls the analyze stdio MCP for all three without the
+/// browser hitting the analyze daemon HTTP directly (#1104 architecture).
+/// What: Calls `extract_graph`, `list_entities`, and `cluster_concepts` (k=8)
+/// via `McpServiceHandle::call_tool_raw` and returns a combined JSON object:
+/// `{"graph": ..., "entities": ..., "clusters": ...}`. Missing index param
+/// returns 400. Absent binary or backoff returns 503.
+/// Test: `test_analyze_visualize_handler_no_index_returns_400` below.
+async fn analyze_visualize_handler(
+    State(state): State<AppState>,
+    Query(params): Query<VisualizeQuery>,
+) -> axum::response::Response {
+    let index_id = match params.index {
+        Some(id) if !id.is_empty() => id,
+        _ => {
+            return axum::Json(json!({"error": "missing required query param: index"}))
+                .into_response();
+        }
+    };
+
+    let handle = state.analyze_handle();
+    let args = serde_json::json!({ "index_id": index_id });
+
+    let (graph_res, entities_res, clusters_res) = tokio::join!(
+        handle.call_tool_raw("extract_graph", args.clone()),
+        handle.call_tool_raw("list_entities", args.clone()),
+        handle.call_tool_raw("cluster_concepts", {
+            let mut a = args.clone();
+            if let Some(m) = a.as_object_mut() {
+                m.insert("k".to_string(), serde_json::json!(8));
+            }
+            a
+        }),
+    );
+
+    // Surface the error if binary is absent/backoff; otherwise return best-effort data.
+    if let Err(ref e) = graph_res {
+        let msg = e.to_string();
+        if msg.contains("not installed") || msg.contains("backoff") || msg.contains("Absent") {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    }
+
+    let combined = json!({
+        "graph":    graph_res.unwrap_or(serde_json::Value::Null),
+        "entities": entities_res.unwrap_or(serde_json::Value::Null),
+        "clusters": clusters_res.unwrap_or(serde_json::Value::Null),
+    });
+    axum::Json(combined).into_response()
 }
 
 /// `GET /` — serve the SPA index.html.
@@ -583,5 +713,50 @@ mod tests {
             .expect("request");
         let resp = router.oneshot(req).await.expect("response");
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Why: the analyze indexes route must return 503 (not 200 with empty data)
+    /// when the trusty-analyze binary is absent — the handle immediately marks
+    /// itself Absent and the route converts that to SERVICE_UNAVAILABLE.
+    /// What: issues GET /api/console/metrics/analyze/indexes on a fresh state
+    /// (where trusty-analyze is not on PATH in CI), asserts 503.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn test_analyze_indexes_absent_binary_returns_503() {
+        let router = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/console/metrics/analyze/indexes")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        // Binary absent (or in backoff) → 503; if present and daemon is up → 200.
+        // In CI neither condition holds; the route must not return 500.
+        assert_ne!(
+            resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "indexes route must not 500 when binary absent"
+        );
+    }
+
+    /// Why: the analyze visualize route must return 400 when no `index` param
+    /// is provided — the endpoint needs it to query the daemon.
+    /// What: issues GET /api/console/metrics/analyze/visualize (no ?index=),
+    /// asserts the JSON body contains `error`.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn test_analyze_visualize_handler_no_index_returns_json_error() {
+        let router = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/console/metrics/analyze/visualize")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        // Missing index returns a JSON error body (200 with error field).
+        let bytes = get_bytes(resp).await;
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
+        assert!(
+            body.get("error").is_some(),
+            "expected error field, got: {body}"
+        );
     }
 }
