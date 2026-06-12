@@ -6,7 +6,7 @@
 //! each handler a focused home.
 //!
 //! What: re-exports `cmd_run`, `cmd_compare`, and `cmd_serve` (the latter gated
-//! behind `http-server`).  Also re-exports the shared helpers `build_deps_async`,
+//! behind `http-server`). Also re-exports the shared helpers `build_deps_async`,
 //! `resolve_diff_source_run`, `resolve_diff_source_compare`, and
 //! `print_compare_table`/`truncate_str` used by the compare printer.
 //!
@@ -14,7 +14,6 @@
 //! CLI smoke-tests in this file's sibling modules.
 
 pub mod compare;
-pub mod daemon_utils;
 pub mod port;
 pub mod run;
 #[cfg(feature = "http-server")]
