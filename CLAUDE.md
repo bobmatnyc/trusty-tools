@@ -124,41 +124,9 @@ Always verify the `name` field in the crate's `Cargo.toml` if you get a "package
 
 ## Code Structure
 
-```
-trusty-tools/               # workspace root
-├── Cargo.toml              # workspace manifest — glob members = ["crates/*"]
-├── Cargo.lock
-├── crates/                 # 16 members (matches `ls crates/`)
-│   ├── trusty-common/       # shared utilities, tracing, OpenRouter chat; hosts the
-│   │                        # consolidated mcp/rpc/embedder/symgraph/memory-core/
-│   │                        # tickets/monitor-tui modules behind feature flags
-│   ├── trusty-embedderd/    # fastembed wrapper — sidecar daemon for trusty-search
-│   ├── trusty-bm25-daemon/  # BM25 index daemon — sidecar for trusty-memory
-│   ├── trusty-gworkspace/   # Google Workspace client (Calendar, Tasks, Drive)
-│   ├── trusty-cto-db/       # SQLite CTO database (rusqlite-backed)
-│   ├── tc-services/         # service-layer adapters: CTO DB, Granola, GWorkspace
-│   ├── trusty-search/       # hybrid BM25 + vector + KG search daemon + MCP server
-│   ├── trusty-memory/       # MCP server frontend for memory (includes Svelte UI)
-│   ├── trusty-analyze/      # code analysis daemon + MCP server
-│   ├── trusty-mpm/          # unified MPM platform: CLI (tm/trusty-mpm), daemon, MCP, TUI, Telegram
-│   ├── trusty-mpm-gui/      # MPM desktop GUI (Tauri, publish=false)
-│   ├── cto-assistant/       # CTO assistant CLI (publish=false)
-│   ├── trusty-git-analytics/ # developer productivity analytics (tga)
-│   ├── trusty-agents/       # agent orchestration platform (publish=false)
-│   ├── trusty-agents-common/ # trusty-agents common API types (publish=false)
-│   ├── trusty-agents-local/ # trusty-agents local execution (publish=false)
-│   └── trusty-code/         # per-project Claude-Code-compatible MPM orchestration harness (bin: tcode); Phase 0 scaffold; extraction tracked in #587
-└── .gitignore
-```
+The workspace root contains `crates/` (16 members, one per subdirectory). Each crate's `README.md` describes its purpose, layout, and dependencies. For a complete map, see [docs/reference/crate-map.md](docs/reference/crate-map.md).
 
-> **Consolidation note:** the formerly separate `trusty-symgraph`, `trusty-rpc`,
-> `trusty-tickets`, `trusty-mcp-core`, `trusty-embedder`, `trusty-memory-core`,
-> and `trusty-monitor-tui` crates no longer exist as standalone directories —
-> they were absorbed into `trusty-common` behind the `symgraph`, `rpc`,
-> `tickets`, `mcp`, `embedder`, `memory-core`, and `monitor-tui` feature flags
-> respectively. Enable the relevant feature to pull in the corresponding module.
-
-For the source layout of any crate, read its `README.md` or browse `crates/<name>/src/`. Each crate owns its own `README.md` covering purpose, usage, and design notes. For a quick reference to all crates and their locations, see [docs/reference/crate-map.md](docs/reference/crate-map.md).
+Note: formerly separate `trusty-symgraph`, `trusty-rpc`, `trusty-tickets`, `trusty-mcp-core`, `trusty-embedder`, `trusty-memory-core`, and `trusty-monitor-tui` crates were consolidated into `trusty-common` behind feature flags (`symgraph`, `rpc`, `tickets`, `mcp`, `embedder`, `memory-core`, `monitor-tui`).
 
 ## Documentation Layout
 
@@ -275,88 +243,28 @@ versions by version number.
 
 ## Git Tag / Release Convention
 
-Each crate is tagged independently using the pattern `<crate-name>-v<version>`,
-e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
+Each crate is tagged independently: `<crate-name>-v<version>` (e.g. `trusty-mcp-core-v0.2.0`). Version comes from the crate's `Cargo.toml`.
 
-Release workflow:
-1. Bump the crate version in `crates/<name>/Cargo.toml`.
-2. Update any dependent crates that pin that version.
+**Release workflow** (when publishing, bump only changed crates — see #343):
+
+1. Bump version in `crates/<name>/Cargo.toml`.
+2. Update dependent crates that pin that version.
 3. Run `cargo test -p <name>` and `cargo clippy --workspace -- -D warnings`.
 4. Commit the version bump.
-5. Create the tag: `git tag <crate-name>-v<version>`.
-6. Push the tag: `git push origin <crate-name>-v<version>`.
+5. Create tag: `git tag <crate-name>-v<version>`.
+6. Push tag: `git push origin <crate-name>-v<version>`.
 7. Publish: `cargo publish -p <crate-name>`.
-   - **UI-embedding crates** (trusty-search, trusty-memory, trusty-analyze): prefix with `SKIP_UI_BUILD=1`:
-     ```bash
-     SKIP_UI_BUILD=1 cargo publish -p <crate-name>
-     ```
-     The committed `ui-dist/` bundle is already in the repo; without this flag, `build.rs` will attempt to invoke `pnpm` inside cargo's verification tarball, which fails because it tries to modify files outside `OUT_DIR`.
-8. Build the release binary (if not already fresh): `cargo build --release -p <crate-name>`.
-9. Install the binary locally with `cargo install --path crates/<dir> --locked`
-   (for crates with binaries, e.g. trusty-search, trusty-mpm). This ensures the
-   binary on PATH is always the version that was just released.
+   - **UI-embedding crates** (trusty-search, trusty-memory, trusty-analyze): `SKIP_UI_BUILD=1 cargo publish -p <crate-name>` (ui-dist/ is prebuilt; build.rs fails without pnpm in verification tarball).
+8. Build release binary: `cargo build --release -p <crate-name>`.
+9. Install locally: `cargo install --path crates/<dir> --locked`.
 
-   🔴 **Never `cp target/release/<binary> ~/.cargo/bin/<binary>` on macOS.**
-   `cargo build` ad-hoc ("linker-signed") signs every release binary, and the
-   kernel's code-signing cache is keyed by the executable's `cdhash`. A plain
-   `cp` over an existing on-PATH binary can leave the kernel with a stale
-   cached identity, so the next exec is SIGKILL'd with
-   `EXC_CRASH / CODESIGNING — Taskgated Invalid Signature` **before any code
-   runs** — the process dies with `zsh: killed` and zero output, which looks
-   exactly like an OOM kill but is not. `cargo install` writes to a temp path
-   and renames atomically, which keeps the cache consistent. If you must copy
-   manually, follow it with `codesign --force --sign - ~/.cargo/bin/<binary>`
-   to regenerate the ad-hoc signature against the final file.
+🔴 **Never `cp target/release/<binary> ~/.cargo/bin/<binary>` on macOS.** `cargo build` signs binaries; the kernel's code-signing cache is keyed by `cdhash`. Copying over an existing binary leaves a stale cached identity, causing `EXC_CRASH / CODESIGNING` kills. Use `cargo install` (atomic rename) or follow manual copy with `codesign --force --sign - ~/.cargo/bin/<binary>`.
 
-Every crate manages its own version independently in its own `Cargo.toml`.
-The `[workspace.package]` table no longer carries a `version` field (see #343).
-When publishing, bump only the crates that actually changed — do not cascade
-version bumps to siblings with no functional changes.
+🔴 **After every `cargo install trusty-search` on macOS, re-grant Full Disk Access** (issue #873): each install writes a new file with new cdhash, invalidating the TCC grant. Symptom: `trusty-search status` shows `indexes:2` and warm-boot logs show `tcc=57`. Steps: Settings → Privacy → Full Disk Access → remove/re-add `~/.cargo/bin/trusty-search` → restart daemon. The daemon auto-detects degraded warm-boot and logs the hint.
 
-### macOS Full Disk Access must be re-granted after every `cargo install` (issue #873)
+**Connection-safe daemon restart (issue #534):** Daemons (trusty-memory, trusty-search, trusty-analyze) support graceful shutdown (SIGTERM drains in-flight requests). Use `launchctl bootout` (SIGTERM), not `kickstart -k` (SIGKILL). Re-grant FDA after install.
 
-On macOS, every `cargo install` of a binary writes a NEW file at
-`~/.cargo/bin/<binary>` with a new **cdhash** (code-signing hash). macOS TCC
-keys the **Full Disk Access** grant by cdhash, so the previously-granted FDA no
-longer applies to the freshly-installed binary. The launchd daemon then cannot
-read indexes on `/Volumes/…` and warm-boot collapses from ~102 indexes to
-**indexes:2** (only non-external-volume indexes load).
-
-**After every `cargo install trusty-search` (or any binary that accesses
-external/protected volumes as a launchd daemon), re-grant FDA:**
-
-1. Open **System Settings → Privacy & Security → Full Disk Access**.
-2. Remove `~/.cargo/bin/trusty-search` from the list.
-3. Re-add it (`+` button, navigate to `~/.cargo/bin/trusty-search`).
-4. Restart the daemon: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/<label>.plist && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist`.
-
-**Symptom:** `trusty-search status` shows `indexes:2` (or very few) immediately
-after a reinstall, with warm-boot logs showing `skipped: blocked-volume` or
-`tcc=57`. This is NOT data loss — all on-disk indexes are intact.
-
-The daemon now detects this automatically: when the loaded count drops below 80%
-of the prior-known count, `GET /health` returns `warm_boot_degraded: true` and
-the daemon logs an error with the actionable FDA re-grant hint.
-
-### Connection-safe daemon restart convention (issue #534)
-
-As of trusty-common 0.10.0, all three HTTP daemons (trusty-memory, trusty-search,
-trusty-analyze) implement graceful shutdown: they drain in-flight requests before
-exiting when they receive SIGTERM. The `mcp_bridge` binary reconnects automatically
-with exponential backoff when the daemon restarts.
-
-**Use `launchctl bootout` (SIGTERM), not `launchctl kickstart -k` (SIGKILL):**
-
-```bash
-# Graceful stop → install → restart
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
-cargo install --path crates/<dir> --locked
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
-# IMPORTANT on macOS: re-grant Full Disk Access after cargo install (see above)
-```
-
-Prefer restarting between Claude Code sessions. See the cargo-publish skill
-(`.claude/skills/cargo-publish/SKILL.md`) for the full restart convention.
+For full details, see [docs/reference/release-workflow.md](docs/reference/release-workflow.md).
 
 ## Cross-Crate Development Workflow
 
@@ -379,22 +287,11 @@ When publishing a crate to crates.io:
 
 ## Parallel Worktree Discipline
 
-Multiple Claude Code sessions and subagents may share this repo concurrently.
-The main checkout often holds another session's uncommitted work. To prevent
-one session from stomping on another's edits, the following rules apply to
-every session and every dispatched subagent.
+Multiple sessions share this repo. To prevent interference, follow this mandatory pattern:
 
-🔴 **The main checkout is inspection-only.** From the repo root
-(`/path/to/trusty-tools/` — wherever the repo lives on disk), the only
-allowed operations are read-only: `git status`, `git log`, `git diff`,
-`git show`, file reads. **Forbidden in the main checkout's working tree**:
-edits, `git reset --hard`, `git checkout .`, `git stash`, `git restore .`,
-`cargo build`/`cargo test` (write to `target/`), `sed`/`awk`/`patch`, or
-any command that mutates the working tree, the index, or `target/`.
+🔴 **Main checkout is read-only:** `git status`, `git log`, `git diff`, `git show`, file reads only. Forbidden: edits, builds, `git reset --hard`, `cargo build`, `sed`/`awk`.
 
-🔴 **All write-side work happens in a dedicated git worktree branched off
-`origin/main`.** Provision one before starting any edit, build, or test:
-
+🔴 **All writes happen in a dedicated worktree:**
 ```bash
 git fetch origin main
 git worktree add -b <feature-or-fix-branch> \
@@ -403,53 +300,15 @@ cd .claude/worktrees/<dirname>
 # … edit, build, test, commit, push from here …
 ```
 
-Each ticket, refactor, or experiment gets its own worktree. Worktrees are
-disposable — delete them with `git worktree remove --force <path>` once the
-PR has merged.
+🟡 **Emergency main-checkout operations:** stash first, operate, restore (with stash name in report if pop fails).
 
-🟡 **If you absolutely must run a command from the main checkout** — for
-example `cargo install --path crates/<name> --locked` after a merge —
-stash first, operate, then restore:
+🟡 **Preferred `cargo install`:** from a worktree (keeps cdhash cache consistent on macOS).
 
-```bash
-git -C /path/to/main-checkout stash push -u \
-    -m "claude: pre-op-safety $(date +%s)"
-# … do the op …
-git -C /path/to/main-checkout stash pop
-```
+🟢 **Subagents:** must name exact worktree path, forbid main-checkout access, forbid touching files outside worktree.
 
-Surface the stash name in your report if popping fails so the human can
-restore manually.
+🟢 **Cleanup:** `git worktree remove --force <path>` is safe; it never touches the main checkout.
 
-🟡 **`cargo install` from a worktree, not the main checkout.** The preferred
-pattern for installing a freshly-built binary onto your PATH is:
-
-```bash
-cargo install --path .claude/worktrees/<dirname>/crates/<name> --locked
-```
-
-Cargo writes atomically to a temp file and renames into `~/.cargo/bin/`,
-which keeps the macOS kernel's cdhash cache consistent (see the
-release-workflow note above). The main checkout never needs to be involved.
-
-🟢 **Subagents inherit these rules.** Every `Agent`/`Task` dispatch prompt
-**must**:
-- name the exact worktree path the agent should operate from
-- explicitly forbid leaving that worktree into the main checkout
-- forbid `git reset --hard`, `git checkout .`, and `git stash` against the
-  main checkout
-- forbid touching files outside the assigned worktree
-
-The pattern of instructing an agent to "operate from the main checkout" is
-banned. QA agents get their own worktree
-(`.claude/worktrees/qa-<ticket-or-pass>`) just like engineering agents.
-
-🟢 **Worktree cleanup is safe.** `git worktree remove --force <path>` deletes
-the worktree directory but never the main checkout. After a squash-merge the
-local feature branch will appear "unmerged" to git because the squashed
-commit on `main` has a different hash — use `git branch -D <branch>` and
-`git push origin --delete <branch>` to clean up. These operations touch only
-refs, never working trees.
+For full rationale and edge cases, see [docs/reference/worktree-discipline.md](docs/reference/worktree-discipline.md).
 
 ## Per-Crate Reference
 
@@ -501,50 +360,18 @@ See [docs/reference/running-mcp-servers.md](docs/reference/running-mcp-servers.m
 
 ## Common Pitfalls
 
-🔴 **Using `unwrap()` in library crates** — the compiler does not stop you, but
-it violates the project's hard rule. Use `?` with `thiserror` error types in
-libraries. `expect()` is allowed only for invariants that genuinely cannot
-occur at runtime (not for "I think this will always be Some").
+Quick checklist of common mistakes. For full explanations and rationale, see [docs/reference/common-pitfalls.md](docs/reference/common-pitfalls.md).
 
-🔴 **Logging to stdout in a daemon or MCP server** — MCP JSON-RPC framing uses
-stdout as the transport channel. A stray `println!` corrupts the protocol.
-Always use `tracing::info!` / `tracing::debug!` etc. (which write to stderr).
-
-🔴 **Adding `axum` as an unconditional dependency in a library crate** — put it
-behind the `axum-server` feature flag, matching the pattern in `trusty-common`.
-Otherwise every library consumer pulls in the full axum + tower stack.
-
-🟡 **Editing a shared crate without propagating changes** — modifying
-`trusty-common` (or its consolidated `symgraph` / `embedder` / `mcp` modules),
-`trusty-embedderd`, or `trusty-bm25-daemon` can silently break dependents. Always run `cargo check` (workspace-wide) and
-`cargo test -p <consumer>` for every crate that imports the edited library.
-
-🟡 **Forgetting the Why/What/Test doc pattern on new public items** — clippy
-does not enforce this. Review public APIs manually before committing.
-
-🟡 **Building the Svelte UI manually before `cargo build`** — `trusty-search`
-uses `build.rs` to invoke pnpm if `ui-dist/` is stale. If pnpm is not
-installed, the build script fails loudly. Install pnpm or set
-`SKIP_UI_BUILD=1` if you are not changing the UI.
-
-🟡 **`[patch.crates-io]` only works at the workspace root** — do not add
-`[patch]` tables inside individual crate `Cargo.toml` files; Cargo ignores
-them. All patches must live in the root `Cargo.toml`.
-
-🔴 **Growing a file past 500 lines instead of splitting** — the compiler does not
-stop you, but continued feature additions to a 1,000+ line file make the module
-harder to review, reason about, and test. Split proactively. The trusty-agents `ctrl/`,
-`runtime/`, and `workflow/engine/` modules (#170, #171, #172) were the canonical
-examples of files that grew past the cap; all three have since been split into
-focused submodules and now serve as the worked examples of a clean split.
-
-🟢 **MSRV drift** — the workspace pins `rust-version = "1.91"`. Running
-`rustup update` and picking up a new nightly may introduce syntax that
-compiles locally but fails on CI. Prefer stable channel toolchains.
-
-🟢 **Edition mismatch** — `trusty-mpm`, `trusty-mpm-gui`, `trusty-agents`, `trusty-agents-common`, and `trusty-agents-local` use edition 2024;
-all other crates use edition 2021. Let-chains (`if let … && let …`) only
-work in edition 2024. Do not copy let-chain patterns into edition-2021 crates.
+- 🔴 `unwrap()` in libraries — use `?` + `thiserror`; `expect()` only for invariants
+- 🔴 Logging to stdout in daemons/MCP — corrupts JSON-RPC; use `tracing` (stderr)
+- 🔴 `axum` unconditional in libraries — gate behind `axum-server` feature flag
+- 🟡 Shared crate changes without propagating — run `cargo check` + `cargo test -p <consumer>` for all dependents
+- 🟡 Missing Why/What/Test docs on public items — clippy won't catch; manual review required
+- 🟡 Manual Svelte UI builds — let `build.rs` handle it; use `SKIP_UI_BUILD=1` if needed
+- 🟡 `[patch.crates-io]` in crate `Cargo.toml` — Cargo ignores per-crate patches; use root only
+- 🔴 Files exceeding 500 lines — split proactively (see line-cap section in Key Conventions)
+- 🟢 MSRV drift — pin to stable; nightly syntax fails on CI's locked MSRV 1.91
+- 🟢 Edition mismatch — let-chains require edition 2024; don't copy into 2021 crates
 
 ## Former Repos Reference
 
