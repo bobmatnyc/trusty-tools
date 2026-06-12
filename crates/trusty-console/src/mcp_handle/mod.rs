@@ -45,7 +45,7 @@
 //! Test: `mcp_handle_absent_binary_returns_error`,
 //! `mcp_handle_absent_never_retries`,
 //! `mcp_handle_respawn_failure_applies_backoff`, and
-//! `compute_backoff_delay_*` in this module.
+//! `compute_backoff_delay_*` in `tests.rs`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -57,13 +57,16 @@ use tracing::{debug, warn};
 use trusty_common::console_metrics::{CONSOLE_METRICS_METHOD, ConsoleMetricsReport, parse_report};
 use trusty_common::stdio_mcp_client::StdioMcpClient;
 
+#[cfg(test)]
+mod tests;
+
 // ── Backoff constants (matches workspace supervisor pattern) ─────────────────
 
 /// Initial retry delay in milliseconds after the first spawn failure.
-const BACKOFF_BASE_MS: u64 = 1_000;
+pub(super) const BACKOFF_BASE_MS: u64 = 1_000;
 
 /// Maximum retry delay cap in milliseconds (60 s, matches EmbedderSupervisor).
-const BACKOFF_CAP_MS: u64 = 60_000;
+pub(super) const BACKOFF_CAP_MS: u64 = 60_000;
 
 /// Remediation hint surfaced when the `tools/list` probe succeeds but the
 /// expected `console_metrics` tool is absent from the listing.
@@ -150,7 +153,7 @@ impl std::error::Error for McpHandleError {
 // ── State ────────────────────────────────────────────────────────────────────
 
 /// State of the supervised connection.
-enum HandleState {
+pub(super) enum HandleState {
     /// `which(binary)` returned None — service not installed; never retry.
     Absent,
     /// Connection is up.
@@ -161,8 +164,11 @@ enum HandleState {
     Connected(Arc<Mutex<Box<StdioMcpClient>>>),
     /// MCP handshake succeeded but `tools/list` did not include
     /// `console_metrics` — the service is reachable but cannot supply
-    /// metrics. Permanently degraded until the next spawn attempt drops the
-    /// state back to `None` via `on_call_failure`.
+    /// metrics. Self-heals: `ensure_connected` treats this state like `None`
+    /// once the `SpawnBackoff` window elapses, dropping back to `None` and
+    /// re-running the full `initialize` + `tools/list` probe. While still
+    /// inside the backoff window, callers receive `McpHandleError::Degraded`
+    /// so the UI keeps showing the degraded badge and remediation hint.
     Degraded,
 }
 
@@ -177,15 +183,15 @@ enum HandleState {
 /// time using `compute_backoff_delay`; resets to zero on the first successful
 /// spawn.
 /// Test: `compute_backoff_delay_*` tests cover the pure delay logic.
-struct SpawnBackoff {
+pub(super) struct SpawnBackoff {
     /// Number of consecutive spawn failures so far.
-    failure_count: u32,
+    pub(super) failure_count: u32,
     /// The earliest `Instant` at which the next spawn attempt is allowed.
-    next_attempt: Instant,
+    pub(super) next_attempt: Instant,
 }
 
 impl SpawnBackoff {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             failure_count: 0,
             next_attempt: Instant::now(),
@@ -194,20 +200,20 @@ impl SpawnBackoff {
 
     /// Record a spawn failure and advance `next_attempt` by the exponential
     /// backoff delay.
-    fn record_failure(&mut self) {
+    pub(super) fn record_failure(&mut self) {
         self.failure_count = self.failure_count.saturating_add(1);
         let delay_ms = compute_backoff_delay(self.failure_count, BACKOFF_BASE_MS, BACKOFF_CAP_MS);
         self.next_attempt = Instant::now() + Duration::from_millis(delay_ms);
     }
 
     /// Reset on a successful spawn so the next failure starts from the base.
-    fn reset(&mut self) {
+    pub(super) fn reset(&mut self) {
         self.failure_count = 0;
         self.next_attempt = Instant::now();
     }
 
     /// Return `true` if enough time has elapsed to allow the next spawn attempt.
-    fn should_attempt(&self) -> bool {
+    pub(super) fn should_attempt(&self) -> bool {
         Instant::now() >= self.next_attempt
     }
 }
@@ -224,17 +230,17 @@ impl SpawnBackoff {
 /// the poller is not spammed with error logs on every cycle.
 /// What: Holds the `StdioMcpClient` behind an async `Mutex`. `poll_metrics()`
 /// calls the `console_metrics` tool and returns a `ConsoleMetricsReport`.
-/// Test: Unit tests in this module cover the absent-binary, backoff-delay pure
+/// Test: Unit tests in `tests.rs` cover the absent-binary, backoff-delay pure
 /// function, and parse-failure paths; the end-to-end smoke test covers the live
 /// pipe.
 pub struct McpServiceHandle {
     /// Absolute path or short name of the binary to spawn.
-    binary: String,
+    pub(super) binary: String,
     /// Args to pass to the binary (e.g. `["mcp"]`).
-    args: Vec<String>,
+    pub(super) args: Vec<String>,
     /// The supervised client state plus backoff tracking, protected by an async
     /// mutex so the console and the poller task can share the same handle.
-    state: Arc<Mutex<(Option<HandleState>, SpawnBackoff)>>,
+    pub(super) state: Arc<Mutex<(Option<HandleState>, SpawnBackoff)>>,
 }
 
 impl McpServiceHandle {
@@ -260,13 +266,33 @@ impl McpServiceHandle {
     /// machine details; a targeted `#[cfg(test)]` helper keeps the internals
     /// opaque while giving tests a precise seam.
     /// What: Acquires the outer state lock and sets `state_opt =
-    /// Some(HandleState::Degraded)`.
-    /// Test: Used by `server::tests::test_services_route_handle_degraded_overlay`.
+    /// Some(HandleState::Degraded)`.  The backoff `next_attempt` is set to
+    /// `Instant::now() + future_backoff` so callers can control whether the
+    /// self-healing window has elapsed. Pass `Duration::ZERO` to simulate an
+    /// already-expired window (self-heal is allowed); pass a large duration to
+    /// hold the handle in-window (self-heal is suppressed).
+    /// Test: Used by `server::tests::test_services_route_handle_degraded_overlay`
+    /// and `mcp_handle_degraded_self_heals_after_backoff_window`.
     #[cfg(test)]
     pub async fn prime_degraded_for_test(&self) {
+        self.prime_degraded_with_backoff_for_test(Duration::from_secs(60))
+            .await;
+    }
+
+    /// Prime this handle to `Degraded` with a specific backoff offset — test helper.
+    ///
+    /// Why: Self-healing tests need to simulate both the in-window case (no
+    /// re-probe) and the post-window case (re-probe triggered).
+    /// What: Sets state to `Degraded`, `failure_count = 1`, and
+    /// `next_attempt = Instant::now() + future_backoff`.
+    /// Test: Used by `mcp_handle_degraded_self_heals_after_backoff_window`.
+    #[cfg(test)]
+    pub async fn prime_degraded_with_backoff_for_test(&self, future_backoff: Duration) {
         let mut guard = self.state.lock().await;
-        let (state_opt, _) = &mut *guard;
+        let (state_opt, backoff) = &mut *guard;
         *state_opt = Some(HandleState::Degraded);
+        backoff.failure_count = 1;
+        backoff.next_attempt = Instant::now() + future_backoff;
     }
 
     /// Return the degraded hint string if the handle is in the `Degraded` state.
@@ -281,7 +307,7 @@ impl McpServiceHandle {
     /// `Some(DEGRADED_HINT.to_string())` when the state is
     /// `HandleState::Degraded`, `None` for every other state (`None` uninit,
     /// `Absent`, `Connected`).
-    /// Test: `test_degraded_hint_returns_some_when_degraded` in this module.
+    /// Test: `test_degraded_hint_returns_some_when_degraded` in `tests.rs`.
     pub async fn degraded_hint(&self) -> Option<String> {
         let guard = self.state.lock().await;
         let (state_opt, _) = &*guard;
@@ -391,16 +417,36 @@ impl McpServiceHandle {
     /// Why: Separates the state-machine logic (lazy-init, absent detection,
     /// backoff gating, spawn) from the tool-call I/O. This allows the outer
     /// `state` lock to be released before the long `call_tool` await.
-    /// What: Acquires the outer `state` lock; if `None`, tries to spawn;
-    /// transitions to `Absent` or `Connected`. Returns `McpHandleError::Absent`
-    /// or `McpHandleError::Backoff` on the corresponding terminal/gate
-    /// conditions, `McpHandleError::Other` on spawn/init failures. On success
-    /// returns a clone of the `Arc<Mutex<Box<StdioMcpClient>>>` so the caller
-    /// can drop the outer lock before invoking `call_tool`.
+    /// What: Acquires the outer `state` lock; if `None` OR if `Degraded` and the
+    /// backoff window has elapsed, tries to spawn; transitions to `Absent`,
+    /// `Connected`, or `Degraded`. `Degraded` within the backoff window returns
+    /// `McpHandleError::Degraded` immediately (UI keeps showing the hint).
+    /// `Degraded` after the window resets to `None` and re-runs the full probe —
+    /// this is the self-healing path: if the daemon was restarted with the correct
+    /// `serve --stdio` wiring, the re-probe finds `console_metrics` and transitions
+    /// back to `Connected`. Returns `McpHandleError::Absent` or
+    /// `McpHandleError::Backoff` on the corresponding terminal/gate conditions,
+    /// `McpHandleError::Other` on spawn/init failures. On success returns a clone
+    /// of the `Arc<Mutex<Box<StdioMcpClient>>>` so the caller can drop the outer
+    /// lock before invoking `call_tool`.
     /// Test: Exercised transitively by all handle tests and route tests.
+    /// Self-healing path: `mcp_handle_degraded_self_heals_after_backoff_window`.
     async fn ensure_connected(&self) -> Result<Arc<Mutex<Box<StdioMcpClient>>>, McpHandleError> {
         let mut guard = self.state.lock().await;
         let (state_opt, backoff) = &mut *guard;
+
+        // Self-healing: if Degraded but the backoff window has elapsed, drop
+        // back to None so the probe re-runs on this call.  While still inside
+        // the window, fall through to the Degraded arm below which returns the
+        // Degraded error so callers (and the UI) keep showing the hint.
+        if matches!(state_opt, Some(HandleState::Degraded)) && backoff.should_attempt() {
+            warn!(
+                binary = %self.binary,
+                "McpServiceHandle: Degraded handle backoff window elapsed — \
+                 re-probing to attempt self-heal"
+            );
+            *state_opt = None;
+        }
 
         if state_opt.is_none() {
             let resolved = which::which(&self.binary).ok();
@@ -457,12 +503,25 @@ impl McpServiceHandle {
                                 let has_metrics =
                                     tools.iter().any(|t| t.name == CONSOLE_METRICS_METHOD);
                                 if !has_metrics {
+                                    // Record a failure so the backoff window is
+                                    // non-zero: the self-healing path in
+                                    // `ensure_connected` requires
+                                    // `backoff.should_attempt()` to return true
+                                    // before it resets Degraded → None and
+                                    // re-probes. Using record_failure (not reset)
+                                    // guarantees at least BACKOFF_BASE_MS
+                                    // (1 s) before the re-probe is triggered,
+                                    // so the UI shows the degraded badge for at
+                                    // least one full poll cycle.
+                                    backoff.record_failure();
                                     warn!(
                                         binary = %self.binary,
+                                        failure_count = backoff.failure_count,
+                                        next_attempt_secs = ?backoff.next_attempt.saturating_duration_since(Instant::now()),
                                         "McpServiceHandle: tools/list OK but \
-                                         `console_metrics` not listed — marking Degraded"
+                                         `console_metrics` not listed — marking Degraded; \
+                                         will self-heal after backoff window"
                                     );
-                                    backoff.reset();
                                     *state_opt = Some(HandleState::Degraded);
                                 } else {
                                     backoff.reset();
@@ -586,8 +645,8 @@ impl McpServiceHandle {
 /// What: Extracts `content[0].text`, tries to parse it as JSON. If the
 /// text is not valid JSON (or the envelope shape is unexpected), returns the
 /// raw Value unchanged so the caller always gets *something*.
-/// Test: Inline unit test `unwrap_mcp_content_extracts_text_json` below.
-fn unwrap_mcp_content(raw: Value) -> Value {
+/// Test: Inline unit test `unwrap_mcp_content_extracts_text_json` in `tests.rs`.
+pub(super) fn unwrap_mcp_content(raw: Value) -> Value {
     // Expected shape: {"content":[{"type":"text","text":"..."}],"isError":false}
     if let Some(text) = raw
         .get("content")
@@ -631,308 +690,4 @@ pub fn compute_backoff_delay(attempt: u32, base_ms: u64, cap_ms: u64) -> u64 {
     let shift = attempt.saturating_sub(1).min(62);
     let raw = base_ms.saturating_mul(1u64 << shift);
     raw.min(cap_ms)
-}
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ── MCP content envelope helper tests ────────────────────────────────────
-
-    /// Why: The MCP envelope must be stripped so route handlers return clean JSON.
-    /// What: pass a well-formed envelope and assert the inner array is returned.
-    /// Test: this test.
-    #[test]
-    fn unwrap_mcp_content_extracts_text_json() {
-        let envelope = json!({
-            "content": [{"type": "text", "text": "[{\"id\":\"foo\"}]"}],
-            "isError": false
-        });
-        let result = unwrap_mcp_content(envelope);
-        assert!(result.is_array(), "expected array, got: {result}");
-        assert_eq!(result[0]["id"], "foo");
-    }
-
-    /// Why: a non-JSON text payload must be returned as a JSON string, not crash.
-    /// What: pass an envelope with plain-text content, assert a string Value.
-    /// Test: this test.
-    #[test]
-    fn unwrap_mcp_content_non_json_text_returns_string() {
-        let envelope = json!({
-            "content": [{"type": "text", "text": "plain text, not json"}],
-            "isError": false
-        });
-        let result = unwrap_mcp_content(envelope);
-        assert!(result.is_string(), "expected string for non-JSON text");
-    }
-
-    /// Why: if the envelope shape is unexpected (no content key), the raw value
-    /// must be returned unchanged so callers always get something useful.
-    /// What: pass a value without a content key, assert it is returned as-is.
-    /// Test: this test.
-    #[test]
-    fn unwrap_mcp_content_passthrough_on_unknown_shape() {
-        let raw = json!({"data": [1, 2, 3]});
-        let result = unwrap_mcp_content(raw.clone());
-        assert_eq!(result, raw);
-    }
-
-    // ── Pure backoff function tests ───────────────────────────────────────────
-
-    /// Why: attempt=1 (first failure) must wait exactly base_ms, not 2*base_ms.
-    /// What: call compute_backoff_delay(1, 1000, 60000) and assert 1000.
-    /// Test: this test.
-    #[test]
-    fn compute_backoff_delay_base() {
-        assert_eq!(
-            compute_backoff_delay(1, BACKOFF_BASE_MS, BACKOFF_CAP_MS),
-            BACKOFF_BASE_MS,
-            "first failure must wait base_ms"
-        );
-    }
-
-    /// Why: second failure must double the delay (2*base_ms = 2000 ms).
-    /// What: call compute_backoff_delay(2, 1000, 60000) and assert 2000.
-    /// Test: this test.
-    #[test]
-    fn compute_backoff_delay_doubles() {
-        assert_eq!(
-            compute_backoff_delay(2, BACKOFF_BASE_MS, BACKOFF_CAP_MS),
-            2 * BACKOFF_BASE_MS,
-            "second failure must double the delay"
-        );
-    }
-
-    /// Why: large attempt counts must be capped at cap_ms so the delay never
-    /// grows without bound.
-    /// What: call compute_backoff_delay(100, 1000, 60000) and assert 60000.
-    /// Test: this test.
-    #[test]
-    fn compute_backoff_delay_caps() {
-        assert_eq!(
-            compute_backoff_delay(100, BACKOFF_BASE_MS, BACKOFF_CAP_MS),
-            BACKOFF_CAP_MS,
-            "large attempt must cap at cap_ms"
-        );
-    }
-
-    /// Why: attempt=0 is a sentinel (no failures yet); it should return base_ms
-    /// (shift by saturating_sub(1) → 0, so 2^0 * base = base).
-    /// What: call compute_backoff_delay(0, 1000, 60000) and assert 1000.
-    /// Test: this test.
-    #[test]
-    fn compute_backoff_delay_attempt_zero() {
-        assert_eq!(
-            compute_backoff_delay(0, BACKOFF_BASE_MS, BACKOFF_CAP_MS),
-            BACKOFF_BASE_MS,
-            "attempt=0 must not underflow — returns base_ms"
-        );
-    }
-
-    // ── Integration-style handle tests ────────────────────────────────────────
-
-    /// Why: When the binary is absent from PATH, `poll_metrics` must return an
-    /// error immediately (not hang or panic) so the poller can degrade gracefully.
-    /// What: Create a handle pointing at a binary that does not exist, call
-    /// `poll_metrics`, assert it returns `Err`.
-    /// Test: This test.
-    #[tokio::test]
-    async fn mcp_handle_absent_binary_returns_error() {
-        let handle =
-            McpServiceHandle::new("/nonexistent/trusty-analyze-xyzzy", vec!["mcp".to_string()]);
-        let result = handle.poll_metrics().await;
-        assert!(result.is_err(), "absent binary must return Err");
-    }
-
-    /// Why: `new()` must succeed synchronously without performing I/O so
-    /// the console can construct handles at startup without async.
-    /// What: Construct a handle and assert the binary/args fields are stored.
-    /// Test: This test (checks construction is cheap/sync-compatible).
-    #[test]
-    fn mcp_handle_constructs_without_io() {
-        let handle = McpServiceHandle::new("trusty-analyze", vec!["mcp".to_string()]);
-        assert_eq!(handle.binary, "trusty-analyze");
-        assert_eq!(handle.args, vec!["mcp"]);
-    }
-
-    /// Why: Once a binary is marked `Absent` (not found on PATH) the handle
-    /// must never retry — every subsequent poll must return Err immediately.
-    /// What: Poll twice; both must return Err with no hang.
-    /// Test: This test.
-    #[tokio::test]
-    async fn mcp_handle_absent_never_retries() {
-        let handle = McpServiceHandle::new(
-            "/nonexistent/trusty-analyze-xyzzy2",
-            vec!["mcp".to_string()],
-        );
-        let r1 = handle.poll_metrics().await;
-        let r2 = handle.poll_metrics().await;
-        assert!(r1.is_err(), "first poll must return Err for absent binary");
-        assert!(r2.is_err(), "second poll must also return Err (no retry)");
-    }
-
-    /// Why: When the handle is in the Degraded state (tools/list succeeded but
-    /// console_metrics was not listed), poll_metrics must return
-    /// McpHandleError::Degraded with the remediation hint — not Absent or Other.
-    /// What: Manually prime the handle state to HandleState::Degraded, then
-    /// call poll_metrics and assert the Degraded variant with a non-empty hint.
-    /// Test: This test.
-    #[tokio::test]
-    async fn mcp_handle_degraded_state_returns_degraded_error() {
-        let handle = McpServiceHandle::new("trusty-analyze", vec!["mcp".to_string()]);
-        {
-            let mut guard = handle.state.lock().await;
-            let (state_opt, _backoff) = &mut *guard;
-            *state_opt = Some(HandleState::Degraded);
-        }
-        let result = handle.poll_metrics().await;
-        assert!(result.is_err(), "degraded handle must return Err");
-        match result.unwrap_err() {
-            McpHandleError::Degraded { hint } => {
-                assert!(!hint.is_empty(), "degraded hint must not be empty");
-                assert!(
-                    hint.contains("console_metrics"),
-                    "hint must mention console_metrics, got: {hint}"
-                );
-            }
-            other => panic!("expected McpHandleError::Degraded, got: {other}"),
-        }
-    }
-
-    /// Why: `degraded_hint()` must return `Some(hint)` only for the `Degraded`
-    /// state, so the services handler can both set `status = Degraded` and
-    /// populate the `hint` field in one call.
-    /// What: primes three different states (Degraded / None / Absent) and
-    /// asserts the expected `Option<String>` for each.
-    /// Test: this test.
-    #[tokio::test]
-    async fn test_degraded_hint_returns_some_when_degraded() {
-        // Degraded → Some(hint containing "console_metrics")
-        let handle = McpServiceHandle::new("trusty-analyze", vec!["mcp".to_string()]);
-        {
-            let mut guard = handle.state.lock().await;
-            let (state_opt, _) = &mut *guard;
-            *state_opt = Some(HandleState::Degraded);
-        }
-        let hint = handle.degraded_hint().await;
-        assert!(hint.is_some(), "Degraded state must return Some(hint)");
-        assert!(
-            hint.unwrap().contains("console_metrics"),
-            "hint must mention console_metrics"
-        );
-
-        // None (uninitialised) → None
-        let h2 = McpServiceHandle::new("trusty-analyze", vec!["mcp".to_string()]);
-        assert!(
-            h2.degraded_hint().await.is_none(),
-            "None state must return None"
-        );
-
-        // Absent → None
-        let h3 = McpServiceHandle::new("trusty-analyze", vec!["mcp".to_string()]);
-        {
-            let mut guard = h3.state.lock().await;
-            let (state_opt, _) = &mut *guard;
-            *state_opt = Some(HandleState::Absent);
-        }
-        assert!(
-            h3.degraded_hint().await.is_none(),
-            "Absent state must return None"
-        );
-    }
-
-    /// Why: After a `call_tool` / respawn failure on an already-connected handle,
-    /// `SpawnBackoff` must gate subsequent poll attempts — the respawn path must
-    /// NOT be unbounded just because the handle reached `Connected` once. This
-    /// verifies the fix for the backoff gap identified in PR #1124 review.
-    ///
-    /// Mechanism under test: when `call_tool` returns `Err`, `poll_metrics`
-    /// records a failure via `backoff.record_failure()`, resets state to `None`,
-    /// and returns `Err`. The very next call re-enters the lazy-init block; since
-    /// `backoff.should_attempt()` returns `false` (backoff window not yet elapsed),
-    /// it returns `Err` immediately without attempting another spawn — proving
-    /// the respawn path is now gated by the same backoff mechanism as the initial
-    /// connect path.
-    ///
-    /// What: Manually insert a `SpawnBackoff` in the failure state (failure_count=1,
-    /// next_attempt = far future) into a handle whose state is `None`, then verify
-    /// that `poll_metrics` returns `Err` immediately without trying to spawn.
-    /// Test: This test (no real binary or network required).
-    #[tokio::test]
-    async fn mcp_handle_respawn_failure_applies_backoff() {
-        // Construct a handle whose backoff is already in the penalty window:
-        // failure_count = 1, next_attempt = 60 seconds in the future.
-        let handle = McpServiceHandle::new("trusty-analyze", vec!["mcp".to_string()]);
-        {
-            let mut guard = handle.state.lock().await;
-            let (state_opt, backoff) = &mut *guard;
-            // Simulate one prior failure that put us in backoff.
-            backoff.failure_count = 1;
-            backoff.next_attempt = Instant::now() + Duration::from_secs(60);
-            // State remains None (as if we transitioned back from Connected after
-            // a failed call_tool / respawn).
-            assert!(state_opt.is_none());
-        }
-
-        // The binary exists on the machine (trusty-analyze may or may not be on
-        // PATH). We prime the binary name to something that IS on PATH to avoid
-        // the `which` miss path, so the test exercises the backoff gate rather
-        // than the absent-binary gate. Use "true" (always present on Unix).
-        let handle_with_true = McpServiceHandle::new("true", vec![]);
-        {
-            let mut guard = handle_with_true.state.lock().await;
-            let (_state_opt, backoff) = &mut *guard;
-            backoff.failure_count = 1;
-            backoff.next_attempt = Instant::now() + Duration::from_secs(60);
-        }
-
-        let result = handle_with_true.poll_metrics().await;
-        assert!(
-            result.is_err(),
-            "poll_metrics must return Err while in backoff window — respawn path must be gated"
-        );
-        // Should be the Backoff variant
-        assert!(
-            matches!(result.unwrap_err(), McpHandleError::Backoff { .. }),
-            "error must be McpHandleError::Backoff"
-        );
-    }
-
-    /// Why: The tools/list probe must transition the handle to DEGRADED when the
-    /// handshake succeeds but console_metrics is not in the tool listing. This
-    /// test exercises the real probe path with a minimal shell-script MCP stub
-    /// that answers initialize and tools/list (without console_metrics).
-    /// What: Spawns a sh script that completes the MCP handshake and returns an
-    /// empty tools/list, then verifies poll_metrics returns McpHandleError::Degraded.
-    /// Test: This test. Marked #[ignore] to keep CI fast (requires Unix + sh).
-    #[tokio::test]
-    #[cfg(unix)]
-    #[ignore]
-    async fn mcp_handle_probe_detects_missing_console_metrics_tool() {
-        // Minimal MCP stub: answers initialize, then tools/list with no tools.
-        let script = r#"
-while IFS= read -r line; do
-  id=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null)
-  method=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('method',''))" 2>/dev/null)
-  case "$method" in
-    initialize) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2024-11-05\",\"serverInfo\":{\"name\":\"stub\",\"version\":\"0.0.1\"},\"capabilities\":{}}}" ;;
-    "notifications/initialized") ;;
-    "tools/list") echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"tools\":[]}}" ;;
-    *) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}" ;;
-  esac
-done
-"#;
-        let handle = McpServiceHandle::new("sh", vec!["-c".to_string(), script.to_string()]);
-        let result = handle.poll_metrics().await;
-        assert!(
-            result.is_err(),
-            "stub with no console_metrics must return Err"
-        );
-        assert!(
-            matches!(result.unwrap_err(), McpHandleError::Degraded { .. }),
-            "error must be McpHandleError::Degraded when console_metrics absent"
-        );
-    }
 }

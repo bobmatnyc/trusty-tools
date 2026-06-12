@@ -98,3 +98,40 @@ pub trait ServiceConnector: Send + Sync {
     /// Test: Unit tests in `detect.rs` inject a temp home dir and fake files.
     fn detect(&self) -> ServiceInfo;
 }
+
+// ─── tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Why: The JSON API contract requires `ServiceStatus` variants to serialise
+    /// to exact lowercase strings. A missing or mismatched `#[serde(rename_all)]`
+    /// attribute would silently change the wire format and break the Svelte UI.
+    /// What: Serialises each variant via `serde_json::to_value` and asserts the
+    /// exact expected string so any future rename is caught at test time.
+    /// Test: This test.
+    #[test]
+    fn service_status_serialises_to_lowercase_strings() {
+        assert_eq!(
+            serde_json::to_value(ServiceStatus::Running).unwrap(),
+            serde_json::json!("running"),
+            "Running must serialise to \"running\""
+        );
+        assert_eq!(
+            serde_json::to_value(ServiceStatus::Available).unwrap(),
+            serde_json::json!("available"),
+            "Available must serialise to \"available\""
+        );
+        assert_eq!(
+            serde_json::to_value(ServiceStatus::Absent).unwrap(),
+            serde_json::json!("absent"),
+            "Absent must serialise to \"absent\""
+        );
+        assert_eq!(
+            serde_json::to_value(ServiceStatus::Degraded).unwrap(),
+            serde_json::json!("degraded"),
+            "Degraded must serialise to \"degraded\""
+        );
+    }
+}

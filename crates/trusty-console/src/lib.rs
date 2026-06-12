@@ -206,6 +206,12 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
                 state.memory_metrics_cache().clone(),
                 Duration::from_secs(args.poll_interval),
             );
+        } else {
+            tracing::warn!(
+                service = "trusty-memory",
+                "run_serve: no MCP handle registered for trusty-memory — \
+                 metrics poller will not start for this service"
+            );
         }
     }
 
@@ -222,6 +228,12 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
                 Arc::clone(h),
                 state.search_metrics_cache().clone(),
                 Duration::from_secs(args.poll_interval),
+            );
+        } else {
+            tracing::warn!(
+                service = "trusty-search",
+                "run_serve: no MCP handle registered for trusty-search — \
+                 metrics poller will not start for this service"
             );
         }
     }

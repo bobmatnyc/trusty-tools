@@ -57,7 +57,7 @@
     {:else if service.status === 'available'}
       <p class="hint">Binary found but daemon is not running.</p>
     {:else if service.status === 'degraded'}
-      <p class="hint degraded-hint">{service.hint ?? 'Reachable but metrics tool not available — restart the daemon.'}</p>
+      <p class="hint degraded-hint">{service.hint ?? 'Service reachable but its metrics tool is unavailable.'}</p>
     {/if}
     {#if hasTab && onViewDetails}
       <button class="details-btn" onclick={handleViewDetails}>
