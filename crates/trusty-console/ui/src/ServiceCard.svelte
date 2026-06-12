@@ -1,9 +1,17 @@
 <script>
   /**
+   * Why: Displays a single service's status card; delegates tab-awareness to
+   *      the caller (App.svelte) which owns SERVICE_TAB_MAP — the single source
+   *      of truth for which services have real detail tabs.
+   * What: Renders service name, status badge, optional hint, and a "View details"
+   *       button when the service appears in the caller-supplied tabbedServices set.
+   * Test: Mount with a service whose id is in tabbedServices and onViewDetails set —
+   *       assert button visible; mount without the id in the set — assert no button.
+   *
    * @typedef {{ id: string, display_name: string, status: string, version?: string, url?: string, hint?: string }} Service
-   * @type {{ service: Service, onViewDetails?: (id: string) => void }}
+   * @type {{ service: Service, tabbedServices: Set<string>, onViewDetails?: (id: string) => void }}
    */
-  let { service, onViewDetails } = $props();
+  let { service, tabbedServices, onViewDetails } = $props();
 
   const STATUS_LABELS = {
     running: 'Running',
@@ -21,17 +29,10 @@
     degraded: '#f97316',
   };
 
-  // Known services that have a details tab in the console.
-  const TABBED_SERVICES = new Set([
-    'trusty-search',
-    'trusty-memory',
-    'trusty-analyze',
-    'trusty-review',
-  ]);
-
   let statusLabel = $derived(STATUS_LABELS[service.status] ?? service.status);
   let statusColor = $derived(STATUS_COLORS[service.status] ?? '#94a3b8');
-  let hasTab = $derived(TABBED_SERVICES.has(service.id));
+  // hasTab is derived from the caller-owned tabbedServices — no local duplicate.
+  let hasTab = $derived(tabbedServices.has(service.id));
 
   function handleViewDetails() {
     onViewDetails?.(service.id);

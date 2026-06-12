@@ -1,11 +1,33 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
+  import RefreshHeader from './RefreshHeader.svelte';
 
   let report = $state(null);
   let loading = $state(true);
   let error = $state(null);
+  let refreshing = $state(false);
 
-  onMount(async () => {
+  /**
+   * Why: Fetches memory metrics while preventing concurrent in-flight requests
+   *      from stacking (e.g. slow >20 s fetch overlapping the next interval tick
+   *      or a rapid manual button click).
+   * What: Returns early when a fetch is already in progress; otherwise sets the
+   *       appropriate loading flag, fetches /api/console/metrics/memory, and
+   *       stores the result or an error message.
+   * Test: Call twice in rapid succession — assert only one HTTP request is made
+   *       and state is consistent after both calls resolve.
+   */
+  async function fetchMetrics(isRefresh = false) {
+    // Guard: drop the tick if a fetch is already in flight.
+    // The very first call has refreshing=false and loading=true so it always
+    // proceeds; subsequent interval ticks are dropped while busy.
+    if (refreshing || (isRefresh && loading)) return;
+
+    if (isRefresh) {
+      refreshing = true;
+    } else {
+      loading = true;
+    }
     try {
       const resp = await fetch('/api/console/metrics/memory');
       if (resp.status === 503) {
@@ -14,11 +36,25 @@
       }
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       report = await resp.json();
+      error = null;
     } catch (e) {
       error = e.message;
     } finally {
       loading = false;
+      refreshing = false;
     }
+  }
+
+  /** Auto-refresh interval handle — cleared on component destroy to prevent leaks. */
+  let refreshInterval;
+
+  onMount(async () => {
+    await fetchMetrics();
+    refreshInterval = setInterval(() => fetchMetrics(true), 20_000);
+  });
+
+  onDestroy(() => {
+    clearInterval(refreshInterval);
   });
 
   let statusColor = $derived(
@@ -29,7 +65,7 @@
 </script>
 
 <div class="tab-content">
-  <h2 class="section-title">Trusty Memory</h2>
+  <RefreshHeader title="Trusty Memory" onRefresh={() => fetchMetrics(true)} {refreshing} />
 
   {#if loading}
     <div class="placeholder">Loading memory metrics…</div>
@@ -100,9 +136,6 @@
 
 <style>
   .tab-content { padding: 0.25rem 0; }
-  .section-title {
-    font-size: 1.25rem; font-weight: 600; margin: 0 0 1rem; color: #e2e8f0;
-  }
   .placeholder, .not-available {
     background: #1e2130; border-radius: 0.5rem;
     padding: 1.25rem; color: #94a3b8; font-size: 0.9rem;

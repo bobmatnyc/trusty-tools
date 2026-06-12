@@ -1,11 +1,13 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
+  import RefreshHeader from './RefreshHeader.svelte';
 
   // ─── state ──────────────────────────────────────────────────────────────────
 
   let report = $state(null);
   let metricsLoading = $state(true);
   let metricsError = $state(null);
+  let metricsRefreshing = $state(false);
 
   let indexes = $state([]);
   let indexesLoading = $state(false);
@@ -17,13 +19,41 @@
   let vizLoading = $state(false);
   let vizError = $state(null);
 
+  /** Auto-refresh interval handle — cleared on component destroy to prevent leaks. */
+  let refreshInterval;
+
   // ─── fetch on mount ─────────────────────────────────────────────────────────
 
   onMount(async () => {
     await Promise.all([fetchMetrics(), fetchIndexes()]);
+    // Only auto-refresh the lightweight metrics endpoint (every 20 s).
+    // Index list and visualization are user-driven to avoid hammering the daemon.
+    refreshInterval = setInterval(() => fetchMetrics(true), 20_000);
   });
 
-  async function fetchMetrics() {
+  onDestroy(() => {
+    clearInterval(refreshInterval);
+  });
+
+  /**
+   * Why: Fetches analyze metrics while preventing concurrent in-flight requests
+   *      from stacking (e.g. slow >20 s fetch overlapping the next interval tick
+   *      or a rapid manual button click).
+   * What: Returns early when a fetch is already in progress; otherwise sets the
+   *       appropriate loading flag, fetches /api/console/metrics/analyze, and
+   *       stores the result or an error message.
+   * Test: Call twice in rapid succession — assert only one HTTP request is made
+   *       and state is consistent after both calls resolve.
+   */
+  async function fetchMetrics(isRefresh = false) {
+    // Guard: drop the tick if a fetch is already in flight.
+    if (metricsRefreshing || (isRefresh && metricsLoading)) return;
+
+    if (isRefresh) {
+      metricsRefreshing = true;
+    } else {
+      metricsLoading = true;
+    }
     try {
       const resp = await fetch('/api/console/metrics/analyze');
       if (resp.status === 503) {
@@ -32,10 +62,12 @@
       }
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       report = await resp.json();
+      metricsError = null;
     } catch (e) {
       metricsError = e.message;
     } finally {
       metricsLoading = false;
+      metricsRefreshing = false;
     }
   }
 
@@ -193,7 +225,7 @@
 </script>
 
 <div class="tab-content">
-  <h2 class="section-title">Trusty Analyze</h2>
+  <RefreshHeader title="Trusty Analyze" onRefresh={() => fetchMetrics(true)} refreshing={metricsRefreshing} />
 
   <!-- ── Health panel ──────────────────────────────────────────────────────── -->
   {#if metricsLoading}
@@ -357,9 +389,6 @@
 
 <style>
   .tab-content { padding: 0.25rem 0; }
-  .section-title {
-    font-size: 1.25rem; font-weight: 600; margin: 0 0 1rem; color: #e2e8f0;
-  }
   .placeholder, .not-available {
     background: #1e2130; border-radius: 0.5rem;
     padding: 1.25rem; color: #94a3b8; font-size: 0.9rem;
