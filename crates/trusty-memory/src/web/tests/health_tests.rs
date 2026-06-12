@@ -1,6 +1,7 @@
 //! Tests for the `GET /health` handler and health probe helpers.
 use super::super::health::{
-    ensure_health_probe_palace, run_health_round_trip_inner, HealthProbeError,
+    ensure_health_probe_palace, run_health_round_trip_inner, seed_probe_sentinel_if_absent,
+    HealthProbeError, PROBE_SENTINEL_CONTENT,
 };
 use super::super::router;
 use super::super::HEALTH_PROBE_PALACE;
@@ -296,18 +297,19 @@ async fn health_probe_palace_is_invisible() {
 }
 
 /// Issue #185 — after a successful round-trip, the probe palace holds
-/// zero drawers.
+/// zero ephemeral drawers (only the permanent sentinel, if already seeded).
 ///
-/// Why: The probe must clean up after itself on every success path. If
-/// the forget step were ever skipped silently, the probe palace would
-/// grow unbounded over time (the original symptom was ~1,420 leaked
-/// drawers in `localLLM`). This test pins the post-condition without
-/// requiring the heavy ONNX recall — it exercises
+/// Why: The probe must clean up the ephemeral round-trip drawer on every
+/// success path. If the forget step were ever skipped silently, the probe
+/// palace would grow unbounded over time (the original symptom was ~1,420
+/// leaked drawers in `localLLM`). This test pins the post-condition
+/// without requiring the heavy ONNX recall — it exercises
 /// `run_health_round_trip_inner` with a recall stub that returns a
 /// synthetic hit matching the probe drawer id.
-/// What: Provisions the probe palace, opens its handle, runs the inner
-/// round-trip with a stubbed recall that returns the probe drawer, and
-/// asserts the handle's drawer count drops back to zero.
+/// What: Provisions the probe palace (no sentinel yet — fresh palace),
+/// opens its handle, runs the inner round-trip with a stubbed recall that
+/// returns the last drawer, and asserts the handle's drawer count drops
+/// back to zero after cleanup.
 /// Test: this test.
 #[tokio::test]
 async fn health_probe_cleans_up_on_success() {
@@ -392,9 +394,7 @@ async fn health_probe_cleans_up_on_recall_miss() {
 ///
 /// Why: The second leak mode pre-#185: `recall` returning `Err(_)` made
 /// the function `return Err(Recall(e))` before reaching `forget`. The
-/// fix calls forget unconditionally; this test guards that ordering by
-/// stubbing a recall that always errors and asserting the palace ends
-/// empty.
+/// fix calls forget unconditionally; this test guards that ordering.
 /// What: Drives `run_health_round_trip_inner` with a recall stub that
 /// returns `Err(Recall(...))`, asserts the function surfaces a Recall
 /// error, and then asserts the probe palace is empty.
@@ -421,5 +421,74 @@ async fn health_probe_cleans_up_on_recall_error() {
     assert_eq!(
         drawer_count, 0,
         "probe palace must be empty after a recall error (got {drawer_count})"
+    );
+}
+
+/// Issue #1142 — `seed_probe_sentinel_if_absent` self-heals the sentinel
+/// drawer when the probe palace exists but is empty (post-migration wipe).
+///
+/// Why: After a redb v2→v3 migration the palace directory and `palace.json`
+/// survive but the internal vector/drawer stores are reset to empty. Before
+/// this fix the probe would open the empty palace, store a probe drawer,
+/// recall via the ANN index (which also reset), find nothing, and report
+/// `ProbeMissing` on every deep probe — making `/health?probe=true`
+/// permanently degraded. The fix calls `seed_probe_sentinel_if_absent` from
+/// `run_health_round_trip`, which seeds a sentinel on the first probe and
+/// returns `Ok(())` immediately so the caller never sees a false failure.
+/// What: Creates the probe palace with an empty drawer store (simulates the
+/// post-migration state), calls `seed_probe_sentinel_if_absent` directly,
+/// and asserts (a) it returns `Ok(true)` (was absent, now seeded), (b) the
+/// palace holds exactly one drawer with the expected sentinel content, and
+/// (c) a second call returns `Ok(false)` (already present — idempotent).
+/// Test: this test (issue #1142 regression guard).
+#[tokio::test]
+async fn health_probe_self_heals_after_migration_wipe() {
+    let state = test_state();
+    // Simulate post-migration state: palace exists but drawers are empty.
+    ensure_health_probe_palace(&state).expect("create probe palace");
+    let handle = state
+        .registry
+        .open_palace(&state.data_root, &PalaceId::new(HEALTH_PROBE_PALACE))
+        .expect("open probe palace");
+    assert_eq!(
+        handle.drawers.read().len(),
+        0,
+        "palace must be empty before self-heal"
+    );
+
+    // First call: sentinel is absent → seed it and return Ok(true).
+    let seeded = seed_probe_sentinel_if_absent(&handle)
+        .await
+        .expect("seed_probe_sentinel_if_absent");
+    assert!(
+        seeded,
+        "first call must report that the sentinel was seeded"
+    );
+
+    {
+        let drawers = handle.drawers.read();
+        assert_eq!(
+            drawers.len(),
+            1,
+            "sentinel must be seeded when palace is empty (issue #1142)"
+        );
+        assert_eq!(
+            drawers[0].content, PROBE_SENTINEL_CONTENT,
+            "seeded drawer must carry the well-known sentinel content"
+        );
+    }
+
+    // Second call: sentinel already present → return Ok(false) (idempotent).
+    let seeded_again = seed_probe_sentinel_if_absent(&handle)
+        .await
+        .expect("seed_probe_sentinel_if_absent idempotent");
+    assert!(
+        !seeded_again,
+        "second call must report sentinel already present"
+    );
+    let drawer_count = handle.drawers.read().len();
+    assert_eq!(
+        drawer_count, 1,
+        "seed_probe_sentinel_if_absent must be idempotent (got {drawer_count})"
     );
 }
