@@ -21,8 +21,10 @@ impl McpServer {
     /// Why: most read-only endpoints (list_indexes, index_status, health)
     /// return JSON bodies; one shared helper avoids copy-pasting the
     /// response-decoding and error-mapping logic.
-    /// What: GETs `{base_url}{path}`, decodes the JSON body, returns
-    /// `DispatchError::Transport` on network or decode failure.
+    /// What: GETs `{base_url}{path}`, reads the raw text body, checks HTTP
+    /// status first (so a plain-text 503 surfaces the status code rather than
+    /// a confusing JSON-decode error), then deserialises to `Value`. Returns
+    /// `DispatchError::Transport` on network, status, or decode failure.
     /// Test: `search_health` and `index_status` arms exercise this.
     pub(super) async fn get(&self, path: &str) -> Result<Value, DispatchError> {
         let url = format!("{}{}", self.base_url, path);
@@ -33,15 +35,17 @@ impl McpServer {
             .await
             .map_err(|e| DispatchError::Transport(format!("GET {url}: {e}")))?;
         let status = resp.status();
-        let body: Value = resp
-            .json()
+        let text = resp
+            .text()
             .await
-            .map_err(|e| DispatchError::Transport(format!("decode {url}: {e}")))?;
+            .map_err(|e| DispatchError::Transport(format!("read {url}: {e}")))?;
         if !status.is_success() {
             return Err(DispatchError::Transport(format!(
-                "GET {url} returned {status}: {body}"
+                "GET {url} returned {status}: {text}"
             )));
         }
+        let body: Value = serde_json::from_str(&text)
+            .map_err(|e| DispatchError::Transport(format!("decode {url}: {e}")))?;
         Ok(body)
     }
 
@@ -127,8 +131,10 @@ impl McpServer {
     ///
     /// Why: `delete_index` is the only DELETE endpoint; a dedicated helper
     /// keeps the tool arm simple.
-    /// What: sends DELETE to `{base_url}{path}`, decodes JSON response, maps
-    /// failure to `DispatchError::Transport`.
+    /// What: sends DELETE to `{base_url}{path}`, reads raw text body, checks
+    /// HTTP status first (mirrors `get` — a plain-text error body surfaces the
+    /// status code rather than a confusing decode error), then deserialises to
+    /// `Value`. Maps failure to `DispatchError::Transport`.
     /// Test: `delete_index` arm exercises this path.
     pub(super) async fn delete(&self, path: &str) -> Result<Value, DispatchError> {
         let url = format!("{}{}", self.base_url, path);
@@ -139,15 +145,17 @@ impl McpServer {
             .await
             .map_err(|e| DispatchError::Transport(format!("DELETE {url}: {e}")))?;
         let status = resp.status();
-        let body: Value = resp
-            .json()
+        let text = resp
+            .text()
             .await
-            .map_err(|e| DispatchError::Transport(format!("decode {url}: {e}")))?;
+            .map_err(|e| DispatchError::Transport(format!("read {url}: {e}")))?;
         if !status.is_success() {
             return Err(DispatchError::Transport(format!(
-                "DELETE {url} returned {status}: {body}"
+                "DELETE {url} returned {status}: {text}"
             )));
         }
+        let body: Value = serde_json::from_str(&text)
+            .map_err(|e| DispatchError::Transport(format!("decode {url}: {e}")))?;
         Ok(body)
     }
 }
