@@ -31,6 +31,17 @@
 //! honour the backoff window, and attempt a fresh spawn only when the window
 //! has elapsed.
 //!
+//! ## Lock discipline
+//!
+//! The outer `Mutex<(Option<HandleState>, SpawnBackoff)>` is held **only** for
+//! state inspection and transition (the spawn / initialize path, backoff reads,
+//! and state writes). The long-running `call_tool` I/O is performed **outside**
+//! the outer lock: once we have a reference to the inner client lock we drop
+//! the outer guard, then acquire the per-client `Mutex<StdioMcpClient>` for
+//! the duration of the tool call only. This keeps the background metrics poller
+//! from blocking the on-demand route handlers (and vice-versa) across the full
+//! duration of a MCP round-trip.
+//!
 //! Test: `mcp_handle_absent_binary_returns_error`,
 //! `mcp_handle_absent_never_retries`,
 //! `mcp_handle_respawn_failure_applies_backoff`, and
@@ -54,15 +65,76 @@ const BACKOFF_BASE_MS: u64 = 1_000;
 /// Maximum retry delay cap in milliseconds (60 s, matches EmbedderSupervisor).
 const BACKOFF_CAP_MS: u64 = 60_000;
 
+// ── Typed error ──────────────────────────────────────────────────────────────
+
+/// Structured error returned by `call_tool_raw` and `poll_metrics`.
+///
+/// Why: String-based classification (`msg.contains("not installed")`) is
+/// fragile — a message change silently breaks 503 vs 502 routing in the HTTP
+/// handlers. Giving callers a typed variant they can `match` on makes the
+/// distinction explicit and refactor-safe.
+/// What: Three variants cover every outcome: `Absent` (binary not on PATH,
+/// never retry), `Backoff` (spawn failure window active, retry later), and
+/// `Other` (any other failure — transport error, tool error, parse failure).
+/// Test: `mcp_handle_absent_binary_returns_error` and
+/// `mcp_handle_respawn_failure_applies_backoff` both assert `Err`; callers in
+/// `server.rs` match on the variant to produce the correct HTTP status code.
+#[derive(Debug)]
+pub enum McpHandleError {
+    /// The service binary was not found on PATH; the handle is permanently in
+    /// the `Absent` state and will never retry.
+    Absent,
+    /// A previous spawn failure put the handle into an exponential-backoff
+    /// window; the current attempt was skipped to avoid log spam.
+    Backoff {
+        /// Number of consecutive failures so far.
+        failure_count: u32,
+        /// How long until the next attempt is allowed.
+        next_attempt_in: Duration,
+    },
+    /// Any other failure (spawn error, transport error, tool error, parse
+    /// failure). The inner `anyhow::Error` carries the full context chain.
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for McpHandleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Absent => write!(f, "McpServiceHandle: binary not installed on this machine"),
+            Self::Backoff {
+                failure_count,
+                next_attempt_in,
+            } => write!(
+                f,
+                "McpServiceHandle: in backoff after {failure_count} failure(s); \
+                 next attempt in {next_attempt_in:.2?}"
+            ),
+            Self::Other(e) => write!(f, "{e:#}"),
+        }
+    }
+}
+
+impl std::error::Error for McpHandleError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Other(e) => e.source(),
+            _ => None,
+        }
+    }
+}
+
 // ── State ────────────────────────────────────────────────────────────────────
 
 /// State of the supervised connection.
 enum HandleState {
     /// `which(binary)` returned None — service not installed; never retry.
     Absent,
-    /// Connection is up (client holds the live pipe).
-    /// Boxed to avoid large_enum_variant: `StdioMcpClient` is ~384 bytes.
-    Connected(Box<StdioMcpClient>),
+    /// Connection is up.
+    ///
+    /// The client is wrapped in its own `Arc<Mutex<…>>` so the outer
+    /// `state` lock can be released before the long `call_tool` I/O,
+    /// preventing the metrics poller from blocking on-demand route handlers.
+    Connected(Arc<Mutex<Box<StdioMcpClient>>>),
 }
 
 /// Spawn failure tracking embedded directly in the handle.
@@ -170,114 +242,35 @@ impl McpServiceHandle {
     /// Test: `mcp_handle_absent_binary_returns_error` covers the absent path;
     /// `mcp_handle_respawn_failure_applies_backoff` verifies the post-connect
     /// backoff gate; end-to-end smoke test validates the live pipe.
-    pub async fn poll_metrics(&self) -> Result<ConsoleMetricsReport> {
-        let mut guard = self.state.lock().await;
-        let (state_opt, backoff) = &mut *guard;
+    pub async fn poll_metrics(&self) -> Result<ConsoleMetricsReport, McpHandleError> {
+        let client_arc = self.ensure_connected().await?;
 
-        // Lazy initialisation: None means we have not tried connecting yet (or
-        // a previous attempt failed and we transitioned back to None).
-        if state_opt.is_none() {
-            let resolved = which::which(&self.binary).ok();
-            if resolved.is_none() {
-                warn!(
-                    binary = %self.binary,
-                    "McpServiceHandle: binary not found on PATH — marking as Absent"
-                );
-                *state_opt = Some(HandleState::Absent);
-            } else {
-                // Honour backoff: skip this cycle if we failed recently.
-                if !backoff.should_attempt() {
-                    return Err(anyhow::anyhow!(
-                        "McpServiceHandle: spawn of {} is in backoff (failure #{}); \
-                         next attempt in {:?}",
-                        self.binary,
-                        backoff.failure_count,
-                        backoff
-                            .next_attempt
-                            .saturating_duration_since(Instant::now()),
-                    ));
-                }
+        let mut client_guard = client_arc.lock().await;
+        let raw = client_guard
+            .call_tool(CONSOLE_METRICS_METHOD, json!({}))
+            .await
+            .with_context(|| {
+                format!(
+                    "McpServiceHandle: {} tool call failed for {}",
+                    CONSOLE_METRICS_METHOD, self.binary
+                )
+            });
 
-                debug!(binary = %self.binary, "McpServiceHandle: spawning MCP child");
-                let args_ref: Vec<&str> = self.args.iter().map(String::as_str).collect();
-                match StdioMcpClient::spawn(&self.binary, &args_ref, "trusty-console").await {
-                    Ok(mut client) => {
-                        client.initialize().await.with_context(|| {
-                            format!(
-                                "McpServiceHandle: MCP initialize failed for {}",
-                                self.binary
-                            )
-                        })?;
-                        backoff.reset();
-                        *state_opt = Some(HandleState::Connected(Box::new(client)));
-                    }
-                    Err(e) => {
-                        backoff.record_failure();
-                        warn!(
-                            binary = %self.binary,
-                            failure_count = backoff.failure_count,
-                            next_attempt_secs = ?backoff.next_attempt.saturating_duration_since(Instant::now()),
-                            error = %e,
-                            "McpServiceHandle: spawn failed — will retry after backoff"
-                        );
-                        return Err(e.context(format!(
-                            "McpServiceHandle: failed to spawn {} (failure #{})",
-                            self.binary, backoff.failure_count
-                        )));
-                    }
-                }
-            }
-        }
+        drop(client_guard);
 
-        match state_opt.as_mut() {
-            Some(HandleState::Absent) => anyhow::bail!(
-                "McpServiceHandle: {} is not installed on this machine",
-                self.binary
-            ),
-            Some(HandleState::Connected(client)) => {
-                // `call_tool` calls `ensure_alive` internally, which respawns the
-                // child if it has died. If the respawn itself fails (binary gone,
-                // permissions changed, etc.) the error surfaces here.
-                // Rate-limiting for those repeated failures lives here: on error
-                // we record a failure and drop the client back to `None` so the
-                // next poll re-enters the lazy-init block above and respects the
-                // backoff window. On success we reset the counter so transient
-                // crashes don't permanently throttle the poller.
-                let result = client
-                    .call_tool(CONSOLE_METRICS_METHOD, json!({}))
-                    .await
+        match raw {
+            Ok(value) => {
+                self.on_call_success().await;
+                parse_report(&value)
                     .with_context(|| {
-                        format!(
-                            "McpServiceHandle: {} tool call failed for {}",
-                            CONSOLE_METRICS_METHOD, self.binary
-                        )
-                    });
-
-                match result {
-                    Ok(raw) => {
-                        backoff.reset();
-                        parse_report(&raw).with_context(|| {
-                            format!("McpServiceHandle: parse_report failed for {}", self.binary)
-                        })
-                    }
-                    Err(e) => {
-                        backoff.record_failure();
-                        // Drop the client so the next poll attempts a fresh
-                        // spawn after the backoff window elapses.
-                        *state_opt = None;
-                        warn!(
-                            binary = %self.binary,
-                            failure_count = backoff.failure_count,
-                            next_attempt_secs = ?backoff.next_attempt.saturating_duration_since(Instant::now()),
-                            error = %e,
-                            "McpServiceHandle: tool call/respawn failed — resetting to None, \
-                             will retry after backoff"
-                        );
-                        Err(e)
-                    }
-                }
+                        format!("McpServiceHandle: parse_report failed for {}", self.binary)
+                    })
+                    .map_err(McpHandleError::Other)
             }
-            None => unreachable!("guard must be Some after init block"),
+            Err(e) => {
+                self.on_call_failure().await;
+                Err(McpHandleError::Other(e))
+            }
         }
     }
 
@@ -296,7 +289,47 @@ impl McpServiceHandle {
     /// callers receive the payload `Value` directly.
     /// Test: `call_tool_raw_absent_binary_returns_error` covers the absent path;
     /// the on-demand route integration tests exercise the live path.
-    pub async fn call_tool_raw(&self, tool: &str, args: Value) -> Result<Value> {
+    pub async fn call_tool_raw(&self, tool: &str, args: Value) -> Result<Value, McpHandleError> {
+        let client_arc = self.ensure_connected().await?;
+
+        let mut client_guard = client_arc.lock().await;
+        let result = client_guard.call_tool(tool, args).await.with_context(|| {
+            format!(
+                "McpServiceHandle: {} tool call failed for {}",
+                tool, self.binary
+            )
+        });
+
+        drop(client_guard);
+
+        match result {
+            Ok(raw) => {
+                self.on_call_success().await;
+                Ok(unwrap_mcp_content(raw))
+            }
+            Err(e) => {
+                self.on_call_failure().await;
+                Err(McpHandleError::Other(e))
+            }
+        }
+    }
+
+    // ── Private helpers ───────────────────────────────────────────────────────
+
+    /// Ensure the handle is in `Connected` state and return a clone of the
+    /// inner client `Arc`.
+    ///
+    /// Why: Separates the state-machine logic (lazy-init, absent detection,
+    /// backoff gating, spawn) from the tool-call I/O. This allows the outer
+    /// `state` lock to be released before the long `call_tool` await.
+    /// What: Acquires the outer `state` lock; if `None`, tries to spawn;
+    /// transitions to `Absent` or `Connected`. Returns `McpHandleError::Absent`
+    /// or `McpHandleError::Backoff` on the corresponding terminal/gate
+    /// conditions, `McpHandleError::Other` on spawn/init failures. On success
+    /// returns a clone of the `Arc<Mutex<Box<StdioMcpClient>>>` so the caller
+    /// can drop the outer lock before invoking `call_tool`.
+    /// Test: Exercised transitively by all handle tests and route tests.
+    async fn ensure_connected(&self) -> Result<Arc<Mutex<Box<StdioMcpClient>>>, McpHandleError> {
         let mut guard = self.state.lock().await;
         let (state_opt, backoff) = &mut *guard;
 
@@ -310,29 +343,43 @@ impl McpServiceHandle {
                 *state_opt = Some(HandleState::Absent);
             } else {
                 if !backoff.should_attempt() {
-                    return Err(anyhow::anyhow!(
-                        "McpServiceHandle: spawn of {} is in backoff (failure #{}); \
-                         next attempt in {:?}",
-                        self.binary,
-                        backoff.failure_count,
-                        backoff
-                            .next_attempt
-                            .saturating_duration_since(Instant::now()),
-                    ));
+                    let next_in = backoff
+                        .next_attempt
+                        .saturating_duration_since(Instant::now());
+                    warn!(
+                        binary = %self.binary,
+                        failure_count = backoff.failure_count,
+                        next_attempt_secs = ?next_in,
+                        "McpServiceHandle: spawn is in backoff — skipping this cycle"
+                    );
+                    return Err(McpHandleError::Backoff {
+                        failure_count: backoff.failure_count,
+                        next_attempt_in: next_in,
+                    });
                 }
 
-                debug!(binary = %self.binary, "McpServiceHandle: spawning MCP child (call_tool_raw)");
+                debug!(binary = %self.binary, "McpServiceHandle: spawning MCP child");
                 let args_ref: Vec<&str> = self.args.iter().map(String::as_str).collect();
                 match StdioMcpClient::spawn(&self.binary, &args_ref, "trusty-console").await {
                     Ok(mut client) => {
-                        client.initialize().await.with_context(|| {
+                        if let Err(e) = client.initialize().await.with_context(|| {
                             format!(
                                 "McpServiceHandle: MCP initialize failed for {}",
                                 self.binary
                             )
-                        })?;
+                        }) {
+                            backoff.record_failure();
+                            warn!(
+                                binary = %self.binary,
+                                failure_count = backoff.failure_count,
+                                error = %e,
+                                "McpServiceHandle: initialize failed — will retry after backoff"
+                            );
+                            return Err(McpHandleError::Other(e));
+                        }
                         backoff.reset();
-                        *state_opt = Some(HandleState::Connected(Box::new(client)));
+                        let client_arc = Arc::new(Mutex::new(Box::new(client)));
+                        *state_opt = Some(HandleState::Connected(Arc::clone(&client_arc)));
                     }
                     Err(e) => {
                         backoff.record_failure();
@@ -341,51 +388,57 @@ impl McpServiceHandle {
                             failure_count = backoff.failure_count,
                             next_attempt_secs = ?backoff.next_attempt.saturating_duration_since(Instant::now()),
                             error = %e,
-                            "McpServiceHandle: spawn failed (call_tool_raw) — will retry after backoff"
+                            "McpServiceHandle: spawn failed — will retry after backoff"
                         );
-                        return Err(e.context(format!(
+                        return Err(McpHandleError::Other(e.context(format!(
                             "McpServiceHandle: failed to spawn {} (failure #{})",
                             self.binary, backoff.failure_count
-                        )));
+                        ))));
                     }
                 }
             }
         }
 
-        match state_opt.as_mut() {
-            Some(HandleState::Absent) => anyhow::bail!(
-                "McpServiceHandle: {} is not installed on this machine",
-                self.binary
-            ),
-            Some(HandleState::Connected(client)) => {
-                let result = client.call_tool(tool, args).await.with_context(|| {
-                    format!(
-                        "McpServiceHandle: {} tool call failed for {}",
-                        tool, self.binary
-                    )
-                });
-
-                match result {
-                    Ok(raw) => {
-                        backoff.reset();
-                        Ok(unwrap_mcp_content(raw))
-                    }
-                    Err(e) => {
-                        backoff.record_failure();
-                        *state_opt = None;
-                        warn!(
-                            binary = %self.binary,
-                            tool = %tool,
-                            failure_count = backoff.failure_count,
-                            error = %e,
-                            "McpServiceHandle: tool call/respawn failed — resetting to None"
-                        );
-                        Err(e)
-                    }
-                }
-            }
+        match state_opt.as_ref() {
+            Some(HandleState::Absent) => Err(McpHandleError::Absent),
+            Some(HandleState::Connected(client_arc)) => Ok(Arc::clone(client_arc)),
             None => unreachable!("guard must be Some after init block"),
         }
+    }
+
+    /// Record a successful `call_tool` invocation by resetting the backoff.
+    ///
+    /// Why: On success we reset the failure counter so transient crashes don't
+    /// permanently throttle the poller.
+    /// What: Acquires the outer lock briefly and resets `SpawnBackoff`.
+    /// Test: Exercised transitively by the live-pipe smoke test.
+    async fn on_call_success(&self) {
+        let mut guard = self.state.lock().await;
+        let (_state_opt, backoff) = &mut *guard;
+        backoff.reset();
+    }
+
+    /// Record a failed `call_tool` invocation: increment backoff and reset
+    /// state to `None` so the next call re-enters lazy-init.
+    ///
+    /// Why: On error we record a failure and drop the client back to `None`
+    /// so the next poll re-enters the lazy-init block and respects the
+    /// backoff window.
+    /// What: Acquires the outer lock briefly, calls `backoff.record_failure()`,
+    /// and sets `state_opt = None`.
+    /// Test: `mcp_handle_respawn_failure_applies_backoff`.
+    async fn on_call_failure(&self) {
+        let mut guard = self.state.lock().await;
+        let (state_opt, backoff) = &mut *guard;
+        backoff.record_failure();
+        *state_opt = None;
+        warn!(
+            binary = %self.binary,
+            failure_count = backoff.failure_count,
+            next_attempt_secs = ?backoff.next_attempt.saturating_duration_since(Instant::now()),
+            "McpServiceHandle: tool call/respawn failed — resetting to None, \
+             will retry after backoff"
+        );
     }
 }
 
@@ -637,10 +690,10 @@ mod tests {
             result.is_err(),
             "poll_metrics must return Err while in backoff window — respawn path must be gated"
         );
-        let msg = format!("{:#}", result.unwrap_err());
+        // Should be the Backoff variant
         assert!(
-            msg.contains("backoff"),
-            "error message must mention backoff; got: {msg}"
+            matches!(result.unwrap_err(), McpHandleError::Backoff { .. }),
+            "error must be McpHandleError::Backoff"
         );
     }
 }

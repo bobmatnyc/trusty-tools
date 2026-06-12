@@ -51,18 +51,34 @@ pub fn descriptor() -> Value {
     })
 }
 
+/// Computed per-palace statistics, collected on the blocking thread pool.
+///
+/// Why: Aggregating drawer / vector / KG counts requires opening each palace
+/// (synchronous FS I/O). Collecting them into this struct lets `spawn_blocking`
+/// own a single closure that does all the I/O, keeping the async handler free
+/// of blocking operations.
+/// What: Holds per-palace JSON entries (limited to MAX_PALACES_IN_REPORT) and
+/// workspace-wide totals including palaces beyond the limit.
+/// Test: Exercised transitively by `handle_console_metrics_returns_valid_report`.
+struct PalaceStats {
+    palace_count: usize,
+    total_drawers: usize,
+    total_vectors: usize,
+    total_kg_triples: usize,
+    palace_entries: Vec<Value>,
+}
+
 /// MCP `console_metrics` handler — build and return a `ConsoleMetricsReport`.
 ///
 /// Why: The trusty-console metrics poller calls this tool via a supervised
 /// stdio MCP connection every `poll_interval` seconds to refresh the
 /// `/api/console/metrics/memory` dashboard panel.
-/// What: Lists all palaces from the shared `AppState`, opens each one on a
-/// blocking thread to read drawer / vector / KG counts, then builds a
-/// `ConsoleMetricsReport` via `make_report()`. Always returns `Ok` so the
-/// caller receives valid JSON; the report status is set to `Ok` regardless
-/// of per-palace open failures (those are logged at `warn!` and skipped).
-/// Returns a raw `serde_json::Value` (not the MCP content envelope) — the
-/// dispatcher in `transport/rpc.rs` wraps it.
+/// What: Lists all palaces from the shared `AppState`, opens each one on the
+/// blocking thread pool (synchronous FS I/O) to read drawer / vector / KG
+/// counts, then builds a `ConsoleMetricsReport` via `make_report()`. Always
+/// returns `Ok` so the caller receives valid JSON; per-palace open failures
+/// are logged at `warn!` and skipped. Returns a raw `serde_json::Value` (not
+/// the MCP content envelope) — the dispatcher in `transport/rpc.rs` wraps it.
 /// Test: `handle_console_metrics_aggregates_palaces` in tests below.
 pub async fn handle_console_metrics(state: &AppState, _args: Value) -> Result<Value> {
     let root = state.data_root.clone();
@@ -81,6 +97,51 @@ pub async fn handle_console_metrics(state: &AppState, _args: Value) -> Result<Va
             }
         };
 
+    // Open each palace and aggregate statistics on the blocking thread pool.
+    // `PalaceRegistry::open_palace` does synchronous FS I/O (loads metadata,
+    // opens SQLite/usearch files) so it must not run on the async executor.
+    let root2 = state.data_root.clone();
+    let registry = state.registry.clone();
+    let stats =
+        tokio::task::spawn_blocking(move || collect_palace_stats(&registry, &root2, &palace_infos))
+            .await
+            .map_err(|e| anyhow::anyhow!("join collect_palace_stats: {e}"))?;
+
+    let metrics = json!({
+        "palace_count": stats.palace_count,
+        "total_drawers": stats.total_drawers,
+        "total_vectors": stats.total_vectors,
+        "total_kg_triples": stats.total_kg_triples,
+        "palaces": stats.palace_entries,
+    });
+
+    let report = make_report(
+        "trusty-memory",
+        "Trusty Memory",
+        env!("CARGO_PKG_VERSION"),
+        ServiceHealth::Ok,
+        metrics,
+        1,
+    );
+
+    Ok(serde_json::to_value(&report)?)
+}
+
+/// Open each palace and aggregate drawer / vector / KG statistics.
+///
+/// Why: Extracted as a free function so it can run entirely on the
+/// `spawn_blocking` thread pool — `open_palace` does synchronous FS I/O
+/// (`std::fs`, SQLite, usearch file open) that must not block the async
+/// executor.
+/// What: Iterates `palace_infos`; the first MAX_PALACES_IN_REPORT produce full
+/// entries in `palace_entries`; the remainder contribute only to the totals.
+/// Open failures are logged and produce a zero-count entry with an `error` field.
+/// Test: Exercised via `handle_console_metrics_returns_valid_report`.
+fn collect_palace_stats(
+    registry: &trusty_common::memory_core::PalaceRegistry,
+    data_root: &std::path::Path,
+    palace_infos: &[trusty_common::memory_core::Palace],
+) -> PalaceStats {
     let palace_count = palace_infos.len();
     let mut total_drawers: usize = 0;
     let mut total_vectors: usize = 0;
@@ -92,7 +153,7 @@ pub async fn handle_console_metrics(state: &AppState, _args: Value) -> Result<Va
         let palace_id = info.id.as_str().to_string();
         let name = info.name.clone();
 
-        match state.registry.open_palace(&state.data_root, &info.id) {
+        match registry.open_palace(data_root, &info.id) {
             Ok(handle) => {
                 let drawer_count = handle.drawers.read().len();
                 let vector_count = handle.vector_store.index_size();
@@ -129,32 +190,22 @@ pub async fn handle_console_metrics(state: &AppState, _args: Value) -> Result<Va
     }
 
     // Accumulate totals for any palaces beyond the MAX_PALACES_IN_REPORT cutoff.
+    // These are opened purely for counting — no entry is added to palace_entries.
     for info in palace_infos.iter().skip(MAX_PALACES_IN_REPORT) {
-        if let Ok(handle) = state.registry.open_palace(&state.data_root, &info.id) {
+        if let Ok(handle) = registry.open_palace(data_root, &info.id) {
             total_drawers += handle.drawers.read().len();
             total_vectors += handle.vector_store.index_size();
             total_kg_triples += handle.kg.count_active_triples();
         }
     }
 
-    let metrics = json!({
-        "palace_count": palace_count,
-        "total_drawers": total_drawers,
-        "total_vectors": total_vectors,
-        "total_kg_triples": total_kg_triples,
-        "palaces": palace_entries,
-    });
-
-    let report = make_report(
-        "trusty-memory",
-        "Trusty Memory",
-        env!("CARGO_PKG_VERSION"),
-        ServiceHealth::Ok,
-        metrics,
-        1,
-    );
-
-    Ok(serde_json::to_value(&report)?)
+    PalaceStats {
+        palace_count,
+        total_drawers,
+        total_vectors,
+        total_kg_triples,
+        palace_entries,
+    }
 }
 
 // ─── tests ──────────────────────────────────────────────────────────────────
@@ -168,14 +219,21 @@ mod tests {
     /// What: Builds a minimal `AppState` backed by a temp directory, calls
     /// `handle_console_metrics`, and asserts all required JSON fields are present
     /// and the aggregate counts are zero.
+    ///
+    /// The test uses `current_thread` flavor and sets the skip-enforcement flag
+    /// before constructing `AppState` to avoid the palace-slug check without
+    /// relying on a process-global env mutation that would race with other
+    /// parallel tests.
     /// Test: This test.
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn handle_console_metrics_returns_valid_report() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        // SAFETY: single-threaded test; env var guards against palace slug enforcement.
+        // SAFETY: single-threaded executor (current_thread flavor); no other
+        // thread is reading or writing TRUSTY_SKIP_PALACE_ENFORCEMENT
+        // concurrently within this test binary's run of this test.
         unsafe {
             std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
         }
+        let tmp = tempfile::tempdir().expect("tempdir");
         let state = crate::AppState::new(tmp.path().to_path_buf());
 
         let result = handle_console_metrics(&state, serde_json::json!({}))

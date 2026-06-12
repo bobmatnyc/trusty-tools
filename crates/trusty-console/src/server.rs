@@ -34,7 +34,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::connector::ServiceConnector;
-use crate::mcp_handle::McpServiceHandle;
+use crate::mcp_handle::{McpHandleError, McpServiceHandle};
 use crate::metrics_poller::MetricsCache;
 use crate::poller::PollerCache;
 
@@ -324,7 +324,7 @@ struct VisualizeQuery {
 /// What: Calls the `list_analyze_indexes` MCP tool (which proxies `GET /indexes`
 /// on the daemon). Returns the JSON array on 200, 503 when the analyze binary
 /// is absent or in backoff, 502 on any other error.
-/// Test: `test_analyze_indexes_handler_cold_returns_503` below.
+/// Test: `test_analyze_indexes_absent_binary_returns_503` below.
 async fn analyze_indexes_handler(State(state): State<AppState>) -> axum::response::Response {
     match state
         .analyze_handle()
@@ -332,14 +332,12 @@ async fn analyze_indexes_handler(State(state): State<AppState>) -> axum::respons
         .await
     {
         Ok(val) => axum::Json(val).into_response(),
+        Err(McpHandleError::Absent | McpHandleError::Backoff { .. }) => {
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
         Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("not installed") || msg.contains("backoff") || msg.contains("Absent") {
-                StatusCode::SERVICE_UNAVAILABLE.into_response()
-            } else {
-                tracing::warn!("analyze_indexes_handler error: {e:#}");
-                StatusCode::BAD_GATEWAY.into_response()
-            }
+            tracing::warn!("analyze_indexes_handler error: {e:#}");
+            StatusCode::BAD_GATEWAY.into_response()
         }
     }
 }
@@ -352,8 +350,11 @@ async fn analyze_indexes_handler(State(state): State<AppState>) -> axum::respons
 /// What: Calls `extract_graph`, `list_entities`, and `cluster_concepts` (k=8)
 /// via `McpServiceHandle::call_tool_raw` and returns a combined JSON object:
 /// `{"graph": ..., "entities": ..., "clusters": ...}`. Missing index param
-/// returns 400. Absent binary or backoff returns 503.
-/// Test: `test_analyze_visualize_handler_no_index_returns_400` below.
+/// returns 400 (BAD_REQUEST). Absent binary or backoff returns 503
+/// (SERVICE_UNAVAILABLE). A hard graph error (non-absent/backoff) returns
+/// 502 (BAD_GATEWAY).
+/// Test: `test_analyze_visualize_handler_no_index_returns_400` and
+/// `test_analyze_visualize_handler_absent_binary_returns_503` below.
 async fn analyze_visualize_handler(
     State(state): State<AppState>,
     Query(params): Query<VisualizeQuery>,
@@ -361,7 +362,10 @@ async fn analyze_visualize_handler(
     let index_id = match params.index {
         Some(id) if !id.is_empty() => id,
         _ => {
-            return axum::Json(json!({"error": "missing required query param: index"}))
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({"error": "missing required query param: index"})),
+            )
                 .into_response();
         }
     };
@@ -381,12 +385,17 @@ async fn analyze_visualize_handler(
         }),
     );
 
-    // Surface the error if binary is absent/backoff; otherwise return best-effort data.
-    if let Err(ref e) = graph_res {
-        let msg = e.to_string();
-        if msg.contains("not installed") || msg.contains("backoff") || msg.contains("Absent") {
+    // Classify the graph result: absent/backoff → 503, hard error → 502,
+    // success → combine with best-effort entities and clusters.
+    match &graph_res {
+        Err(McpHandleError::Absent | McpHandleError::Backoff { .. }) => {
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
+        Err(e) => {
+            tracing::warn!("analyze_visualize_handler graph error: {e:#}");
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+        Ok(_) => {}
     }
 
     let combined = json!({
@@ -739,9 +748,11 @@ mod tests {
     }
 
     /// Why: the analyze visualize route must return 400 when no `index` param
-    /// is provided — the endpoint needs it to query the daemon.
+    /// is provided — the endpoint needs it to query the daemon. A 200 with an
+    /// error field is indistinguishable from a success response to callers that
+    /// only check the status code.
     /// What: issues GET /api/console/metrics/analyze/visualize (no ?index=),
-    /// asserts the JSON body contains `error`.
+    /// asserts HTTP 400 and a JSON body containing `error`.
     /// Test: this test itself.
     #[tokio::test]
     async fn test_analyze_visualize_handler_no_index_returns_json_error() {
@@ -751,7 +762,12 @@ mod tests {
             .body(Body::empty())
             .expect("request");
         let resp = router.oneshot(req).await.expect("response");
-        // Missing index returns a JSON error body (200 with error field).
+        // Missing index returns 400 BAD_REQUEST with a JSON error body.
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "missing index param must return 400"
+        );
         let bytes = get_bytes(resp).await;
         let body: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
         assert!(
