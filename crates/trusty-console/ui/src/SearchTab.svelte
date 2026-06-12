@@ -1,5 +1,6 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
+  import RefreshHeader from './RefreshHeader.svelte';
 
   /** Format bytes into a human-readable string (KB / MB / GB). */
   function formatBytes(bytes) {
@@ -15,8 +16,20 @@
   let error = $state(null);
   let refreshing = $state(false);
 
-  /** Fetch (or re-fetch) search metrics from the console API. */
+  /**
+   * Why: Fetches search metrics while preventing concurrent in-flight requests
+   *      from stacking (e.g. slow >20 s fetch overlapping the next interval tick
+   *      or a rapid manual button click).
+   * What: Returns early when a fetch is already in progress; otherwise sets the
+   *       appropriate loading flag, fetches /api/console/metrics/search, and
+   *       stores the result or an error message.
+   * Test: Call twice in rapid succession — assert only one HTTP request is made
+   *       and state is consistent after both calls resolve.
+   */
   async function fetchMetrics(isRefresh = false) {
+    // Guard: drop the tick if a fetch is already in flight.
+    if (refreshing || (isRefresh && loading)) return;
+
     if (isRefresh) {
       refreshing = true;
     } else {
@@ -63,12 +76,7 @@
 </script>
 
 <div class="tab-content">
-  <div class="section-header">
-    <h2 class="section-title">Trusty Search</h2>
-    <button class="refresh-btn" onclick={() => fetchMetrics(true)} disabled={refreshing}>
-      {refreshing ? 'Refreshing…' : 'Refresh'}
-    </button>
-  </div>
+  <RefreshHeader title="Trusty Search" onRefresh={() => fetchMetrics(true)} {refreshing} />
 
   {#if loading}
     <div class="placeholder">Loading search metrics…</div>
@@ -131,19 +139,6 @@
 
 <style>
   .tab-content { padding: 0.25rem 0; }
-  .section-header {
-    display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;
-  }
-  .section-title {
-    font-size: 1.25rem; font-weight: 600; margin: 0; color: #e2e8f0; flex: 1;
-  }
-  .refresh-btn {
-    background: none; border: 1px solid #3d4568; border-radius: 0.4rem;
-    color: #7c3aed; cursor: pointer; font-size: 0.78rem; font-weight: 500;
-    padding: 0.25rem 0.65rem; transition: background 0.15s, border-color 0.15s;
-  }
-  .refresh-btn:hover:not(:disabled) { background: #7c3aed18; border-color: #7c3aed; }
-  .refresh-btn:disabled { opacity: 0.5; cursor: default; }
   .placeholder, .not-available {
     background: #1e2130; border-radius: 0.5rem;
     padding: 1.25rem; color: #94a3b8; font-size: 0.9rem;

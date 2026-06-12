@@ -21,14 +21,19 @@
     { id: 'review',   label: 'Review' },
   ];
 
-  // Map service.id to the console tab key. Only services with a real (non-stub)
-  // tab are listed here — services absent from this map will not show the
-  // "View details →" button in their ServiceCard.
+  // Single source of truth: maps service.id → console tab key.
+  // Services absent from this map will not show the "View details →" button.
+  // ServiceCard derives its `hasTab` check from the key set of this map —
+  // there is no separate TABBED_SERVICES literal anywhere in the codebase.
   const SERVICE_TAB_MAP = {
     'trusty-search':  'search',
     'trusty-memory':  'memory',
     'trusty-analyze': 'analyze',
   };
+
+  // Derived set used by ServiceCard to decide whether to render the button.
+  // Kept in sync automatically — no manual mirroring required.
+  const tabbedServices = new Set(Object.keys(SERVICE_TAB_MAP));
 
   // ── data fetch ───────────────────────────────────────────────────────────
 
@@ -84,7 +89,11 @@
       {:else}
         <div class="cards">
           {#each services as service (service.id)}
-            <ServiceCard {service} onViewDetails={SERVICE_TAB_MAP[service.id] ? handleViewDetails : undefined} />
+            <ServiceCard
+              {service}
+              {tabbedServices}
+              onViewDetails={tabbedServices.has(service.id) ? handleViewDetails : undefined}
+            />
           {/each}
         </div>
       {/if}
