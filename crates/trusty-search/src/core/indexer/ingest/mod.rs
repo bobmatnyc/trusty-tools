@@ -6,8 +6,9 @@
 //! and the persistence module focused.
 //! What: `add_chunk`, `index_file`, the NLP enrichment helper,
 //! `index_files_batch[_no_rebuild]`, `parse_and_embed_files`, the parallel
-//! parse + batched embed helpers, `commit_parsed_batch`, every `commit_*`
-//! helper, and `rebuild_symbol_graph[_now]`.
+//! parse + batched embed helpers, and `rebuild_symbol_graph[_now]`.
+//! `commit_parsed_batch` and every `commit_*` helper live in the sibling
+//! `ingest::commit` sub-module (`ingest/commit.rs`).
 //! Test: covered by `test_index_files_batch_*`,
 //! `test_virtual_terms_populated_from_entities`, and every ingest-flavoured
 //! test in `indexer::tests`.
