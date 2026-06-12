@@ -21,6 +21,15 @@
     { id: 'review',   label: 'Review' },
   ];
 
+  // Map service.id to the console tab key. Only services with a real (non-stub)
+  // tab are listed here — services absent from this map will not show the
+  // "View details →" button in their ServiceCard.
+  const SERVICE_TAB_MAP = {
+    'trusty-search':  'search',
+    'trusty-memory':  'memory',
+    'trusty-analyze': 'analyze',
+  };
+
   // ── data fetch ───────────────────────────────────────────────────────────
 
   onMount(async () => {
@@ -34,6 +43,14 @@
       loading = false;
     }
   });
+
+  // ── navigation callback for ServiceCard overview buttons ─────────────────
+
+  /** Switch to the tab for the given service id (if one exists). */
+  function handleViewDetails(serviceId) {
+    const tabKey = SERVICE_TAB_MAP[serviceId];
+    if (tabKey) activeTab = tabKey;
+  }
 </script>
 
 <main>
@@ -67,7 +84,7 @@
       {:else}
         <div class="cards">
           {#each services as service (service.id)}
-            <ServiceCard {service} />
+            <ServiceCard {service} onViewDetails={SERVICE_TAB_MAP[service.id] ? handleViewDetails : undefined} />
           {/each}
         </div>
       {/if}

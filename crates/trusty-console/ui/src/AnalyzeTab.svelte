@@ -1,11 +1,12 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
 
   // ─── state ──────────────────────────────────────────────────────────────────
 
   let report = $state(null);
   let metricsLoading = $state(true);
   let metricsError = $state(null);
+  let metricsRefreshing = $state(false);
 
   let indexes = $state([]);
   let indexesLoading = $state(false);
@@ -17,13 +18,28 @@
   let vizLoading = $state(false);
   let vizError = $state(null);
 
+  /** Auto-refresh interval handle — cleared on component destroy to prevent leaks. */
+  let refreshInterval;
+
   // ─── fetch on mount ─────────────────────────────────────────────────────────
 
   onMount(async () => {
     await Promise.all([fetchMetrics(), fetchIndexes()]);
+    // Only auto-refresh the lightweight metrics endpoint (every 20 s).
+    // Index list and visualization are user-driven to avoid hammering the daemon.
+    refreshInterval = setInterval(() => fetchMetrics(true), 20_000);
   });
 
-  async function fetchMetrics() {
+  onDestroy(() => {
+    clearInterval(refreshInterval);
+  });
+
+  async function fetchMetrics(isRefresh = false) {
+    if (isRefresh) {
+      metricsRefreshing = true;
+    } else {
+      metricsLoading = true;
+    }
     try {
       const resp = await fetch('/api/console/metrics/analyze');
       if (resp.status === 503) {
@@ -32,10 +48,12 @@
       }
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       report = await resp.json();
+      metricsError = null;
     } catch (e) {
       metricsError = e.message;
     } finally {
       metricsLoading = false;
+      metricsRefreshing = false;
     }
   }
 
@@ -193,7 +211,12 @@
 </script>
 
 <div class="tab-content">
-  <h2 class="section-title">Trusty Analyze</h2>
+  <div class="section-header">
+    <h2 class="section-title">Trusty Analyze</h2>
+    <button class="refresh-btn" onclick={() => fetchMetrics(true)} disabled={metricsRefreshing}>
+      {metricsRefreshing ? 'Refreshing…' : 'Refresh'}
+    </button>
+  </div>
 
   <!-- ── Health panel ──────────────────────────────────────────────────────── -->
   {#if metricsLoading}
@@ -357,9 +380,19 @@
 
 <style>
   .tab-content { padding: 0.25rem 0; }
-  .section-title {
-    font-size: 1.25rem; font-weight: 600; margin: 0 0 1rem; color: #e2e8f0;
+  .section-header {
+    display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;
   }
+  .section-title {
+    font-size: 1.25rem; font-weight: 600; margin: 0; color: #e2e8f0; flex: 1;
+  }
+  .refresh-btn {
+    background: none; border: 1px solid #3d4568; border-radius: 0.4rem;
+    color: #7c3aed; cursor: pointer; font-size: 0.78rem; font-weight: 500;
+    padding: 0.25rem 0.65rem; transition: background 0.15s, border-color 0.15s;
+  }
+  .refresh-btn:hover:not(:disabled) { background: #7c3aed18; border-color: #7c3aed; }
+  .refresh-btn:disabled { opacity: 0.5; cursor: default; }
   .placeholder, .not-available {
     background: #1e2130; border-radius: 0.5rem;
     padding: 1.25rem; color: #94a3b8; font-size: 0.9rem;

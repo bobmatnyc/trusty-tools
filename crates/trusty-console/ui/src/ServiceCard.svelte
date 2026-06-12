@@ -21,12 +21,13 @@
     degraded: '#f97316',
   };
 
-  // Known services that have a details tab in the console.
+  // Known services that have a real (non-stub) details tab in the console.
+  // trusty-review is intentionally excluded: it renders a StubTab and the
+  // "View details" button should not appear until the tab is fully implemented.
   const TABBED_SERVICES = new Set([
     'trusty-search',
     'trusty-memory',
     'trusty-analyze',
-    'trusty-review',
   ]);
 
   let statusLabel = $derived(STATUS_LABELS[service.status] ?? service.status);
