@@ -21,7 +21,7 @@ crates/trusty-common/src/memory_core/dream.rs	1199
 crates/trusty-common/src/memory_core/retrieval/mod.rs	830
 crates/trusty-common/src/memory_core/semantic_consolidation.rs	615
 crates/trusty-common/src/memory_core/store/chat_sessions.rs	510
-crates/trusty-common/src/memory_core/store/kg_redb.rs	1442
+crates/trusty-common/src/memory_core/store/kg_redb.rs	1400
 crates/trusty-common/src/memory_core/store/kg.rs	815
 crates/trusty-common/src/memory_core/store/payload_store.rs	547
 crates/trusty-common/src/monitor/dashboard.rs	745
@@ -56,7 +56,6 @@ crates/trusty-memory/src/chat.rs	1012
 crates/trusty-memory/src/commands/doctor.rs	718
 crates/trusty-memory/src/commands/prompt_context.rs	940
 crates/trusty-memory/src/lib.rs	616
-crates/trusty-memory/src/main.rs	501
 crates/trusty-memory/src/messaging.rs	503
 crates/trusty-memory/src/project_root.rs	501
 crates/trusty-memory/src/prompt_log.rs	542

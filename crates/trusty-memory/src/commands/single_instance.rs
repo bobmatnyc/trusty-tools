@@ -86,6 +86,33 @@ pub async fn single_instance_check(addr_file: Option<&Path>) -> StartupAction {
     startup_action_from_probe_result(probe_ok)
 }
 
+/// Single-instance check with up to `max_retries` additional probes.
+///
+/// Why (issue #1152, Tier 3): a single probe can miss a daemon that is
+/// mid-boot — it wrote the addr file but hasn't yet answered `/health`.
+/// Retrying with a short sleep lets a slow-boot daemon be detected and
+/// this caller exit 0 (stopping the launchd respawn storm) rather than
+/// proceeding to open redb, which would trigger `DatabaseAlreadyOpen`.
+/// What: calls `single_instance_check` repeatedly up to `1 + max_retries`
+/// times, sleeping `delay_ms` between each call, stopping on the first
+/// non-`Proceed` result. Returns the final `StartupAction`.
+/// Test: covered by the unit tests for `startup_action_from_probe_result`;
+/// the retry path is exercised by the integration guard in `main.rs`.
+pub async fn single_instance_check_retried(
+    addr_file: Option<&std::path::Path>,
+    max_retries: u8,
+    delay_ms: u64,
+) -> StartupAction {
+    let mut action = single_instance_check(addr_file).await;
+    let mut retries = max_retries;
+    while action == StartupAction::Proceed && retries > 0 {
+        retries -= 1;
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        action = single_instance_check(addr_file).await;
+    }
+    action
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

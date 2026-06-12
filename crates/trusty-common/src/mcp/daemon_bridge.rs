@@ -50,14 +50,16 @@ pub const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(30);
 /// parameterised function rather than three near-identical functions.
 /// What: holds the service name (for diagnostics), the arguments appended to
 /// `current_exe()` when spawning the daemon, the path for health probing (e.g.
-/// `/health` or `/api/v1/health`), a URL-resolver closure, and optional timeout
-/// overrides.
-/// Test: `daemon_bridge_config_health_url` unit test.
+/// `/health` or `/api/v1/health`), a URL-resolver closure, optional timeout
+/// overrides, and the `no_spawn` flag (issue #1152).
+/// Test: `daemon_bridge_config_health_url` unit test;
+/// `no_spawn_returns_err_without_spawning` covers the new field.
 pub struct DaemonBridgeConfig {
     /// Human-readable service name, used in diagnostic messages.
     pub service_name: String,
     /// Arguments passed to `current_exe()` when the daemon is not running.
     /// Example: `&["serve", "--foreground", "--http", "127.0.0.1:0"]`.
+    /// Ignored when `no_spawn` is `true`.
     pub spawn_args: Vec<String>,
     /// HTTP health endpoint path (including leading `/`).
     /// Example: `/health` or `/api/v1/health`.
@@ -72,6 +74,22 @@ pub struct DaemonBridgeConfig {
     /// Polling interval between health probes.
     /// Defaults to `DAEMON_POLL_INTERVAL` when `None`.
     pub poll_interval: Option<Duration>,
+    /// When `true`, `ensure_daemon_up` will NEVER spawn a background process.
+    ///
+    /// Why (issue #1152): the trusty-memory stdio bridge previously auto-spawned
+    /// an unmanaged `serve --foreground --http 127.0.0.1:0` daemon on every
+    /// transient health-probe miss. That spawned daemon opened production palace
+    /// redb files on a random OS-assigned port, squatting redb's exclusive
+    /// single-writer lock and starving the real launchd daemon at :7070.
+    /// Setting `no_spawn = true` in the trusty-memory bridge config converts the
+    /// spawn-on-miss path into a clear `Err` that tells the user how to start the
+    /// daemon properly.  Other callers (trusty-search, trusty-analyze) that still
+    /// need auto-spawn keep the default `false`.
+    /// What: when `true` and the fast-path health probe fails, `ensure_daemon_up`
+    /// returns `Err` immediately with a human-readable message rather than
+    /// spawning `current_exe() + spawn_args`.
+    /// Test: `no_spawn_returns_err_without_spawning`.
+    pub no_spawn: bool,
 }
 
 impl DaemonBridgeConfig {
@@ -115,14 +133,18 @@ pub(crate) async fn probe_health_once(health_url: &str) -> bool {
 /// tested function prevents three services from independently re-implementing
 /// (and diverging in) the probe-spawn-poll pattern.
 /// What: (1) fast-path probes the current health URL; returns immediately when
-/// the daemon is already up.  (2) On miss, spawns `current_exe() + spawn_args`
-/// as a detached background process; all stdio fds are null-ed so the spawned
+/// the daemon is already up.  (2a) When `config.no_spawn` is `true` and the
+/// probe failed, returns a clear `Err` telling the user to start the daemon
+/// manually — no process is spawned (issue #1152 fix).  (2b) When
+/// `config.no_spawn` is `false`, spawns `current_exe() + spawn_args` as a
+/// detached background process; all stdio fds are null-ed so the spawned
 /// daemon outlives the MCP bridge process.  (3) Polls every `poll_interval`
 /// (re-evaluating `base_url_fn` each iteration for dynamic-port support) until
 /// the daemon responds on `/health` or `startup_timeout` is exceeded.  Hard-
 /// errors on timeout — there is no silent fallback.  All output to stderr only.
 /// Test: `ensure_daemon_up_returns_ok_when_already_healthy` (async integration
-/// test); `probe_health_once_returns_false_on_refused` (unit).
+/// test); `probe_health_once_returns_false_on_refused` (unit);
+/// `no_spawn_returns_err_without_spawning` (issue #1152).
 pub async fn ensure_daemon_up(config: &DaemonBridgeConfig) -> Result<String> {
     let startup_timeout = config.startup_timeout.unwrap_or(DAEMON_START_TIMEOUT);
     let poll_interval = config.poll_interval.unwrap_or(DAEMON_POLL_INTERVAL);
@@ -131,6 +153,26 @@ pub async fn ensure_daemon_up(config: &DaemonBridgeConfig) -> Result<String> {
     let initial_url = (config.base_url_fn)();
     if probe_health_once(&config.health_url()).await {
         return Ok(initial_url);
+    }
+
+    // Issue #1152: when no_spawn is set, refuse to spawn an unmanaged daemon.
+    // The trusty-memory stdio bridge uses this to prevent squatting redb's
+    // exclusive write lock on a random port. Return a clear Err so the user
+    // knows exactly what to do.
+    if config.no_spawn {
+        let addr = (config.base_url_fn)();
+        return Err(anyhow!(
+            "{} daemon is not reachable at {} — \
+             start it with `{} start` (launchd-managed) before using the MCP bridge. \
+             If already installed via `{} setup`, run `launchctl bootstrap gui/$(id -u) \
+             ~/Library/LaunchAgents/io.trusty.{}.plist` or `{} start`.",
+            config.service_name,
+            addr,
+            config.service_name,
+            config.service_name,
+            config.service_name,
+            config.service_name,
+        ));
     }
 
     // Slow path: spawn the daemon detached.
@@ -192,6 +234,7 @@ mod tests {
             base_url_fn: Box::new(move || base_url.to_string()),
             startup_timeout: Some(Duration::from_millis(100)), // very short for tests
             poll_interval: Some(Duration::from_millis(20)),
+            no_spawn: false,
         }
     }
 
@@ -254,6 +297,7 @@ mod tests {
             base_url_fn: Box::new(move || base.clone()),
             startup_timeout: Some(Duration::from_secs(5)),
             poll_interval: Some(Duration::from_millis(50)),
+            no_spawn: false,
         };
         let result = ensure_daemon_up(&cfg).await;
         assert!(
@@ -273,6 +317,40 @@ mod tests {
         assert!(
             result.is_err(),
             "must fail when the daemon never becomes ready"
+        );
+    }
+
+    /// Why (issue #1152): when `no_spawn = true` and the health probe fails,
+    /// `ensure_daemon_up` must return `Err` immediately — it must NOT spawn a
+    /// background process.  The trusty-memory stdio bridge uses this to prevent
+    /// an unmanaged `serve --foreground --http :0` from squatting the production
+    /// palace redb write lock.
+    /// What: builds a config with `no_spawn = true` pointing at a refused port,
+    /// calls `ensure_daemon_up`, and asserts `Err` is returned with a message
+    /// that contains both the service name and "start".
+    /// Test: this test (unit; no real daemon spawned — spawn would fail the test
+    /// binary anyway since `current_exe()` is the test harness, not trusty-memory).
+    #[tokio::test]
+    async fn no_spawn_returns_err_without_spawning() {
+        let cfg = DaemonBridgeConfig {
+            service_name: "trusty-memory".to_string(),
+            spawn_args: vec!["serve".to_string(), "--foreground".to_string()],
+            health_path: "/health".to_string(),
+            base_url_fn: Box::new(|| "http://127.0.0.1:65534".to_string()),
+            startup_timeout: Some(Duration::from_millis(100)),
+            poll_interval: Some(Duration::from_millis(20)),
+            no_spawn: true,
+        };
+        let result = ensure_daemon_up(&cfg).await;
+        assert!(result.is_err(), "no_spawn must return Err when probe fails");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("trusty-memory"),
+            "error must name the service; got: {msg}"
+        );
+        assert!(
+            msg.contains("start"),
+            "error must mention how to start the daemon; got: {msg}"
         );
     }
 }
