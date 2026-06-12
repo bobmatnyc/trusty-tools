@@ -6,7 +6,7 @@
 //! What: Builds an axum `Router` with:
 //!   - `GET /health` — liveness probe.
 //!   - `GET /api/console/services` — return cached snapshot (background poll).
-//!   - `GET /api/console/metrics/{analyze,memory,search}` — MCP-polled metrics.
+//!   - `GET /api/console/metrics/{analyze,memory,search,review}` — MCP-polled metrics.
 //!   - `GET /api/console/metrics/analyze/indexes` — analyze index list via stdio MCP.
 //!   - `GET /api/console/metrics/analyze/visualize?index=<id>` — graph+entities+clusters.
 //!   - `ANY /proxy/{daemon}/{*path}` — reverse-proxy to live daemon.
@@ -59,9 +59,9 @@ struct UiAssets;
 /// Why: Connectors, the poller cache, metrics caches, and HTTP client are
 /// created once at startup and reused for every request so there is no per-
 /// request allocation. A separate `MetricsCache` is maintained for each
-/// stdio-MCP-polled service (analyze, memory, search) so they can be updated
-/// independently and served without coupling. `analyze_handle` is held in Arc
-/// so the on-demand visualize/index routes can call the analyze stdio MCP
+/// stdio-MCP-polled service (analyze, memory, search, review) so they can be
+/// updated independently and served without coupling. `analyze_handle` is held
+/// in Arc so the on-demand visualize/index routes can call the analyze stdio MCP
 /// without going through the /proxy path.
 /// `mcp_handles` maps each service id to its `McpServiceHandle` so the
 /// services route can overlay the connector-reported status with the actual
@@ -77,6 +77,7 @@ pub struct AppState {
     metrics_cache: MetricsCache,
     memory_metrics_cache: MetricsCache,
     search_metrics_cache: MetricsCache,
+    review_metrics_cache: MetricsCache,
     http_client: Arc<reqwest::Client>,
     /// Analyze stdio MCP handle — shared with the metrics poller so both the
     /// background poll and on-demand route calls reuse the same child process.
@@ -119,16 +120,25 @@ impl AppState {
             "trusty-search",
             vec!["serve".to_string()],
         ));
+        // Why: trusty-review's stdio MCP mode is `serve --stdio` (see ServeArgs
+        // in commands/serve.rs). This is the canonical command the console spawns
+        // to poll `console_metrics` without requiring the HTTP daemon to be running.
+        let review_handle = Arc::new(McpServiceHandle::new(
+            "trusty-review",
+            vec!["serve".to_string(), "--stdio".to_string()],
+        ));
         let mut handles: HashMap<String, Arc<McpServiceHandle>> = HashMap::new();
         handles.insert("trusty-analyze".to_string(), Arc::clone(&analyze_handle));
         handles.insert("trusty-memory".to_string(), Arc::clone(&memory_handle));
         handles.insert("trusty-search".to_string(), Arc::clone(&search_handle));
+        handles.insert("trusty-review".to_string(), Arc::clone(&review_handle));
         Self {
             connectors: Arc::new(connectors),
             poller_cache: PollerCache::new(),
             metrics_cache: MetricsCache::new(),
             memory_metrics_cache: MetricsCache::new(),
             search_metrics_cache: MetricsCache::new(),
+            review_metrics_cache: MetricsCache::new(),
             http_client: Arc::new(client),
             analyze_handle,
             mcp_handles: Arc::new(handles),
@@ -206,6 +216,16 @@ impl AppState {
         &self.search_metrics_cache
     }
 
+    /// Access the metrics cache for the trusty-review stdio MCP poller.
+    ///
+    /// Why: Separate cache per service so review reports can be updated and
+    /// served independently from the other service caches.
+    /// What: Returns a reference to the `MetricsCache` handle for review.
+    /// Test: `test_metrics_review_route_cold_cache_returns_503`.
+    pub fn review_metrics_cache(&self) -> &MetricsCache {
+        &self.review_metrics_cache
+    }
+
     /// Access the shared `reqwest::Client`.
     ///
     /// Why: Re-using one client enables connection pooling across proxy requests.
@@ -232,6 +252,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/console/metrics/analyze", get(metrics_analyze_handler))
         .route("/api/console/metrics/memory", get(metrics_memory_handler))
         .route("/api/console/metrics/search", get(metrics_search_handler))
+        .route("/api/console/metrics/review", get(metrics_review_handler))
         // Analyze on-demand routes — call the analyze stdio MCP directly (no /proxy).
         .route(
             "/api/console/metrics/analyze/indexes",
@@ -380,6 +401,20 @@ async fn metrics_memory_handler(State(state): State<AppState>) -> axum::response
 /// Test: `test_metrics_search_route_cold_cache_returns_503` below.
 async fn metrics_search_handler(State(state): State<AppState>) -> axum::response::Response {
     match state.search_metrics_cache().get().await {
+        Some(report) => axum::Json(report).into_response(),
+        None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+/// `GET /api/console/metrics/review` — return the latest review metrics report.
+///
+/// Why: Surfaces trusty-review health/metrics to the SPA without per-request
+/// MCP calls (the background poller keeps the cache warm).
+/// What: Returns the cached `ConsoleMetricsReport` as JSON (200) or 503 when
+/// no poll has completed yet (binary absent or first boot).
+/// Test: `test_metrics_review_route_cold_cache_returns_503` below.
+async fn metrics_review_handler(State(state): State<AppState>) -> axum::response::Response {
+    match state.review_metrics_cache().get().await {
         Some(report) => axum::Json(report).into_response(),
         None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
@@ -870,6 +905,21 @@ mod tests {
         let router = build_router(make_test_state());
         let req = Request::builder()
             .uri("/api/console/metrics/search")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Why: with an empty review metrics cache the route must return 503 so the
+    /// UI can show a "not yet available" state rather than empty JSON.
+    /// What: issues GET /api/console/metrics/review on a fresh state, asserts 503.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn test_metrics_review_route_cold_cache_returns_503() {
+        let router = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/console/metrics/review")
             .body(Body::empty())
             .expect("request");
         let resp = router.oneshot(req).await.expect("response");

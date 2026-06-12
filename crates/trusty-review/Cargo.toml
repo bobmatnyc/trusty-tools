@@ -141,7 +141,7 @@ http-server = ["dep:axum", "dep:tower", "dep:tower-http", "trusty-common/axum-se
 # What: enables `trusty-common/mcp` (Request, Response, run_stdio_loop, etc.)
 #       and compiles the `src/mcp/` module.
 # Test: `cargo test -p trusty-review --features mcp` covers dispatch/tools tests.
-mcp         = ["trusty-common/mcp", "http-server"]
+mcp         = ["trusty-common/mcp", "trusty-common/console-metrics", "http-server"]
 # Why: gates the contributor-profile pipeline (tga + rusqlite heavy deps) behind
 #      an opt-in feature so users who only need the core review pipeline can build
 #      without tga's git2 vendored + rusqlite compilation overhead.

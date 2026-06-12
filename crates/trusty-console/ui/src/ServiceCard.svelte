@@ -11,7 +11,7 @@
    * @typedef {{ id: string, display_name: string, status: string, version?: string, url?: string, hint?: string }} Service
    * @type {{ service: Service, tabbedServices: Set<string>, onViewDetails?: (id: string) => void }}
    */
-  let { service, tabbedServices, onViewDetails } = $props();
+  let { service, tabbedServices = new Set(), onViewDetails } = $props();
 
   const STATUS_LABELS = {
     running: 'Running',
