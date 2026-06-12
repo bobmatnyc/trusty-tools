@@ -3,6 +3,7 @@
   import ServiceCard from './ServiceCard.svelte';
   import MemoryTab from './MemoryTab.svelte';
   import SearchTab from './SearchTab.svelte';
+  import AnalyzeTab from './AnalyzeTab.svelte';
   import StubTab from './StubTab.svelte';
 
   // ── state ────────────────────────────────────────────────────────────────
@@ -75,7 +76,7 @@
     {:else if activeTab === 'memory'}
       <MemoryTab />
     {:else if activeTab === 'analyze'}
-      <StubTab name="Analyze" endpoint="/api/console/metrics/analyze" />
+      <AnalyzeTab />
     {:else if activeTab === 'review'}
       <StubTab name="Review" endpoint={null} />
     {/if}
