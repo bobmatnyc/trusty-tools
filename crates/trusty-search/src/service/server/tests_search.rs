@@ -171,6 +171,95 @@ fn file_is_within_root_outside_root_still_rejected_after_canonicalize() {
     );
 }
 
+/// PR #1103: `search_handler` must consult `last_queried_write_cache` instead
+/// of reading indexes.toml on the hot path, and must update the cache after
+/// spawning the background write so subsequent queries within the rate-limit
+/// window do NOT spawn another write task.
+///
+/// Why: the previous code called `persistence::read_last_queried_unix` (opens +
+/// parses indexes.toml) synchronously on every warm query. The in-memory cache
+/// eliminates that disk I/O.
+/// What: call `search_handler` twice in rapid succession and assert that
+/// `last_queried_write_cache` is populated after the first call and that the
+/// cached timestamp is the same after the second call (no second write within
+/// the interval).
+/// Test: this test.
+#[tokio::test]
+async fn last_queried_cache_rate_limits_disk_writes() {
+    use crate::core::embed::{Embedder, MockEmbedder};
+    use crate::core::indexer::{CodeIndexer, SearchStage};
+    use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
+    use crate::core::store::{UsearchStore, VectorStore};
+    use tempfile::tempdir;
+
+    let tmp = tempdir().unwrap();
+    let dim = 16;
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(dim));
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(dim).expect("usearch"));
+    let indexer = CodeIndexer::new("cache-rate-test", tmp.path())
+        .with_components(Arc::clone(&embedder), Arc::clone(&store));
+    let registry = IndexRegistry::new();
+    let id = IndexId::new("cache-rate-idx");
+    let handle = IndexHandle::bare(
+        id.clone(),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        tmp.path().to_path_buf(),
+    );
+    registry.register(handle);
+    let state = Arc::new(SearchAppState::new(registry));
+    state.install_embedder(embedder).await;
+
+    // Cache should be empty before any search.
+    assert!(
+        state.last_queried_write_cache.get(&id).is_none(),
+        "cache must be empty before first search"
+    );
+
+    // First call — should populate the cache.
+    let query = crate::core::indexer::SearchQuery {
+        text: "hello cache".to_string(),
+        top_k: 1,
+        expand_graph: false,
+        compact: false,
+        branch_files: None,
+        branch_boost: 1.5,
+        branch: None,
+        stage: Some(SearchStage::Lexical),
+        mode: crate::core::indexer::SearchMode::Code,
+        exclude_archived: false,
+        refine_query: None,
+    };
+    let _ = search_handler(
+        axum::extract::State(Arc::clone(&state)),
+        axum::extract::Path("cache-rate-idx".to_string()),
+        axum::extract::Json(query.clone()),
+    )
+    .await;
+
+    let ts_after_first = *state
+        .last_queried_write_cache
+        .get(&id)
+        .expect("cache must be populated after first search");
+
+    // Second call immediately — cache timestamp must stay the same (rate-limited).
+    let _ = search_handler(
+        axum::extract::State(Arc::clone(&state)),
+        axum::extract::Path("cache-rate-idx".to_string()),
+        axum::extract::Json(query),
+    )
+    .await;
+
+    let ts_after_second = *state
+        .last_queried_write_cache
+        .get(&id)
+        .expect("cache must still be present after second search");
+
+    assert_eq!(
+        ts_after_first, ts_after_second,
+        "cache timestamp must not change on second call within rate-limit window"
+    );
+}
+
 /// Issue #541: `search_handler` must always include `stale_index_root` in
 /// the response `meta` block (as a boolean). When no results are dropped by
 /// the out-of-root filter the field is `false`; we verify its presence and
@@ -241,5 +330,81 @@ async fn search_handler_meta_includes_stale_index_root_field() {
     assert_eq!(
         meta["stale_index_root"], false,
         "stale_index_root must be false when no results were dropped"
+    );
+}
+
+/// PR #1103: `POST /search` (global fan-out) must surface `cold_indexes_skipped`
+/// in the response so callers know the fan-out may be incomplete when selective
+/// warm-boot has not yet loaded all indexes.
+///
+/// Why: `registry.list()` returns only hot indexes. Cold indexes in `cold_store`
+/// are silently skipped; without `cold_indexes_skipped` callers have no way to
+/// distinguish "0 results" from "0 results in hot indexes but there are more".
+/// What: registers one hot index and one cold index, calls global search, asserts
+/// `cold_indexes_skipped == 1` in the response.
+/// Test: this test.
+#[tokio::test]
+async fn test_global_search_surfaces_cold_indexes_skipped() {
+    use crate::core::embed::{Embedder, MockEmbedder};
+    use crate::core::indexer::CodeIndexer;
+    use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
+    use crate::core::store::{UsearchStore, VectorStore};
+    use crate::service::lazy_loader::ColdIndexStore;
+    use crate::service::persistence::PersistedIndex;
+    use axum::extract::{Json, State};
+    use tempfile::tempdir;
+
+    let dim = 16;
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(dim));
+
+    // Hot index.
+    let tmp_hot = tempdir().unwrap();
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(dim).expect("usearch"));
+    let hot_indexer = CodeIndexer::new("hot-global", tmp_hot.path())
+        .with_components(Arc::clone(&embedder), Arc::clone(&store));
+    let registry = IndexRegistry::new();
+    let hot_handle = IndexHandle::bare(
+        IndexId::new("hot-global"),
+        Arc::new(tokio::sync::RwLock::new(hot_indexer)),
+        tmp_hot.path().to_path_buf(),
+    );
+    registry.register(hot_handle);
+
+    // Cold index: registered in cold_store but NOT in the hot registry.
+    let cold_store = Arc::new(ColdIndexStore::new());
+    cold_store.register_cold_entries(vec![PersistedIndex {
+        id: "cold-global".to_string(),
+        root_path: std::path::PathBuf::from("/tmp/cold-global"),
+        ..PersistedIndex::default()
+    }]);
+
+    let mut state = SearchAppState::new(registry);
+    // Swap in the cold store that has the cold entry.
+    state.cold_store = cold_store;
+    let state = Arc::new(state);
+    state.install_embedder(embedder).await;
+
+    let resp = global_search_handler(
+        State(Arc::clone(&state)),
+        Json(super::search_global::GlobalSearchRequest {
+            query: "hello".to_string(),
+            top_k: 5,
+            full_content: false,
+            indexes: None,
+            routing: None,
+            routing_n: None,
+            routing_threshold: None,
+        }),
+    )
+    .await;
+
+    let Json(body) = resp.expect("global search must succeed");
+    let cold_skipped = body
+        .get("cold_indexes_skipped")
+        .and_then(|v| v.as_u64())
+        .expect("cold_indexes_skipped must be present in response");
+    assert_eq!(
+        cold_skipped, 1,
+        "global fan-out must report 1 cold index skipped; body={body:?}"
     );
 }

@@ -1,8 +1,8 @@
 # trusty-tools — Claude Code Instructions
 
 Unified Rust workspace consolidating the entire trusty-* AI tooling ecosystem.
-16 crates — shared libraries, daemon/MCP servers, the MPM platform, and an
-orchestrator — all co-located under one Cargo workspace.
+20 crates — shared libraries, daemon/MCP servers, the MPM platform, the
+control plane, and an orchestrator — all co-located under one Cargo workspace.
 
 ## Project Overview
 
@@ -128,7 +128,7 @@ Always verify the `name` field in the crate's `Cargo.toml` if you get a "package
 trusty-tools/               # workspace root
 ├── Cargo.toml              # workspace manifest — glob members = ["crates/*"]
 ├── Cargo.lock
-├── crates/                 # 16 members (matches `ls crates/`)
+├── crates/                 # 20 members (matches `ls crates/`)
 │   ├── trusty-common/       # shared utilities, tracing, OpenRouter chat; hosts the
 │   │                        # consolidated mcp/rpc/embedder/symgraph/memory-core/
 │   │                        # tickets/monitor-tui modules behind feature flags
@@ -147,7 +147,8 @@ trusty-tools/               # workspace root
 │   ├── trusty-agents/       # agent orchestration platform (publish=false)
 │   ├── trusty-agents-common/ # trusty-agents common API types (publish=false)
 │   ├── trusty-agents-local/ # trusty-agents local execution (publish=false)
-│   └── trusty-code/         # per-project Claude-Code-compatible MPM orchestration harness (bin: tcode); Phase 0 scaffold; extraction tracked in #587
+│   ├── trusty-code/         # per-project Claude-Code-compatible MPM orchestration harness (bin: tcode); Phase 0 scaffold; extraction tracked in #587
+│   └── trusty-controller/   # thin control plane for the claude-mpm stack (bin: tctl); Phase 0 scaffold; RFC tracked in #920
 └── .gitignore
 ```
 
@@ -218,26 +219,54 @@ application/binary code and `thiserror` for library error types. Reserve
 `expect()` only for cases that are genuinely programmer errors (invariants that
 can never occur at runtime).
 
-🔴 **500-line file size hard cap (MECHANICALLY ENFORCED)** — no source file
-(`.rs`) should exceed 500 lines. As of issue #610 this is no longer advice: it
-is gated by `scripts/check_line_cap.sh`, wired into CI
-(`.github/workflows/line-cap.yml`) and the local pre-commit hook (`line-cap`).
-A new tracked `.rs` file over 500 lines **cannot merge**. Files approaching this
-limit are a signal to split into focused submodules before the next feature
-lands on them. When splitting, prefer: one public module per logical concept, a
-thin `mod.rs` that re-exports, and sibling files with clear single
-responsibilities.
+🔴 **SLOC file size hard cap (MECHANICALLY ENFORCED, dual-cap since #1131):**
 
-**The ratchet (allowlist that can only shrink):** the 175 files that already
-exceeded the cap when the gate landed are grandfathered in
-`.line-cap-allowlist.tsv` (one `relative/path<TAB>budget` line each, where
-`budget` is that file's frozen max line count). The gate enforces:
+| File type | SLOC cap |
+|---|---|
+| Production source files | **500 SLOC** |
+| Test / benchmark files | **1500 SLOC** |
 
-- a file ≤ 500 lines and **not** allowlisted → OK;
-- a file > 500 lines and **not** allowlisted → **FAIL** (new oversized file — split it);
-- an allowlisted file whose current count **exceeds its budget** → **FAIL** (it grew — split it);
-- an allowlisted file now **≤ 500 lines** → **FAIL** (it dropped under cap — remove its allowlist entry; this is the ratchet-down forcing function);
-- an allowlisted file with `500 < lines ≤ budget` → OK (grandfathered, not growing).
+A file is classified as a **test/benchmark file** when ANY of these match:
+- basename is exactly `tests.rs`
+- basename ends with `_test.rs` or `_tests.rs`
+- path contains a `/tests/` directory segment (covers `crates/*/tests/*.rs`
+  integration tests AND any `src/**/tests/*.rs` inline test modules)
+- path contains a `/benches/` directory segment
+
+All other tracked `.rs` files are **production files**, capped at 500 SLOC.
+
+As of issue #610 the production cap is no longer advice: it is gated by
+`scripts/check_line_cap.sh`, wired into CI (`.github/workflows/line-cap.yml`)
+and the local pre-commit hook (`line-cap`). A new tracked production `.rs` file
+over 500 SLOC **cannot merge**; a new test/benchmark `.rs` file over 1500 SLOC
+**cannot merge**. Files approaching their limit are a signal to split into
+focused submodules before the next feature lands on them. When splitting, prefer:
+one public module per logical concept, a thin `mod.rs` that re-exports, and
+sibling files with clear single responsibilities.
+
+**SLOC definition:** a line counts only when it contains non-whitespace source
+code after all comment matter is stripped. These are **excluded** from the count:
+- blank / whitespace-only lines
+- `//` line comments (including `///` doc comments and `//!` inner-doc comments)
+- `/* ... */` block comments — including multi-line spans; every line inside an
+  open block comment is excluded
+- lines that consist entirely of a closing `*/`
+
+A line that has code followed by a trailing `// comment` **still counts** — it
+has code. The counter is a pragmatic awk heuristic that errs toward leniency:
+edge cases (e.g. `//` inside a string literal) may undercount SLOC but will
+never falsely fail a legitimate file.
+
+**The ratchet (allowlist that can only shrink):** grandfathered files over their
+applicable cap are listed in `.line-cap-allowlist.tsv` (one
+`relative/path<TAB>budget` line each, where `budget` is that file's frozen max
+SLOC count). The gate enforces per-applicable-cap ratchet semantics:
+
+- SLOC ≤ applicable cap and **not** allowlisted → OK;
+- SLOC > applicable cap and **not** allowlisted → **FAIL** (new oversized file — split it);
+- allowlisted, current SLOC **exceeds its budget** → **FAIL** (it grew — split it);
+- allowlisted, current SLOC **≤ applicable cap** → **FAIL** (drop the entry; ratchet-down forcing function);
+- allowlisted, `applicable_cap < SLOC ≤ budget` → OK (grandfathered, not growing).
 
 So allowlisted files may only shrink, and no new oversized file may be added.
 As the #607 sweep and per-crate refactors land, the allowlist ratchets down
@@ -246,13 +275,13 @@ toward empty.
 **Run it locally:** `bash scripts/check_line_cap.sh` (exit 0 = clean). After you
 intentionally split a file (or a file otherwise drops below its budget), refresh
 the frozen budgets with `scripts/check_line_cap.sh --update` — this only *lowers*
-budgets or *removes* entries that fell ≤ 500; it **refuses** to add a new
-oversized file or raise a budget unless you pass `--seed` (initial bootstrap) or
-`--force-add` (rare, intentional bump). Commit the regenerated
+budgets or *removes* entries that fell ≤ their applicable cap; it **refuses** to
+add a new oversized file or raise a budget unless you pass `--seed` (initial
+bootstrap) or `--force-add` (rare, intentional bump). Commit the regenerated
 `.line-cap-allowlist.tsv` alongside your split.
 
 Past violations (refactor tickets #170/#171/#172 are CLOSED and the splits have
-landed — all three former monoliths are now under the 500-line cap):
+landed — all three former monoliths are now under the 500-SLOC cap):
 - `crates/trusty-agents/src/ctrl/mod.rs` — RESOLVED (#170). Split into focused
   submodules under `crates/trusty-agents/src/ctrl/` (`state`, `config`, `repl`,
   `handlers`, `pm_task`, …); `mod.rs` is now a ~50-line re-export facade.
@@ -262,9 +291,9 @@ landed — all three former monoliths are now under the 500-line cap):
   `engine.rs` was split into an `engine/` module; every submodule is now under
   the cap (largest is `engine/executor/run.rs` at ~485 lines).
 
-The largest remaining files in `trusty-agents` (none tied to an open ticket) are
-`tools/memory/tests.rs` (~605) and `tm/manager.rs` (~570) — file a fresh refactor
-ticket before growing those further.
+The largest remaining production file in `trusty-agents` (not tied to an open
+ticket) is `tm/manager.rs` — file a fresh refactor ticket before growing it
+further. Current per-file SLOC budgets live in `.line-cap-allowlist.tsv`.
 
 🔴 **`thiserror` for libraries, `anyhow` for binaries** — library crates
 (`trusty-common`, `trusty-embedderd`, `trusty-bm25-daemon`, etc.) define structured error enums with
@@ -374,8 +403,10 @@ the daemon logs an error with the actionable FDA re-grant hint.
 
 As of trusty-common 0.10.0, all three HTTP daemons (trusty-memory, trusty-search,
 trusty-analyze) implement graceful shutdown: they drain in-flight requests before
-exiting when they receive SIGTERM. The `mcp_bridge` binary reconnects automatically
-with exponential backoff when the daemon restarts.
+exiting when they receive SIGTERM. The `serve --stdio` proxy reconnects automatically
+with exponential backoff when the daemon restarts (the `trusty-memory-mcp-bridge`
+binary is a deprecated shim that forwards to `serve --stdio`; update your
+`.mcp.json` to `"command": "trusty-memory", "args": ["serve", "--stdio"]`).
 
 **Use `launchctl bootout` (SIGTERM), not `launchctl kickstart -k` (SIGKILL):**
 
@@ -499,6 +530,7 @@ Detailed implementation information for each crate lives in its own documentatio
 - **trusty-agents-common** — see `crates/trusty-agents-common/README.md` (common API types for trusty-agents, publish=false)
 - **trusty-agents-local** — see `crates/trusty-agents-local/README.md` (local execution engine for trusty-agents, publish=false)
 - **trusty-git-analytics** — see `crates/trusty-git-analytics/README.md` and `docs/trusty-git-analytics/`
+- **trusty-controller** — see `crates/trusty-controller/README.md` and `docs/trusty-controller/` (Phase 0 scaffold, bin: `tctl`; publish=false until Phase 1+; RFC #920)
 
 For license details, check each crate's `Cargo.toml`: most are **Elastic License 2.0**, but `trusty-memory`, `trusty-analyze`, and a few others are **MIT**.
 
@@ -656,12 +688,17 @@ installed, the build script fails loudly. Install pnpm or set
 `[patch]` tables inside individual crate `Cargo.toml` files; Cargo ignores
 them. All patches must live in the root `Cargo.toml`.
 
-🔴 **Growing a file past 500 lines instead of splitting** — the compiler does not
-stop you, but continued feature additions to a 1,000+ line file make the module
-harder to review, reason about, and test. Split proactively. The trusty-agents `ctrl/`,
-`runtime/`, and `workflow/engine/` modules (#170, #171, #172) were the canonical
-examples of files that grew past the cap; all three have since been split into
-focused submodules and now serve as the worked examples of a clean split.
+🔴 **Growing a file past its SLOC cap instead of splitting** — the compiler does
+not stop you, but continued feature additions make the module harder to review,
+reason about, and test. Split proactively. The applicable cap is **500 SLOC for
+production files** and **1500 SLOC for test/benchmark files** (see the Key
+Conventions section for the exact classification rules). SLOC counts code lines
+only: blank lines, `//` comments, `///` doc comments, `//!` inner-doc comments,
+and `/* ... */` block comments (including multi-line spans) are all excluded.
+The trusty-agents `ctrl/`, `runtime/`, and `workflow/engine/` modules (#170,
+#171, #172) were the canonical examples of files that grew past the prod cap;
+all three have since been split into focused submodules and now serve as the
+worked examples of a clean split.
 
 🟢 **MSRV drift** — the workspace pins `rust-version = "1.91"`. Running
 `rustup update` and picking up a new nightly may introduce syntax that

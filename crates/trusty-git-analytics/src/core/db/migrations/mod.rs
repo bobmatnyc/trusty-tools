@@ -14,6 +14,7 @@
 
 mod v17;
 mod v20;
+pub(crate) mod v21;
 
 use rusqlite::Connection;
 use tracing::{debug, info};
@@ -132,6 +133,12 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "pr_reviewers_review_state",
         sql: include_str!("../sql/0020_pr_reviewers_review_state.sql"),
     },
+    Migration {
+        version: 21,
+        name: "agentic_mode",
+        // Placeholder — execution is routed to v21::apply (with column guard).
+        sql: "",
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.
@@ -200,6 +207,11 @@ pub fn run(conn: &mut Connection) -> Result<()> {
             // pre-release builds added `effort_tshirt` directly in v16's
             // CREATE TABLE; see `v17::apply` for details.
             v17::apply(&tx)?;
+        } else if m.version == 21 {
+            // Migration 21 requires a pre-flight column check because some
+            // pre-release builds may have added `agentic_mode` to `commits`
+            // directly; see `v21::apply` for details.
+            v21::apply(&tx)?;
         } else {
             tx.execute_batch(m.sql).map_err(|e| {
                 TgaError::MigrationError(format!(
@@ -450,5 +462,16 @@ mod tests {
     #[test]
     fn migration_v20_adds_review_state_columns() {
         crate::core::db::migrations::v20::tests::migration_v20_adds_review_state_columns();
+    }
+
+    // Migration v21 tests live in `v21.rs`.
+    #[test]
+    fn migration_v21_adds_agentic_mode_and_fwe() {
+        crate::core::db::migrations::v21::tests::migration_v21_adds_agentic_mode_and_fwe();
+    }
+
+    #[test]
+    fn migration_v21_is_idempotent_when_agentic_mode_already_exists() {
+        crate::core::db::migrations::v21::tests::migration_v21_is_idempotent_when_agentic_mode_already_exists();
     }
 }

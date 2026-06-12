@@ -21,6 +21,7 @@
 //! reads them back into a fresh store; `missing_db_is_empty` covers the
 //! first-run / post-upgrade fallback; `delete_removes_chunk` covers eviction.
 
+pub mod contrib;
 mod corpus_ops;
 mod kg_ops;
 mod meta_ops;

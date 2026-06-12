@@ -49,7 +49,7 @@ which              = { workspace = true }
 open               = { workspace = true }
 rust-embed         = { workspace = true }
 mime_guess         = { workspace = true }
-trusty-common      = { workspace = true }
+trusty-common      = { workspace = true, features = ["stdio-mcp-client", "console-metrics"] }
 reqwest            = { workspace = true }
 
 [dev-dependencies]

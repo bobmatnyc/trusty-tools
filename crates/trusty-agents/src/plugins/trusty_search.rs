@@ -46,7 +46,7 @@ impl TrustySearchPlugin {
         if !binary_on_path("trusty-search") {
             return None;
         }
-        let mut client = StdioMcpClient::spawn("trusty-search", &["serve"])
+        let mut client = StdioMcpClient::spawn("trusty-search", &["serve"], "trusty-agents")
             .await
             .ok()?;
         client.initialize().await.ok()?;

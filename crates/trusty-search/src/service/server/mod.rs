@@ -12,14 +12,17 @@
 //! registry and exercises each endpoint.
 
 mod admin;
+mod contrib_graph;
 mod files;
 mod health;
 mod helpers;
 mod indexes;
+mod indexes_relocate;
 mod reindex_handlers;
 mod router;
 mod routing;
 mod search;
+mod search_global;
 mod state;
 mod state_impl;
 mod status;
@@ -27,7 +30,11 @@ mod tickers;
 
 // cfg(test) sub-modules — each < 500 lines
 #[cfg(test)]
+mod tests_1073;
+#[cfg(test)]
 mod tests_829;
+#[cfg(test)]
+mod tests_contrib_graph;
 #[cfg(test)]
 mod tests_denylist;
 #[cfg(test)]
@@ -52,7 +59,7 @@ pub use files::ChunksParams;
 pub use reindex_handlers::ReindexRequest;
 pub use router::{CreateIndexRequest, IndexFileRequest, RemoveFileRequest};
 pub use routing::SearchSimilarRequest;
-pub use search::GlobalSearchRequest;
+pub use search_global::GlobalSearchRequest;
 pub use state::{DaemonEvent, SearchAppState, WarmBootSummary};
 
 use axum::{
@@ -66,9 +73,10 @@ use admin::{
     admin_stop_handler, get_config_handler, logs_tail_handler, patch_config_handler,
     status_stream_handler,
 };
+use contrib_graph::{graph_neighbors_handler, ingest_graph_handler};
 use files::{get_index_chunks_handler, index_file_handler, remove_file_handler};
 use health::health_handler;
-use indexes::{create_index_handler, list_indexes_handler};
+use indexes::{create_index_handler, list_indexes_handler, relocate_index_handler};
 use reindex_handlers::{reindex_handler, reindex_stream_handler};
 use routing::search_similar_handler;
 use search::{delete_index_handler, global_search_handler, search_handler};
@@ -135,6 +143,17 @@ pub fn build_router(state: SearchAppState) -> Router {
         .route("/indexes/{id}/index-file", post(index_file_handler))
         .route("/indexes/{id}/remove-file", post(remove_file_handler))
         .route("/indexes/{id}/reindex", post(reindex_handler))
+        // Contributed-graph ingest (ADR-0009): bulk lane (store + graph
+        // rebuild can run for seconds). Body limit 64 MiB — observed maxima
+        // from large pilot corpora are ~20 MB, so this is ~3x headroom while
+        // bounding the per-request RAM/DoS surface (PR #1129 review,
+        // finding 2); revisit with a streaming ingest path if producers
+        // outgrow it.
+        .route(
+            "/indexes/{id}/graph",
+            post(ingest_graph_handler)
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
         .route_layer(axum::middleware::from_fn(
             crate::service::concurrency::apply_limiter,
         ))
@@ -151,7 +170,10 @@ pub fn build_router(state: SearchAppState) -> Router {
             "/indexes",
             get(list_indexes_handler).post(create_index_handler),
         )
-        .route("/indexes/{id}", delete(delete_index_handler))
+        .route(
+            "/indexes/{id}",
+            delete(delete_index_handler).patch(relocate_index_handler),
+        )
         .route("/ui", get(|| async { Redirect::permanent("/ui/") }))
         .route("/ui/", get(ui_index_handler))
         .route("/ui/{*path}", get(ui_asset_handler))
@@ -160,6 +182,10 @@ pub fn build_router(state: SearchAppState) -> Router {
         .route("/indexes/{id}/status", get(index_status_handler))
         .route("/indexes/{id}/graph", get(graph_handler))
         .route("/indexes/{id}/graph/stats", get(graph_stats_handler))
+        .route(
+            "/indexes/{id}/graph/neighbors",
+            get(graph_neighbors_handler),
+        )
         .route("/indexes/{id}/reindex/stream", get(reindex_stream_handler))
         .route("/indexes/{id}/chunks", get(get_index_chunks_handler))
         .route("/indexes/{id}/call_chain", get(call_chain_handler))

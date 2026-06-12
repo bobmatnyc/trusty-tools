@@ -379,9 +379,12 @@ pub(super) async fn graph_stats_handler(
         edge_kinds.insert(tag, serde_json::Value::from(count));
     }
 
+    // Issue #816: surface dropped-edge count so operators can detect
+    // daemon/corpus version skew without log scraping.
     Ok(Json(serde_json::json!({
         "node_count": graph.node_count(),
         "edge_count": graph.edge_count(),
         "edge_kinds": serde_json::Value::Object(edge_kinds),
+        "unknown_edge_tags_dropped": graph.unknown_edge_tags_dropped(),
     })))
 }

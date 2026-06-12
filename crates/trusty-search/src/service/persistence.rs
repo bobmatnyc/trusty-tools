@@ -1,25 +1,12 @@
-//! Persistence helpers: registry TOML + per-index data directories.
+//! Persistence helpers: registry TOML + per-index data directories (issue #85).
 //!
-//! Why: The daemon currently keeps every HNSW vector, chunk corpus, and index
-//! registration in process memory only. Every restart forces a full re-index,
-//! which on a 100k-chunk repo costs 2-3 minutes and 86 MB of model load on
-//! top. Persisting these three things across restarts (issue #85) makes the
-//! daemon "warm-boot ready" — registered indexes come back automatically with
-//! their HNSW graph and chunk metadata intact.
-//!
-//! What: this module centralises filesystem layout and (de)serialization for
-//! the persistence layer. Three responsibilities:
-//!
-//! 1. [`indexes_toml_path`] / [`load_index_registry`] / [`save_index_registry`]
-//!    — the registry of `IndexId → root_path` lives at `<data_dir>/indexes.toml`.
-//! 2. [`index_data_dir`] — per-index directory `<data_dir>/indexes/<id>/`
-//!    holds `hnsw.usearch` (vector graph) and `chunks.json` (corpus snapshot).
-//! 3. [`remove_index_data_dir`] — used by `DELETE /indexes/:id` to evict the
-//!    on-disk footprint when an index is unregistered.
-//!
-//! Test: round-trip a `PersistedIndex` through `save_index_registry` /
-//! `load_index_registry` in a tempdir; assert the entry survives. Verified
-//! by `tests::registry_roundtrip` below.
+//! Why: centralises filesystem layout and (de)serialization so startup, DELETE,
+//! and warm-boot all agree on paths. Covers: registry TOML (`indexes_toml_path`
+//! / `load_index_registry` / `save_index_registry`), per-index data dirs
+//! (`index_data_dir`), and on-disk deletion (`remove_index_data_dir`). LRU
+//! timestamp helpers (issue #993) are in `persistence_timestamps.rs` and
+//! re-exported here.
+//! Test: `tests::registry_roundtrip` and `persistence_timestamps::tests`.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -150,6 +137,25 @@ pub struct PersistedIndex {
     /// Test: `colocated_flag_round_trips` in this module.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub colocated: bool,
+
+    /// Unix timestamp of the most recent query against this index (issue #993).
+    ///
+    /// Why: `TRUSTY_WARMBOOT_MAX_INDEXES` ranks indexes by recency to decide which
+    /// to warm-boot eagerly. Sort key = `max(last_queried_unix, last_indexed_unix)`.
+    /// `None` means never queried (first-run / pre-upgrade).
+    /// What: updated fire-and-forget in `search_handler` (rate-limited ≤ 60 s).
+    /// Test: `persistence_timestamps::tests::last_queried_and_indexed_round_trips`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_queried_unix: Option<u64>,
+
+    /// Unix timestamp of the most recent completed reindex of this index (issue #993).
+    ///
+    /// Why: companion to `last_queried_unix` for the lazy warm-boot LRU key so
+    /// recently-reindexed-but-rarely-queried indexes (CI agents) stay in the eager set.
+    /// What: written at reindex SSE `complete`. `None` until first reindex.
+    /// Test: `persistence_timestamps::tests::last_queried_and_indexed_round_trips`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_indexed_unix: Option<u64>,
 }
 
 /// Why: serde's `default` attribute needs a free function (closures aren't
@@ -188,12 +194,6 @@ fn is_default_respect_gitignore(v: &bool) -> bool {
 }
 
 impl Default for PersistedIndex {
-    /// `respect_gitignore` defaults to `true` (issue #100) and
-    /// `include_docs` defaults to `true` (issue #118) so the manual
-    /// `Default` impl matches serde's missing-field behaviour. Without
-    /// this, `PersistedIndex::default()` would silently re-enable the
-    /// docs-exclusion footgun (#118) or disable the gitignore-honouring
-    /// fix (#100) on test / fallback paths.
     fn default() -> Self {
         Self {
             id: String::new(),
@@ -209,9 +209,16 @@ impl Default for PersistedIndex {
             skip_kg: false,
             defer_embed: true,
             colocated: false,
+            last_queried_unix: None,
+            last_indexed_unix: None,
         }
     }
 }
+
+// Issue #993: LRU timestamp helpers live in `persistence_timestamps`; re-exported here.
+pub use super::persistence_timestamps::{
+    read_last_queried_unix, update_last_indexed_unix, update_last_queried_unix, warmboot_sort_key,
+};
 
 /// TOML wrapper so the file uses `[[index]]` array-of-tables syntax —
 /// matches the public format documented in CLAUDE.md.
@@ -539,15 +546,6 @@ pub fn has_persisted_hnsw(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Test helper: redirect `data_local_dir` to a tempdir so tests don't
-    /// touch the user's real `~/Library/Application Support/trusty-search`.
-    /// We override via the `XDG_DATA_HOME` / `HOME` env vars that the `dirs`
-    /// crate consults — but since `dirs::data_local_dir` is platform-specific,
-    /// we instead test the helpers that take an explicit base path.
-    ///
-    /// For full-flow tests we use a unique-id namespace so concurrent runs
-    /// don't collide on the real data dir.
 
     #[test]
     fn sanitize_strips_unsafe_chars() {
@@ -997,7 +995,7 @@ root_path = "/tmp/legacy_col"
     /// `TRUSTY_DATA_DIR` is set (absolute, cwd-independent).
     /// Why: isolated daemons and launchd restarts must land in the override dir.
     /// What: set env var, call `data_dir()`, assert path matches and dir exists.
-    /// Test: `data_dir_respects_trusty_data_dir_env_var`.
+    /// Test: this test. Timestamp round-trip tests live in `persistence_timestamps`.
     #[test]
     #[serial_test::serial]
     fn data_dir_respects_trusty_data_dir_env_var() {

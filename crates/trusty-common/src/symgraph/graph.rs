@@ -34,13 +34,25 @@ pub struct SymbolNode {
     pub start_line: usize,
 }
 
-/// Relationship between two symbols (by name).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EdgeKind {
-    Calls,
-    Imports,
-    Contains,
-}
+/// Canonical edge-kind type re-exported from `contracts` for use as the
+/// petgraph edge weight in `SymbolGraph` (issue #815, ADR-0010 Option C).
+///
+/// Why: `SymbolGraph` (petgraph `StableGraph<SymbolNode, EdgeKind>`) needs an
+/// edge weight for BFS/SCC/toposort queries. The three coarse variants it
+/// historically used (`Calls`, `Imports`, `Contains`) are now part of the
+/// single canonical `contracts::EdgeKind` vocabulary, so there is no longer
+/// a separate 3-variant enum here — this is a type alias.
+///
+/// The `SymbolGraph` call sites that previously used the three coarse variants
+/// now use the canonical names directly:
+///   - `graph::EdgeKind::Calls`    → `contracts::EdgeKind::Calls`
+///   - `graph::EdgeKind::Imports`  → `contracts::EdgeKind::Imports`
+///   - `graph::EdgeKind::Contains` → `contracts::EdgeKind::Contains`
+///
+/// What: re-export of `crate::symgraph::contracts::EdgeKind` to preserve the
+/// `use crate::symgraph::graph::EdgeKind` import paths at all existing call sites.
+/// Test: `kg_calls_edge_between_two_functions` (this module's tests section).
+pub use crate::symgraph::contracts::EdgeKind;
 
 /// Directed edge in the symbol graph.
 ///
@@ -129,7 +141,7 @@ impl SymbolGraph {
                 SymbolEdge {
                     from,
                     to,
-                    kind: *er.weight(),
+                    kind: er.weight().clone(),
                 }
             })
             .collect()

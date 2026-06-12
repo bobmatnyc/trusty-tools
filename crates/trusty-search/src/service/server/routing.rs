@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use crate::core::registry::IndexId;
 
-use super::search::GlobalSearchRequest;
+use super::search_global::GlobalSearchRequest;
 use super::state::SearchAppState;
 
 #[derive(Debug, Clone, Copy)]

@@ -1,263 +1,408 @@
-//! Graph construction, persistence, and edge-kind serialisation helpers.
+//! Build passes for `SymbolGraph` (register nodes, wire edges).
 //!
-//! Why: separating the public build/persist API from the private pass helpers
-//! and the query methods keeps each file under the 500-line cap and makes the
-//! entry points easy to find.
-//! What: contains `build_from_chunks`, `build_from_chunks_with_entities`,
-//! `save_to_corpus`, `load_from_corpus`, `edge_kind_breakdown`, and the
-//! `edge_kind_tag` / `edge_kind_from_tag` free functions used by persistence.
-//! Test: covered by `test_build_simple_graph`, `test_save_load_round_trip_*`,
-//! `test_edge_kind_breakdown_counts_by_variant`, and the Phase B/C tests.
+//! Why: extracted from the monolithic `symbol_graph.rs` to stay under the
+//! 500-line cap. Contains all mutation-during-build logic; read-only
+//! traversal lives in `traverse.rs`.
+//! What: five build passes — symbol node registration, call/inherit edges,
+//! module-contains edges, test-relation edges, and doc-concept edges.
+//! Test: `test_build_simple_graph`, `test_calls_function_edges_present_in_graph`,
+//! `test_inherits_from_emits_implements_edges`, `test_module_contains_edges_*`,
+//! `test_phase_bc_edges_wired_from_entities`, `test_update_file_drops_old_edges`,
+//! `test_remove_file_drops_file_symbols`.
 
 use std::collections::HashMap;
 
-use petgraph::visit::EdgeRef;
+use petgraph::graph::NodeIndex;
 
-use crate::core::corpus::{CorpusStore, PersistedKgNode};
-use crate::core::entity::{EdgeKind, RawEntity};
+use crate::core::chunker::ChunkType;
+use crate::core::entity::{EdgeKind, EntityType, RawEntity};
 
-use super::internals;
-use super::types::{ChunkTuple, SymbolGraph, SymbolNode};
+use super::{graph::SymbolGraph, graph::SymbolNode, ChunkTuple};
 
 impl SymbolGraph {
     /// Build a graph from the chunk corpus.
-    ///
-    /// Each tuple is
-    /// `(chunk_id, file, function_name, calls, inherits_from, chunk_type)`:
-    /// - `function_name`: `None` for non-callable chunks (structs, modules, …);
-    ///   such chunks contribute no node.
-    /// - `calls`: simple-name callees (the chunker reduces `obj.method` and
-    ///   `foo::bar` to the trailing identifier). We add a `CallsFunction` edge
-    ///   per call only if the callee symbol is also defined in the corpus, so
-    ///   the graph stays closed over local code (no edges pointing into the
-    ///   void).
-    /// - `inherits_from`: parent type names. For each parent that's defined in
-    ///   the corpus, emit an `Implements` edge from the child symbol → parent.
-    /// - `chunk_type`: container chunks (`Impl`, `Class`, `Struct`, `Module`)
-    ///   emit `ModuleContains` edges to every other defining symbol that lives
-    ///   in the same file. Coarse but cheap; nesting-depth refinement can come
-    ///   later.
     pub fn build_from_chunks(chunks: &[ChunkTuple]) -> Self {
         Self::build_from_chunks_with_entities(chunks, &[])
     }
 
     /// Build a graph from the chunk corpus, additionally wiring Phase B/C
-    /// entity-derived edges from the supplied per-file entity lists
-    /// (issue #41 phase 2).
+    /// entity-derived edges from the supplied per-file entity lists (issue #41).
     ///
-    /// Why: `build_from_chunks` only emits the structural Phase A edges
-    /// (`CallsFunction`, `Implements`, `ModuleContains`). Phase B/C edges
+    /// Why: `build_from_chunks` only emits Phase A edges. Phase B/C edges
     /// (`TestedBy`, `CoOccursInTest`, `Documents`, `ReferencesConcept`) need
-    /// the per-file `RawEntity` lists — they live alongside chunks in the
-    /// `CorpusStore` but aren't part of the structural `ChunkTuple`. This
-    /// entry point keeps the old signature intact while letting warm-boot and
-    /// per-file ingest populate the richer edge set.
-    /// What: same three structural passes as `build_from_chunks`, followed by
-    /// a fourth pass that walks `entities_by_file` to emit:
-    ///   * `EdgeKind::TestedBy`: for every callee of a `ChunkType::Test`
-    ///     chunk, draw `callee → test_symbol`.
-    ///   * `EdgeKind::CoOccursInTest`: for two distinct test chunks that both
-    ///     call the same function, draw the symmetric pair of edges.
-    ///   * `EdgeKind::Documents` / `EdgeKind::ReferencesConcept`: for every
-    ///     `DocConcept` / `NaturalLanguagePhrase` entity whose `text`
-    ///     resolves to a defined symbol, draw an edge from each symbol in the
-    ///     entity's source file to that target.
-    ///
-    /// Test: covered by `test_phase_bc_edges_wired_from_entities`.
+    /// the per-file `RawEntity` lists.
+    /// What: four sequential passes — register nodes, call/inherit edges,
+    /// module-contains edges, test/doc-concept edges.
+    /// Test: `test_phase_bc_edges_wired_from_entities`.
     pub fn build_from_chunks_with_entities(
         chunks: &[ChunkTuple],
         entities_by_file: &[(String, Vec<RawEntity>)],
     ) -> Self {
         let mut g = Self::new();
-
-        // Pass 1: register all defining symbols.
-        internals::register_symbol_nodes(&mut g, chunks);
-
-        // Build a `simple_name → first-NodeIndex` lookup for qualified-symbol
-        // resolution. Replaces the per-edge `O(symbols)` linear suffix scan
-        // that used to live inside `resolve_callee`. On a 115k-chunk corpus
-        // with thousands of qualified methods this collapses what was an
-        // O(N²) build pass into O(N).
-        let by_suffix = internals::build_suffix_lookup(&g);
-
-        // Pass 2: add CallsFunction + Implements edges.
-        internals::add_call_and_inherit_edges(&mut g, chunks, &by_suffix);
-
-        // Pass 3: ModuleContains edges from container chunks.
-        internals::add_module_contains_edges(&mut g, chunks);
-
-        // Pass 4 (issue #41 phase 2): Phase B test-relation edges +
-        // Phase C documentation/concept edges from the entity lists.
-        internals::add_test_relation_edges(&mut g, chunks, &by_suffix);
-        internals::add_doc_concept_edges(&mut g, chunks, entities_by_file, &by_suffix);
-
+        g.register_symbol_nodes(chunks);
+        let by_suffix = g.build_suffix_lookup();
+        g.add_call_and_inherit_edges(chunks, &by_suffix);
+        g.add_module_contains_edges(chunks);
+        g.add_test_relation_edges(chunks, &by_suffix);
+        g.add_doc_concept_edges(chunks, entities_by_file, &by_suffix);
         g
     }
 
-    /// Persist the current graph into the supplied [`CorpusStore`]
-    /// (issue #41 phase 2).
+    /// Replace one file's portion of the graph with a freshly-rebuilt subset.
     ///
-    /// Why: cold-start graph rebuild from chunks is O(N) and loses Phase B/C
-    /// edges that were derived from per-file entity lists at ingest time.
-    /// Persisting the graph alongside the chunk corpus lets warm-boot rehydrate
-    /// it in O(nodes + edges) with the full multi-phase edge set intact.
-    /// What: walks every node and every edge, builds the
-    /// `(nodes, adj_fwd, adj_rev)` payload, and hands it to
-    /// `CorpusStore::save_kg_graph` (one atomic redb txn).
-    /// Test: `test_save_load_round_trip_preserves_graph`.
-    pub fn save_to_corpus(&self, corpus: &CorpusStore) -> anyhow::Result<()> {
-        let mut nodes: Vec<(String, PersistedKgNode)> = Vec::with_capacity(self.graph.node_count());
-        for node in self.graph.node_weights() {
-            nodes.push((
-                node.symbol.clone(),
-                PersistedKgNode {
-                    chunk_id: node.chunk_id.clone(),
-                    file: node.file.clone(),
-                },
-            ));
+    /// Why: a per-file index update shouldn't trigger a full `build_from_chunks`
+    /// over the entire corpus. Rebuilds from the merged corpus snapshot.
+    /// What: filters existing chunks to exclude the old file, appends new ones,
+    /// and calls `build_from_chunks_with_entities` on the result.
+    /// Test: `test_update_file_drops_old_edges_and_wires_new`.
+    pub fn update_file(
+        &mut self,
+        existing: &[ChunkTuple],
+        existing_entities: &[(String, Vec<RawEntity>)],
+        file_path: &str,
+        new_chunks: &[ChunkTuple],
+        new_entities: &[RawEntity],
+    ) {
+        let mut merged: Vec<ChunkTuple> = existing
+            .iter()
+            .filter(|t| t.1 != file_path)
+            .cloned()
+            .collect();
+        merged.extend(new_chunks.iter().cloned());
+
+        let mut merged_ents: Vec<(String, Vec<RawEntity>)> = existing_entities
+            .iter()
+            .filter(|(f, _)| f != file_path)
+            .cloned()
+            .collect();
+        if !new_entities.is_empty() {
+            merged_ents.push((file_path.to_string(), new_entities.to_vec()));
         }
 
-        let mut fwd: HashMap<String, Vec<(String, String)>> = HashMap::new();
-        let mut rev: HashMap<String, Vec<(String, String)>> = HashMap::new();
-        for edge in self.graph.edge_references() {
-            let src = match self.graph.node_weight(edge.source()) {
-                Some(n) => n.symbol.clone(),
-                None => continue,
-            };
-            let tgt = match self.graph.node_weight(edge.target()) {
-                Some(n) => n.symbol.clone(),
-                None => continue,
-            };
-            let kind = edge_kind_tag(edge.weight()).to_string();
-            fwd.entry(src.clone())
-                .or_default()
-                .push((kind.clone(), tgt.clone()));
-            rev.entry(tgt).or_default().push((kind, src));
-        }
-        let adj_fwd: Vec<(String, Vec<(String, String)>)> = fwd.into_iter().collect();
-        let adj_rev: Vec<(String, Vec<(String, String)>)> = rev.into_iter().collect();
-        corpus.save_kg_graph(&nodes, &adj_fwd, &adj_rev)
+        *self = Self::build_from_chunks_with_entities(&merged, &merged_ents);
     }
 
-    /// Load the persisted graph from the supplied [`CorpusStore`]
-    /// (issue #41 phase 2).
+    /// Remove every node / edge attributed to `file_path`.
     ///
-    /// Why: warm-boot wants to skip the full `build_from_chunks` rebuild when
-    /// a previously-saved graph is available. Restoring the persisted graph
-    /// directly preserves Phase B/C edges that were computed at ingest time.
-    /// What: reads the three KG tables, reconstructs the `petgraph::DiGraph`,
-    /// and returns `Ok(Some(graph))`. Returns `Ok(None)` when the persisted
-    /// node table is empty (fresh database / not yet saved). Forward edges are
-    /// canonical; the reverse table is consulted to recover edges whose
-    /// source node was filtered out of the forward index (should not normally
-    /// happen but guards against an inconsistent persisted state).
-    /// Test: `test_save_load_round_trip_preserves_graph`.
-    pub fn load_from_corpus(corpus: &CorpusStore) -> anyhow::Result<Option<Self>> {
-        let (nodes, adj_fwd, _adj_rev) = corpus.load_kg_graph()?;
-        if nodes.is_empty() {
-            return Ok(None);
+    /// Why: a file deletion must purge that file's symbols from the graph
+    /// so subsequent KG expansions don't surface stale chunks.
+    /// What: filters existing chunks/entities to exclude the deleted file,
+    /// then rebuilds via `build_from_chunks_with_entities`.
+    /// Test: `test_remove_file_drops_file_symbols`.
+    pub fn remove_file(
+        &mut self,
+        existing: &[ChunkTuple],
+        existing_entities: &[(String, Vec<RawEntity>)],
+        file_path: &str,
+    ) {
+        let kept: Vec<ChunkTuple> = existing
+            .iter()
+            .filter(|t| t.1 != file_path)
+            .cloned()
+            .collect();
+        let kept_ents: Vec<(String, Vec<RawEntity>)> = existing_entities
+            .iter()
+            .filter(|(f, _)| f != file_path)
+            .cloned()
+            .collect();
+        *self = Self::build_from_chunks_with_entities(&kept, &kept_ents);
+    }
+
+    // ── Pass 1: register symbol nodes ─────────────────────────────────────
+
+    /// Register one `SymbolNode` per unique `function_name` in the corpus.
+    ///
+    /// Why: every later pass keys on `by_symbol`, so symbols must exist before
+    /// any edges are drawn. Hard cap via `max_kg_nodes()` prevents runaway RSS.
+    /// What: first-write-wins for the symbol → node mapping.
+    /// Test: `test_build_simple_graph`, `test_chunk_with_no_function_name_is_skipped`.
+    pub(crate) fn register_symbol_nodes(&mut self, chunks: &[ChunkTuple]) {
+        let cap = Self::max_kg_nodes();
+        let mut cap_warned = false;
+        for (chunk_id, file, name, _calls, _inh, _ct) in chunks {
+            self.register_one_symbol(chunk_id, file, name.as_deref(), cap, &mut cap_warned);
         }
-        let mut g = Self::new();
-        for (symbol, persisted) in nodes {
-            let idx = g.graph.add_node(SymbolNode {
-                symbol: symbol.clone(),
-                chunk_id: persisted.chunk_id.clone(),
-                file: persisted.file.clone(),
-            });
-            g.by_symbol.insert(symbol, idx);
-            g.chunk_to_symbol
-                .insert(persisted.chunk_id, g.graph[idx].symbol.clone());
+    }
+
+    fn register_one_symbol(
+        &mut self,
+        chunk_id: &str,
+        file: &str,
+        name: Option<&str>,
+        cap: usize,
+        cap_warned: &mut bool,
+    ) {
+        let Some(name) = name else { return };
+        if name.is_empty() {
+            return;
         }
-        for (src, targets) in adj_fwd {
-            let Some(&src_idx) = g.by_symbol.get(&src) else {
-                continue;
-            };
-            for (kind_tag, tgt) in targets {
-                let Some(&tgt_idx) = g.by_symbol.get(&tgt) else {
-                    continue;
-                };
-                let Some(kind) = edge_kind_from_tag(&kind_tag) else {
-                    tracing::warn!("kg: skipping persisted edge with unknown kind '{kind_tag}'");
-                    continue;
-                };
-                g.graph.add_edge(src_idx, tgt_idx, kind);
+        if self.by_symbol.contains_key(name) {
+            self.chunk_to_symbol
+                .insert(chunk_id.to_string(), name.to_string());
+            return;
+        }
+        if Self::cap_exceeded(cap, self.by_symbol.len()) {
+            Self::warn_cap_once(cap, cap_warned);
+            return;
+        }
+        let idx = self.graph.add_node(SymbolNode {
+            symbol: name.to_string(),
+            chunk_id: chunk_id.to_string(),
+            file: file.to_string(),
+            kind: None,
+        });
+        self.by_symbol.insert(name.to_string(), idx);
+        self.chunk_to_symbol
+            .insert(chunk_id.to_string(), name.to_string());
+    }
+
+    fn cap_exceeded(cap: usize, current: usize) -> bool {
+        cap > 0 && current >= cap
+    }
+
+    fn warn_cap_once(cap: usize, cap_warned: &mut bool) {
+        if !*cap_warned {
+            tracing::warn!(
+                "symbol graph node cap ({}) reached — skipping further new symbols \
+                 (override via TRUSTY_MAX_KG_NODES; 0 = unlimited)",
+                cap
+            );
+            *cap_warned = true;
+        }
+    }
+
+    // ── Suffix lookup ──────────────────────────────────────────────────────
+
+    /// Build a `simple_name → NodeIndex` map for fast qualified-callee resolution.
+    ///
+    /// Why: callers often write `bar()` even when only `Foo::bar` is defined;
+    /// looking up by trailing identifier avoids an O(N) per-edge scan.
+    /// What: for every symbol `A::B::name`, registers `name → idx` (first-write-wins).
+    /// Test: `test_simple_callee_resolves_to_qualified_definition`.
+    pub(crate) fn build_suffix_lookup(&self) -> HashMap<String, NodeIndex> {
+        let mut by_suffix: HashMap<String, NodeIndex> = HashMap::new();
+        for (sym, &idx) in self.by_symbol.iter() {
+            if let Some(suffix) = sym.rsplit("::").next() {
+                by_suffix.entry(suffix.to_string()).or_insert(idx);
             }
         }
-        Ok(Some(g))
+        by_suffix
     }
 
-    /// Edge-kind counts per `EdgeKind` variant present in the graph
-    /// (issue #41 phase 2).
-    ///
-    /// Why: the `GET /indexes/{id}/graph/stats` endpoint surfaces these
-    /// counts so operators (and agents) can verify graph health without
-    /// scraping Prometheus.
-    /// What: returns a `Vec<(edge_kind_tag, count)>` sorted by tag for stable
-    /// JSON output.
-    /// Test: `test_edge_kind_breakdown_counts_by_variant`.
-    pub fn edge_kind_breakdown(&self) -> Vec<(String, usize)> {
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        for edge in self.graph.edge_references() {
-            *counts
-                .entry(edge_kind_tag(edge.weight()).to_string())
-                .or_insert(0) += 1;
+    // ── Pass 2: call and inherit edges ─────────────────────────────────────
+
+    pub(crate) fn add_call_and_inherit_edges(
+        &mut self,
+        chunks: &[ChunkTuple],
+        by_suffix: &HashMap<String, NodeIndex>,
+    ) {
+        for (_chunk_id, _file, name, calls, inherits_from, _ct) in chunks {
+            let Some(name) = name else { continue };
+            let Some(&from) = self.by_symbol.get(name) else {
+                continue;
+            };
+            self.add_edges_for_targets(from, calls, by_suffix, EdgeKind::CallsFunction);
+            self.add_edges_for_targets(from, inherits_from, by_suffix, EdgeKind::Implements);
         }
-        let mut out: Vec<(String, usize)> = counts.into_iter().collect();
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        out
     }
-}
 
-/// Stable string tag for an `EdgeKind`, used as the persisted edge label and
-/// the JSON key in `/graph/stats` (issue #41 phase 2).
-///
-/// Why: persisting an enum directly couples the on-disk format to a particular
-/// `serde` representation. Funnelling every persistence + API hop through this
-/// helper keeps the tag stable across rust-version / serde-format changes and
-/// makes the round-trip easy to reason about.
-/// What: returns the matching variant name (`Debug`-style spelling).
-/// Test: covered transitively by `test_save_load_round_trip_preserves_graph`.
-pub(super) fn edge_kind_tag(kind: &EdgeKind) -> &'static str {
-    match kind {
-        EdgeKind::CallsFunction => "CallsFunction",
-        EdgeKind::CalledByFunction => "CalledByFunction",
-        EdgeKind::Implements => "Implements",
-        EdgeKind::UsesType => "UsesType",
-        EdgeKind::Derives => "Derives",
-        EdgeKind::ModuleContains => "ModuleContains",
-        EdgeKind::ReExports => "ReExports",
-        EdgeKind::RaisesError => "RaisesError",
-        EdgeKind::Configures => "Configures",
-        EdgeKind::TestedBy => "TestedBy",
-        EdgeKind::TestUsesFixture => "TestUsesFixture",
-        EdgeKind::CoOccursInTest => "CoOccursInTest",
-        EdgeKind::Documents => "Documents",
-        EdgeKind::ReferencesConcept => "ReferencesConcept",
-        EdgeKind::Aliases => "Aliases",
-        EdgeKind::ErrorDescribes => "ErrorDescribes",
+    fn add_edges_for_targets(
+        &mut self,
+        from: NodeIndex,
+        targets: &[String],
+        by_suffix: &HashMap<String, NodeIndex>,
+        kind: EdgeKind,
+    ) {
+        for target in targets {
+            let Some(to) = self.resolve_callee_fast(target, by_suffix) else {
+                continue;
+            };
+            if from == to {
+                continue;
+            }
+            self.graph.add_edge(from, to, kind.clone());
+        }
     }
-}
 
-/// Inverse of [`edge_kind_tag`]: parse a persisted edge tag back into the
-/// `EdgeKind` variant (issue #41 phase 2).
-pub(super) fn edge_kind_from_tag(tag: &str) -> Option<EdgeKind> {
-    Some(match tag {
-        "CallsFunction" => EdgeKind::CallsFunction,
-        "CalledByFunction" => EdgeKind::CalledByFunction,
-        "Implements" => EdgeKind::Implements,
-        "UsesType" => EdgeKind::UsesType,
-        "Derives" => EdgeKind::Derives,
-        "ModuleContains" => EdgeKind::ModuleContains,
-        "ReExports" => EdgeKind::ReExports,
-        "RaisesError" => EdgeKind::RaisesError,
-        "Configures" => EdgeKind::Configures,
-        "TestedBy" => EdgeKind::TestedBy,
-        "TestUsesFixture" => EdgeKind::TestUsesFixture,
-        "CoOccursInTest" => EdgeKind::CoOccursInTest,
-        "Documents" => EdgeKind::Documents,
-        "ReferencesConcept" => EdgeKind::ReferencesConcept,
-        "Aliases" => EdgeKind::Aliases,
-        "ErrorDescribes" => EdgeKind::ErrorDescribes,
-        _ => return None,
-    })
+    // ── Pass 3: module-contains edges ─────────────────────────────────────
+
+    pub(crate) fn add_module_contains_edges(&mut self, chunks: &[ChunkTuple]) {
+        if !Self::has_any_container(chunks) {
+            return;
+        }
+        let by_file = self.group_symbols_by_file(chunks);
+        for (_chunk_id, file, name, _calls, _inh, ct) in chunks {
+            self.emit_container_edges_for(file, name.as_deref(), ct, &by_file);
+        }
+    }
+
+    fn emit_container_edges_for(
+        &mut self,
+        file: &str,
+        name: Option<&str>,
+        ct: &ChunkType,
+        by_file: &HashMap<&str, Vec<(&str, NodeIndex)>>,
+    ) {
+        if !Self::is_container(ct) {
+            return;
+        }
+        let Some(name) = name else { return };
+        let Some(&from) = self.by_symbol.get(name) else {
+            return;
+        };
+        let Some(siblings) = by_file.get(file) else {
+            return;
+        };
+        self.add_sibling_edges(from, name, siblings);
+    }
+
+    fn add_sibling_edges(&mut self, from: NodeIndex, owner: &str, siblings: &[(&str, NodeIndex)]) {
+        for (sib_name, sib_idx) in siblings {
+            if *sib_idx == from || *sib_name == owner {
+                continue;
+            }
+            self.graph
+                .add_edge(from, *sib_idx, EdgeKind::ModuleContains);
+        }
+    }
+
+    fn has_any_container(chunks: &[ChunkTuple]) -> bool {
+        chunks
+            .iter()
+            .any(|(_, _, name, _, _, ct)| name.is_some() && Self::is_container(ct))
+    }
+
+    pub(crate) fn is_container(ct: &ChunkType) -> bool {
+        matches!(
+            ct,
+            ChunkType::Impl | ChunkType::Class | ChunkType::Struct | ChunkType::Module
+        )
+    }
+
+    pub(crate) fn group_symbols_by_file<'a>(
+        &self,
+        chunks: &'a [ChunkTuple],
+    ) -> HashMap<&'a str, Vec<(&'a str, NodeIndex)>> {
+        let mut by_file: HashMap<&str, Vec<(&str, NodeIndex)>> = HashMap::new();
+        for (_chunk_id, file, name, _calls, _inh, _ct) in chunks {
+            if let Some(name) = name {
+                if let Some(&idx) = self.by_symbol.get(name) {
+                    by_file
+                        .entry(file.as_str())
+                        .or_default()
+                        .push((name.as_str(), idx));
+                }
+            }
+        }
+        by_file
+    }
+
+    pub(crate) fn resolve_callee_fast(
+        &self,
+        callee: &str,
+        by_suffix: &HashMap<String, NodeIndex>,
+    ) -> Option<NodeIndex> {
+        if let Some(&idx) = self.by_symbol.get(callee) {
+            return Some(idx);
+        }
+        by_suffix.get(callee).copied()
+    }
+
+    // ── Pass 4a: test relation edges ───────────────────────────────────────
+
+    /// Wire Phase B `TestedBy` and `CoOccursInTest` edges from test chunks.
+    ///
+    /// Why: a hit on a `#[test] fn` is a strong signal that the function(s)
+    /// it exercises are relevant — and tests sharing a callee form a cluster.
+    /// What: for each `ChunkType::Test` chunk, resolves `calls` to defining
+    /// symbols and adds `callee → test` `TestedBy` edges. Emits symmetric
+    /// `CoOccursInTest` edges between pairs of tests sharing a callee.
+    /// Test: `test_phase_bc_edges_wired_from_entities`.
+    pub(crate) fn add_test_relation_edges(
+        &mut self,
+        chunks: &[ChunkTuple],
+        by_suffix: &HashMap<String, NodeIndex>,
+    ) {
+        let mut callee_to_tests: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
+        for (_chunk_id, _file, name, calls, _inh, ct) in chunks {
+            if !matches!(ct, ChunkType::Test) {
+                continue;
+            }
+            let Some(name) = name else { continue };
+            let Some(&test_idx) = self.by_symbol.get(name) else {
+                continue;
+            };
+            for callee in calls {
+                let Some(callee_idx) = self.resolve_callee_fast(callee, by_suffix) else {
+                    continue;
+                };
+                if callee_idx == test_idx {
+                    continue;
+                }
+                self.graph
+                    .add_edge(callee_idx, test_idx, EdgeKind::TestedBy);
+                callee_to_tests
+                    .entry(callee_idx)
+                    .or_default()
+                    .push(test_idx);
+            }
+        }
+
+        for tests in callee_to_tests.values() {
+            for i in 0..tests.len() {
+                for j in (i + 1)..tests.len() {
+                    let a = tests[i];
+                    let b = tests[j];
+                    if a == b {
+                        continue;
+                    }
+                    self.graph.add_edge(a, b, EdgeKind::CoOccursInTest);
+                    self.graph.add_edge(b, a, EdgeKind::CoOccursInTest);
+                }
+            }
+        }
+    }
+
+    // ── Pass 4b: doc-concept edges ─────────────────────────────────────────
+
+    /// Wire Phase C `Documents` and `ReferencesConcept` edges from entity lists.
+    ///
+    /// Why: doc-comment derived concepts tie natural-language queries to the
+    /// symbols defined in the same file.
+    /// What: for each `DocConcept` / `NaturalLanguagePhrase` entity, resolves
+    /// its `text` to a symbol. Every other symbol in the entity's source file
+    /// gets a `Documents` or `ReferencesConcept` edge to that target.
+    /// Test: `test_phase_bc_edges_wired_from_entities`.
+    pub(crate) fn add_doc_concept_edges(
+        &mut self,
+        chunks: &[ChunkTuple],
+        entities_by_file: &[(String, Vec<RawEntity>)],
+        by_suffix: &HashMap<String, NodeIndex>,
+    ) {
+        if entities_by_file.is_empty() {
+            return;
+        }
+        let by_file = self.group_symbols_by_file(chunks);
+        for (file, ents) in entities_by_file {
+            let Some(siblings) = by_file.get(file.as_str()) else {
+                continue;
+            };
+            for ent in ents {
+                let kind = match ent.entity_type {
+                    EntityType::DocConcept => EdgeKind::Documents,
+                    EntityType::NaturalLanguagePhrase => EdgeKind::ReferencesConcept,
+                    _ => continue,
+                };
+                let Some(target_idx) = self.resolve_callee_fast(&ent.text, by_suffix) else {
+                    continue;
+                };
+                for (_sym, src_idx) in siblings.iter() {
+                    if *src_idx == target_idx {
+                        continue;
+                    }
+                    self.graph.add_edge(*src_idx, target_idx, kind.clone());
+                }
+            }
+        }
+    }
 }

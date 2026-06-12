@@ -43,6 +43,28 @@ names; the mechanics below are DOC-8's.
 
 #### 1.1 The end-to-end flow (vanilla machine → ready stack)
 
+**STEP 0 — get `tctl` onto a vanilla machine (the UUC2 on-ramp).** Before any of
+the flow below can run, `tctl` must exist on the machine, and `tctl` itself is a
+Rust binary installed via `cargo`. On a truly-vanilla machine (no Rust toolchain
+yet) the zero-knowledge user first installs the Rust toolchain via the official
+rustup one-liner, then installs the controller with `cargo install`:
+
+```sh
+# STEP 0 — bootstrap the toolchain, then install tctl (run once, by the user):
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # installs rustup + cargo
+cargo install trusty-controller                                  # installs the tctl binary
+tctl install                                                     # NOW the flow below runs
+```
+
+This STEP 0 is the genuine zero-knowledge entry point: it is **documented
+guidance the user runs by hand**, not something `tctl` does for them — consistent
+with §5's stance that the controller does not auto-install toolchains. It
+**precedes and is distinct from** the §5 guide-and-abort: the §5 guide-and-abort
+can only fire once `tctl` already exists, so it covers the *remaining* hard
+dependencies discovered after `tctl` is installed (notably `uv` for the
+orchestrator member). The flow below begins at the first `tctl install`
+invocation:
+
 ```
 tctl install [<member>…]   [--yes]                     # system scope (forced)
         │
@@ -157,8 +179,13 @@ way it does for cargo (§5).
 The orchestrator's *contract surface* is synthesized by the DOC-6 shim
 (`trusty_common::contract::orchestrator`), so step-5 verification of claude-mpm
 routes through the shim (`doctor`/`health`/`version` only — its advertised `verbs[]`).
-DOC-8 performs an unpinned `uv tool install claude-mpm` and verifies via the shim;
-the concrete pinned version is owned by DOC-6/DOC-10. (Resolved Decision 2: locked for v1.)
+DOC-8 installs the **BOM-pinned** claude-mpm version (`uv tool install
+claude-mpm==<pin>`) and verifies via the shim. The pin is **owned by DOC-6 §5** (and
+frozen by DOC-10 §6): because the shim's output-parsing is **version-coupled** (DOC-6
+§4/§4.1), the installed claude-mpm must match the version the shim was tested against
+— exactly like every cargo member installs its BOM `version`. Installing **latest**
+is an opt-in `--latest` move that **marks the stack drifted** (the M2/M11 drift
+framing), not the default. (Resolved Decision 2: locked for v1.)
 
 #### 1.5 Idempotency (DOC-3 §4: install runs once)
 
@@ -351,11 +378,15 @@ project dir.
 claude-mpm is **external** (a different repo; DOC-6 §4 cross-repo note), so the
 hook must not require modifying claude-mpm's core. There is **strong in-tree
 precedent**: the trusty-memory/trusty-search `setup` already installs a
-**claude-mpm/Claude-Code startup hook** into the settings file
-(`merge_prompt_context_hook`, verified in `claude_config` + `setup.rs`) that runs
-on session start.
+**Claude Code `SessionStart` hook** into `~/.claude/settings.json`
+(`merge_prompt_context_hook`, verified in `claude_config` + `setup.rs`, which
+installs `SessionStart` + `UserPromptSubmit` Claude Code hooks specifically) that
+runs on session start. **claude-mpm is an orchestrator layered on the Claude Code
+CLI: it runs Claude Code underneath and merges into the user's
+`~/.claude/settings.json`, so a Claude Code `SessionStart` hook fires for
+claude-mpm sessions — claude-mpm needs no hook surface of its own.**
 
-- **Primary: a claude-mpm / Claude Code startup hook** that invokes
+- **Primary: a Claude Code `SessionStart` hook** that invokes
   `tctl ensure --scope project --yes` (non-interactive, backgrounded reindex per
   §3.3). The hook is installed **idempotently into the project `.mcp.json` /
   settings both during `tctl install`'s optional ensure step (§1.1 step 7) AND on
@@ -363,10 +394,12 @@ on session start.
   hook-merge primitives the per-tool `setup` already uses (idempotent either way).
   This makes the hook a *one-line shell-out to `tctl`*, so all the real logic stays
   in the controller (single source of truth) and the hook itself never needs to change.
-- **Fallback: a thin wrapper / alias.** Where a startup hook is unavailable, a
-  `claude-mpm` launch wrapper (or shell alias) that runs `tctl ensure` first, then
-  `exec`s the real orchestrator, achieves the same effect. This is the
-  lowest-coupling option and works regardless of claude-mpm internals.
+- **Fallback: a thin wrapper / alias.** Where the entry point is *not* a Claude
+  Code session (e.g. an orchestrator launched outside a Claude Code session, so the
+  `SessionStart` hook never fires), a `claude-mpm` launch wrapper (or shell alias)
+  that runs `tctl ensure` first, then `exec`s the real orchestrator, achieves the
+  same effect. This is the lowest-coupling option and works regardless of
+  claude-mpm internals.
 - **Not for v1: MCP-triggered ensure.** Triggering the pass from an MCP server call
   (e.g. on first tool use) couples auto-config to a specific tool's MCP lifecycle
   and muddies the "no hidden mutation" line DOC-5 drew. Keep ensure an explicit
@@ -389,8 +422,9 @@ Because the hook fires on **every** launch, its no-op cost must be negligible:
 
 #### 4.3 Cross-repo aspect
 
-The hook *content* is a one-line `tctl ensure` shell-out, so the only claude-mpm
-dependency is "it supports a startup hook (or can be wrapped)." All install/ensure
+The hook *content* is a one-line `tctl ensure` shell-out, so the only dependency
+is "Claude Code supports the `SessionStart` settings hook (which claude-mpm
+sessions inherit), or the launch can be wrapped." All install/ensure
 logic lives in `tctl` (this repo). When the orchestrator swaps claude-mpm →
 trusty-mpm (DOC-2 §7 / DOC-6 §6), the hook mechanism may change (trusty-mpm, being
 in-tree, could call `tctl ensure` natively), but the ensure-pass mechanics (§2)
@@ -403,6 +437,12 @@ tool-chain is installed and functioning correctly. e.g. we need 'cargo' to
 bootstrap"*). The controller itself was installed via `cargo install
 trusty-controller`, so by the time `tctl` runs, cargo was present *at least once* —
 but it may have been removed, or `uv` may be absent for the orchestrator.
+
+The pre-`tctl` rust+cargo bootstrap is **STEP 0** of the §1.1 flow (install Rust
+via the rustup one-liner, then `cargo install trusty-controller`): a reader sees
+that on-ramp before this guide-and-abort. The guide-and-abort below covers the
+hard dependencies discovered *after* `tctl` already exists — it cannot fire until
+`tctl` is installed.
 
 **Detection (preflight, §1.1 step 0):**
 
@@ -456,8 +496,12 @@ otherwise dispatches each member's own `service`/lifecycle contract verb, which 
 where the per-OS knowledge already lives. **The deep platform matrix (exact
 systemd unit content, Linux port/data-dir conventions, container nuances) is
 deferred to DOC-10** (isolation harness, MUC1/MUC2), which must exercise both
-OSes; DOC-8 only fixes the *shape* of the divergence. (Resolved Decision 6: Linux v1
-target is systemd-user where available, foreground fallback.)
+OSes; DOC-8 only fixes the *shape* of the divergence. The **primary target** (macOS,
+including the cdhash caveat above) and the Linux **systemd-user product supervision
+path** are gated **per-PR** by DOC-10's minimal macOS smoke + per-PR
+systemd-user-runner legs (not only nightly), so primary-target supervision/restart and
+cdhash regressions are caught pre-merge (cross-ref DOC-10 §6b / §4.1). (Resolved
+Decision 6: Linux v1 target is systemd-user where available, foreground fallback.)
 
 ### 7. Failure / partial-install handling (Resolved Decision 7)
 
@@ -619,12 +663,17 @@ Source-first audit, 2026-06-08 (trusty-search MCP search + Read against the tree
    service-install is included in step 4 of the UUC2 flow (§1.1), restarted last
    in any stack restart to maintain DOC-7 UI continuity (DOC-5 §7).** Locked for v1.
 
-2. **claude-mpm pinned version for install/verify — unpinned in DOC-8 (§1.4).** (Owner-approved)
-   DOC-8 install treats the orchestrator as "install latest via `uv tool install
-   claude-mpm`, then verify via the shim" in v1. The concrete pinned version is
-   owned by DOC-6/DOC-10, not DOC-8. When DOC-10 pins a tested release, that
-   version flows into the manifest's `version` field; DOC-8 does not carry a separate
-   pin. Locked for v1.
+2. **claude-mpm pinned version for install/verify — install the BOM-pinned version (§1.4).** (Owner-approved)
+   DOC-8 installs the orchestrator at the **BOM-pinned** claude-mpm version (`uv tool
+   install claude-mpm==<pin>`), then verifies via the shim, in v1 — **not** "install
+   latest." This is the M3 reconciliation: because the shim's output-parsing is
+   **version-coupled** (DOC-6 §4/§4.1), install and shim move in **lockstep**, so the
+   orchestrator installs a known-tested version exactly like every cargo member
+   installs its BOM `version`. The concrete pin is **owned by DOC-6/DOC-10**, not
+   DOC-8 — DOC-8 does not carry a separate pin; the version flows into the manifest's
+   `version` field once DOC-10 freezes a tested release. Installing **latest** is an
+   opt-in `--latest` move that **marks the stack drifted** (M2/M11), not the default.
+   Locked for v1.
 
 3. **Default blocking behavior of `tctl ensure` — return at usable-now + `--wait` opt-in (§3.3).** (Owner-approved)
    Interactive `tctl ensure` (TTY) returns at *usable-now* (project configured +
@@ -634,7 +683,8 @@ Source-first audit, 2026-06-08 (trusty-search MCP search + Read against the tree
    Project-`pending` always exits 0. Locked for v1.
 
 4. **Launch-hook mechanism — primary startup hook + idempotent install timing (§4).** (Owner-approved)
-   Primary = a claude-mpm / Claude-Code **startup hook** that shells out to
+   Primary = a Claude Code **`SessionStart` hook** (which fires for claude-mpm
+   sessions, since claude-mpm runs on Claude Code) that shells out to
    `tctl ensure --scope project --yes` (installed idempotently via the existing
    `claude_config` hook-merge primitive, reusing the `merge_prompt_context_hook`
    precedent); fallback = a launch wrapper/alias. NOT MCP-triggered in v1. The hook
@@ -652,7 +702,11 @@ Source-first audit, 2026-06-08 (trusty-search MCP search + Read against the tree
    macOS uses launchd (grounded). Linux v1 installs a **systemd user unit** where
    `systemctl --user` is available, falling back to documented foreground/daemonless
    (`<binary> serve`) otherwise. The exact unit content and Linux path/port
-   conventions are deferred to DOC-10 (isolation harness). Locked for v1.
+   conventions are deferred to DOC-10 (isolation harness). The systemd-user product
+   path is exercised **per-PR on a standard ubuntu runner** (which has
+   `systemctl --user`), and the foreground/daemonless fallback is covered by the
+   per-PR container leg (DOC-10 §4.1 / §6b) — so both Linux supervision branches have
+   per-PR coverage. Locked for v1.
 
 7. **Partial-install behavior — continue and report (§7).** (Owner-approved)
    **Continue** on member failure (install all selected members, report failures in a

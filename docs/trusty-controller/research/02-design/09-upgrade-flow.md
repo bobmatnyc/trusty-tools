@@ -366,6 +366,14 @@ sequencing is the net-new orchestration layered on top.
 - **Install order = `depends_on` topological** (DOC-2 §3): a dependency is
   upgraded before its dependents (search → analyze → review), so a dependent is
   never running new code against an older-than-expected dependency mid-upgrade.
+- **Dependent upgrade/restart is gated on the dependency's verify-after.** A
+  dependent is only upgraded/restarted **after** its dependency has reached its
+  target version *and* verified healthy (the §7 verify-after step). If a
+  dependency's upgrade **fails** (build error, health-gate fail, failed
+  verify-after), its dependents are **not** upgraded onto a half-upgraded base —
+  they are held at the last known-good combination and reported `blocked-by` the
+  root (§6). This is what prevents an untested new-dependency + old-dependent (or
+  new-dependent + old-dependency) pair forming silently mid-sweep.
 - **Restart order = same topological order, daemons after their install, the
   controller's own UI service last** (§5.2 / DOC-5 §7) so the controller does not
   kill itself mid-sweep.
@@ -435,9 +443,7 @@ active, so `tctl status` / `tctl version` / DOC-7 can report "you are on
 - **Clean tuple move** → record the target `stack_version` (e.g. `2026.07-1`) in
   controller state (the system-scope state dir,
   `~/.config/trusty-controller/` per DOC-2 §2 location helpers). (owner-approved)
-  Persist the last successfully applied `stack_version` to a small `state.toml`,
-  and reconcile against live installed versions on `tctl status` so a manual
-  `cargo install` of one member surfaces as drift.
+  Persist the last successfully applied `stack_version` to a small `state.toml`.
 - **`--latest` / partial move** → record a drift marker
   (`2026.06-1+latest` / `2026.06-1 (partial)`), never a clean label, so the user
   always knows whether they are on a tested tuple (§7).
@@ -447,6 +453,31 @@ are read live from each binary (DOC-2 §6: the manifest says what *should* be
 installed; `version --json` says what *is*). Only the human-facing
 `stack_version` label is persisted.
 
+**The clean/drift verdict is always derived live — `state.toml` is a label
+cache, never the verdict.** This rule is **normative and universal**: every
+surface (the CLI *and* the DOC-7 UI) derives clean-vs-drift by comparing each
+member's live `version --json` against the labeled tuple's BOM pins, and never
+by trusting the persisted label. `state.toml` caches the human-facing
+`stack_version` string only — it is a *hint* of the last-applied label, surfaced
+verbatim, but never the source of the verdict. So a manual `cargo install` of one
+member (or any divergence from the pinned tuple) surfaces as drift on the *next*
+read regardless of what the cached label says. The
+`tctl version --json` / `tctl stack health --json` payloads carry this
+live-reconciled drift verdict, which is exactly what DOC-7 §2.1 renders.
+
+To keep the cached label honest and concurrency-safe:
+
+- **Atomic + advisory-locked writes.** `state.toml` is written via temp-file +
+  rename (atomic) under an advisory lock, so a DOC-7 UI poll (every ~10 s, §8)
+  that lands mid-upgrade never reads a torn / half-written label and two
+  concurrent writers cannot corrupt it.
+- **In-progress / partial marker during an upgrade.** While an upgrade is
+  running the controller writes a partial/in-progress marker, so even the cached
+  label cannot read falsely "clean" after a crash mid-upgrade. (The live
+  reconcile above would catch the drift anyway — the marker makes the *cached*
+  value honest too, rather than leaving a stale "clean" string behind a dead
+  process.)
+
 ### 5. "New versions take effect" (the explicit UUC3 requirement)
 
 UUC3 states it twice and unambiguously: *"Once upgraded, the new versions of
@@ -455,24 +486,43 @@ running daemon use it — the old process keeps serving until it is restarted.
 **The restart/reload step is therefore mandatory, not optional**, and is the
 defining responsibility of `tctl upgrade` over a bare `cargo install`.
 
-#### 5.1 Connection-safe graceful restart (daemons)
+#### 5.1 Graceful restart of daemons (request-drain, not session-continuity)
 
-For each upgraded `kind = "daemon"` member the controller drives a
-**connection-safe graceful restart** — the exact convention CLAUDE.md (#534)
-mandates and which `trusty_common` already implements:
+For each upgraded `kind = "daemon"` member the controller drives a graceful
+restart that **drains in-flight HTTP requests** before swapping in the new
+binary. Two things must be kept distinct here, because one is grounded reuse and
+the other is net-new work:
 
-- **SIGTERM, not SIGKILL.** Use `launchctl bootout` (sends SIGTERM) → `bootstrap`,
-  **never** `kickstart -k` (SIGKILL). As of trusty-common 0.10.0 all three HTTP
-  daemons implement graceful shutdown via `trusty_common::shutdown::shutdown_signal`
-  (verified: awaits SIGTERM/SIGINT, feeds axum `with_graceful_shutdown`), so they
-  **drain in-flight requests before exiting**. `mcp_bridge` reconnects with
-  exponential backoff across the bounce (CLAUDE.md #534).
-- **The primitives are grounded:** `trusty_common::launchd::LaunchdConfig::{bootout,
-  bootstrap}` (verified: `bootout` runs `launchctl bootout gui/<uid>/<label>` and
-  treats "not loaded" as success; `bootstrap` boots out first then
-  `launchctl bootstrap gui/<uid> <plist>`). The controller invokes the member's
-  **`restart` contract verb** (DOC-1 lifecycle / DOC-6: composed from `bootout` +
-  `bootstrap`), so the per-OS knowledge lives in the member, not the controller.
+- **The primitives are grounded.** The launchd bounce and the request-drain it
+  composes are already implemented in `trusty_common`. Use `launchctl bootout`
+  (sends SIGTERM) → `bootstrap`, **never** `kickstart -k` (SIGKILL):
+  `trusty_common::launchd::LaunchdConfig::{bootout,bootstrap}` (verified:
+  `bootout` runs `launchctl bootout gui/<uid>/<label>` and treats "not loaded"
+  as success; `bootstrap` boots out first then
+  `launchctl bootstrap gui/<uid> <plist>`). As of trusty-common 0.10.0 all three
+  HTTP daemons implement graceful shutdown via
+  `trusty_common::shutdown::shutdown_signal` (verified: awaits SIGTERM/SIGINT,
+  feeds axum `with_graceful_shutdown`), so they drain in-flight HTTP requests
+  before exiting — exactly the convention CLAUDE.md (#534) mandates.
+- **The `restart` contract verb is net-new.** What the controller actually
+  dispatches is the member's `restart` contract verb (DOC-1 lifecycle), and that
+  verb is **not yet built**: DOC-6 §2.1–2.4 marks `restart` as ❌ absent on every
+  daemon. Search, memory, and analyze each need a new `commands/restart.rs` that
+  composes the grounded `bootout` + `bootstrap` primitives above; review is the
+  heaviest retrofit. Keeping the per-OS knowledge inside the member's `restart`
+  verb (rather than the controller) is the deliberate architecture — but it means
+  the take-effect step, the defining responsibility of `tctl upgrade` over a bare
+  `cargo install`, **depends on** that DOC-6 T2-lifecycle retrofit landing. It is
+  not free reuse; this net-new `restart` surface is part of the retrofit-scope
+  realism noted in DOC-11 m11 / DOC-6 §2.
+- **Request-drain is not session-continuity.** The drain guarantees in-flight
+  HTTP requests complete before exit (true, #534) — it does **not** preserve
+  sessions. An MCP / Claude Code session bound to that daemon **is interrupted**
+  across the bounce: `mcp_bridge` reconnects with exponential backoff, but
+  in-flight session/stream state is lost. This is exactly what the §3.2
+  blast-radius warning states ("all active projects and sessions on this machine
+  will be interrupted") — the restart is connection-safe at the HTTP request
+  layer, not session-transparent.
 - **Linux** uses `systemctl --user restart` (or stop+start the foreground process)
   per DOC-8 §6; the deep matrix is DOC-10's. The cdhash caveat is macOS-only.
 
@@ -485,10 +535,12 @@ The spec requires restart to cover *"all demonized tools **and UI services**"*
   member's UI is embedded in its own daemon** (DOC-2 `ui = /ui` on the daemon
   port), so restarting the daemon restarts its UI — there is no separate UI
   process.
-- **The controller's own UI service** (DOC-7) → `tctl upgrade` of `tctl` (or an
-  upgrade that includes the controller) bounces the controller's own DOC-7 UI
-  **last** (DOC-5 §7 / Resolved Q4 — controller-UI restarted last to avoid
-  self-kill mid-sweep). For self-upgrade of the controller binary itself, see §8.
+- **The controller itself** (`kind = "controller"`, DOC-2 §3 — a supervised,
+  system-only daemon) → `tctl upgrade` of `tctl` (or an upgrade that includes the
+  controller) bounces the controller's own DOC-7 UI **last** (DOC-5 §7 / Resolved
+  Q4 — controller-UI restarted last via self-exit to avoid self-kill mid-sweep);
+  selected by `kind`, not by name. For self-upgrade of the controller binary
+  itself, see §8.
 - **The orchestrator** (claude-mpm) advertises no `restart` (DOC-6 §4) → skipped
   with the session-restart note (§3.4, §5.4).
 - **CLI-only members** (trusty-review) have no long-lived daemon unless in `serve`
@@ -507,11 +559,17 @@ on stderr — DOC-5 §4):
     daemon up at 127.0.0.1:7879 (v0.25.0) … ok
 ```
 
-During the bounce the daemon is briefly unavailable; because the restart is
+During the bounce the daemon is briefly unavailable. Because the restart is
 graceful (drain-then-exit) and the controller waits for the daemon to answer
-`health` again before declaring the member done (§7), the window is the drain
-time plus a fast rebind — not an abrupt kill. A still-indexing project after
-restart is `project: pending`, **not** an error (DOC-3 §2 / DOC-4 §2.0 — exit 0).
+`health` again before declaring the member done (§7), the window is the
+request-drain time plus a fast rebind — not an abrupt kill. But "drain" is
+bounded to in-flight HTTP requests, not sessions: any MCP / Claude Code session
+bound to that daemon **is interrupted** across the bounce, consistent with the
+§3.2 blast-radius warning (`mcp_bridge` reconnects with backoff; in-flight
+session/stream state is lost). So the user sees a short unavailability window
+*and* a session interruption on bound daemons — not a transparent drain. A
+still-indexing project after restart is `project: pending`, **not** an error
+(DOC-3 §2 / DOC-4 §2.0 — exit 0).
 
 #### 5.4 The "restart between Claude Code sessions" convention
 
@@ -538,6 +596,34 @@ continue+report) and DOC-4's rollup:
     (`depends_on`) failed to upgrade or is now `down`, its dependents are reported
     `blocked-by` the root (one remediation: fix the root) rather than each
     independently failing/restarting.
+- **Cross-member gap: the health-gate is per-member, not per-tuple.** The §3.3
+  health-gate (and the §7 verify-after) catch "the new binary is broken on its
+  own"; they do **not** catch the cross-member case. With topological ordering
+  (search → analyze), a partial upgrade where search moves to new but analyze's
+  upgrade fails and stays old leaves new-search + old-analyze running together —
+  each individually healthy, but the *pair* is an untested tuple (the BOM tested
+  the all-new `2026.07-1` and the prior all-old `2026.06-1`; new + old is
+  neither). DOC-9 closes this with two parts:
+  - **(a) Verify-after gating prevents the untested pair forming silently.** Per
+    §3.6, a dependent is only upgraded/restarted after its dependency reaches
+    target *and* verifies healthy; a failed dependency holds its dependents at the
+    last known-good combination, reported `blocked-by` the root. This **extends
+    the dependency exception above** from "dep is down" to "dep upgrade
+    incomplete" — so the controller does not stack a new dependent onto a
+    half-upgraded base and call the result done.
+  - **(b) A partial/failed tuple is a first-class drifted/partial-tuple
+    outcome.** A partial upgrade is recorded as a partial/drift state (reusing the
+    in-progress/partial `state.toml` marker, §4.4 / M11) and surfaced as a
+    distinct *partial tuple — not a tested combination* verdict in the DOC-4
+    matrix — never silently "done." Recovery is **one command to pin back to the
+    last known-good tested tuple**: a whole-tuple form of the §4.2 stack-move /
+    Resolved Decision 4 downgrade, e.g. `tctl upgrade --to <last-good-stack_version>`,
+    which re-installs the known-good pins for the drifted members. This is **not**
+    automatic rollback (no-auto-rollback stays owner-approved, Resolved
+    Decision 5) — it is a one-command **manual** pin-back to a tested tuple,
+    replacing the per-crate `cargo install <crate>@<old> --locked` incantation
+    that defeats zero-knowledge. The known-good tuple is the tested BOM (M2); the
+    partial marker and live-reconciled drift verdict are M11.
 - **Non-zero exit on any system failure.** `tctl upgrade` exits `1` if any
   member's final system verdict is `down`; `2` if any is `degraded` (e.g.
   older-but-≥-floor contract after upgrade); `0` if all reach target and run.
@@ -769,10 +855,19 @@ upgrade, the changelog format) is **strongly reusable** and already in the tree.
 
 3. **Persisting the active stack version (§4.4).** (owner-approved) Persist the
    last successfully applied `stack_version` to a small system-scope `state.toml`
-   (`~/.config/trusty-controller/`), and reconcile it against live installed
-   versions on `tctl status` so a manual `cargo install` of one member surfaces
-   as drift; record `--latest`/partial moves as a drift marker rather than a
-   clean label.
+   (`~/.config/trusty-controller/`) **as a label cache only** — record
+   `--latest`/partial moves as a drift marker rather than a clean label. The
+   clean/drift verdict is **always derived live and universally**: every surface
+   (the CLI *and* the DOC-7 UI) compares each member's live `version --json`
+   against the labeled tuple's pins and **never trusts the persisted label**, so
+   a manual `cargo install` of one member surfaces as drift on the next read
+   regardless of the cached string. `state.toml` writes are **atomic (temp-file +
+   rename) and advisory-locked** so a UI poll mid-upgrade never reads a torn
+   label and concurrent writers cannot corrupt it; an **in-progress/partial
+   marker** is written during an upgrade so a crash mid-upgrade cannot leave a
+   falsely-"clean" cached label. The live-reconciled verdict rides in the
+   `tctl version --json` / `tctl stack health --json` payloads that DOC-7 §2.1
+   renders.
 
 4. **Downgrade handling (§4.3).** (owner-approved) When an installed member is
    **newer** than the target (installed > target), `tctl upgrade` **refuses to
@@ -781,9 +876,16 @@ upgrade, the changelog format) is **strongly reusable** and already in the tree.
 
 5. **Rollback scope (§6).** (owner-approved) **No automatic version rollback in
    v1.** The health-gate-before-restart (§3.3) prevents restarting into a broken
-   binary (the old binary keeps serving), and idempotent re-run + forward-fix /
-   explicit manual downgrade (`cargo install <crate>@<old> --locked`) is the
-   recovery model.
+   binary (the old binary keeps serving), and idempotent re-run + forward-fix is
+   the recovery model. **A partial/drifted tuple is now a first-class outcome**
+   (§6, reusing the §4.4 / M11 partial `state.toml` marker), surfaced as a
+   distinct DOC-4 verdict: recovery is a **one-command manual pin-back** to the
+   last known-good `stack_version` (`tctl upgrade --to <last-good-stack_version>`,
+   the whole-tuple form of the §4.2 stack-move / Resolved Decision 4 downgrade),
+   no longer a raw per-crate `cargo install <crate>@<old> --locked` incantation.
+   This stays **manual / owner-driven** — the no-auto-rollback stance is
+   unchanged; the pin-back is just the zero-knowledge-friendly recovery surface,
+   not an automatic revert.
 
 6. **Off-tuple drift warning on selective `--latest` upgrade (§7).**
    (owner-approved) **Warn + mark the stack drifted** when a selective
