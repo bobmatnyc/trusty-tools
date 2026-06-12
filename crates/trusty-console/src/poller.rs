@@ -218,6 +218,7 @@ mod tests {
                 },
                 version: None,
                 url: self.url.map(|u| u.to_string()),
+                hint: None,
             }
         }
     }
@@ -269,6 +270,7 @@ mod tests {
                     status: ServiceStatus::Running,
                     version: Some("1.0.0".to_string()),
                     url: Some("http://127.0.0.1:7878".to_string()),
+                    hint: None,
                 },
                 ServiceInfo {
                     id: "trusty-memory".to_string(),
@@ -276,6 +278,7 @@ mod tests {
                     status: ServiceStatus::Absent,
                     version: None,
                     url: None,
+                    hint: None,
                 },
             ],
             refreshed_at: Instant::now(),

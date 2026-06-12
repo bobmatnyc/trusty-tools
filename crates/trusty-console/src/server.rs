@@ -332,9 +332,11 @@ async fn analyze_indexes_handler(State(state): State<AppState>) -> axum::respons
         .await
     {
         Ok(val) => axum::Json(val).into_response(),
-        Err(McpHandleError::Absent | McpHandleError::Backoff { .. }) => {
-            StatusCode::SERVICE_UNAVAILABLE.into_response()
-        }
+        Err(
+            McpHandleError::Absent
+            | McpHandleError::Backoff { .. }
+            | McpHandleError::Degraded { .. },
+        ) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
         Err(e) => {
             tracing::warn!("analyze_indexes_handler error: {e:#}");
             StatusCode::BAD_GATEWAY.into_response()
@@ -396,10 +398,14 @@ async fn analyze_visualize_handler(
         }),
     );
 
-    // Classify the graph result: absent/backoff → 503, hard error → 502,
+    // Classify the graph result: absent/backoff/degraded → 503, hard error → 502,
     // success → combine with best-effort entities and clusters.
     match &graph_res {
-        Err(McpHandleError::Absent | McpHandleError::Backoff { .. }) => {
+        Err(
+            McpHandleError::Absent
+            | McpHandleError::Backoff { .. }
+            | McpHandleError::Degraded { .. },
+        ) => {
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
         Err(e) => {
@@ -516,6 +522,7 @@ mod tests {
                 status: self.status.clone(),
                 version: None,
                 url: None,
+                hint: None,
             }
         }
     }
@@ -598,6 +605,58 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
         assert_eq!(body["status"], "ok");
         assert!(body["version"].is_string());
+    }
+
+    /// Why: the services route must serialise `Degraded` status and the
+    /// `hint` field correctly so the UI can render a distinct badge.
+    /// What: builds the router with a Degraded stub connector, issues GET
+    /// /api/console/services, asserts `status == "degraded"` and `hint` present.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn test_services_route_returns_degraded_with_hint() {
+        use crate::connector::ServiceInfo;
+        struct DegradedConnector;
+        impl ServiceConnector for DegradedConnector {
+            fn id(&self) -> &'static str {
+                "trusty-analyze"
+            }
+            fn display_name(&self) -> &'static str {
+                "Trusty Analyze"
+            }
+            fn detect(&self) -> ServiceInfo {
+                ServiceInfo {
+                    id: "trusty-analyze".to_string(),
+                    display_name: "Trusty Analyze".to_string(),
+                    status: ServiceStatus::Degraded,
+                    version: None,
+                    url: None,
+                    hint: Some("reachable but `console_metrics` tool not registered".to_string()),
+                }
+            }
+        }
+        let state = AppState::new(vec![Box::new(DegradedConnector)]);
+        let router = build_router(state);
+        let req = Request::builder()
+            .uri("/api/console/services")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = get_bytes(resp).await;
+        let body: Vec<serde_json::Value> = serde_json::from_slice(&bytes).expect("parse json");
+        assert_eq!(body.len(), 1);
+        assert_eq!(body[0]["status"], "degraded");
+        assert!(
+            body[0].get("hint").is_some(),
+            "degraded service must include hint field"
+        );
+        assert!(
+            body[0]["hint"]
+                .as_str()
+                .unwrap_or("")
+                .contains("console_metrics"),
+            "hint must mention console_metrics"
+        );
     }
 
     /// Why: the root path must serve the embedded HTML (or placeholder).

@@ -131,6 +131,7 @@ pub(super) fn detect_service(
             status: ServiceStatus::Absent,
             version: None,
             url: None,
+            hint: None,
         };
     }
 
@@ -145,6 +146,7 @@ pub(super) fn detect_service(
             status: ServiceStatus::Running,
             version,
             url: Some(base_url),
+            hint: None,
         };
     }
 
@@ -154,6 +156,7 @@ pub(super) fn detect_service(
         status: ServiceStatus::Available,
         version: None,
         url: None,
+        hint: None,
     }
 }
 

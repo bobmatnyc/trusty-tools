@@ -119,6 +119,7 @@ impl ServiceConnector for AnalyzeConnector {
                 status: ServiceStatus::Absent,
                 version: None,
                 url: None,
+                hint: None,
             };
         }
 
@@ -134,6 +135,7 @@ impl ServiceConnector for AnalyzeConnector {
                 status: ServiceStatus::Running,
                 version,
                 url: Some(base_url),
+                hint: None,
             };
         }
 
@@ -148,6 +150,7 @@ impl ServiceConnector for AnalyzeConnector {
                 status: ServiceStatus::Running,
                 version,
                 url: Some(base_url),
+                hint: None,
             };
         }
 
@@ -157,6 +160,7 @@ impl ServiceConnector for AnalyzeConnector {
             status: ServiceStatus::Available,
             version: None,
             url: None,
+            hint: None,
         }
     }
 }

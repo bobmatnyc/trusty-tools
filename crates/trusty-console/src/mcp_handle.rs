@@ -65,6 +65,18 @@ const BACKOFF_BASE_MS: u64 = 1_000;
 /// Maximum retry delay cap in milliseconds (60 s, matches EmbedderSupervisor).
 const BACKOFF_CAP_MS: u64 = 60_000;
 
+/// Remediation hint surfaced when the `tools/list` probe succeeds but the
+/// expected `console_metrics` tool is absent from the listing.
+///
+/// Why: A constant prevents the message from drifting between code and the
+/// API payload; centralising it here makes it easy to update.
+/// What: Human-readable actionable string returned in `McpHandleError::Degraded`
+/// and stored in `HandleState::Degraded` for repeated calls.
+/// Test: `mcp_handle_degraded_when_console_metrics_missing` asserts this
+/// string appears in the `Degraded` error hint.
+const DEGRADED_HINT: &str = "reachable but `console_metrics` tool not registered — \
+     check `serve --stdio` wiring / restart the daemon";
+
 // ── Typed error ──────────────────────────────────────────────────────────────
 
 /// Structured error returned by `call_tool_raw` and `poll_metrics`.
@@ -73,12 +85,13 @@ const BACKOFF_CAP_MS: u64 = 60_000;
 /// fragile — a message change silently breaks 503 vs 502 routing in the HTTP
 /// handlers. Giving callers a typed variant they can `match` on makes the
 /// distinction explicit and refactor-safe.
-/// What: Three variants cover every outcome: `Absent` (binary not on PATH,
-/// never retry), `Backoff` (spawn failure window active, retry later), and
-/// `Other` (any other failure — transport error, tool error, parse failure).
-/// Test: `mcp_handle_absent_binary_returns_error` and
-/// `mcp_handle_respawn_failure_applies_backoff` both assert `Err`; callers in
-/// `server.rs` match on the variant to produce the correct HTTP status code.
+/// What: Four variants cover every outcome: `Absent` (binary not on PATH,
+/// never retry), `Backoff` (spawn failure window active, retry later),
+/// `Degraded` (handshake OK but expected tool missing — actionable hint
+/// included), and `Other` (any other failure).
+/// Test: `mcp_handle_absent_binary_returns_error`,
+/// `mcp_handle_respawn_failure_applies_backoff`, and
+/// `mcp_handle_degraded_when_console_metrics_missing` cover the variants.
 #[derive(Debug)]
 pub enum McpHandleError {
     /// The service binary was not found on PATH; the handle is permanently in
@@ -91,6 +104,14 @@ pub enum McpHandleError {
         failure_count: u32,
         /// How long until the next attempt is allowed.
         next_attempt_in: Duration,
+    },
+    /// MCP handshake succeeded but the expected `console_metrics` tool was
+    /// not listed in `tools/list`. The service is reachable but cannot supply
+    /// metrics — the binary may not be running in `serve --stdio` mode or may
+    /// need to be restarted.
+    Degraded {
+        /// Human-readable actionable remediation hint.
+        hint: String,
     },
     /// Any other failure (spawn error, transport error, tool error, parse
     /// failure). The inner `anyhow::Error` carries the full context chain.
@@ -109,6 +130,9 @@ impl std::fmt::Display for McpHandleError {
                 "McpServiceHandle: in backoff after {failure_count} failure(s); \
                  next attempt in {next_attempt_in:.2?}"
             ),
+            Self::Degraded { hint } => {
+                write!(f, "McpServiceHandle: degraded — {hint}")
+            }
             Self::Other(e) => write!(f, "{e:#}"),
         }
     }
@@ -135,6 +159,11 @@ enum HandleState {
     /// `state` lock can be released before the long `call_tool` I/O,
     /// preventing the metrics poller from blocking on-demand route handlers.
     Connected(Arc<Mutex<Box<StdioMcpClient>>>),
+    /// MCP handshake succeeded but `tools/list` did not include
+    /// `console_metrics` — the service is reachable but cannot supply
+    /// metrics. Permanently degraded until the next spawn attempt drops the
+    /// state back to `None` via `on_call_failure`.
+    Degraded,
 }
 
 /// Spawn failure tracking embedded directly in the handle.
@@ -377,9 +406,48 @@ impl McpServiceHandle {
                             );
                             return Err(McpHandleError::Other(e));
                         }
-                        backoff.reset();
-                        let client_arc = Arc::new(Mutex::new(Box::new(client)));
-                        *state_opt = Some(HandleState::Connected(Arc::clone(&client_arc)));
+
+                        // tools/list probe: verify the service exposes the expected
+                        // console_metrics tool. A missing tool means the binary is
+                        // running but in the wrong mode (e.g. HTTP-only, not stdio
+                        // MCP). We mark the handle Degraded rather than silently
+                        // failing — poll_metrics will never succeed in this state.
+                        match client.list_tools().await {
+                            Ok(tools) => {
+                                let has_metrics =
+                                    tools.iter().any(|t| t.name == CONSOLE_METRICS_METHOD);
+                                if !has_metrics {
+                                    warn!(
+                                        binary = %self.binary,
+                                        "McpServiceHandle: tools/list OK but \
+                                         `console_metrics` not listed — marking Degraded"
+                                    );
+                                    backoff.reset();
+                                    *state_opt = Some(HandleState::Degraded);
+                                } else {
+                                    backoff.reset();
+                                    let client_arc = Arc::new(Mutex::new(Box::new(client)));
+                                    *state_opt =
+                                        Some(HandleState::Connected(Arc::clone(&client_arc)));
+                                }
+                            }
+                            Err(e) => {
+                                // tools/list failure is treated as a spawn failure
+                                // so the backoff gate applies on the next attempt.
+                                backoff.record_failure();
+                                warn!(
+                                    binary = %self.binary,
+                                    failure_count = backoff.failure_count,
+                                    error = %e,
+                                    "McpServiceHandle: tools/list failed after \
+                                     initialize — will retry after backoff"
+                                );
+                                return Err(McpHandleError::Other(e.context(format!(
+                                    "McpServiceHandle: tools/list failed for {}",
+                                    self.binary
+                                ))));
+                            }
+                        }
                     }
                     Err(e) => {
                         backoff.record_failure();
@@ -401,6 +469,9 @@ impl McpServiceHandle {
 
         match state_opt.as_ref() {
             Some(HandleState::Absent) => Err(McpHandleError::Absent),
+            Some(HandleState::Degraded) => Err(McpHandleError::Degraded {
+                hint: DEGRADED_HINT.to_string(),
+            }),
             Some(HandleState::Connected(client_arc)) => Ok(Arc::clone(client_arc)),
             None => unreachable!("guard must be Some after init block"),
         }
@@ -662,6 +733,34 @@ mod tests {
         assert!(r2.is_err(), "second poll must also return Err (no retry)");
     }
 
+    /// Why: When the handle is in the Degraded state (tools/list succeeded but
+    /// console_metrics was not listed), poll_metrics must return
+    /// McpHandleError::Degraded with the remediation hint — not Absent or Other.
+    /// What: Manually prime the handle state to HandleState::Degraded, then
+    /// call poll_metrics and assert the Degraded variant with a non-empty hint.
+    /// Test: This test.
+    #[tokio::test]
+    async fn mcp_handle_degraded_state_returns_degraded_error() {
+        let handle = McpServiceHandle::new("trusty-analyze", vec!["mcp".to_string()]);
+        {
+            let mut guard = handle.state.lock().await;
+            let (state_opt, _backoff) = &mut *guard;
+            *state_opt = Some(HandleState::Degraded);
+        }
+        let result = handle.poll_metrics().await;
+        assert!(result.is_err(), "degraded handle must return Err");
+        match result.unwrap_err() {
+            McpHandleError::Degraded { hint } => {
+                assert!(!hint.is_empty(), "degraded hint must not be empty");
+                assert!(
+                    hint.contains("console_metrics"),
+                    "hint must mention console_metrics, got: {hint}"
+                );
+            }
+            other => panic!("expected McpHandleError::Degraded, got: {other}"),
+        }
+    }
+
     /// Why: After a `call_tool` / respawn failure on an already-connected handle,
     /// `SpawnBackoff` must gate subsequent poll attempts — the respawn path must
     /// NOT be unbounded just because the handle reached `Connected` once. This
@@ -716,6 +815,42 @@ mod tests {
         assert!(
             matches!(result.unwrap_err(), McpHandleError::Backoff { .. }),
             "error must be McpHandleError::Backoff"
+        );
+    }
+
+    /// Why: The tools/list probe must transition the handle to DEGRADED when the
+    /// handshake succeeds but console_metrics is not in the tool listing. This
+    /// test exercises the real probe path with a minimal shell-script MCP stub
+    /// that answers initialize and tools/list (without console_metrics).
+    /// What: Spawns a sh script that completes the MCP handshake and returns an
+    /// empty tools/list, then verifies poll_metrics returns McpHandleError::Degraded.
+    /// Test: This test. Marked #[ignore] to keep CI fast (requires Unix + sh).
+    #[tokio::test]
+    #[cfg(unix)]
+    #[ignore]
+    async fn mcp_handle_probe_detects_missing_console_metrics_tool() {
+        // Minimal MCP stub: answers initialize, then tools/list with no tools.
+        let script = r#"
+while IFS= read -r line; do
+  id=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null)
+  method=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('method',''))" 2>/dev/null)
+  case "$method" in
+    initialize) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2024-11-05\",\"serverInfo\":{\"name\":\"stub\",\"version\":\"0.0.1\"},\"capabilities\":{}}}" ;;
+    "notifications/initialized") ;;
+    "tools/list") echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"tools\":[]}}" ;;
+    *) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}" ;;
+  esac
+done
+"#;
+        let handle = McpServiceHandle::new("sh", vec!["-c".to_string(), script.to_string()]);
+        let result = handle.poll_metrics().await;
+        assert!(
+            result.is_err(),
+            "stub with no console_metrics must return Err"
+        );
+        assert!(
+            matches!(result.unwrap_err(), McpHandleError::Degraded { .. }),
+            "error must be McpHandleError::Degraded when console_metrics absent"
         );
     }
 }
