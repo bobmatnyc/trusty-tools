@@ -184,6 +184,7 @@ impl JsonRpcResponse {
 /// the forwarding works end-to-end.
 const TOOL_METHODS: &[&str] = &[
     "add_alias",
+    "console_metrics",
     "discover_aliases",
     "get_prompt_context",
     "kg_assert",

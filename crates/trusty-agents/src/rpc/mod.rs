@@ -99,8 +99,9 @@ mod tests {
         //          the `/grep` MCP tool added another (→14 … →15); bundling
         //          trusty-bm25-daemon + trusty-embedderd surfaces via
         //          PR #190/#191 added 3 more (→18 — closes #174);
-        //          issue #537 added the `upgrade` MCP tool (→19).
-        assert_eq!(svc.tools().len(), 19);
+        //          issue #537 added the `upgrade` MCP tool (→19);
+        //          issue #1104 added `console_metrics` (→20).
+        assert_eq!(svc.tools().len(), 20);
     }
 
     #[test]
