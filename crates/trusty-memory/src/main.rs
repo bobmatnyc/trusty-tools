@@ -11,7 +11,7 @@
 //! removed in PR3 of the #914 epic; `serve --stdio` is the canonical
 //! stdio integration.
 //! What: defines a `clap::Parser` with `serve`, `migrate`, and other
-//! subcommands. `serve --stdio` defers to `commands::serve_stdio`;
+//! subcommands. `serve --stdio` defers to `commands::serve_stdio_bridge`;
 //! `serve` (HTTP) defers to `trusty_memory::run_http` / `run_http_dynamic`.
 //! Test: `cargo run -p trusty-memory -- --help` lists all subcommands.
 //! `cargo run -p trusty-memory -- migrate kuzu-memory --dry-run` exercises

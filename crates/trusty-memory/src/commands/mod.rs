@@ -3,7 +3,7 @@
 //! Why: Keep CLI handlers out of `lib.rs` so the library surface stays focused
 //! on MCP server code while the binary stays a thin clap-to-handler shim.
 //! What: One submodule per subcommand. `serve --stdio` is handled by
-//! `serve_stdio` (direct MCP, PR1 #919 of the #914 cutover epic); `serve`
+//! `serve_stdio_bridge` (pure daemon-bridge, PR #1080); `serve`
 //! (HTTP) is wired to `crate::run_http` / `crate::run_http_dynamic` in
 //! `main.rs`; `migrate` rewrites Claude settings to point at trusty-memory;
 //! `service` manages the macOS launchd LaunchAgent; `setup` orchestrates
@@ -26,7 +26,6 @@ pub mod note;
 pub mod port;
 pub mod prompt_context;
 pub mod send_message;
-pub mod serve_stdio;
 pub mod serve_stdio_bridge;
 pub mod service;
 pub mod setup;
