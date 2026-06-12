@@ -1,10 +1,11 @@
 //! MCP tool definitions and `tools/call` router.
 //!
 //! Why: Claude Code communicates with MCP servers using JSON-RPC 2.0 over
-//! stdio.  This module provides the three trusty-review tools:
-//!   - `review_pr`     — review a GitHub PR by owner/repo/number
-//!   - `review_diff`   — review a raw unified diff string
-//!   - `review_health` — probe service liveness and configuration
+//! stdio.  This module provides the four trusty-review tools:
+//!   - `review_pr`       — review a GitHub PR by owner/repo/number
+//!   - `review_diff`     — review a raw unified diff string
+//!   - `review_health`   — probe service liveness and configuration
+//!   - `console_metrics` — return health/metrics for trusty-console polling
 //!
 //! What: `tool_descriptors` returns the `tools/list` payload; `call_tool`
 //! dispatches a `tools/call` request to the appropriate handler.  Results are
@@ -20,8 +21,11 @@ use serde_json::Value;
 use tempfile::NamedTempFile;
 use tracing::info;
 
+use trusty_common::console_metrics::CONSOLE_METRICS_METHOD;
+
 use crate::{
     integrations::github::{AuthStrategy, GithubClient, RunMode},
+    mcp::console_metrics,
     models::ReviewResult,
     pipeline::{DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review},
     service::{
@@ -37,10 +41,11 @@ use crate::{
 /// Why: Claude Code calls `tools/list` at startup to discover what the server
 /// can do.  Accurate `inputSchema` JSON Schema lets the LLM construct correct
 /// tool calls without guessing.
-/// What: returns a serde_json `Value` array with three tool objects.
-/// Test: `tools_list_has_three_tools`.
+/// What: returns a serde_json `Value` array with four tool objects (including
+/// `console_metrics` for trusty-console polling).
+/// Test: `tools_list_has_three_tools` (which now verifies four tools).
 pub fn tool_descriptors() -> Value {
-    serde_json::json!([
+    let mut tools = serde_json::json!([
         {
             "name": "review_pr",
             "description": "Review a GitHub pull request. Fetches the PR diff, retrieves \
@@ -119,7 +124,12 @@ pub fn tool_descriptors() -> Value {
                 "properties": {}
             }
         }
-    ])
+    ]);
+    // Append the console_metrics descriptor so the console poller discovers it.
+    if let Some(arr) = tools.as_array_mut() {
+        arr.push(console_metrics::descriptor());
+    }
+    tools
 }
 
 // ─── Tool errors ─────────────────────────────────────────────────────────────
@@ -155,6 +165,9 @@ pub async fn call_tool(tool: &str, args: &Value, state: &AppState) -> Result<Val
         "review_pr" => call_review_pr(args, state).await,
         "review_diff" => call_review_diff(args, state).await,
         "review_health" => Ok(call_review_health(state).await),
+        name if name == CONSOLE_METRICS_METHOD => Ok(wrap_value(
+            &console_metrics::handle_console_metrics(state).await,
+        )),
         _ => Err(ToolError::UnknownTool),
     }
 }

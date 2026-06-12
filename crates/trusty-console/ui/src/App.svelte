@@ -4,7 +4,7 @@
   import MemoryTab from './MemoryTab.svelte';
   import SearchTab from './SearchTab.svelte';
   import AnalyzeTab from './AnalyzeTab.svelte';
-  import StubTab from './StubTab.svelte';
+  import ReviewTab from './ReviewTab.svelte';
 
   // ── state ────────────────────────────────────────────────────────────────
 
@@ -29,6 +29,7 @@
     'trusty-search':  'search',
     'trusty-memory':  'memory',
     'trusty-analyze': 'analyze',
+    'trusty-review':  'review',
   };
 
   // Derived set used by ServiceCard to decide whether to render the button.
@@ -104,7 +105,7 @@
     {:else if activeTab === 'analyze'}
       <AnalyzeTab />
     {:else if activeTab === 'review'}
-      <StubTab name="Review" endpoint={null} />
+      <ReviewTab />
     {/if}
   </div>
 </main>

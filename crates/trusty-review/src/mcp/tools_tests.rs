@@ -135,7 +135,8 @@ fn make_tool_state_fail_search(llm: Arc<dyn LlmProvider>) -> AppState {
 fn tools_list_has_three_tools() {
     let tools = tool_descriptors();
     let arr = tools.as_array().expect("must be array");
-    assert_eq!(arr.len(), 3, "expected 3 tools, got {}", arr.len());
+    // Now four tools: review_pr, review_diff, review_health, console_metrics.
+    assert_eq!(arr.len(), 4, "expected 4 tools, got {}", arr.len());
     let names: Vec<&str> = arr
         .iter()
         .filter_map(|t| t.get("name").and_then(Value::as_str))
@@ -143,6 +144,10 @@ fn tools_list_has_three_tools() {
     assert!(names.contains(&"review_pr"), "missing review_pr");
     assert!(names.contains(&"review_diff"), "missing review_diff");
     assert!(names.contains(&"review_health"), "missing review_health");
+    assert!(
+        names.contains(&"console_metrics"),
+        "missing console_metrics"
+    );
 }
 
 #[test]

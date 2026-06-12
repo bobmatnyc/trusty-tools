@@ -180,10 +180,10 @@ async fn dispatch_tools_call_missing_name_returns_invalid_params() {
 ///
 /// Why: guarantees the tools/list handler is wired correctly and the tool
 /// count matches the documented surface (review_pr, review_diff,
-/// review_health) without spawning a subprocess or needing credentials
-/// (closes #950 in-process requirement).
+/// review_health, console_metrics) without spawning a subprocess or needing
+/// credentials (closes #950 in-process requirement; #1163 adds console_metrics).
 /// What: dispatches a `tools/list` request through the in-process
-/// `dispatch` function and asserts exactly 3 tools with the expected names.
+/// `dispatch` function and asserts exactly 4 tools with the expected names.
 /// Test: this test itself; always runs in CI (not gated with `#[ignore]`).
 #[tokio::test]
 async fn dispatch_tools_list_three_tools_names_verified() {
@@ -193,9 +193,15 @@ async fn dispatch_tools_list_three_tools_names_verified() {
     let result = resp.result.expect("expected result");
     let tools = result["tools"].as_array().expect("tools must be array");
     let names: HashSet<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-    let expected: HashSet<&str> = ["review_pr", "review_diff", "review_health"]
-        .into_iter()
-        .collect();
+    // #1163 adds console_metrics — four tools in total.
+    let expected: HashSet<&str> = [
+        "review_pr",
+        "review_diff",
+        "review_health",
+        "console_metrics",
+    ]
+    .into_iter()
+    .collect();
     assert_eq!(
         names, expected,
         "tools/list returned unexpected set: {:?}",
@@ -204,7 +210,8 @@ async fn dispatch_tools_list_three_tools_names_verified() {
 }
 
 /// Binary stdio smoke test: spawn `trusty-review serve --stdio`, send MCP
-/// `initialize` + `tools/list`, assert exactly 3 tools are listed.
+/// `initialize` + `tools/list`, assert exactly 4 tools are listed (#1163
+/// adds console_metrics).
 ///
 /// Why: validates the end-to-end `serve --stdio` path as an integration
 /// test — subprocess spawn, JSON-RPC framing, and tool registration —
@@ -287,7 +294,7 @@ async fn stdio_serve_tools_list_returns_three_tools() {
     child.kill().await.ok();
 
     assert_eq!(
-        tool_count, 3,
-        "serve --stdio tools/list must return 3 tools"
+        tool_count, 4,
+        "serve --stdio tools/list must return 4 tools (review_pr, review_diff, review_health, console_metrics)"
     );
 }

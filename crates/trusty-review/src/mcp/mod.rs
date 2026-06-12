@@ -16,6 +16,7 @@
 //! `dispatch_unknown_tool_returns_method_not_found`,
 //! `dispatch_notification_is_suppressed`.
 
+pub mod console_metrics;
 pub mod tools;
 
 use std::sync::Arc;

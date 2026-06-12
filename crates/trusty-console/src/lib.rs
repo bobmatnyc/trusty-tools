@@ -238,6 +238,32 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
         }
     }
 
+    // ── metrics MCP poll (trusty-review) ────────────────────────────────────
+    // trusty-review's stdio MCP mode is `serve --stdio` (see commands/serve.rs).
+    // When in stdio mode, trusty-review does NOT start an HTTP daemon — it runs
+    // a pure MCP JSON-RPC loop over stdin/stdout, connected to the LLM directly.
+    // This is the correct invocation for the console's lightweight metrics poll.
+    // On machines without trusty-review the handle marks it Absent immediately;
+    // the cache stays None; /api/console/metrics/review returns 503.
+    //
+    // Same shared-handle pattern as trusty-memory and trusty-search above.
+    {
+        let handles = state.mcp_handles();
+        if let Some(h) = handles.get("trusty-review") {
+            metrics_poller::start(
+                Arc::clone(h),
+                state.review_metrics_cache().clone(),
+                Duration::from_secs(args.poll_interval),
+            );
+        } else {
+            tracing::warn!(
+                service = "trusty-review",
+                "run_serve: no MCP handle registered for trusty-review — \
+                 metrics poller will not start for this service"
+            );
+        }
+    }
+
     let router = server::build_router(state.clone());
 
     // ── bind primary listener ───────────────────────────────────────────────
