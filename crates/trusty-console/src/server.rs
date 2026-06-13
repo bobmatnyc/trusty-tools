@@ -289,7 +289,7 @@ async fn health_handler() -> impl IntoResponse {
     }))
 }
 
-/// Apply per-service MCP handle degraded state on top of connector-reported statuses.
+/// Apply per-service MCP handle state on top of connector-reported statuses.
 ///
 /// Why: The connector `detect()` path (TCP probe / `which`) can only report
 /// `Running`, `Available`, or `Absent`. It has no knowledge of the MCP
@@ -298,12 +298,17 @@ async fn health_handler() -> impl IntoResponse {
 /// still reports `Running` or `Available` — the UI incorrectly shows a healthy
 /// badge. This function overlays the handle's known state: if a handle is
 /// Degraded, the corresponding `ServiceInfo` is updated in-place to
-/// `status = Degraded` and `hint = DEGRADED_HINT`.
+/// `status = Degraded` and `hint = DEGRADED_HINT`. If a handle is Connected, the
+/// daemon version from the `initialize` response is surfaced (unless the connector
+/// already reported a version from the HTTP `/health` endpoint).
 /// What: Iterates `infos` in place; for each entry looks up the matching handle
-/// by `id`; if `handle.degraded_hint()` returns `Some(hint)` and the current
+/// by `id`. If `handle.degraded_hint()` returns `Some(hint)` and the current
 /// status is NOT already `Absent`, sets `status = Degraded` and `hint = Some`.
+/// If `info.version` is `None` and `handle.daemon_version()` returns `Some`,
+/// sets `info.version` from the MCP `serverInfo.version`.
 /// A process-down (`Absent`) service is never overridden — only reachable ones.
-/// Test: `test_services_route_handle_degraded_overlay` below.
+/// Test: `test_services_route_handle_degraded_overlay` and
+/// `test_services_route_daemon_version_overlay` below.
 async fn apply_handle_overrides(
     infos: &mut [ServiceInfo],
     handles: &HashMap<String, Arc<McpServiceHandle>>,
@@ -312,11 +317,19 @@ async fn apply_handle_overrides(
         if info.status == ServiceStatus::Absent {
             continue;
         }
-        if let Some(handle) = handles.get(&info.id)
-            && let Some(hint) = handle.degraded_hint().await
-        {
-            info.status = ServiceStatus::Degraded;
-            info.hint = Some(hint);
+        if let Some(handle) = handles.get(&info.id) {
+            if let Some(hint) = handle.degraded_hint().await {
+                info.status = ServiceStatus::Degraded;
+                info.hint = Some(hint);
+            }
+            // Surface the MCP daemon version when the connector hasn't
+            // already provided one (e.g. when the HTTP daemon isn't running
+            // but the stdio MCP process is up and has responded to initialize).
+            if info.version.is_none()
+                && let Some(ver) = handle.daemon_version().await
+            {
+                info.version = Some(ver);
+            }
         }
     }
 }
@@ -435,20 +448,41 @@ struct VisualizeQuery {
 /// `GET /api/console/metrics/analyze/indexes` — list analyze indexes via stdio.
 ///
 /// Why: The Analyze tab needs a list of indexes to populate the dropdown.
-/// This route calls the analyze stdio MCP (via `McpServiceHandle::call_tool_raw`)
+/// This route calls the analyze stdio MCP (via `McpServiceHandle::call_tool_checked`)
 /// instead of the browser hitting the analyze daemon HTTP directly, honouring
 /// the #1104 architecture principle: the console is a stdio MCP client only.
+/// Using `call_tool_checked` instead of `call_tool_raw` prevents a raw -32601
+/// JSON-RPC error from reaching the browser as a 502 when the stale daemon lacks
+/// the `list_analyze_indexes` tool — the capability-gate returns `ToolUnavailable`
+/// which maps to a clean 503 with an actionable hint.
 /// What: Calls the `list_analyze_indexes` MCP tool (which proxies `GET /indexes`
-/// on the daemon). Returns the JSON array on 200, 503 when the analyze binary
-/// is absent or in backoff, 502 on any other error.
-/// Test: `test_analyze_indexes_absent_binary_returns_503` below.
+/// on the daemon). Returns the JSON array on 200, 503+hint when the analyze binary
+/// is absent, in backoff, degraded, or the tool is not in the cached tool set;
+/// 502 on any other error.
+/// Test: `test_analyze_indexes_absent_binary_returns_503` and
+/// `test_analyze_indexes_tool_unavailable_returns_degraded_hint` below.
 async fn analyze_indexes_handler(State(state): State<AppState>) -> axum::response::Response {
     match state
         .analyze_handle()
-        .call_tool_raw("list_analyze_indexes", serde_json::json!({}))
+        .call_tool_checked("list_analyze_indexes", serde_json::json!({}))
         .await
     {
         Ok(val) => axum::Json(val).into_response(),
+        Err(McpHandleError::ToolUnavailable { tool, hint }) => {
+            tracing::warn!(
+                tool = %tool,
+                hint = %hint,
+                "analyze_indexes_handler: tool not available — capability-gate triggered"
+            );
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(serde_json::json!({
+                    "status": "degraded",
+                    "hint": hint,
+                })),
+            )
+                .into_response()
+        }
         Err(
             McpHandleError::Absent
             | McpHandleError::Backoff { .. }
@@ -466,12 +500,16 @@ async fn analyze_indexes_handler(State(state): State<AppState>) -> axum::respons
 /// Why: The Analyze tab needs graph nodes, entities, and clusters in one round
 /// trip. This route calls the analyze stdio MCP for all three without the
 /// browser hitting the analyze daemon HTTP directly (#1104 architecture).
+/// Using `call_tool_checked` prevents a raw -32601 from reaching the browser
+/// as a 502 when a stale daemon lacks `extract_graph`/`list_entities`/
+/// `cluster_concepts` — the capability-gate returns `ToolUnavailable` which maps
+/// to a clean 503+hint response.
 /// What: Calls `extract_graph`, `list_entities`, and `cluster_concepts` (k=8)
-/// via `McpServiceHandle::call_tool_raw` and returns a combined JSON object:
+/// via `McpServiceHandle::call_tool_checked` and returns a combined JSON object:
 /// `{"graph": ..., "entities": ..., "clusters": ...}`. Missing index param
-/// returns 400 (BAD_REQUEST). Absent binary or backoff returns 503
-/// (SERVICE_UNAVAILABLE). A hard graph error (non-absent/backoff) returns
-/// 502 (BAD_GATEWAY).
+/// returns 400 (BAD_REQUEST). Absent binary, backoff, degraded, or tool
+/// unavailable returns 503 (SERVICE_UNAVAILABLE) with optional hint JSON.
+/// A hard graph error (non-absent/backoff/tool-unavailable) returns 502 (BAD_GATEWAY).
 /// Test: `test_analyze_visualize_handler_no_index_returns_400` and
 /// `test_analyze_visualize_handler_absent_binary_returns_503` below.
 async fn analyze_visualize_handler(
@@ -493,7 +531,7 @@ async fn analyze_visualize_handler(
     let args = serde_json::json!({ "index_id": index_id });
 
     // NOTE: although `tokio::join!` normally drives all three futures
-    // concurrently, these three `call_tool_raw` calls share a single stdio
+    // concurrently, these three `call_tool_checked` calls share a single stdio
     // child process behind `McpServiceHandle`'s inner `Arc<Mutex<StdioMcpClient>>`.
     // Each call acquires that inner mutex for the full duration of its
     // JSON-RPC round trip, so the three futures effectively serialize behind
@@ -504,9 +542,9 @@ async fn analyze_visualize_handler(
     // (separate stdin/stdout framing per call), this join would gain true
     // concurrency automatically without changing the call sites.
     let (graph_res, entities_res, clusters_res) = tokio::join!(
-        handle.call_tool_raw("extract_graph", args.clone()),
-        handle.call_tool_raw("list_entities", args.clone()),
-        handle.call_tool_raw("cluster_concepts", {
+        handle.call_tool_checked("extract_graph", args.clone()),
+        handle.call_tool_checked("list_entities", args.clone()),
+        handle.call_tool_checked("cluster_concepts", {
             let mut a = args.clone();
             if let Some(m) = a.as_object_mut() {
                 m.insert("k".to_string(), serde_json::json!(8));
@@ -515,9 +553,24 @@ async fn analyze_visualize_handler(
         }),
     );
 
-    // Classify the graph result: absent/backoff/degraded → 503, hard error → 502,
-    // success → combine with best-effort entities and clusters.
+    // Classify the graph result: tool unavailable → 503+hint, absent/backoff/degraded → 503,
+    // hard error → 502, success → combine with best-effort entities and clusters.
     match &graph_res {
+        Err(McpHandleError::ToolUnavailable { tool, hint }) => {
+            tracing::warn!(
+                tool = %tool,
+                hint = %hint,
+                "analyze_visualize_handler: tool not available — capability-gate triggered"
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(serde_json::json!({
+                    "status": "degraded",
+                    "hint": hint,
+                })),
+            )
+                .into_response();
+        }
         Err(
             McpHandleError::Absent
             | McpHandleError::Backoff { .. }
@@ -1063,6 +1116,65 @@ mod tests {
         assert_eq!(
             analyze["status"], "absent",
             "Absent service must not be overridden to degraded"
+        );
+    }
+
+    /// Why: Regression test for issue #1170 — a stale daemon whose MCP process
+    /// is running but lacks the `list_analyze_indexes` tool must cause the
+    /// `/api/console/metrics/analyze/indexes` route to return HTTP 503 with a
+    /// clean JSON body containing `status: "degraded"` and an actionable `hint`,
+    /// NOT HTTP 502 with empty body. The capability-gate in `call_tool_checked`
+    /// must fire before any JSON-RPC call is made to the daemon.
+    /// What: Builds state with a `trusty-analyze` handle primed to `Connected`
+    /// but missing `list_analyze_indexes` in the cached tool set. Issues GET
+    /// /api/console/metrics/analyze/indexes and asserts:
+    ///   1. Status is 503 (SERVICE_UNAVAILABLE), not 502 (BAD_GATEWAY).
+    ///   2. JSON body has `status == "degraded"`.
+    ///   3. JSON body has a non-empty `hint` mentioning the missing tool.
+    /// Test: this test itself. Key regression for #1170.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_analyze_indexes_tool_unavailable_returns_degraded_hint() {
+        let state = make_test_state();
+
+        // Prime the analyze handle to Connected with list_analyze_indexes absent.
+        {
+            let analyze_handle = state.analyze_handle();
+            analyze_handle
+                .prime_connected_missing_tool_for_test("list_analyze_indexes")
+                .await;
+        }
+
+        let router = build_router(state);
+        let req = Request::builder()
+            .uri("/api/console/metrics/analyze/indexes")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+
+        // Must be 503, not 502 — the capability gate fires, not the JSON-RPC call.
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "missing tool must return 503 SERVICE_UNAVAILABLE, not 502 BAD_GATEWAY"
+        );
+
+        let bytes = get_bytes(resp).await;
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json body");
+
+        assert_eq!(
+            body["status"], "degraded",
+            "response body must have status=degraded, got: {body}"
+        );
+
+        let hint = body["hint"].as_str().unwrap_or("");
+        assert!(
+            !hint.is_empty(),
+            "response body must include a non-empty hint, got: {body}"
+        );
+        assert!(
+            hint.contains("list_analyze_indexes"),
+            "hint must mention the missing tool name, got: {hint}"
         );
     }
 }

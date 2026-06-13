@@ -385,3 +385,135 @@ async fn mcp_handle_degraded_self_heals_after_backoff_window() {
          not Degraded"
     );
 }
+
+/// Why: This is the key regression test for issue #1170. A stale daemon that
+/// lacks a specific tool (e.g. `list_analyze_indexes`) previously caused route
+/// handlers to receive a raw JSON-RPC -32601 error → HTTP 502 with empty body.
+/// `call_tool_checked` must return `McpHandleError::ToolUnavailable` WITHOUT
+/// making a JSON-RPC call, so the route handler can return a clean 503+hint.
+/// What: Manually prime a handle into `Connected` state with a tool set that
+/// does NOT include `list_analyze_indexes`, then call `call_tool_checked` with
+/// that tool name and assert the result is `McpHandleError::ToolUnavailable`
+/// with a non-empty hint mentioning the tool name. No real MCP call is made —
+/// the guard fires before any I/O.
+/// Test: This test. Simulates the exact production failure that prompted #1170.
+#[tokio::test]
+async fn call_tool_checked_returns_tool_unavailable_when_tool_absent() {
+    use std::collections::HashSet;
+    use trusty_common::stdio_mcp_client::StdioMcpClient;
+
+    let handle = McpServiceHandle::new("trusty-analyze", vec!["mcp".to_string()]);
+
+    // Manually prime the handle to Connected state with a limited tool set —
+    // console_metrics is present (required sentinel) but list_analyze_indexes
+    // is absent (simulating a stale daemon built before that tool was added).
+    // We use `cat` as a benign placeholder binary since we need a valid child
+    // handle but will never actually make a call through the MCP client.
+    let cat_client = StdioMcpClient::spawn("cat", &[], "test-client")
+        .await
+        .expect("cat must be available");
+    let client_arc = std::sync::Arc::new(tokio::sync::Mutex::new(
+        Box::new(cat_client) as Box<StdioMcpClient>
+    ));
+    let mut tool_set = HashSet::new();
+    tool_set.insert("console_metrics".to_string());
+    // Intentionally do NOT add list_analyze_indexes — simulating stale daemon.
+    {
+        let mut guard = handle.state.lock().await;
+        let (state_opt, backoff) = &mut *guard;
+        backoff.reset();
+        *state_opt = Some(HandleState::Connected {
+            client: std::sync::Arc::clone(&client_arc),
+            tool_names: tool_set,
+            daemon_version: "0.7.0".to_string(),
+        });
+    }
+
+    let result = handle
+        .call_tool_checked("list_analyze_indexes", serde_json::json!({}))
+        .await;
+
+    assert!(
+        result.is_err(),
+        "call_tool_checked must return Err when tool is absent from cached set"
+    );
+    match result.unwrap_err() {
+        McpHandleError::ToolUnavailable { tool, hint } => {
+            assert_eq!(
+                tool, "list_analyze_indexes",
+                "ToolUnavailable must name the requested tool"
+            );
+            assert!(
+                !hint.is_empty(),
+                "ToolUnavailable must include a non-empty actionable hint"
+            );
+            assert!(
+                hint.contains("list_analyze_indexes"),
+                "hint must mention the missing tool name, got: {hint}"
+            );
+        }
+        other => panic!(
+            "expected McpHandleError::ToolUnavailable, got: {other} — \
+             capability-gate must fire BEFORE any JSON-RPC call"
+        ),
+    }
+}
+
+/// Why: `daemon_version()` must return `Some(version)` when the handle is
+/// `Connected` and the version is non-empty, so route handlers and the UI
+/// can surface the daemon's reported version without additional I/O.
+/// What: Manually primes the handle to `Connected` with a known version string,
+/// then asserts `daemon_version()` returns that exact string. Also asserts
+/// `None` for `Absent` and uninitialised states.
+/// Test: This test.
+#[tokio::test]
+#[cfg(unix)]
+async fn test_daemon_version_returns_some_when_connected() {
+    use std::collections::HashSet;
+    use trusty_common::stdio_mcp_client::StdioMcpClient;
+
+    let handle = McpServiceHandle::new("trusty-analyze", vec!["mcp".to_string()]);
+
+    // Uninitialised → None
+    assert!(
+        handle.daemon_version().await.is_none(),
+        "uninitialised handle must return None for daemon_version"
+    );
+
+    // Prime to Connected with known version
+    let cat_client = StdioMcpClient::spawn("cat", &[], "test-client")
+        .await
+        .expect("cat must be available");
+    let client_arc = std::sync::Arc::new(tokio::sync::Mutex::new(
+        Box::new(cat_client) as Box<StdioMcpClient>
+    ));
+    let mut tool_set = HashSet::new();
+    tool_set.insert("console_metrics".to_string());
+    {
+        let mut guard = handle.state.lock().await;
+        let (state_opt, _) = &mut *guard;
+        *state_opt = Some(HandleState::Connected {
+            client: client_arc,
+            tool_names: tool_set,
+            daemon_version: "1.2.3-test".to_string(),
+        });
+    }
+    let v = handle.daemon_version().await;
+    assert_eq!(
+        v.as_deref(),
+        Some("1.2.3-test"),
+        "Connected handle must return the cached daemon version"
+    );
+
+    // Absent → None
+    let h2 = McpServiceHandle::new("/nonexistent/binary", vec![]);
+    {
+        let mut guard = h2.state.lock().await;
+        let (state_opt, _) = &mut *guard;
+        *state_opt = Some(HandleState::Absent);
+    }
+    assert!(
+        h2.daemon_version().await.is_none(),
+        "Absent handle must return None for daemon_version"
+    );
+}

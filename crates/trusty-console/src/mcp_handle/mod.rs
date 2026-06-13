@@ -47,6 +47,7 @@
 //! `mcp_handle_respawn_failure_applies_backoff`, and
 //! `compute_backoff_delay_*` in `tests.rs`.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -82,19 +83,21 @@ const DEGRADED_HINT: &str = "reachable but `console_metrics` tool not registered
 
 // ── Typed error ──────────────────────────────────────────────────────────────
 
-/// Structured error returned by `call_tool_raw` and `poll_metrics`.
+/// Structured error returned by `call_tool_raw`, `call_tool_checked`, and `poll_metrics`.
 ///
 /// Why: String-based classification (`msg.contains("not installed")`) is
 /// fragile — a message change silently breaks 503 vs 502 routing in the HTTP
 /// handlers. Giving callers a typed variant they can `match` on makes the
 /// distinction explicit and refactor-safe.
-/// What: Four variants cover every outcome: `Absent` (binary not on PATH,
+/// What: Five variants cover every outcome: `Absent` (binary not on PATH,
 /// never retry), `Backoff` (spawn failure window active, retry later),
 /// `Degraded` (handshake OK but expected tool missing — actionable hint
-/// included), and `Other` (any other failure).
+/// included), `ToolUnavailable` (specific requested tool absent from the
+/// cached tool set — capability-gate), and `Other` (any other failure).
 /// Test: `mcp_handle_absent_binary_returns_error`,
-/// `mcp_handle_respawn_failure_applies_backoff`, and
-/// `mcp_handle_degraded_when_console_metrics_missing` cover the variants.
+/// `mcp_handle_respawn_failure_applies_backoff`,
+/// `mcp_handle_degraded_when_console_metrics_missing`, and
+/// `call_tool_checked_returns_tool_unavailable_when_tool_absent` cover the variants.
 #[derive(Debug)]
 pub enum McpHandleError {
     /// The service binary was not found on PATH; the handle is permanently in
@@ -114,6 +117,16 @@ pub enum McpHandleError {
     /// need to be restarted.
     Degraded {
         /// Human-readable actionable remediation hint.
+        hint: String,
+    },
+    /// The specific tool requested by `call_tool_checked` is not in the
+    /// service's cached tool set (from `tools/list`). The call was NOT made —
+    /// returned immediately to prevent a raw JSON-RPC -32601 error reaching
+    /// the HTTP handler as a 502.
+    ToolUnavailable {
+        /// The tool name that was requested but not found in `tools/list`.
+        tool: String,
+        /// Human-readable actionable remediation hint (e.g. "rebuild/upgrade the daemon").
         hint: String,
     },
     /// Any other failure (spawn error, transport error, tool error, parse
@@ -136,6 +149,9 @@ impl std::fmt::Display for McpHandleError {
             Self::Degraded { hint } => {
                 write!(f, "McpServiceHandle: degraded — {hint}")
             }
+            Self::ToolUnavailable { tool, hint } => {
+                write!(f, "McpServiceHandle: tool `{tool}` unavailable — {hint}")
+            }
             Self::Other(e) => write!(f, "{e:#}"),
         }
     }
@@ -156,12 +172,23 @@ impl std::error::Error for McpHandleError {
 pub(super) enum HandleState {
     /// `which(binary)` returned None — service not installed; never retry.
     Absent,
-    /// Connection is up.
+    /// Connection is up, with the full tool set and daemon version cached
+    /// from the `tools/list` + `initialize` probe.
     ///
     /// The client is wrapped in its own `Arc<Mutex<…>>` so the outer
     /// `state` lock can be released before the long `call_tool` I/O,
     /// preventing the metrics poller from blocking on-demand route handlers.
-    Connected(Arc<Mutex<Box<StdioMcpClient>>>),
+    /// `tool_names` caches the `tools/list` result so `call_tool_checked`
+    /// can gate without a network round-trip. `daemon_version` stores the
+    /// `serverInfo.version` from `initialize` for UI display.
+    Connected {
+        /// The inner stdio MCP client, behind a per-client lock.
+        client: Arc<Mutex<Box<StdioMcpClient>>>,
+        /// Full set of tool names returned by the last `tools/list` probe.
+        tool_names: HashSet<String>,
+        /// Daemon version string from `serverInfo.version` in the `initialize` response.
+        daemon_version: String,
+    },
     /// MCP handshake succeeded but `tools/list` did not include
     /// `console_metrics` — the service is reachable but cannot supply
     /// metrics. Self-heals: `ensure_connected` treats this state like `None`
@@ -295,6 +322,48 @@ impl McpServiceHandle {
         backoff.next_attempt = Instant::now() + future_backoff;
     }
 
+    /// Prime this handle to `Connected` with a tool set that excludes a specific
+    /// tool — test helper for capability-gate regression tests.
+    ///
+    /// Why: Route handler tests need to verify that `call_tool_checked` returns
+    /// `ToolUnavailable` when the connected daemon lacks a specific tool without
+    /// spawning a real MCP process. This helper sets the `Connected` state with
+    /// a curated tool set that includes `console_metrics` (the required sentinel)
+    /// but excludes the named tool.
+    /// What: Spawns `cat` as a placeholder child (never called through), wraps it
+    /// in the standard `Arc<Mutex<Box<StdioMcpClient>>>`, builds a tool set with
+    /// `console_metrics` plus any `extra_tools`, then sets state to `Connected`
+    /// with `daemon_version = "0.0.0-test"`.
+    /// Test: Used by route tests in `server.rs` to simulate a stale daemon
+    /// (capability-gate regression for #1170).
+    #[cfg(test)]
+    pub async fn prime_connected_missing_tool_for_test(&self, missing_tool: &str) {
+        let client =
+            trusty_common::stdio_mcp_client::StdioMcpClient::spawn("cat", &[], "test-client")
+                .await
+                .expect("cat must be present for test setup");
+        let client_arc = Arc::new(Mutex::new(Box::new(client)));
+        let mut tool_names = HashSet::new();
+        tool_names.insert(CONSOLE_METRICS_METHOD.to_string());
+        // Add several common analyze tools but NOT the one being tested as absent.
+        for t in &["extract_graph", "list_entities", "cluster_concepts"] {
+            if *t != missing_tool {
+                tool_names.insert(t.to_string());
+            }
+        }
+        // Ensure the missing_tool is absent regardless of the defaults above.
+        tool_names.remove(missing_tool);
+
+        let mut guard = self.state.lock().await;
+        let (state_opt, backoff) = &mut *guard;
+        backoff.reset();
+        *state_opt = Some(HandleState::Connected {
+            client: Arc::clone(&client_arc),
+            tool_names,
+            daemon_version: "0.0.0-test".to_string(),
+        });
+    }
+
     /// Return the degraded hint string if the handle is in the `Degraded` state.
     ///
     /// Why: The services route needs to overlay the connector-reported status with
@@ -338,7 +407,7 @@ impl McpServiceHandle {
     /// `mcp_handle_respawn_failure_applies_backoff` verifies the post-connect
     /// backoff gate; end-to-end smoke test validates the live pipe.
     pub async fn poll_metrics(&self) -> Result<ConsoleMetricsReport, McpHandleError> {
-        let client_arc = self.ensure_connected().await?;
+        let (client_arc, _tool_names) = self.ensure_connected().await?;
 
         let mut client_guard = client_arc.lock().await;
         let raw = client_guard
@@ -385,7 +454,7 @@ impl McpServiceHandle {
     /// Test: `call_tool_raw_absent_binary_returns_error` covers the absent path;
     /// the on-demand route integration tests exercise the live path.
     pub async fn call_tool_raw(&self, tool: &str, args: Value) -> Result<Value, McpHandleError> {
-        let client_arc = self.ensure_connected().await?;
+        let (client_arc, _tool_names) = self.ensure_connected().await?;
 
         let mut client_guard = client_arc.lock().await;
         let result = client_guard.call_tool(tool, args).await.with_context(|| {
@@ -409,10 +478,92 @@ impl McpServiceHandle {
         }
     }
 
+    /// Call a named MCP tool only if it is present in the cached tool set.
+    ///
+    /// Why: Calling a tool absent from `tools/list` causes the daemon to reply
+    /// with JSON-RPC -32601 "unknown method", which surfaces as a raw 502 to the
+    /// browser — an opaque, non-actionable error. This guard prevents that call
+    /// entirely and returns a typed `McpHandleError::ToolUnavailable` with an
+    /// actionable hint, which route handlers can map to a clean 503+JSON response.
+    /// After the user rebuilds/upgrades the daemon and the handle self-heals, the
+    /// re-probe populates the updated tool set, and the call becomes allowed again.
+    /// What: Calls `ensure_connected` to obtain the cached tool set; if `tool` is
+    /// not in the set, returns `McpHandleError::ToolUnavailable` immediately
+    /// without making a JSON-RPC round-trip. Otherwise delegates to `call_tool_raw`.
+    /// Test: `call_tool_checked_returns_tool_unavailable_when_tool_absent` in `tests.rs`.
+    pub async fn call_tool_checked(
+        &self,
+        tool: &str,
+        args: Value,
+    ) -> Result<Value, McpHandleError> {
+        let (client_arc, tool_names) = self.ensure_connected().await?;
+
+        if !tool_names.contains(tool) {
+            let hint = format!(
+                "{} does not expose `{tool}` — rebuild/upgrade the daemon \
+                 (run `cargo install {}`)",
+                self.binary, self.binary
+            );
+            warn!(
+                binary = %self.binary,
+                tool = %tool,
+                "McpServiceHandle: capability-gate rejected call — tool not in cached tool set"
+            );
+            return Err(McpHandleError::ToolUnavailable {
+                tool: tool.to_string(),
+                hint,
+            });
+        }
+
+        let mut client_guard = client_arc.lock().await;
+        let result = client_guard.call_tool(tool, args).await.with_context(|| {
+            format!(
+                "McpServiceHandle: {} tool call failed for {}",
+                tool, self.binary
+            )
+        });
+        drop(client_guard);
+
+        match result {
+            Ok(raw) => {
+                self.on_call_success().await;
+                Ok(unwrap_mcp_content(raw))
+            }
+            Err(e) => {
+                self.on_call_failure().await;
+                Err(McpHandleError::Other(e))
+            }
+        }
+    }
+
+    /// Return the daemon version string cached from the last successful `initialize` response.
+    ///
+    /// Why: The UI needs to display the daemon version so operators can confirm
+    /// whether they are running the expected build after an upgrade — a pure
+    /// capability-gate cannot catch version regressions, but version surfacing
+    /// gives operators the context they need to diagnose unexpected behaviour.
+    /// What: Acquires the outer state lock briefly; returns `Some(version)` when
+    /// in `Connected` state, `None` for every other state (`None`, `Absent`,
+    /// `Degraded`).
+    /// Test: `test_daemon_version_returns_some_when_connected` in `tests.rs`.
+    pub async fn daemon_version(&self) -> Option<String> {
+        let guard = self.state.lock().await;
+        let (state_opt, _) = &*guard;
+        if let Some(HandleState::Connected { daemon_version, .. }) = state_opt {
+            if daemon_version.is_empty() {
+                None
+            } else {
+                Some(daemon_version.clone())
+            }
+        } else {
+            None
+        }
+    }
+
     // ── Private helpers ───────────────────────────────────────────────────────
 
     /// Ensure the handle is in `Connected` state and return a clone of the
-    /// inner client `Arc`.
+    /// inner client `Arc` plus the cached tool name set.
     ///
     /// Why: Separates the state-machine logic (lazy-init, absent detection,
     /// backoff gating, spawn) from the tool-call I/O. This allows the outer
@@ -427,11 +578,13 @@ impl McpServiceHandle {
     /// back to `Connected`. Returns `McpHandleError::Absent` or
     /// `McpHandleError::Backoff` on the corresponding terminal/gate conditions,
     /// `McpHandleError::Other` on spawn/init failures. On success returns a clone
-    /// of the `Arc<Mutex<Box<StdioMcpClient>>>` so the caller can drop the outer
-    /// lock before invoking `call_tool`.
+    /// of the `Arc<Mutex<Box<StdioMcpClient>>>` and a clone of the cached tool
+    /// name set so the caller can drop the outer lock before invoking `call_tool`.
     /// Test: Exercised transitively by all handle tests and route tests.
     /// Self-healing path: `mcp_handle_degraded_self_heals_after_backoff_window`.
-    async fn ensure_connected(&self) -> Result<Arc<Mutex<Box<StdioMcpClient>>>, McpHandleError> {
+    async fn ensure_connected(
+        &self,
+    ) -> Result<(Arc<Mutex<Box<StdioMcpClient>>>, HashSet<String>), McpHandleError> {
         let mut guard = self.state.lock().await;
         let (state_opt, backoff) = &mut *guard;
 
@@ -477,31 +630,36 @@ impl McpServiceHandle {
                 let args_ref: Vec<&str> = self.args.iter().map(String::as_str).collect();
                 match StdioMcpClient::spawn(&self.binary, &args_ref, "trusty-console").await {
                     Ok(mut client) => {
-                        if let Err(e) = client.initialize().await.with_context(|| {
+                        let server_info = match client.initialize().await.with_context(|| {
                             format!(
                                 "McpServiceHandle: MCP initialize failed for {}",
                                 self.binary
                             )
                         }) {
-                            backoff.record_failure();
-                            warn!(
-                                binary = %self.binary,
-                                failure_count = backoff.failure_count,
-                                error = %e,
-                                "McpServiceHandle: initialize failed — will retry after backoff"
-                            );
-                            return Err(McpHandleError::Other(e));
-                        }
+                            Ok(info) => info,
+                            Err(e) => {
+                                backoff.record_failure();
+                                warn!(
+                                    binary = %self.binary,
+                                    failure_count = backoff.failure_count,
+                                    error = %e,
+                                    "McpServiceHandle: initialize failed — will retry after backoff"
+                                );
+                                return Err(McpHandleError::Other(e));
+                            }
+                        };
 
                         // tools/list probe: verify the service exposes the expected
                         // console_metrics tool. A missing tool means the binary is
                         // running but in the wrong mode (e.g. HTTP-only, not stdio
                         // MCP). We mark the handle Degraded rather than silently
                         // failing — poll_metrics will never succeed in this state.
+                        // Also cache the full tool name set for capability-gating.
                         match client.list_tools().await {
                             Ok(tools) => {
-                                let has_metrics =
-                                    tools.iter().any(|t| t.name == CONSOLE_METRICS_METHOD);
+                                let tool_names: HashSet<String> =
+                                    tools.iter().map(|t| t.name.clone()).collect();
+                                let has_metrics = tool_names.contains(CONSOLE_METRICS_METHOD);
                                 if !has_metrics {
                                     // Record a failure so the backoff window is
                                     // non-zero: the self-healing path in
@@ -526,8 +684,11 @@ impl McpServiceHandle {
                                 } else {
                                     backoff.reset();
                                     let client_arc = Arc::new(Mutex::new(Box::new(client)));
-                                    *state_opt =
-                                        Some(HandleState::Connected(Arc::clone(&client_arc)));
+                                    *state_opt = Some(HandleState::Connected {
+                                        client: Arc::clone(&client_arc),
+                                        tool_names,
+                                        daemon_version: server_info.version,
+                                    });
                                 }
                             }
                             Err(e) => {
@@ -571,7 +732,9 @@ impl McpServiceHandle {
             Some(HandleState::Degraded) => Err(McpHandleError::Degraded {
                 hint: DEGRADED_HINT.to_string(),
             }),
-            Some(HandleState::Connected(client_arc)) => Ok(Arc::clone(client_arc)),
+            Some(HandleState::Connected {
+                client, tool_names, ..
+            }) => Ok((Arc::clone(client), tool_names.clone())),
             None => unreachable!("guard must be Some after init block"),
         }
     }
