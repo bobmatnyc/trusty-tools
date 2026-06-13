@@ -185,6 +185,20 @@ pub(super) enum HandleState {
         /// The inner stdio MCP client, behind a per-client lock.
         client: Arc<Mutex<Box<StdioMcpClient>>>,
         /// Full set of tool names returned by the last `tools/list` probe.
+        ///
+        /// **Staleness invariant:** this set is a snapshot captured at
+        /// `ensure_connected` probe time and is only refreshed on a full
+        /// (re)connect or self-heal reconnect — that is, when the stdio
+        /// connection drops and a new MCP client is spawned, triggering a fresh
+        /// `initialize` + `tools/list` round-trip.  It is NOT updated on every
+        /// `call_tool_checked` call.
+        ///
+        /// This is intentionally correct for the stale-daemon upgrade use case:
+        /// upgrading a daemon restarts its OS process, which closes the stdio
+        /// pipe.  The pipe close is detected by the next poll or call, the
+        /// connection transitions back to `None`, and `ensure_connected` re-runs
+        /// the full probe — so the snapshot is refreshed automatically without
+        /// any special handling at the call site.
         tool_names: HashSet<String>,
         /// Daemon version string from `serverInfo.version` in the `initialize` response.
         daemon_version: String,

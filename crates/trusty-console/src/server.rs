@@ -585,6 +585,24 @@ async fn analyze_visualize_handler(
         Ok(_) => {}
     }
 
+    // Log a warning when a best-effort tool is missing (e.g. stale daemon that
+    // predates list_entities or cluster_concepts).  We do NOT return 503 here —
+    // these two are genuinely best-effort and the route still returns a useful
+    // partial payload.  The primary `extract_graph` gate above is the hard 503
+    // path; these are only observable degradation signals.
+    if let Err(McpHandleError::ToolUnavailable { tool, .. }) = &entities_res {
+        tracing::warn!(
+            tool = %tool,
+            "analyze_visualize_handler: list_entities tool unavailable — returning partial payload"
+        );
+    }
+    if let Err(McpHandleError::ToolUnavailable { tool, .. }) = &clusters_res {
+        tracing::warn!(
+            tool = %tool,
+            "analyze_visualize_handler: cluster_concepts tool unavailable — returning partial payload"
+        );
+    }
+
     let combined = json!({
         "graph":    graph_res.unwrap_or(serde_json::Value::Null),
         "entities": entities_res.unwrap_or(serde_json::Value::Null),
