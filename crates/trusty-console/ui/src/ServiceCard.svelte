@@ -20,17 +20,20 @@
     degraded: 'Degraded',
   };
 
-  const STATUS_COLORS = {
-    running: '#22c55e',
-    available: '#f59e0b',
-    absent: '#64748b',
-    // Degraded uses amber-orange to indicate partial impairment (reachable but
-    // console_metrics tool missing). Distinct from the yellow "Available" state.
-    degraded: '#f97316',
+  // Maps a service status to a theme-adaptive CSS custom property reference.
+  // The returned `var(--color-status-*)` resolves against the active palette at
+  // render time, so badges recolor automatically when the theme flips — no JS hex.
+  const STATUS_VARS = {
+    running: 'var(--color-status-ok)',
+    available: 'var(--color-status-warn)',
+    absent: 'var(--color-status-absent)',
+    // Degraded uses orange to indicate partial impairment (reachable but the
+    // console_metrics tool is missing). Distinct from the amber "Available" state.
+    degraded: 'var(--color-status-degraded)',
   };
 
   let statusLabel = $derived(STATUS_LABELS[service.status] ?? service.status);
-  let statusColor = $derived(STATUS_COLORS[service.status] ?? '#94a3b8');
+  let statusVar = $derived(STATUS_VARS[service.status] ?? 'var(--color-text-muted)');
   // hasTab is derived from the caller-owned tabbedServices — no local duplicate.
   let hasTab = $derived(tabbedServices.has(service.id));
 
@@ -42,8 +45,8 @@
 <div class="card">
   <div class="card-header">
     <h2 class="name">{service.display_name}</h2>
-    <span class="badge" style="background: {statusColor}22; color: {statusColor}; border-color: {statusColor}44;">
-      <span class="dot" style="background: {statusColor};"></span>
+    <span class="badge" style="--_s: {statusVar};">
+      <span class="dot"></span>
       {statusLabel}
     </span>
   </div>
@@ -70,14 +73,14 @@
 
 <style>
   .card {
-    background: #1e2130;
-    border: 1px solid #2d3348;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
     border-radius: 0.75rem;
     padding: 1.25rem;
     transition: border-color 0.15s;
   }
   .card:hover {
-    border-color: #3d4568;
+    border-color: var(--color-border-hover);
   }
   .card-header {
     display: flex;
@@ -90,7 +93,7 @@
     font-size: 1.1rem;
     font-weight: 600;
     margin: 0;
-    color: #e2e8f0;
+    color: var(--color-text-primary);
   }
   .badge {
     display: flex;
@@ -102,37 +105,46 @@
     border-radius: 9999px;
     border: 1px solid;
     white-space: nowrap;
+    /* --_s is supplied inline (statusVar) as a theme-adaptive --color-status-* ref.
+       The 13%/27% color-mix produces the subtle bg/border tint on either palette. */
+    --_s: var(--color-text-muted);
+    color: var(--_s);
+    background: rgba(0,0,0,0.08);
+    background: color-mix(in srgb, var(--_s) 13%, transparent);
+    border-color: rgba(0,0,0,0.18);
+    border-color: color-mix(in srgb, var(--_s) 27%, transparent);
   }
   .dot {
     width: 6px;
     height: 6px;
     border-radius: 50%;
+    background: var(--_s);
   }
   .card-body p {
     margin: 0.3rem 0;
     font-size: 0.85rem;
-    color: #94a3b8;
+    color: var(--color-text-secondary);
   }
   code {
     font-family: 'JetBrains Mono', 'Fira Code', monospace;
     font-size: 0.8rem;
-    background: #0f1117;
+    background: var(--color-surface-code);
     padding: 0.1rem 0.35rem;
     border-radius: 0.25rem;
-    color: #e2e8f0;
+    color: var(--color-text-primary);
   }
   .hint {
     font-style: italic;
   }
   .degraded-hint {
-    color: #f97316;
+    color: var(--color-status-degraded);
   }
   .details-btn {
     margin-top: 0.75rem;
     background: none;
-    border: 1px solid #3d4568;
+    border: 1px solid var(--color-border-hover);
     border-radius: 0.4rem;
-    color: #7c3aed;
+    color: var(--color-accent);
     cursor: pointer;
     font-size: 0.8rem;
     font-weight: 500;
@@ -140,7 +152,8 @@
     transition: background 0.15s, border-color 0.15s;
   }
   .details-btn:hover {
-    background: #7c3aed18;
-    border-color: #7c3aed;
+    background: rgba(0,0,0,0.06);
+    background: color-mix(in srgb, var(--color-accent) 9%, transparent);
+    border-color: var(--color-accent);
   }
 </style>
