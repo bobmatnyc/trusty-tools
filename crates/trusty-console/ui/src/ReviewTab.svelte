@@ -57,14 +57,16 @@
     clearInterval(refreshInterval);
   });
 
-  let statusColor = $derived(
-    report?.status === 'ok'         ? '#22c55e'
-    : report?.status === 'degraded' ? '#f59e0b'
-    : '#ef4444'
+  // Theme-adaptive CSS custom property refs (resolved against the active palette
+  // at render time) instead of hardcoded hex — badge/stat recolor on theme flip.
+  let statusVar = $derived(
+    report?.status === 'ok'         ? 'var(--color-status-ok)'
+    : report?.status === 'degraded' ? 'var(--color-status-warn)'
+    : 'var(--color-status-error)'
   );
 
-  let inferenceColor = $derived(
-    report?.metrics?.inference === 'ok' ? '#22c55e' : '#f59e0b'
+  let inferenceVar = $derived(
+    report?.metrics?.inference === 'ok' ? 'var(--color-status-ok)' : 'var(--color-status-warn)'
   );
 </script>
 
@@ -78,8 +80,8 @@
   {:else if report}
     <!-- Status badge + version -->
     <div class="meta-row">
-      <span class="badge" style="background: {statusColor}22; color: {statusColor}; border-color: {statusColor}44;">
-        <span class="dot" style="background: {statusColor};"></span>
+      <span class="badge" style="--_s: {statusVar};">
+        <span class="dot"></span>
         {report.status}
       </span>
       <span class="version">v{report.version}</span>
@@ -96,7 +98,7 @@
       </div>
       <div class="stat-card">
         <span class="stat-label">Inference</span>
-        <span class="stat-value" style="color: {inferenceColor};">
+        <span class="stat-value" style="color: {inferenceVar};">
           {report.metrics?.inference ?? '—'}
         </span>
       </div>
@@ -130,25 +132,32 @@
 <style>
   .tab-content { padding: 0.25rem 0; }
   .placeholder, .not-available {
-    background: #1e2130; border-radius: 0.5rem;
-    padding: 1.25rem; color: #94a3b8; font-size: 0.9rem;
+    background: var(--color-surface); border-radius: 0.5rem;
+    padding: 1.25rem; color: var(--color-text-secondary); font-size: 0.9rem;
   }
-  .not-available { color: #f59e0b; }
+  .not-available { color: var(--color-status-warn); }
 
   .meta-row {
     display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.25rem; flex-wrap: wrap;
   }
+  /* --_s supplied inline (statusVar) as a theme-adaptive --color-status-* ref. */
   .badge {
     display: inline-flex; align-items: center; gap: 0.35rem;
     font-size: 0.75rem; font-weight: 600; padding: 0.2rem 0.6rem;
     border-radius: 9999px; border: 1px solid;
+    --_s: var(--color-text-muted);
+    color: var(--_s);
+    background: color-mix(in srgb, var(--_s) 13%, transparent);
+    border-color: color-mix(in srgb, var(--_s) 27%, transparent);
   }
-  .dot { width: 6px; height: 6px; border-radius: 50%; }
-  .version { color: #94a3b8; font-size: 0.85rem; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--_s); }
+  .version { color: var(--color-text-secondary); font-size: 0.85rem; }
   .dry-run-badge {
     font-size: 0.7rem; font-weight: 600; padding: 0.15rem 0.5rem;
-    border-radius: 9999px; background: #7c3aed22; color: #a78bfa;
-    border: 1px solid #7c3aed44;
+    border-radius: 9999px;
+    background: color-mix(in srgb, var(--color-accent) 13%, transparent);
+    color: var(--color-accent-light);
+    border: 1px solid color-mix(in srgb, var(--color-accent) 27%, transparent);
   }
 
   .stat-grid {
@@ -157,39 +166,44 @@
     gap: 0.75rem; margin-bottom: 1.5rem;
   }
   .stat-card {
-    background: #1e2130; border: 1px solid #2d3348; border-radius: 0.5rem;
+    background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 0.5rem;
     padding: 1rem; display: flex; flex-direction: column; gap: 0.35rem;
   }
   .stat-card.wide {
     grid-column: span 2;
   }
   .stat-value {
-    font-size: 1rem; font-weight: 600; color: #e2e8f0; word-break: break-word;
+    font-size: 1rem; font-weight: 600; color: var(--color-text-primary); word-break: break-word;
   }
   .stat-value.model {
     font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;
   }
   .stat-label {
-    font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em;
+    font-size: 0.75rem; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.05em;
   }
 
-  .sub-title { font-size: 1rem; font-weight: 600; color: #94a3b8; margin: 0 0 0.75rem; }
+  .sub-title { font-size: 1rem; font-weight: 600; color: var(--color-text-secondary); margin: 0 0 0.75rem; }
 
   .dep-list {
     display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1.5rem;
   }
   .dep-row {
     display: flex; align-items: center; gap: 0.6rem;
-    background: #1e2130; border: 1px solid #2d3348; border-radius: 0.4rem;
+    background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 0.4rem;
     padding: 0.6rem 0.9rem;
   }
-  .dep-name { font-weight: 500; color: #e2e8f0; font-size: 0.9rem; }
-  .dep-required { color: #64748b; font-size: 0.75rem; }
+  .dep-name { font-weight: 500; color: var(--color-text-primary); font-size: 0.9rem; }
+  .dep-required { color: var(--color-text-muted); font-size: 0.75rem; }
+  /* Dependency reachability pills: --_s is a static theme-adaptive status var. */
   .dep-status {
     margin-left: auto; font-size: 0.75rem; font-weight: 600;
     padding: 0.15rem 0.5rem; border-radius: 9999px; border: 1px solid;
+    --_s: var(--color-text-muted);
+    color: var(--_s);
+    background: color-mix(in srgb, var(--_s) 13%, transparent);
+    border-color: color-mix(in srgb, var(--_s) 27%, transparent);
   }
-  .dep-status.ok  { color: #22c55e; background: #22c55e22; border-color: #22c55e44; }
-  .dep-status.fail { color: #ef4444; background: #ef444422; border-color: #ef444444; }
-  .dep-status.warn { color: #94a3b8; background: #94a3b822; border-color: #94a3b844; }
+  .dep-status.ok   { --_s: var(--color-status-ok);    }
+  .dep-status.fail { --_s: var(--color-status-error); }
+  .dep-status.warn { --_s: var(--color-text-muted);   }
 </style>

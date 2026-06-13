@@ -5,6 +5,7 @@
   import SearchTab from './SearchTab.svelte';
   import AnalyzeTab from './AnalyzeTab.svelte';
   import ReviewTab from './ReviewTab.svelte';
+  import ThemeSelector from './ThemeSelector.svelte';
 
   // ── state ────────────────────────────────────────────────────────────────
 
@@ -61,8 +62,11 @@
 
 <main>
   <header>
-    <h1>Trusty Console</h1>
-    <p class="subtitle">Unified service dashboard</p>
+    <div class="header-left">
+      <h1>Trusty Console</h1>
+      <p class="subtitle">Unified service dashboard</p>
+    </div>
+    <ThemeSelector />
   </header>
 
   <!-- Tab bar -->
@@ -117,8 +121,8 @@
   :global(body) {
     margin: 0;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: #0f1117;
-    color: #e2e8f0;
+    background: var(--color-bg);
+    color: var(--color-text-primary);
     min-height: 100vh;
   }
   main {
@@ -127,6 +131,9 @@
     padding: 2rem 1rem;
   }
   header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
     margin-bottom: 1.5rem;
   }
   h1 {
@@ -139,15 +146,18 @@
     background-clip: text;
   }
   .subtitle {
-    color: #94a3b8;
+    color: var(--color-text-secondary);
     margin: 0;
+  }
+  .header-left {
+    min-width: 0;
   }
 
   /* Tab bar */
   div.tabs {
     display: flex;
     gap: 0.25rem;
-    border-bottom: 1px solid #2d3348;
+    border-bottom: 1px solid var(--color-border);
     margin-bottom: 1.5rem;
   }
   .tab-btn {
@@ -155,7 +165,7 @@
     border: none;
     border-bottom: 2px solid transparent;
     padding: 0.6rem 1.2rem;
-    color: #94a3b8;
+    color: var(--color-text-secondary);
     font-size: 0.9rem;
     font-weight: 500;
     cursor: pointer;
@@ -163,11 +173,11 @@
     margin-bottom: -1px;
   }
   .tab-btn:hover {
-    color: #e2e8f0;
+    color: var(--color-text-primary);
   }
   .tab-btn.active {
-    color: #7c3aed;
-    border-bottom-color: #7c3aed;
+    color: var(--color-accent);
+    border-bottom-color: var(--color-accent);
   }
 
   /* Panel */
@@ -183,10 +193,10 @@
   .error {
     padding: 1.5rem;
     border-radius: 0.5rem;
-    background: #1e2130;
-    color: #94a3b8;
+    background: var(--color-surface);
+    color: var(--color-text-secondary);
   }
   .error {
-    color: #f87171;
+    color: var(--color-status-error);
   }
 </style>

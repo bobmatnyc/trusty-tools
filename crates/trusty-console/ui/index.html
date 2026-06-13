@@ -4,6 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Trusty Console</title>
+    <script>
+      (function() {
+        var k = 'trusty-console-theme';
+        var saved = localStorage.getItem(k) || 'system';
+        var effective = saved === 'system'
+          ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+          : saved;
+        document.documentElement.setAttribute('data-theme', effective);
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>

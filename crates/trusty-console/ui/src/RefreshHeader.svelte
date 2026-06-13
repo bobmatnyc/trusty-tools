@@ -25,13 +25,13 @@
     display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;
   }
   .section-title {
-    font-size: 1.25rem; font-weight: 600; margin: 0; color: #e2e8f0; flex: 1;
+    font-size: 1.25rem; font-weight: 600; margin: 0; color: var(--color-text-primary); flex: 1;
   }
   .refresh-btn {
-    background: none; border: 1px solid #3d4568; border-radius: 0.4rem;
-    color: #7c3aed; cursor: pointer; font-size: 0.78rem; font-weight: 500;
+    background: none; border: 1px solid var(--color-border-hover); border-radius: 0.4rem;
+    color: var(--color-accent); cursor: pointer; font-size: 0.78rem; font-weight: 500;
     padding: 0.25rem 0.65rem; transition: background 0.15s, border-color 0.15s;
   }
-  .refresh-btn:hover:not(:disabled) { background: #7c3aed18; border-color: #7c3aed; }
+  .refresh-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--color-accent) 9%, transparent); border-color: var(--color-accent); }
   .refresh-btn:disabled { opacity: 0.5; cursor: default; }
 </style>
