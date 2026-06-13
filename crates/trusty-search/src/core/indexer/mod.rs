@@ -154,6 +154,18 @@ pub struct CodeIndexer {
 
     /// `true` once the in-memory `chunks` map has been evicted.
     pub(super) chunks_evicted: Arc<AtomicBool>,
+
+    /// Issue #1158: `true` when the redb corpus file existed but could NOT be
+    /// opened on this boot (e.g. incompatible page format, corruption).
+    ///
+    /// Why: the persistence loader logs an ERROR and continues without wiring a
+    /// corpus store when `CorpusStore::open` fails. Without this flag the
+    /// warm-boot stage-classifier only sees `corpus_store() == None` →
+    /// `chunk_count = 0` → `lexical = InProgress`, which is indistinguishable
+    /// from a legitimately empty, freshly-created index.  This flag lets the
+    /// classifier emit `StageStatus::Failed` with an actionable message instead
+    /// of the misleading `InProgress` / "walking" state (closes #1158).
+    pub corpus_open_failed: bool,
 }
 
 /// Coalescing state for `spawn_incremental_persist`.
@@ -209,6 +221,7 @@ impl CodeIndexer {
             created_at: Instant::now(),
             last_activity_ms: Arc::new(AtomicU64::new(0)),
             chunks_evicted: Arc::new(AtomicBool::new(false)),
+            corpus_open_failed: false,
         }
     }
 

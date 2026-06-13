@@ -285,6 +285,11 @@ pub(crate) async fn restore_one_index(
     // `hnsw.usearch` is a `path.exists()` filesystem call (the dim /
     // deserialise check already happened inside the loader), and the
     // symbol-graph node count is an `Arc::clone` + in-memory read.
+    //
+    // Issue #1158: also read `corpus_open_failed` so the classifier emits
+    // `StageStatus::Failed` instead of the silent `InProgress` when the
+    // corpus file existed but could not be opened (incompatible format etc.).
+    let corpus_open_failed = indexer.corpus_open_failed;
     let chunk_count = indexer
         .corpus_store()
         .and_then(|c| c.chunk_count().ok())
@@ -299,10 +304,11 @@ pub(crate) async fn restore_one_index(
         graph_node_count,
         lexical_only,
         skip_kg,
+        corpus_open_failed,
     });
     tracing::info!(
         "warm-boot: index '{}' restored (colocated={}) — chunks={} hnsw_snapshot={} \
-         graph_nodes={} lexical_only={} skip_kg={} → \
+         graph_nodes={} lexical_only={} skip_kg={} corpus_open_failed={} → \
          stages(lexical={:?}, semantic={:?}, graph={:?})",
         entry.id,
         entry.colocated,
@@ -311,6 +317,7 @@ pub(crate) async fn restore_one_index(
         graph_node_count,
         lexical_only,
         skip_kg,
+        corpus_open_failed,
         stages.lexical.status,
         stages.semantic.status,
         stages.graph.status,

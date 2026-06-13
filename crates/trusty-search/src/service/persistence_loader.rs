@@ -105,22 +105,29 @@ pub async fn build_indexer_from_entry(
     let mut indexer =
         CodeIndexer::new(index_id, root_path).with_components(Arc::clone(embedder), store);
 
-    // Issue #28/#840: wire the durable redb corpus store.  Failure is non-fatal
-    // but logged at ERROR (#840) because a missing corpus means the next reindex
-    // cold-starts (Skipped 0).  `open_corpus_with_retry` retries once on
-    // DatabaseAlreadyOpen (stale file lock from a rapid restart).
+    // Issue #28/#840/#1158: wire the durable redb corpus store.  Failure is
+    // non-fatal but logged at ERROR (#840) because a missing corpus means the
+    // next reindex cold-starts (Skipped 0).  `open_corpus_with_retry` retries
+    // once on DatabaseAlreadyOpen (stale file lock from a rapid restart).
+    // Issue #1158: set `corpus_open_failed` so the warm-boot stage-classifier
+    // can emit `StageStatus::Failed` instead of the misleading `InProgress`.
     match persistence::corpus_redb_path_for_entry(entry) {
         Ok(redb_path) => {
             let open_result = open_corpus_with_retry(&redb_path).await;
             match open_result {
                 Ok(corpus) => indexer.set_corpus_store(Arc::new(corpus)),
-                Err(e) => tracing::error!(
-                    "warm-boot: FAILED to open redb corpus for '{index_id}' at {} ({e}). \
-                     The durable corpus store is unavailable — the next reindex will be a \
-                     full cold-start (Skipped 0). Check permissions and whether another \
-                     process holds the redb file lock. (refs #840)",
-                    redb_path.display()
-                ),
+                Err(e) => {
+                    tracing::error!(
+                        "warm-boot: FAILED to open redb corpus for '{index_id}' at {} ({e}). \
+                         The durable corpus store is unavailable — the next reindex will be a \
+                         full cold-start (Skipped 0). Check permissions and whether another \
+                         process holds the redb file lock. (refs #840, #1158)",
+                        redb_path.display()
+                    );
+                    // Issue #1158: mark the failure so the stage-classifier
+                    // emits Failed instead of the misleading InProgress.
+                    indexer.corpus_open_failed = true;
+                }
             }
         }
         Err(e) => tracing::warn!("cannot resolve redb corpus path for '{index_id}': {e}"),

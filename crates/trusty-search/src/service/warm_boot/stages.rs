@@ -37,6 +37,17 @@ pub struct WarmBootInputs {
     pub lexical_only: bool,
     /// `skip_kg` flag (issue #313): forces graph stage to `Skipped`.
     pub skip_kg: bool,
+    /// Issue #1158: `true` when the redb corpus file existed but could not be
+    /// opened (e.g. incompatible redb page-format, corrupted file).
+    ///
+    /// Why: before this flag, a failed corpus open caused `chunk_count = 0`
+    /// (no corpus store → `unwrap_or(0)`), which the classifier treated as
+    /// `InProgress` — indistinguishable from a freshly-created, never-indexed
+    /// handle. Operators saw `chunks=0` in the warm-boot log and the index
+    /// looked healthy-ish when it was silently broken. This flag lets the
+    /// classifier emit `StageStatus::Failed` with an actionable reason
+    /// instead of the misleading `InProgress` state.
+    pub corpus_open_failed: bool,
 }
 
 /// Pure classifier: given on-disk signals, derive the [`IndexStages`] for a
@@ -44,15 +55,26 @@ pub struct WarmBootInputs {
 ///
 /// Why (issue #135): see [`WarmBootInputs`].
 /// What: applies rules in order:
-///   1. `lexical_only == true` → semantic + graph are `Skipped`.
+///   1. `corpus_open_failed == true` → lexical is `Failed` (issue #1158).
 ///   2. `chunk_count > 0` → lexical is `Ready`.
 ///   3. `chunk_count == 0` → lexical is `InProgress`.
-///   4. `hnsw_snapshot_ready` → semantic is `Ready`.
-///   5. `graph_node_count > 0` → graph is `Ready`.
+///   4. `lexical_only == true` → semantic + graph are `Skipped`.
+///   5. `hnsw_snapshot_ready` → semantic is `Ready`.
+///   6. `graph_node_count > 0` → graph is `Ready`.
 ///
 /// Test: `warm_boot_*` tests in `commands/start.rs`.
 pub fn derive_warm_boot_stages(inputs: WarmBootInputs) -> IndexStages {
-    let lexical = if inputs.chunk_count > 0 {
+    // Issue #1158: corpus open failure must surface as Failed, not InProgress.
+    // Before this guard, `chunk_count == 0` (corpus store absent) was treated
+    // identically to a freshly-created, never-indexed handle — silently
+    // appearing healthy while the durable store was unreadable.
+    let lexical = if inputs.corpus_open_failed {
+        StageState::failed(
+            "redb corpus could not be opened (incompatible or corrupted format); \
+             run `trusty-search index <path> --force` to rebuild from source \
+             (issue #1158)",
+        )
+    } else if inputs.chunk_count > 0 {
         StageState {
             status: StageStatus::Ready,
             ..Default::default()

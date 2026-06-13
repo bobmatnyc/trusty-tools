@@ -1252,6 +1252,7 @@ mod tests {
             graph_node_count: 0,
             lexical_only: false,
             skip_kg: false,
+            corpus_open_failed: false,
         }
     }
 
@@ -1330,6 +1331,7 @@ mod tests {
             graph_node_count: 7_402,
             lexical_only: true,
             skip_kg: false,
+            corpus_open_failed: false,
         });
         assert_eq!(stages.lexical.status, StageStatus::Ready);
         assert_eq!(stages.semantic.status, StageStatus::Skipped);
@@ -1347,13 +1349,7 @@ mod tests {
     /// trigger can resume cleanly via the hash-skip path.
     #[test]
     fn warm_boot_marks_mid_reindex_as_in_progress() {
-        let stages = derive_warm_boot_stages(WarmBootInputs {
-            chunk_count: 0,
-            hnsw_snapshot_ready: false,
-            graph_node_count: 0,
-            lexical_only: false,
-            skip_kg: false,
-        });
+        let stages = derive_warm_boot_stages(inputs());
         assert_eq!(stages.lexical.status, StageStatus::InProgress);
         assert_eq!(stages.lifecycle_status(), "walking");
         assert!(stages.search_capabilities().is_empty());
@@ -1379,6 +1375,7 @@ mod tests {
             graph_node_count: 7_402,
             lexical_only: false,
             skip_kg: true,
+            corpus_open_failed: false,
         });
         assert_eq!(
             stages.graph.status,
@@ -1407,6 +1404,7 @@ mod tests {
             graph_node_count: 7_402,
             lexical_only: true,
             skip_kg: true,
+            corpus_open_failed: false,
         });
         assert_eq!(stages_both.semantic.status, StageStatus::Skipped);
         assert_eq!(stages_both.graph.status, StageStatus::Skipped);
