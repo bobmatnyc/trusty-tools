@@ -147,7 +147,9 @@
     border-radius: 9999px; border: 1px solid;
     --_s: var(--color-text-muted);
     color: var(--_s);
+    background: rgba(0,0,0,0.08);
     background: color-mix(in srgb, var(--_s) 13%, transparent);
+    border-color: rgba(0,0,0,0.18);
     border-color: color-mix(in srgb, var(--_s) 27%, transparent);
   }
   .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--_s); }
@@ -155,8 +157,10 @@
   .dry-run-badge {
     font-size: 0.7rem; font-weight: 600; padding: 0.15rem 0.5rem;
     border-radius: 9999px;
+    background: rgba(0,0,0,0.08);
     background: color-mix(in srgb, var(--color-accent) 13%, transparent);
     color: var(--color-accent-light);
+    border: 1px solid rgba(0,0,0,0.18);
     border: 1px solid color-mix(in srgb, var(--color-accent) 27%, transparent);
   }
 
@@ -200,7 +204,9 @@
     padding: 0.15rem 0.5rem; border-radius: 9999px; border: 1px solid;
     --_s: var(--color-text-muted);
     color: var(--_s);
+    background: rgba(0,0,0,0.08);
     background: color-mix(in srgb, var(--_s) 13%, transparent);
+    border-color: rgba(0,0,0,0.18);
     border-color: color-mix(in srgb, var(--_s) 27%, transparent);
   }
   .dep-status.ok   { --_s: var(--color-status-ok);    }

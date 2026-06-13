@@ -411,7 +411,9 @@
     border-radius: 9999px; border: 1px solid;
     --_s: var(--color-text-muted);
     color: var(--_s);
+    background: rgba(0,0,0,0.08);
     background: color-mix(in srgb, var(--_s) 13%, transparent);
+    border-color: rgba(0,0,0,0.18);
     border-color: color-mix(in srgb, var(--_s) 27%, transparent);
   }
   .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--_s); }

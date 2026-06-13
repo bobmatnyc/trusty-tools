@@ -32,6 +32,6 @@
     color: var(--color-accent); cursor: pointer; font-size: 0.78rem; font-weight: 500;
     padding: 0.25rem 0.65rem; transition: background 0.15s, border-color 0.15s;
   }
-  .refresh-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--color-accent) 9%, transparent); border-color: var(--color-accent); }
+  .refresh-btn:hover:not(:disabled) { background: rgba(0,0,0,0.06); background: color-mix(in srgb, var(--color-accent) 9%, transparent); border-color: var(--color-accent); }
   .refresh-btn:disabled { opacity: 0.5; cursor: default; }
 </style>

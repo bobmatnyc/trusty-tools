@@ -6,8 +6,8 @@
     <title>Trusty Console</title>
     <script>
       (function() {
-        var k = 'trusty-console-theme';
-        var saved = localStorage.getItem(k) || 'system';
+        var saved = 'system';
+        try { saved = localStorage.getItem('trusty-console-theme') || 'system'; } catch (_) {}
         var effective = saved === 'system'
           ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
           : saved;

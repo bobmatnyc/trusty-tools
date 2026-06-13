@@ -196,7 +196,5 @@
     background: var(--color-surface);
     color: var(--color-text-secondary);
   }
-  .error {
-    color: var(--color-status-error);
-  }
+  .error { color: var(--color-status-error); }
 </style>

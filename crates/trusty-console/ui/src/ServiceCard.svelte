@@ -109,7 +109,9 @@
        The 13%/27% color-mix produces the subtle bg/border tint on either palette. */
     --_s: var(--color-text-muted);
     color: var(--_s);
+    background: rgba(0,0,0,0.08);
     background: color-mix(in srgb, var(--_s) 13%, transparent);
+    border-color: rgba(0,0,0,0.18);
     border-color: color-mix(in srgb, var(--_s) 27%, transparent);
   }
   .dot {
@@ -150,6 +152,7 @@
     transition: background 0.15s, border-color 0.15s;
   }
   .details-btn:hover {
+    background: rgba(0,0,0,0.06);
     background: color-mix(in srgb, var(--color-accent) 9%, transparent);
     border-color: var(--color-accent);
   }

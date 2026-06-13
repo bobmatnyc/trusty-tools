@@ -72,9 +72,6 @@
     : 'var(--color-status-error)'
   );
 
-  let degradedVar = $derived(
-    report?.metrics?.warm_boot_degraded ? 'var(--color-status-warn)' : 'var(--color-status-ok)'
-  );
 </script>
 
 <div class="tab-content">
@@ -100,8 +97,8 @@
         <span class="stat-value">{report.metrics?.index_count ?? 0}</span>
         <span class="stat-label">Indexes</span>
       </div>
-      <div class="stat-card" style="--_d: {degradedVar}; border-color: color-mix(in srgb, var(--_d) 27%, transparent);">
-        <span class="stat-value" style="color: var(--_d);">
+      <div class="stat-card" class:degraded={report.metrics?.warm_boot_degraded}>
+        <span class="stat-value">
           {report.metrics?.warm_boot_degraded ? 'Yes' : 'No'}
         </span>
         <span class="stat-label">Warm Boot Degraded</span>
@@ -157,7 +154,9 @@
     border-radius: 9999px; border: 1px solid;
     --_s: var(--color-text-muted);
     color: var(--_s);
+    background: rgba(0,0,0,0.08);
     background: color-mix(in srgb, var(--_s) 13%, transparent);
+    border-color: rgba(0,0,0,0.18);
     border-color: color-mix(in srgb, var(--_s) 27%, transparent);
   }
   .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--_s); }
@@ -173,6 +172,14 @@
   }
   .stat-value { font-size: 1.6rem; font-weight: 700; color: var(--color-text-primary); }
   .stat-label { font-size: 0.75rem; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
+  /* .degraded modifier: warm-boot-degraded card gets amber border/value tint,
+     consistent with the --_s badge pattern (single scoped var, no inline one-offs). */
+  .stat-card.degraded {
+    --_s: var(--color-status-warn);
+    border-color: rgba(0,0,0,0.18);
+    border-color: color-mix(in srgb, var(--_s) 27%, transparent);
+  }
+  .stat-card.degraded .stat-value { color: var(--color-status-warn); }
 
   .sub-title { font-size: 1rem; font-weight: 600; color: var(--color-text-secondary); margin: 0 0 0.75rem; }
   .table-wrap { overflow-x: auto; }
