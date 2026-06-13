@@ -71,6 +71,30 @@
     }
   }
 
+  /**
+   * Why: Extracts a user-facing error string from a non-OK response. When the
+   *      server returns 503 with a capability-gate JSON body (status + hint),
+   *      surfaces the actionable hint rather than a generic "HTTP 503" message.
+   * What: If resp.status === 503 and the body has a `hint` field, returns that
+   *       hint. Otherwise returns a generic HTTP status message.
+   * Test: Call with a mocked 503 response whose body has {status:"degraded",hint:"rebuild…"};
+   *       assert the returned string equals the hint.
+   */
+  async function extractErrorMessage(resp, genericPrefix) {
+    if (resp.status === 503) {
+      try {
+        const data = await resp.json();
+        if (data?.hint) {
+          return `${data.hint}`;
+        }
+      } catch (_) {
+        // Body was not JSON or was empty — fall through to generic message.
+      }
+      return `${genericPrefix}: daemon absent, starting up, or not yet upgraded.`;
+    }
+    return `${genericPrefix}: HTTP ${resp.status}`;
+  }
+
   async function fetchIndexes() {
     indexesLoading = true;
     try {
@@ -78,13 +102,8 @@
       // stdio MCP internally. The browser never contacts the analyze daemon HTTP
       // directly (architecture: console is a stdio MCP client only, per #1104).
       const resp = await fetch('/api/console/metrics/analyze/indexes');
-      if (resp.status === 503) {
-        // Analyze binary absent or in backoff — non-fatal.
-        indexesError = 'trusty-analyze not available (binary absent or starting up).';
-        return;
-      }
       if (!resp.ok) {
-        indexesError = `Index list error: HTTP ${resp.status}`;
+        indexesError = await extractErrorMessage(resp, 'trusty-analyze index list unavailable');
         return;
       }
       const data = await resp.json();
@@ -115,12 +134,8 @@
       const resp = await fetch(
         `/api/console/metrics/analyze/visualize?index=${encodeURIComponent(indexId)}`
       );
-      if (resp.status === 503) {
-        vizError = 'trusty-analyze not available (binary absent or starting up).';
-        return;
-      }
       if (!resp.ok) {
-        vizError = `Failed to load visualization data: HTTP ${resp.status}`;
+        vizError = await extractErrorMessage(resp, 'Visualization unavailable');
         return;
       }
       const data = await resp.json();
