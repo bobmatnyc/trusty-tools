@@ -1,24 +1,32 @@
-//! Azure DevOps integration (Phase 2).
+//! Azure DevOps integration (Phases 2–6).
 //!
-//! Phase 2 wires a real `reqwest` HTTP session with PAT-based Basic auth
-//! and implements two endpoints against `api-version=7.1`:
-//!
-//! * `GET _apis/connectionData` — auth probe + identity echo
-//!   ([`AzureDevOpsClient::test_connection`])
-//! * `GET _apis/projects` — list projects (single page, up to 100)
-//!   ([`AzureDevOpsClient::get_projects`])
-//!
-//! Phase 6 will add work-item fetching on top of this session.
+//! Why: groups all Azure DevOps HTTP client code, PR fetching, and supporting
+//! types under one module so callers import from `collect::azdo::*`.
+//! What: re-exports all public items from sub-modules (`client`, `errors`,
+//! `helpers`, `pr_fetcher`, `types`) while keeping internal wire shapes and
+//! tests private.
+//! Test: `cargo test -p tga` runs all tests in `azdo/tests.rs` and
+//! `azdo/pr_fetcher/tests.rs`.
 
 pub mod client;
+pub(super) mod errors;
+pub(super) mod helpers;
 pub mod pr_fetcher;
+pub(super) mod types;
+pub(super) mod wire;
 
-pub use client::{
-    extract_work_item_refs, feed_azdo_users, fetch_referenced_work_items, AzdoComment,
-    AzdoConnectionInfo, AzdoError, AzdoField, AzdoIteration, AzdoProject, AzdoUser, AzdoWorkItem,
-    AzdoWorkItemExtended, AzdoWorkItemType, AzureDevOpsClient, WiqlResult, WorkItem, WorkItemRef,
-};
+#[cfg(test)]
+mod tests;
+
+// Re-export the full public API so external call sites remain unchanged.
+pub use client::AzureDevOpsClient;
+pub use errors::AzdoError;
+pub use helpers::{extract_work_item_refs, feed_azdo_users, fetch_referenced_work_items};
 pub use pr_fetcher::{
     extract_pr_ids, get_existing_pr_numbers, upsert_pr, upsert_pr_reviewer, AdoPrFetcher,
     AdoPrReviewer, AdoPullRequest,
+};
+pub use types::{
+    AzdoComment, AzdoConnectionInfo, AzdoField, AzdoIteration, AzdoProject, AzdoUser, AzdoWorkItem,
+    AzdoWorkItemExtended, AzdoWorkItemType, WiqlResult, WorkItem, WorkItemRef,
 };

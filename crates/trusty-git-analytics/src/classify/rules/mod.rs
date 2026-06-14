@@ -12,6 +12,14 @@ pub mod loader;
 pub mod multi_loader;
 pub mod types;
 
+pub(super) mod default_rules_a;
+pub(super) mod default_rules_b;
+pub(super) mod default_rules_c;
+pub(super) mod default_rules_d;
+
 pub use loader::{default_rules, load_rules};
 pub use multi_loader::{apply_repo_category_fallback, load_rules_multi, repo_matches};
 pub use types::{Rule, RuleSet};
+
+#[cfg(test)]
+mod loader_tests;

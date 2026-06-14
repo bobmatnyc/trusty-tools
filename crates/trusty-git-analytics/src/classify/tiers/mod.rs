@@ -91,6 +91,12 @@ impl ClassificationResult {
 }
 
 #[cfg(test)]
+mod llm_tests;
+
+#[cfg(test)]
+mod weighted_sum_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
