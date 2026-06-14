@@ -20,11 +20,11 @@
 mod scan;
 mod types;
 
-pub use types::{
-    result_to_json, BootstrapResult, BootstrapTriple, ScannedFile, KG_EMPTY_HINT,
-    is_kg_empty_for_subject,
-};
 pub use scan::scan_project;
+pub use types::{
+    is_kg_empty_for_subject, result_to_json, BootstrapResult, BootstrapTriple, ScannedFile,
+    KG_EMPTY_HINT,
+};
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};

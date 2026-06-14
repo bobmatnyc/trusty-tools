@@ -422,7 +422,6 @@ pub fn service_result_to_anyhow<T: serde::Serialize>(r: ServiceResult<T>) -> Res
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

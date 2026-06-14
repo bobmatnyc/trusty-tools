@@ -19,7 +19,6 @@
 //! - `kg_assert(palace, subject, predicate, object, confidence?, provenance?)` -> ()
 //! - `kg_query(palace, subject)`                    -> Vec<Triple>
 
-
 pub mod bm25;
 pub mod definitions;
 pub mod helpers;

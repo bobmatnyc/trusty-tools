@@ -16,9 +16,7 @@ use trusty_common::memory_core::{PalaceHandle, PalaceRegistry};
 
 use super::core::KG_GRAPH_MAX_TRIPLES;
 use super::helpers::refresh_gaps_cache;
-use super::types::{
-    DreamStatusPayload, KgAssertBody, KgGraphPayload, ServiceError, ServiceResult,
-};
+use super::types::{DreamStatusPayload, KgAssertBody, KgGraphPayload, ServiceError, ServiceResult};
 use super::MemoryService;
 
 impl MemoryService {
