@@ -71,6 +71,30 @@
     }
   }
 
+  /**
+   * Why: Extracts a user-facing error string from a non-OK response. When the
+   *      server returns 503 with a capability-gate JSON body (status + hint),
+   *      surfaces the actionable hint rather than a generic "HTTP 503" message.
+   * What: If resp.status === 503 and the body has a `hint` field, returns that
+   *       hint. Otherwise returns a generic HTTP status message.
+   * Test: Call with a mocked 503 response whose body has {status:"degraded",hint:"rebuild…"};
+   *       assert the returned string equals the hint.
+   */
+  async function extractErrorMessage(resp, genericPrefix) {
+    if (resp.status === 503) {
+      try {
+        const data = await resp.json();
+        if (data?.hint) {
+          return `${data.hint}`;
+        }
+      } catch (_) {
+        // Body was not JSON or was empty — fall through to generic message.
+      }
+      return `${genericPrefix}: daemon absent, starting up, or not yet upgraded.`;
+    }
+    return `${genericPrefix}: HTTP ${resp.status}`;
+  }
+
   async function fetchIndexes() {
     indexesLoading = true;
     try {
@@ -78,13 +102,8 @@
       // stdio MCP internally. The browser never contacts the analyze daemon HTTP
       // directly (architecture: console is a stdio MCP client only, per #1104).
       const resp = await fetch('/api/console/metrics/analyze/indexes');
-      if (resp.status === 503) {
-        // Analyze binary absent or in backoff — non-fatal.
-        indexesError = 'trusty-analyze not available (binary absent or starting up).';
-        return;
-      }
       if (!resp.ok) {
-        indexesError = `Index list error: HTTP ${resp.status}`;
+        indexesError = await extractErrorMessage(resp, 'trusty-analyze index list unavailable');
         return;
       }
       const data = await resp.json();
@@ -115,12 +134,8 @@
       const resp = await fetch(
         `/api/console/metrics/analyze/visualize?index=${encodeURIComponent(indexId)}`
       );
-      if (resp.status === 503) {
-        vizError = 'trusty-analyze not available (binary absent or starting up).';
-        return;
-      }
       if (!resp.ok) {
-        vizError = `Failed to load visualization data: HTTP ${resp.status}`;
+        vizError = await extractErrorMessage(resp, 'Visualization unavailable');
         return;
       }
       const data = await resp.json();
@@ -145,10 +160,16 @@
 
   // ─── derived ────────────────────────────────────────────────────────────────
 
-  let statusColor = $derived(
-    report?.status === 'ok'         ? '#22c55e'
-    : report?.status === 'degraded' ? '#f59e0b'
-    : '#ef4444'
+  // Theme-adaptive CSS custom property refs (resolved against the active palette
+  // at render time) instead of hardcoded hex — badge/stat recolor on theme flip.
+  let statusVar = $derived(
+    report?.status === 'ok'         ? 'var(--color-status-ok)'
+    : report?.status === 'degraded' ? 'var(--color-status-warn)'
+    : 'var(--color-status-error)'
+  );
+
+  let searchReachableVar = $derived(
+    report?.metrics?.search_reachable ? 'var(--color-status-ok)' : 'var(--color-status-error)'
   );
 
   /** Group entities by kind for a compact summary bar. */
@@ -234,8 +255,8 @@
     <div class="not-available">{metricsError}</div>
   {:else if report}
     <div class="meta-row">
-      <span class="badge" style="background: {statusColor}22; color: {statusColor}; border-color: {statusColor}44;">
-        <span class="dot" style="background: {statusColor};"></span>
+      <span class="badge" style="--_s: {statusVar};">
+        <span class="dot"></span>
         {report.status}
       </span>
       <span class="version">v{report.version}</span>
@@ -243,7 +264,7 @@
 
     <div class="stat-grid">
       <div class="stat-card">
-        <span class="stat-value" style="color: {report.metrics?.search_reachable ? '#22c55e' : '#ef4444'};">
+        <span class="stat-value" style="color: {searchReachableVar};">
           {report.metrics?.search_reachable ? 'Yes' : 'No'}
         </span>
         <span class="stat-label">Search Reachable</span>
@@ -298,12 +319,12 @@
           <svg width={SVG_W} height={SVG_H} viewBox="0 0 {SVG_W} {SVG_H}" role="img" aria-label="Entity node map">
             {#each vizNodes.nodes as node (node.id)}
               <g class="viz-node" transform="translate({node.x},{node.y})">
-                <circle r="10" fill={kindColor(node.kind)} fill-opacity="0.85" stroke="#2d3348" stroke-width="1.5"/>
+                <circle r="10" fill={kindColor(node.kind)} fill-opacity="0.85" stroke="var(--color-border)" stroke-width="1.5"/>
                 <text
                   x="0" y="22"
                   text-anchor="middle"
                   font-size="9"
-                  fill="#94a3b8"
+                  fill="var(--color-text-secondary)"
                   font-family="'JetBrains Mono', monospace"
                 >
                   {node.label}
@@ -390,43 +411,50 @@
 <style>
   .tab-content { padding: 0.25rem 0; }
   .placeholder, .not-available {
-    background: #1e2130; border-radius: 0.5rem;
-    padding: 1.25rem; color: #94a3b8; font-size: 0.9rem;
+    background: var(--color-surface); border-radius: 0.5rem;
+    padding: 1.25rem; color: var(--color-text-secondary); font-size: 0.9rem;
   }
-  .not-available { color: #f59e0b; }
+  .not-available { color: var(--color-status-warn); }
 
   .meta-row {
     display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.25rem;
   }
+  /* --_s supplied inline (statusVar) as a theme-adaptive --color-status-* ref. */
   .badge {
     display: inline-flex; align-items: center; gap: 0.35rem;
     font-size: 0.75rem; font-weight: 600; padding: 0.2rem 0.6rem;
     border-radius: 9999px; border: 1px solid;
+    --_s: var(--color-text-muted);
+    color: var(--_s);
+    background: rgba(0,0,0,0.08);
+    background: color-mix(in srgb, var(--_s) 13%, transparent);
+    border-color: rgba(0,0,0,0.18);
+    border-color: color-mix(in srgb, var(--_s) 27%, transparent);
   }
-  .dot { width: 6px; height: 6px; border-radius: 50%; }
-  .version { color: #94a3b8; font-size: 0.85rem; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--_s); }
+  .version { color: var(--color-text-secondary); font-size: 0.85rem; }
 
   .stat-grid {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
     gap: 0.75rem; margin-bottom: 1.5rem;
   }
   .stat-card {
-    background: #1e2130; border: 1px solid #2d3348; border-radius: 0.5rem;
+    background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 0.5rem;
     padding: 1rem; display: flex; flex-direction: column; align-items: center; gap: 0.25rem;
   }
-  .stat-value { font-size: 1.6rem; font-weight: 700; color: #e2e8f0; }
-  .stat-label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; }
+  .stat-value { font-size: 1.6rem; font-weight: 700; color: var(--color-text-primary); }
+  .stat-label { font-size: 0.75rem; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
 
   .selector-row {
     display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.25rem;
   }
-  .selector-label { color: #94a3b8; font-size: 0.85rem; }
+  .selector-label { color: var(--color-text-secondary); font-size: 0.85rem; }
   .index-select {
-    background: #1e2130; border: 1px solid #2d3348; border-radius: 0.375rem;
-    color: #e2e8f0; padding: 0.35rem 0.6rem; font-size: 0.85rem; cursor: pointer;
+    background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 0.375rem;
+    color: var(--color-text-primary); padding: 0.35rem 0.6rem; font-size: 0.85rem; cursor: pointer;
     max-width: 500px; min-width: 200px;
   }
-  .index-select:focus { outline: none; border-color: #7c3aed; }
+  .index-select:focus { outline: none; border-color: var(--color-accent); }
 
   .kind-bar {
     display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 1rem;
@@ -437,7 +465,7 @@
   }
 
   .svg-wrap {
-    background: #1e2130; border: 1px solid #2d3348; border-radius: 0.5rem;
+    background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 0.5rem;
     overflow: auto; margin-bottom: 1.25rem; padding: 0.5rem;
   }
 
@@ -445,25 +473,25 @@
   .viz-node circle { transition: r 0.15s; }
   .viz-node:hover circle { r: 14; }
 
-  .sub-title { font-size: 1rem; font-weight: 600; color: #94a3b8; margin: 0 0 0.75rem; }
+  .sub-title { font-size: 1rem; font-weight: 600; color: var(--color-text-secondary); margin: 0 0 0.75rem; }
   .table-wrap { overflow-x: auto; margin-bottom: 1.5rem; }
   table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   th {
     text-align: left; padding: 0.5rem 0.75rem;
-    background: #1e2130; color: #94a3b8; font-weight: 600;
-    border-bottom: 1px solid #2d3348;
+    background: var(--color-surface); color: var(--color-text-secondary); font-weight: 600;
+    border-bottom: 1px solid var(--color-border);
   }
-  td { padding: 0.5rem 0.75rem; border-bottom: 1px solid #1e2130; color: #e2e8f0; }
+  td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--color-surface); color: var(--color-text-primary); }
   tr:last-child td { border-bottom: none; }
-  tr:hover td { background: #1e2130; }
-  td.path { font-size: 0.78rem; color: #94a3b8; max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
-  td.lang { font-size: 0.78rem; color: #64748b; }
+  tr:hover td { background: var(--color-surface); }
+  td.path { font-size: 0.78rem; color: var(--color-text-secondary); max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
+  td.lang { font-size: 0.78rem; color: var(--color-text-muted); }
   .kind-pill { font-size: 0.75rem; font-weight: 600; }
   code {
     font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;
-    background: #0f1117; padding: 0.1rem 0.35rem; border-radius: 0.25rem;
+    background: var(--color-surface-code); padding: 0.1rem 0.35rem; border-radius: 0.25rem;
   }
-  .empty-hint { color: #94a3b8; font-size: 0.85rem; }
+  .empty-hint { color: var(--color-text-secondary); font-size: 0.85rem; }
   .clusters-grid { margin-top: 1rem; }
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
 </style>
