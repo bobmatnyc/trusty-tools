@@ -53,7 +53,7 @@ fn sample_pr() -> AdoPullRequest {
             is_required: true,
             is_container: false,
         }],
-        merge_commit_sha: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into())
+        merge_commit_sha: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
     }
 }
 
@@ -224,8 +224,7 @@ fn upsert_pr_writes_commit_shas_when_merge_sha_present() {
         )
         .expect("query");
     assert_eq!(
-        stored,
-        r#"["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]"#,
+        stored, r#"["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]"#,
         "merge commit SHA must be persisted as a JSON array"
     );
 }
