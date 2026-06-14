@@ -1,0 +1,439 @@
+//! Embedder construction and adapter types for `trusty-search start`.
+//!
+//! Why (issue #110 Phase 2 — stdio): `trusty-embedderd` is a required runtime
+//! dependency. Running embedding in-process inside the search daemon couples
+//! the ONNX model lifecycle to the daemon's memory budget and prevents
+//! independent restart/upgrade of the embedding subsystem. The sidecar
+//! architecture is a core design commitment, not an optional feature.
+//!
+//! What: `build_embedder()` reads `TRUSTY_EMBEDDER` and returns an
+//! `Arc<dyn Embedder>` for the selected back-end. Adapter types bridge the
+//! `trusty_common` `EmbedderClient` trait (Vec<String>) to the internal
+//! `Embedder` trait (&[&str]). `tune_batch_size_for_provider` resets
+//! `TRUSTY_MAX_BATCH_SIZE` when a GPU EP is detected.
+//!
+//! Test: exercised by `lazy_adapter_reports_resolved_provider` and
+//! `uds_adapter_reports_resolved_provider` in `start/tests.rs`.
+
+use std::path::PathBuf;
+use std::sync::atomic::AtomicU32;
+use std::sync::Arc;
+
+use anyhow::Result;
+
+/// Resolve the embedder back-end and return an `Arc<dyn Embedder>` ready for use.
+///
+/// Why (issue #110 Phase 2 — stdio): `trusty-embedderd` is a required runtime
+/// dependency. Running embedding in-process inside the search daemon couples
+/// the ONNX model lifecycle to the daemon's memory budget and prevents
+/// independent restart/upgrade of the embedding subsystem. The sidecar
+/// architecture is a core design commitment, not an optional feature — silent
+/// fallback to in-process would let users miss the new architecture entirely.
+///
+/// What: reads `TRUSTY_EMBEDDER` and dispatches:
+///   - unset / `auto` / `stdio` → arm a `LazyEmbedderHandle` (issue #315,
+///     deferred spawn — the child process starts on the first embed request,
+///     not at daemon boot). Fails fast with an install hint if the binary is
+///     not on PATH.
+///   - `in-process`             → in-process FastEmbedder (explicit escape hatch
+///     for tests / debugging — never silently activated)
+///   - `http://…`               → HTTP remote (manually managed embedderd)
+///   - `unix:/path`             → UDS remote (manually managed embedderd)
+///   - `candle`                 → Candle Metal backend (feature-gated)
+///
+/// Test: run `trusty-search start` with `RUST_LOG=info` — the startup log must
+/// contain `"embedderd supervisor armed, deferred spawn enabled"` before the
+/// first request is served, and `"spawning trusty-embedderd"` only when the
+/// first hybrid search or reindex arrives.
+///
+/// Returns `(embedder, embedderd_pid_slot)`. `embedderd_pid_slot` is `Some` only
+/// for the stdio-sidecar path and holds an `Arc<AtomicU32>` that the
+/// `LazyEmbedderHandle` keeps updated with the current child OS PID (0 when no
+/// live process) so callers can sample the sidecar's RSS without holding any
+/// mutex. Non-stdio paths return `None`.
+pub(super) async fn build_embedder() -> Result<(
+    std::sync::Arc<dyn crate::core::Embedder>,
+    Option<Arc<AtomicU32>>,
+)> {
+    use crate::service::embedder_supervisor::{
+        locate_embedderd_binary, LazyEmbedderHandle, SupervisorConfig,
+    };
+
+    let trusty_embedder_env = std::env::var("TRUSTY_EMBEDDER").unwrap_or_default();
+
+    // Issue #41 phase 4: candle Metal path (feature-gated, explicit opt-in).
+    #[cfg(feature = "candle")]
+    {
+        if trusty_embedder_env == "candle" {
+            let candle =
+                tokio::task::spawn_blocking(crate::service::candle_embedder::CandleEmbedder::new)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("candle embedder init task panicked: {e}"))??;
+            let dim = candle.dimension();
+            tracing::info!("embedder initialized: model=all-MiniLM-L6-v2 dim={dim} backend=candle");
+            return Ok((std::sync::Arc::new(candle), None));
+        }
+    }
+
+    match trusty_embedder_env.as_str() {
+        // ── Lazy-spawn stdio sidecar (issue #315 — deferred boot default) ──
+        "" | "auto" | "stdio" => {
+            // `trusty-embedderd` is a required runtime dependency — fail fast
+            // with an actionable install hint rather than silently downgrading
+            // to in-process embedding. Users who need to skip the sidecar for
+            // tests or debugging must set `TRUSTY_EMBEDDER=in-process` explicitly.
+            let binary = locate_embedderd_binary().map_err(|e| {
+                anyhow::anyhow!(
+                    "{e}\n\n\
+                     ERROR: trusty-embedderd binary not found on PATH.\n\
+                     \n\
+                     trusty-search v0.13+ requires trusty-embedderd to be installed alongside it.\n\
+                     \n\
+                     Install it with:\n\
+                     \x20 cargo install trusty-embedderd --locked\n\
+                     \n\
+                     Or set TRUSTY_EMBEDDERD_BIN to an absolute path:\n\
+                     \x20 export TRUSTY_EMBEDDERD_BIN=/path/to/trusty-embedderd\n\
+                     \n\
+                     If you need to run without the sidecar (tests, debugging), use:\n\
+                     \x20 TRUSTY_EMBEDDER=in-process trusty-search start"
+                )
+            })?;
+
+            let config = SupervisorConfig::from_env();
+
+            tracing::info!(
+                "embedder mode: stdio-sidecar lazy (binary={}, idle_shutdown_secs={})",
+                binary.display(),
+                config.idle_shutdown_secs,
+            );
+
+            // Issue #315: construct the lazy handle (no child spawned yet).
+            let handle = Arc::new(LazyEmbedderHandle::new(binary, config));
+            let pid_slot = handle.app_pid_slot();
+
+            Ok((Arc::new(LazySlotEmbedderAdapter { handle }), Some(pid_slot)))
+        }
+
+        // ── In-process safety-valve ────────────────────────────────────────
+        "in-process" | "local" => {
+            tracing::info!("embedder mode: in-process (override via TRUSTY_EMBEDDER=in-process)");
+            let embedder = build_in_process_embedder().await?;
+            Ok((embedder, None))
+        }
+
+        // ── HTTP remote (manually managed embedderd) ───────────────────────
+        addr if addr.starts_with("http://") || addr.starts_with("https://") => {
+            tracing::info!("embedder mode: remote http ({})", addr);
+            let client = trusty_common::embedder_client::RemoteEmbedderClient::new(addr.to_owned());
+            Ok((
+                Arc::new(RemoteEmbedderAdapter {
+                    client: EmbedderClientKind::Http(client),
+                }),
+                None,
+            ))
+        }
+
+        // ── UDS remote (manually managed embedderd) ────────────────────────
+        path if path.starts_with("unix:") => {
+            let sock = PathBuf::from(&path["unix:".len()..]);
+            tracing::info!("embedder mode: remote uds ({})", sock.display());
+            let client = trusty_common::embedder_client::UdsEmbedderClient::new(sock);
+            Ok((Arc::new(UdsEmbedderAdapter { client }), None))
+        }
+
+        other => anyhow::bail!(
+            "invalid TRUSTY_EMBEDDER value: {other:?}. \
+             Expected: unset (default stdio sidecar), 'auto', 'stdio', 'in-process', \
+             'http://...', or 'unix:/path/to/socket'"
+        ),
+    }
+}
+
+/// Build the in-process `FastEmbedder` and log details.
+///
+/// Why: extracted from the monolithic `build_embedder` so the `in-process`
+/// escape-hatch path has a clean, focused helper. This is never called from
+/// the default `auto`/`stdio` path — it is only reachable via explicit
+/// `TRUSTY_EMBEDDER=in-process` or `TRUSTY_EMBEDDER=local`.
+/// What: constructs `FastEmbedder`, logs the provider / dimension, applies
+/// GPU batch-size tuning, and wraps in an `Arc<dyn Embedder>`.
+/// Test: exercised when `TRUSTY_EMBEDDER=in-process` is set explicitly.
+async fn build_in_process_embedder() -> Result<Arc<dyn crate::core::Embedder>> {
+    let embedder = crate::core::FastEmbedder::new().await.map_err(|e| {
+        tracing::error!("FastEmbedder init failed: {e:#}");
+        anyhow::anyhow!("FastEmbedder init failed: {e}")
+    })?;
+    let dim = <crate::core::FastEmbedder as crate::core::Embedder>::dimension(&embedder);
+    let provider = embedder.provider();
+    let metal_hint = match provider {
+        trusty_common::embedder::ExecutionProvider::CoreML => " (Metal GPU + ANE + CPU)",
+        trusty_common::embedder::ExecutionProvider::CoreMLAne => " (Neural Engine + CPU)",
+        trusty_common::embedder::ExecutionProvider::Cuda => " (CUDA GPU)",
+        trusty_common::embedder::ExecutionProvider::Cpu => "",
+    };
+    tracing::info!(
+        "embedder initialized: model=AllMiniLML6V2(Q) dim={dim} provider={provider}{metal_hint}"
+    );
+    tune_batch_size_for_provider(provider);
+    Ok(Arc::new(embedder))
+}
+
+/// Internal enum for the HTTP remote adapter to hold either HTTP or UDS client.
+///
+/// Why: avoids duplicating the `RemoteEmbedderAdapter` struct for the two HTTP
+/// variants — both share identical adapter logic and differ only in the
+/// concrete `EmbedderClient` impl they hold.
+/// What: two variants, each wrapping the corresponding `trusty_common`
+/// client type.
+/// Test: exercised via `TRUSTY_EMBEDDER=http://...` (Http variant) startup.
+enum EmbedderClientKind {
+    Http(trusty_common::embedder_client::RemoteEmbedderClient),
+}
+
+/// Adapter that implements trusty-search's `Embedder` trait by delegating to
+/// a `RemoteEmbedderClient` (HTTP) (issue #110 Phase 1 / Phase 2).
+///
+/// Why: trusty-search's internal `Embedder` trait uses `&[&str]` slices;
+/// `EmbedderClient` uses `Vec<String>`. This adapter bridges the two without
+/// modifying either side.
+/// What: holds an `EmbedderClientKind` and impls the local `Embedder`
+/// facade that `CodeIndexer` and `EmbedPool` hold behind `Arc<dyn Embedder>`.
+/// Test: exercised end-to-end when `TRUSTY_EMBEDDER=http://...` is set at
+/// daemon startup; the `bit_identical` integration test validates correctness.
+struct RemoteEmbedderAdapter {
+    client: EmbedderClientKind,
+}
+
+#[async_trait::async_trait]
+impl crate::core::Embedder for RemoteEmbedderAdapter {
+    async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        use trusty_common::embedder_client::EmbedderClient as _;
+        let mut v = match &self.client {
+            EmbedderClientKind::Http(c) => c
+                .embed_batch(vec![text.to_string()])
+                .await
+                .map_err(|e| anyhow::anyhow!("remote embed failed: {e}"))?,
+        };
+        v.pop()
+            .ok_or_else(|| anyhow::anyhow!("remote embedder returned no vector"))
+    }
+
+    async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        use trusty_common::embedder_client::EmbedderClient as _;
+        let owned: Vec<String> = texts.iter().map(|s| (*s).to_owned()).collect();
+        match &self.client {
+            EmbedderClientKind::Http(c) => c
+                .embed_batch(owned)
+                .await
+                .map_err(|e| anyhow::anyhow!("remote embed_batch failed: {e}")),
+        }
+    }
+
+    fn dimension(&self) -> usize {
+        trusty_common::embedder::EMBED_DIM
+    }
+
+    /// Report the execution provider the remote `trusty-embedderd` resolves.
+    ///
+    /// Why: issue #604. The remote sidecar selects its EP through this crate's
+    /// `init_options`, which is a pure function of build features + env, so the
+    /// parent can predict the same answer and `/health` reports the real
+    /// provider instead of the trait-default `CPU`.
+    /// What: delegates to `trusty_common::embedder::resolve_expected_provider`.
+    /// Test: `resolve_expected_provider_*` in trusty-common cover the resolver;
+    /// real-GPU end-to-end is hardware-gated.
+    fn provider(&self) -> trusty_common::embedder::ExecutionProvider {
+        trusty_common::embedder::resolve_expected_provider()
+    }
+}
+
+/// Adapter that implements trusty-search's `Embedder` trait by delegating to
+/// a `UdsEmbedderClient` (issue #110 Phase 2).
+///
+/// Why: the auto-spawn path uses a UDS socket for low-latency IPC; this
+/// adapter bridges the `EmbedderClient` trait (Vec<String>) to the internal
+/// `Embedder` trait (&[&str]) without changing either side.
+/// What: holds a `UdsEmbedderClient` and delegates `embed` / `embed_batch`
+/// calls through the EmbedderClient trait.
+/// Test: exercised whenever `TRUSTY_EMBEDDER` is unset (auto-spawn) or set to
+/// `unix:/path`; the `supervisor_spawns_and_serves_embed_requests` integration
+/// test validates round-trip correctness.
+pub(super) struct UdsEmbedderAdapter {
+    pub(super) client: trusty_common::embedder_client::UdsEmbedderClient,
+}
+
+#[async_trait::async_trait]
+impl crate::core::Embedder for UdsEmbedderAdapter {
+    async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        use trusty_common::embedder_client::EmbedderClient as _;
+        let mut v = self
+            .client
+            .embed_batch(vec![text.to_string()])
+            .await
+            .map_err(|e| anyhow::anyhow!("uds embed failed: {e}"))?;
+        v.pop()
+            .ok_or_else(|| anyhow::anyhow!("uds embedder returned no vector"))
+    }
+
+    async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        use trusty_common::embedder_client::EmbedderClient as _;
+        let owned: Vec<String> = texts.iter().map(|s| (*s).to_owned()).collect();
+        self.client
+            .embed_batch(owned)
+            .await
+            .map_err(|e| anyhow::anyhow!("uds embed_batch failed: {e}"))
+    }
+
+    fn dimension(&self) -> usize {
+        trusty_common::embedder::EMBED_DIM
+    }
+
+    /// Report the execution provider the UDS-remote `trusty-embedderd` resolves.
+    ///
+    /// Why: issue #604 — see `RemoteEmbedderAdapter::provider`. The UDS sidecar
+    /// runs the same `init_options` resolution, so the parent predicts the same
+    /// provider for `/health`.
+    /// What: delegates to `trusty_common::embedder::resolve_expected_provider`.
+    /// Test: covered by trusty-common's `resolve_expected_provider_*` tests.
+    fn provider(&self) -> trusty_common::embedder::ExecutionProvider {
+        trusty_common::embedder::resolve_expected_provider()
+    }
+}
+
+/// Adapter for the lazy stdio sidecar path (issue #315).
+///
+/// Why: `LazyEmbedderHandle` defers the child spawn to the first embed call.
+/// This adapter satisfies the `Arc<dyn Embedder>` interface that the rest of
+/// the daemon holds, forwarding every `embed` / `embed_batch` call through
+/// `LazyEmbedderHandle::embed_via` which triggers the spawn on first use and
+/// then routes through the supervisor's slot on all subsequent calls.
+/// What: holds an `Arc<LazyEmbedderHandle>` and delegates both `embed` and
+/// `embed_batch` through `embed_via`. The lazy handle handles single-flight
+/// spawn, crash-restart transparency, and optional idle-shutdown internally.
+/// Test: exercised whenever `TRUSTY_EMBEDDER` is unset or set to `auto` /
+/// `stdio`. The `supervisor_spawns_and_serves_embed_requests` integration test
+/// validates round-trip correctness (marked `#[ignore]`, requires binary).
+pub(super) struct LazySlotEmbedderAdapter {
+    pub(super) handle: Arc<crate::service::embedder_supervisor::LazyEmbedderHandle>,
+}
+
+#[async_trait::async_trait]
+impl crate::core::Embedder for LazySlotEmbedderAdapter {
+    async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        let text_owned = text.to_string();
+        let mut v = self
+            .handle
+            .embed_via(|client| async move { client.embed_batch(vec![text_owned]).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("lazy-stdio embed failed: {e}"))?;
+        v.pop()
+            .ok_or_else(|| anyhow::anyhow!("lazy-stdio embedder returned no vector"))
+    }
+
+    async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        let owned: Vec<String> = texts.iter().map(|s| (*s).to_owned()).collect();
+        self.handle
+            .embed_via(|client| async move { client.embed_batch(owned).await })
+            .await
+            .map_err(|e| anyhow::anyhow!("lazy-stdio embed_batch failed: {e}"))
+    }
+
+    fn dimension(&self) -> usize {
+        trusty_common::embedder::EMBED_DIM
+    }
+
+    /// Report the execution provider the lazy stdio sidecar resolves.
+    ///
+    /// Why: issue #604 — this is the **default** deployment path, and it was the
+    /// direct cause of `/health` reporting `provider=CPU` while the sidecar's
+    /// own startup log said `provider=CUDA`. The `LazyEmbedderHandle` defers the
+    /// child spawn, so there is no live provider to read until the first embed;
+    /// rather than report a stale `CPU`, predict the provider the sidecar will
+    /// resolve via the shared `init_options` logic. This is correct even before
+    /// the child has spawned, because the resolution is a pure function of build
+    /// features + env.
+    /// What: delegates to `trusty_common::embedder::resolve_expected_provider`.
+    /// Test: covered by trusty-common's `resolve_expected_provider_*` tests;
+    /// real-GPU validation is hardware-gated.
+    fn provider(&self) -> trusty_common::embedder::ExecutionProvider {
+        trusty_common::embedder::resolve_expected_provider()
+    }
+}
+
+/// When the resolved execution provider is a GPU, retune `TRUSTY_MAX_BATCH_SIZE`
+/// upward so ONNX dispatches use the GPU efficiently.
+///
+/// Why (issue #113): the CPU batch-size formula (≈55 MB transient ORT arena
+/// per batch slot, clamped to `[32, 512]`) is sized to keep the *CPU* ORT
+/// path under the soft RSS cap. On a CUDA GPU the arena lives in device
+/// memory and the per-slot transient is much smaller, so the CPU-tuned
+/// default (e.g. 128 on Medium tier) starves the GPU — most wall-clock is
+/// spent on host↔device round-trips instead of compute. Bumping the default
+/// to 512 cuts host↔device transitions ~4× and is what turns a 5-hour
+/// reindex into a ~30-minute one on a Tesla T4 (40 k files, INT8 model).
+/// What: if a GPU EP is active AND the operator did NOT opt out by setting
+/// `TRUSTY_MAX_BATCH_SIZE_EXPLICIT=1`, retune `TRUSTY_MAX_BATCH_SIZE` to 512.
+/// Test: on a CUDA-enabled binary the startup log shows
+/// `gpu_batch_tuning: TRUSTY_MAX_BATCH_SIZE=512 (was N)`; running with
+/// `TRUSTY_MAX_BATCH_SIZE_EXPLICIT=1 TRUSTY_MAX_BATCH_SIZE=256 trusty-search start`
+/// keeps 256.
+pub(super) fn tune_batch_size_for_provider(provider: trusty_common::embedder::ExecutionProvider) {
+    const GPU_BATCH_DEFAULT: usize = 512;
+
+    // CoreML is intentionally excluded from the GPU batch-size bump.
+    //
+    // Why: unlike CUDA (whose ORT arena lives in device memory), CoreML on
+    // Apple Silicon pre-allocates GPU/ANE buffers in the *unified* memory
+    // pool and those buffers stack between calls. Bumping TRUSTY_MAX_BATCH_SIZE
+    // to 512 on CoreML reliably inflates process RSS by ~70 GB in seconds
+    // and triggers macOS jetsam SIGKILL. The reindex pipeline now uses
+    // `TRUSTY_COREML_BATCH_SIZE` (default 32) when CoreML is active —
+    // see `core::indexer::ingest::embed_chunks_in_batches`. Leaving
+    // `TRUSTY_MAX_BATCH_SIZE` at its tier default is the safe answer.
+    if matches!(
+        provider,
+        trusty_common::embedder::ExecutionProvider::CoreML
+            | trusty_common::embedder::ExecutionProvider::CoreMLAne
+    ) {
+        let coreml_bs = crate::core::resolve_coreml_batch_size();
+        tracing::info!(
+            "gpu_batch_tuning: provider={provider} → using TRUSTY_COREML_BATCH_SIZE={coreml_bs} for \
+             indexing batches (CoreML EP allocates per-batch buffers in the unified-memory pool)"
+        );
+        return;
+    }
+
+    let is_gpu = matches!(provider, trusty_common::embedder::ExecutionProvider::Cuda);
+    if !is_gpu {
+        return;
+    }
+
+    if std::env::var("TRUSTY_MAX_BATCH_SIZE_EXPLICIT")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        tracing::info!(
+            "gpu_batch_tuning: TRUSTY_MAX_BATCH_SIZE_EXPLICIT=1 set, leaving batch size unchanged"
+        );
+        return;
+    }
+
+    let current = std::env::var("TRUSTY_MAX_BATCH_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(128);
+    if current >= GPU_BATCH_DEFAULT {
+        return;
+    }
+
+    // SAFETY: invoked on the main thread before any indexing worker has
+    // started. Same invariant `MemoryPolicy::apply_to_env` relies on.
+    unsafe {
+        std::env::set_var("TRUSTY_MAX_BATCH_SIZE", GPU_BATCH_DEFAULT.to_string());
+    }
+    tracing::info!(
+        "gpu_batch_tuning: provider={provider} → TRUSTY_MAX_BATCH_SIZE={GPU_BATCH_DEFAULT} (was {current}); \
+         set TRUSTY_MAX_BATCH_SIZE_EXPLICIT=1 to keep your value"
+    );
+}
