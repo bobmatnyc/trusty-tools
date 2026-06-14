@@ -1,0 +1,383 @@
+use super::*;
+use std::future::IntoFuture;
+
+/// Spawn the daemon's real HTTP API on a random loopback port.
+///
+/// Why: lets the executor be tested against the genuine daemon routes
+/// without a live daemon, tmux, or external network.
+/// What: builds `api::router(DaemonState::shared())`, binds an ephemeral
+/// port, serves it on a background task, and returns the state plus base URL.
+/// Test: used by the `execute_*` tests below.
+async fn spawn_test_daemon() -> (std::sync::Arc<crate::daemon::state::DaemonState>, String) {
+    use crate::daemon::{api, state::DaemonState};
+    // Root the daemon's persisted state at a throwaway temp directory so
+    // pairing tests never read (or write) the operator's real pairing
+    // record. `keep` leaks the directory so it outlives the server task.
+    let root = tempfile::tempdir().unwrap().keep();
+    let state = std::sync::Arc::new(DaemonState::with_root(root));
+    let router = api::router(std::sync::Arc::clone(&state));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, router).into_future());
+    (state, format!("http://{addr}"))
+}
+
+#[tokio::test]
+async fn execute_help_returns_help() {
+    // The `/help` path is pure — no HTTP, no daemon.
+    let executor = CommandExecutor::new("http://unused");
+    match executor.execute(TrustyCommand::Help).await {
+        CommandResult::Help(text) => assert!(text.contains("/sessions")),
+        other => panic!("expected Help, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn execute_sessions_against_test_daemon() {
+    // With one registered session, `/sessions` returns exactly that summary.
+    use crate::core::session::{ControlModel, Session, SessionId, SessionStatus};
+    let (state, url) = spawn_test_daemon().await;
+    let mut session = Session::new(SessionId::new(), "/tmp/proj", ControlModel::Tmux, None);
+    session.status = SessionStatus::Active;
+    state.register_session(session);
+
+    let executor = CommandExecutor::new(url);
+    match executor.execute(TrustyCommand::Sessions).await {
+        CommandResult::Sessions(list) => {
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0].workdir, "/tmp/proj");
+        }
+        other => panic!("expected Sessions, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn execute_kill_returns_killed() {
+    // Registering a session then killing it yields `Killed`.
+    use crate::core::session::{ControlModel, Session, SessionId, SessionStatus};
+    let (state, url) = spawn_test_daemon().await;
+    let id = SessionId::new();
+    let mut session = Session::new(id, "/tmp/proj", ControlModel::Tmux, None);
+    session.status = SessionStatus::Active;
+    state.register_session(session);
+
+    let executor = CommandExecutor::new(url);
+    match executor
+        .execute(TrustyCommand::Kill {
+            session_id: id.0.to_string(),
+        })
+        .await
+    {
+        CommandResult::Killed { session_id } => assert_eq!(session_id, id.0.to_string()),
+        other => panic!("expected Killed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn execute_kill_unknown_session_errors() {
+    let (_state, url) = spawn_test_daemon().await;
+    let executor = CommandExecutor::new(url);
+    match executor
+        .execute(TrustyCommand::Kill {
+            session_id: uuid::Uuid::new_v4().to_string(),
+        })
+        .await
+    {
+        CommandResult::Error(msg) => assert!(msg.contains("not found")),
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn execute_approve_unknown_session_errors() {
+    let (_state, url) = spawn_test_daemon().await;
+    let executor = CommandExecutor::new(url);
+    match executor
+        .execute(TrustyCommand::Approve {
+            session_id: uuid::Uuid::new_v4().to_string(),
+        })
+        .await
+    {
+        CommandResult::Error(msg) => assert!(msg.contains("not found")),
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn execute_approve_known_session() {
+    use crate::core::session::{ControlModel, Session, SessionId, SessionStatus};
+    let (state, url) = spawn_test_daemon().await;
+    let id = SessionId::new();
+    let mut session = Session::new(id, "/tmp/proj", ControlModel::Tmux, None);
+    session.status = SessionStatus::Active;
+    state.register_session(session);
+
+    let executor = CommandExecutor::new(url);
+    match executor
+        .execute(TrustyCommand::Approve {
+            session_id: id.0.to_string(),
+        })
+        .await
+    {
+        CommandResult::Approved { session_id } => assert_eq!(session_id, id.0.to_string()),
+        other => panic!("expected Approved, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn execute_projects_against_test_daemon() {
+    // `/projects` returns a well-formed (possibly empty) discovered list.
+    let (_state, url) = spawn_test_daemon().await;
+    let executor = CommandExecutor::new(url);
+    match executor.execute(TrustyCommand::Projects).await {
+        CommandResult::DiscoveredProjects(list) => {
+            for p in &list {
+                assert!(!p.path.is_empty());
+            }
+        }
+        other => panic!("expected DiscoveredProjects, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn execute_discover_against_test_daemon() {
+    // `/discover` returns a well-formed count (zero when tmux is absent on
+    // CI), never an error against a live daemon.
+    let (_state, url) = spawn_test_daemon().await;
+    let executor = CommandExecutor::new(url);
+    match executor.execute(TrustyCommand::Discover).await {
+        CommandResult::Discovered { count } => {
+            // Count is a usize; the call simply must succeed.
+            let _ = count;
+        }
+        other => panic!("expected Discovered, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn execute_adopt_unknown_session_errors() {
+    // Adopting a session that does not exist (or with tmux unavailable on
+    // CI) reports an error rather than a success.
+    let (_state, url) = spawn_test_daemon().await;
+    let executor = CommandExecutor::new(url);
+    match executor
+        .execute(TrustyCommand::Adopt {
+            session: "no-such-session-xyz".into(),
+        })
+        .await
+    {
+        CommandResult::Error(_) => {}
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn register_project_succeeds() {
+    // The `[Set Active]` flow registers a project by path.
+    let (_state, url) = spawn_test_daemon().await;
+    let executor = CommandExecutor::new(url);
+    match executor.register_project("/work/discovered-demo").await {
+        CommandResult::ProjectRegistered { path } => {
+            assert_eq!(path, "/work/discovered-demo");
+        }
+        other => panic!("expected ProjectRegistered, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn execute_doctor_against_test_daemon() {
+    // `/doctor` returns a five-check report against a live daemon.
+    let (_state, url) = spawn_test_daemon().await;
+    let executor = CommandExecutor::new(url);
+    match executor.execute(TrustyCommand::Doctor).await {
+        CommandResult::Doctor(report) => {
+            assert_eq!(report.checks.len(), 5);
+        }
+        other => panic!("expected Doctor, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn execute_overseer_returns_status() {
+    let (_state, url) = spawn_test_daemon().await;
+    let executor = CommandExecutor::new(url);
+    match executor.execute(TrustyCommand::Overseer).await {
+        CommandResult::OverseerStatus { handler, .. } => assert!(!handler.is_empty()),
+        other => panic!("expected OverseerStatus, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn execute_status_no_events() {
+    use crate::core::session::{ControlModel, Session, SessionId, SessionStatus};
+    let (state, url) = spawn_test_daemon().await;
+    let id = SessionId::new();
+    let mut session = Session::new(id, "/tmp/proj", ControlModel::Tmux, None);
+    session.status = SessionStatus::Active;
+    state.register_session(session);
+
+    let executor = CommandExecutor::new(url);
+    match executor
+        .execute(TrustyCommand::Status {
+            session_id: id.0.to_string(),
+        })
+        .await
+    {
+        CommandResult::SessionDetail { events, .. } => assert!(events.is_empty()),
+        other => panic!("expected SessionDetail, got {other:?}"),
+    }
+}
+
+#[test]
+fn resolve_session_exact_and_prefix() {
+    use crate::client::http_client::SessionRow;
+    use crate::core::session::{SessionId, SessionStatus};
+    let rows = vec![
+        SessionRow {
+            id: SessionId(uuid::Uuid::nil()),
+            workdir: "/tmp/a".into(),
+            status: SessionStatus::Active,
+            active_delegations: 0,
+            tmux_name: "tmpm-blue-fox".into(),
+            last_seen: Default::default(),
+        },
+        SessionRow {
+            id: SessionId(uuid::Uuid::from_u128(1)),
+            workdir: "/tmp/b".into(),
+            status: SessionStatus::Active,
+            active_delegations: 0,
+            tmux_name: "frontend".into(),
+            last_seen: Default::default(),
+        },
+    ];
+    // Exact friendly-name match.
+    assert_eq!(
+        resolve_session(&rows, "frontend").as_deref(),
+        Some("frontend")
+    );
+    // Prefix match.
+    assert_eq!(
+        resolve_session(&rows, "tmpm-blue").as_deref(),
+        Some("tmpm-blue-fox")
+    );
+    // Exact id match resolves to the friendly name.
+    assert_eq!(
+        resolve_session(&rows, &uuid::Uuid::nil().to_string()).as_deref(),
+        Some("tmpm-blue-fox")
+    );
+    assert!(resolve_session(&rows, "no-such").is_none());
+}
+
+#[test]
+fn truncate_output_caps_long_text() {
+    let short = "hello";
+    assert_eq!(truncate_output(short), short);
+    let long = "x".repeat(MAX_OUTPUT_CHARS + 100);
+    let truncated = truncate_output(&long);
+    assert!(truncated.contains("output truncated"));
+    assert!(truncated.chars().count() <= MAX_OUTPUT_CHARS + 32);
+}
+
+#[tokio::test]
+async fn execute_send_unknown_session_errors() {
+    let (_state, url) = spawn_test_daemon().await;
+    let executor = CommandExecutor::new(url);
+    match executor
+        .execute(TrustyCommand::Send {
+            session: "no-such-session".into(),
+            prompt: "hello".into(),
+        })
+        .await
+    {
+        CommandResult::Error(msg) => assert!(msg.contains("not found")),
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn execute_connect_errors_when_daemon_unreachable() {
+    // `/connect` registers via `POST /api/v1/sessions/connect`; with no
+    // daemon the failure surfaces as a renderable `Error`, never a panic.
+    let executor = CommandExecutor::new("http://127.0.0.1:0");
+    match executor
+        .execute(TrustyCommand::Connect {
+            project: "/tmp/no-such-project".into(),
+            session_name: None,
+        })
+        .await
+    {
+        CommandResult::Error(msg) => assert!(msg.contains("connect failed")),
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn execute_launch_errors_when_daemon_unreachable() {
+    // `/launch` registers via `POST /sessions`; with no daemon the failure
+    // surfaces as a renderable `Error`.
+    let executor = CommandExecutor::new("http://127.0.0.1:0");
+    match executor
+        .execute(TrustyCommand::Launch {
+            project: "/tmp/no-such-project".into(),
+            session_name: None,
+        })
+        .await
+    {
+        CommandResult::Error(msg) => assert!(msg.contains("launch failed")),
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn execute_send_empty_prompt_errors() {
+    let executor = CommandExecutor::new("http://unused");
+    match executor
+        .execute(TrustyCommand::Send {
+            session: "frontend".into(),
+            prompt: "   ".into(),
+        })
+        .await
+    {
+        CommandResult::Error(msg) => assert!(msg.contains("prompt")),
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn pair_request_returns_code() {
+    let (_state, url) = spawn_test_daemon().await;
+    let executor = CommandExecutor::new(url);
+    match executor.pair_request().await {
+        CommandResult::PairCode { code, .. } => assert_eq!(code.len(), 6),
+        other => panic!("expected PairCode, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn pair_confirm_unknown_code_errors() {
+    let (_state, url) = spawn_test_daemon().await;
+    let executor = CommandExecutor::new(url);
+    match executor.pair_confirm("ZZZZZZ", 999).await {
+        CommandResult::Error(msg) => assert!(msg.contains("invalid")),
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn pair_request_then_confirm_succeeds() {
+    // The full handshake: request a code, confirm it, then status is paired.
+    let (_state, url) = spawn_test_daemon().await;
+    let executor = CommandExecutor::new(url);
+    let code = match executor.pair_request().await {
+        CommandResult::PairCode { code, .. } => code,
+        other => panic!("expected PairCode, got {other:?}"),
+    };
+    match executor.pair_confirm(&code, 424242).await {
+        CommandResult::PairSuccess { chat_info } => assert!(chat_info.contains("424242")),
+        other => panic!("expected PairSuccess, got {other:?}"),
+    }
+    match executor.execute(TrustyCommand::Start).await {
+        CommandResult::PairState { paired } => assert!(paired),
+        other => panic!("expected PairState, got {other:?}"),
+    }
+}

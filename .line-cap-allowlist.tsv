@@ -17,17 +17,6 @@ crates/trusty-analyze/src/main.rs	567
 crates/trusty-analyze/src/mcp/mod.rs	892
 crates/trusty-gworkspace/src/tools.rs	557
 crates/trusty-memory/src/lib.rs	616
-crates/trusty-mpm/src/client/executor.rs	666
-crates/trusty-mpm/src/client/http_client.rs	897
-crates/trusty-mpm/src/core/session_launch.rs	705
-crates/trusty-mpm/src/daemon/bug_report/scrubber.rs	565
-crates/trusty-mpm/src/daemon/claude_config.rs	894
-crates/trusty-mpm/src/daemon/state.rs	770
-crates/trusty-mpm/src/services/discoverer.rs	662
-crates/trusty-mpm/src/telegram/formatter.rs	504
-crates/trusty-mpm/src/tui/dashboard.rs	696
-crates/trusty-mpm/src/tui/health.rs	2200
-crates/trusty-mpm/src/tui/mod.rs	520
 crates/trusty-search/src/commands/doctor_checks.rs	503
 crates/trusty-search/src/core/indexer/tests.rs	2472
 crates/trusty-search/src/service/call_chain.rs	738
