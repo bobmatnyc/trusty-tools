@@ -187,15 +187,16 @@ fn warm_boot_respects_skip_kg_flag() {
 /// `"cargo install trusty-embedderd"`.
 /// Test: this test (no binary / ONNX model needed; always runs).
 #[test]
+#[serial]
 fn missing_binary_fails_fast_with_install_hint() {
     use crate::service::embedder_supervisor::locate_embedderd_binary;
 
     // Isolate from the real environment: point TRUSTY_EMBEDDERD_BIN at a
     // path that definitely does not exist, bypassing the PATH walk.
-    // SAFETY: test-only. Cargo runs each test binary in its own process
-    // (not a thread-per-test model), so env mutation here is safe as long
-    // as no parallel test reads the same var. This is the only test in
-    // this module that touches TRUSTY_EMBEDDERD_BIN.
+    // SAFETY: test-only. `cargo test` runs tests as threads within a single
+    // process (not as separate processes), so env mutation is a data race
+    // unless the test is marked `#[serial]`. The `#[serial]` attribute
+    // above ensures this test runs exclusively while env is mutated.
     let prev = std::env::var("TRUSTY_EMBEDDERD_BIN").ok();
     unsafe {
         std::env::set_var(
