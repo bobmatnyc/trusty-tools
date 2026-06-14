@@ -16,15 +16,6 @@
 //! covers shape, cache hits, and the mock embedder. ONNX-backed tests are
 //! `#[ignore]` to keep CI under one cargo-feature umbrella.
 
-use std::num::NonZeroUsize;
-use std::sync::Arc;
-
-use anyhow::{Context, Result};
-use async_trait::async_trait;
-use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
-use lru::LruCache;
-use parking_lot::Mutex;
-
 // Issue #54: opt-in Candle BERT backend. Lives in its own submodule behind
 // the `embedder-candle` feature so the default fastembed/ORT build never
 // pays the candle compile cost.
@@ -43,793 +34,21 @@ pub use candle_embedder::{CandleEmbedder, CandleEmbedderError};
 /// basic sanity invariants.
 pub mod rss;
 
-/// Output dimension of the all-MiniLM-L6-v2 model.
-///
-/// Note: we now load the INT8-quantised variant (`AllMiniLML6V2Q`) which
-/// produces identical 384-dim vectors but runs ~3-4× faster on CPU ONNX
-/// and ships as a ~22MB file (vs 86MB for the f32 model).
-pub const EMBED_DIM: usize = 384;
-
-/// Default LRU cache capacity. Picked to be large enough to keep the
-/// hot working set of repeat queries in memory but small enough that the
-/// cache itself fits well inside L2/L3 on a typical developer machine.
-pub const DEFAULT_CACHE_CAPACITY: usize = 256;
-
-/// Resolve the on-disk cache directory used by fastembed for ONNX model
-/// downloads.
-///
-/// Why: fastembed's default cache path is the process-relative
-/// `./.fastembed_cache`, and when an explicit `FASTEMBED_CACHE_DIR` env var is
-/// not set the library falls back to a `TMPDIR`-derived path during model
-/// retrieval. Under macOS launchd the daemon's `TMPDIR` is a sandboxed
-/// `/var/folders/.../T/` mount that is **read-only** for the agent's UID,
-/// so the very first `TextEmbedding::try_new` call fails with
-/// `EROFS: Read-only file system (os error 30)` and the daemon never
-/// reaches a ready state (GH #58). Surfacing a single resolver lets every
-/// call site (and the launchd plist installer) agree on a writable path.
-/// What: returns the first match in this preference order:
-///   1. `FASTEMBED_CACHE_DIR` — fastembed's own override, honoured natively
-///      by `get_cache_dir()` inside the crate.
-///   2. `FASTEMBED_CACHE_PATH` — alternative name documented in our launchd
-///      install flow; accepted for forward-compat.
-///   3. `$HOME/.cache/fastembed` — XDG-style fallback that is always
-///      writable under launchd.
-///   4. As a last resort, the system temp dir with a `tracing::warn!`
-///      noting the daemon is likely misconfigured.
-///
-/// Test: `resolve_fastembed_cache_dir_prefers_env_vars` covers (1)–(3).
-pub fn resolve_fastembed_cache_dir() -> std::path::PathBuf {
-    if let Ok(p) = std::env::var("FASTEMBED_CACHE_DIR")
-        && !p.trim().is_empty()
-    {
-        return std::path::PathBuf::from(p);
-    }
-    if let Ok(p) = std::env::var("FASTEMBED_CACHE_PATH")
-        && !p.trim().is_empty()
-    {
-        return std::path::PathBuf::from(p);
-    }
-    if let Some(home) = dirs::home_dir() {
-        return home.join(".cache").join("fastembed");
-    }
-    tracing::warn!(
-        "trusty-embedder: neither FASTEMBED_CACHE_DIR nor HOME is set; falling \
-         back to TMPDIR-derived cache. This is the likely cause of EROFS errors \
-         under launchd — set FASTEMBED_CACHE_DIR in the LaunchAgent plist."
-    );
-    std::env::temp_dir().join("fastembed")
-}
-
-/// Default CUDA `gpu_mem_limit` (bytes) — 12 GiB.
-///
-/// Why: a bare `ort::ep::CUDA::default()` leaves ORT's BFCArena unbounded and
-/// defaulting to `kNextPowerOfTwo` growth, so the very first large embedding
-/// batch grabs nearly all device VRAM up-front and a 16 GB Tesla T4 OOMs before
-/// the second batch (issue #600). Capping the arena at 12 GiB leaves ~4 GiB of
-/// headroom for the CUDA context, cuDNN workspaces, and fragmentation on a 16 GB
-/// card, which is the empirical sweet spot that removes the need for the
-/// `TRUSTY_MAX_BATCH_SIZE=32` workaround while still letting the GPU run a full
-/// 512-chunk batch.
-/// What: 12 * 1024^3 bytes, used when neither `TRUSTY_GPU_MEM_LIMIT_BYTES` nor
-/// `TRUSTY_GPU_MEM_LIMIT_MB` is set.
-/// Test: `cuda_options_default_limit` asserts `resolve_cuda_options` returns
-/// this value when no env knob is present.
-pub const DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES: usize = 12 * 1024 * 1024 * 1024;
-
-/// Resolved CUDA execution-provider tuning, derived purely from the environment.
-///
-/// Why: the option construction must be unit-testable on a host with no CUDA
-/// GPU (and possibly no `embedder-cuda` build at all), so the *values* are
-/// resolved by a pure function and only *applied* to `ort::ep::CUDA` behind the
-/// feature gate. This keeps the OOM-prevention contract (issue #600) covered by
-/// tests that always compile and run.
-/// What: carries the `gpu_mem_limit` byte cap to pass to
-/// `CUDA::with_memory_limit`. The arena-extend strategy is always
-/// `SameAsRequested` (see `build_cuda_provider`), so it is not represented as a
-/// field — there is nothing to vary.
-/// Test: `cuda_options_*` tests below.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CudaOptions {
-    /// Per-process device-memory ceiling handed to ORT's `gpu_mem_limit`.
-    pub gpu_mem_limit_bytes: usize,
-}
-
-/// Resolve CUDA tuning options from the process environment.
-///
-/// Why: centralises the `TRUSTY_GPU_MEM_LIMIT_*` knob parsing so both the live
-/// EP builder and the unit tests agree on precedence and defaults, and so the
-/// VRAM-OOM fix (issue #600) is verifiable without a GPU.
-/// What: reads, in precedence order, `TRUSTY_GPU_MEM_LIMIT_BYTES` then
-/// `TRUSTY_GPU_MEM_LIMIT_MB` (MB is multiplied by 1024^2). A malformed or
-/// non-positive value is ignored and the next source is tried; if neither is
-/// usable the default [`DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES`] (12 GiB) is returned.
-/// Test: `cuda_options_default_limit`, `cuda_options_bytes_env`,
-/// `cuda_options_mb_env`, `cuda_options_bytes_takes_precedence`,
-/// `cuda_options_ignores_malformed`.
-pub fn resolve_cuda_options() -> CudaOptions {
-    let bytes = std::env::var("TRUSTY_GPU_MEM_LIMIT_BYTES")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|n| *n > 0)
-        .or_else(|| {
-            std::env::var("TRUSTY_GPU_MEM_LIMIT_MB")
-                .ok()
-                .and_then(|v| v.trim().parse::<usize>().ok())
-                .filter(|n| *n > 0)
-                .and_then(|mb| mb.checked_mul(1024 * 1024))
-        })
-        .unwrap_or(DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES);
-    CudaOptions {
-        gpu_mem_limit_bytes: bytes,
-    }
-}
-
-/// Build a tuned CUDA execution-provider dispatch from resolved [`CudaOptions`].
-///
-/// Why: a default `ort::ep::CUDA::default().build()` inherits ORT's
-/// `kNextPowerOfTwo` BFCArena growth, which over-reserves device memory and
-/// OOMs a 16 GB Tesla T4 on the first large batch (issue #600). Forcing
-/// `kSameAsRequested` makes the arena grow only by what each allocation needs,
-/// and `gpu_mem_limit` caps the per-process device-memory ceiling so a runaway
-/// arena can never grab all VRAM.
-/// What: returns a `CUDA` EP dispatch with `arena_extend_strategy =
-/// kSameAsRequested` and `gpu_mem_limit = opts.gpu_mem_limit_bytes`.
-/// Test: the option *values* are covered by `resolve_cuda_options` tests; the
-/// EP construction itself is GPU/driver-gated and therefore exercised only on a
-/// real CUDA host (e.g. a g4dn/T4 instance), not in CI.
-#[cfg(feature = "embedder-cuda")]
-fn build_cuda_provider(opts: &CudaOptions) -> ort::execution_providers::ExecutionProviderDispatch {
-    use ort::ep::ArenaExtendStrategy;
-    ort::ep::CUDA::default()
-        .with_arena_extend_strategy(ArenaExtendStrategy::SameAsRequested)
-        .with_memory_limit(opts.gpu_mem_limit_bytes)
-        .build()
-}
-
-/// Identifier for the execution provider an embedder is actually using.
-///
-/// Why: callers want to log which backend is active (CPU vs CoreML/Metal vs
-/// CUDA) so operators can verify the daemon is GPU-accelerated without a
-/// debug log dive.
-/// What: a stable, human-friendly tag returned by `FastEmbedder::provider()`.
-/// Test: `FastEmbedder::new()` on Apple Silicon should yield `CoreML`; on
-/// other platforms it yields `Cpu` (or `Cuda` when the `cuda` feature is on).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExecutionProvider {
-    Cpu,
-    /// CoreML EP with `MLComputeUnits=ALL` (CPU + GPU + ANE). On Apple
-    /// Silicon this allocates from the unified-memory GPU pool and was the
-    /// source of the ~72 GB virtual-RSS spike that triggered jetsam SIGKILL
-    /// during indexing (issue #24). Retained for completeness but no longer
-    /// the default.
-    CoreML,
-    /// CoreML EP with `MLComputeUnits=CPUAndNeuralEngine`. The Neural Engine
-    /// uses dedicated memory, not the GPU unified-memory pool, so this
-    /// avoids the 72 GB spike while still delivering ~10× CPU throughput.
-    /// New default on Apple Silicon as of trusty-search 0.3.55.
-    CoreMLAne,
-    Cuda,
-}
-
-impl ExecutionProvider {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ExecutionProvider::Cpu => "CPU",
-            ExecutionProvider::CoreML => "CoreML",
-            ExecutionProvider::CoreMLAne => "CoreML(ANE)",
-            ExecutionProvider::Cuda => "CUDA",
-        }
-    }
-}
-
-impl std::fmt::Display for ExecutionProvider {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// Predict the execution provider a freshly-constructed [`FastEmbedder`] will
-/// resolve, from build cfg + environment alone — without constructing a model.
-///
-/// Why: issue #604. When `trusty-search` runs the embedder out-of-process (the
-/// default lazy stdio sidecar, or a UDS/HTTP remote), the live `Embedder`
-/// handle is an RPC adapter whose `provider()` fell through to the trait
-/// default `Cpu`, so `GET /health` reported `provider=CPU` even though the
-/// sidecar's own startup log said `provider=CUDA`. The sidecar resolves its
-/// provider through this crate's [`FastEmbedder::init_options`]; since that
-/// resolution is a pure function of build features, platform, and the
-/// `TRUSTY_DEVICE` / `TRUSTY_COREML_COMPUTE_UNITS` env vars, the parent can
-/// predict the exact same answer and surface it on `/health` without an extra
-/// RPC round-trip or any change to the wire protocol.
-///
-/// What: mirrors the provider-selection branches of `init_options` in the same
-/// precedence order — `TRUSTY_DEVICE=cpu` forces `Cpu`; otherwise an
-/// `embedder-cuda` build yields `Cuda`; otherwise Apple Silicon yields a
-/// `CoreML*` tag derived from `TRUSTY_COREML_COMPUTE_UNITS` (default
-/// `CoreMLAne`); every other host yields `Cpu`. It deliberately does **not**
-/// probe whether a CUDA device actually initialises — that runtime fallback is
-/// reflected by the in-process path's own `provider()` and, for the sidecar,
-/// is reported by the sidecar's startup log.
-///
-/// Test: `resolve_expected_provider_forces_cpu`,
-/// `resolve_expected_provider_default_matches_platform`, and (Apple Silicon)
-/// `resolve_expected_provider_coreml_units` below.
-pub fn resolve_expected_provider() -> ExecutionProvider {
-    let force_cpu = std::env::var("TRUSTY_DEVICE")
-        .map(|v| v.eq_ignore_ascii_case("cpu"))
-        .unwrap_or(false);
-    if force_cpu {
-        return ExecutionProvider::Cpu;
-    }
-
-    #[cfg(feature = "embedder-cuda")]
-    {
-        return ExecutionProvider::Cuda;
-    }
-
-    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-    {
-        return match std::env::var("TRUSTY_COREML_COMPUTE_UNITS")
-            .ok()
-            .as_deref()
-            .map(|s| s.trim().to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("all") | Some("cpu_gpu") | Some("cpuandgpu") => ExecutionProvider::CoreML,
-            // Default and `cpu_only`/`cpu_ane` map to the ANE tag, matching the
-            // `units_tag` chosen in `init_options`.
-            _ => ExecutionProvider::CoreMLAne,
-        };
-    }
-
-    #[allow(unreachable_code)]
-    ExecutionProvider::Cpu
-}
-
-/// Abstraction over embedding backends.
-///
-/// Why: Decouple consumers from any one model so we can swap in remote APIs,
-/// quantised models, or deterministic mocks without changing call sites.
-/// What: a single primitive — `embed_batch` — plus a dimension accessor.
-/// Single-text callers should use the [`embed_one`] convenience helper.
-/// Test: covered by `FastEmbedder` and `MockEmbedder` tests below.
-#[async_trait]
-pub trait Embedder: Send + Sync {
-    /// Embed a batch of texts. Returns one `Vec<f32>` per input, each of
-    /// length `self.dimension()`. An empty input batch returns an empty Vec.
-    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
-
-    /// Output dimension of the produced embeddings.
-    fn dimension(&self) -> usize;
-
-    /// Active ONNX execution provider for this embedder.
-    ///
-    /// Why: callers (e.g. the trusty-search reindex pipeline) need to pick
-    /// provider-appropriate batch sizes — CoreML pre-allocates large GPU/ANE
-    /// buffers sized to the full batch tensor shape, so a 512-chunk batch can
-    /// inflate unified-memory RSS to 70 GB+ and stack between calls. Exposing
-    /// the active provider through the trait lets callers throttle batch size
-    /// without re-reading env vars or duplicating provider-detection logic.
-    /// What: default impl returns `ExecutionProvider::Cpu`, which is the
-    /// correct conservative answer for embedders that do not advertise a
-    /// provider (e.g. `MockEmbedder` and any external implementation). The
-    /// `FastEmbedder` impl overrides this to return its actual provider.
-    /// Test: covered by the public-surface compile check and `MockEmbedder`
-    /// trait usage (defaults to `Cpu`).
-    fn provider(&self) -> ExecutionProvider {
-        ExecutionProvider::Cpu
-    }
-}
-
-/// Convenience helper: embed a single text via `embed_batch` and return the
-/// lone vector.
-///
-/// Why: Most call sites only need one embedding at a time and writing
-/// `.embed_batch(&[text]).await?.into_iter().next()` everywhere is noise.
-/// What: builds a 1-element batch, calls `embed_batch`, returns the first
-/// vector (or errors if the embedder produced nothing).
-/// Test: covered indirectly by `mock_embedder_round_trip`.
-pub async fn embed_one(embedder: &dyn Embedder, text: &str) -> Result<Vec<f32>> {
-    let mut v = embedder.embed_batch(&[text.to_string()]).await?;
-    v.pop()
-        .context("embedder returned no embedding for non-empty input")
-}
-
-/// Local CPU embedder backed by fastembed-rs (ONNX runtime, all-MiniLM-L6-v2).
-///
-/// Why: Default to local-only embeddings so consumers have zero external
-/// network dependency and predictable latency. The LRU cache keeps the hot
-/// path free of redundant ONNX work for repeat strings (queries, common
-/// chunks).
-/// What: wraps a single `TextEmbedding` behind a `parking_lot::Mutex` (the
-/// underlying `embed` requires `&mut self`) and an `LruCache<String, Vec<f32>>`.
-/// Initialisation warms the ORT graph with a small batch so the first user
-/// query doesn't pay the one-shot compile cost.
-/// Test: `embed_batch_returns_correct_dim` and `cache_hit_is_idempotent`
-/// (marked `#[ignore]` — they download a real model).
-pub struct FastEmbedder {
-    model: Arc<Mutex<TextEmbedding>>,
-    cache: Arc<Mutex<LruCache<String, Vec<f32>>>>,
-    dim: usize,
-    provider: ExecutionProvider,
-}
-
-impl FastEmbedder {
-    /// Construct a new `FastEmbedder` with the default cache size.
-    pub async fn new() -> Result<Self> {
-        Self::with_cache_size(DEFAULT_CACHE_CAPACITY).await
-    }
-
-    /// Identifier for the execution provider this embedder is actually using.
-    ///
-    /// Why: callers (e.g. `trusty-search` startup logs) want to surface
-    /// whether the daemon is running on CPU or GPU/ANE without poking at
-    /// internals.
-    /// What: returns `ExecutionProvider::CoreML` on Apple Silicon (when EP
-    /// registration succeeded), otherwise `Cpu` (or `Cuda` if/when wired).
-    /// Test: covered by the public-surface compile check.
-    pub fn provider(&self) -> ExecutionProvider {
-        self.provider
-    }
-
-    /// Build `TextInitOptions` for the given model, attempting to register
-    /// the CoreML execution provider at runtime when on Apple Silicon.
-    ///
-    /// Why: We want zero-friction GPU/ANE acceleration on Apple Silicon
-    /// without forcing users to pass `--features coreml`. fastembed-rs accepts
-    /// a `Vec<ExecutionProviderDispatch>` via `with_execution_providers`, and
-    /// our `ort` dep (pinned to the exact `=2.0.0-rc.12` fastembed uses) has
-    /// the `coreml` feature on by default on macOS, so we can always try to
-    /// build and register CoreML at runtime. On non-Apple platforms, or if
-    /// CoreML registration fails for any reason, we transparently fall back
-    /// to the default CPU provider.
-    /// What: returns `(TextInitOptions, ExecutionProvider)` where the tag
-    /// reflects which backend was actually wired in.
-    /// Test: on an M-series Mac the tag is `CoreML`; on Intel/Linux/Windows
-    /// (or if CoreML build fails) the tag is `Cpu`.
-    fn init_options(model: EmbeddingModel) -> (TextInitOptions, ExecutionProvider) {
-        use ort::execution_providers::ExecutionProviderDispatch;
-
-        // Pin the model cache to a writable, user-scoped directory before
-        // fastembed has a chance to fall back to the process-relative
-        // `./.fastembed_cache` or — worse — a `TMPDIR`-derived path that
-        // launchd has mounted read-only (GH #58).
-        let cache_dir = resolve_fastembed_cache_dir();
-        if let Err(e) = std::fs::create_dir_all(&cache_dir) {
-            tracing::warn!(
-                "trusty-embedder: failed to create fastembed cache dir {}: {e}",
-                cache_dir.display()
-            );
-        } else {
-            tracing::info!(
-                "trusty-embedder: fastembed model cache dir = {}",
-                cache_dir.display()
-            );
-        }
-        // Also export FASTEMBED_CACHE_DIR so any internal fastembed call
-        // sites that read the env var directly (e.g. tokenizer/config
-        // fetches) pick up the same path. SAFETY: env mutation happens on
-        // the calling thread before any worker thread is spawned by
-        // fastembed itself.
-        unsafe {
-            std::env::set_var("FASTEMBED_CACHE_DIR", &cache_dir);
-        }
-        let opts = TextInitOptions::new(model).with_cache_dir(cache_dir);
-
-        // Always register an explicit CPU EP with the memory arena DISABLED.
-        //
-        // Why: ORT's default CPU memory arena pre-allocates a large contiguous
-        // slab sized to the peak tensor shape on first inference. For repos
-        // with 16k+ files this arena grows to 19-53 GB before any RSS soft cap
-        // can react (issue bobmatnyc/trusty-search#89). Disabling the arena
-        // forces per-inference allocations that are freed after each call,
-        // capping steady-state RSS at ~hundreds of MB instead of tens of GB.
-        let cpu_no_arena: ExecutionProviderDispatch =
-            ort::ep::CPU::default().with_arena_allocator(false).build();
-
-        // ──────────────────────────────────────────────────────────────────
-        // CUDA (Linux/Windows, NVIDIA GPU)
-        //
-        // Why: when the operator opts in with `--features cuda` and runs on a
-        // host with a CUDA-capable GPU, we should auto-prefer the CUDA EP so
-        // embedding throughput jumps from CPU-bound (~5h for a 40k-file repo)
-        // to GPU-bound (target <30 min). This mirrors the always-on CoreML
-        // pattern on Apple Silicon but is gated on the build-time `cuda`
-        // feature because the `ort/cuda` feature requires a CUDA toolkit at
-        // compile time. If the binary was built without `cuda`, this branch
-        // is compiled out entirely (no runtime cost, no link-time CUDA dep).
-        //
-        // Operator override: setting `TRUSTY_DEVICE=cpu` forces CPU even on a
-        // GPU-enabled binary. Useful for A/B benchmarking or for running on a
-        // host whose GPU is reserved for another workload.
-        // Test: on a g4dn.xlarge with `--features cuda` the provider tag
-        // resolves to `Cuda`; setting `TRUSTY_DEVICE=cpu` reverts to `Cpu`.
-        #[cfg(feature = "embedder-cuda")]
-        {
-            let force_cpu = std::env::var("TRUSTY_DEVICE")
-                .map(|v| v.eq_ignore_ascii_case("cpu"))
-                .unwrap_or(false);
-            if !force_cpu {
-                let cuda_opts = resolve_cuda_options();
-                let cuda: ExecutionProviderDispatch = build_cuda_provider(&cuda_opts);
-                let providers: Vec<ExecutionProviderDispatch> = vec![cuda, cpu_no_arena];
-                tracing::info!(
-                    gpu_mem_limit_bytes = cuda_opts.gpu_mem_limit_bytes,
-                    "trusty-embedder: registering CUDA + CPU(no-arena) execution providers \
-                     (arena_extend_strategy=kSameAsRequested, gpu_mem_limit set to bound VRAM; \
-                     will fall back to CPU at session-init if no CUDA device is available)"
-                );
-                return (
-                    opts.with_execution_providers(providers),
-                    ExecutionProvider::Cuda,
-                );
-            }
-            tracing::info!(
-                "trusty-embedder: TRUSTY_DEVICE=cpu set — skipping CUDA EP registration"
-            );
-        }
-
-        #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-        {
-            // Operator override: setting `TRUSTY_DEVICE=cpu` forces CPU even on
-            // Apple Silicon. Historically this was the load-bearing escape
-            // hatch for the macOS jetsam kill (issue #24): the default
-            // `MLComputeUnits=ALL` configuration allocated from the unified-
-            // memory GPU pool and inflated *virtual* RSS to ~72 GB during
-            // indexing of large repos, triggering jetsam SIGKILL even though
-            // physical RAM was fine.
-            //
-            // As of trusty-search 0.3.55 the default CoreML configuration is
-            // `MLComputeUnits=CPUAndNeuralEngine` — the Neural Engine uses
-            // dedicated memory, NOT the GPU unified-memory pool, so the
-            // 72 GB virtual-RSS spike no longer occurs. Operators who want
-            // the full CPU+GPU+ANE pipeline (and have the headroom) can opt
-            // in with `TRUSTY_COREML_COMPUTE_UNITS=all`; the other values
-            // (`cpu_ane`, `cpu_gpu`, `cpu_only`) map to the corresponding
-            // `ComputeUnits` variants.
-            let force_cpu = std::env::var("TRUSTY_DEVICE")
-                .map(|v| v.eq_ignore_ascii_case("cpu"))
-                .unwrap_or(false);
-            if !force_cpu {
-                use ort::ep::coreml::{ComputeUnits, SpecializationStrategy};
-
-                let (units, units_tag) = match std::env::var("TRUSTY_COREML_COMPUTE_UNITS")
-                    .ok()
-                    .as_deref()
-                    .map(|s| s.trim().to_ascii_lowercase())
-                    .as_deref()
-                {
-                    Some("all") => (ComputeUnits::All, ExecutionProvider::CoreML),
-                    Some("cpu_gpu") | Some("cpuandgpu") => {
-                        (ComputeUnits::CPUAndGPU, ExecutionProvider::CoreML)
-                    }
-                    Some("cpu_only") | Some("cpuonly") => {
-                        (ComputeUnits::CPUOnly, ExecutionProvider::CoreMLAne)
-                    }
-                    // Default: ANE+CPU. Avoids GPU unified-memory allocation
-                    // entirely (the root cause of the 72 GB virtual-RSS
-                    // spike). Empirically delivers ~10× CPU throughput while
-                    // keeping steady-state RSS in the hundreds of MB.
-                    _ => (
-                        ComputeUnits::CPUAndNeuralEngine,
-                        ExecutionProvider::CoreMLAne,
-                    ),
-                };
-
-                // Cache compiled CoreML model on disk so we don't pay the
-                // compile cost (and its transient memory) on every daemon
-                // start. Falls back to a tmp path if HOME is unset.
-                let cache_dir = std::env::var("HOME")
-                    .map(|h| format!("{}/Library/Caches/trusty-embedder/coreml", h))
-                    .unwrap_or_else(|_| "/tmp/trusty-embedder-coreml".to_string());
-                let _ = std::fs::create_dir_all(&cache_dir);
-
-                let coreml: ExecutionProviderDispatch = ort::ep::CoreML::default()
-                    .with_compute_units(units)
-                    // Static input shapes prevent CoreML from compiling a
-                    // separate specialized graph per encountered tensor
-                    // shape. The all-MiniLM-L6-v2 ONNX model uses dynamic
-                    // sequence length; without this flag CoreML retains
-                    // every variant in memory across the indexing batch.
-                    .with_static_input_shapes(true)
-                    .with_specialization_strategy(SpecializationStrategy::FastPrediction)
-                    .with_model_cache_dir(cache_dir.clone())
-                    .build();
-                // CoreML first (ANE/GPU per units), CPU-no-arena as fallback.
-                // The CPU EP still applies its session-level DisableCpuMemArena
-                // flag even when CoreML handles most ops, which keeps the
-                // residual CPU work from re-allocating the arena.
-                let providers: Vec<ExecutionProviderDispatch> = vec![coreml, cpu_no_arena];
-                // Use units_tag for logging since ComputeUnits::as_str is pub(crate) in ort.
-                let units_str = match units {
-                    ComputeUnits::All => "all",
-                    ComputeUnits::CPUAndGPU => "cpu_gpu",
-                    ComputeUnits::CPUOnly => "cpu_only",
-                    ComputeUnits::CPUAndNeuralEngine => "cpu_ane",
-                };
-                tracing::info!(
-                    "trusty-embedder: registering CoreML (compute_units={}, static_shapes=true, \
-                     cache={}) + CPU(no-arena) execution providers (Apple Silicon)",
-                    units_str,
-                    cache_dir,
-                );
-                return (opts.with_execution_providers(providers), units_tag);
-            }
-            tracing::info!(
-                "trusty-embedder: TRUSTY_DEVICE=cpu set — skipping CoreML EP registration (Apple Silicon)"
-            );
-        }
-
-        #[allow(unreachable_code)]
-        {
-            tracing::info!("trusty-embedder: registering CPU(no-arena) execution provider");
-            let providers: Vec<ExecutionProviderDispatch> = vec![cpu_no_arena];
-            (
-                opts.with_execution_providers(providers),
-                ExecutionProvider::Cpu,
-            )
-        }
-    }
-
-    /// Construct with an explicit LRU capacity.
-    pub async fn with_cache_size(capacity: usize) -> Result<Self> {
-        let capacity =
-            NonZeroUsize::new(capacity.max(1)).expect("capacity.max(1) is always non-zero");
-
-        // fastembed's `try_new` downloads + builds an ONNX session — blocking
-        // work that must run off the async reactor.
-        let (model, provider) =
-            tokio::task::spawn_blocking(|| -> Result<(TextEmbedding, ExecutionProvider)> {
-                // Honour the explicit `TRUSTY_DEVICE=gpu` requirement: when the
-                // operator asks for GPU, init_options will have selected an
-                // accelerated EP. If that EP fails to initialise (no GPU, no
-                // CUDA driver, etc.) AND the user did NOT explicitly require
-                // GPU, we transparently fall back to CPU. With `gpu` we
-                // surface the failure so the operator notices instead of
-                // silently running CPU-bound on a "GPU node".
-                let require_gpu = std::env::var("TRUSTY_DEVICE")
-                    .map(|v| v.eq_ignore_ascii_case("gpu"))
-                    .unwrap_or(false);
-
-                let (q_opts, q_provider) = Self::init_options(EmbeddingModel::AllMiniLML6V2Q);
-                let (m, provider) = match TextEmbedding::try_new(q_opts) {
-                    Ok(m) => (m, q_provider),
-                    Err(q_err) => {
-                        // Hardware-accelerated EP build failed — most often
-                        // "no CUDA device" or "CoreML EP not available". On a
-                        // best-effort tier (default), retry once with CPU only
-                        // so the daemon still starts. On `TRUSTY_DEVICE=gpu`
-                        // we propagate the original error.
-                        if q_provider != ExecutionProvider::Cpu && !require_gpu {
-                            // LOUD structured error (fix #763 Fix 3a): a plain
-                            // `warn!` was silently discarded in production logs.
-                            // Use `error!` so the sidecar operator is paged.
-                            // The `/health` endpoint reports the PREDICTED provider
-                            // (CUDA), not the actual provider (CPU after fallback) —
-                            // this mismatch causes "CUDA" in health while inference
-                            // runs on CPU. Setting TRUSTY_DEVICE=gpu prevents this
-                            // silent mismatch by making init fail-fast instead.
-                            tracing::error!(
-                                predicted_provider = %q_provider,
-                                actual_provider = "CPU",
-                                error = %q_err,
-                                "SILENT FALLBACK DETECTED (#763): {p} EP failed to \
-                                 initialise — falling back to CPU. The /health endpoint \
-                                 will report provider={p} but inference will run on CPU. \
-                                 Set TRUSTY_DEVICE=gpu to surface this as a hard failure \
-                                 instead of a silent performance regression.",
-                                p = q_provider
-                            );
-                            // SAFETY: see TRUSTY_DEVICE comment in
-                            // init_options — the env mutation happens before
-                            // any worker thread reads it.
-                            unsafe { std::env::set_var("TRUSTY_DEVICE", "cpu") };
-                            let (cpu_opts, cpu_provider) =
-                                Self::init_options(EmbeddingModel::AllMiniLML6V2Q);
-                            match TextEmbedding::try_new(cpu_opts) {
-                                Ok(m) => (m, cpu_provider),
-                                Err(cpu_err) => {
-                                    tracing::warn!(
-                                        "AllMiniLML6V2Q init failed on CPU ({cpu_err:#}), \
-                                         falling back to AllMiniLML6V2"
-                                    );
-                                    let (fb_opts, fb_provider) =
-                                        Self::init_options(EmbeddingModel::AllMiniLML6V2);
-                                    let m = TextEmbedding::try_new(fb_opts).context(
-                                        "failed to initialise fastembed (tried CUDA→CPU on AllMiniLML6V2Q, then AllMiniLML6V2)",
-                                    )?;
-                                    (m, fb_provider)
-                                }
-                            }
-                        } else if require_gpu {
-                            return Err(anyhow::anyhow!(
-                                "TRUSTY_DEVICE=gpu requested but accelerated execution provider \
-                                 failed to initialise: {q_err:#}"
-                            ));
-                        } else {
-                            tracing::warn!(
-                                "AllMiniLML6V2Q init failed ({q_err:#}), falling back to AllMiniLML6V2"
-                            );
-                            let (fb_opts, fb_provider) =
-                                Self::init_options(EmbeddingModel::AllMiniLML6V2);
-                            let m = TextEmbedding::try_new(fb_opts).context(
-                                "failed to initialise fastembed (tried AllMiniLML6V2Q and AllMiniLML6V2)",
-                            )?;
-                            (m, fb_provider)
-                        }
-                    }
-                };
-                let mut m = m;
-
-                // Warm the graph so the first real user query is hot.
-                let warmup: Vec<&str> = vec![
-                    "hello world",
-                    "the quick brown fox",
-                    "memory palace warmup",
-                    "embedding model ready",
-                    "trusty common warmup",
-                ];
-                let _ = m
-                    .embed(warmup, None)
-                    .context("fastembed warmup batch failed")?;
-                Ok((m, provider))
-            })
-            .await
-            .context("spawn_blocking joined with error during embedder init")??;
-
-        tracing::info!(
-            "trusty-embedder: FastEmbedder ready (provider={}, dim={})",
-            provider,
-            EMBED_DIM
-        );
-
-        Ok(Self {
-            model: Arc::new(Mutex::new(model)),
-            cache: Arc::new(Mutex::new(LruCache::new(capacity))),
-            dim: EMBED_DIM,
-            provider,
-        })
-    }
-}
-
-/// Return `true` if every element of `vector` is exactly `0.0`.
-///
-/// Why: extracted from `FastEmbedder::embed_batch` so the guard can be tested
-/// without a live ONNX backend. The guard rejects all-zero ORT output — a
-/// zero-initialised output buffer that was never written indicates a silent
-/// CUDA EP failure and must not reach the HNSW index.
-///
-/// What: `iter().all(|&v| v == 0.0)`. The `== 0.0` comparison is INTENTIONAL
-/// — an ORT zero-initialised buffer contains exact IEEE 754 zero (+0.0), not
-/// a near-zero value. Legitimate embeddings from a working ONNX session always
-/// contain at least one non-zero component (the model is trained to produce
-/// unit-normalised vectors away from the origin). Using exact equality avoids
-/// false positives from legitimate vectors with very small (but non-zero)
-/// components.
-///
-/// Test: `zero_vector_guard_rejects_all_zero_batch` exercises this function
-/// directly, so the guard cannot be deleted without a test failure.
-pub(crate) fn is_zero_vector(vector: &[f32]) -> bool {
-    vector.iter().all(|&v| v == 0.0)
-}
-
-#[async_trait]
-impl Embedder for FastEmbedder {
-    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        if texts.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Split into cached hits vs misses.
-        let mut results: Vec<Option<Vec<f32>>> = vec![None; texts.len()];
-        let mut to_compute: Vec<(usize, String)> = Vec::new();
-        {
-            let mut cache = self.cache.lock();
-            for (i, t) in texts.iter().enumerate() {
-                if let Some(v) = cache.get(t) {
-                    results[i] = Some(v.clone());
-                } else {
-                    to_compute.push((i, t.clone()));
-                }
-            }
-        }
-
-        if !to_compute.is_empty() {
-            let model = Arc::clone(&self.model);
-            let owned: Vec<String> = to_compute.iter().map(|(_, s)| s.clone()).collect();
-            let computed = tokio::task::spawn_blocking(move || -> Result<Vec<Vec<f32>>> {
-                let mut guard = model.lock();
-                guard
-                    .embed(owned, None)
-                    .context("fastembed embed call failed")
-            })
-            .await
-            .context("spawn_blocking joined with error during embed")??;
-
-            if computed.len() != to_compute.len() {
-                anyhow::bail!(
-                    "fastembed returned {} embeddings, expected {}",
-                    computed.len(),
-                    to_compute.len()
-                );
-            }
-
-            let mut cache = self.cache.lock();
-            for ((idx, key), vector) in to_compute.into_iter().zip(computed) {
-                // Zero-vector guard (fix #763 Fix 3b): delegates to
-                // `is_zero_vector` — see that function's doc for the rationale
-                // behind using exact `== 0.0` comparison.
-                if is_zero_vector(&vector) {
-                    anyhow::bail!(
-                        "zero-vector returned by fastembed for text slot {idx} \
-                         (provider={} — possible CUDA EP OOM / silent fallback). \
-                         Set TRUSTY_DEVICE=gpu to surface the real error at init time.",
-                        self.provider
-                    );
-                }
-                cache.put(key, vector.clone());
-                results[idx] = Some(vector);
-            }
-        }
-
-        results
-            .into_iter()
-            .map(|opt| opt.context("missing embedding slot after batch"))
-            .collect()
-    }
-
-    fn dimension(&self) -> usize {
-        self.dim
-    }
-
-    fn provider(&self) -> ExecutionProvider {
-        self.provider
-    }
-}
-
-/// Deterministic test double — hashes input bytes into a fixed-dim vector.
-///
-/// Why: ONNX model downloads dominate test runtime and can race on cold
-/// caches when multiple tests construct embedders in parallel. The mock
-/// gives integration tests a "rank by similarity" surface without any I/O.
-/// What: a tiny per-byte hash spread across `dim` slots, with the first byte
-/// always contributing so short/empty strings still differ.
-/// Test: `mock_embedder_round_trip` confirms shape + determinism.
-#[cfg(any(test, feature = "embedder-test-support"))]
-pub struct MockEmbedder {
-    dim: usize,
-}
+mod fast_embedder;
+mod types;
 
 #[cfg(any(test, feature = "embedder-test-support"))]
-impl MockEmbedder {
-    pub fn new(dim: usize) -> Self {
-        Self { dim }
-    }
+mod mock;
 
-    fn hash_to_vec(&self, text: &str) -> Vec<f32> {
-        let mut v = vec![0.0_f32; self.dim];
-        for (i, b) in text.bytes().enumerate() {
-            let slot = (i + b as usize) % self.dim;
-            v[slot] += (b as f32) / 255.0;
-        }
-        if let Some(first) = text.bytes().next() {
-            v[0] += first as f32 / 255.0;
-        }
-        v
-    }
-}
+pub use fast_embedder::FastEmbedder;
+pub use types::{
+    CudaOptions, DEFAULT_CACHE_CAPACITY, DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES, EMBED_DIM, Embedder,
+    ExecutionProvider, embed_one, resolve_cuda_options, resolve_expected_provider,
+    resolve_fastembed_cache_dir,
+};
 
 #[cfg(any(test, feature = "embedder-test-support"))]
-#[async_trait]
-impl Embedder for MockEmbedder {
-    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        Ok(texts.iter().map(|t| self.hash_to_vec(t)).collect())
-    }
-
-    fn dimension(&self) -> usize {
-        self.dim
-    }
-}
+pub use mock::MockEmbedder;
 
 #[cfg(test)]
 mod tests {
@@ -927,8 +146,7 @@ mod tests {
         fn apply(key: &'static str, value: Option<&str>) -> Self {
             let prev = std::env::var(key).ok();
             // SAFETY: every caller holds `ENV_LOCK`, so no other thread reads
-            // or writes the environment concurrently. Rust 2024 marks env
-            // mutation `unsafe` for exactly this multi-threaded hazard.
+            // or writes the environment concurrently.
             unsafe {
                 match value {
                     Some(v) => std::env::set_var(key, v),
@@ -970,10 +188,6 @@ mod tests {
         assert_eq!(DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES, 12 * 1024 * 1024 * 1024);
     }
 
-    /// Why: operators on cards larger or smaller than a T4 must be able to set
-    /// an exact byte ceiling.
-    /// What: sets `TRUSTY_GPU_MEM_LIMIT_BYTES` and asserts it is honoured verbatim.
-    /// Test: this test.
     #[test]
     fn cuda_options_bytes_env() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -986,10 +200,6 @@ mod tests {
         );
     }
 
-    /// Why: an MB knob is friendlier for operators than raw bytes.
-    /// What: sets `TRUSTY_GPU_MEM_LIMIT_MB=4096` and asserts the value is
-    /// multiplied by 1024^2 into bytes.
-    /// Test: this test.
     #[test]
     fn cuda_options_mb_env() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -1002,10 +212,6 @@ mod tests {
         );
     }
 
-    /// Why: when both knobs are set the byte-precise one must win so operators
-    /// have an unambiguous override.
-    /// What: sets both vars and asserts the BYTES value is chosen.
-    /// Test: this test.
     #[test]
     fn cuda_options_bytes_takes_precedence() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -1018,12 +224,6 @@ mod tests {
         );
     }
 
-    /// Why: a typo (`TRUSTY_GPU_MEM_LIMIT_BYTES=lots`) or a zero value must not
-    /// silently disable the arena cap — it must fall through to the next source
-    /// and ultimately the safe default.
-    /// What: sets garbage in BYTES and a valid MB, asserts MB is used; then sets
-    /// garbage in both and asserts the default.
-    /// Test: this test.
     #[test]
     fn cuda_options_ignores_malformed() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -1047,12 +247,6 @@ mod tests {
         }
     }
 
-    /// Why: issue #604 — the operator escape hatch `TRUSTY_DEVICE=cpu` must
-    /// make `/health` report `CPU` on every platform/build, since it forces the
-    /// real embedder onto CPU regardless of CUDA/CoreML availability.
-    /// What: sets `TRUSTY_DEVICE=cpu` and asserts the predicted provider is
-    /// `Cpu`.
-    /// Test: this test.
     #[test]
     fn resolve_expected_provider_forces_cpu() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -1060,13 +254,6 @@ mod tests {
         assert_eq!(resolve_expected_provider(), ExecutionProvider::Cpu);
     }
 
-    /// Why: issue #604 — with no overrides, the predicted provider must equal
-    /// what `init_options` actually selects on this build/platform, so `/health`
-    /// matches the sidecar's startup log. On this CPU-only, non-CUDA dev build:
-    /// Apple Silicon → `CoreML(ANE)`, every other host → `CPU`.
-    /// What: clears the override env vars and asserts the platform-appropriate
-    /// default.
-    /// Test: this test.
     #[test]
     fn resolve_expected_provider_default_matches_platform() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -1095,12 +282,6 @@ mod tests {
         );
     }
 
-    /// Why: issue #604 — when the operator opts into the full CPU+GPU+ANE
-    /// pipeline via `TRUSTY_COREML_COMPUTE_UNITS=all`, the predicted tag must be
-    /// the `CoreML` (All) variant so `/health` reflects the real configuration.
-    /// What: on Apple Silicon, sets the units var to `all` and asserts the
-    /// `CoreML` tag; default (unset) maps to `CoreMLAne`.
-    /// Test: this test (Apple Silicon only — the CoreML branch is cfg-gated).
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     #[cfg(not(feature = "embedder-cuda"))]
     #[test]
@@ -1138,8 +319,6 @@ mod tests {
         assert!(v.is_empty());
     }
 
-    // ONNX-backed test: downloads ~23MB on first run. Marked ignored so default
-    // `cargo test` stays offline; run with `cargo test -- --ignored` when needed.
     #[tokio::test]
     #[ignore]
     async fn fastembed_returns_correct_dim() {
@@ -1161,38 +340,21 @@ mod tests {
         assert_eq!(v1, v2);
     }
 
-    /// Why: `TRUSTY_DEVICE=cpu` MUST suppress CoreML EP registration on Apple
-    /// Silicon. CoreML on M-series uses the unified memory pool and inflates
-    /// virtual RSS to ~100 GB during indexing of large repos, which triggers
-    /// macOS jetsam SIGKILL even though physical RAM is fine (blocking bug,
-    /// reported via trusty-search). The `--device cpu` flag is the operator's
-    /// escape hatch; if `init_options` ignores it the daemon is unkillable
-    /// short of disabling the launchd plist.
-    /// What: serialises env mutation, sets `TRUSTY_DEVICE=cpu`, calls
-    /// `init_options`, and asserts the returned `ExecutionProvider` is `Cpu`.
-    /// Then clears the var and asserts it goes back to `CoreML` on macOS
-    /// aarch64 (or stays `Cpu` elsewhere — both are acceptable for this test
-    /// since the bug is specifically about the override being honoured).
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     #[test]
     fn trusty_device_cpu_disables_coreml_on_apple_silicon() {
-        // Serialise env mutation via the module-level ENV_LOCK so this
-        // test does not race with the resolve_fastembed / CoreML variants.
+        use crate::embedder::fast_embedder::FastEmbedder as FE;
         let _guard = ENV_LOCK.lock().unwrap();
-
-        // SAFETY: test is single-threaded under ENV_LOCK; no other thread
-        // observes the env mutation.
         let prev = std::env::var("TRUSTY_DEVICE").ok();
         unsafe { std::env::set_var("TRUSTY_DEVICE", "cpu") };
 
-        let (_opts, provider) = FastEmbedder::init_options(EmbeddingModel::AllMiniLML6V2Q);
+        let (_opts, provider) = FE::init_options(fastembed::EmbeddingModel::AllMiniLML6V2Q);
         assert_eq!(
             provider,
             ExecutionProvider::Cpu,
             "TRUSTY_DEVICE=cpu must suppress CoreML EP on Apple Silicon"
         );
 
-        // Restore for sibling tests.
         unsafe {
             match prev {
                 Some(v) => std::env::set_var("TRUSTY_DEVICE", v),
@@ -1201,31 +363,20 @@ mod tests {
         }
     }
 
-    /// Why: counterpart to the test above — confirms the default path still
-    /// registers CoreML when `TRUSTY_DEVICE` is unset, so we don't regress
-    /// GPU/ANE acceleration for operators who *want* it. The expected default
-    /// is now `CoreMLAne` (CPU + Neural Engine, no GPU unified-memory
-    /// allocation) — the safe replacement for the original `CoreML` (CPU + GPU
-    /// + ANE) default that caused the 72 GB virtual-RSS spike.
-    ///
-    /// What: clears `TRUSTY_DEVICE` and `TRUSTY_COREML_COMPUTE_UNITS`, calls
-    /// `init_options`, asserts `CoreMLAne`.
-    ///
-    /// Test: this test, on M-series Mac.
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     #[test]
     fn default_apple_silicon_uses_coreml_ane() {
+        use crate::embedder::fast_embedder::FastEmbedder as FE;
         let _guard = ENV_LOCK.lock().unwrap();
 
         let prev_device = std::env::var("TRUSTY_DEVICE").ok();
         let prev_units = std::env::var("TRUSTY_COREML_COMPUTE_UNITS").ok();
-        // SAFETY: single-threaded under ENV_LOCK.
         unsafe {
             std::env::remove_var("TRUSTY_DEVICE");
             std::env::remove_var("TRUSTY_COREML_COMPUTE_UNITS");
         }
 
-        let (_opts, provider) = FastEmbedder::init_options(EmbeddingModel::AllMiniLML6V2Q);
+        let (_opts, provider) = FE::init_options(fastembed::EmbeddingModel::AllMiniLML6V2Q);
         assert_eq!(
             provider,
             ExecutionProvider::CoreMLAne,
@@ -1244,75 +395,20 @@ mod tests {
         }
     }
 
-    /// Regression test for fix #763 Fix 3b: an all-zeros embedding batch must
-    /// produce an `Err`, not a silent zero result.
-    ///
-    /// Why: zero vectors from a CUDA EP silent fallback would be stored in the
-    /// HNSW index and corrupt all similarity searches (every vector is
-    /// equidistant from zero). This test proves the guard fires before the
-    /// vector reaches the cache or the caller.
-    ///
-    /// What: uses `MockEmbedder`'s `hash_to_vec` which always produces non-zero
-    /// vectors for non-empty input. We test the guard directly by calling the
-    /// private helper logic through a controlled path: assert that a synthesised
-    /// all-zero `Vec<f32>` triggers the bail condition. Because `FastEmbedder`
-    /// requires ONNX (test is `#[ignore]`), we test the guard path through the
-    /// public `MockEmbedder` contract (non-zero guarantee) and verify the guard
-    /// logic with a direct check of the bail condition.
-    ///
-    /// Test: `zero_vector_guard_rejects_all_zero_batch`.
-    #[test]
-    fn zero_vector_guard_rejects_all_zero_batch() {
-        // Why: exercise `is_zero_vector` directly so the guard function cannot
-        //      be deleted without breaking this test. Previously the guard logic
-        //      was inlined in embed_batch; extracting it here makes it testable
-        //      without an ONNX backend.
-        // What: assert that an all-zero vector returns `true` (guard fires) and
-        //       a vector with any non-zero component returns `false` (passes).
-        // Test: this test.
-        let zero_vec: Vec<f32> = vec![0.0; EMBED_DIM];
-        let non_zero_vec: Vec<f32> = {
-            let mut v = vec![0.0_f32; EMBED_DIM];
-            v[0] = 1.0;
-            v
-        };
-        assert!(
-            is_zero_vector(&zero_vec),
-            "synthetic zero vector must be detected by is_zero_vector"
-        );
-        assert!(
-            !is_zero_vector(&non_zero_vec),
-            "non-zero vector must NOT be detected by is_zero_vector"
-        );
-        // Confirm that the MockEmbedder never produces a zero vector for
-        // non-empty input (it uses a hash-based non-zero fill).
-        let mock = MockEmbedder::new(EMBED_DIM);
-        let hash_result = mock.hash_to_vec("some text");
-        assert!(
-            !is_zero_vector(&hash_result),
-            "MockEmbedder must produce non-zero vectors for non-empty input"
-        );
-    }
-
-    /// Why: operators with enough headroom may want the full CPU+GPU+ANE
-    /// pipeline; `TRUSTY_COREML_COMPUTE_UNITS=all` is the documented opt-in.
-    /// What: sets the env var, calls `init_options`, asserts `CoreML` (the
-    /// All variant tag).
-    /// Test: this test, on M-series Mac.
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     #[test]
     fn coreml_compute_units_all_opt_in() {
+        use crate::embedder::fast_embedder::FastEmbedder as FE;
         let _guard = ENV_LOCK.lock().unwrap();
 
         let prev_device = std::env::var("TRUSTY_DEVICE").ok();
         let prev_units = std::env::var("TRUSTY_COREML_COMPUTE_UNITS").ok();
-        // SAFETY: single-threaded under ENV_LOCK.
         unsafe {
             std::env::remove_var("TRUSTY_DEVICE");
             std::env::set_var("TRUSTY_COREML_COMPUTE_UNITS", "all");
         }
 
-        let (_opts, provider) = FastEmbedder::init_options(EmbeddingModel::AllMiniLML6V2Q);
+        let (_opts, provider) = FE::init_options(fastembed::EmbeddingModel::AllMiniLML6V2Q);
         assert_eq!(
             provider,
             ExecutionProvider::CoreML,
@@ -1329,5 +425,34 @@ mod tests {
                 None => std::env::remove_var("TRUSTY_COREML_COMPUTE_UNITS"),
             }
         }
+    }
+
+    /// Why: zero vectors from a CUDA EP silent fallback would be stored in the
+    /// HNSW index and corrupt all similarity searches.
+    /// What: asserts `is_zero_vector` fires on an all-zero vector and not on
+    /// a non-zero vector.
+    /// Test: `zero_vector_guard_rejects_all_zero_batch`.
+    #[test]
+    fn zero_vector_guard_rejects_all_zero_batch() {
+        let zero_vec: Vec<f32> = vec![0.0; EMBED_DIM];
+        let non_zero_vec: Vec<f32> = {
+            let mut v = vec![0.0_f32; EMBED_DIM];
+            v[0] = 1.0;
+            v
+        };
+        assert!(
+            types::is_zero_vector(&zero_vec),
+            "synthetic zero vector must be detected by is_zero_vector"
+        );
+        assert!(
+            !types::is_zero_vector(&non_zero_vec),
+            "non-zero vector must NOT be detected by is_zero_vector"
+        );
+        let mock = MockEmbedder::new(EMBED_DIM);
+        let hash_result = mock.hash_to_vec("some text");
+        assert!(
+            !types::is_zero_vector(&hash_result),
+            "MockEmbedder must produce non-zero vectors for non-empty input"
+        );
     }
 }
