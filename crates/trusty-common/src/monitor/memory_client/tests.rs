@@ -9,6 +9,7 @@
 //! Test: this file is the test coverage.
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use super::super::client::MemoryClient;
     use super::super::parsers::{

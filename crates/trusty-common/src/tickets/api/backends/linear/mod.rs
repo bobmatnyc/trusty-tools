@@ -10,3 +10,6 @@ mod client;
 mod types;
 
 pub use types::LinearBackend;
+
+#[cfg(test)]
+mod tests;

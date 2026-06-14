@@ -526,6 +526,3 @@ impl Backend for LinearBackend {
         .await
     }
 }
-
-#[cfg(test)]
-mod tests;

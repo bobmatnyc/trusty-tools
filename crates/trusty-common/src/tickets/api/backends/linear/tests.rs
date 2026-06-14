@@ -5,7 +5,7 @@
 //! What: Unit tests for priority/state helpers and backend construction.
 //! Test: Run with `cargo test -p trusty-common`.
 
-use super::super::types::{int_to_priority, priority_to_int, state_from_name};
+use super::types::{int_to_priority, priority_to_int, state_from_name};
 use crate::tickets::api::backends::linear::LinearBackend;
 use crate::tickets::api::config::LinearConfig;
 use crate::tickets::api::models::{IssueState, Priority};
