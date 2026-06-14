@@ -67,11 +67,12 @@ impl PayloadStore {
             })?;
         }
 
-        let db =
-            super::super::open_or_recreate(&redb_path).map_err(|e| PayloadStoreError::Database {
+        let db = super::super::open_or_recreate(&redb_path).map_err(|e| {
+            PayloadStoreError::Database {
                 path: redb_path.clone(),
                 source: Box::new(e),
-            })?;
+            }
+        })?;
 
         // Touch the PAYLOADS table so it exists on disk before the first read
         // transaction. redb only persists a table once it is opened in a write

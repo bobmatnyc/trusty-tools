@@ -13,10 +13,10 @@ use std::sync::Arc;
 use crate::memory_core::palace::Drawer;
 
 use super::inference::Inference;
+use super::types::ConsolidationAction;
 use super::types::{
     ConsolidationResult, SemanticConsolidationConfig, apply_actions_to_result, batch_cache_key,
 };
-use super::types::ConsolidationAction;
 
 /// Content-hash-keyed cache for consolidation results.
 ///

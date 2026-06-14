@@ -10,8 +10,8 @@
 //! Test: `tool_def_serializes_as_function`, `empty_tools_serializes_to_none`
 //! in the parent module's test suite.
 
-use crate::chat::ToolDef;
 use crate::ChatMessage;
+use crate::chat::ToolDef;
 use serde::Serialize;
 
 /// OpenAI wire shape for a single tool definition.

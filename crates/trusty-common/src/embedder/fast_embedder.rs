@@ -39,9 +39,7 @@ use super::types::{CudaOptions, resolve_cuda_options};
 /// EP construction itself is GPU/driver-gated and therefore exercised only on a
 /// real CUDA host (e.g. a g4dn/T4 instance), not in CI.
 #[cfg(feature = "embedder-cuda")]
-fn build_cuda_provider(
-    opts: &CudaOptions,
-) -> ort::execution_providers::ExecutionProviderDispatch {
+fn build_cuda_provider(opts: &CudaOptions) -> ort::execution_providers::ExecutionProviderDispatch {
     use ort::ep::ArenaExtendStrategy;
     ort::ep::CUDA::default()
         .with_arena_extend_strategy(ArenaExtendStrategy::SameAsRequested)

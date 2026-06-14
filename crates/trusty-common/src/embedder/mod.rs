@@ -42,9 +42,9 @@ mod mock;
 
 pub use fast_embedder::FastEmbedder;
 pub use types::{
-    CudaOptions, DEFAULT_CACHE_CAPACITY, DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES, EMBED_DIM,
-    Embedder, ExecutionProvider, embed_one, resolve_cuda_options,
-    resolve_expected_provider, resolve_fastembed_cache_dir,
+    CudaOptions, DEFAULT_CACHE_CAPACITY, DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES, EMBED_DIM, Embedder,
+    ExecutionProvider, embed_one, resolve_cuda_options, resolve_expected_provider,
+    resolve_fastembed_cache_dir,
 };
 
 #[cfg(any(test, feature = "embedder-test-support"))]

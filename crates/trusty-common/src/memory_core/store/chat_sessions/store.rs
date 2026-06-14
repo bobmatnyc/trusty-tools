@@ -11,8 +11,8 @@
 //! `roundtrip_persists_across_reopen`.
 
 use super::types::{
-    ChatMessage, ChatSession, ChatSessionMeta, ChatSessionRecord, ChatSessionStoreError,
-    Result, parse_timestamp,
+    ChatMessage, ChatSession, ChatSessionMeta, ChatSessionRecord, ChatSessionStoreError, Result,
+    parse_timestamp,
 };
 use crate::memory_core::store::kg_store::SESSIONS;
 use chrono::Utc;
@@ -71,11 +71,12 @@ impl ChatSessionStore {
             })?;
         }
 
-        let db =
-            super::super::open_or_recreate(&redb_path).map_err(|e| ChatSessionStoreError::Database {
+        let db = super::super::open_or_recreate(&redb_path).map_err(|e| {
+            ChatSessionStoreError::Database {
                 path: redb_path.clone(),
                 source: Box::new(e),
-            })?;
+            }
+        })?;
 
         {
             let wtx = db
@@ -215,8 +216,7 @@ impl ChatSessionStore {
             .map_err(|e| ChatSessionStoreError::Postcard { source: e })?;
         let created_at = parse_timestamp(&record.created_at, "created_at")?;
         let updated_at = parse_timestamp(&record.updated_at, "updated_at")?;
-        let history: Vec<ChatMessage> =
-            serde_json::from_str(&record.history).unwrap_or_default();
+        let history: Vec<ChatMessage> = serde_json::from_str(&record.history).unwrap_or_default();
         Ok(Some(ChatSession {
             id: id.to_string(),
             title: record.title,

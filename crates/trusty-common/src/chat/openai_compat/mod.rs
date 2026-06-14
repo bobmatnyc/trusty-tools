@@ -21,7 +21,7 @@ mod tests {
     use super::providers::{OllamaProvider, OpenRouterProvider, auto_detect_local_provider};
     use super::sse_pump::ToolCallAccumulator;
     use super::wire::tools_wire;
-    use crate::chat::{ChatEvent, ToolDef};
+    use crate::chat::{ChatEvent, ChatProvider, ToolDef};
 
     #[test]
     fn openrouter_provider_reports_metadata() {

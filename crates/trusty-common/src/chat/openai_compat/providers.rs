@@ -15,8 +15,8 @@
 
 use super::sse_pump::pump_openai_sse;
 use super::wire::tools_wire;
-use crate::chat::{ChatEvent, ChatProvider, ToolDef};
 use crate::ChatMessage;
+use crate::chat::{ChatEvent, ChatProvider, ToolDef};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use tokio::sync::mpsc::Sender;

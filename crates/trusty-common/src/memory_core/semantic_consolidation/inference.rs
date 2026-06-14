@@ -18,8 +18,7 @@ use super::types::{
     parse_consolidation_actions,
 };
 
-pub(super) const OPENROUTER_COMPLETIONS_URL: &str =
-    "https://openrouter.ai/api/v1/chat/completions";
+pub(super) const OPENROUTER_COMPLETIONS_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 
 pub(super) const CONSOLIDATION_PROMPT_SYSTEM: &str = r#"You are a knowledge consolidation assistant for a personal memory system. Given a batch of memory entries (drawers), identify:
 1. Aliases: different names for the same concept (e.g. "ts" = "trusty-search")

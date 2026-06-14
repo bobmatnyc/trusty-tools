@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::tickets::api::config::GithubConfig;
 
-use super::types::{GitHubBackend, GRAPHQL_URL, REST_BASE, USER_AGENT, ensure_ok};
+use super::types::{GRAPHQL_URL, GitHubBackend, REST_BASE, USER_AGENT, ensure_ok};
 
 impl GitHubBackend {
     /// Why: Caller has validated config; we just wire up the client.
