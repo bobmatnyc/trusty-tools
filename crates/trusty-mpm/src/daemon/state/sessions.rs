@@ -1,0 +1,305 @@
+//! Session, project, and delegation methods on [`DaemonState`].
+//!
+//! Why: the session-registry operations are a cohesive group used by many
+//! handlers but unrelated to resource-management (breakers, memory, overseer);
+//! splitting them keeps each file focused and under the SLOC cap.
+//! What: session CRUD, project CRUD, delegation upsert/query, and the
+//! dead-session reaper.
+//! Test: see `super::tests`.
+
+use std::path::PathBuf;
+
+use crate::core::agent::Delegation;
+use crate::core::project::ProjectInfo;
+use crate::core::session::{Session, SessionId};
+
+use super::core::PAIR_CODE_TTL;
+use super::core::{DaemonState, ReapResult};
+use crate::daemon::tmux::TmuxDriver;
+
+impl DaemonState {
+    // ---- bot pairing ----------------------------------------------------
+
+    /// Generate and store a one-time pairing code.
+    ///
+    /// Why: `tm pair` asks the daemon for a short code the operator types into
+    /// the Telegram bot; the daemon must remember it (and its issue time) so a
+    /// later `/pair` confirm can validate it within the TTL window.
+    /// What: derives a six-character uppercase alphanumeric code from a fresh
+    /// UUID, stores it with the current instant, and returns the code.
+    /// Test: `pairing_round_trip`.
+    pub fn generate_pair_code(&self) -> String {
+        let code: String = uuid::Uuid::new_v4()
+            .simple()
+            .to_string()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(6)
+            .collect::<String>()
+            .to_uppercase();
+        *self.pair_code.lock() = Some((code.clone(), std::time::Instant::now()));
+        code
+    }
+
+    /// Confirm a pairing code and register `chat_id` on success.
+    ///
+    /// Why: the bot's `/pair <code>` flow validates the operator's code and, on
+    /// success, binds the chat so push alerts have a destination — and the
+    /// binding must survive a daemon restart.
+    /// What: returns `true` and stores `chat_id` (in memory *and* persisted to
+    /// `~/.trusty-mpm/pairing.json`) when `code` matches the outstanding code
+    /// and it is within [`PAIR_CODE_TTL`]; clears the code either way (a used or
+    /// expired code never validates twice). A failed disk write is logged, not
+    /// fatal — the in-memory pairing still takes effect.
+    /// Test: `pairing_round_trip`, `pairing_persists_to_disk`.
+    pub fn confirm_pair_code(&self, code: &str, chat_id: i64) -> bool {
+        let mut guard = self.pair_code.lock();
+        let valid = matches!(
+            guard.as_ref(),
+            Some((stored, issued))
+                if stored == code && issued.elapsed() < PAIR_CODE_TTL
+        );
+        *guard = None;
+        if valid {
+            *self.paired_chat_id.lock() = Some(chat_id);
+            let record = crate::daemon::pairing_store::PairingRecord::new(chat_id);
+            if let Err(e) = crate::daemon::pairing_store::save(&self.framework_root, &record) {
+                tracing::warn!("failed to persist Telegram pairing: {e}");
+            }
+        }
+        valid
+    }
+
+    /// Clear the Telegram pairing, in memory and on disk.
+    ///
+    /// Why: `POST /pair/reset` (or any explicit unpair) must drop the binding so
+    /// a restart does not resurrect it from `pairing.json`.
+    /// What: sets `paired_chat_id` to `None` and deletes the persisted record;
+    /// a failed delete is logged, not fatal.
+    /// Test: `pairing_reset_clears_disk`.
+    pub fn clear_pairing(&self) {
+        *self.paired_chat_id.lock() = None;
+        if let Err(e) = crate::daemon::pairing_store::clear(&self.framework_root) {
+            tracing::warn!("failed to delete persisted Telegram pairing: {e}");
+        }
+    }
+
+    /// The chat id currently paired with this daemon, if any.
+    ///
+    /// Why: `GET /pair/status` and the alert loop need the paired destination.
+    /// What: returns the stored chat id, or `None` when unpaired.
+    /// Test: `pairing_round_trip`.
+    pub fn paired_chat_id(&self) -> Option<i64> {
+        *self.paired_chat_id.lock()
+    }
+
+    // ---- sessions -------------------------------------------------------
+
+    /// Register (or replace) a managed session.
+    pub fn register_session(&self, session: Session) {
+        self.sessions.insert(session.id, session);
+    }
+
+    /// Record the OS-level `claude` process PID on a registered session.
+    ///
+    /// Why: the CLI and the daemon discover the real `claude` PID inside a tmux
+    /// pane *after* launch; reporting it back lets the reaper check process
+    /// liveness rather than relying on the tmux session alone.
+    /// What: sets `session.pid = Some(pid)` under a write guard; returns `true`
+    /// when the session existed, `false` for an unknown id.
+    /// Test: `set_session_pid_updates_field`.
+    pub fn set_session_pid(&self, id: SessionId, pid: u32) -> bool {
+        self.update_session(&id, |s| s.pid = Some(pid))
+    }
+
+    /// Remove a session and its associated memory snapshot.
+    pub fn remove_session(&self, id: SessionId) -> Option<Session> {
+        self.memory.remove(&id);
+        self.sessions.remove(&id).map(|(_, s)| s)
+    }
+
+    /// Snapshot all managed sessions.
+    pub fn list_sessions(&self) -> Vec<Session> {
+        self.sessions.iter().map(|e| e.value().clone()).collect()
+    }
+
+    /// Look up one session by id.
+    pub fn session(&self, id: SessionId) -> Option<Session> {
+        self.sessions.get(&id).map(|e| e.value().clone())
+    }
+
+    /// Mutate an existing session in place under a write lock.
+    ///
+    /// Why: the pause/resume handlers must change a session's `status`,
+    /// `paused_at`, and `pause_summary` atomically without the read-modify-write
+    /// race of `session()` + `register_session()`.
+    /// What: takes a write guard on the session entry and calls `f` if the
+    /// session exists; returns `true` when it ran, `false` for an unknown id.
+    /// Test: `update_session_mutates_existing`, `update_session_missing_is_false`.
+    pub fn update_session<F>(&self, id: &SessionId, f: F) -> bool
+    where
+        F: FnOnce(&mut Session),
+    {
+        match self.sessions.get_mut(id) {
+            Some(mut entry) => {
+                f(entry.value_mut());
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Snapshot the sessions belonging to one project.
+    ///
+    /// Why: `GET /sessions?project=<path>` and `trusty-mpm session list`
+    /// scope the listing to the caller's project.
+    /// What: returns every session whose `project_path` equals `path`.
+    /// Test: `list_sessions_for_project_filters`.
+    pub fn list_sessions_for_project(&self, path: &std::path::Path) -> Vec<Session> {
+        self.sessions
+            .iter()
+            .filter(|e| e.value().project_path.as_deref() == Some(path))
+            .map(|e| e.value().clone())
+            .collect()
+    }
+
+    /// Look up one session by id or by friendly tmux name.
+    ///
+    /// Why: the `session stop` / `session info` subcommands accept either a
+    /// UUID or the friendly `tmpm-<adj>-<noun>` name the daemon prints on
+    /// start; resolving both keeps the CLI ergonomic.
+    /// What: tries to parse `key` as a UUID first; on failure scans the
+    /// registry for a session whose `tmux_name` matches.
+    /// Test: `find_session_by_id_or_name`.
+    pub fn find_session(&self, key: &str) -> Option<Session> {
+        if let Ok(uuid) = uuid::Uuid::parse_str(key) {
+            return self.session(SessionId(uuid));
+        }
+        self.sessions
+            .iter()
+            .find(|e| e.value().tmux_name == key)
+            .map(|e| e.value().clone())
+    }
+
+    /// Drop dead tmux sessions and mark Stopped ones whose process has exited.
+    ///
+    /// Why: sessions accumulate forever otherwise — a dead tmux session leaves a
+    /// stale registry entry behind. Additionally a tmux session can outlive the
+    /// `claude` process inside it (the pane drops to a bare shell); such a
+    /// session should be visibly `Stopped`, not silently "active". The daemon's
+    /// housekeeping loop calls this periodically, and `DELETE /sessions/dead`
+    /// calls it on demand.
+    /// What: discovers the live tmux session names via `driver.list_sessions()`,
+    /// then delegates to [`reap_against`](Self::reap_against). A failed tmux
+    /// listing reaps nothing (returns a zeroed [`ReapResult`]) rather than
+    /// wrongly deleting every session.
+    /// Test: `reap_dead_sessions`, `reap_marks_stopped_when_pid_dead`.
+    pub fn reap_dead_sessions(&self, driver: &TmuxDriver) -> ReapResult {
+        let live: std::collections::HashSet<String> = match driver.list_sessions() {
+            Ok(sessions) => sessions.into_iter().map(|s| s.name).collect(),
+            Err(e) => {
+                tracing::warn!("reap skipped — tmux list-sessions failed: {e}");
+                return ReapResult::default();
+            }
+        };
+        self.reap_against(&live)
+    }
+
+    /// Remove dead tmux sessions and mark Stopped ones with a dead process.
+    ///
+    /// Why: separating the set-difference logic from the tmux call makes the
+    /// reaping rule unit-testable without spawning a tmux process. Native
+    /// (`SessionHost::Native`) sessions have no tmux session, so the tmux
+    /// liveness check must skip them — otherwise every discovered Terminal.app
+    /// process would be reaped the instant after it was discovered.
+    /// What: for tmux-origin sessions —
+    /// - if the `tmux_name` is absent from `live`, the entry is removed;
+    /// - if the `tmux_name` is alive but the session has a tracked `pid` whose
+    ///   `claude` process has exited, the session is marked
+    ///   [`SessionStatus::Stopped`] in place (kept so the operator can see it).
+    ///
+    /// Returns the [`ReapResult`] with both counts. Native sessions are left
+    /// untouched.
+    /// Test: `reap_dead_sessions`, `reap_keeps_native_sessions`,
+    /// `reap_marks_stopped_when_pid_dead`.
+    pub(super) fn reap_against(&self, live: &std::collections::HashSet<String>) -> ReapResult {
+        use crate::core::session::{SessionHost, SessionStatus};
+
+        let mut dead: Vec<SessionId> = Vec::new();
+        let mut stopped_ids: Vec<SessionId> = Vec::new();
+        for entry in self.sessions.iter() {
+            let session = entry.value();
+            if session.origin != SessionHost::Tmux {
+                continue;
+            }
+            if !live.contains(&session.tmux_name) {
+                dead.push(*entry.key());
+            } else if session.status != SessionStatus::Stopped
+                && let Some(pid) = session.pid
+                && !crate::core::process::is_process_alive(pid)
+            {
+                stopped_ids.push(*entry.key());
+            }
+        }
+        for id in &dead {
+            self.remove_session(*id);
+        }
+        for id in &stopped_ids {
+            self.update_session(id, |s| s.status = SessionStatus::Stopped);
+        }
+        ReapResult {
+            reaped: dead.len(),
+            stopped: stopped_ids.len(),
+        }
+    }
+
+    // ---- projects -------------------------------------------------------
+
+    /// Register a project by its working-directory path.
+    ///
+    /// Why: `trusty-mpm project init` and `POST /projects` need to record a
+    /// directory as a managed project so sessions can be associated with it.
+    /// What: builds a [`ProjectInfo`] from `path`, inserting (or replacing) it
+    /// in the registry keyed by the path; returns the stored info.
+    /// Test: `register_and_list_projects`.
+    pub fn register_project(&self, path: PathBuf) -> ProjectInfo {
+        let info = ProjectInfo::new(path.clone());
+        self.projects.write().insert(path, info.clone());
+        info
+    }
+
+    /// Snapshot every registered project.
+    ///
+    /// Why: `trusty-mpm project list` and `GET /projects` need the full set.
+    /// What: clones each [`ProjectInfo`] out from under a short read lock.
+    /// Test: `register_and_list_projects`.
+    pub fn list_projects(&self) -> Vec<ProjectInfo> {
+        self.projects.read().values().cloned().collect()
+    }
+
+    /// Look up one registered project by its path.
+    ///
+    /// Why: `GET /projects/current` resolves the project for the caller's cwd.
+    /// What: returns a clone of the stored [`ProjectInfo`], or `None` if the
+    /// path is not registered.
+    /// Test: `project_lookup_by_path`.
+    pub fn project(&self, path: &std::path::Path) -> Option<ProjectInfo> {
+        self.projects.read().get(path).cloned()
+    }
+
+    // ---- delegations ----------------------------------------------------
+
+    /// Record a new (or updated) delegation.
+    pub fn upsert_delegation(&self, delegation: Delegation) {
+        self.delegations.insert(delegation.id.0, delegation);
+    }
+
+    /// All delegations belonging to one session.
+    pub fn delegations_for(&self, session: SessionId) -> Vec<Delegation> {
+        self.delegations
+            .iter()
+            .filter(|e| e.value().session == session)
+            .map(|e| e.value().clone())
+            .collect()
+    }
+}

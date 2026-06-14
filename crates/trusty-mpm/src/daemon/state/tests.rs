@@ -1,0 +1,443 @@
+use std::path::PathBuf;
+
+use crate::core::hook::HookEvent;
+use crate::core::hook::HookEventRecord;
+use crate::core::memory::MemoryPressure;
+use crate::core::memory::MemoryUsage;
+use crate::core::overseer_config::OverseerConfig;
+use crate::core::session::{ControlModel, SessionStatus};
+
+use super::core::{DaemonState, HOOK_HISTORY_LIMIT, ReapResult};
+use super::overseer::build_overseer;
+
+use crate::core::session::{Session, SessionId};
+
+fn sample_session() -> Session {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut s = Session::new(SessionId::new(), "/tmp/p", ControlModel::Tmux, None);
+    s.tmux_name = format!("tmpm-test-{n}");
+    s.status = SessionStatus::Active;
+    s
+}
+
+#[test]
+fn register_and_list_sessions() {
+    let state = DaemonState::new();
+    let s = sample_session();
+    let id = s.id;
+    state.register_session(s);
+    assert_eq!(state.list_sessions().len(), 1);
+    assert!(state.session(id).is_some());
+    assert!(state.remove_session(id).is_some());
+    assert!(state.list_sessions().is_empty());
+}
+
+#[test]
+fn update_session_mutates_existing() {
+    let state = DaemonState::new();
+    let s = sample_session();
+    let id = s.id;
+    state.register_session(s);
+    let ran = state.update_session(&id, |session| {
+        session.status = SessionStatus::Paused;
+        session.pause_summary = Some("note".to_string());
+    });
+    assert!(ran);
+    let updated = state.session(id).expect("session exists");
+    assert_eq!(updated.status, SessionStatus::Paused);
+    assert_eq!(updated.pause_summary.as_deref(), Some("note"));
+}
+
+#[test]
+fn update_session_missing_is_false() {
+    let state = DaemonState::new();
+    let ran = state.update_session(&SessionId::new(), |_| {});
+    assert!(!ran);
+}
+
+#[test]
+fn register_and_list_projects() {
+    let state = DaemonState::new();
+    assert!(state.list_projects().is_empty());
+    let info = state.register_project(PathBuf::from("/work/demo"));
+    assert_eq!(info.name, "demo");
+    assert_eq!(state.list_projects().len(), 1);
+    // Re-registering the same path replaces rather than duplicates.
+    state.register_project(PathBuf::from("/work/demo"));
+    assert_eq!(state.list_projects().len(), 1);
+    state.register_project(PathBuf::from("/work/other"));
+    assert_eq!(state.list_projects().len(), 2);
+}
+
+#[test]
+fn project_lookup_by_path() {
+    let state = DaemonState::new();
+    state.register_project(PathBuf::from("/work/demo"));
+    assert!(state.project(std::path::Path::new("/work/demo")).is_some());
+    assert!(
+        state
+            .project(std::path::Path::new("/work/missing"))
+            .is_none()
+    );
+}
+
+#[test]
+fn list_sessions_for_project_filters() {
+    let state = DaemonState::new();
+    let mut in_proj = sample_session();
+    in_proj.project_path = Some(PathBuf::from("/work/demo"));
+    let mut other_proj = sample_session();
+    other_proj.project_path = Some(PathBuf::from("/work/other"));
+    let no_proj = sample_session();
+    state.register_session(in_proj.clone());
+    state.register_session(other_proj);
+    state.register_session(no_proj);
+
+    let listed = state.list_sessions_for_project(std::path::Path::new("/work/demo"));
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, in_proj.id);
+}
+
+#[test]
+fn find_session_by_id_or_name() {
+    let state = DaemonState::new();
+    let s = sample_session();
+    let id = s.id;
+    let name = s.tmux_name.clone();
+    state.register_session(s);
+
+    assert!(state.find_session(&id.0.to_string()).is_some());
+    assert!(state.find_session(&name).is_some());
+    assert!(state.find_session("tmpm-no-such-name").is_none());
+    assert!(
+        state
+            .find_session(&SessionId::new().0.to_string())
+            .is_none()
+    );
+}
+
+#[test]
+fn breaker_tracks_outcomes() {
+    let state = DaemonState::new();
+    // Default threshold is 3 consecutive failures.
+    for _ in 0..3 {
+        state.record_outcome("research", false);
+    }
+    let cb = state.breaker("research");
+    assert!(!cb.allows_delegation());
+    // A success resets the counter (after an attempt_reset path it closes).
+    state.record_outcome("research", true);
+    assert_eq!(state.breaker("research").consecutive_failures, 0);
+}
+
+#[test]
+fn memory_pressure_is_classified() {
+    let state = DaemonState::new();
+    let id = SessionId::new();
+    let pressure = state.record_memory(
+        id,
+        MemoryUsage {
+            used_tokens: 900,
+            window_tokens: 1000,
+        },
+    );
+    assert_eq!(pressure, MemoryPressure::Compact);
+    assert!(state.memory_for(id).is_some());
+}
+
+#[test]
+fn trusty_addrs_round_trip() {
+    let state = DaemonState::new();
+    assert!(state.trusty_addrs().is_none());
+    let addrs = crate::daemon::discover::TrustyAddrs {
+        memory: "127.0.0.1:3038".parse().unwrap(),
+        search: "127.0.0.1:7878".parse().unwrap(),
+    };
+    state.set_trusty_addrs(addrs);
+    let got = state.trusty_addrs().expect("addrs stored");
+    assert_eq!(got.memory, "127.0.0.1:3038".parse().unwrap());
+    assert_eq!(got.search, "127.0.0.1:7878".parse().unwrap());
+}
+
+#[test]
+fn reap_dead_sessions() {
+    // Three registered sessions; tmux reports only two of them alive.
+    // `reap_against` (the testable core of `reap_dead_sessions`) must drop
+    // exactly the one whose tmux_name is absent from the live set.
+    let state = DaemonState::new();
+    let alive_a = sample_session();
+    let alive_b = sample_session();
+    let dead = sample_session();
+    let (id_a, id_b, id_dead) = (alive_a.id, alive_b.id, dead.id);
+    state.register_session(alive_a.clone());
+    state.register_session(alive_b.clone());
+    state.register_session(dead);
+    assert_eq!(state.list_sessions().len(), 3);
+
+    let live: std::collections::HashSet<String> =
+        [alive_a.tmux_name.clone(), alive_b.tmux_name.clone()]
+            .into_iter()
+            .collect();
+    let result = state.reap_against(&live);
+
+    assert_eq!(result.reaped, 1);
+    assert_eq!(result.stopped, 0);
+    assert!(state.session(id_a).is_some());
+    assert!(state.session(id_b).is_some());
+    assert!(state.session(id_dead).is_none());
+
+    // Reaping again is idempotent — nothing left to remove.
+    assert_eq!(state.reap_against(&live), ReapResult::default());
+}
+
+#[test]
+fn reap_against_empty_live_removes_all_tmux_sessions() {
+    // An empty live set (e.g. tmux server fully stopped) drops every
+    // tmux-hosted entry.
+    let state = DaemonState::new();
+    state.register_session(sample_session());
+    state.register_session(sample_session());
+    let result = state.reap_against(&std::collections::HashSet::new());
+    assert_eq!(result.reaped, 2);
+    assert!(state.list_sessions().is_empty());
+}
+
+#[test]
+fn reap_keeps_native_sessions() {
+    // Native (Terminal.app) sessions have no tmux session; the tmux-based
+    // reaper must never delete them, even against an empty live set.
+    let state = DaemonState::new();
+    let mut native = sample_session();
+    native.origin = crate::core::session::SessionHost::Native;
+    native.pid = Some(9999);
+    let native_id = native.id;
+    let tmux = sample_session();
+    let tmux_id = tmux.id;
+    state.register_session(native);
+    state.register_session(tmux);
+
+    let result = state.reap_against(&std::collections::HashSet::new());
+
+    // Only the tmux-hosted session is reaped.
+    assert_eq!(result.reaped, 1);
+    assert!(state.session(native_id).is_some());
+    assert!(state.session(tmux_id).is_none());
+}
+
+#[test]
+fn set_session_pid_updates_field() {
+    // Registering a session leaves `pid` unset; set_session_pid records it.
+    let state = DaemonState::new();
+    let s = sample_session();
+    let id = s.id;
+    state.register_session(s);
+    assert_eq!(state.session(id).unwrap().pid, None);
+
+    assert!(state.set_session_pid(id, 4242));
+    assert_eq!(state.session(id).unwrap().pid, Some(4242));
+
+    // An unknown id is reported as not updated.
+    assert!(!state.set_session_pid(SessionId::new(), 1));
+}
+
+#[test]
+fn reap_marks_stopped_when_pid_dead() {
+    // A tmux session that is still alive but whose tracked `claude` process
+    // has exited (u32::MAX is a guaranteed-dead PID) must be marked Stopped
+    // — not removed — so the operator can still see it.
+    let state = DaemonState::new();
+    let mut session = sample_session();
+    session.pid = Some(u32::MAX);
+    let id = session.id;
+    let tmux_name = session.tmux_name.clone();
+    state.register_session(session);
+
+    let live: std::collections::HashSet<String> = [tmux_name].into_iter().collect();
+    let result = state.reap_against(&live);
+
+    assert_eq!(result.reaped, 0);
+    assert_eq!(result.stopped, 1);
+    let after = state.session(id).expect("session is kept, not removed");
+    assert_eq!(after.status, SessionStatus::Stopped);
+}
+
+#[test]
+fn new_reads_default_when_optimizer_file_missing() {
+    // With no framework installed (the optimizer.toml file absent), the
+    // daemon must still construct, falling back to the default policy.
+    let state = DaemonState::new();
+    assert_eq!(
+        state.optimizer_config().default_level,
+        crate::core::compress::CompressionLevel::Trim
+    );
+}
+
+#[test]
+fn reload_optimizer_config_picks_up_file_changes() {
+    // Reloading from an explicit temp file must overwrite the in-memory
+    // policy with whatever the file declares.
+    use std::io::Write;
+    let state = DaemonState::new();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("optimizer.toml");
+    let mut file = std::fs::File::create(&path).expect("create file");
+    writeln!(file, "[default]\nlevel = \"caveman\"").expect("write file");
+
+    state
+        .reload_optimizer_config_from(&path)
+        .expect("reload succeeds");
+    assert_eq!(
+        state.optimizer_config().default_level,
+        crate::core::compress::CompressionLevel::Caveman
+    );
+
+    // A missing file reloads to the default policy rather than erroring.
+    state
+        .reload_optimizer_config_from(&dir.path().join("absent.toml"))
+        .expect("missing file is not an error");
+    assert_eq!(
+        state.optimizer_config().default_level,
+        crate::core::compress::CompressionLevel::Trim
+    );
+}
+
+#[test]
+fn new_overseer_is_disabled_when_file_missing() {
+    // With no framework installed (overseer.toml absent), the overseer
+    // must be present but disabled — oversight is opt-in.
+    let state = DaemonState::new();
+    assert!(!state.overseer().is_enabled());
+}
+
+#[test]
+fn overseer_is_deterministic_without_llm() {
+    // With the `[llm]` section absent/disabled, the overseer is the plain
+    // deterministic strategy and (with no rules) reports disabled.
+    let cfg = OverseerConfig::default();
+    let build = build_overseer(cfg);
+    assert!(!build.overseer.is_enabled());
+    assert_eq!(build.handler, "deterministic");
+    assert!(build.llm.is_none());
+}
+
+#[test]
+fn overseer_falls_back_when_llm_key_missing() {
+    // `[llm] enabled = true` but no API key resolves: the daemon must not
+    // panic — it falls back to the deterministic overseer.
+    let mut cfg = OverseerConfig::default();
+    cfg.llm.enabled = true;
+    cfg.llm.api_key_env = "TRUSTY_MPM_DEFINITELY_NOT_SET".to_string(); // pragma: allowlist secret
+    let build = build_overseer(cfg);
+    // Deterministic with no rules and disabled top-level flag → disabled.
+    assert!(!build.overseer.is_enabled());
+    assert_eq!(build.handler, "deterministic");
+    assert!(build.llm.is_none());
+}
+
+#[test]
+fn llm_overseer_is_none_without_key() {
+    // A default daemon (no OpenRouter key) exposes no LLM chat handler.
+    let state = DaemonState::new();
+    assert!(state.llm_overseer().is_none());
+}
+
+#[test]
+fn overseer_handler_reports_strategy() {
+    // The default daemon reports the deterministic handler.
+    let state = DaemonState::new();
+    assert_eq!(state.overseer_handler(), "deterministic");
+}
+
+#[test]
+fn overseer_is_accessible() {
+    let state = DaemonState::new();
+    // The shared overseer can be cloned out and queried.
+    let overseer = state.overseer();
+    assert!(!overseer.is_enabled());
+}
+
+#[test]
+fn audit_logger_is_accessible() {
+    let state = DaemonState::new();
+    // The audit logger resolves a dated JSONL path under `logs/overseer`.
+    let audit = state.audit();
+    assert_eq!(
+        audit.path().extension().and_then(|e| e.to_str()),
+        Some("jsonl")
+    );
+}
+
+#[test]
+fn hook_history_is_bounded() {
+    let state = DaemonState::new();
+    let id = SessionId::new();
+    for _ in 0..(HOOK_HISTORY_LIMIT + 50) {
+        state.push_hook_event(HookEventRecord::now(
+            id,
+            HookEvent::PreToolUse,
+            serde_json::Value::Null,
+        ));
+    }
+    assert_eq!(state.recent_hook_events().len(), HOOK_HISTORY_LIMIT);
+    assert_eq!(state.hook_events_for(id).len(), HOOK_HISTORY_LIMIT);
+}
+
+#[test]
+fn pairing_round_trip() {
+    // A freshly-generated code confirms once, binds the chat id, and is
+    // then consumed so the same code cannot validate twice. The state is
+    // rooted at a temp dir so the persisted record never touches HOME.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let state = DaemonState::with_root(dir.path().to_path_buf());
+    assert_eq!(state.paired_chat_id(), None);
+    let code = state.generate_pair_code();
+    assert_eq!(code.len(), 6);
+    assert!(code.chars().all(|c| c.is_ascii_alphanumeric()));
+    assert!(state.confirm_pair_code(&code, 12345678));
+    assert_eq!(state.paired_chat_id(), Some(12345678));
+    // The code was consumed; confirming it again must fail.
+    assert!(!state.confirm_pair_code(&code, 999));
+}
+
+#[test]
+fn wrong_pair_code_is_rejected() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let state = DaemonState::with_root(dir.path().to_path_buf());
+    let _code = state.generate_pair_code();
+    assert!(!state.confirm_pair_code("ZZZZZZ", 12345678));
+    assert_eq!(state.paired_chat_id(), None);
+}
+
+#[test]
+fn pairing_persists_to_disk() {
+    // Confirming a code writes pairing.json; a fresh state rooted at the
+    // same directory restores the binding without a new handshake.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().to_path_buf();
+    let state = DaemonState::with_root(root.clone());
+    let code = state.generate_pair_code();
+    assert!(state.confirm_pair_code(&code, 555));
+    // The on-disk record exists.
+    assert_eq!(
+        crate::daemon::pairing_store::load(&root).map(|r| r.chat_id),
+        Some(555)
+    );
+    // A new state restores the pairing from disk.
+    let restored = DaemonState::with_root(root);
+    assert_eq!(restored.paired_chat_id(), Some(555));
+}
+
+#[test]
+fn pairing_reset_clears_disk() {
+    // clear_pairing drops the binding in memory and removes pairing.json.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().to_path_buf();
+    let state = DaemonState::with_root(root.clone());
+    let code = state.generate_pair_code();
+    assert!(state.confirm_pair_code(&code, 777));
+    state.clear_pairing();
+    assert_eq!(state.paired_chat_id(), None);
+    assert!(crate::daemon::pairing_store::load(&root).is_none());
+}
