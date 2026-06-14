@@ -43,3 +43,19 @@ Every crate manages its own version independently in its own `Cargo.toml`.
 The `[workspace.package]` table no longer carries a `version` field (see #343).
 When publishing, bump only the crates that actually changed — do not cascade
 version bumps to siblings with no functional changes.
+
+## Bundled Crates — Intentionally Skipped by `release.yml`
+
+`release.yml` only builds standalone distributable binaries. Three crates are
+**bundled** under the Single-Install Convention (epic #943) and have no
+standalone binary target of their own — when their tags fire, the workflow
+skips the build/release/homebrew-bump jobs and exits success:
+
+| Bundled crate | Ships inside |
+|---|---|
+| `trusty-console` | `trusty-search`, `trusty-memory`, `trusty-analyze`, `trusty-review`, `trusty-mpm` |
+| `trusty-bm25-daemon` | `trusty-memory` |
+| `trusty-embedderd` | `trusty-search` |
+
+To add a new bundled crate in the future, add it to the `elif` block in the
+"Resolve per-crate config" step of `.github/workflows/release.yml`.

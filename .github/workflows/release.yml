@@ -75,6 +75,12 @@ jobs:
       version:  ${{ steps.parse.outputs.version }}
       matrix:   ${{ steps.matrix.outputs.matrix }}
       dry_run:  ${{ steps.parse.outputs.dry_run }}
+      # Why: bundled crates (trusty-console, trusty-bm25-daemon, trusty-embedderd)
+      # are published to crates.io as library/sidecar crates but ship their
+      # binaries INSIDE a parent crate under the Single-Install Convention
+      # (epic #943).  They have no standalone distributable binary target, so
+      # the build and release jobs must be skipped when one of their tags fires.
+      bundled:  ${{ steps.config.outputs.bundled }}
 
     steps:
       - name: Parse tag or dispatch inputs
@@ -243,14 +249,39 @@ jobs:
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
 
+          # ── Bundled crates — graceful skip, not an error ─────────────────────
+          # These crates are published to crates.io as library/sidecar packages
+          # under the Single-Install Convention (epic #943).  Their binaries ship
+          # INSIDE a parent distributable crate and there is NO standalone binary
+          # target to build here:
+          #
+          #   trusty-console    — bundled into trusty-search, trusty-memory,
+          #                       trusty-analyze, trusty-review, trusty-mpm
+          #   trusty-bm25-daemon — bundled into trusty-memory
+          #   trusty-embedderd   — bundled into trusty-search
+          #
+          # When one of these tags fires (e.g. trusty-console-v0.3.0), we emit
+          # bundled=true so the build / release / homebrew-bump jobs are skipped.
+          elif [[ "$CRATE" == "trusty-console" || \
+                  "$CRATE" == "trusty-bm25-daemon" || \
+                  "$CRATE" == "trusty-embedderd" ]]; then
+            echo "Skipping bundled crate '$CRATE' — ships inside parent crate(s)."
+            echo "  trusty-console   → trusty-search, trusty-memory, trusty-analyze, trusty-review, trusty-mpm"
+            echo "  trusty-bm25-daemon → trusty-memory"
+            echo "  trusty-embedderd   → trusty-search"
+            echo "No standalone binary to build. Exiting successfully."
+            echo "bundled=true" >> "$GITHUB_OUTPUT"
+            exit 0
+
           else
             echo "ERROR: crate '$CRATE' is not in the release config map."
             echo "  Distributable crates: trusty-search, trusty-memory, trusty-analyze,"
             echo "    trusty-review, trusty-mpm, trusty-git-analytics, trusty-code"
+            echo "  Bundled crates (skipped — no standalone binary): trusty-console,"
+            echo "    trusty-bm25-daemon, trusty-embedderd"
             echo "  Out-of-scope (publish=false / internal): trusty-agents*, trusty-mpm-gui,"
             echo "    tc-services, cto-assistant, trusty-cto-db, trusty-gworkspace,"
-            echo "    trusty-common, trusty-embedderd (bundled with trusty-search),"
-            echo "    trusty-bm25-daemon (bundled with trusty-memory)"
+            echo "    trusty-common"
             exit 1
           fi
 
@@ -264,6 +295,7 @@ jobs:
             echo "al2023_variant=$AL2023_VARIANT"
             echo "al2023_no_default=$AL2023_NO_DEFAULT"
             echo "al2023_features=$AL2023_FEATURES"
+            echo "bundled=false"
           } >> "$GITHUB_OUTPUT"
 
       # ── Build matrix generation ─────────────────────────────────────────────
@@ -281,6 +313,10 @@ jobs:
       # ─────────────────────────────────────────────────────────────────────────
       - name: Generate build matrix
         id: matrix
+        # Skip matrix generation for bundled crates — the build job is also
+        # skipped, so there is no matrix consumer.  An empty / unset matrix
+        # would cause the build job to error rather than skip cleanly.
+        if: steps.config.outputs.bundled != 'true'
         shell: python3 {0}
         env:
           CARGO_PKG:            ${{ steps.config.outputs.cargo_pkg }}
@@ -372,6 +408,8 @@ jobs:
   build:
     name: Build ${{ matrix.crate }} ${{ matrix.asset_suffix }}
     needs: setup
+    # Skip entirely for bundled crates — they have no standalone binary target.
+    if: needs.setup.outputs.bundled != 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     # Why: AL2023 uses GCC 11 which rejects newer SIMD probe flags emitted by
@@ -640,6 +678,7 @@ jobs:
     # it didn't get cancelled outright.  The Tier-1 artifacts (macOS arm64 +
     # linux-gnu) will be present in the artifact store regardless.
     if: >-
+      needs.setup.outputs.bundled != 'true' &&
       needs.setup.outputs.dry_run != 'true' &&
       needs.build.result != 'cancelled' &&
       needs.build.result != 'skipped'
@@ -731,6 +770,7 @@ jobs:
     # release.result may be 'success' or 'failure' (if softprops errored); only
     # skip on cancel/skip to avoid tap diverging from a partially-uploaded release.
     if: >-
+      needs.setup.outputs.bundled != 'true' &&
       needs.setup.outputs.dry_run != 'true' &&
       vars.HOMEBREW_TAP_ENABLED == 'true' &&
       needs.release.result == 'success'
