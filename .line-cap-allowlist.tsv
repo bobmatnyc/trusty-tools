@@ -18,7 +18,6 @@ crates/trusty-analyze/src/mcp/mod.rs	892
 crates/trusty-common/src/memory_core/dream.rs	1199
 crates/trusty-common/src/memory_core/retrieval/mod.rs	830
 crates/trusty-common/src/memory_core/semantic_consolidation.rs	615
-crates/trusty-common/src/memory_core/store/chat_sessions.rs	510
 crates/trusty-common/src/memory_core/store/kg_redb.rs	1400
 crates/trusty-common/src/memory_core/store/kg.rs	815
 crates/trusty-common/src/memory_core/store/payload_store.rs	547
