@@ -123,6 +123,8 @@ pub(crate) async fn handle_console_metrics(state: &AppState) -> Value {
 
     let status = if health_str == "ok" {
         ServiceHealth::Ok
+    } else if health_str == "error" {
+        ServiceHealth::Error
     } else {
         ServiceHealth::Degraded
     };
@@ -429,6 +431,53 @@ mod tests {
         assert_ne!(
             inference, "ok",
             "auth_error state must not report inference=ok"
+        );
+    }
+
+    // ── ServiceHealth::Error mapping test ────────────────────────────────────
+
+    /// Why: The `else if health_str == "error"` branch (issue #1164 sweep-up)
+    /// must map to `ServiceHealth::Error`, not `Degraded`. Without the fix the
+    /// branch fell to the final `else` and silently produced `Degraded`.
+    /// What: Construct a report directly with `ServiceHealth::Error`, round-trip
+    /// it through the MCP envelope, and assert the decoded status is `Error`.
+    /// The `make_report` helper constructs the report independently of
+    /// `handle_console_metrics`; we only need to verify the serde round-trip
+    /// and that `ServiceHealth::Error` serialises to `"error"` as expected by
+    /// the console's `parse_report`.
+    /// Test: This test.
+    #[test]
+    fn service_health_error_serialises_correctly() {
+        use trusty_common::console_metrics::make_report;
+
+        let report = make_report(
+            "trusty-review",
+            "Trusty Review",
+            "0.1.0",
+            ServiceHealth::Error,
+            serde_json::json!({"reason": "catastrophic failure"}),
+            1,
+        );
+        let raw_value = serde_json::to_value(&report).expect("to_value must succeed");
+        // Verify the serialised status field is "error" (not "degraded").
+        assert_eq!(
+            raw_value["status"].as_str(),
+            Some("error"),
+            "ServiceHealth::Error must serialise to \"error\""
+        );
+        let wrapped = serde_json::json!({
+            "content": [{
+                "type": "text",
+                "text": serde_json::to_string_pretty(&raw_value)
+                    .expect("to_string_pretty must succeed"),
+            }],
+            "isError": false,
+        });
+        let decoded = parse_report(&wrapped).expect("parse must succeed");
+        assert_eq!(
+            decoded.status,
+            ServiceHealth::Error,
+            "parse_report must decode \"error\" back to ServiceHealth::Error"
         );
     }
 }
