@@ -17,7 +17,10 @@
 //! - `completion`  — KG rebuild + terminal `complete` SSE event builder.
 //! - `corpus_swap` — atomic `index.redb.tmp` → `index.redb` swap.
 //! - `guard`       — `ReindexTerminationGuard` RAII safety guard.
-//! - `orchestrator`— top-level `spawn_reindex` / `spawn_reindex_with_cleanup`.
+//! - `orchestrator`— top-level `spawn_reindex` / `spawn_reindex_with_cleanup` + file walk.
+//! - `pollers`     — background RSS poller tasks (daemon + embedderd sidecar).
+//! - `runner`      — Phase 1 (walk) + Phase 2 (batch loop) async body (`run_reindex`).
+//! - `finish`      — post-loop completion: prune, KG rebuild, swap, terminal event.
 //!
 //! Pre-existing sibling modules (not modified by #1175):
 //! - `defer_embed` — background embedding pass for `defer_embed=true` indexes.
@@ -35,10 +38,13 @@
 mod batch;
 mod completion;
 mod corpus_swap;
+mod finish;
 mod guard;
 mod hash;
 mod orchestrator;
+mod pollers;
 mod progress;
+mod runner;
 mod semaphore;
 mod stages;
 
