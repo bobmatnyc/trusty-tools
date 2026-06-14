@@ -57,10 +57,12 @@
     clearInterval(refreshInterval);
   });
 
-  let statusColor = $derived(
-    report?.status === 'ok'       ? '#22c55e'
-    : report?.status === 'degraded' ? '#f59e0b'
-    : '#ef4444'
+  // Theme-adaptive CSS custom property ref (resolved against the active palette
+  // at render time) instead of hardcoded hex — badge recolors on theme flip.
+  let statusVar = $derived(
+    report?.status === 'ok'       ? 'var(--color-status-ok)'
+    : report?.status === 'degraded' ? 'var(--color-status-warn)'
+    : 'var(--color-status-error)'
   );
 </script>
 
@@ -74,8 +76,8 @@
   {:else if report}
     <!-- Status badge + version -->
     <div class="meta-row">
-      <span class="badge" style="background: {statusColor}22; color: {statusColor}; border-color: {statusColor}44;">
-        <span class="dot" style="background: {statusColor};"></span>
+      <span class="badge" style="--_s: {statusVar};">
+        <span class="dot"></span>
         {report.status}
       </span>
       <span class="version">v{report.version}</span>
@@ -137,48 +139,55 @@
 <style>
   .tab-content { padding: 0.25rem 0; }
   .placeholder, .not-available {
-    background: #1e2130; border-radius: 0.5rem;
-    padding: 1.25rem; color: #94a3b8; font-size: 0.9rem;
+    background: var(--color-surface); border-radius: 0.5rem;
+    padding: 1.25rem; color: var(--color-text-secondary); font-size: 0.9rem;
   }
-  .not-available { color: #f59e0b; }
+  .not-available { color: var(--color-status-warn); }
 
   .meta-row {
     display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.25rem;
   }
+  /* --_s supplied inline (statusVar) as a theme-adaptive --color-status-* ref. */
   .badge {
     display: inline-flex; align-items: center; gap: 0.35rem;
     font-size: 0.75rem; font-weight: 600; padding: 0.2rem 0.6rem;
     border-radius: 9999px; border: 1px solid;
+    --_s: var(--color-text-muted);
+    color: var(--_s);
+    background: rgba(0,0,0,0.08);
+    background: color-mix(in srgb, var(--_s) 13%, transparent);
+    border-color: rgba(0,0,0,0.18);
+    border-color: color-mix(in srgb, var(--_s) 27%, transparent);
   }
-  .dot { width: 6px; height: 6px; border-radius: 50%; }
-  .version { color: #94a3b8; font-size: 0.85rem; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--_s); }
+  .version { color: var(--color-text-secondary); font-size: 0.85rem; }
 
   .stat-grid {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
     gap: 0.75rem; margin-bottom: 1.5rem;
   }
   .stat-card {
-    background: #1e2130; border: 1px solid #2d3348; border-radius: 0.5rem;
+    background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 0.5rem;
     padding: 1rem; display: flex; flex-direction: column; align-items: center; gap: 0.25rem;
   }
-  .stat-value { font-size: 1.6rem; font-weight: 700; color: #e2e8f0; }
-  .stat-label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; }
+  .stat-value { font-size: 1.6rem; font-weight: 700; color: var(--color-text-primary); }
+  .stat-label { font-size: 0.75rem; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
 
-  .sub-title { font-size: 1rem; font-weight: 600; color: #94a3b8; margin: 0 0 0.75rem; }
+  .sub-title { font-size: 1rem; font-weight: 600; color: var(--color-text-secondary); margin: 0 0 0.75rem; }
   .table-wrap { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   th {
     text-align: left; padding: 0.5rem 0.75rem;
-    background: #1e2130; color: #94a3b8; font-weight: 600;
-    border-bottom: 1px solid #2d3348;
+    background: var(--color-surface); color: var(--color-text-secondary); font-weight: 600;
+    border-bottom: 1px solid var(--color-border);
   }
-  td { padding: 0.5rem 0.75rem; border-bottom: 1px solid #1e2130; color: #e2e8f0; }
+  td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--color-surface); color: var(--color-text-primary); }
   tr:last-child td { border-bottom: none; }
-  tr:hover td { background: #1e2130; }
+  tr:hover td { background: var(--color-surface); }
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
   code {
     font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;
-    background: #0f1117; padding: 0.1rem 0.35rem; border-radius: 0.25rem;
+    background: var(--color-surface-code); padding: 0.1rem 0.35rem; border-radius: 0.25rem;
   }
-  .empty-hint { color: #94a3b8; font-size: 0.85rem; }
+  .empty-hint { color: var(--color-text-secondary); font-size: 0.85rem; }
 </style>

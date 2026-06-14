@@ -18,8 +18,10 @@
 //! `failing_deferred_embed_pass_marks_semantic_failed` in
 //! `service::reindex::defer_embed::tests`.
 
+use super::progress::ReindexProgress;
+use super::semaphore::background_reindex_semaphore;
+use super::stages::now_rfc3339;
 use crate::core::registry::{IndexHandle, StageState, StageStatus};
-use crate::service::reindex::{background_reindex_semaphore, now_rfc3339, ReindexProgress};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
