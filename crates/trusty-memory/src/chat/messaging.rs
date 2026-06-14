@@ -7,9 +7,7 @@
 //! messaging handlers, moved verbatim.
 //! Test: `messages_endpoint_round_trip`.
 
-use crate::web::{
-    creator_info_from_http, open_handle, ApiError,
-};
+use crate::web::{creator_info_from_http, open_handle, ApiError};
 use crate::{ActivitySource, AppState, DaemonEvent};
 use axum::{
     extract::{Query, State},

@@ -17,7 +17,9 @@ use trusty_common::memory_core::retrieval::RememberOptions;
 use trusty_common::memory_core::PalaceHandle;
 use uuid::Uuid;
 
-use super::types::{build_message_tags, slugify_for_palace, Message, MSG_MARKER_TAG, TAG_READ_PREFIX};
+use super::types::{
+    build_message_tags, slugify_for_palace, Message, MSG_MARKER_TAG, TAG_READ_PREFIX,
+};
 
 /// Persist a message into the recipient palace.
 ///

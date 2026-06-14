@@ -272,11 +272,11 @@ pub(super) fn hash_prompt(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::config::{
         is_off, is_on, DEFAULT_MAX_BYTES, DEFAULT_RETENTION_DAYS, ENV_DIR, ENV_ENABLED,
         ENV_HASH_PROMPTS, ENV_MAX_BYTES, ENV_RETENTION_DAYS,
     };
+    use super::*;
     use std::path::{Path, PathBuf};
 
     /// Helper: build a logger pointed at a tempdir's `logs/` subdir.

@@ -7,9 +7,7 @@
 //! moved verbatim.
 //! Test: `providers_endpoint_returns_payload` and the session-CRUD HTTP tests.
 
-use crate::web::{
-    load_user_config, ApiError,
-};
+use crate::web::{load_user_config, ApiError};
 use crate::AppState;
 use axum::{
     extract::{Path as AxumPath, State},

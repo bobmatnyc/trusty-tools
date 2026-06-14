@@ -9,10 +9,7 @@
 //! Test: `all_tools_returns_expected_set`, `execute_tool_dispatches_known_tools`
 //! in `web::tests`.
 
-use crate::web::{
-    load_user_config, palace_info_from,
-    DreamStatusPayload,
-};
+use crate::web::{load_user_config, palace_info_from, DreamStatusPayload};
 use crate::AppState;
 use serde::Deserialize;
 use serde_json::{json, Value};

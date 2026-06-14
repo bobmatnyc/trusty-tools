@@ -10,6 +10,7 @@
 //! Test: `content_gate_*`, `blocklist_gate_*`, `dedup_*`, and the dispatch
 //! tests in `tools::tests`.
 
+use super::bm25::bm25_index_enqueue;
 use crate::attribution::{session_tag_from_tags, CreatorInfo, CreatorSource, MCP_CLIENT_NAME};
 use crate::kg_extract::{extract_triples, ExtractInput};
 use crate::{ActivitySource, AppState, DaemonEvent};
@@ -19,7 +20,6 @@ use trusty_common::memory_core::filter::{FilterConfig, MCP_MIN_TOKENS};
 use trusty_common::memory_core::palace::{PalaceId, RoomType};
 use trusty_common::memory_core::retrieval::RememberOptions;
 use uuid::Uuid;
-use super::bm25::bm25_index_enqueue;
 
 /// Look up the friendly palace name (Palace.name) from the in-memory cache,
 /// falling back to the id when the cache misses.
@@ -337,7 +337,11 @@ pub(crate) async fn auto_extract_and_assert(
 /// `state.default_palace`. Errors with a helpful message if both are absent.
 /// Test: `default_palace_used_when_arg_omitted` and
 /// `dispatch_unknown_tool_errors`.
-pub(crate) fn resolve_palace<'a>(state: &'a AppState, args: &'a Value, tool: &str) -> Result<String> {
+pub(crate) fn resolve_palace<'a>(
+    state: &'a AppState,
+    args: &'a Value,
+    tool: &str,
+) -> Result<String> {
     if let Some(p) = args.get("palace").and_then(|v| v.as_str()) {
         return Ok(p.to_string());
     }

@@ -15,7 +15,6 @@
 //! Hard constraint (issue #151): no behaviour change. Every method's success
 //! and failure shapes match what the handler used to produce inline.
 
-
 pub mod core;
 pub mod core_kg;
 pub mod helpers;

@@ -43,11 +43,11 @@ pub use types::{
 mod tests {
     use super::*;
     use crate::attribution::{CreatorInfo, CreatorSource};
-    use std::path::PathBuf;
+    use chrono::Utc;
     use std::path::Path;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use trusty_common::memory_core::{Palace, PalaceHandle, PalaceId, PalaceRegistry};
-    use chrono::Utc;
 
     /// Test-only builder for a `CreatorInfo`. Tests don't care which writer
     /// they simulate; pinning the values here avoids per-test boilerplate.

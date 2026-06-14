@@ -27,8 +27,7 @@ pub(crate) use messaging::{
     list_messages_handler, mark_message_read_handler, send_message_handler,
 };
 pub(crate) use sessions::{
-    create_chat_session, delete_chat_session, get_chat_session, list_chat_sessions,
-    list_providers,
+    create_chat_session, delete_chat_session, get_chat_session, list_chat_sessions, list_providers,
 };
 #[cfg(test)]
 pub(crate) use tools::{all_tools, execute_tool};

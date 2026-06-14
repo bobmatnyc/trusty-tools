@@ -27,8 +27,8 @@ use super::helpers::{
     palace_info_from, recall_entry_json,
 };
 use super::types::{
-    CreateDrawerBody, CreatePalaceBody, ListDrawersQuery, PalaceInfo, ServiceError,
-    ServiceResult, StatusPayload,
+    CreateDrawerBody, CreatePalaceBody, ListDrawersQuery, PalaceInfo, ServiceError, ServiceResult,
+    StatusPayload,
 };
 
 /// Hard cap on triples returned by the per-palace graph endpoint.
