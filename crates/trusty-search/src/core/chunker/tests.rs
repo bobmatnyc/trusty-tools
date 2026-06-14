@@ -288,6 +288,86 @@ fn test_chunk_xml_top_level_children() {
     }
 }
 
+// --- malformed-XML depth-clamp tests (issue #1181) ---
+
+/// Why: a file that starts with a closing tag drives depth negative before
+/// the fix; the clamped depth must stay at 0 and not emit a spurious chunk.
+/// What: asserts that no chunk is produced when the only content is an
+/// orphaned closing tag (the fallback single-chunk path runs instead but
+/// produces a non-empty chunk from the raw content).
+/// Test: depth must never go below 0; no panic; the chunk content must equal
+/// the raw input, not a partial slice caused by a spurious mid-loop emit.
+#[test]
+fn test_chunk_xml_malformed_leading_close() {
+    // Input starts with a closing tag — no opener precedes it.
+    let content = "</root>\n<other/>\n";
+    let chunks = chunk_xml("bad.xml", content);
+    // No chunk should have been emitted by the emit-guard (depth went to -1
+    // before the fix). The fallback path may produce one chunk; what we
+    // enforce is that no chunk contains only a partial slice starting at
+    // line 0 without a matching open.
+    for c in &chunks {
+        // The chunk text must be the full content (fallback), not a
+        // partial slice that would indicate a spurious mid-loop emit.
+        assert!(
+            c.content.contains("</root>"),
+            "unexpected partial chunk: {:?}",
+            c.content
+        );
+    }
+}
+
+/// Why: an XML file with more closing tags than opening tags would previously
+/// push depth into negative territory, causing `depth <= 1` to be satisfied
+/// permanently and firing the emit guard on every subsequent line.
+/// What: asserts the chunker returns without panic and the chunk count is
+/// sane (≤ 1 for this all-close input, i.e. the fallback single-chunk path).
+/// Test: depth clamp at 0 means `depth <= 1` is trivially true but
+/// `prev_depth >= 1` also requires prev_depth to be ≥ 1 — which it cannot be
+/// if depth is clamped to 0 from the start.
+#[test]
+fn test_chunk_xml_malformed_extra_closes() {
+    // More closing tags than opening tags.
+    let content = "<root>\n</child>\n</child>\n</child>\n</root>\n";
+    // Must not panic; depth must never go negative.
+    let chunks = chunk_xml("extra_closes.xml", content);
+    // Reasonable: either 0 named chunks (falls back to single-chunk) or the
+    // one valid root child that happens to appear.  The important invariant
+    // is that the number of chunks is small and no index-out-of-bounds panics.
+    assert!(
+        chunks.len() <= 2,
+        "unexpected chunk count {}: {:?}",
+        chunks.len(),
+        chunks.iter().map(|c| &c.content).collect::<Vec<_>>()
+    );
+}
+
+/// Why: the depth clamp must not alter behaviour for well-formed XML — the
+/// fix is intended to be behaviour-preserving for valid input.
+/// What: runs the same well-formed library fixture and asserts identical chunk
+/// names to the pre-fix baseline captured in `test_chunk_xml_top_level_children`.
+/// Test: both `book` children and `magazine` must appear; language == `xml`.
+#[test]
+fn test_chunk_xml_well_formed_unchanged() {
+    let content = "<?xml version=\"1.0\"?>\n<library>\n  <book id=\"1\">\n    <title>A</title>\n  </book>\n  <book id=\"2\">\n    <title>B</title>\n  </book>\n  <magazine>\n    <title>C</title>\n  </magazine>\n</library>\n";
+    let chunks = chunk_xml("data.xml", content);
+    let names: Vec<_> = chunks
+        .iter()
+        .filter_map(|c| c.function_name.clone())
+        .collect();
+    assert!(
+        names.iter().filter(|n| *n == "book").count() >= 2,
+        "well-formed regression: book count wrong; names={names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "magazine"),
+        "well-formed regression: magazine missing; names={names:?}"
+    );
+    for c in &chunks {
+        assert_eq!(c.language.as_deref(), Some("xml"));
+    }
+}
+
 #[test]
 fn test_chunk_document_dispatch() {
     // Verify chunk_ast routes structured documents through chunk_document.

@@ -418,8 +418,14 @@ pub(super) fn chunk_plaintext(file: &str, content: &str) -> Vec<RawChunk> {
 /// Why: XML files have strong element-level structure; chunking at top-level
 /// children keeps each chunk to one entity (e.g. one `<book>`).
 /// What: walks lines tracking open/close depth; at depth 1 a new opening tag
-/// starts a child, which is flushed when it closes back to depth 1.
-/// Test: `test_chunk_xml_top_level_children`.
+/// starts a child, which is flushed when it closes back to depth 1. Depth is
+/// clamped at 0 so malformed input (orphan closing tags, more closes than
+/// opens) never produces a negative depth and the emit guard never fires
+/// spuriously on garbage input (closes #1181).
+/// Test: `test_chunk_xml_top_level_children`,
+/// `test_chunk_xml_malformed_leading_close`,
+/// `test_chunk_xml_malformed_extra_closes`,
+/// `test_chunk_xml_well_formed_unchanged`.
 pub(super) fn chunk_xml(file: &str, content: &str) -> Vec<RawChunk> {
     let lines: Vec<&str> = content.lines().collect();
     if lines.is_empty() {
@@ -447,6 +453,9 @@ pub(super) fn chunk_xml(file: &str, content: &str) -> Vec<RawChunk> {
         let prev_depth = depth;
         depth += opens as i32;
         depth -= closes as i32;
+        // Clamp to 0: malformed input (orphan closing tags, more closes than
+        // opens) must not drive depth negative and trigger spurious emits.
+        depth = depth.max(0);
 
         // Closed a top-level child: emit chunk.
         if let Some(start) = child_start {
