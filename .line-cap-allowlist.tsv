@@ -25,9 +25,6 @@ crates/trusty-common/src/memory_core/store/payload_store.rs	547
 crates/trusty-common/src/monitor/dashboard.rs	745
 crates/trusty-common/src/monitor/memory_client.rs	754
 crates/trusty-common/src/monitor/search_tui.rs	1596
-crates/trusty-common/src/tickets/api/backends/github.rs	721
-crates/trusty-common/src/tickets/api/backends/jira.rs	758
-crates/trusty-common/src/tickets/api/backends/linear.rs	686
 crates/trusty-git-analytics/src/classify/mod.rs	793
 crates/trusty-git-analytics/src/classify/pipeline.rs	1247
 crates/trusty-git-analytics/src/classify/rules/loader.rs	1419

@@ -1,341 +1,24 @@
-//! GitHub backend (REST v3 + GraphQL v4).
+//! GitHub backend — `Backend` trait implementation.
 //!
-//! Why: GitHub Issues is the de-facto open-source tracker; we need full
-//! CRUD + labels + milestones + Projects V2.
-//! What: PAT-authenticated `reqwest` client. REST for issues/comments/
-//! labels/milestones; GraphQL for Projects V2.
-//! Test: shape tests in this module; live tests gated by env vars.
+//! Why: Isolates the Backend trait methods from transport and parse helpers
+//! so the file stays under the 500-SLOC cap.
+//! What: Implements the full `Backend` trait for `GitHubBackend`, wiring
+//! REST helpers and GraphQL for Projects V2 support.
+//! Test: `tests::parse_issue_minimal`, `tests::urlencode_basic`.
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, bail};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use reqwest::Client;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::tickets::api::backends::{
     Backend, CreateIssueParams, CreateMilestoneParams, ListIssuesParams, SearchIssuesParams,
     UpdateIssueParams,
 };
-use crate::tickets::api::config::GithubConfig;
 use crate::tickets::api::models::*;
 
-const REST_BASE: &str = "https://api.github.com";
-const GRAPHQL_URL: &str = "https://api.github.com/graphql";
-const USER_AGENT: &str = "trusty-tickets/0.1";
-
-/// GitHub backend implementation.
-///
-/// Why: Holds the auth token + repo coordinates + HTTP client.
-/// What: All requests carry `Authorization: Bearer ...` and the
-/// recommended `X-GitHub-Api-Version` header.
-/// Test: `tests::parse_issue_minimal` (shape only).
-pub struct GitHubBackend {
-    token: String,
-    owner: String,
-    repo: String,
-    http: Client,
-}
-
-impl GitHubBackend {
-    /// Why: Caller has validated config; we just wire up the client.
-    /// What: Constructs from `GithubConfig` after env-var fallback applied.
-    /// Test: covered by `client.rs` construction tests.
-    pub fn new(cfg: GithubConfig) -> Result<Self> {
-        let token = cfg
-            .token
-            .ok_or_else(|| anyhow!("github: missing token (set GITHUB_TOKEN)"))?;
-        let owner = cfg
-            .owner
-            .ok_or_else(|| anyhow!("github: missing owner (set GITHUB_OWNER)"))?;
-        let repo = cfg
-            .repo
-            .ok_or_else(|| anyhow!("github: missing repo (set GITHUB_REPO)"))?;
-        let http = Client::builder()
-            .user_agent(USER_AGENT)
-            .build()
-            .context("build github http client")?;
-        Ok(Self {
-            token,
-            owner,
-            repo,
-            http,
-        })
-    }
-
-    fn rest_url(&self, path: &str) -> String {
-        format!("{REST_BASE}{path}")
-    }
-
-    async fn rest_get(&self, path: &str) -> Result<Value> {
-        let resp = self
-            .http
-            .get(self.rest_url(path))
-            .bearer_auth(&self.token)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .await
-            .with_context(|| format!("GET {path}"))?;
-        ensure_ok(resp).await
-    }
-
-    async fn rest_post(&self, path: &str, body: Value) -> Result<Value> {
-        let resp = self
-            .http
-            .post(self.rest_url(path))
-            .bearer_auth(&self.token)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("POST {path}"))?;
-        ensure_ok(resp).await
-    }
-
-    async fn rest_patch(&self, path: &str, body: Value) -> Result<Value> {
-        let resp = self
-            .http
-            .patch(self.rest_url(path))
-            .bearer_auth(&self.token)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("PATCH {path}"))?;
-        ensure_ok(resp).await
-    }
-
-    async fn rest_delete(&self, path: &str) -> Result<()> {
-        let resp = self
-            .http
-            .delete(self.rest_url(path))
-            .bearer_auth(&self.token)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .await
-            .with_context(|| format!("DELETE {path}"))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            bail!("github DELETE failed: {status}: {text}");
-        }
-        Ok(())
-    }
-
-    async fn graphql(&self, query: &str, variables: Value) -> Result<Value> {
-        let resp = self
-            .http
-            .post(GRAPHQL_URL)
-            .bearer_auth(&self.token)
-            .header("Accept", "application/vnd.github+json")
-            .json(&json!({ "query": query, "variables": variables }))
-            .send()
-            .await
-            .context("github graphql")?;
-        let v = ensure_ok(resp).await?;
-        if let Some(errors) = v.get("errors") {
-            bail!("github graphql errors: {errors}");
-        }
-        Ok(v)
-    }
-
-    fn issue_path(&self, number: &str) -> String {
-        format!("/repos/{}/{}/issues/{number}", self.owner, self.repo)
-    }
-}
-
-async fn ensure_ok(resp: reqwest::Response) -> Result<Value> {
-    let status = resp.status();
-    let text = resp.text().await.context("read body")?;
-    if !status.is_success() {
-        bail!("github API failed: {status}: {text}");
-    }
-    if text.is_empty() {
-        return Ok(Value::Null);
-    }
-    serde_json::from_str(&text).with_context(|| format!("parse json: {text}"))
-}
-
-/// Convert a GitHub issue JSON blob into the canonical `Issue`.
-fn parse_issue(backend: &GitHubBackend, raw: &Value) -> Issue {
-    let number = raw
-        .get("number")
-        .and_then(|v| v.as_i64())
-        .map(|n| n.to_string())
-        .unwrap_or_default();
-    let state_str = raw.get("state").and_then(|v| v.as_str()).unwrap_or("open");
-    let state = match state_str {
-        "closed" => IssueState::Closed,
-        _ => IssueState::Open,
-    };
-    let labels: Vec<String> = raw
-        .get("labels")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|l| l.get("name").and_then(|n| n.as_str()).map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    let assignee = raw
-        .get("assignee")
-        .and_then(|v| v.get("login"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let title = raw
-        .get("title")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let description = raw.get("body").and_then(|v| v.as_str()).map(String::from);
-    let url = raw
-        .get("html_url")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let (milestone_id, milestone_name) = raw
-        .get("milestone")
-        .map(|m| {
-            let id = m
-                .get("number")
-                .and_then(|n| n.as_i64())
-                .map(|n| n.to_string());
-            let name = m.get("title").and_then(|n| n.as_str()).map(String::from);
-            (id, name)
-        })
-        .unwrap_or((None, None));
-    let created_at = raw
-        .get("created_at")
-        .and_then(|v| v.as_str())
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|d| d.with_timezone(&Utc));
-    let updated_at = raw
-        .get("updated_at")
-        .and_then(|v| v.as_str())
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|d| d.with_timezone(&Utc));
-
-    Issue {
-        id: number,
-        backend: backend.name().to_string(),
-        url,
-        title,
-        description,
-        state,
-        issue_type: IssueType::Issue,
-        priority: None,
-        assignee,
-        labels,
-        milestone_id,
-        milestone_name,
-        project_id: None,
-        project_name: Some(format!("{}/{}", backend.owner, backend.repo)),
-        parent_id: None,
-        children: vec![],
-        created_at,
-        updated_at,
-        extra: raw.clone(),
-    }
-}
-
-fn parse_comment(issue_id: &str, raw: &Value) -> Comment {
-    Comment {
-        id: raw
-            .get("id")
-            .and_then(|v| v.as_i64())
-            .map(|n| n.to_string())
-            .unwrap_or_default(),
-        issue_id: issue_id.to_string(),
-        author: raw
-            .get("user")
-            .and_then(|u| u.get("login"))
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        body: raw
-            .get("body")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        created_at: raw
-            .get("created_at")
-            .and_then(|v| v.as_str())
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .map(|d| d.with_timezone(&Utc)),
-        updated_at: raw
-            .get("updated_at")
-            .and_then(|v| v.as_str())
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .map(|d| d.with_timezone(&Utc)),
-    }
-}
-
-fn parse_label(raw: &Value) -> Label {
-    Label {
-        id: raw
-            .get("id")
-            .and_then(|v| v.as_i64())
-            .map(|n| n.to_string())
-            .unwrap_or_default(),
-        name: raw
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        color: raw.get("color").and_then(|v| v.as_str()).map(String::from),
-        description: raw
-            .get("description")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-    }
-}
-
-fn parse_milestone(raw: &Value) -> Milestone {
-    let total = raw.get("open_issues").and_then(|v| v.as_u64()).unwrap_or(0)
-        + raw
-            .get("closed_issues")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-    let closed = raw
-        .get("closed_issues")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let pct = if total > 0 {
-        Some(closed as f64 / total as f64 * 100.0)
-    } else {
-        None
-    };
-    Milestone {
-        id: raw
-            .get("number")
-            .and_then(|v| v.as_i64())
-            .map(|n| n.to_string())
-            .unwrap_or_default(),
-        name: raw
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        description: raw
-            .get("description")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        state: raw
-            .get("state")
-            .and_then(|v| v.as_str())
-            .unwrap_or("open")
-            .to_string(),
-        due_date: raw
-            .get("due_on")
-            .and_then(|v| v.as_str())
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .map(|d| d.with_timezone(&Utc)),
-        total_issues: Some(total as u32),
-        closed_issues: Some(closed as u32),
-        progress_pct: pct,
-    }
-}
+use super::types::{
+    GitHubBackend, parse_comment, parse_issue, parse_label, parse_milestone, urlencode,
+};
 
 #[async_trait]
 impl Backend for GitHubBackend {
@@ -743,22 +426,13 @@ impl Backend for GitHubBackend {
     }
 }
 
-fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use reqwest::Client;
+    use serde_json::json;
+
+    use super::super::types::{GitHubBackend, parse_issue, urlencode};
+    use crate::tickets::api::models::IssueState;
 
     fn make() -> GitHubBackend {
         GitHubBackend {

@@ -1,313 +1,23 @@
-//! JIRA Cloud backend (REST API v3).
+//! JIRA backend — `Backend` trait implementation.
 //!
-//! Why: JIRA is the enterprise default; the v3 API uses ADF for prose.
-//! What: Basic-auth (email + API token), JQL for queries, Versions for
-//! milestones.
-//! Test: shape tests in this module; live tests gated by env vars.
+//! Why: Isolates the Backend trait methods from transport and parse helpers
+//! so the file stays under the 500-SLOC cap.
+//! What: Implements the full `Backend` trait for `JiraBackend`, wiring
+//! REST helpers and JQL queries.
+//! Test: `tests::parse_adf_text`, `tests::issue_state_mapping`.
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
-use base64::Engine;
 use chrono::{DateTime, Utc};
-use reqwest::Client;
 use serde_json::{Value, json};
 
 use crate::tickets::api::backends::{
     Backend, CreateIssueParams, CreateMilestoneParams, ListIssuesParams, SearchIssuesParams,
     UpdateIssueParams,
 };
-use crate::tickets::api::config::JiraConfig;
 use crate::tickets::api::models::*;
 
-const USER_AGENT: &str = "trusty-tickets/0.1";
-
-/// JIRA Cloud backend.
-///
-/// Why: Stores server URL + creds + project key.
-/// What: Builds basic-auth header once.
-/// Test: `tests::parse_adf_text`.
-pub struct JiraBackend {
-    server: String,
-    auth_header: String,
-    project_key: String,
-    http: Client,
-}
-
-impl JiraBackend {
-    /// Why: Validate required fields up-front so the dispatcher can fail fast.
-    /// What: Constructs from `JiraConfig`. Requires server, email, token,
-    ///   and project_key.
-    /// Test: covered by `client.rs` tests.
-    pub fn new(cfg: JiraConfig) -> Result<Self> {
-        let server = cfg
-            .server
-            .ok_or_else(|| anyhow!("jira: missing server (set JIRA_SERVER)"))?;
-        let email = cfg
-            .email
-            .ok_or_else(|| anyhow!("jira: missing email (set JIRA_EMAIL)"))?;
-        let token = cfg
-            .api_token
-            .ok_or_else(|| anyhow!("jira: missing api_token (set JIRA_API_TOKEN)"))?;
-        let project_key = cfg
-            .project_key
-            .ok_or_else(|| anyhow!("jira: missing project_key (set JIRA_PROJECT_KEY)"))?;
-        let creds = format!("{email}:{token}");
-        let encoded = base64::engine::general_purpose::STANDARD.encode(creds.as_bytes());
-        let auth_header = format!("Basic {encoded}");
-        let http = Client::builder()
-            .user_agent(USER_AGENT)
-            .build()
-            .context("build jira http client")?;
-        Ok(Self {
-            server: server.trim_end_matches('/').to_string(),
-            auth_header,
-            project_key,
-            http,
-        })
-    }
-
-    fn url(&self, path: &str) -> String {
-        format!("{}/rest/api/3{path}", self.server)
-    }
-
-    async fn get(&self, path: &str) -> Result<Value> {
-        let resp = self
-            .http
-            .get(self.url(path))
-            .header("Authorization", &self.auth_header)
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .with_context(|| format!("GET {path}"))?;
-        ensure_ok(resp).await
-    }
-
-    async fn post(&self, path: &str, body: Value) -> Result<Value> {
-        let resp = self
-            .http
-            .post(self.url(path))
-            .header("Authorization", &self.auth_header)
-            .header("Accept", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("POST {path}"))?;
-        ensure_ok(resp).await
-    }
-
-    async fn put(&self, path: &str, body: Value) -> Result<Value> {
-        let resp = self
-            .http
-            .put(self.url(path))
-            .header("Authorization", &self.auth_header)
-            .header("Accept", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("PUT {path}"))?;
-        ensure_ok(resp).await
-    }
-
-    async fn delete(&self, path: &str) -> Result<()> {
-        let resp = self
-            .http
-            .delete(self.url(path))
-            .header("Authorization", &self.auth_header)
-            .send()
-            .await
-            .with_context(|| format!("DELETE {path}"))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            bail!("jira DELETE failed: {status}: {text}");
-        }
-        Ok(())
-    }
-}
-
-async fn ensure_ok(resp: reqwest::Response) -> Result<Value> {
-    let status = resp.status();
-    let text = resp.text().await.context("read body")?;
-    if !status.is_success() {
-        bail!("jira API failed: {status}: {text}");
-    }
-    if text.is_empty() {
-        return Ok(Value::Null);
-    }
-    serde_json::from_str(&text).with_context(|| format!("parse json: {text}"))
-}
-
-/// Wrap a plain-text string in a minimal ADF (Atlassian Document Format)
-/// paragraph.
-fn adf_paragraph(text: &str) -> Value {
-    json!({
-        "type": "doc",
-        "version": 1,
-        "content": [{
-            "type": "paragraph",
-            "content": [{"type": "text", "text": text}]
-        }]
-    })
-}
-
-/// Best-effort flatten of an ADF body into a plain string.
-fn flatten_adf(doc: &Value) -> Option<String> {
-    if doc.is_null() {
-        return None;
-    }
-    let mut out = String::new();
-    fn walk(v: &Value, out: &mut String) {
-        if let Some(t) = v.get("text").and_then(|t| t.as_str()) {
-            out.push_str(t);
-        }
-        if let Some(arr) = v.get("content").and_then(|c| c.as_array()) {
-            for c in arr {
-                walk(c, out);
-            }
-            if v.get("type")
-                .and_then(|t| t.as_str())
-                .map(|s| s == "paragraph")
-                .unwrap_or(false)
-            {
-                out.push('\n');
-            }
-        }
-    }
-    walk(doc, &mut out);
-    if out.is_empty() { None } else { Some(out) }
-}
-
-fn map_state(category: &str) -> IssueState {
-    match category {
-        "Done" | "done" => IssueState::Done,
-        "In Progress" | "indeterminate" => IssueState::InProgress,
-        _ => IssueState::Open,
-    }
-}
-
-fn parse_issue(raw: &Value) -> Issue {
-    let key = raw
-        .get("key")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let fields = raw.get("fields").cloned().unwrap_or(json!({}));
-    let title = fields
-        .get("summary")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let description = fields.get("description").and_then(flatten_adf);
-    let state_cat = fields
-        .get("status")
-        .and_then(|s| s.get("statusCategory"))
-        .and_then(|c| c.get("name"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("To Do");
-    let state = map_state(state_cat);
-    let assignee = fields
-        .get("assignee")
-        .and_then(|a| a.get("displayName"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let priority_name = fields
-        .get("priority")
-        .and_then(|p| p.get("name"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_lowercase());
-    let priority = priority_name.and_then(|s| match s.as_str() {
-        "lowest" | "low" => Some(Priority::Low),
-        "medium" => Some(Priority::Medium),
-        "high" => Some(Priority::High),
-        "highest" | "critical" => Some(Priority::Critical),
-        _ => None,
-    });
-    let labels = fields
-        .get("labels")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    let issuetype = fields
-        .get("issuetype")
-        .and_then(|t| t.get("name"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("Task")
-        .to_lowercase();
-    let issue_type = match issuetype.as_str() {
-        "epic" => IssueType::Epic,
-        "sub-task" | "subtask" => IssueType::Subtask,
-        "task" => IssueType::Task,
-        _ => IssueType::Issue,
-    };
-    let project_id = fields
-        .get("project")
-        .and_then(|p| p.get("key"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let created_at = fields
-        .get("created")
-        .and_then(|v| v.as_str())
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|d| d.with_timezone(&Utc));
-    let updated_at = fields
-        .get("updated")
-        .and_then(|v| v.as_str())
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|d| d.with_timezone(&Utc));
-
-    Issue {
-        id: key,
-        backend: "jira".into(),
-        url: None,
-        title,
-        description,
-        state,
-        issue_type,
-        priority,
-        assignee,
-        labels,
-        milestone_id: None,
-        milestone_name: None,
-        project_id,
-        project_name: None,
-        parent_id: None,
-        children: vec![],
-        created_at,
-        updated_at,
-        extra: raw.clone(),
-    }
-}
-
-fn parse_comment(issue_id: &str, raw: &Value) -> Comment {
-    Comment {
-        id: raw
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        issue_id: issue_id.to_string(),
-        author: raw
-            .get("author")
-            .and_then(|a| a.get("displayName"))
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        body: raw.get("body").and_then(flatten_adf).unwrap_or_default(),
-        created_at: raw
-            .get("created")
-            .and_then(|v| v.as_str())
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .map(|d| d.with_timezone(&Utc)),
-        updated_at: raw
-            .get("updated")
-            .and_then(|v| v.as_str())
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .map(|d| d.with_timezone(&Utc)),
-    }
-}
+use super::types::{JiraBackend, adf_paragraph, parse_comment, parse_issue};
 
 #[async_trait]
 impl Backend for JiraBackend {
@@ -803,7 +513,10 @@ impl Backend for JiraBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use serde_json::json;
+
+    use super::super::types::{flatten_adf, map_state};
+    use crate::tickets::api::models::IssueState;
 
     #[test]
     fn parse_adf_text() {
