@@ -1,148 +1,23 @@
-//! redb-backed payload sidecar for external integrations.
+//! `PayloadStore` struct and all public CRUD methods.
 //!
-//! Why: `TrustyBackedMemoryStore` in open-mpm maps caller-supplied string ids
-//! onto trusty's `Uuid` keyspace and attaches an arbitrary JSON payload to each
-//! entry. The vector data already persists to the usearch index on disk, but
-//! the string-id ↔ uuid ↔ JSON mapping was process-local — losing it on
-//! restart blocked switching `TrustyBackedMemoryStore` to the production
-//! default (issue #52). This module provides the missing durable sidecar so
-//! payloads survive a process restart without forcing every embedding adapter
-//! to roll its own storage layer.
-//!
-//! Issue #46 migrates this store from rusqlite to redb so the payload sidecar
-//! drops the heavy native dependency chain (rusqlite + r2d2 + r2d2_sqlite) and
-//! lines up with the rest of the Memory Palace (`kg_redb.rs`, palace_store).
-//! The public `PayloadStore` API is unchanged so `TrustyBackedMemoryStore`
-//! continues to work as a drop-in.
-//!
-//! What: `PayloadStore` opens a single redb database at a caller-supplied path
-//! and exposes `upsert` / `get` / `delete` / `exists` / `list_segment` /
-//! `lookup_id_for_uuid` / `load_all` over the `PAYLOADS` table defined in
-//! `kg_store.rs`. The composite key is `[segment_len][segment][id]` (see
-//! `encode_payload_key`); the value is a postcard-encoded `PayloadRecord`
-//! that bundles the 16-byte uuid with the JSON payload string.
-//!
-//! Rows are partitioned by `segment` so a single store can back multiple
-//! namespaces (open-mpm's `Segment::AgentMemory`, `CodeIndex`, etc.). Errors
-//! flow through the typed `PayloadStoreError` so callers can distinguish I/O
-//! from JSON from schema problems.
-//!
-//! Test: This module's `tests` exercise the full CRUD path plus a reopen
-//! round-trip (the load-all method must return every row written by a prior
-//! process). The one-shot migration from the legacy `payloads.db` SQLite
-//! sidecar was removed in issue #989 (all palaces confirmed migrated).
+//! Why: Houses the store implementation separately from the error/type
+//! definitions in `types.rs` so both files stay under the 500-SLOC cap.
+//! What: `PayloadStore::open` + `upsert` + `get` + `exists` +
+//! `lookup_id_for_uuid` + `delete` + `list_segment` + `load_all`.
+//! Test: All methods are covered by the CRUD round-trip tests in `mod.rs`.
 
 use redb::{Database, ReadableDatabase, ReadableTable};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use thiserror::Error;
 use uuid::Uuid;
 
 use crate::memory_core::store::kg_store::{PAYLOADS, encode_payload_key, segment_prefix};
 
-/// Errors raised by `PayloadStore`.
-///
-/// Why: Callers may want to fall back gracefully on a missing payload but
-/// surface a hard I/O failure — distinguishing the two requires a typed error.
-/// What: Wraps the error sources (redb storage, transaction, table, postcard,
-/// JSON, migration) so each can be inspected without `downcast`. `NotFound`
-/// is a value not an error path — missing rows surface as `Ok(None)` instead.
-/// Test: Covered indirectly by the round-trip test and the missing-row test.
-//
-// Why (boxing): redb's error types (`DatabaseError`, `TransactionError`,
-// `TableError`, `StorageError`, `CommitError`) are large enums (the largest
-// variant pushes the parent enum past 180 bytes), which trips Clippy's
-// `result_large_err` lint at every `Result<_, PayloadStoreError>` return site.
-// We box each redb source so the enum stays small (≤ a couple of words per
-// variant) while preserving the typed error API. `serde_json::Error` is
-// similarly boxy and is boxed for the same reason.
-// What: Each variant whose source is a large foreign error owns a
-// `Box<Source>`; the `Display` impl deref-prints transparently.
-// Test: existing CRUD tests still exercise every variant's construction path
-// without behavioural change.
-#[derive(Debug, Error)]
-pub enum PayloadStoreError {
-    #[error("payload store io error at {path}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("payload store redb database error at {path}: {source}")]
-    Database {
-        path: PathBuf,
-        #[source]
-        source: Box<redb::DatabaseError>,
-    },
-    #[error("payload store redb transaction error at {path}: {source}")]
-    Transaction {
-        path: PathBuf,
-        #[source]
-        source: Box<redb::TransactionError>,
-    },
-    #[error("payload store redb table error at {path}: {source}")]
-    Table {
-        path: PathBuf,
-        #[source]
-        source: Box<redb::TableError>,
-    },
-    #[error("payload store redb storage error at {path}: {source}")]
-    Storage {
-        path: PathBuf,
-        #[source]
-        source: Box<redb::StorageError>,
-    },
-    #[error("payload store redb commit error at {path}: {source}")]
-    Commit {
-        path: PathBuf,
-        #[source]
-        source: Box<redb::CommitError>,
-    },
-    #[error("payload store postcard codec error: {source}")]
-    Postcard {
-        #[source]
-        source: postcard::Error,
-    },
-    #[error("payload store json error: {source}")]
-    Json {
-        #[source]
-        source: Box<serde_json::Error>,
-    },
-}
-
-type Result<T> = std::result::Result<T, PayloadStoreError>;
-
-/// One persisted payload row.
-///
-/// Why: `load_all` needs a single struct shape so callers can hydrate their
-/// in-memory sidecar in one pass.
-/// What: Pairs the original caller id, the deterministic uuid the vector store
-/// keys by, and the JSON payload.
-/// Test: `roundtrip_persists_across_reopen` reads the row back through this
-/// type.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PayloadRow {
-    pub segment: String,
-    pub id: String,
-    pub uuid: Uuid,
-    pub payload: Value,
-}
-
-/// Postcard-encoded value layout for one PAYLOADS row.
-///
-/// Why: redb table values are raw byte slices; we postcard-encode this struct
-/// so the (uuid, json) pair travels as a single, fixed schema.
-/// What: 16-byte uuid + JSON payload string. JSON-as-string lets us avoid the
-/// `serde_json::Value` <-> postcard impedance issue while still round-tripping
-/// arbitrary user payloads.
-/// Test: `roundtrip_persists_across_reopen` covers the codec.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PayloadRecord {
-    uuid: [u8; 16],
-    payload: String,
-}
+use super::types::{
+    PayloadRecord, PayloadRow, PayloadStoreError, Result, RowBytes, decode_row, resolve_redb_path,
+    split_payload_key,
+};
 
 /// redb-backed sidecar for external string-id ↔ uuid ↔ JSON mappings.
 ///
@@ -160,8 +35,8 @@ struct PayloadRecord {
 /// `lookup_id_for_uuid_round_trips`, `load_all_filters_by_segment`,
 /// `list_segment_returns_rows`.
 pub struct PayloadStore {
-    db: Arc<Database>,
-    path: PathBuf,
+    pub(super) db: Arc<Database>,
+    pub(super) path: PathBuf,
 }
 
 impl PayloadStore {
@@ -192,14 +67,11 @@ impl PayloadStore {
             })?;
         }
 
-        // Note: the one-shot SQLite → redb migration (formerly gated behind
-        // `sqlite-kg`) was removed in issue #989 — all palaces are confirmed
-        // migrated.
-
-        let db = super::open_or_recreate(&redb_path).map_err(|e| PayloadStoreError::Database {
-            path: redb_path.clone(),
-            source: Box::new(e),
-        })?;
+        let db =
+            super::super::open_or_recreate(&redb_path).map_err(|e| PayloadStoreError::Database {
+                path: redb_path.clone(),
+                source: Box::new(e),
+            })?;
 
         // Touch the PAYLOADS table so it exists on disk before the first read
         // transaction. redb only persists a table once it is opened in a write
@@ -512,6 +384,13 @@ impl PayloadStore {
 
     /// Internal: walk every row in `segment`, yielding `RowBytes` so callers
     /// can decode value bytes once per row in whichever shape they need.
+    ///
+    /// Why: Both `lookup_id_for_uuid` and `list_segment` scan the same range;
+    /// extracting the range scan prevents duplication.
+    /// What: Collects range results into an owned `Vec<Result<RowBytes>>` so
+    /// the redb transaction lifetime does not escape this function.
+    /// Test: Covered indirectly by `lookup_id_for_uuid_round_trips` and
+    /// `list_segment_returns_rows`.
     fn iter_segment(&self, segment: &str) -> Result<impl Iterator<Item = Result<RowBytes>> + '_> {
         let rtx = self
             .db
@@ -558,227 +437,5 @@ impl PayloadStore {
             }
         }
         Ok(rows.into_iter())
-    }
-}
-
-/// Internal helper: decoded key/value pair for a single PAYLOADS row.
-struct RowBytes {
-    id: String,
-    raw_value: Vec<u8>,
-}
-
-/// Internal helper: turn a raw `(key, value)` redb pair into a `PayloadRow`.
-fn decode_row(key: &[u8], value: &[u8]) -> Result<Option<PayloadRow>> {
-    let (segment, id) = match split_payload_key_any(key) {
-        Some(parts) => parts,
-        None => return Ok(None),
-    };
-    let record: PayloadRecord =
-        postcard::from_bytes(value).map_err(|e| PayloadStoreError::Postcard { source: e })?;
-    let uuid = Uuid::from_bytes(record.uuid);
-    let payload: Value =
-        serde_json::from_str(&record.payload).map_err(|e| PayloadStoreError::Json {
-            source: Box::new(e),
-        })?;
-    Ok(Some(PayloadRow {
-        segment,
-        id,
-        uuid,
-        payload,
-    }))
-}
-
-/// Internal: extract the id half of a payload key when the segment is known.
-/// Returns `None` if the key is malformed or doesn't start with the expected
-/// segment prefix.
-fn split_payload_key(key: &[u8], segment: &str) -> Option<String> {
-    if key.len() < 2 {
-        return None;
-    }
-    let seg_len = u16::from_be_bytes([key[0], key[1]]) as usize;
-    if key.len() < 2 + seg_len {
-        return None;
-    }
-    let seg_bytes = &key[2..2 + seg_len];
-    if seg_bytes != segment.as_bytes() {
-        return None;
-    }
-    let id_bytes = &key[2 + seg_len..];
-    std::str::from_utf8(id_bytes).ok().map(|s| s.to_string())
-}
-
-/// Internal: split a payload key into `(segment, id)` without knowing the
-/// segment in advance. Used by `load_all`.
-fn split_payload_key_any(key: &[u8]) -> Option<(String, String)> {
-    if key.len() < 2 {
-        return None;
-    }
-    let seg_len = u16::from_be_bytes([key[0], key[1]]) as usize;
-    if key.len() < 2 + seg_len {
-        return None;
-    }
-    let segment = std::str::from_utf8(&key[2..2 + seg_len]).ok()?.to_string();
-    let id = std::str::from_utf8(&key[2 + seg_len..]).ok()?.to_string();
-    Some((segment, id))
-}
-
-/// Internal: callers historically passed `<data_root>/payloads.db` for the
-/// SQLite sidecar. Now that the store is redb-backed, accept that same path
-/// and silently rewrite it to `payloads.redb` so existing call sites continue
-/// to work. Paths with any other extension (or no extension) are kept as-is.
-fn resolve_redb_path(path: &Path) -> PathBuf {
-    if path.extension().is_some_and(|e| e == "db") {
-        path.with_extension("redb")
-    } else {
-        path.to_path_buf()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-    use tempfile::tempdir;
-
-    fn fixture_uuid(b: u8) -> Uuid {
-        let mut bytes = [0u8; 16];
-        bytes[0] = b;
-        Uuid::from_bytes(bytes)
-    }
-
-    #[test]
-    fn roundtrip_persists_across_reopen() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("payloads.db");
-        let u = fixture_uuid(1);
-
-        {
-            let store = PayloadStore::open(&path).unwrap();
-            store
-                .upsert("seg-a", "rec-1", u, &json!({"hello": "world"}))
-                .unwrap();
-        }
-
-        // Reopen — payload must survive.
-        let store2 = PayloadStore::open(&path).unwrap();
-        let got = store2.get("seg-a", "rec-1").unwrap();
-        assert_eq!(got, Some((u, json!({"hello": "world"}))));
-
-        let rows = store2.load_all(None).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].id, "rec-1");
-        assert_eq!(rows[0].uuid, u);
-        assert_eq!(rows[0].segment, "seg-a");
-    }
-
-    #[test]
-    fn get_missing_returns_none() {
-        let dir = tempdir().unwrap();
-        let store = PayloadStore::open(&dir.path().join("p.redb")).unwrap();
-        assert!(store.get("seg-a", "nope").unwrap().is_none());
-    }
-
-    #[test]
-    fn delete_drops_row() {
-        let dir = tempdir().unwrap();
-        let store = PayloadStore::open(&dir.path().join("p.redb")).unwrap();
-        let u = fixture_uuid(2);
-        store.upsert("seg-a", "k", u, &json!(42)).unwrap();
-        store.delete("seg-a", "k").unwrap();
-        assert!(store.get("seg-a", "k").unwrap().is_none());
-        // Idempotent — second delete is fine.
-        store.delete("seg-a", "k").unwrap();
-    }
-
-    #[test]
-    fn exists_reports_membership() {
-        let dir = tempdir().unwrap();
-        let store = PayloadStore::open(&dir.path().join("p.redb")).unwrap();
-        assert!(!store.exists("seg-a", "k").unwrap());
-        store
-            .upsert("seg-a", "k", fixture_uuid(5), &json!("v"))
-            .unwrap();
-        assert!(store.exists("seg-a", "k").unwrap());
-        assert!(!store.exists("seg-b", "k").unwrap());
-        store.delete("seg-a", "k").unwrap();
-        assert!(!store.exists("seg-a", "k").unwrap());
-    }
-
-    #[test]
-    fn lookup_id_for_uuid_round_trips() {
-        let dir = tempdir().unwrap();
-        let store = PayloadStore::open(&dir.path().join("p.redb")).unwrap();
-        let u = fixture_uuid(7);
-        store.upsert("seg-a", "rec-7", u, &json!({"x": 1})).unwrap();
-        let got = store.lookup_id_for_uuid("seg-a", u).unwrap();
-        assert_eq!(got, Some("rec-7".to_string()));
-        // Wrong segment must miss.
-        assert!(store.lookup_id_for_uuid("seg-b", u).unwrap().is_none());
-    }
-
-    #[test]
-    fn load_all_filters_by_segment() {
-        let dir = tempdir().unwrap();
-        let store = PayloadStore::open(&dir.path().join("p.redb")).unwrap();
-        store.upsert("a", "1", fixture_uuid(1), &json!(1)).unwrap();
-        store.upsert("a", "2", fixture_uuid(2), &json!(2)).unwrap();
-        store.upsert("b", "3", fixture_uuid(3), &json!(3)).unwrap();
-
-        let only_a = store.load_all(Some("a")).unwrap();
-        assert_eq!(only_a.len(), 2);
-        assert!(only_a.iter().all(|r| r.segment == "a"));
-
-        let all = store.load_all(None).unwrap();
-        assert_eq!(all.len(), 3);
-    }
-
-    #[test]
-    fn list_segment_returns_rows() {
-        let dir = tempdir().unwrap();
-        let store = PayloadStore::open(&dir.path().join("p.redb")).unwrap();
-        store
-            .upsert("seg-a", "x", fixture_uuid(1), &json!({"k": "v"}))
-            .unwrap();
-        store
-            .upsert("seg-a", "y", fixture_uuid(2), &json!({"k": "w"}))
-            .unwrap();
-        store
-            .upsert("seg-b", "z", fixture_uuid(3), &json!({"k": "u"}))
-            .unwrap();
-        let mut rows = store.list_segment("seg-a").unwrap();
-        rows.sort_by(|a, b| a.0.cmp(&b.0));
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].0, "x");
-        assert_eq!(rows[0].1, fixture_uuid(1));
-        assert!(rows[0].2.contains("\"v\""));
-        assert_eq!(rows[1].0, "y");
-        assert_eq!(rows[1].1, fixture_uuid(2));
-
-        let other = store.list_segment("seg-b").unwrap();
-        assert_eq!(other.len(), 1);
-        assert_eq!(other[0].0, "z");
-
-        let empty = store.list_segment("seg-c").unwrap();
-        assert!(empty.is_empty());
-    }
-
-    #[test]
-    fn callers_passing_payloads_db_get_redb_sibling() {
-        // Existing callers (`TrustyBackedMemoryStore`) pass `payloads.db`. Make
-        // sure the resolver redirects them to `payloads.redb` so the on-disk
-        // store actually uses redb regardless of caller hygiene.
-        let dir = tempdir().unwrap();
-        let legacy_path = dir.path().join("payloads.db");
-        let store = PayloadStore::open(&legacy_path).unwrap();
-        store
-            .upsert("s", "i", fixture_uuid(9), &json!({"ok": true}))
-            .unwrap();
-        drop(store);
-        let redb_path = dir.path().join("payloads.redb");
-        assert!(
-            redb_path.exists(),
-            "expected redb sibling to be created at {}",
-            redb_path.display()
-        );
     }
 }

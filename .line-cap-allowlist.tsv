@@ -20,7 +20,6 @@ crates/trusty-common/src/memory_core/retrieval/mod.rs	830
 crates/trusty-common/src/memory_core/semantic_consolidation.rs	615
 crates/trusty-common/src/memory_core/store/kg_redb.rs	1400
 crates/trusty-common/src/memory_core/store/kg.rs	815
-crates/trusty-common/src/memory_core/store/payload_store.rs	547
 crates/trusty-common/src/monitor/dashboard.rs	745
 crates/trusty-common/src/monitor/memory_client.rs	754
 crates/trusty-common/src/monitor/search_tui.rs	1596
