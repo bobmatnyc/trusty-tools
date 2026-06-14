@@ -50,7 +50,6 @@ crates/trusty-git-analytics/src/report/aggregator.rs	1095
 crates/trusty-git-analytics/src/report/drilldown.rs	732
 crates/trusty-git-analytics/src/report/mod.rs	712
 crates/trusty-gworkspace/src/tools.rs	557
-crates/trusty-memory/src/lib.rs	616
 crates/trusty-mpm/src/client/executor.rs	666
 crates/trusty-mpm/src/client/http_client.rs	897
 crates/trusty-mpm/src/core/session_launch.rs	705
