@@ -1,7 +1,9 @@
 use super::*;
 use crate::core::indexer::CodeIndexer;
+use crate::core::registry::{IndexHandle, IndexId, IndexStages, StageStatus};
 use std::fs;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 /// Filter wiring: with `include_paths` set on the handle, the reindex
 /// must walk ONLY those subtrees. Files outside the configured slice
