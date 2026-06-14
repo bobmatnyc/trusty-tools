@@ -30,11 +30,17 @@ use crate::commands::prior_index_count::load_prior_index_count;
 /// What: probes the lockfile fast-path, then constructs `SearchAppState` and
 /// hands off to `run_daemon`. Maps `DaemonError::AlreadyRunning` to a friendly
 /// exit-1 message. When `data_dir` is `Some`, the override is stamped into
-/// `TRUSTY_DATA_DIR` before any path resolution. When `no_auto_discover` is
-/// `true` (or `TRUSTY_NO_AUTO_DISCOVER=1` is set), the post-hydration
-/// auto-discovery scan is skipped entirely.
+/// `TRUSTY_DATA_DIR` for the foreground path AND passed as an explicit
+/// `--data-dir` CLI arg to the background self-spawn (issue #1182: the explicit
+/// flag now always wins over any pre-existing `TRUSTY_DATA_DIR` in the
+/// environment). When `no_auto_discover` is `true` (or
+/// `TRUSTY_NO_AUTO_DISCOVER=1` is set), the post-hydration auto-discovery scan
+/// is skipped entirely so the daemon serves only indexes already in
+/// `indexes.toml` or registered at runtime.
 /// Test: run twice in a row — the second invocation must exit 1 with the
-/// "another daemon is already running" message.
+/// "another daemon is already running" message. Run with `--data-dir /tmp/ts-x`
+/// and confirm the lockfile lands in `/tmp/ts-x/daemon.lock`. Unit coverage:
+/// `spawn_args_include_data_dir_when_preset_env` in `tests/data_dir_forward.rs`.
 pub async fn handle_start(
     port: u16,
     foreground: bool,
@@ -43,9 +49,11 @@ pub async fn handle_start(
     verbose: bool,
     no_auto_discover: bool,
 ) -> Result<()> {
-    // Apply the --data-dir override as early as possible — before the
-    // background self-spawn path so the spawned child inherits the env var.
-    // Precedence: TRUSTY_DATA_DIR (env) > --data-dir (flag).
+    // Apply the --data-dir override as early as possible so the foreground path
+    // sees the correct root in TRUSTY_DATA_DIR.  The background self-spawn path
+    // receives the explicit --data-dir CLI arg directly (issue #1182) so the
+    // CLI flag wins over any pre-set TRUSTY_DATA_DIR.  Precedence for the
+    // foreground path: TRUSTY_DATA_DIR (env) > --data-dir (flag).
     //
     // SAFETY: invoked on the main thread before tokio spawns any workers.
     if std::env::var_os("TRUSTY_DATA_DIR").is_none() {
@@ -108,6 +116,13 @@ pub async fn handle_start(
             .arg(device);
         if no_auto_discover {
             cmd.arg("--no-auto-discover");
+        }
+        // Issue #1182: pass --data-dir explicitly so the CLI flag wins even
+        // when TRUSTY_DATA_DIR was already set in the parent environment.
+        // Relying solely on env inheritance loses the explicit flag when the
+        // parent's TRUSTY_DATA_DIR differs from the requested --data-dir.
+        if let Some(dir) = data_dir {
+            cmd.arg("--data-dir").arg(dir);
         }
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
