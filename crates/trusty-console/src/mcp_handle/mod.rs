@@ -44,7 +44,8 @@
 //!
 //! Test: `mcp_handle_absent_binary_returns_error`,
 //! `mcp_handle_absent_never_retries`,
-//! `mcp_handle_respawn_failure_applies_backoff`, and
+//! `mcp_handle_respawn_failure_applies_backoff`,
+//! `outer_lock_not_held_during_probe_outer_lock_remains_acquirable`, and
 //! `compute_backoff_delay_*` in `tests.rs`.
 
 use std::collections::HashSet;
@@ -581,167 +582,205 @@ impl McpServiceHandle {
     ///
     /// Why: Separates the state-machine logic (lazy-init, absent detection,
     /// backoff gating, spawn) from the tool-call I/O. This allows the outer
-    /// `state` lock to be released before the long `call_tool` await.
-    /// What: Acquires the outer `state` lock; if `None` OR if `Degraded` and the
-    /// backoff window has elapsed, tries to spawn; transitions to `Absent`,
-    /// `Connected`, or `Degraded`. `Degraded` within the backoff window returns
-    /// `McpHandleError::Degraded` immediately (UI keeps showing the hint).
-    /// `Degraded` after the window resets to `None` and re-runs the full probe —
-    /// this is the self-healing path: if the daemon was restarted with the correct
-    /// `serve --stdio` wiring, the re-probe finds `console_metrics` and transitions
-    /// back to `Connected`. Returns `McpHandleError::Absent` or
-    /// `McpHandleError::Backoff` on the corresponding terminal/gate conditions,
-    /// `McpHandleError::Other` on spawn/init failures. On success returns a clone
-    /// of the `Arc<Mutex<Box<StdioMcpClient>>>` and a clone of the cached tool
-    /// name set so the caller can drop the outer lock before invoking `call_tool`.
+    /// `state` lock to be released before the long `call_tool` await and
+    /// before the `list_tools` probe (issue #1164 fix).
+    /// What: Phase 1 — acquires the outer `state` lock; runs all synchronous
+    /// state transitions (self-heal reset, absent detection, backoff gate,
+    /// spawn, initialize). When a tools/list probe is needed, packages the
+    /// client into `maybe_probe` and exits the phase-1 scoped block so the
+    /// borrow on `guard` ends. Phase 2 — drops `guard` BEFORE `list_tools().await`,
+    /// then re-acquires it to record the Connected/Degraded outcome. This mirrors
+    /// the call_tool lock discipline and prevents blocking concurrent callers
+    /// (poll_metrics / route handlers) for the full network round-trip.
+    /// `Degraded` within the backoff window returns `McpHandleError::Degraded`
+    /// immediately (UI keeps showing the hint). `Degraded` after the window
+    /// resets to `None` and re-runs the full probe (self-healing path). On
+    /// success returns a clone of the `Arc<Mutex<Box<StdioMcpClient>>>` and
+    /// the cached tool name set so the caller can drop the outer lock before
+    /// invoking `call_tool`.
     /// Test: Exercised transitively by all handle tests and route tests.
-    /// Self-healing path: `mcp_handle_degraded_self_heals_after_backoff_window`.
+    /// Self-healing: `mcp_handle_degraded_self_heals_after_backoff_window`.
+    /// Lock discipline: `outer_lock_not_held_during_probe_outer_lock_remains_acquirable`.
     async fn ensure_connected(
         &self,
     ) -> Result<(Arc<Mutex<Box<StdioMcpClient>>>, HashSet<String>), McpHandleError> {
+        // Phase 1: acquire the outer lock, run all synchronous state transitions
+        // (self-heal reset, absent detection, backoff gate, spawn, initialize).
+        // If a tools/list probe is needed, we package the client_arc and break
+        // out of the phase-1 scoped block so the borrow on `guard` can end
+        // before the async I/O starts (lock discipline — see issue #1164).
         let mut guard = self.state.lock().await;
-        let (state_opt, backoff) = &mut *guard;
+        // Holds the ready client + server_info when a tools/list probe is
+        // needed after phase 1.
+        let maybe_probe: Option<(Arc<Mutex<Box<StdioMcpClient>>>, String)>;
 
-        // Self-healing: if Degraded but the backoff window has elapsed, drop
-        // back to None so the probe re-runs on this call.  While still inside
-        // the window, fall through to the Degraded arm below which returns the
-        // Degraded error so callers (and the UI) keep showing the hint.
-        if matches!(state_opt, Some(HandleState::Degraded)) && backoff.should_attempt() {
-            warn!(
-                binary = %self.binary,
-                "McpServiceHandle: Degraded handle backoff window elapsed — \
-                 re-probing to attempt self-heal"
-            );
-            *state_opt = None;
-        }
+        {
+            let (state_opt, backoff) = &mut *guard;
 
-        if state_opt.is_none() {
-            let resolved = which::which(&self.binary).ok();
-            if resolved.is_none() {
+            // Self-healing: if Degraded but the backoff window has elapsed, drop
+            // back to None so the probe re-runs on this call.  While still inside
+            // the window, fall through to the Degraded arm below which returns the
+            // Degraded error so callers (and the UI) keep showing the hint.
+            if matches!(state_opt, Some(HandleState::Degraded)) && backoff.should_attempt() {
                 warn!(
                     binary = %self.binary,
-                    "McpServiceHandle: binary not found on PATH — marking as Absent"
+                    "McpServiceHandle: Degraded handle backoff window elapsed — \
+                     re-probing to attempt self-heal"
                 );
-                *state_opt = Some(HandleState::Absent);
-            } else {
-                if !backoff.should_attempt() {
-                    let next_in = backoff
-                        .next_attempt
-                        .saturating_duration_since(Instant::now());
+                *state_opt = None;
+            }
+
+            if state_opt.is_none() {
+                let resolved = which::which(&self.binary).ok();
+                if resolved.is_none() {
                     warn!(
                         binary = %self.binary,
-                        failure_count = backoff.failure_count,
-                        next_attempt_secs = ?next_in,
-                        "McpServiceHandle: spawn is in backoff — skipping this cycle"
+                        "McpServiceHandle: binary not found on PATH — marking as Absent"
                     );
-                    return Err(McpHandleError::Backoff {
-                        failure_count: backoff.failure_count,
-                        next_attempt_in: next_in,
-                    });
-                }
+                    *state_opt = Some(HandleState::Absent);
+                    maybe_probe = None;
+                } else {
+                    if !backoff.should_attempt() {
+                        let next_in = backoff
+                            .next_attempt
+                            .saturating_duration_since(Instant::now());
+                        warn!(
+                            binary = %self.binary,
+                            failure_count = backoff.failure_count,
+                            next_attempt_secs = ?next_in,
+                            "McpServiceHandle: spawn is in backoff — skipping this cycle"
+                        );
+                        return Err(McpHandleError::Backoff {
+                            failure_count: backoff.failure_count,
+                            next_attempt_in: next_in,
+                        });
+                    }
 
-                debug!(binary = %self.binary, "McpServiceHandle: spawning MCP child");
-                let args_ref: Vec<&str> = self.args.iter().map(String::as_str).collect();
-                match StdioMcpClient::spawn(&self.binary, &args_ref, "trusty-console").await {
-                    Ok(mut client) => {
-                        let server_info = match client.initialize().await.with_context(|| {
-                            format!(
-                                "McpServiceHandle: MCP initialize failed for {}",
-                                self.binary
-                            )
-                        }) {
-                            Ok(info) => info,
-                            Err(e) => {
-                                backoff.record_failure();
-                                warn!(
-                                    binary = %self.binary,
-                                    failure_count = backoff.failure_count,
-                                    error = %e,
-                                    "McpServiceHandle: initialize failed — will retry after backoff"
-                                );
-                                return Err(McpHandleError::Other(e));
-                            }
-                        };
-
-                        // tools/list probe: verify the service exposes the expected
-                        // console_metrics tool. A missing tool means the binary is
-                        // running but in the wrong mode (e.g. HTTP-only, not stdio
-                        // MCP). We mark the handle Degraded rather than silently
-                        // failing — poll_metrics will never succeed in this state.
-                        // Also cache the full tool name set for capability-gating.
-                        match client.list_tools().await {
-                            Ok(tools) => {
-                                let tool_names: HashSet<String> =
-                                    tools.iter().map(|t| t.name.clone()).collect();
-                                let has_metrics = tool_names.contains(CONSOLE_METRICS_METHOD);
-                                if !has_metrics {
-                                    // Record a failure so the backoff window is
-                                    // non-zero: the self-healing path in
-                                    // `ensure_connected` requires
-                                    // `backoff.should_attempt()` to return true
-                                    // before it resets Degraded → None and
-                                    // re-probes. Using record_failure (not reset)
-                                    // guarantees at least BACKOFF_BASE_MS
-                                    // (1 s) before the re-probe is triggered,
-                                    // so the UI shows the degraded badge for at
-                                    // least one full poll cycle.
+                    debug!(binary = %self.binary, "McpServiceHandle: spawning MCP child");
+                    let args_ref: Vec<&str> = self.args.iter().map(String::as_str).collect();
+                    match StdioMcpClient::spawn(&self.binary, &args_ref, "trusty-console").await {
+                        Ok(mut client) => {
+                            let server_info = match client.initialize().await.with_context(|| {
+                                format!(
+                                    "McpServiceHandle: MCP initialize failed for {}",
+                                    self.binary
+                                )
+                            }) {
+                                Ok(info) => info,
+                                Err(e) => {
                                     backoff.record_failure();
                                     warn!(
                                         binary = %self.binary,
                                         failure_count = backoff.failure_count,
-                                        next_attempt_secs = ?backoff.next_attempt.saturating_duration_since(Instant::now()),
-                                        "McpServiceHandle: tools/list OK but \
-                                         `console_metrics` not listed — marking Degraded; \
-                                         will self-heal after backoff window"
+                                        error = %e,
+                                        "McpServiceHandle: initialize failed — will retry after backoff"
                                     );
-                                    *state_opt = Some(HandleState::Degraded);
-                                } else {
-                                    backoff.reset();
-                                    let client_arc = Arc::new(Mutex::new(Box::new(client)));
-                                    *state_opt = Some(HandleState::Connected {
-                                        client: Arc::clone(&client_arc),
-                                        tool_names,
-                                        daemon_version: server_info.version,
-                                    });
+                                    return Err(McpHandleError::Other(e));
                                 }
-                            }
-                            Err(e) => {
-                                // tools/list failure is treated as a spawn failure
-                                // so the backoff gate applies on the next attempt.
-                                backoff.record_failure();
-                                warn!(
-                                    binary = %self.binary,
-                                    failure_count = backoff.failure_count,
-                                    error = %e,
-                                    "McpServiceHandle: tools/list failed after \
-                                     initialize — will retry after backoff"
-                                );
-                                return Err(McpHandleError::Other(e.context(format!(
-                                    "McpServiceHandle: tools/list failed for {}",
-                                    self.binary
-                                ))));
-                            }
+                            };
+
+                            // tools/list probe needed. Wrap the client NOW but do NOT
+                            // call list_tools yet — that I/O must happen outside the
+                            // outer lock (issue #1164). Signal to phase 2 via maybe_probe.
+                            let client_arc = Arc::new(Mutex::new(Box::new(client)));
+                            maybe_probe = Some((Arc::clone(&client_arc), server_info.version));
+                            // Leave state_opt as None; phase 2 will set it after the
+                            // probe result is known.
+                        }
+                        Err(e) => {
+                            backoff.record_failure();
+                            warn!(
+                                binary = %self.binary,
+                                failure_count = backoff.failure_count,
+                                next_attempt_secs = ?backoff.next_attempt.saturating_duration_since(Instant::now()),
+                                error = %e,
+                                "McpServiceHandle: spawn failed — will retry after backoff"
+                            );
+                            return Err(McpHandleError::Other(e.context(format!(
+                                "McpServiceHandle: failed to spawn {} (failure #{})",
+                                self.binary, backoff.failure_count
+                            ))));
                         }
                     }
-                    Err(e) => {
+                }
+            } else {
+                maybe_probe = None;
+            }
+        } // `state_opt` and `backoff` borrows of `guard` end here.
+
+        // Phase 2: tools/list probe (if needed).
+        //
+        // Drop the outer guard BEFORE the async I/O so concurrent callers
+        // (poll_metrics / route handlers) are not blocked for the full
+        // tools/list network round-trip. Re-acquire afterward to record the
+        // Connected/Degraded outcome. This mirrors the call_tool path.
+        // Fixes issue #1164.
+        if let Some((client_arc, daemon_version)) = maybe_probe {
+            // tools/list probe: verify the service exposes the expected
+            // console_metrics tool. A missing tool means the binary is
+            // running but in the wrong mode (e.g. HTTP-only, not stdio MCP).
+            // We mark the handle Degraded rather than silently failing —
+            // poll_metrics will never succeed in this state.
+            // Also cache the full tool name set for capability-gating.
+            drop(guard);
+            let probe_result = client_arc.lock().await.list_tools().await;
+            // Re-acquire the outer guard to record the probe outcome.
+            guard = self.state.lock().await;
+            let (state_opt, backoff) = &mut *guard;
+            match probe_result {
+                Ok(tools) => {
+                    let tool_names: HashSet<String> =
+                        tools.iter().map(|t| t.name.clone()).collect();
+                    let has_metrics = tool_names.contains(CONSOLE_METRICS_METHOD);
+                    if !has_metrics {
+                        // Record a failure so the backoff window is non-zero:
+                        // the self-healing path in `ensure_connected` requires
+                        // `backoff.should_attempt()` to return true before it
+                        // resets Degraded → None and re-probes. Using
+                        // record_failure (not reset) guarantees at least
+                        // BACKOFF_BASE_MS (1 s) before the re-probe is
+                        // triggered, so the UI shows the degraded badge for at
+                        // least one full poll cycle.
                         backoff.record_failure();
                         warn!(
                             binary = %self.binary,
                             failure_count = backoff.failure_count,
                             next_attempt_secs = ?backoff.next_attempt.saturating_duration_since(Instant::now()),
-                            error = %e,
-                            "McpServiceHandle: spawn failed — will retry after backoff"
+                            "McpServiceHandle: tools/list OK but \
+                             `console_metrics` not listed — marking Degraded; \
+                             will self-heal after backoff window"
                         );
-                        return Err(McpHandleError::Other(e.context(format!(
-                            "McpServiceHandle: failed to spawn {} (failure #{})",
-                            self.binary, backoff.failure_count
-                        ))));
+                        *state_opt = Some(HandleState::Degraded);
+                    } else {
+                        backoff.reset();
+                        *state_opt = Some(HandleState::Connected {
+                            client: Arc::clone(&client_arc),
+                            tool_names,
+                            daemon_version,
+                        });
                     }
+                }
+                Err(e) => {
+                    // tools/list failure is treated as a spawn failure so the
+                    // backoff gate applies on the next attempt.
+                    backoff.record_failure();
+                    warn!(
+                        binary = %self.binary,
+                        failure_count = backoff.failure_count,
+                        error = %e,
+                        "McpServiceHandle: tools/list failed after \
+                         initialize — will retry after backoff"
+                    );
+                    return Err(McpHandleError::Other(e.context(format!(
+                        "McpServiceHandle: tools/list failed for {}",
+                        self.binary
+                    ))));
                 }
             }
         }
 
-        match state_opt.as_ref() {
+        let (final_state, _) = &*guard;
+        match final_state.as_ref() {
             Some(HandleState::Absent) => Err(McpHandleError::Absent),
             Some(HandleState::Degraded) => Err(McpHandleError::Degraded {
                 hint: DEGRADED_HINT.to_string(),

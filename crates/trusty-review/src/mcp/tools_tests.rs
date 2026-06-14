@@ -132,7 +132,7 @@ fn make_tool_state_fail_search(llm: Arc<dyn LlmProvider>) -> AppState {
 // ── Tool-descriptor tests ─────────────────────────────────────────────────────
 
 #[test]
-fn tools_list_has_three_tools() {
+fn tools_list_has_four_tools() {
     let tools = tool_descriptors();
     let arr = tools.as_array().expect("must be array");
     // Now four tools: review_pr, review_diff, review_health, console_metrics.

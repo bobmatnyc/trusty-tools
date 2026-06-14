@@ -307,6 +307,9 @@ async fn health_handler() -> impl IntoResponse {
 /// If `info.version` is `None` and `handle.daemon_version()` returns `Some`,
 /// sets `info.version` from the MCP `serverInfo.version`.
 /// A process-down (`Absent`) service is never overridden — only reachable ones.
+/// Skipping only `Absent` is safe: `Available` handles always return `None`
+/// from `degraded_hint` (no tools/list probe runs until the first poll), so
+/// they pass through unchanged.
 /// Test: `test_services_route_handle_degraded_overlay` and
 /// `test_services_route_daemon_version_overlay` below.
 async fn apply_handle_overrides(
