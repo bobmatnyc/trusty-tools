@@ -151,7 +151,7 @@ pub fn resolve_github_repos_with_discovered(
     org_discovered: &[(String, String)],
 ) -> Vec<(String, String)> {
     // Start with the per-repo resolution from client.rs.
-    let base = super::client::resolve_github_repos(github, repositories);
+    let base = super::repo_resolver::resolve_github_repos(github, repositories);
     let mut seen: std::collections::HashSet<(String, String)> = base.iter().cloned().collect();
     let mut out = base;
 

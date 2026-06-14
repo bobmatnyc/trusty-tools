@@ -16,7 +16,7 @@
 use rusqlite::{params, Connection};
 use tracing::debug;
 
-use crate::collect::github::client::GitHubReview;
+use crate::collect::github::types::GitHubReview;
 use crate::core::errors::{Result, TgaError};
 
 /// Upsert a single GitHub review into `pr_reviewers`.
@@ -99,7 +99,7 @@ pub fn lookup_github_pr_id(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collect::github::client::{GhUser, GitHubReview};
+    use crate::collect::github::types::{GhUser, GitHubReview};
     use crate::core::db::Database;
     use rusqlite::params;
 

@@ -447,6 +447,9 @@ pub struct ExternalSignal {
 pub const EXTERNAL_SOURCE_CONFIDENCE: f64 = 0.92;
 
 #[cfg(test)]
+mod resolver_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

@@ -16,9 +16,10 @@
 use futures::StreamExt as _;
 use tracing::{info, warn};
 
-use crate::collect::github::client::{build_http_client, GitHubReview};
 use crate::collect::github::org_discovery::{discover_org_repos, effective_orgs};
+use crate::collect::github::repo_resolver::build_http_client;
 use crate::collect::github::reviewer_store::upsert_github_pr_reviewer;
+use crate::collect::github::types::GitHubReview;
 use crate::collect::github::GitHubClient;
 use crate::core::config::GithubConfig;
 use crate::core::db::Database;
@@ -229,7 +230,7 @@ pub(super) async fn fetch_and_store_github_reviewers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collect::github::client::{GhUser, GitHubReview};
+    use crate::collect::github::types::{GhUser, GitHubReview};
     use crate::core::config::GithubConfig;
     use crate::core::db::Database;
     use rusqlite::params;
