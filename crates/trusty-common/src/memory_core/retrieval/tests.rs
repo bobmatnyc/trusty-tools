@@ -7,8 +7,15 @@
 //!   cargo test -p trusty-common --features memory-core retrieval::tests
 
 use super::*;
-use crate::memory_core::store::{kg::KnowledgeGraph, vector::UsearchStore};
+use crate::memory_core::analytics::RecallLog;
+use crate::memory_core::palace::{Drawer, DrawerType, Palace, PalaceId, RoomType};
+use crate::memory_core::store::{kg::KnowledgeGraph, vector::UsearchStore, vector::VectorStore};
+use std::collections::HashMap;
+use std::sync::Arc;
 use tempfile::tempdir;
+use uuid::Uuid;
+
+use super::layers::{L1_NO_SIMILARITY_PENALTY, uuid_prefix_eq};
 
 /// Pre-seed the process-wide shared embedder with `MockEmbedder` so no
 /// HuggingFace download is attempted. Safe to call multiple times (no-op
@@ -88,7 +95,6 @@ async fn l2_returns_relevant_drawer() {
 #[tokio::test]
 async fn cli_remember_and_recall() {
     init_embedder();
-    use crate::memory_core::palace::Palace;
     let dir = tempdir().unwrap();
     let palace = Palace {
         id: PalaceId::new("test"),
@@ -136,7 +142,6 @@ async fn cli_remember_and_recall() {
 #[tokio::test]
 async fn cli_forget_removes_drawer() {
     init_embedder();
-    use crate::memory_core::palace::Palace;
     let dir = tempdir().unwrap();
     let palace = Palace {
         id: PalaceId::new("forget-test"),
@@ -184,7 +189,6 @@ async fn cli_forget_removes_drawer() {
 #[tokio::test]
 async fn remember_concurrent_does_not_lose_writes() {
     init_embedder();
-    use crate::memory_core::palace::Palace;
     let dir = tempdir().unwrap();
     let palace = Palace {
         id: PalaceId::new("concurrent-test"),
@@ -256,7 +260,6 @@ async fn remember_concurrent_does_not_lose_writes() {
 #[tokio::test]
 async fn cli_list_filters_by_room() {
     init_embedder();
-    use crate::memory_core::palace::Palace;
     let dir = tempdir().unwrap();
     let palace = Palace {
         id: PalaceId::new("list-test"),
@@ -360,7 +363,6 @@ async fn recall_logs_events_when_log_present() {
 #[tokio::test]
 async fn open_attaches_recall_log_automatically() {
     init_embedder();
-    use crate::memory_core::palace::Palace;
     let dir = tempdir().unwrap();
     let palace = Palace {
         id: PalaceId::new("analytics-auto"),
@@ -423,7 +425,6 @@ async fn open_attaches_recall_log_automatically() {
 #[tokio::test]
 async fn closet_updated_after_remember() {
     init_embedder();
-    use crate::memory_core::palace::Palace;
     let dir = tempdir().unwrap();
     let palace = Palace {
         id: PalaceId::new("closet-test"),
@@ -505,7 +506,6 @@ fn expand_query_noop_for_unmatched() {
 #[tokio::test]
 async fn cold_restart_recalls_beyond_l1_snapshot() {
     init_embedder();
-    use crate::memory_core::palace::Palace;
     let dir = tempdir().unwrap();
     let palace = Palace {
         id: PalaceId::new("cold-restart"),
@@ -591,7 +591,6 @@ async fn shared_embedder_is_singleton() {
 #[tokio::test]
 async fn retrieve_l2_tag_boost_raises_rank() {
     init_embedder();
-    use crate::memory_core::palace::Palace;
     let dir = tempdir().unwrap();
     let palace = Palace {
         id: PalaceId::new("boost-test"),
@@ -655,7 +654,6 @@ async fn retrieve_l2_tag_boost_raises_rank() {
 #[tokio::test]
 async fn recall_across_palaces_merges_results() {
     init_embedder();
-    use crate::memory_core::palace::Palace;
     let dir = tempdir().unwrap();
 
     let palace_a = Palace {
@@ -902,7 +900,6 @@ async fn purge_expired_drops_only_past_ttl() {
 #[tokio::test]
 async fn recall_ranks_by_similarity_over_importance() {
     init_embedder();
-    use crate::memory_core::palace::Palace;
     let dir = tempdir().unwrap();
     let palace = Palace {
         id: PalaceId::new("similarity-ranking-test"),
@@ -1085,7 +1082,6 @@ fn rescore_l1_by_similarity_patches_scores() {
 #[tokio::test]
 async fn recall_top_k_caps_result_count() {
     init_embedder();
-    use crate::memory_core::palace::Palace;
     let dir = tempdir().unwrap();
     let palace = Palace {
         id: PalaceId::new("topk-cap-test"),

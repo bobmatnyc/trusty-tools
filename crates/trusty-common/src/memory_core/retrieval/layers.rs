@@ -36,7 +36,7 @@ use uuid::Uuid;
 /// similarity score (0.15) is outranked by a mediocre-similarity L2 hit
 /// (e.g. importance=0.5 * similarity=0.4 = 0.20).
 /// Test: `recall_ranks_by_similarity_over_importance` in the tests below.
-const L1_NO_SIMILARITY_PENALTY: f32 = 0.15;
+pub(super) const L1_NO_SIMILARITY_PENALTY: f32 = 0.15;
 
 /// Hash a `RoomType` to a deterministic `Uuid` so the room signal survives
 /// through the in-memory drawer table without a real `Room` row.

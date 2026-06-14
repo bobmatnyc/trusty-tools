@@ -640,7 +640,7 @@ impl PalaceHandle {
         limit: usize,
     ) -> Vec<Drawer> {
         let drawers = self.drawers.read();
-        let target_room_id = room.as_ref().map(|r| super::layers::room_to_uuid(r));
+        let target_room_id = room.as_ref().map(super::layers::room_to_uuid);
         let mut filtered: Vec<Drawer> = drawers
             .iter()
             .filter(|d| match &target_room_id {

@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     // `super` is the file-level of tests.rs (kg_redb::tests);
     // `super::super` is kg_redb itself, which re-exports KgStoreRedb,
