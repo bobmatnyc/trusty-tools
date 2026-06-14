@@ -21,12 +21,19 @@
 //! orchestrator is exercised manually via
 //! `cargo run -p trusty-memory -- doctor`.
 
+mod audit;
+mod checks;
+
+use audit::audit_palaces;
+pub use audit::{PalaceAuditEntry, PalaceAuditStatus};
+#[cfg(target_os = "macos")]
+use checks::check_launchd_plist;
+use checks::{check_daemon_health, check_fastembed_cache, check_stale_palace_locks};
+
 use anyhow::Result;
 use colored::Colorize;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-use crate::project_root::{project_slug_at, read_project_pin, PERSONAL_PALACE, PIN_FILE_REL};
+use crate::project_root::PERSONAL_PALACE;
 
 /// Outcome of a single doctor check.
 ///
@@ -37,7 +44,7 @@ use crate::project_root::{project_slug_at, read_project_pin, PERSONAL_PALACE, PI
 /// failures (flip exit code to 1).
 /// Test: not directly — exercised via the per-check unit tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum CheckStatus {
+pub(super) enum CheckStatus {
     Pass,
     Warn,
     Fail,
@@ -51,28 +58,28 @@ enum CheckStatus {
 /// (file path, error message, etc.).
 /// Test: covered transitively by the helper tests.
 #[derive(Debug, Clone)]
-struct CheckResult {
-    status: CheckStatus,
+pub(super) struct CheckResult {
+    pub(super) status: CheckStatus,
     label: String,
     detail: Option<String>,
 }
 
 impl CheckResult {
-    fn pass(label: impl Into<String>, detail: impl Into<String>) -> Self {
+    pub(super) fn pass(label: impl Into<String>, detail: impl Into<String>) -> Self {
         Self {
             status: CheckStatus::Pass,
             label: label.into(),
             detail: Some(detail.into()),
         }
     }
-    fn warn(label: impl Into<String>, detail: impl Into<String>) -> Self {
+    pub(super) fn warn(label: impl Into<String>, detail: impl Into<String>) -> Self {
         Self {
             status: CheckStatus::Warn,
             label: label.into(),
             detail: Some(detail.into()),
         }
     }
-    fn fail(label: impl Into<String>, detail: impl Into<String>) -> Self {
+    pub(super) fn fail(label: impl Into<String>, detail: impl Into<String>) -> Self {
         Self {
             status: CheckStatus::Fail,
             label: label.into(),
@@ -80,7 +87,7 @@ impl CheckResult {
         }
     }
 
-    fn print(&self) {
+    pub(super) fn print(&self) {
         let glyph = match self.status {
             CheckStatus::Pass => "✅".to_string(),
             CheckStatus::Warn => "⚠️ ".to_string(),
@@ -96,221 +103,6 @@ impl CheckResult {
             None => println!("{glyph} {label}"),
         }
     }
-}
-
-/// Outcome of a single palace audit entry for `doctor --fix-palaces`.
-///
-/// Why: separating the palace audit result from the standard `CheckResult`
-/// makes the presentation logic cleaner — palace audit output is tabular
-/// (one row per palace) rather than the pass/warn/fail traffic-light model
-/// used by the daemon health checks.
-/// What: encodes whether a palace is `Ok` (name matches a detectable project
-/// slug, is the `personal` sentinel, or is claimed by a pin file in any
-/// scanned project directory), `Orphaned` (name does not correspond to any
-/// project directory we can find on disk), or `Empty` (the palace directory
-/// exists but has no `palace.json`).
-/// Test: `find_orphaned_palaces_lists_non_matching_and_empty`,
-///       `audit_palaces_ok_when_pin_file_claims_it`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PalaceAuditStatus {
-    /// Palace name matches the current project slug, is `personal`, or is
-    /// claimed by a `.trusty-tools/trusty-memory.yaml` pin file found in
-    /// any of the standard project search directories.
-    Ok,
-    /// Palace name does not match any project directory or pin file found by
-    /// the bounded scan. Advisory: existing data is intact; no mutation made.
-    Orphaned,
-    /// The palace directory exists under the data root but contains no
-    /// `palace.json` (was never fully initialised, or was manually deleted).
-    Empty,
-}
-
-/// One row in the `doctor --fix-palaces` audit table.
-///
-/// Why: bundles the palace id, its on-disk data directory, and the audit
-/// status into a single struct so the presenter and the audit logic can be
-/// separated cleanly.
-/// What: carries `id` (the palace name used as the on-disk dir name),
-/// `data_dir` (absolute path), and `status`.
-/// Test: `find_orphaned_palaces_lists_non_matching_and_empty`.
-#[derive(Debug, Clone)]
-pub struct PalaceAuditEntry {
-    pub id: String,
-    pub data_dir: PathBuf,
-    pub status: PalaceAuditStatus,
-}
-
-/// Audit every palace subdirectory under `registry_dir` and classify each.
-///
-/// Why: the classification logic is factored out of the presenter so it can
-/// be unit-tested without touching the terminal.
-/// What: walks `registry_dir` one level deep; for each subdirectory, checks
-/// for a `palace.json` (marks `Empty` when absent), then applies the following
-/// resolution order:
-///
-///   1. `personal` is always `Ok`.
-///   2. Any ancestor of `registry_dir` is a project root whose slug matches
-///      the palace id → `Ok` (daemon running inside a project tree).
-///   3. A standard project search directory (`~/Projects/<id>`,
-///      `~/Developer/<id>`, etc.) exists on disk with a matching basename →
-///      `Ok` (heuristic, covers common single-project-dir layout).
-///   4. Change 3: a `.trusty-tools/trusty-memory.yaml` pin file is found in
-///      any immediate subdirectory of the standard search dirs whose `palace`
-///      field equals this palace id → `Ok`. This is the key improvement: a
-///      repo that has been moved or renamed but still has its pin file
-///      committed will NOT be flagged as orphaned even if its directory name
-///      no longer matches the palace id.
-///   5. None of the above → `Orphaned` (advisory, no mutation).
-///
-/// The scan is bounded: we only look one level deep inside the standard
-/// search dirs (no recursive filesystem walk).
-/// Test: `find_orphaned_palaces_lists_non_matching_and_empty`,
-///       `audit_palaces_ok_when_pin_file_claims_it`.
-pub fn audit_palaces(registry_dir: &Path) -> Vec<PalaceAuditEntry> {
-    let Ok(entries) = std::fs::read_dir(registry_dir) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let id = match path.file_name().and_then(|n| n.to_str()) {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-        // `Empty` takes priority — no palace.json means it was never
-        // initialised or was partially deleted.
-        if !path.join("palace.json").exists() {
-            out.push(PalaceAuditEntry {
-                id,
-                data_dir: path,
-                status: PalaceAuditStatus::Empty,
-            });
-            continue;
-        }
-        // `personal` is always Ok.
-        if id == PERSONAL_PALACE {
-            out.push(PalaceAuditEntry {
-                id,
-                data_dir: path,
-                status: PalaceAuditStatus::Ok,
-            });
-            continue;
-        }
-        // Check whether any ancestor of `registry_dir` is a project root
-        // whose slug matches the palace id. This catches the case where the
-        // user runs the daemon from inside a project tree.
-        let matches_ancestor = project_slug_at(registry_dir)
-            .map(|slug| slug == id)
-            .unwrap_or(false);
-        if matches_ancestor {
-            out.push(PalaceAuditEntry {
-                id,
-                data_dir: path,
-                status: PalaceAuditStatus::Ok,
-            });
-            continue;
-        }
-        // Step 3: heuristic — look for a directory named after the slug in the
-        // user's common project locations. We check `$HOME/Projects/<id>`,
-        // `$HOME/Developer/<id>`, `$HOME/Code/<id>`, and `$HOME/<id>` as
-        // plausible locations. This keeps the check lightweight (no recursive
-        // scan) while catching the most common single-project-dir layout.
-        let home = dirs::home_dir();
-        let found_on_disk = home
-            .as_ref()
-            .map(|home| {
-                let candidates = [
-                    home.join("Projects").join(&id),
-                    home.join("Developer").join(&id),
-                    home.join("Code").join(&id),
-                    home.join(&id),
-                ];
-                candidates.iter().any(|c| c.is_dir())
-            })
-            .unwrap_or(false);
-        if found_on_disk {
-            out.push(PalaceAuditEntry {
-                id,
-                data_dir: path,
-                status: PalaceAuditStatus::Ok,
-            });
-            continue;
-        }
-
-        // Step 4 (Change 3): scan one level inside the standard search dirs
-        // for a `.trusty-tools/trusty-memory.yaml` pin file that claims this
-        // palace id. This lets renamed/moved repos avoid the Orphaned
-        // classification as long as they committed their pin file.
-        let claimed_by_pin = home
-            .as_ref()
-            .map(|home| {
-                scan_project_dirs_for_pin(
-                    &[
-                        home.join("Projects"),
-                        home.join("Developer"),
-                        home.join("Code"),
-                        home.clone(),
-                    ],
-                    &id,
-                )
-            })
-            .unwrap_or(false);
-        let status = if claimed_by_pin {
-            PalaceAuditStatus::Ok
-        } else {
-            PalaceAuditStatus::Orphaned
-        };
-        out.push(PalaceAuditEntry {
-            id,
-            data_dir: path,
-            status,
-        });
-    }
-    out.sort_by(|a, b| a.id.cmp(&b.id));
-    out
-}
-
-/// Scan one level inside each of `search_dirs` for a committed pin file
-/// (`PIN_FILE_REL`) whose `palace` field equals `palace_id`.
-///
-/// Why: Change 3 — a palace created from a project that was later moved or
-/// renamed should not be flagged `Orphaned` as long as the project's pin file
-/// is still present somewhere on the standard project search path. A bounded
-/// one-level scan keeps the check cheap (no recursive walk) while catching the
-/// common case where projects live directly under `~/Projects/` or `~/Code/`.
-/// What: for each dir in `search_dirs` that exists, `read_dir` one level and
-/// for each entry attempt to read `<entry>/PIN_FILE_REL`; if the parse
-/// succeeds and `pin.palace == palace_id`, returns `true` immediately.
-/// Returns `false` if no match is found. All I/O errors are silently ignored
-/// (advisory check, read-only).
-/// Test: `audit_palaces_ok_when_pin_file_claims_it`.
-fn scan_project_dirs_for_pin(search_dirs: &[PathBuf], palace_id: &str) -> bool {
-    for search_dir in search_dirs {
-        let Ok(entries) = std::fs::read_dir(search_dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let candidate = entry.path();
-            if !candidate.is_dir() {
-                continue;
-            }
-            // Read the pin file if present.
-            if let Ok(Some(pin)) = read_project_pin(&candidate) {
-                if pin.palace == palace_id {
-                    tracing::debug!(
-                        palace_id = %palace_id,
-                        pin_path = %candidate.join(PIN_FILE_REL).display(),
-                        "audit: palace claimed by pin file — classifying as Ok"
-                    );
-                    return true;
-                }
-            }
-        }
-    }
-    false
 }
 
 /// Entry point for `trusty-memory doctor --fix-palaces [--fix]`.
@@ -488,314 +280,12 @@ pub async fn handle_doctor() -> Result<()> {
     }
 }
 
-/// Verify the fastembed model cache exists and is readable.
-///
-/// Why: GH #58/#62 — when the daemon can't reach a writable cache path it
-/// fails with EROFS on first embed and never goes ready. Checking for the
-/// resolved cache dir up-front catches both "env var unset" (resolver falls
-/// back to `$HOME/.cache/fastembed` which might not exist) and "directory
-/// pinned but missing".
-/// What: calls `trusty_common::embedder::resolve_fastembed_cache_dir()`,
-/// then checks the path exists and is a directory we can read. Returns
-/// `Pass` when the dir contains at least one model file, `Warn` when it
-/// exists but is empty (pre-warm never ran), `Fail` when it does not exist.
-/// Test: `fastembed_cache_check_reports_missing_dir`.
-fn check_fastembed_cache() -> CheckResult {
-    let cache = trusty_common::embedder::resolve_fastembed_cache_dir();
-    let label = "fastembed cache".to_string();
-    if !cache.exists() {
-        return CheckResult::fail(
-            label,
-            format!(
-                "missing: {} — run `trusty-memory setup` to pre-warm",
-                cache.display()
-            ),
-        );
-    }
-    if !cache.is_dir() {
-        return CheckResult::fail(label, format!("not a directory: {}", cache.display()));
-    }
-    match fastembed_cache_has_models(&cache) {
-        Ok(true) => CheckResult::pass(label, format!("ready at {}", cache.display())),
-        Ok(false) => CheckResult::warn(
-            label,
-            format!(
-                "{} exists but is empty — daemon will download on first request",
-                cache.display()
-            ),
-        ),
-        Err(e) => CheckResult::fail(label, format!("cannot read {}: {e}", cache.display())),
-    }
-}
-
-/// Check whether the fastembed cache directory holds at least one entry.
-///
-/// Why: an empty `~/.cache/fastembed` is operationally equivalent to a
-/// missing one — the daemon will still have to download on first call.
-/// What: returns `Ok(true)` if `read_dir` yields any entry, `Ok(false)` if
-/// it's empty, `Err` if `read_dir` itself fails (permissions, etc.).
-/// Test: `fastembed_cache_has_models_detects_entries`.
-fn fastembed_cache_has_models(path: &Path) -> std::io::Result<bool> {
-    let mut iter = std::fs::read_dir(path)?;
-    Ok(iter.next().is_some())
-}
-
-/// Verify the launchd plist exists and contains `FASTEMBED_CACHE_PATH`.
-///
-/// Why: GH #62 — the whole point of the plist update is that
-/// `FASTEMBED_CACHE_PATH` (and/or `FASTEMBED_CACHE_DIR`) is wired into the
-/// daemon's environment. If an older plist is still installed without the
-/// env var, the daemon will silently fail with EROFS. Detecting this is
-/// the single most useful thing `doctor` can do.
-/// What: resolves `~/Library/LaunchAgents/com.trusty.memory.plist`, reads
-/// it as text, and looks for the `FASTEMBED_CACHE_PATH` key. `Pass` when
-/// present, `Fail` when the file exists but the key is missing, `Fail`
-/// when the file is missing entirely.
-/// Test: `plist_check_detects_missing_env_var`.
-#[cfg(target_os = "macos")]
-fn check_launchd_plist() -> CheckResult {
-    let label = "launchd plist".to_string();
-    let Some(home) = dirs::home_dir() else {
-        return CheckResult::fail(label, "could not resolve $HOME".to_string());
-    };
-    let plist = home
-        .join("Library")
-        .join("LaunchAgents")
-        .join(format!("{}.plist", crate::commands::service::LAUNCHD_LABEL));
-    if !plist.exists() {
-        return CheckResult::fail(
-            label,
-            format!(
-                "missing: {} — run `trusty-memory service install`",
-                plist.display()
-            ),
-        );
-    }
-    match plist_contains_fastembed_cache_path(&plist) {
-        Ok(true) => CheckResult::pass(label, format!("{} ok", plist.display())),
-        Ok(false) => CheckResult::fail(
-            label,
-            format!(
-                "{} is missing FASTEMBED_CACHE_PATH — reinstall via `trusty-memory service install`",
-                plist.display()
-            ),
-        ),
-        Err(e) => CheckResult::fail(label, format!("cannot read {}: {e}", plist.display())),
-    }
-}
-
-/// Check whether a plist file contains the `FASTEMBED_CACHE_PATH` key.
-///
-/// Why: keeping the parse trivial (substring search) avoids pulling in an
-/// XML/plist crate just for one diagnostic. The key string is unique enough
-/// inside a launchd plist that a false positive is implausible.
-/// What: reads the file as UTF-8 text and returns true iff the literal
-/// `FASTEMBED_CACHE_PATH` substring appears.
-/// Test: `plist_check_detects_missing_env_var`.
-#[cfg(target_os = "macos")]
-fn plist_contains_fastembed_cache_path(path: &Path) -> std::io::Result<bool> {
-    let contents = std::fs::read_to_string(path)?;
-    Ok(contents.contains("FASTEMBED_CACHE_PATH"))
-}
-
-/// Verify the HTTP daemon responds to `GET /health`.
-///
-/// Why (issue #475): the most direct test of "is the daemon running and
-/// accepting requests". The `http_addr` discovery file can be stale after an
-/// unclean shutdown (SIGKILL, power loss) — the daemon writes the file on
-/// bind but the cleanup in `run_http_on` only runs on clean exit. A stale
-/// file with an ephemeral or wrong port must not produce a false "daemon not
-/// running" result when the daemon IS live on the default port.
-/// What: reads the daemon address from `trusty_common::read_daemon_addr`;
-/// if the recorded address is absent or responds with anything other than
-/// HTTP 2xx, falls back to probing the well-known default port range
-/// (`DEFAULT_HTTP_PORT` 7070..=7079) before reporting failure. `Pass` on
-/// any 2xx from either probe, `Fail` on all connection errors or non-2xx.
-/// Test: `check_daemon_health_falls_back_to_default_port_when_addr_stale` —
-/// verifies that a stale addr file does not suppress a healthy daemon on the
-/// default port.
-async fn check_daemon_health() -> CheckResult {
-    let label = "HTTP daemon".to_string();
-
-    // Build a reusable reqwest client for the probes below.
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => return CheckResult::fail(label, format!("could not build HTTP client: {e}")),
-    };
-
-    // Primary probe: use the recorded addr file when present.
-    let recorded_url = match trusty_common::read_daemon_addr("trusty-memory") {
-        Ok(Some(addr)) => {
-            // `read_daemon_addr` returns a bare `host:port`; prepend scheme.
-            let base = if addr.starts_with("http://") || addr.starts_with("https://") {
-                addr.clone()
-            } else {
-                format!("http://{addr}")
-            };
-            Some(base)
-        }
-        Ok(None) => None,
-        Err(e) => {
-            // Filesystem error reading the addr file — skip primary probe.
-            tracing::debug!("doctor: could not read daemon addr file: {e:#}");
-            None
-        }
-    };
-
-    if let Some(ref base) = recorded_url {
-        let url = format!("{base}/health");
-        match client.get(&url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                return CheckResult::pass(label, format!("{} → {}", url, resp.status()));
-            }
-            Ok(resp) => {
-                // Non-2xx from the recorded addr: continue to fallback.
-                tracing::debug!(
-                    "doctor: recorded addr {url} returned {}; trying fallback ports",
-                    resp.status()
-                );
-            }
-            Err(_) => {
-                // Connection refused or timeout: recorded addr is stale.
-                // Continue to default-port fallback below.
-                tracing::debug!(
-                    "doctor: recorded addr {url} unreachable (stale?); trying fallback ports"
-                );
-            }
-        }
-    }
-
-    // Fallback probe (issue #475): when the addr file is absent or its
-    // recorded address does not respond, walk the well-known port range
-    // 7070..=7079 so a daemon on the default port is not missed. This is
-    // the same range `bind_dynamic_port` prefers, so the fallback succeeds
-    // in the common case where the daemon self-assigned port 7070 but the
-    // addr file was left stale from a previous ephemeral-port run.
-    for port in crate::DEFAULT_HTTP_PORT..=crate::DEFAULT_HTTP_PORT.saturating_add(9) {
-        let url = format!("http://127.0.0.1:{port}/health");
-        match client.get(&url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                let note = if recorded_url.is_some() {
-                    format!(
-                        "{url} → {} (addr file was stale — daemon is live on fallback port {port})",
-                        resp.status()
-                    )
-                } else {
-                    format!(
-                        "{url} → {} (no addr file; found daemon on default port {port})",
-                        resp.status()
-                    )
-                };
-                return CheckResult::pass(label, note);
-            }
-            _ => continue,
-        }
-    }
-
-    // All probes failed.
-    if recorded_url.is_some() {
-        CheckResult::fail(
-            label,
-            "recorded address unreachable and no daemon found on default ports 7070-7079 \
-             — start with `trusty-memory service start`"
-                .to_string(),
-        )
-    } else {
-        CheckResult::fail(
-            label,
-            "no daemon address recorded and no daemon found on default ports 7070-7079 \
-             — start with `trusty-memory service start`"
-                .to_string(),
-        )
-    }
-}
-
-/// Scan the data directory for stray `*.lock` files left over from a
-/// crashed daemon.
-///
-/// Why: redb leaves a sidecar lock file when a previous owner exits
-/// uncleanly; opening the palace from a fresh daemon then fails until the
-/// stale lock is removed. Surfacing this in `doctor` saves users from a
-/// confusing "palace won't load" symptom that has nothing to do with the
-/// palace itself.
-/// What: walks the trusty-memory data dir (one level deep into each palace
-/// directory) and lists any `*.lock` file. `Pass` when none found, `Warn`
-/// when at least one is present (the daemon may be running and using it,
-/// so we can't safely call this a `Fail`).
-/// Test: `stale_lock_check_warns_when_lock_present`.
-fn check_stale_palace_locks() -> CheckResult {
-    let label = "palace locks".to_string();
-    let data_dir = match trusty_common::resolve_data_dir("trusty-memory") {
-        Ok(d) => d,
-        Err(e) => return CheckResult::fail(label, format!("could not resolve data dir: {e}")),
-    };
-    let root = crate::resolve_palace_registry_dir(data_dir);
-    let locks = find_lock_files(&root);
-    if locks.is_empty() {
-        CheckResult::pass(label, format!("{} clean", root.display()))
-    } else {
-        let preview = locks
-            .iter()
-            .take(3)
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let suffix = if locks.len() > 3 {
-            format!(" (+{} more)", locks.len() - 3)
-        } else {
-            String::new()
-        };
-        CheckResult::warn(
-            label,
-            format!(
-                "{} lock file(s) found: {preview}{suffix} — if the daemon is stopped, these can be removed",
-                locks.len()
-            ),
-        )
-    }
-}
-
-/// Collect `*.lock` files one level deep beneath `root`.
-///
-/// Why: keeps the scan cheap (no recursive walk) while still catching the
-/// common case of `<palace>/kg.redb.lock` sidecars from redb crashes.
-/// What: returns every `*.lock` path in `root` itself and in each
-/// immediate subdirectory of `root`. Missing or unreadable directories are
-/// silently skipped (the surrounding check handles fatal data-dir errors).
-/// Test: `find_lock_files_returns_paths`.
-fn find_lock_files(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return out;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if is_lock_file(&path) {
-            out.push(path.clone());
-        }
-        if path.is_dir() {
-            if let Ok(sub) = std::fs::read_dir(&path) {
-                for child in sub.flatten() {
-                    let cpath = child.path();
-                    if is_lock_file(&cpath) {
-                        out.push(cpath);
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-fn is_lock_file(path: &Path) -> bool {
-    path.extension().and_then(|s| s.to_str()) == Some("lock")
-}
-
 #[cfg(test)]
 mod tests {
+    use super::audit::scan_project_dirs_for_pin;
+    #[cfg(target_os = "macos")]
+    use super::checks::plist_contains_fastembed_cache_path;
+    use super::checks::{fastembed_cache_has_models, find_lock_files};
     use super::*;
 
     /// Why: when the cache directory genuinely doesn't exist, doctor must

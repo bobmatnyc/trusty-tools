@@ -1,232 +1,27 @@
-//! Enriched-prompt logger for the UserPromptSubmit / SessionStart hooks
-//! (issue #105).
+//! Rolling JSONL writer for the enriched-prompt logger.
 //!
-//! Why: `trusty-memory prompt-context` and `trusty-memory inbox-check` both
-//! inject context into Claude Code sessions. Without a record of what was
-//! injected we can't evaluate the effectiveness of either pipeline (relevance,
-//! length, signal-vs-noise) or iterate on the recall / message-surfacing
-//! logic. This module captures every invocation as a single JSONL entry under
-//! the daemon data root so the logs are grep- and `jq`-friendly.
-//!
-//! What: a small, self-contained rolling writer. `PromptLogger::from_env`
-//! reads the [`PromptLogConfig`] env vars, computes the active log path, and
-//! returns a logger that swallows every I/O failure (best-effort by contract
-//! — the hook caller must never fail because of a log write). The on-disk
-//! layout is `<data_root>/logs/enriched-prompts.<YYYY-MM-DD>.jsonl` with a
-//! `.<n>.jsonl` numeric suffix appended on size-cap rotation
-//! (`enriched-prompts.2026-05-25.1.jsonl`, `.2.jsonl`, …).
-//!
-//! Rotation rules:
-//!   - **Daily**: the date prefix in the filename changes when the local clock
-//!     rolls over to a new UTC day.
-//!   - **Size cap**: before each write, the active file's length is checked
-//!     against `max_bytes` (default 50 MiB). When the cap would be exceeded
-//!     the writer advances to the next numeric suffix.
-//!
-//! Retention: each successful first-write-of-the-day prunes files outside the
-//! configured window (`retention_days`, default 30). The check is cheap (one
-//! `read_dir` scan per first write per day).
-//!
-//! Privacy controls:
-//!   - `TRUSTY_MEMORY_PROMPT_LOG=off` (or `0`, `false`, `no`, case-insensitive)
-//!     disables the pipeline entirely — no files created, no I/O.
-//!   - `TRUSTY_MEMORY_PROMPT_LOG_HASH_PROMPTS=1` (or `true`, `yes`, `on`)
-//!     replaces the raw `trigger_prompt` with `sha256:<hex>` so the file holds
-//!     no plaintext user input.
-//!
-//! Failure isolation: every public method swallows I/O / serialisation errors
-//! and emits a `tracing::warn!` to stderr. The hook caller must never observe
-//! a failure path from this module.
-//!
-//! Test: see [`tests`] for round-trip, rotation, retention, disabled, hash and
-//! integration-style assertions.
+//! Why: Isolates the file-rotation, retention-prune, and hash-privacy logic
+//! from the type definitions so each file stays under the 500-SLOC cap.
+//! What: `PromptLogger` — a best-effort rolling writer that appends one
+//! `PromptLogEntry` per `log()` call. `parse_log_filename_date` and
+//! `hash_prompt` are private helpers used only here.
+//! Test: `single_event_roundtrip`, `rotation_at_size_cap`,
+//! `retention_prunes_old_files`, `disabled_mode_writes_nothing`,
+//! `hash_mode_hashes_trigger_prompt`.
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Env var: master switch (`off`/`0`/`false`/`no` → disabled).
-pub const ENV_ENABLED: &str = "TRUSTY_MEMORY_PROMPT_LOG";
-/// Env var: directory override (defaults to `<data_root>/logs`).
-pub const ENV_DIR: &str = "TRUSTY_MEMORY_PROMPT_LOG_DIR";
-/// Env var: per-file size cap in bytes (default `DEFAULT_MAX_BYTES`).
-pub const ENV_MAX_BYTES: &str = "TRUSTY_MEMORY_PROMPT_LOG_MAX_BYTES";
-/// Env var: retention window in days (default `DEFAULT_RETENTION_DAYS`).
-pub const ENV_RETENTION_DAYS: &str = "TRUSTY_MEMORY_PROMPT_LOG_RETENTION_DAYS";
-/// Env var: SHA-256-hash `trigger_prompt` when truthy.
-pub const ENV_HASH_PROMPTS: &str = "TRUSTY_MEMORY_PROMPT_LOG_HASH_PROMPTS";
+use super::config::{PromptLogConfig, PromptLogEntry};
 
-/// Default per-file size cap (50 MiB).
-pub const DEFAULT_MAX_BYTES: u64 = 50 * 1024 * 1024;
-/// Default retention window in days.
-pub const DEFAULT_RETENTION_DAYS: u32 = 30;
 /// Filename stem prefix for log files.
 const FILE_PREFIX: &str = "enriched-prompts";
 /// Filename extension for log files.
 const FILE_EXT: &str = "jsonl";
-
-/// Configuration for [`PromptLogger`].
-///
-/// Why: keeps env-parsing out of the hot path and allows tests to construct
-/// loggers directly without mutating process-wide env state. The struct is
-/// `Clone` so a logger can be cheaply re-derived per invocation.
-/// What: holds the resolved log directory, size cap, retention window, and
-/// privacy toggles. `enabled = false` short-circuits every write.
-/// Test: covered by `config_from_env_disabled` and the integration tests.
-#[derive(Clone, Debug)]
-pub struct PromptLogConfig {
-    /// Master enable switch. `false` → every method is a no-op.
-    pub enabled: bool,
-    /// Directory holding the rolling log files (created lazily on first write).
-    pub dir: PathBuf,
-    /// Per-file size cap; the writer rolls to a new numeric suffix when the
-    /// active file would exceed this size.
-    pub max_bytes: u64,
-    /// Retention window in days. Files older than this are pruned on the
-    /// first write of each day.
-    pub retention_days: u32,
-    /// Replace `trigger_prompt` field bodies with `sha256:<hex>` when true.
-    pub hash_prompts: bool,
-}
-
-impl PromptLogConfig {
-    /// Build a config rooted at the supplied `data_root` and overlayed with
-    /// env vars.
-    ///
-    /// Why: `prompt-context` and `inbox-check` both resolve their data root
-    /// via [`trusty_common::resolve_data_dir`] but only that caller knows the
-    /// app name. Accepting an explicit root lets the logger reuse the same
-    /// resolution without parsing dirs::data_dir twice.
-    /// What: defaults `dir = data_root/logs`; overrides via `TRUSTY_MEMORY_*`
-    /// envs. `enabled` defaults to `true`; flips to `false` when
-    /// `TRUSTY_MEMORY_PROMPT_LOG` is set to an off-value.
-    /// Test: `config_from_env_defaults`, `config_from_env_disabled`,
-    /// `config_from_env_overrides_dir`.
-    pub fn from_env_with_root(data_root: &Path) -> Self {
-        let enabled = match std::env::var(ENV_ENABLED) {
-            Ok(v) => !is_off(&v),
-            Err(_) => true,
-        };
-        let dir = match std::env::var(ENV_DIR) {
-            Ok(d) if !d.trim().is_empty() => PathBuf::from(d),
-            _ => data_root.join("logs"),
-        };
-        let max_bytes = std::env::var(ENV_MAX_BYTES)
-            .ok()
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(DEFAULT_MAX_BYTES);
-        let retention_days = std::env::var(ENV_RETENTION_DAYS)
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(DEFAULT_RETENTION_DAYS);
-        let hash_prompts = std::env::var(ENV_HASH_PROMPTS)
-            .map(|v| is_on(&v))
-            .unwrap_or(false);
-        Self {
-            enabled,
-            dir,
-            max_bytes,
-            retention_days,
-            hash_prompts,
-        }
-    }
-}
-
-/// One enriched-prompt log entry — written as a single JSONL line.
-///
-/// Why: the consumer is a human running `jq` over a day's worth of injections
-/// to grade signal-vs-noise. Stable field names, RFC-3339 timestamps, and
-/// numeric byte/duration counts keep the analysis script trivial.
-/// What: tagged by `injection_kind`. `palace_facts_count` is filled for
-/// `prompt-context-facts`; `unread_messages_count` for `inbox-check-messages`.
-/// Both default to `None` so the JSON shape stays compact for entries that
-/// only have one of the two.
-/// Test: `single_event_roundtrip` writes one entry and parses it back.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PromptLogEntry {
-    /// RFC-3339 UTC timestamp set at the moment the entry is built.
-    pub timestamp: DateTime<Utc>,
-    /// `"UserPromptSubmit"` or `"SessionStart"`.
-    pub hook_type: String,
-    /// `"prompt-context-facts"` or `"inbox-check-messages"`.
-    pub injection_kind: String,
-    /// Palace id the injection was scoped to.
-    pub palace: String,
-    /// Hook stdin verbatim; replaced with `"sha256:<hex>"` when
-    /// `hash_prompts = true` in the active config.
-    pub trigger_prompt: String,
-    /// Hook stdout (the actual injection sent to Claude Code) verbatim.
-    pub injection: String,
-    /// Byte length of `injection`.
-    pub injection_length: usize,
-    /// Number of facts in the prompt-context injection, when applicable.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub palace_facts_count: Option<usize>,
-    /// Number of unread messages in the inbox-check injection, when applicable.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub unread_messages_count: Option<usize>,
-    /// Wall-clock duration of the invocation, in milliseconds.
-    pub duration_ms: u64,
-}
-
-impl PromptLogEntry {
-    /// Construct a new entry stamped with the current UTC time.
-    ///
-    /// Why: the hook caller has the raw fields handy but should not carry
-    /// chrono in its imports. This helper builds an entry with `timestamp`
-    /// auto-populated and zero-initialised optional counts.
-    /// What: sets `timestamp = Utc::now()` and copies the supplied fields.
-    /// Test: `single_event_roundtrip`.
-    pub fn new(
-        hook_type: impl Into<String>,
-        injection_kind: impl Into<String>,
-        palace: impl Into<String>,
-        trigger_prompt: impl Into<String>,
-        injection: impl Into<String>,
-    ) -> Self {
-        let injection = injection.into();
-        let injection_length = injection.len();
-        Self {
-            timestamp: Utc::now(),
-            hook_type: hook_type.into(),
-            injection_kind: injection_kind.into(),
-            palace: palace.into(),
-            trigger_prompt: trigger_prompt.into(),
-            injection,
-            injection_length,
-            palace_facts_count: None,
-            unread_messages_count: None,
-            duration_ms: 0,
-        }
-    }
-
-    /// Builder: set the duration this hook invocation took.
-    #[must_use]
-    pub fn with_duration_ms(mut self, ms: u64) -> Self {
-        self.duration_ms = ms;
-        self
-    }
-
-    /// Builder: attach the palace-facts count (prompt-context only).
-    #[must_use]
-    pub fn with_palace_facts_count(mut self, n: usize) -> Self {
-        self.palace_facts_count = Some(n);
-        self
-    }
-
-    /// Builder: attach the unread-messages count (inbox-check only).
-    #[must_use]
-    pub fn with_unread_messages_count(mut self, n: usize) -> Self {
-        self.unread_messages_count = Some(n);
-        self
-    }
-}
 
 /// Best-effort rolling JSONL writer.
 ///
@@ -468,33 +263,21 @@ fn parse_log_filename_date(name: &str) -> Option<NaiveDate> {
 /// What: returns `sha256:<lowercase hex>` so consumers can spot the
 /// transformed field at a glance.
 /// Test: `hash_mode_hashes_trigger_prompt`.
-fn hash_prompt(text: &str) -> String {
+pub(super) fn hash_prompt(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
     let digest = hasher.finalize();
     format!("sha256:{digest:x}")
 }
 
-/// True when the value looks like an explicit off switch.
-fn is_off(v: &str) -> bool {
-    matches!(
-        v.trim().to_ascii_lowercase().as_str(),
-        "0" | "off" | "false" | "no" | "disabled"
-    )
-}
-
-/// True when the value looks like an explicit on switch.
-fn is_on(v: &str) -> bool {
-    matches!(
-        v.trim().to_ascii_lowercase().as_str(),
-        "1" | "on" | "true" | "yes" | "enabled"
-    )
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::config::{
+        is_off, is_on, DEFAULT_MAX_BYTES, DEFAULT_RETENTION_DAYS, ENV_DIR, ENV_ENABLED,
+        ENV_HASH_PROMPTS, ENV_MAX_BYTES, ENV_RETENTION_DAYS,
+    };
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     /// Helper: build a logger pointed at a tempdir's `logs/` subdir.
     fn logger_in(
@@ -620,6 +403,7 @@ mod tests {
     /// Test: itself.
     #[test]
     fn retention_prunes_old_files() {
+        use chrono::Datelike;
         let tmp = tempfile::tempdir().expect("tempdir");
         let logs_dir = tmp.path().join("logs");
         std::fs::create_dir_all(&logs_dir).unwrap();
