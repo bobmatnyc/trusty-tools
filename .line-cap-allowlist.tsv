@@ -50,16 +50,7 @@ crates/trusty-git-analytics/src/report/aggregator.rs	1095
 crates/trusty-git-analytics/src/report/drilldown.rs	732
 crates/trusty-git-analytics/src/report/mod.rs	712
 crates/trusty-gworkspace/src/tools.rs	557
-crates/trusty-memory/src/bootstrap.rs	616
-crates/trusty-memory/src/chat.rs	1012
-crates/trusty-memory/src/commands/doctor.rs	718
-crates/trusty-memory/src/commands/prompt_context.rs	940
 crates/trusty-memory/src/lib.rs	616
-crates/trusty-memory/src/messaging.rs	503
-crates/trusty-memory/src/project_root.rs	501
-crates/trusty-memory/src/prompt_log.rs	542
-crates/trusty-memory/src/service.rs	1075
-crates/trusty-memory/src/tools.rs	2602
 crates/trusty-mpm/src/client/executor.rs	666
 crates/trusty-mpm/src/client/http_client.rs	897
 crates/trusty-mpm/src/core/session_launch.rs	705
