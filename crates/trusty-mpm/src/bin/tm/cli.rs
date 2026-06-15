@@ -314,6 +314,97 @@ pub(crate) enum Command {
         #[arg(long, default_value = "gh", value_enum, global = true)]
         system: crate::commands::ticket::system::TicketSystemKind,
     },
+
+    /// Watch a board for label-routed issues and dispatch them autonomously.
+    ///
+    /// Why: `tm ticket <issue#>` executes ONE hand-named issue. `tm watch`
+    /// complements it with a board-watch mode: discover every issue carrying a
+    /// routing label (default `tm-agent`) and dispatch each into the SAME
+    /// managed-session execution path so a team can drop the label on an issue
+    /// and have it picked up. Routing is by LABEL, not assignee (no bot account
+    /// exists). `poll` runs once (cron-friendly); `listen` polls on an interval
+    /// until Ctrl-C.
+    /// What: a `poll`/`listen` sub-subcommand group. Both default to DRY-RUN —
+    /// they only spawn real work with the explicit `--execute` flag. `<project>`
+    /// is an `owner/repo` or a name resolved via the `watch:` config section.
+    /// Test: `cli_parses_watch_*` in `tests.rs`; logic in `commands::watch`.
+    Watch {
+        /// Watch mode to run (`poll` one-shot or `listen` loop).
+        #[command(subcommand)]
+        cmd: WatchCmd,
+    },
+}
+
+/// Modes for the `tm watch` command group.
+///
+/// Why: `poll` and `listen` share every flag but differ in lifecycle (one-shot
+/// vs loop); a sub-subcommand enum keeps them discoverable and individually
+/// parseable while reusing one flag set via the flattened [`WatchArgs`].
+/// What: `Poll` (discover + dispatch once, then exit) and `Listen` (repeatedly
+/// poll on an interval, processing newly-matched issues, until Ctrl-C).
+/// Test: `cli_parses_watch_poll`, `cli_parses_watch_listen` in `tests.rs`.
+#[derive(Debug, Subcommand)]
+pub(crate) enum WatchCmd {
+    /// One-shot: list label-matched issues, dispatch each, then exit.
+    Poll {
+        /// Shared watch flags (project + label/state/safety/runtime).
+        #[command(flatten)]
+        args: WatchArgs,
+    },
+    /// Long-running: poll on `--interval-secs`, dispatching new issues each cycle.
+    Listen {
+        /// Shared watch flags (project + label/interval/state/safety/runtime).
+        #[command(flatten)]
+        args: WatchArgs,
+    },
+}
+
+/// The shared flag set for both `tm watch poll` and `tm watch listen`.
+///
+/// Why: poll and listen take the same inputs (board, routing label, issue state,
+/// the dry-run/execute safety gate, and the spawn runtime), plus listen's poll
+/// interval. Flattening one struct into both keeps the surface identical and the
+/// dispatch wiring DRY.
+/// What: the `<project>` positional (`owner/repo` or a configured name) and the
+/// `--label` / `--interval-secs` / `--state` / `--dry-run` / `--execute` /
+/// `--runtime` flags. Safety: default is dry-run; `--execute` is required to
+/// actually spawn work, and `--dry-run` (the default) always wins if both appear.
+/// Test: `cli_parses_watch_*` assert the parsed fields.
+#[derive(Debug, clap::Args)]
+pub(crate) struct WatchArgs {
+    /// Board to watch: an `owner/repo` (e.g. `bobmatnyc/trusty-tools`) OR a
+    /// registered project name resolved via the `watch:` config section.
+    pub(crate) project: String,
+
+    /// Routing label; only issues carrying it are picked up (default `tm-agent`).
+    #[arg(long)]
+    pub(crate) label: Option<String>,
+
+    /// `listen`-mode poll interval in seconds (default 60).
+    #[arg(long = "interval-secs")]
+    pub(crate) interval_secs: Option<u64>,
+
+    /// Which issues to consider: `open` (default) or `all`.
+    #[arg(long, value_enum)]
+    pub(crate) state: Option<crate::commands::watch::github::IssueState>,
+
+    /// List matched issues and what WOULD run without spawning anything.
+    ///
+    /// This is the DEFAULT behaviour; the flag exists to make the safe intent
+    /// explicit and, if both `--dry-run` and `--execute` are passed, dry-run wins.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
+
+    /// Actually spawn a managed session per matched issue (the explicit opt-in).
+    ///
+    /// Without this flag, `tm watch` only describes what it would do. This guard
+    /// makes accidental mass-execution against real repos impossible.
+    #[arg(long)]
+    pub(crate) execute: bool,
+
+    /// Runtime backend for spawned sessions: `claude-code` (default) or `tcode`.
+    #[arg(long, default_value = "claude-code", value_enum)]
+    pub(crate) runtime: trusty_mpm::runtime::RuntimeKind,
 }
 
 /// Verbs for the `tm issue` state-management command group (#1246).

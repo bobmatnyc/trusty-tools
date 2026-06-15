@@ -249,6 +249,60 @@ async fn main() -> anyhow::Result<()> {
             runtime,
         } => commands::ticket::ticket(&client, &url, issue, system, notes, runtime).await,
         Command::Issue { cmd, system } => commands::issue::issue(cmd, system),
+        Command::Watch { cmd } => dispatch_watch(&client, &url, cmd).await,
+    }
+}
+
+/// Dispatch a `tm watch poll|listen` invocation to its handler.
+///
+/// Why: keeps `main`'s match arm thin by folding the flattened [`WatchArgs`] into
+/// the [`commands::watch`] entry points in one place, mapping the shared CLI flags
+/// onto the module's `RawWatchArgs` and the safety-gate booleans.
+/// What: builds a `RawWatchArgs` from the parsed flags and calls
+/// [`commands::watch::poll`] or [`commands::watch::listen`] accordingly, threading
+/// the `--execute`/`--dry-run` safety flags and the spawn runtime through.
+/// Test: the resolution/safety logic is unit-tested in `commands::watch::tests`;
+/// CLI parsing in `tests.rs` (`cli_parses_watch_*`).
+async fn dispatch_watch(
+    client: &reqwest::Client,
+    url: &str,
+    cmd: cli::WatchCmd,
+) -> anyhow::Result<()> {
+    use cli::{WatchArgs, WatchCmd};
+    use commands::watch::args::RawWatchArgs;
+
+    fn raw(args: &WatchArgs) -> RawWatchArgs {
+        RawWatchArgs {
+            project: args.project.clone(),
+            label: args.label.clone(),
+            interval_secs: args.interval_secs,
+            state: args.state,
+        }
+    }
+
+    match cmd {
+        WatchCmd::Poll { args } => {
+            commands::watch::poll(
+                client,
+                url,
+                raw(&args),
+                args.execute,
+                args.dry_run,
+                args.runtime,
+            )
+            .await
+        }
+        WatchCmd::Listen { args } => {
+            commands::watch::listen(
+                client,
+                url,
+                raw(&args),
+                args.execute,
+                args.dry_run,
+                args.runtime,
+            )
+            .await
+        }
     }
 }
 
@@ -306,7 +360,9 @@ fn resolve_gui_binary() -> std::path::PathBuf {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        let sibling = dir.join(GUI_BIN);
+        // Include the platform executable suffix (`.exe` on Windows; "" on
+        // macOS/Linux) so the sibling lookup finds the GUI binary on every OS.
+        let sibling = dir.join(format!("{GUI_BIN}{}", std::env::consts::EXE_SUFFIX));
         if sibling.is_file() {
             return sibling;
         }

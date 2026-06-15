@@ -22,3 +22,4 @@ pub(crate) mod session;
 pub(crate) mod supervisor;
 pub(crate) mod telegram;
 pub(crate) mod ticket;
+pub(crate) mod watch;
