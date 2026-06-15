@@ -55,6 +55,16 @@ pub use claude_config_routes::*;
 pub mod coordinator_routes;
 pub use coordinator_routes::*;
 
+/// The loopback-only JSON-RPC dispatch endpoint (`POST /rpc`, #1221).
+///
+/// Why: the `serve --stdio` bridge forwards MCP JSON-RPC envelopes to the durable
+/// daemon over this internal channel. It is gated to loopback peers only (the
+/// #1221 hard requirement) so a future `0.0.0.0` rebind cannot expose the tool
+/// surface. Keeping it in a sibling module mirrors `coordinator_routes` and keeps
+/// `api.rs` focused.
+pub mod rpc;
+pub use rpc::rpc_handler;
+
 /// The managed session-manager routes (`/api/v1/sessions/managed/*`).
 ///
 /// Why: the managed-session API is a cohesive cluster (spawn, list, get,
@@ -167,6 +177,9 @@ pub fn router(state: Arc<DaemonState>) -> Router {
             "/api/v1/sessions/managed/{id}/decommission",
             post(decommission_managed_session),
         )
+        // #1221: loopback-only JSON-RPC dispatch for the `serve --stdio` bridge.
+        // The handler independently enforces the loopback gate via ConnectInfo.
+        .route("/rpc", post(rpc_handler))
         .merge(
             SwaggerUi::new("/api-docs")
                 .url("/api-docs/openapi.json", super::openapi::ApiDoc::openapi()),

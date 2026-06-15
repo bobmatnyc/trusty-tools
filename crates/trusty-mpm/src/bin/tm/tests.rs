@@ -60,8 +60,16 @@ fn cli_parses_start() {
 
 #[test]
 fn cli_parses_serve() {
+    // Bare `serve` defaults to the non-stdio (start-like) behaviour.
     let cli = Cli::try_parse_from(["trusty-mpm", "serve"]).unwrap();
-    assert!(matches!(cli.command, Command::Serve));
+    assert!(matches!(cli.command, Command::Serve { stdio: false }));
+}
+
+#[test]
+fn cli_parses_serve_stdio() {
+    // `serve --stdio` selects the MCP stdio bridge (#1221).
+    let cli = Cli::try_parse_from(["trusty-mpm", "serve", "--stdio"]).unwrap();
+    assert!(matches!(cli.command, Command::Serve { stdio: true }));
 }
 
 #[test]

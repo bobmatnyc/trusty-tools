@@ -609,3 +609,95 @@ async fn tcode_session_spawns_and_accepts_commands() {
         "the issued command must reach the tcode session's pane; sends={sends:?}"
     );
 }
+
+// ── Typed resume-error tests (regression guard for #1221 review findings) ───────
+//
+// Why: the resume HTTP handler previously chose its 404/409 status by
+// SUBSTRING-matching the error's `Display` string, which silently regressed to
+// 500 whenever wording changed; and it ran a pre-flight `get` before `resume`,
+// opening a TOCTOU window. These tests drive the shared `resume_managed` helper
+// directly and assert on the TYPED `ResumeManagedError` variant — never on the
+// Display string — so the 404/409 contract is enforced structurally.
+
+use trusty_mpm::daemon::managed_routes::{ResumeManagedError, resume_managed};
+use trusty_mpm::daemon::state::DaemonState;
+use trusty_mpm::runtime::RuntimeKind as ResumeRuntimeKind;
+use trusty_mpm::session_manager::ManagedSessionId as ResumeSessionId;
+
+/// Resuming a missing session yields the typed `NotFound` variant (→ HTTP 404).
+///
+/// Why: a session decommissioned (or never created) must produce a 404, and the
+/// handler now derives that from the typed variant rather than a Display
+/// substring. Removing the pre-flight `get` means this single round-trip is the
+/// only place the 404 can originate — so we assert it lands here.
+/// What: builds a fresh `DaemonState`, calls `resume_managed` with a random id,
+/// and asserts the error is exactly `ResumeManagedError::NotFound`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn resume_managed_typed_missing_session_is_not_found() {
+    // Hermetic framework root so the on-disk session store never touches the
+    // operator's real `~/.trusty-mpm`.
+    let root = TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::with_root(root.path().to_path_buf()));
+    let missing = ResumeSessionId::new();
+
+    let err = resume_managed(&state, &missing)
+        .await
+        .expect_err("resuming a missing session must error");
+
+    assert!(
+        matches!(err, ResumeManagedError::NotFound(_)),
+        "missing session must map to the typed NotFound variant (→ 404), got {err:?}"
+    );
+}
+
+/// Resuming a non-resumable session yields the typed `InvalidState` variant
+/// (→ HTTP 409) — driven WITHOUT depending on the Display string.
+///
+/// Why: only `Stopped`/`Errored` sessions are resumable. A freshly created
+/// session is `Provisioning`, so resuming it is an invalid state transition that
+/// must surface as a 409. The handler derives 409 from the typed variant; this
+/// test proves the variant is produced for a non-resumable state.
+/// What: seeds a session via the daemon's session manager (it starts in
+/// `Provisioning`), calls `resume_managed`, and asserts the error matches
+/// `ResumeManagedError::InvalidState`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn resume_managed_typed_invalid_state_is_conflict() {
+    // Hermetic framework root so the seeded session persists to a temp store, not
+    // the operator's real `~/.trusty-mpm`.
+    let root = TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::with_root(root.path().to_path_buf()));
+    let mgr = state.session_manager().await;
+
+    // A newly created record is in `Provisioning` — not `Stopped`/`Errored` — so
+    // resuming it is an invalid state transition (→ 409), never a 404.
+    let id = ResumeSessionId::new();
+    // Derive a UNIQUE workspace path from the id: the tmux name is derived from
+    // the cwd basename (and truncated to 20 chars), so a fixed path would collide
+    // with a leftover tmux session (or a parallel run). Putting the UUID FIRST
+    // keeps the name unique even after truncation; rooting it under the hermetic
+    // temp dir keeps it isolated.
+    let ws = root.path().join(format!("{id}-resume-ws"));
+    mgr.create_with_id(
+        id,
+        "regression: invalid-state resume".to_string(),
+        Some(ws.clone()),
+        None,
+        Some(ws),
+        Some("https://example.com/r.git".to_string()),
+        Some("main".to_string()),
+        ResumeRuntimeKind::default(),
+    )
+    .await
+    .expect("seed session");
+
+    let err = resume_managed(&state, &id)
+        .await
+        .expect_err("resuming a Provisioning session must error");
+
+    assert!(
+        matches!(err, ResumeManagedError::InvalidState(_)),
+        "non-resumable state must map to the typed InvalidState variant (→ 409), got {err:?}"
+    );
+}

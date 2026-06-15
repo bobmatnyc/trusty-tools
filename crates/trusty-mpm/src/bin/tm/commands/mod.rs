@@ -15,6 +15,7 @@ pub(crate) mod managed;
 pub(crate) mod misc;
 pub(crate) mod project;
 pub(crate) mod repair;
+pub(crate) mod serve_stdio;
 pub(crate) mod services;
 pub(crate) mod session;
 pub(crate) mod supervisor;

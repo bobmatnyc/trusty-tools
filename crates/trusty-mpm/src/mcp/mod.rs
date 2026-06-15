@@ -7,11 +7,15 @@
 //! MCP is the protocol Claude Code already speaks, so trusty-mpm exposes
 //! an MCP server rather than inventing a bespoke channel.
 //!
-//! What: defines the nine orchestration tools (six core + three bug-reporting:
-//! `list_recent_errors`, `preview_bug_report`, `report_bug`), the
-//! [`OrchestratorBackend`] trait the daemon implements to service them, and
-//! [`dispatch`], which routes a JSON-RPC [`Request`] to the backend. The daemon
-//! wires [`dispatch`] into `trusty_mcp_core::run_stdio_loop`.
+//! What: defines the fifteen MCP tools — nine orchestration/bug-reporting (six
+//! core + three bug-reporting: `list_recent_errors`, `preview_bug_report`,
+//! `report_bug`) plus six session-lifecycle tools (#1221: `session_new`,
+//! `session_stop`, `session_resume`, `session_decommission`, `session_activity`,
+//! `session_send`) — the [`OrchestratorBackend`] trait the daemon implements to
+//! service them, and [`dispatch`], which routes a JSON-RPC [`Request`] to the
+//! backend. The daemon wires [`dispatch`] into both `run_stdio_loop` (the `tm
+//! daemon --mcp` path) and the loopback `POST /rpc` endpoint (the `serve
+//! --stdio` bridge path).
 //!
 //! Test: `cargo test -p trusty-mpm` exercises the tool catalog, argument
 //! parsing, and dispatch against an in-memory mock backend.
@@ -20,6 +24,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use trusty_common::mcp::{Request, Response, error_codes};
 
+pub mod session_dispatch;
 pub mod tools;
 
 pub use tools::{TOOL_CATALOG, tool_catalog};
@@ -110,6 +115,79 @@ pub trait OrchestratorBackend: Send + Sync {
     ///       issue_number }` or a graceful "no token" message.
     /// Test: `dispatch_report_bug_no_confirm_is_preview` in the `tests` module.
     async fn report_bug(&self, fingerprint: &str, confirm: bool) -> Result<Value, String>;
+
+    // ── #1221: session-lifecycle tools ───────────────────────────────────────
+
+    /// Back `session_new`: spawn a new managed session.
+    ///
+    /// Why: the driver skill needs a typed, JSON-native way to create an
+    ///      isolated, provisioned workspace and launch a harness in it — without
+    ///      scraping `tm session new` CLI text (the #842 defect).
+    /// What: provisions a workspace cloned from `repo_url` at `git_ref`, creates
+    ///       the tmux host, launches the selected `runtime` (default claude-code)
+    ///       with `task`, and returns the new session's id / tmux name /
+    ///       workspace path / state / attach command. An unknown `runtime` value
+    ///       is an error string.
+    /// Test: `dispatch_session_new_tool` (mock) + the daemon-side
+    ///       `session_new_spawns_via_manager` integration test.
+    async fn session_new(
+        &self,
+        repo_url: &str,
+        git_ref: &str,
+        task: &str,
+        name_hint: Option<&str>,
+        runtime: Option<&str>,
+    ) -> Result<Value, String>;
+
+    /// Back `session_stop`: stop a session's runtime, keeping its workspace.
+    ///
+    /// Why: a session endures beyond its running runtime; stopping must preserve
+    ///      the workspace so the session can be resumed later.
+    /// What: kills the tmux session + harness, marks the record Stopped, returns
+    ///       the updated record summary. A missing id is an error string.
+    /// Test: `dispatch_session_stop_tool` (mock).
+    async fn session_stop(&self, session_id: &str) -> Result<Value, String>;
+
+    /// Back `session_resume`: re-spawn the runtime in the existing workspace.
+    ///
+    /// Why: the counterpart to `session_stop` — bring a stopped session back
+    ///      without re-cloning.
+    /// What: re-creates the tmux host rooted at the on-disk workspace, re-spawns
+    ///       the SAME runtime backend, and returns the updated record. A missing
+    ///       id (or an invalid state transition) is an error string.
+    /// Test: `dispatch_session_resume_tool` (mock).
+    async fn session_resume(&self, session_id: &str) -> Result<Value, String>;
+
+    /// Back `session_decommission`: full, terminal teardown.
+    ///
+    /// Why: the only operation that removes the workspace from disk; terminal so
+    ///      a session can be fully reclaimed.
+    /// What: kills the runtime, removes the workspace dir, marks the record
+    ///       Decommissioned (a tombstone is kept), and returns it. A missing id
+    ///       is an error string.
+    /// Test: `dispatch_session_decommission_tool` (mock).
+    async fn session_decommission(&self, session_id: &str) -> Result<Value, String>;
+
+    /// Back `session_activity`: capture pane + lifecycle state.
+    ///
+    /// Why: the driver must reason about whether a session is working / idle /
+    ///      blocked WITHOUT requiring an LLM key, so raw pane content is always
+    ///      returned and the LLM classification is an optional overlay.
+    /// What: captures the last `lines` (default 60) pane lines, reports
+    ///       `runtime_active` + pending-decision fields, and includes an LLM
+    ///       `classification` when OPENROUTER_API_KEY is set. A missing id is an
+    ///       error string.
+    /// Test: `dispatch_session_activity_tool` (mock).
+    async fn session_activity(&self, session_id: &str, lines: u32) -> Result<Value, String>;
+
+    /// Back `session_send`: inject a line into a session's pane.
+    ///
+    /// Why: drive a running session (answer prompts, issue commands) without
+    ///      attaching to the tmux pane.
+    /// What: sends `text` followed by Enter to the session's pane and returns a
+    ///       confirmation with the tmux name. A missing id is an error string.
+    /// Test: `dispatch_session_send_tool` (mock).
+    async fn session_send(&self, session_id: &str, text: &str) -> Result<Value, String>;
 }
 
 /// Route a JSON-RPC request to the backend, returning the MCP response.
@@ -228,7 +306,12 @@ async fn dispatch_tool_call<B: OrchestratorBackend>(
             }
             Err(e) => Err(e),
         },
-        other => Err(format!("unknown tool: {other}")),
+        // #1221: the six session-lifecycle tools route through a sibling module
+        // so this match stays focused and `mod.rs` stays under the SLOC cap.
+        other => match session_dispatch::try_dispatch(backend, other, &args).await {
+            Some(result) => result,
+            None => Err(format!("unknown tool: {other}")),
+        },
     };
 
     match result {
@@ -251,7 +334,7 @@ async fn dispatch_tool_call<B: OrchestratorBackend>(
 }
 
 /// Extract a required string argument or produce a descriptive error.
-fn required_str(args: &Value, key: &str) -> Result<String, String> {
+pub(crate) fn required_str(args: &Value, key: &str) -> Result<String, String> {
     args.get(key)
         .and_then(Value::as_str)
         .map(str::to_string)
@@ -266,249 +349,5 @@ fn required_u64(args: &Value, key: &str) -> Result<u64, String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// In-memory backend that records calls and returns canned values.
-    struct MockBackend;
-
-    #[async_trait]
-    impl OrchestratorBackend for MockBackend {
-        async fn session_list(&self) -> Result<Value, String> {
-            Ok(json!([{ "id": "s1", "status": "active" }]))
-        }
-        async fn session_status(&self, session_id: &str) -> Result<Value, String> {
-            Ok(json!({ "id": session_id, "status": "active" }))
-        }
-        async fn agent_delegate(
-            &self,
-            _session_id: &str,
-            agent: &str,
-            _task: &str,
-            _tier: Option<&str>,
-        ) -> Result<Value, String> {
-            Ok(json!({ "delegation_id": "d1", "agent": agent }))
-        }
-        async fn memory_protect(
-            &self,
-            _session_id: &str,
-            used_tokens: u64,
-            window_tokens: u64,
-        ) -> Result<Value, String> {
-            Ok(json!({ "fraction": used_tokens as f64 / window_tokens as f64 }))
-        }
-        async fn circuit_breaker_status(&self, _agent: Option<&str>) -> Result<Value, String> {
-            Ok(json!({ "state": "closed" }))
-        }
-        async fn hook_event(
-            &self,
-            _session_id: &str,
-            event: &str,
-            _payload: Value,
-        ) -> Result<Value, String> {
-            Ok(json!({ "received": event }))
-        }
-        async fn list_recent_errors(&self, limit: u64) -> Result<Value, String> {
-            Ok(json!({ "errors": [], "limit": limit, "total": 0 }))
-        }
-        async fn preview_bug_report(&self, fingerprint: &str) -> Result<Value, String> {
-            Ok(json!({ "fingerprint": fingerprint, "title": "mock title", "body": "mock body" }))
-        }
-        async fn report_bug(&self, fingerprint: &str, confirm: bool) -> Result<Value, String> {
-            if confirm {
-                Ok(json!({ "filed": false, "note": "mock: no token in test" }))
-            } else {
-                Ok(
-                    json!({ "filed": false, "note": "confirm:false — preview only", "fingerprint": fingerprint }),
-                )
-            }
-        }
-    }
-
-    fn call(name: &str, args: Value) -> Request {
-        Request {
-            jsonrpc: Some("2.0".into()),
-            id: Some(json!(1)),
-            method: "tools/call".into(),
-            params: Some(json!({ "name": name, "arguments": args })),
-        }
-    }
-
-    #[tokio::test]
-    async fn dispatch_initialize_returns_server_info() {
-        let req = Request {
-            jsonrpc: Some("2.0".into()),
-            id: Some(json!(1)),
-            method: "initialize".into(),
-            params: None,
-        };
-        let resp = dispatch(&MockBackend, req).await;
-        let result = resp.result.unwrap();
-        assert_eq!(result["serverInfo"]["name"], SERVER_NAME);
-    }
-
-    #[tokio::test]
-    async fn dispatch_tools_list_returns_nine_tools() {
-        let req = Request {
-            jsonrpc: Some("2.0".into()),
-            id: Some(json!(1)),
-            method: "tools/list".into(),
-            params: None,
-        };
-        let resp = dispatch(&MockBackend, req).await;
-        let tools = resp.result.unwrap()["tools"].clone();
-        assert_eq!(tools.as_array().unwrap().len(), 9);
-    }
-
-    #[tokio::test]
-    async fn dispatch_session_list_tool() {
-        let resp = dispatch(&MockBackend, call("session_list", json!({}))).await;
-        let result = resp.result.unwrap();
-        assert_eq!(result["isError"], false);
-        assert!(
-            result["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("s1")
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_agent_delegate_tool() {
-        let resp = dispatch(
-            &MockBackend,
-            call(
-                "agent_delegate",
-                json!({ "session_id": "s1", "agent": "research", "task": "find" }),
-            ),
-        )
-        .await;
-        let result = resp.result.unwrap();
-        assert_eq!(result["isError"], false);
-        assert!(
-            result["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("research")
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_missing_argument_is_tool_error() {
-        // `session_id` is required; omitting it yields an isError result.
-        let resp = dispatch(&MockBackend, call("session_status", json!({}))).await;
-        let result = resp.result.unwrap();
-        assert_eq!(result["isError"], true);
-        assert!(
-            result["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("session_id")
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_unknown_tool_is_error() {
-        let resp = dispatch(&MockBackend, call("nope", json!({}))).await;
-        assert_eq!(resp.result.unwrap()["isError"], true);
-    }
-
-    #[tokio::test]
-    async fn dispatch_unknown_method_returns_jsonrpc_error() {
-        let req = Request {
-            jsonrpc: Some("2.0".into()),
-            id: Some(json!(1)),
-            method: "frobnicate".into(),
-            params: None,
-        };
-        let resp = dispatch(&MockBackend, req).await;
-        assert_eq!(resp.error.unwrap().code, error_codes::METHOD_NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn dispatch_notification_is_suppressed() {
-        let req = Request {
-            jsonrpc: Some("2.0".into()),
-            id: None,
-            method: "notifications/initialized".into(),
-            params: None,
-        };
-        let resp = dispatch(&MockBackend, req).await;
-        assert!(resp.suppress);
-    }
-
-    // ── Phase 3: bug-reporting dispatch tests ─────────────────────────────────
-
-    #[tokio::test]
-    async fn dispatch_list_recent_errors_tool() {
-        let resp = dispatch(
-            &MockBackend,
-            call("list_recent_errors", json!({ "limit": 10 })),
-        )
-        .await;
-        let result = resp.result.unwrap();
-        assert_eq!(result["isError"], false);
-        assert!(
-            result["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("errors")
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_list_recent_errors_default_limit() {
-        // No limit specified — should default to 20 without error.
-        let resp = dispatch(&MockBackend, call("list_recent_errors", json!({}))).await;
-        assert_eq!(resp.result.unwrap()["isError"], false);
-    }
-
-    #[tokio::test]
-    async fn dispatch_preview_bug_report_tool() {
-        let fp = "a".repeat(64);
-        let resp = dispatch(
-            &MockBackend,
-            call("preview_bug_report", json!({ "fingerprint": fp })),
-        )
-        .await;
-        let result = resp.result.unwrap();
-        assert_eq!(result["isError"], false);
-        assert!(result["content"][0]["text"].as_str().unwrap().contains(&fp));
-    }
-
-    #[tokio::test]
-    async fn dispatch_preview_bug_report_requires_fingerprint() {
-        let resp = dispatch(&MockBackend, call("preview_bug_report", json!({}))).await;
-        assert_eq!(resp.result.unwrap()["isError"], true);
-    }
-
-    #[tokio::test]
-    async fn dispatch_report_bug_no_confirm_is_preview_only() {
-        let fp = "b".repeat(64);
-        let resp = dispatch(
-            &MockBackend,
-            call("report_bug", json!({ "fingerprint": fp, "confirm": false })),
-        )
-        .await;
-        let result = resp.result.unwrap();
-        assert_eq!(result["isError"], false);
-        let text = result["content"][0]["text"].as_str().unwrap();
-        // The mock returns `filed: false` with the preview-only note.
-        assert!(text.contains("false"), "expected filed:false: {text}");
-    }
-
-    #[tokio::test]
-    async fn dispatch_report_bug_confirm_true_calls_backend() {
-        let fp = "c".repeat(64);
-        let resp = dispatch(
-            &MockBackend,
-            call("report_bug", json!({ "fingerprint": fp, "confirm": true })),
-        )
-        .await;
-        let result = resp.result.unwrap();
-        assert_eq!(result["isError"], false);
-        // Mock returns filed:false + no-token note (still a valid response shape).
-        let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("filed"), "expected 'filed' key: {text}");
-    }
-}
+#[path = "tests.rs"]
+mod tests;

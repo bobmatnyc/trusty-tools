@@ -20,12 +20,14 @@ use axum::{
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::daemon::state::DaemonState;
-use crate::provisioner::WorkspaceProvisioner;
-use crate::runtime::{RuntimeKind, build_adapter};
-use crate::session_manager::{ManagedSessionId, ManagedSessionState, SessionRecord};
+use crate::runtime::RuntimeKind;
+use crate::session_manager::{ManagedSessionId, SessionRecord};
+
+mod lifecycle;
+pub use lifecycle::{ResumeManagedError, SpawnParams, resume_managed, spawn_managed};
 
 // ── Request / Response shapes ─────────────────────────────────────────────────
 
@@ -235,6 +237,30 @@ pub struct ActivityResponse {
     pub proposed_default: Option<String>,
 }
 
+/// Serialize a [`SessionRecord`] to the flat JSON shape the MCP tools return.
+///
+/// Why: the MCP tools return JSON values (not axum responses); reusing the same
+/// field set as [`SpawnResponse`]/[`SessionSummary`] keeps the MCP and HTTP
+/// payloads consistent for the driver skill.
+/// What: maps the record to a JSON object including the derived `attach_cmd`.
+/// Test: covered by `crate::daemon::mcp_session` tests that assert echoed fields.
+pub fn record_to_json(r: &SessionRecord) -> serde_json::Value {
+    serde_json::json!({
+        "id": r.id.to_string(),
+        "name": r.tmux_name,
+        "state": r.state.to_string(),
+        "workspace_path": r.workspace_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+        "repo_url": r.repo_url,
+        "branch": r.branch,
+        "created_at": r.created_at.to_rfc3339(),
+        "last_activity_at": r.last_activity_at.map(|t| t.to_rfc3339()),
+        "attach_cmd": attach_cmd_for(&r.tmux_name),
+        "runtime": r.runtime.as_str(),
+        "pending_decision": r.pending_decision,
+        "proposed_default": r.proposed_default,
+    })
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Convert a [`SessionRecord`] into a wire [`SessionSummary`].
@@ -314,118 +340,44 @@ pub async fn spawn_session(
     State(state): State<Arc<DaemonState>>,
     Json(req): Json<SpawnRequest>,
 ) -> impl IntoResponse {
-    // ── Step 0: resolve the requested runtime backend (default: claude-code) ──
-    let runtime = match req.runtime.as_deref() {
-        None => RuntimeKind::default(),
-        Some(raw) => match raw.parse::<RuntimeKind>() {
-            Ok(kind) => kind,
-            Err(e) => {
-                warn!("spawn_session: invalid runtime selector: {e}");
-                return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
-            }
-        },
-    };
-
-    // ── Step 1: pre-generate session id + provision isolated workspace ────────
-    let workspace_root = std::env::var("TRUSTY_MPM_WORKSPACE_ROOT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::home_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-                .join(".trusty-mpm")
-                .join("workspaces")
-        });
-
-    let session_id = ManagedSessionId::new();
-    let provisioner = WorkspaceProvisioner::new(crate::provisioner::RealGitBackend, workspace_root);
-
-    let prepared = match provisioner.provision(&session_id, &req.repo_url, &req.git_ref, &req.task)
+    // Reject an invalid runtime selector up front with a 400 (the shared
+    // `spawn_managed` helper also rejects it, but doing it here lets us keep the
+    // HTTP-specific 400-vs-500 status distinction that existing clients rely on).
+    if let Some(raw) = req.runtime.as_deref()
+        && let Err(e) = raw.parse::<RuntimeKind>()
     {
-        Ok(p) => p,
-        Err(e) => {
-            warn!(id = %session_id, "spawn_session: provision failed: {e}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("workspace provisioning failed: {e}"),
-            )
-                .into_response();
-        }
-    };
-
-    // ── Step 2: create tmux session rooted at the provisioned workspace ───────
-    let mgr = state.session_manager().await;
-    let record = match mgr
-        .create_with_id(
-            session_id,
-            req.task.clone(),
-            Some(prepared.path.clone()),
-            req.name_hint,
-            Some(prepared.path.clone()),
-            Some(req.repo_url.clone()),
-            Some(req.git_ref.clone()),
-            runtime,
-        )
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            warn!(id = %session_id, "spawn_session: session create failed: {e}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-        }
-    };
-
-    // Transition to Active now that the workspace is ready and the tmux session
-    // has been created.
-    if let Err(e) = mgr
-        .set_workspace(
-            &record.id,
-            prepared.path.clone(),
-            ManagedSessionState::Active,
-        )
-        .await
-    {
-        warn!(id = %record.id, "spawn_session: set_workspace failed: {e}");
+        warn!("spawn_session: invalid runtime selector: {e}");
+        return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
     }
 
-    // ── Step 3: spawn the selected runtime in the pane ───────────────────────
-    let tmux_arc = mgr.tmux_driver();
-    let adapter = build_adapter(record.runtime, tmux_arc);
-    if let Err(e) = adapter.spawn(&record.tmux_name, &prepared.path, &req.task) {
-        warn!(
-            id = %record.id,
-            name = %record.tmux_name,
-            runtime = %record.runtime.as_str(),
-            "spawn_session: runtime adapter spawn failed: {e}"
-        );
-        let _ = mgr
-            .mark_errored(&record.id, &format!("spawn failed: {e}"))
-            .await;
-    } else {
-        info!(
-            id = %record.id,
-            name = %record.tmux_name,
-            path = %prepared.path.display(),
-            "managed session spawned successfully"
-        );
-    }
-
-    let final_record = mgr.get(&record.id).await.unwrap_or(record);
-    let attach = attach_cmd_for(&final_record.tmux_name);
-    let runtime_str = final_record.runtime.as_str().to_owned();
-    let resp = SpawnResponse {
-        id: final_record.id.to_string(),
-        name: final_record.tmux_name,
-        workspace_path: final_record
-            .workspace_path
-            .map(|p| p.to_string_lossy().to_string()),
-        repo_url: final_record.repo_url,
-        branch: final_record.branch,
-        state: final_record.state.to_string(),
-        created_at: final_record.created_at.to_rfc3339(),
-        attach_cmd: attach,
-        runtime: runtime_str,
+    let params = SpawnParams {
+        repo_url: req.repo_url,
+        git_ref: req.git_ref,
+        task: req.task,
+        name_hint: req.name_hint,
+        runtime: req.runtime,
     };
-    (StatusCode::CREATED, Json(resp)).into_response()
+
+    match spawn_managed(&state, params).await {
+        Ok(final_record) => {
+            let resp = SpawnResponse {
+                id: final_record.id.to_string(),
+                name: final_record.tmux_name.clone(),
+                workspace_path: final_record
+                    .workspace_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
+                repo_url: final_record.repo_url.clone(),
+                branch: final_record.branch.clone(),
+                state: final_record.state.to_string(),
+                created_at: final_record.created_at.to_rfc3339(),
+                attach_cmd: attach_cmd_for(&final_record.tmux_name),
+                runtime: final_record.runtime.as_str().to_owned(),
+            };
+            (StatusCode::CREATED, Json(resp)).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
 }
 
 /// GET /api/v1/sessions/managed — list all managed sessions.
@@ -588,51 +540,26 @@ pub async fn resume_managed_session(
         Ok(id) => id,
         Err((code, msg)) => return (code, msg).into_response(),
     };
-    let mgr = state.session_manager().await;
 
-    let record = match mgr.resume(&id).await {
-        Ok(r) => r,
-        Err(crate::session_manager::ManagedError::SessionNotFound(_)) => {
-            return (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response();
+    // Single round-trip: the shared `resume_managed` helper performs the
+    // existence + state check inside `SessionManager::resume` and re-spawns the
+    // runtime. We match on its TYPED error to choose the HTTP status — no
+    // pre-flight `get` (which introduced a TOCTOU race where the session could be
+    // decommissioned between the probe and the resume, yielding 500 instead of
+    // 404) and no `Display`-substring matching (which silently fell through to 500
+    // whenever the error wording changed).
+    match resume_managed(&state, &id).await {
+        Ok(final_record) => Json(record_to_summary(&final_record)).into_response(),
+        Err(ResumeManagedError::NotFound(_)) => {
+            (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response()
         }
-        Err(crate::session_manager::ManagedError::InvalidState(_, msg)) => {
-            return (StatusCode::CONFLICT, msg).into_response();
+        Err(ResumeManagedError::InvalidState(reason)) => {
+            (StatusCode::CONFLICT, reason).into_response()
         }
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        Err(ResumeManagedError::Other(msg)) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
         }
-    };
-
-    // Re-spawn the SAME runtime in the fresh tmux session (no re-clone —
-    // workspace reused). The backend is read from the persisted record so a
-    // tcode session resumes on tcode.
-    let workspace = record
-        .workspace_path
-        .clone()
-        .unwrap_or_else(|| record.cwd.clone());
-    let tmux_arc = mgr.tmux_driver();
-    let adapter = build_adapter(record.runtime, tmux_arc);
-    if let Err(e) = adapter.spawn(&record.tmux_name, &workspace, &record.task) {
-        warn!(
-            id = %record.id,
-            name = %record.tmux_name,
-            runtime = %record.runtime.as_str(),
-            "resume: runtime adapter spawn failed: {e}"
-        );
-        let _ = mgr
-            .mark_errored(&record.id, &format!("resume spawn failed: {e}"))
-            .await;
-    } else {
-        info!(
-            id = %record.id,
-            name = %record.tmux_name,
-            workspace = %workspace.display(),
-            "managed session resumed and claude respawned"
-        );
     }
-
-    let final_record = mgr.get(&id).await.unwrap_or(record);
-    Json(record_to_summary(&final_record)).into_response()
 }
 
 /// POST /api/v1/sessions/managed/{id}/decommission — full teardown.

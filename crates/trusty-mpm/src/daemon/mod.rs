@@ -22,6 +22,7 @@ pub mod llm_overseer;
 pub mod lock;
 pub mod managed_routes;
 pub mod mcp_backend;
+pub mod mcp_session;
 pub mod openapi;
 pub mod optimizer;
 pub mod overseer_compose;
@@ -102,7 +103,14 @@ pub async fn serve_http(
 
     let app = api::router(state);
     info!("daemon listening; press Ctrl-C to stop");
-    axum::serve(listener, app).await?;
+    // `into_make_service_with_connect_info` makes the peer `SocketAddr` available
+    // to handlers via `ConnectInfo` — the loopback-only `POST /rpc` gate (#1221)
+    // depends on it. Without connect-info the `ConnectInfo` extractor would 500.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -118,7 +126,16 @@ pub async fn serve_http(
 pub fn spawn_secondary_listener(state: Arc<DaemonState>, listener: tokio::net::TcpListener) {
     let app = api::router(state);
     tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
+        // Match the primary listener: expose ConnectInfo so the loopback-only
+        // `POST /rpc` gate (#1221) works on this listener too. The Tailscale
+        // listener is non-loopback, so `/rpc` here will correctly 403 — the
+        // bridge only ever talks to the loopback listener.
+        if let Err(e) = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        {
             tracing::warn!("secondary listener failed: {e}");
         }
     });
