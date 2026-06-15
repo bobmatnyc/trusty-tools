@@ -881,3 +881,110 @@ async fn manager_get_reflects_out_of_process_write() {
         "manager A's list must also reflect the out-of-process write"
     );
 }
+
+/// Corrupt the manager's backing `sessions.json` so the next reload-on-read
+/// fails. Writing garbage (a) changes the file length so `reload_if_changed`
+/// detects a change and re-reads, and (b) makes `serde_json::from_str` fail with
+/// `StoreError::Serialize` — a faithful stand-in for a transient reload I/O error
+/// (NFS hiccup, partial write observed by a reader, etc.).
+fn corrupt_store_file(mgr: &SessionManager) {
+    let path = mgr.data_dir().join("sessions.json");
+    std::fs::write(&path, b"{ this is not valid json ]").expect("corrupt store file");
+}
+
+/// Why: #1219 follow-up — `list()` must never report an EMPTY fleet because of a
+/// transient reload error. The old code returned `Vec::new()` on reload failure
+/// (despite a comment claiming "last-known set"), which would mislead the
+/// supervisor/operator into thinking every session vanished. This test pins the
+/// corrected behavior: a reload error yields the ACTUAL last-known in-memory set.
+/// What: creates a session (so the manager holds it in memory and on disk), then
+/// corrupts `sessions.json` so the next `list()` reload fails, and asserts
+/// `list()` still returns the previously-loaded record rather than an empty Vec.
+/// Test: this test.
+#[tokio::test]
+async fn manager_list_returns_last_known_on_reload_error() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let record = mgr
+        .create(
+            "fleet-visibility task".into(),
+            Some(PathBuf::from("/tmp/wt-lastknown")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    let id = record.id;
+
+    // Sanity: with a healthy file, list sees the one session.
+    assert_eq!(
+        mgr.list().await.len(),
+        1,
+        "precondition: one session listed"
+    );
+
+    // Inject a transient reload failure by corrupting the backing file.
+    corrupt_store_file(&mgr);
+
+    // The reload now fails — but list() must fall back to the last-known set,
+    // NOT report an empty fleet.
+    let listed = mgr.list().await;
+    assert_eq!(
+        listed.len(),
+        1,
+        "list() must return the last-known set on reload error, not empty: {listed:?}"
+    );
+    assert_eq!(
+        listed[0].id, id,
+        "the last-known record must be the one we created"
+    );
+}
+
+/// Why: #1219 follow-up — a transient reload error on a single-session lookup
+/// must NOT surface as a false `SessionNotFound`; that would make a still-present
+/// session look gone. `get()` must fall back to the last-known in-memory record.
+/// What: creates a session, corrupts `sessions.json` so the next `get()` reload
+/// fails, and asserts `get()` still returns the previously-loaded record instead
+/// of erroring.
+/// Test: this test.
+#[tokio::test]
+async fn manager_get_returns_last_known_on_reload_error() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let record = mgr
+        .create(
+            "single-session task".into(),
+            Some(PathBuf::from("/tmp/wt-getlastknown")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    let id = record.id;
+
+    // Inject a transient reload failure by corrupting the backing file.
+    corrupt_store_file(&mgr);
+
+    // get() must fall back to the last-known record, not a false not-found.
+    let got = mgr
+        .get(&id)
+        .await
+        .expect("get must return last-known record on reload error");
+    assert_eq!(got.id, id, "get() returned the last-known record");
+
+    // A genuinely-absent id must still be a not-found, even under reload error.
+    let missing = ManagedSessionId::new();
+    assert!(
+        matches!(
+            mgr.get(&missing).await,
+            Err(ManagedError::SessionNotFound(_))
+        ),
+        "an unknown id must still yield SessionNotFound"
+    );
+}

@@ -297,14 +297,27 @@ impl SessionManager {
     ///
     /// Why: the HTTP GET and activity handlers need a typed, async lookup. Since
     /// #1219 the lookup must also reflect writes made by another process (the
-    /// supervisor) to the shared store, so it goes through the store's
-    /// reload-on-read `get`. That reload mutates the in-memory map, hence a write
-    /// lock rather than a read lock.
-    /// What: acquires a write lock and delegates to [`SessionStore::get`], which
-    /// reloads from disk first if the backing file changed.
-    /// Test: `manager_create_record`, `manager_get_reflects_out_of_process_write`.
+    /// supervisor) to the shared store, so it reloads-on-read first. That reload
+    /// mutates the in-memory map, hence a write lock rather than a read lock. A
+    /// transient reload error must NOT manifest as a false "session not found":
+    /// if the id is still present in the last-known in-memory map we return that
+    /// record (slightly stale) instead of failing the lookup — only a genuinely
+    /// absent id yields `SessionNotFound`.
+    /// What: acquires a write lock, attempts [`SessionStore::reload_if_changed`];
+    /// on reload success the freshly-reloaded map is consulted, on reload failure
+    /// the last-known map is consulted. Either way the lookup uses
+    /// [`SessionStore::cached_get`], so a reload error degrades to stale-but-present
+    /// rather than "gone".
+    /// Test: `manager_create_record`, `manager_get_reflects_out_of_process_write`,
+    /// `manager_get_returns_last_known_on_reload_error`.
     pub async fn get(&self, id: &ManagedSessionId) -> Result<SessionRecord, ManagedError> {
-        self.store.write().await.get(id).await.map_err(|e| match e {
+        let mut guard = self.store.write().await;
+        if let Err(e) = guard.reload_if_changed().await {
+            // Reload failed (transient I/O): do NOT surface as "not found". Fall
+            // through to the last-known in-memory record if we have it.
+            warn!(id = %id, "session get: reload failed: {e}; using last-known record");
+        }
+        guard.cached_get(id).map_err(|e| match e {
             StoreError::NotFound(k) => ManagedError::SessionNotFound(k),
             other => ManagedError::Store(other),
         })
@@ -313,18 +326,29 @@ impl SessionManager {
     /// Return all managed sessions.
     ///
     /// Why: `GET /api/v1/sessions/managed` returns the full list, and (since
-    /// #1219) must reflect any out-of-process write before answering.
+    /// #1219) must reflect any out-of-process write before answering. Crucially, a
+    /// transient reload I/O error (e.g. an NFS hiccup or a momentarily unreadable
+    /// file) must NOT make the endpoint report ZERO sessions — that would mislead
+    /// the supervisor/operator into thinking the fleet is empty and could trigger
+    /// spurious re-provisioning. The in-memory map already holds the last-known
+    /// set, so a reload failure degrades to "slightly stale", never "fleet empty".
     /// What: acquires a write lock and delegates to [`SessionStore::all`], which
-    /// reloads from disk first if the backing file changed. On a reload I/O error
-    /// it logs and falls back to the last-known in-memory set so a transient stat
-    /// failure never makes `list` itself fail.
-    /// Test: `manager_create_record`, `manager_get_reflects_out_of_process_write`.
+    /// reloads from disk first if the backing file changed. On a reload error it
+    /// logs and falls back to the ACTUAL last-known in-memory set
+    /// ([`SessionStore::cached_all`]) rather than an empty list.
+    /// Test: `manager_get_reflects_out_of_process_write`,
+    /// `manager_list_returns_last_known_on_reload_error`.
     pub async fn list(&self) -> Vec<SessionRecord> {
-        match self.store.write().await.all().await {
+        let mut guard = self.store.write().await;
+        match guard.all().await {
             Ok(records) => records,
             Err(e) => {
-                warn!("session list: reload failed: {e}; returning last-known set");
-                Vec::new()
+                let last_known = guard.cached_all();
+                warn!(
+                    count = last_known.len(),
+                    "session list: reload failed: {e}; returning last-known in-memory set"
+                );
+                last_known
             }
         }
     }

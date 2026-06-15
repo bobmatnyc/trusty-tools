@@ -60,8 +60,10 @@ struct StoredData {
 /// would compare equal and the reader would miss the second write. Pairing the
 /// mtime with the byte length catches a same-second write that changed the file
 /// size, which a state transition (different JSON length) almost always does.
-/// What: the file's last-modified `SystemTime` and its length in bytes. `None`
-/// for either component means "unknown" (file absent or metadata unsupported).
+/// What: the file's last-modified `SystemTime` (an `Option` — `None` when the
+/// platform/filesystem cannot report an mtime) and its length in bytes. The whole
+/// `FileSig` is wrapped in an `Option` by callers, where `None` means "file
+/// absent / could not be stat'd".
 /// Test: `store_reload_picks_up_external_write`, `store_reload_noop_when_unchanged`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct FileSig {
@@ -149,19 +151,24 @@ impl SessionStore {
     /// logic; factoring it out keeps the two callers in lock-step so a reload can
     /// never diverge from an initial load.
     /// What: if `path` exists, reads and JSON-parses it and returns `(data,
-    /// Some(sig))`; if absent, returns `(empty, None)`. The signature is read
-    /// from the same metadata, so it reflects the bytes just parsed.
-    /// Test: `store_reload_picks_up_external_write`, `store_load_save_round_trip`.
+    /// Some(sig))`; if absent, returns `(empty, None)`. The signature is captured
+    /// from a stat taken AFTER `read_to_string` so it reflects the bytes actually
+    /// parsed: were we to stat first and another process renamed a new file into
+    /// place between the stat and the read, the old (mtime, len) would be paired
+    /// with the new bytes, and `reload_if_changed` would keep seeing a mismatch
+    /// (re-reading on every read) until the next local save reset `last_sig`.
+    /// Re-statting after the read closes that TOCTOU window. If the post-read
+    /// stat fails (file vanished mid-read), `mtime`/`len` fall back to `None`/`0`,
+    /// which compares unequal and harmlessly forces a future reload.
+    /// Test: `store_reload_picks_up_external_write`, `store_load_save_round_trip`,
+    /// `store_read_file_sig_matches_post_read_bytes`.
     async fn read_file(path: &Path) -> Result<(StoredData, Option<FileSig>), StoreError> {
-        match fs::metadata(path).await {
-            Ok(meta) => {
-                let raw = fs::read_to_string(path).await?;
+        match fs::read_to_string(path).await {
+            Ok(raw) => {
                 let data = serde_json::from_str::<StoredData>(&raw)
                     .map_err(|e| StoreError::Serialize(e.to_string()))?;
-                let sig = FileSig {
-                    mtime: meta.modified().ok(),
-                    len: meta.len(),
-                };
+                // Stat AFTER the read so the signature matches the bytes we parsed.
+                let sig = Self::sig_of(path).await.unwrap_or_default();
                 Ok((data, Some(sig)))
             }
             Err(_) => {
@@ -281,7 +288,37 @@ impl SessionStore {
     /// Test: `store_upsert_and_get`, `store_reload_picks_up_external_write`.
     pub async fn all(&mut self) -> Result<Vec<SessionRecord>, StoreError> {
         self.reload_if_changed().await?;
-        Ok(self.data.sessions.values().cloned().collect())
+        Ok(self.cached_all())
+    }
+
+    /// Return all stored session records from the in-memory map WITHOUT reloading.
+    ///
+    /// Why: a transient reload I/O error (e.g. an NFS hiccup) must never make the
+    /// daemon report an EMPTY fleet (#1219 follow-up). When `all()`'s reload fails,
+    /// callers fall back to this last-known set so a stat failure degrades to
+    /// "slightly stale" rather than "all sessions vanished".
+    /// What: clones and collects the current in-memory values; no disk access.
+    /// Test: `store_cached_all_returns_last_known`, exercised end-to-end by
+    /// `manager_list_returns_last_known_on_reload_error` in tests.rs.
+    pub fn cached_all(&self) -> Vec<SessionRecord> {
+        self.data.sessions.values().cloned().collect()
+    }
+
+    /// Look up a record from the in-memory map WITHOUT reloading from disk.
+    ///
+    /// Why: a transient reload error on a single-record lookup must not surface as
+    /// a false "session not found" (#1219 follow-up); `get()` falls back to this
+    /// last-known record when the reload fails but the id is still in memory.
+    /// What: returns a clone of the cached record or `StoreError::NotFound`; no
+    /// disk access.
+    /// Test: `manager_get_returns_last_known_on_reload_error` in tests.rs.
+    pub fn cached_get(&self, id: &ManagedSessionId) -> Result<SessionRecord, StoreError> {
+        let key = id.to_string();
+        self.data
+            .sessions
+            .get(&key)
+            .cloned()
+            .ok_or(StoreError::NotFound(key))
     }
 
     /// Remove a session record from the store and persist.
@@ -472,5 +509,81 @@ mod tests {
         assert_eq!(all.len(), 2, "both X and Y must survive: {all:?}");
         assert!(store_a.get(&id_x).await.is_ok(), "X present");
         assert!(store_a.get(&id_y).await.is_ok(), "Y must survive A's write");
+    }
+
+    /// Why: #1219 follow-up — `cached_all`/`cached_get` are the no-reload fallback
+    /// that keeps a transient reload error from looking like an empty fleet or a
+    /// missing session. This pins that they return the in-memory set without
+    /// touching disk and without reloading.
+    /// What: seeds a record, corrupts the file on disk (which would fail a reload),
+    /// and asserts the cached accessors still return the seeded record.
+    /// Test: this test.
+    #[tokio::test]
+    async fn store_cached_accessors_ignore_disk() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut store = SessionStore::load(dir.path()).await.expect("load");
+        let id = ManagedSessionId::new();
+        store.upsert(make_record(id)).await.expect("upsert");
+
+        // Corrupt the backing file: a reload would now fail, but the cached
+        // accessors never read disk, so they keep serving the last-known record.
+        let path = dir.path().join("sessions.json");
+        std::fs::write(&path, b"{ not json ]").expect("corrupt file");
+
+        assert_eq!(store.cached_all().len(), 1, "cached_all serves last-known");
+        assert_eq!(
+            store.cached_get(&id).expect("cached_get hit").id,
+            id,
+            "cached_get serves last-known record"
+        );
+        let missing = ManagedSessionId::new();
+        assert!(
+            matches!(store.cached_get(&missing), Err(StoreError::NotFound(_))),
+            "cached_get still reports genuinely-absent ids as NotFound"
+        );
+
+        // And `all()`/`get()` now propagate the reload error (the manager layer
+        // is responsible for falling back to the cached accessors).
+        assert!(store.all().await.is_err(), "all() propagates reload error");
+    }
+
+    /// Why: #1227 review (TOCTOU) — `read_file` must capture the file signature
+    /// from a stat taken AFTER the read, so the `(mtime, len)` pair always matches
+    /// the bytes just parsed. If the signature were captured before the read, a
+    /// concurrent rename in the window would pair an old signature with new bytes,
+    /// and `reload_if_changed` would re-read on every subsequent call until the
+    /// next local save reset `last_sig`.
+    /// What: writes a known file, loads it (so `last_sig` is captured post-read),
+    /// and asserts an immediate `reload_if_changed` is a no-op — i.e. the recorded
+    /// signature's `len` equals the on-disk byte length of the content we parsed.
+    /// Test: this test.
+    #[tokio::test]
+    async fn store_read_file_sig_matches_post_read_bytes() {
+        let dir = TempDir::new().expect("tempdir");
+        let id = ManagedSessionId::new();
+
+        // Author a file via a save so it contains real, parseable JSON.
+        let mut writer = SessionStore::load(dir.path()).await.expect("load writer");
+        writer.upsert(make_record(id)).await.expect("seed");
+
+        // Fresh reader loads the same file; its last_sig is captured AFTER the
+        // read, so it must equal the on-disk length.
+        let mut reader = SessionStore::load(dir.path()).await.expect("load reader");
+        let on_disk_len = std::fs::metadata(dir.path().join("sessions.json"))
+            .expect("stat")
+            .len();
+        let sig = reader.last_sig.expect("reader captured a signature");
+        assert_eq!(
+            sig.len, on_disk_len,
+            "recorded signature length must match the bytes that were parsed"
+        );
+
+        // Because the signature matches the parsed bytes, an immediate reload with
+        // no external write is a clean no-op (record still present, unchanged).
+        reader.reload_if_changed().await.expect("reload no-op");
+        assert!(
+            reader.get(&id).await.is_ok(),
+            "record still present after no-op reload"
+        );
     }
 }
