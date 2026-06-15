@@ -363,8 +363,13 @@ impl DaemonState {
                             std::sync::Arc::new(crate::session_manager::real_tmux::NoopTmuxDriver)
                         }
                     };
-                match crate::session_manager::SessionManager::new(&data_dir, tmux.clone()).await {
-                    Ok(mgr) => std::sync::Arc::new(mgr),
+                let mgr = match crate::session_manager::SessionManager::new(
+                    &data_dir,
+                    tmux.clone(),
+                )
+                .await
+                {
+                    Ok(mgr) => mgr,
                     Err(e) => {
                         tracing::error!(
                             "failed to load managed session store at {}: {e}; using temp dir",
@@ -372,12 +377,36 @@ impl DaemonState {
                         );
                         let tmp = std::env::temp_dir().join("trusty-mpm-session-manager");
                         let _ = std::fs::create_dir_all(&tmp);
-                        let mgr = crate::session_manager::SessionManager::new(&tmp, tmux)
+                        crate::session_manager::SessionManager::new(&tmp, tmux)
                             .await
-                            .expect("temp-dir session store must load");
-                        std::sync::Arc::new(mgr)
+                            .expect("temp-dir session store must load")
+                    }
+                };
+                // Reconcile persisted session records against live tmux state:
+                // sessions whose tmux is gone are flipped to Stopped (resumable);
+                // live sessions are re-adopted as Active.
+                let auto_resume = std::env::var("TRUSTY_MPM_AUTO_RESUME")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                match mgr.reconcile_on_boot(auto_resume).await {
+                    Ok(report) => {
+                        let n_adopted = report.adopted.len();
+                        let n_stopped = report.stopped.len();
+                        let n_external = report.external_adopted.len();
+                        if n_adopted > 0 || n_stopped > 0 || n_external > 0 {
+                            tracing::info!(
+                                adopted = n_adopted,
+                                stopped = n_stopped,
+                                external = n_external,
+                                "session-manager reconcile complete"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("session-manager reconcile failed: {e}");
                     }
                 }
+                std::sync::Arc::new(mgr)
             })
             .await
             .clone()
