@@ -295,11 +295,16 @@ impl SessionManager {
 
     /// Look up a session by its managed id.
     ///
-    /// Why: the HTTP GET and activity handlers need a typed, async lookup.
-    /// What: acquires a read lock and delegates to [`SessionStore::get`].
-    /// Test: `manager_create_record`.
+    /// Why: the HTTP GET and activity handlers need a typed, async lookup. Since
+    /// #1219 the lookup must also reflect writes made by another process (the
+    /// supervisor) to the shared store, so it goes through the store's
+    /// reload-on-read `get`. That reload mutates the in-memory map, hence a write
+    /// lock rather than a read lock.
+    /// What: acquires a write lock and delegates to [`SessionStore::get`], which
+    /// reloads from disk first if the backing file changed.
+    /// Test: `manager_create_record`, `manager_get_reflects_out_of_process_write`.
     pub async fn get(&self, id: &ManagedSessionId) -> Result<SessionRecord, ManagedError> {
-        self.store.read().await.get(id).map_err(|e| match e {
+        self.store.write().await.get(id).await.map_err(|e| match e {
             StoreError::NotFound(k) => ManagedError::SessionNotFound(k),
             other => ManagedError::Store(other),
         })
@@ -307,11 +312,21 @@ impl SessionManager {
 
     /// Return all managed sessions.
     ///
-    /// Why: `GET /api/v1/sessions/managed` returns the full list.
-    /// What: acquires a read lock and returns a clone of all stored records.
-    /// Test: `manager_create_record`.
+    /// Why: `GET /api/v1/sessions/managed` returns the full list, and (since
+    /// #1219) must reflect any out-of-process write before answering.
+    /// What: acquires a write lock and delegates to [`SessionStore::all`], which
+    /// reloads from disk first if the backing file changed. On a reload I/O error
+    /// it logs and falls back to the last-known in-memory set so a transient stat
+    /// failure never makes `list` itself fail.
+    /// Test: `manager_create_record`, `manager_get_reflects_out_of_process_write`.
     pub async fn list(&self) -> Vec<SessionRecord> {
-        self.store.read().await.all()
+        match self.store.write().await.all().await {
+            Ok(records) => records,
+            Err(e) => {
+                warn!("session list: reload failed: {e}; returning last-known set");
+                Vec::new()
+            }
+        }
     }
 
     /// Inject text into a live session's tmux pane.
@@ -492,7 +507,7 @@ impl SessionManager {
 
         let mut report = ReconcileReport::default();
         let mut guard = self.store.write().await;
-        let all_records = guard.all();
+        let all_records = guard.all().await?;
 
         // Build a set of store-known tmux names.
         let known_names: std::collections::HashSet<String> =

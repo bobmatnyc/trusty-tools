@@ -509,7 +509,7 @@ async fn manager_send_input() {
     // Transition to Active so send_input does not reject.
     {
         let mut store = mgr.store.write().await;
-        let mut r = store.get(&record.id).unwrap();
+        let mut r = store.get(&record.id).await.unwrap();
         r.state = ManagedSessionState::Active;
         store.upsert(r).await.unwrap();
     }
@@ -545,7 +545,7 @@ async fn manager_send_input_rejected_for_stopped_and_decommissioned() {
     // Test Stopped rejection.
     {
         let mut store = mgr.store.write().await;
-        let mut r = store.get(&record.id).unwrap();
+        let mut r = store.get(&record.id).await.unwrap();
         r.state = ManagedSessionState::Stopped;
         store.upsert(r).await.unwrap();
     }
@@ -555,7 +555,7 @@ async fn manager_send_input_rejected_for_stopped_and_decommissioned() {
     // Test Decommissioned rejection.
     {
         let mut store = mgr.store.write().await;
-        let mut r = store.get(&record.id).unwrap();
+        let mut r = store.get(&record.id).await.unwrap();
         r.state = ManagedSessionState::Decommissioned;
         store.upsert(r).await.unwrap();
     }
@@ -593,7 +593,7 @@ async fn manager_env_scrub_command_sent() {
     mgr.send_input(
         &{
             let mut store = mgr.store.write().await;
-            let mut r = store.get(&record.id).unwrap();
+            let mut r = store.get(&record.id).await.unwrap();
             r.state = ManagedSessionState::Active;
             store.upsert(r).await.unwrap();
             record.id
@@ -630,7 +630,7 @@ async fn manager_answer_decision() {
     // Seed a pending decision so answer_decision has something to clear.
     {
         let mut store = mgr.store.write().await;
-        let mut r = store.get(&record.id).unwrap();
+        let mut r = store.get(&record.id).await.unwrap();
         r.pending_decision = Some("merge or rebase?".into());
         r.proposed_default = Some("rebase".into());
         store.upsert(r).await.unwrap();
@@ -804,5 +804,80 @@ async fn manager_create_persists_runtime() {
         reloaded.runtime,
         crate::runtime::RuntimeKind::Tcode,
         "runtime must survive persistence so resume re-spawns the same backend"
+    );
+}
+
+/// Why: #1219 — the daemon and the supervisor each own a `SessionManager` over
+/// the SAME on-disk `sessions.json`. When the supervisor writes a state change
+/// (e.g. auto-resume flips `stopped` → `active`), the daemon's manager MUST
+/// reflect that transition on its next read; previously it served stale state
+/// from its load-once in-memory map forever. This test simulates the supervisor
+/// as a second, independent `SessionManager` over the same data dir, writes a
+/// state change through it, and asserts the first manager's `get` returns the
+/// NEW state — proving reload-on-read.
+/// What: builds two managers over one temp data dir, creates+stops a session via
+/// manager A (so both managers' file is seeded), then resumes via manager B
+/// (out-of-process write to disk), then asserts manager A's `get` returns
+/// `Active`, not the stale `Stopped` it last held in memory.
+/// Test: this test.
+#[tokio::test]
+async fn manager_get_reflects_out_of_process_write() {
+    let dir = TempDir::new().unwrap();
+
+    // Manager A = the daemon's view; Manager B = the supervisor's view.
+    // Both point at the same data dir / sessions.json.
+    let (mgr_a, _fake_a) = make_manager(&dir).await;
+    let (mgr_b, fake_b) = make_manager(&dir).await;
+
+    // Create + stop a session via A. The record is now `Stopped` on disk.
+    let record = mgr_a
+        .create(
+            "shared-state task".into(),
+            Some(PathBuf::from("/tmp/wt-shared")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    let id = record.id;
+    mgr_a.stop(&id).await.expect("stop");
+
+    // A reads the session: it now holds `Stopped` in its in-memory map.
+    let before = mgr_a.get(&id).await.expect("get before");
+    assert_eq!(
+        before.state,
+        ManagedSessionState::Stopped,
+        "precondition: manager A sees the session as Stopped"
+    );
+
+    // The supervisor (manager B) resumes the session out of A's process. This
+    // writes `Active` to the shared sessions.json. B reloads-on-read first, so
+    // it sees the Stopped record A persisted, then transitions it to Active.
+    // The fake tmux driver must report the session as NOT existing so resume's
+    // kill-stale path is a no-op, then must accept the create_session call.
+    fake_b.seeded_names.lock().unwrap().clear();
+    mgr_b.resume(&id).await.expect("supervisor resume");
+
+    // The daemon (manager A) reads again. WITHOUT reload-on-read this returns the
+    // stale `Stopped`; WITH it, A re-reads the file and returns `Active`.
+    let after = mgr_a.get(&id).await.expect("get after");
+    assert_eq!(
+        after.state,
+        ManagedSessionState::Active,
+        "manager A must reflect the out-of-process resume written by manager B"
+    );
+
+    // `list` must also reflect the cross-process write.
+    let listed = mgr_a.list().await;
+    let found = listed
+        .iter()
+        .find(|r| r.id == id)
+        .expect("session present in list");
+    assert_eq!(
+        found.state,
+        ManagedSessionState::Active,
+        "manager A's list must also reflect the out-of-process write"
     );
 }
