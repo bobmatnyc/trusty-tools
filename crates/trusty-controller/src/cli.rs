@@ -96,6 +96,25 @@ pub enum ScopeArg {
     All,
 }
 
+/// CLI value for `tctl up --analyze-core` (DOC-12 §3.5).
+///
+/// Why: A clap-facing enum keeps the `--analyze-core blocking|background|skip`
+/// surface declarative while the orchestrator works in terms of
+/// `commands::up::config::AnalyzeMode`; `commands::up_dispatch` bridges the two.
+///
+/// What: Mirrors the §3.5 tri-state.
+///
+/// Test: `cli_tests::parse_up_analyze_core` round-trips each value.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum AnalyzeCoreArg {
+    /// Wait for the core-analysis snapshot before proceeding.
+    Blocking,
+    /// Run the snapshot in the background, non-gating (default).
+    Background,
+    /// Omit the boot-analysis pass entirely.
+    Skip,
+}
+
 /// All `tctl` subcommands.
 ///
 /// Why: A single enum over the entire DOC-5 §1.1 command tree lets the
@@ -111,6 +130,36 @@ pub enum ScopeArg {
 /// `tests::cli` in `cli.rs`.
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// `tctl up` — boot the whole stack: always-on core → analyze → console → opt-in mpm. (DOC-12)
+    ///
+    /// The first-loaded control plane's boot orchestrator. Idempotent and
+    /// restart-safe: a second `up` on a healthy stack is an all-no-op. Brings
+    /// memory + search to healthy (gated), runs a background boot analysis,
+    /// starts trusty-console (printing its URL), and — when opted in via
+    /// `--with-mpm` / config / interactive-yes — starts trusty-mpm and ensures
+    /// Claude Code is present and at latest (prompting before any upgrade).
+    Up {
+        /// Force the opt-in orchestrator (trusty-mpm) ON (§4).
+        #[arg(long, conflicts_with = "no_mpm")]
+        with_mpm: bool,
+
+        /// Force the opt-in orchestrator (trusty-mpm) OFF (§4).
+        #[arg(long)]
+        no_mpm: bool,
+
+        /// Boot-analysis mode over the core crates (§3.5). Default: background.
+        #[arg(long, value_enum)]
+        analyze_core: Option<AnalyzeCoreArg>,
+
+        /// Block STAGE 5 ensure-project until the index reaches `fresh` (§3.5).
+        #[arg(long)]
+        wait: bool,
+
+        /// Skip the Claude Code upgrade step even when stale (§6).
+        #[arg(long)]
+        skip_claude_upgrade: bool,
+    },
+
     /// Install the stack (or named members) — system scope. (DOC-8)
     ///
     /// Idempotent: already-installed members are no-ops. Requires cargo and

@@ -10842,13 +10842,17 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "dirs 5.0.1",
+ "libc",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "trusty-common",
+ "which 6.0.3",
 ]
 
 [[package]]

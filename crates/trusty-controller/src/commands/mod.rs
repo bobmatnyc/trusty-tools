@@ -22,6 +22,47 @@ pub mod port;
 pub mod stack;
 pub mod status;
 pub mod ui;
+pub mod up;
 pub mod updates;
 pub mod upgrade;
 pub mod version;
+
+use crate::cli::AnalyzeCoreArg;
+use up::config::AnalyzeMode;
+use up::UpArgs;
+
+/// Bridge clap's `tctl up` flags into `up::UpArgs` and run the orchestrator.
+///
+/// Why: Keeps `main.rs` a pure dispatcher and isolates the one place clap's
+/// `AnalyzeCoreArg` value enum is translated into the orchestrator's
+/// `AnalyzeMode`, so neither layer depends on the other's enum.
+///
+/// What: Maps the parsed flags into `UpArgs` (folding the global `--json` /
+/// `--yes`), calls `up::run`, and returns its process exit code (DOC-12 §5).
+///
+/// Test: `up::tests` covers the orchestrator; this thin bridge is exercised via
+/// the CLI parse tests in `cli_tests.rs`.
+pub fn run_up(
+    with_mpm: bool,
+    no_mpm: bool,
+    analyze_core: Option<AnalyzeCoreArg>,
+    wait: bool,
+    skip_claude_upgrade: bool,
+    yes: bool,
+    json: bool,
+) -> i32 {
+    let analyze_core = analyze_core.map(|a| match a {
+        AnalyzeCoreArg::Blocking => AnalyzeMode::Blocking,
+        AnalyzeCoreArg::Background => AnalyzeMode::Background,
+        AnalyzeCoreArg::Skip => AnalyzeMode::Skip,
+    });
+    up::run(UpArgs {
+        with_mpm,
+        no_mpm,
+        analyze_core,
+        wait,
+        skip_claude_upgrade,
+        yes,
+        json,
+    })
+}
