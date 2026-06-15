@@ -363,11 +363,8 @@ impl DaemonState {
                             std::sync::Arc::new(crate::session_manager::real_tmux::NoopTmuxDriver)
                         }
                     };
-                let mgr = match crate::session_manager::SessionManager::new(
-                    &data_dir,
-                    tmux.clone(),
-                )
-                .await
+                let mgr = match crate::session_manager::SessionManager::new(&data_dir, tmux.clone())
+                    .await
                 {
                     Ok(mgr) => mgr,
                     Err(e) => {
