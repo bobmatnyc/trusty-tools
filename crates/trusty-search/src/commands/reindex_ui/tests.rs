@@ -760,3 +760,70 @@ fn timing_breakdown_ends_with_newline() {
         "BM25-only path: output must not have double trailing newline; got:\n{out_bm25:?}"
     );
 }
+
+/// Issue #1174: on the defer-embed (fast C1) path, `format_timing_breakdown`
+/// must NOT log "upsert 0ms (0 vectors upserted)" — that annotation is
+/// misleading because real BM25 work happened but vector upsert was intentionally
+/// deferred to the background C2 pass. The fix emits "vectors deferred to
+/// background embed pass" instead, and omits the upsert timing entirely.
+///
+/// Why: the pre-fix output confused operators into thinking the embedder was
+/// broken (zero vectors, zero upsert time) when in fact deferred embedding
+/// was working as designed.
+///
+/// What: calls `format_timing_breakdown` with `defer_embed=true` and
+/// `vector_count==0`, then asserts that "upsert" does NOT appear, "deferred"
+/// DOES appear, "bm25" DOES appear, and output ends with exactly one newline.
+///
+/// Test: this test.
+#[test]
+fn defer_embed_path_suppresses_upsert_zero_annotation() {
+    // Disable ANSI color codes so substring assertions match plain text.
+    colored::control::set_override(false);
+    let defer_timings = ReindexTimings {
+        walk_ms: 50,
+        parse_ms: 800,
+        embed_ms: 0,
+        bm25_ms: 1_200,
+        vector_upsert_ms: 0,
+        kg_ms: 300,
+        vector_count: 0,
+        symbol_count: 100,
+        edge_count: 42,
+    };
+    // defer_embed=true, lexical_only=false
+    let out = format_timing_breakdown(&defer_timings, 5_000, 3_000, true, false);
+
+    // The misleading "upsert 0ms (0 vectors upserted)" MUST NOT appear.
+    assert!(
+        !out.contains("upsert"),
+        "defer-embed path must not show 'upsert' line (issue #1174); got:\n{out}"
+    );
+    assert!(
+        !out.contains("0 vectors"),
+        "defer-embed path must not show '0 vectors upserted' (issue #1174); got:\n{out}"
+    );
+
+    // Informative "deferred" annotation MUST appear.
+    assert!(
+        out.contains("deferred"),
+        "defer-embed path must show 'deferred' annotation so operator knows \
+         vectors will be committed asynchronously (issue #1174); got:\n{out}"
+    );
+
+    // Real BM25 work MUST still appear.
+    assert!(
+        out.contains("bm25"),
+        "defer-embed path must still show 'bm25' timing; got:\n{out}"
+    );
+
+    // Newline invariant: ends with exactly one newline.
+    assert!(
+        out.ends_with('\n'),
+        "defer-embed path: output must end with '\\n'; got:\n{out:?}"
+    );
+    assert!(
+        !out.ends_with("\n\n"),
+        "defer-embed path: output must not have double trailing newline; got:\n{out:?}"
+    );
+}

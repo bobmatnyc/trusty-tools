@@ -74,21 +74,21 @@ pub(super) static INPROCESS_EMBEDDER_EVER_READY: AtomicBool = AtomicBool::new(fa
 /// Test: called at the top of each unit test that exercises this flag so tests
 /// are isolated regardless of execution order.
 #[cfg(test)]
-pub(super) fn reset_inprocess_embedder_flag_for_tests() {
+pub(crate) fn reset_inprocess_embedder_flag_for_tests() {
     INPROCESS_EMBEDDER_EVER_READY.store(false, AtomicOrdering::SeqCst);
 }
 
 /// Read `INPROCESS_EMBEDDER_EVER_READY` for test assertions.
 ///
 /// Why (issue #1179): the static is `pub(super)` scoped to the `reindex`
-/// module; tests in the sibling `tests.rs` can only reach it via this accessor
-/// (direct field access would require `pub(crate)` visibility on the static,
-/// which would widen the surface beyond what production code needs).
+/// module. These test-only accessors are `pub(crate)` so that `mod.rs` can
+/// re-export them as `pub(crate)` for `tests.rs` to use without widening the
+/// production static itself.
 /// What: loads the current value with `SeqCst` ordering and returns it.
 /// Test: used in `inprocess_embedder_flag_reset_restores_false` and
 /// `inprocess_embedder_flag_isolated_across_scenarios`.
 #[cfg(test)]
-pub(super) fn inprocess_embedder_ever_ready_for_tests() -> bool {
+pub(crate) fn inprocess_embedder_ever_ready_for_tests() -> bool {
     INPROCESS_EMBEDDER_EVER_READY.load(AtomicOrdering::SeqCst)
 }
 
