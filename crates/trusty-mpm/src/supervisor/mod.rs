@@ -207,7 +207,9 @@ impl<C: LlmClassifier> Supervisor<C> {
 /// never dies mid-sweep (CLAUDE.md #534).
 /// What: completes on the first of `SIGTERM` (unix only) or Ctrl-C; on a signal
 /// installation error it logs and resolves immediately (fail-stop rather than
-/// hang). Side-effect-only beyond the returned future.
+/// hang). On non-unix targets (Windows) `SIGTERM` is unavailable, so shutdown is
+/// intentionally limited to Ctrl-C — acceptable because the supported persistence
+/// targets (launchd/systemd) are both unix. Side-effect-only beyond the future.
 /// Test: covered indirectly — `run`'s shutdown path is unit-tested via
 /// `run_until` with an injected future, since real OS signals can't be raised
 /// deterministically in a parallel test binary.
@@ -229,6 +231,12 @@ async fn shutdown_signal() {
         }
     };
 
+    // On non-unix targets (Windows) there is no SIGTERM; `tokio::signal::unix`
+    // is unix-only. Shutdown there is intentionally limited to Ctrl-C — the
+    // production deployment targets (launchd on macOS, systemd on Linux) are both
+    // unix and stop the daemon with SIGTERM, so Windows is a best-effort/dev path.
+    // A never-resolving future keeps the `select!` arm valid while deferring
+    // entirely to the Ctrl-C handler.
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
 

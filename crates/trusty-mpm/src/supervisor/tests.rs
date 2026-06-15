@@ -26,7 +26,8 @@ use crate::session_manager::{
 
 use super::Supervisor;
 use super::config::{
-    ENV_AUTO_RESUME, ENV_CLASSIFY_IDLE, ENV_INTERVAL_SECS, ENV_METRICS_ADDR, SupervisorConfig,
+    DEFAULT_LLM_MODEL, ENV_AUTO_RESUME, ENV_CLASSIFY_IDLE, ENV_INTERVAL_SECS, ENV_LLM_MODEL,
+    ENV_METRICS_ADDR, SupervisorConfig,
 };
 use super::metrics::FleetMetrics;
 use super::poller::run_tick;
@@ -209,6 +210,15 @@ fn config_defaults() {
     // An empty injected env yields the same defaults (no process env touched).
     let from_empty = SupervisorConfig::from_env_with(fake_env(&[]));
     assert_eq!(from_empty, c);
+}
+
+#[test]
+fn default_llm_model_is_documented() {
+    // The classification model env var + default are exposed as named constants
+    // so the read site (`commands/supervisor.rs`) and the README config table
+    // share one source of truth rather than a buried string literal.
+    assert_eq!(ENV_LLM_MODEL, "TRUSTY_LLM_MODEL");
+    assert_eq!(DEFAULT_LLM_MODEL, "openai/gpt-4o-mini");
 }
 
 #[test]

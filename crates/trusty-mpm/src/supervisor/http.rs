@@ -6,8 +6,9 @@
 //! health endpoint" acceptance criterion while keeping the surface minimal.
 //! What: holds a shared [`MetricsHandle`] (an `Arc<RwLock<FleetMetrics>>`) that
 //! the supervisor loop updates after each sweep; [`router`] builds the axum
-//! [`Router`]; [`serve`] binds and serves it. Gated behind the `daemon` feature
-//! because axum is only a dependency there (per the workspace axum-feature rule).
+//! [`Router`]; [`bind`] reserves the port (fail-fast) and [`serve_on`] serves it
+//! on the bound listener. Gated behind the `daemon` feature because axum is only
+//! a dependency there (per the workspace axum-feature rule).
 //! Test: `metrics_endpoint_returns_snapshot`, `health_endpoint_ok` in `super::tests`.
 
 use std::net::SocketAddr;
@@ -124,18 +125,4 @@ pub async fn serve_on(
     }
     axum::serve(listener, router(handle)).await?;
     Ok(())
-}
-
-/// Bind and serve the metrics router until the process exits.
-///
-/// Why: a convenience wrapper for callers that want bind+serve in one step (e.g.
-/// integration tests); production wiring uses [`bind`] + [`serve_on`] so the bind
-/// error can be propagated before the supervisor loop starts.
-/// What: binds a `TcpListener` to `addr` via [`bind`] and serves [`router`] via
-/// [`serve_on`]. Returns an error if either the bind or serve fails.
-/// Test: covered indirectly — handlers are unit-tested via the router; the
-/// bind/serve path mirrors the daemon's own `serve_http`.
-pub async fn serve(handle: MetricsHandle, addr: SocketAddr) -> anyhow::Result<()> {
-    let listener = bind(addr).await?;
-    serve_on(listener, handle).await
 }

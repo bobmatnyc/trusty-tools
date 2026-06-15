@@ -33,6 +33,25 @@ pub const ENV_AUTO_RESUME: &str = "TRUSTY_MPM_AUTO_RESUME";
 /// Test: `interval_env_parsing`.
 pub const ENV_INTERVAL_SECS: &str = "TRUSTY_MPM_SUPERVISOR_INTERVAL";
 
+/// Environment variable that selects the LLM model for idle classification.
+///
+/// Why: idle-session activity classification calls an LLM through OpenRouter;
+/// the model is operator-tunable (cost vs. accuracy) and must be read from one
+/// named constant so the env contract is auditable alongside the other `ENV_*`
+/// knobs rather than buried as a string literal at the read site.
+/// What: the variable an operator sets to override the classification model;
+/// when absent the supervisor falls back to [`DEFAULT_LLM_MODEL`].
+/// Test: `default_llm_model_is_documented` asserts the constant + default pair.
+pub const ENV_LLM_MODEL: &str = "TRUSTY_LLM_MODEL";
+
+/// Default LLM model used for idle classification when [`ENV_LLM_MODEL`] is unset.
+///
+/// Why: a cheap, capable default keeps token spend low for the common case while
+/// still letting operators opt into a stronger model via [`ENV_LLM_MODEL`].
+/// What: the fallback model id passed to the classifier when the env var is absent.
+/// Test: `default_llm_model_is_documented`.
+pub const DEFAULT_LLM_MODEL: &str = "openai/gpt-4o-mini";
+
 /// Environment variable that toggles idle-session activity classification.
 ///
 /// Why: classification calls the activity monitor (which may call an LLM). On a

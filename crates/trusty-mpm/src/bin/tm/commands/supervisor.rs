@@ -20,7 +20,35 @@ use trusty_mpm::activity::monitor::{ActivityMonitor, OpenRouterClassifier};
 use trusty_mpm::core::paths::FrameworkPaths;
 use trusty_mpm::session_manager::real_tmux::NoopTmuxDriver;
 use trusty_mpm::session_manager::{ManagedTmuxDriver, RealTmuxDriver, SessionManager};
+use trusty_mpm::supervisor::config::{DEFAULT_LLM_MODEL, ENV_LLM_MODEL};
 use trusty_mpm::supervisor::{Supervisor, SupervisorConfig};
+
+/// Validate the optional `--interval` CLI override and apply it to a config.
+///
+/// Why: previously a `--interval 0` was silently filtered to the default, so an
+/// operator who fat-fingered a zero got no feedback and a cadence they did not
+/// ask for. Rejecting zero with an explicit error gives immediate, actionable
+/// feedback instead of a surprising silent fallback.
+/// What: when `interval` is `Some(0)` returns an error; when `Some(n)` with
+/// `n > 0` sets `cfg.interval` to `n` seconds; when `None` leaves `cfg` untouched
+/// (the env-derived / default cadence stands).
+/// Test: `interval_zero_is_rejected`, `interval_positive_overrides`,
+/// `interval_none_keeps_config` in `super::tests`.
+pub(crate) fn apply_interval_override(
+    cfg: &mut SupervisorConfig,
+    interval: Option<u64>,
+) -> anyhow::Result<()> {
+    match interval {
+        Some(0) => anyhow::bail!(
+            "--interval must be greater than 0 seconds (got 0); omit the flag to use the default"
+        ),
+        Some(secs) => {
+            cfg.interval = std::time::Duration::from_secs(secs);
+            Ok(())
+        }
+        None => Ok(()),
+    }
+}
 
 /// Run the supervisor loop with config resolved from env + CLI overrides.
 ///
@@ -42,9 +70,9 @@ pub(crate) async fn run_supervisor(
     if let Some(a) = addr {
         cfg.metrics_addr = a;
     }
-    if let Some(secs) = interval.filter(|s| *s > 0) {
-        cfg.interval = std::time::Duration::from_secs(secs);
-    }
+    // A zero interval is rejected outright (immediate feedback) rather than
+    // silently falling back to the default.
+    apply_interval_override(&mut cfg, interval)?;
     if auto_resume {
         cfg.auto_resume = true;
     }
@@ -66,8 +94,7 @@ pub(crate) async fn run_supervisor(
 
     // Build the activity monitor unless classification is disabled.
     let monitor = if cfg.classify_idle {
-        let model =
-            std::env::var("TRUSTY_LLM_MODEL").unwrap_or_else(|_| "openai/gpt-4o-mini".to_owned());
+        let model = std::env::var(ENV_LLM_MODEL).unwrap_or_else(|_| DEFAULT_LLM_MODEL.to_owned());
         Some(ActivityMonitor::new(OpenRouterClassifier::new(), model))
     } else {
         None
@@ -113,5 +140,50 @@ pub(crate) async fn run_supervisor(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Why: a zero interval is a fat-finger that previously vanished into the
+    /// default; it must now surface as an error so the operator notices.
+    /// What: asserts `apply_interval_override(_, Some(0))` is an `Err` and that
+    /// the config interval is left unchanged.
+    /// Test: this test.
+    #[test]
+    fn interval_zero_is_rejected() {
+        let mut cfg = SupervisorConfig::default();
+        let before = cfg.interval;
+        let result = apply_interval_override(&mut cfg, Some(0));
+        assert!(result.is_err(), "--interval 0 must be rejected");
+        assert_eq!(
+            cfg.interval, before,
+            "rejected interval must not mutate cfg"
+        );
+    }
+
+    /// Why: a positive override is the intended path and must replace the
+    /// env/default cadence.
+    /// What: asserts `Some(n)` sets `cfg.interval` to `n` seconds.
+    /// Test: this test.
+    #[test]
+    fn interval_positive_overrides() {
+        let mut cfg = SupervisorConfig::default();
+        apply_interval_override(&mut cfg, Some(45)).expect("positive interval is accepted");
+        assert_eq!(cfg.interval, std::time::Duration::from_secs(45));
+    }
+
+    /// Why: omitting `--interval` must leave the env-derived / default cadence in
+    /// place rather than zeroing it.
+    /// What: asserts `None` leaves `cfg.interval` untouched.
+    /// Test: this test.
+    #[test]
+    fn interval_none_keeps_config() {
+        let mut cfg = SupervisorConfig::default();
+        let before = cfg.interval;
+        apply_interval_override(&mut cfg, None).expect("absent interval is a no-op");
+        assert_eq!(cfg.interval, before);
     }
 }
