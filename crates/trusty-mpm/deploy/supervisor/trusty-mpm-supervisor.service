@@ -28,9 +28,11 @@ ExecStart=__TM_BINARY_PATH__ supervisor
 Restart=always
 RestartSec=5
 
-# Seed config. TRUSTY_MPM_AUTO_RESUME=1 enables auto-resume of stopped sessions;
-# remove it (or set 0) to run observe-only.
-Environment=TRUSTY_MPM_AUTO_RESUME=1
+# Seed config. Auto-resume ships DISABLED for safety (the README's "opt-in"
+# stance): the supervisor runs observe-only until you explicitly turn it on.
+# To ENABLE auto-resume of stopped sessions, UNCOMMENT the line below (set it to
+# 1), or pass `tm supervisor --auto-resume`.
+# Environment=TRUSTY_MPM_AUTO_RESUME=1
 Environment=TRUSTY_MPM_SUPERVISOR_INTERVAL=30
 Environment=TRUSTY_MPM_SUPERVISOR_ADDR=127.0.0.1:7881
 Environment=RUST_LOG=info

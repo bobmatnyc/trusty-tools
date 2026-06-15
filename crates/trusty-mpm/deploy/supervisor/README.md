@@ -41,6 +41,7 @@ curl -s http://127.0.0.1:7881/health        # {"status":"ok"}
 | `TRUSTY_MPM_SUPERVISOR_INTERVAL` | `30` | Poll interval, seconds. |
 | `TRUSTY_MPM_SUPERVISOR_CLASSIFY` | `1` (on) | `0`/`false` disables idle classification (no LLM spend). |
 | `TRUSTY_MPM_SUPERVISOR_ADDR` | `127.0.0.1:7881` | `/metrics` + `/health` bind address. |
+| `TRUSTY_LLM_MODEL` | `openai/gpt-4o-mini` | OpenRouter model used for idle-session activity classification. |
 | `OPENROUTER_API_KEY` | — | Required for real activity classification; absent ⇒ `unknown`. |
 
 CLI flags (`--interval`, `--addr`, `--auto-resume`, `--no-classify`) override the
@@ -49,10 +50,13 @@ env vars.
 ## Enabling auto-resume
 
 Auto-resume is **opt-in** for safety — by default the supervisor runs observe-only
-and only surfaces fleet state. To enable it, do **one** of:
+and only surfaces fleet state. The launchd plist and systemd unit below ship with
+`TRUSTY_MPM_AUTO_RESUME` **commented out**, so an out-of-the-box install never
+resumes sessions until you opt in. To enable it, do **one** of:
 
-- export `TRUSTY_MPM_AUTO_RESUME=1` in the supervisor's environment (the launchd
-  plist / systemd unit below already set this), **or**
+- **uncomment / set `TRUSTY_MPM_AUTO_RESUME=1`** in the supervisor's environment
+  (uncomment the `TRUSTY_MPM_AUTO_RESUME` block in the plist, or the
+  `Environment=TRUSTY_MPM_AUTO_RESUME=1` line in the systemd unit), **or**
 - pass `tm supervisor --auto-resume`.
 
 ## Persistence — macOS (launchd)
