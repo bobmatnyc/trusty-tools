@@ -6,10 +6,13 @@
 //! What: Builds an axum `Router` with:
 //!   - `GET /health` — liveness probe.
 //!   - `GET /api/console/services` — return cached snapshot (background poll).
-//!   - `GET /api/console/metrics/{analyze,memory,search,review}` — MCP-polled metrics.
+//!   - `GET /api/console/metrics/{analyze,memory,search,review,mpm}` — MCP-polled metrics.
 //!   - `GET /api/console/metrics/analyze/indexes` — analyze index list via stdio MCP.
 //!   - `GET /api/console/metrics/analyze/visualize?index=<id>` — graph+entities+clusters.
-//!   - `ANY /proxy/{daemon}/{*path}` — reverse-proxy to live daemon.
+//!   - `…/api/console/sessions/*` — the single HTTP front door for the trusty-mpm
+//!     session manager (#1222); handlers live in `crate::routes::sessions`.
+//!   - `ANY /proxy/{daemon}/{*path}` — reverse-proxy to live daemon (mpm is NOT
+//!     in the proxy allowlist — operators use `/api/console/sessions/*` instead).
 //!   - `GET /` and `GET /ui/*path` — serve the embedded Svelte SPA.
 //!
 //! All logs go to stderr; stdout is clean.
@@ -78,6 +81,9 @@ pub struct AppState {
     memory_metrics_cache: MetricsCache,
     search_metrics_cache: MetricsCache,
     review_metrics_cache: MetricsCache,
+    /// trusty-mpm `console_metrics` cache (#1222). Populated by the background
+    /// poller; served by `GET /api/console/metrics/mpm`.
+    mpm_metrics_cache: MetricsCache,
     http_client: Arc<reqwest::Client>,
     /// Analyze stdio MCP handle — shared with the metrics poller so both the
     /// background poll and on-demand route calls reuse the same child process.
@@ -127,11 +133,20 @@ impl AppState {
             "trusty-review",
             vec!["serve".to_string(), "--stdio".to_string()],
         ));
+        // Why: trusty-mpm's stdio MCP mode is `serve --stdio` (the #1221 bridge
+        // that auto-starts the durable daemon and forwards JSON-RPC to its
+        // loopback POST /rpc). The console spawns this to render the Sessions tab
+        // natively (#1222) without ever touching the daemon's HTTP port (#1104).
+        let mpm_handle = Arc::new(McpServiceHandle::new(
+            "trusty-mpm",
+            vec!["serve".to_string(), "--stdio".to_string()],
+        ));
         let mut handles: HashMap<String, Arc<McpServiceHandle>> = HashMap::new();
         handles.insert("trusty-analyze".to_string(), Arc::clone(&analyze_handle));
         handles.insert("trusty-memory".to_string(), Arc::clone(&memory_handle));
         handles.insert("trusty-search".to_string(), Arc::clone(&search_handle));
         handles.insert("trusty-review".to_string(), Arc::clone(&review_handle));
+        handles.insert("trusty-mpm".to_string(), Arc::clone(&mpm_handle));
         Self {
             connectors: Arc::new(connectors),
             poller_cache: PollerCache::new(),
@@ -139,6 +154,7 @@ impl AppState {
             memory_metrics_cache: MetricsCache::new(),
             search_metrics_cache: MetricsCache::new(),
             review_metrics_cache: MetricsCache::new(),
+            mpm_metrics_cache: MetricsCache::new(),
             http_client: Arc::new(client),
             analyze_handle,
             mcp_handles: Arc::new(handles),
@@ -226,6 +242,16 @@ impl AppState {
         &self.review_metrics_cache
     }
 
+    /// Access the metrics cache for the trusty-mpm stdio MCP poller (#1222).
+    ///
+    /// Why: separate cache per service so the mpm session/supervisor report can
+    /// be updated and served independently from the other service caches.
+    /// What: returns a reference to the `MetricsCache` handle for mpm.
+    /// Test: `test_metrics_mpm_route_cold_cache_returns_503`.
+    pub fn mpm_metrics_cache(&self) -> &MetricsCache {
+        &self.mpm_metrics_cache
+    }
+
     /// Access the shared `reqwest::Client`.
     ///
     /// Why: Re-using one client enables connection pooling across proxy requests.
@@ -253,6 +279,42 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/console/metrics/memory", get(metrics_memory_handler))
         .route("/api/console/metrics/search", get(metrics_search_handler))
         .route("/api/console/metrics/review", get(metrics_review_handler))
+        .route("/api/console/metrics/mpm", get(metrics_mpm_handler))
+        // ── trusty-mpm session-manager surface (#1222: P2 tab + P3 front door) ──
+        // The console is the SINGLE HTTP front door for the session REST API;
+        // every handler calls a trusty-mpm MCP tool via the stdio bridge — never
+        // the daemon's HTTP port (#1104). Route order: the static `supervisor`
+        // and `auto-resume` sub-paths are declared before the `{id}` capture so
+        // axum matches them first.
+        .route(
+            "/api/console/sessions",
+            get(crate::routes::sessions::list_handler).post(crate::routes::sessions::new_handler),
+        )
+        .route(
+            "/api/console/sessions/supervisor",
+            get(crate::routes::sessions::supervisor_handler),
+        )
+        .route(
+            "/api/console/sessions/supervisor/auto-resume",
+            axum::routing::post(crate::routes::sessions::auto_resume_handler),
+        )
+        .route(
+            "/api/console/sessions/{id}",
+            get(crate::routes::sessions::get_handler)
+                .delete(crate::routes::sessions::decommission_handler),
+        )
+        .route(
+            "/api/console/sessions/{id}/activity",
+            get(crate::routes::sessions::activity_handler),
+        )
+        .route(
+            "/api/console/sessions/{id}/stop",
+            axum::routing::post(crate::routes::sessions::stop_handler),
+        )
+        .route(
+            "/api/console/sessions/{id}/resume",
+            axum::routing::post(crate::routes::sessions::resume_handler),
+        )
         // Analyze on-demand routes — call the analyze stdio MCP directly (no /proxy).
         .route(
             "/api/console/metrics/analyze/indexes",
@@ -431,6 +493,22 @@ async fn metrics_search_handler(State(state): State<AppState>) -> axum::response
 /// Test: `test_metrics_review_route_cold_cache_returns_503` below.
 async fn metrics_review_handler(State(state): State<AppState>) -> axum::response::Response {
     match state.review_metrics_cache().get().await {
+        Some(report) => axum::Json(report).into_response(),
+        None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+/// `GET /api/console/metrics/mpm` — return the latest trusty-mpm metrics report.
+///
+/// Why: surfaces trusty-mpm session-fleet + supervisor health to the SPA without
+/// per-request MCP calls (the background poller keeps the cache warm). This is
+/// the coarse, low-frequency health cache; the Sessions tab polls the live
+/// `/api/console/sessions` list at a faster cadence for active monitoring.
+/// What: returns the cached `ConsoleMetricsReport` as JSON (200) or 503 when no
+/// poll has completed yet (binary absent or first boot).
+/// Test: `test_metrics_mpm_route_cold_cache_returns_503` below.
+async fn metrics_mpm_handler(State(state): State<AppState>) -> axum::response::Response {
+    match state.mpm_metrics_cache().get().await {
         Some(report) => axum::Json(report).into_response(),
         None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
@@ -994,6 +1072,21 @@ mod tests {
         let router = build_router(make_test_state());
         let req = Request::builder()
             .uri("/api/console/metrics/review")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Why: with an empty mpm metrics cache the route must return 503 so the UI
+    /// can show a "not yet available" state rather than empty JSON (#1222).
+    /// What: issues GET /api/console/metrics/mpm on a fresh state, asserts 503.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn test_metrics_mpm_route_cold_cache_returns_503() {
+        let router = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/console/metrics/mpm")
             .body(Body::empty())
             .expect("request");
         let resp = router.oneshot(req).await.expect("response");

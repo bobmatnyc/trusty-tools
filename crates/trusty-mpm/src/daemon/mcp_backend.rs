@@ -404,6 +404,20 @@ impl OrchestratorBackend for StateBackend {
     async fn session_send(&self, session_id: &str, text: &str) -> Result<Value, String> {
         super::mcp_session::session_send(&self.state, session_id, text).await
     }
+
+    // ── #1222: console-facing tools (delegate to mcp_console) ────────────────
+
+    async fn console_metrics(&self) -> Result<Value, String> {
+        super::mcp_console::console_metrics(&self.state).await
+    }
+
+    async fn supervisor_status(&self) -> Result<Value, String> {
+        super::mcp_console::supervisor_status(&self.state).await
+    }
+
+    async fn auto_resume_set(&self, enabled: bool) -> Result<Value, String> {
+        super::mcp_console::auto_resume_set(enabled).await
+    }
 }
 
 #[cfg(test)]

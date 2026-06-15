@@ -5,6 +5,7 @@
   import SearchTab from './SearchTab.svelte';
   import AnalyzeTab from './AnalyzeTab.svelte';
   import ReviewTab from './ReviewTab.svelte';
+  import SessionsTab from './SessionsTab.svelte';
   import ThemeSelector from './ThemeSelector.svelte';
 
   // ── state ────────────────────────────────────────────────────────────────
@@ -20,6 +21,7 @@
     { id: 'memory',   label: 'Memory' },
     { id: 'analyze',  label: 'Analyze' },
     { id: 'review',   label: 'Review' },
+    { id: 'sessions', label: 'Sessions' },
   ];
 
   // Single source of truth: maps service.id → console tab key.
@@ -31,6 +33,7 @@
     'trusty-memory':  'memory',
     'trusty-analyze': 'analyze',
     'trusty-review':  'review',
+    'trusty-mpm':     'sessions',
   };
 
   // Derived set used by ServiceCard to decide whether to render the button.
@@ -110,6 +113,8 @@
       <AnalyzeTab />
     {:else if activeTab === 'review'}
       <ReviewTab />
+    {:else if activeTab === 'sessions'}
+      <SessionsTab />
     {/if}
   </div>
 </main>
