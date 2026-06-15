@@ -6,8 +6,9 @@
 //! and from the workspace-wide types in `trusty-common`.
 //!
 //! What: Defines the `LanguageAnalyzer` trait, file-extension-based language
-//! detection, and a set of adapters: Rust and TypeScript/JavaScript are
-//! fully implemented; Python, Java, and Go are stubbed for Phase 2b.
+//! detection, and a full set of adapters: Rust, TypeScript/JavaScript, Python,
+//! Java, Go, C, C++, C#, Kotlin, PHP, Ruby, Scala, and Swift are all
+//! implemented via tree-sitter AST walks.
 //!
 //! Test: each adapter has a unit test that parses a minimal source snippet
 //! and asserts at least one expected node is extracted.
