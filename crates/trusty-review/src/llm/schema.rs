@@ -99,3 +99,10 @@ pub fn enforce_strict_mode(schema: &mut Value) {
 #[cfg(test)]
 #[path = "schema_tests.rs"]
 mod tests;
+
+// Re-export the recursive strict-mode assertion so the prompt-schema tests in
+// `pipeline::prompt_tests` reuse the single canonical implementation instead of
+// duplicating it. `pub(crate)` keeps it test-only (the `tests` module is
+// `#[cfg(test)]`) and crate-private.
+#[cfg(test)]
+pub(crate) use tests::assert_object_nodes_strict;

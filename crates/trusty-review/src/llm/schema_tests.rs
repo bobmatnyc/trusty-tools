@@ -23,8 +23,10 @@ use super::enforce_strict_mode;
 /// map), asserts `additionalProperties == false` and that `required` lists
 /// exactly the `properties` keys; recurses into `properties`, `items`, and
 /// object-valued `additionalProperties`.
-/// Test: used by the strict-mode assertions in this file.
-fn assert_object_nodes_strict(schema: &Value) {
+/// Test: used by the strict-mode assertions in this file, and re-exported
+/// `pub(crate)` (see `schema.rs`) for the prompt-schema tests in
+/// `pipeline::prompt_tests` so the recursive check lives in exactly one place.
+pub(crate) fn assert_object_nodes_strict(schema: &Value) {
     if let Value::Object(map) = schema {
         // Mirror `enforce_strict_mode`: a node is a closed object schema (the
         // kind strict mode constrains) when it carries a `properties` map.
@@ -175,12 +177,9 @@ fn recurses_into_object_valued_additional_properties() {
         }
     });
     enforce_strict_mode(&mut schema);
-    // The inner additionalProperties object schema must itself be strict.
-    let inner = &schema["properties"]["meta"]["properties"];
-    // `meta` had no `properties`, so its additionalProperties stays the object
-    // schema (we only overwrite to `false` when properties drive the node);
-    // verify recursion still made the inner schema strict.
-    let _ = inner; // meta has no properties; assert via the additionalProperties path
+    // `meta` has no `properties`, so its `additionalProperties` stays the object
+    // schema (we only overwrite it to `false` when `properties` drive the node).
+    // Verify recursion still made that inner object schema strict.
     let ap = &schema["properties"]["meta"]["additionalProperties"];
     assert_object_nodes_strict(ap);
 }

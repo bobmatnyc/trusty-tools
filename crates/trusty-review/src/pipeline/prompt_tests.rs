@@ -423,62 +423,11 @@ fn review_output_schema_enum_matches_board_grades() {
     assert_eq!(values.len(), 5, "schema must have exactly 5 board grades");
 }
 
-/// Recursively assert every object node of a JSON Schema is OpenAI strict-mode
-/// compliant: `additionalProperties == false` and `required` lists exactly the
-/// `properties` keys.
-///
-/// Why: the OpenAI strict-mode contract is recursive; a flat check on the top
-/// level would miss the exact regression we are guarding (`findings.items`
-/// previously lacked `additionalProperties`, blocking all OpenAI reviews).
-/// What: walks the schema, asserting the invariant on each object node and
-/// recursing into `properties`, array `items`, and object-valued
-/// `additionalProperties`.
-/// Test: invoked by `review_schema_is_openai_strict_compliant`.
-fn assert_strict(schema: &serde_json::Value) {
-    use serde_json::Value;
-    if let Value::Object(map) = schema {
-        let has_properties = map.get("properties").is_some_and(Value::is_object);
-        if has_properties {
-            assert_eq!(
-                map.get("additionalProperties"),
-                Some(&Value::Bool(false)),
-                "object node must set additionalProperties:false — {map:?}"
-            );
-            let props: std::collections::BTreeSet<&str> = map["properties"]
-                .as_object()
-                .expect("properties object")
-                .keys()
-                .map(String::as_str)
-                .collect();
-            let required: std::collections::BTreeSet<&str> = map
-                .get("required")
-                .and_then(Value::as_array)
-                .map(|r| r.iter().filter_map(Value::as_str).collect())
-                .unwrap_or_default();
-            assert_eq!(
-                props, required,
-                "every property must be listed in required — {map:?}"
-            );
-        }
-        if let Some(p) = map.get("properties").and_then(Value::as_object) {
-            for c in p.values() {
-                assert_strict(c);
-            }
-        }
-        if let Some(i) = map.get("items") {
-            assert_strict(i);
-        }
-        if let Some(ap) = map.get("additionalProperties")
-            && ap.is_object()
-        {
-            assert_strict(ap);
-        }
-    } else if let Value::Array(items) = schema {
-        for i in items {
-            assert_strict(i);
-        }
-    }
-}
+// The recursive strict-mode assertion lives in `llm::schema_tests`
+// (`assert_object_nodes_strict`) and is re-exported `pub(crate)` from
+// `llm::schema`. We reuse it here instead of duplicating the walk so the
+// invariant is defined in exactly one place.
+use crate::llm::schema::assert_object_nodes_strict as assert_strict;
 
 /// The review response schema must be OpenAI strict-mode compliant top-to-bottom.
 ///
