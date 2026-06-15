@@ -1011,6 +1011,41 @@ fn cli_parses_issue_current_and_states_and_repair() {
 }
 
 #[test]
+fn gui_not_found_error_has_install_hint() {
+    // Why: when `trusty-mpm-gui` is not installed, `tm gui` must fail with an
+    // actionable message telling the user how to install it (gui decoupling,
+    // publish-prep). A bare "No such file" from the OS is not acceptable.
+    // What: feeds a synthetic `NotFound` spawn error into the result mapper and
+    // asserts the error string carries the `cargo install trusty-mpm-gui` hint.
+    let not_found = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+    let err = crate::gui_status_to_result(Err(not_found))
+        .expect_err("NotFound spawn error must map to an Err");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("cargo install trusty-mpm-gui"),
+        "expected install hint, got: {msg}"
+    );
+    assert!(
+        msg.contains("not installed"),
+        "expected 'not installed' phrasing, got: {msg}"
+    );
+}
+
+#[test]
+fn gui_binary_resolution_falls_back_to_bare_name() {
+    // Why: when no `trusty-mpm-gui` sibling exists next to the running binary,
+    // the resolver must fall back to the bare name so the OS resolves it on PATH
+    // (Single-Install convention). The test binary's dir has no such sibling.
+    // What: asserts the resolved path's file name is exactly `trusty-mpm-gui`.
+    let resolved = crate::resolve_gui_binary();
+    assert_eq!(
+        resolved.file_name().and_then(|n| n.to_str()),
+        Some("trusty-mpm-gui"),
+        "resolver must yield a trusty-mpm-gui path, got: {resolved:?}"
+    );
+}
+
+#[test]
 fn cli_parses_issue_seed_config_force() {
     // Why: `tm issue seed-config --force` must parse the overwrite flag (#1246).
     use crate::cli::IssueCmd;
