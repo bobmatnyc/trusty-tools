@@ -109,13 +109,14 @@ pub(crate) async fn session_ls(
     Ok(())
 }
 
-/// `tm session activity <id>` — classify a managed session's activity state.
+/// `tm session activity <id>` — inspect a managed session's activity state.
 ///
-/// Why: inspect what a session is doing without attaching; the LLM verdict
-/// tells the calling agentic process whether to intervene.
-/// What: GETs `/api/v1/sessions/managed/{id}/activity` and prints the verdict
-/// fields (state, summary, confidence, cache_hit, token costs) plus any pending
-/// decision.
+/// Why: inspect what a session is doing without attaching; the raw pane is
+/// always returned for the calling agentic process to reason over. The LLM
+/// classification is shown when available (OpenRouter key set); when absent,
+/// `classification: null` and the raw pane are still returned with no error.
+/// What: GETs `/api/v1/sessions/managed/{id}/activity` and prints the raw pane,
+/// structured state, classification (or "no classifier"), and pending decision.
 /// Test: HTTP path covered by the integration test.
 pub(crate) async fn session_activity(
     client: &reqwest::Client,
@@ -124,6 +125,8 @@ pub(crate) async fn session_activity(
 ) -> anyhow::Result<()> {
     #[derive(Deserialize)]
     struct ActivityResp {
+        raw_pane: String,
+        runtime_active: bool,
         state: String,
         summary: String,
         confidence: f32,
@@ -133,6 +136,8 @@ pub(crate) async fn session_activity(
         latency_ms: u64,
         total_input_tokens: u64,
         total_output_tokens: u64,
+        #[serde(default)]
+        classification: Option<String>,
         #[serde(default)]
         pending_decision: Option<String>,
         #[serde(default)]
@@ -147,8 +152,19 @@ pub(crate) async fn session_activity(
         return Ok(());
     }
     let a: ActivityResp = resp.error_for_status()?.json().await?;
+    let runtime_str = if a.runtime_active {
+        "running"
+    } else {
+        "stopped"
+    };
+    println!("runtime:    {runtime_str}");
     println!("state:      {} (confidence: {:.2})", a.state, a.confidence);
     println!("summary:    {}", a.summary);
+    let classification_str = a
+        .classification
+        .as_deref()
+        .unwrap_or("(no classifier — raw pane available for agentic inference)");
+    println!("classification: {classification_str}");
     let cache = if a.cache_hit { "hit" } else { "miss" };
     println!(
         "cache:      {} | tokens: in={} out={} | latency: {}ms",
@@ -163,6 +179,10 @@ pub(crate) async fn session_activity(
         if let Some(default) = &a.proposed_default {
             println!("  proposed default: {default}");
         }
+    }
+    if !a.raw_pane.is_empty() {
+        println!("--- raw pane (last 60 lines) ---");
+        println!("{}", a.raw_pane);
     }
     Ok(())
 }
@@ -232,18 +252,33 @@ pub(crate) async fn session_attach(
     Ok(())
 }
 
-/// `tm session managed-stop <id>` — stop and deregister a managed session.
+/// `tm session managed-stop <id>` — stop runtime only (keep workspace, legacy alias).
 ///
-/// Why: terminate a managed session when its work is done.
-/// What: DELETEs `/api/v1/sessions/managed/{id}`.
+/// Why: backward-compatible alias for `session_runtime_stop`; existing scripts
+/// that call `managed-stop` get the new non-destructive behavior.
+/// What: POSTs `/api/v1/sessions/managed/{id}/runtime-stop`.
 /// Test: HTTP path covered by the integration test.
 pub(crate) async fn session_managed_stop(
     client: &reqwest::Client,
     url: &str,
     id: String,
 ) -> anyhow::Result<()> {
+    session_runtime_stop(client, url, id).await
+}
+
+/// `tm session runtime-stop <id>` — stop the runtime, keep the workspace.
+///
+/// Why: a session ENDURES beyond its runtime; `runtime-stop` kills only the
+/// tmux session and claude process, preserving the workspace for later `resume`.
+/// What: POSTs `/api/v1/sessions/managed/{id}/runtime-stop`.
+/// Test: HTTP path covered by the integration test.
+pub(crate) async fn session_runtime_stop(
+    client: &reqwest::Client,
+    url: &str,
+    id: String,
+) -> anyhow::Result<()> {
     let resp = client
-        .delete(format!("{url}/api/v1/sessions/managed/{id}"))
+        .post(format!("{url}/api/v1/sessions/managed/{id}/runtime-stop"))
         .send()
         .await?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -251,7 +286,67 @@ pub(crate) async fn session_managed_stop(
         return Ok(());
     }
     resp.error_for_status()?;
-    println!("stopped {id}");
+    println!("runtime stopped {id} (workspace intact; use 'resume' to restart)");
+    Ok(())
+}
+
+/// `tm session managed-resume <id>` — resume a stopped session in its existing workspace.
+///
+/// Why: after `runtime-stop`, the workspace is still on disk; `managed-resume`
+/// re-spawns the runtime there without re-cloning.
+/// What: POSTs `/api/v1/sessions/managed/{id}/resume`.
+/// Test: HTTP path covered by the integration test.
+pub(crate) async fn session_managed_resume(
+    client: &reqwest::Client,
+    url: &str,
+    id: String,
+) -> anyhow::Result<()> {
+    let resp = client
+        .post(format!("{url}/api/v1/sessions/managed/{id}/resume"))
+        .send()
+        .await?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        println!("not found");
+        return Ok(());
+    }
+    if resp.status() == reqwest::StatusCode::CONFLICT {
+        let msg = resp.text().await.unwrap_or_default();
+        println!("cannot resume: {msg}");
+        return Ok(());
+    }
+    #[derive(Deserialize)]
+    struct ResumeResp {
+        id: String,
+        name: String,
+        state: String,
+    }
+    let body: ResumeResp = resp.error_for_status()?.json().await?;
+    println!("resumed {} ({}) [{}]", body.name, body.id, body.state);
+    Ok(())
+}
+
+/// `tm session decommission <id>` — full teardown (remove workspace from disk).
+///
+/// Why: the ONLY operation that permanently removes the workspace directory.
+/// Unlike `runtime-stop`, decommission is terminal — no resume is possible.
+/// A tombstone record is kept so `ls` shows history.
+/// What: POSTs `/api/v1/sessions/managed/{id}/decommission`.
+/// Test: HTTP path covered by the integration test.
+pub(crate) async fn session_decommission(
+    client: &reqwest::Client,
+    url: &str,
+    id: String,
+) -> anyhow::Result<()> {
+    let resp = client
+        .post(format!("{url}/api/v1/sessions/managed/{id}/decommission"))
+        .send()
+        .await?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        println!("not found");
+        return Ok(());
+    }
+    resp.error_for_status()?;
+    println!("decommissioned {id} (workspace removed; tombstone record kept)");
     Ok(())
 }
 

@@ -369,6 +369,15 @@ pub(crate) async fn session(
         SessionAction::ManagedStop { id } => {
             crate::commands::managed::session_managed_stop(client, url, id).await?
         }
+        SessionAction::RuntimeStop { id } => {
+            crate::commands::managed::session_runtime_stop(client, url, id).await?
+        }
+        SessionAction::ManagedResume { id } => {
+            crate::commands::managed::session_managed_resume(client, url, id).await?
+        }
+        SessionAction::Decommission { id } => {
+            crate::commands::managed::session_decommission(client, url, id).await?
+        }
     }
     Ok(())
 }
