@@ -717,8 +717,9 @@ the body sections noted.
 - [x] Owner review of §3 sequence + §5 gating + §6 Claude-Code policy (Bob, 2026-06-15)
 - [x] Resolve Open Questions Q1–Q6 with Bob (RESOLVED 2026-06-15 — see Open
       questions section: Q1/Q2/Q3/Q6 by decision, Q4/Q5 by recommendation)
-- [ ] Land ADR-0011 (tctl headless / console single-HTTP) — drafted alongside;
-      flip its status Proposed → Accepted on owner sign-off
+- [x] Land ADR-0011 (tctl headless / console single-HTTP) — drafted alongside;
+      flip its status Proposed → Accepted on owner sign-off (Accepted 2026-06-15
+      via PR #1240 merge)
 - [x] Re-status DOC-7 → Superseded (Q4 confirmed 2026-06-15) — banner + README
       index updated
 - [ ] (impl-time) build `tctl up` staging in `crates/trusty-controller/src/`
