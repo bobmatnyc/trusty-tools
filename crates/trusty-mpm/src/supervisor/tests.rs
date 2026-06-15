@@ -437,7 +437,7 @@ async fn tick_never_answers_pending_decision() {
     let ids = seed_sessions(&mgr, 1, ManagedSessionState::Active, &ws).await;
     {
         let mut store = mgr.store.write().await;
-        let mut r = store.get(&ids[0]).expect("get");
+        let mut r = store.get(&ids[0]).await.expect("get");
         r.pending_decision = Some("Force-push to main?".into());
         store.upsert(r).await.expect("upsert");
     }
