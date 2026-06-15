@@ -168,6 +168,22 @@ pub struct DaemonState {
     /// Test: `managed_routes` handler tests exercise the accessor via the router.
     pub(super) managed_sessions:
         tokio::sync::OnceCell<std::sync::Arc<crate::session_manager::SessionManager>>,
+    /// Lazily-initialized activity monitor for the `/sessions/managed/{id}/activity`
+    /// route.
+    ///
+    /// Why: `ActivityMonitor` must be shared across requests so the per-session
+    /// content-hash cache persists between calls; a `OnceLock` defers
+    /// construction until the first activity request and amortizes the cost.
+    /// What: holds the shared monitor; built on first access using the default
+    /// [`OpenRouterClassifier`] (reads `OPENROUTER_API_KEY` from env).
+    /// Test: `managed_routes` handler tests exercise this via the router.
+    pub(super) activity_monitor: std::sync::OnceLock<
+        std::sync::Arc<
+            crate::activity::monitor::ActivityMonitor<
+                crate::activity::monitor::OpenRouterClassifier,
+            >,
+        >,
+    >,
 }
 
 impl Default for DaemonState {
@@ -219,6 +235,7 @@ impl DaemonState {
             framework_root,
             event_tx,
             managed_sessions: tokio::sync::OnceCell::new(),
+            activity_monitor: std::sync::OnceLock::new(),
         }
     }
 
@@ -289,7 +306,35 @@ impl DaemonState {
             framework_root,
             event_tx,
             managed_sessions: tokio::sync::OnceCell::new(),
+            activity_monitor: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Return the shared activity monitor, constructing it on first access.
+    ///
+    /// Why: the `/sessions/managed/{id}/activity` handler needs a single,
+    /// shared `ActivityMonitor` whose per-session content-hash cache persists
+    /// across requests; a `OnceCell` amortises the construction cost and
+    /// guarantees the same cache is reused for every request.
+    /// What: on first call builds `ActivityMonitor<OpenRouterClassifier>` with
+    /// the model from `TRUSTY_LLM_MODEL` (or `openai/gpt-4o-mini`); returns the
+    /// shared `Arc` on every subsequent call.
+    /// Test: `handler_activity_cache_hit` in `tests/session_manager_mvp.rs`.
+    pub fn activity_monitor(
+        &self,
+    ) -> std::sync::Arc<
+        crate::activity::monitor::ActivityMonitor<crate::activity::monitor::OpenRouterClassifier>,
+    > {
+        self.activity_monitor
+            .get_or_init(|| {
+                let model = std::env::var("TRUSTY_LLM_MODEL")
+                    .unwrap_or_else(|_| "openai/gpt-4o-mini".to_owned());
+                let classifier = crate::activity::monitor::OpenRouterClassifier::new();
+                Arc::new(crate::activity::monitor::ActivityMonitor::new(
+                    classifier, model,
+                ))
+            })
+            .clone()
     }
 
     /// Return the lazily-initialized managed [`SessionManager`].
@@ -336,5 +381,24 @@ impl DaemonState {
             })
             .await
             .clone()
+    }
+
+    /// Inject a pre-built session manager into the OnceCell for testing.
+    ///
+    /// Why: handler-level tests need a `SessionManager` backed by a fake tmux
+    /// driver; this constructor lets tests seed the cell before the first request
+    /// fires so `session_manager()` returns the pre-built instance.
+    /// What: sets `managed_sessions` to `mgr`; calling `session_manager()` after
+    /// this returns the injected value without touching the real tmux binary or
+    /// disk store paths.
+    /// Test: used by `handler_spawn_wires_provision_and_spawn` and
+    /// `handler_activity_cache_hit` in `tests/session_manager_mvp.rs`.
+    #[cfg(test)]
+    pub fn with_session_manager(
+        mgr: std::sync::Arc<crate::session_manager::SessionManager>,
+    ) -> Self {
+        let state = Self::new();
+        let _ = state.managed_sessions.set(mgr);
+        state
     }
 }

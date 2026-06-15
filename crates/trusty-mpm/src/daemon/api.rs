@@ -62,8 +62,8 @@ pub use coordinator_routes::*;
 /// [`crate::daemon::managed_routes`]; importing them here lets `router` refer to
 /// them unqualified, mirroring the `coordinator_routes` wiring.
 use super::managed_routes::{
-    answer_session_decision, get_attach_cmd, get_managed_session, list_managed_sessions,
-    send_to_session, spawn_session, stop_managed_session,
+    answer_session_decision, get_attach_cmd, get_managed_session, get_session_activity,
+    list_managed_sessions, send_to_session, spawn_session, stop_managed_session,
 };
 
 /// Typed HTTP response bodies for every endpoint.
@@ -148,6 +148,10 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .route(
             "/api/v1/sessions/managed/{id}/attach-cmd",
             get(get_attach_cmd),
+        )
+        .route(
+            "/api/v1/sessions/managed/{id}/activity",
+            get(get_session_activity),
         )
         .merge(
             SwaggerUi::new("/api-docs")

@@ -192,18 +192,54 @@ impl<G: GitBackend> CatalogSync<G> {
         }
     }
 
-    /// Count files in a subdirectory of the catalog repo clone.
+    /// Resolve the directory that holds a given catalog resource type.
+    ///
+    /// Why: the claude-mpm repo stores agents and skills under `repo/.claude/agents`
+    /// and `repo/.claude/skills/`; older forks or mirrors may use the flat
+    /// `repo/agents` / `repo/skills` layout. This helper tries the preferred
+    /// `.claude/<subdir>` location first and falls back to the legacy flat path.
+    /// What: returns the first of (`repo/.claude/<subdir>`, `repo/<subdir>`) that
+    /// exists as a directory; falls back to `repo/<subdir>` when neither exists.
+    /// Test: catalog_ls_lists_agents uses the `.claude/agents` path after the real
+    /// repo layout was confirmed via `find ~/.trusty-mpm/catalog/repo/.claude`.
+    fn catalog_subdir(&self, subdir: &str) -> std::path::PathBuf {
+        let preferred = self.catalog_dir.join("repo").join(".claude").join(subdir);
+        if preferred.is_dir() {
+            return preferred;
+        }
+        // Fall back to the legacy flat layout.
+        self.catalog_dir.join("repo").join(subdir)
+    }
+
+    /// Count files in a catalog subdirectory (agents or skills).
     ///
     /// Why: the CLI needs to show how many agents and skills are cached.
-    /// What: counts non-directory entries in catalog_dir/repo/<subdir>/.
+    /// What: resolves the correct subdir path via `catalog_subdir`, then counts
+    /// non-directory entries. Skills may be stored as directories (one dir per
+    /// skill containing SKILL.md), so for skills we count directories instead.
     /// Test: catalog_sync_fetches_on_first_call asserts agent_count >= 0.
     fn count_files(&self, subdir: &str) -> usize {
-        let dir = self.catalog_dir.join("repo").join(subdir);
+        let dir = self.catalog_subdir(subdir);
         match std::fs::read_dir(&dir) {
-            Ok(entries) => entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().map(|t| !t.is_dir()).unwrap_or(false))
-                .count(),
+            Ok(entries) => {
+                let entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+                // Skills are stored as directories (one dir per skill).
+                // Agents are stored as flat .md files. Count whichever is present.
+                let file_count = entries
+                    .iter()
+                    .filter(|e| e.file_type().map(|t| !t.is_dir()).unwrap_or(false))
+                    .count();
+                let dir_count = entries
+                    .iter()
+                    .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                    .count();
+                // Return whichever is non-zero; prefer files (agents) over dirs (skills).
+                if file_count > 0 {
+                    file_count
+                } else {
+                    dir_count
+                }
+            }
             Err(_) => 0,
         }
     }
@@ -211,32 +247,82 @@ impl<G: GitBackend> CatalogSync<G> {
     /// List agent file names from the cached catalog.
     ///
     /// Why: `tm catalog ls` needs a listing of available agents.
-    /// What: returns file stems from catalog_dir/repo/agents/.
+    /// What: returns file stems from `catalog_subdir("agents")` — preferring
+    /// `.claude/agents` over the legacy `agents` flat path.
     /// Test: catalog_ls_lists_agents.
     pub fn list_agents(&self) -> Vec<String> {
-        list_names(&self.catalog_dir.join("repo").join("agents"))
+        list_names(&self.catalog_subdir("agents"))
     }
 
-    /// List skill file names from the cached catalog.
+    /// List skill directory names from the cached catalog.
     ///
     /// Why: `tm catalog ls` needs a listing of available skills.
-    /// What: returns file stems from catalog_dir/repo/skills/.
-    /// Test: catalog_ls_lists_agents.
+    /// What: returns directory names from `catalog_subdir("skills")` — preferring
+    /// `.claude/skills` over the legacy `skills` flat path. Skills are stored
+    /// as one directory per skill containing a SKILL.md file.
+    /// Test: catalog_ls_lists_skills.
     pub fn list_skills(&self) -> Vec<String> {
-        list_names(&self.catalog_dir.join("repo").join("skills"))
+        list_skill_names(&self.catalog_subdir("skills"))
     }
 }
 
-/// Return the file stems in a directory.
+/// Return the file stems in a directory (for flat-file layouts like agents).
 ///
 /// Why: catalog listing needs clean names without extensions.
-/// What: reads directory entries, strips extensions, and returns sorted names.
-/// Test: used by list_agents/list_skills which are tested in unit tests.
+/// What: reads directory entries, skips directories, strips extensions, and
+/// returns sorted names.
+/// Test: used by list_agents which is tested in unit tests.
 fn list_names(dir: &Path) -> Vec<String> {
     match std::fs::read_dir(dir) {
         Ok(entries) => {
             let mut names: Vec<String> = entries
                 .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| !t.is_dir()).unwrap_or(false))
+                .filter_map(|e| {
+                    e.path()
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_owned())
+                })
+                .collect();
+            names.sort();
+            names
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Return the subdirectory names in a skills directory.
+///
+/// Why: in the claude-mpm repo, each skill is stored as a directory containing
+/// a SKILL.md file (e.g. `.claude/skills/trusty-memory/SKILL.md`). The catalog
+/// listing should show skill directory names, not file extensions.
+/// What: reads directory entries, includes only directories, and returns sorted
+/// names. Falls back to flat-file stems when no directories are found (legacy).
+/// Test: used by list_skills which is tested in unit tests.
+fn list_skill_names(dir: &Path) -> Vec<String> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => {
+            let all: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+            // Prefer directory-per-skill layout (`.claude/skills/<name>/SKILL.md`).
+            let dir_names: Vec<String> = all
+                .iter()
+                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .filter_map(|e| {
+                    e.path()
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_owned())
+                })
+                .collect();
+            if !dir_names.is_empty() {
+                let mut sorted = dir_names;
+                sorted.sort();
+                return sorted;
+            }
+            // Fall back: flat .md files (legacy layout).
+            let mut names: Vec<String> = all
+                .iter()
                 .filter(|e| e.file_type().map(|t| !t.is_dir()).unwrap_or(false))
                 .filter_map(|e| {
                     e.path()
@@ -309,14 +395,65 @@ mod tests {
         let sync = make_sync(&root);
         sync.sync(false).unwrap();
 
-        // Create fake agent files to simulate a catalog.
-        let agents_dir = root.path().join("repo").join("agents");
+        // Simulate the real claude-mpm repo layout: agents are at
+        // repo/.claude/agents/ (not repo/agents/).
+        let agents_dir = root.path().join("repo").join(".claude").join("agents");
         std::fs::create_dir_all(&agents_dir).unwrap();
         std::fs::write(agents_dir.join("engineer.md"), "# engineer").unwrap();
         std::fs::write(agents_dir.join("qa.md"), "# qa").unwrap();
 
         let agents = sync.list_agents();
-        assert!(agents.contains(&"engineer".to_owned()));
-        assert!(agents.contains(&"qa".to_owned()));
+        assert!(
+            agents.contains(&"engineer".to_owned()),
+            "agents: {agents:?}"
+        );
+        assert!(agents.contains(&"qa".to_owned()), "agents: {agents:?}");
+    }
+
+    #[test]
+    fn catalog_ls_lists_skills() {
+        let root = TempDir::new().unwrap();
+        let sync = make_sync(&root);
+        sync.sync(false).unwrap();
+
+        // Simulate the real claude-mpm repo layout: skills are stored as
+        // directories under repo/.claude/skills/ (one dir per skill).
+        let skills_dir = root.path().join("repo").join(".claude").join("skills");
+        std::fs::create_dir_all(skills_dir.join("trusty-memory")).unwrap();
+        std::fs::create_dir_all(skills_dir.join("auto-bug-reporter")).unwrap();
+        std::fs::write(
+            skills_dir.join("trusty-memory").join("SKILL.md"),
+            "# trusty-memory",
+        )
+        .unwrap();
+
+        let skills = sync.list_skills();
+        assert!(
+            skills.contains(&"trusty-memory".to_owned()),
+            "skills: {skills:?}"
+        );
+        assert!(
+            skills.contains(&"auto-bug-reporter".to_owned()),
+            "skills: {skills:?}"
+        );
+    }
+
+    #[test]
+    fn catalog_ls_falls_back_to_legacy_agent_path() {
+        // When .claude/agents doesn't exist, should fall back to repo/agents/.
+        let root = TempDir::new().unwrap();
+        let sync = make_sync(&root);
+        sync.sync(false).unwrap();
+
+        // Use legacy flat path (no .claude dir).
+        let agents_dir = root.path().join("repo").join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("legacy-agent.md"), "# legacy").unwrap();
+
+        let agents = sync.list_agents();
+        assert!(
+            agents.contains(&"legacy-agent".to_owned()),
+            "agents from legacy path: {agents:?}"
+        );
     }
 }

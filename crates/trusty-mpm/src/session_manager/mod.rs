@@ -12,6 +12,9 @@ pub mod manager;
 pub mod record;
 pub mod store;
 
+#[cfg(test)]
+mod tests;
+
 /// Real tmux driver adapter — only available when the `daemon` feature (and thus
 /// the daemon's `TmuxDriver`) is compiled in.
 #[cfg(feature = "daemon")]

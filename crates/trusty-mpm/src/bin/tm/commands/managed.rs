@@ -18,16 +18,12 @@ use crate::cli::CatalogAction;
 /// Why: the CLI renders a stable subset of fields; deriving Deserialize on a
 /// dedicated struct decouples the CLI from the daemon's internal record shape.
 /// What: mirrors `daemon::managed_routes::SessionSummary`.
-/// Test: rendered by `ls`/`activity`; round-trip covered by the integration test.
+/// Test: rendered by `ls`; round-trip covered by the integration test.
 #[derive(Debug, Deserialize)]
 struct ManagedSummary {
     id: String,
     name: String,
     state: String,
-    #[serde(default)]
-    repo_url: Option<String>,
-    #[serde(default)]
-    branch: Option<String>,
     #[serde(default)]
     pending_decision: Option<String>,
 }
@@ -113,36 +109,60 @@ pub(crate) async fn session_ls(
     Ok(())
 }
 
-/// `tm session activity <id>` — show a managed session's summary.
+/// `tm session activity <id>` — classify a managed session's activity state.
 ///
-/// Why: inspect what a session is doing without attaching.
-/// What: GETs `/api/v1/sessions/managed/{id}` and prints its fields.
+/// Why: inspect what a session is doing without attaching; the LLM verdict
+/// tells the calling agentic process whether to intervene.
+/// What: GETs `/api/v1/sessions/managed/{id}/activity` and prints the verdict
+/// fields (state, summary, confidence, cache_hit, token costs) plus any pending
+/// decision.
 /// Test: HTTP path covered by the integration test.
 pub(crate) async fn session_activity(
     client: &reqwest::Client,
     url: &str,
     id: String,
 ) -> anyhow::Result<()> {
+    #[derive(Deserialize)]
+    struct ActivityResp {
+        state: String,
+        summary: String,
+        confidence: f32,
+        cache_hit: bool,
+        input_tokens: u32,
+        output_tokens: u32,
+        latency_ms: u64,
+        total_input_tokens: u64,
+        total_output_tokens: u64,
+        #[serde(default)]
+        pending_decision: Option<String>,
+        #[serde(default)]
+        proposed_default: Option<String>,
+    }
     let resp = client
-        .get(format!("{url}/api/v1/sessions/managed/{id}"))
+        .get(format!("{url}/api/v1/sessions/managed/{id}/activity"))
         .send()
         .await?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         println!("not found");
         return Ok(());
     }
-    let s: ManagedSummary = resp.error_for_status()?.json().await?;
-    println!("id:     {}", s.id);
-    println!("name:   {}", s.name);
-    println!("state:  {}", s.state);
-    if let Some(repo) = &s.repo_url {
-        println!("repo:   {repo}");
-    }
-    if let Some(branch) = &s.branch {
-        println!("branch: {branch}");
-    }
-    if let Some(pending) = &s.pending_decision {
+    let a: ActivityResp = resp.error_for_status()?.json().await?;
+    println!("state:      {} (confidence: {:.2})", a.state, a.confidence);
+    println!("summary:    {}", a.summary);
+    let cache = if a.cache_hit { "hit" } else { "miss" };
+    println!(
+        "cache:      {} | tokens: in={} out={} | latency: {}ms",
+        cache, a.input_tokens, a.output_tokens, a.latency_ms
+    );
+    println!(
+        "total:      in={} out={}",
+        a.total_input_tokens, a.total_output_tokens
+    );
+    if let Some(pending) = &a.pending_decision {
         println!("pending decision: {pending}");
+        if let Some(default) = &a.proposed_default {
+            println!("  proposed default: {default}");
+        }
     }
     Ok(())
 }

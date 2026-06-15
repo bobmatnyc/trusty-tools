@@ -20,10 +20,13 @@ use axum::{
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{info, warn};
 
+use crate::activity::monitor::ActivityCheckResult;
 use crate::daemon::state::DaemonState;
-use crate::session_manager::{ManagedSessionId, SessionRecord};
+use crate::provisioner::WorkspaceProvisioner;
+use crate::runtime::{ClaudeCodeAdapter, RuntimeAdapter};
+use crate::session_manager::{ManagedSessionId, ManagedSessionState, SessionRecord};
 
 // ── Request / Response shapes ─────────────────────────────────────────────────
 
@@ -175,6 +178,41 @@ pub struct AttachCmdResponse {
     pub attach_cmd: String,
 }
 
+/// Response body for GET /api/v1/sessions/managed/{id}/activity.
+///
+/// Why: the calling agentic process needs the full activity picture —
+/// the LLM verdict, cost metrics, cache status, and cumulative tally — in
+/// one response so it can decide whether to intervene or let the session run.
+/// What: the activity state string, a human-readable summary, a confidence
+/// score, whether the check hit the content-hash cache, token counts for this
+/// check, cumulative token tally, and any pending decision fields.
+/// Test: activity route handler test.
+#[derive(Debug, Serialize)]
+pub struct ActivityResponse {
+    /// Activity state: working, idle, blocked_on_permission, errored, done, unknown.
+    pub state: String,
+    /// Human-readable summary of what the session is doing.
+    pub summary: String,
+    /// Confidence of the classification (0.0–1.0).
+    pub confidence: f32,
+    /// True when the verdict was served from the content-hash cache.
+    pub cache_hit: bool,
+    /// Input token count for this check (0 on cache hit).
+    pub input_tokens: u32,
+    /// Output token count for this check (0 on cache hit).
+    pub output_tokens: u32,
+    /// Latency in milliseconds for this check.
+    pub latency_ms: u64,
+    /// Cumulative input tokens across all checks for this session.
+    pub total_input_tokens: u64,
+    /// Cumulative output tokens across all checks for this session.
+    pub total_output_tokens: u64,
+    /// A pending decision question, if surfaced by a previous activity check.
+    pub pending_decision: Option<String>,
+    /// Proposed default answer to the pending decision.
+    pub proposed_default: Option<String>,
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Convert a [`SessionRecord`] into a wire [`SessionSummary`].
@@ -234,48 +272,127 @@ fn parse_id(id_str: &str) -> Result<ManagedSessionId, (StatusCode, String)> {
 ///
 /// Why: the primary entry point for the calling agentic process to create a new
 /// isolated agent workspace and start a harness in it.
-/// What: creates the session in SessionManager (recording repo_url + ref) and
-/// returns 201 with the attach command. Workspace provisioning is recorded on
-/// the session via repo_url/branch; the dedicated provisioner is wired in a
-/// follow-up.
-/// Test: spawn handler test.
+/// What: in order —
+///   (a) provisions an isolated workspace via `WorkspaceProvisioner::provision`
+///       (clone + prepare_session deploy of agents/skills);
+///   (b) creates the tmux session record in `SessionManager` with cwd set to the
+///       provisioned directory;
+///   (c) launches Claude Code in the pane via `ClaudeCodeAdapter::spawn`
+///       (`env -u ANTHROPIC_API_KEY claude`);
+///   (d) marks the record Active and persists the workspace_path.
+/// On any step failing the record is marked `errored` (or the error is returned
+/// before the record is created). No panics, no `unwrap` on the critical path.
+/// Test: `handler_spawn_wires_provision_and_spawn` in tests/session_manager_mvp.rs
+/// asserts provision was called (workspace_path is non-null under workspaces root)
+/// and that the spawn command was sent to tmux.
 pub async fn spawn_session(
     State(state): State<Arc<DaemonState>>,
     Json(req): Json<SpawnRequest>,
 ) -> impl IntoResponse {
+    // ── Step 1: provision an isolated workspace ───────────────────────────────
+    // Allow tests (and operators) to override the workspace root via an env var
+    // so the provisioner does not write into the real ~/.trusty-mpm tree.
+    let workspace_root = std::env::var("TRUSTY_MPM_WORKSPACE_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                .join(".trusty-mpm")
+                .join("workspaces")
+        });
+
+    let provisioner = WorkspaceProvisioner::new(crate::provisioner::RealGitBackend, workspace_root);
+
+    // Create the session record first to obtain the session_id for the workspace path.
     let mgr = state.session_manager().await;
-    match mgr
+    let record = match mgr
         .create(
-            req.task,
+            req.task.clone(),
             None,
             req.name_hint,
             None,
-            Some(req.repo_url),
-            Some(req.git_ref),
+            Some(req.repo_url.clone()),
+            Some(req.git_ref.clone()),
         )
         .await
     {
-        Ok(record) => {
-            let attach = attach_cmd_for(&record.tmux_name);
-            let resp = SpawnResponse {
-                id: record.id.to_string(),
-                name: record.tmux_name,
-                workspace_path: record
-                    .workspace_path
-                    .map(|p| p.to_string_lossy().to_string()),
-                repo_url: record.repo_url,
-                branch: record.branch,
-                state: record.state.to_string(),
-                created_at: record.created_at.to_rfc3339(),
-                attach_cmd: attach,
-            };
-            (StatusCode::CREATED, Json(resp)).into_response()
-        }
+        Ok(r) => r,
         Err(e) => {
-            warn!("spawn_session failed: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+            warn!("spawn_session: session create failed: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
         }
+    };
+
+    // Provision workspace, writing into ~/.trusty-mpm/workspaces/<project>/<id>/.
+    let prepared = match provisioner.provision(&record.id, &req.repo_url, &req.git_ref, &req.task) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(id = %record.id, "spawn_session: provision failed: {e}");
+            // Mark the session errored so `ls` surfaces the failure.
+            let _ = mgr
+                .mark_errored(&record.id, &format!("provision failed: {e}"))
+                .await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("workspace provisioning failed: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    // ── Step 2: update the record with workspace_path and transition to Active ─
+    if let Err(e) = mgr
+        .set_workspace(
+            &record.id,
+            prepared.path.clone(),
+            ManagedSessionState::Active,
+        )
+        .await
+    {
+        warn!(id = %record.id, "spawn_session: set_workspace failed: {e}");
+        // Non-fatal — the session was created; continue to spawn.
     }
+
+    // ── Step 3: spawn Claude Code in the pane ────────────────────────────────
+    // Re-read the tmux driver via the same session manager Arc.
+    let tmux_arc = mgr.tmux_driver();
+    let adapter = ClaudeCodeAdapter::new(tmux_arc);
+    if let Err(e) = adapter.spawn(&record.tmux_name, &prepared.path, &req.task) {
+        warn!(
+            id = %record.id,
+            name = %record.tmux_name,
+            "spawn_session: ClaudeCodeAdapter::spawn failed: {e}"
+        );
+        // Mark errored but still return a 201 so the caller can inspect the
+        // workspace and attach manually. The error is surfaced in the state field.
+        let _ = mgr
+            .mark_errored(&record.id, &format!("spawn failed: {e}"))
+            .await;
+    } else {
+        info!(
+            id = %record.id,
+            name = %record.tmux_name,
+            path = %prepared.path.display(),
+            "managed session spawned successfully"
+        );
+    }
+
+    // Re-fetch the record after all mutations so the response reflects the final state.
+    let final_record = mgr.get(&record.id).await.unwrap_or(record);
+    let attach = attach_cmd_for(&final_record.tmux_name);
+    let resp = SpawnResponse {
+        id: final_record.id.to_string(),
+        name: final_record.tmux_name,
+        workspace_path: final_record
+            .workspace_path
+            .map(|p| p.to_string_lossy().to_string()),
+        repo_url: final_record.repo_url,
+        branch: final_record.branch,
+        state: final_record.state.to_string(),
+        created_at: final_record.created_at.to_rfc3339(),
+        attach_cmd: attach,
+    };
+    (StatusCode::CREATED, Json(resp)).into_response()
 }
 
 /// GET /api/v1/sessions/managed — list all managed sessions.
@@ -418,4 +535,67 @@ pub async fn stop_managed_session(
         Ok(record) => Json(record_to_summary(&record)).into_response(),
         Err(_) => (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response(),
     }
+}
+
+/// GET /api/v1/sessions/managed/{id}/activity — classify a session's activity.
+///
+/// Why: the calling agentic process needs to know whether the session is
+/// working, idle, blocked, errored, or done, without attaching to the tmux
+/// pane. The content-hash cache eliminates redundant LLM calls when the pane
+/// content has not changed.
+/// What: captures the pane via the session's tmux driver, hashes the content,
+/// and calls `ActivityMonitor::check` with the OpenRouterClassifier. Returns
+/// the verdict (state, summary, confidence), cache_hit, per-check token counts,
+/// cumulative tally, and the session's pending_decision fields.
+/// Test: `handler_activity_cache_hit` in tests/session_manager_mvp.rs.
+pub async fn get_session_activity(
+    State(state): State<Arc<DaemonState>>,
+    AxumPath(id_str): AxumPath<String>,
+) -> impl IntoResponse {
+    let id = match parse_id(&id_str) {
+        Ok(id) => id,
+        Err((code, msg)) => return (code, msg).into_response(),
+    };
+    let mgr = state.session_manager().await;
+    let record = match mgr.get(&id).await {
+        Ok(r) => r,
+        Err(_) => {
+            return (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response();
+        }
+    };
+
+    // Capture the last 60 pane lines.
+    let pane_text = mgr
+        .capture_pane(&id, 60)
+        .await
+        .unwrap_or_else(|_| String::new());
+
+    // Run the activity check through the shared ActivityMonitor.
+    let monitor = state.activity_monitor();
+    let result: ActivityCheckResult = match monitor.check(&id_str, &pane_text).await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(session = %id_str, "activity check failed: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("activity check failed: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    Json(ActivityResponse {
+        state: format!("{:?}", result.verdict.state).to_lowercase(),
+        summary: result.verdict.summary,
+        confidence: result.verdict.confidence,
+        cache_hit: result.cache_hit,
+        input_tokens: result.cost.input_tokens,
+        output_tokens: result.cost.output_tokens,
+        latency_ms: result.cost.latency_ms,
+        total_input_tokens: result.tally.total_input_tokens,
+        total_output_tokens: result.tally.total_output_tokens,
+        pending_decision: record.pending_decision,
+        proposed_default: record.proposed_default,
+    })
+    .into_response()
 }

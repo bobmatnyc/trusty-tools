@@ -102,6 +102,19 @@ pub struct ActivityMonitor<C: LlmClassifier> {
     model: String,
 }
 
+impl<C: LlmClassifier> std::fmt::Debug for ActivityMonitor<C> {
+    /// Why: `DaemonState` derives `Debug` and holds `Arc<ActivityMonitor<…>>`;
+    /// the generic `C` may not implement `Debug` so we provide a manual impl.
+    /// What: prints only the model name (the cache and classifier have no useful
+    /// debug form and may reference runtime handles).
+    /// Test: compile-time only.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActivityMonitor")
+            .field("model", &self.model)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<C: LlmClassifier> ActivityMonitor<C> {
     /// Construct a monitor with the given LLM classifier.
     ///

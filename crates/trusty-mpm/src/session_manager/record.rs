@@ -92,6 +92,9 @@ pub enum ManagedSessionState {
     /// A tmux session with the right prefix was found during reconciliation
     /// and adopted into the store.
     Adopted,
+    /// The session failed to provision or spawn; the record is preserved for
+    /// post-mortem inspection but the session is not running.
+    Errored,
 }
 
 impl fmt::Display for ManagedSessionState {
@@ -103,6 +106,7 @@ impl fmt::Display for ManagedSessionState {
             Self::Dead => "dead",
             Self::Orphaned => "orphaned",
             Self::Adopted => "adopted",
+            Self::Errored => "errored",
         };
         write!(f, "{s}")
     }
