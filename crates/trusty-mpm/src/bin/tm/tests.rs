@@ -774,6 +774,64 @@ fn deprecation_notice_format() {
 }
 
 #[test]
+fn classify_managed_target_matches_by_id() {
+    // #1218: the canonical `stop`/`resume` verbs must recognize a managed
+    // session by its UUID and route to the managed endpoint, not project-sessions.
+    use crate::commands::managed::{ManagedSummary, classify_managed_target};
+    let uuid = "11111111-2222-3333-4444-555555555555";
+    let sessions: Vec<ManagedSummary> = serde_json::from_value(serde_json::json!([
+        { "id": uuid, "name": "tmpm-quiet-falcon", "state": "running" }
+    ]))
+    .unwrap();
+    assert_eq!(
+        classify_managed_target(&sessions, uuid),
+        Some(uuid.to_string()),
+        "a managed UUID must resolve to the managed id (routes to managed endpoint)"
+    );
+}
+
+#[test]
+fn classify_managed_target_matches_by_name_returns_id() {
+    // A friendly managed name must resolve to the canonical UUID the managed
+    // endpoints require, so `tm session stop <name>` works for managed sessions.
+    use crate::commands::managed::{ManagedSummary, classify_managed_target};
+    let uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let sessions: Vec<ManagedSummary> = serde_json::from_value(serde_json::json!([
+        { "id": uuid, "name": "tmpm-brave-otter", "state": "stopped" }
+    ]))
+    .unwrap();
+    assert_eq!(
+        classify_managed_target(&sessions, "tmpm-brave-otter"),
+        Some(uuid.to_string()),
+        "a managed name must resolve to its id, not be passed through verbatim"
+    );
+}
+
+#[test]
+fn classify_managed_target_unknown_falls_back_to_none() {
+    // A non-managed id/name must NOT match — the caller then falls back to the
+    // project-session path, preserving the local/project-session family (#1218).
+    use crate::commands::managed::{ManagedSummary, classify_managed_target};
+    let sessions: Vec<ManagedSummary> = serde_json::from_value(serde_json::json!([
+        { "id": "11111111-2222-3333-4444-555555555555", "name": "tmpm-quiet-falcon", "state": "running" }
+    ]))
+    .unwrap();
+    assert_eq!(
+        classify_managed_target(&sessions, "some-local-session-name"),
+        None,
+        "an unknown id/name must yield None so `stop`/`resume` fall back to project-sessions"
+    );
+}
+
+#[test]
+fn classify_managed_target_empty_list_is_none() {
+    // With no managed sessions, every argument falls back to project-sessions.
+    use crate::commands::managed::{ManagedSummary, classify_managed_target};
+    let sessions: Vec<ManagedSummary> = Vec::new();
+    assert_eq!(classify_managed_target(&sessions, "anything"), None);
+}
+
+#[test]
 fn cli_parses_catalog_sync() {
     let cli = Cli::try_parse_from(["trusty-mpm", "catalog", "sync", "--force"]).unwrap();
     match cli.command {

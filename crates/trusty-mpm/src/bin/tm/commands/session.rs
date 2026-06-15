@@ -19,8 +19,10 @@ use crate::types::{EventRow, SessionRow};
 /// Why: a session is a Claude Code instance; operators start, stop, list,
 /// reap, and inspect them per project from the shell.
 /// What: `Start` posts `POST /sessions` with the project path; `Stop` and
-/// `Info` resolve a session by id or friendly name; `List` and `Clean` scope
-/// to the project directory.
+/// `Resume` are managed-aware (#1218) — they route to the managed runtime-stop/
+/// resume endpoints when the id/name resolves to a managed session, falling back
+/// to the project-session path otherwise; `Info` resolves a session by id or
+/// friendly name; `List` and `Clean` scope to the project directory.
 /// Test: `cli_parses_session_start`, `cli_parses_session_stop`,
 /// `cli_parses_session_list`, `cli_parses_session_clean`,
 /// `cli_parses_session_info`.
@@ -113,15 +115,26 @@ pub(crate) async fn session(
             }
         }
         SessionAction::Stop { id_or_name } => {
-            let resp = client
-                .delete(format!("{url}/sessions/{id_or_name}"))
-                .send()
-                .await?;
-            if resp.status() == reqwest::StatusCode::NOT_FOUND {
-                println!("not found");
+            // #1218: `stop` is managed-aware. If the argument resolves to a
+            // MANAGED session (by id or friendly name), route to the managed
+            // runtime-stop endpoint; otherwise fall back to the project-session
+            // DELETE path. This keeps one intuitive verb that does the right
+            // thing for both families (the #842 driver skill documents `stop`).
+            if let Some(managed_id) =
+                crate::commands::managed::resolve_managed_id(client, url, &id_or_name).await
+            {
+                crate::commands::managed::session_stop(client, url, managed_id).await?;
             } else {
-                resp.error_for_status()?;
-                println!("stopped {id_or_name}");
+                let resp = client
+                    .delete(format!("{url}/sessions/{id_or_name}"))
+                    .send()
+                    .await?;
+                if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                    println!("not found");
+                } else {
+                    resp.error_for_status()?;
+                    println!("stopped {id_or_name}");
+                }
             }
         }
         SessionAction::List { dir } => {
@@ -273,20 +286,29 @@ pub(crate) async fn session(
             }
         }
         SessionAction::Resume { id_or_name } => {
-            let resp = client
-                .post(format!("{url}/sessions/{id_or_name}/resume"))
-                .send()
-                .await?;
-            match resp.status() {
-                reqwest::StatusCode::NOT_FOUND => {
-                    println!("session '{id_or_name}' not found");
-                }
-                reqwest::StatusCode::CONFLICT => {
-                    println!("session '{id_or_name}' is not paused");
-                }
-                _ => {
-                    resp.error_for_status()?;
-                    println!("resumed {id_or_name}");
+            // #1218: `resume` is managed-aware (mirrors `Stop`). A managed
+            // session id/name routes to the managed resume endpoint; anything
+            // else falls back to the project-session pause/resume path.
+            if let Some(managed_id) =
+                crate::commands::managed::resolve_managed_id(client, url, &id_or_name).await
+            {
+                crate::commands::managed::session_resume(client, url, managed_id).await?;
+            } else {
+                let resp = client
+                    .post(format!("{url}/sessions/{id_or_name}/resume"))
+                    .send()
+                    .await?;
+                match resp.status() {
+                    reqwest::StatusCode::NOT_FOUND => {
+                        println!("session '{id_or_name}' not found");
+                    }
+                    reqwest::StatusCode::CONFLICT => {
+                        println!("session '{id_or_name}' is not paused");
+                    }
+                    _ => {
+                        resp.error_for_status()?;
+                        println!("resumed {id_or_name}");
+                    }
                 }
             }
         }
