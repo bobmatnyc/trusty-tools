@@ -68,4 +68,4 @@ Proposed ──► Accepted ──► Superseded (by ADR-NNNN)
 | [0008](./0008-project-identity-convention.md) | Project-identity convention: full-path slug of the nearest git root | Accepted |
 | [0009](./0009-external-extractor-kg-ingest-contract.md) | External-extractor KG ingest contract: durable contributed overlay in trusty-search | Accepted |
 | [0010](./0010-kg-edge-kind-extensibility.md) | KG edge-kind extensibility: first-class data-flow variants + Custom escape hatch | Proposed |
-| [0011](./0011-tctl-owns-service-lifecycle.md) | `tctl` headless control plane (owns boot/lifecycle); `trusty-console` is the single HTTP surface | Proposed |
+| [0011](./0011-tctl-owns-service-lifecycle.md) | `tctl` headless control plane (owns boot/lifecycle); `trusty-console` is the single HTTP surface | Accepted |

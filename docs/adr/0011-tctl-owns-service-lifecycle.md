@@ -1,7 +1,8 @@
 # 0011. `tctl` owns service lifecycle (headless control plane); `trusty-console` owns the single HTTP surface
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-15
+- **Accepted:** 2026-06-15 (owner sign-off via PR #1240 merge)
 - **Scope:** Workspace-wide (trusty-controller boot model; reconciles DOC-7 with
   the #1104 console architecture). Consumed by
   `docs/trusty-controller/research/02-design/DOC-12-bootstrap-orchestration.md`
