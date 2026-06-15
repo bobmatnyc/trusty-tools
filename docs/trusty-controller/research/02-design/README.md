@@ -1,6 +1,6 @@
 # trusty-controller — Design Document Set
 
-**Status:** Complete — all 11 docs Accepted (owner-approved)
+**Status:** DOC-0..DOC-10 Accepted (owner-approved); DOC-12 Draft (owner directive 2026-06-15)
 **Source spec:** ../01-spec/trusty-end-to-end-setup.md
 
 > **Location:** this design set lives under `docs/trusty-controller/research/`
@@ -8,12 +8,20 @@
 > frozen source-of-record; `02-design/` is this refinement layer). It was
 > relocated here from the former `docs-local/02-trusty-controller/` path.
 >
-> **The set is finished and handoff-ready.** All 11 docs (DOC-0 through DOC-10)
-> are Accepted (owner-approved). Three decisions are escalated to ADRs:
+> **DOC-0 through DOC-10 are Accepted (owner-approved).** A later owner directive
+> (Bob, 2026-06-15) added **[DOC-12](./DOC-12-bootstrap-orchestration.md)**
+> (Draft): `tctl` is the **first-loaded control plane** — `tctl up` boots the
+> stack (always-on memory+search → boot analyze over the core crates → console →
+> opt-in trusty-mpm + Claude Code @ latest) and DOC-12 reconciles `tctl`
+> (headless lifecycle/control plane) with `trusty-console` (single HTTP surface,
+> #1104), recorded as [ADR-0011](../../../adr/0011-tctl-owns-service-lifecycle.md).
+> Four decisions are escalated to ADRs:
 > [ADR-0006](../../../adr/0006-trusty-controller-naming.md) (naming),
 > [ADR-0007](../../../adr/0007-tool-contract-versioning-and-verb-model.md)
-> (contract versioning + verb model), and
-> [ADR-0008](../../../adr/0008-project-identity-convention.md) (project identity).
+> (contract versioning + verb model),
+> [ADR-0008](../../../adr/0008-project-identity-convention.md) (project identity),
+> and [ADR-0011](../../../adr/0011-tctl-owns-service-lifecycle.md) (tctl headless /
+> console single-HTTP).
 > The crate is **`trusty-controller`** (dir `crates/trusty-controller/`), the
 > binary and alias are **`tctl`**. See
 > [`00-naming-and-doc-charter.md`](./00-naming-and-doc-charter.md) for the full
@@ -101,6 +109,7 @@ All 11 docs are **Accepted (owner-approved)**.
 | [**DOC-9**](./09-upgrade-flow.md) | Upgrade Flow (UUC3) | Cross-tool update detection, changelog headlines, upgrade + take-effect restart. | Accepted | — |
 | [**DOC-10**](./10-isolation-testing-harness.md) | Isolation Testing Harness (MUC1, MUC2) | Test stack install/upgrade in a vanilla container/VM without contaminating the host. | Accepted | — |
 | [**DOC-11**](./DOC-11-open-issues.md) | Open Issues & Adversarial-Review Tracker | Living tracker of open issues raised against the Accepted design set; iterated per item. | Active tracker | — |
+| [**DOC-12**](./DOC-12-bootstrap-orchestration.md) | Bootstrap Orchestration (first-load control plane) | `tctl up` boot sequence: always-on memory+search → boot analyze over core crates → console → opt-in trusty-mpm + Claude Code @ latest; reconciles tctl (headless) vs trusty-console (single HTTP). | Draft (owner directive 2026-06-15) | [ADR-0011](../../../adr/0011-tctl-owns-service-lifecycle.md) |
 
 ## Implementation order
 
@@ -174,3 +183,4 @@ without opening every doc. Each reflects what the Accepted docs actually say.
 - [ADR-0006 — trusty-controller naming](../../../adr/0006-trusty-controller-naming.md) (DOC-0)
 - [ADR-0007 — Tool contract versioning + verb model](../../../adr/0007-tool-contract-versioning-and-verb-model.md) (DOC-1)
 - [ADR-0008 — Project identity convention](../../../adr/0008-project-identity-convention.md) (DOC-3)
+- [ADR-0011 — `tctl` headless control plane / `trusty-console` single HTTP surface](../../../adr/0011-tctl-owns-service-lifecycle.md) (DOC-12; supersedes DOC-7's embedded-UI surface)

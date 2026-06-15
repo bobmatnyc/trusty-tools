@@ -1,7 +1,20 @@
 # DOC-7 — Controller Web UI (link-out control plane)
 
-**Status:** Accepted (owner-approved)
+**Status:** Accepted — but **surface superseded** by the `trusty-console`-as-single-HTTP direction (#1104/#1222) per [DOC-12 §7](./DOC-12-bootstrap-orchestration.md) and [ADR-0011](../../../adr/0011-tctl-owns-service-lifecycle.md) (owner directive 2026-06-15).
 **Source spec:** ../01-spec/trusty-end-to-end-setup.md
+
+> ⚠ **Surface superseded (2026-06-15).** This doc specifies a web UI **embedded
+> in `trusty-controller` itself**. A later owner directive (#1104: "HTTP is
+> implemented exactly once — in `trusty-console`"; #1222) makes `tctl`
+> **headless** (CLI + supervised control process, no HTTP) and relocates this
+> doc's control-plane UI (installed tools + versions, upgrade indicators, health,
+> doctor rollup, link-out to each tool's own view) **into a `trusty-console`
+> tab**, fed by the controller's `--json`/stdio-MCP stack rollup. The
+> *content/semantics* below remain authoritative for what that view must show;
+> the *delivery surface* moves from controller-embedded HTTP to trusty-console.
+> See [DOC-12 §7](./DOC-12-bootstrap-orchestration.md) and
+> [ADR-0011](../../../adr/0011-tctl-owns-service-lifecycle.md). DOC-7 will be
+> formally re-statused **Superseded** once Open Question Q4 (DOC-12) is confirmed.
 **Consumes:** [DOC-1](./01-tool-contract.md) (Accepted), [DOC-2](./02-stack-manifest-and-versioning.md) (Accepted), [DOC-4](./04-doctor-health-rollup.md) (Accepted), [DOC-5](./05-controller-cli.md) (Accepted)
 **Cross-ref:** [DOC-6](./06-contract-conformance-and-mpm-adapter.md) (Accepted), [DOC-8](./08-install-bootstrap.md) (Accepted), [DOC-9](./09-upgrade-flow.md) (Accepted), [DOC-0](./00-naming-and-doc-charter.md)
 
