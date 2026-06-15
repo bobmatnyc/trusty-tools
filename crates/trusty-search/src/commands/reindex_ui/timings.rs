@@ -116,18 +116,34 @@ pub fn format_timing_breakdown(
     // bm25 and upsert: the vector count is parenthetical to upsert only —
     // "(N vectors upserted)" makes it unambiguous which subsystem the count
     // belongs to.  bm25 has no per-call vector annotation.
+    //
+    // Issue #1174: on the defer-embed (fast C1) path, vector_upsert_ms == 0
+    // and vector_count == 0 because upsert is deferred to the background C2
+    // pass. Emitting "upsert 0ms (0 vectors upserted)" on this path is
+    // actively misleading — real BM25 work happened, but the zero-upsert
+    // annotation makes it look like something was skipped or broken.
+    // When defer_embed=true and vector_count==0 we show only the BM25 line
+    // with a "(vectors deferred to background pass)" annotation so the
+    // operator knows upsert will happen asynchronously.
     let bm25_line = format!("{} {:>7}", "bm25   ".dimmed(), fmt_elapsed(t.bm25_ms));
-    let upsert_line = format!(
-        "{} {:>7}",
-        "upsert ".dimmed(),
-        fmt_elapsed(t.vector_upsert_ms)
-    );
-    out.push_str(&format!(
-        "    {} \u{00b7} {} ({} vectors upserted)\n",
-        bm25_line,
-        upsert_line,
-        format_with_commas(t.vector_count),
-    ));
+    if defer_embed && t.vector_count == 0 {
+        out.push_str(&format!(
+            "    {}  (vectors deferred to background embed pass)\n",
+            bm25_line,
+        ));
+    } else {
+        let upsert_line = format!(
+            "{} {:>7}",
+            "upsert ".dimmed(),
+            fmt_elapsed(t.vector_upsert_ms)
+        );
+        out.push_str(&format!(
+            "    {} \u{00b7} {} ({} vectors upserted)\n",
+            bm25_line,
+            upsert_line,
+            format_with_commas(t.vector_count),
+        ));
+    }
 
     // KG is a genuine tail stage — it runs after the batch loop completes.
     let kg_line = format!(

@@ -357,10 +357,15 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
         .saturating_sub(total_bm25_ms)
         .saturating_sub(total_vector_upsert_ms)
         .saturating_sub(kg.kg_ms);
+    // Issue #1174: include `defer_embed` in the timing log so operators can
+    // distinguish "vector_upsert=0ms because deferred" from "0ms because the
+    // embedder failed silently". On the defer path, vector_upsert_ms is always
+    // 0 for the C1 fast pass — the real upsert happens in the background C2
+    // pass logged separately by `spawn_deferred_embed_pass`.
     tracing::info!(
         "reindex phase timings: index={} walk={}ms parse={}ms \
          model_load_approx={}ms embed={}ms bm25={}ms vector_upsert={}ms \
-         kg={}ms total={}ms",
+         kg={}ms total={}ms defer_embed={}",
         index_id.0,
         walk_ms,
         total_parse_ms,
@@ -370,6 +375,7 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
         total_vector_upsert_ms,
         kg.kg_ms,
         elapsed_ms,
+        defer_embed,
     );
 
     let run_totals = RunTotals {

@@ -93,6 +93,10 @@ pub use orchestrator::{spawn_reindex, spawn_reindex_with_cleanup};
 // Gated under #[cfg(test)] so clippy does not flag them as unused in release
 // builds. The test glob `use super::*` picks them up when running `cargo test`.
 #[cfg(test)]
+pub(crate) use batch::inprocess_embedder_ever_ready_for_tests;
+#[cfg(test)]
+pub(crate) use batch::reset_inprocess_embedder_flag_for_tests;
+#[cfg(test)]
 pub(crate) use guard::ReindexTerminationGuard;
 #[cfg(test)]
 pub(crate) use semaphore::{

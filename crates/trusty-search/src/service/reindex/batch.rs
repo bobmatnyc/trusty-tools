@@ -58,8 +58,39 @@ pub(super) const REINDEX_BATCH_SIZE: usize = 128;
 /// `parse_and_embed_files` call in in-process mode.
 ///
 /// Test: `needs_embedder_init` unit tests in this module verify the flag
-/// suppresses re-emission on the second reindex.
+/// suppresses re-emission on the second reindex. Use
+/// `reset_inprocess_embedder_flag_for_tests` in test code to isolate tests
+/// from each other (issue #1179).
 pub(super) static INPROCESS_EMBEDDER_EVER_READY: AtomicBool = AtomicBool::new(false);
+
+/// Reset `INPROCESS_EMBEDDER_EVER_READY` to `false` for test isolation.
+///
+/// Why (issue #1179): `INPROCESS_EMBEDDER_EVER_READY` is a process-global
+/// `AtomicBool`. Without an explicit reset, once any test in the binary sets
+/// it to `true`, every subsequent test that checks it sees `true` regardless
+/// of construction order, making tests order-dependent and non-deterministic.
+/// What: stores `false` under `SeqCst` so all later loads in the same test see
+/// a clean initial state identical to a freshly-started daemon.
+/// Test: called at the top of each unit test that exercises this flag so tests
+/// are isolated regardless of execution order.
+#[cfg(test)]
+pub(crate) fn reset_inprocess_embedder_flag_for_tests() {
+    INPROCESS_EMBEDDER_EVER_READY.store(false, AtomicOrdering::SeqCst);
+}
+
+/// Read `INPROCESS_EMBEDDER_EVER_READY` for test assertions.
+///
+/// Why (issue #1179): the static is `pub(super)` scoped to the `reindex`
+/// module. These test-only accessors are `pub(crate)` so that `mod.rs` can
+/// re-export them as `pub(crate)` for `tests.rs` to use without widening the
+/// production static itself.
+/// What: loads the current value with `SeqCst` ordering and returns it.
+/// Test: used in `inprocess_embedder_flag_reset_restores_false` and
+/// `inprocess_embedder_flag_isolated_across_scenarios`.
+#[cfg(test)]
+pub(crate) fn inprocess_embedder_ever_ready_for_tests() -> bool {
+    INPROCESS_EMBEDDER_EVER_READY.load(AtomicOrdering::SeqCst)
+}
 
 /// Shared context threaded into `process_one_batch` so the per-batch helper
 /// doesn't take a dozen arguments. Cheap to clone (everything is `Arc` /

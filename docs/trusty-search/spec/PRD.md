@@ -549,7 +549,7 @@ mode that is a daemonized ripgrep with MCP/HTTP integration.
 | Q7 | Further BM25 / redb in-memory footprint reductions | 🟡 | #340 |
 | Q8 | Reconcile the README/CLAUDE.md memory-tier description (Tiny/Small retained vs removed) | 🟡 | docs |
 | Q9 | Windows daemon path support (via `trusty-common`) | ⚪ | — |
-| Q10 | Split `reindex_engine.rs` (1 438 lines, over 500-line cap) | 🟡 | #571 |
+| Q10 | ~~Split `reindex_engine.rs` (1 438 lines, over 500-line cap)~~ **RESOLVED** — `reindex_engine.rs` no longer exists; the reindex module was split into focused submodules under `src/service/reindex/` (issue #1175): `batch`, `completion`, `corpus_swap`, `finish`, `guard`, `hash`, `orchestrator`, `pollers`, `progress`, `runner`, `semaphore`, `stages`. All production files are under the 500-SLOC cap. | 🟢 | #571 |
 
 For **cross-release performance tracking**, see
 [#129](https://github.com/bobmatnyc/trusty-tools/issues/129), which accumulates
