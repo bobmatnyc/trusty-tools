@@ -10,8 +10,24 @@ use std::net::SocketAddr;
 
 use clap::{Parser, Subcommand};
 
-/// Default daemon address when `--url` / `TRUSTY_MPM_URL` is unset.
-pub(crate) const DEFAULT_URL: &str = "http://127.0.0.1:7880";
+/// Default daemon URL when `--url` / `TRUSTY_MPM_URL` is unset.
+///
+/// Why (issue #1268): this must be the *same* address the daemon binds to by
+/// default, or the client probes a port nothing is listening on and reports
+/// "daemon: unreachable". It is re-exported from the single source of truth in
+/// `core::discovery` (which also drives the daemon `--addr` default) so the two
+/// sides can never drift.
+/// What: alias of [`trusty_mpm::core::DEFAULT_DAEMON_URL`].
+/// Test: `core::discovery::default_url_matches_addr` proves URL and addr agree.
+pub(crate) const DEFAULT_URL: &str = trusty_mpm::core::DEFAULT_DAEMON_URL;
+
+/// Default daemon bind address for the `daemon --addr` flag (issue #1268).
+///
+/// Why: keeps the daemon's bind default tied to the same constant that drives
+/// the client's [`DEFAULT_URL`], so `tm start` and the thin CLI always agree.
+/// What: alias of [`trusty_mpm::core::DEFAULT_DAEMON_ADDR`].
+/// Test: `core::discovery::default_addr_parses`.
+pub(crate) const DEFAULT_ADDR: &str = trusty_mpm::core::DEFAULT_DAEMON_ADDR;
 
 /// trusty-mpm command-line interface.
 #[derive(Debug, Parser)]
@@ -117,7 +133,7 @@ pub(crate) enum Command {
     /// Run the trusty-mpm daemon.
     Daemon {
         /// Address the daemon HTTP API binds to.
-        #[arg(long, env = "TRUSTY_MPM_ADDR", default_value = "127.0.0.1:7880")]
+        #[arg(long, env = "TRUSTY_MPM_ADDR", default_value = DEFAULT_ADDR)]
         addr: SocketAddr,
         /// Also expose the daemon on the Tailscale interface for remote access.
         #[arg(long, env = "TRUSTY_MPM_TAILSCALE")]

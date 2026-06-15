@@ -1,6 +1,6 @@
 use super::settings::{
     clean_global_trusty_memory_hooks, deploy_output_style, inject_trusty_memory_mcp,
-    write_output_style, write_project_hooks,
+    inject_trusty_search_mcp, preseed_workspace_trust, write_output_style, write_project_hooks,
 };
 use super::*;
 use tempfile::tempdir;
@@ -187,10 +187,10 @@ fn write_output_style_sets_spinner_tips() {
 
 #[test]
 fn write_project_hooks_writes_all_event_types() {
-    // Why: the trusty-memory hooks must be scoped to the project and cover
-    // the session lifecycle — PostToolUse, Stop, and UserPromptSubmit.
-    // PreToolUse is intentionally absent: trusty-memory has no
-    // `claude.pre-tool-use` handler.
+    // Why (#1270): the trusty-memory hooks must be scoped to the project and use
+    // the canonical, real CLI surface — `UserPromptSubmit` → prompt-context and
+    // `SessionStart` → inbox-check. The old `PostToolUse`/`Stop` events invoked
+    // the nonexistent `hooks fire` subcommand and are gone.
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
@@ -201,7 +201,7 @@ fn write_project_hooks_writes_all_event_types() {
     )
     .unwrap();
     let hooks = value["hooks"].as_object().expect("hooks must be an object");
-    for event in ["PostToolUse", "Stop", "UserPromptSubmit"] {
+    for event in ["UserPromptSubmit", "SessionStart"] {
         let groups = hooks[event]
             .as_array()
             .unwrap_or_else(|| panic!("{event} must be an array"));
@@ -210,17 +210,17 @@ fn write_project_hooks_writes_all_event_types() {
             .as_str()
             .expect("command must be a string");
         assert!(
-            cmd.contains("trusty-memory hooks fire"),
-            "{event} command must invoke trusty-memory"
+            cmd.starts_with("trusty-memory "),
+            "{event} command must invoke trusty-memory: {cmd}"
         );
     }
 }
 
 #[test]
-fn write_project_hooks_omits_pre_tool_use() {
-    // Why: trusty-memory has no `claude.pre-tool-use` handler, so a
-    // PreToolUse hook would error on every tool call. The written hooks
-    // block must not register one.
+fn write_project_hooks_uses_canonical_commands() {
+    // Why (#1270): the hook commands MUST match the real trusty-memory CLI
+    // (`prompt-context`, `inbox-check`) — never the bogus `hooks fire` form that
+    // hard-blocked prompts with "unrecognized subcommand 'hooks'".
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
@@ -230,10 +230,41 @@ fn write_project_hooks_omits_pre_tool_use() {
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
     )
     .unwrap();
+    let raw = serde_json::to_string(&value).unwrap();
     assert!(
-        value["hooks"].get("PreToolUse").is_none(),
-        "PreToolUse hook must not be registered"
+        !raw.contains("hooks fire"),
+        "the broken `hooks fire` command must never be written: {raw}"
     );
+    assert_eq!(
+        value["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
+        serde_json::json!("trusty-memory prompt-context")
+    );
+    assert_eq!(
+        value["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+        serde_json::json!("trusty-memory inbox-check")
+    );
+}
+
+#[test]
+fn write_project_hooks_omits_post_tool_use_and_stop() {
+    // Why (#1270): trusty-memory has no PostToolUse/Stop CLI hook surface, so
+    // those events must not be registered (they previously invoked `hooks fire`,
+    // which fails). Memory writes during a session flow through MCP tools.
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+
+    write_project_hooks(project).expect("write succeeds");
+
+    let value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    for absent in ["PreToolUse", "PostToolUse", "Stop"] {
+        assert!(
+            value["hooks"].get(absent).is_none(),
+            "{absent} hook must not be registered"
+        );
+    }
 }
 
 #[test]
@@ -250,11 +281,11 @@ fn write_project_hooks_replaces_existing() {
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
     )
     .unwrap();
-    let post = value["hooks"]["PostToolUse"]
+    let ss = value["hooks"]["SessionStart"]
         .as_array()
-        .expect("PostToolUse must be an array");
+        .expect("SessionStart must be an array");
     assert_eq!(
-        post.len(),
+        ss.len(),
         1,
         "re-running must replace, not append, handler groups"
     );
@@ -287,7 +318,31 @@ fn inject_trusty_memory_mcp_adds_server() {
     let server = &value["mcpServers"]["trusty-memory"];
     assert_eq!(server["type"], serde_json::json!("stdio"));
     assert_eq!(server["command"], serde_json::json!("trusty-memory"));
-    assert_eq!(server["args"], serde_json::json!(["mcp", "serve"]));
+    assert_eq!(server["args"], serde_json::json!(["serve", "--stdio"]));
+}
+
+#[test]
+fn inject_trusty_memory_mcp_uses_serve_stdio() {
+    // Why (#1270): the previous args `["mcp","serve"]` were invalid (no `mcp`
+    // subcommand). The canonical stdio MCP invocation is `serve --stdio`.
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+
+    inject_trusty_memory_mcp(project).expect("injection succeeds");
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(project.join(".mcp.json")).unwrap()).unwrap();
+    let args = value["mcpServers"]["trusty-memory"]["args"]
+        .as_array()
+        .expect("args is an array");
+    assert_eq!(
+        args,
+        &vec![serde_json::json!("serve"), serde_json::json!("--stdio")]
+    );
+    assert!(
+        !args.contains(&serde_json::json!("mcp")),
+        "must not use the nonexistent `mcp` subcommand"
+    );
 }
 
 #[test]
@@ -432,6 +487,201 @@ fn remove_global_hooks_tolerates_missing_file() {
     let tmp = tempdir().unwrap();
     let missing = tmp.path().join("nope.json");
     clean_global_trusty_memory_hooks(&missing).expect("missing file is a no-op");
+}
+
+// ──────────────────────────────────────────────
+// trusty-search MCP injection (#1270 / step 4)
+// ──────────────────────────────────────────────
+
+#[test]
+fn inject_trusty_search_mcp_adds_server() {
+    // Why (#1270/step 4): spawned sessions need the code-search tools; the
+    // server must be registered as `trusty-search serve` (stdio default).
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+
+    inject_trusty_search_mcp(project).expect("injection succeeds");
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(project.join(".mcp.json")).unwrap()).unwrap();
+    let server = &value["mcpServers"]["trusty-search"];
+    assert_eq!(server["type"], serde_json::json!("stdio"));
+    assert_eq!(server["command"], serde_json::json!("trusty-search"));
+    assert_eq!(server["args"], serde_json::json!(["serve"]));
+}
+
+#[test]
+fn inject_trusty_search_mcp_preserves_existing() {
+    // Why: injecting trusty-search must not clobber an existing trusty-memory.
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    inject_trusty_memory_mcp(project).expect("memory injection succeeds");
+
+    inject_trusty_search_mcp(project).expect("search injection succeeds");
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(project.join(".mcp.json")).unwrap()).unwrap();
+    let servers = value["mcpServers"].as_object().expect("object");
+    assert!(servers.contains_key("trusty-memory"), "memory must survive");
+    assert!(
+        servers.contains_key("trusty-search"),
+        "search must be added"
+    );
+}
+
+#[test]
+fn inject_trusty_search_mcp_is_idempotent() {
+    // Why: prep may run repeatedly; re-injecting must not change the file.
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+
+    inject_trusty_search_mcp(project).expect("first injection succeeds");
+    let first = std::fs::read_to_string(project.join(".mcp.json")).unwrap();
+    inject_trusty_search_mcp(project).expect("second injection succeeds");
+    let second = std::fs::read_to_string(project.join(".mcp.json")).unwrap();
+
+    assert_eq!(first, second, "re-injecting must leave the file unchanged");
+}
+
+#[test]
+fn inject_both_mcp_servers_coexist() {
+    // Why (#1270/step 4): the end state must have BOTH servers so the spawned
+    // session gets memory AND code search.
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+
+    inject_trusty_memory_mcp(project).expect("memory injection succeeds");
+    inject_trusty_search_mcp(project).expect("search injection succeeds");
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(project.join(".mcp.json")).unwrap()).unwrap();
+    let servers = value["mcpServers"].as_object().expect("object");
+    assert_eq!(servers.len(), 2, "exactly memory + search");
+    assert_eq!(
+        servers["trusty-memory"]["args"],
+        serde_json::json!(["serve", "--stdio"])
+    );
+    assert_eq!(
+        servers["trusty-search"]["args"],
+        serde_json::json!(["serve"])
+    );
+}
+
+#[test]
+fn prepare_session_injects_both_mcp_servers() {
+    // Why (#1270/step 4): the single launch-prep entry point must wire BOTH the
+    // memory and the search MCP servers.
+    let tmp_home = tempdir().unwrap();
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    prepare_session(&fw, project).expect("prep succeeds");
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(project.join(".mcp.json")).unwrap()).unwrap();
+    assert_eq!(
+        value["mcpServers"]["trusty-memory"]["command"],
+        serde_json::json!("trusty-memory")
+    );
+    assert_eq!(
+        value["mcpServers"]["trusty-search"]["command"],
+        serde_json::json!("trusty-search")
+    );
+}
+
+// ──────────────────────────────────────────────
+// Workspace trust pre-seed (#1269)
+// ──────────────────────────────────────────────
+
+#[test]
+fn preseed_trust_marks_directory() {
+    // Why (#1269): the interactive session must not stall on the trust dialog;
+    // seeding the per-dir entry in ~/.claude.json suppresses it.
+    let tmp = tempdir().unwrap();
+    let claude_json = tmp.path().join(".claude.json");
+    let workspace = tmp.path().join("ws");
+
+    preseed_workspace_trust(&claude_json, &workspace).expect("seed succeeds");
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
+    let key = workspace.to_string_lossy().to_string();
+    let entry = &value["projects"][&key];
+    assert_eq!(entry["hasTrustDialogAccepted"], serde_json::json!(true));
+    assert_eq!(
+        entry["hasCompletedProjectOnboarding"],
+        serde_json::json!(true)
+    );
+    assert!(
+        entry["projectOnboardingSeenCount"].as_u64().unwrap() >= 1,
+        "onboarding counter must be >= 1"
+    );
+}
+
+#[test]
+fn preseed_trust_preserves_other_keys() {
+    // Why: the file holds OAuth/login data; seeding trust must not drop it.
+    let tmp = tempdir().unwrap();
+    let claude_json = tmp.path().join(".claude.json");
+    let workspace = tmp.path().join("ws");
+    std::fs::write(
+        &claude_json,
+        r#"{"oauthAccount":{"emailAddress":"r@1mc.io"},"projects":{"/other":{"hasTrustDialogAccepted":true}}}"#,
+    )
+    .unwrap();
+
+    preseed_workspace_trust(&claude_json, &workspace).expect("seed succeeds");
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
+    // OAuth survives untouched (issue #1269: OAuth must be preserved).
+    assert_eq!(
+        value["oauthAccount"]["emailAddress"],
+        serde_json::json!("r@1mc.io")
+    );
+    // Pre-existing project survives.
+    assert_eq!(
+        value["projects"]["/other"]["hasTrustDialogAccepted"],
+        serde_json::json!(true)
+    );
+    // New workspace is trusted.
+    let key = workspace.to_string_lossy().to_string();
+    assert_eq!(
+        value["projects"][&key]["hasTrustDialogAccepted"],
+        serde_json::json!(true)
+    );
+}
+
+#[test]
+fn preseed_trust_is_idempotent() {
+    // Why: prep may run repeatedly; a second seed must not change the file.
+    let tmp = tempdir().unwrap();
+    let claude_json = tmp.path().join(".claude.json");
+    let workspace = tmp.path().join("ws");
+
+    preseed_workspace_trust(&claude_json, &workspace).expect("first seed");
+    let first = std::fs::read_to_string(&claude_json).unwrap();
+    preseed_workspace_trust(&claude_json, &workspace).expect("second seed");
+    let second = std::fs::read_to_string(&claude_json).unwrap();
+
+    assert_eq!(first, second, "re-seeding must leave the file unchanged");
+}
+
+#[test]
+fn preseed_trust_leaves_malformed_file() {
+    // Why (#1269): a malformed ~/.claude.json likely still holds OAuth state;
+    // clobbering it would force a re-login. Seeding must bail out untouched.
+    let tmp = tempdir().unwrap();
+    let claude_json = tmp.path().join(".claude.json");
+    let workspace = tmp.path().join("ws");
+    let garbage = "{ this is not valid json ";
+    std::fs::write(&claude_json, garbage).unwrap();
+
+    preseed_workspace_trust(&claude_json, &workspace).expect("soft-fails to Ok");
+
+    let after = std::fs::read_to_string(&claude_json).unwrap();
+    assert_eq!(after, garbage, "malformed file must be left untouched");
 }
 
 #[test]

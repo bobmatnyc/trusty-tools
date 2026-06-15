@@ -23,11 +23,27 @@ use super::RuntimeError;
 /// The shell command sent to the tmux pane to start Claude Code.
 ///
 /// Why: the `env -u ANTHROPIC_API_KEY` prefix strips the API key from the
-/// child environment so Claude Code falls back to its own credential store or
-/// prompts the user, preventing accidental key leakage through pane history.
-/// What: literal string piped to `tmux send-keys … Enter`.
-/// Test: `claude_code_adapter_spawn_sends_env_scrub_command`.
-const SPAWN_COMMAND: &str = "env -u ANTHROPIC_API_KEY claude";
+/// child environment so Claude Code falls back to its OAuth login in
+/// `~/.claude.json`, preventing accidental key leakage through pane history.
+/// The `--setting-sources project,local` flag isolates the session from the
+/// operator's interfering global `~/.claude/settings.json` hooks (issue #1269 /
+/// step 4) without touching `~/.claude.json` (so OAuth is preserved), and
+/// `--permission-mode acceptEdits` keeps the unattended session from blocking on
+/// per-tool permission prompts (issue #1269). The isolation flags reuse the
+/// shared [`crate::core::model_inject::SETTING_SOURCES_FLAG`] /
+/// [`crate::core::model_inject::PERMISSION_MODE_FLAG`] constants so this spawn
+/// path and the CLI launch path can never drift.
+/// What: built once at first use from `env -u ANTHROPIC_API_KEY claude` plus the
+/// two shared flag constants; piped to `tmux send-keys … Enter`.
+/// Test: `spawn_command_contains_env_scrub`,
+/// `spawn_command_contains_isolation_flags`.
+fn spawn_command() -> String {
+    format!(
+        "env -u ANTHROPIC_API_KEY claude {} {}",
+        crate::core::model_inject::SETTING_SOURCES_FLAG,
+        crate::core::model_inject::PERMISSION_MODE_FLAG,
+    )
+}
 
 /// Runtime adapter that launches Claude Code CLI inside a tmux session.
 ///
@@ -74,10 +90,11 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// Why: the session manager calls this after creating the tmux pane so the
     /// actual agent process starts inside it.
     /// What: checks that `claude` is on PATH (returns `BinaryNotFound` if not),
-    /// then sends `env -u ANTHROPIC_API_KEY claude` to the pane; the task is
-    /// logged for observability but not passed to the command (Claude Code reads
+    /// then sends [`spawn_command`] (`env -u ANTHROPIC_API_KEY claude` plus the
+    /// isolation/permission flags) to the pane; the task is logged for
+    /// observability but not passed to the command (Claude Code reads
     /// instructions from CLAUDE.md or an interactive prompt).
-    /// Test: `claude_code_adapter_spawn_sends_env_scrub_command`.
+    /// Test: `spawn_sends_env_scrub_when_binary_available`.
     fn spawn(&self, tmux_name: &str, cwd: &Path, task: &str) -> Result<(), RuntimeError> {
         if !Self::claude_available() {
             return Err(RuntimeError::BinaryNotFound(
@@ -91,7 +108,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             "spawning claude-code in tmux pane"
         );
         self.tmux
-            .send_line(tmux_name, SPAWN_COMMAND)
+            .send_line(tmux_name, &spawn_command())
             .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))
     }
 
@@ -119,15 +136,32 @@ mod tests {
     }
 
     #[test]
-    fn spawn_command_constant_contains_env_scrub() {
-        // The spawn command must always strip the API key from the environment.
+    fn spawn_command_contains_env_scrub() {
+        // The spawn command must always strip the API key from the environment
+        // so the session falls back to OAuth in ~/.claude.json.
+        let cmd = spawn_command();
         assert!(
-            SPAWN_COMMAND.contains("env -u ANTHROPIC_API_KEY"),
-            "SPAWN_COMMAND must contain env scrub: {SPAWN_COMMAND}"
+            cmd.contains("env -u ANTHROPIC_API_KEY"),
+            "spawn command must contain env scrub: {cmd}"
         );
         assert!(
-            SPAWN_COMMAND.ends_with("claude"),
-            "SPAWN_COMMAND must end with claude: {SPAWN_COMMAND}"
+            cmd.contains(" claude "),
+            "spawn command must invoke claude: {cmd}"
+        );
+    }
+
+    #[test]
+    fn spawn_command_contains_isolation_flags() {
+        // Why (#1269): the session_manager spawn path must isolate from the
+        // user's global settings and run unattended, exactly like the CLI path.
+        let cmd = spawn_command();
+        assert!(
+            cmd.contains("--setting-sources project,local"),
+            "spawn command must isolate settings: {cmd}"
+        );
+        assert!(
+            cmd.contains("--permission-mode acceptEdits"),
+            "spawn command must set unattended permission mode: {cmd}"
         );
     }
 
@@ -153,6 +187,6 @@ mod tests {
         let sends = fake.sends.lock().unwrap();
         assert_eq!(sends.len(), 1);
         assert_eq!(sends[0].0, "tmpm-test");
-        assert_eq!(sends[0].1, SPAWN_COMMAND);
+        assert_eq!(sends[0].1, spawn_command());
     }
 }

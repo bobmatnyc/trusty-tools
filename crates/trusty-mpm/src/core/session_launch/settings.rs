@@ -40,46 +40,44 @@ pub(super) const SPINNER_TIPS: &[&str] = &[
 /// The `trusty-memory` hook block written into the project's
 /// `.claude/settings.json`.
 ///
-/// Why: these hooks must fire only for trusty-mpm-managed sessions, not for
-/// every Claude Code instance on the machine. Writing them at the project
-/// level (rather than `~/.claude/settings.json`) scopes them to projects
-/// prepared by trusty-mpm. The block covers the `PostToolUse`, `Stop`, and
-/// `UserPromptSubmit` events — the `trusty-memory` binary does not implement a
-/// `claude.pre-tool-use` handler, so a `PreToolUse` hook would only error on
-/// every tool call. These three events capture the session lifecycle for
-/// memory.
+/// Why (issue #1270): the previous block invoked `trusty-memory hooks fire
+/// <event>`, but the installed `trusty-memory` binary has **no `hooks`
+/// subcommand** — that invocation exits non-zero with "unrecognized subcommand
+/// 'hooks'". A non-zero `UserPromptSubmit` hook *hard-blocks the prompt*, so
+/// every trusty-mpm-spawned session was dead on arrival: the injected task was
+/// rejected before Claude ever saw it. This block now mirrors the canonical
+/// hooks that `trusty-memory setup` installs (see
+/// `crates/trusty-memory/src/commands/setup.rs`): `UserPromptSubmit` runs
+/// `trusty-memory prompt-context` (documented to always exit 0 so it can never
+/// block a prompt) and `SessionStart` runs `trusty-memory inbox-check` (also
+/// fail-silent). There is intentionally no `PostToolUse` or `Stop` hook because
+/// `trusty-memory` ships no corresponding CLI surface; memory writes during a
+/// session flow through the MCP tools instead.
+/// What: a `UserPromptSubmit` → `trusty-memory prompt-context` hook and a
+/// `SessionStart` → `trusty-memory inbox-check` hook, scoped to the project so
+/// they fire only for trusty-mpm sessions.
+/// Test: `write_project_hooks_uses_canonical_commands`,
+/// `write_project_hooks_writes_all_event_types`.
 pub(super) const TRUSTY_MEMORY_HOOKS: &str = r#"{
-  "PostToolUse": [
-    {
-      "matcher": "Write|Edit|Bash",
-      "hooks": [
-        {
-          "type": "command",
-          "command": "trusty-memory hooks fire claude.post-tool-use",
-          "timeout": 60
-        }
-      ]
-    }
-  ],
-  "Stop": [
-    {
-      "matcher": "",
-      "hooks": [
-        {
-          "type": "command",
-          "command": "trusty-memory hooks fire claude.stop",
-          "timeout": 60
-        }
-      ]
-    }
-  ],
   "UserPromptSubmit": [
     {
       "matcher": "",
       "hooks": [
         {
           "type": "command",
-          "command": "trusty-memory hooks fire claude.user-prompt",
+          "command": "trusty-memory prompt-context",
+          "timeout": 60
+        }
+      ]
+    }
+  ],
+  "SessionStart": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "trusty-memory inbox-check",
           "timeout": 60
         }
       ]
@@ -90,18 +88,53 @@ pub(super) const TRUSTY_MEMORY_HOOKS: &str = r#"{
 /// The `trusty-memory` MCP server definition injected into a project's
 /// `.mcp.json`.
 ///
-/// Why: Claude Code reads MCP servers from `<project>/.mcp.json`; a launched
-/// trusty-mpm session needs the `trusty-memory` server registered there so the
-/// memory tools (`memory_recall`, `memory_store`, …) are available.
+/// Why (issue #1270): Claude Code reads MCP servers from `<project>/.mcp.json`;
+/// a launched trusty-mpm session needs the `trusty-memory` server registered
+/// there so the memory tools (`memory_recall`, `memory_remember`, …) are
+/// available. The previous definition used `args: ["mcp", "serve"]`, but
+/// `trusty-memory` has **no `mcp` subcommand** — the server would have failed
+/// to start. The canonical stdio MCP invocation (per `trusty-memory setup`) is
+/// `serve --stdio`.
+/// What: a stdio MCP server entry running `trusty-memory serve --stdio`.
+/// Test: `inject_trusty_memory_mcp_uses_serve_stdio`.
 pub(super) const TRUSTY_MEMORY_MCP_SERVER: &str = r#"{
   "type": "stdio",
   "command": "trusty-memory",
-  "args": ["mcp", "serve"]
+  "args": ["serve", "--stdio"]
 }"#;
 
-/// Hook event types the global `trusty-memory` entries were registered under.
+/// The `trusty-search` MCP server definition injected into a project's
+/// `.mcp.json`.
+///
+/// Why (issue #1270 / step 4): trusty-mpm-spawned sessions are expected to have
+/// both the memory *and* the code-search tools, but `trusty-search` was never
+/// registered in the workspace `.mcp.json` — only `trusty-memory` was. Without
+/// it the spawned PM cannot run `search`, `grep`, `get_call_chain`, etc. The
+/// canonical stdio MCP invocation (per `trusty-search setup`) is bare `serve`
+/// (stdio is the default transport; HTTP is off unless `--with-http`).
+/// What: a stdio MCP server entry running `trusty-search serve`. This wires the
+/// tools only — index creation is a separate concern handled elsewhere.
+/// Test: `inject_trusty_search_mcp_adds_server`,
+/// `inject_trusty_search_mcp_preserves_existing`,
+/// `inject_trusty_search_mcp_is_idempotent`.
+pub(super) const TRUSTY_SEARCH_MCP_SERVER: &str = r#"{
+  "type": "stdio",
+  "command": "trusty-search",
+  "args": ["serve"]
+}"#;
+
+/// Hook event types the global `trusty-memory` entries may have been registered
+/// under (across current and legacy trusty-mpm builds).
+///
+/// Why: [`clean_global_trusty_memory_hooks`] strips trusty-mpm's
+/// `trusty-memory` hook entries from `~/.claude/settings.json` so they stop
+/// firing for unrelated sessions. It must cover every event trusty-mpm has ever
+/// written globally: the new canonical pair (`UserPromptSubmit`, `SessionStart`)
+/// AND the legacy `hooks fire` events (`PostToolUse`, `Stop`) so an upgrade
+/// cleans up the old entries too.
+/// What: the union of current and legacy global hook event keys.
 pub(super) const GLOBAL_TRUSTY_MEMORY_EVENTS: &[&str] =
-    &["PostToolUse", "Stop", "UserPromptSubmit"];
+    &["UserPromptSubmit", "SessionStart", "PostToolUse", "Stop"];
 
 /// Deploy the bundled `trusty-mpm` output style under `<home>/.claude/output-styles/`.
 ///
@@ -225,20 +258,20 @@ pub(super) fn write_project_hooks(project_dir: &Path) -> Result<(), PrepError> {
     Ok(())
 }
 
-/// Inject the `trusty-memory` MCP server into the project's `.mcp.json`.
+/// Inject (or update) a named stdio MCP server into the project's `.mcp.json`.
 ///
-/// Why: `prepare_session` configures hooks and instructions but, without this,
-/// the launched `claude` process has no access to the memory tools because the
-/// `trusty-memory` MCP server is never registered in `<project>/.mcp.json`.
+/// Why: trusty-mpm needs to register multiple MCP servers (`trusty-memory`,
+/// `trusty-search`) into the workspace `.mcp.json` with identical merge/idempotency
+/// semantics. Factoring the read-merge-write logic into one helper keeps the two
+/// public wrappers thin and guarantees they behave consistently (issue #1270).
 /// What: reads an existing `<project_path>/.mcp.json` (starting from `{}` when
-/// absent or malformed), adds/updates the `trusty-memory` entry under
-/// `mcpServers` with [`TRUSTY_MEMORY_MCP_SERVER`], and writes the merged JSON
-/// back pretty-printed — preserving all other MCP servers. Idempotent: if the
-/// entry already matches, the file is left untouched.
-/// Test: `inject_trusty_memory_mcp_adds_server`,
-/// `inject_trusty_memory_mcp_preserves_existing`,
-/// `inject_trusty_memory_mcp_is_idempotent`.
-pub(super) fn inject_trusty_memory_mcp(project_path: &Path) -> Result<(), PrepError> {
+/// absent or malformed), adds/updates `mcpServers.<name>` to the parsed
+/// `server_json`, and writes the merged JSON back pretty-printed — preserving all
+/// other MCP servers. Idempotent: if the entry already matches, the file is left
+/// untouched and no write occurs. `server_json` MUST be a valid JSON object
+/// (callers pass compile-time constants).
+/// Test: exercised via `inject_trusty_memory_mcp_*` and `inject_trusty_search_mcp_*`.
+fn inject_mcp_server(project_path: &Path, name: &str, server_json: &str) -> Result<(), PrepError> {
     let mcp_path = project_path.join(".mcp.json");
 
     // Load existing config to preserve unrelated servers; tolerate a missing or
@@ -252,8 +285,8 @@ pub(super) fn inject_trusty_memory_mcp(project_path: &Path) -> Result<(), PrepEr
     };
 
     // The bundled server block is a constant and is guaranteed to parse.
-    let server: serde_json::Value = serde_json::from_str(TRUSTY_MEMORY_MCP_SERVER)
-        .expect("bundled trusty-memory MCP server block is valid JSON");
+    let server: serde_json::Value =
+        serde_json::from_str(server_json).expect("bundled MCP server block is valid JSON");
 
     // Ensure `mcpServers` is an object we can insert into.
     let servers = config
@@ -269,10 +302,10 @@ pub(super) fn inject_trusty_memory_mcp(project_path: &Path) -> Result<(), PrepEr
         .expect("mcpServers normalized to an object");
 
     // Idempotent: skip the write when the entry already matches.
-    if servers.get("trusty-memory") == Some(&server) {
+    if servers.get(name) == Some(&server) {
         return Ok(());
     }
-    servers.insert("trusty-memory".to_string(), server);
+    servers.insert(name.to_string(), server);
 
     let serialized =
         serde_json::to_string_pretty(&config).map_err(|err| PrepError::Deploy(err.to_string()))?;
@@ -281,6 +314,152 @@ pub(super) fn inject_trusty_memory_mcp(project_path: &Path) -> Result<(), PrepEr
         source,
     })?;
     Ok(())
+}
+
+/// Inject the `trusty-memory` MCP server into the project's `.mcp.json`.
+///
+/// Why: `prepare_session` configures hooks and instructions but, without this,
+/// the launched `claude` process has no access to the memory tools because the
+/// `trusty-memory` MCP server is never registered in `<project>/.mcp.json`.
+/// What: thin wrapper over [`inject_mcp_server`] registering the
+/// [`TRUSTY_MEMORY_MCP_SERVER`] entry under the key `trusty-memory`.
+/// Test: `inject_trusty_memory_mcp_adds_server`,
+/// `inject_trusty_memory_mcp_preserves_existing`,
+/// `inject_trusty_memory_mcp_is_idempotent`,
+/// `inject_trusty_memory_mcp_uses_serve_stdio`.
+pub(super) fn inject_trusty_memory_mcp(project_path: &Path) -> Result<(), PrepError> {
+    inject_mcp_server(project_path, "trusty-memory", TRUSTY_MEMORY_MCP_SERVER)
+}
+
+/// Inject the `trusty-search` MCP server into the project's `.mcp.json`.
+///
+/// Why (issue #1270 / step 4): spawned sessions must reach the code-search
+/// tools, but `trusty-search` was never registered alongside `trusty-memory`.
+/// This wires the MCP server so `search`, `grep`, `get_call_chain`, etc. are
+/// available. Index creation is out of scope here.
+/// What: thin wrapper over [`inject_mcp_server`] registering the
+/// [`TRUSTY_SEARCH_MCP_SERVER`] entry under the key `trusty-search`.
+/// Test: `inject_trusty_search_mcp_adds_server`,
+/// `inject_trusty_search_mcp_preserves_existing`,
+/// `inject_trusty_search_mcp_is_idempotent`,
+/// `inject_both_mcp_servers_coexist`.
+pub(super) fn inject_trusty_search_mcp(project_path: &Path) -> Result<(), PrepError> {
+    inject_mcp_server(project_path, "trusty-search", TRUSTY_SEARCH_MCP_SERVER)
+}
+
+/// Pre-seed per-directory trust acceptance for `workspace` in `~/.claude.json`.
+///
+/// Why (issue #1269): trusty-mpm launches Claude Code inside an *interactive*
+/// tmux pane (so the session can be observed and driven). For a directory it has
+/// never trusted, Claude Code blocks on the "Do you trust the files in this
+/// folder?" dialog before it will accept any input — so the task prompt that tm
+/// injects via `send-keys` is swallowed and the session stalls. Trust is keyed
+/// by absolute directory path in the config dir (`~/.claude.json`), which
+/// `--setting-sources` does NOT govern, so we must seed it directly. Because tm
+/// clones each repo into its OWN throwaway workspace under
+/// `~/trusty-mpm-projects/<owner>/<repo>/<id>/`, marking that path trusted is
+/// safe — no real user project is affected.
+/// What: reads `~/.claude.json` (the JSON config; starts from `{}` when absent
+/// or malformed — but a malformed *existing* file is left untouched to avoid
+/// clobbering the operator's OAuth/login data), ensures
+/// `projects.<workspace>` carries `hasTrustDialogAccepted: true`,
+/// `hasCompletedProjectOnboarding: true`, and `projectOnboardingSeenCount >= 1`,
+/// then writes it back pretty-printed preserving every other key. Idempotent.
+/// The OAuth fields elsewhere in the file are never touched.
+/// Test: `preseed_trust_marks_directory`, `preseed_trust_preserves_other_keys`,
+/// `preseed_trust_is_idempotent`, `preseed_trust_leaves_malformed_file`.
+pub(super) fn preseed_workspace_trust(
+    claude_json: &Path,
+    workspace: &Path,
+) -> Result<(), PrepError> {
+    use serde_json::Value;
+
+    // Read the existing config. If the file exists but is malformed JSON we must
+    // NOT overwrite it — it likely holds the operator's OAuth credentials, and
+    // clobbering it would force a re-login. Treat that as a soft failure.
+    let mut config: Value = match std::fs::read_to_string(claude_json) {
+        Ok(text) => match serde_json::from_str::<Value>(&text) {
+            Ok(value) if value.is_object() => value,
+            Ok(_) => {
+                tracing::warn!(
+                    "skipping trust pre-seed: {} is valid JSON but not an object",
+                    claude_json.display()
+                );
+                return Ok(());
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "skipping trust pre-seed: {} is not valid JSON ({err}); \
+                     leaving it untouched to protect OAuth state",
+                    claude_json.display()
+                );
+                return Ok(());
+            }
+        },
+        // Missing file: start fresh. (Rare — claude writes it on first run.)
+        Err(_) => Value::Object(serde_json::Map::new()),
+    };
+
+    let key = workspace.to_string_lossy().to_string();
+
+    let projects = config
+        .as_object_mut()
+        .expect("config is an object")
+        .entry("projects")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !projects.is_object() {
+        *projects = Value::Object(serde_json::Map::new());
+    }
+    let projects = projects.as_object_mut().expect("projects is an object");
+
+    let entry = projects
+        .entry(key)
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !entry.is_object() {
+        *entry = Value::Object(serde_json::Map::new());
+    }
+    let entry = entry.as_object_mut().expect("project entry is an object");
+
+    // Idempotent: skip the write when trust is already fully accepted.
+    let already_trusted = entry.get("hasTrustDialogAccepted") == Some(&Value::Bool(true))
+        && entry.get("hasCompletedProjectOnboarding") == Some(&Value::Bool(true));
+    if already_trusted {
+        return Ok(());
+    }
+
+    entry.insert("hasTrustDialogAccepted".to_string(), Value::Bool(true));
+    entry.insert(
+        "hasCompletedProjectOnboarding".to_string(),
+        Value::Bool(true),
+    );
+    // Claude Code shows the onboarding flow until this counter is >= 1.
+    entry
+        .entry("projectOnboardingSeenCount")
+        .or_insert_with(|| Value::from(1));
+
+    let serialized =
+        serde_json::to_string_pretty(&config).map_err(|err| PrepError::Deploy(err.to_string()))?;
+    std::fs::write(claude_json, serialized).map_err(|source| PrepError::Io {
+        path: claude_json.to_path_buf(),
+        source,
+    })?;
+    Ok(())
+}
+
+/// Pre-seed workspace trust in the operator's real `~/.claude.json`.
+///
+/// Why: thin home-resolving wrapper over [`preseed_workspace_trust`] so
+/// `prepare_session` can call it without knowing the config-dir layout; tests
+/// target a temp file via the inner function directly.
+/// What: resolves `~/.claude.json` and delegates. A missing home directory is a
+/// soft failure (logged, non-fatal) so launch still proceeds.
+/// Test: covered by the inner `preseed_trust_*` tests.
+pub(super) fn preseed_workspace_trust_home(workspace: &Path) -> Result<(), PrepError> {
+    let Some(home) = dirs::home_dir() else {
+        tracing::warn!("skipping trust pre-seed: home directory unresolved");
+        return Ok(());
+    };
+    preseed_workspace_trust(&home.join(".claude.json"), workspace)
 }
 
 /// Remove the `trusty-memory` hook entries from `~/.claude/settings.json`.
@@ -352,8 +531,13 @@ pub(super) fn clean_global_trusty_memory_hooks(settings_path: &Path) -> Result<(
 /// Whether a hook handler group is a `trusty-memory` entry.
 ///
 /// Why: identifies the groups [`clean_global_trusty_memory_hooks`] must drop.
-/// What: returns `true` when any command in the group's `hooks` array contains
-/// the substring `trusty-memory hooks fire`.
+/// Matching on the broad `trusty-memory` prefix (rather than the old, narrow
+/// `trusty-memory hooks fire` substring) cleans up BOTH the legacy global
+/// entries and the canonical `prompt-context` / `inbox-check` entries should
+/// either ever have been written globally (issue #1270).
+/// What: returns `true` when any command in the group's `hooks` array invokes
+/// the `trusty-memory` binary (the command string starts with `trusty-memory `
+/// or is exactly `trusty-memory`).
 /// Test: covered indirectly by `remove_global_hooks_removes_trusty_memory_entries`.
 pub(super) fn group_is_trusty_memory(group: &serde_json::Value) -> bool {
     group
@@ -364,7 +548,7 @@ pub(super) fn group_is_trusty_memory(group: &serde_json::Value) -> bool {
                 handler
                     .get("command")
                     .and_then(|c| c.as_str())
-                    .is_some_and(|cmd| cmd.contains("trusty-memory hooks fire"))
+                    .is_some_and(|cmd| cmd == "trusty-memory" || cmd.starts_with("trusty-memory "))
             })
         })
 }

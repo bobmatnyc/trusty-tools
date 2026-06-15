@@ -56,16 +56,46 @@ pub fn resolve_pm_model(config: &MpmConfig, explicit: Option<&str>) -> String {
     crate::core::config::resolve_agent_model(config, "pm", None, explicit)
 }
 
+/// The setting-sources flag every trusty-mpm-spawned `claude` carries.
+///
+/// Why (issue #1269 / step 4): the operator's global `~/.claude/settings.json`
+/// carries hooks (e.g. claude-mpm's) that bleed into — and interfere with —
+/// trusty-mpm sessions. `--setting-sources project,local` tells Claude Code to
+/// load ONLY the project (tm-owned workspace `.claude/settings.json`) and local
+/// settings sources, excluding `user`. This is the correct isolation lever: it
+/// does NOT touch `~/.claude.json`, so the ambient OAuth login tm relies on is
+/// preserved.
+/// What: the literal flag string appended to every launch command.
+/// Test: `claude_command_includes_setting_sources`.
+pub const SETTING_SOURCES_FLAG: &str = "--setting-sources project,local";
+
+/// The permission-mode flag every trusty-mpm-spawned `claude` carries.
+///
+/// Why (issue #1269): tm runs Claude Code in an interactive tmux pane; without
+/// a non-interactive permission mode, Claude blocks on per-tool permission
+/// prompts and the injected task stalls. `acceptEdits` lets the unattended
+/// session make edits without prompting while stopping short of the fully
+/// unguarded `bypassPermissions` (reserved for sandboxed/provisioned runs).
+/// What: the literal flag string appended to every launch command.
+/// Test: `claude_command_includes_permission_mode`.
+pub const PERMISSION_MODE_FLAG: &str = "--permission-mode acceptEdits";
+
 /// Build the full `claude` command string for `tmux send-keys`.
 ///
 /// Why: the command passed to `tmux send-keys` must be a single shell string;
 /// constructing it in one place keeps the CLI `launch`, `session start`, and
-/// future daemon-driven paths from drifting apart.
-/// What: always starts with `"claude"`; appends `--model <model>` when
-/// `model` is `Some`; appends `--append-system-prompt-file <path>` when
-/// `prompt_file` is `Some`. Returns the composed string.
+/// future daemon-driven paths from drifting apart. It is also the single place
+/// the session-isolation flag ([`SETTING_SOURCES_FLAG`]) and the
+/// unattended-permission flag ([`PERMISSION_MODE_FLAG`]) are applied so every
+/// spawn path stays unattended and isolated (issue #1269).
+/// What: always starts with `"claude"`; appends `--model <model>` when `model`
+/// is `Some`; appends `--append-system-prompt-file <path>` when `prompt_file` is
+/// `Some`; then ALWAYS appends [`SETTING_SOURCES_FLAG`] and
+/// [`PERMISSION_MODE_FLAG`]. Returns the composed string.
 /// Test: `claude_command_bare`, `claude_command_with_model`,
-/// `claude_command_with_prompt`, `claude_command_with_both`.
+/// `claude_command_with_prompt`, `claude_command_with_both`,
+/// `claude_command_includes_setting_sources`,
+/// `claude_command_includes_permission_mode`.
 pub fn build_claude_command(model: Option<&str>, prompt_file: Option<&Path>) -> String {
     let mut cmd = "claude".to_string();
     if let Some(m) = model {
@@ -76,6 +106,11 @@ pub fn build_claude_command(model: Option<&str>, prompt_file: Option<&Path>) -> 
         cmd.push_str(" --append-system-prompt-file ");
         cmd.push_str(&p.display().to_string());
     }
+    // Isolation + unattended flags, always applied (issue #1269 / step 4).
+    cmd.push(' ');
+    cmd.push_str(SETTING_SOURCES_FLAG);
+    cmd.push(' ');
+    cmd.push_str(PERMISSION_MODE_FLAG);
     cmd
 }
 
@@ -109,23 +144,29 @@ pub fn build_agent_command(
 mod tests {
     use super::*;
 
+    /// The isolation + unattended suffix every command now carries (#1269).
+    const FLAGS: &str = "--setting-sources project,local --permission-mode acceptEdits";
+
     #[test]
     fn claude_command_bare() {
-        // No model, no prompt file → plain "claude".
-        assert_eq!(build_claude_command(None, None), "claude");
+        // No model, no prompt file → "claude" + the always-on isolation flags.
+        assert_eq!(build_claude_command(None, None), format!("claude {FLAGS}"));
     }
 
     #[test]
     fn claude_command_with_model() {
         let cmd = build_claude_command(Some("claude-opus-4-5"), None);
-        assert_eq!(cmd, "claude --model claude-opus-4-5");
+        assert_eq!(cmd, format!("claude --model claude-opus-4-5 {FLAGS}"));
     }
 
     #[test]
     fn claude_command_with_prompt() {
         let path = Path::new("/tmp/prompt.txt");
         let cmd = build_claude_command(None, Some(path));
-        assert_eq!(cmd, "claude --append-system-prompt-file /tmp/prompt.txt");
+        assert_eq!(
+            cmd,
+            format!("claude --append-system-prompt-file /tmp/prompt.txt {FLAGS}")
+        );
     }
 
     #[test]
@@ -134,7 +175,35 @@ mod tests {
         let cmd = build_claude_command(Some("claude-haiku-4-5"), Some(path));
         assert_eq!(
             cmd,
-            "claude --model claude-haiku-4-5 --append-system-prompt-file /tmp/sys.txt"
+            format!(
+                "claude --model claude-haiku-4-5 --append-system-prompt-file /tmp/sys.txt {FLAGS}"
+            )
+        );
+    }
+
+    #[test]
+    fn claude_command_includes_setting_sources() {
+        // Why (#1269/step 4): every spawned session must EXCLUDE the user's
+        // global settings by loading only project,local sources.
+        let cmd = build_claude_command(None, None);
+        assert!(
+            cmd.contains("--setting-sources project,local"),
+            "missing setting-sources isolation flag: {cmd}"
+        );
+        // Must not load the `user` source.
+        assert!(
+            !cmd.contains("user"),
+            "should not reference the user source: {cmd}"
+        );
+    }
+
+    #[test]
+    fn claude_command_includes_permission_mode() {
+        // Why (#1269): unattended sessions must not block on permission prompts.
+        let cmd = build_claude_command(Some("sonnet"), None);
+        assert!(
+            cmd.contains("--permission-mode acceptEdits"),
+            "missing permission-mode flag: {cmd}"
         );
     }
 
@@ -176,6 +245,6 @@ mod tests {
 
         // Config per-agent override (haiku) wins over frontmatter (sonnet).
         let cmd = build_agent_command(&cfg, &agent, None, None);
-        assert_eq!(cmd, "claude --model claude-haiku-4-5");
+        assert_eq!(cmd, format!("claude --model claude-haiku-4-5 {FLAGS}"));
     }
 }
