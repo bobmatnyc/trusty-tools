@@ -97,6 +97,27 @@ impl OrchestratorBackend for MockBackend {
     async fn session_send(&self, session_id: &str, text: &str) -> Result<Value, String> {
         Ok(json!({ "id": session_id, "sent": true, "text": text }))
     }
+
+    // ── #1222: console-facing mock impls ─────────────────────────────────────
+    async fn console_metrics(&self) -> Result<Value, String> {
+        Ok(json!({
+            "service_id": "trusty-mpm",
+            "display_name": "Trusty MPM",
+            "version": "0.0.0",
+            "status": "ok",
+            "metrics": { "fleet": { "active": 0 }, "auto_resume": { "desired": false } },
+            "metrics_schema_version": 1,
+        }))
+    }
+    async fn supervisor_status(&self) -> Result<Value, String> {
+        Ok(json!({
+            "fleet": { "active": 0, "stopped": 0, "total": 0 },
+            "auto_resume": { "desired": false, "env": false, "pending_restart": false },
+        }))
+    }
+    async fn auto_resume_set(&self, enabled: bool) -> Result<Value, String> {
+        Ok(json!({ "desired": enabled, "env": false, "pending_restart": enabled }))
+    }
 }
 
 fn call(name: &str, args: Value) -> Request {
@@ -123,7 +144,7 @@ async fn dispatch_initialize_returns_server_info() {
 
 #[tokio::test]
 async fn dispatch_tools_list_returns_full_catalog() {
-    // 9 pre-existing + 6 new session-lifecycle tools = 15 (#1221).
+    // 9 pre-existing + 6 session-lifecycle + 3 console-facing tools = 18 (#1222).
     let req = Request {
         jsonrpc: Some("2.0".into()),
         id: Some(json!(1)),
@@ -132,7 +153,73 @@ async fn dispatch_tools_list_returns_full_catalog() {
     };
     let resp = dispatch(&MockBackend, req).await;
     let tools = resp.result.unwrap()["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 15);
+    assert_eq!(tools.as_array().unwrap().len(), 18);
+}
+
+/// Why: the console poller calls `console_metrics`; dispatch must route it to the
+/// backend and return a non-error result carrying the report.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_console_metrics_tool() {
+    let resp = dispatch(&MockBackend, call("console_metrics", json!({}))).await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("trusty-mpm")
+    );
+}
+
+/// Why: the supervisor widget calls `supervisor_status`; dispatch must route it.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_supervisor_status_tool() {
+    let resp = dispatch(&MockBackend, call("supervisor_status", json!({}))).await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("fleet")
+    );
+}
+
+/// Why: the auto-resume toggle calls `auto_resume_set` with `enabled`; dispatch
+/// must parse the bool and route it.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_auto_resume_set_tool() {
+    let resp = dispatch(
+        &MockBackend,
+        call("auto_resume_set", json!({ "enabled": true })),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("desired")
+    );
+}
+
+/// Why: `auto_resume_set` must reject a call missing the required `enabled` bool.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_auto_resume_set_requires_enabled() {
+    let resp = dispatch(&MockBackend, call("auto_resume_set", json!({}))).await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("enabled")
+    );
 }
 
 #[tokio::test]

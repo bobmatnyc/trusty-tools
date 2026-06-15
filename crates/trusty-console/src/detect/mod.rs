@@ -20,11 +20,13 @@
 mod analyze;
 mod helpers;
 mod memory;
+mod mpm;
 mod review;
 mod search;
 
 pub use analyze::AnalyzeConnector;
 pub use memory::MemoryConnector;
+pub use mpm::MpmConnector;
 pub use review::ReviewConnector;
 pub use search::SearchConnector;
 
@@ -36,15 +38,17 @@ use crate::connector::ServiceConnector;
 /// command iterate the same set. Issue #1163 lifts the prior #1069 exclusion
 /// of trusty-review: the Review dashboard tab is now fully implemented with a
 /// `console_metrics` MCP tool, so the service is included in the Overview.
-/// What: Returns a `Vec<Box<dyn ServiceConnector>>` with four connectors:
-/// search, memory, analyze, review.
-/// Test: `test_all_connectors_returns_four` below.
+/// What: Returns a `Vec<Box<dyn ServiceConnector>>` with five connectors:
+/// search, memory, analyze, review, mpm (#1222 adds trusty-mpm for the Sessions
+/// tab).
+/// Test: `test_all_connectors_returns_five` below.
 pub fn all_connectors() -> Vec<Box<dyn ServiceConnector>> {
     vec![
         Box::new(SearchConnector::new()),
         Box::new(MemoryConnector::new()),
         Box::new(AnalyzeConnector::new()),
         Box::new(ReviewConnector::new()),
+        Box::new(MpmConnector::new()),
     ]
 }
 
@@ -54,17 +58,18 @@ pub fn all_connectors() -> Vec<Box<dyn ServiceConnector>> {
 mod tests {
     use super::*;
 
-    /// Why: the registry must return exactly four connectors in order (search,
-    /// memory, analyze, review — #1163 lifts the prior #1069 review exclusion).
+    /// Why: the registry must return exactly five connectors in order (search,
+    /// memory, analyze, review, mpm — #1222 adds trusty-mpm for the Sessions tab).
     /// What: calls all_connectors() and checks IDs.
     /// Test: this test itself.
     #[test]
-    fn test_all_connectors_returns_four() {
+    fn test_all_connectors_returns_five() {
         let cs = all_connectors();
-        assert_eq!(cs.len(), 4);
+        assert_eq!(cs.len(), 5);
         assert_eq!(cs[0].id(), "trusty-search");
         assert_eq!(cs[1].id(), "trusty-memory");
         assert_eq!(cs[2].id(), "trusty-analyze");
         assert_eq!(cs[3].id(), "trusty-review");
+        assert_eq!(cs[4].id(), "trusty-mpm");
     }
 }

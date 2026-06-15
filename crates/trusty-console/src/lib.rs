@@ -26,6 +26,7 @@ pub mod mcp_handle;
 pub mod metrics_poller;
 pub mod poller;
 pub mod proxy;
+pub mod routes;
 pub mod server;
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
@@ -259,6 +260,31 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
             tracing::warn!(
                 service = "trusty-review",
                 "run_serve: no MCP handle registered for trusty-review — \
+                 metrics poller will not start for this service"
+            );
+        }
+    }
+
+    // ── metrics MCP poll (trusty-mpm) ───────────────────────────────────────
+    // trusty-mpm's stdio MCP mode is `serve --stdio` (the #1221 bridge that
+    // auto-starts the durable daemon and forwards JSON-RPC to its loopback
+    // POST /rpc). The console_metrics poll keeps the coarse session-fleet +
+    // supervisor health cache warm for /api/console/metrics/mpm; the Sessions
+    // tab itself polls /api/console/sessions live at a faster cadence (#1222).
+    // On machines without trusty-mpm the handle marks it Absent immediately; the
+    // cache stays None; /api/console/metrics/mpm returns 503 (graceful).
+    {
+        let handles = state.mcp_handles();
+        if let Some(h) = handles.get("trusty-mpm") {
+            metrics_poller::start(
+                Arc::clone(h),
+                state.mpm_metrics_cache().clone(),
+                Duration::from_secs(args.poll_interval),
+            );
+        } else {
+            tracing::warn!(
+                service = "trusty-mpm",
+                "run_serve: no MCP handle registered for trusty-mpm — \
                  metrics poller will not start for this service"
             );
         }

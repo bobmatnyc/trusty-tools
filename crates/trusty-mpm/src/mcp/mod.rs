@@ -188,6 +188,36 @@ pub trait OrchestratorBackend: Send + Sync {
     ///       confirmation with the tmux name. A missing id is an error string.
     /// Test: `dispatch_session_send_tool` (mock).
     async fn session_send(&self, session_id: &str, text: &str) -> Result<Value, String>;
+
+    // ── #1222: console-facing tools ──────────────────────────────────────────
+
+    /// Back `console_metrics`: the standard service-agnostic metrics report.
+    ///
+    /// Why: trusty-console polls every service's `console_metrics` tool uniformly
+    ///      (#1104). trusty-mpm must speak the same contract so it renders in the
+    ///      dashboard alongside search/memory/analyze/review.
+    /// What: returns a serialised
+    ///      [`trusty_common::console_metrics::ConsoleMetricsReport`] whose
+    ///      `metrics` payload carries the fleet snapshot and auto-resume state.
+    /// Test: `dispatch_console_metrics_tool` (mock).
+    async fn console_metrics(&self) -> Result<Value, String>;
+
+    /// Back `supervisor_status`: fleet snapshot + auto-resume control state.
+    ///
+    /// Why: the Sessions tab's supervisor widget needs lifecycle-state counts and
+    ///      the auto-resume control state in one call.
+    /// What: returns `{ fleet, auto_resume }`.
+    /// Test: `dispatch_supervisor_status_tool` (mock).
+    async fn supervisor_status(&self) -> Result<Value, String>;
+
+    /// Back `auto_resume_set`: persist the operator's desired auto-resume flag.
+    ///
+    /// Why: the console toggle must durably set auto-resume without the CLI
+    ///      (RFC §6 Q6). The supervisor reads the persisted flag on its next sweep.
+    /// What: writes the desired flag and echoes `{ desired, env,
+    ///      pending_restart }`.
+    /// Test: `dispatch_auto_resume_set_tool` (mock).
+    async fn auto_resume_set(&self, enabled: bool) -> Result<Value, String>;
 }
 
 /// Route a JSON-RPC request to the backend, returning the MCP response.
@@ -305,6 +335,13 @@ async fn dispatch_tool_call<B: OrchestratorBackend>(
                 backend.report_bug(&fp, confirm).await
             }
             Err(e) => Err(e),
+        },
+        // ── #1222: console-facing tools ──────────────────────────────────────
+        "console_metrics" => backend.console_metrics().await,
+        "supervisor_status" => backend.supervisor_status().await,
+        "auto_resume_set" => match args.get("enabled").and_then(Value::as_bool) {
+            Some(enabled) => backend.auto_resume_set(enabled).await,
+            None => Err("missing required boolean argument: `enabled`".to_string()),
         },
         // #1221: the six session-lifecycle tools route through a sibling module
         // so this match stays focused and `mod.rs` stays under the SLOC cap.
