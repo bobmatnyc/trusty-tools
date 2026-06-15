@@ -13,7 +13,6 @@
 //! `tcode_adapter_spawn_sends_run_task` (see the module test block).
 
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
 use tracing::debug;
@@ -71,15 +70,44 @@ impl TcodeAdapter {
     /// Return `true` if the `tcode` binary can be found on `PATH`.
     ///
     /// Why: `spawn` must return `RuntimeError::BinaryNotFound` rather than
-    /// sending a command that silently fails inside the pane.
-    /// What: runs `which tcode` and checks the exit status.
+    /// sending a command that silently fails inside the pane. The previous
+    /// implementation shelled out to `which`, which is absent on some targets
+    /// (notably Windows) and adds a subprocess; the `which` crate performs the
+    /// same PATH/PATHEXT resolution portably and in-process (#1213).
+    /// What: resolves `tcode` against `PATH` via [`which::which`] and reports
+    /// whether a matching executable was found (any lookup error → `false`).
     /// Test: `tcode_adapter_binary_check_returns_bool`.
     fn tcode_available() -> bool {
-        Command::new("which")
-            .arg(TCODE_BINARY)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        which::which(TCODE_BINARY).is_ok()
+    }
+
+    /// Build the `tcode run-task` line and send it to the named tmux pane.
+    ///
+    /// Why: this is the half of `spawn` AFTER the binary-availability gate —
+    /// command construction plus the tmux send. Factoring it out lets the unit
+    /// tests exercise the send path deterministically through `FakeTmux` without
+    /// a real `tcode` binary on PATH (the availability check is the only part
+    /// that depends on the environment), closing the silent-skip gap in #1213.
+    /// What: constructs the command via [`build_spawn_command`], logs it, and
+    /// forwards it to `send_line`, mapping any tmux failure to
+    /// [`RuntimeError::TmuxUnavailable`]. It does NOT check binary availability.
+    /// Test: `tcode_adapter_spawn_sends_run_task` (always runs in CI).
+    fn send_spawn_command(
+        &self,
+        tmux_name: &str,
+        cwd: &Path,
+        task: &str,
+    ) -> Result<(), RuntimeError> {
+        let command = build_spawn_command(cwd, task);
+        debug!(
+            session = %tmux_name,
+            cwd = %cwd.display(),
+            task = %task,
+            "spawning tcode in tmux pane"
+        );
+        self.tmux
+            .send_line(tmux_name, &command)
+            .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))
     }
 }
 
@@ -129,16 +157,7 @@ impl RuntimeAdapter for TcodeAdapter {
                 "tcode binary not found on PATH — install trusty-code first".into(),
             ));
         }
-        let command = build_spawn_command(cwd, task);
-        debug!(
-            session = %tmux_name,
-            cwd = %cwd.display(),
-            task = %task,
-            "spawning tcode in tmux pane"
-        );
-        self.tmux
-            .send_line(tmux_name, &command)
-            .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))
+        self.send_spawn_command(tmux_name, cwd, task)
     }
 
     /// Return `"tcode"` as the adapter's identifier.
@@ -154,51 +173,8 @@ impl RuntimeAdapter for TcodeAdapter {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_helpers::FakeTmux;
     use super::*;
-    use crate::session_manager::ManagedError;
-    use std::sync::Mutex;
-
-    struct FakeTmux {
-        sends: Mutex<Vec<(String, String)>>,
-    }
-
-    impl FakeTmux {
-        fn new() -> Arc<Self> {
-            Arc::new(Self {
-                sends: Mutex::new(Vec::new()),
-            })
-        }
-    }
-
-    impl ManagedTmuxDriver for FakeTmux {
-        fn create_session(&self, _name: &str, _workdir: &str) -> Result<(), ManagedError> {
-            Ok(())
-        }
-
-        fn kill_session(&self, _name: &str) -> Result<(), ManagedError> {
-            Ok(())
-        }
-
-        fn send_line(&self, name: &str, text: &str) -> Result<(), ManagedError> {
-            self.sends
-                .lock()
-                .unwrap()
-                .push((name.to_owned(), text.to_owned()));
-            Ok(())
-        }
-
-        fn capture(&self, _name: &str, _lines: u32) -> Result<String, ManagedError> {
-            Ok(String::new())
-        }
-
-        fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
-            Ok(Vec::new())
-        }
-
-        fn session_exists(&self, _name: &str) -> bool {
-            false
-        }
-    }
 
     #[test]
     fn tcode_adapter_identifies() {
@@ -269,22 +245,47 @@ mod tests {
 
     #[test]
     fn tcode_adapter_spawn_sends_run_task() {
-        // If tcode is not installed this test is a no-op (we cannot install it
-        // in CI). We only assert the send when the binary exists.
-        if !TcodeAdapter::tcode_available() {
-            return;
-        }
+        // The send/command-construction path must be exercised in EVERY CI run,
+        // regardless of whether a real `tcode` binary is on PATH. We therefore
+        // drive `send_spawn_command` (the post-availability-check half of
+        // `spawn`) directly: it needs only the `FakeTmux` driver, never a real
+        // binary, so the launch-line assertion below runs unconditionally.
         let fake = FakeTmux::new();
         let adapter = TcodeAdapter::new(fake.clone());
         adapter
-            .spawn("tmpm-test", Path::new("/tmp"), "some task")
-            .expect("spawn");
-        let sends = fake.sends.lock().unwrap();
+            .send_spawn_command("tmpm-test", Path::new("/tmp"), "some task")
+            .expect("send_spawn_command");
+        let sends = fake.sends.lock().expect("send log mutex");
         assert_eq!(sends.len(), 1);
         assert_eq!(sends[0].0, "tmpm-test");
         assert_eq!(
             sends[0].1,
             build_spawn_command(Path::new("/tmp"), "some task")
         );
+    }
+
+    #[test]
+    fn tcode_adapter_spawn_errors_when_binary_missing() {
+        // The availability gate must short-circuit with `BinaryNotFound` and
+        // send NOTHING when `tcode` is absent. We can only assert this branch
+        // deterministically when the binary is genuinely off PATH; when it is
+        // present (e.g. a dev machine with trusty-code installed) we assert the
+        // happy path instead so the test is meaningful in both environments.
+        let fake = FakeTmux::new();
+        let adapter = TcodeAdapter::new(fake.clone());
+        let result = adapter.spawn("tmpm-test", Path::new("/tmp"), "some task");
+        if TcodeAdapter::tcode_available() {
+            assert!(result.is_ok(), "spawn should succeed when tcode is on PATH");
+            assert_eq!(fake.sends.lock().expect("send log mutex").len(), 1);
+        } else {
+            assert!(
+                matches!(result, Err(RuntimeError::BinaryNotFound(_))),
+                "spawn must report BinaryNotFound when tcode is absent: {result:?}"
+            );
+            assert!(
+                fake.sends.lock().expect("send log mutex").is_empty(),
+                "no command may be sent when the binary is missing"
+            );
+        }
     }
 }

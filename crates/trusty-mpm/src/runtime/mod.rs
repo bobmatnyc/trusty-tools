@@ -14,6 +14,9 @@
 mod claude_code;
 mod tcode;
 
+#[cfg(test)]
+pub(crate) mod test_helpers;
+
 pub use claude_code::ClaudeCodeAdapter;
 pub use tcode::TcodeAdapter;
 
@@ -21,6 +24,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -84,15 +88,20 @@ pub trait RuntimeAdapter: Send + Sync {
 /// SAME backend rather than silently reverting to the default.
 /// What: a two-variant enum with `Default` = [`RuntimeKind::ClaudeCode`] (so
 /// existing behavior is unchanged), stable serde wire strings (`"claude-code"`,
-/// `"tcode"`), and `FromStr` for CLI/HTTP parsing.
+/// `"tcode"`), `FromStr` for HTTP parsing, and a `clap::ValueEnum` impl so the
+/// `--runtime` CLI flag rejects bad values at parse time rather than at the HTTP
+/// layer (#1213). The `ValueEnum` value names are pinned to the same kebab-case
+/// spellings as the serde wire form so the CLI and HTTP surfaces never diverge.
 /// Test: `runtime_kind_default_is_claude_code`, `runtime_kind_from_str_*`,
-/// `runtime_kind_serde_round_trip`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// `runtime_kind_serde_round_trip`, `runtime_kind_value_enum_matches_wire`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum RuntimeKind {
     /// Claude Code CLI over OAuth (the default; `ANTHROPIC_API_KEY` is scrubbed).
+    #[value(name = "claude-code")]
     ClaudeCode,
     /// trusty-code (`tcode`) over the direct Anthropic API (`ANTHROPIC_API_KEY`).
+    #[value(name = "tcode")]
     Tcode,
 }
 
@@ -165,46 +174,8 @@ pub fn build_adapter(
 
 #[cfg(test)]
 mod tests {
+    use super::test_helpers::FakeTmux;
     use super::*;
-    use crate::session_manager::ManagedError;
-    use std::sync::Mutex;
-
-    struct FakeTmux {
-        sends: Mutex<Vec<(String, String)>>,
-    }
-
-    impl FakeTmux {
-        fn new() -> Arc<Self> {
-            Arc::new(Self {
-                sends: Mutex::new(Vec::new()),
-            })
-        }
-    }
-
-    impl ManagedTmuxDriver for FakeTmux {
-        fn create_session(&self, _name: &str, _workdir: &str) -> Result<(), ManagedError> {
-            Ok(())
-        }
-        fn kill_session(&self, _name: &str) -> Result<(), ManagedError> {
-            Ok(())
-        }
-        fn send_line(&self, name: &str, text: &str) -> Result<(), ManagedError> {
-            self.sends
-                .lock()
-                .unwrap()
-                .push((name.to_owned(), text.to_owned()));
-            Ok(())
-        }
-        fn capture(&self, _name: &str, _lines: u32) -> Result<String, ManagedError> {
-            Ok(String::new())
-        }
-        fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
-            Ok(Vec::new())
-        }
-        fn session_exists(&self, _name: &str) -> bool {
-            false
-        }
-    }
 
     #[test]
     fn runtime_kind_default_is_claude_code() {
@@ -256,6 +227,25 @@ mod tests {
             serde_json::to_string(&RuntimeKind::Tcode).unwrap(),
             "\"tcode\""
         );
+    }
+
+    #[test]
+    fn runtime_kind_value_enum_matches_wire() {
+        // The clap CLI value names must be byte-identical to the serde wire form
+        // and `as_str`, so `--runtime <x>` and `runtime=<x>` accept the same set.
+        for kind in [RuntimeKind::ClaudeCode, RuntimeKind::Tcode] {
+            let value = kind.to_possible_value().expect("kind has a CLI value");
+            assert_eq!(value.get_name(), kind.as_str());
+            // Round-trips back through the HTTP-side `FromStr` parser.
+            let parsed = kind.as_str().parse::<RuntimeKind>().expect("parses");
+            assert_eq!(parsed, kind);
+        }
+        // The CLI exposes exactly the two supported backends, in order.
+        let names: Vec<String> = RuntimeKind::value_variants()
+            .iter()
+            .map(|k| k.to_possible_value().unwrap().get_name().to_owned())
+            .collect();
+        assert_eq!(names, vec!["claude-code".to_owned(), "tcode".to_owned()]);
     }
 
     #[test]

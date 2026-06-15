@@ -70,7 +70,7 @@ pub(crate) async fn session_new(
     git_ref: String,
     task: String,
     name_hint: Option<String>,
-    runtime: String,
+    runtime: trusty_mpm::runtime::RuntimeKind,
 ) -> anyhow::Result<()> {
     #[derive(Deserialize)]
     struct SpawnResp {
@@ -88,7 +88,9 @@ pub(crate) async fn session_new(
             "ref": git_ref,
             "task": task,
             "name_hint": name_hint,
-            "runtime": runtime,
+            // Send the canonical wire spelling (`claude-code`/`tcode`) so the
+            // daemon's `FromStr` accepts it; the CLI already validated the value.
+            "runtime": runtime.as_str(),
         }))
         .send()
         .await?

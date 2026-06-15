@@ -119,6 +119,9 @@ tracing-subscriber.workspace = true
 colored.workspace = true
 sysinfo.workspace = true
 libc.workspace = true
+# Portable executable lookup on PATH (replaces the non-portable `which` shell-out
+# in the tcode runtime adapter's availability probe — see #1213).
+which.workspace = true
 
 # ── Optional dependencies (feature-gated) ────────────────────────────────────
 
