@@ -86,6 +86,40 @@ pub struct TrustyToolsConfig {
     /// #1220 convention without touching the legacy TOML.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+
+    /// `tm watch` defaults (the `watch:` YAML section).
+    ///
+    /// `None` → no configured defaults; the watch CLI flags supply their own
+    /// built-in defaults. Present so an operator can pin a board's repo, routing
+    /// label, and poll interval declaratively instead of typing them every run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch: Option<WatchConfig>,
+}
+
+/// The `watch:` section of `~/.trusty-tools/trusty-mpm/config.yaml`.
+///
+/// Why: `tm watch poll|listen` routes board issues to managed sessions; an
+/// operator running it repeatedly (or from cron) wants to pin the board repo,
+/// the routing label, and the poll interval once rather than passing them on
+/// every invocation. Every field is optional so an absent section or key falls
+/// back to the CLI flag's built-in default; CLI flags always override config.
+/// What: optional `repo` (`owner/repo`), `label` (routing label), and
+/// `interval_secs` (listen-mode poll cadence). Resolution precedence lives in
+/// the `watch::args` module, not here — this is purely the on-disk shape.
+/// Test: round-trips via the `crate_config` tests; precedence in `watch::args`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchConfig {
+    /// Default board repository as `owner/repo` (e.g. `bobmatnyc/trusty-tools`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+
+    /// Default routing label; only issues carrying it are picked up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+
+    /// Default poll interval (seconds) for `listen` mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_secs: Option<u64>,
 }
 
 impl TrustyToolsConfig {

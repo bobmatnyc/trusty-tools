@@ -1058,3 +1058,82 @@ fn cli_parses_issue_seed_config_force() {
         }
     ));
 }
+
+#[test]
+fn cli_parses_watch_poll_minimal() {
+    // Why: the minimal `tm watch poll <project>` must parse with safety defaults
+    // (dry-run off but execute also off → dry-run behaviour) and claude-code.
+    use crate::cli::WatchCmd;
+    let cli = Cli::try_parse_from(["trusty-mpm", "watch", "poll", "owner/repo"]).unwrap();
+    match cli.command {
+        Command::Watch {
+            cmd: WatchCmd::Poll { args },
+        } => {
+            assert_eq!(args.project, "owner/repo");
+            assert!(args.label.is_none());
+            assert!(!args.dry_run);
+            assert!(!args.execute, "execute must default off (safe)");
+            assert!(args.interval_secs.is_none());
+            assert!(args.state.is_none());
+            assert_eq!(args.runtime, trusty_mpm::runtime::RuntimeKind::ClaudeCode);
+        }
+        other => panic!("expected watch poll, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_watch_poll_with_flags() {
+    // Why: `--label`, `--state`, and `--execute` must all parse on poll.
+    use crate::cli::WatchCmd;
+    use crate::commands::watch::github::IssueState;
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "watch",
+        "poll",
+        "acme/widget",
+        "--label",
+        "ship-it",
+        "--state",
+        "all",
+        "--execute",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Watch {
+            cmd: WatchCmd::Poll { args },
+        } => {
+            assert_eq!(args.project, "acme/widget");
+            assert_eq!(args.label.as_deref(), Some("ship-it"));
+            assert_eq!(args.state, Some(IssueState::All));
+            assert!(args.execute);
+        }
+        other => panic!("expected watch poll, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_watch_listen_with_interval() {
+    // Why: `tm watch listen <project> --interval-secs N --dry-run` must parse the
+    // listen-specific interval and the explicit safe flag.
+    use crate::cli::WatchCmd;
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "watch",
+        "listen",
+        "owner/repo",
+        "--interval-secs",
+        "30",
+        "--dry-run",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Watch {
+            cmd: WatchCmd::Listen { args },
+        } => {
+            assert_eq!(args.project, "owner/repo");
+            assert_eq!(args.interval_secs, Some(30));
+            assert!(args.dry_run);
+        }
+        other => panic!("expected watch listen, got {other:?}"),
+    }
+}
