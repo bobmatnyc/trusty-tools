@@ -205,6 +205,43 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: RepairAction,
     },
+
+    /// Sync and inspect the claude-mpm agent/skill catalog.
+    ///
+    /// Why: the session-manager MVP deploys agents and skills sourced from the
+    /// authoritative claude-mpm repository; `tm catalog` keeps the local cache
+    /// current and lets operators inspect what is available.
+    /// What: `sync` fetches (or refreshes) the catalog under
+    /// `~/.trusty-mpm/catalog/`; `ls` lists the cached agents and skills.
+    /// Test: `cli_parses_catalog_sync`, `cli_parses_catalog_ls`.
+    Catalog {
+        /// Catalog action to perform.
+        #[command(subcommand)]
+        action: CatalogAction,
+    },
+}
+
+/// Actions for the `catalog` subcommand.
+///
+/// Why: catalog management splits into a remote-sync operation and a local
+/// listing; separate sub-actions keep each scriptable.
+/// What: `Sync` fetches the catalog (respecting a TTL unless `--force`); `Ls`
+/// lists cached agents and skills.
+/// Test: `cli_parses_catalog_sync`, `cli_parses_catalog_ls`.
+#[derive(Debug, Subcommand)]
+pub(crate) enum CatalogAction {
+    /// Fetch or refresh the agent/skill catalog from the claude-mpm repo.
+    Sync {
+        /// Force a fetch even if the cache TTL has not expired.
+        #[arg(long)]
+        force: bool,
+    },
+    /// List the cached agents and skills.
+    Ls {
+        /// Output as JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Actions for the `repair` subcommand.
@@ -370,6 +407,85 @@ pub(crate) enum SessionAction {
         /// Summarize the output before printing (uses the Summarise level).
         #[arg(long)]
         summarize: bool,
+    },
+    /// Spawn a new managed session from a repo + ref (session-manager MVP).
+    ///
+    /// Why: the session-manager MVP provisions an isolated workspace from a git
+    /// repo and starts a harness in it; `tm session new` is the operator-facing
+    /// entry point that posts to `POST /api/v1/sessions/managed`.
+    /// What: posts repo, ref, task, and an optional name hint to the daemon.
+    /// Test: `cli_parses_session_new`.
+    New {
+        /// Repository URL to provision the session from.
+        repo: String,
+        /// Git branch or ref to check out.
+        #[arg(long, default_value = "main")]
+        git_ref: String,
+        /// Human-readable task description.
+        #[arg(long)]
+        task: String,
+        /// Optional name hint for the tmux session.
+        #[arg(long)]
+        name_hint: Option<String>,
+    },
+    /// List managed sessions (session-manager MVP).
+    ///
+    /// Why: operators need to see every managed session and its pending decision.
+    /// What: GETs `/api/v1/sessions/managed` and renders a table or JSON.
+    /// Test: `cli_parses_session_ls`.
+    Ls {
+        /// Output as JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show recent activity for a managed session.
+    ///
+    /// Why: operators inspect what a session is doing without attaching.
+    /// What: GETs `/api/v1/sessions/managed/{id}` and prints its summary.
+    /// Test: `cli_parses_session_activity`.
+    Activity {
+        /// Managed session id.
+        id: String,
+    },
+    /// Inject text into a managed session's pane.
+    ///
+    /// Why: send a message to the harness without attaching to tmux.
+    /// What: POSTs `/api/v1/sessions/managed/{id}/send`.
+    /// Test: `cli_parses_session_send`.
+    Send {
+        /// Managed session id.
+        id: String,
+        /// Text to inject.
+        text: String,
+    },
+    /// Answer a managed session's pending decision.
+    ///
+    /// Why: resolve a decision the harness is blocked on.
+    /// What: POSTs `/api/v1/sessions/managed/{id}/answer`.
+    /// Test: `cli_parses_session_answer`.
+    Answer {
+        /// Managed session id.
+        id: String,
+        /// Answer text.
+        answer: String,
+    },
+    /// Print the tmux attach command for a managed session.
+    ///
+    /// Why: operators need the exact `tmux attach` command to take over a pane.
+    /// What: GETs `/api/v1/sessions/managed/{id}/attach-cmd`.
+    /// Test: `cli_parses_session_attach`.
+    Attach {
+        /// Managed session id.
+        id: String,
+    },
+    /// Stop and deregister a managed session.
+    ///
+    /// Why: terminate a managed session when its work is done.
+    /// What: DELETEs `/api/v1/sessions/managed/{id}`.
+    /// Test: `cli_parses_session_managed_stop`.
+    ManagedStop {
+        /// Managed session id.
+        id: String,
     },
 }
 

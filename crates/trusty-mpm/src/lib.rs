@@ -50,6 +50,48 @@ pub mod core;
 /// Test: URL construction and the command model are covered by the unit suite.
 pub mod client;
 
+/// Managed session subsystem: records, persistence, lifecycle manager.
+///
+/// Why: the session-manager MVP tracks every agent session the daemon spawns so
+/// operators can inspect, control, and recover sessions across daemon restarts.
+/// What: re-exports `SessionManager`, `SessionRecord`, `ManagedSessionId`,
+/// `ManagedSessionState`, and the tmux/store seams from its submodules.
+/// Test: each submodule carries unit tests; `tests/session_manager_mvp.rs`
+/// exercises the integration path.
+pub mod session_manager;
+
+/// Runtime adapters that launch an agent runtime inside a tmux session.
+///
+/// Why: the session manager must swap runtime backends (Claude Code CLI today,
+/// trusty-code tomorrow) without changing its own code.
+/// What: defines the `RuntimeAdapter` trait and the `ClaudeCodeAdapter`.
+/// Test: `runtime::claude_code::tests`.
+pub mod runtime;
+
+/// Activity monitoring for managed sessions (content-hash cached classification).
+///
+/// Why: the dashboard and circuit-breaker logic need a real-time, token-cheap
+/// view of what each session is doing.
+/// What: re-exports the cache and monitor types.
+/// Test: `activity::*::tests`.
+pub mod activity;
+
+/// Workspace provisioner: clones a repo into an isolated session workspace.
+///
+/// Why: agent sessions must never collide with an operator's live checkout; each
+/// session gets a clean, isolated workspace under `~/.trusty-mpm/workspaces/`.
+/// What: re-exports `WorkspaceProvisioner`, `GitBackend`, `PreparedWorkspace`.
+/// Test: `provisioner::workspace::tests`.
+pub mod provisioner;
+
+/// Agent/skill catalog synchronization from the claude-mpm repository.
+///
+/// Why: syncing the agent/skill catalog from the authoritative claude-mpm repo
+/// keeps the local catalog current without manual re-porting.
+/// What: re-exports `CatalogSync`, `CatalogError`, `CatalogSyncResult`.
+/// Test: `content::catalog_sync::tests`.
+pub mod content;
+
 // ── Feature-gated modules ────────────────────────────────────────────────────
 
 /// MCP server: six orchestration tools exposed to Claude Code sessions.

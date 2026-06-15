@@ -20,6 +20,7 @@ pub mod doctor;
 pub mod error;
 pub mod llm_overseer;
 pub mod lock;
+pub mod managed_routes;
 pub mod mcp_backend;
 pub mod openapi;
 pub mod optimizer;

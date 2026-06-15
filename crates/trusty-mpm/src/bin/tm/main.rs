@@ -233,5 +233,6 @@ async fn main() -> anyhow::Result<()> {
                 RepairAction::Deploy { force } => repair_deploy(force),
             }
         }
+        Command::Catalog { action } => commands::managed::catalog(action).await,
     }
 }

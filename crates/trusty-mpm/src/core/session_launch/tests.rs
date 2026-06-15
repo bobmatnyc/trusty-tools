@@ -59,9 +59,13 @@ fn prepare_session_stash_reflects_override() {
     // Why: the inspectable stash (`last-instructions.md`) must reflect the
     // SAME override-resolved prompt the launch path uses, so `tm session
     // instructions` shows what was actually delivered (issue #381 / #382).
+    // Use a dedicated tmp_home for FrameworkPaths so parallel test runs
+    // never race on the shared ~/.claude/agents manifest (issue: parallel
+    // test isolation — each test needs its own claude_agents_dir).
+    let tmp_home = tempdir().unwrap();
     let tmp = tempdir().unwrap();
     let project = tmp.path();
-    let fw = crate::core::paths::FrameworkPaths::default();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     let override_dir = project.join(".trusty-mpm");
     std::fs::create_dir_all(&override_dir).unwrap();
@@ -94,9 +98,12 @@ fn prepare_session_stash_reflects_override() {
 fn prepare_session_writes_claude_md_and_stash() {
     // Why: the launch paths rely on `prepare_session` writing the project
     // CLAUDE.md and the inspectable stash before `claude` is started.
+    // Use a dedicated tmp_home so parallel tests never race on the shared
+    // ~/.claude/agents manifest (each test needs its own claude_agents_dir).
+    let tmp_home = tempdir().unwrap();
     let tmp = tempdir().unwrap();
     let project = tmp.path();
-    let fw = crate::core::paths::FrameworkPaths::default();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     let report = prepare_session(&fw, project).expect("prep succeeds");
 
@@ -118,9 +125,12 @@ fn prepare_session_writes_claude_md_and_stash() {
 fn prepare_session_sets_output_style() {
     // Why: a launched session must show `style:trusty-mpm`, which Claude
     // Code reads from `<project>/.claude/settings.json`.
+    // Use a dedicated tmp_home so parallel tests never race on the shared
+    // ~/.claude/agents manifest (each test needs its own claude_agents_dir).
+    let tmp_home = tempdir().unwrap();
     let tmp = tempdir().unwrap();
     let project = tmp.path();
-    let fw = crate::core::paths::FrameworkPaths::default();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     prepare_session(&fw, project).expect("prep succeeds");
 
@@ -343,9 +353,12 @@ fn prepare_session_injects_trusty_memory_mcp() {
     // Why: `prepare_session` is the single launch-prep entry point; it must
     // register the trusty-memory MCP server so launched sessions get the
     // memory tools.
+    // Use a dedicated tmp_home so parallel tests never race on the shared
+    // ~/.claude/agents manifest (each test needs its own claude_agents_dir).
+    let tmp_home = tempdir().unwrap();
     let tmp = tempdir().unwrap();
     let project = tmp.path();
-    let fw = crate::core::paths::FrameworkPaths::default();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     prepare_session(&fw, project).expect("prep succeeds");
 
@@ -459,9 +472,12 @@ fn deploy_output_style_overwrites() {
 fn prepare_session_reports_output_style() {
     // Why: callers report the deployed style path; `prepare_session` must
     // populate `PrepReport.output_style` with the file it deployed.
+    // Use a dedicated tmp_home so parallel tests never race on the shared
+    // ~/.claude/agents manifest (each test needs its own claude_agents_dir).
+    let tmp_home = tempdir().unwrap();
     let tmp = tempdir().unwrap();
     let project = tmp.path();
-    let fw = crate::core::paths::FrameworkPaths::default();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     let report = prepare_session(&fw, project).expect("prep succeeds");
 
@@ -476,9 +492,12 @@ fn prepare_session_reports_output_style() {
 fn prepare_session_reports_skill_deploy() {
     // Why: `prepare_session` must run the skill deploy step so launched
     // sessions see trusty-mpm skills; the report must carry its stats.
+    // Use a dedicated tmp_home so parallel tests never race on the shared
+    // ~/.claude/agents manifest (each test needs its own claude_agents_dir).
+    let tmp_home = tempdir().unwrap();
     let tmp = tempdir().unwrap();
     let project = tmp.path();
-    let fw = crate::core::paths::FrameworkPaths::default();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     let report = prepare_session(&fw, project).expect("prep succeeds");
 
@@ -492,9 +511,12 @@ fn prepare_session_reports_skill_deploy() {
 fn prepare_session_is_idempotent() {
     // Why: `/connect` and `tm session start` may run repeatedly on the same
     // project; a second prep must not fail and must not recreate CLAUDE.md.
+    // Use a dedicated tmp_home so parallel tests never race on the shared
+    // ~/.claude/agents manifest (each test needs its own claude_agents_dir).
+    let tmp_home = tempdir().unwrap();
     let tmp = tempdir().unwrap();
     let project = tmp.path();
-    let fw = crate::core::paths::FrameworkPaths::default();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     let first = prepare_session(&fw, project).expect("first prep succeeds");
     assert!(first.instructions.claude_md_created);

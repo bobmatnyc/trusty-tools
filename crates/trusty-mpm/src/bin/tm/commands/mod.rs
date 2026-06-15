@@ -11,6 +11,7 @@
 pub(crate) mod daemon;
 pub(crate) mod install;
 pub(crate) mod launch;
+pub(crate) mod managed;
 pub(crate) mod misc;
 pub(crate) mod project;
 pub(crate) mod repair;

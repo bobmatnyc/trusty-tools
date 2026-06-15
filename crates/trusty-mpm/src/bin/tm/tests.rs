@@ -10,7 +10,9 @@
 
 use clap::Parser;
 
-use crate::cli::{Cli, Command, DEFAULT_URL, ProjectAction, SessionAction, TelegramCmd};
+use crate::cli::{
+    CatalogAction, Cli, Command, DEFAULT_URL, ProjectAction, SessionAction, TelegramCmd,
+};
 use crate::formatters::banner::{
     fallback_session_name, normalize_workdir, print_launch_banner,
     print_launch_banner_reconnecting, render_launch_banner, terminal_width,
@@ -488,5 +490,135 @@ fn cli_parses_daemon_tailscale() {
     match cli.command {
         Command::Daemon { tailscale, .. } => assert!(tailscale),
         other => panic!("expected Daemon, got {other:?}"),
+    }
+}
+
+// ── Session-manager MVP CLI parse tests ─────────────────────────────────────
+
+#[test]
+fn cli_parses_session_new() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "session",
+        "new",
+        "https://github.com/owner/repo",
+        "--git-ref",
+        "feat/x",
+        "--task",
+        "do the thing",
+        "--name-hint",
+        "ticket-1",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Session {
+            action:
+                SessionAction::New {
+                    repo,
+                    git_ref,
+                    task,
+                    name_hint,
+                },
+        } => {
+            assert_eq!(repo, "https://github.com/owner/repo");
+            assert_eq!(git_ref, "feat/x");
+            assert_eq!(task, "do the thing");
+            assert_eq!(name_hint.as_deref(), Some("ticket-1"));
+        }
+        other => panic!("expected session new, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_session_ls() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "ls", "--json"]).unwrap();
+    match cli.command {
+        Command::Session {
+            action: SessionAction::Ls { json },
+        } => assert!(json),
+        other => panic!("expected session ls, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_session_activity() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "activity", "abc"]).unwrap();
+    match cli.command {
+        Command::Session {
+            action: SessionAction::Activity { id },
+        } => assert_eq!(id, "abc"),
+        other => panic!("expected session activity, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_session_send() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "send", "abc", "hello"]).unwrap();
+    match cli.command {
+        Command::Session {
+            action: SessionAction::Send { id, text },
+        } => {
+            assert_eq!(id, "abc");
+            assert_eq!(text, "hello");
+        }
+        other => panic!("expected session send, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_session_answer() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "answer", "abc", "rebase"]).unwrap();
+    match cli.command {
+        Command::Session {
+            action: SessionAction::Answer { id, answer },
+        } => {
+            assert_eq!(id, "abc");
+            assert_eq!(answer, "rebase");
+        }
+        other => panic!("expected session answer, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_session_attach() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "attach", "abc"]).unwrap();
+    match cli.command {
+        Command::Session {
+            action: SessionAction::Attach { id },
+        } => assert_eq!(id, "abc"),
+        other => panic!("expected session attach, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_session_managed_stop() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "managed-stop", "abc"]).unwrap();
+    match cli.command {
+        Command::Session {
+            action: SessionAction::ManagedStop { id },
+        } => assert_eq!(id, "abc"),
+        other => panic!("expected session managed-stop, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_catalog_sync() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "catalog", "sync", "--force"]).unwrap();
+    match cli.command {
+        Command::Catalog {
+            action: CatalogAction::Sync { force },
+        } => assert!(force),
+        other => panic!("expected catalog sync, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_catalog_ls() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "catalog", "ls"]).unwrap();
+    match cli.command {
+        Command::Catalog {
+            action: CatalogAction::Ls { json },
+        } => assert!(!json),
+        other => panic!("expected catalog ls, got {other:?}"),
     }
 }

@@ -155,6 +155,35 @@ pub struct DaemonState {
     /// [`Self::event_subscribe`] to obtain a `Receiver`.
     /// Test: `ingest_hook_broadcasts_to_subscribers` exercises subscribe + publish.
     pub event_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
+    /// Lazily-initialized managed session manager for the `/sessions/managed`
+    /// API surface.
+    ///
+    /// Why: [`crate::session_manager::SessionManager::new`] is async (it loads
+    /// the on-disk store) and needs a tmux driver, so it cannot be built inside
+    /// the synchronous `DaemonState` constructors. A `tokio::sync::OnceCell`
+    /// defers construction to the first managed-session request and caches the
+    /// shared handle thereafter.
+    /// What: holds `None` until [`Self::session_manager`] first runs, then the
+    /// shared `Arc<SessionManager>`.
+    /// Test: `managed_routes` handler tests exercise the accessor via the router.
+    pub(super) managed_sessions:
+        tokio::sync::OnceCell<std::sync::Arc<crate::session_manager::SessionManager>>,
+    /// Lazily-initialized activity monitor for the `/sessions/managed/{id}/activity`
+    /// route.
+    ///
+    /// Why: `ActivityMonitor` must be shared across requests so the per-session
+    /// content-hash cache persists between calls; a `OnceLock` defers
+    /// construction until the first activity request and amortizes the cost.
+    /// What: holds the shared monitor; built on first access using the default
+    /// [`OpenRouterClassifier`] (reads `OPENROUTER_API_KEY` from env).
+    /// Test: `managed_routes` handler tests exercise this via the router.
+    pub(super) activity_monitor: std::sync::OnceLock<
+        std::sync::Arc<
+            crate::activity::monitor::ActivityMonitor<
+                crate::activity::monitor::OpenRouterClassifier,
+            >,
+        >,
+    >,
 }
 
 impl Default for DaemonState {
@@ -205,6 +234,8 @@ impl DaemonState {
             pair_code: Mutex::new(None),
             framework_root,
             event_tx,
+            managed_sessions: tokio::sync::OnceCell::new(),
+            activity_monitor: std::sync::OnceLock::new(),
         }
     }
 
@@ -274,6 +305,100 @@ impl DaemonState {
             pair_code: Mutex::new(None),
             framework_root,
             event_tx,
+            managed_sessions: tokio::sync::OnceCell::new(),
+            activity_monitor: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Return the shared activity monitor, constructing it on first access.
+    ///
+    /// Why: the `/sessions/managed/{id}/activity` handler needs a single,
+    /// shared `ActivityMonitor` whose per-session content-hash cache persists
+    /// across requests; a `OnceCell` amortises the construction cost and
+    /// guarantees the same cache is reused for every request.
+    /// What: on first call builds `ActivityMonitor<OpenRouterClassifier>` with
+    /// the model from `TRUSTY_LLM_MODEL` (or `openai/gpt-4o-mini`); returns the
+    /// shared `Arc` on every subsequent call.
+    /// Test: `handler_activity_cache_hit` in `tests/session_manager_mvp.rs`.
+    pub fn activity_monitor(
+        &self,
+    ) -> std::sync::Arc<
+        crate::activity::monitor::ActivityMonitor<crate::activity::monitor::OpenRouterClassifier>,
+    > {
+        self.activity_monitor
+            .get_or_init(|| {
+                let model = std::env::var("TRUSTY_LLM_MODEL")
+                    .unwrap_or_else(|_| "openai/gpt-4o-mini".to_owned());
+                let classifier = crate::activity::monitor::OpenRouterClassifier::new();
+                Arc::new(crate::activity::monitor::ActivityMonitor::new(
+                    classifier, model,
+                ))
+            })
+            .clone()
+    }
+
+    /// Return the lazily-initialized managed [`SessionManager`].
+    ///
+    /// Why: the `/sessions/managed` handlers need a single shared session
+    /// manager backed by an on-disk store and a real tmux driver. Because the
+    /// manager's constructor is async, it is built on first access and cached
+    /// in a `OnceCell` so every subsequent request reuses the same handle.
+    /// What: on first call, loads the store under `<framework_root>/session-manager`
+    /// with a [`crate::daemon::tmux::TmuxDriver`] and caches the `Arc`; returns
+    /// the shared handle. Falls back to an in-memory temp dir if store load fails
+    /// so a transient I/O error never poisons the OnceCell permanently.
+    /// Test: `managed_routes` handler tests drive this via the router.
+    pub async fn session_manager(&self) -> std::sync::Arc<crate::session_manager::SessionManager> {
+        self.managed_sessions
+            .get_or_init(|| async {
+                let data_dir = self.framework_root.join("session-manager");
+                // Use the real tmux-backed driver when available; fall back to a
+                // no-op driver when `tmux` is not installed so the API still
+                // responds (operations that need tmux will surface a typed error).
+                let tmux: std::sync::Arc<dyn crate::session_manager::ManagedTmuxDriver> =
+                    match crate::session_manager::RealTmuxDriver::discover() {
+                        Ok(d) => std::sync::Arc::new(d),
+                        Err(e) => {
+                            tracing::warn!("tmux unavailable for managed sessions: {e}");
+                            std::sync::Arc::new(crate::session_manager::real_tmux::NoopTmuxDriver)
+                        }
+                    };
+                match crate::session_manager::SessionManager::new(&data_dir, tmux.clone()).await {
+                    Ok(mgr) => std::sync::Arc::new(mgr),
+                    Err(e) => {
+                        tracing::error!(
+                            "failed to load managed session store at {}: {e}; using temp dir",
+                            data_dir.display()
+                        );
+                        let tmp = std::env::temp_dir().join("trusty-mpm-session-manager");
+                        let _ = std::fs::create_dir_all(&tmp);
+                        let mgr = crate::session_manager::SessionManager::new(&tmp, tmux)
+                            .await
+                            .expect("temp-dir session store must load");
+                        std::sync::Arc::new(mgr)
+                    }
+                }
+            })
+            .await
+            .clone()
+    }
+
+    /// Inject a pre-built session manager into the OnceCell for testing.
+    ///
+    /// Why: handler-level tests need a `SessionManager` backed by a fake tmux
+    /// driver; this constructor lets tests seed the cell before the first request
+    /// fires so `session_manager()` returns the pre-built instance.
+    /// What: sets `managed_sessions` to `mgr`; calling `session_manager()` after
+    /// this returns the injected value without touching the real tmux binary or
+    /// disk store paths.
+    /// Test: used by `handler_spawn_wires_provision_and_spawn` and
+    /// `handler_activity_cache_hit` in `tests/session_manager_mvp.rs`.
+    #[cfg(test)]
+    pub fn with_session_manager(
+        mgr: std::sync::Arc<crate::session_manager::SessionManager>,
+    ) -> Self {
+        let state = Self::new();
+        let _ = state.managed_sessions.set(mgr);
+        state
     }
 }
