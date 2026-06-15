@@ -60,6 +60,16 @@ anyhow = "1"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# YAML (de)serialisation. PINNED to the 0.9.x line — and ONLY 0.9.x — on
+# purpose (#1220 acceptance criterion #4): the 0.8 line pulls the unmaintained
+# `unsafe-libyaml` C-binding, whereas 0.9.x parses via the pure-Rust
+# `libyaml-safer` fork, so 0.9 is the floor for any new YAML-consuming code in
+# this workspace (e.g. the `~/.trusty-tools/<crate>/config.yaml` convention added
+# in #1220). `serde_yaml` 0.9 itself is in maintenance mode upstream; the full
+# migration to a maintained successor (`serde_yml` / `serde-yaml-ng`) across all
+# crates is tracked separately in #1250 and is NOT part of #1220 — this pin is
+# the interim, conscious "no surprise new unmaintained dep" guard that #1220
+# requires. Do not relax the `0.9` floor without coordinating with #1250.
 serde_yaml = "0.9"
 # Jaro-Winkler / Levenshtein similarity helpers used by the
 # `trusty_common::help` "did you mean?" suggester behind the `cli-help`

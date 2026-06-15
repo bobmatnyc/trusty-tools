@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 use trusty_common::console_metrics::{ConsoleMetricsReport, ServiceHealth, make_report};
 
 use crate::core::auto_resume;
+use crate::core::trusty_tools_config::{self, TrustyToolsConfig};
 use crate::daemon::state::DaemonState;
 use crate::supervisor::metrics::FleetMetrics;
 
@@ -150,12 +151,92 @@ pub async fn auto_resume_set(enabled: bool) -> Result<Value, String> {
     }))
 }
 
+/// Serialise a [`TrustyToolsConfig`] into the JSON the console Config tab renders,
+/// annotated with the resolved absolute workspace root.
+///
+/// Why: both `config_read` and `config_write` return the same shape — the raw
+/// config fields plus the `workspace_root` the resolver would actually use — so the
+/// UI can show the effective path even when the template field is null. One helper
+/// keeps the two tools in lockstep.
+/// What: returns `{ workspace_root_template, auto_resume, default_model,
+/// workspace_root }` where `workspace_root` is [`trusty_tools_config::workspace_root`].
+/// Test: `config_read_returns_resolved_root`.
+fn config_to_json(config: &TrustyToolsConfig) -> Value {
+    json!({
+        "workspace_root_template": config.workspace_root_template,
+        "auto_resume": config.auto_resume,
+        "default_model": config.default_model,
+        "workspace_root": trusty_tools_config::workspace_root(config).to_string_lossy(),
+    })
+}
+
+/// Back the `config_read` tool: load and return the config-convention file.
+///
+/// Why: the console Config tab (#1220) reads the current
+/// `~/.trusty-tools/trusty-mpm/config.yaml` to render its form.
+/// What: loads [`TrustyToolsConfig`] (absent file → defaults) and serialises it via
+/// [`config_to_json`], including the resolved absolute workspace root.
+/// Test: `config_read_returns_resolved_root`.
+pub fn config_read() -> Result<Value, String> {
+    Ok(config_to_json(&TrustyToolsConfig::load()))
+}
+
+/// Back the `config_write` tool: merge edits and persist the config file.
+///
+/// Why: the console Config tab's save action durably records the operator's
+/// workspace-root / auto-resume / default-model choices (#1220) without touching
+/// the legacy `~/.trusty-mpm/config.toml`.
+/// What: loads the current config, overlays only the supplied fields (omitted
+/// fields stay unchanged), writes it back via
+/// [`trusty_common::crate_config::save`], and returns the merged config (with the
+/// resolved root) on success.
+/// Test: `config_write_merges_and_persists`.
+pub fn config_write(
+    workspace_root_template: Option<&str>,
+    auto_resume: Option<bool>,
+    default_model: Option<&str>,
+) -> Result<Value, String> {
+    let mut config = TrustyToolsConfig::load();
+    if let Some(t) = workspace_root_template {
+        config.workspace_root_template = Some(t.to_string());
+    }
+    if let Some(a) = auto_resume {
+        config.auto_resume = Some(a);
+    }
+    if let Some(m) = default_model {
+        config.default_model = Some(m.to_string());
+    }
+
+    trusty_common::crate_config::save(trusty_tools_config::CRATE_NAME, &config)
+        .map_err(|e| format!("persisting trusty-mpm config: {e}"))?;
+
+    Ok(config_to_json(&config))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn state() -> Arc<DaemonState> {
         DaemonState::shared()
+    }
+
+    /// Why: `config_read` must always return the four-field shape including the
+    /// resolved absolute `workspace_root`, even on a fresh install (defaults).
+    /// Test: this test (reads the real/default config; asserts SHAPE, not values,
+    /// since the host may have a real config file).
+    #[tokio::test]
+    async fn config_read_returns_resolved_root() {
+        let got = config_read().expect("config_read");
+        assert!(
+            got.get("workspace_root_template").is_some(),
+            "must carry workspace_root_template key: {got}"
+        );
+        assert!(
+            got["workspace_root"].is_string()
+                && !got["workspace_root"].as_str().unwrap().is_empty(),
+            "workspace_root must be a non-empty resolved path: {got}"
+        );
     }
 
     /// Why: the console deserialises the report with `parse_report`; the tool must

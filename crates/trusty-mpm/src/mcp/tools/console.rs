@@ -17,14 +17,17 @@ use serde_json::{Value, json};
 
 use super::tool;
 
-/// Build the three console-facing tool descriptors.
+/// Build the five console-facing tool descriptors.
 ///
 /// Why: the console poller (`console_metrics`), the Sessions supervisor widget
-/// (`supervisor_status`), and the auto-resume toggle (`auto_resume_set`) each map
-/// to one descriptor here; a dedicated builder keeps the catalog modular.
-/// What: returns the three descriptors. `console_metrics` and `supervisor_status`
-/// take no arguments; `auto_resume_set` requires a boolean `enabled`. All schemas
-/// set `additionalProperties: false`.
+/// (`supervisor_status`), the auto-resume toggle (`auto_resume_set`), and the
+/// #1220 Config tab (`config_read` / `config_write`) each map to one descriptor
+/// here; a dedicated builder keeps the catalog modular.
+/// What: returns the five descriptors. `console_metrics`, `supervisor_status`, and
+/// `config_read` take no arguments; `auto_resume_set` requires a boolean `enabled`;
+/// `config_write` takes an optional `workspace_root_template`/`default_model`
+/// string and an optional `auto_resume` boolean. All schemas set
+/// `additionalProperties: false`.
 /// Test: `super::tests::console_tools_present`.
 pub(super) fn console_tools() -> Vec<Value> {
     vec![
@@ -71,6 +74,45 @@ pub(super) fn console_tools() -> Vec<Value> {
                     }
                 },
                 "required": ["enabled"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "config_read",
+            "Read trusty-mpm's `~/.trusty-tools/trusty-mpm/config.yaml` (the #1220 \
+             cross-crate config convention) and return its current settings as JSON: \
+             `workspace_root_template`, `auto_resume`, and `default_model`. An absent \
+             file returns the defaults (all null). Backs the trusty-console Config tab.",
+            json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "config_write",
+            "Write trusty-mpm's `~/.trusty-tools/trusty-mpm/config.yaml` (#1220). \
+             Supplied fields replace the corresponding settings; omitted fields are \
+             left unchanged. `workspace_root_template` sets the managed-session \
+             workspace root (a leading `~` is expanded); `auto_resume` sets the \
+             supervisor default; `default_model` sets the launch model. Returns the \
+             merged config that was persisted.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "workspace_root_template": {
+                        "type": "string",
+                        "description": "Template dir for session workspaces (e.g. `~/trusty-mpm-projects`)."
+                    },
+                    "auto_resume": {
+                        "type": "boolean",
+                        "description": "Default supervisor auto-resume preference."
+                    },
+                    "default_model": {
+                        "type": "string",
+                        "description": "Default model id or tier alias for launched sessions."
+                    }
+                },
                 "additionalProperties": false
             }),
         ),

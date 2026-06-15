@@ -418,6 +418,21 @@ impl OrchestratorBackend for StateBackend {
     async fn auto_resume_set(&self, enabled: bool) -> Result<Value, String> {
         super::mcp_console::auto_resume_set(enabled).await
     }
+
+    // ── #1220: config-convention tools (delegate to mcp_console) ─────────────
+
+    async fn config_read(&self) -> Result<Value, String> {
+        super::mcp_console::config_read()
+    }
+
+    async fn config_write(
+        &self,
+        workspace_root_template: Option<&str>,
+        auto_resume: Option<bool>,
+        default_model: Option<&str>,
+    ) -> Result<Value, String> {
+        super::mcp_console::config_write(workspace_root_template, auto_resume, default_model)
+    }
 }
 
 #[cfg(test)]

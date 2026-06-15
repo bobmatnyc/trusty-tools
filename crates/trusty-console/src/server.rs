@@ -323,6 +323,14 @@ pub fn build_router(state: AppState) -> Router {
             "/api/console/sessions/{id}/resume",
             axum::routing::post(crate::routes::sessions::resume_handler),
         )
+        // #1220 Config tab: read/write the `~/.trusty-tools/trusty-mpm/config.yaml`
+        // convention via the trusty-mpm `config_read` / `config_write` MCP tools.
+        // The POST is a state-changing write, so it sits inside the same
+        // origin-guarded block as the session write routes below.
+        .route(
+            "/api/console/config/mpm",
+            get(crate::routes::config::get_handler).post(crate::routes::config::post_handler),
+        )
         // Same-origin guard for the DESTRUCTIVE session write routes (#1222
         // review #3). The console serves a permissive CORS policy (open reads),
         // so without this guard any web page the operator visited could fire a

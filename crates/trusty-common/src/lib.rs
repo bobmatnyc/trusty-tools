@@ -308,6 +308,19 @@ pub mod update;
 #[cfg(feature = "bug-capture")]
 pub mod error_capture;
 
+/// The `~/.trusty-tools/<crate>/config.yaml` cross-crate config convention (#1220).
+///
+/// Why: every trusty-* crate had its own config location/format; #1220
+/// standardises one convention so an operator always knows where a crate's
+/// configuration lives. Centralising the path resolution and typed YAML
+/// load/save here means each crate adopts it by calling two functions.
+/// What: Gated behind the `crate-config` feature. Exposes
+/// [`crate_config::crate_config_path`], [`crate_config::load`],
+/// [`crate_config::load_or_default`], and [`crate_config::save`].
+/// Test: `cargo test -p trusty-common --features crate-config -- crate_config::tests`.
+#[cfg(feature = "crate-config")]
+pub mod crate_config;
+
 // ─── Focused submodules (split from lib.rs in issue #1108) ────────────────
 
 /// TCP port auto-walking helper.
@@ -318,6 +331,18 @@ pub mod error_capture;
 /// port within `max_attempts`.
 /// Test: `cargo test -p trusty-common -- port::tests`.
 pub mod port;
+
+/// Shared GitHub `owner/repo` path derivation (issue #1220).
+///
+/// Why: trusty-mpm's managed-session workspace root
+/// (`~/trusty-mpm-projects/<owner>/<repo>/…`) and trusty-memory's palace-ID
+/// derivation both need the canonical `owner/repo` identity of a project's git
+/// origin remote. Centralising the parsing here keeps the two crates in lockstep.
+/// What: Exposes [`github_path::GithubPath`], [`github_path::parse_github_path`]
+/// (pure URL parse), and [`github_path::derive_github_path`] (reads
+/// `remote.origin.url`).
+/// Test: `cargo test -p trusty-common -- github_path::tests`.
+pub mod github_path;
 
 /// Data-directory resolution and filesystem utilities.
 ///

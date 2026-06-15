@@ -230,10 +230,33 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
         _task: &str,
     ) -> Result<PreparedWorkspace, ProvisionError> {
         let project_slug = repo_slug(repo_url);
-        let workspace_path = self
-            .workspace_root
-            .join(&project_slug)
-            .join(session_id.to_string());
+        let project_dir = self.workspace_root.join(&project_slug);
+        self.provision_in(&project_dir, session_id, repo_url, git_ref, _task)
+    }
+
+    /// Provision an isolated workspace under an explicit project directory.
+    ///
+    /// Why: #1220 nests session workspaces as
+    /// `~/trusty-mpm-projects/<owner>/<repo>/<session-id>/`, where the
+    /// `<owner>/<repo>` project home is resolved by the caller from the target
+    /// repo's GitHub remote (see [`crate::core::trusty_tools_config`]). The legacy
+    /// [`Self::provision`] derives a single-segment slug from the URL; this variant
+    /// lets the caller supply the pre-resolved two-segment project directory so the
+    /// session id is the only segment appended here. Both share the clone + prepare
+    /// flow below.
+    /// What: joins `session_id` onto `project_dir`, clones `repo_url`@`git_ref` into
+    /// it via the [`GitBackend`], runs `prepare_session` (unless `prepare` is false),
+    /// and returns the [`PreparedWorkspace`].
+    /// Test: `provision_in_uses_explicit_project_dir`.
+    pub fn provision_in(
+        &self,
+        project_dir: &Path,
+        session_id: &ManagedSessionId,
+        repo_url: &str,
+        git_ref: &str,
+        _task: &str,
+    ) -> Result<PreparedWorkspace, ProvisionError> {
+        let workspace_path = project_dir.join(session_id.to_string());
 
         debug!(
             session = %session_id,
@@ -372,6 +395,30 @@ mod tests {
         // The leaf directory must be the session id.
         let leaf = ws.path.file_name().unwrap().to_string_lossy();
         assert_eq!(leaf.as_ref(), id.to_string());
+    }
+
+    #[test]
+    fn provision_in_uses_explicit_project_dir() {
+        // The #1220 path: caller supplies a pre-resolved `<owner>/<repo>` project
+        // dir; only the session id is appended.
+        let root = TempDir::new().unwrap();
+        let prov = make_provisioner(&root);
+        let id = ManagedSessionId::new();
+        let project_dir = root.path().join("bobmatnyc").join("trusty-tools");
+
+        let ws = prov
+            .provision_in(
+                &project_dir,
+                &id,
+                "https://github.com/bobmatnyc/trusty-tools",
+                "main",
+                "task",
+            )
+            .unwrap();
+
+        // Path must be exactly <project_dir>/<session-id> — no extra slug nesting.
+        assert_eq!(ws.path, project_dir.join(id.to_string()));
+        assert!(ws.path.starts_with(&project_dir));
     }
 
     #[test]

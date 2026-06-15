@@ -7,10 +7,10 @@
 //! ([`core`]) and the new session-lifecycle tools ([`session`]) — so this is a
 //! thin facade that re-exports both and concatenates their descriptors, keeping
 //! each leaf file well under the 500-SLOC production cap.
-//! What: [`tool_catalog`] builds the eighteen MCP tool descriptors (nine core +
-//! six session + three console — #1222); [`TOOL_CATALOG`] lists their names for
-//! tests and the startup log; [`tool`] is the shared descriptor builder used by
-//! every submodule.
+//! What: [`tool_catalog`] builds the twenty MCP tool descriptors (nine core +
+//! six session + five console — #1222 / #1220); [`TOOL_CATALOG`] lists their names
+//! for tests and the startup log; [`tool`] is the shared descriptor builder used
+//! by every submodule.
 //! Test: the `tests` module below asserts the catalog has the expected count,
 //! well-formed entries, and names matching [`TOOL_CATALOG`].
 
@@ -26,11 +26,11 @@ pub mod session;
 /// the authoritative list without re-parsing the JSON schema. Keeping it exact
 /// resolves the #1221 review nit about ambiguous existing-vs-new counts: there
 /// are exactly NINE pre-existing tools and SIX new session-lifecycle tools.
-/// What: a static slice of the eighteen tool names — the six orchestration
+/// What: a static slice of the twenty tool names — the six orchestration
 /// tools, the three bug-reporting tools, the six session-lifecycle tools, then
-/// the three console-facing tools (#1222).
+/// the five console-facing tools (#1222 + the two #1220 config tools).
 /// Test: `catalog_names_match_constant`.
-pub const TOOL_CATALOG: [&str; 18] = [
+pub const TOOL_CATALOG: [&str; 20] = [
     // ── 9 pre-existing tools (core.rs) ───────────────────────────────────────
     "session_list",
     "session_status",
@@ -48,10 +48,13 @@ pub const TOOL_CATALOG: [&str; 18] = [
     "session_decommission",
     "session_activity",
     "session_send",
-    // ── 3 console-facing tools (#1222, console.rs) ───────────────────────────
+    // ── 5 console-facing tools (#1222 + #1220, console.rs) ───────────────────
     "console_metrics",
     "supervisor_status",
     "auto_resume_set",
+    // #1220 config-convention tools: read/write ~/.trusty-tools/trusty-mpm/config.yaml
+    "config_read",
+    "config_write",
 ];
 
 /// Build the MCP tool descriptor list returned by `tools/list`.
@@ -61,7 +64,7 @@ pub const TOOL_CATALOG: [&str; 18] = [
 /// the core and session-lifecycle tool groups.
 /// What: concatenates [`core::core_tools`] (nine descriptors),
 /// [`session::session_tools`] (six descriptors), and [`console::console_tools`]
-/// (three descriptors) in catalog order, returning eighteen
+/// (five descriptors) in catalog order, returning twenty
 /// `{ name, description, inputSchema }` objects.
 /// Test: `catalog_has_expected_tool_count` and `every_tool_has_input_schema`.
 pub fn tool_catalog() -> Vec<Value> {
@@ -91,9 +94,9 @@ mod tests {
 
     #[test]
     fn catalog_has_expected_tool_count() {
-        // 9 pre-existing + 6 session-lifecycle + 3 console-facing tools = 18.
-        assert_eq!(tool_catalog().len(), 18);
-        assert_eq!(TOOL_CATALOG.len(), 18);
+        // 9 pre-existing + 6 session-lifecycle + 5 console-facing tools = 20.
+        assert_eq!(tool_catalog().len(), 20);
+        assert_eq!(TOOL_CATALOG.len(), 20);
     }
 
     #[test]
@@ -143,7 +146,13 @@ mod tests {
     fn console_tools_present() {
         let catalog = tool_catalog();
         let names: Vec<&str> = catalog.iter().filter_map(|t| t["name"].as_str()).collect();
-        for expected in ["console_metrics", "supervisor_status", "auto_resume_set"] {
+        for expected in [
+            "console_metrics",
+            "supervisor_status",
+            "auto_resume_set",
+            "config_read",
+            "config_write",
+        ] {
             assert!(names.contains(&expected), "missing {expected}: {names:?}");
         }
     }

@@ -86,7 +86,12 @@ path = "tests/services_integration.rs"
 # ── Always-on dependencies ─────────────────────────────────────────────────────
 # Required by the `core` and `client` library modules (compiled unconditionally).
 [dependencies]
-trusty-common = { workspace = true, features = ["mcp", "cli-help", "bug-capture"] }
+trusty-common = { workspace = true, features = [
+    "mcp",
+    "cli-help",
+    "bug-capture",
+    "crate-config",
+] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # Why: bundle trusty-console (Single-Install Convention, epic #943). Declaring
 # it as a dep causes `cargo install trusty-mpm` to also install trusty-console.

@@ -218,6 +218,33 @@ pub trait OrchestratorBackend: Send + Sync {
     ///      pending_restart }`.
     /// Test: `dispatch_auto_resume_set_tool` (mock).
     async fn auto_resume_set(&self, enabled: bool) -> Result<Value, String>;
+
+    // ── #1220: config-convention tools ───────────────────────────────────────
+
+    /// Back `config_read`: return trusty-mpm's `~/.trusty-tools/trusty-mpm/config.yaml`.
+    ///
+    /// Why: the console Config tab (#1220) edits the cross-crate config convention;
+    ///      it first reads the current settings to render the form.
+    /// What: returns `{ workspace_root_template, auto_resume, default_model }` (each
+    ///      possibly null) plus the resolved absolute `workspace_root` so the UI can
+    ///      show the effective path. An absent file yields the defaults.
+    /// Test: `dispatch_config_read_tool` (mock).
+    async fn config_read(&self) -> Result<Value, String>;
+
+    /// Back `config_write`: persist edits to the config-convention file.
+    ///
+    /// Why: the console Config tab's save action durably records the operator's
+    ///      workspace-root / auto-resume / default-model choices (#1220).
+    /// What: merges the supplied fields onto the current config (omitted fields
+    ///      unchanged), writes `~/.trusty-tools/trusty-mpm/config.yaml`, and returns
+    ///      the merged config that was persisted.
+    /// Test: `dispatch_config_write_tool` (mock).
+    async fn config_write(
+        &self,
+        workspace_root_template: Option<&str>,
+        auto_resume: Option<bool>,
+        default_model: Option<&str>,
+    ) -> Result<Value, String>;
 }
 
 /// Route a JSON-RPC request to the backend, returning the MCP response.
@@ -343,6 +370,16 @@ async fn dispatch_tool_call<B: OrchestratorBackend>(
             Some(enabled) => backend.auto_resume_set(enabled).await,
             None => Err("missing required boolean argument: `enabled`".to_string()),
         },
+        // ── #1220: config-convention tools ────────────────────────────────────
+        "config_read" => backend.config_read().await,
+        "config_write" => {
+            let template = args.get("workspace_root_template").and_then(Value::as_str);
+            let auto_resume = args.get("auto_resume").and_then(Value::as_bool);
+            let default_model = args.get("default_model").and_then(Value::as_str);
+            backend
+                .config_write(template, auto_resume, default_model)
+                .await
+        }
         // #1221: the six session-lifecycle tools route through a sibling module
         // so this match stays focused and `mod.rs` stays under the SLOC cap.
         other => match session_dispatch::try_dispatch(backend, other, &args).await {
