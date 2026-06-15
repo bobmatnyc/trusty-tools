@@ -57,13 +57,15 @@ pub use coordinator_routes::*;
 
 /// The managed session-manager routes (`/api/v1/sessions/managed/*`).
 ///
-/// Why: the managed-session API is a new cohesive cluster (spawn, list, get,
-/// send, answer, attach-cmd, stop). The handlers live in
-/// [`crate::daemon::managed_routes`]; importing them here lets `router` refer to
-/// them unqualified, mirroring the `coordinator_routes` wiring.
+/// Why: the managed-session API is a cohesive cluster (spawn, list, get,
+/// send, answer, attach-cmd, stop/runtime-stop/resume/decommission, activity).
+/// The handlers live in [`crate::daemon::managed_routes`]; importing them here
+/// lets `router` refer to them unqualified, mirroring the `coordinator_routes`
+/// wiring.
 use super::managed_routes::{
-    answer_session_decision, get_attach_cmd, get_managed_session, get_session_activity,
-    list_managed_sessions, send_to_session, spawn_session, stop_managed_session,
+    answer_session_decision, decommission_managed_session, get_attach_cmd, get_managed_session,
+    get_session_activity, list_managed_sessions, resume_managed_session, send_to_session,
+    spawn_session, stop_managed_session, stop_managed_session_runtime,
 };
 
 /// Typed HTTP response bodies for every endpoint.
@@ -152,6 +154,18 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .route(
             "/api/v1/sessions/managed/{id}/activity",
             get(get_session_activity),
+        )
+        .route(
+            "/api/v1/sessions/managed/{id}/runtime-stop",
+            post(stop_managed_session_runtime),
+        )
+        .route(
+            "/api/v1/sessions/managed/{id}/resume",
+            post(resume_managed_session),
+        )
+        .route(
+            "/api/v1/sessions/managed/{id}/decommission",
+            post(decommission_managed_session),
         )
         .merge(
             SwaggerUi::new("/api-docs")

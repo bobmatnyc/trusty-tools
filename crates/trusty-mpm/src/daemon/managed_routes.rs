@@ -22,7 +22,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::activity::monitor::ActivityCheckResult;
 use crate::daemon::state::DaemonState;
 use crate::provisioner::WorkspaceProvisioner;
 use crate::runtime::{ClaudeCodeAdapter, RuntimeAdapter};
@@ -180,26 +179,36 @@ pub struct AttachCmdResponse {
 
 /// Response body for GET /api/v1/sessions/managed/{id}/activity.
 ///
-/// Why: the calling agentic process needs the full activity picture —
-/// the LLM verdict, cost metrics, cache status, and cumulative tally — in
-/// one response so it can decide whether to intervene or let the session run.
-/// What: the activity state string, a human-readable summary, a confidence
-/// score, whether the check hit the content-hash cache, token counts for this
-/// check, cumulative token tally, and any pending decision fields.
-/// Test: activity route handler test.
+/// Why: the calling agentic process needs the full activity picture without
+/// requiring an LLM key — raw pane content and structured lifecycle fields are
+/// always available; the LLM classification is an optional overlay when
+/// OpenRouter is configured. This lets the calling agentic process do its own
+/// inference over the raw pane content.
+/// What: always-present fields: `raw_pane` (last 60 lines), `runtime_active`
+/// (tmux session alive or not), `pending_decision`, `proposed_default`. LLM
+/// fields (`state`, `summary`, `confidence`, `classification`) are populated
+/// when the classifier ran successfully; `classification` is `null` when the
+/// key is absent or the classifier was not invoked.
+/// Test: activity route handler test; `activity_no_key_returns_raw_pane` test.
 #[derive(Debug, Serialize)]
 pub struct ActivityResponse {
-    /// Activity state: working, idle, blocked_on_permission, errored, done, unknown.
+    /// Raw pane content (last 60 lines). Always present so the calling agentic
+    /// process can reason over the raw terminal output directly.
+    pub raw_pane: String,
+    /// Whether the tmux runtime session is currently alive.
+    pub runtime_active: bool,
+    /// Activity state from LLM classification: working, idle, blocked_on_permission,
+    /// errored, done, unknown. Populated from classifier verdict or "unknown".
     pub state: String,
-    /// Human-readable summary of what the session is doing.
+    /// Human-readable summary of what the session is doing (from LLM or fallback).
     pub summary: String,
-    /// Confidence of the classification (0.0–1.0).
+    /// Confidence of the classification (0.0–1.0). 0.0 when no classifier ran.
     pub confidence: f32,
     /// True when the verdict was served from the content-hash cache.
     pub cache_hit: bool,
-    /// Input token count for this check (0 on cache hit).
+    /// Input token count for this check (0 on cache hit or no classifier).
     pub input_tokens: u32,
-    /// Output token count for this check (0 on cache hit).
+    /// Output token count for this check (0 on cache hit or no classifier).
     pub output_tokens: u32,
     /// Latency in milliseconds for this check.
     pub latency_ms: u64,
@@ -207,6 +216,9 @@ pub struct ActivityResponse {
     pub total_input_tokens: u64,
     /// Cumulative output tokens across all checks for this session.
     pub total_output_tokens: u64,
+    /// LLM classification result. `null` when no OpenRouter key or classifier
+    /// not configured; string state name when classifier ran.
+    pub classification: Option<String>,
     /// A pending decision question, if surfaced by a previous activity check.
     pub pending_decision: Option<String>,
     /// Proposed default answer to the pending decision.
@@ -293,13 +305,6 @@ pub async fn spawn_session(
     Json(req): Json<SpawnRequest>,
 ) -> impl IntoResponse {
     // ── Step 1: pre-generate session id + provision isolated workspace ────────
-    // The id must be known before provisioning because the provisioner embeds it
-    // in the workspace path (<root>/<project>/<id>/). Provisioning before tmux
-    // session creation is the invariant that ensures the pane opens in the
-    // workspace, not in $HOME.
-    //
-    // Allow tests (and operators) to override the workspace root via an env var
-    // so the provisioner does not write into the real ~/.trusty-mpm tree.
     let workspace_root = std::env::var("TRUSTY_MPM_WORKSPACE_ROOT")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
@@ -326,8 +331,6 @@ pub async fn spawn_session(
     };
 
     // ── Step 2: create tmux session rooted at the provisioned workspace ───────
-    // Pass `cwd = Some(workspace_path)` so `tmux new-session -c <workspace>` is
-    // issued. The pane will open IN the workspace directory, never in $HOME.
     let mgr = state.session_manager().await;
     let record = match mgr
         .create_with_id(
@@ -349,8 +352,7 @@ pub async fn spawn_session(
     };
 
     // Transition to Active now that the workspace is ready and the tmux session
-    // has been created. This is best-effort: if it fails the state stays
-    // Starting and the caller can still inspect and attach.
+    // has been created.
     if let Err(e) = mgr
         .set_workspace(
             &record.id,
@@ -371,8 +373,6 @@ pub async fn spawn_session(
             name = %record.tmux_name,
             "spawn_session: ClaudeCodeAdapter::spawn failed: {e}"
         );
-        // Mark errored but still return a 201 so the caller can inspect the
-        // workspace and attach manually. The error is surfaced in the state field.
         let _ = mgr
             .mark_errored(&record.id, &format!("spawn failed: {e}"))
             .await;
@@ -385,7 +385,6 @@ pub async fn spawn_session(
         );
     }
 
-    // Re-fetch the record after all mutations so the response reflects the final state.
     let final_record = mgr.get(&record.id).await.unwrap_or(record);
     let attach = attach_cmd_for(&final_record.tmux_name);
     let resp = SpawnResponse {
@@ -524,13 +523,14 @@ pub async fn get_attach_cmd(
     }
 }
 
-/// DELETE /api/v1/sessions/managed/{id} — stop and deregister a session.
+/// POST /api/v1/sessions/managed/{id}/runtime-stop — stop the runtime only (keep workspace).
 ///
-/// Why: the calling agentic process or operator terminates a session when work
-/// is done; the record is marked Dead for post-mortem inspection.
-/// What: delegates to SessionManager::stop.
-/// Test: stop handler test.
-pub async fn stop_managed_session(
+/// Why: a session ENDURES beyond its running runtime; `runtime-stop` kills the
+/// tmux session and claude process but preserves the workspace directory and
+/// record so the session can be resumed later.
+/// What: delegates to SessionManager::stop; returns the updated record summary.
+/// Test: stop handler test; `manager_stop_keeps_workspace`.
+pub async fn stop_managed_session_runtime(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id_str): AxumPath<String>,
 ) -> impl IntoResponse {
@@ -545,17 +545,123 @@ pub async fn stop_managed_session(
     }
 }
 
-/// GET /api/v1/sessions/managed/{id}/activity — classify a session's activity.
+/// POST /api/v1/sessions/managed/{id}/resume — re-spawn the runtime in the existing workspace.
+///
+/// Why: after `stop`, the workspace is still on disk; `resume` brings back the
+/// runtime without re-cloning by creating a fresh tmux session with
+/// cwd = workspace_path and spawning claude inside it.
+/// What: delegates to SessionManager::resume, then calls ClaudeCodeAdapter::spawn
+/// on the fresh tmux session.
+/// Test: `manager_resume_respawns_in_existing_workspace`.
+pub async fn resume_managed_session(
+    State(state): State<Arc<DaemonState>>,
+    AxumPath(id_str): AxumPath<String>,
+) -> impl IntoResponse {
+    let id = match parse_id(&id_str) {
+        Ok(id) => id,
+        Err((code, msg)) => return (code, msg).into_response(),
+    };
+    let mgr = state.session_manager().await;
+
+    let record = match mgr.resume(&id).await {
+        Ok(r) => r,
+        Err(crate::session_manager::ManagedError::SessionNotFound(_)) => {
+            return (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response();
+        }
+        Err(crate::session_manager::ManagedError::InvalidState(_, msg)) => {
+            return (StatusCode::CONFLICT, msg).into_response();
+        }
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    };
+
+    // Spawn claude in the fresh tmux session (no re-clone — workspace reused).
+    let workspace = record
+        .workspace_path
+        .clone()
+        .unwrap_or_else(|| record.cwd.clone());
+    let tmux_arc = mgr.tmux_driver();
+    let adapter = ClaudeCodeAdapter::new(tmux_arc);
+    if let Err(e) = adapter.spawn(&record.tmux_name, &workspace, &record.task) {
+        warn!(
+            id = %record.id,
+            name = %record.tmux_name,
+            "resume: ClaudeCodeAdapter::spawn failed: {e}"
+        );
+        let _ = mgr
+            .mark_errored(&record.id, &format!("resume spawn failed: {e}"))
+            .await;
+    } else {
+        info!(
+            id = %record.id,
+            name = %record.tmux_name,
+            workspace = %workspace.display(),
+            "managed session resumed and claude respawned"
+        );
+    }
+
+    let final_record = mgr.get(&id).await.unwrap_or(record);
+    Json(record_to_summary(&final_record)).into_response()
+}
+
+/// POST /api/v1/sessions/managed/{id}/decommission — full teardown.
+///
+/// Why: the ONLY operation that removes the workspace from disk. Unlike `stop`,
+/// decommission is terminal — no further `resume` is possible.
+/// What: delegates to SessionManager::decommission (kills runtime, removes
+/// workspace dir, marks record Decommissioned). A tombstone record is kept.
+/// Test: `manager_decommission_removes_workspace`.
+pub async fn decommission_managed_session(
+    State(state): State<Arc<DaemonState>>,
+    AxumPath(id_str): AxumPath<String>,
+) -> impl IntoResponse {
+    let id = match parse_id(&id_str) {
+        Ok(id) => id,
+        Err((code, msg)) => return (code, msg).into_response(),
+    };
+    let mgr = state.session_manager().await;
+    match mgr.decommission(&id).await {
+        Ok(record) => Json(record_to_summary(&record)).into_response(),
+        Err(crate::session_manager::ManagedError::SessionNotFound(_)) => {
+            (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// DELETE /api/v1/sessions/managed/{id} — stop and deregister (legacy alias).
+///
+/// Why: the original MVP wired DELETE to a "stop" that marked the record Dead.
+/// The new semantic is `POST /{id}/runtime-stop` (keep workspace) and
+/// `POST /{id}/decommission` (full teardown). This handler now delegates to
+/// `runtime-stop` (marks Stopped, keeps workspace) so existing scripts that use
+/// DELETE do not experience data loss.
+/// What: delegates to SessionManager::stop.
+/// Test: covered by `stop_managed_session_runtime` tests.
+pub async fn stop_managed_session(
+    State(state): State<Arc<DaemonState>>,
+    AxumPath(id_str): AxumPath<String>,
+) -> impl IntoResponse {
+    stop_managed_session_runtime(State(state), AxumPath(id_str)).await
+}
+
+/// GET /api/v1/sessions/managed/{id}/activity — inspect session activity.
 ///
 /// Why: the calling agentic process needs to know whether the session is
-/// working, idle, blocked, errored, or done, without attaching to the tmux
-/// pane. The content-hash cache eliminates redundant LLM calls when the pane
-/// content has not changed.
-/// What: captures the pane via the session's tmux driver, hashes the content,
-/// and calls `ActivityMonitor::check` with the OpenRouterClassifier. Returns
-/// the verdict (state, summary, confidence), cache_hit, per-check token counts,
-/// cumulative tally, and the session's pending_decision fields.
-/// Test: `handler_activity_cache_hit` in tests/session_manager_mvp.rs.
+/// working, idle, blocked, errored, or done WITHOUT requiring an LLM key.
+/// The raw pane content is ALWAYS returned so the calling agentic process can
+/// perform its own inference. The OpenRouter LLM classifier is invoked ONLY
+/// when configured (i.e. when OPENROUTER_API_KEY is set).
+/// What: captures the pane via the session's tmux driver (last 60 lines);
+/// determines `runtime_active` from tmux presence; calls `ActivityMonitor::check`
+/// — which already converts `MissingApiKey` to an Unknown verdict non-erroring —
+/// and returns the verdict alongside `raw_pane` and `classification` (null when
+/// no classifier ran or key absent).
+/// The hash-skip cache and cost instrumentation remain active for the
+/// optional-classifier path.
+/// Test: `activity_no_key_returns_raw_pane` in tests/session_manager_mvp.rs;
+/// `handler_activity_cache_hit`.
 pub async fn get_session_activity(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id_str): AxumPath<String>,
@@ -572,18 +678,24 @@ pub async fn get_session_activity(
         }
     };
 
-    // Capture the last 60 pane lines.
+    // Capture the last 60 pane lines (may return empty string when tmux is gone).
     let pane_text = mgr
         .capture_pane(&id, 60)
         .await
         .unwrap_or_else(|_| String::new());
 
+    // Determine runtime_active from the driver directly.
+    let runtime_active = mgr.tmux_driver().session_exists(&record.tmux_name);
+
     // Run the activity check through the shared ActivityMonitor.
+    // ActivityMonitor::check already handles MissingApiKey non-erroring — it
+    // converts it to an Unknown verdict with 0 tokens. We never propagate
+    // ActivityError to the HTTP response; unknown is a valid result.
     let monitor = state.activity_monitor();
-    let result: ActivityCheckResult = match monitor.check(&id_str, &pane_text).await {
+    let result = match monitor.check(&id_str, &pane_text).await {
         Ok(r) => r,
         Err(e) => {
-            warn!(session = %id_str, "activity check failed: {e}");
+            warn!(session = %id_str, "activity check error (non-key): {e}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("activity check failed: {e}"),
@@ -592,7 +704,18 @@ pub async fn get_session_activity(
         }
     };
 
+    // Determine whether the LLM actually classified (vs. falling back to Unknown
+    // due to missing key). classification is null when no key / no LLM ran.
+    let api_key_present = std::env::var("OPENROUTER_API_KEY").is_ok();
+    let classification = if api_key_present {
+        Some(format!("{:?}", result.verdict.state).to_lowercase())
+    } else {
+        None
+    };
+
     Json(ActivityResponse {
+        raw_pane: pane_text,
+        runtime_active,
         state: format!("{:?}", result.verdict.state).to_lowercase(),
         summary: result.verdict.summary,
         confidence: result.verdict.confidence,
@@ -602,6 +725,7 @@ pub async fn get_session_activity(
         latency_ms: result.cost.latency_ms,
         total_input_tokens: result.tally.total_input_tokens,
         total_output_tokens: result.tally.total_output_tokens,
+        classification,
         pending_decision: record.pending_decision,
         proposed_default: record.proposed_default,
     })
