@@ -493,6 +493,50 @@ fn cli_parses_daemon_tailscale() {
     }
 }
 
+#[test]
+fn cli_parses_supervisor() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "supervisor"]).unwrap();
+    match cli.command {
+        Command::Supervisor {
+            interval,
+            auto_resume,
+            no_classify,
+            ..
+        } => {
+            assert_eq!(interval, None);
+            assert!(!auto_resume);
+            assert!(!no_classify);
+        }
+        other => panic!("expected Supervisor, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_supervisor_flags() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "supervisor",
+        "--interval",
+        "60",
+        "--auto-resume",
+        "--no-classify",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Supervisor {
+            interval,
+            auto_resume,
+            no_classify,
+            ..
+        } => {
+            assert_eq!(interval, Some(60));
+            assert!(auto_resume);
+            assert!(no_classify);
+        }
+        other => panic!("expected Supervisor, got {other:?}"),
+    }
+}
+
 // ── Session-manager MVP CLI parse tests ─────────────────────────────────────
 
 #[test]

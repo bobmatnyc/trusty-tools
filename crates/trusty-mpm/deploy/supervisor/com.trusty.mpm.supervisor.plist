@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd plist for the trusty-mpm unattended supervisor (#1206).
+
+  Why: macOS-primary persistence. This LaunchAgent keeps the supervisor running
+  24/7 and restarts it after a reboot or a crash, so the managed-session fleet
+  keeps moving with no live caller attached.
+
+  What: runs `tm supervisor`, restarts on exit (KeepAlive), logs to
+  ~/.trusty-mpm/logs/, and seeds the supervisor's policy via EnvironmentVariables.
+  Edit the env block to taste, then load it (see deploy/supervisor/README.md).
+
+  IMPORTANT — replace the placeholders before loading:
+    * __USER__              your macOS short username (e.g. `masa`)
+    * __TM_BINARY_PATH__    absolute path to the `tm` binary, e.g.
+                            /Users/__USER__/.cargo/bin/tm  (run `which tm`)
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.trusty.mpm.supervisor</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__TM_BINARY_PATH__</string>
+        <string>supervisor</string>
+    </array>
+
+    <!-- Seed config. TRUSTY_MPM_AUTO_RESUME=1 enables auto-resume of stopped
+         sessions; remove it (or set 0) to run observe-only. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TRUSTY_MPM_AUTO_RESUME</key>
+        <string>1</string>
+        <key>TRUSTY_MPM_SUPERVISOR_INTERVAL</key>
+        <string>30</string>
+        <key>TRUSTY_MPM_SUPERVISOR_ADDR</key>
+        <string>127.0.0.1:7881</string>
+        <key>RUST_LOG</key>
+        <string>info</string>
+        <!-- Optional: enable idle-session activity classification.
+        <key>OPENROUTER_API_KEY</key>
+        <string>sk-or-...</string>
+        -->
+    </dict>
+
+    <!-- Restart on exit and start at login → survives reboots and crashes. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Logs land next to the daemon's own logs. -->
+    <key>StandardOutPath</key>
+    <string>/Users/__USER__/.trusty-mpm/logs/supervisor.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/__USER__/.trusty-mpm/logs/supervisor.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

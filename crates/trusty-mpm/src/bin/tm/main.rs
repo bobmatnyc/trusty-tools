@@ -110,7 +110,12 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "daemon")]
     let mut _error_store: Option<trusty_common::error_capture::ErrorStore> = None;
 
-    if matches!(cli.command, Command::Daemon { .. }) {
+    // Long-running modes (daemon, supervisor) get the full file-rotating tracing
+    // + bug-capture layer; short-lived CLI invocations skip subscriber init.
+    if matches!(
+        cli.command,
+        Command::Daemon { .. } | Command::Supervisor { .. }
+    ) {
         #[cfg(feature = "daemon")]
         {
             // File logging: write daily-rotated logs to ~/.trusty-mpm/logs/ in
@@ -220,6 +225,12 @@ async fn main() -> anyhow::Result<()> {
             tailscale,
             mcp,
         } => run_daemon(addr, tailscale, mcp).await,
+        Command::Supervisor {
+            addr,
+            interval,
+            auto_resume,
+            no_classify,
+        } => commands::supervisor::run_supervisor(addr, interval, auto_resume, no_classify).await,
         Command::Launch { dir } => launch(&client, &url, dir).await,
         Command::Connect { dir } => connect(&client, &url, dir).await,
         Command::Attach { target, json } => attach_cmd(&client, &url, &target, json).await,
