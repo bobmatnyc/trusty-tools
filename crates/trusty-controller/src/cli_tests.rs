@@ -12,7 +12,74 @@
 
 use clap::Parser;
 
-use crate::cli::{Cli, Commands, ScopeArg, StackCmd};
+use crate::cli::{AnalyzeCoreArg, Cli, Commands, ScopeArg, StackCmd};
+
+/// Parse `tctl up` — selects `Commands::Up` with all flags defaulted off.
+#[test]
+fn parse_up() {
+    let cli = Cli::try_parse_from(["tctl", "up"]).expect("up parses");
+    assert!(matches!(
+        cli.command,
+        Commands::Up {
+            with_mpm: false,
+            no_mpm: false,
+            analyze_core: None,
+            wait: false,
+            skip_claude_upgrade: false,
+        }
+    ));
+}
+
+/// Parse `tctl up --with-mpm`.
+#[test]
+fn parse_up_with_mpm() {
+    let cli = Cli::try_parse_from(["tctl", "up", "--with-mpm"]).expect("up --with-mpm parses");
+    assert!(matches!(cli.command, Commands::Up { with_mpm: true, .. }));
+}
+
+/// `--with-mpm` and `--no-mpm` are mutually exclusive (clap conflicts_with).
+#[test]
+fn parse_up_with_and_no_mpm_conflict() {
+    assert!(Cli::try_parse_from(["tctl", "up", "--with-mpm", "--no-mpm"]).is_err());
+}
+
+/// Parse `tctl up --analyze-core blocking|background|skip`.
+#[test]
+fn parse_up_analyze_core() {
+    let cli = Cli::try_parse_from(["tctl", "up", "--analyze-core", "blocking"])
+        .expect("up --analyze-core blocking parses");
+    assert!(matches!(
+        cli.command,
+        Commands::Up {
+            analyze_core: Some(AnalyzeCoreArg::Blocking),
+            ..
+        }
+    ));
+    let cli = Cli::try_parse_from(["tctl", "up", "--analyze-core", "skip"]).expect("skip parses");
+    assert!(matches!(
+        cli.command,
+        Commands::Up {
+            analyze_core: Some(AnalyzeCoreArg::Skip),
+            ..
+        }
+    ));
+}
+
+/// Parse `tctl up --wait --skip-claude-upgrade --no-mpm`.
+#[test]
+fn parse_up_combined_flags() {
+    let cli = Cli::try_parse_from(["tctl", "up", "--wait", "--skip-claude-upgrade", "--no-mpm"])
+        .expect("combined up flags parse");
+    assert!(matches!(
+        cli.command,
+        Commands::Up {
+            wait: true,
+            skip_claude_upgrade: true,
+            no_mpm: true,
+            ..
+        }
+    ));
+}
 
 /// Parse `tctl version` — must succeed and select `Commands::Version`.
 #[test]

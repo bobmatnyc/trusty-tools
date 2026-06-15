@@ -722,7 +722,14 @@ the body sections noted.
       via PR #1240 merge)
 - [x] Re-status DOC-7 → Superseded (Q4 confirmed 2026-06-15) — banner + README
       index updated
-- [ ] (impl-time) build `tctl up` staging in `crates/trusty-controller/src/`
+- [x] (impl-time) build `tctl up` staging in `crates/trusty-controller/src/`
       composing DOC-8/DOC-4/DOC-5 primitives + the §6 Claude Code ensure
+      (landed for #1239: `crates/trusty-controller/src/commands/up/` — manifest
+      (§2), config (§8), policy fold (§4/§8), member ensure (§3.4), STAGE 4b
+      Claude Code (§6), advisory lock (§3.4), staged sequence (§3), report +
+      exit codes (§5). The composed DOC-8/DOC-4/DOC-5 primitives are still
+      Phase-0 stubs, so `up` shells the members' own contract verbs
+      (`health --json` / `start`) directly and self-dispatches `tctl install`
+      for auto-install; it will route through those primitives once they land.)
 - [ ] (DOC-10-owned) wire `tctl up [--with-mpm] [--analyze-core blocking]
       [--wait]` into the isolation harness as the boot acceptance gate

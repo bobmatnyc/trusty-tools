@@ -17,8 +17,8 @@ use clap::Parser;
 use trusty_controller::{
     cli::{Cli, Commands, StackCmd},
     commands::{
-        config, doctor, ensure, install, lifecycle, passthrough, port, stack, status, ui, updates,
-        upgrade, version,
+        config, doctor, ensure, install, lifecycle, passthrough, port, run_up, stack, status, ui,
+        updates, upgrade, version,
     },
 };
 
@@ -63,6 +63,28 @@ fn dispatch(cli: Cli) {
     let _ = cli.scope; // intentionally unused in Phase 0; see TODO above
 
     match cli.command {
+        Commands::Up {
+            with_mpm,
+            no_mpm,
+            analyze_core,
+            wait,
+            skip_claude_upgrade,
+        } => {
+            // `tctl up` is the one command with a meaningful process exit code
+            // (DOC-12 §5: 0 healthy / 2 degraded / 1 core hard-failure), so it
+            // exits directly with that code rather than falling through to 0.
+            let code = run_up(
+                with_mpm,
+                no_mpm,
+                analyze_core,
+                wait,
+                skip_claude_upgrade,
+                yes,
+                json,
+            );
+            std::process::exit(code);
+        }
+
         Commands::Version => {
             version::run(json);
         }
