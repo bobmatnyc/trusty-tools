@@ -1,5 +1,27 @@
 # Changelog — trusty-mpm
 
+## [Unreleased]
+
+### Deprecated: verbose managed session-lifecycle verbs (issue #1205)
+
+The managed session-lifecycle CLI verbs were renamed to the cleaner, symmetric
+`stop` / `resume` / `decommission` family. The old verbose verbs still work but
+now emit a one-line deprecation notice to **stderr** on every invocation and
+will be removed in a future release.
+
+| Deprecated verb | Use instead | Behavior |
+|-----------------|-------------|----------|
+| `tm session runtime-stop <id>` | `tm session stop <id>` | Stop the runtime, keep the workspace (resumable) |
+| `tm session managed-stop <id>` | `tm session stop <id>` | Same as `runtime-stop` |
+| `tm session managed-resume <id>` | `tm session resume <id>` | Re-spawn the runtime in the existing workspace |
+
+- The deprecated verbs are hidden from `tm session --help` but continue to parse
+  for backward compatibility.
+- Each deprecated invocation prints `warning: '<old>' is deprecated; use '<new>'`
+  to stderr; stdout stays clean for scripts.
+- `tm session decommission <id>` (terminal teardown: remove workspace from disk)
+  is unchanged.
+
 ## [0.5.0] — 2026-05-28
 
 ### Added: `tm services` — canonical service-discovery CLI (issue #339)
