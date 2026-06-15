@@ -218,8 +218,8 @@ to `crates/trusty-memory/src/`.
 
 **FR-6.1 — Temporal triple store (`kg_assert`, `kg_query`)** ✅
 - *Vision:* Assert and query time-bounded triples (`valid_from`/`valid_to`); back the store with pure-Rust embedded storage.
-- *Current:* `KnowledgeGraph` over **redb** (`memory_core/store/kg.rs`, `kg_redb.rs`, #44); the legacy SQLite path is preserved behind the `sqlite-kg` feature for migration (#45) and slated for removal (#47).
-- *Gap:* SQLite KG code still present pending #47 cleanup. 🟡
+- *Current:* `KnowledgeGraph` over **redb** (`memory_core/store/kg.rs`, `kg_redb.rs`, #44). The legacy `sqlite-kg` feature flag and all associated rusqlite/r2d2/r2d2_sqlite dependencies were removed in issue #989 — all production palaces migrated to redb (#44, #45, #46, #56, #57) and the migration tooling has been retired.
+- *Gap:* None. SQLite KG retirement completed (#47 / #989). ✅
 
 **FR-6.2 — Auto-extraction on write** ✅
 - *Vision:* Every `memory_remember` populates the KG so palaces always have a non-empty graph, offline and fast.
@@ -387,16 +387,16 @@ daemon *or* an in-process library.
 
 ### Open questions
 
-- **Tool-count doc drift:** the wire surface is now **24 tools** (per
+- **Tool-count doc drift:** the wire surface is now **25 tools** (per
   `tool_definitions_lists_all_tools`). The crate README should be updated to
   reflect this. The authoritative source remains `tool_definitions()`. 🟡
 - **Orphaned-palace remediation:** `doctor --fix-palaces` is advisory only.
   Should it actually merge orphans into `personal` (FR-2.2)? 🔵
-- **SQLite KG retirement (#47):** the legacy `sqlite-kg` path lingers for
-  migration. When can it be removed entirely? 🟡
-- **LRU palace-handle cache (#463):** each open palace holds ~3 redb files;
-  with many palaces this can exhaust file descriptors even with the 8192 fd
-  limit. Should handle lifetime be bounded by an LRU cache? 🔵
+- **SQLite KG retirement (#47 / #989):** completed. The `sqlite-kg` feature
+  flag and all associated rusqlite dependencies were removed in #989. ✅
+- **LRU palace-handle cache (#463):** completed. `PalaceRegistry` now uses an
+  `LruCache<PalaceId, Arc<PalaceHandle>>` bounded by `DEFAULT_MAX_OPEN_PALACES`
+  (64) with a configurable override via `PalaceRegistry::with_max_open`. ✅
 - **Leiden refinement:** community detection is Louvain-only; is phase-2
   refinement worth adding to reduce false-positive knowledge gaps (FR-6.6)? 🔵
 - **Scope enforcement:** scopes are advertised, not enforced. Should the daemon
@@ -411,8 +411,8 @@ daemon *or* an in-process library.
 
 | Phase | Theme | Highlights |
 |---|---|---|
-| **Now** | Doc hygiene | Update README tool table to 24; fix the broken README link (#398). |
-| **Phase 2** | Storage cleanup | Retire the legacy `sqlite-kg` path (#47) once migration tooling is no longer needed. |
+| **Now** | Doc hygiene | Update README tool table to 25; fix the broken README link (#398). |
+| **Phase 2 (done)** | Storage cleanup | Retired the legacy `sqlite-kg` path (#47 / #989). ✅ |
+| **Phase 2 (done)** | fd robustness | LRU redb-handle cache (#463) landed in `PalaceRegistry`. ✅ |
 | **Phase 3** | Palace lifecycle | Implement actual orphaned-palace merge into `personal` behind `doctor --fix` (FR-2.2/FR-10.4). |
-| **Phase 3** | fd robustness | Implement lazy/LRU redb-handle cache (#463) to bound fd usage regardless of palace count. |
 | **Later** | Retrieval/graph depth | Leiden phase-2 refinement for knowledge gaps (FR-6.6); richer KG auto-extraction beyond the heuristic table (FR-6.2). |
