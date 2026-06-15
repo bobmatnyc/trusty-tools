@@ -158,6 +158,14 @@ pub struct SessionRecord {
     pub pending_decision: Option<String>,
     /// The harness's proposed default answer to the pending decision.
     pub proposed_default: Option<String>,
+    /// Session ↔ artifact correlation: links this session to its worktree,
+    /// branch, PR, and/or issue so the driver's autonomy policy can validate
+    /// that generated work stays in-scope before auto-accepting.
+    ///
+    /// `#[serde(default)]` keeps records persisted before this field existed
+    /// deserializable — they load with an empty (fully-unset) correlation.
+    #[serde(default)]
+    pub correlation: crate::driver::SessionCorrelation,
 }
 
 /// Error types for session record operations.
@@ -216,6 +224,7 @@ mod tests {
             branch: None,
             pending_decision: None,
             proposed_default: None,
+            correlation: Default::default(),
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -241,6 +250,7 @@ mod tests {
             branch: Some("main".into()),
             pending_decision: None,
             proposed_default: None,
+            correlation: Default::default(),
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -264,6 +274,7 @@ mod tests {
             branch: None,
             pending_decision: None,
             proposed_default: None,
+            correlation: Default::default(),
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");

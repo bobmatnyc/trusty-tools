@@ -92,6 +92,18 @@ pub mod provisioner;
 /// Test: `content::catalog_sync::tests`.
 pub mod content;
 
+/// Driver autonomy subsystem: T1–T4 tier policy + session↔artifact correlation.
+///
+/// Why: the calling agentic process that drives trusty-mpm must decide, for every
+/// `pending_decision` a managed session surfaces, whether to auto-accept the
+/// proposed default or escalate to a human. This module provides the structured,
+/// non-LLM policy (T1–T4 tiers, hard guardrails) and the session↔artifact
+/// correlation that defines a session's scope boundary.
+/// What: re-exports `evaluate_autonomy_tier`, `AutonomyTier`, `AutonomyDecision`,
+/// `GuardrailSignals`, `SessionCorrelation`, and `ScopeCheck`.
+/// Test: pure unit tests in `driver::policy::tests` and `driver::correlation::tests`.
+pub mod driver;
+
 // ── Feature-gated modules ────────────────────────────────────────────────────
 
 /// MCP server: six orchestration tools exposed to Claude Code sessions.

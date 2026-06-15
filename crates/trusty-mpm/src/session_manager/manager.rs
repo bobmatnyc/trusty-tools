@@ -230,6 +230,17 @@ impl SessionManager {
             .create_session(&tmux_name, &workdir)
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
 
+        // Seed the session↔artifact correlation from what we know at creation
+        // time (worktree path + branch). PR / issue ids accrue later as the
+        // driver pushes work and opens a PR.
+        let mut correlation = crate::driver::SessionCorrelation::new();
+        if let Some(ref ws) = workspace_path {
+            correlation = correlation.with_worktree(ws.clone());
+        }
+        if let Some(ref b) = branch {
+            correlation = correlation.with_branch(b.clone());
+        }
+
         let record = SessionRecord {
             id,
             tmux_name: tmux_name.clone(),
@@ -243,6 +254,7 @@ impl SessionManager {
             branch,
             pending_decision: None,
             proposed_default: None,
+            correlation,
         };
 
         self.store.write().await.upsert(record.clone()).await?;
@@ -522,6 +534,7 @@ impl SessionManager {
                     branch: None,
                     pending_decision: None,
                     proposed_default: None,
+                    correlation: Default::default(),
                 };
                 guard.upsert(external).await?;
                 report.external_adopted.push(name.clone());
