@@ -1,43 +1,32 @@
-//! MCP tool definitions for the trusty-mpm orchestration server.
+//! Core orchestration + bug-reporting MCP tool descriptors.
 //!
 //! Why: `tools/list` must advertise a JSON Schema for every tool so Claude Code
-//! knows how to call it. Keeping the catalog in one module — separate from the
-//! dispatch logic — makes the tool surface easy to audit and version.
-//! What: [`tool_catalog`] builds the nine MCP tool descriptors (name, human
-//! description, `inputSchema`); [`TOOL_CATALOG`] lists their names for tests.
-//! The three bug-reporting tools (`list_recent_errors`, `preview_bug_report`,
-//! `report_bug`) are added in Phase 3.
-//! Test: `cargo test -p trusty-mpm` asserts the catalog has nine well-formed
-//! entries whose names match [`TOOL_CATALOG`].
+//! knows how to call it. Splitting the catalog by concept — the six original
+//! orchestration tools plus the three bug-reporting tools live here, the
+//! session-lifecycle tools live in [`super::session`] — keeps each file well
+//! under the 500-SLOC production cap and makes the surface easy to audit.
+//! What: [`core_tools`] returns the nine original MCP tool descriptors (name,
+//! human description, `inputSchema`); the shared [`tool`] descriptor-builder is
+//! re-exported from the parent module.
+//! Test: `cargo test -p trusty-mpm` (in [`super`]) asserts the full catalog —
+//! core + session — is well-formed and matches the name constant.
 
 use serde_json::{Value, json};
 
-/// Canonical names of every tool the server exposes, in catalog order.
-///
-/// Why: tests and the daemon's startup log both want the authoritative list
-/// without re-parsing the JSON schema.
-/// What: a static slice of the nine tool names (six orchestration + three
-///       bug-reporting added in Phase 3).
-/// Test: `catalog_names_match_constant`.
-pub const TOOL_CATALOG: [&str; 9] = [
-    "session_list",
-    "session_status",
-    "agent_delegate",
-    "memory_protect",
-    "circuit_breaker_status",
-    "hook_event",
-    "list_recent_errors",
-    "preview_bug_report",
-    "report_bug",
-];
+use super::tool;
 
-/// Build the MCP tool descriptor list returned by `tools/list`.
+/// Build the six orchestration + three bug-reporting tool descriptors.
 ///
-/// Why: Claude Code reads `inputSchema` to validate calls; a single builder
-/// keeps the schemas and the dispatch argument-parsing in lockstep.
-/// What: returns nine JSON objects, each `{ name, description, inputSchema }`.
-/// Test: `catalog_has_nine_tools` and `every_tool_has_input_schema`.
-pub fn tool_catalog() -> Vec<Value> {
+/// Why: these nine tools predate the session-lifecycle surface (#1221); keeping
+/// their schemas in a dedicated builder isolates them from the new tools so each
+/// group can evolve independently without growing one monolithic function past
+/// the SLOC cap.
+/// What: returns the nine `{ name, description, inputSchema }` objects in catalog
+/// order — `session_list`, `session_status`, `agent_delegate`, `memory_protect`,
+/// `circuit_breaker_status`, `hook_event`, then the three bug-reporting tools.
+/// Test: `super::tests::catalog_has_expected_tool_count` and
+/// `super::tests::catalog_names_match_constant`.
+pub(super) fn core_tools() -> Vec<Value> {
     vec![
         tool(
             "session_list",
@@ -204,50 +193,4 @@ pub fn tool_catalog() -> Vec<Value> {
             }),
         ),
     ]
-}
-
-/// Assemble one MCP tool descriptor object.
-fn tool(name: &str, description: &str, input_schema: Value) -> Value {
-    json!({
-        "name": name,
-        "description": description,
-        "inputSchema": input_schema,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn catalog_has_nine_tools() {
-        assert_eq!(tool_catalog().len(), 9);
-    }
-
-    #[test]
-    fn catalog_names_match_constant() {
-        let names: Vec<String> = tool_catalog()
-            .iter()
-            .map(|t| t["name"].as_str().unwrap().to_string())
-            .collect();
-        assert_eq!(names, TOOL_CATALOG);
-    }
-
-    #[test]
-    fn every_tool_has_input_schema() {
-        for t in tool_catalog() {
-            assert!(t["name"].is_string());
-            assert!(t["description"].is_string());
-            assert_eq!(t["inputSchema"]["type"], "object");
-        }
-    }
-
-    #[test]
-    fn bug_reporting_tools_present() {
-        let catalog = tool_catalog();
-        let names: Vec<&str> = catalog.iter().filter_map(|t| t["name"].as_str()).collect();
-        assert!(names.contains(&"list_recent_errors"), "{names:?}");
-        assert!(names.contains(&"preview_bug_report"), "{names:?}");
-        assert!(names.contains(&"report_bug"), "{names:?}");
-    }
 }

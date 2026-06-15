@@ -37,9 +37,20 @@ pub(crate) enum Command {
     ///
     /// Why: matches the trusty-search / trusty-memory CLI surface so users
     /// moving between the three daemons get the same `start` / `serve` /
-    /// `stop` triad. `tm serve` does NOT speak MCP stdio — pass
-    /// `tm daemon --mcp` for the MCP-on-stdin/stdout mode.
-    Serve,
+    /// `stop` triad. With `--stdio` it becomes the MCP stdio bridge (#1221):
+    /// a thin proxy that forwards JSON-RPC to the daemon's loopback `POST /rpc`,
+    /// mirroring `trusty-memory serve --stdio`. This is the form wired into
+    /// `.mcp.json`. Without `--stdio` it behaves like `start`. (The older
+    /// `tm daemon --mcp` direct-stdio mode is retained for diagnostics.)
+    Serve {
+        /// Run as an MCP stdio bridge that proxies to the daemon's `POST /rpc`.
+        ///
+        /// Why: Claude Code speaks MCP over stdio; the durable daemon speaks
+        /// HTTP. This flag selects the bridge that connects the two, auto-starting
+        /// the daemon if needed and reconnecting with backoff if it restarts.
+        #[arg(long)]
+        stdio: bool,
+    },
     /// Stop every running trusty-mpm daemon process.
     ///
     /// Why: pairs with `start` so operators can take the daemon down

@@ -365,6 +365,45 @@ impl OrchestratorBackend for StateBackend {
             Err(e) => Err(format!("GitHub filing failed: {e}")),
         }
     }
+
+    // ── #1221: session-lifecycle tools ───────────────────────────────────────
+    //
+    // Each method is a thin wrapper over the existing `SessionManager` lifecycle
+    // ops (the same ones the HTTP `…/managed/*` routes use), so MCP and HTTP
+    // share one implementation. The wrapping logic lives in
+    // `super::mcp_session` to keep this file under the 500-SLOC cap.
+
+    async fn session_new(
+        &self,
+        repo_url: &str,
+        git_ref: &str,
+        task: &str,
+        name_hint: Option<&str>,
+        runtime: Option<&str>,
+    ) -> Result<Value, String> {
+        super::mcp_session::session_new(&self.state, repo_url, git_ref, task, name_hint, runtime)
+            .await
+    }
+
+    async fn session_stop(&self, session_id: &str) -> Result<Value, String> {
+        super::mcp_session::session_stop(&self.state, session_id).await
+    }
+
+    async fn session_resume(&self, session_id: &str) -> Result<Value, String> {
+        super::mcp_session::session_resume(&self.state, session_id).await
+    }
+
+    async fn session_decommission(&self, session_id: &str) -> Result<Value, String> {
+        super::mcp_session::session_decommission(&self.state, session_id).await
+    }
+
+    async fn session_activity(&self, session_id: &str, lines: u32) -> Result<Value, String> {
+        super::mcp_session::session_activity(&self.state, session_id, lines).await
+    }
+
+    async fn session_send(&self, session_id: &str, text: &str) -> Result<Value, String> {
+        super::mcp_session::session_send(&self.state, session_id, text).await
+    }
 }
 
 #[cfg(test)]

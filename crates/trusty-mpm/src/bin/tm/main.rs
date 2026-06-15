@@ -190,7 +190,16 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Status => status(&client, &url).await,
         Command::Start => start(&client, &url).await,
-        Command::Serve => start(&client, &url).await,
+        Command::Serve { stdio } => {
+            if stdio {
+                // #1221: MCP stdio bridge — forward JSON-RPC to the daemon's
+                // loopback POST /rpc, auto-starting the daemon and reconnecting
+                // with backoff. This is the `.mcp.json` entry point.
+                commands::serve_stdio::run_stdio_bridge().await
+            } else {
+                start(&client, &url).await
+            }
+        }
         Command::Stop => stop_daemon().await,
         Command::Restart => restart(&client, &url).await,
         Command::Project { action } => project(&client, &url, action).await,

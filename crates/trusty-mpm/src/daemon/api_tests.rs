@@ -571,6 +571,71 @@ async fn openapi_spec_is_valid() {
 }
 
 #[tokio::test]
+async fn rpc_rejects_non_loopback_peer() {
+    // #1221 hard requirement: POST /rpc must 403 a non-loopback source IP even
+    // though the daemon binds loopback — guarding a future 0.0.0.0 rebind.
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::Request;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use tower::ServiceExt;
+
+    let app = router(DaemonState::shared());
+    // Simulate a request arriving from a public LAN address.
+    let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), 40000);
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/rpc")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+        ))
+        .unwrap();
+    req.extensions_mut().insert(ConnectInfo(peer));
+
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "non-loopback /rpc must be forbidden"
+    );
+}
+
+#[tokio::test]
+async fn rpc_dispatches_tools_list_for_loopback() {
+    // A loopback peer is allowed and gets the full 15-tool catalog back through
+    // the in-process MCP dispatch path.
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::Request;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use tower::ServiceExt;
+
+    let app = router(DaemonState::shared());
+    let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 50505);
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/rpc")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#,
+        ))
+        .unwrap();
+    req.extensions_mut().insert(ConnectInfo(peer));
+
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["id"], 7);
+    let tools = body["result"]["tools"].as_array().expect("tools array");
+    assert_eq!(tools.len(), 15, "loopback /rpc must dispatch tools/list");
+}
+
+#[tokio::test]
 async fn pause_then_resume_round_trips() {
     // Pausing flips a session to `Paused`; resuming flips it back to
     // `Active` and clears the pause metadata.

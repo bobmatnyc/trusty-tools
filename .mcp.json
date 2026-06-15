@@ -11,8 +11,8 @@
       "type": "stdio",
       "command": "trusty-mpm",
       "args": [
-        "daemon",
-        "--mcp"
+        "serve",
+        "--stdio"
       ]
     },
     "trusty-memory": {
