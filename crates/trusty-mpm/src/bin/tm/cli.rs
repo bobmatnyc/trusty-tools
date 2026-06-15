@@ -478,33 +478,36 @@ pub(crate) enum SessionAction {
         /// Managed session id.
         id: String,
     },
-    /// Stop and deregister a managed session (legacy alias for ManagedRuntimeStop).
+    /// [DEPRECATED] Stop a managed session's runtime — use `stop` instead.
     ///
-    /// Why: retained for backward compatibility; new scripts should use
-    /// `ManagedRuntimeStop` or `Decommission`.
-    /// What: POSTs `/api/v1/sessions/managed/{id}/runtime-stop`.
+    /// Why: legacy verbose verb retained for backward compatibility (#1205).
+    /// Invoking it prints a deprecation notice and behaves like `stop`
+    /// (runtime-stop semantics: workspace preserved, resumable).
+    /// What: POSTs `/api/v1/sessions/managed/{id}/runtime-stop` after the notice.
     /// Test: `cli_parses_session_managed_stop`.
+    #[command(hide = true)]
     ManagedStop {
         /// Managed session id.
         id: String,
     },
-    /// Stop the runtime of a managed session, keeping the workspace intact.
+    /// [DEPRECATED] Stop a managed session's runtime — use `stop` instead.
     ///
-    /// Why: a session ENDURES beyond its running runtime; RuntimeStop kills
-    /// the tmux session and claude process but preserves the workspace directory
-    /// so the session can be resumed later.
-    /// What: POSTs `/api/v1/sessions/managed/{id}/runtime-stop`.
+    /// Why: `runtime-stop` was renamed to `stop` in #1205; the old spelling
+    /// still parses but emits a deprecation notice steering operators to `stop`.
+    /// What: POSTs `/api/v1/sessions/managed/{id}/runtime-stop` after the notice.
     /// Test: `cli_parses_session_runtime_stop`.
+    #[command(hide = true)]
     RuntimeStop {
         /// Managed session id.
         id: String,
     },
-    /// Resume a stopped managed session in its existing workspace (no re-clone).
+    /// [DEPRECATED] Resume a stopped managed session — use `resume` instead.
     ///
-    /// Why: after `runtime-stop`, the workspace is still on disk; `managed-resume`
-    /// re-spawns the runtime in the SAME workspace without cloning again.
-    /// What: POSTs `/api/v1/sessions/managed/{id}/resume`.
+    /// Why: `managed-resume` was renamed to `resume` in #1205; the old spelling
+    /// still parses but emits a deprecation notice steering operators to `resume`.
+    /// What: POSTs `/api/v1/sessions/managed/{id}/resume` after the notice.
     /// Test: `cli_parses_session_managed_resume`.
+    #[command(hide = true)]
     ManagedResume {
         /// Managed session id.
         id: String,

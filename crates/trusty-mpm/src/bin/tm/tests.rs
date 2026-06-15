@@ -602,6 +602,83 @@ fn cli_parses_session_managed_stop() {
 }
 
 #[test]
+fn cli_parses_session_runtime_stop() {
+    // The deprecated `runtime-stop` verb still parses (alias of `stop`, #1205).
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "runtime-stop", "abc"]).unwrap();
+    match cli.command {
+        Command::Session {
+            action: SessionAction::RuntimeStop { id },
+        } => assert_eq!(id, "abc"),
+        other => panic!("expected session runtime-stop, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_session_managed_resume() {
+    // The deprecated `managed-resume` verb still parses (alias of `resume`, #1205).
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "managed-resume", "abc"]).unwrap();
+    match cli.command {
+        Command::Session {
+            action: SessionAction::ManagedResume { id },
+        } => assert_eq!(id, "abc"),
+        other => panic!("expected session managed-resume, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_session_stop_verb() {
+    // The canonical `stop` verb parses to the local-session Stop action (#1205);
+    // it shares the clean name the deprecated managed verbs now point at.
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "stop", "abc"]).unwrap();
+    match cli.command {
+        Command::Session {
+            action: SessionAction::Stop { id_or_name },
+        } => assert_eq!(id_or_name, "abc"),
+        other => panic!("expected session stop, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_session_resume_verb() {
+    // The canonical `resume` verb parses to the Resume action (#1205).
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "resume", "abc"]).unwrap();
+    match cli.command {
+        Command::Session {
+            action: SessionAction::Resume { id_or_name },
+        } => assert_eq!(id_or_name, "abc"),
+        other => panic!("expected session resume, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_session_decommission() {
+    // `decommission` remains the terminal teardown verb (#1205).
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "decommission", "abc"]).unwrap();
+    match cli.command {
+        Command::Session {
+            action: SessionAction::Decommission { id },
+        } => assert_eq!(id, "abc"),
+        other => panic!("expected session decommission, got {other:?}"),
+    }
+}
+
+#[test]
+fn deprecation_notice_format() {
+    // The deprecation helper renders a stable, single-line message (#1205).
+    // We assert the pure message builder since the eprintln side-effect itself
+    // is untestable without capturing process stderr.
+    use crate::commands::managed::deprecation_message;
+    assert_eq!(
+        deprecation_message("runtime-stop", "stop"),
+        "warning: 'runtime-stop' is deprecated; use 'stop'"
+    );
+    assert_eq!(
+        deprecation_message("managed-resume", "resume"),
+        "warning: 'managed-resume' is deprecated; use 'resume'"
+    );
+}
+
+#[test]
 fn cli_parses_catalog_sync() {
     let cli = Cli::try_parse_from(["trusty-mpm", "catalog", "sync", "--force"]).unwrap();
     match cli.command {

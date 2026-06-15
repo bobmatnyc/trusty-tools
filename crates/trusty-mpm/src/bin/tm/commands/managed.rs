@@ -13,6 +13,31 @@ use serde::Deserialize;
 
 use crate::cli::CatalogAction;
 
+/// Build the one-line deprecation message for a renamed CLI verb.
+///
+/// Why: splitting message construction from the stderr write makes the wording
+/// unit-testable without capturing process stderr (#1205).
+/// What: returns `warning: '<old>' is deprecated; use '<new>'`.
+/// Test: `deprecation_notice_format` in `tests.rs` asserts the exact text.
+pub(crate) fn deprecation_message(old: &str, new: &str) -> String {
+    format!("warning: '{old}' is deprecated; use '{new}'")
+}
+
+/// Emit a one-line deprecation notice to stderr for a renamed CLI verb.
+///
+/// Why: the verbose managed-lifecycle verbs (`runtime-stop`, `managed-resume`,
+/// `managed-stop`) were renamed to the cleaner `stop`/`resume`/`decommission`
+/// family (#1205). The old spellings still parse for backward compatibility, but
+/// every invocation must nudge the operator toward the canonical verb so the
+/// aliases can eventually be retired.
+/// What: writes `deprecation_message(old, new)` to stderr, leaving stdout clean
+/// for scriptable output.
+/// Test: `cli_parses_session_runtime_stop`/`_managed_resume` assert the aliases
+/// still parse; the message text is asserted by `deprecation_notice_format`.
+pub(crate) fn deprecation_notice(old: &str, new: &str) {
+    eprintln!("{}", deprecation_message(old, new));
+}
+
 /// A managed-session summary as returned by the daemon list/get endpoints.
 ///
 /// Why: the CLI renders a stable subset of fields; deriving Deserialize on a
@@ -252,27 +277,63 @@ pub(crate) async fn session_attach(
     Ok(())
 }
 
-/// `tm session managed-stop <id>` — stop runtime only (keep workspace, legacy alias).
+/// `tm session managed-stop <id>` — stop runtime only (keep workspace, deprecated alias).
 ///
-/// Why: backward-compatible alias for `session_runtime_stop`; existing scripts
-/// that call `managed-stop` get the new non-destructive behavior.
-/// What: POSTs `/api/v1/sessions/managed/{id}/runtime-stop`.
-/// Test: HTTP path covered by the integration test.
+/// Why: backward-compatible alias for `session_stop`; existing scripts that call
+/// `managed-stop` keep working but get a deprecation nudge toward `stop` (#1205).
+/// What: emits the deprecation notice, then POSTs
+/// `/api/v1/sessions/managed/{id}/runtime-stop` via `session_stop`.
+/// Test: HTTP path covered by the integration test; parse by
+/// `cli_parses_session_managed_stop`.
 pub(crate) async fn session_managed_stop(
     client: &reqwest::Client,
     url: &str,
     id: String,
 ) -> anyhow::Result<()> {
-    session_runtime_stop(client, url, id).await
+    deprecation_notice("managed-stop", "stop");
+    session_stop(client, url, id).await
 }
 
-/// `tm session runtime-stop <id>` — stop the runtime, keep the workspace.
+/// `tm session runtime-stop <id>` — stop runtime only (deprecated alias).
 ///
-/// Why: a session ENDURES beyond its runtime; `runtime-stop` kills only the
-/// tmux session and claude process, preserving the workspace for later `resume`.
-/// What: POSTs `/api/v1/sessions/managed/{id}/runtime-stop`.
-/// Test: HTTP path covered by the integration test.
+/// Why: `runtime-stop` was renamed to `stop` (#1205); the old spelling still
+/// parses but emits a deprecation notice steering operators to `stop`.
+/// What: emits the deprecation notice, then delegates to `session_stop`.
+/// Test: parse by `cli_parses_session_runtime_stop`; HTTP path via `session_stop`.
 pub(crate) async fn session_runtime_stop(
+    client: &reqwest::Client,
+    url: &str,
+    id: String,
+) -> anyhow::Result<()> {
+    deprecation_notice("runtime-stop", "stop");
+    session_stop(client, url, id).await
+}
+
+/// `tm session managed-resume <id>` — resume a stopped session (deprecated alias).
+///
+/// Why: `managed-resume` was renamed to `resume` (#1205); the old spelling still
+/// parses but emits a deprecation notice steering operators to `resume`.
+/// What: emits the deprecation notice, then delegates to `session_resume`.
+/// Test: parse by `cli_parses_session_managed_resume`; HTTP path via
+/// `session_resume`.
+pub(crate) async fn session_managed_resume(
+    client: &reqwest::Client,
+    url: &str,
+    id: String,
+) -> anyhow::Result<()> {
+    deprecation_notice("managed-resume", "resume");
+    session_resume(client, url, id).await
+}
+
+/// `tm session stop <id>` — stop the runtime of a managed session, keep the workspace.
+///
+/// Why: a session ENDURES beyond its runtime; `stop` kills only the tmux session
+/// and claude process, preserving the workspace for later `resume`. Renamed from
+/// the verbose `runtime-stop` in #1205 (which remains a deprecated alias).
+/// What: POSTs `/api/v1/sessions/managed/{id}/runtime-stop`.
+/// Test: HTTP path covered by the integration test; parse by
+/// `cli_parses_session_managed_stop_verb`.
+pub(crate) async fn session_stop(
     client: &reqwest::Client,
     url: &str,
     id: String,
@@ -290,13 +351,15 @@ pub(crate) async fn session_runtime_stop(
     Ok(())
 }
 
-/// `tm session managed-resume <id>` — resume a stopped session in its existing workspace.
+/// `tm session resume <id>` — resume a stopped managed session in its existing workspace.
 ///
-/// Why: after `runtime-stop`, the workspace is still on disk; `managed-resume`
-/// re-spawns the runtime there without re-cloning.
+/// Why: after `stop`, the workspace is still on disk; `resume` re-spawns the
+/// runtime there without re-cloning. Renamed from the verbose `managed-resume`
+/// in #1205 (which remains a deprecated alias).
 /// What: POSTs `/api/v1/sessions/managed/{id}/resume`.
-/// Test: HTTP path covered by the integration test.
-pub(crate) async fn session_managed_resume(
+/// Test: HTTP path covered by the integration test; parse by
+/// `cli_parses_session_managed_resume_verb`.
+pub(crate) async fn session_resume(
     client: &reqwest::Client,
     url: &str,
     id: String,
