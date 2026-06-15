@@ -1,0 +1,242 @@
+# issue-state.yaml — default Unicorn Factory model
+# Extracted from src/unicorn/github_client.py + executor.py
+# All label names and colors are hardcoded in _canonical_labels() and
+# applied by the executor; this YAML is a faithful, behavior-preserving
+# externalization of that logic.
+#
+# This file is committed at crates/trusty-mpm/examples/issue-state/
+# unicorn-factory.yaml and embedded in the `tm` binary via include_str! as the
+# built-in default state model (see commands/issue/config.rs).
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# Label families
+# Labels are organized into four families. All family prefixes are
+# configurable; defaults produce the canonical unicorn:* / blast:* namespace.
+# ---------------------------------------------------------------------------
+
+label_config:
+  base: "unicorn"               # workflow.labels.base  (manifest.py WorkflowLabelsConfig)
+  approved: "unicorn:approved"  # workflow.labels.approved
+  blast_prefix: "blast:"        # workflow.labels.blast_prefix
+  status_prefix: "unicorn:"     # workflow.labels.status_prefix (UNI-REQ-018)
+
+# ---------------------------------------------------------------------------
+# States (the unicorn:* lifecycle labels)
+# ---------------------------------------------------------------------------
+
+states:
+
+  # Initial state — set at issue creation by ticket_builder.py
+  - name: queued
+    label:
+      name: "unicorn:queued"
+      color: "BFD4F2"
+      description: "Queued: awaiting human review"
+    order: 1
+
+  # Gate state — human applies this label to approve execution
+  - name: approved
+    label:
+      name: "unicorn:approved"
+      color: "0E8A16"
+      description: "Human-approved: execution eligible"
+    order: 2
+
+  # Running state — executor applies this label when the session starts
+  - name: active-development
+    label:
+      name: "unicorn:active-development"
+      color: "1D76DB"
+      description: "Executor actively working"
+    order: 3
+
+  # Control-channel halt states — human applies; watcher polls for these
+  - name: paused
+    label:
+      name: "unicorn:paused"
+      color: "E4E669"
+      description: "Execution intentionally suspended"
+    order: 4
+
+  - name: blocked
+    label:
+      name: "unicorn:blocked"
+      color: "E11D48"
+      description: "Execution halted; needs human input"
+    order: 5
+
+  # Terminal states
+  - name: done
+    label:
+      name: "unicorn:done"
+      color: "0075CA"
+      description: "Execution complete; PR opened — terminal"
+    terminal: true
+    order: 6
+
+  - name: failed
+    label:
+      name: "unicorn:failed"
+      color: "B60205"
+      description: "Execution failed — terminal"
+    terminal: true
+    order: 7
+
+# ---------------------------------------------------------------------------
+# Additional label families (not part of state machine, but seeded by bootstrap)
+# ---------------------------------------------------------------------------
+
+extra_labels:
+
+  # Base / ownership label — applied to all issues at creation
+  - name: "unicorn"
+    color: "7B68EE"
+    description: "Unicorn Factory work item"
+
+  # Blast-radius labels — applied at issue creation from AWP blast_radius field
+  - name: "blast:low"
+    color: "BFD4F2"
+    description: "Low blast radius"
+  - name: "blast:medium"
+    color: "FBCA04"
+    description: "Medium blast radius"
+  - name: "blast:high"
+    color: "E11D48"
+    description: "High blast radius"
+
+  # PR-tier labels — applied to PRs by executor._create_tiered_pr()
+  # blast:low → T4, blast:medium → T3, blast:high or missing → T2 (draft)
+  - name: "T2"
+    color: "E11D48"
+    description: "Tier 2 PR: high blast — SELT/CTO review required"
+  - name: "T3"
+    color: "FBCA04"
+    description: "Tier 3 PR: medium blast — 1 reviewer required"
+  - name: "T4"
+    color: "0075CA"
+    description: "Tier 4 PR: low blast — CI passing is sufficient"
+
+  # Approval-level labels — applied to PRs by executor._classify_and_gate()
+  # Level matrix (blast × project_class):
+  #   blast:low   × internal   → level 1 (auto-merge eligible)
+  #   blast:low   × production → level 2
+  #   blast:medium × any       → level 2
+  #   blast:high   × any       → level 3
+  - name: "approval:level-1"
+    color: "0E8A16"
+    description: "Approval level 1: trusty-review + CI sufficient"
+  - name: "approval:level-2"
+    color: "FBCA04"
+    description: "Approval level 2: harness owner review required"
+  - name: "approval:level-3"
+    color: "E11D48"
+    description: "Approval level 3: harness owner review required"
+
+# ---------------------------------------------------------------------------
+# State machine transitions
+# ---------------------------------------------------------------------------
+
+transitions:
+
+  # Ticket creation: no prior state → queued (ticket_builder.py build_issue_payloads)
+  - from: null
+    to: queued
+    trigger: issue_created
+    description: "ticket_builder applies unicorn:queued at issue creation"
+
+  # Human approval gate (human manually applies unicorn:approved label)
+  # The scheduler (OnApproveScheduler) polls for this label to trigger execution.
+  - from: queued
+    to: approved
+    trigger: human_label
+    description: "Human reviewer applies unicorn:approved to gate execution"
+
+  # Execution start: executor Phase 3 (add active-dev first, then remove approved)
+  - from: approved
+    to: active-development
+    trigger: executor_start
+    description: "executor.execute() Phase 3 — add new label first, then remove old"
+
+  # Control-channel halt: human applies paused/blocked during active session
+  # The _run_with_watcher polls get_issue() every poll_interval_seconds.
+  # On detection: session is cancelled (subprocess killed); human label is left in place.
+  - from: active-development
+    to: paused
+    trigger: human_label
+    description: "Human applies unicorn:paused; watcher cancels session"
+
+  - from: active-development
+    to: blocked
+    trigger: human_label
+    description: "Human applies unicorn:blocked; watcher cancels session"
+
+  # Happy path terminal: PR opened and (if level-1) auto-merged
+  - from: active-development
+    to: done
+    trigger: executor_complete
+    description: "executor Phase 6 success path — add done, remove active-development"
+
+  # Failure terminal: any exception in execute() after worktree creation
+  - from: active-development
+    to: failed
+    trigger: executor_failure
+    description: "executor Phase 6 failure path — add failed, remove active-development"
+
+# ---------------------------------------------------------------------------
+# Assignee / identity model
+# ---------------------------------------------------------------------------
+
+assignee_model:
+
+  # Strategy: the harness self-assigns issues using a named bot identity.
+  # The identity is derived from the manifest at runtime (never hardcoded):
+  #   - manifest.identity (explicit, e.g. "bob-unicorn") if set, else
+  #   - "{manifest.github.accountable_user}-unicorn" if accountable_user is set, else
+  #   - "{manifest.author}-unicorn"
+  # Pattern enforced: ^[a-z0-9][a-z0-9-]*-unicorn$  (e.g. "bob-unicorn")
+  # Source: manifest.py derive_identity() + _IDENTITY_PATTERN
+  strategy: bot_identity
+  identity_pattern: "{accountable_user_or_author}-unicorn"
+  identity_example: "bob-unicorn"
+
+  # Git attribution (commit trailers injected into every harness commit):
+  #   Unicorn: {identity}
+  #   Unicorn-Issue: #{issue_number}
+  # NOTE: The {identity} here is used ONLY for git commit attribution (user.name +
+  # trailers), NOT as a GitHub assignee. It is a bot identity for tracking which
+  # unicorn executed the work.
+  # Git user.name and user.email are set per-worktree (not globally):
+  #   user.name  = {identity}
+  #   user.email = {identity}@users.noreply.github.com
+  git_attribution:
+    user_name: "{identity}"
+    user_email: "{identity}@users.noreply.github.com"
+    commit_trailers:
+      - "Unicorn: {identity}"
+      - "Unicorn-Issue: #{issue_number}"
+    scope: worktree_local  # git config --worktree; never touches shared .git/config
+
+  # Assignment timing: issues receive assignees at creation from
+  # manifest.github.review_assignees (the human reviewers, not the bot).
+  # The coding-trigger eligibility check (UNI-REQ-014) additionally requires
+  # the issue to be assigned to manifest.github.accountable_user before execution.
+  per_state:
+    queued:
+      assignees: "{manifest.github.review_assignees}"  # human reviewers
+      description: "Set at creation by ticket_builder; review_assignees for human approval gate"
+    approved:
+      assignees: unchanged
+      description: "Human applies label; assignees unchanged from queued state"
+    active-development:
+      assignees: unchanged
+      description: "Executor does not modify assignees; accountable_user must already be assigned"
+    done:
+      assignees: unchanged
+    failed:
+      assignees: unchanged
+    paused:
+      assignees: unchanged
+    blocked:
+      assignees: unchanged

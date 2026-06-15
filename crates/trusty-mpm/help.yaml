@@ -178,3 +178,54 @@ commands:
         description: Note to post as an issue comment for the audit trail (repeatable)
       - name: runtime
         description: "Runtime backend for the spawned session: claude-code (default) or tcode"
+  issue:
+    description: YAML-configurable issue state-management (labels/transitions/assignee); gh default
+    examples:
+      - cmd: trusty-mpm issue seed-labels
+      - cmd: trusty-mpm issue seed-labels --dry-run
+      - cmd: trusty-mpm issue transition 1232 approved --note "approved by reviewer"
+      - cmd: trusty-mpm issue current 1232
+      - cmd: trusty-mpm issue states
+      - cmd: trusty-mpm issue seed-config --force
+      - cmd: trusty-mpm issue repair 1232
+    flags:
+      - name: system
+        description: "Ticket backend: gh (default), jira, or linear"
+    subcommands:
+      seed-labels:
+        description: Create any missing state + family labels in the repo (idempotent)
+        flags:
+          - name: config
+            description: Explicit path to an issue-state YAML (overrides discovery)
+          - name: dry-run
+            description: Print what would be created without creating anything
+      transition:
+        description: Move an issue to a target state, validating the edge against the model
+        args: [issue, to_state]
+        flags:
+          - name: config
+            description: Explicit path to an issue-state YAML (overrides discovery)
+          - name: note
+            description: Optional note appended to the transition audit comment
+      current:
+        description: Report an issue's current state, derived from its labels
+        args: [issue]
+        flags:
+          - name: config
+            description: Explicit path to an issue-state YAML (overrides discovery)
+      states:
+        description: List the configured states and transitions (reads YAML only)
+        flags:
+          - name: config
+            description: Explicit path to an issue-state YAML (overrides discovery)
+      seed-config:
+        description: Write the embedded default model to ~/.trusty-tools/trusty-mpm/issue-state.yaml
+        flags:
+          - name: force
+            description: Overwrite an existing user config file
+      repair:
+        description: Resolve a mid-transition issue carrying multiple state labels
+        args: [issue]
+        flags:
+          - name: config
+            description: Explicit path to an issue-state YAML (overrides discovery)

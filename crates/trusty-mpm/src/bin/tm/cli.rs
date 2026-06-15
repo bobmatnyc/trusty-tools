@@ -290,6 +290,94 @@ pub(crate) enum Command {
         #[arg(long, default_value = "claude-code", value_enum)]
         runtime: trusty_mpm::runtime::RuntimeKind,
     },
+
+    /// YAML-configurable issue state-management (labels/transitions/assignee).
+    ///
+    /// Why: externalizes the (formerly hardcoded) issue state machine — the
+    /// label set, the allowed transitions, and the assignee model — into a YAML
+    /// contract owned by trusty-mpm (#1246). The Unicorn Factory consumes these
+    /// verbs by shelling out; the YAML is the portable shared contract. Every
+    /// verb maps to a concrete GitHub label/assignee/comment mutation so issue
+    /// state stays reconstructable from GitHub artifacts alone.
+    /// What: a verb group (`seed-labels`, `transition`, `current`, `states`,
+    /// `seed-config`, `repair`) over the selected `[system]` backend (`gh`
+    /// default; `jira`/`linear` are not-yet-supported stubs). Config discovery:
+    /// `--config` > `./issue-state.yaml` > `~/.trusty-tools/trusty-mpm/
+    /// issue-state.yaml` > the embedded Unicorn Factory default.
+    /// Test: `cli_parses_issue_*` in `tests.rs`; verb logic in the
+    /// `commands::issue` submodule unit tests.
+    Issue {
+        /// Issue verb to run.
+        #[command(subcommand)]
+        cmd: IssueCmd,
+        /// Ticket backend: `gh` (default), `jira`, or `linear`.
+        #[arg(long, default_value = "gh", value_enum, global = true)]
+        system: crate::commands::ticket::system::TicketSystemKind,
+    },
+}
+
+/// Verbs for the `tm issue` state-management command group (#1246).
+///
+/// Why: each operation (seed labels, transition state, inspect, repair) is a
+/// distinct, scriptable verb; a sub-subcommand enum keeps them discoverable and
+/// individually parseable.
+/// What: `SeedLabels` (idempotent create-missing), `Transition` (validated
+/// atomic state change), `Current` (read state from labels), `States` (list the
+/// model), `SeedConfig` (write the default YAML to disk), `Repair` (resolve a
+/// multi-state issue).
+/// Test: `cli_parses_issue_*` in `tests.rs`.
+#[derive(Debug, Subcommand)]
+pub(crate) enum IssueCmd {
+    /// Create any missing labels (states + extra families) in the repo.
+    SeedLabels {
+        /// Explicit path to an issue-state YAML (overrides discovery).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+        /// Print what would be created without creating anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Move an issue to `<to-state>`, validating the edge against the model.
+    Transition {
+        /// Issue number (e.g. `1232`).
+        issue: u64,
+        /// Target state name (e.g. `approved`).
+        to_state: String,
+        /// Explicit path to an issue-state YAML (overrides discovery).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+        /// Optional note appended to the transition audit comment.
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Report an issue's current state, derived from its labels.
+    Current {
+        /// Issue number.
+        issue: u64,
+        /// Explicit path to an issue-state YAML (overrides discovery).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
+    /// List the configured states and transitions (reads YAML only).
+    States {
+        /// Explicit path to an issue-state YAML (overrides discovery).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
+    /// Write the embedded default model to the user config path.
+    SeedConfig {
+        /// Overwrite an existing user config file.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Resolve a mid-transition issue carrying multiple state labels.
+    Repair {
+        /// Issue number.
+        issue: u64,
+        /// Explicit path to an issue-state YAML (overrides discovery).
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
 }
 
 /// Actions for the `catalog` subcommand.

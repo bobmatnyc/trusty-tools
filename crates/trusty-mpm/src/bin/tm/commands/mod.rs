@@ -10,6 +10,7 @@
 
 pub(crate) mod daemon;
 pub(crate) mod install;
+pub(crate) mod issue;
 pub(crate) mod launch;
 pub(crate) mod managed;
 pub(crate) mod misc;
