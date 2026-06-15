@@ -11,8 +11,6 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-# Phase-0 scaffold — not ready to publish yet.
-publish = false
 
 [lib]
 name = "trusty_controller"

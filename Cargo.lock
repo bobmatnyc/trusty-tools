@@ -6247,7 +6247,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 1.3.1",
+ "proc-macro-crate 2.0.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -10741,7 +10741,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10813,7 +10813,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-console"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -10991,7 +10991,6 @@ dependencies = [
  "tracing-subscriber",
  "trusty-common",
  "trusty-console",
- "trusty-mpm-gui",
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",

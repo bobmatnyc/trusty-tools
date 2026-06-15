@@ -1,7 +1,6 @@
 [package]
 name = "trusty-mpm"
 version = "0.6.2"
-publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -41,10 +40,16 @@ tui = ["dep:ratatui", "dep:crossterm"]
 # `telegram` gates the Telegram bot library module (`tm telegram`).
 telegram = ["dep:teloxide", "dep:tokio-util"]
 
-# `gui` gates the `tm gui` subcommand (non-default: pulls in Tauri/WebKit).
-# The Tauri GUI lives in the separate `trusty-mpm-gui` crate (it owns
-# `build.rs` + `tauri.conf.json` which cannot be merged into a generic crate).
-gui = ["dep:trusty-mpm-gui"]
+# `gui` is intentionally a no-dep CLI-gating feature. The `tm gui` subcommand
+# is ALWAYS available; this flag exists only so the subcommand can optionally
+# advertise itself. The Tauri GUI lives in the separate, publish=false
+# `trusty-mpm-gui` crate (it owns `build.rs` + `tauri.conf.json` which cannot be
+# published cleanly to crates.io). Rather than pull that unpublishable crate in
+# as an optional Cargo dependency — which blocks `cargo publish` for trusty-mpm,
+# because cargo requires even optional deps to resolve on crates.io — `tm gui`
+# shells out to a separately-installed `trusty-mpm-gui` binary (Single-Install
+# convention: `cargo install trusty-mpm-gui`). See src/bin/tm/main.rs.
+gui = []
 
 # ── Library ────────────────────────────────────────────────────────────────────
 [lib]
@@ -153,8 +158,11 @@ crossterm = { workspace = true, optional = true }
 teloxide = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true }
 
-# gui feature — separate crate due to Tauri build system
-trusty-mpm-gui = { path = "../trusty-mpm-gui", version = "0.2.12", optional = true }
+# NOTE: trusty-mpm-gui is deliberately NOT a Cargo dependency. It is a
+# publish=false Tauri crate that cannot resolve on crates.io, so declaring it
+# (even as an optional dep) blocks `cargo publish` for trusty-mpm. The `tm gui`
+# subcommand shells out to a separately-installed `trusty-mpm-gui` binary
+# instead — see the `gui` feature comment above and src/bin/tm/main.rs.
 
 # ── Platform-specific always-on deps ─────────────────────────────────────────
 [target.'cfg(unix)'.dependencies]
