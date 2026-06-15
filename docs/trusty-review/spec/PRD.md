@@ -135,9 +135,9 @@ Status tags:
 | Requirement | Status | Notes |
 |-------------|--------|-------|
 | Noisy-file collapse at diff-fetch stage | 🔵 | Tracked in #551 |
-| Stage A — FileFilter (file-level deterministic) | 🔵 | Tracked in #551 |
-| Stage B — HunkFilter (hunk-level deterministic) | 🔵 | Tracked in #551 |
-| Stage C — HunkClassifier (LLM per-hunk) | 🔵 | Tracked in #551 |
+| Stage A — FileFilter (file-level deterministic) | ✅ | `crates/trusty-review/src/pipeline/diff_analyzer/file_filter.rs` + tests |
+| Stage B — HunkFilter (hunk-level deterministic) | ✅ | `crates/trusty-review/src/pipeline/diff_analyzer/hunk_filter.rs` + tests |
+| Stage C — HunkClassifier (LLM per-hunk) | ✅ | `crates/trusty-review/src/pipeline/diff_analyzer/hunk_classifier.rs` + tests |
 
 ### 4.7 Longitudinal contributor profiles (epic #558)
 
@@ -158,7 +158,7 @@ Status tags:
 | Requirement | Status | Notes |
 |-------------|--------|-------|
 | Filesystem review log (JSON + Markdown) | ✅ | |
-| redb cross-process dedup claim | 🔵 | Tracked in #549 |
+| redb cross-process dedup claim | ✅ | `crates/trusty-review/src/store/dedup.rs` used by `pipeline/runner.rs` |
 | `ReviewLog` trait (pluggable backend) | 🔵 | Tracked in #549 |
 
 ### 4.9 Deployment & observability (#554)
