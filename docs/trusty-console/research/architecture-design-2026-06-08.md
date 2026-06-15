@@ -8,11 +8,17 @@
 
 trusty-console is a single long-running HTTP service that serves a unified web dashboard fronting the four core trusty daemons (trusty-memory :7070, trusty-search :7878, trusty-analyze :7879, trusty-review :7880), extensible to more later. It eliminates the need to remember per-daemon ports and open multiple browser tabs. Default port: 7788.
 
-## Current state (P0 scaffold already exists)
+## Current state (P0 ✅ SHIPPED)
 
-`crates/trusty-console/` is already scaffolded and compiles: axum service, embedded Svelte 5 + Vite 6 SPA (via rust-embed), a `ServiceConnector` trait, and discovery for 3 of 4 daemons. publish=false, edition=2024, MSRV 1.91, license.workspace=MIT.
+**Status:** P0 (issue #959) completed 2026-06-14.
 
-Remaining for P0 (issue #959): add `ReviewConnector` (reads ~/.trusty-review/http_addr), register it in detect/mod.rs all_connectors(); write ~/.trusty-console/http_addr via trusty_common::write_daemon_addr on bind; add .with_graceful_shutdown(trusty_common::shutdown_signal()); replace inline tracing_subscriber with trusty_common::init_tracing(1).
+`crates/trusty-console/` is fully scaffolded and operationally deployed: axum service, embedded Svelte 5 + Vite 6 SPA (via rust-embed), a `ServiceConnector` trait, and discovery for all 4 daemons. publish=false, edition=2024, MSRV 1.91, license.workspace=MIT.
+
+P0 deliverables (all shipped):
+- ✅ `ReviewConnector` added (`src/detect/review.rs`), registered in `detect/mod.rs::all_connectors()`
+- ✅ Discovery file write via `trusty_common::write_daemon_addr("trusty-console", &addr)` on bind (lib.rs:297)
+- ✅ Graceful shutdown via `.with_graceful_shutdown(trusty_common::shutdown_signal())` on both primary and extra listeners (lib.rs:287, 310)
+- ✅ Centralized tracing init via `trusty_common::init_tracing(1)` (lib.rs:121)
 
 ## Daemon HTTP surfaces (ground truth)
 
@@ -20,7 +26,7 @@ Remaining for P0 (issue #959): add `ReviewConnector` (reads ~/.trusty-review/htt
 |---|---|---|---|
 | trusty-search | 7878 | GET /health {status,version,indexes,...} | ~/.trusty-search/http_addr; `trusty-search port` |
 | trusty-memory | 7070 | GET /health {status,version,palace_count,...} | ~/.trusty-memory/http_addr; `trusty-memory port` |
-| trusty-analyze | 7879 | GET /health {status,search_reachable} | NO discovery file (port assumed 7879) |
+| trusty-analyze | 7879 | GET /health {status,search_reachable} | ~/.trusty-analyze/http_addr; `trusty-analyze port` |
 | trusty-review | 7880 | GET /health {status,version,inference,deps} | ~/.trusty-review/http_addr |
 
 Embedded UIs: search, memory, analyze each ship a Svelte SPA; review has no UI (REST + webhook only).
@@ -54,9 +60,8 @@ Add `trusty-common = { workspace = true }` for shutdown_signal/write_daemon_addr
 
 ## MVP vs later
 
-- **P0 (issue #959):** health dashboard for all 4 daemons + complete workspace-convention alignment. ~½ day.
-
-  **Operator note:** trusty-analyze writes no discovery file (see issue #956), so the P0 health dashboard assumes port 7879. If trusty-analyze is started on a non-default port, the console will show it as unreachable until #956 lands. Promoting the #956 discovery-file fix into P0 scope would remove this caveat.
+- **P0 (issue #959):** health dashboard for all 4 daemons + complete workspace-convention alignment. ✅ **Shipped 2026-06-14.**
+  All four daemons now write discovery files; issue #956 is resolved. The console correctly detects all services on dynamic ports.
 - **P1 (issue #960):** /proxy/{daemon}/{*path} reverse-proxy (reqwest streaming) + base-href handling + background health-poll cache + SPA links into proxied views. Watch the 500-line cap on server.rs — split proxy routes + poller into their own modules.
 - **P2 (future):** cross-daemon features (unified search bar, memory recall panel, review trigger); optional console_status MCP tool.
 
