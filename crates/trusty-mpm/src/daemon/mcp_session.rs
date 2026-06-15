@@ -92,11 +92,17 @@ pub async fn session_stop(state: &Arc<DaemonState>, session_id: &str) -> Result<
 /// Why: thin wrapper that mirrors the HTTP resume handler — it both resumes the
 /// record AND re-spawns the runtime so the session is actually live again.
 /// What: parses the id, delegates to
-/// [`crate::daemon::managed_routes::resume_managed`], returns the record as JSON.
+/// [`crate::daemon::managed_routes::resume_managed`], and renders its typed
+/// [`crate::daemon::managed_routes::ResumeManagedError`] to a flat string via
+/// `Display` for the MCP tool result (the not-found variant's string still
+/// contains the literal "not found" the dispatch tests assert on). On success
+/// returns the record as JSON.
 /// Test: `session_resume_unknown_id_errors` in the `tests` module.
 pub async fn session_resume(state: &Arc<DaemonState>, session_id: &str) -> Result<Value, String> {
     let id = parse_managed_id(session_id)?;
-    let record = crate::daemon::managed_routes::resume_managed(state, &id).await?;
+    let record = crate::daemon::managed_routes::resume_managed(state, &id)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(record_to_json(&record))
 }
 

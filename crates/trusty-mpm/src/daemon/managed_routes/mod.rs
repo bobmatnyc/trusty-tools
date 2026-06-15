@@ -20,12 +20,14 @@ use axum::{
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::daemon::state::DaemonState;
-use crate::provisioner::WorkspaceProvisioner;
-use crate::runtime::{RuntimeKind, build_adapter};
-use crate::session_manager::{ManagedSessionId, ManagedSessionState, SessionRecord};
+use crate::runtime::RuntimeKind;
+use crate::session_manager::{ManagedSessionId, SessionRecord};
+
+mod lifecycle;
+pub use lifecycle::{ResumeManagedError, SpawnParams, resume_managed, spawn_managed};
 
 // ── Request / Response shapes ─────────────────────────────────────────────────
 
@@ -233,180 +235,6 @@ pub struct ActivityResponse {
     pub pending_decision: Option<String>,
     /// Proposed default answer to the pending decision.
     pub proposed_default: Option<String>,
-}
-
-// ── Shared lifecycle core (reused by HTTP handlers + MCP tools, #1221) ─────────
-
-/// Transport-agnostic inputs for spawning a managed session.
-///
-/// Why: both the HTTP `POST /…/managed` handler and the MCP `session_new` tool
-/// need to spawn a session with the same semantics; a shared struct lets one
-/// [`spawn_managed`] function serve both without the MCP path re-implementing
-/// the provision→create→spawn ritual.
-/// What: the same fields as [`SpawnRequest`] but plain owned types (no axum/serde
-/// extraction), so non-HTTP callers can build it directly.
-/// Test: `spawn_managed` is exercised via `crate::daemon::mcp_session`'s
-/// `session_new_invalid_runtime_errors` and the HTTP spawn tests.
-#[derive(Debug, Clone)]
-pub struct SpawnParams {
-    /// Repository URL to provision the session workspace from.
-    pub repo_url: String,
-    /// Git branch or ref to check out.
-    pub git_ref: String,
-    /// Human-readable task description for the session.
-    pub task: String,
-    /// Optional name hint overriding the auto-generated tmux session name.
-    pub name_hint: Option<String>,
-    /// Optional runtime selector (`"claude-code"` | `"tcode"`).
-    pub runtime: Option<String>,
-}
-
-/// Spawn a managed session, shared by the HTTP handler and the MCP tool.
-///
-/// Why: the spawn flow (resolve runtime → provision workspace → create tmux host
-/// → launch harness) must be identical across transports; centralising it here
-/// means the MCP `session_new` tool is a true thin wrapper rather than a
-/// divergent copy.
-/// What: in order — (0) parses the runtime selector (an unknown value is an early
-/// `Err` before any side effect); (1) provisions an isolated workspace; (2)
-/// creates the tmux session rooted at that workspace; (3) spawns the selected
-/// runtime in the pane (a spawn failure marks the record errored but is not
-/// fatal — the record still exists). Returns the final [`SessionRecord`].
-/// Test: `crate::daemon::mcp_session::tests::session_new_invalid_runtime_errors`
-/// covers the early runtime-rejection path; the HTTP spawn tests cover the
-/// provision/create/spawn path.
-pub async fn spawn_managed(
-    state: &Arc<DaemonState>,
-    params: SpawnParams,
-) -> Result<SessionRecord, String> {
-    // Step 0: resolve the runtime backend (default claude-code). Reject unknown
-    // selectors BEFORE any provisioning so a typo never leaves an orphan
-    // workspace.
-    let runtime = match params.runtime.as_deref() {
-        None => RuntimeKind::default(),
-        Some(raw) => raw.parse::<RuntimeKind>().map_err(|e| e.to_string())?,
-    };
-
-    // Step 1: pre-generate the id + provision an isolated workspace.
-    let workspace_root = std::env::var("TRUSTY_MPM_WORKSPACE_ROOT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::home_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-                .join(".trusty-mpm")
-                .join("workspaces")
-        });
-
-    let session_id = ManagedSessionId::new();
-    let provisioner = WorkspaceProvisioner::new(crate::provisioner::RealGitBackend, workspace_root);
-    let prepared = provisioner
-        .provision(&session_id, &params.repo_url, &params.git_ref, &params.task)
-        .map_err(|e| {
-            warn!(id = %session_id, "spawn_managed: provision failed: {e}");
-            format!("workspace provisioning failed: {e}")
-        })?;
-
-    // Step 2: create the tmux session rooted at the provisioned workspace.
-    let mgr = state.session_manager().await;
-    let record = mgr
-        .create_with_id(
-            session_id,
-            params.task.clone(),
-            Some(prepared.path.clone()),
-            params.name_hint,
-            Some(prepared.path.clone()),
-            Some(params.repo_url.clone()),
-            Some(params.git_ref.clone()),
-            runtime,
-        )
-        .await
-        .map_err(|e| {
-            warn!(id = %session_id, "spawn_managed: session create failed: {e}");
-            e.to_string()
-        })?;
-
-    if let Err(e) = mgr
-        .set_workspace(
-            &record.id,
-            prepared.path.clone(),
-            ManagedSessionState::Active,
-        )
-        .await
-    {
-        warn!(id = %record.id, "spawn_managed: set_workspace failed: {e}");
-    }
-
-    // Step 3: spawn the selected runtime in the pane. A spawn failure is recorded
-    // (the record is marked errored) but is not fatal — the record exists and the
-    // caller still gets it back.
-    let tmux_arc = mgr.tmux_driver();
-    let adapter = build_adapter(record.runtime, tmux_arc);
-    if let Err(e) = adapter.spawn(&record.tmux_name, &prepared.path, &params.task) {
-        warn!(
-            id = %record.id,
-            name = %record.tmux_name,
-            runtime = %record.runtime.as_str(),
-            "spawn_managed: runtime adapter spawn failed: {e}"
-        );
-        let _ = mgr
-            .mark_errored(&record.id, &format!("spawn failed: {e}"))
-            .await;
-    } else {
-        info!(
-            id = %record.id,
-            name = %record.tmux_name,
-            path = %prepared.path.display(),
-            "managed session spawned successfully"
-        );
-    }
-
-    Ok(mgr.get(&record.id).await.unwrap_or(record))
-}
-
-/// Resume a stopped session and re-spawn its runtime, shared across transports.
-///
-/// Why: the HTTP resume handler and the MCP `session_resume` tool must both
-/// resume the record AND re-spawn the runtime so the session is actually live;
-/// centralising avoids the MCP path silently resuming without re-spawning.
-/// What: calls [`crate::session_manager::SessionManager::resume`], then re-spawns
-/// the SAME runtime backend in the fresh tmux session (no re-clone). Returns the
-/// final record. A `SessionNotFound` becomes a "not found" error; an invalid
-/// state transition becomes a descriptive error.
-/// Test: covered by the HTTP `resume_managed_session` tests and the MCP
-/// `session_resume_unknown_id_errors` test.
-pub async fn resume_managed(
-    state: &Arc<DaemonState>,
-    id: &ManagedSessionId,
-) -> Result<SessionRecord, String> {
-    let mgr = state.session_manager().await;
-    let record = mgr.resume(id).await.map_err(|e| e.to_string())?;
-
-    let workspace = record
-        .workspace_path
-        .clone()
-        .unwrap_or_else(|| record.cwd.clone());
-    let tmux_arc = mgr.tmux_driver();
-    let adapter = build_adapter(record.runtime, tmux_arc);
-    if let Err(e) = adapter.spawn(&record.tmux_name, &workspace, &record.task) {
-        warn!(
-            id = %record.id,
-            name = %record.tmux_name,
-            runtime = %record.runtime.as_str(),
-            "resume_managed: runtime adapter spawn failed: {e}"
-        );
-        let _ = mgr
-            .mark_errored(&record.id, &format!("resume spawn failed: {e}"))
-            .await;
-    } else {
-        info!(
-            id = %record.id,
-            name = %record.tmux_name,
-            workspace = %workspace.display(),
-            "managed session resumed and runtime respawned"
-        );
-    }
-
-    Ok(mgr.get(id).await.unwrap_or(record))
 }
 
 /// Serialize a [`SessionRecord`] to the flat JSON shape the MCP tools return.
@@ -713,34 +541,23 @@ pub async fn resume_managed_session(
         Err((code, msg)) => return (code, msg).into_response(),
     };
 
-    // The shared `resume_managed` helper resumes the record AND re-spawns the
-    // runtime. We re-map its errors to the HTTP-specific 404/409/500 statuses by
-    // first probing the manager's typed error (so existing clients keep getting
-    // the same codes), then delegating the spawn-and-respawn to the shared path.
-    let mgr = state.session_manager().await;
-    if let Err(e) = mgr.get(&id).await {
-        match e {
-            crate::session_manager::ManagedError::SessionNotFound(_) => {
-                return (StatusCode::NOT_FOUND, format!("session {id_str} not found"))
-                    .into_response();
-            }
-            other => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, other.to_string()).into_response();
-            }
-        }
-    }
-
-    match crate::daemon::managed_routes::resume_managed(&state, &id).await {
+    // Single round-trip: the shared `resume_managed` helper performs the
+    // existence + state check inside `SessionManager::resume` and re-spawns the
+    // runtime. We match on its TYPED error to choose the HTTP status — no
+    // pre-flight `get` (which introduced a TOCTOU race where the session could be
+    // decommissioned between the probe and the resume, yielding 500 instead of
+    // 404) and no `Display`-substring matching (which silently fell through to 500
+    // whenever the error wording changed).
+    match resume_managed(&state, &id).await {
         Ok(final_record) => Json(record_to_summary(&final_record)).into_response(),
-        Err(msg) => {
-            // `resume` rejects an invalid state transition; surface as 409.
-            if msg.contains("invalid state transition") {
-                (StatusCode::CONFLICT, msg).into_response()
-            } else if msg.contains("session not found") {
-                (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response()
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
-            }
+        Err(ResumeManagedError::NotFound(_)) => {
+            (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response()
+        }
+        Err(ResumeManagedError::InvalidState(reason)) => {
+            (StatusCode::CONFLICT, reason).into_response()
+        }
+        Err(ResumeManagedError::Other(msg)) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
         }
     }
 }

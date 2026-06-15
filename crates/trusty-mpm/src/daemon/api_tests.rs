@@ -603,8 +603,13 @@ async fn rpc_rejects_non_loopback_peer() {
 
 #[tokio::test]
 async fn rpc_dispatches_tools_list_for_loopback() {
-    // A loopback peer is allowed and gets the full 15-tool catalog back through
-    // the in-process MCP dispatch path.
+    // A loopback peer is allowed and gets the full tool catalog back through the
+    // in-process MCP dispatch path. We assert the catalog CONTAINS the expected
+    // tool NAMES (not a brittle exact count): the 6 new session-lifecycle tools
+    // must all be present, and the total must be at least 15. The expected
+    // breakdown is 9 pre-existing tools + 6 new session-lifecycle tools = 15; if
+    // a future change adds tools, only this comment and the `>= 15` floor need
+    // revisiting — the name assertions keep protecting the session surface.
     use axum::body::Body;
     use axum::extract::ConnectInfo;
     use axum::http::Request;
@@ -632,7 +637,32 @@ async fn rpc_dispatches_tools_list_for_loopback() {
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["id"], 7);
     let tools = body["result"]["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 15, "loopback /rpc must dispatch tools/list");
+
+    // Collect the advertised tool names for name-based (not count-based) asserts.
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+
+    // The 6 new session-lifecycle tools must all be advertised.
+    for expected in [
+        "session_new",
+        "session_stop",
+        "session_resume",
+        "session_decommission",
+        "session_activity",
+        "session_send",
+    ] {
+        assert!(
+            names.contains(&expected),
+            "loopback /rpc tools/list must advertise `{expected}`; got {names:?}"
+        );
+    }
+
+    // Count floor: 9 existing + 6 new = 15. Use `>=` so adding future tools does
+    // not break this test for the wrong reason.
+    assert!(
+        tools.len() >= 15,
+        "loopback /rpc tools/list must advertise at least 15 tools (9 existing + 6 session-lifecycle); got {}",
+        tools.len()
+    );
 }
 
 #[tokio::test]
