@@ -10,6 +10,7 @@
 mod cli;
 mod commands;
 mod formatters;
+mod gh_identity;
 mod types;
 
 use clap::Parser;

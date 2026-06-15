@@ -94,7 +94,79 @@ pub struct TrustyToolsConfig {
     /// label, and poll interval declaratively instead of typing them every run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch: Option<WatchConfig>,
+
+    /// Per-project GitHub identity binding (the `github:` YAML section, #1265).
+    ///
+    /// `None` → no binding; every `gh` call inherits the ambient gh identity
+    /// (current behaviour, no regression). When present, the resolved overrides
+    /// are applied to every `gh` subprocess `tm` spawns for the active project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<GithubConfig>,
 }
+
+/// The `github:` section of `~/.trusty-tools/trusty-mpm/config.yaml` (#1265).
+///
+/// Why: a host may have several GitHub identities (a personal account, a work
+/// account, a bot, a GitHub Enterprise host) and `tm`'s many `gh` calls must use
+/// the RIGHT one for the active project rather than whichever identity happens to
+/// be ambient. Binding the identity per-project — alongside the `watch:` section
+/// that already keys defaults to the active board — lets an operator pin
+/// "this project's gh actions use THIS account/token/host" declaratively. Every
+/// field is optional so an absent section (or a partly-filled one) cleanly falls
+/// back to the ambient gh identity, guaranteeing no regression for existing setups.
+/// What: optional `config_dir` (a private gh config home), `token_env` (the NAME
+/// of an env var or keychain reference to resolve a token from at call time —
+/// never a plaintext token), `account` (a gh username), and `host` (the gh host,
+/// default `github.com`, also used for clone-URL synthesis). The resolution
+/// precedence and the env overrides each field maps to live in the
+/// `gh_identity` module, not here — this is purely the on-disk shape.
+/// Test: round-trips via the `crate_config` tests; resolution in `gh_identity`;
+/// the no-plaintext-token guarantee is asserted by `github_config_stores_only_env_name`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubConfig {
+    /// A private gh config home directory → exported as `GH_CONFIG_DIR`.
+    ///
+    /// `None` → not set. When set, `gh` reads its auth/config from this directory
+    /// instead of the user's default `~/.config/gh`, isolating the identity
+    /// WITHOUT mutating any global gh state. This is the highest-precedence,
+    /// least-invasive strategy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_dir: Option<PathBuf>,
+
+    /// The NAME of an env var to resolve a token from at runtime → `GH_TOKEN`.
+    ///
+    /// `None` → not set. This is intentionally the env-var NAME, never a token:
+    /// the plaintext secret never lives in the config file or this struct. At
+    /// call time `std::env::var(<this name>)` resolves the actual token; if the
+    /// named var is absent the strategy is skipped (precedence falls through).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_env: Option<String>,
+
+    /// A gh username to select as the active account.
+    ///
+    /// `None` → not set. The least-precise strategy: `gh` has no universal
+    /// per-invocation `--user` flag, so binding by account alone has caveats
+    /// (documented in `gh_identity`). Prefer `config_dir` or `token_env`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+
+    /// The gh host (e.g. `github.example.com` for GitHub Enterprise).
+    ///
+    /// `None` → the built-in default `github.com`. When set it is exported as
+    /// `GH_HOST` (independent of the identity strategy) AND used to synthesise
+    /// clone URLs as `https://<host>/<owner>/<repo>` (closes the GHE part of
+    /// #1261).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+}
+
+/// Built-in default GitHub host used for clone-URL synthesis and `GH_HOST`.
+///
+/// Why: when no `github.host` is configured, clone URLs and gh fall back to the
+/// public host. Naming it once keeps the resolver and the URL synthesiser aligned.
+/// What: `"github.com"`.
+/// Test: `default_host_is_github_com` in `gh_identity`.
+pub const DEFAULT_GITHUB_HOST: &str = "github.com";
 
 /// The `watch:` section of `~/.trusty-tools/trusty-mpm/config.yaml`.
 ///
@@ -277,6 +349,50 @@ mod tests {
         );
         assert_eq!(expand_tilde("~", &home), home);
         assert_eq!(expand_tilde("/abs/path", &home), PathBuf::from("/abs/path"));
+    }
+
+    /// Why: the `github:` section must round-trip through YAML so an operator's
+    /// declarative binding survives load/save unchanged (and absent fields stay
+    /// absent rather than serialising as nulls).
+    /// Test: itself.
+    #[test]
+    fn github_config_yaml_round_trip() {
+        let cfg = TrustyToolsConfig {
+            github: Some(GithubConfig {
+                config_dir: Some(PathBuf::from("/home/bob/.config/gh-work")),
+                token_env: Some("WORK_GH_TOKEN".into()),
+                account: Some("bob-work".into()),
+                host: Some("github.example.com".into()),
+            }),
+            ..Default::default()
+        };
+        let yaml = serde_yaml::to_string(&cfg).expect("serialise");
+        let back: TrustyToolsConfig = serde_yaml::from_str(&yaml).expect("deserialise");
+        assert_eq!(cfg, back);
+        // Absent top-level fields must not appear in the YAML.
+        assert!(!yaml.contains("workspace_root_template"), "yaml: {yaml}");
+        assert!(yaml.contains("github:"), "yaml: {yaml}");
+    }
+
+    /// Why: the #1265 no-plaintext-token guarantee — the config stores only the
+    /// NAME of the env var, never the secret value. A reviewer must be able to
+    /// assert this invariant mechanically.
+    /// Test: itself.
+    #[test]
+    fn github_config_stores_only_env_name() {
+        let cfg = GithubConfig {
+            token_env: Some("MY_GH_TOKEN".into()),
+            ..Default::default()
+        };
+        // The struct field is named `token_env` and holds the var NAME; there is
+        // no field that could hold a token value. Serialised form proves it.
+        let yaml = serde_yaml::to_string(&cfg).expect("serialise");
+        assert!(yaml.contains("token_env"), "yaml: {yaml}");
+        assert!(yaml.contains("MY_GH_TOKEN"), "yaml: {yaml}");
+        assert!(
+            !yaml.contains("token:"),
+            "must not have a bare token field: {yaml}"
+        );
     }
 
     /// Why: the project subpath must nest `<owner>/<repo>` under the root in that

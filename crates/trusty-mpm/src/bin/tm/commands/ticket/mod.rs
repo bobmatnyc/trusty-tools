@@ -165,15 +165,17 @@ pub(crate) async fn ticket(
 ) -> anyhow::Result<()> {
     let issue_number = parse_issue_number(&issue_ref)?;
 
-    // Two independent `RealCommandRunner`s by design: one owned by the backend
-    // for issue-level `gh` calls (validate/comment), and one used here for the
-    // repo-level `gh repo view` resolution. They are stateless zero-sized values,
-    // so separate instances are equivalent to sharing — keeping them independent
-    // avoids threading a borrow through the backend's generic parameter purely to
-    // reuse a unit struct.
-    let runner = RealCommandRunner;
+    // #1265: resolve the active project's GitHub identity once and bind it to
+    // every `gh` subprocess. An absent `github:` config yields an empty binding
+    // (ambient gh identity, no regression). Two independent `RealCommandRunner`s
+    // (one for the backend's issue-level calls, one for repo-level `gh repo
+    // view`) each carry the SAME resolved overrides.
+    let gh_env = crate::gh_identity::load_gh_env()?;
+    let runner = RealCommandRunner::with_env(gh_env.vars().to_vec());
     let backend = match system {
-        TicketSystemKind::Gh => GhTicketSystem::new(RealCommandRunner),
+        TicketSystemKind::Gh => {
+            GhTicketSystem::new(RealCommandRunner::with_env(gh_env.vars().to_vec()))
+        }
         TicketSystemKind::Jira => return Err(not_yet_supported("jira")),
         TicketSystemKind::Linear => return Err(not_yet_supported("linear")),
     };

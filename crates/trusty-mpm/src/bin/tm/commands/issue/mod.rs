@@ -36,8 +36,13 @@ use config::{StateModel, load_model};
 /// loading + validating the model first for the verbs that need it.
 /// Test: parsing in `tests.rs`; per-verb logic in the submodule unit tests.
 pub(crate) fn issue(cmd: IssueCmd, system: TicketSystemKind) -> anyhow::Result<()> {
+    // #1265: bind the active project's GitHub identity to every `gh` call this
+    // verb makes (empty binding → ambient gh identity, no regression).
+    let gh_env = crate::gh_identity::load_gh_env()?;
     let backend = match system {
-        TicketSystemKind::Gh => GhTicketSystem::new(RealCommandRunner),
+        TicketSystemKind::Gh => {
+            GhTicketSystem::new(RealCommandRunner::with_env(gh_env.vars().to_vec()))
+        }
         TicketSystemKind::Jira => return Err(not_yet_supported("jira")),
         TicketSystemKind::Linear => return Err(not_yet_supported("linear")),
     };

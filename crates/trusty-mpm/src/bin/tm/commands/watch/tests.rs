@@ -427,7 +427,8 @@ fn dispatch_mode_explicit_dry_run() {
 #[test]
 fn resolve_board_repo_threads_default_branch() {
     let runner = FakeRunner::new(vec![ok_out("trunk")]);
-    let board = resolve_board_repo(&runner, "acme/widget").expect("resolve");
+    // No `github:` config → default host `github.com`.
+    let board = resolve_board_repo(&runner, "acme/widget", None).expect("resolve");
     assert_eq!(
         board,
         BoardRepo {
@@ -440,17 +441,32 @@ fn resolve_board_repo_threads_default_branch() {
 #[test]
 fn resolve_board_repo_falls_back_to_main() {
     let runner = FakeRunner::new(vec![ok_out("")]);
-    let board = resolve_board_repo(&runner, "acme/widget").expect("resolve");
+    let board = resolve_board_repo(&runner, "acme/widget", None).expect("resolve");
     assert_eq!(board.default_branch, "main");
 }
 
 #[test]
 fn resolve_board_repo_surfaces_failure() {
     let runner = FakeRunner::new(vec![fail_out("no such repo")]);
-    let err = resolve_board_repo(&runner, "acme/widget")
+    let err = resolve_board_repo(&runner, "acme/widget", None)
         .unwrap_err()
         .to_string();
     assert!(err.contains("no such repo"), "got: {err}");
+}
+
+#[test]
+fn resolve_board_repo_uses_configured_host() {
+    use trusty_mpm::core::trusty_tools_config::GithubConfig;
+    let runner = FakeRunner::new(vec![ok_out("main")]);
+    let github = GithubConfig {
+        host: Some("github.example.com".into()),
+        ..Default::default()
+    };
+    let board = resolve_board_repo(&runner, "acme/widget", Some(&github)).expect("resolve");
+    assert_eq!(
+        board.clone_url, "https://github.example.com/acme/widget",
+        "clone URL must honour the configured GHE host"
+    );
 }
 
 // --- listen: dedup core ----------------------------------------------------
