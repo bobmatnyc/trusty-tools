@@ -928,3 +928,98 @@ fn cli_rejects_ticket_unknown_system() {
     let err = Cli::try_parse_from(["trusty-mpm", "ticket", "1", "bogus"]);
     assert!(err.is_err(), "expected unknown system to be rejected");
 }
+
+#[test]
+fn cli_parses_issue_seed_labels() {
+    // Why: `tm issue seed-labels [--dry-run]` must parse with the gh default
+    // and surface the dry-run flag (#1246).
+    use crate::cli::IssueCmd;
+    let cli = Cli::try_parse_from(["trusty-mpm", "issue", "seed-labels", "--dry-run"]).unwrap();
+    match cli.command {
+        Command::Issue { cmd, .. } => match cmd {
+            IssueCmd::SeedLabels { dry_run, config } => {
+                assert!(dry_run);
+                assert!(config.is_none());
+            }
+            other => panic!("expected seed-labels, got {other:?}"),
+        },
+        other => panic!("expected issue, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_issue_transition() {
+    // Why: `tm issue transition <issue#> <to-state> [--note]` must parse the
+    // numeric issue, the target state, and the optional note (#1246).
+    use crate::cli::IssueCmd;
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "issue",
+        "transition",
+        "1232",
+        "approved",
+        "--note",
+        "approved by reviewer",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Issue { cmd, .. } => match cmd {
+            IssueCmd::Transition {
+                issue,
+                to_state,
+                note,
+                ..
+            } => {
+                assert_eq!(issue, 1232);
+                assert_eq!(to_state, "approved");
+                assert_eq!(note.as_deref(), Some("approved by reviewer"));
+            }
+            other => panic!("expected transition, got {other:?}"),
+        },
+        other => panic!("expected issue, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_issue_current_and_states_and_repair() {
+    // Why: the read/introspection/recovery verbs must all parse (#1246).
+    use crate::cli::IssueCmd;
+    let current = Cli::try_parse_from(["trusty-mpm", "issue", "current", "7"]).unwrap();
+    assert!(matches!(
+        current.command,
+        Command::Issue {
+            cmd: IssueCmd::Current { issue: 7, .. },
+            ..
+        }
+    ));
+    let states = Cli::try_parse_from(["trusty-mpm", "issue", "states"]).unwrap();
+    assert!(matches!(
+        states.command,
+        Command::Issue {
+            cmd: IssueCmd::States { .. },
+            ..
+        }
+    ));
+    let repair = Cli::try_parse_from(["trusty-mpm", "issue", "repair", "9"]).unwrap();
+    assert!(matches!(
+        repair.command,
+        Command::Issue {
+            cmd: IssueCmd::Repair { issue: 9, .. },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn cli_parses_issue_seed_config_force() {
+    // Why: `tm issue seed-config --force` must parse the overwrite flag (#1246).
+    use crate::cli::IssueCmd;
+    let cli = Cli::try_parse_from(["trusty-mpm", "issue", "seed-config", "--force"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Issue {
+            cmd: IssueCmd::SeedConfig { force: true },
+            ..
+        }
+    ));
+}

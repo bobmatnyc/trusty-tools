@@ -260,5 +260,6 @@ async fn main() -> anyhow::Result<()> {
             notes,
             runtime,
         } => commands::ticket::ticket(&client, &url, issue, system, notes, runtime).await,
+        Command::Issue { cmd, system } => commands::issue::issue(cmd, system),
     }
 }

@@ -15,6 +15,7 @@
 //! sibling modules; CLI parsing in `tests.rs`.
 
 pub(crate) mod branch;
+pub(crate) mod labels;
 pub(crate) mod runner;
 pub(crate) mod system;
 
@@ -344,6 +345,7 @@ mod tests {
             title: "Add the thing".to_string(),
             body: "do the thing properly".to_string(),
             labels: vec!["enhancement".to_string()],
+            assignees: vec![],
             open: true,
         };
         let task = build_task(&issue, "feat/1232-add-the-thing", "main");
@@ -362,6 +364,7 @@ mod tests {
             title: "Fix it".to_string(),
             body: "   ".to_string(),
             labels: vec![],
+            assignees: vec![],
             open: true,
         };
         let task = build_task(&issue, "feat/7-fix-it", "main");
@@ -377,6 +380,7 @@ mod tests {
             title: "Do thing".to_string(),
             body: "body".to_string(),
             labels: vec![],
+            assignees: vec![],
             open: true,
         };
         let task = build_task(&issue, "feat/9-do-thing", "master");

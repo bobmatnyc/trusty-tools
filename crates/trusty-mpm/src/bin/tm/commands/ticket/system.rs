@@ -14,6 +14,10 @@ use clap::ValueEnum;
 use serde::Deserialize;
 
 use super::branch::derive_branch_name;
+use super::labels::{
+    AssigneeTarget, RepoLabel, gh_add_label, gh_create_label, gh_list_repo_labels, gh_remove_label,
+    gh_set_assignee, gh_swap_labels,
+};
 use super::runner::CommandRunner;
 
 /// Which ticketing backend `tm ticket` should use.
@@ -52,6 +56,9 @@ pub(crate) struct Issue {
     pub(crate) body: String,
     /// Label names (drive the conventional-commit branch type).
     pub(crate) labels: Vec<String>,
+    /// Current GitHub assignee logins (the read side of the assignee model;
+    /// needed by `set_assignee`'s `None` clear-all rule — RFC §5.4).
+    pub(crate) assignees: Vec<String>,
     /// Whether the issue is OPEN (closed issues are refused).
     pub(crate) open: bool,
 }
@@ -88,6 +95,49 @@ pub(crate) trait TicketSystem {
 
     /// Post a comment on the issue for the audit trail.
     fn comment(&self, issue_number: u64, body: &str) -> anyhow::Result<()>;
+
+    // --- NEW for #1246: label/assignee write side -----------------------------
+    //
+    // Each ships with a default body that ERRORS so the `Jira`/`Linear` stubs
+    // keep compiling unchanged; `GhTicketSystem` overrides all of them. A future
+    // `tm issue` run against a non-`gh` backend fails loudly and legibly rather
+    // than silently. (RFC §3.3.)
+
+    /// List labels that already exist in the repo (for idempotent seeding).
+    fn list_repo_labels(&self) -> anyhow::Result<Vec<RepoLabel>> {
+        anyhow::bail!("list_repo_labels not supported for this ticket system")
+    }
+
+    /// Create a label in the repo (create-missing half of seeding).
+    fn create_label(&self, _label: &RepoLabel) -> anyhow::Result<()> {
+        anyhow::bail!("create_label not supported for this ticket system")
+    }
+
+    /// Add one label to an issue (two-call transition fallback primitive).
+    fn add_label(&self, _issue: u64, _label: &str) -> anyhow::Result<()> {
+        anyhow::bail!("add_label not supported for this ticket system")
+    }
+
+    /// Remove one label from an issue (`repair`/fallback primitive).
+    fn remove_label(&self, _issue: u64, _label: &str) -> anyhow::Result<()> {
+        anyhow::bail!("remove_label not supported for this ticket system")
+    }
+
+    /// Atomic single-call label swap (the transition default — RFC §5.2).
+    fn swap_labels(&self, _issue: u64, _add: &str, _remove: &str) -> anyhow::Result<()> {
+        anyhow::bail!("swap_labels not supported for this ticket system")
+    }
+
+    /// Apply an assignee rule to an issue; `current` is the issue's existing
+    /// assignee set (needed for the `None` clear-all rule — RFC §5.4).
+    fn set_assignee(
+        &self,
+        _issue: u64,
+        _who: &AssigneeTarget,
+        _current: &[String],
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("set_assignee not supported for this ticket system")
+    }
 }
 
 /// GitHub-backed [`TicketSystem`] driving the `gh` CLI.
@@ -131,6 +181,20 @@ struct GhIssueJson {
     state: String,
     #[serde(default)]
     labels: Vec<GhLabel>,
+    #[serde(default)]
+    assignees: Vec<GhAssignee>,
+}
+
+/// A single assignee object in the gh issue JSON.
+///
+/// Why: gh returns assignees as objects with a `login` field; the `None`
+/// clear-all assignee rule (RFC §5.4) needs those logins.
+/// What: captures just the `login`.
+/// Test: parsed in `gh_validate_parses_assignees`.
+#[derive(Debug, Deserialize)]
+struct GhAssignee {
+    #[serde(default)]
+    login: String,
 }
 
 /// A single label object in the gh issue JSON.
@@ -158,7 +222,7 @@ impl<R: CommandRunner> TicketSystem for GhTicketSystem<R> {
                 "view",
                 &number,
                 "--json",
-                "number,title,body,state,labels",
+                "number,title,body,state,labels,assignees",
             ],
         )?;
         if !out.success {
@@ -192,6 +256,7 @@ impl<R: CommandRunner> TicketSystem for GhTicketSystem<R> {
             title: parsed.title,
             body: parsed.body,
             labels: parsed.labels.into_iter().map(|l| l.name).collect(),
+            assignees: parsed.assignees.into_iter().map(|a| a.login).collect(),
             open,
         })
     }
@@ -203,6 +268,37 @@ impl<R: CommandRunner> TicketSystem for GhTicketSystem<R> {
             .run("gh", &["issue", "comment", &number, "--body", body])?;
         out.ok_or_stderr("gh issue comment")?;
         Ok(())
+    }
+
+    // --- #1246 gh-backed overrides: thin delegation to the `labels` helpers ----
+
+    fn list_repo_labels(&self) -> anyhow::Result<Vec<RepoLabel>> {
+        gh_list_repo_labels(&self.runner)
+    }
+
+    fn create_label(&self, label: &RepoLabel) -> anyhow::Result<()> {
+        gh_create_label(&self.runner, label)
+    }
+
+    fn add_label(&self, issue: u64, label: &str) -> anyhow::Result<()> {
+        gh_add_label(&self.runner, issue, label)
+    }
+
+    fn remove_label(&self, issue: u64, label: &str) -> anyhow::Result<()> {
+        gh_remove_label(&self.runner, issue, label)
+    }
+
+    fn swap_labels(&self, issue: u64, add: &str, remove: &str) -> anyhow::Result<()> {
+        gh_swap_labels(&self.runner, issue, add, remove)
+    }
+
+    fn set_assignee(
+        &self,
+        issue: u64,
+        who: &AssigneeTarget,
+        current: &[String],
+    ) -> anyhow::Result<()> {
+        gh_set_assignee(&self.runner, issue, who, current)
     }
 }
 
@@ -287,6 +383,7 @@ mod tests {
             title: "Add the thing".to_string(),
             body: String::new(),
             labels: vec!["enhancement".to_string()],
+            assignees: vec![],
             open: true,
         };
         assert_eq!(issue.branch_name(), "feat/1232-add-the-thing");
@@ -302,8 +399,21 @@ mod tests {
         assert_eq!(issue.body, "do it");
         assert_eq!(issue.labels, vec!["bug".to_string()]);
         assert!(issue.open);
+        // Missing `assignees` defaults to empty.
+        assert!(issue.assignees.is_empty());
         // The derived branch uses the bug label → fix.
         assert_eq!(issue.branch_name(), "fix/1232-add-the-thing");
+    }
+
+    #[test]
+    fn gh_validate_parses_assignees() {
+        let json = r#"{"number":7,"title":"t","body":"","state":"OPEN","labels":[],"assignees":[{"login":"alice"},{"login":"bob"}]}"#;
+        let sys = GhTicketSystem::new(FakeRunner::new(vec![ok_out(json)]));
+        let issue = sys.validate(7).expect("should validate");
+        assert_eq!(
+            issue.assignees,
+            vec!["alice".to_string(), "bob".to_string()]
+        );
     }
 
     #[test]
