@@ -245,5 +245,11 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Catalog { action } => commands::managed::catalog(action).await,
+        Command::Ticket {
+            issue,
+            system,
+            notes,
+            runtime,
+        } => commands::ticket::ticket(&client, &url, issue, system, notes, runtime).await,
     }
 }

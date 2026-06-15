@@ -249,6 +249,36 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: CatalogAction,
     },
+
+    /// One-shot issue → branch → PR → close workflow (#1237).
+    ///
+    /// Why: packages the manual issue-resolution loop (validate the issue,
+    /// branch off the default branch in an isolated worktree, drive an agent to
+    /// implement it, post audit comments, open a PR that closes the issue on
+    /// merge) into a single invocation. Reuses the session-manager managed-spawn
+    /// path and the #842 driver agent/skill.
+    /// What: validates `<issue#>` via the selected `[system]` backend (`gh`
+    /// default; `jira`/`linear` are not-yet-supported stubs), posts any `--note`
+    /// text as issue comments, derives a `<type>/<issue#>-<slug>` branch from the
+    /// issue title/labels, and spawns a managed session whose task = "address
+    /// issue #<n>: <title>" so the driver implements the change and opens the PR.
+    /// Test: `cli_parses_ticket`, `cli_parses_ticket_with_system`,
+    /// `cli_parses_ticket_with_notes` in `tests.rs`; orchestration logic in the
+    /// `commands::ticket` unit tests.
+    Ticket {
+        /// Issue reference to resolve (e.g. `1232` or `#1232`).
+        issue: String,
+        /// Ticket backend: `gh` (default), `jira`, or `linear`.
+        #[arg(default_value = "gh", value_enum)]
+        system: crate::commands::ticket::system::TicketSystemKind,
+        /// Note to post as an issue comment for the audit trail (repeatable).
+        #[arg(long = "note", short = 'm')]
+        notes: Vec<String>,
+        /// Runtime backend for the spawned session: `claude-code` (default) or
+        /// `tcode`.
+        #[arg(long, default_value = "claude-code", value_enum)]
+        runtime: trusty_mpm::runtime::RuntimeKind,
+    },
 }
 
 /// Actions for the `catalog` subcommand.
