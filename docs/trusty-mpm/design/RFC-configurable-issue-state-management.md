@@ -21,11 +21,14 @@ unambiguous:
 > — without running the harness or reading its logs.
 
 Today the factory's issue **state machine** is hardcoded in the harness's
-`src/unicorn/github_client.py`:
+`src/unicorn/github_client.py` (plus `executor.py`, `ticket_builder.py`,
+`manifest.py`):
 
 - the **label set** that represents each state,
-- the **allowed label transitions** (`approved → active-development → … → done`),
-- the **assignee / identity model** (self-assign under the `bob-unicorn` identity),
+- the **allowed label transitions** (`queued → approved → active-development →
+  done`, with `paused`/`blocked` halt states and `failed` as a terminal),
+- the **assignee / identity model** (issues assigned to human reviewers; the
+  `bob-unicorn` bot identity used only for git commit attribution),
 - the **label seeding** logic (create-missing with fixed colors/descriptions).
 
 This hardcoding has three problems:
@@ -49,7 +52,9 @@ This hardcoding has three problems:
   consumes them by **shelling out to `tm`** and the YAML is the portable shared
   contract.
 - Ship a **default YAML that reproduces the Unicorn Factory model exactly**
-  (behavior-preserving migration).
+  (behavior-preserving migration). The exact model — label families, state
+  lifecycle, transitions, and assignee/identity rules — is **confirmed from
+  factory source** via the schema appended to #1246 (§2.5).
 - Preserve the **visibility north star**: state is always reconstructable from
   GitHub artifacts (labels + assignee + comments), never only from harness state.
 
@@ -196,36 +201,48 @@ new dependency is required for this RFC.
 > the migration is a separate cross-workspace concern that this RFC depends on
 > but does not perform. See §10 open-question resolution.
 
-### 2.5 The hardcoded Unicorn Factory model (source NOT accessible)
+### 2.5 The Unicorn Factory model (CONFIRMED from factory source via #1246)
 
-> **Decision (RESOLVED 2026-06-15): adopt the assumed model now, reconcile at
-> implementation time as a hard acceptance gate.** `src/unicorn/github_client.py`
-> **could not be read** at authoring time — the repo `bob-duetto/unicorn-factory`
-> returns HTTP 404 under the active `gh` token (`bobmatnyc` account; the
-> `bob-duetto` account is logged in but not active and has no access to the repo),
-> and `gh search code --owner bob-duetto` returned nothing. The owner has
-> **decided** to proceed on the **assumed model below** (states `approved →
-> active-development → in-review → done`, plus `blocked`/`failed`; self-assign
-> under the `bob-unicorn` bot identity) as the working default. This is not an
-> open question — it is the accepted starting point. The label names, colors,
-> descriptions, and exact transition edges remain marked **"TO BE CONFIRMED
-> against `github_client.py` during unicorn-factory #100 adoption"**, and the
-> implementation PR **must** diff the committed default YAML against the real
-> `github_client.py` and reconcile any drift. **That reconciliation remains a hard
-> acceptance-criteria gate (§8, §9).** Adopting the assumed model now does not
-> relax the gate — it only removes the model choice from the list of open
-> questions.
+> **Decision (CONFIRMED 2026-06-15): the model is now extracted directly from the
+> factory source.** The owner appended the exact, source-extracted state-model
+> schema to issue #1246 ("Concrete schema — current Unicorn Factory model"),
+> derived from `src/unicorn/github_client.py`, `src/unicorn/executor.py`,
+> `src/unicorn/ticket_builder.py`, and `src/unicorn/manifest.py` (with per-rule
+> source-file line references reproduced in §4.3). This **supersedes** the earlier
+> "assumed model" framing: the label set, colors, descriptions, lifecycle states,
+> transition edges, and assignee/identity rules below are no longer placeholders —
+> they are the authoritative values the default YAML reproduces verbatim. The
+> implementation is no longer blocked on inaccessible source; behavior-preserving
+> adoption (unicorn-factory #100) remains an acceptance criterion (§8, §9) but is
+> now a **mechanical equality check against a known-good schema**, not a discovery
+> exercise.
 
-From the issue body, the current model is (TO BE CONFIRMED):
+The confirmed model (full values in §4.2/§4.3, exactly as in #1246):
 
-- **States:** `approved → active-development → in-review → done`, plus `failed`
-  and `blocked` as off-path terminal/holding states.
-- **Labels:** one GitHub label per state. Exact label strings, colors, and
-  descriptions are **unknown from source** — the issue references e.g. an
-  `active-development` label and a (possibly `unicorn:`-prefixed) naming scheme
-  (`unicorn:approved`). The default YAML records placeholder values flagged for
-  confirmation.
-- **Assignee/identity:** self-assign under the `bob-unicorn` bot identity.
+- **States (the `unicorn:*` lifecycle labels):** `queued` (initial, set at issue
+  creation) → `approved` (human gate) → `active-development` (executor running) →
+  `done` (terminal success). Two halt states branch from `active-development`:
+  `paused` and `blocked` (human-applied; the watcher cancels the session in
+  place). `failed` is the terminal failure state. **There is no `in-review`
+  state** — the prior draft was wrong on this point. `done` and `failed` are the
+  only terminal states.
+- **Labels:** one GitHub label per state, all `unicorn:`-prefixed
+  (`unicorn:queued`, `unicorn:approved`, `unicorn:active-development`,
+  `unicorn:paused`, `unicorn:blocked`, `unicorn:done`, `unicorn:failed`), plus
+  four non-state label families seeded by bootstrap: the ownership label
+  `unicorn` (`7B68EE`), blast-radius labels (`blast:low/medium/high`), PR-tier
+  labels (`T2`/`T3`/`T4`), and approval-level labels
+  (`approval:level-1/2/3`). Exact colors/descriptions in §4.2.
+- **Assignee/identity:** the strategy is **`bot_identity`**, but the bot identity
+  (e.g. `bob-unicorn`, derived `{accountable_user_or_author}-unicorn`, pattern
+  `^[a-z0-9][a-z0-9-]*-unicorn$`) is used **only for git commit attribution**
+  (worktree-local `user.name`/`user.email` plus `Unicorn:` / `Unicorn-Issue:`
+  commit trailers) — **not** as a GitHub assignee. Issues are assigned at creation
+  to `manifest.github.review_assignees` (human reviewers); the harness does
+  **not** reassign during transitions. Execution eligibility additionally requires
+  the issue be assigned to `manifest.github.accountable_user` (a precondition
+  check, not an assignment action). PR-tier and approval-level labels are applied
+  to the **PR**, not the issue.
 - **Seeding:** create-missing labels with fixed color/description, idempotently.
 
 ---
@@ -368,142 +385,358 @@ no current benefit (only `gh` is implemented today).
 
 ## 4. YAML Schema
 
+> The schema below is the **exact, source-confirmed Unicorn Factory model** as
+> appended to issue #1246 (§2.5). Label names, color hexes, descriptions,
+> transition edges + triggers, and the assignee/identity model are transcribed
+> verbatim from that schema.
+
 ### 4.1 Schema overview
 
-| Key                         | Type            | Required | Meaning |
-|-----------------------------|-----------------|----------|---------|
-| `version`                   | integer         | yes      | Schema version (start at `1`). |
-| `identity.default`          | enum            | yes      | Global default assignee rule: `self`, `bot`, or `none`. |
-| `identity.bot_login`        | string          | when `bot` used | Bot login for `bot` rule (e.g. `bob-unicorn`). |
-| `states[]`                  | list            | yes      | Ordered list of states. |
-| `states[].name`             | string          | yes      | Human/machine state name (unique key; used by `tm issue transition`). |
-| `states[].order`            | integer         | no       | Display/sort ordering (informational; does not gate transitions). |
-| `states[].label.name`       | string          | yes      | GitHub label representing this state (the visible artifact). |
-| `states[].label.color`      | string (hex)    | yes      | 6-hex-digit color, no `#`. Used by `seed-labels`. |
-| `states[].label.description`| string          | no       | Label description used by `seed-labels`. |
-| `states[].assignee`         | enum            | no       | Per-state override: `self` \| `bot` \| `none`. Falls back to `identity.default`. |
-| `transitions[]`             | list            | yes      | Allowed `from → to` edges. |
-| `transitions[].from`        | string          | yes      | Source state name (must match a `states[].name`). |
-| `transitions[].to`          | string          | yes      | Destination state name (must match a `states[].name`). |
+| Key                          | Type         | Required | Meaning |
+|------------------------------|--------------|----------|---------|
+| `version`                    | integer      | yes      | Schema version (start at `1`). |
+| `label_config.base`          | string       | yes      | Ownership/base label applied to every work item (`unicorn`). |
+| `label_config.approved`      | string       | yes      | The approval gate label (`unicorn:approved`). |
+| `label_config.blast_prefix`  | string       | yes      | Prefix for blast-radius labels (`blast:`). |
+| `label_config.status_prefix` | string       | yes      | Prefix for the `unicorn:*` lifecycle labels (`unicorn:`). |
+| `states[]`                   | list         | yes      | Ordered list of lifecycle states. |
+| `states[].name`              | string       | yes      | Machine state name (unique key; used by `tm issue transition`). |
+| `states[].order`             | integer      | no       | Display/sort ordering (informational; does not gate transitions). |
+| `states[].terminal`          | bool         | no       | `true` for terminal states (`done`, `failed`); no outbound edges. |
+| `states[].label.name`        | string       | yes      | GitHub label representing this state (the visible artifact). |
+| `states[].label.color`       | string (hex) | yes      | 6-hex-digit color, no `#`. Used by `seed-labels`. |
+| `states[].label.description` | string       | no       | Label description used by `seed-labels`. |
+| `extra_labels[]`             | list         | yes      | Non-state label families (ownership/blast/PR-tier/approval) seeded by bootstrap. |
+| `extra_labels[].name`        | string       | yes      | Label name (e.g. `blast:high`, `T2`, `approval:level-1`). |
+| `extra_labels[].color`       | string (hex) | yes      | 6-hex-digit color, no `#`. |
+| `extra_labels[].description` | string       | no       | Label description used by `seed-labels`. |
+| `transitions[]`              | list         | yes      | Allowed `from → to` edges (with a trigger annotation). |
+| `transitions[].from`         | string\|null | yes      | Source state name (or `null` for the creation edge `null → queued`). |
+| `transitions[].to`           | string       | yes      | Destination state name (must match a `states[].name`). |
+| `transitions[].trigger`      | enum         | yes      | What drives the edge: `issue_created` \| `human_label` \| `executor_start` \| `executor_complete` \| `executor_failure`. |
+| `assignee_model.strategy`    | enum         | yes      | Assignment strategy. For the factory: `bot_identity`. |
+| `assignee_model.identity_pattern` | string  | yes      | How the bot identity is derived (`{accountable_user_or_author}-unicorn`). |
+| `assignee_model.git_attribution` | map      | yes      | Git `user.name`/`user.email` + commit trailers for attribution (worktree-local). |
+| `assignee_model.per_state`   | map          | yes      | Per-state assignee rule (`{manifest.github.review_assignees}` at `queued`, else `unchanged`). |
 
-**Assignee rule semantics:**
-
-- `self` — assign the **current `gh` authenticated user** (`gh api user --jq .login`).
-  This is what reproduces the harness's "self-assign" behavior when `tm` runs
-  authenticated as the bot.
-- `bot` — assign the explicit `identity.bot_login` (e.g. `bob-unicorn`),
-  regardless of who is authenticated.
-- `none` — clear all assignees on the issue.
+**Assignee model semantics (factory `bot_identity` strategy):** the bot identity
+(e.g. `bob-unicorn`) is used **only for git commit attribution** — worktree-local
+`user.name`/`user.email` and the `Unicorn:` / `Unicorn-Issue:` commit trailers.
+It is **never** set as a GitHub assignee. Issue assignees are set **once, at
+creation**, to the human reviewers in `manifest.github.review_assignees`; the
+harness does not reassign during transitions (every non-initial state is
+`unchanged`). Execution eligibility additionally requires the issue be assigned to
+`manifest.github.accountable_user` — a precondition check, not an assignment
+action. PR-tier (`T2`/`T3`/`T4`) and approval-level (`approval:level-N`) labels
+are applied to the **PR**, not the issue.
 
 **Validation rules (enforced at load, before any `gh` call):**
 
 1. `version` is recognised (`1`).
 2. Every `states[].name` is unique and non-empty.
-3. Every `transitions[].from` / `.to` references an existing state name.
-4. Every `states[].label.color` is a 6-hex-digit string.
-5. If any effective assignee rule is `bot`, `identity.bot_login` is present.
-6. The transition graph is well-formed (no edge references a missing state).
+3. Every `transitions[].from` (when non-`null`) and `.to` references an existing
+   state name; the single `null → queued` creation edge is the only `null` source.
+4. Every `states[].label.color` and `extra_labels[].color` is a 6-hex-digit string.
+5. `assignee_model.strategy` is recognised; for `bot_identity` the
+   `identity_pattern` is present.
+6. The transition graph is well-formed (no edge references a missing state); the
+   terminal states (`done`, `failed`) have no outbound edges.
 
 ### 4.2 Complete annotated example (default = Unicorn Factory model)
 
 > Committed at `crates/trusty-mpm/examples/issue-state/unicorn-factory.yaml` and
 > embedded in the binary via `include_str!` as the default. **All label strings,
-> colors, and descriptions below are TO BE CONFIRMED against
-> `src/unicorn/github_client.py` (§2.5) before the default is frozen.**
+> colors, descriptions, transition edges, and assignee rules below are the exact,
+> source-confirmed values from issue #1246 (§2.5/§4.3).**
 
-**Entry state: `approved` is set externally, not via `tm issue transition`.**
-The state machine deliberately has **no entry edge into `approved`** — there is
-no `transitions[]` row whose `to` is `approved`. `approved` is the **initial
-state**, applied **externally** by manual labeling / triage (a human or an
-upstream triage step adds the `approved` label to an issue). `tm issue
-transition` only moves an issue **between** existing states along the listed
-edges; it never *creates* the initial state. This matches the Unicorn Factory
-model, where an issue becomes a candidate for autonomous work the moment a human
-approves it (labels it `approved`), and the first thing the harness does is
-transition it `approved → active-development`. Operationally: `tm issue
-seed-labels` ensures the `approved` label *exists* in the repo; a human/triage
-applies it; the unicorn then drives the machine forward from there. An issue with
-**no** state label is "not yet in the machine" (pre-`approved`) and is simply not
-acted upon by `tm issue transition` until it carries a recognised state label.
+**Entry state: `queued` is the initial state, set at issue creation.** The state
+machine's initial state is **`queued`**, applied by `ticket_builder.py` at issue
+creation (the `null → queued` edge, trigger `issue_created`). A human reviewer then
+applies `unicorn:approved` to gate execution (`queued → approved`, trigger
+`human_label`); the scheduler polls for that label. The executor then drives
+`approved → active-development` (trigger `executor_start`) and on completion
+`active-development → done` (trigger `executor_complete`) or on any exception
+`active-development → failed` (trigger `executor_failure`). Two human-applied halt
+edges branch from `active-development`: `→ paused` and `→ blocked` (trigger
+`human_label`; the watcher cancels the session in place, leaving the halt label).
+`done` and `failed` are terminal. (This corrects the earlier draft, which wrongly
+treated `approved` as the externally-set initial state and included a non-existent
+`in-review` state.)
 
 ```yaml
-# trusty-mpm issue-state model — Unicorn Factory default.
-# This file is the portable contract between the Python harness and `tm issue`.
-# State is reconstructable from GitHub artifacts alone: the label on an issue IS
-# the state; the assignee is the identity; comments record the transition audit.
+# state-management.yaml — default Unicorn Factory model
+# Extracted from src/unicorn/github_client.py + executor.py
+# All label names and colors are hardcoded in _canonical_labels() and
+# applied by the executor; this YAML is a faithful, behavior-preserving
+# externalization of that logic.
+
 version: 1
 
-identity:
-  # Global default applied to any state that does not override `assignee`.
-  # `self`  -> assign the authenticated gh user (the bot, when tm runs as the bot)
-  # `bot`   -> assign `bot_login` explicitly
-  # `none`  -> clear assignees
-  default: self
-  # The named bot identity for `bot` rules. TO BE CONFIRMED: `bob-unicorn`.
-  bot_login: bob-unicorn
+# ---------------------------------------------------------------------------
+# Label families
+# Labels are organized into four families. All family prefixes are
+# configurable; defaults produce the canonical unicorn:* / blast:* namespace.
+# ---------------------------------------------------------------------------
+
+label_config:
+  base: "unicorn"            # workflow.labels.base  (manifest.py WorkflowLabelsConfig)
+  approved: "unicorn:approved"  # workflow.labels.approved
+  blast_prefix: "blast:"    # workflow.labels.blast_prefix
+  status_prefix: "unicorn:" # workflow.labels.status_prefix (UNI-REQ-018)
+
+# ---------------------------------------------------------------------------
+# States (the unicorn:* lifecycle labels)
+# ---------------------------------------------------------------------------
 
 states:
-  - name: approved              # INITIAL state — set externally by triage/manual
-                                # labeling; has NO entry edge in transitions[].
-    order: 10
-    label:
-      name: approved            # TO BE CONFIRMED (may be `unicorn:approved`)
-      color: 0e8a16             # green — TO BE CONFIRMED
-      description: "Approved for autonomous work; not yet started."
-    assignee: self              # the unicorn self-assigns on pickup
 
-  - name: active-development     # the unicorn is actively working
-    order: 20
+  # Initial state — set at issue creation by ticket_builder.py
+  - name: queued
     label:
-      name: active-development  # TO BE CONFIRMED
-      color: 1d76db             # blue — TO BE CONFIRMED
-      description: "A unicorn is actively implementing this issue."
-    assignee: self
+      name: "unicorn:queued"
+      color: "BFD4F2"
+      description: "Queued: awaiting human review"
+    order: 1
 
-  - name: in-review             # PR open, awaiting review/merge
-    order: 30
+  # Gate state — human applies this label to approve execution
+  - name: approved
     label:
-      name: in-review           # TO BE CONFIRMED
-      color: fbca04             # yellow — TO BE CONFIRMED
-      description: "Implementation complete; PR open and under review."
-    assignee: self
+      name: "unicorn:approved"
+      color: "0E8A16"
+      description: "Human-approved: execution eligible"
+    order: 2
 
-  - name: done                  # terminal success
-    order: 40
+  # Running state — executor applies this label when the session starts
+  - name: active-development
     label:
-      name: done                # TO BE CONFIRMED
-      color: 5319e7             # purple — TO BE CONFIRMED
-      description: "Work merged and complete."
-    assignee: none              # release the assignee on completion (TO BE CONFIRMED)
+      name: "unicorn:active-development"
+      color: "1D76DB"
+      description: "Executor actively working"
+    order: 3
 
-  - name: blocked               # holding state; can return to active
-    order: 50
+  # Control-channel halt states — human applies; watcher polls for these
+  - name: paused
     label:
-      name: blocked             # TO BE CONFIRMED
-      color: d93f0b             # orange-red — TO BE CONFIRMED
-      description: "Work cannot proceed; awaiting external unblock."
-    assignee: self
+      name: "unicorn:paused"
+      color: "E4E669"
+      description: "Execution intentionally suspended"
+    order: 4
 
-  - name: failed                # terminal failure
-    order: 60
+  - name: blocked
     label:
-      name: failed              # TO BE CONFIRMED
-      color: b60205             # red — TO BE CONFIRMED
-      description: "Autonomous work failed; needs human intervention."
-    assignee: none              # TO BE CONFIRMED
+      name: "unicorn:blocked"
+      color: "E11D48"
+      description: "Execution halted; needs human input"
+    order: 5
 
-# Allowed edges. Anything not listed here is rejected by `tm issue transition`.
+  # Terminal states
+  - name: done
+    label:
+      name: "unicorn:done"
+      color: "0075CA"
+      description: "Execution complete; PR opened — terminal"
+    terminal: true
+    order: 6
+
+  - name: failed
+    label:
+      name: "unicorn:failed"
+      color: "B60205"
+      description: "Execution failed — terminal"
+    terminal: true
+    order: 7
+
+# ---------------------------------------------------------------------------
+# Additional label families (not part of state machine, but seeded by bootstrap)
+# ---------------------------------------------------------------------------
+
+extra_labels:
+
+  # Base / ownership label — applied to all issues at creation
+  - name: "unicorn"
+    color: "7B68EE"
+    description: "Unicorn Factory work item"
+
+  # Blast-radius labels — applied at issue creation from AWP blast_radius field
+  - name: "blast:low"
+    color: "BFD4F2"
+    description: "Low blast radius"
+  - name: "blast:medium"
+    color: "FBCA04"
+    description: "Medium blast radius"
+  - name: "blast:high"
+    color: "E11D48"
+    description: "High blast radius"
+
+  # PR-tier labels — applied to PRs by executor._create_tiered_pr()
+  # blast:low → T4, blast:medium → T3, blast:high or missing → T2 (draft)
+  - name: "T2"
+    color: "E11D48"
+    description: "Tier 2 PR: high blast — SELT/CTO review required"
+  - name: "T3"
+    color: "FBCA04"
+    description: "Tier 3 PR: medium blast — 1 reviewer required"
+  - name: "T4"
+    color: "0075CA"
+    description: "Tier 4 PR: low blast — CI passing is sufficient"
+
+  # Approval-level labels — applied to PRs by executor._classify_and_gate()
+  # Level matrix (blast × project_class):
+  #   blast:low   × internal   → level 1 (auto-merge eligible)
+  #   blast:low   × production → level 2
+  #   blast:medium × any       → level 2
+  #   blast:high   × any       → level 3
+  - name: "approval:level-1"
+    color: "0E8A16"
+    description: "Approval level 1: trusty-review + CI sufficient"
+  - name: "approval:level-2"
+    color: "FBCA04"
+    description: "Approval level 2: harness owner review required"
+  - name: "approval:level-3"
+    color: "E11D48"
+    description: "Approval level 3: harness owner review required"
+
+# ---------------------------------------------------------------------------
+# State machine transitions
+# ---------------------------------------------------------------------------
+
 transitions:
-  - { from: approved,           to: active-development }
-  - { from: active-development,  to: in-review }
-  - { from: in-review,          to: done }
-  # Off-path edges (TO BE CONFIRMED against github_client.py):
-  - { from: active-development,  to: blocked }
-  - { from: blocked,            to: active-development }
-  - { from: active-development,  to: failed }
-  - { from: in-review,          to: active-development }   # review bounce-back
-  - { from: in-review,          to: failed }
+
+  # Ticket creation: no prior state → queued (ticket_builder.py build_issue_payloads)
+  - from: null
+    to: queued
+    trigger: issue_created
+    description: "ticket_builder applies unicorn:queued at issue creation"
+
+  # Human approval gate (human manually applies unicorn:approved label)
+  # The scheduler (OnApproveScheduler) polls for this label to trigger execution.
+  - from: queued
+    to: approved
+    trigger: human_label
+    description: "Human reviewer applies unicorn:approved to gate execution"
+
+  # Execution start: executor Phase 3 (add active-dev first, then remove approved)
+  - from: approved
+    to: active-development
+    trigger: executor_start
+    description: "executor.execute() Phase 3 — add new label first, then remove old"
+
+  # Control-channel halt: human applies paused/blocked during active session
+  # The _run_with_watcher polls get_issue() every poll_interval_seconds.
+  # On detection: session is cancelled (subprocess killed); human label is left in place.
+  - from: active-development
+    to: paused
+    trigger: human_label
+    description: "Human applies unicorn:paused; watcher cancels session"
+
+  - from: active-development
+    to: blocked
+    trigger: human_label
+    description: "Human applies unicorn:blocked; watcher cancels session"
+
+  # Happy path terminal: PR opened and (if level-1) auto-merged
+  - from: active-development
+    to: done
+    trigger: executor_complete
+    description: "executor Phase 6 success path — add done, remove active-development"
+
+  # Failure terminal: any exception in execute() after worktree creation
+  - from: active-development
+    to: failed
+    trigger: executor_failure
+    description: "executor Phase 6 failure path — add failed, remove active-development"
+
+# ---------------------------------------------------------------------------
+# Assignee / identity model
+# ---------------------------------------------------------------------------
+
+assignee_model:
+
+  # Strategy: the harness self-assigns issues using a named bot identity.
+  # The identity is derived from the manifest at runtime (never hardcoded):
+  #   - manifest.identity (explicit, e.g. "bob-unicorn") if set, else
+  #   - "{manifest.github.accountable_user}-unicorn" if accountable_user is set, else
+  #   - "{manifest.author}-unicorn"
+  # Pattern enforced: ^[a-z0-9][a-z0-9-]*-unicorn$  (e.g. "bob-unicorn")
+  # Source: manifest.py derive_identity() + _IDENTITY_PATTERN
+  strategy: bot_identity
+  identity_pattern: "{accountable_user_or_author}-unicorn"
+  identity_example: "bob-unicorn"
+
+  # Git attribution (commit trailers injected into every harness commit):
+  #   Unicorn: {identity}
+  #   Unicorn-Issue: #{issue_number}
+  # Git user.name and user.email are set per-worktree (not globally):
+  #   user.name  = {identity}
+  #   user.email = {identity}@users.noreply.github.com
+  git_attribution:
+    user_name: "{identity}"
+    user_email: "{identity}@users.noreply.github.com"
+    commit_trailers:
+      - "Unicorn: {identity}"
+      - "Unicorn-Issue: #{issue_number}"
+    scope: worktree_local  # git config --worktree; never touches shared .git/config
+
+  # Assignment timing: issues receive assignees at creation from
+  # manifest.github.review_assignees (the human reviewers, not the bot).
+  # The coding-trigger eligibility check (UNI-REQ-014) additionally requires
+  # the issue to be assigned to manifest.github.accountable_user before execution.
+  per_state:
+    queued:
+      assignees: "{manifest.github.review_assignees}"  # human reviewers
+      description: "Set at creation by ticket_builder; review_assignees for human approval gate"
+    approved:
+      assignees: unchanged
+      description: "Human applies label; assignees unchanged from queued state"
+    active-development:
+      assignees: unchanged
+      description: "Executor does not modify assignees; accountable_user must already be assigned"
+    done:
+      assignees: unchanged
+    failed:
+      assignees: unchanged
+    paused:
+      assignees: unchanged
+    blocked:
+      assignees: unchanged
 ```
+
+### 4.3 Transition and assignee rules (prose summary, with source-file references)
+
+**Transitions.** The state machine is linear for the happy path:
+`null → queued → approved → active-development → done`. All transitions except
+`queued → approved` (human-driven) are executor-driven. Two halt paths branch from
+`active-development`: to `paused` or `blocked` (human-applied, session cancelled in
+place), and to `failed` (any exception after the worktree is created). Terminal
+states `done` and `failed` have no outbound transitions. All label transitions are
+atomic in the sense of "add new first, then remove old" so the issue is never in a
+zero-label state.
+
+**Assignee model.** Issues are created with `manifest.github.review_assignees` as
+assignees (human reviewers, not the bot). The harness itself never explicitly
+reassigns during state transitions. The coding-trigger eligibility check
+(`executor._check_eligibility`) gates execution on the issue being assigned to
+`manifest.github.accountable_user` — this is a precondition check, not an
+assignment action. The harness identity (e.g. `bob-unicorn`) is used only for
+**git commit attribution** (worktree-local `user.name`/`user.email` + commit
+trailers `Unicorn:` / `Unicorn-Issue:`), not as a GitHub assignee. PR-level labels
+(`T2`/`T3`/`T4`, `approval:level-N`) are applied to the **PR**, not the issue, by
+the executor after the PR is opened.
+
+**Source-file references (from #1246):**
+
+- `src/unicorn/github_client.py` lines 70–133: `_canonical_labels()` — all label
+  names, colors, descriptions
+- `src/unicorn/github_client.py` lines 373–418: `add_labels()` / `remove_label()`
+  — atomic transition primitives
+- `src/unicorn/executor.py` lines 695–710: Phase 3 (approved → active-development)
+- `src/unicorn/executor.py` lines 790–800: Phase 6 success (active-development → done)
+- `src/unicorn/executor.py` lines 820–835: Phase 6 failure (active-development → failed)
+- `src/unicorn/executor.py` lines 946–949: control-channel halt labels (paused, blocked)
+- `src/unicorn/executor.py` lines 1535–1558: worktree-local git identity setup (UNI-REQ-017)
+- `src/unicorn/ticket_builder.py` lines 240–255: issue creation labels (base + blast: + :queued)
+- `src/unicorn/manifest.py` lines 233–251: `WorkflowLabelsConfig` — configurable label prefixes
+- `src/unicorn/manifest.py` lines 613–660: `derive_identity()` — bot identity derivation
 
 ---
 
@@ -557,11 +790,16 @@ Algorithm:
    `(program, args)` tuple. The two-call fallback (`add_label` then
    `remove_label`) is retained only as a documented degraded path for backends
    whose `edit` does not support a combined add/remove.
-6. Apply the effective assignee rule for `to-state`
-   (`states[].assignee` ?? `identity.default`) via `set_assignee(...)`.
+6. Apply the effective assignee rule for `to-state` from `assignee_model.per_state`
+   (§4.1/§4.2) via `set_assignee(...)`. For the Unicorn Factory model **every
+   non-initial state is `unchanged`** — the harness does **not** reassign during
+   transitions, so this step is a no-op for the factory default; `set_assignee`
+   exists for models that *do* mutate assignees per state. (The factory's
+   `bot_identity` is a git-commit-attribution concern, not a GitHub-assignee one —
+   see §4.1.)
 7. Post a transition audit comment (visibility): `comment(issue#, "…")` recording
-   `from → to` and the assignee applied, plus any `--note` text. This keeps the
-   transition reconstructable from comments even after labels change again.
+   `from → to` and any assignee change applied, plus any `--note` text. This keeps
+   the transition reconstructable from comments even after labels change again.
 
 > **Atomicity note (RESOLVED 2026-06-15: single-call is the default).** The
 > single-call form `gh issue edit <n> --add-label <new> --remove-label <old>`
@@ -584,7 +822,15 @@ Algorithm:
 
 ### 5.4 Assignee application — exact `gh` semantics (incl. the `none` rule)
 
-`set_assignee(issue, who)` maps the three assignee rules (§4.1) to `gh issue
+> **Note on the factory default.** The Unicorn Factory model's `assignee_model`
+> is `bot_identity` with every per-state rule set to `unchanged` (assignees are set
+> once at creation to `manifest.github.review_assignees`; the bot identity is used
+> only for git commit attribution — §4.1). So for the factory default, `tm issue
+> transition` performs **no** `set_assignee` call. The generic `self`/`bot`/`none`
+> primitives below exist for *other* models that mutate assignees per state; they
+> are not exercised by the factory default.
+
+`set_assignee(issue, who)` maps three generic assignee rules to `gh issue
 edit` invocations. The subtlety is the **`none` (clear-all) rule**: `gh issue
 edit --remove-assignee` **requires an explicit login** — there is no
 "clear all assignees" flag. Clearing therefore requires **reading the current
@@ -592,8 +838,8 @@ assignees first** and removing each by login.
 
 | Rule   | Mechanism |
 |--------|-----------|
-| `self` | `gh api user --jq .login` → `<login>`, then `gh issue edit <n> --add-assignee <login>`. (When `tm` runs authenticated as the bot, this self-assigns the bot — reproducing the harness behavior.) |
-| `bot`  | `gh issue edit <n> --add-assignee <identity.bot_login>` (e.g. `bob-unicorn`). |
+| `self` | `gh api user --jq .login` → `<login>`, then `gh issue edit <n> --add-assignee <login>`. (Generic primitive; not used by the factory default, whose per-state rules are all `unchanged`.) |
+| `bot`  | `gh issue edit <n> --add-assignee <bot_login>` for a configured bot login. (Generic primitive; **not** how the factory uses its `bob-unicorn` identity — that identity is git-attribution-only, never a GitHub assignee. §4.1.) |
 | `none` | **Read then remove.** First read the issue's current assignees — reuse the existing `validate(issue#)` read (extend `Issue` to carry `assignees`, or query `gh issue view <n> --json assignees --jq '.assignees[].login'`). Then for each current assignee login `L`, `gh issue edit <n> --remove-assignee <L>`. As a shortcut, when the issue is known to be self-assigned, `gh issue edit <n> --remove-assignee @me` clears the authenticated user without a prior read. If there are no assignees, `none` is a no-op (no `gh` call). |
 
 Because `--remove-assignee` needs a concrete login (or `@me`), the `none` rule is
@@ -631,9 +877,11 @@ copy and edit.
 Every operation is unit-tested behind the existing `FakeRunner` (the scripted
 `CommandRunner` from `ticket/system.rs`/`ticket/mod.rs`), with **no live `gh`**:
 
-- **YAML schema:** `serde_yaml::from_str` round-trips for the default model;
-  validation rejects: unknown `version`, duplicate state names, transition edges
-  referencing missing states, non-hex colors, `bot` rule without `bot_login`.
+- **YAML schema:** `serde_yaml::from_str` round-trips for the default model
+  (including `label_config`, `extra_labels`, the `null → queued` creation edge,
+  the `trigger` annotations, and the `bot_identity` `assignee_model`); validation
+  rejects: unknown `version`, duplicate state names, transition edges referencing
+  missing states, non-hex colors, an unrecognised `assignee_model.strategy`.
 - **State machine:** `transition_allowed(from, to)` true for every listed edge,
   false for an unlisted edge; unknown target state rejected with the
   valid-states list in the message.
@@ -643,16 +891,24 @@ Every operation is unit-tested behind the existing `FakeRunner` (the scripted
   `create` calls.
 - **`transition`:** `FakeRunner` scripts `gh issue view` (current label present) →
   assert the **single** `gh issue edit --add-label <new> --remove-label <old>`
-  call (the default single-call swap, §5.2) and the correct `set_assignee` call,
-  in order. A scripted issue whose current label has **no allowed edge** to the
-  target asserts the operation **errors before any `gh` mutation** (no label-swap
-  call recorded). Zero/multiple state-labels present asserts a clear error.
-- **Assignee rules:** `self` → asserts a `gh api user` lookup then `--add-assignee
-  <login>`; `bot` → `--add-assignee bob-unicorn`; `none` → scripts a known current
-  assignee set (via `gh issue view --json assignees` / extended `validate`) and
-  asserts the exact `--remove-assignee <login>` call per current assignee (or a
-  `--remove-assignee @me` shortcut when self-assigned); empty assignee set asserts
-  **zero** `gh` calls (no-op) — see §5.4.
+  call (the default single-call swap, §5.2). For the factory default the per-state
+  rule is `unchanged`, so assert **no** `set_assignee`/`--add-assignee`/
+  `--remove-assignee` call is recorded. A scripted issue whose current label has
+  **no allowed edge** to the target asserts the operation **errors before any `gh`
+  mutation** (no label-swap call recorded). Cover at least the canonical edges:
+  `queued → approved`, `approved → active-development`, `active-development → done`,
+  `active-development → failed`, and the halt edges `active-development → paused`/
+  `→ blocked`; reject e.g. `done → active-development` (terminal) and
+  `queued → done` (no edge). Zero/multiple state-labels present asserts a clear
+  error.
+- **Assignee rules (generic primitives, §5.4):** `self` → asserts a `gh api user`
+  lookup then `--add-assignee <login>`; `bot` → `--add-assignee <bot_login>`;
+  `none` → scripts a known current assignee set (via `gh issue view --json
+  assignees` / extended `validate`) and asserts the exact `--remove-assignee
+  <login>` call per current assignee (or a `--remove-assignee @me` shortcut when
+  self-assigned); empty assignee set asserts **zero** `gh` calls (no-op). These
+  primitives are exercised by tests for *non-factory* models; the factory default
+  exercises only the `unchanged` path (no assignee mutation).
 
 This mirrors the #1237/#1244 test convention exactly: scripted `CommandOutput`s,
 recorded calls, assertions on `(program, args)`.
@@ -665,11 +921,14 @@ The default YAML **must reproduce the current `github_client.py` behavior
 end-to-end** (behavior-preserving). Migration path for bob-duetto/unicorn-factory
 (ADR-0004 / #103 / child #100):
 
-1. **Freeze the default YAML.** The implementation PR diffs
-   `examples/issue-state/unicorn-factory.yaml` against the real
-   `src/unicorn/github_client.py` (§2.5) and reconciles every label name, color,
-   description, transition edge, and the `bob-unicorn` self-assign rule. This is a
-   hard acceptance gate.
+1. **Freeze the default YAML.** The committed
+   `examples/issue-state/unicorn-factory.yaml` reproduces the **source-confirmed
+   schema from #1246** (§2.5/§4.2) verbatim — every label name, color,
+   description, the `null → queued` creation edge and all transition edges +
+   triggers, and the `bot_identity` attribution-only assignee model. The
+   implementation PR verifies the committed YAML matches that schema exactly (a
+   mechanical equality check against a known-good schema; no longer a discovery
+   exercise against inaccessible source). This is a hard acceptance gate.
 2. **Adopt in the harness (#100).** Replace the hardcoded state machine in
    `github_client.py` with shell-outs to `tm issue`:
    - label seeding → `tm issue seed-labels`,
@@ -694,7 +953,7 @@ No trusty-mpm behavior is removed or changed for existing users: `tm issue` is a
 | P1 | YAML schema + `config.rs` (load/discovery/validate) + `state.rs` (state machine) + embedded default; `tm issue states` / `seed-config`. | M | Additive |
 | P2 | Extend `TicketSystem`/`GhTicketSystem` with label/assignee methods; `tm issue seed-labels` (idempotent, `--dry-run`). | M | Additive |
 | P3 | `tm issue transition` (edge validation, atomic label swap, assignee rule, audit comment); `tm issue current`. | M | Additive |
-| P4 | Reconcile default YAML against real `github_client.py`; wire unicorn-factory #100 to shell out to `tm issue`. | S | Additive (cross-repo) |
+| P4 | Verify default YAML matches the source-confirmed #1246 schema; wire unicorn-factory #100 to shell out to `tm issue`. | S | Additive (cross-repo) |
 
 ### Acceptance criteria (mirroring #1246)
 
@@ -704,7 +963,10 @@ No trusty-mpm behavior is removed or changed for existing users: `tm issue` is a
       entirely by the YAML** — no state names, label strings, or identities
       hardcoded in source (only the *embedded default YAML text* via `include_str!`).
 - [ ] The **default YAML reproduces the factory's label/assignee behavior
-      end-to-end** (reconciled against `github_client.py`).
+      end-to-end** — it transcribes the **source-confirmed schema appended to
+      #1246** verbatim (full label families, `queued`-initial lifecycle with no
+      `in-review` state, transition edges + triggers, and the attribution-only
+      `bot_identity` assignee model; §2.5/§4.2).
 - [ ] **Invalid transitions** (edges not in the YAML) are **rejected with a clear
       error** before any `gh` mutation.
 - [ ] All operations **unit-tested behind `FakeRunner`** (no live `gh`);
@@ -752,16 +1014,22 @@ default noted.
    form is retained only as a documented fallback for backends without a combined
    edit.
 
-3. **Exact Unicorn Factory model values — RESOLVED 2026-06-15.** `github_client.py`
-   was inaccessible at authoring time (§2.5). **Decision:** proceed on the
-   **assumed model** (states `approved → active-development → in-review → done`,
-   plus `blocked`/`failed`; self-assign under `bob-unicorn`) as the working
-   default, with `approved` as the externally-set initial state (§4.2). The exact
-   label strings/colors/descriptions/edges remain marked **"to be confirmed
-   against `github_client.py` during #100 adoption"**, and reconciling the
-   committed default YAML against the real source **remains a hard
-   acceptance-criteria gate** (§8 step 1, §9). Adopting the assumed model removes
-   the *model choice* from the open list without relaxing the reconciliation gate.
+3. **Exact Unicorn Factory model values — RESOLVED 2026-06-15 (source-confirmed).**
+   The owner appended the **exact, source-extracted schema** to issue #1246
+   (derived from `github_client.py` / `executor.py` / `ticket_builder.py` /
+   `manifest.py`, with per-rule line references). **Decision:** the default YAML
+   transcribes that authoritative schema verbatim (§2.5/§4.2): states
+   `queued` (initial) → `approved` → `active-development` → `done`, plus halt
+   states `paused`/`blocked` branching from `active-development` and the terminal
+   `failed`; **there is no `in-review` state**; the full `unicorn`/`blast:*`/
+   `T2-T4`/`approval:level-*` label families with exact colors; and an
+   attribution-only `bot_identity` model (issues assigned to
+   `manifest.github.review_assignees`, the `bob-unicorn` identity used only for git
+   commit attribution). This **supersedes** the earlier "assumed model" (which
+   wrongly used `approved` as the initial state and included a non-existent
+   `in-review` state). The implementation gate is now a **mechanical equality check
+   against this known-good schema**, not a discovery exercise; behavior-preserving
+   adoption (§8, §9) is unblocked.
 
 ### 10.2 Still open (recommended defaults noted)
 
@@ -773,14 +1041,20 @@ default noted.
    opt-in `--reconcile` flag later to overwrite drifted color/description. This
    keeps `seed-labels` purely create-missing and non-destructive by default.
 
-2. **Multi-identity / bot auth.** The `self` rule assigns the authenticated `gh`
-   user; the `bot` rule assigns `identity.bot_login` by name. For the Unicorn
-   Factory the harness runs `tm` authenticated **as** `bob-unicorn`, so `self`
-   reproduces current behavior. Is there a near-term need for `tm issue` to
-   *switch* gh identity itself (e.g. a token / `--as` flag)?
-   **RFC recommended default:** **no in-process identity switching** for now — run
-   `tm` under the bot's auth (the `self` rule then self-assigns the bot). Revisit
-   only if a consumer needs a single `tm` invocation to act as multiple identities.
+2. **Multi-identity / bot auth.** The generic `self` rule assigns the authenticated
+   `gh` user; the generic `bot` rule assigns a configured `bot_login` by name
+   (§5.4). The **Unicorn Factory does not use either** for issue assignment — its
+   `assignee_model` is `bot_identity` with every per-state rule `unchanged`: issue
+   assignees are the human reviewers (`manifest.github.review_assignees`), and the
+   `bob-unicorn` identity is used **only for git commit attribution** (worktree-local
+   `user.name`/`user.email` + `Unicorn:`/`Unicorn-Issue:` trailers — §4.1). So no
+   GitHub-identity switching by `tm issue` is needed for the factory. Is there a
+   near-term need for `tm issue` to *switch* gh identity itself (e.g. a token /
+   `--as` flag) for *other* models?
+   **RFC recommended default:** **no in-process identity switching** for now. The
+   factory needs none (attribution is handled in git config, not via `tm`).
+   Revisit only if a future non-factory consumer needs a single `tm` invocation to
+   act as multiple GitHub assignee identities.
 
 ---
 
@@ -799,5 +1073,6 @@ default noted.
 | `crates/trusty-mpm/src/core/error.rs` | Existing `#[from] serde_yaml::Error` thiserror variant |
 | `crates/trusty-mpm/Cargo.toml` | `serde_yaml.workspace = true` (already present) |
 | `docs/trusty-mpm/design/RFC-session-manager-mcp-console.md` | Sibling RFC; format/convention this doc mirrors |
-| (cross-repo) `bob-duetto/unicorn-factory` `src/unicorn/github_client.py` | The hardcoded model the default YAML must reproduce (inaccessible at authoring — §2.5) |
+| (cross-repo) `bob-duetto/unicorn-factory` `src/unicorn/{github_client,executor,ticket_builder,manifest}.py` | The hardcoded model the default YAML reproduces; the exact source-extracted schema (with line references) is in #1246 / §2.5 / §4.3 |
+| #1246 appended schema ("Concrete schema — current Unicorn Factory model") | The authoritative, source-confirmed model transcribed into §4.2/§4.3 |
 | (cross-repo) unicorn-factory ADR-0004 / #100 / #103 | Migration driver; #100 is the first consumer unblocked by this RFC |
