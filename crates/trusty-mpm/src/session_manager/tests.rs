@@ -2,8 +2,10 @@
 //!
 //! Why: tests in a separate file keep manager.rs under the 500 SLOC production
 //! cap while the 1500 SLOC test cap gives the test suite room to grow.
-//! What: full lifecycle tests for create, stop, send_input, reconcile,
-//! answer_decision, and the env-scrub command convention.
+//! What: full lifecycle tests for create, stop (keep workspace), resume
+//! (re-spawn in existing workspace), decommission (remove workspace from disk),
+//! send_input, reconcile (gone tmux → Stopped), answer_decision,
+//! and the env-scrub command convention.
 //! Test: this file IS the test module; run with `cargo test -p trusty-mpm`.
 
 use std::collections::HashMap;
@@ -131,7 +133,7 @@ async fn manager_create_record() {
         "tmux_name has prefix: {}",
         record.tmux_name
     );
-    assert_eq!(record.state, ManagedSessionState::Starting);
+    assert_eq!(record.state, ManagedSessionState::Provisioning);
     assert_eq!(record.task, "implement OAuth2");
 
     let listed = mgr.list().await;
@@ -180,17 +182,25 @@ async fn manager_name_hint_overrides() {
     assert_eq!(record.tmux_name, "tmpm-ticket-1234");
 }
 
+/// `stop` must kill the runtime but KEEP the workspace directory and record,
+/// setting state to `Stopped` (not `Dead` or any terminal state).
+///
+/// Why: a session ENDURES beyond its running runtime; stop is non-destructive.
+/// What: creates a session with a temp workspace dir, stops it, asserts state
+/// is `Stopped`, workspace dir still exists, tmux kill was called.
+/// Test: this function IS the test.
 #[tokio::test]
-async fn manager_stop_marks_dead() {
+async fn manager_stop_keeps_workspace() {
     let dir = TempDir::new().unwrap();
+    let workspace_dir = TempDir::new().unwrap();
     let (mgr, fake) = make_manager(&dir).await;
 
     let record = mgr
         .create(
             "task".into(),
-            Some(PathBuf::from("/tmp/x")),
+            Some(workspace_dir.path().to_owned()),
             None,
-            None,
+            Some(workspace_dir.path().to_owned()),
             None,
             None,
         )
@@ -198,8 +208,279 @@ async fn manager_stop_marks_dead() {
         .expect("create");
 
     let stopped = mgr.stop(&record.id).await.expect("stop");
-    assert_eq!(stopped.state, ManagedSessionState::Dead);
+
+    // State must be Stopped (runtime gone) not Dead (which implied loss).
+    assert_eq!(stopped.state, ManagedSessionState::Stopped);
+
+    // tmux session must have been killed.
     assert!(fake.kill_calls.lock().unwrap().contains(&record.tmux_name));
+
+    // Workspace directory must STILL EXIST on disk.
+    assert!(
+        workspace_dir.path().exists(),
+        "workspace dir must survive a stop; it is still on disk for resume"
+    );
+
+    // workspace_path field must still be set in the persisted record.
+    let after = mgr.get(&record.id).await.unwrap();
+    assert_eq!(after.state, ManagedSessionState::Stopped);
+    assert!(
+        after.workspace_path.is_some(),
+        "workspace_path must be preserved in the record after stop"
+    );
+}
+
+/// `resume` must create a NEW tmux session rooted at the EXISTING workspace,
+/// NOT re-clone the repository.
+///
+/// Why: workspace is provisioned once; resume only re-spawns the runtime.
+/// What: creates a session with a workspace dir, stops it, resumes it, and
+/// asserts: (a) a second `create_session` call was issued, (b) its cwd equals
+/// the original workspace_path, (c) state transitions to Active.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn manager_resume_respawns_in_existing_workspace() {
+    let dir = TempDir::new().unwrap();
+    let workspace_dir = TempDir::new().unwrap();
+    let (mgr, fake) = make_manager(&dir).await;
+
+    let workspace_path = workspace_dir.path().to_owned();
+
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(workspace_path.clone()),
+            Some("my-session".into()),
+            Some(workspace_path.clone()),
+            Some("https://github.com/owner/repo".into()),
+            Some("main".into()),
+        )
+        .await
+        .expect("create");
+
+    // Stop the session.
+    mgr.stop(&record.id).await.expect("stop");
+
+    // Record the create_session call count before resume.
+    let creates_before = fake.create_cwd_calls.lock().unwrap().len();
+
+    // Resume the session.
+    let resumed = mgr.resume(&record.id).await.expect("resume");
+
+    // State must be Active.
+    assert_eq!(resumed.state, ManagedSessionState::Active);
+
+    // A NEW create_session must have been issued.
+    // Drop the lock guard before the next await point.
+    let (create_len, resume_cwd) = {
+        let create_calls = fake.create_cwd_calls.lock().unwrap();
+        let len = create_calls.len();
+        let cwd = create_calls
+            .get(creates_before)
+            .map(|c| c.1.clone())
+            .unwrap_or_default();
+        (len, cwd)
+    };
+    assert!(
+        create_len > creates_before,
+        "resume must issue a new tmux create_session call"
+    );
+
+    // The new create_session must use the EXISTING workspace as cwd.
+    assert_eq!(
+        resume_cwd,
+        workspace_path.to_string_lossy().to_string(),
+        "resume must use the EXISTING workspace path as cwd, not re-clone"
+    );
+
+    // workspace_path field must still be set (no re-clone).
+    let after = mgr.get(&record.id).await.unwrap();
+    assert_eq!(
+        after.workspace_path.as_deref(),
+        Some(workspace_path.as_path()),
+        "workspace_path must be preserved after resume (no re-clone)"
+    );
+}
+
+/// `decommission` must remove the workspace directory from disk and set state
+/// to `Decommissioned`, but keep a tombstone record.
+///
+/// Why: decommission is the ONLY teardown that removes disk artifacts; without
+/// it the workspace dir accumulates indefinitely.
+/// What: creates a session with a real temp workspace dir, decommissions it,
+/// asserts the workspace dir is gone from disk and the record state is
+/// `Decommissioned` with `workspace_path = None`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn manager_decommission_removes_workspace() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    // Create a real temp workspace directory that we can check after decommission.
+    let workspace_dir = TempDir::new().unwrap();
+    let workspace_path = workspace_dir.path().to_owned();
+    // Write a sentinel file so we can verify the dir was removed.
+    std::fs::write(workspace_path.join("sentinel.txt"), "exists").unwrap();
+
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(workspace_path.clone()),
+            None,
+            Some(workspace_path.clone()),
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+
+    // Decommission.
+    let tombstone = mgr.decommission(&record.id).await.expect("decommission");
+
+    // State must be Decommissioned.
+    assert_eq!(tombstone.state, ManagedSessionState::Decommissioned);
+
+    // workspace_path must be cleared in the tombstone record.
+    assert!(
+        tombstone.workspace_path.is_none(),
+        "workspace_path must be None after decommission (workspace was deleted)"
+    );
+
+    // Workspace directory MUST be gone from disk.
+    // Note: TempDir's Drop won't fail if the dir is already removed.
+    assert!(
+        !workspace_path.exists(),
+        "workspace directory must be removed from disk after decommission"
+    );
+
+    // Tombstone record must still be queryable (for `ls` history).
+    let after = mgr.get(&record.id).await.unwrap();
+    assert_eq!(after.state, ManagedSessionState::Decommissioned);
+    assert!(after.workspace_path.is_none());
+}
+
+/// Reconciliation with a gone tmux session must yield `Stopped` (resumable),
+/// not `Orphaned` or `Dead` (both imply the session is lost).
+///
+/// Why: a gone tmux after a daemon restart means the RUNTIME stopped, not
+/// the SESSION. The record and workspace are intact and resumable.
+/// What: seeds a live tmux session for one record and no live session for
+/// another (simulating reboot), runs reconcile, asserts: live → Active,
+/// gone → Stopped (not Orphaned).
+/// Test: this function IS the test.
+#[tokio::test]
+async fn manager_reconcile_gone_tmux_yields_stopped() {
+    let dir = TempDir::new().unwrap();
+    let fake = FakeTmuxDriver::new();
+
+    // Seed a live tmux session.
+    fake.seeded_names
+        .lock()
+        .unwrap()
+        .push("tmpm-live-session".into());
+
+    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+
+    let live_record = SessionRecord {
+        id: ManagedSessionId::new(),
+        tmux_name: "tmpm-live-session".into(),
+        cwd: PathBuf::from("/tmp"),
+        task: "live task".into(),
+        state: ManagedSessionState::Active,
+        created_at: Utc::now(),
+        last_activity_at: None,
+        workspace_path: Some(PathBuf::from("/tmp/live-ws")),
+        repo_url: None,
+        branch: None,
+        pending_decision: None,
+        proposed_default: None,
+    };
+    // A record whose tmux session will NOT be found (simulating reboot).
+    let rebooted_record = SessionRecord {
+        id: ManagedSessionId::new(),
+        tmux_name: "tmpm-rebooted-session".into(),
+        cwd: PathBuf::from("/tmp"),
+        task: "rebooted task".into(),
+        state: ManagedSessionState::Active,
+        created_at: Utc::now(),
+        last_activity_at: None,
+        workspace_path: Some(PathBuf::from("/tmp/rebooted-ws")),
+        repo_url: None,
+        branch: None,
+        pending_decision: None,
+        proposed_default: None,
+    };
+    {
+        let mut store = mgr.store.write().await;
+        store.upsert(live_record.clone()).await.unwrap();
+        store.upsert(rebooted_record.clone()).await.unwrap();
+    }
+
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+    assert!(report.adopted.contains(&"tmpm-live-session".to_string()));
+    // The gone session must be in the `stopped` list, NOT `orphaned`.
+    assert!(
+        report.stopped.contains(&rebooted_record.id.to_string()),
+        "gone session must be in report.stopped; report: {:?}",
+        report
+    );
+
+    // Live session → Active.
+    let live = mgr.get(&live_record.id).await.unwrap();
+    assert_eq!(live.state, ManagedSessionState::Active);
+
+    // Gone session → Stopped (RESUMABLE), workspace_path preserved.
+    let rebooted = mgr.get(&rebooted_record.id).await.unwrap();
+    assert_eq!(
+        rebooted.state,
+        ManagedSessionState::Stopped,
+        "gone-tmux session must be Stopped (resumable), not Orphaned or Dead"
+    );
+    assert!(
+        rebooted.workspace_path.is_some(),
+        "workspace_path must be preserved after reconcile→Stopped"
+    );
+}
+
+/// Decommissioned tombstones are not touched by reconciliation.
+///
+/// Why: a decommissioned session has no workspace and no tmux; reconciliation
+/// must not try to resurrect or re-stop it.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn manager_reconcile_skips_decommissioned() {
+    let dir = TempDir::new().unwrap();
+    let fake = FakeTmuxDriver::new();
+    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+
+    let tombstone = SessionRecord {
+        id: ManagedSessionId::new(),
+        tmux_name: "tmpm-decomm".into(),
+        cwd: PathBuf::from("/tmp"),
+        task: "done task".into(),
+        state: ManagedSessionState::Decommissioned,
+        created_at: Utc::now(),
+        last_activity_at: None,
+        workspace_path: None,
+        repo_url: None,
+        branch: None,
+        pending_decision: None,
+        proposed_default: None,
+    };
+    {
+        let mut store = mgr.store.write().await;
+        store.upsert(tombstone.clone()).await.unwrap();
+    }
+
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    // Tombstone must not appear in adopted or stopped lists.
+    assert!(!report.adopted.contains(&tombstone.tmux_name));
+    assert!(!report.stopped.contains(&tombstone.id.to_string()));
+
+    // State must remain Decommissioned after reconcile.
+    let after = mgr.get(&tombstone.id).await.unwrap();
+    assert_eq!(after.state, ManagedSessionState::Decommissioned);
 }
 
 #[tokio::test]
@@ -234,67 +515,49 @@ async fn manager_send_input() {
     assert!(calls.iter().any(|(_, text)| text == "hello from test"));
 }
 
+/// send_input must be rejected for Stopped and Decommissioned sessions.
+///
+/// Why: those states mean the tmux session is gone; sending would fail silently.
+/// Test: this function IS the test.
 #[tokio::test]
-async fn manager_reconcile_adopts_and_orphans() {
+async fn manager_send_input_rejected_for_stopped_and_decommissioned() {
     let dir = TempDir::new().unwrap();
-    let fake = FakeTmuxDriver::new();
+    let (mgr, _fake) = make_manager(&dir).await;
 
-    // Seed a live tmux session without going through manager.create so
-    // the session is in tmux but in the store as Active (simulating a
-    // prior run).
-    fake.seeded_names
-        .lock()
-        .unwrap()
-        .push("tmpm-live-session".into());
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(PathBuf::from("/tmp/x")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
 
-    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
-
-    // Create a record that maps to the live session.
-    let live_record = SessionRecord {
-        id: ManagedSessionId::new(),
-        tmux_name: "tmpm-live-session".into(),
-        cwd: PathBuf::from("/tmp"),
-        task: "live task".into(),
-        state: ManagedSessionState::Active,
-        created_at: Utc::now(),
-        last_activity_at: None,
-        workspace_path: None,
-        repo_url: None,
-        branch: None,
-        pending_decision: None,
-        proposed_default: None,
-    };
-    // A dead record whose tmux session will not be found.
-    let dead_record = SessionRecord {
-        id: ManagedSessionId::new(),
-        tmux_name: "tmpm-dead-session".into(),
-        cwd: PathBuf::from("/tmp"),
-        task: "dead task".into(),
-        state: ManagedSessionState::Active,
-        created_at: Utc::now(),
-        last_activity_at: None,
-        workspace_path: None,
-        repo_url: None,
-        branch: None,
-        pending_decision: None,
-        proposed_default: None,
-    };
+    // Test Stopped rejection.
     {
         let mut store = mgr.store.write().await;
-        store.upsert(live_record.clone()).await.unwrap();
-        store.upsert(dead_record.clone()).await.unwrap();
+        let mut r = store.get(&record.id).unwrap();
+        r.state = ManagedSessionState::Stopped;
+        store.upsert(r).await.unwrap();
     }
+    let result = mgr.send_input(&record.id, "test").await;
+    assert!(result.is_err(), "send_input must fail for Stopped sessions");
 
-    let report = mgr.reconcile_on_boot().await.expect("reconcile");
-    assert!(report.adopted.contains(&"tmpm-live-session".to_string()));
-    assert!(report.orphaned.contains(&dead_record.id.to_string()));
-
-    // Verify store state.
-    let live = mgr.get(&live_record.id).await.unwrap();
-    assert_eq!(live.state, ManagedSessionState::Active);
-
-    let dead = mgr.get(&dead_record.id).await.unwrap();
-    assert_eq!(dead.state, ManagedSessionState::Orphaned);
+    // Test Decommissioned rejection.
+    {
+        let mut store = mgr.store.write().await;
+        let mut r = store.get(&record.id).unwrap();
+        r.state = ManagedSessionState::Decommissioned;
+        store.upsert(r).await.unwrap();
+    }
+    let result = mgr.send_input(&record.id, "test").await;
+    assert!(
+        result.is_err(),
+        "send_input must fail for Decommissioned sessions"
+    );
 }
 
 #[tokio::test]

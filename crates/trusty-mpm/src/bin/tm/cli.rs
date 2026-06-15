@@ -478,12 +478,45 @@ pub(crate) enum SessionAction {
         /// Managed session id.
         id: String,
     },
-    /// Stop and deregister a managed session.
+    /// Stop and deregister a managed session (legacy alias for ManagedRuntimeStop).
     ///
-    /// Why: terminate a managed session when its work is done.
-    /// What: DELETEs `/api/v1/sessions/managed/{id}`.
+    /// Why: retained for backward compatibility; new scripts should use
+    /// `ManagedRuntimeStop` or `Decommission`.
+    /// What: POSTs `/api/v1/sessions/managed/{id}/runtime-stop`.
     /// Test: `cli_parses_session_managed_stop`.
     ManagedStop {
+        /// Managed session id.
+        id: String,
+    },
+    /// Stop the runtime of a managed session, keeping the workspace intact.
+    ///
+    /// Why: a session ENDURES beyond its running runtime; RuntimeStop kills
+    /// the tmux session and claude process but preserves the workspace directory
+    /// so the session can be resumed later.
+    /// What: POSTs `/api/v1/sessions/managed/{id}/runtime-stop`.
+    /// Test: `cli_parses_session_runtime_stop`.
+    RuntimeStop {
+        /// Managed session id.
+        id: String,
+    },
+    /// Resume a stopped managed session in its existing workspace (no re-clone).
+    ///
+    /// Why: after `runtime-stop`, the workspace is still on disk; `managed-resume`
+    /// re-spawns the runtime in the SAME workspace without cloning again.
+    /// What: POSTs `/api/v1/sessions/managed/{id}/resume`.
+    /// Test: `cli_parses_session_managed_resume`.
+    ManagedResume {
+        /// Managed session id.
+        id: String,
+    },
+    /// Decommission a managed session: stop runtime + remove workspace from disk.
+    ///
+    /// Why: the ONLY operation that removes the workspace directory. Unlike
+    /// `runtime-stop`, decommission is terminal — no further resume is possible.
+    /// A tombstone record is kept for `ls` history.
+    /// What: POSTs `/api/v1/sessions/managed/{id}/decommission`.
+    /// Test: `cli_parses_session_decommission`.
+    Decommission {
         /// Managed session id.
         id: String,
     },

@@ -5,12 +5,12 @@
 //! logic here keeps the HTTP handlers thin and makes the manager unit-testable
 //! through the [`ManagedTmuxDriver`] trait seam.
 //! What: [`SessionManager`] wraps a [`SessionStore`] and a [`ManagedTmuxDriver`]
-//! and provides `create`, `list`, `get`, `send_input`, `stop`, and
-//! `reconcile_on_boot`. [`ReconcileReport`] describes what the reconciliation
-//! pass found. [`ManagedError`] is the module's error type.
-//! Test: `manager_create_record`, `manager_stop_marks_dead`,
-//! `manager_reconcile_adopts_and_orphans`, `env_scrub_command` in this file;
-//! see also `activity` and `runtime` module tests for the trait seam.
+//! and provides `create`, `list`, `get`, `send_input`, `stop`, `resume`,
+//! `decommission`, and `reconcile_on_boot`. [`ReconcileReport`] describes
+//! what the reconciliation pass found. [`ManagedError`] is the module's error type.
+//! Test: `manager_create_record`, `manager_stop_keeps_workspace`,
+//! `manager_resume_respawns`, `manager_decommission_removes_workspace`,
+//! `manager_reconcile_gone_tmux_yields_stopped` in tests.rs.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,7 +30,7 @@ use super::store::{SessionStore, StoreError};
 /// Why: HTTP handlers dispatch on error variants to choose status codes;
 /// a typed enum keeps that mapping clean and avoids stringly-typed matching.
 /// What: one variant per failure mode: tmux problems, missing sessions,
-/// store I/O, and miscellaneous I/O errors.
+/// store I/O, miscellaneous I/O errors, and invalid state transitions.
 /// Test: `ManagedError` variants are exercised by the manager unit tests.
 #[derive(Debug, Error)]
 pub enum ManagedError {
@@ -53,6 +53,10 @@ pub enum ManagedError {
     /// A name derived from the cwd hint collided with an existing session.
     #[error("name already in use: {0} — use `tm session ls` to find it")]
     NameCollision(String),
+
+    /// The operation is not valid for the current session state.
+    #[error("invalid state transition for session {0}: {1}")]
+    InvalidState(String, String),
 }
 
 /// Trait seam over tmux operations used by the session manager.
@@ -90,16 +94,16 @@ pub trait ManagedTmuxDriver: Send + Sync {
 /// Summary of what a reconciliation pass found and changed.
 ///
 /// Why: operators and the daemon start-up log need to know how many sessions
-/// were re-adopted and how many were declared orphaned after a restart.
-/// What: counts of adopted (live) and orphaned (dead) sessions, plus the
+/// were re-adopted and how many were marked stopped after a restart.
+/// What: counts of re-adopted (live) and stopped (gone) sessions, plus the
 /// tmux names of sessions that were unknown to the store before reconciliation.
-/// Test: `manager_reconcile_adopts_and_orphans`.
+/// Test: `manager_reconcile_gone_tmux_yields_stopped` in tests.rs.
 #[derive(Debug, Default)]
 pub struct ReconcileReport {
     /// tmux session names that were live and re-adopted into the store.
     pub adopted: Vec<String>,
-    /// Session ids that were in the store but had no live tmux session.
-    pub orphaned: Vec<String>,
+    /// Session ids whose tmux session was gone; marked Stopped (resumable).
+    pub stopped: Vec<String>,
     /// tmux sessions with the `tmpm-` prefix that the store did not know about.
     pub external_adopted: Vec<String>,
 }
@@ -112,8 +116,8 @@ pub struct ReconcileReport {
 /// What: wraps a [`SessionStore`] behind an async `RwLock` and a
 /// [`ManagedTmuxDriver`] behind an `Arc`; all public methods are `async`
 /// so the HTTP handlers can await them directly.
-/// Test: `manager_create_record`, `manager_stop_marks_dead`,
-/// `manager_reconcile_adopts_and_orphans`.
+/// Test: `manager_create_record`, `manager_stop_keeps_workspace`,
+/// `manager_resume_respawns`, `manager_decommission_removes_workspace`.
 pub struct SessionManager {
     /// Persisted session store; `pub(crate)` for test helpers that need to
     /// seed internal state without going through the public API.
@@ -159,7 +163,7 @@ impl SessionManager {
     /// flow in one operation so the HTTP handler stays thin.
     /// What: derives the tmux name from `name_hint` (→ `name_from_dir`) or from
     /// the generated UUID (→ `name_from_uuid`), creates the tmux session via the
-    /// driver, persists a [`SessionRecord`] in state `Starting`, and returns it.
+    /// driver, persists a [`SessionRecord`] in state `Provisioning`, and returns it.
     /// Test: `manager_create_record`.
     pub async fn create(
         &self,
@@ -192,7 +196,7 @@ impl SessionManager {
     /// Some(workspace_path)` so `tmux new-session -c <workspace>` is issued.
     /// What: identical to [`create`] except the id is supplied by the caller.
     /// Creates the tmux session at `cwd` via the driver, persists a
-    /// [`SessionRecord`] in state `Starting`, and returns it.
+    /// [`SessionRecord`] in state `Provisioning`, and returns it.
     /// Test: `spawn_session_tmux_cwd_is_workspace` in session_manager/tests.rs;
     /// `handler_spawn_creates_tmux_at_workspace_cwd` in session_manager_mvp.rs.
     #[allow(clippy::too_many_arguments)]
@@ -231,7 +235,7 @@ impl SessionManager {
             tmux_name: tmux_name.clone(),
             cwd,
             task,
-            state: ManagedSessionState::Starting,
+            state: ManagedSessionState::Provisioning,
             created_at: Utc::now(),
             last_activity_at: None,
             workspace_path,
@@ -295,14 +299,14 @@ impl SessionManager {
     ///
     /// Why: `POST /api/v1/sessions/managed/{id}/send` lets the operator or
     /// automation feed text into a running session without attaching.
-    /// What: looks up the record, verifies it is not Dead/Orphaned, calls
-    /// `tmux.send_line(tmux_name, text)`, and updates `last_activity_at`.
+    /// What: looks up the record, verifies it is not Stopped/Decommissioned,
+    /// calls `tmux.send_line(tmux_name, text)`, and updates `last_activity_at`.
     /// Test: `manager_send_input`.
     pub async fn send_input(&self, id: &ManagedSessionId, text: &str) -> Result<(), ManagedError> {
         let mut record = self.get(id).await?;
         if matches!(
             record.state,
-            ManagedSessionState::Dead | ManagedSessionState::Orphaned
+            ManagedSessionState::Stopped | ManagedSessionState::Decommissioned
         ) {
             return Err(ManagedError::TmuxUnavailable(format!(
                 "session {} is {}; cannot inject input",
@@ -318,35 +322,144 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Stop a managed session: kill the tmux session and mark the record Dead.
+    /// Stop the runtime of a managed session, keeping the workspace intact.
     ///
-    /// Why: `DELETE /api/v1/sessions/managed/{id}` must both terminate the tmux
-    /// process and persist the terminal state so `ls` shows it correctly.
+    /// Why: a session ENDURES beyond its running runtime. `stop` terminates the
+    /// tmux session and the `claude` process inside it, but PRESERVES the
+    /// workspace directory on disk and the session record so the session can
+    /// be resumed later via `resume`.
     /// What: kills the tmux session (best-effort; logs a warning on failure
-    /// since the session may already be gone), marks the record `Dead`, and
-    /// persists.
-    /// Test: `manager_stop_marks_dead`.
+    /// since the session may already be gone), marks the record `Stopped`
+    /// (workspace path untouched), and persists.
+    /// Test: `manager_stop_keeps_workspace` — asserts state is `Stopped` and
+    /// workspace dir still exists on disk.
     pub async fn stop(&self, id: &ManagedSessionId) -> Result<SessionRecord, ManagedError> {
         let mut record = self.get(id).await?;
         if let Err(e) = self.tmux.kill_session(&record.tmux_name) {
             warn!(name = %record.tmux_name, "kill_session failed (may already be gone): {e}");
         }
-        record.state = ManagedSessionState::Dead;
+        record.state = ManagedSessionState::Stopped;
         self.store.write().await.upsert(record.clone()).await?;
-        info!(id = %id, name = %record.tmux_name, "managed session stopped");
+        info!(id = %id, name = %record.tmux_name, "managed session stopped (workspace intact)");
+        Ok(record)
+    }
+
+    /// Resume a stopped session by re-spawning the runtime in its existing workspace.
+    ///
+    /// Why: a session ENDURES until decommissioned; after `stop` the workspace
+    /// directory is still on disk and `resume` brings the runtime back without
+    /// re-cloning. A new tmux session is created with `cwd = workspace_path` and
+    /// the caller is responsible for spawning claude inside it (via
+    /// `ClaudeCodeAdapter::spawn`) so the runtime restarts cleanly.
+    /// What: validates the session is `Stopped` or `Errored`, creates a fresh
+    /// tmux session with `cwd = workspace_path` (falls back to `cwd` when
+    /// `workspace_path` is absent), marks the record `Active`, and persists.
+    /// Returns the updated record; the HTTP handler then calls
+    /// `ClaudeCodeAdapter::spawn` on the new tmux session.
+    /// Test: `manager_resume_respawns` — asserts a new `create_session` call is
+    /// issued with cwd = existing workspace_path, no re-clone occurs.
+    pub async fn resume(&self, id: &ManagedSessionId) -> Result<SessionRecord, ManagedError> {
+        let mut record = self.get(id).await?;
+        match record.state {
+            ManagedSessionState::Stopped | ManagedSessionState::Errored => {}
+            ref s => {
+                return Err(ManagedError::InvalidState(
+                    id.to_string(),
+                    format!(
+                        "cannot resume a session in state '{s}'; only Stopped or Errored sessions can be resumed"
+                    ),
+                ));
+            }
+        }
+
+        // Use workspace_path as cwd if set, otherwise fall back to cwd.
+        let workdir = record
+            .workspace_path
+            .as_ref()
+            .unwrap_or(&record.cwd)
+            .to_string_lossy()
+            .to_string();
+
+        // Kill the old tmux session if still somehow alive (best-effort).
+        if self.tmux.session_exists(&record.tmux_name)
+            && let Err(e) = self.tmux.kill_session(&record.tmux_name)
+        {
+            warn!(name = %record.tmux_name, "resume: kill stale session failed: {e}");
+        }
+
+        // Create a fresh tmux session rooted at the EXISTING workspace.
+        // No re-clone — workspace_path is reused as-is.
+        self.tmux
+            .create_session(&record.tmux_name, &workdir)
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+
+        record.state = ManagedSessionState::Active;
+        record.last_activity_at = Some(Utc::now());
+        self.store.write().await.upsert(record.clone()).await?;
+        info!(id = %id, name = %record.tmux_name, workdir = %workdir, "managed session resumed");
+        Ok(record)
+    }
+
+    /// Decommission a session: stop the runtime, remove the workspace from disk,
+    /// and mark the record `Decommissioned`.
+    ///
+    /// Why: the only full teardown operation. Unlike `stop`, this removes the
+    /// workspace directory from disk so no future `resume` is possible. A
+    /// tombstone record is kept in the store so `ls` can show history.
+    /// What: kills the tmux session (best-effort), removes the workspace directory
+    /// via `std::fs::remove_dir_all` when `workspace_path` is set, clears
+    /// `workspace_path` on the record, marks it `Decommissioned`, and persists.
+    /// Test: `manager_decommission_removes_workspace` — asserts the workspace dir
+    /// is gone from disk and the record state is `Decommissioned`.
+    pub async fn decommission(&self, id: &ManagedSessionId) -> Result<SessionRecord, ManagedError> {
+        let mut record = self.get(id).await?;
+
+        // Kill the runtime (best-effort).
+        if self.tmux.session_exists(&record.tmux_name)
+            && let Err(e) = self.tmux.kill_session(&record.tmux_name)
+        {
+            warn!(name = %record.tmux_name, "decommission: kill_session failed: {e}");
+        }
+
+        // Remove the workspace directory from disk.
+        if let Some(ref ws) = record.workspace_path {
+            if ws.exists() {
+                std::fs::remove_dir_all(ws).map_err(|e| {
+                    ManagedError::Io(std::io::Error::new(
+                        e.kind(),
+                        format!("remove workspace {:?}: {e}", ws),
+                    ))
+                })?;
+                info!(id = %id, workspace = %ws.display(), "decommission: workspace removed from disk");
+            } else {
+                warn!(id = %id, workspace = %ws.display(), "decommission: workspace path absent (already removed?)");
+            }
+        }
+
+        // Tombstone: clear workspace_path, mark Decommissioned, persist.
+        record.workspace_path = None;
+        record.state = ManagedSessionState::Decommissioned;
+        self.store.write().await.upsert(record.clone()).await?;
+        info!(id = %id, name = %record.tmux_name, "managed session decommissioned");
         Ok(record)
     }
 
     /// Reconcile daemon state against live tmux sessions after a restart.
     ///
     /// Why: the daemon may have crashed or been restarted while sessions were
-    /// running; reconciliation re-adopts live sessions and marks vanished ones
-    /// as Orphaned so operators can see what happened.
+    /// running. A persisted record whose tmux session is GONE (e.g. after reboot)
+    /// must become `Stopped` (resumable), NOT a "lost" or "orphaned" session —
+    /// a stopped runtime does NOT mean the session itself is lost.
     /// What: lists all tmux sessions, filters to `tmpm-` prefix, cross-references
-    /// against the store, marks live store records Active, dead ones Orphaned,
-    /// and adopts external `tmpm-` sessions not in the store.
-    /// Test: `manager_reconcile_adopts_and_orphans`.
-    pub async fn reconcile_on_boot(&self) -> Result<ReconcileReport, ManagedError> {
+    /// against the store: live → `Active`; gone → `Stopped` (unless already
+    /// `Decommissioned`). External `tmpm-` sessions unknown to the store are
+    /// adopted as `Active`.
+    /// When `auto_resume` is true, all `Stopped` sessions are immediately resumed.
+    /// Test: `manager_reconcile_gone_tmux_yields_stopped`.
+    pub async fn reconcile_on_boot(
+        &self,
+        auto_resume: bool,
+    ) -> Result<ReconcileReport, ManagedError> {
         let live_names: std::collections::HashSet<String> = self
             .tmux
             .list_sessions()
@@ -366,28 +479,28 @@ impl SessionManager {
         let known_names: std::collections::HashSet<String> =
             all_records.iter().map(|r| r.tmux_name.clone()).collect();
 
+        // Collect ids of sessions to auto-resume after the write guard is released.
+        let mut to_resume: Vec<ManagedSessionId> = Vec::new();
+
         // Reconcile store records against live sessions.
         for mut record in all_records {
+            // Decommissioned tombstones are never touched by reconciliation.
+            if matches!(record.state, ManagedSessionState::Decommissioned) {
+                continue;
+            }
+
             if live_names.contains(&record.tmux_name) {
-                // Session is alive — adopt it.
-                if !matches!(
-                    record.state,
-                    ManagedSessionState::Dead | ManagedSessionState::Orphaned
-                ) {
-                    record.state = ManagedSessionState::Active;
-                    report.adopted.push(record.tmux_name.clone());
-                    info!(name = %record.tmux_name, "reconcile: re-adopted live session");
-                } else {
-                    // Was dead/orphaned before but now exists — adopt it.
-                    record.state = ManagedSessionState::Adopted;
-                    report.adopted.push(record.tmux_name.clone());
-                }
+                // Session is alive — re-adopt as Active.
+                record.state = ManagedSessionState::Active;
+                report.adopted.push(record.tmux_name.clone());
+                info!(name = %record.tmux_name, "reconcile: re-adopted live session");
             } else {
-                // Session is gone — mark orphaned unless already dead.
-                if !matches!(record.state, ManagedSessionState::Dead) {
-                    record.state = ManagedSessionState::Orphaned;
-                    report.orphaned.push(record.id.to_string());
-                    warn!(name = %record.tmux_name, "reconcile: session gone, marked orphaned");
+                // Session is gone — mark Stopped (resumable), never Orphaned.
+                record.state = ManagedSessionState::Stopped;
+                report.stopped.push(record.id.to_string());
+                warn!(name = %record.tmux_name, "reconcile: tmux session gone, marked Stopped (workspace intact, resumable)");
+                if auto_resume {
+                    to_resume.push(record.id);
                 }
             }
             guard.upsert(record).await?;
@@ -401,7 +514,7 @@ impl SessionManager {
                     tmux_name: name.clone(),
                     cwd: PathBuf::from("/unknown"),
                     task: "externally created".into(),
-                    state: ManagedSessionState::Adopted,
+                    state: ManagedSessionState::Active,
                     created_at: Utc::now(),
                     last_activity_at: None,
                     workspace_path: None,
@@ -413,6 +526,21 @@ impl SessionManager {
                 guard.upsert(external).await?;
                 report.external_adopted.push(name.clone());
                 info!(name = %name, "reconcile: adopted external tmpm- session");
+            }
+        }
+
+        // Release write guard before auto-resume (which needs its own locks).
+        drop(guard);
+
+        if auto_resume && !to_resume.is_empty() {
+            info!(
+                "reconcile: auto_resume=true, resuming {} stopped sessions",
+                to_resume.len()
+            );
+            for sid in to_resume {
+                if let Err(e) = self.resume(&sid).await {
+                    warn!(id = %sid, "reconcile: auto_resume failed: {e}");
+                }
             }
         }
 
@@ -459,7 +587,7 @@ impl SessionManager {
     /// Mark a session as errored with a message.
     ///
     /// Why: when provisioning or spawning fails the session must not remain in
-    /// `Starting`; marking it errored surfaces the failure to `tm session ls`.
+    /// `Provisioning`; marking it errored surfaces the failure to `tm session ls`.
     /// What: transitions the record to `ManagedSessionState::Errored` and appends
     /// the error message to the task field for observability, then persists.
     /// Test: covered by handler_spawn_wires_provision_and_spawn error path.
