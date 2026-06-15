@@ -5,4 +5,4 @@
 
 schema_version: 1
 palace: trusty-tools
-note: 'Pinned 2026-05-30: canonical checkout /Volumes/SSD1/Projects/trusty-tools (moved off /Volumes/Kemono)'
+note: 'Pinned to ''trusty-tools'' for continuity with existing palace memories. This pin (read by pinned_slug_at, Step 2 of cwd_palace_slug_at) overrides the #1224 git-path identity derivation, which would otherwise default this repo to the owner/repo slug ''bobmatnyc-trusty-tools'' and orphan all existing memories. Origin: pinned 2026-05-30 for the canonical checkout /Volumes/SSD1/Projects/trusty-tools (moved off /Volumes/Kemono).'
