@@ -49,6 +49,51 @@ mod tests {
     use std::sync::Arc;
     use trusty_common::memory_core::{Palace, PalaceHandle, PalaceId, PalaceRegistry};
 
+    /// RAII guard that sets or clears an environment variable for the duration
+    /// of a test and restores the prior value on drop.
+    ///
+    /// Why: the issue-#1217 derivation reads `TRUSTY_MEMORY_PALACE`; tests must
+    /// pin it deterministically without leaking state into sibling tests. Pair
+    /// every use with `#[serial_test::serial]` so no other thread reads the env
+    /// concurrently (cargo runs test fns across OS threads in one process).
+    /// What: `set` installs a value, `clear` removes it; both capture the prior
+    /// value and restore it in `Drop`.
+    /// Test: exercised by `cwd_palace_slug_at_env_override_wins` and the
+    /// derivation tests that must run with the override cleared.
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: paired with `#[serial]` on the calling test so no other
+            // thread reads or writes the env concurrently.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, prev }
+        }
+
+        fn clear(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: see `set`.
+            unsafe { std::env::remove_var(key) };
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `set`.
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
     /// Test-only builder for a `CreatorInfo`. Tests don't care which writer
     /// they simulate; pinning the values here avoids per-test boilerplate.
     fn test_creator() -> CreatorInfo {
@@ -162,12 +207,16 @@ mod tests {
         );
     }
 
+    #[serial_test::serial]
     #[test]
     fn cwd_palace_slug_uses_git_toplevel() {
-        // Best-effort: this test only works when run inside a git checkout.
-        // The trusty-tools repo *is* a git checkout, so the test is real.
+        // Issue #1217: a repo *without* an origin remote must derive from the
+        // git toplevel via the parent/dir slug — and must NOT take the nested
+        // sub-directory name. (With an origin remote it would use owner/repo;
+        // that path is covered by `cwd_palace_slug_at_uses_git_owner_repo`.)
+        let _guard = EnvGuard::clear(crate::palace_id_derive::PALACE_OVERRIDE_ENV);
         let tmp = tempfile::tempdir().expect("tempdir");
-        // Init a fake repo so the test is hermetic.
+        // Init a fake repo (no remote) so the test is hermetic.
         let status = std::process::Command::new("git")
             .args(["init", "-q"])
             .current_dir(tmp.path())
@@ -178,20 +227,93 @@ mod tests {
             let nested = tmp.path().join("nested-area");
             std::fs::create_dir_all(&nested).unwrap();
             let slug = cwd_palace_slug_at(&nested).expect("slug");
-            // Tempdir basename varies; the important assertion is that we
-            // didn't take the nested directory name.
+            // The toplevel parent/dir slug must end with the toplevel basename,
+            // never the nested directory name.
             assert_ne!(slug, "nested-area", "slug must come from git toplevel");
+            assert!(
+                !slug.contains("nested-area"),
+                "slug must not include the nested sub-dir; got {slug}"
+            );
         }
     }
 
+    #[serial_test::serial]
     #[test]
-    fn cwd_palace_slug_falls_back_to_basename() {
+    fn cwd_palace_slug_falls_back_to_parent_dir() {
+        // Issue #1217: a non-git directory derives `parent-leaf`, not just the
+        // bare leaf basename. The tempdir's own basename is random, so assert
+        // the slug ends with `-my-project` and is not the bare leaf.
+        let _guard = EnvGuard::clear(crate::palace_id_derive::PALACE_OVERRIDE_ENV);
         let tmp = tempfile::tempdir().expect("tempdir");
         let dir = tmp.path().join("my-project");
         std::fs::create_dir_all(&dir).unwrap();
-        // Not a git repo — must fall back to the basename slug.
+        // Not a git repo — must fall back to the parent/dir slug.
         let slug = cwd_palace_slug_at(&dir).expect("slug");
-        assert_eq!(slug, "my-project");
+        assert!(
+            slug.ends_with("-my-project"),
+            "non-git dir must derive `<parent>-my-project`; got {slug}"
+        );
+    }
+
+    /// Why: the `TRUSTY_MEMORY_PALACE` env override must beat every derivation
+    /// source (issue #1217 precedence level 1).
+    /// What: set the env var, call `cwd_palace_slug_at` from a plain dir, assert
+    /// the slugified override is returned regardless of the directory name.
+    /// Test: itself (serialised against other env-mutating tests via the var).
+    #[serial_test::serial]
+    #[test]
+    fn cwd_palace_slug_at_env_override_wins() {
+        let _guard = EnvGuard::set(crate::palace_id_derive::PALACE_OVERRIDE_ENV, "My Override");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("some-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        let slug = cwd_palace_slug_at(&dir).expect("slug");
+        assert_eq!(
+            slug, "my-override",
+            "env override must win and be slugified"
+        );
+    }
+
+    /// Why: a git repo *with* an origin remote must derive the default palace
+    /// from the GitHub-style `owner/repo` path (issue #1217 precedence level 2).
+    /// What: init a repo, add an SSH origin remote, call from a subdirectory,
+    /// assert the slug is `acme-widget` (owner-repo, separator collapsed).
+    /// Test: itself.
+    #[serial_test::serial]
+    #[test]
+    fn cwd_palace_slug_at_uses_git_owner_repo() {
+        let _guard = EnvGuard::clear(crate::palace_id_derive::PALACE_OVERRIDE_ENV);
+        // Skip when `git` is unavailable on PATH.
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .ok()
+            .map(|o| !o.status.success())
+            .unwrap_or(true)
+        {
+            eprintln!("skipping cwd_palace_slug_at_uses_git_owner_repo: git not on PATH");
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let run = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            assert!(ok, "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        run(&["remote", "add", "origin", "git@github.com:acme/widget.git"]);
+        let nested = root.join("crates").join("foo");
+        std::fs::create_dir_all(&nested).unwrap();
+        let slug = cwd_palace_slug_at(&nested).expect("slug");
+        assert_eq!(
+            slug, "acme-widget",
+            "git owner/repo must drive the default palace id; got {slug}"
+        );
     }
 
     /// Why: Change 1 — when a `.trusty-tools/trusty-memory.yaml` pin file is

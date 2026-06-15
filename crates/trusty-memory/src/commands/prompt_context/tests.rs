@@ -426,6 +426,24 @@ async fn spin_up_test_daemon_with_palace(
         std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
     }
 
+    // Issue #1217: the default palace ID is now derived from project identity
+    // (git owner/repo, else parent/dir slug), so a bare tempdir whose basename
+    // equals `palace_slug` no longer resolves to that slug (a non-git dir
+    // derives `<parent>-<leaf>`). Write a committed pin file in `project_dir`
+    // so the hook's `cwd_palace_slug_at` resolves deterministically to the
+    // palace this fixture created. This is fully hermetic (per-tempdir, no env
+    // or global state to leak into sibling tests) and exercises the #1217
+    // pin-file-primacy anchor that keeps existing palaces from being orphaned.
+    crate::project_root::write_project_pin(
+        &project_dir,
+        &crate::project_root::ProjectPin {
+            schema_version: crate::project_root::PIN_SCHEMA_VERSION,
+            palace: palace_slug.to_string(),
+            note: None,
+        },
+    )
+    .expect("write project pin for fixture");
+
     let data_root =
         trusty_common::resolve_data_dir("trusty-memory").expect("resolve data dir under override");
     let state = crate::AppState::new(data_root.clone());
@@ -434,9 +452,9 @@ async fn spin_up_test_daemon_with_palace(
     state.set_ready();
 
     // Create the palace via MCP dispatch so the on-disk metadata
-    // matches what a real client would have produced. The slug here
-    // matches the project_dir basename so `cwd_palace_slug_at` resolves
-    // to the same palace.
+    // matches what a real client would have produced. The `TRUSTY_MEMORY_PALACE`
+    // override pinned above makes `cwd_palace_slug_at` (and thus the hook)
+    // resolve to exactly this slug (issue #1217).
     let _ = crate::tools::dispatch_tool(&state, "palace_create", json!({"name": palace_slug}))
         .await
         .expect("palace_create");

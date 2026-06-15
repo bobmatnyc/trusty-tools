@@ -25,8 +25,7 @@ use tokio::sync::{broadcast, OnceCell, RwLock};
 use trusty_common::bm25_client::Bm25Client;
 use trusty_common::mcp::initialize_response;
 use trusty_common::memory_core::embed::FastEmbedder;
-use trusty_common::memory_core::store::ChatSessionStore;
-use trusty_common::memory_core::PalaceRegistry;
+use trusty_common::memory_core::{store::ChatSessionStore, PalaceRegistry};
 use trusty_common::ChatProvider;
 
 // Why: `tracing::info` is only used by the axum HTTP-serving helpers
@@ -109,6 +108,16 @@ pub mod kg_extract;
 pub mod mcp_service;
 pub mod messaging;
 pub mod openrpc;
+/// Issue #1217: default palace-ID derivation from project identity.
+///
+/// Why: the default palace ID should reflect the project's identity
+/// (git `owner/repo`, else `parent/dir`) rather than the bare directory
+/// basename, so the same repo resolves to the same palace across checkouts.
+/// What: exports the pure `derive_palace_id` core plus
+/// `owner_repo_from_git_remote`, `parent_dir_slug`, and the
+/// `TRUSTY_MEMORY_PALACE` env-override helpers.
+/// Test: see unit tests inside this module.
+pub mod palace_id_derive;
 /// Issue #88: project-root detection and palace-slug enforcement.
 ///
 /// Why: prevents unbounded palace creation by anchoring palace names to the

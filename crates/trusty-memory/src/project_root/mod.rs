@@ -30,8 +30,9 @@ mod validation;
 
 pub use detection::{find_project_root, PERSONAL_PALACE, PROJECT_MARKERS, TRUSTY_TOOLS_DIR};
 pub use pin_file::{
-    project_slug, project_slug_at, project_slug_at_readonly, project_slug_from_basename,
-    read_project_pin, write_project_pin, ProjectPin, PIN_FILE_REL, PIN_SCHEMA_VERSION,
+    pinned_slug_at, project_slug, project_slug_at, project_slug_at_readonly,
+    project_slug_from_basename, read_project_pin, write_project_pin, ProjectPin, PIN_FILE_REL,
+    PIN_SCHEMA_VERSION,
 };
 pub use validation::validate_palace_name;
 
@@ -397,6 +398,51 @@ mod tests {
             found.is_some(),
             ".trusty-tools must trigger project-root detection"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // pinned_slug_at (issue #1217)
+    // -----------------------------------------------------------------------
+
+    /// Why: `pinned_slug_at` must return the pinned slug when a pin file exists
+    /// — this is the backward-compat anchor that keeps already-pinned projects
+    /// from being re-derived by the new git/dir scheme.
+    /// What: write a pin for `original-slug` under a `.git` root, call from a
+    /// subdirectory, assert the pinned slug is returned.
+    /// Test: itself.
+    #[test]
+    fn pinned_slug_at_returns_pin_when_present() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("renamed-dir");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        let pin = ProjectPin {
+            schema_version: PIN_SCHEMA_VERSION,
+            palace: "original-slug".to_string(),
+            note: None,
+        };
+        write_project_pin(&root, &pin).expect("write pin");
+        let sub = root.join("src");
+        fs::create_dir_all(&sub).unwrap();
+        assert_eq!(pinned_slug_at(&sub).as_deref(), Some("original-slug"));
+    }
+
+    /// Why: when no pin file exists `pinned_slug_at` must return `None` (NOT the
+    /// basename) so the caller falls through to identity derivation. This is the
+    /// behavioural difference from `project_slug_at_readonly`.
+    /// What: a `.git` root with no pin file; assert `None` and that no pin file
+    /// was created as a side-effect.
+    /// Test: itself.
+    #[test]
+    fn pinned_slug_at_returns_none_without_pin() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("my-repo");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        assert!(
+            pinned_slug_at(&root).is_none(),
+            "no pin file must yield None, not the basename"
+        );
+        // Must not write a pin file.
+        assert!(read_project_pin(&root).expect("no err").is_none());
     }
 
     // -----------------------------------------------------------------------
