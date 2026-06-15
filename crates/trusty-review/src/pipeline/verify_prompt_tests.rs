@@ -99,6 +99,36 @@ fn verify_schema_enumerates_judgments() {
     assert_eq!(enum_vals[1], "REFUTED");
 }
 
+/// The verify response schema must be OpenAI strict-mode compliant.
+///
+/// Why: the verify pass also runs through OpenRouter with `strict: true` for
+/// `openai/*` models; a missing `additionalProperties:false` or an incomplete
+/// `required` list would block every OpenAI verification call exactly as the
+/// review schema bug blocked reviews.
+/// What: asserts the top-level object sets `additionalProperties:false` and
+/// requires BOTH `judgment` and `reason` (strict mode requires all properties).
+/// Test: no network — pure schema inspection.
+#[test]
+fn verify_schema_is_openai_strict_compliant() {
+    let schema = verify_response_schema();
+    assert_eq!(
+        schema.schema["additionalProperties"],
+        serde_json::json!(false),
+        "verify schema object must set additionalProperties:false"
+    );
+    let required: std::collections::BTreeSet<&str> = schema.schema["required"]
+        .as_array()
+        .expect("required array")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert_eq!(
+        required,
+        ["judgment", "reason"].into_iter().collect(),
+        "strict mode requires every property (judgment AND reason)"
+    );
+}
+
 #[test]
 fn verify_system_prompt_mentions_refuted_guard() {
     let sys = verifier_system_prompt();

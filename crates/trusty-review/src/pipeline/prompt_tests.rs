@@ -423,6 +423,100 @@ fn review_output_schema_enum_matches_board_grades() {
     assert_eq!(values.len(), 5, "schema must have exactly 5 board grades");
 }
 
+/// Recursively assert every object node of a JSON Schema is OpenAI strict-mode
+/// compliant: `additionalProperties == false` and `required` lists exactly the
+/// `properties` keys.
+///
+/// Why: the OpenAI strict-mode contract is recursive; a flat check on the top
+/// level would miss the exact regression we are guarding (`findings.items`
+/// previously lacked `additionalProperties`, blocking all OpenAI reviews).
+/// What: walks the schema, asserting the invariant on each object node and
+/// recursing into `properties`, array `items`, and object-valued
+/// `additionalProperties`.
+/// Test: invoked by `review_schema_is_openai_strict_compliant`.
+fn assert_strict(schema: &serde_json::Value) {
+    use serde_json::Value;
+    if let Value::Object(map) = schema {
+        let has_properties = map.get("properties").is_some_and(Value::is_object);
+        if has_properties {
+            assert_eq!(
+                map.get("additionalProperties"),
+                Some(&Value::Bool(false)),
+                "object node must set additionalProperties:false — {map:?}"
+            );
+            let props: std::collections::BTreeSet<&str> = map["properties"]
+                .as_object()
+                .expect("properties object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            let required: std::collections::BTreeSet<&str> = map
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|r| r.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            assert_eq!(
+                props, required,
+                "every property must be listed in required — {map:?}"
+            );
+        }
+        if let Some(p) = map.get("properties").and_then(Value::as_object) {
+            for c in p.values() {
+                assert_strict(c);
+            }
+        }
+        if let Some(i) = map.get("items") {
+            assert_strict(i);
+        }
+        if let Some(ap) = map.get("additionalProperties")
+            && ap.is_object()
+        {
+            assert_strict(ap);
+        }
+    } else if let Value::Array(items) = schema {
+        for i in items {
+            assert_strict(i);
+        }
+    }
+}
+
+/// The review response schema must be OpenAI strict-mode compliant top-to-bottom.
+///
+/// Why: OpenRouter forwards the schema with `strict: true` for `openai/*`
+/// models; if ANY object node (top-level OR the nested `findings.items`) omits
+/// `additionalProperties:false` or fails to list every property in `required`,
+/// OpenAI rejects the request and EVERY OpenAI review fails.  This locks the
+/// recursive invariant against regression.
+/// What: builds `review_response_schema()` and walks it with `assert_strict`,
+/// then spot-checks the previously-broken `findings.items` node directly.
+/// Test: no network — pure schema inspection.
+#[test]
+fn review_schema_is_openai_strict_compliant() {
+    let schema = review_response_schema();
+    assert_strict(&schema.schema);
+
+    // Spot-check the exact node that was non-compliant before the fix.
+    let items = &schema.schema["properties"]["findings"]["items"];
+    assert_eq!(
+        items["additionalProperties"],
+        serde_json::json!(false),
+        "findings.items must set additionalProperties:false"
+    );
+    let required: std::collections::BTreeSet<&str> = items["required"]
+        .as_array()
+        .expect("findings.items.required array")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert_eq!(
+        required,
+        ["body", "confidence", "file", "line", "severity", "title"]
+            .into_iter()
+            .collect(),
+        "findings.items must require every property under strict mode"
+    );
+}
+
 /// Verify the system prompt describes UNKNOWN.
 ///
 /// Why: the model must know what UNKNOWN means and when to use it; if it is

@@ -79,6 +79,47 @@ fn parse_direct_json_finding_with_null_line() {
     assert_eq!(result.findings[0].line, None);
 }
 
+/// Verify a maximally-strict OpenAI-shaped response round-trips cleanly.
+///
+/// Why: under OpenAI strict mode every property is required, so a conforming
+/// response carries ALL top-level fields (`grade`, `grade_justification`,
+/// `verdict`, `summary`, `findings`) and every finding carries ALL its fields
+/// (`title`, `body`, `severity`, `confidence`, `file`, `line`).  This test
+/// proves the `LlmOutputBlock`/`LlmFinding` deserializers parse that fully
+/// populated shape — guarding that the schema tightening (which forces the
+/// model to emit all fields) does not break the parse contract.
+/// What: deserializes a body matching the strict schema exactly and asserts the
+/// verdict, grade, and finding fields are extracted.
+/// Test: no network.
+#[test]
+fn parse_direct_json_strict_full_shape() {
+    let body = serde_json::json!({
+        "grade": "B+",
+        "grade_justification": "solid but missing tests",
+        "verdict": "REQUEST_CHANGES",
+        "summary": "Needs test coverage.",
+        "findings": [
+            {
+                "title": "Missing tests",
+                "body": "The new handler has no unit tests.",
+                "severity": "medium",
+                "confidence": 0.8,
+                "file": "src/handler.rs",
+                "line": null
+            }
+        ]
+    })
+    .to_string();
+
+    let result = parse_review_response(&body);
+    assert!(!result.is_fail_safe, "strict-shaped response must parse");
+    assert_eq!(result.verdict, Verdict::RequestChanges);
+    assert_eq!(result.grade.as_deref(), Some("B+"));
+    assert_eq!(result.findings.len(), 1);
+    assert_eq!(result.findings[0].file, "src/handler.rs");
+    assert_eq!(result.findings[0].line, None);
+}
+
 // ── Legacy fenced JSON block path ─────────────────────────────────────────
 
 const BODY_WITH_JSON_APPROVE: &str = r#"
