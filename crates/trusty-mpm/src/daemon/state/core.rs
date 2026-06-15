@@ -155,6 +155,19 @@ pub struct DaemonState {
     /// [`Self::event_subscribe`] to obtain a `Receiver`.
     /// Test: `ingest_hook_broadcasts_to_subscribers` exercises subscribe + publish.
     pub event_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
+    /// Lazily-initialized managed session manager for the `/sessions/managed`
+    /// API surface.
+    ///
+    /// Why: [`crate::session_manager::SessionManager::new`] is async (it loads
+    /// the on-disk store) and needs a tmux driver, so it cannot be built inside
+    /// the synchronous `DaemonState` constructors. A `tokio::sync::OnceCell`
+    /// defers construction to the first managed-session request and caches the
+    /// shared handle thereafter.
+    /// What: holds `None` until [`Self::session_manager`] first runs, then the
+    /// shared `Arc<SessionManager>`.
+    /// Test: `managed_routes` handler tests exercise the accessor via the router.
+    pub(super) managed_sessions:
+        tokio::sync::OnceCell<std::sync::Arc<crate::session_manager::SessionManager>>,
 }
 
 impl Default for DaemonState {
@@ -205,6 +218,7 @@ impl DaemonState {
             pair_code: Mutex::new(None),
             framework_root,
             event_tx,
+            managed_sessions: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -274,6 +288,53 @@ impl DaemonState {
             pair_code: Mutex::new(None),
             framework_root,
             event_tx,
+            managed_sessions: tokio::sync::OnceCell::new(),
         }
+    }
+
+    /// Return the lazily-initialized managed [`SessionManager`].
+    ///
+    /// Why: the `/sessions/managed` handlers need a single shared session
+    /// manager backed by an on-disk store and a real tmux driver. Because the
+    /// manager's constructor is async, it is built on first access and cached
+    /// in a `OnceCell` so every subsequent request reuses the same handle.
+    /// What: on first call, loads the store under `<framework_root>/session-manager`
+    /// with a [`crate::daemon::tmux::TmuxDriver`] and caches the `Arc`; returns
+    /// the shared handle. Falls back to an in-memory temp dir if store load fails
+    /// so a transient I/O error never poisons the OnceCell permanently.
+    /// Test: `managed_routes` handler tests drive this via the router.
+    pub async fn session_manager(&self) -> std::sync::Arc<crate::session_manager::SessionManager> {
+        self.managed_sessions
+            .get_or_init(|| async {
+                let data_dir = self.framework_root.join("session-manager");
+                // Use the real tmux-backed driver when available; fall back to a
+                // no-op driver when `tmux` is not installed so the API still
+                // responds (operations that need tmux will surface a typed error).
+                let tmux: std::sync::Arc<dyn crate::session_manager::ManagedTmuxDriver> =
+                    match crate::session_manager::RealTmuxDriver::discover() {
+                        Ok(d) => std::sync::Arc::new(d),
+                        Err(e) => {
+                            tracing::warn!("tmux unavailable for managed sessions: {e}");
+                            std::sync::Arc::new(crate::session_manager::real_tmux::NoopTmuxDriver)
+                        }
+                    };
+                match crate::session_manager::SessionManager::new(&data_dir, tmux.clone()).await {
+                    Ok(mgr) => std::sync::Arc::new(mgr),
+                    Err(e) => {
+                        tracing::error!(
+                            "failed to load managed session store at {}: {e}; using temp dir",
+                            data_dir.display()
+                        );
+                        let tmp = std::env::temp_dir().join("trusty-mpm-session-manager");
+                        let _ = std::fs::create_dir_all(&tmp);
+                        let mgr = crate::session_manager::SessionManager::new(&tmp, tmux)
+                            .await
+                            .expect("temp-dir session store must load");
+                        std::sync::Arc::new(mgr)
+                    }
+                }
+            })
+            .await
+            .clone()
     }
 }

@@ -341,6 +341,34 @@ pub(crate) async fn session(
                 print_compression_stats(&body);
             }
         }
+        // ── Managed session-manager MVP actions (delegate to `managed`) ──────
+        SessionAction::New {
+            repo,
+            git_ref,
+            task,
+            name_hint,
+        } => {
+            crate::commands::managed::session_new(client, url, repo, git_ref, task, name_hint)
+                .await?
+        }
+        SessionAction::Ls { json } => {
+            crate::commands::managed::session_ls(client, url, json).await?
+        }
+        SessionAction::Activity { id } => {
+            crate::commands::managed::session_activity(client, url, id).await?
+        }
+        SessionAction::Send { id, text } => {
+            crate::commands::managed::session_send(client, url, id, text).await?
+        }
+        SessionAction::Answer { id, answer } => {
+            crate::commands::managed::session_answer(client, url, id, answer).await?
+        }
+        SessionAction::Attach { id } => {
+            crate::commands::managed::session_attach(client, url, id).await?
+        }
+        SessionAction::ManagedStop { id } => {
+            crate::commands::managed::session_managed_stop(client, url, id).await?
+        }
     }
     Ok(())
 }

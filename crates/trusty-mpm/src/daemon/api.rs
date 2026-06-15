@@ -55,6 +55,17 @@ pub use claude_config_routes::*;
 pub mod coordinator_routes;
 pub use coordinator_routes::*;
 
+/// The managed session-manager routes (`/api/v1/sessions/managed/*`).
+///
+/// Why: the managed-session API is a new cohesive cluster (spawn, list, get,
+/// send, answer, attach-cmd, stop). The handlers live in
+/// [`crate::daemon::managed_routes`]; importing them here lets `router` refer to
+/// them unqualified, mirroring the `coordinator_routes` wiring.
+use super::managed_routes::{
+    answer_session_decision, get_attach_cmd, get_managed_session, list_managed_sessions,
+    send_to_session, spawn_session, stop_managed_session,
+};
+
 /// Typed HTTP response bodies for every endpoint.
 ///
 /// Why: keeping the response structs in their own module keeps `api.rs`
@@ -121,6 +132,23 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .route("/api/v1/doctor", get(doctor))
         .route("/api/v1/errors", get(list_errors))
         .route("/api/v1/report-bug", post(report_bug_http))
+        .route(
+            "/api/v1/sessions/managed",
+            post(spawn_session).get(list_managed_sessions),
+        )
+        .route(
+            "/api/v1/sessions/managed/{id}",
+            get(get_managed_session).delete(stop_managed_session),
+        )
+        .route("/api/v1/sessions/managed/{id}/send", post(send_to_session))
+        .route(
+            "/api/v1/sessions/managed/{id}/answer",
+            post(answer_session_decision),
+        )
+        .route(
+            "/api/v1/sessions/managed/{id}/attach-cmd",
+            get(get_attach_cmd),
+        )
         .merge(
             SwaggerUi::new("/api-docs")
                 .url("/api-docs/openapi.json", super::openapi::ApiDoc::openapi()),
