@@ -423,6 +423,49 @@ fn review_output_schema_enum_matches_board_grades() {
     assert_eq!(values.len(), 5, "schema must have exactly 5 board grades");
 }
 
+// The recursive strict-mode assertion lives in `llm::schema_tests`
+// (`assert_object_nodes_strict`) and is re-exported `pub(crate)` from
+// `llm::schema`. We reuse it here instead of duplicating the walk so the
+// invariant is defined in exactly one place.
+use crate::llm::schema::assert_object_nodes_strict as assert_strict;
+
+/// The review response schema must be OpenAI strict-mode compliant top-to-bottom.
+///
+/// Why: OpenRouter forwards the schema with `strict: true` for `openai/*`
+/// models; if ANY object node (top-level OR the nested `findings.items`) omits
+/// `additionalProperties:false` or fails to list every property in `required`,
+/// OpenAI rejects the request and EVERY OpenAI review fails.  This locks the
+/// recursive invariant against regression.
+/// What: builds `review_response_schema()` and walks it with `assert_strict`,
+/// then spot-checks the previously-broken `findings.items` node directly.
+/// Test: no network — pure schema inspection.
+#[test]
+fn review_schema_is_openai_strict_compliant() {
+    let schema = review_response_schema();
+    assert_strict(&schema.schema);
+
+    // Spot-check the exact node that was non-compliant before the fix.
+    let items = &schema.schema["properties"]["findings"]["items"];
+    assert_eq!(
+        items["additionalProperties"],
+        serde_json::json!(false),
+        "findings.items must set additionalProperties:false"
+    );
+    let required: std::collections::BTreeSet<&str> = items["required"]
+        .as_array()
+        .expect("findings.items.required array")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert_eq!(
+        required,
+        ["body", "confidence", "file", "line", "severity", "title"]
+            .into_iter()
+            .collect(),
+        "findings.items must require every property under strict mode"
+    );
+}
+
 /// Verify the system prompt describes UNKNOWN.
 ///
 /// Why: the model must know what UNKNOWN means and when to use it; if it is

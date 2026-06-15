@@ -551,6 +551,68 @@ async fn verify_approve_two_advisory_medium_stays_approve() {
     );
 }
 
+// ── Verify-path schema deserialization (#1235 strict-mode regression guard) ────
+//
+// Symmetric to the review path's `parse_direct_json_strict_full_shape`
+// (`parser_tests.rs`). The #1235 strict-mode fix makes `reason` a REQUIRED
+// property on the OpenAI verify schema; `#[serde(default)]` on
+// `VerifyJudgment::reason` is what keeps lenient providers (Bedrock / Anthropic /
+// Gemini) that OMIT `reason` deserializing instead of silently failing the
+// verify path. These tests pin that invariant so a future edit that drops the
+// `#[serde(default)]` fails loudly.
+
+/// Full-shape verify response (`judgment` + `reason`) deserializes and is parsed.
+///
+/// Why: proves the happy path for strict providers that emit every required
+/// field round-trips into `VerifyJudgment` and maps to the right decision.
+/// What: deserializes `{"judgment":"CONFIRMED","reason":...}` and confirms both
+/// the typed struct fields and `parse_judgment` agree it is CONFIRMED.
+/// Test: this is the test.
+#[test]
+fn verify_judgment_full_shape_deserializes() {
+    let body = serde_json::json!({
+        "judgment": "CONFIRMED",
+        "reason": "the finding is present in the diff at the cited line",
+    })
+    .to_string();
+
+    let parsed: VerifyJudgment =
+        serde_json::from_str(&body).expect("full-shape verify response must deserialize");
+    assert_eq!(parsed.judgment, "CONFIRMED");
+    assert_eq!(
+        parsed.reason,
+        "the finding is present in the diff at the cited line"
+    );
+
+    // End-to-end through the public parser entry point.
+    assert_eq!(parse_judgment(&body), Some(true));
+}
+
+/// Verify response that OMITS `reason` still deserializes (proves `#[serde(default)]`).
+///
+/// Why: lenient providers (Bedrock / Anthropic / Gemini) ignore the strict
+/// schema and may omit `reason`. Without `#[serde(default)]` on
+/// `VerifyJudgment::reason` this would fail to deserialize and silently break
+/// the verify path — the #1235 regression this PR guards against.
+/// What: deserializes `{"judgment":"REFUTED"}` (no `reason`), asserts `reason`
+/// defaults to the empty string, and that `parse_judgment` still maps REFUTED.
+/// Test: this is the test.
+#[test]
+fn verify_judgment_omits_reason_still_deserializes() {
+    let body = serde_json::json!({ "judgment": "REFUTED" }).to_string();
+
+    let parsed: VerifyJudgment = serde_json::from_str(&body)
+        .expect("verify response omitting `reason` must still deserialize (#[serde(default)])");
+    assert_eq!(parsed.judgment, "REFUTED");
+    assert_eq!(
+        parsed.reason, "",
+        "omitted `reason` must default to empty string"
+    );
+
+    // End-to-end: a reason-less judgment still yields a clean decision.
+    assert_eq!(parse_judgment(&body), Some(false));
+}
+
 // Liveness gate decision logic is tested in `verify_liveness.rs::tests`
 // (`liveness_alive_allows_start`, `liveness_model_unavailable_refuses`, etc.)
 // to keep this file under the 500-line cap and respect module ownership.

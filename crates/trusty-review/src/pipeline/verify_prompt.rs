@@ -18,7 +18,7 @@
 //! `verify_schema_enumerates_judgments` in `verify_prompt_tests.rs`.
 
 use crate::{
-    llm::{ChatMessage, LlmRequest, ResponseSchema, strip_provider_prefix},
+    llm::{ChatMessage, LlmRequest, ResponseSchema, enforce_strict_mode, strip_provider_prefix},
     models::Finding,
 };
 
@@ -105,26 +105,33 @@ Populate the structured response fields: `judgment` (CONFIRMED or REFUTED) and
 /// guessed" failure mode — the provider guarantees `LlmResponse.text` is a clean
 /// JSON object with a `judgment` enum, so a parse can never silently default.
 /// What: returns a `ResponseSchema` whose object requires `judgment` ∈
-/// {CONFIRMED, REFUTED} plus an optional one-line `reason`.
-/// Test: `verify_schema_enumerates_judgments`.
+/// {CONFIRMED, REFUTED} plus a one-line `reason`.  The schema is declared in
+/// its natural shape and then made OpenAI strict-mode compliant in one pass by
+/// [`enforce_strict_mode`] (every object node gets `additionalProperties:false`
+/// and all properties listed in `required`).  `reason` thus becomes required
+/// for strict providers; the `VerifyJudgment` deserializer keeps
+/// `#[serde(default)]` on it so lenient providers that omit it still parse.
+/// Test: `verify_schema_enumerates_judgments`,
+/// `verify_schema_is_openai_strict_compliant`.
 pub fn verify_response_schema() -> ResponseSchema {
+    let mut schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "judgment": {
+                "type": "string",
+                "enum": ["CONFIRMED", "REFUTED"],
+                "description": "Binary verification judgment for the finding"
+            },
+            "reason": {
+                "type": "string",
+                "description": "One short sentence justifying the judgment"
+            }
+        }
+    });
+    enforce_strict_mode(&mut schema);
     ResponseSchema {
         name: VERIFY_SCHEMA_NAME.to_string(),
-        schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "judgment": {
-                    "type": "string",
-                    "enum": ["CONFIRMED", "REFUTED"],
-                    "description": "Binary verification judgment for the finding"
-                },
-                "reason": {
-                    "type": "string",
-                    "description": "One short sentence justifying the judgment"
-                }
-            },
-            "required": ["judgment"]
-        }),
+        schema,
     }
 }
 

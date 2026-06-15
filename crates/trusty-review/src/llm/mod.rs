@@ -15,10 +15,12 @@ pub mod bedrock;
 pub mod error;
 pub mod models;
 pub mod openrouter;
+pub mod schema;
 
 pub use bedrock::BedrockProvider;
 pub use error::LlmError;
 pub use openrouter::OpenRouterProvider;
+pub use schema::enforce_strict_mode;
 
 use std::sync::Arc;
 

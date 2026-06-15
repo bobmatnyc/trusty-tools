@@ -28,7 +28,7 @@ use crate::{
         apex_context::ApexContextResult,
         search_client::SearchResult,
     },
-    llm::{ChatMessage, LlmRequest, ResponseSchema, strip_provider_prefix},
+    llm::{ChatMessage, LlmRequest, ResponseSchema, enforce_strict_mode, strip_provider_prefix},
     models::ReviewResult,
     voice::VoiceConfig,
 };
@@ -63,52 +63,66 @@ const REVIEW_SCHEMA_NAME: &str = "review_output";
 /// object describing the `review_output` shape expected by `parse_review_response`.
 /// The schema matches the fields that `LlmOutputBlock` deserializes.
 /// The `grade` and `grade_justification` fields were added in 0.3.4 (#732).
-/// Test: `build_review_prompt_includes_response_schema` in this module.
+///
+/// OpenAI strict mode (forwarded by OpenRouter for `openai/*` models with
+/// `strict: true`) requires EVERY `object` node to set
+/// `"additionalProperties": false` AND to list every property key in
+/// `"required"`.  Rather than hand-maintain those on each nested object — the
+/// omission on `findings.items` is exactly what blocked all OpenAI reviews —
+/// the schema is declared in its natural shape and then made strict-compliant
+/// in one pass by [`enforce_strict_mode`] (#1235).  Fields that are
+/// semantically optional are expressed as nullable types (`line`) or carry a
+/// safe default value the model emits; the `LlmOutputBlock` deserializer uses
+/// `#[serde(default)]` so both lenient (Bedrock/Anthropic, Gemini) and strict
+/// (OpenAI) responses round-trip.
+/// Test: `build_review_prompt_includes_response_schema` and
+/// `review_schema_is_openai_strict_compliant` in this module.
 pub fn review_response_schema() -> ResponseSchema {
-    ResponseSchema {
-        name: REVIEW_SCHEMA_NAME.to_string(),
-        schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "grade": {
-                    "type": "string",
-                    "enum": ["A+", "A", "A-", "B+", "B", "B-", "C+", "C", "C-", "D+", "D", "D-", "F"],
-                    "description": "Letter grade for overall PR quality (A+ = best, F = worst)"
-                },
-                "grade_justification": {
-                    "type": "string",
-                    "description": "One-line justification for the assigned grade"
-                },
-                "verdict": {
-                    "type": "string",
-                    "enum": ["APPROVE", "APPROVE*", "REQUEST_CHANGES", "BLOCK", "UNKNOWN"],
-                    "description": "Review verdict — one of the five board grades"
-                },
-                "summary": {
-                    "type": "string",
-                    "description": "One-line summary of the review"
-                },
-                "findings": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string"},
-                            "body": {"type": "string"},
-                            "severity": {
-                                "type": "string",
-                                "enum": ["low", "medium", "high", "critical"]
-                            },
-                            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                            "file": {"type": "string"},
-                            "line": {"type": ["integer", "null"]}
+    let mut schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "grade": {
+                "type": "string",
+                "enum": ["A+", "A", "A-", "B+", "B", "B-", "C+", "C", "C-", "D+", "D", "D-", "F"],
+                "description": "Letter grade for overall PR quality (A+ = best, F = worst)"
+            },
+            "grade_justification": {
+                "type": "string",
+                "description": "One-line justification for the assigned grade"
+            },
+            "verdict": {
+                "type": "string",
+                "enum": ["APPROVE", "APPROVE*", "REQUEST_CHANGES", "BLOCK", "UNKNOWN"],
+                "description": "Review verdict — one of the five board grades"
+            },
+            "summary": {
+                "type": "string",
+                "description": "One-line summary of the review"
+            },
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "body": {"type": "string"},
+                        "severity": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high", "critical"]
                         },
-                        "required": ["title", "body"]
+                        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                        "file": {"type": "string"},
+                        "line": {"type": ["integer", "null"]}
                     }
                 }
-            },
-            "required": ["grade", "grade_justification", "verdict", "summary", "findings"]
-        }),
+            }
+        }
+    });
+    // Make every object node OpenAI strict-mode compliant in one pass.
+    enforce_strict_mode(&mut schema);
+    ResponseSchema {
+        name: REVIEW_SCHEMA_NAME.to_string(),
+        schema,
     }
 }
 
