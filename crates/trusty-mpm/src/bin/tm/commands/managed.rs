@@ -56,10 +56,13 @@ struct ManagedSummary {
 /// `tm session new` — spawn a managed session from a repo + ref.
 ///
 /// Why: the operator-facing entry point to provision an isolated workspace and
-/// start a harness in it.
-/// What: POSTs repo/ref/task/name_hint to `/api/v1/sessions/managed` and prints
-/// the new session id, state, and attach command.
-/// Test: HTTP path covered by `tests/session_manager_mvp.rs`.
+/// start a harness in it, optionally selecting the runtime backend.
+/// What: POSTs repo/ref/task/name_hint/runtime to `/api/v1/sessions/managed` and
+/// prints the new session id, state, runtime, and attach command. `runtime`
+/// defaults to `claude-code`; pass `--runtime tcode` for the direct-API backend.
+/// Test: arg parsing covered by `cli_parses_session_new`; HTTP path covered by
+/// `tests/session_manager_mvp.rs`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn session_new(
     client: &reqwest::Client,
     url: &str,
@@ -67,6 +70,7 @@ pub(crate) async fn session_new(
     git_ref: String,
     task: String,
     name_hint: Option<String>,
+    runtime: String,
 ) -> anyhow::Result<()> {
     #[derive(Deserialize)]
     struct SpawnResp {
@@ -74,6 +78,8 @@ pub(crate) async fn session_new(
         name: String,
         state: String,
         attach_cmd: String,
+        #[serde(default)]
+        runtime: String,
     }
     let resp: SpawnResp = client
         .post(format!("{url}/api/v1/sessions/managed"))
@@ -82,13 +88,17 @@ pub(crate) async fn session_new(
             "ref": git_ref,
             "task": task,
             "name_hint": name_hint,
+            "runtime": runtime,
         }))
         .send()
         .await?
         .error_for_status()?
         .json()
         .await?;
-    println!("spawned {} ({}) [{}]", resp.name, resp.id, resp.state);
+    println!(
+        "spawned {} ({}) [{}] runtime={}",
+        resp.name, resp.id, resp.state, resp.runtime
+    );
     println!("  attach: {}", resp.attach_cmd);
     Ok(())
 }

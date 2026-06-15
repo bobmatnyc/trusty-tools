@@ -1,19 +1,30 @@
 //! Runtime adapter trait and concrete implementations.
 //!
 //! Why: the session manager must be able to swap different runtime backends
-//! (MVP: Claude Code CLI; future: trusty-code) without changing its own code.
-//! A trait seam here means future adapters slot in without touching the manager.
-//! What: defines [`RuntimeAdapter`] trait, [`RuntimeError`] error type, and
-//! re-exports [`ClaudeCodeAdapter`] as the only MVP implementation.
-//! Test: each adapter carries its own unit tests; `ClaudeCodeAdapter` is
-//! testable without a real tmux binary via [`FakeTmuxDriver`].
+//! (Claude Code CLI via OAuth, or trusty-code via the direct Anthropic API)
+//! without changing its own code. A trait seam here means new adapters slot in
+//! without touching the manager.
+//! What: defines [`RuntimeAdapter`] trait, [`RuntimeError`] error type, the
+//! [`RuntimeKind`] selector + its [`build_adapter`] factory, and re-exports the
+//! two concrete adapters ([`ClaudeCodeAdapter`], [`TcodeAdapter`]).
+//! Test: each adapter carries its own unit tests; both are testable without a
+//! real tmux binary via a fake tmux driver. `RuntimeKind` parsing/serde is
+//! covered by `runtime_kind_*` tests in this module.
 
 mod claude_code;
+mod tcode;
 
 pub use claude_code::ClaudeCodeAdapter;
+pub use tcode::TcodeAdapter;
 
 use std::path::Path;
+use std::str::FromStr;
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::session_manager::ManagedTmuxDriver;
 
 /// Errors produced by a runtime adapter during spawning.
 ///
@@ -63,4 +74,196 @@ pub trait RuntimeAdapter: Send + Sync {
     /// What: returns a static string like `"claude-code"` or `"tcode"`.
     /// Test: `claude_code_adapter_identifies`.
     fn identify(&self) -> &str;
+}
+
+/// Selector for which runtime backend a managed session uses.
+///
+/// Why: the spawn endpoint and `tm session new` let the operator pick a backend
+/// (`runtime=tcode` / `--runtime tcode`); the choice must survive on the
+/// persisted [`crate::session_manager::SessionRecord`] so `resume` re-spawns the
+/// SAME backend rather than silently reverting to the default.
+/// What: a two-variant enum with `Default` = [`RuntimeKind::ClaudeCode`] (so
+/// existing behavior is unchanged), stable serde wire strings (`"claude-code"`,
+/// `"tcode"`), and `FromStr` for CLI/HTTP parsing.
+/// Test: `runtime_kind_default_is_claude_code`, `runtime_kind_from_str_*`,
+/// `runtime_kind_serde_round_trip`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeKind {
+    /// Claude Code CLI over OAuth (the default; `ANTHROPIC_API_KEY` is scrubbed).
+    ClaudeCode,
+    /// trusty-code (`tcode`) over the direct Anthropic API (`ANTHROPIC_API_KEY`).
+    Tcode,
+}
+
+impl Default for RuntimeKind {
+    /// Why: existing callers that omit a runtime selector must keep getting the
+    /// Claude Code path so behavior is unchanged (#1203 acceptance criterion).
+    /// What: returns [`RuntimeKind::ClaudeCode`].
+    /// Test: `runtime_kind_default_is_claude_code`.
+    fn default() -> Self {
+        RuntimeKind::ClaudeCode
+    }
+}
+
+impl RuntimeKind {
+    /// Return the stable wire/log string for this kind.
+    ///
+    /// Why: logs, the persisted record, and the HTTP/CLI surface all need one
+    /// canonical spelling per backend so they never drift.
+    /// What: `"claude-code"` or `"tcode"` (matches the adapters' `identify()`).
+    /// Test: `runtime_kind_as_str_matches_identify`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RuntimeKind::ClaudeCode => "claude-code",
+            RuntimeKind::Tcode => "tcode",
+        }
+    }
+}
+
+impl FromStr for RuntimeKind {
+    type Err = RuntimeError;
+
+    /// Parse a runtime selector from an HTTP field or CLI flag value.
+    ///
+    /// Why: `runtime=tcode` (HTTP) and `--runtime tcode` (CLI) arrive as free
+    /// strings that must map to a known backend or be rejected with a clear
+    /// error rather than silently defaulting.
+    /// What: accepts `claude-code`/`claude`/`claude_code` → `ClaudeCode` and
+    /// `tcode`/`trusty-code` → `Tcode` (case-insensitive); any other value is a
+    /// `RuntimeError::Spawn` describing the supported values.
+    /// Test: `runtime_kind_from_str_accepts_known`, `runtime_kind_from_str_rejects_unknown`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "claude-code" | "claude_code" | "claude" => Ok(RuntimeKind::ClaudeCode),
+            "tcode" | "trusty-code" => Ok(RuntimeKind::Tcode),
+            other => Err(RuntimeError::Spawn(format!(
+                "unknown runtime '{other}'; supported values: claude-code, tcode"
+            ))),
+        }
+    }
+}
+
+/// Build the concrete [`RuntimeAdapter`] for a [`RuntimeKind`].
+///
+/// Why: the spawn and resume HTTP handlers must turn the persisted/selected
+/// runtime kind into an adapter without hard-coding `ClaudeCodeAdapter`; one
+/// factory keeps that mapping in a single place so adding a backend touches only
+/// this function and the enum.
+/// What: returns a boxed adapter wrapping the shared tmux driver — a
+/// [`ClaudeCodeAdapter`] or [`TcodeAdapter`].
+/// Test: `build_adapter_returns_matching_identify`.
+pub fn build_adapter(
+    kind: RuntimeKind,
+    tmux: Arc<dyn ManagedTmuxDriver + Send + Sync>,
+) -> Box<dyn RuntimeAdapter> {
+    match kind {
+        RuntimeKind::ClaudeCode => Box::new(ClaudeCodeAdapter::new(tmux)),
+        RuntimeKind::Tcode => Box::new(TcodeAdapter::new(tmux)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session_manager::ManagedError;
+    use std::sync::Mutex;
+
+    struct FakeTmux {
+        sends: Mutex<Vec<(String, String)>>,
+    }
+
+    impl FakeTmux {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                sends: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    impl ManagedTmuxDriver for FakeTmux {
+        fn create_session(&self, _name: &str, _workdir: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn kill_session(&self, _name: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn send_line(&self, name: &str, text: &str) -> Result<(), ManagedError> {
+            self.sends
+                .lock()
+                .unwrap()
+                .push((name.to_owned(), text.to_owned()));
+            Ok(())
+        }
+        fn capture(&self, _name: &str, _lines: u32) -> Result<String, ManagedError> {
+            Ok(String::new())
+        }
+        fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+            Ok(Vec::new())
+        }
+        fn session_exists(&self, _name: &str) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn runtime_kind_default_is_claude_code() {
+        assert_eq!(RuntimeKind::default(), RuntimeKind::ClaudeCode);
+    }
+
+    #[test]
+    fn runtime_kind_as_str_matches_identify() {
+        assert_eq!(RuntimeKind::ClaudeCode.as_str(), "claude-code");
+        assert_eq!(RuntimeKind::Tcode.as_str(), "tcode");
+    }
+
+    #[test]
+    fn runtime_kind_from_str_accepts_known() {
+        assert_eq!(
+            "claude-code".parse::<RuntimeKind>().unwrap(),
+            RuntimeKind::ClaudeCode
+        );
+        assert_eq!(
+            "CLAUDE".parse::<RuntimeKind>().unwrap(),
+            RuntimeKind::ClaudeCode
+        );
+        assert_eq!("tcode".parse::<RuntimeKind>().unwrap(), RuntimeKind::Tcode);
+        assert_eq!(
+            "trusty-code".parse::<RuntimeKind>().unwrap(),
+            RuntimeKind::Tcode
+        );
+    }
+
+    #[test]
+    fn runtime_kind_from_str_rejects_unknown() {
+        let err = "gpt".parse::<RuntimeKind>().unwrap_err();
+        assert!(err.to_string().contains("unknown runtime"));
+    }
+
+    #[test]
+    fn runtime_kind_serde_round_trip() {
+        for kind in [RuntimeKind::ClaudeCode, RuntimeKind::Tcode] {
+            let json = serde_json::to_string(&kind).unwrap();
+            let back: RuntimeKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(kind, back);
+        }
+        // The wire form must be the kebab-case spelling.
+        assert_eq!(
+            serde_json::to_string(&RuntimeKind::ClaudeCode).unwrap(),
+            "\"claude-code\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RuntimeKind::Tcode).unwrap(),
+            "\"tcode\""
+        );
+    }
+
+    #[test]
+    fn build_adapter_returns_matching_identify() {
+        let tmux = FakeTmux::new();
+        let claude = build_adapter(RuntimeKind::ClaudeCode, tmux.clone());
+        assert_eq!(claude.identify(), "claude-code");
+        let tcode = build_adapter(RuntimeKind::Tcode, tmux);
+        assert_eq!(tcode.identify(), "tcode");
+    }
 }

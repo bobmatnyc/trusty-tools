@@ -518,12 +518,40 @@ fn cli_parses_session_new() {
                     git_ref,
                     task,
                     name_hint,
+                    runtime,
                 },
         } => {
             assert_eq!(repo, "https://github.com/owner/repo");
             assert_eq!(git_ref, "feat/x");
             assert_eq!(task, "do the thing");
             assert_eq!(name_hint.as_deref(), Some("ticket-1"));
+            // No --runtime flag → default claude-code.
+            assert_eq!(runtime, "claude-code");
+        }
+        other => panic!("expected session new, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_session_new_with_tcode_runtime() {
+    // Why: #1203 — operators must be able to select the tcode backend via
+    // `--runtime tcode`; this guards the flag wiring on the New subcommand.
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "session",
+        "new",
+        "https://github.com/owner/repo",
+        "--task",
+        "do the thing",
+        "--runtime",
+        "tcode",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Session {
+            action: SessionAction::New { runtime, .. },
+        } => {
+            assert_eq!(runtime, "tcode");
         }
         other => panic!("expected session new, got {other:?}"),
     }

@@ -164,6 +164,8 @@ impl SessionManager {
     /// What: derives the tmux name from `name_hint` (→ `name_from_dir`) or from
     /// the generated UUID (→ `name_from_uuid`), creates the tmux session via the
     /// driver, persists a [`SessionRecord`] in state `Provisioning`, and returns it.
+    /// The runtime backend defaults to [`crate::runtime::RuntimeKind::ClaudeCode`]
+    /// so callers that do not care about the backend keep the pre-#1203 behavior.
     /// Test: `manager_create_record`.
     pub async fn create(
         &self,
@@ -182,6 +184,7 @@ impl SessionManager {
             workspace_path,
             repo_url,
             branch,
+            crate::runtime::RuntimeKind::default(),
         )
         .await
     }
@@ -194,11 +197,13 @@ impl SessionManager {
     /// upfront (it is embedded in the workspace path). This method lets the
     /// handler pre-generate the id, provision, and then call here with `cwd =
     /// Some(workspace_path)` so `tmux new-session -c <workspace>` is issued.
-    /// What: identical to [`create`] except the id is supplied by the caller.
-    /// Creates the tmux session at `cwd` via the driver, persists a
-    /// [`SessionRecord`] in state `Provisioning`, and returns it.
+    /// What: identical to [`create`] except the id and runtime backend are
+    /// supplied by the caller. Creates the tmux session at `cwd` via the driver,
+    /// persists a [`SessionRecord`] in state `Provisioning` carrying `runtime`,
+    /// and returns it.
     /// Test: `spawn_session_tmux_cwd_is_workspace` in session_manager/tests.rs;
-    /// `handler_spawn_creates_tmux_at_workspace_cwd` in session_manager_mvp.rs.
+    /// `handler_spawn_creates_tmux_at_workspace_cwd` in session_manager_mvp.rs;
+    /// `manager_create_persists_runtime` in session_manager/tests.rs.
     #[allow(clippy::too_many_arguments)]
     pub async fn create_with_id(
         &self,
@@ -209,6 +214,7 @@ impl SessionManager {
         workspace_path: Option<PathBuf>,
         repo_url: Option<String>,
         branch: Option<String>,
+        runtime: crate::runtime::RuntimeKind,
     ) -> Result<SessionRecord, ManagedError> {
         let cwd = cwd.unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")));
         let tmux_name = if let Some(hint) = name_hint {
@@ -255,10 +261,11 @@ impl SessionManager {
             pending_decision: None,
             proposed_default: None,
             correlation,
+            runtime,
         };
 
         self.store.write().await.upsert(record.clone()).await?;
-        info!(id = %id, name = %tmux_name, "managed session created");
+        info!(id = %id, name = %tmux_name, runtime = %runtime.as_str(), "managed session created");
         Ok(record)
     }
 
@@ -535,6 +542,9 @@ impl SessionManager {
                     pending_decision: None,
                     proposed_default: None,
                     correlation: Default::default(),
+                    // Externally-created tmux sessions have unknown provenance;
+                    // assume the default (claude-code) backend.
+                    runtime: crate::runtime::RuntimeKind::default(),
                 };
                 guard.upsert(external).await?;
                 report.external_adopted.push(name.clone());

@@ -24,7 +24,7 @@ use tracing::{info, warn};
 
 use crate::daemon::state::DaemonState;
 use crate::provisioner::WorkspaceProvisioner;
-use crate::runtime::{ClaudeCodeAdapter, RuntimeAdapter};
+use crate::runtime::{RuntimeKind, build_adapter};
 use crate::session_manager::{ManagedSessionId, ManagedSessionState, SessionRecord};
 
 // ── Request / Response shapes ─────────────────────────────────────────────────
@@ -32,9 +32,11 @@ use crate::session_manager::{ManagedSessionId, ManagedSessionState, SessionRecor
 /// Request body for POST /api/v1/sessions/managed (spawn).
 ///
 /// Why: the calling agentic process must supply the repo, ref, and task;
-/// an optional name hint overrides the auto-generated tmux session name.
-/// What: deserializable JSON body with repo_url, ref, task, and optional name_hint.
-/// Test: spawn handler test in session_manager_mvp.rs.
+/// an optional name hint overrides the auto-generated tmux session name, and an
+/// optional runtime selector picks the backend (Claude Code vs trusty-code).
+/// What: deserializable JSON body with repo_url, ref, task, optional name_hint,
+/// and optional `runtime` (`"claude-code"` | `"tcode"`; defaults to claude-code).
+/// Test: spawn handler test in session_manager_mvp.rs; `spawn_request_runtime_*`.
 #[derive(Debug, Deserialize)]
 pub struct SpawnRequest {
     /// Repository URL to provision the session workspace from.
@@ -46,6 +48,12 @@ pub struct SpawnRequest {
     pub task: String,
     /// Optional name hint overriding the auto-generated tmux session name.
     pub name_hint: Option<String>,
+    /// Optional runtime selector (`"claude-code"` | `"tcode"`).
+    ///
+    /// Absent or null → the default Claude Code path, so existing callers are
+    /// unaffected. Parsed via [`crate::runtime::RuntimeKind::from_str`]; an
+    /// unrecognized value yields a `400 Bad Request`.
+    pub runtime: Option<String>,
 }
 
 /// Response body for POST /api/v1/sessions/managed (spawn, 201 Created).
@@ -72,6 +80,8 @@ pub struct SpawnResponse {
     pub created_at: String,
     /// tmux attach command string.
     pub attach_cmd: String,
+    /// Runtime backend that hosts the session (`"claude-code"` | `"tcode"`).
+    pub runtime: String,
 }
 
 /// List response for GET /api/v1/sessions/managed.
@@ -304,6 +314,18 @@ pub async fn spawn_session(
     State(state): State<Arc<DaemonState>>,
     Json(req): Json<SpawnRequest>,
 ) -> impl IntoResponse {
+    // ── Step 0: resolve the requested runtime backend (default: claude-code) ──
+    let runtime = match req.runtime.as_deref() {
+        None => RuntimeKind::default(),
+        Some(raw) => match raw.parse::<RuntimeKind>() {
+            Ok(kind) => kind,
+            Err(e) => {
+                warn!("spawn_session: invalid runtime selector: {e}");
+                return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+            }
+        },
+    };
+
     // ── Step 1: pre-generate session id + provision isolated workspace ────────
     let workspace_root = std::env::var("TRUSTY_MPM_WORKSPACE_ROOT")
         .map(std::path::PathBuf::from)
@@ -341,6 +363,7 @@ pub async fn spawn_session(
             Some(prepared.path.clone()),
             Some(req.repo_url.clone()),
             Some(req.git_ref.clone()),
+            runtime,
         )
         .await
     {
@@ -364,14 +387,15 @@ pub async fn spawn_session(
         warn!(id = %record.id, "spawn_session: set_workspace failed: {e}");
     }
 
-    // ── Step 3: spawn Claude Code in the pane ────────────────────────────────
+    // ── Step 3: spawn the selected runtime in the pane ───────────────────────
     let tmux_arc = mgr.tmux_driver();
-    let adapter = ClaudeCodeAdapter::new(tmux_arc);
+    let adapter = build_adapter(record.runtime, tmux_arc);
     if let Err(e) = adapter.spawn(&record.tmux_name, &prepared.path, &req.task) {
         warn!(
             id = %record.id,
             name = %record.tmux_name,
-            "spawn_session: ClaudeCodeAdapter::spawn failed: {e}"
+            runtime = %record.runtime.as_str(),
+            "spawn_session: runtime adapter spawn failed: {e}"
         );
         let _ = mgr
             .mark_errored(&record.id, &format!("spawn failed: {e}"))
@@ -387,6 +411,7 @@ pub async fn spawn_session(
 
     let final_record = mgr.get(&record.id).await.unwrap_or(record);
     let attach = attach_cmd_for(&final_record.tmux_name);
+    let runtime_str = final_record.runtime.as_str().to_owned();
     let resp = SpawnResponse {
         id: final_record.id.to_string(),
         name: final_record.tmux_name,
@@ -398,6 +423,7 @@ pub async fn spawn_session(
         state: final_record.state.to_string(),
         created_at: final_record.created_at.to_rfc3339(),
         attach_cmd: attach,
+        runtime: runtime_str,
     };
     (StatusCode::CREATED, Json(resp)).into_response()
 }
@@ -550,8 +576,9 @@ pub async fn stop_managed_session_runtime(
 /// Why: after `stop`, the workspace is still on disk; `resume` brings back the
 /// runtime without re-cloning by creating a fresh tmux session with
 /// cwd = workspace_path and spawning claude inside it.
-/// What: delegates to SessionManager::resume, then calls ClaudeCodeAdapter::spawn
-/// on the fresh tmux session.
+/// What: delegates to SessionManager::resume, then re-spawns the SAME runtime
+/// backend the session was created with (via `build_adapter(record.runtime, …)`)
+/// on the fresh tmux session — a tcode session resumes on tcode, not claude-code.
 /// Test: `manager_resume_respawns_in_existing_workspace`.
 pub async fn resume_managed_session(
     State(state): State<Arc<DaemonState>>,
@@ -576,18 +603,21 @@ pub async fn resume_managed_session(
         }
     };
 
-    // Spawn claude in the fresh tmux session (no re-clone — workspace reused).
+    // Re-spawn the SAME runtime in the fresh tmux session (no re-clone —
+    // workspace reused). The backend is read from the persisted record so a
+    // tcode session resumes on tcode.
     let workspace = record
         .workspace_path
         .clone()
         .unwrap_or_else(|| record.cwd.clone());
     let tmux_arc = mgr.tmux_driver();
-    let adapter = ClaudeCodeAdapter::new(tmux_arc);
+    let adapter = build_adapter(record.runtime, tmux_arc);
     if let Err(e) = adapter.spawn(&record.tmux_name, &workspace, &record.task) {
         warn!(
             id = %record.id,
             name = %record.tmux_name,
-            "resume: ClaudeCodeAdapter::spawn failed: {e}"
+            runtime = %record.runtime.as_str(),
+            "resume: runtime adapter spawn failed: {e}"
         );
         let _ = mgr
             .mark_errored(&record.id, &format!("resume spawn failed: {e}"))

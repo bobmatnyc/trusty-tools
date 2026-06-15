@@ -395,6 +395,7 @@ async fn manager_reconcile_gone_tmux_yields_stopped() {
         pending_decision: None,
         proposed_default: None,
         correlation: Default::default(),
+        runtime: Default::default(),
     };
     // A record whose tmux session will NOT be found (simulating reboot).
     let rebooted_record = SessionRecord {
@@ -411,6 +412,7 @@ async fn manager_reconcile_gone_tmux_yields_stopped() {
         pending_decision: None,
         proposed_default: None,
         correlation: Default::default(),
+        runtime: Default::default(),
     };
     {
         let mut store = mgr.store.write().await;
@@ -469,6 +471,7 @@ async fn manager_reconcile_skips_decommissioned() {
         pending_decision: None,
         proposed_default: None,
         correlation: Default::default(),
+        runtime: Default::default(),
     };
     {
         let mut store = mgr.store.write().await;
@@ -698,6 +701,7 @@ async fn spawn_session_tmux_cwd_is_workspace() {
             Some(workspace_path.clone()),
             Some("https://github.com/owner/repo".into()),
             Some("main".into()),
+            crate::runtime::RuntimeKind::default(),
         )
         .await
         .expect("create_with_id");
@@ -739,5 +743,66 @@ async fn spawn_session_tmux_cwd_is_workspace() {
     assert!(
         workspace_path.starts_with(workspace_root.path()),
         "workspace must be under the mpm workspace root"
+    );
+}
+
+/// `create` defaults the runtime to claude-code (unchanged pre-#1203 behavior).
+///
+/// Why: every existing caller of `create` must keep getting the Claude Code
+/// backend so #1203 introduces no behavior change for the default path.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn manager_create_defaults_runtime_to_claude_code() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(PathBuf::from("/tmp/wt-d")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+
+    assert_eq!(record.runtime, crate::runtime::RuntimeKind::ClaudeCode);
+    // It must survive the round-trip through the store.
+    let reloaded = mgr.get(&record.id).await.expect("get");
+    assert_eq!(reloaded.runtime, crate::runtime::RuntimeKind::ClaudeCode);
+}
+
+/// `create_with_id` persists the caller-selected runtime on the record.
+///
+/// Why: #1203 — a tcode session must carry `runtime = Tcode` so `resume`
+/// re-spawns the SAME backend; this asserts the field is stored and reloaded.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn manager_create_persists_runtime() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let record = mgr
+        .create_with_id(
+            ManagedSessionId::new(),
+            "task".into(),
+            Some(PathBuf::from("/tmp/wt-t")),
+            None,
+            None,
+            None,
+            None,
+            crate::runtime::RuntimeKind::Tcode,
+        )
+        .await
+        .expect("create_with_id");
+
+    assert_eq!(record.runtime, crate::runtime::RuntimeKind::Tcode);
+    let reloaded = mgr.get(&record.id).await.expect("get");
+    assert_eq!(
+        reloaded.runtime,
+        crate::runtime::RuntimeKind::Tcode,
+        "runtime must survive persistence so resume re-spawns the same backend"
     );
 }

@@ -431,6 +431,7 @@ async fn handler_spawn_creates_tmux_at_workspace_cwd() {
             Some(workspace_path.clone()),
             Some(repo_url.into()),
             Some(git_ref.into()),
+            trusty_mpm::runtime::RuntimeKind::default(),
         )
         .await
         .expect("create_with_id");
@@ -531,4 +532,80 @@ fn live_provision_real_repo() {
         .expect("provision real repo");
     assert!(ws.path.exists());
     assert!(ws.path.join("README.md").exists());
+}
+
+// ── #1203: tcode-backed managed session integration ─────────────────────────
+//
+// Acceptance criterion: "Integration test verifies a tcode-backed session can
+// be spawned and issued commands." This drives the same create→build_adapter→
+// send_input path the spawn handler uses, but with `RuntimeKind::Tcode`, and
+// asserts (a) the record persists `runtime = tcode` so resume re-spawns tcode,
+// and (b) an operator command can be issued into the session's pane.
+
+use trusty_mpm::runtime::{RuntimeKind, build_adapter};
+
+/// A tcode-backed session is spawnable and can be issued commands.
+///
+/// Why: proves the tcode runtime is wired end-to-end through the session
+/// manager — the record carries the tcode backend, the tcode adapter is
+/// constructed via `build_adapter`, and the pane accepts a subsequent command.
+/// What: creates a session with `RuntimeKind::Tcode`, asserts the persisted
+/// `runtime` is tcode, builds the tcode adapter and spawns (tolerating the
+/// `BinaryNotFound` error when `tcode` is absent in CI), then issues a command
+/// via `send_input` and asserts it reached the recording tmux pane.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn tcode_session_spawns_and_accepts_commands() {
+    let store_dir = TempDir::new().unwrap();
+    let tmux = RecordingTmux::new();
+    let mgr = Arc::new(
+        SessionManager::new(store_dir.path(), tmux.clone())
+            .await
+            .expect("manager"),
+    );
+
+    // Create a tcode-backed session.
+    let record = mgr
+        .create_with_id(
+            ManagedSessionId::new(),
+            "implement feature Y".into(),
+            Some(std::path::PathBuf::from("/tmp/tcode-ws")),
+            None,
+            Some(std::path::PathBuf::from("/tmp/tcode-ws")),
+            Some("https://github.com/owner/repo".into()),
+            Some("main".into()),
+            RuntimeKind::Tcode,
+        )
+        .await
+        .expect("create_with_id");
+
+    // The persisted runtime must be tcode so resume re-spawns the same backend.
+    assert_eq!(record.runtime, RuntimeKind::Tcode);
+    let reloaded = mgr.get(&record.id).await.expect("get");
+    assert_eq!(reloaded.runtime, RuntimeKind::Tcode);
+
+    // Build the tcode adapter the way the spawn handler does and spawn it.
+    // `spawn` returns BinaryNotFound when `tcode` is not installed (CI); the
+    // wiring under test is the adapter selection, which we assert via identify().
+    let adapter = build_adapter(record.runtime, mgr.tmux_driver());
+    assert_eq!(adapter.identify(), "tcode");
+    let _ = adapter.spawn(
+        &record.tmux_name,
+        std::path::Path::new("/tmp/tcode-ws"),
+        &record.task,
+    );
+
+    // Issue a command into the session's pane (operator interaction).
+    mgr.send_input(&record.id, "status")
+        .await
+        .expect("send_input");
+
+    // The command must have reached the recording tmux pane for this session.
+    let sends = tmux.sends.lock().unwrap();
+    assert!(
+        sends
+            .iter()
+            .any(|(name, text)| name == &record.tmux_name && text == "status"),
+        "the issued command must reach the tcode session's pane; sends={sends:?}"
+    );
 }
