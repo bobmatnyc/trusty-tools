@@ -69,44 +69,53 @@ impl From<Uuid> for ManagedSessionId {
 
 /// Lifecycle state of a managed session.
 ///
-/// Why: the session manager needs to track where each session is in its
-/// lifecycle so operators and reconciliation logic can make informed decisions
-/// about what actions are valid (e.g. you cannot send input to a Dead session).
-/// What: FSM states from initial creation through active use to termination and
-/// post-mortem states for orphaned / re-adopted sessions.
+/// Why: a session ENDURES from provisioning until explicit decommissioning —
+/// the running `claude` process is transient inside an enduring session.
+/// The state machine captures where in the lifecycle a session currently sits
+/// so operators and reconciliation logic can make informed decisions.
+///
+/// FSM: `Provisioning` → `Active` ⇄ `Stopped` / `Errored` → `Decommissioned`.
+///
+/// Key invariant: `Stopped` means the RUNTIME is not running but the workspace
+/// directory and record are INTACT and RESUMABLE. Only `Decommissioned` means
+/// the workspace has been removed from disk.
+///
+/// What: five variants covering the full lifecycle from first provisioning
+/// through active use, voluntary/involuntary runtime stop, resume, and final
+/// teardown. `Dead`/`Orphaned`/`Idle`/`Adopted` are intentionally absent —
+/// a stopped-or-gone runtime must never read as "session lost".
 /// Test: `state_display`, serde round-trips in `record_serde_round_trip`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManagedSessionState {
-    /// The session has been created in the store but tmux setup is in progress.
-    Starting,
-    /// The tmux session exists and is actively running.
+    /// Workspace is being provisioned; tmux session and runtime not yet started.
+    Provisioning,
+    /// Workspace provisioned, tmux session created, runtime (claude) is running.
     Active,
-    /// The tmux session exists but has been quiet for a while.
-    Idle,
-    /// The tmux session has been killed or exited; terminal state.
-    Dead,
-    /// The session record exists in the store but no tmux session was found
-    /// during reconciliation — the daemon may have crashed.
-    Orphaned,
-    /// A tmux session with the right prefix was found during reconciliation
-    /// and adopted into the store.
-    Adopted,
-    /// The session failed to provision or spawn; the record is preserved for
-    /// post-mortem inspection but the session is not running.
+    /// Runtime is NOT running; workspace directory and record INTACT and RESUMABLE.
+    ///
+    /// Entered when: (a) the operator calls `stop`, (b) the runtime exits on its
+    /// own, or (c) the daemon restarts and finds no live tmux session for a
+    /// previously-active record (post-reboot reconciliation).
+    Stopped,
+    /// Provisioning or runtime spawn failed; record preserved for post-mortem.
+    ///
+    /// Resumable after the operator fixes the underlying issue and calls `resume`.
     Errored,
+    /// Terminal state: workspace removed from disk; only a tombstone record remains.
+    ///
+    /// Entered when the operator calls `decommission`. No resume is possible.
+    Decommissioned,
 }
 
 impl fmt::Display for ManagedSessionState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
-            Self::Starting => "starting",
+            Self::Provisioning => "provisioning",
             Self::Active => "active",
-            Self::Idle => "idle",
-            Self::Dead => "dead",
-            Self::Orphaned => "orphaned",
-            Self::Adopted => "adopted",
+            Self::Stopped => "stopped",
             Self::Errored => "errored",
+            Self::Decommissioned => "decommissioned",
         };
         write!(f, "{s}")
     }
@@ -116,10 +125,12 @@ impl fmt::Display for ManagedSessionState {
 ///
 /// Why: persistence enables crash recovery — the manager can reload all known
 /// sessions on startup and reconcile them against live tmux state rather than
-/// losing track of sessions between restarts.
+/// losing track of sessions between restarts. Records survive daemon restarts;
+/// decommissioned tombstones too, so `ls` can show history.
 /// What: captures every field needed to identify, describe, and operate on a
 /// session: its id, tmux name, working directory, human-readable task
-/// description, lifecycle state, and timestamps.
+/// description, lifecycle state, timestamps, workspace path, git coordinates,
+/// and any pending decision fields.
 /// Test: `record_serde_round_trip`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
@@ -177,12 +188,17 @@ mod tests {
 
     #[test]
     fn state_display() {
-        assert_eq!(ManagedSessionState::Starting.to_string(), "starting");
+        assert_eq!(
+            ManagedSessionState::Provisioning.to_string(),
+            "provisioning"
+        );
         assert_eq!(ManagedSessionState::Active.to_string(), "active");
-        assert_eq!(ManagedSessionState::Idle.to_string(), "idle");
-        assert_eq!(ManagedSessionState::Dead.to_string(), "dead");
-        assert_eq!(ManagedSessionState::Orphaned.to_string(), "orphaned");
-        assert_eq!(ManagedSessionState::Adopted.to_string(), "adopted");
+        assert_eq!(ManagedSessionState::Stopped.to_string(), "stopped");
+        assert_eq!(ManagedSessionState::Errored.to_string(), "errored");
+        assert_eq!(
+            ManagedSessionState::Decommissioned.to_string(),
+            "decommissioned"
+        );
     }
 
     #[test]
@@ -206,5 +222,52 @@ mod tests {
         assert_eq!(back.id, record.id);
         assert_eq!(back.tmux_name, record.tmux_name);
         assert_eq!(back.state, record.state);
+    }
+
+    #[test]
+    fn stopped_state_survives_serde() {
+        // Why: reconciliation persists Stopped state; this guards the serde
+        // round-trip for the new variant.
+        let record = SessionRecord {
+            id: ManagedSessionId::new(),
+            tmux_name: "tmpm-test".into(),
+            cwd: PathBuf::from("/tmp"),
+            task: "task".into(),
+            state: ManagedSessionState::Stopped,
+            created_at: Utc::now(),
+            last_activity_at: None,
+            workspace_path: Some(PathBuf::from("/tmp/ws")),
+            repo_url: Some("https://github.com/owner/repo".into()),
+            branch: Some("main".into()),
+            pending_decision: None,
+            proposed_default: None,
+        };
+        let json = serde_json::to_string(&record).expect("serialize");
+        let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.state, ManagedSessionState::Stopped);
+        assert_eq!(back.workspace_path, record.workspace_path);
+    }
+
+    #[test]
+    fn decommissioned_state_survives_serde() {
+        // Why: tombstone records for decommissioned sessions must survive restarts.
+        let record = SessionRecord {
+            id: ManagedSessionId::new(),
+            tmux_name: "tmpm-gone".into(),
+            cwd: PathBuf::from("/tmp"),
+            task: "task".into(),
+            state: ManagedSessionState::Decommissioned,
+            created_at: Utc::now(),
+            last_activity_at: None,
+            workspace_path: None, // removed from disk
+            repo_url: None,
+            branch: None,
+            pending_decision: None,
+            proposed_default: None,
+        };
+        let json = serde_json::to_string(&record).expect("serialize");
+        let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.state, ManagedSessionState::Decommissioned);
+        assert!(back.workspace_path.is_none());
     }
 }
