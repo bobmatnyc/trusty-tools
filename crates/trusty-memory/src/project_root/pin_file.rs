@@ -200,6 +200,38 @@ pub fn project_slug_at(start: &Path) -> Option<String> {
     Some(slug)
 }
 
+/// Return the *pinned* palace slug for the project at or above `start`, and
+/// ONLY when a committed pin file exists — never the basename fallback.
+///
+/// Why: issue #1217 inserts git-`owner/repo` identity derivation between the
+/// pin file (authoritative, rename-stable) and the directory-basename
+/// fallback. The default-palace resolver therefore needs to consult the pin
+/// file *in isolation* — if it used `project_slug_at_readonly` it would also
+/// receive the basename slug, which would shadow the new git derivation and
+/// reduce the change to a no-op inside any project directory. This helper
+/// returns `Some` strictly when a pin exists, so callers can honour the pin
+/// first and fall through to identity derivation when absent.
+/// What: walks up to the project root, reads `.trusty-tools/trusty-memory.yaml`
+/// via [`read_project_pin`], and returns `Some(pin.palace)` when present.
+/// Returns `None` when no project root is found OR no pin file exists OR the
+/// pin file is unreadable (logged, non-fatal — never panics, never writes).
+/// Test: `pinned_slug_at_returns_pin_when_present`,
+/// `pinned_slug_at_returns_none_without_pin`.
+pub fn pinned_slug_at(start: &Path) -> Option<String> {
+    let root = find_project_root(start)?;
+    match read_project_pin(&root) {
+        Ok(Some(pin)) if !pin.palace.is_empty() => Some(pin.palace),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!(
+                path = %root.join(PIN_FILE_REL).display(),
+                "could not read palace pin file ({e:#}); ignoring pin and falling through"
+            );
+            None
+        }
+    }
+}
+
 /// Derive a palace slug from the project root found at or above `start`,
 /// WITHOUT the lazy-write side-effect.
 ///
