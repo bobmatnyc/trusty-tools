@@ -394,6 +394,7 @@ async fn manager_reconcile_gone_tmux_yields_stopped() {
         branch: None,
         pending_decision: None,
         proposed_default: None,
+        correlation: Default::default(),
     };
     // A record whose tmux session will NOT be found (simulating reboot).
     let rebooted_record = SessionRecord {
@@ -409,6 +410,7 @@ async fn manager_reconcile_gone_tmux_yields_stopped() {
         branch: None,
         pending_decision: None,
         proposed_default: None,
+        correlation: Default::default(),
     };
     {
         let mut store = mgr.store.write().await;
@@ -466,6 +468,7 @@ async fn manager_reconcile_skips_decommissioned() {
         branch: None,
         pending_decision: None,
         proposed_default: None,
+        correlation: Default::default(),
     };
     {
         let mut store = mgr.store.write().await;
