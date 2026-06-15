@@ -15,7 +15,7 @@
 //! functions guarantees the host-merged manifest and the standalone one
 //! stay byte-identical.
 //!
-//! Test: `tests` below assert the tool count (23), the name string, and
+//! Test: `tests` below assert the tool count (25), the name string, and
 //! that the read/write scope split matches what `scopes_for_tool` returns
 //! for representative tools (`memory_recall` → `memory.read`,
 //! `memory_remember` → `memory.write`).
@@ -25,7 +25,7 @@ use trusty_common::mcp::ServiceDescriptor;
 use crate::openrpc::scopes_for_tool;
 use crate::tools::tool_definitions_with;
 
-/// `ServiceDescriptor` impl that advertises this crate's 23 memory tools.
+/// `ServiceDescriptor` impl that advertises this crate's 25 memory tools.
 ///
 /// Why: Lets open-mpm link trusty-memory-mcp directly and include its
 /// tools in a unified `rpc.discover` document without bespoke glue code.
@@ -33,7 +33,7 @@ use crate::tools::tool_definitions_with;
 /// mapping behind the shared trait. The struct is unit-like — there is
 /// no per-instance state — so callers can construct it with
 /// `MemoryMcpService` at the call site.
-/// Test: `tests::tools_returns_eleven`, `tests::scopes_for_read_tool`,
+/// Test: `tests::tools_returns_expected_count`, `tests::scopes_for_read_tool`,
 /// `tests::scopes_for_write_tool`, `tests::name_returns_trusty_memory`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MemoryMcpService;

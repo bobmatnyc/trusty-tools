@@ -32,10 +32,26 @@ use uuid::Uuid;
 /// Why: gives `ensure_health_probe_palace` a drawer it can check for
 /// existence to determine whether the palace data was lost — and, if lost,
 /// to re-plant it so the next probe round-trip has a healthy baseline.
-/// What: a fixed string that is recognisable in drawer dumps / logs.
-/// Test: `health_probe_self_heals_after_migration_wipe` (issue #1142).
+/// What: a fixed string with a well-known prefix (`PROBE_SENTINEL_PREFIX`)
+/// that is recognisable in drawer dumps / logs. `seed_probe_sentinel_if_absent`
+/// matches by prefix rather than exact equality so future versions can append
+/// a version tag without breaking the self-heal check (issue #1156).
+/// Test: `health_probe_self_heals_after_migration_wipe` (issue #1142),
+/// `health_sentinel_prefix_match_is_robust` (issue #1156).
 pub(crate) const PROBE_SENTINEL_CONTENT: &str =
     "__trusty_memory_health_sentinel__ issue-#1142 self-heal probe";
+
+/// Prefix used by `seed_probe_sentinel_if_absent` to identify sentinel drawers.
+///
+/// Why: Issue #1156 — matching sentinel drawers by the exact `PROBE_SENTINEL_CONTENT`
+/// string is brittle: any future version bump in the content (e.g. adding a
+/// version tag) would cause the old sentinel to be invisible to the check, forcing
+/// an unnecessary re-seed cycle. A prefix match decouples detection from the
+/// full literal so older sentinels remain recognisable even after content evolution.
+/// What: The leading token `"__trusty_memory_health_sentinel__"` is stable across
+/// versions and uniquely identifies health-probe sentinel drawers.
+/// Test: `health_sentinel_prefix_match_is_robust` in `web::tests::health_tests`.
+pub(crate) const PROBE_SENTINEL_PREFIX: &str = "__trusty_memory_health_sentinel__";
 
 use crate::AppState;
 
@@ -341,11 +357,15 @@ pub(crate) fn ensure_health_probe_palace(state: &AppState) -> Result<(), HealthP
 pub(crate) async fn seed_probe_sentinel_if_absent(
     handle: &std::sync::Arc<trusty_common::memory_core::PalaceHandle>,
 ) -> Result<bool, HealthProbeError> {
+    // Issue #1156: use a prefix match rather than exact equality so that
+    // future content changes (e.g. appending a version tag) don't make older
+    // sentinel drawers invisible to this check. The prefix `PROBE_SENTINEL_PREFIX`
+    // is stable across versions and is unique enough to identify health sentinels.
     let sentinel_present = handle
         .drawers
         .read()
         .iter()
-        .any(|d| d.content == PROBE_SENTINEL_CONTENT);
+        .any(|d| d.content.starts_with(PROBE_SENTINEL_PREFIX));
 
     if sentinel_present {
         return Ok(false);
@@ -365,9 +385,13 @@ pub(crate) async fn seed_probe_sentinel_if_absent(
         )
         .await
         .map_err(|e| HealthProbeError::EnsureProbePalace(format!("seed sentinel: {e:#}")))?;
+    // Issue #1156: include a structured `self_heal = true` field so log
+    // aggregators can alert on self-heal events without string-parsing the
+    // message (e.g. `filter[self_heal=true]` in a tracing subscriber query).
     tracing::info!(
-        "health probe: seeded sentinel drawer in {} (issue #1142 self-heal)",
-        HEALTH_PROBE_PALACE
+        palace = HEALTH_PROBE_PALACE,
+        self_heal = true,
+        "health probe: seeded sentinel drawer (issue #1142 self-heal)"
     );
     Ok(true)
 }

@@ -1,12 +1,16 @@
-//! Concurrent palace registry.
+//! Concurrent palace registry with LRU-bounded open-handle cache.
 //!
-//! Why: The service is machine-wide and must serve many concurrent requests
-//! across multiple palaces; a `DashMap<PalaceId, Arc<PalaceHandle>>` lets
-//! lookups proceed without blocking other readers or writers.
-//! What: Wraps a `DashMap` with register / get / list helpers. The
-//! `PalaceHandle` type re-exported here is the canonical retrieval handle from
-//! [`crate::retrieval`] — there is exactly one `PalaceHandle` in the crate.
-//! Test: Register two palaces on separate tasks, assert both visible via `list()`.
+//! Why: Issue #463 — each open palace holds ~3 redb file descriptors.
+//! With many palaces the daemon can exhaust the OS fd limit (EMFILE).
+//! An LRU-bounded cache lazily opens handles and evicts the least-recently-used
+//! palace when the resident count reaches `max_open_palaces`, closing its fds.
+//! The next access reopens from disk transparently.
+//! What: Wraps a `parking_lot::Mutex<LruCache<PalaceId, Arc<PalaceHandle>>>` for
+//! the open-handle set, with a `DashMap` for the knowledge-gap cache (unchanged).
+//! The maximum number of concurrently-open handles is configurable via
+//! `PalaceRegistry::with_max_open` and defaults to `DEFAULT_MAX_OPEN_PALACES`.
+//! Test: `lru_evicts_least_recently_used`, `lru_evicted_handle_reopens`, and
+//! `registry_remove_clears_cached_handle` in this module.
 
 use crate::memory_core::community::KnowledgeGap;
 use crate::memory_core::palace::{Palace, PalaceId};
@@ -14,12 +18,43 @@ use crate::memory_core::retrieval::PalaceHandle;
 use crate::memory_core::store::palace_store::PalaceStore;
 use anyhow::{Context, Result};
 use dashmap::DashMap;
+use lru::LruCache;
+use parking_lot::Mutex;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 
-#[derive(Default, Clone)]
+/// Default maximum number of palace handles to hold open simultaneously.
+///
+/// Why: Each open palace holds ~3 redb file descriptors (kg.db, index.usearch,
+/// recall.db). With a typical macOS soft fd limit of 256 and daemon overhead,
+/// 64 open palaces allows ~192 palace fds — leaving headroom for HTTP sockets,
+/// log files, and other process fds. On Linux where the soft limit is commonly
+/// 1 024 or higher, the default remains conservative; operators can raise it
+/// via `PalaceRegistry::with_max_open`.
+/// What: A compile-time constant; overridable per-instance.
+/// Test: `lru_evicts_least_recently_used` forces eviction below this limit.
+pub const DEFAULT_MAX_OPEN_PALACES: usize = 64;
+
+/// Concurrent palace registry with LRU-bounded open-handle cache (issue #463).
+///
+/// Why: Unbounded `DashMap` growth meant one fd-exhaustion crash per large
+/// workspace. The LRU strategy closes handles for idle palaces automatically
+/// so the resident fd count stays bounded regardless of palace count.
+/// What: `Mutex<LruCache<PalaceId, Arc<PalaceHandle>>>` for handles;
+/// `DashMap<PalaceId, Vec<KnowledgeGap>>` for the gap cache (unchanged).
+/// Cloning the registry is cheap — all heavyweight state lives behind `Arc`.
+/// Test: `lru_evicts_least_recently_used`, `lru_evicted_handle_reopens`.
+#[derive(Clone)]
 pub struct PalaceRegistry {
-    palaces: Arc<DashMap<PalaceId, Arc<PalaceHandle>>>,
+    /// LRU cache of open palace handles bounded by `max_open_palaces`.
+    ///
+    /// Why: `Mutex` wraps the `LruCache` (which is not `Send + Sync` on its
+    /// own) so it can be shared across async tasks via `Arc`. We use
+    /// `parking_lot::Mutex` (not `std::sync::Mutex`) because it is
+    /// `Send + Sync` and has lower overhead; we never hold it across an
+    /// `.await` point.
+    handles: Arc<Mutex<LruCache<PalaceId, Arc<PalaceHandle>>>>,
     /// Per-palace knowledge-gap cache populated by the dream cycle.
     ///
     /// Why: Issue #53 — community detection on the KG is too expensive to run
@@ -34,45 +69,124 @@ pub struct PalaceRegistry {
     gaps_cache: Arc<DashMap<PalaceId, Vec<KnowledgeGap>>>,
 }
 
+impl Default for PalaceRegistry {
+    fn default() -> Self {
+        Self::with_max_open(DEFAULT_MAX_OPEN_PALACES)
+    }
+}
+
 impl PalaceRegistry {
+    /// Create a registry with the default open-handle limit.
+    ///
+    /// Why: Most callers just want sane defaults; `new()` is the idiomatic
+    /// constructor.
+    /// What: Delegates to `with_max_open(DEFAULT_MAX_OPEN_PALACES)`.
+    /// Test: All tests that call `PalaceRegistry::new()` implicitly exercise this.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a registry with a custom open-handle limit.
+    ///
+    /// Why: Issue #463 — operators on machines with a high fd limit may want
+    /// more concurrent handles; operators running close to the fd ceiling can
+    /// reduce the cap. The test suite uses small capacities to force eviction.
+    /// What: Constructs a `LruCache` with capacity `max_open_palaces`; values
+    /// below 1 are clamped to 1.
+    /// Test: `lru_evicts_least_recently_used` uses capacity 2 to force eviction.
+    pub fn with_max_open(max_open_palaces: usize) -> Self {
+        let cap = NonZeroUsize::new(max_open_palaces.max(1)).expect("max(1) is always nonzero");
+        Self {
+            handles: Arc::new(Mutex::new(LruCache::new(cap))),
+            gaps_cache: Arc::new(DashMap::new()),
+        }
     }
 
     /// Insert a new palace handle, replacing any prior entry with the same id.
     ///
     /// Why: Registry is the single source of truth for live palaces; callers
     /// hand off ownership of a freshly built handle and the registry shares it
-    /// behind an `Arc` to all concurrent readers.
-    /// What: Reads `handle.id`, wraps the handle in `Arc`, and inserts.
+    /// behind an `Arc` to all concurrent readers. If the LRU capacity is
+    /// reached, the least-recently-used handle is evicted (its fds close).
+    /// What: Acquires the handle lock, calls `LruCache::put`, and drops the
+    /// evicted entry (if any) outside the lock so Drop doesn't run under it.
     /// Test: `register_and_get_roundtrip` re-fetches by id and compares.
     pub fn register(&self, handle: PalaceHandle) {
         let id = handle.id.clone();
-        self.palaces.insert(id, Arc::new(handle));
+        let arc = Arc::new(handle);
+        let _evicted = {
+            let mut cache = self.handles.lock();
+            cache.put(id, arc)
+        };
+        // `_evicted` drops here, outside the lock, closing fds.
     }
 
-    /// Insert an already-shared handle. Useful when the caller wants to keep
-    /// its own `Arc` reference (e.g. to mutate L1 caches under a separate lock).
+    /// Insert an already-shared handle.
+    ///
+    /// Why: Useful when the caller wants to keep its own `Arc` reference
+    /// (e.g. to mutate L1 caches under a separate lock). Semantics match
+    /// `register` — may evict the LRU handle if at capacity.
+    /// What: Acquires the lock, calls `LruCache::put`.
+    /// Test: Exercised by `open_palace` and `create_palace`.
     pub fn register_arc(&self, handle: Arc<PalaceHandle>) {
         let id = handle.id.clone();
-        self.palaces.insert(id, handle);
+        let _evicted = {
+            let mut cache = self.handles.lock();
+            cache.put(id, handle)
+        };
     }
 
-    /// Cheap clone of the `Arc` — no locking, never blocks readers.
+    /// Cheap clone of the `Arc` — promotes the entry to MRU position.
+    ///
+    /// Why: Returns the handle if present; the LRU get call also refreshes
+    /// the access order so frequently-used palaces stay in cache.
+    /// What: Acquires the lock, calls `LruCache::get`, clones the `Arc`.
+    /// Test: `register_and_get_roundtrip`, `lru_evicts_least_recently_used`.
     pub fn get(&self, id: &PalaceId) -> Option<Arc<PalaceHandle>> {
-        self.palaces.get(id).map(|r| r.clone())
+        let mut cache = self.handles.lock();
+        cache.get(id).cloned()
     }
 
+    /// Peek at a handle without promoting it to MRU position.
+    ///
+    /// Why: Introspection paths (e.g. `len`, iteration) want to inspect without
+    /// disturbing the eviction order that the request path relies on.
+    /// What: Acquires the lock, calls `LruCache::peek`.
+    /// Test: `lru_evicts_least_recently_used` uses `peek` to inspect LRU state.
+    pub fn peek(&self, id: &PalaceId) -> Option<Arc<PalaceHandle>> {
+        let cache = self.handles.lock();
+        cache.peek(id).cloned()
+    }
+
+    /// List all currently open palace ids (order not guaranteed).
+    ///
+    /// Why: `palace list` and `status` need a registry-wide view of what is
+    /// currently loaded. Note: this only returns currently-open handles; to list
+    /// all persisted palaces use `PalaceRegistry::list_palaces`.
+    /// What: Snapshots the LRU key set.
+    /// Test: `list_contains_all_registered`.
     pub fn list(&self) -> Vec<PalaceId> {
-        self.palaces.iter().map(|r| r.key().clone()).collect()
+        let cache = self.handles.lock();
+        cache.iter().map(|(k, _)| k.clone()).collect()
     }
 
+    /// Number of currently open handles.
+    ///
+    /// Why: Health and admin endpoints surface open-handle count for fd-exhaustion
+    /// monitoring.
+    /// What: Returns `LruCache::len()`.
+    /// Test: `register_and_get_roundtrip`.
     pub fn len(&self) -> usize {
-        self.palaces.len()
+        self.handles.lock().len()
     }
 
+    /// Whether the registry has no open handles.
+    ///
+    /// Why: Guard condition for startup code that expects an empty registry.
+    /// What: Returns `true` when `len() == 0`.
+    /// Test: `register_and_get_roundtrip`.
     pub fn is_empty(&self) -> bool {
-        self.palaces.is_empty()
+        self.handles.lock().is_empty()
     }
 
     /// Store the latest knowledge-gap snapshot for `palace_id`.
@@ -118,24 +232,31 @@ impl PalaceRegistry {
     /// see the missing directory instead of silently serving the stale
     /// handle from cache. Without this, the daemon would keep returning
     /// the deleted palace's KG/drawer state until the next restart.
-    /// What: Removes the registry entry and the associated gap-cache entry.
+    /// What: Removes the LRU entry and the associated gap-cache entry.
     /// Both removes are no-ops when the entries are absent, so this method
     /// is safe to call on an already-cleared id.
     /// Test: `registry_remove_clears_cached_handle`.
     pub fn remove(&self, palace_id: &PalaceId) {
-        self.palaces.remove(palace_id);
+        let _evicted = {
+            let mut cache = self.handles.lock();
+            cache.pop(palace_id)
+        };
         self.gaps_cache.remove(palace_id);
+        // `_evicted` drops here, closing fds outside the lock.
     }
 
     /// Open a palace by id, hydrating from `<data_root>/<palace_id>/` on disk.
     ///
     /// Why: The CLI and MCP server look palaces up by id; this is the single
     /// entry point for reconstructing a `PalaceHandle` from disk and
-    /// memoizing it in the registry.
-    /// What: Returns the cached `Arc<PalaceHandle>` if present; otherwise loads
-    /// metadata via `PalaceStore::load_palace`, calls `PalaceHandle::open`, and
-    /// inserts the handle.
-    /// Test: `registry_create_and_open` round-trips create -> drop -> reopen.
+    /// memoizing it in the LRU registry. If the cache is full the LRU entry
+    /// is silently evicted (its fds close); the data is safe on disk.
+    /// What: Returns the cached `Arc<PalaceHandle>` if present (promotes to MRU);
+    /// otherwise loads metadata via `PalaceStore::load_palace`, calls
+    /// `PalaceHandle::open`, and inserts the handle (may evict LRU).
+    /// Test: `registry_create_and_open` round-trips create -> drop -> reopen;
+    /// `lru_evicted_handle_reopens` verifies evicted handles are transparently
+    /// reopened.
     pub fn open_palace(&self, data_root: &Path, palace_id: &PalaceId) -> Result<Arc<PalaceHandle>> {
         if let Some(h) = self.get(palace_id) {
             return Ok(h);
@@ -154,7 +275,8 @@ impl PalaceRegistry {
     /// for further operations; combining the steps avoids a TOCTOU between
     /// save and open.
     /// What: Computes `data_dir = data_root/<id>`, writes `palace.json`, and
-    /// returns a freshly opened handle (registered in the registry).
+    /// returns a freshly opened handle (registered in the LRU cache, possibly
+    /// evicting the LRU entry if at capacity).
     /// Test: `registry_create_and_open`.
     pub fn create_palace(&self, data_root: &Path, mut palace: Palace) -> Result<Arc<PalaceHandle>> {
         // Always anchor data_dir under data_root/<id> so callers can pass a
@@ -183,13 +305,17 @@ impl PalaceRegistry {
     }
 
     /// Open a registry rooted at `data_root` and pre-hydrate every persisted
-    /// palace into the in-memory map.
+    /// palace into the in-memory LRU cache.
     ///
     /// Why: Issue #52 — production hosts (open-mpm) want a single call that
     /// brings up the full registry on daemon startup so that recall paths
     /// don't pay a lazy-open latency on the first request after a restart.
     /// Existing call sites continue to use `new()` + `open_palace()`; this is
     /// the convenience for hosts that prefer an eager warmup.
+    /// Note (issue #463): if the number of persisted palaces exceeds
+    /// `max_open_palaces`, the oldest-opened ones are evicted during hydration
+    /// — they will be lazily re-opened on first access. The LRU invariant is
+    /// maintained throughout.
     /// What: Creates `data_root` if missing, calls `PalaceStore::list_palaces`,
     /// and for each persisted palace builds a `PalaceHandle` via
     /// `PalaceHandle::open` and registers it. Errors hydrating a single palace
@@ -402,5 +528,133 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&"a".to_string()));
         assert!(ids.contains(&"b".to_string()));
+    }
+
+    /// Issue #463 — the LRU registry evicts the least-recently-used handle
+    /// when the capacity ceiling is reached, bounding resident fd usage.
+    ///
+    /// Why: With many palaces the daemon can exhaust file descriptors
+    /// (EMFILE). This test proves that the eviction policy fires correctly:
+    /// inserting a third handle into a capacity-2 registry evicts the LRU,
+    /// and the two remaining entries are the ones accessed most recently.
+    /// What: Creates a capacity-2 registry, registers "a" (LRU) then "b"
+    /// (MRU), then registers "c" — expecting "a" to be evicted. Asserts
+    /// "b" and "c" are present and "a" is gone.
+    /// Test: This test itself (issue #463 regression guard).
+    #[test]
+    fn lru_evicts_least_recently_used() {
+        let dir = tempdir().unwrap();
+        let reg = PalaceRegistry::with_max_open(2);
+
+        // Insert "a" first (will become LRU) then "b".
+        reg.register(make_handle("a", dir.path()));
+        reg.register(make_handle("b", dir.path()));
+        assert_eq!(reg.len(), 2, "two handles registered");
+
+        // "a" was inserted before "b"; inserting "c" must evict "a" (LRU).
+        reg.register(make_handle("c", dir.path()));
+        assert_eq!(reg.len(), 2, "capacity-2 registry must stay at 2");
+        assert!(
+            reg.peek(&PalaceId::new("a")).is_none(),
+            "LRU handle 'a' must have been evicted"
+        );
+        assert!(
+            reg.peek(&PalaceId::new("b")).is_some(),
+            "MRU handle 'b' must survive"
+        );
+        assert!(
+            reg.peek(&PalaceId::new("c")).is_some(),
+            "newly inserted 'c' must be present"
+        );
+    }
+
+    /// Issue #463 — a `get` call promotes the accessed handle to MRU,
+    /// protecting it from immediate eviction.
+    ///
+    /// Why: LRU eviction must respect actual access order, not insertion
+    /// order. A handle that was inserted first but subsequently accessed
+    /// should survive longer than one that was inserted more recently but
+    /// never accessed.
+    /// What: Creates a capacity-2 registry, inserts "a" then "b", accesses
+    /// "a" (promoting it to MRU), inserts "c" — expects "b" to be evicted
+    /// instead of "a".
+    /// Test: This test itself (issue #463 regression guard).
+    #[test]
+    fn lru_get_promotes_to_mru() {
+        let dir = tempdir().unwrap();
+        let reg = PalaceRegistry::with_max_open(2);
+
+        reg.register(make_handle("a", dir.path()));
+        reg.register(make_handle("b", dir.path()));
+
+        // Access "a" — promotes it to MRU; "b" is now LRU.
+        let _ = reg.get(&PalaceId::new("a"));
+
+        // Inserting "c" must evict "b" (the new LRU), not "a".
+        reg.register(make_handle("c", dir.path()));
+        assert_eq!(reg.len(), 2);
+        assert!(
+            reg.peek(&PalaceId::new("b")).is_none(),
+            "'b' must be evicted — it was LRU after 'a' was promoted"
+        );
+        assert!(
+            reg.peek(&PalaceId::new("a")).is_some(),
+            "'a' must survive — it was promoted to MRU by get()"
+        );
+        assert!(
+            reg.peek(&PalaceId::new("c")).is_some(),
+            "'c' must be present"
+        );
+    }
+
+    /// Issue #463 — an evicted palace handle is transparently reopened on
+    /// the next `open_palace` call.
+    ///
+    /// Why: Eviction closes fds but must not lose data. The handle is only
+    /// in-memory state; the authoritative store is always on disk. This test
+    /// proves that after an eviction the palace can be reopened from disk
+    /// without error and its metadata is intact.
+    /// What: Creates a capacity-1 registry, creates palace "a", then
+    /// registers "b" (evicting "a"), then calls `open_palace` for "a"
+    /// (must reopen from disk successfully) and asserts the id matches.
+    /// Test: This test itself (issue #463 regression guard).
+    #[test]
+    fn lru_evicted_handle_reopens() {
+        use crate::memory_core::palace::Palace;
+        use chrono::Utc;
+
+        let dir = tempdir().unwrap();
+        let data_root = dir.path();
+        let reg = PalaceRegistry::with_max_open(1);
+
+        // Create and persist "alpha" on disk.
+        let palace_a = Palace {
+            id: PalaceId::new("alpha"),
+            name: "Alpha".to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join("alpha"),
+        };
+        reg.create_palace(data_root, palace_a)
+            .expect("create alpha");
+        assert_eq!(reg.len(), 1, "'alpha' registered");
+
+        // Register "beta" directly — evicts "alpha" from the capacity-1 cache.
+        reg.register(make_handle("beta", data_root));
+        assert_eq!(reg.len(), 1, "capacity-1: only 'beta' remains");
+        assert!(
+            reg.peek(&PalaceId::new("alpha")).is_none(),
+            "'alpha' must have been evicted"
+        );
+
+        // Reopening "alpha" from disk must succeed.
+        let reopened = reg
+            .open_palace(data_root, &PalaceId::new("alpha"))
+            .expect("open_palace after eviction must succeed");
+        assert_eq!(reopened.id, PalaceId::new("alpha"), "reopened id matches");
+        assert!(
+            reg.peek(&PalaceId::new("alpha")).is_some(),
+            "'alpha' must be back in the cache after reopen"
+        );
     }
 }

@@ -236,16 +236,17 @@ running (started either by `trusty-memory setup`'s LaunchAgent or by
 
 ## Available MCP Tools
 
-The MCP server registers **23 tools** (authoritative source:
-`src/tools.rs` `tool_definitions`, asserted by the
+The MCP server registers **25 tools** (authoritative source:
+`src/tools/definitions.rs` `tool_definitions`, asserted by the
 `tool_definitions_lists_all_tools` test). All are exposed via both the MCP
 protocol (over the `serve --stdio` path) and the HTTP API (`/api/v1/`). The
 `palace` argument is required unless the server was started with `--palace
 <name>`. The tables below cover the primary surface; the full roster also
 includes `memory_note`, `memory_recall_all`, `palace_delete`,
 `palace_update`, `palace_compact`, `kg_gaps`, `kg_bootstrap`, `add_alias`,
-`discover_aliases`, `list_prompt_facts`, `remove_prompt_fact`, and
-`get_prompt_context`.
+`discover_aliases`, `list_prompt_facts`, `remove_prompt_fact`,
+`get_prompt_context`, `memory_send_message`, `upgrade`, and
+`console_metrics`.
 
 ### Memory tools
 
@@ -557,7 +558,7 @@ trusty-memory (this crate)          trusty-common `memory-core` feature
   axum HTTP/SSE server     ──────►  PalaceRegistry
   Unix domain socket       ──────►  usearch vector index (index.usearch)
   embedded Svelte UI               redb metadata + KG (kg.redb)
-  23 MCP tools                     fastembed (AllMiniLML6V2Q)
+  25 MCP tools                     fastembed (AllMiniLML6V2Q)
 
 trusty-memory-mcp-bridge (separate binary, PR #149)
   Claude Code stdio  ◄──pipe──►  trusty-memory UDS

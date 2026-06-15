@@ -280,7 +280,7 @@ symgraph-server = ["symgraph-parser", "axum-server"]
 # (formerly the `trusty-memory-core` crate). Pulls in usearch (HNSW
 # vector index), redb + postcard (knowledge graph + payload/chat stores),
 # git2 (git history extraction), and dashmap / chrono / regex /
-# parking_lot / thiserror / uuid utilities. Requires the bundled-ORT
+# lru / parking_lot / thiserror / uuid utilities. Requires the bundled-ORT
 # embedder variant by default so FastEmbedder is available; downstream
 # consumers can switch to the load-dynamic or CUDA variants by enabling
 # `embedder-load-dynamic` / `embedder-cuda` explicitly.
@@ -295,6 +295,7 @@ memory-core = [
     "dep:dashmap",
     "dep:futures",
     "dep:regex",
+    "dep:lru",
     "dep:parking_lot",
     "dep:thiserror",
     "dep:uuid",
