@@ -369,7 +369,11 @@ pub(crate) enum SessionAction {
         #[arg(long)]
         dir: Option<String>,
     },
-    /// Stop a session by id or friendly name.
+    /// Stop a session by id or friendly name (managed or project session).
+    ///
+    /// Managed-aware (#1218): if the id/name is a managed session, this stops its
+    /// runtime (workspace preserved, resumable); otherwise it stops the local
+    /// project session.
     Stop {
         /// Session id or friendly name (e.g. `tmpm-quiet-falcon`).
         id_or_name: String,
@@ -412,7 +416,11 @@ pub(crate) enum SessionAction {
         #[arg(long)]
         note: Option<String>,
     },
-    /// Resume a paused session.
+    /// Resume a stopped/paused session (managed or project session).
+    ///
+    /// Managed-aware (#1218): if the id/name is a managed session, this re-spawns
+    /// its runtime in the existing workspace; otherwise it resumes the local
+    /// paused project session.
     Resume {
         /// Session id or friendly name.
         id_or_name: String,

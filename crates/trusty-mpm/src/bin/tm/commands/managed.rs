@@ -45,12 +45,69 @@ pub(crate) fn deprecation_notice(old: &str, new: &str) {
 /// What: mirrors `daemon::managed_routes::SessionSummary`.
 /// Test: rendered by `ls`; round-trip covered by the integration test.
 #[derive(Debug, Deserialize)]
-struct ManagedSummary {
-    id: String,
-    name: String,
+pub(crate) struct ManagedSummary {
+    pub(crate) id: String,
+    pub(crate) name: String,
     state: String,
     #[serde(default)]
     pending_decision: Option<String>,
+}
+
+/// Decide whether an id-or-name refers to a MANAGED session, returning its UUID.
+///
+/// Why: the canonical `tm session stop`/`resume` verbs must operate on managed
+/// sessions (the documented #842 driver-skill behavior) while still serving the
+/// older local/project-session family. #1218: those verbs were routing every
+/// argument to the project-sessions API, so managed UUIDs came back "not found".
+/// This classifier is the pure decision that makes the verbs managed-aware: if
+/// the argument matches a managed session by id or friendly name, the caller
+/// routes to the managed endpoint; otherwise it falls back to project-sessions.
+/// What: scans the managed-session list, matching `id_or_name` against each
+/// session's `id` (UUID) or `name`; returns `Some(id)` on the first hit, else
+/// `None`. Matching the canonical UUID (not the input) lets a friendly-name
+/// argument resolve to the id the managed endpoints require.
+/// Test: `classify_managed_target_*` in `tests.rs`.
+pub(crate) fn classify_managed_target(
+    sessions: &[ManagedSummary],
+    id_or_name: &str,
+) -> Option<String> {
+    sessions
+        .iter()
+        .find(|s| s.id == id_or_name || s.name == id_or_name)
+        .map(|s| s.id.clone())
+}
+
+/// Resolve an id-or-name to a MANAGED session id by querying the daemon.
+///
+/// Why: `tm session stop`/`resume` need to know — before choosing an endpoint —
+/// whether the argument is a managed session (#1218). Fetching the managed list
+/// and applying [`classify_managed_target`] keeps that decision in one place and
+/// off the project-session path.
+/// What: GETs `/api/v1/sessions/managed`, deserializes the session list, and
+/// returns `classify_managed_target(&sessions, id_or_name)`. A non-200 response
+/// or a body that fails to parse yields `None` (treated as "not managed") so the
+/// caller transparently falls back to the project-session path rather than erroring.
+/// Test: HTTP wiring covered by the integration test; the matching logic by
+/// `classify_managed_target_*`.
+pub(crate) async fn resolve_managed_id(
+    client: &reqwest::Client,
+    url: &str,
+    id_or_name: &str,
+) -> Option<String> {
+    #[derive(Deserialize)]
+    struct ListResp {
+        sessions: Vec<ManagedSummary>,
+    }
+    let resp = client
+        .get(format!("{url}/api/v1/sessions/managed"))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: ListResp = resp.json().await.ok()?;
+    classify_managed_target(&body.sessions, id_or_name)
 }
 
 /// `tm session new` — spawn a managed session from a repo + ref.
