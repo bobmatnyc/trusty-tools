@@ -22,18 +22,23 @@ const MAX_SLUG_LEN: usize = 50;
 ///
 /// Why: branch names may only contain a restricted character set; titles contain
 /// spaces, punctuation, and mixed case that must be normalised to a predictable
-/// form so the same title always yields the same branch.
-/// What: lowercases, replaces any run of non-alphanumeric characters with a
-/// single `-`, trims leading/trailing `-`, then truncates to [`MAX_SLUG_LEN`] at
-/// the last `-` boundary so words are never cut mid-token. Returns `issue` when
-/// the title has no usable characters.
+/// form so the same title always yields the same branch. Non-ASCII titles
+/// (Japanese, accented Latin, Arabic) must survive slugification rather than
+/// collapsing to the `issue` fallback and colliding with every other non-ASCII
+/// title.
+/// What: lowercases, keeps Unicode alphanumerics (`char::is_alphanumeric`),
+/// replaces any run of other characters with a single `-`, trims leading/trailing
+/// `-`, then truncates to [`MAX_SLUG_LEN`] at the last `-` boundary so words are
+/// never cut mid-token. Returns `issue` only when the title has no usable
+/// alphanumeric characters at all.
 /// Test: `slugify_basic`, `slugify_collapses_punctuation`,
-/// `slugify_truncates_long_title`, `slugify_empty_falls_back`.
+/// `slugify_truncates_long_title`, `slugify_empty_falls_back`,
+/// `slugify_preserves_accented_latin`, `slugify_preserves_cjk`.
 pub(crate) fn slugify(title: &str) -> String {
     let mut slug = String::with_capacity(title.len());
     let mut prev_dash = false;
     for ch in title.chars() {
-        if ch.is_ascii_alphanumeric() {
+        if ch.is_alphanumeric() {
             slug.extend(ch.to_lowercase());
             prev_dash = false;
         } else if !prev_dash {
@@ -49,7 +54,13 @@ pub(crate) fn slugify(title: &str) -> String {
         return trimmed.to_string();
     }
     // Truncate at the last dash at or before the cap so we never split a word.
-    let cut = &trimmed[..MAX_SLUG_LEN];
+    // Find a UTF-8 char boundary at or below the cap first, since non-ASCII
+    // slugs may contain multi-byte codepoints and slicing mid-codepoint panics.
+    let mut end = MAX_SLUG_LEN;
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    let cut = &trimmed[..end];
     match cut.rfind('-') {
         Some(idx) if idx > 0 => cut[..idx].to_string(),
         _ => cut.trim_end_matches('-').to_string(),
@@ -123,15 +134,49 @@ mod tests {
             "this is a very long issue title that should be truncated at a word boundary somewhere";
         let slug = slugify(title);
         assert!(slug.len() <= MAX_SLUG_LEN, "slug too long: {slug}");
-        // Must not end on a dangling dash and must cut on a word boundary.
+        // Must not end on a dangling dash and must be a prefix of the *fully
+        // slugified* title (truncation only drops a trailing word, never
+        // rewrites earlier characters). Comparing against the slugified form —
+        // rather than a naive space→dash replace — keeps this robust to any
+        // punctuation in the title.
         assert!(!slug.ends_with('-'));
-        assert!(title.replace(' ', "-").starts_with(&slug));
+        let full = slugify(title);
+        assert!(
+            full.starts_with(&slug),
+            "slug `{slug}` is not a prefix of full slug `{full}`"
+        );
     }
 
     #[test]
     fn slugify_empty_falls_back() {
         assert_eq!(slugify(""), "issue");
         assert_eq!(slugify("!!!"), "issue");
+    }
+
+    #[test]
+    fn slugify_preserves_accented_latin() {
+        // Accented Latin must survive: lowercased and kept, not dashed away.
+        let slug = slugify("Café déjà vu");
+        assert_ne!(slug, "issue", "accented title collapsed to fallback");
+        assert_eq!(slug, "café-déjà-vu");
+    }
+
+    #[test]
+    fn slugify_preserves_cjk() {
+        // CJK titles must produce a real slug, not the `issue` fallback.
+        let slug = slugify("課題を修正する");
+        assert_ne!(slug, "issue", "CJK title collapsed to fallback");
+        assert_eq!(slug, "課題を修正する");
+    }
+
+    #[test]
+    fn slugify_truncates_multibyte_safely() {
+        // A long all-multibyte title with no dashes must truncate on a UTF-8
+        // char boundary (never panic) and stay within the byte cap.
+        let title = "あ".repeat(60);
+        let slug = slugify(&title);
+        assert!(slug.len() <= MAX_SLUG_LEN, "slug too long: {slug}");
+        assert!(!slug.is_empty());
     }
 
     #[test]
