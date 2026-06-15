@@ -102,11 +102,110 @@ to *whole Claude Code sessions* and orchestrates many concurrently.
   routed commands and session management still work; free-text reasoning returns
   a "no inference configured" notice.
 
-### 1.3 Non-goals (see §13)
+### 1.3 Non-goals (see §12)
 
-Implementing the SM in Rust; the TUI rendering (DOC-13); a graphical UI; the
+Implementing the SM in Rust; the TUI rendering (DOC-13, the UAT UI built *after*
+the stdio API — §1A.2); the deferred Telegram/Slack/Web UIs (§1A.3); the
 trust/headless-spawn auto-accept (#1269); replacing the `tm` CLI; per-project
-palace creation for the *spawned sessions* (that is separate work — §11.5).
+palace creation for the *spawned sessions* (that is separate work — §8.5).
+
+> **Interface-first note:** the **primary** interface for the initial build is
+> **direct JSON-RPC over STDIO** (§1A); all SM functionality is validated
+> headlessly over stdio before any UI is built.
+
+---
+
+## 1A. Interface strategy & roadmap (API-first) — NORMATIVE
+
+> **Read this before §2.** This section fixes *how* the SM is driven and *in what
+> order* the interfaces are built. The headline decision: **build the SM
+> API-first**, validate **all** functionality headlessly over **direct JSON-RPC
+> over STDIO** before any UI exists, then build the TUI for UAT, and defer the
+> richer UIs (Telegram / Slack / Web) to their own future tickets.
+
+### 1A.1 Primary interface = direct JSON-RPC over STDIO (NORMATIVE)
+
+- **D1A.1 — The SM core is interface-agnostic.** All SM behavior (chat,
+  orchestration, goals, session delegation, context, health) lives behind a
+  transport-neutral core. **The first and primary transport is a STDIO JSON-RPC
+  adapter**, so an external driver — e.g. a parent `claude-mpm` / PM agent — can
+  drive the SM **headlessly** to exercise **every** capability without any UI.
+- **D1A.2 — Wire conventions.** **JSON-RPC 2.0 over stdio**, one request/response
+  object per line (newline-delimited), mirroring the existing trusty-* MCP
+  `serve --stdio` pattern (`trusty-memory serve --stdio`, `trusty-search serve`).
+  Requests carry `{ "jsonrpc": "2.0", "id": <n>, "method": "<m>", "params": {…} }`;
+  responses carry `{ "jsonrpc": "2.0", "id": <n>, "result": {…} }` or
+  `{ …, "error": { "code", "message", "data" } }`. Logs go to **stderr only**
+  (CLAUDE.md daemon convention) so stdout stays clean for JSON-RPC framing.
+- **D1A.3 — The adapter is a thin mapping**, not new logic: it maps each method
+  onto the existing session-manager control surface (§2.6) + the SM agent loop
+  (§3.4). No business logic lives in the transport.
+
+#### First-cut JSON-RPC method surface (NORMATIVE starting point)
+
+| Method | Params (shape) | Result | Maps onto |
+|---|---|---|---|
+| `sm.chat` | `{ message, conv_id? }` | `{ reply, conv_id, cost? }` | SM agent loop (§3.4) + working-prompt assembly (§7.5) |
+| `sm.goals.list` | `{ status? }` | `{ goals: [Goal] }` | Goal model (§9) |
+| `sm.goals.create` | `{ description, acceptance? }` | `{ goal: Goal }` | Goal create (§9.2) |
+| `sm.goals.update` | `{ id, status?, progress?, note? }` | `{ goal: Goal }` | Goal update (§9.2) |
+| `sm.sessions.launch` | `{ workdir, model?, prompt?, goal_id? }` | `{ session_id }` | `POST /sessions` (§2.6) |
+| `sm.sessions.list` | `{}` | `{ sessions: [...] }` | `GET /sessions` (§2.6) |
+| `sm.sessions.get` | `{ session_id }` | `{ session, output?, events? }` | `GET /sessions/{id}` + `/output` + `/events` (§2.6) |
+| `sm.sessions.send` | `{ session_id, text }` | `{ ok }` | `POST /sessions/{id}/command` (§2.6) |
+| `sm.sessions.stop` | `{ session_id }` | `{ ok }` | `DELETE /sessions/{id}` (§2.6) |
+| `sm.sessions.resume` | `{ session_id }` | `{ ok }` | `POST /sessions/{id}/resume` (§2.6) |
+| `sm.sessions.kill` | `{ session_id }` | `{ ok }` | force-stop / reap (`DELETE /sessions/{id}`, `/sessions/dead`, §2.6) |
+| `sm.context.get` | `{ conv_id? }` | `{ compressed_context, recent_rounds, total_rounds, token_estimate }` | Context engine state (§7.1/§7.5) |
+| `sm.health` | `{}` | `{ ok, provider, degraded, model_tiers }` | Provider/degraded status (§5.3) |
+
+> These map directly onto the existing session-manager API (§2.6) and the SM
+> agent loop (§3.4); the adapter resolves `goal_id ↔ session_id` links (§9.3) so
+> `sm.sessions.launch` with a `goal_id` records the link.
+
+### 1A.2 Build & test sequence (NORMATIVE ordering)
+
+Validate the SM **API-first**, then build the UAT UI:
+
+1. **STDIO JSON-RPC first.** Stand up the SM core + STDIO JSON-RPC adapter and
+   validate **all** SM functionality headlessly over stdio. The reference test
+   topology is:
+
+   ```
+   claude-mpm (parent / PM)
+        ⟷  SM  (JSON-RPC over stdio)
+              ⟷  t-mpm (session-manager + spawned Claude Code sessions)
+   ```
+
+   The parent `claude-mpm`/PM drives `sm.*` methods over stdio; the SM delegates
+   by driving t-mpm's session-manager (§2.6), which spawns/observes the Claude
+   Code sessions. **Every** capability (chat, goals, launch/observe/verify,
+   context, health) must be exercisable and verifiable over stdio with no UI.
+2. **TUI for UAT, second.** Only after stdio validation, build the TUI
+   (the coordinator/SM TUI — DOC-13 / PR #1271 / epic **#1272**) for
+   user-acceptance testing. **Test the TUI using the `tmux` agent** (the
+   `session-manager-driver` / tmux harness), driving the TUI panes the same way
+   the driver drives sessions.
+3. **Richer UIs, later.** Telegram, Slack, and Web UIs are **deferred** to their
+   own future tickets (§1A.3) — each is a thin front-end over the same SM core +
+   JSON-RPC/HTTP surface.
+
+### 1A.3 Future UIs (DESIGN FOR, DO NOT BUILD NOW)
+
+All future UIs are **thin front-ends over the SM core** and the **same
+JSON-RPC/HTTP method surface** (§1A.1). They are explicitly **out of scope for the
+initial API-first build**; each becomes its own future ticket (§14 FUTURE group):
+
+| Future UI | Status | Notes |
+|---|---|---|
+| **(a) TUI** (coordinator/SM TUI) | DEFERRED — UAT UI, **built after stdio** | DOC-13 / PR #1271 / epic **#1272**; tested via the `tmux` agent. |
+| **(b) Telegram bot UI** | DEFERRED — future ticket | Thin front-end over SM core; chat + status over Telegram. |
+| **(c) Slack bot UI** | DEFERRED — future ticket | Thin front-end over SM core; chat + status over Slack. |
+| **(d) Web (console) UI** | DEFERRED — future ticket | Thin front-end over SM core; lives in `trusty-console` / `trusty-mpm-gui`. |
+
+The SM core must be designed so these attach without core changes: they all speak
+the JSON-RPC surface (or the aliased HTTP endpoints, D0.1). Building any of them
+now is out of scope.
 
 ---
 
@@ -489,14 +588,62 @@ abstractions rather than reinventing them.
   notice (matching the current `503` semantics at `coordinator_routes.rs:128-132`,
   but surfaced as a graceful notice in the SM path rather than a hard 503).
 
-### 5.4 Cost & determinism
+### 5.4 Model-tier strategy (per-task model selection) — NORMATIVE
+
+The SM runs **two distinct classes of LLM call**, and they default to **different
+model tiers** because their cost/quality profiles differ:
+
+1. **SM chat / orchestration** — the conversational brain that interprets operator
+   intent, decomposes goals, and drives the delegation loop (§3.4). The SM
+   **largely RELAYS instructions and orchestrates** rather than doing heavy
+   reasoning, so it defaults to a **MEDIUM** tier model — **Sonnet**
+   (`claude-sonnet-4-6` tier). This is the floor that keeps orchestration crisp
+   without paying for a top-tier reasoner.
+2. **Session summarization & context compaction** — the per-session
+   `last_summary` (the DOC-13 "last summarized message", §3.6) **and** the rolling
+   auto-compaction compression calls (§7.3). These are frequent, mechanical
+   summarize/compress operations, so they default to an **INEXPENSIVE** tier model
+   — **Haiku** — to keep cost low at high call volume.
+
+#### Model-tier table (defaults + rationale)
+
+| LLM task | Default tier | Default model | Rationale |
+|---|---|---|---|
+| SM chat / orchestration | **MEDIUM (Sonnet)** | `claude-sonnet-4-6` tier | SM relays + orchestrates; needs reliable instruction-following, not top-tier reasoning. |
+| Session summarization (`last_summary`) | **INEXPENSIVE (Haiku)** | Haiku tier | Frequent, short, mechanical summaries of session panes; cost-sensitive. |
+| Context auto-compaction compression (§7.3) | **INEXPENSIVE (Haiku)** | Haiku tier | Runs ≈ once per 10 rounds; lossless-on-decisions summary, not reasoning; cost-sensitive. |
+
+#### Per-task model overrides (multi-provider) — NORMATIVE
+
+The multi-provider config (openrouter / bedrock / anthropic) **must support
+per-task model overrides**, each independently resolvable on **any of the three
+providers** via the prefix-routing rule (D5.3). Two distinct model fields are
+specified (config in §10):
+
+- **`sm_model`** — the SM chat/orchestration model. Default: Sonnet tier
+  (`anthropic/claude-sonnet-4-6`, or the provider-equivalent when `provider` is
+  `openrouter`/`bedrock`).
+- **`summary_model`** — the model used for **both** per-session `last_summary`
+  **and** rolling-compaction compression. Default: Haiku tier
+  (`anthropic/claude-haiku-*`, or the provider-equivalent).
+
+Each field may carry an `openrouter/`, `bedrock/`, or `anthropic/` prefix to pin a
+specific provider for that task, overriding the active `provider` per call
+(D5.3). When a field is empty, it resolves to its tier default on the active
+provider. `compaction_model` (§7.3) is retained as a more-specific override that,
+when set, supersedes `summary_model` for the compaction call only; when unset, the
+compaction call uses `summary_model`.
+
+### 5.5 Cost & determinism
 
 - Temperature default `0.3` for the SM (lower than the current `0.7` overseer
   default — orchestration favors determinism over creativity); configurable.
 - The shared `LlmProvider` returns token usage + latency + estimated cost
   (already provided by trusty-review's trait); the SM logs per-call cost and
   exposes a running session-cost total to the TUI (DOC-13 status bar).
-- Compaction calls (§10) use a configurable (cheaper) model — see §10.3.
+- Summarization + compaction calls use the cheaper `summary_model` (Haiku tier,
+  §5.4) by default; the more-specific `compaction_model` (§7.3) overrides it for
+  the compaction call when set.
 
 
 ---
@@ -505,24 +652,35 @@ abstractions rather than reinventing them.
 
 ### 6.1 Placement
 
-The SM is a **daemon-side service** inside trusty-mpm that powers the
-`/coordinator` (and aliased `/session-manager`) endpoints. It replaces the
-current `LlmOverseer` brain (`daemon/llm_overseer.rs`) behind those endpoints.
+The SM is a **daemon-side service** inside trusty-mpm with an
+**interface-agnostic core** (§1A.1). Its **primary transport is a STDIO JSON-RPC
+adapter** (the API-first path); it *also* powers the `/coordinator` (and aliased
+`/session-manager`) HTTP endpoints, replacing the current `LlmOverseer` brain
+(`daemon/llm_overseer.rs`) behind those endpoints. UIs (TUI/Telegram/Slack/Web)
+are thin front-ends over the same surface (§1A.3).
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │ trusty-mpm daemon                                                │
 │                                                                  │
-│  DOC-13 TUI / GUI ──HTTP──► /api/v1/coordinator/chat  (alias     │
-│                              /api/v1/session-manager/chat)       │
+│  PRIMARY: claude-mpm / PM ──JSON-RPC/stdio──► SM core (§1A.1)    │
+│  ALSO:    DOC-13 TUI / GUI ──HTTP──► /api/v1/coordinator/chat    │
+│                              (alias /api/v1/session-manager/chat)│
 │                                   │                              │
 │                                   ▼                              │
+│                ┌──────────────────────────────┐                 │
+│                │ STDIO JSON-RPC adapter (§1A.1)│  thin mapping   │
+│                │  sm.chat / sm.goals.* /       │                 │
+│                │  sm.sessions.* / sm.context / │                 │
+│                │  sm.health                    │                 │
+│                └───────────────┬──────────────┘                 │
+│                                ▼                                 │
 │                         ┌───────────────────┐                   │
 │                         │ SessionManagerAgent│  (this spec)      │
-│                         │  - SmContextEngine │  §10              │
-│                         │  - SmProviders     │  §5               │
-│                         │  - SmMemory(palace)│  §11              │
-│                         │  - SmGoals         │  §12              │
+│                         │  - SmContextEngine │  §7               │
+│                         │  - SmProviders     │  §5 (tiers §5.4)  │
+│                         │  - SmMemory(palace)│  §8               │
+│                         │  - SmGoals         │  §9               │
 │                         └─────────┬─────────┘                   │
 │                 delegates by driving ▼                          │
 │            session control surface (api.rs:72-130) §2.6         │
@@ -593,11 +751,12 @@ compressed block's size (itself periodically re-compacted, §7.5).
 
 ### 7.3 The compression call
 
-- Performed by a **configurable (cheaper) model**:
-  `inference.compaction_model` (default: a small/cheap model id, e.g.
-  `openrouter/meta-llama/llama-3.1-8b-instruct:free` or
-  `anthropic/claude-haiku-*` depending on provider), falling back to the active
-  provider's model if unset.
+- Performed by a **configurable INEXPENSIVE (Haiku-tier) model** — the same
+  `summary_model` used for per-session `last_summary` (§5.4). Resolution order:
+  `inference.compaction_model` (most-specific override) → `inference.summary_model`
+  (Haiku-tier default, e.g. `anthropic/claude-haiku-*` or the provider-equivalent
+  such as `openrouter/meta-llama/llama-3.1-8b-instruct:free`) → the active
+  provider's model if both are unset.
 - Prompt: a fixed compaction instruction ("merge the prior summary and these
   evicted rounds into an updated, faithful, lossless-on-decisions summary;
   preserve goal ids, session ids, decisions, blockers, and open questions; drop
@@ -765,11 +924,21 @@ enabled = true                      # opt-in; false → legacy LlmOverseer/coord
 
 [session_manager.inference]
 provider = "auto"                   # "auto" | "openrouter" | "bedrock" | "anthropic"
-model = "anthropic/claude-sonnet-4" # may carry openrouter/ bedrock/ anthropic/ prefix
+
+# Per-task model tiers (§5.4). Each may carry an openrouter/ bedrock/ anthropic/
+# prefix to pin a provider for that task (D5.3); empty → tier default on the
+# active provider.
+sm_model = "anthropic/claude-sonnet-4-6"  # SM chat/orchestration — MEDIUM (Sonnet) tier
+summary_model = "anthropic/claude-haiku"  # session last_summary + compaction — INEXPENSIVE (Haiku) tier
+
+# Deprecated alias: `model` (kept for back-compat) is interpreted as `sm_model`
+# when `sm_model` is unset.
+model = "anthropic/claude-sonnet-4-6"     # legacy alias for sm_model
+
 fallback = []                       # e.g. ["openrouter", "bedrock"]; [] = no fallback
 temperature = 0.3
 context_token_budget = 24000        # compaction safety-valve trigger
-compaction_model = ""               # "" → use a cheap default; else explicit (prefixed) id
+compaction_model = ""               # "" → use summary_model (Haiku); else explicit (prefixed) id overrides for compaction only
 compressed_context_max_tokens = 4000
 
 # provider auth is resolved from env (not stored in config):
@@ -811,8 +980,12 @@ parse. The `config_valid_parsed` test (`config.rs:334`) is extended to cover it.
 ## 12. Out of scope
 
 - Rust implementation of anything in this spec (this is a spec-only PR).
-- The TUI rendering and slash-command modals (DOC-13 owns that).
-- A graphical/web UI for the SM (that is `trusty-console` / `trusty-mpm-gui`).
+- The TUI rendering and slash-command modals (DOC-13 owns that). The TUI itself
+  is the **UAT UI built after the stdio API is validated** (§1A.2) — out of scope
+  for the initial API-first build (epic #1272).
+- **Telegram / Slack / Web (console) UIs** — explicitly **deferred** future UIs
+  (§1A.3); each is its own future ticket (§14 FUTURE group). The Web UI lives in
+  `trusty-console` / `trusty-mpm-gui`.
 - Trust-dialog / headless-spawn auto-accept (#1269) — a blocker, not in scope.
 - Per-project palace creation for *spawned sessions* (§8.5).
 - Retiring the `/api/v1/coordinator/*` paths (alias kept per D0.1).
@@ -847,10 +1020,26 @@ parse. The `config_valid_parsed` test (`config.rs:334`) is extended to cover it.
 
 > **EPIC — Session Manager (SM) agent (DOC-14 / `SPEC-SM-AGENT-01`).**
 > Build the daemon-side LLM orchestrator behind the coordinator/session-manager
-> endpoints: multi-provider inference, delegate-all-via-session workflow + system
-> prompt, rolling auto-compaction context, a dedicated memory palace, and goal
-> tracking. Builds on DOC-13 (PR #1271) and the SM TUI epic (#1272). Ships as
-> small, independently mergeable child tickets.
+> endpoints — **API-first**: multi-provider inference with per-task model tiers
+> (Sonnet orchestration / Haiku summarization), delegate-all-via-session workflow
+> + system prompt, rolling auto-compaction context, a dedicated memory palace,
+> goal tracking, and a **STDIO JSON-RPC adapter** so the SM can be driven and
+> tested headlessly before any UI. Builds on DOC-13 (PR #1271) and the SM TUI epic
+> (#1272). Ships as small, independently mergeable child tickets.
+
+### Build order at a glance (NORMATIVE)
+
+**NOW set (API-first, this epic — build in this order):**
+SM-1 (config) → SM-2 (providers + model tiers) + SM-3 (system prompt) + SM-4
+(memory/palace) → SM-5 (compaction) → SM-6 (goals) → SM-7 (endpoint wiring) →
+**SM-STDIO (JSON-RPC stdio adapter — the headless drive/test surface)** → SM-8
+(SM↔session delegation). **All SM functionality is validated over stdio
+(SM-STDIO) before any UI is built (§1A.2).**
+
+**FUTURE set (NOT for now — each its own future ticket, §14 FUTURE):**
+**TUI (epic #1272)** — the UAT UI built *after* stdio works → **SM Telegram bot
+UI** → **SM Slack bot UI** → **SM Web (console) UI**. All are thin front-ends over
+the SM core + the same JSON-RPC/HTTP surface (§1A.3).
 
 Child tickets (small, independently shippable):
 
@@ -863,16 +1052,25 @@ Child tickets (small, independently shippable):
 - **Acceptance:** config parses (full + partial); `enabled=false` is a no-op vs
   current behavior; clippy/fmt/tests green; SLOC cap respected.
 
-### SM-2 — Multi-provider inference abstraction (openrouter/bedrock/anthropic)
+### SM-2 — Multi-provider inference abstraction + per-task model tiers
 - **Scope:** Extract trusty-review's `llm` module into a shared location
   (§5.2 D5.1); add `AnthropicProvider` (D5.2) porting trusty-agents'
   `anthropic_native`; extend prefix routing to `anthropic/` (D5.3); implement
   provider selection + precedence + optional fallback (§5.3) and cost/usage
-  logging (§5.4).
+  logging (§5.5). **Implement per-task model tiers (§5.4):** an **`sm_model`**
+  defaulting to the **Sonnet** tier (`anthropic/claude-sonnet-4-6`) for
+  chat/orchestration, and a **`summary_model`** defaulting to the **Haiku** tier
+  for session summarization + compaction; each independently resolvable on any of
+  the 3 providers via the `openrouter/`/`bedrock/`/`anthropic/` prefix.
+  `compaction_model` (when set) overrides `summary_model` for the compaction call
+  only; legacy `model` aliases `sm_model` when `sm_model` is unset.
 - **Deps:** SM-1.
 - **Acceptance:** unit tests for `resolve_provider_and_model` incl. `anthropic/`;
-  a `complete()` round-trips against each provider (mocked); precedence + degraded
-  mode covered; trusty-review still compiles against the extracted module.
+  `sm_model` resolves to Sonnet-tier and `summary_model` to Haiku-tier by default;
+  each per-task model resolvable on each of the 3 providers via prefix;
+  `compaction_model` override precedence tested; a `complete()` round-trips against
+  each provider (mocked); precedence + degraded mode covered; trusty-review still
+  compiles against the extracted module.
 
 ### SM-3 — SM system prompt + workflow instructions (delegate-all-via-session)
 - **Scope:** Add `src/assets/sm_instructions/*.md` (§4.1) with the draft text
@@ -921,17 +1119,78 @@ Child tickets (small, independently shippable):
   recall + recent rounds, §7.5); `enabled=false` falls back to `LlmOverseer`;
   alias endpoints/CLI resolve to the same handler; DOC-13 TUI unaffected.
 
+### SM-STDIO — SM JSON-RPC stdio adapter (headless drive/test surface)
+- **Scope:** Add a **direct JSON-RPC 2.0 over STDIO** adapter (the **primary**
+  transport, §1A.1) exposing the first-cut method surface: `sm.chat`,
+  `sm.goals.list/create/update`, `sm.sessions.launch/list/get/stop/resume/kill/send`,
+  `sm.context.get`, `sm.health`. The adapter is a **thin mapping** onto the
+  existing session-manager API (§2.6) + the SM agent loop (§3.4) — no business
+  logic in transport. Newline-delimited JSON-RPC on stdout, logs to stderr only
+  (mirrors trusty-* `serve --stdio`). This is the surface a parent
+  `claude-mpm`/PM drives to validate **all** SM functionality headlessly before
+  any UI (test topology in §1A.2).
+- **Deps:** SM core + provider (SM-2) + system prompt (SM-3); ideally also SM-5
+  (`sm.context.get`) and SM-6 (`sm.goals.*`) for the full surface, but `sm.chat`/
+  `sm.sessions.*`/`sm.health` are landable earlier.
+- **Acceptance:** each method round-trips over stdio (JSON-RPC 2.0 framing; stdout
+  clean, logs on stderr); `sm.chat` drives a full SM turn; `sm.sessions.launch`
+  spawns and links a session; `sm.context.get` returns the rolling context state;
+  `sm.health` reports provider + degraded + model tiers; a scripted parent driver
+  exercises chat→launch→observe→verify→goal-close end-to-end over stdio (the
+  §1A.2 sequence, step 1).
+
 ### SM-8 — SM ↔ session-manager delegation (launch/observe for all work)
 - **Scope:** Implement the delegation loop (§3.4): the SM spawns sessions via the
   control surface (§2.6), observes output/events, answers session decisions,
   applies the verification gate (§3.5), and reports; enforce the Prohibitions
   (§3.2) so the SM never does work directly.
-- **Deps:** SM-6, SM-7. (Soft-blocked by #1269 for headless spawn — gate behind
-  CLI-owned launch / operator confirm until #1269 lands.)
+- **Deps:** SM-6, SM-7, **SM-STDIO** (the delegation loop is first validated over
+  stdio). (Soft-blocked by #1269 for headless spawn — gate behind CLI-owned
+  launch / operator confirm until #1269 lands.)
 - **Acceptance:** an operator goal results in ≥1 launched session linked to the
   goal; observation drives goal progress; a goal cannot be reported done without
   observed evidence; SM attempts at direct work are refused/redirected to a
-  session (tested).
+  session (tested); the full loop is exercisable over the SM-STDIO surface.
+
+---
+
+## 14A. FUTURE ticket group (NOT for now — deferred UIs)
+
+> These tickets are **explicitly out of scope for the initial API-first build**
+> and are listed here so they can be filed as separate future issues. Each is a
+> **thin front-end over the SM core + the same JSON-RPC/HTTP surface** (§1A.3).
+> They are built **after** the NOW set above, and only after **all SM
+> functionality is validated over stdio** (SM-STDIO, §1A.2).
+
+### FUTURE: SM TUI (UAT UI) — epic #1272
+- **Scope:** The coordinator/SM TUI (DOC-13 / PR #1271 / epic **#1272**) as the
+  **UAT UI**, built **after** the stdio API is validated. **Tested via the `tmux`
+  agent** (the `session-manager-driver` / tmux harness) driving the TUI panes.
+- **Deps:** SM-STDIO (stdio surface validated first), SM-7 (endpoint wiring).
+- **Acceptance:** operator drives the full SM loop from the TUI; tmux-agent UAT
+  pass covers chat, goal surfacing, and session observation.
+
+### FUTURE: SM Telegram bot UI
+- **Scope:** A Telegram bot front-end over the SM core (chat + status + triage)
+  speaking the JSON-RPC/HTTP surface; no SM core changes.
+- **Deps:** SM-STDIO / SM-7 (a stable SM surface).
+- **Acceptance:** operator can chat with the SM and receive fleet status over
+  Telegram; all calls go through the existing SM surface.
+
+### FUTURE: SM Slack bot UI
+- **Scope:** A Slack bot front-end over the SM core (chat + status + triage)
+  speaking the JSON-RPC/HTTP surface; no SM core changes.
+- **Deps:** SM-STDIO / SM-7.
+- **Acceptance:** operator can chat with the SM and receive fleet status over
+  Slack; all calls go through the existing SM surface.
+
+### FUTURE: SM Web (console) UI
+- **Scope:** A Web/console front-end over the SM core (chat + goals + sessions),
+  living in `trusty-console` / `trusty-mpm-gui`, speaking the JSON-RPC/HTTP
+  surface; no SM core changes.
+- **Deps:** SM-STDIO / SM-7.
+- **Acceptance:** operator can drive the SM (chat, goals, sessions) from the web
+  console; all calls go through the existing SM surface.
 
 ---
 
@@ -940,3 +1199,15 @@ Child tickets (small, independently shippable):
 - **2026-06-15** — Initial draft (DOC-14). Investigation of current coordinator
   inference, trusty-review provider abstraction, PM instruction composition, and
   memory/palace state; spec authored; EPIC + 8 child tickets defined.
+- **2026-06-15** — Amendment (DOC-14). Added **model-tier strategy** (§5.4):
+  Sonnet-tier `sm_model` for chat/orchestration, Haiku-tier `summary_model` for
+  session summarization + compaction, with per-task overrides resolvable on any of
+  the 3 providers (config §10; compaction §7.3). Added **interface strategy &
+  roadmap** (§1A): direct **JSON-RPC over STDIO** as the primary API-first
+  transport with a first-cut method surface (`sm.chat`, `sm.goals.*`,
+  `sm.sessions.*`, `sm.context.get`, `sm.health`); explicit **build & test
+  sequence** (stdio first → TUI for UAT via the tmux agent → defer Telegram/Slack/
+  Web); reflected in the architecture diagram (§6.1) and out-of-scope (§12).
+  Reworked the ticket breakdown: NOW-vs-FUTURE build order, added **SM-STDIO**,
+  updated **SM-2** for per-task model tiers, added the **FUTURE** ticket group
+  (TUI #1272 UAT + Telegram/Slack/Web).
