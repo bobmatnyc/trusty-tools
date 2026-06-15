@@ -106,28 +106,44 @@ impl Default for SupervisorConfig {
 }
 
 impl SupervisorConfig {
-    /// Build a config from the documented environment variables.
+    /// Build a config from the process environment.
     ///
     /// Why: the supervisor is launched unattended by launchd/systemd, which can
-    /// only pass configuration through the environment; this is the single place
-    /// that maps env vars onto the typed config.
-    /// What: reads [`ENV_AUTO_RESUME`], [`ENV_INTERVAL_SECS`], [`ENV_CLASSIFY_IDLE`],
-    /// and [`ENV_METRICS_ADDR`], each falling back to its default on absence or a
-    /// parse failure.
-    /// Test: `auto_resume_env_parsing`, `interval_env_parsing`,
-    /// `classify_idle_env_parsing`, `metrics_addr_env_parsing`.
+    /// only pass configuration through the environment; this is the production
+    /// entry point that maps the real process env onto the typed config.
+    /// What: delegates to [`Self::from_env_with`] with a resolver backed by
+    /// [`std::env::var`], reading [`ENV_AUTO_RESUME`], [`ENV_INTERVAL_SECS`],
+    /// [`ENV_CLASSIFY_IDLE`], and [`ENV_METRICS_ADDR`], each falling back to its
+    /// default on absence or a parse failure.
+    /// Test: covered transitively by the `*_env_parsing` tests, which exercise the
+    /// shared [`Self::from_env_with`] logic with an injected resolver.
     pub fn from_env() -> Self {
+        Self::from_env_with(|key| std::env::var(key).ok())
+    }
+
+    /// Build a config from an injectable environment resolver.
+    ///
+    /// Why: the original `from_env` read the process-wide environment directly,
+    /// which forced its tests to call `std::env::set_var`/`remove_var` — a global
+    /// mutation that flakes under parallel test execution. Threading the env
+    /// through a resolver closure lets tests inject a deterministic fake map with
+    /// zero process-wide state, while production passes [`std::env::var`].
+    /// What: for each documented variable, calls `get(key)` to obtain its raw
+    /// value, parses it, and falls back to the [`Self::default`] value on absence
+    /// or a parse failure; the parsing/fallback rules are identical to the legacy
+    /// `from_env`.
+    /// Test: `auto_resume_env_parsing`, `interval_env_parsing`,
+    /// `classify_idle_env_parsing`, `metrics_addr_env_parsing`, `config_defaults`.
+    pub fn from_env_with(get: impl Fn(&str) -> Option<String>) -> Self {
         let defaults = Self::default();
-        let auto_resume = env_bool(ENV_AUTO_RESUME).unwrap_or(defaults.auto_resume);
-        let classify_idle = env_bool(ENV_CLASSIFY_IDLE).unwrap_or(defaults.classify_idle);
-        let interval = std::env::var(ENV_INTERVAL_SECS)
-            .ok()
+        let auto_resume = env_bool(&get, ENV_AUTO_RESUME).unwrap_or(defaults.auto_resume);
+        let classify_idle = env_bool(&get, ENV_CLASSIFY_IDLE).unwrap_or(defaults.classify_idle);
+        let interval = get(ENV_INTERVAL_SECS)
             .and_then(|v| v.trim().parse::<u64>().ok())
             .filter(|s| *s > 0)
             .map(Duration::from_secs)
             .unwrap_or(defaults.interval);
-        let metrics_addr = std::env::var(ENV_METRICS_ADDR)
-            .ok()
+        let metrics_addr = get(ENV_METRICS_ADDR)
             .and_then(|v| v.trim().parse::<SocketAddr>().ok())
             .unwrap_or(defaults.metrics_addr);
         Self {
@@ -139,16 +155,18 @@ impl SupervisorConfig {
     }
 }
 
-/// Parse a boolean-ish environment variable.
+/// Parse a boolean-ish environment variable via a resolver.
 ///
 /// Why: the env contract accepts `1`/`true`/`yes`/`on` (and their negatives) so
 /// operators are not surprised by which spelling works; sharing one parser keeps
-/// every boolean flag consistent.
+/// every boolean flag consistent. Taking the value through a resolver (rather than
+/// reading `std::env` directly) keeps [`SupervisorConfig::from_env_with`] testable
+/// without process-wide mutation.
 /// What: returns `Some(true)` for truthy spellings, `Some(false)` for falsy ones,
-/// and `None` when the var is unset or unrecognized (so the caller keeps its default).
-/// Test: `env_bool_recognizes_truthy_and_falsy`.
-fn env_bool(key: &str) -> Option<bool> {
-    let raw = std::env::var(key).ok()?;
+/// and `None` when the var is absent or unrecognized (so the caller keeps its default).
+/// Test: `env_bool_recognizes_truthy_and_falsy`, `auto_resume_env_parsing`.
+fn env_bool(get: impl Fn(&str) -> Option<String>, key: &str) -> Option<bool> {
+    let raw = get(key)?;
     match raw.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
         "0" | "false" | "no" | "off" => Some(false),

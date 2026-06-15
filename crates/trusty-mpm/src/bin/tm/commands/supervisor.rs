@@ -73,14 +73,19 @@ pub(crate) async fn run_supervisor(
         None
     };
 
-    // Spawn the /metrics + /health server.
+    // Bind the /metrics + /health listener BEFORE the loop so a port collision
+    // fails fast (propagated out of run_supervisor) instead of leaving the
+    // supervisor running for hours with no metrics endpoint.
     let handle = trusty_mpm::supervisor::new_handle();
     let metrics_addr = cfg.metrics_addr;
+    let listener = trusty_mpm::supervisor::http::bind(metrics_addr).await?;
+
+    // Now that the port is confirmed free, serve on the bound listener. We keep
+    // the JoinHandle and select on it inside the loop so a later serve failure
+    // surfaces rather than being swallowed by a detached task.
     let server_handle = handle.clone();
-    tokio::spawn(async move {
-        if let Err(e) = trusty_mpm::supervisor::http::serve(server_handle, metrics_addr).await {
-            tracing::error!("supervisor metrics server exited: {e}");
-        }
+    let mut server_task = tokio::spawn(async move {
+        trusty_mpm::supervisor::http::serve_on(listener, server_handle).await
     });
 
     tracing::info!(
@@ -92,5 +97,21 @@ pub(crate) async fn run_supervisor(
     );
 
     let supervisor = Supervisor::new(mgr, cfg, monitor);
-    supervisor.run(handle).await
+    // Race the supervisor loop against the metrics server task: if the server
+    // dies (serve error or panic), abort the supervisor and propagate the error
+    // instead of running on without observability.
+    tokio::select! {
+        loop_result = supervisor.run(handle) => loop_result,
+        server_result = &mut server_task => {
+            match server_result {
+                Ok(Ok(())) => {
+                    anyhow::bail!("supervisor metrics server exited unexpectedly")
+                }
+                Ok(Err(e)) => Err(e.context("supervisor metrics server failed")),
+                Err(join_err) => {
+                    Err(anyhow::anyhow!("supervisor metrics server task panicked: {join_err}"))
+                }
+            }
+        }
+    }
 }

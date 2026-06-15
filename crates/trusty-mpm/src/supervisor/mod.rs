@@ -24,6 +24,7 @@ pub mod http;
 #[cfg(test)]
 mod tests;
 
+use std::future::Future;
 use std::sync::Arc;
 
 use tracing::{info, warn};
@@ -121,19 +122,43 @@ impl<C: LlmClassifier> Supervisor<C> {
         m
     }
 
-    /// Run the supervisor loop forever, publishing snapshots after each sweep.
+    /// Run the supervisor loop until an OS shutdown signal arrives.
     ///
     /// Why: this is the unattended heartbeat — it keeps the fleet moving (auto-
     /// resume), keeps observing (classification), and keeps the `/metrics`
-    /// snapshot fresh, with no live caller, until the process is signalled to stop.
-    /// What: on an interval timer (`cfg.interval`), runs [`Self::tick`], then
-    /// writes [`Self::snapshot`] into the shared `handle` so HTTP readers see the
-    /// latest state. The loop never returns under normal operation; a fleet sweep
-    /// that errors internally is already degraded-handled inside `run_tick`.
-    /// Test: the per-iteration behavior is tested via `tick` + `snapshot`; the
-    /// timer wrapper itself is a thin shell exercised at runtime.
+    /// snapshot fresh, with no live caller. Per the project's connection-safe
+    /// restart convention (CLAUDE.md #534) it must stop *cleanly* on SIGTERM /
+    /// Ctrl-C: never killed mid-sweep, so a `cargo install` + restart cannot
+    /// interrupt a half-applied auto-resume.
+    /// What: delegates to [`Self::run_until`] with a shutdown future that resolves
+    /// on `SIGTERM` (unix) or Ctrl-C, so the loop finishes the in-flight sweep,
+    /// emits a final tracing line, and returns `Ok(())`.
+    /// Test: the per-iteration behavior is tested via `tick` + `snapshot`; clean
+    /// shutdown is tested via `run_until` with an injected shutdown future
+    /// (`supervisor_run_until_stops_cleanly`).
     #[cfg(feature = "daemon")]
-    pub async fn run(mut self, handle: http::MetricsHandle) -> anyhow::Result<()> {
+    pub async fn run(self, handle: http::MetricsHandle) -> anyhow::Result<()> {
+        self.run_until(handle, shutdown_signal()).await
+    }
+
+    /// Run the supervisor loop until `shutdown` resolves, publishing snapshots.
+    ///
+    /// Why: a bare `loop { timer.tick().await; … }` is killed mid-sweep when the
+    /// process is signalled, which can leave an auto-resume half-applied. Selecting
+    /// the timer tick against an injectable shutdown future gives a clean stop AND
+    /// keeps the loop testable: production passes the OS-signal future, a unit test
+    /// passes a future it controls (e.g. a oneshot) to trigger a deterministic stop.
+    /// What: on an interval timer (`cfg.interval`), `select!`s the next tick against
+    /// `shutdown`. On a tick it runs [`Self::tick`] and republishes [`Self::snapshot`]
+    /// into `handle`; once `shutdown` resolves it breaks the loop *after* any
+    /// in-flight sweep completes, logs a final line, and returns `Ok(())`.
+    /// Test: `supervisor_run_until_stops_cleanly`.
+    #[cfg(feature = "daemon")]
+    pub async fn run_until(
+        mut self,
+        handle: http::MetricsHandle,
+        shutdown: impl Future<Output = ()>,
+    ) -> anyhow::Result<()> {
         info!(
             interval_secs = self.cfg.interval.as_secs(),
             auto_resume = self.cfg.auto_resume,
@@ -150,10 +175,65 @@ impl<C: LlmClassifier> Supervisor<C> {
         // Publish an initial snapshot before the first sleep so /metrics is
         // populated immediately on startup rather than after one full interval.
         *handle.write().await = self.snapshot().await;
+        // Pin the shutdown future so it can be polled across loop iterations.
+        let mut shutdown = std::pin::pin!(shutdown);
         loop {
-            timer.tick().await;
-            self.tick().await;
-            *handle.write().await = self.snapshot().await;
+            tokio::select! {
+                // Bias toward shutdown so a signal that arrives during a long
+                // interval is never starved by the timer.
+                biased;
+                () = &mut shutdown => {
+                    info!(
+                        sweeps = self.stats.sweeps,
+                        auto_resumed = self.stats.auto_resumed,
+                        "supervisor received shutdown signal; stopping cleanly"
+                    );
+                    return Ok(());
+                }
+                _ = timer.tick() => {
+                    self.tick().await;
+                    *handle.write().await = self.snapshot().await;
+                }
+            }
         }
+    }
+}
+
+/// Resolve when the process receives an OS shutdown signal (SIGTERM / Ctrl-C).
+///
+/// Why: an unattended launchd/systemd daemon is stopped with `SIGTERM`
+/// (`launchctl bootout`), and an interactive run is stopped with Ctrl-C
+/// (`SIGINT`); the supervisor must treat either as a clean-shutdown request so it
+/// never dies mid-sweep (CLAUDE.md #534).
+/// What: completes on the first of `SIGTERM` (unix only) or Ctrl-C; on a signal
+/// installation error it logs and resolves immediately (fail-stop rather than
+/// hang). Side-effect-only beyond the returned future.
+/// Test: covered indirectly — `run`'s shutdown path is unit-tested via
+/// `run_until` with an injected future, since real OS signals can't be raised
+/// deterministically in a parallel test binary.
+#[cfg(feature = "daemon")]
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            warn!("failed to listen for Ctrl-C: {e}");
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => warn!("failed to install SIGTERM handler: {e}"),
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
     }
 }

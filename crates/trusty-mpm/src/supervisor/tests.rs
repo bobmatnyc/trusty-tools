@@ -170,6 +170,7 @@ async fn seed_sessions(
             pending_decision: None,
             proposed_default: None,
             correlation: Default::default(),
+            runtime: Default::default(),
         };
         store.upsert(rec).await.expect("seed upsert");
         ids.push(id);
@@ -180,6 +181,24 @@ async fn seed_sessions(
 
 // ── Config tests ─────────────────────────────────────────────────────────────
 
+/// Build an env resolver over a fixed `(key, value)` map.
+///
+/// Why: the `*_env_parsing` tests must exercise `SupervisorConfig::from_env_with`
+/// with deterministic input and NO process-wide mutation, so they cannot flake
+/// when the test runner schedules them on parallel threads. A closure over a local
+/// `HashMap` is the injectable fake env.
+/// What: returns an `impl Fn(&str) -> Option<String>` that looks each key up in the
+/// supplied pairs, mirroring `std::env::var(key).ok()`.
+/// Test: used by `auto_resume_env_parsing`, `interval_env_parsing`,
+/// `classify_idle_env_parsing`, `metrics_addr_env_parsing`.
+fn fake_env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+    let map: HashMap<String, String> = pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect();
+    move |key: &str| map.get(key).cloned()
+}
+
 #[test]
 fn config_defaults() {
     let c = SupervisorConfig::default();
@@ -187,53 +206,67 @@ fn config_defaults() {
     assert!(!c.auto_resume);
     assert!(c.classify_idle);
     assert_eq!(c.metrics_addr.to_string(), "127.0.0.1:7881");
+    // An empty injected env yields the same defaults (no process env touched).
+    let from_empty = SupervisorConfig::from_env_with(fake_env(&[]));
+    assert_eq!(from_empty, c);
 }
 
 #[test]
 fn auto_resume_env_parsing() {
-    // SAFETY: single-threaded test; we restore by removing afterward. Env-var
-    // tests in this crate already use this pattern (see activity monitor tests).
-    unsafe { std::env::set_var(ENV_AUTO_RESUME, "true") };
-    assert!(SupervisorConfig::from_env().auto_resume);
-    unsafe { std::env::set_var(ENV_AUTO_RESUME, "0") };
-    assert!(!SupervisorConfig::from_env().auto_resume);
-    unsafe { std::env::remove_var(ENV_AUTO_RESUME) };
+    // Injected env — no std::env::set_var, so this is parallel-safe.
+    let on = SupervisorConfig::from_env_with(fake_env(&[(ENV_AUTO_RESUME, "true")]));
+    assert!(on.auto_resume);
+    let off = SupervisorConfig::from_env_with(fake_env(&[(ENV_AUTO_RESUME, "0")]));
+    assert!(!off.auto_resume);
+    // Absent → default (off).
+    let unset = SupervisorConfig::from_env_with(fake_env(&[]));
+    assert!(!unset.auto_resume);
 }
 
 #[test]
 fn interval_env_parsing() {
-    unsafe { std::env::set_var(ENV_INTERVAL_SECS, "5") };
-    assert_eq!(SupervisorConfig::from_env().interval.as_secs(), 5);
+    let five = SupervisorConfig::from_env_with(fake_env(&[(ENV_INTERVAL_SECS, "5")]));
+    assert_eq!(five.interval.as_secs(), 5);
     // Zero is rejected (falls back to default), as is garbage.
-    unsafe { std::env::set_var(ENV_INTERVAL_SECS, "0") };
-    assert_eq!(SupervisorConfig::from_env().interval.as_secs(), 30);
-    unsafe { std::env::set_var(ENV_INTERVAL_SECS, "notanumber") };
-    assert_eq!(SupervisorConfig::from_env().interval.as_secs(), 30);
-    unsafe { std::env::remove_var(ENV_INTERVAL_SECS) };
+    let zero = SupervisorConfig::from_env_with(fake_env(&[(ENV_INTERVAL_SECS, "0")]));
+    assert_eq!(zero.interval.as_secs(), 30);
+    let garbage = SupervisorConfig::from_env_with(fake_env(&[(ENV_INTERVAL_SECS, "notanumber")]));
+    assert_eq!(garbage.interval.as_secs(), 30);
 }
 
 #[test]
 fn classify_idle_env_parsing() {
-    unsafe { std::env::set_var(ENV_CLASSIFY_IDLE, "off") };
-    assert!(!SupervisorConfig::from_env().classify_idle);
-    unsafe { std::env::remove_var(ENV_CLASSIFY_IDLE) };
+    let off = SupervisorConfig::from_env_with(fake_env(&[(ENV_CLASSIFY_IDLE, "off")]));
+    assert!(!off.classify_idle);
     // Unset → default (enabled).
-    assert!(SupervisorConfig::from_env().classify_idle);
+    let unset = SupervisorConfig::from_env_with(fake_env(&[]));
+    assert!(unset.classify_idle);
 }
 
 #[test]
 fn metrics_addr_env_parsing() {
-    unsafe { std::env::set_var(ENV_METRICS_ADDR, "127.0.0.1:9999") };
-    assert_eq!(
-        SupervisorConfig::from_env().metrics_addr.to_string(),
-        "127.0.0.1:9999"
-    );
-    unsafe { std::env::set_var(ENV_METRICS_ADDR, "garbage") };
-    assert_eq!(
-        SupervisorConfig::from_env().metrics_addr.to_string(),
-        "127.0.0.1:7881"
-    );
-    unsafe { std::env::remove_var(ENV_METRICS_ADDR) };
+    let custom = SupervisorConfig::from_env_with(fake_env(&[(ENV_METRICS_ADDR, "127.0.0.1:9999")]));
+    assert_eq!(custom.metrics_addr.to_string(), "127.0.0.1:9999");
+    // Garbage falls back to the default address.
+    let garbage = SupervisorConfig::from_env_with(fake_env(&[(ENV_METRICS_ADDR, "garbage")]));
+    assert_eq!(garbage.metrics_addr.to_string(), "127.0.0.1:7881");
+}
+
+#[test]
+fn env_bool_recognizes_truthy_and_falsy() {
+    // Every documented truthy spelling enables auto-resume…
+    for truthy in ["1", "true", "yes", "on", "TRUE", " On "] {
+        let c = SupervisorConfig::from_env_with(fake_env(&[(ENV_AUTO_RESUME, truthy)]));
+        assert!(c.auto_resume, "{truthy:?} should be truthy");
+    }
+    // …and every falsy spelling keeps it off.
+    for falsy in ["0", "false", "no", "off", "FALSE"] {
+        let c = SupervisorConfig::from_env_with(fake_env(&[(ENV_AUTO_RESUME, falsy)]));
+        assert!(!c.auto_resume, "{falsy:?} should be falsy");
+    }
+    // Unrecognized spelling → fall back to the default (off).
+    let unknown = SupervisorConfig::from_env_with(fake_env(&[(ENV_AUTO_RESUME, "maybe")]));
+    assert!(!unknown.auto_resume);
 }
 
 // ── Metrics tests ────────────────────────────────────────────────────────────
@@ -253,6 +286,7 @@ fn rec(state: ManagedSessionState, pending: Option<&str>) -> SessionRecord {
         pending_decision: pending.map(|s| s.to_owned()),
         proposed_default: None,
         correlation: Default::default(),
+        runtime: Default::default(),
     }
 }
 
@@ -504,6 +538,50 @@ mod http_tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn supervisor_run_until_stops_cleanly() {
+        // The loop must finish cleanly when its injected shutdown future resolves,
+        // having published at least the initial snapshot — never killed mid-sweep.
+        let dir = TempDir::new().unwrap();
+        let ws = TempDir::new().unwrap();
+        let tmux = FakeTmux::new();
+        let mgr = make_manager(&dir, tmux.clone()).await;
+        seed_sessions(&mgr, 2, ManagedSessionState::Stopped, &ws).await;
+
+        // A long interval guarantees the loop is parked on the timer when the
+        // shutdown signal fires, exercising the biased select's shutdown arm.
+        let cfg = SupervisorConfig {
+            interval: std::time::Duration::from_secs(3600),
+            auto_resume: true,
+            classify_idle: false,
+            ..SupervisorConfig::default()
+        };
+        let sup: Supervisor<StubClassifier> = Supervisor::new(mgr, cfg, None);
+
+        let handle = http::new_handle();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        // Fire shutdown almost immediately; the loop should observe it and return.
+        tokio::spawn(async move {
+            let _ = tx.send(());
+        });
+        let shutdown = async move {
+            let _ = rx.await;
+        };
+
+        // Bound the test so a regression (loop ignoring shutdown) fails fast
+        // instead of hanging the suite.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            sup.run_until(handle.clone(), shutdown),
+        )
+        .await
+        .expect("run_until must return promptly after shutdown");
+        result.expect("clean shutdown returns Ok");
+
+        // The initial snapshot was published before the loop parked on the timer.
+        assert_eq!(handle.read().await.stopped, 2);
     }
 
     #[tokio::test]

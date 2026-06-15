@@ -88,17 +88,54 @@ async fn metrics(State(handle): State<MetricsHandle>) -> Json<FleetMetrics> {
     Json(snapshot)
 }
 
+/// Bind a `TcpListener` for the metrics server on `addr`.
+///
+/// Why: the supervisor must fail *fast* if the metrics port is already in use —
+/// otherwise it would run for hours with no `/metrics` and only a buried log line.
+/// Binding before the loop starts (and propagating the error) turns a silent
+/// degradation into an immediate startup failure the operator sees.
+/// What: binds and returns a `TcpListener`, surfacing any bind error to the
+/// caller with the offending address as context.
+/// Test: covered indirectly by `run_supervisor` (bind-before-loop); the failure
+/// path mirrors the daemon's own listener bind.
+pub async fn bind(addr: SocketAddr) -> anyhow::Result<tokio::net::TcpListener> {
+    use anyhow::Context as _;
+    tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("binding supervisor metrics server to {addr}"))
+}
+
+/// Serve the metrics router on an already-bound listener until the task is dropped.
+///
+/// Why: separating bind from serve lets the caller bind first (failing fast on a
+/// port collision) and only then spawn the serving task, so a bind error can be
+/// propagated synchronously rather than lost inside a detached `tokio::spawn`.
+/// What: logs the bound address and serves [`router`] on `listener`; returns an
+/// error only if serving subsequently fails.
+/// Test: handlers are unit-tested via the router; the serve path mirrors the
+/// daemon's own `serve_http`.
+pub async fn serve_on(
+    listener: tokio::net::TcpListener,
+    handle: MetricsHandle,
+) -> anyhow::Result<()> {
+    let local = listener.local_addr().ok();
+    if let Some(addr) = local {
+        info!("supervisor metrics listening on http://{addr}/metrics");
+    }
+    axum::serve(listener, router(handle)).await?;
+    Ok(())
+}
+
 /// Bind and serve the metrics router until the process exits.
 ///
-/// Why: the supervisor runs this as a background task so fleet state is queryable
-/// for the whole unattended run.
-/// What: binds a `TcpListener` to `addr` and serves [`router`]; logs the bound
-/// address. Returns an error only if the bind or serve fails.
+/// Why: a convenience wrapper for callers that want bind+serve in one step (e.g.
+/// integration tests); production wiring uses [`bind`] + [`serve_on`] so the bind
+/// error can be propagated before the supervisor loop starts.
+/// What: binds a `TcpListener` to `addr` via [`bind`] and serves [`router`] via
+/// [`serve_on`]. Returns an error if either the bind or serve fails.
 /// Test: covered indirectly — handlers are unit-tested via the router; the
 /// bind/serve path mirrors the daemon's own `serve_http`.
 pub async fn serve(handle: MetricsHandle, addr: SocketAddr) -> anyhow::Result<()> {
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!("supervisor metrics listening on http://{addr}/metrics");
-    axum::serve(listener, router(handle)).await?;
-    Ok(())
+    let listener = bind(addr).await?;
+    serve_on(listener, handle).await
 }
