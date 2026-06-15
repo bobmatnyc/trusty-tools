@@ -15,21 +15,36 @@
 //! Test: see the `tests` module — covers a single-branch function, a
 //! no-branch function, deep nesting, and the smart dispatcher.
 
-use crate::types::complexity::{CodeSmell, ComplexityGrade, ComplexityMetrics};
+use crate::types::complexity::{CodeSmell, ComplexityGrade, ComplexityMetrics, SmellThresholds};
 use tree_sitter::{Node, Parser};
-
-/// Threshold for `LongFunction`: > 50 lines spanned by the function node.
-const LONG_FUNCTION_THRESHOLD: usize = 50;
-/// Threshold for `DeepNesting`: max nesting depth above this triggers the smell.
-const DEEP_NESTING_THRESHOLD: u8 = 4;
-/// Threshold for `TooManyParams`: parameter count above this triggers the smell.
-const TOO_MANY_PARAMS_THRESHOLD: usize = 5;
 
 /// Compute `ComplexityMetrics` for Rust source using tree-sitter AST.
 ///
 /// Returns `None` if parsing fails so the caller can fall back to the
 /// text-heuristic implementation in `complexity.rs`.
+///
+/// Why: tree-sitter AST walk gives accurate branch counts unlike the text
+/// heuristic; separating from TypeScript keeps file sizes manageable.
+/// What: parses Rust source, walks the AST accumulating cyclomatic/cognitive
+/// counts, then runs `detect_smells_rust` with default thresholds.
+/// Test: `compute_complexity_rust_single_branch` checks cyclomatic >= 2 for
+/// an if/else; `long_function_smell_fires_for_long_fn` tests smell detection.
 pub fn compute_complexity_rust(content: &str) -> Option<ComplexityMetrics> {
+    compute_complexity_rust_with_thresholds(content, &SmellThresholds::default())
+}
+
+/// Variant of `compute_complexity_rust` that uses caller-supplied thresholds.
+///
+/// Why: lets `compute_complexity_for_with_thresholds` propagate runtime
+/// thresholds into the Rust AST smell detector without changing the public
+/// signature of `compute_complexity_rust`.
+/// What: identical to `compute_complexity_rust` but passes `thresholds` to
+/// `detect_smells_rust`.
+/// Test: covered transitively by `compute_complexity_for_with_thresholds` tests.
+pub fn compute_complexity_rust_with_thresholds(
+    content: &str,
+    thresholds: &SmellThresholds,
+) -> Option<ComplexityMetrics> {
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_rust::LANGUAGE.into())
@@ -44,7 +59,7 @@ pub fn compute_complexity_rust(content: &str) -> Option<ComplexityMetrics> {
     let cyclomatic = state.cyclomatic.saturating_add(1);
     let cognitive = state.cognitive;
     let grade = ComplexityGrade::from_cyclomatic(cyclomatic);
-    let smells = detect_smells_rust(root, src, &state);
+    let smells = detect_smells_rust(root, src, &state, thresholds);
 
     tracing::debug!(
         cyclomatic,
@@ -68,7 +83,25 @@ pub fn compute_complexity_rust(content: &str) -> Option<ComplexityMetrics> {
 ///
 /// Returns `None` if parsing fails so the caller can fall back to the
 /// text-heuristic implementation.
+///
+/// Why: TSX grammar is a superset of TS and JS, eliminating the need for a
+/// separate JavaScript grammar when computing complexity metrics.
+/// What: parses source, walks the AST, detects smells with default thresholds.
+/// Test: `compute_complexity_typescript_single_branch` checks cyclomatic >= 2.
 pub fn compute_complexity_typescript(content: &str) -> Option<ComplexityMetrics> {
+    compute_complexity_typescript_with_thresholds(content, &SmellThresholds::default())
+}
+
+/// Variant of `compute_complexity_typescript` that uses caller-supplied thresholds.
+///
+/// Why: propagates runtime thresholds into the TS/JS AST smell detector.
+/// What: identical to `compute_complexity_typescript` but passes `thresholds`
+/// to `detect_smells_ts`.
+/// Test: covered transitively by `compute_complexity_for_with_thresholds` tests.
+pub fn compute_complexity_typescript_with_thresholds(
+    content: &str,
+    thresholds: &SmellThresholds,
+) -> Option<ComplexityMetrics> {
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_typescript::LANGUAGE_TSX.into())
@@ -83,7 +116,7 @@ pub fn compute_complexity_typescript(content: &str) -> Option<ComplexityMetrics>
     let cyclomatic = state.cyclomatic.saturating_add(1);
     let cognitive = state.cognitive;
     let grade = ComplexityGrade::from_cyclomatic(cyclomatic);
-    let smells = detect_smells_ts(root, src, &state);
+    let smells = detect_smells_ts(root, src, &state, thresholds);
 
     tracing::debug!(
         cyclomatic,
@@ -270,7 +303,19 @@ fn has_child_kind(node: Node, kind: &str) -> bool {
 }
 
 /// AST-driven smell detection for Rust.
-fn detect_smells_rust(root: Node, src: &[u8], state: &WalkState) -> Vec<CodeSmell> {
+///
+/// Why: uses AST node positions for accurate line counts and parameter counting
+/// rather than text heuristics.
+/// What: checks `LongFunction`, `DeepNesting`, `TooManyParams`, and
+/// `MissingDocstring` against the caller-supplied `thresholds`.
+/// Test: `long_function_smell_fires_for_long_fn` and
+/// `missing_docstring_smell_for_undocumented_rust_fn` in the tests module.
+fn detect_smells_rust(
+    root: Node,
+    src: &[u8],
+    state: &WalkState,
+    thresholds: &SmellThresholds,
+) -> Vec<CodeSmell> {
     let mut smells = Vec::new();
 
     let fn_node = find_first_kind(root, "function_item");
@@ -279,11 +324,11 @@ fn detect_smells_rust(root: Node, src: &[u8], state: &WalkState) -> Vec<CodeSmel
     } else {
         line_count(src)
     };
-    if lines > LONG_FUNCTION_THRESHOLD {
+    if lines > thresholds.long_function_lines {
         smells.push(CodeSmell::LongFunction { lines });
     }
 
-    if state.max_nesting > DEEP_NESTING_THRESHOLD {
+    if state.max_nesting > thresholds.deep_nesting_depth {
         smells.push(CodeSmell::DeepNesting {
             max_depth: state.max_nesting,
         });
@@ -294,7 +339,7 @@ fn detect_smells_rust(root: Node, src: &[u8], state: &WalkState) -> Vec<CodeSmel
             .child_by_field_name("parameters")
             .map(|p| count_named_children_kind(p, "parameter"))
             .unwrap_or(0);
-        if params > TOO_MANY_PARAMS_THRESHOLD {
+        if params > thresholds.too_many_params {
             smells.push(CodeSmell::TooManyParams { count: params });
         }
         if !has_rust_doc(fn_n, src) {
@@ -308,7 +353,17 @@ fn detect_smells_rust(root: Node, src: &[u8], state: &WalkState) -> Vec<CodeSmel
 }
 
 /// AST-driven smell detection for TypeScript / JavaScript.
-fn detect_smells_ts(root: Node, src: &[u8], state: &WalkState) -> Vec<CodeSmell> {
+///
+/// Why: uses AST node positions for accurate line and parameter counts.
+/// What: checks `LongFunction`, `DeepNesting`, `TooManyParams`, and
+/// `MissingDocstring` against the caller-supplied `thresholds`.
+/// Test: `compute_complexity_typescript_single_branch` and related tests.
+fn detect_smells_ts(
+    root: Node,
+    src: &[u8],
+    state: &WalkState,
+    thresholds: &SmellThresholds,
+) -> Vec<CodeSmell> {
     let mut smells = Vec::new();
 
     let fn_node = find_first_kind(root, "function_declaration")
@@ -319,11 +374,11 @@ fn detect_smells_ts(root: Node, src: &[u8], state: &WalkState) -> Vec<CodeSmell>
     } else {
         line_count(src)
     };
-    if lines > LONG_FUNCTION_THRESHOLD {
+    if lines > thresholds.long_function_lines {
         smells.push(CodeSmell::LongFunction { lines });
     }
 
-    if state.max_nesting > DEEP_NESTING_THRESHOLD {
+    if state.max_nesting > thresholds.deep_nesting_depth {
         smells.push(CodeSmell::DeepNesting {
             max_depth: state.max_nesting,
         });
@@ -334,7 +389,7 @@ fn detect_smells_ts(root: Node, src: &[u8], state: &WalkState) -> Vec<CodeSmell>
             .child_by_field_name("parameters")
             .map(count_param_children)
             .unwrap_or(0);
-        if params > TOO_MANY_PARAMS_THRESHOLD {
+        if params > thresholds.too_many_params {
             smells.push(CodeSmell::TooManyParams { count: params });
         }
         if !has_jsdoc(fn_n, src) {
@@ -624,7 +679,28 @@ fn generic_language(lang: &str) -> Option<(tree_sitter::Language, &'static [&'st
 ///
 /// Returns `None` if the language is unknown or parsing fails, so the caller
 /// can fall back to the text heuristic.
+///
+/// Why: Phase 2 ships adapters for 14 languages; rather than a bespoke walker
+/// per language, one generic walker with per-language branch-kind lists covers
+/// all of them without code duplication.
+/// What: delegates to `compute_complexity_generic_with_thresholds` with
+/// `SmellThresholds::default()`.
+/// Test: `generic_complexity_counts_python_branches` in the tests module.
 pub fn compute_complexity_generic(content: &str, lang: &str) -> Option<ComplexityMetrics> {
+    compute_complexity_generic_with_thresholds(content, lang, &SmellThresholds::default())
+}
+
+/// Variant of `compute_complexity_generic` that uses caller-supplied thresholds.
+///
+/// Why: propagates runtime thresholds into the generic AST smell detector.
+/// What: identical to `compute_complexity_generic` but passes `thresholds` to
+/// `detect_smells_generic`.
+/// Test: covered transitively by `compute_complexity_for_with_thresholds` tests.
+pub fn compute_complexity_generic_with_thresholds(
+    content: &str,
+    lang: &str,
+    thresholds: &SmellThresholds,
+) -> Option<ComplexityMetrics> {
     let (language, branch_kinds) = generic_language(lang)?;
     let mut parser = Parser::new();
     parser.set_language(&language).ok()?;
@@ -638,7 +714,7 @@ pub fn compute_complexity_generic(content: &str, lang: &str) -> Option<Complexit
     let cyclomatic = state.cyclomatic.saturating_add(1);
     let cognitive = state.cognitive;
     let grade = ComplexityGrade::from_cyclomatic(cyclomatic);
-    let smells = detect_smells_generic(src, &state);
+    let smells = detect_smells_generic(src, &state, thresholds);
 
     tracing::debug!(
         lang,
@@ -707,14 +783,25 @@ fn is_logical_op(node: Node, src: &[u8]) -> bool {
 
 /// Generic AST-driven smell detection: derives `DeepNesting` from the walk
 /// state and `LongFunction` / `MissingDocstring` from cheap text checks.
-fn detect_smells_generic(src: &[u8], state: &WalkState) -> Vec<CodeSmell> {
+///
+/// Why: all non-Rust/TS languages share the same smell rules; a single
+/// function avoids per-language duplication.
+/// What: checks line count, nesting depth, and doc marker presence against
+/// caller-supplied `thresholds`.
+/// Test: covered by `generic_complexity_counts_python_branches` and
+/// `compute_complexity_for_with_thresholds` tests in this module.
+fn detect_smells_generic(
+    src: &[u8],
+    state: &WalkState,
+    thresholds: &SmellThresholds,
+) -> Vec<CodeSmell> {
     let mut smells = Vec::new();
 
     let lines = line_count(src);
-    if lines > LONG_FUNCTION_THRESHOLD {
+    if lines > thresholds.long_function_lines {
         smells.push(CodeSmell::LongFunction { lines });
     }
-    if state.max_nesting > DEEP_NESTING_THRESHOLD {
+    if state.max_nesting > thresholds.deep_nesting_depth {
         smells.push(CodeSmell::DeepNesting {
             max_depth: state.max_nesting,
         });

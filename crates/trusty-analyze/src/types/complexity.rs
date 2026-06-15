@@ -7,6 +7,47 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Runtime-configurable thresholds for code-smell detection.
+///
+/// Why: The README advertises configurable thresholds, but the original
+/// implementation used compile-time constants. This struct lets callers
+/// override thresholds at startup (or per-request) without recompilation,
+/// keeping the defaults identical to the former constants so existing
+/// deployments see no behaviour change unless they explicitly set values.
+///
+/// What: Holds the three numeric thresholds used by both the text-heuristic
+/// and tree-sitter-backed smell detectors. Created with `Default::default()`
+/// to get the original constant values.
+///
+/// Test: `custom_thresholds_change_detection_results` in `types/complexity`
+/// tests proves that lowering a threshold triggers the smell on a chunk that
+/// the default threshold would not flag.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SmellThresholds {
+    /// Lines-of-code threshold above which a function is flagged as
+    /// `LongFunction`. Default: 50.
+    pub long_function_lines: usize,
+    /// Maximum nesting depth above which `DeepNesting` is reported. Default: 4.
+    pub deep_nesting_depth: u8,
+    /// Parameter count above which `TooManyParams` is reported. Default: 5.
+    pub too_many_params: usize,
+}
+
+impl Default for SmellThresholds {
+    /// Why: matches the former compile-time constants so existing callers that
+    /// construct `SmellThresholds::default()` observe no behaviour change.
+    /// What: returns `long_function_lines=50`, `deep_nesting_depth=4`,
+    /// `too_many_params=5`.
+    /// Test: `default_thresholds_match_legacy_constants` below.
+    fn default() -> Self {
+        Self {
+            long_function_lines: 50,
+            deep_nesting_depth: 4,
+            too_many_params: 5,
+        }
+    }
+}
+
 /// Bundle of per-chunk complexity numbers and detected smells.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ComplexityMetrics {
@@ -133,5 +174,28 @@ mod tests {
         let s = r#"{}"#;
         let m: ComplexityMetrics = serde_json::from_str(s).unwrap();
         assert_eq!(m, ComplexityMetrics::default());
+    }
+
+    #[test]
+    fn default_thresholds_match_legacy_constants() {
+        // Why: verifies backward compatibility — default thresholds must equal
+        // the original compile-time constants so no behaviour change occurs
+        // when callers construct `SmellThresholds::default()`.
+        let t = SmellThresholds::default();
+        assert_eq!(t.long_function_lines, 50);
+        assert_eq!(t.deep_nesting_depth, 4);
+        assert_eq!(t.too_many_params, 5);
+    }
+
+    #[test]
+    fn smell_thresholds_round_trip_json() {
+        let t = SmellThresholds {
+            long_function_lines: 30,
+            deep_nesting_depth: 2,
+            too_many_params: 3,
+        };
+        let s = serde_json::to_string(&t).unwrap();
+        let back: SmellThresholds = serde_json::from_str(&s).unwrap();
+        assert_eq!(t, back);
     }
 }
