@@ -1,6 +1,6 @@
 # trusty-controller — Design Document Set
 
-**Status:** DOC-0..DOC-10 Accepted (owner-approved); DOC-12 Draft (owner directive 2026-06-15)
+**Status:** DOC-0..DOC-10 Accepted (owner-approved) — **DOC-7 Superseded** (2026-06-15, ADR-0011/#1104); DOC-12 Draft with Open Questions Q1–Q6 **resolved** (owner decisions 2026-06-15)
 **Source spec:** ../01-spec/trusty-end-to-end-setup.md
 
 > **Location:** this design set lives under `docs/trusty-controller/research/`
@@ -93,7 +93,10 @@ Edges (consumes → produced-by) in detail:
 
 ## Document index
 
-All 11 docs are **Accepted (owner-approved)**.
+DOC-0..DOC-10 are **Accepted (owner-approved)**, **except DOC-7 which is now
+Superseded** (2026-06-15, by ADR-0011 / #1104 — its content relocates to a
+trusty-console tab). DOC-11 is an active tracker; **DOC-12 is Draft with its open
+questions Q1–Q6 resolved** (owner decisions, 2026-06-15).
 
 | Doc | Title | One-line purpose | Status | ADR |
 |---|---|---|---|---|
@@ -104,7 +107,7 @@ All 11 docs are **Accepted (owner-approved)**.
 | [**DOC-4**](./04-doctor-health-rollup.md) | Doctor/Health Rollup Model | Aggregate per-tool doctor/health JSON into a stack verdict + tools×scope matrix. | Accepted | — |
 | [**DOC-5**](./05-controller-cli.md) | Controller CLI Command Surface + Dispatch | Define the controller's own CLI and manifest-driven verb dispatch. | Accepted | — |
 | [**DOC-6**](./06-contract-conformance-and-mpm-adapter.md) | Per-Tool Contract Conformance + claude-mpm Python Adapter | Audit each tool vs DOC-1; specify how Python claude-mpm satisfies the contract. | Accepted | — |
-| [**DOC-7**](./07-controller-web-ui.md) | Controller Web UI (link-out control plane) | Out-of-the-box UI that links out to each tool's existing UI, never reimplementing. | Accepted | — |
+| [**DOC-7**](./07-controller-web-ui.md) | Controller Web UI (link-out control plane) | Out-of-the-box UI that links out to each tool's existing UI, never reimplementing. | **Superseded** (2026-06-15, by ADR-0011 / #1104; content → trusty-console tab) | [ADR-0011](../../../adr/0011-tctl-owns-service-lifecycle.md) |
 | [**DOC-8**](./08-install-bootstrap.md) | Install/Bootstrap Flow (UUC1, UUC2) | Zero-knowledge install + per-project auto-config on claude-mpm launch. | Accepted | — |
 | [**DOC-9**](./09-upgrade-flow.md) | Upgrade Flow (UUC3) | Cross-tool update detection, changelog headlines, upgrade + take-effect restart. | Accepted | — |
 | [**DOC-10**](./10-isolation-testing-harness.md) | Isolation Testing Harness (MUC1, MUC2) | Test stack install/upgrade in a vanilla container/VM without contaminating the host. | Accepted | — |

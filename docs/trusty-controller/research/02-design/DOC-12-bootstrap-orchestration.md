@@ -1,6 +1,6 @@
 # DOC-12 — Bootstrap Orchestration (first-load control plane)
 
-**Status:** Draft (owner directive 2026-06-15)
+**Status:** Draft — **open questions Q1–Q6 RESOLVED** (owner decisions, Bob, 2026-06-15)
 **Source spec:** ../01-spec/trusty-end-to-end-setup.md
 **Owner directive:** Bob, 2026-06-15 — "`tctl` is the first thing loaded; it
 handles ALL dependent loads of the trusty stack."
@@ -14,10 +14,13 @@ DOC-0..DOC-8 framed `tctl` as a **coordinator the user invokes on demand**
 directive: `tctl` is the **first-loaded control plane** — the single entry point
 through which the entire trusty stack comes up. It specifies the **boot
 sequence** `tctl` runs (`tctl up`), the dependency-ordered staging of services,
-the always-on core (memory + search), the boot-time analyze pass over the core
-crates, the **opt-in** orchestrator stage (trusty-mpm), and — when the
+the always-on core (memory + search, plus trusty-console as the always-on single
+HTTP front door), the boot-time **background** analyze pass over the core crates
+(non-gating), the **opt-in** orchestrator stage (trusty-mpm), and — when the
 orchestrator is opted into — ensuring **Claude Code is present and at the latest
-version** for the native managed-session path.
+version** (prompting before any upgrade) for the native managed-session path.
+The six original open questions are **resolved** (owner decisions, 2026-06-15);
+see the "Open questions — RESOLVED" section.
 
 This is a **requirements + sequence** spec. It does **not** implement the binary.
 It composes the mechanics DOC-8 (install/ensure), DOC-4 (rollup), DOC-5
@@ -84,10 +87,10 @@ defaults preserve current behavior):
 
 | Member | `kind` | `boot_stage` | `boot_policy` |
 |---|---|---|---|
-| `trusty-memory` | daemon | `core` | **`always_on`** |
-| `trusty-search` | daemon | `core` | **`always_on`** |
-| `trusty-analyze` | daemon | `analysis` | **`boot_analysis`** |
-| `trusty-console` | controller/daemon | `console` | `always_on` (the single HTTP front door — §7) |
+| `trusty-memory` | daemon | `core` | **`always_on`** (health-gated core, RESOLVED Q6) |
+| `trusty-search` | daemon | `core` | **`always_on`** (health-gated core, RESOLVED Q6) |
+| `trusty-analyze` | daemon | `analysis` | **`boot_analysis`** (background, non-gating, RESOLVED Q6) |
+| `trusty-console` | controller/daemon | `console` | **`always_on`** (the single HTTP front door — §7; starts even on partial core, RESOLVED Q2/Q6) |
 | `trusty-controller` (`tctl`) | controller | control | n/a (it *is* the orchestrator of boot) |
 | `trusty-mpm` | orchestrator | `orchestrator` | **`opt_in`** |
 | `claude-mpm` | orchestrator | `orchestrator` | `opt_in` (legacy orchestrator slot, DOC-0 A4) |
@@ -100,17 +103,23 @@ trusty-mpm, DOC-6 §6) or marking a fourth daemon `always_on` is a manifest edit
 
 The owner's ordering is a **dependency graph**:
 
+(Resolutions baked in (2026-06-15): always-on members auto-install if missing
+(Q1); analyze is a background, non-gating boot pass (Q6); console is always-on and
+starts even on partial core (Q2/Q6); Claude Code upgrades prompt-before-apply (Q3).)
+
 ```
-        memory + search  (always-on core)
+        memory + search  (always-on core; AUTO-INSTALL if missing — Q1)
                 │  gate: both system-healthy + version-ok
                 ▼
-        analyze over core crates  (boot analysis — blocking|background)
+        analyze over core crates  (boot analysis — DEFAULT background, NON-gating — Q6)
                 │  gate: analyze daemon healthy (analysis result is non-gating)
                 ▼
-        console  (single HTTP front door — §7; always-on)
-                │  gate: console healthy
+        console  (single HTTP front door — §7; always-on; AUTO-INSTALL if missing — Q1;
+                  starts even on PARTIAL core for observability — Q2/Q6)
+                │  gate: console healthy (best-effort on partial core)
                 ▼
-        [OPT-IN] trusty-mpm  ──► ensures Claude Code @ latest (native runtime)
+        [OPT-IN] trusty-mpm  ──► ensures Claude Code @ latest (native runtime;
+                                  PROMPT before upgrade, never silent; absent → guide — Q3)
                                   (only if user opts in — §4/§6)
 ```
 
@@ -132,7 +141,8 @@ tctl up [--with-mpm]
   │        CHECK  `<binary> health --json`  (DOC-1) → already running+healthy?
   │        ├─ healthy + version-ok          → no-op ("trusty-search 0.24.1 — running")
   │        ├─ installed, down               → `<binary> start` (or service bootstrap)
-  │        └─ not installed                 → `tctl install <member>` then start (§3.4)
+  │        └─ not installed                 → AUTO-INSTALL to latest (always_on only)
+  │                                            `tctl install <member>` then start (§3.4, RESOLVED Q1)
   │        VERIFY `<binary> health --json` → running   (bounded retry, DOC-4 §1.3)
   │     GATE: BOTH memory AND search must reach system: healthy + version-ok.
   │           If either fails → STOP per failure policy (§5); do NOT proceed to
@@ -148,20 +158,26 @@ tctl up [--with-mpm]
   │     GATE: only that the analyze DAEMON is healthy (so the console's analyze
   │           tab works); the analysis CONTENT is non-gating.
   │
-  ├─ STAGE 3  CONSOLE  (trusty-console; single HTTP front door — §7)
-  │     • ensure-running (CHECK→act→VERIFY) like any always_on member.
+  ├─ STAGE 3  CONSOLE  (trusty-console; single HTTP front door — §7; always_on)
+  │     • ensure-running (CHECK→act→VERIFY) like any always_on member; AUTO-INSTALL
+  │       to latest if absent (always_on → auto-install per RESOLVED Q1).
   │     • console connects to memory/search/analyze over stdio-MCP (#1104) and
   │       renders their metrics natively — it is the HTTP/UI surface for the
   │       now-healthy core.
+  │     • STARTS EVEN ON PARTIAL CORE (e.g. search down, memory up) for
+  │       observability (RESOLVED Q2/Q6) — see §5.
   │     GATE: console healthy → print its URL (the user's single web entry).
   │
   ├─ STAGE 4  [OPT-IN] ORCHESTRATOR  (trusty-mpm; boot_policy = opt_in)
   │     • Only if opted in (§4): --with-mpm flag, or config default_with_mpm=true,
   │       or interactive prompt "Start the session manager (trusty-mpm)? [y/N]".
   │     • ensure-running the trusty-mpm session-manager daemon (#1221/#1222).
-  │     • ENSURE CLAUDE CODE @ LATEST (§6): verify `claude` present, check/upgrade
-  │       to latest, confirm the native managed-session path
-  │       (`env -u ANTHROPIC_API_KEY claude`) is usable.
+  │       (trusty-mpm absent on --with-mpm → GUIDE, do not auto-install — Q1.)
+  │     • ENSURE CLAUDE CODE @ LATEST (§6): verify `claude` present, check version,
+  │       PROMPT before upgrading to latest (native `claude update` first, npm
+  │       fallback; never silent), confirm the native managed-session path
+  │       (`env -u ANTHROPIC_API_KEY claude`) is usable. Absent `claude` → guide,
+  │       do not auto-install (RESOLVED Q3).
   │     GATE: mpm healthy + Claude Code present-and-current → ready for sessions.
   │
   └─ STAGE 5  ENSURE-PROJECT  (if invoked inside a project dir, --scope all)
@@ -239,12 +255,15 @@ reuses DOC-3 §4's check→act→verify and DOC-8's idempotent primitives:
   healthy, version-ok member is a **reported no-op**, never restarted. `tctl up`
   is not `tctl restart` — it never bounces a healthy daemon (so it does not
   disrupt in-flight sessions on a re-run).
-- **Missing member** → `tctl up` may **install** it (DOC-8) only when its
-  `boot_policy = always_on`, because an always-on core member absent on boot is
-  the zero-effort-install case the spec targets (UUC2). For `opt_in`/`on_demand`
-  members `up` never installs implicitly — a missing trusty-mpm on `--with-mpm`
-  **guides** (points at `tctl install trusty-mpm`) rather than silently
-  installing a heavy component. (Open Q1.)
+- **Missing member** → `tctl up` **auto-installs** it (DOC-8) when its
+  `boot_policy = always_on` (memory / search / console), because an always-on
+  core member absent on boot is the zero-effort-install case the spec targets
+  (UUC2). It installs the missing always-on member **to latest**, then starts it.
+  For `opt_in`/`on_demand` members `up` never installs implicitly — a missing
+  trusty-mpm on `--with-mpm` **guides** (points at `tctl install trusty-mpm`)
+  rather than silently installing a heavy component; an absent Claude Code is
+  likewise guided, not auto-installed (§6). (**RESOLVED Q1**, 2026-06-15:
+  auto-install always-on members; guide opt-in/on-demand.)
 - **Concurrency:** STAGE 0 takes the **system-scope advisory lock** (DOC-3 §4
   `ensure.lock`) around the system-mutating stages, so two `tctl up` invocations
   (e.g. a launchd boot trigger racing a manual run) do not double-start. The
@@ -264,7 +283,7 @@ reuses DOC-3 §4's check→act→verify and DOC-8's idempotent primitives:
 | 2 — analyze *content* | **background** (non-gating) | a baseline snapshot is advisory, can take time | `--analyze-core blocking` to wait; `skip` to omit |
 | 3 — console | **blocking** (gate + print URL) | it is the user's web entry point | — |
 | 4 — orchestrator | **blocking when opted in** | a session manager the user asked for should be confirmed ready | absent when not opted in |
-| 4 — Claude Code @ latest | **blocking when opted in** (§6) | a session against a stale/absent runtime fails confusingly | `--skip-claude-upgrade` (§6) |
+| 4 — Claude Code @ latest | **blocking when opted in**, **prompt before upgrade** (§6, RESOLVED Q3) | a session against a stale/absent runtime fails confusingly; upgrades are never silent | `--skip-claude-upgrade` (§6) |
 | 5 — ensure-project | **background reindex** | DOC-8 §3.3 progressive readiness | `--wait` to block to `fresh` |
 
 ### 4. Opt-in orchestrator stage (trusty-mpm)
@@ -316,7 +335,9 @@ Per-stage gates, with the owner's "memory or search won't start" case called out
     console is the operator's window to *see and remediate* the failure (it
     renders the same `down` matrix). This is the one nuance to the hard-stop:
     the console is brought up *for observability* even on partial-core, but the
-    **orchestrator stage is skipped** entirely on any core failure. (Open Q2.)
+    **orchestrator stage is skipped** entirely on any core failure. (**RESOLVED
+    Q2**, 2026-06-15: yes — start the console on partial-core for observability;
+    orchestrator stage still skipped on any core failure.)
   - **Idempotent re-run is the recovery path** (DOC-8 §7): fix the cause, re-run
     `tctl up`; healthy members no-op, only the failed one is retried.
 - **Analyze daemon down** → STAGE 2 reports analyze `down` (console's analyze tab
@@ -348,33 +369,43 @@ the failure surfaces *before* a session is attempted, not mid-session.
 
 ```
 STAGE 4b — ensure Claude Code @ latest  (orchestrator opted in, runtime.kind = claude-code)
+  (RESOLVED Q3, 2026-06-15: native `claude update` first, PROMPT before applying
+   — never silent; fall back to npm @latest; absent → guide, never auto-install.)
   1. PRESENCE   `which claude` (reuse the adapter's check).
-                absent → per runtime.min_policy:
-                  • GUIDE + fail the orchestrator stage (default): print the
-                    install hint (`runtime.install_hint`, e.g.
+                absent → GUIDE + fail the orchestrator stage (per runtime.min_policy):
+                  • print the install hint (`runtime.install_hint`, e.g.
                     `npm i -g @anthropic-ai/claude-code`) and a docs link;
                     do NOT auto-run a remote installer (same trust stance as
-                    DOC-8 §5 guide-and-abort for rustup/uv).
-  2. VERSION    `claude --version` → installed version.
-  3. LATEST     determine the latest available version:
-                  • prefer Claude Code's own self-update path if present
-                    (e.g. `claude update` / `claude upgrade` if the CLI exposes
-                    one — probe, do not assume);
+                    DOC-8 §5 guide-and-abort for rustup/uv, and consistent with
+                    the Q1 "guide opt-in components" decision).
+  2. VERSION    `claude --version` → installed version (the version probe).
+  3. LATEST     determine the latest available version (compare-to-latest):
+                  • prefer Claude Code's own native updater if present
+                    (probe for `claude update`; do not assume it exists);
                   • else compare against the npm-published latest
-                    (`npm view @anthropic-ai/claude-code version`) when npm is
-                    the install channel (runtime.install_hint encodes the
-                    channel).
-  4. UPGRADE    installed < latest → upgrade per policy:
-                  • runtime.min_policy = "latest" (default for the managed path):
-                    run the runtime's own update command if it has one, else the
-                    channel upgrade (`npm i -g @anthropic-ai/claude-code@latest`),
+                    (`npm view @anthropic-ai/claude-code version`) — npm is the
+                    fallback channel (runtime.install_hint encodes it).
+  4. PROMPT +   installed < latest → upgrade per policy, ALWAYS asking first:
+     UPGRADE      • runtime.min_policy = "latest" (default for the managed path):
+                    PROMPT the user before applying any upgrade ("claude X is
+                    installed; latest is Y. Update now? [Y/n]") — the update is
+                    NEVER applied silently. On consent:
+                      – run the CLI's NATIVE updater `claude update` if present
+                        (preferred);
+                      – else fall back to the npm channel upgrade
+                        (`npm i -g @anthropic-ai/claude-code@latest`),
                     streaming progress to stderr.
                   • --skip-claude-upgrade or min_policy = "present": skip the
                     upgrade, accept the installed version, warn if stale.
+                  • non-TTY (scripted/CI): with no TTY to prompt, do NOT apply the
+                    upgrade silently — warn that an update is available and that a
+                    TTY (or `--skip-claude-upgrade` to suppress) is required to
+                    apply it.
   5. CONFIRM    re-run `claude --version`; confirm the native managed-session
                 command (`env -u ANTHROPIC_API_KEY claude`) resolves (the same
-                `ClaudeCodeAdapter` presence check passes). Report the version in
-                the DOC-4 matrix (orchestrator row, runtime sub-cell).
+                `ClaudeCodeAdapter` presence check passes — the managed-session
+                path re-verify). Report the version in the DOC-4 matrix
+                (orchestrator row, runtime sub-cell).
 ```
 
 **Decisions / open points:**
@@ -383,9 +414,11 @@ STAGE 4b — ensure Claude Code @ latest  (orchestrator opted in, runtime.kind =
   install/update channel is not Rust/cargo; DOC-12 keys it off
   `runtime.install_hint`/`runtime.channel` in the manifest (npm today). The
   controller probes for a native `claude update` command first (so it uses the
-  tool's own upgrade path when available) and only falls back to the package
-  manager. (Open Q3 — confirm the exact latest-version source and self-update
-  command with Bob / the Claude Code CLI surface.)
+  tool's own upgrade path when available) and only falls back to the npm package
+  manager (`@anthropic-ai/claude-code@latest`). (**RESOLVED Q3**, 2026-06-15:
+  native `claude update` first, **prompt the user before applying — never
+  silent**; npm `@latest` fallback when no native updater exists; absent
+  `claude` → guide the user to install, do not auto-install.)
 - **Absent Claude Code = guide, don't auto-install** (default), consistent with
   DOC-8 §5's stance on not running remote installers as a side effect. A future
   `tctl up --bootstrap-claude` opt-in (explicit consent) could run the installer,
@@ -430,9 +463,11 @@ becomes **headless** (CLI + control process); it exposes its stack rollup as
 This is an architectural decision (DOC-7 surface → trusty-console) recorded as
 **[ADR-0011](../../../adr/0011-tctl-owns-service-lifecycle.md)**: *tctl owns
 service lifecycle (headless control plane); trusty-console owns the single HTTP
-surface.* (Open Q4 — confirm DOC-7 is formally re-statused **Superseded-by-#1104
-/ ADR-0011**, and whether any controller-only view must remain CLI-only vs
-console-rendered.)
+surface.* (**RESOLVED-BY-RECOMMENDATION Q4**, 2026-06-15: DOC-7 is formally
+**Superseded** by ADR-0011 / #1104 — its content relocates to a trusty-console
+tab; DOC-7's status banner reads Superseded and the README index reflects it.
+The headless CLI rollup remains available via `tctl stack doctor` / `tctl
+status`, so there is no controller-only HTML view.)
 
 **`tctl`'s own process under #1104.** The controller still needs a small
 **supervised process** for boot triggering and lock-holding (the `kind =
@@ -441,7 +476,10 @@ launchd/systemd-supervised boot+lifecycle agent that exposes its state via
 stdio-MCP (`console_metrics`) to the console, not via its own HTTP port. The
 DOC-5 `tctl port`/`tctl ui` commands change meaning: `tctl ui` now prints/open
 **the trusty-console URL** (discovered via the console's `port --json`), not a
-controller-served page. (Open Q5.)
+controller-served page. (**RESOLVED-BY-RECOMMENDATION Q5**, 2026-06-15: yes — the
+`kind=controller` process is a genuinely HTTP-less launchd/systemd boot agent that
+holds the boot lock and exposes state via stdio-MCP; trusty-console renders it,
+and `tctl ui` redirects to the console URL.)
 
 ### 8. Configuration (`~/.trusty-tools/trusty-controller/config.yaml`, #1220)
 
@@ -468,6 +506,27 @@ crates), so a user toggles `with_mpm` / `claude_code.policy` from the console an
 `tctl up` honors it. Config precedence follows DOC-3 §7 (project > system >
 default) for any project-scoped override; boot policy is **system-scoped** (boot
 is a system act).
+
+**Config-overridable vs fixed (post-resolution map).** Of the resolved decisions,
+the following are **config-overridable** under
+`~/.trusty-tools/trusty-controller/config.yaml` (#1220), with CLI flags winning
+over config:
+
+| Decision | Config key | Default | Flag override |
+|---|---|---|---|
+| Opt-in orchestrator default (`--with-mpm`) | `boot.with_mpm` | `false` | `--with-mpm` / `--no-mpm` |
+| Analyze blocking / background / skip | `boot.analyze_core` | `background` | `--analyze-core <blocking\|background\|skip>` |
+| Claude Code auto-update policy (RESOLVED Q3) | `boot.claude_code.policy` (`latest`\|`present`) + `boot.claude_code.skip_upgrade` | `latest`, `false` | `--skip-claude-upgrade` |
+| Core-analysis target set | `analyze_core_targets` | §3.3 default set | — |
+
+The following resolved behaviors are **fixed (not config-overridable)** because
+they are load-bearing invariants of the boot model: **auto-installing missing
+always-on members** (memory / search / console) to latest (RESOLVED Q1);
+**prompting the user before any Claude Code upgrade — never silent** (RESOLVED
+Q3 — `policy`/`skip_upgrade` tune *whether/what* to upgrade, but consent is
+always required when an upgrade would be applied on a TTY); **starting the console
+on partial-core for observability** (RESOLVED Q2/Q6); and the **always-on set =
+memory + search + console** with analyze as a non-gating boot pass (RESOLVED Q6).
 
 **Workspace-root note (#1220).** trusty-mpm's default managed-session workspace
 root (`~/trusty-mpm-projects/<owner>/<repo>`) and its
@@ -497,27 +556,37 @@ boot-sequence change.
 1. **`tctl up` exists** as a first-class command (DOC-5 tree) and is the single
    documented boot entry point; `tctl install`/`start`/`ensure` remain distinct
    (§1 table).
-2. **Always-on core gating:** `tctl up` ensures memory **and** search to
-   `system: healthy + version-ok` before any later stage; if either fails the
-   stack hard-stops the dependent stages and exits `1`, while preserving and
-   reporting any healthy sibling (§3.2/§5).
-3. **Boot analysis:** trusty-analyze runs over the manifest-defined core-crate set
-   (§3.3); default background + non-gating; `--analyze-core blocking|skip`
-   honored; the analyze *daemon* health gates only the console's analyze tab.
+2. **Always-on core gating + auto-install:** `tctl up` ensures memory **and**
+   search to `system: healthy + version-ok` before any later stage,
+   **auto-installing any missing always-on member (memory / search / console) to
+   latest** (RESOLVED Q1); if either core member fails the stack hard-stops the
+   dependent stages and exits `1`, while preserving and reporting any healthy
+   sibling, and **the console still starts on partial-core for observability**
+   (RESOLVED Q2) (§3.2/§5).
+3. **Boot analysis (non-gating):** trusty-analyze runs as a **boot-time
+   background pass** over the manifest-defined core-crate set (§3.3); default
+   background + non-gating; `--analyze-core blocking|skip` honored; only the
+   analyze *daemon* health (if used by the console's analyze tab) gates anything —
+   never the analysis content (RESOLVED Q6).
 4. **Opt-in orchestrator:** trusty-mpm starts only via `--with-mpm` / config /
    interactive-yes; non-TTY default off (§4).
-5. **Claude Code @ latest:** when the orchestrator is opted in and uses the
-   native `claude-code` runtime, `tctl up` verifies `claude` presence, checks +
-   (per policy) upgrades to latest, and confirms `env -u ANTHROPIC_API_KEY claude`
-   resolves before declaring the orchestrator ready; absent → guide, don't
-   auto-install (§6).
+5. **Claude Code @ latest (prompt-first):** when the orchestrator is opted in and
+   uses the native `claude-code` runtime, `tctl up` verifies `claude` presence,
+   checks the version against latest, and — **prompting the user before applying,
+   never silent** — upgrades via the CLI's native `claude update` (falling back to
+   npm `@anthropic-ai/claude-code@latest` when no native updater exists), then
+   confirms `env -u ANTHROPIC_API_KEY claude` resolves before declaring the
+   orchestrator ready; **absent `claude` → guide, don't auto-install** (RESOLVED
+   Q3) (§6).
 6. **Idempotency / restart-safety:** a second `tctl up` on a healthy stack is an
    all-no-op (no daemon bounced); concurrent invocations serialize via the
    system advisory lock; a supervised re-exec converges (§3.4).
-7. **tctl ⟂ console boundary:** `tctl` is headless (CLI + control process,
-   no HTTP); trusty-console is the single HTTP/UI surface and renders the
-   controller's `--json` stack rollup; DOC-7's embedded UI is superseded by the
-   console (ADR-0011) (§7).
+7. **tctl ⟂ console boundary:** `tctl` is **headless** (CLI + a supervised,
+   **HTTP-less** launchd/systemd boot agent that holds the boot lock and exposes
+   state via stdio-MCP — RESOLVED-BY-RECOMMENDATION Q5); trusty-console is the
+   single HTTP/UI surface and renders the controller's `--json`/stdio-MCP stack
+   rollup; **DOC-7's embedded UI is Superseded** by the console (ADR-0011,
+   RESOLVED-BY-RECOMMENDATION Q4); `tctl ui` redirects to the console URL (§7).
 8. **Config:** boot policy read from
    `~/.trusty-tools/trusty-controller/config.yaml` (#1220) and editable via the
    console; flags override config (§8).
@@ -564,8 +633,9 @@ boot-sequence change.
 ### Produces (consumed by)
 - **trusty-console (#1104/#1222)** — consumes `tctl`'s stack-rollup `--json` /
   MCP tool to render the controller/stack view.
-- **DOC-7** — superseded in surface by §7/ADR-0011 (content relocates to the
-  console).
+- **DOC-7** — **Superseded** by §7/ADR-0011 (RESOLVED-BY-RECOMMENDATION Q4,
+  2026-06-15): its status banner reads Superseded, its content relocates to the
+  trusty-console controller tab, and the README index reflects it.
 - **DOC-10** — the isolation harness drives `tctl up` (and `--with-mpm`,
   `--analyze-core blocking`, `--wait`) as the boot acceptance gate in a clean VM.
 
@@ -581,40 +651,76 @@ boot-sequence change.
 | Session-manager MCP | #1221 (open): trusty-mpm `serve --stdio` MCP frontend. | §9: STAGE-4 probe composes with the future MCP surface. |
 | The `tctl up` boot orchestrator | **Net-new.** No staged boot command, no boot metadata, no Claude-Code-@-latest gate exists today. | This document. |
 
-## Open questions (for Bob)
+## Open questions — RESOLVED (owner decisions, Bob, 2026-06-15)
 
-1. **Q1 — install-on-boot for always-on members?** Should `tctl up` *install* a
-   missing always-on core member (memory/search) automatically (treating boot as
-   the UUC2 zero-effort path), or only *start* an already-installed one and guide
-   otherwise? DOC-12 proposes: install always-on members, guide for
-   opt-in/on-demand (§3.4). Confirm.
-2. **Q2 — console on partial-core.** On a core failure (e.g. search down, memory
-   up), should the console still start *for observability* (proposed yes, §5) so
-   the user can see/remediate via the web UI, or hard-stop everything after the
-   core gate?
-3. **Q3 — Claude Code latest-version source + self-update.** What is the
-   authoritative "latest" source and upgrade command for Claude Code (a native
-   `claude update`? npm `@anthropic-ai/claude-code@latest`? something else)?
-   §6 probes for a native update path first, else npm — confirm the channel and
-   whether `tctl` should ever auto-run it vs always guide.
-4. **Q4 — DOC-7 disposition.** Confirm DOC-7 (controller embedded web UI) is
-   formally **Superseded** by trusty-console (#1104) per ADR-0011, and that the
-   controller crate drops its Svelte/`SKIP_UI_BUILD` surface (§7).
-5. **Q5 — `tctl` process shape under #1104.** Is the `kind=controller` process a
-   genuinely HTTP-less launchd/systemd boot agent exposing state via stdio-MCP
-   (proposed, §7), and does `tctl ui` redirect to the console URL?
-6. **Q6 — always-on set.** Is the always-on core exactly **memory + search**
-   (per the directive), with analyze as boot-analysis and console as always-on
-   front door — or should analyze/console also be `always_on` proper? DOC-12
-   models analyze as `boot_analysis` and console as `always_on` (§2 table);
-   confirm.
+All six open questions were resolved by the owner on 2026-06-15. Q1, Q3, and Q6
+(with Q2) are **RESOLVED** by direct decision; Q4 and Q5 are
+**RESOLVED-BY-RECOMMENDATION** (the spec's recommended resolution stands,
+consistent with ADR-0011, pending no objection). Each resolution is reflected in
+the body sections noted.
+
+1. **Q1 — install-on-boot for always-on members? → RESOLVED.** `tctl up`
+   **auto-installs missing ALWAYS-ON members** (memory / search / console) to
+   latest, then starts them — boot is the UUC2 zero-effort path for the
+   always-on substrate. **Opt-in components (trusty-mpm, Claude Code) are
+   GUIDED, not auto-installed** when absent (present + opted-in → prompt-to-update
+   per Q3; absent → guide). *Rationale: an always-on core member absent on boot
+   is exactly the zero-effort-install case the spec targets, whereas a heavy
+   opt-in component should never be installed as a silent boot side effect.*
+   Reflected in §3.4, §2 mapping, and acceptance criterion 2/10.
+2. **Q2 — console on partial-core? → RESOLVED (yes).** On a core failure (e.g.
+   search down, memory up) the console **still starts for observability** so the
+   user can see and remediate the failure via the web console; the **orchestrator
+   stage is still skipped** on any core failure. *Rationale: the console is the
+   operator's window to see/remediate a degraded core — bringing it up on
+   partial-core maximizes usefulness without pretending the core is healthy.*
+   Reflected in §5 and acceptance criterion 2.
+3. **Q3 — Claude Code latest-version source + self-update? → RESOLVED.** `tctl`
+   checks the installed `claude` version and upgrades to latest via the CLI's
+   **native `claude update`**, **prompting the user before applying** (never
+   silent). If no native updater is available, it falls back to npm
+   `@anthropic-ai/claude-code@latest`. If `claude` is **absent**, `tctl`
+   **guides** the user to install it (does not auto-install — consistent with
+   Q1). The flow is: `claude --version` (probe) → compare-to-latest → **prompt**
+   → `claude update` (fallback npm `@latest`) → re-verify the managed-session
+   path (`env -u ANTHROPIC_API_KEY claude`) resolves. *Rationale: prefer the
+   tool's own upgrade path, keep the user in the loop for any mutation, and never
+   silently install a runtime.* Reflected in §6 (STAGE 4b) and acceptance
+   criterion 5.
+4. **Q4 — DOC-7 disposition. → RESOLVED-BY-RECOMMENDATION.** DOC-7 (controller
+   embedded web UI) is **Superseded** by ADR-0011 / #1104 — its content relocates
+   to a trusty-console tab; the controller crate drops its Svelte /
+   `SKIP_UI_BUILD` surface. DOC-7's status banner reads **Superseded** and the
+   README index reflects it. *Rationale: #1104's "HTTP exactly once, in
+   trusty-console" invariant admits no controller-embedded HTTP exception.*
+   Reflected in §7 and the dependency `Produces` list.
+5. **Q5 — `tctl` process shape under #1104. → RESOLVED-BY-RECOMMENDATION.** The
+   controller process is **HTTP-less** — a small supervised boot agent
+   (launchd/systemd) that holds the boot lock and exposes state via **stdio-MCP**;
+   trusty-console renders it. `tctl ui` redirects to the console URL. *Rationale:
+   keeps the single-HTTP invariant whole while preserving the controller's
+   boot-trigger / lock-holder role.* Reflected in §7.
+6. **Q6 — always-on set. → RESOLVED.** The always-on, health-gated set is
+   **trusty-memory + trusty-search**; **trusty-console is also always-on** (the
+   single HTTP front door). **trusty-analyze runs as a boot-time background pass
+   over the core crates (non-gating)** — only the analyze *daemon* health (if used
+   by the console's analyze tab) matters, not the analysis content. The console
+   **starts even on partial core** (e.g. search down, memory up) for observability
+   (this is the Q2 = yes decision). *Rationale: memory+search are the substrate
+   every capability reads; the console is the operator's single window and so is
+   always-on; analyze's product is advisory, so it is backgrounded and
+   non-gating.* Reflected in §2 mapping table, §3, §5, and acceptance criterion
+   3/6.
 
 ## Remaining work
 
-- [ ] Owner review of §3 sequence + §5 gating + §6 Claude-Code policy
-- [ ] Resolve Open Questions Q1–Q6 with Bob
-- [ ] Land ADR-0011 (tctl headless / console single-HTTP) — drafted alongside
-- [ ] Re-status DOC-7 → Superseded once Q4 confirmed
+- [x] Owner review of §3 sequence + §5 gating + §6 Claude-Code policy (Bob, 2026-06-15)
+- [x] Resolve Open Questions Q1–Q6 with Bob (RESOLVED 2026-06-15 — see Open
+      questions section: Q1/Q2/Q3/Q6 by decision, Q4/Q5 by recommendation)
+- [ ] Land ADR-0011 (tctl headless / console single-HTTP) — drafted alongside;
+      flip its status Proposed → Accepted on owner sign-off
+- [x] Re-status DOC-7 → Superseded (Q4 confirmed 2026-06-15) — banner + README
+      index updated
 - [ ] (impl-time) build `tctl up` staging in `crates/trusty-controller/src/`
       composing DOC-8/DOC-4/DOC-5 primitives + the §6 Claude Code ensure
 - [ ] (DOC-10-owned) wire `tctl up [--with-mpm] [--analyze-core blocking]
