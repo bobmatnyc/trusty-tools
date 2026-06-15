@@ -44,7 +44,7 @@ tga = { path = "crates/trusty-git-analytics", version = "2.8.0" }
 # trusty-mpm: unified crate (replaces the former trusty-mpm-{core,mcp,client,
 # daemon,cli,tui,telegram} sub-crates). The gui sub-crate is kept separate
 # because it owns Tauri's build.rs and tauri.conf.json.
-trusty-mpm = { path = "crates/trusty-mpm", version = "0.8.0" }
+trusty-mpm = { path = "crates/trusty-mpm", version = "0.8.1" }
 # trusty-review: LLM-backed PR-review service. Referenced by trusty-analyze
 # (behind the optional `review` feature) so the analyze MCP server can expose
 # the trusty-review pipeline as `tr_review_*` tools (#630).

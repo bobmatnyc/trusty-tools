@@ -25,8 +25,9 @@ use crate::core::instruction_pipeline::{PipelineInput, PipelineOutput, build_ins
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deployer::{DeployStats, deploy_skills};
 use settings::{
-    deploy_output_style, inject_trusty_memory_mcp, remove_global_trusty_memory_hooks,
-    write_output_style, write_project_hooks,
+    deploy_output_style, inject_trusty_memory_mcp, inject_trusty_search_mcp,
+    preseed_workspace_trust_home, remove_global_trusty_memory_hooks, write_output_style,
+    write_project_hooks,
 };
 
 /// Outcome of the pre-launch preparation for one session.
@@ -164,6 +165,23 @@ pub fn prepare_session(fw: &FrameworkPaths, project_dir: &Path) -> Result<PrepRe
     // the memory tools.
     if let Err(err) = inject_trusty_memory_mcp(project_dir) {
         tracing::warn!("failed to inject trusty-memory MCP server: {err}");
+    }
+
+    // Inject the `trusty-search` MCP server too (issue #1270 / step 4) so the
+    // spawned session can reach the code-search tools (`search`, `grep`,
+    // `get_call_chain`, …) alongside the memory tools. Non-fatal: the session
+    // still launches without code search.
+    if let Err(err) = inject_trusty_search_mcp(project_dir) {
+        tracing::warn!("failed to inject trusty-search MCP server: {err}");
+    }
+
+    // Pre-seed per-directory trust for this workspace in `~/.claude.json`
+    // (issue #1269) so the interactive tmux Claude session does not stall on the
+    // "Do you trust this folder?" dialog and the injected task prompt is
+    // received. tm owns this workspace path, so marking it trusted is safe.
+    // Non-fatal: a trust-seed failure only means the operator may see the dialog.
+    if let Err(err) = preseed_workspace_trust_home(project_dir) {
+        tracing::warn!("failed to pre-seed workspace trust: {err}");
     }
 
     // Remove the now-redundant global `trusty-memory` hook entries so they no

@@ -11,8 +11,46 @@ use std::path::PathBuf;
 
 use crate::core::paths::FRAMEWORK_DIR_NAME;
 
+/// Canonical loopback bind address the daemon listens on by default.
+///
+/// Why (issue #1268): the daemon's `--addr` default, the thin CLI's `--url`
+/// default, and [`DEFAULT_DAEMON_URL`] previously each hard-coded the
+/// `127.0.0.1:7880` literal independently. Any one of them drifting (or an
+/// operator carrying a stale `TRUSTY_MPM_URL=…:7881` in their environment)
+/// produced "daemon: unreachable" because the client probed a port the daemon
+/// never bound. Hoisting the port into a single constant — and deriving every
+/// other default address string from it — makes the bind side and the client
+/// side provably agree from one source of truth.
+/// What: the literal `"127.0.0.1:7880"`, parsed into a [`SocketAddr`] by
+/// [`default_daemon_addr`] and embedded into [`DEFAULT_DAEMON_URL`].
+/// Test: `default_url_matches_addr`, `default_addr_parses`.
+pub const DEFAULT_DAEMON_ADDR: &str = "127.0.0.1:7880";
+
 /// Default daemon URL when no override and no lock file is found.
+///
+/// Why: derived from [`DEFAULT_DAEMON_ADDR`] so the client default and the
+/// daemon bind default can never drift (issue #1268).
+/// What: `"http://127.0.0.1:7880"` — the `http://` scheme prepended to
+/// [`DEFAULT_DAEMON_ADDR`]. Kept as a `&'static str` literal (rather than a
+/// runtime `format!`) so it remains usable in `const`/`default_value` contexts;
+/// the [`default_url_matches_addr`] test guarantees the two stay in lockstep.
+/// Test: `default_url_matches_addr`.
 pub const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:7880";
+
+/// Parse [`DEFAULT_DAEMON_ADDR`] into a [`SocketAddr`].
+///
+/// Why: the daemon's clap `--addr` argument is typed as [`SocketAddr`]; this
+/// helper lets that default be derived from the shared [`DEFAULT_DAEMON_ADDR`]
+/// constant instead of repeating the literal (issue #1268).
+/// What: parses the constant; the parse is infallible for a well-formed
+/// literal, so a malformed constant is a programmer error caught by
+/// `default_addr_parses` at test time.
+/// Test: `default_addr_parses`.
+pub fn default_daemon_addr() -> std::net::SocketAddr {
+    DEFAULT_DAEMON_ADDR
+        .parse()
+        .expect("DEFAULT_DAEMON_ADDR is a valid SocketAddr literal")
+}
 
 /// Path to the daemon lock file.
 ///
@@ -119,6 +157,26 @@ mod tests {
         // We can't guarantee no lock file exists, so just check it's a valid URL.
         let result = resolve_daemon_url(None);
         assert!(result.starts_with("http"));
+    }
+
+    #[test]
+    fn default_url_matches_addr() {
+        // Why (issue #1268): the client default URL and the daemon bind default
+        // must agree. `DEFAULT_DAEMON_URL` is `http://` + `DEFAULT_DAEMON_ADDR`.
+        assert_eq!(
+            DEFAULT_DAEMON_URL,
+            format!("http://{DEFAULT_DAEMON_ADDR}"),
+            "client default URL and daemon bind addr drifted (issue #1268)"
+        );
+    }
+
+    #[test]
+    fn default_addr_parses() {
+        // The shared bind constant must parse into a SocketAddr so the daemon's
+        // clap `--addr` default can be derived from it.
+        let addr = default_daemon_addr();
+        assert_eq!(addr.to_string(), DEFAULT_DAEMON_ADDR);
+        assert_eq!(addr.port(), 7880);
     }
 
     #[test]
