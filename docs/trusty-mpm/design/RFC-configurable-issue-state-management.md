@@ -1,7 +1,8 @@
 # RFC: Configurable Issue State-Management (Labels / Transitions / Assignee) via YAML
 
-**Status:** Draft
+**Status:** Accepted
 **Date:** 2026-06-15
+**Accepted:** 2026-06-15 (owner sign-off)
 **Issues:** [#1246] (this RFC)
 **Related:** [#1237] (`TicketSystem` trait), [#1244] (`tm ticket` `TicketSystem`/`CommandRunner` seam), [#1220] (`~/.trusty-tools/<crate>/config.yaml` convention)
 **Cross-repo:** bob-duetto/unicorn-factory ADR-0004 (harness → trusty-mpm migration), bob-duetto/unicorn-factory#100 (first consumer — adopt the YAML model), bob-duetto/unicorn-factory#103 (migration PR), bob-duetto/unicorn-factory#97 (epic)
@@ -182,21 +183,38 @@ on first use, overridable on disk).
 `[workspace.dependencies]`) and is already a dependency of **trusty-mpm**
 (`crates/trusty-mpm/Cargo.toml`: `serde_yaml.workspace = true`). The crate's
 `core/error.rs` even carries a `#[from] serde_yaml::Error` thiserror variant. No
-new dependency is required for this RFC. (This resolves what would otherwise be
-an open question — see §9.)
+new dependency is required for this RFC.
+
+> **Decision (RESOLVED 2026-06-15): reuse `serde_yaml 0.9` now, migrate before
+> production.** `serde_yaml 0.9` is **unmaintained** (the upstream crate is
+> archived). This RFC does **not** change the dependency as part of this work —
+> the issue-state subsystem reuses the already-present `serde_yaml` so it adds no
+> new surface. However, a **follow-up issue WILL be filed** to migrate the whole
+> workspace off `serde_yaml` to a maintained successor (`serde_yml` or
+> `serde-yaml-ng`) **before this subsystem ships to production consumers** (i.e.
+> before unicorn-factory #100 goes live). The PM is filing that tracking issue;
+> the migration is a separate cross-workspace concern that this RFC depends on
+> but does not perform. See §10 open-question resolution.
 
 ### 2.5 The hardcoded Unicorn Factory model (source NOT accessible)
 
-> **Could not read `src/unicorn/github_client.py`.** The repo
-> `bob-duetto/unicorn-factory` returns HTTP 404 under the active `gh` token
-> (`bobmatnyc` account; the `bob-duetto` account is logged in but not active and
-> has no access to the repo). `gh search code --owner bob-duetto` also returned
-> nothing. **All label names, colors, descriptions, transition edges, and the
-> `bob-unicorn` self-assign logic below are taken from issue #1246's body and are
-> marked "TO BE CONFIRMED against `github_client.py`" before the default YAML is
-> frozen.** The implementation PR must diff the committed default YAML against the
-> real `github_client.py` and reconcile any drift; that reconciliation is an
-> explicit acceptance gate (§8).
+> **Decision (RESOLVED 2026-06-15): adopt the assumed model now, reconcile at
+> implementation time as a hard acceptance gate.** `src/unicorn/github_client.py`
+> **could not be read** at authoring time — the repo `bob-duetto/unicorn-factory`
+> returns HTTP 404 under the active `gh` token (`bobmatnyc` account; the
+> `bob-duetto` account is logged in but not active and has no access to the repo),
+> and `gh search code --owner bob-duetto` returned nothing. The owner has
+> **decided** to proceed on the **assumed model below** (states `approved →
+> active-development → in-review → done`, plus `blocked`/`failed`; self-assign
+> under the `bob-unicorn` bot identity) as the working default. This is not an
+> open question — it is the accepted starting point. The label names, colors,
+> descriptions, and exact transition edges remain marked **"TO BE CONFIRMED
+> against `github_client.py` during unicorn-factory #100 adoption"**, and the
+> implementation PR **must** diff the committed default YAML against the real
+> `github_client.py` and reconcile any drift. **That reconciliation remains a hard
+> acceptance-criteria gate (§8, §9).** Adopting the assumed model now does not
+> relax the gate — it only removes the model choice from the list of open
+> questions.
 
 From the issue body, the current model is (TO BE CONFIRMED):
 
@@ -244,7 +262,7 @@ From the issue body, the current model is (TO BE CONFIRMED):
   |  YAML state model (the portable contract)                   |
   |   default: crates/trusty-mpm/examples/issue-state/          |
   |            unicorn-factory.yaml                              |
-  |   on-disk: ./trusty-issue-state.yaml  OR                     |
+  |   on-disk: ./issue-state.yaml  OR                            |
   |            ~/.trusty-tools/trusty-mpm/issue-state.yaml       |
   +-------------------------------------------------------------+
 ```
@@ -291,9 +309,60 @@ pub(crate) trait TicketSystem {
 | `create_label`    | `gh label create <name> --color <hex> --description <desc>`       |
 | `add_label`       | `gh issue edit <n> --add-label <name>`                           |
 | `remove_label`    | `gh issue edit <n> --remove-label <name>`                       |
-| `set_assignee`    | `gh issue edit <n> --add-assignee <login>` / `--remove-assignee` |
+| (label swap)      | `gh issue edit <n> --add-label <new> --remove-label <old>` (single-call default, §5.2) |
+| `set_assignee`    | `gh issue edit <n> --add-assignee <login>`; clear: `--remove-assignee <login>` per current assignee (§5.4) |
 
 Every one of these is unit-tested behind `FakeRunner` (§7) — no live `gh`.
+
+### 3.3 Breaking-change mitigation: default trait-method bodies for the stub backends
+
+Extending `TicketSystem` with the six new methods (`list_repo_labels`,
+`create_label`, `add_label`, `remove_label`, `set_assignee`, plus the read side
+exposed by the existing `validate`/`Issue.labels`) is a **breaking change to the
+trait**: the `Jira` and `Linear` stubs (`TicketSystemKind::Jira` / `Linear`)
+would otherwise fail to compile until they implement all six.
+
+**Chosen mitigation (Option 1 — default trait-method bodies that error).** Each
+new method ships with a **default body that returns an error** so existing stubs
+keep compiling unchanged:
+
+```rust
+pub(crate) trait TicketSystem {
+    fn name(&self) -> &'static str;
+    fn validate(&self, issue_number: u64) -> anyhow::Result<Issue>;
+    fn comment(&self, issue_number: u64, body: &str) -> anyhow::Result<()>;
+
+    // --- NEW for #1246: default bodies keep Jira/Linear stubs compiling ---
+
+    fn list_repo_labels(&self) -> anyhow::Result<Vec<RepoLabel>> {
+        anyhow::bail!("list_repo_labels not supported for this ticket system")
+    }
+    fn create_label(&self, _label: &RepoLabel) -> anyhow::Result<()> {
+        anyhow::bail!("create_label not supported for this ticket system")
+    }
+    fn add_label(&self, _issue: u64, _label: &str) -> anyhow::Result<()> {
+        anyhow::bail!("add_label not supported for this ticket system")
+    }
+    fn remove_label(&self, _issue: u64, _label: &str) -> anyhow::Result<()> {
+        anyhow::bail!("remove_label not supported for this ticket system")
+    }
+    fn set_assignee(&self, _issue: u64, _who: AssigneeTarget) -> anyhow::Result<()> {
+        anyhow::bail!("set_assignee not supported for this ticket system")
+    }
+}
+```
+
+`GhTicketSystem` **overrides all six** with real `gh`-backed implementations
+(§3.2 table); the `Jira`/`Linear` stubs inherit the erroring defaults and so keep
+compiling without modification. This is the **lowest-friction** option and is
+consistent with the **no-new-abstraction** non-goal (§1.2): we extend the
+existing trait rather than introducing a parallel label/assignee abstraction.
+Each default returns a clear, user-facing
+`"<op> not supported for this ticket system"` error, so a future `tm issue` run
+against a non-`gh` backend fails loudly and legibly rather than silently. The
+alternatives — a separate `LabelOps` trait, or making the methods non-default and
+forcing every stub to implement them now — were rejected as higher-friction for
+no current benefit (only `gh` is implemented today).
 
 ---
 
@@ -342,6 +411,21 @@ Every one of these is unit-tested behind `FakeRunner` (§7) — no live `gh`.
 > colors, and descriptions below are TO BE CONFIRMED against
 > `src/unicorn/github_client.py` (§2.5) before the default is frozen.**
 
+**Entry state: `approved` is set externally, not via `tm issue transition`.**
+The state machine deliberately has **no entry edge into `approved`** — there is
+no `transitions[]` row whose `to` is `approved`. `approved` is the **initial
+state**, applied **externally** by manual labeling / triage (a human or an
+upstream triage step adds the `approved` label to an issue). `tm issue
+transition` only moves an issue **between** existing states along the listed
+edges; it never *creates* the initial state. This matches the Unicorn Factory
+model, where an issue becomes a candidate for autonomous work the moment a human
+approves it (labels it `approved`), and the first thing the harness does is
+transition it `approved → active-development`. Operationally: `tm issue
+seed-labels` ensures the `approved` label *exists* in the repo; a human/triage
+applies it; the unicorn then drives the machine forward from there. An issue with
+**no** state label is "not yet in the machine" (pre-`approved`) and is simply not
+acted upon by `tm issue transition` until it carries a recognised state label.
+
 ```yaml
 # trusty-mpm issue-state model — Unicorn Factory default.
 # This file is the portable contract between the Python harness and `tm issue`.
@@ -359,7 +443,8 @@ identity:
   bot_login: bob-unicorn
 
 states:
-  - name: approved              # entry state: work is approved, not yet started
+  - name: approved              # INITIAL state — set externally by triage/manual
+                                # labeling; has NO entry edge in transitions[].
     order: 10
     label:
       name: approved            # TO BE CONFIRMED (may be `unicorn:approved`)
@@ -460,22 +545,35 @@ Algorithm:
    surfaced clearly — the visibility north star requires exactly one.)
 4. Check the edge `current → to-state` is in `transitions[]`. If not, **reject**
    with: `invalid transition <from> → <to>; allowed from <from>: [...]`.
-5. **Atomic label swap** (order chosen so the issue is never *un-stated*
-   mid-operation — add the new label first, then remove the old):
-   `add_label(issue, to.label.name)` then
-   `remove_label(issue, from.label.name)`.
+5. **Atomic label swap — single-call by default.** Swap the state label in **one
+   `gh` invocation**:
+   `gh issue edit <issue#> --add-label <to.label.name> --remove-label <from.label.name>`.
+   `gh issue edit` accepts both `--add-label` and `--remove-label` in a single
+   call, so the add and the remove are applied together — closing the window in
+   which the issue could be observed carrying *both* labels (or *neither*). This
+   directly serves the visibility north star (an issue is always in exactly one
+   state from an observer's perspective) and also collapses the operation to a
+   **single recorded `CommandRunner` call**, simplifying the test assertion to one
+   `(program, args)` tuple. The two-call fallback (`add_label` then
+   `remove_label`) is retained only as a documented degraded path for backends
+   whose `edit` does not support a combined add/remove.
 6. Apply the effective assignee rule for `to-state`
    (`states[].assignee` ?? `identity.default`) via `set_assignee(...)`.
 7. Post a transition audit comment (visibility): `comment(issue#, "…")` recording
    `from → to` and the assignee applied, plus any `--note` text. This keeps the
    transition reconstructable from comments even after labels change again.
 
-> **Atomicity note.** `gh` has no multi-mutation transaction. We add-then-remove
-> so a failure between steps leaves the issue with *both* labels (recoverable, and
-> still clearly mid-transition) rather than *no* state label (ambiguous). The
-> implementation PR documents this ordering and the recovery story; a future
-> `gh issue edit --add-label X --remove-label Y` single call (which `gh` does
-> support) can make it a single mutation — see §9.
+> **Atomicity note (RESOLVED 2026-06-15: single-call is the default).** The
+> single-call form `gh issue edit <n> --add-label <new> --remove-label <old>`
+> applies the add and the remove together in one `gh` invocation, so there is no
+> intermediate window in which the issue carries both labels or neither — the
+> tightest atomicity `gh` offers, and the one most aligned with the visibility
+> north star. It is therefore the **default** implementation. The two-call form
+> (add-then-remove) is kept only as a documented **fallback** for backends without
+> a combined-edit primitive; in that degraded mode the ordering is chosen so a
+> mid-operation failure leaves the issue with *both* labels (recoverable, still
+> clearly mid-transition) rather than *no* state label (ambiguous). The
+> implementation PR documents the fallback ordering and its recovery story.
 
 ### 5.3 Supporting verbs (implementation may include)
 
@@ -483,6 +581,26 @@ Algorithm:
   (operator introspection; reads YAML only, no `gh`).
 - `tm issue current <issue#>` — print the issue's current state derived from its
   labels (read side; reconstructs state from GitHub artifacts).
+
+### 5.4 Assignee application — exact `gh` semantics (incl. the `none` rule)
+
+`set_assignee(issue, who)` maps the three assignee rules (§4.1) to `gh issue
+edit` invocations. The subtlety is the **`none` (clear-all) rule**: `gh issue
+edit --remove-assignee` **requires an explicit login** — there is no
+"clear all assignees" flag. Clearing therefore requires **reading the current
+assignees first** and removing each by login.
+
+| Rule   | Mechanism |
+|--------|-----------|
+| `self` | `gh api user --jq .login` → `<login>`, then `gh issue edit <n> --add-assignee <login>`. (When `tm` runs authenticated as the bot, this self-assigns the bot — reproducing the harness behavior.) |
+| `bot`  | `gh issue edit <n> --add-assignee <identity.bot_login>` (e.g. `bob-unicorn`). |
+| `none` | **Read then remove.** First read the issue's current assignees — reuse the existing `validate(issue#)` read (extend `Issue` to carry `assignees`, or query `gh issue view <n> --json assignees --jq '.assignees[].login'`). Then for each current assignee login `L`, `gh issue edit <n> --remove-assignee <L>`. As a shortcut, when the issue is known to be self-assigned, `gh issue edit <n> --remove-assignee @me` clears the authenticated user without a prior read. If there are no assignees, `none` is a no-op (no `gh` call). |
+
+Because `--remove-assignee` needs a concrete login (or `@me`), the `none` rule is
+**not** a single fixed command — its `gh` calls depend on the issue's current
+assignee set, which the operation reads first. The `none` path is unit-tested by
+scripting `gh issue view` (or the extended `validate`) to return a known assignee
+set and asserting the exact `--remove-assignee <login>` calls (§7).
 
 ---
 
@@ -492,8 +610,11 @@ Aligned with the #1220 `~/.trusty-tools/<crate>/config.yaml` convention. `tm
 issue` resolves the state-model YAML in this order (first hit wins):
 
 1. **`--config <path>` flag** — explicit override (highest precedence).
-2. **Project file** — `./trusty-issue-state.yaml` in the current working
-   directory (per-repo customization, checkable into the consumer repo).
+2. **Project file** — `./issue-state.yaml` in the current working directory
+   (per-repo customization, checkable into the consumer repo). The basename is
+   deliberately the **same** as the user-config basename (`issue-state.yaml`) for
+   consistency — the two differ only by location (CWD vs. `~/.trusty-tools/…`),
+   not by name.
 3. **User config** — `~/.trusty-tools/trusty-mpm/issue-state.yaml` (the #1220
    location).
 4. **Embedded default** — the Unicorn Factory model compiled into the binary via
@@ -521,14 +642,17 @@ Every operation is unit-tested behind the existing `FakeRunner` (the scripted
   `(program, args)`), and present ones do not. `--dry-run` records **zero**
   `create` calls.
 - **`transition`:** `FakeRunner` scripts `gh issue view` (current label present) →
-  assert the correct `--add-label` then `--remove-label` calls and the correct
-  `set_assignee` call, in order. A scripted issue whose current label has **no
-  allowed edge** to the target asserts the operation **errors before any `gh`
-  mutation** (no `add_label`/`remove_label` recorded). Zero/multiple state-labels
-  present asserts a clear error.
+  assert the **single** `gh issue edit --add-label <new> --remove-label <old>`
+  call (the default single-call swap, §5.2) and the correct `set_assignee` call,
+  in order. A scripted issue whose current label has **no allowed edge** to the
+  target asserts the operation **errors before any `gh` mutation** (no label-swap
+  call recorded). Zero/multiple state-labels present asserts a clear error.
 - **Assignee rules:** `self` → asserts a `gh api user` lookup then `--add-assignee
-  <login>`; `bot` → `--add-assignee bob-unicorn`; `none` → `--remove-assignee`
-  (or clears).
+  <login>`; `bot` → `--add-assignee bob-unicorn`; `none` → scripts a known current
+  assignee set (via `gh issue view --json assignees` / extended `validate`) and
+  asserts the exact `--remove-assignee <login>` call per current assignee (or a
+  `--remove-assignee @me` shortcut when self-assigned); empty assignee set asserts
+  **zero** `gh` calls (no-op) — see §5.4.
 
 This mirrors the #1237/#1244 test convention exactly: scripted `CommandOutput`s,
 recorded calls, assertions on `(program, args)`.
@@ -590,44 +714,73 @@ No trusty-mpm behavior is removed or changed for existing users: `tm issue` is a
       `commands/issue/` into `config.rs` / `state.rs` / `ops.rs` / `mod.rs`).
 - [ ] **Visibility guarantee:** every operation mutates GitHub artifacts
       (labels/assignee/comment) so state is reconstructable from GitHub alone.
+- [ ] **Trait extension does not break the stub backends:** the six new
+      `TicketSystem` methods ship with **default erroring bodies** (§3.3), and
+      `Jira`/`Linear` keep compiling unchanged (`cargo check -p trusty-mpm`).
+- [ ] **`transition` uses the single-call label swap by default** (§5.2):
+      `gh issue edit … --add-label … --remove-label …`, asserted as one recorded
+      `CommandRunner` call.
+- [ ] **`serde_yaml` migration tracking issue is filed** (PM) to move the
+      workspace to a maintained YAML crate (`serde_yml`/`serde-yaml-ng`) **before
+      this subsystem ships to production** (unicorn-factory #100 go-live). This RFC
+      does not change the dependency; it records the dependency on that follow-up.
 
 ---
 
-## 10. Open Questions for Bob
+## 10. Open Questions & Resolutions
 
-Only genuine, unresolved questions remain (the placement, surface, and format
-questions are **locked owner decisions** stated in §1.2 and are *not* open).
+The placement, surface, and format questions are **locked owner decisions**
+stated in §1.2. At owner sign-off (2026-06-15) three of the prior open questions
+were **resolved**; two genuine items remain open, each with the RFC's recommended
+default noted.
 
-1. **`serde_yaml` — already available (informational, likely no action).**
-   `serde_yaml = "0.9"` is already a workspace dep *and* already used by
-   trusty-mpm (§2.4). The plan reuses it as-is. Confirm there is no desire to
-   migrate to a maintained successor (e.g. `serde_yml`) as part of this work, or
-   whether that is a separate cross-workspace concern.
+### 10.1 Resolved at sign-off (2026-06-15)
 
-2. **Label color/description drift on *existing* labels.** When `seed-labels`
+1. **`serde_yaml` successor — RESOLVED 2026-06-15.** `serde_yaml 0.9` is
+   unmaintained. **Decision:** reuse it as-is for this RFC (no new surface; §2.4),
+   **and** file a separate follow-up tracking issue to migrate the whole workspace
+   to a maintained YAML crate (`serde_yml` / `serde-yaml-ng`) **before this
+   subsystem ships to production** (unicorn-factory #100 go-live). The PM is filing
+   that tracking issue. This RFC depends on that migration but does not perform it.
+
+2. **Transition atomicity primitive — RESOLVED 2026-06-15 in favor of
+   single-call.** **Decision:** the **single-call** form
+   `gh issue edit <n> --add-label <new> --remove-label <old>` is the **default**
+   (§5.2) — it applies both mutations together (closing the both-labels/no-label
+   window, directly serving the visibility north star) and collapses the test
+   assertion to one recorded `CommandRunner` call. The two-call add-then-remove
+   form is retained only as a documented fallback for backends without a combined
+   edit.
+
+3. **Exact Unicorn Factory model values — RESOLVED 2026-06-15.** `github_client.py`
+   was inaccessible at authoring time (§2.5). **Decision:** proceed on the
+   **assumed model** (states `approved → active-development → in-review → done`,
+   plus `blocked`/`failed`; self-assign under `bob-unicorn`) as the working
+   default, with `approved` as the externally-set initial state (§4.2). The exact
+   label strings/colors/descriptions/edges remain marked **"to be confirmed
+   against `github_client.py` during #100 adoption"**, and reconciling the
+   committed default YAML against the real source **remains a hard
+   acceptance-criteria gate** (§8 step 1, §9). Adopting the assumed model removes
+   the *model choice* from the open list without relaxing the reconciliation gate.
+
+### 10.2 Still open (recommended defaults noted)
+
+1. **Label color/description drift on *existing* labels.** When `seed-labels`
    finds a state's label already present but with a **different color or
-   description** than the YAML, should it (a) leave it alone (proposed default),
-   (b) reconcile it to match the YAML (overwrite), or (c) warn only? Proposed:
-   leave alone by default, add an opt-in `--reconcile` flag later. Confirm.
+   description** than the YAML, should it (a) leave it alone, (b) reconcile it to
+   match the YAML (overwrite), or (c) warn only?
+   **RFC recommended default:** (a) **leave existing labels alone**, and add an
+   opt-in `--reconcile` flag later to overwrite drifted color/description. This
+   keeps `seed-labels` purely create-missing and non-destructive by default.
 
-3. **Transition atomicity primitive.** Proposed: add-then-remove via two `gh`
-   calls (§5.2) for a safe failure mode. `gh issue edit` actually accepts
-   `--add-label X --remove-label Y` in a single invocation. Prefer the single-call
-   form (more atomic, fewer API calls) even though it's harder to assert
-   granularly in tests, or keep the two-call form for clearer test seams?
-
-4. **Multi-identity / bot auth.** The `self` rule assigns the authenticated `gh`
+2. **Multi-identity / bot auth.** The `self` rule assigns the authenticated `gh`
    user; the `bot` rule assigns `identity.bot_login` by name. For the Unicorn
    Factory the harness runs `tm` authenticated **as** `bob-unicorn`, so `self`
    reproduces current behavior. Is there a near-term need for `tm issue` to
-   *switch* gh identity itself (e.g. a token/`--as` flag), or is "run `tm` under
-   the bot's auth" sufficient (proposed)?
-
-5. **Exact Unicorn Factory model values.** `github_client.py` was **inaccessible**
-   at authoring time (§2.5). All label strings/colors/descriptions/edges and the
-   `bob-unicorn` rule in the default YAML are flagged TO BE CONFIRMED. Confirm the
-   implementation PR's reconciliation against the real source is the right gate
-   (vs. attaching the values to this RFC now).
+   *switch* gh identity itself (e.g. a token / `--as` flag)?
+   **RFC recommended default:** **no in-process identity switching** for now — run
+   `tm` under the bot's auth (the `self` rule then self-assigns the bot). Revisit
+   only if a consumer needs a single `tm` invocation to act as multiple identities.
 
 ---
 
