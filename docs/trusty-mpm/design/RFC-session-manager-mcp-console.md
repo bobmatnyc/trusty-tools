@@ -1,7 +1,8 @@
 # RFC: Session-Manager MCP Service + trusty-console HTTP Front Door
 
-**Status:** Draft  
+**Status:** Accepted  
 **Date:** 2026-06-15  
+**Accepted:** 2026-06-15 (all open questions resolved by owner sign-off — see §6)  
 **Issues:** [#1221] (MCP service), [#1222] (console front door), [#1220] (config convention)  
 **Related:** [#1104] (console architecture), [#1206] (24/7 supervisor), [#1218], [#1219]  
 **Author:** Bob Matsuoka
@@ -561,12 +562,21 @@ surface and all known callers have migrated.
 
 ---
 
-## 6. Open Questions for Bob
+## 6. Open Questions for Bob (ALL RESOLVED 2026-06-15)
+
+> All seven open questions were resolved by owner decision (Bob Matsuoka) on
+> 2026-06-15. The resolutions below are baked into the phased plan in §4; where a
+> resolution refines scope, treat §6 as authoritative. With these resolved, the
+> RFC status is flipped to **Accepted** (see header).
 
 1. **`POST /rpc` endpoint shape.** Should the daemon accept a raw JSON-RPC
    `Request` body at `POST /rpc` (mirroring `trusty-memory`'s `POST /rpc`), or
    should the stdio bridge use a different internal channel (Unix socket, named
    pipe)? HTTP `POST /rpc` is the simplest and most consistent with `trusty-memory`.
+
+   **RESOLVED 2026-06-15 (owner decision)** — Use a raw JSON-RPC `Request` body at
+   `POST /rpc`, mirroring `trusty-memory`. Simplest and most consistent with the
+   existing reference pattern; no Unix-socket/named-pipe channel.
 
 2. **Session-manager tool scope in P1.** The 9 existing tools cover orchestration
    (delegation, circuit breakers, memory protection). The new session-lifecycle
@@ -574,6 +584,10 @@ surface and all known callers have migrated.
    `session_activity`, `session_send`) more than double the catalog. Should they
    ship as one PR (P1) or as a follow-up P1b? The SLOC cap on `mcp/tools.rs`
    (currently ~254 SLOC) and `mcp/mod.rs` will need splits either way.
+
+   **RESOLVED 2026-06-15 (owner decision)** — Ship the 6 new session-lifecycle
+   tools in P1 as a single PR (not a P1b follow-up). Perform the required SLOC
+   splits of `mcp/tools.rs` and `mcp/mod.rs` as part of P1.
 
 3. **SSE streaming in P3.** The daemon exposes `GET /events` (SSE) for live hook
    events. The console (a stdio MCP client) cannot forward that SSE stream to the
@@ -585,14 +599,26 @@ surface and all known callers have migrated.
    - (c) Defer live SSE to a later phase; poll-based refresh is good enough for P2/P3.
    Which option do you prefer?
 
+   **RESOLVED 2026-06-15 (owner decision)** — Option (c): defer live SSE to a later
+   phase; poll-based refresh is sufficient for P2/P3. Lowest risk — no proxy
+   exception and no console-native event ring yet.
+
 4. **Config file format.** YAML (`~/.trusty-tools/trusty-mpm/config.yaml` as
    specified in #1220) requires `serde_yaml`. JSON is already a workspace dep.
    Is YAML required by the spec, or is JSON + `.yaml` extension unacceptable?
+
+   **RESOLVED 2026-06-15 (owner decision)** — YAML
+   (`~/.trusty-tools/trusty-mpm/config.yaml`, per #1220). Add the `serde_yaml`
+   dependency.
 
 5. **`feat/memory-palace-id-from-path` branch timing.** The `GithubPath` helper
    for P4 should be extracted from that branch. Is task #12
    (trusty-memory palace-ID) expected to land before P4, or should we extract the
    helper in P4 independently and then reconcile?
+
+   **RESOLVED 2026-06-15 (owner decision)** — Extract the `GithubPath` helper in P4
+   independently; do NOT serialize on task #12 (trusty-memory palace-ID).
+   Reconcile after.
 
 6. **Supervisor persistence.** The 24/7 unattended supervisor (#1206) lives in the
    daemon and is managed by launchd. After P2, the console's session tab will show
@@ -600,10 +626,18 @@ surface and all known callers have migrated.
    auto-resume (the `TRUSTY_MPM_AUTO_RESUME` env var), or is that a CLI-only
    operator setting?
 
+   **RESOLVED 2026-06-15 (owner decision)** — The console SHALL provide controls to
+   enable/disable auto-resume (`TRUSTY_MPM_AUTO_RESUME`), consistent with the
+   "console always-on" decision. Not CLI-only.
+
 7. **Telegram bot coupling.** The Telegram bot currently calls the daemon's HTTP
    API directly (`POST /hooks`, `GET /sessions`, etc.). After P3, should the bot
    be updated to call via the console, or is direct-daemon access a justified
    exception for the bot's 24/7 alert path?
+
+   **RESOLVED 2026-06-15 (owner decision)** — Keep the Telegram bot's direct-daemon
+   HTTP access as a justified exception for its 24/7 alert path; it is NOT required
+   to route via the console after P3.
 
 ---
 
