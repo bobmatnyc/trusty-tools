@@ -381,7 +381,10 @@ pub(crate) struct WatchArgs {
     pub(crate) label: Option<String>,
 
     /// `listen`-mode poll interval in seconds (default 60).
-    #[arg(long = "interval-secs")]
+    #[arg(
+        long = "interval-secs",
+        help = "Poll interval in seconds (listen mode only; ignored by poll)"
+    )]
     pub(crate) interval_secs: Option<u64>,
 
     /// Which issues to consider: `open` (default) or `all`.

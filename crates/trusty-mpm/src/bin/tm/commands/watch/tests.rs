@@ -21,7 +21,7 @@ use super::dispatch::{DispatchMode, build_watch_task, dispatch_issue, watch_bran
 use super::github::{
     GhIssueLister, IssueLister, IssueState, MatchedIssue, filter_by_label, parse_issues,
 };
-use super::listen::select_new_issues;
+use super::listen::{select_new_issues, should_warn};
 use super::{BoardRepo, dispatch_mode, resolve_board_repo};
 
 use crate::commands::ticket::runner::{CommandOutput, CommandRunner};
@@ -494,4 +494,12 @@ fn select_new_issues_second_poll_is_empty() {
     assert_eq!(first.len(), 2);
     let second = select_new_issues(&batch, &mut seen);
     assert!(second.is_empty(), "re-poll of same issues must be empty");
+}
+
+#[test]
+fn should_warn_only_for_execute() {
+    // The in-memory-dedup restart warning must fire only when we actually spawn
+    // work (Execute); dry-run re-listing is harmless and must stay quiet.
+    assert!(should_warn(DispatchMode::Execute));
+    assert!(!should_warn(DispatchMode::DryRun));
 }

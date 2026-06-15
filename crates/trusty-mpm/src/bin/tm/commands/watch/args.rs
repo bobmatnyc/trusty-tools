@@ -83,11 +83,16 @@ pub(crate) struct ResolvedWatch {
 /// Why: the spec lets `<project>` be a direct `owner/repo` OR a registered
 /// project name resolved via config. A direct `owner/repo` must win as-is; any
 /// other token (a bare name, or anything that does not parse to two segments)
-/// falls back to the configured `watch.repo`. Surfacing a clear error when
-/// neither yields a repo stops the loop from running against a guessed board.
+/// falls back to the configured `watch.repo`. That fallback must NEVER be silent:
+/// a typo in the `<project>` token would otherwise quietly target the configured
+/// board, so we emit a clear stderr notice naming both the offending token and
+/// the repo we are substituting. Surfacing a clear error when neither yields a
+/// repo stops the loop from running against a guessed board.
 /// What: returns the trimmed `project` when it parses to a clean `owner/repo`
-/// (two non-empty segments and no extra path noise); otherwise returns the
-/// configured `repo`; otherwise an actionable error.
+/// (two non-empty segments and no extra path noise); otherwise, when a non-empty
+/// `config.repo` exists, prints `note: project token '<tok>' is not 'owner/repo';
+/// using configured repo '<config.repo>'` to stderr and returns that repo;
+/// otherwise an actionable error (never a guess).
 /// Test: `resolve_project_direct_owner_repo`, `resolve_project_name_uses_config`,
 /// `resolve_project_unresolvable_errors`.
 fn resolve_project(project: &str, config: &WatchConfig) -> anyhow::Result<String> {
@@ -101,6 +106,11 @@ fn resolve_project(project: &str, config: &WatchConfig) -> anyhow::Result<String
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
+        // Never substitute silently: a typo in `<project>` must not quietly
+        // target the wrong board. Name both the token and the repo we use.
+        eprintln!(
+            "note: project token '{token}' is not 'owner/repo'; using configured repo '{repo}'"
+        );
         return Ok(repo.to_string());
     }
     anyhow::bail!(

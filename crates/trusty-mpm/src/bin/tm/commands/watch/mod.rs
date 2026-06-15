@@ -92,6 +92,7 @@ pub(crate) fn resolve_board_repo<R: CommandRunner>(
     runner: &R,
     repo: &str,
 ) -> anyhow::Result<BoardRepo> {
+    // TODO: support configurable GitHub host (GHE)
     let clone_url = format!("https://github.com/{repo}");
     let out = runner.run(
         "gh",

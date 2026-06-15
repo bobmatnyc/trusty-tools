@@ -93,8 +93,9 @@ pub(crate) trait IssueLister {
 /// behind a [`CommandRunner`] keeps the discovery path unit-testable and reuses
 /// the exact process seam `tm ticket` uses.
 /// What: `list` runs `gh issue list -R <repo> --label <l> --state <s> --json
-/// number,title,body,labels,assignees,url`, parses the JSON, and applies the
-/// defensive label re-filter.
+/// number,title,body,labels,url`, parses the JSON, and applies the defensive
+/// label re-filter. (Assignees are intentionally not requested: routing is by
+/// LABEL, so the field was never deserialised.)
 /// Test: `gh_list_parses_and_filters`, `gh_list_surfaces_gh_failure`.
 pub(crate) struct GhIssueLister<R: CommandRunner> {
     runner: R,
@@ -130,7 +131,7 @@ impl<R: CommandRunner> IssueLister for GhIssueLister<R> {
                 "--state",
                 state.as_gh(),
                 "--json",
-                "number,title,body,labels,assignees,url",
+                "number,title,body,labels,url",
             ],
         )?;
         if !out.success {

@@ -49,6 +49,20 @@ pub(crate) fn select_new_issues(
     fresh
 }
 
+/// Decide whether the in-memory-dedup restart warning should be emitted.
+///
+/// Why: the `seen` set lives only for the process lifetime, so a restart loses
+/// it and `--execute` would re-dispatch every currently-open matching issue. That
+/// risk only exists when we are actually spawning work, so the warning must fire
+/// for `Execute` and stay silent for `DryRun` (where re-listing is harmless).
+/// Pulling the predicate out of the loop body makes the "warn iff Execute"
+/// invariant directly unit-testable without driving the sleeping loop.
+/// What: returns `true` only for [`DispatchMode::Execute`].
+/// Test: `should_warn_only_for_execute`.
+pub(crate) fn should_warn(mode: DispatchMode) -> bool {
+    matches!(mode, DispatchMode::Execute)
+}
+
 /// Drive the `tm watch listen` poll loop until Ctrl-C.
 ///
 /// Why: the long-running entry point. Polling on an interval (rather than a
@@ -87,6 +101,14 @@ pub(crate) async fn run_listen_loop<L: IssueLister>(
             DispatchMode::Execute => "EXECUTE",
         }
     );
+    // The dedup set is process-local (a persistent state file is a documented
+    // future enhancement). In execute mode a restart therefore re-dispatches
+    // every currently-open matching issue, which is destructive — warn loudly.
+    if should_warn(mode) {
+        eprintln!(
+            "warn: dedup set is in-memory; a restart will re-dispatch all currently-open matching issues"
+        );
+    }
 
     loop {
         match lister.list(&settings.repo, &settings.label, settings.state) {
