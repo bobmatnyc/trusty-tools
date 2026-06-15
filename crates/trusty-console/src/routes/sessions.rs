@@ -267,6 +267,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
     use tower::ServiceExt;
 
     use crate::server::build_router;
@@ -366,5 +367,120 @@ mod tests {
     async fn map_tool_result_absent_is_503() {
         let resp = map_tool_result(Err(McpHandleError::Absent));
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // ── route-shadowing verification (#1222 review finding #2) ────────────────
+    //
+    // The static `/api/console/sessions/supervisor` route shares a prefix with the
+    // dynamic `/api/console/sessions/{id}` capture. axum 0.8 (matchit 0.8)
+    // prioritises a literal/static segment over a `{param}` capture, so the static
+    // routes SHOULD win — these tests prove it rather than trusting the router
+    // ordering. They do so by priming the trusty-mpm handle to a `Connected` state
+    // whose tool set deliberately excludes every session tool, so each session
+    // route returns `503 { status: degraded, hint }` where the hint names the tool
+    // the matched handler asked for. The tool name in the hint reveals which
+    // handler axum dispatched to:
+    //   - `supervisor` route → `supervisor_handler` → hint names `supervisor_status`
+    //   - shadowed by `{id}`  → `get_handler`        → hint names `session_status`
+
+    /// Build a router whose trusty-mpm handle is `Connected` but exposes no
+    /// session tools, so each route's 503 hint reveals the dispatched handler.
+    async fn router_primed_missing_tools() -> axum::Router {
+        let state = AppState::new(vec![]);
+        {
+            let handles = state.mcp_handles();
+            let mpm = handles.get("trusty-mpm").expect("mpm handle registered");
+            // Any argument primes a Connected state whose tool set is
+            // {console_metrics, …analyze tools} — none of the session tools — so
+            // every session route trips the capability-gate with a tool-named hint.
+            mpm.prime_connected_missing_tool_for_test("supervisor_status")
+                .await;
+        }
+        build_router(state)
+    }
+
+    async fn hint_of(resp: axum::http::Response<Body>) -> String {
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes()
+            .to_vec();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
+        body["hint"].as_str().unwrap_or("").to_string()
+    }
+
+    /// Why: prove `GET /api/console/sessions/supervisor` reaches
+    /// `supervisor_handler` (calls `supervisor_status`) and is NOT shadowed by the
+    /// `{id}` capture (which would call `session_status` with id="supervisor").
+    /// Test: this test — the discriminator is the tool name in the 503 hint.
+    #[tokio::test]
+    async fn supervisor_route_is_not_shadowed_by_id_capture() {
+        let router = router_primed_missing_tools().await;
+        let req = Request::builder()
+            .uri("/api/console/sessions/supervisor")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "primed-missing-tool supervisor route must be a capability-gated 503"
+        );
+        let hint = hint_of(resp).await;
+        assert!(
+            hint.contains("supervisor_status"),
+            "supervisor route must reach supervisor_handler (hint should name \
+             supervisor_status); got: {hint}"
+        );
+        assert!(
+            !hint.contains("session_status"),
+            "supervisor route must NOT be shadowed by the {{id}} capture \
+             (session_status); got: {hint}"
+        );
+    }
+
+    /// Why: prove `POST /api/console/sessions/supervisor/auto-resume` reaches
+    /// `auto_resume_handler` (calls `auto_resume_set`), not any `{id}` capture.
+    /// Test: this test — the 503 hint must name `auto_resume_set`.
+    #[tokio::test]
+    async fn auto_resume_route_is_not_shadowed() {
+        let router = router_primed_missing_tools().await;
+        let body = Body::from(json!({ "enabled": true }).to_string());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/console/sessions/supervisor/auto-resume")
+            .header("content-type", "application/json")
+            .body(body)
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let hint = hint_of(resp).await;
+        assert!(
+            hint.contains("auto_resume_set"),
+            "auto-resume route must reach auto_resume_handler (hint should name \
+             auto_resume_set); got: {hint}"
+        );
+    }
+
+    /// Why: the sanity counterpart — a genuine id capture (`/{id}`) must reach
+    /// `get_handler` (calls `session_status`), confirming the discriminator works
+    /// and the `{id}` route is still wired for non-`supervisor` ids.
+    /// Test: this test.
+    #[tokio::test]
+    async fn ordinary_id_route_reaches_session_status() {
+        let router = router_primed_missing_tools().await;
+        let req = Request::builder()
+            .uri("/api/console/sessions/sess-abc123")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let hint = hint_of(resp).await;
+        assert!(
+            hint.contains("session_status"),
+            "ordinary id route must reach get_handler (session_status); got: {hint}"
+        );
     }
 }

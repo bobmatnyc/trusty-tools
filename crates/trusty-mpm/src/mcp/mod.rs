@@ -214,7 +214,7 @@ pub trait OrchestratorBackend: Send + Sync {
     ///
     /// Why: the console toggle must durably set auto-resume without the CLI
     ///      (RFC §6 Q6). The supervisor reads the persisted flag on its next sweep.
-    /// What: writes the desired flag and echoes `{ desired, env, effective,
+    /// What: writes the desired flag and echoes `{ desired, env,
     ///      pending_restart }`.
     /// Test: `dispatch_auto_resume_set_tool` (mock).
     async fn auto_resume_set(&self, enabled: bool) -> Result<Value, String>;

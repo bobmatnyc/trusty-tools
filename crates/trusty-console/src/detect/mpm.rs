@@ -74,23 +74,37 @@ impl Default for MpmConnector {
 /// Why: the lock file is TOML with `addr = "http://127.0.0.1:<port>"`; the TCP
 /// probe needs a bare `host:port` with no scheme. A tiny line scan avoids
 /// pulling a TOML dependency into the console for one field.
-/// What: finds the `addr = "..."` line, strips the quotes and any `http(s)://`
-/// scheme, and returns the `host:port`. Returns `None` when absent/malformed.
-/// Test: `parse_lock_addr_strips_scheme`, `parse_lock_addr_none_when_absent`.
+/// What: splits each line on the FIRST `=` into key/value, matches the key
+/// EXACTLY against `addr` (so `addr_extra` is rejected), consumes exactly one
+/// `=`, strips the quotes and any `http(s)://` scheme, and returns the
+/// `host:port`. Returns `None` when absent/malformed.
+///
+/// The exact-key match and single-`=` split are deliberate (review finding #4):
+/// the previous `strip_prefix("addr")` + `trim_start_matches([' ', '='])` matched
+/// `addr_extra = "…"` and stripped ALL leading spaces/`=`, which could yield a
+/// garbage address. Splitting on the first `=` and comparing the trimmed key for
+/// equality fixes both issues.
+/// Test: `parse_lock_addr_strips_scheme`, `parse_lock_addr_none_when_absent`,
+/// `parse_lock_addr_well_formed_no_scheme`, `parse_lock_addr_ignores_prefixed_key`,
+/// `parse_lock_addr_prefers_exact_key_over_decoy`.
 fn parse_lock_addr(body: &str) -> Option<String> {
     for line in body.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("addr") {
-            // rest looks like: ` = "http://127.0.0.1:7880"`
-            let value = rest.trim_start_matches([' ', '=']).trim();
-            let unquoted = value.trim_matches('"');
-            let host_port = unquoted
-                .strip_prefix("http://")
-                .or_else(|| unquoted.strip_prefix("https://"))
-                .unwrap_or(unquoted);
-            if !host_port.is_empty() {
-                return Some(host_port.to_string());
-            }
+        // Split on the FIRST `=` only; a value like an IPv6 host:port has no `=`
+        // but this keeps any stray `=` inside the quoted value intact.
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        // Exact key match — `addr_extra`, `addr2`, etc. must NOT match.
+        if key.trim() != "addr" {
+            continue;
+        }
+        let unquoted = value.trim().trim_matches('"');
+        let host_port = unquoted
+            .strip_prefix("http://")
+            .or_else(|| unquoted.strip_prefix("https://"))
+            .unwrap_or(unquoted);
+        if !host_port.is_empty() {
+            return Some(host_port.to_string());
         }
     }
     None
@@ -174,6 +188,42 @@ mod tests {
     #[test]
     fn parse_lock_addr_none_when_absent() {
         assert_eq!(parse_lock_addr("pid = 42\n"), None);
+    }
+
+    /// Why: a well-formed `addr = "host:port"` (no scheme) must parse to the bare
+    /// host:port unchanged — the common case for a scheme-less lock value.
+    /// Test: this test.
+    #[test]
+    fn parse_lock_addr_well_formed_no_scheme() {
+        assert_eq!(
+            parse_lock_addr("addr = \"127.0.0.1:9001\"\n").as_deref(),
+            Some("127.0.0.1:9001")
+        );
+    }
+
+    /// Why: the key match must be EXACT — a different key whose name merely starts
+    /// with `addr` (e.g. `addr_extra`) must NOT be mistaken for the `addr` line.
+    /// The old `strip_prefix("addr")` matched `addr_extra` and, after stripping
+    /// the leading ` _extra =` punctuation loosely, could have yielded a garbage
+    /// address. Here the lone non-`addr` key must parse to `None`.
+    /// Test: this test (regression guard for review finding #4).
+    #[test]
+    fn parse_lock_addr_ignores_prefixed_key() {
+        // Only `addr_extra` present — no real `addr` key — must yield None.
+        assert_eq!(
+            parse_lock_addr("addr_extra = \"http://6.6.6.6:6666\"\n"),
+            None
+        );
+    }
+
+    /// Why: when BOTH `addr_extra` and the real `addr` are present, the parser
+    /// must return the value of the EXACT `addr` key, never the prefixed decoy —
+    /// regardless of declaration order.
+    /// Test: this test (regression guard for review finding #4).
+    #[test]
+    fn parse_lock_addr_prefers_exact_key_over_decoy() {
+        let body = "addr_extra = \"http://6.6.6.6:6666\"\naddr = \"http://127.0.0.1:7880\"\n";
+        assert_eq!(parse_lock_addr(body).as_deref(), Some("127.0.0.1:7880"));
     }
 
     /// Why: with no binary on PATH the connector must report Absent regardless of

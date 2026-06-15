@@ -283,9 +283,17 @@ pub fn build_router(state: AppState) -> Router {
         // ── trusty-mpm session-manager surface (#1222: P2 tab + P3 front door) ──
         // The console is the SINGLE HTTP front door for the session REST API;
         // every handler calls a trusty-mpm MCP tool via the stdio bridge — never
-        // the daemon's HTTP port (#1104). Route order: the static `supervisor`
-        // and `auto-resume` sub-paths are declared before the `{id}` capture so
-        // axum matches them first.
+        // the daemon's HTTP port (#1104).
+        //
+        // Route precedence (verified, NOT declaration-order dependent): axum 0.8
+        // routes via matchit 0.8, which prioritises a literal/static path segment
+        // over a `{param}` capture at the same position regardless of the order
+        // routes are added. So `/sessions/supervisor` and
+        // `/sessions/supervisor/auto-resume` always win over `/sessions/{id}` —
+        // a request for `…/supervisor` reaches `supervisor_handler`, never
+        // `get_handler` with id="supervisor". This is asserted directly by
+        // `routes::sessions::tests::supervisor_route_is_not_shadowed_by_id_capture`
+        // and `…::auto_resume_route_is_not_shadowed`.
         .route(
             "/api/console/sessions",
             get(crate::routes::sessions::list_handler).post(crate::routes::sessions::new_handler),
@@ -315,6 +323,17 @@ pub fn build_router(state: AppState) -> Router {
             "/api/console/sessions/{id}/resume",
             axum::routing::post(crate::routes::sessions::resume_handler),
         )
+        // Same-origin guard for the DESTRUCTIVE session write routes (#1222
+        // review #3). The console serves a permissive CORS policy (open reads),
+        // so without this guard any web page the operator visited could fire a
+        // cross-origin `fetch` and spawn/stop/decommission sessions (CSRF). The
+        // middleware is method-aware — it only blocks state-changing methods
+        // whose `Origin` header is present and non-loopback, so the GET reads on
+        // these same paths pass through untouched. `route_layer` applies it only
+        // to the seven session routes declared above, not the whole console.
+        .route_layer(axum::middleware::from_fn(
+            crate::routes::origin_guard::guard_write_origin,
+        ))
         // Analyze on-demand routes — call the analyze stdio MCP directly (no /proxy).
         .route(
             "/api/console/metrics/analyze/indexes",
@@ -1289,6 +1308,105 @@ mod tests {
         assert!(
             hint.contains("list_analyze_indexes"),
             "hint must mention the missing tool name, got: {hint}"
+        );
+    }
+
+    // ── same-origin guard on destructive session write routes (#1222 review #3) ──
+
+    /// Why: a cross-origin browser `POST` to a destructive session route is the
+    /// CSRF threat the same-origin guard exists to block. With a non-loopback
+    /// `Origin` header present, the write route must return `403 FORBIDDEN` and
+    /// never reach the handler (which would otherwise return 503 absent-binary).
+    /// What: issues `POST /api/console/sessions` with `Origin: http://evil.example`
+    /// and asserts 403.
+    /// Test: this test itself (review finding #3 regression guard).
+    #[tokio::test]
+    async fn write_route_rejects_cross_origin() {
+        let router = build_router(make_test_state());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/console/sessions")
+            .header("origin", "http://evil.example.com")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"repo_url":"https://x/y","ref":"main","task":"t"}).to_string(),
+            ))
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-origin write must be rejected with 403"
+        );
+    }
+
+    /// Why: the legitimate operator surface (the SPA served from loopback) must
+    /// still be able to drive write routes — a loopback `Origin` must pass the
+    /// guard. With no trusty-mpm binary on PATH the handler then returns a 503,
+    /// so the guard is proven transparent by asserting the status is NOT 403.
+    /// What: issues `DELETE /api/console/sessions/abc` with a loopback Origin and
+    /// asserts the response is not 403 (guard passed; handler degraded to 503).
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn write_route_allows_loopback_origin() {
+        let router = build_router(make_test_state());
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/console/sessions/abc")
+            .header("origin", "http://127.0.0.1:7788")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "loopback-origin write must pass the same-origin guard"
+        );
+    }
+
+    /// Why: non-browser clients (curl, native tooling, the console's own
+    /// server-side calls) send no `Origin` header and are not the CSRF threat;
+    /// they must pass the guard. With no binary present the handler degrades to
+    /// 503, so we assert the status is NOT 403.
+    /// What: issues `POST /api/console/sessions/abc/stop` with no Origin header.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn write_route_allows_missing_origin() {
+        let router = build_router(make_test_state());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/console/sessions/abc/stop")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "missing-Origin write must pass the same-origin guard"
+        );
+    }
+
+    /// Why: the guard must NOT block safe cross-origin reads — the CORS policy is
+    /// intentionally open for GETs so the SPA and tooling can read fleet state.
+    /// A cross-origin `GET` must pass the guard (and then degrade to 503 with no
+    /// binary), proving the middleware is method-aware.
+    /// What: issues `GET /api/console/sessions` with a remote Origin; asserts the
+    /// status is NOT 403.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn read_route_allows_cross_origin() {
+        let router = build_router(make_test_state());
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/console/sessions")
+            .header("origin", "http://evil.example.com")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-origin GET (read) must not be blocked by the write guard"
         );
     }
 }

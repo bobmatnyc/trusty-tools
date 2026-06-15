@@ -44,7 +44,20 @@ const SERVICE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// them in one place keeps the two tool payloads in lockstep.
 /// What: lists the managed session records, derives [`FleetMetrics`] from them,
 /// and reads the persisted desired + live env auto-resume flags. Returns a JSON
-/// object: `{ fleet, auto_resume: { desired, env, effective } }`.
+/// object: `{ fleet, auto_resume: { desired, env, pending_restart } }`.
+///
+/// Auto-resume control fields:
+/// - `desired`: the operator's persisted choice (console-mutable, the source of
+///   truth the supervisor will read on its next sweep).
+/// - `env`: the flag the supervisor process actually booted with
+///   (`TRUSTY_MPM_AUTO_RESUME`); changes only take full effect on restart.
+/// - `pending_restart`: `desired != env` — render a "restart pending" hint.
+///
+/// There is deliberately NO `effective` field: until the supervisor-sweep wiring
+/// lands, "what is in force right now" is exactly `env`, so a separate
+/// `effective` field would just duplicate `env` and mislead readers into thinking
+/// it already reflects the desired-state file. Reintroduce it (distinct from
+/// `env`) only when the supervisor honours `desired` mid-run.
 /// Test: `supervisor_status_reports_fleet_and_auto_resume`.
 async fn fleet_snapshot(state: &Arc<DaemonState>) -> Value {
     let mgr = state.session_manager().await;
@@ -61,9 +74,6 @@ async fn fleet_snapshot(state: &Arc<DaemonState>) -> Value {
         "auto_resume": {
             "desired": desired,
             "env": env,
-            // `effective` is what is actually in force right now: the supervisor
-            // only honours its boot-time env until it next reads the file.
-            "effective": env,
             "pending_restart": desired != env,
         },
     })
@@ -122,9 +132,10 @@ pub async fn supervisor_status(state: &Arc<DaemonState>) -> Result<Value, String
 /// as a separate process, so this writes the desired state the supervisor reads
 /// on its next sweep rather than mutating a live env var.
 /// What: writes `~/.trusty-mpm/auto_resume`, then echoes the resulting
-/// `{ desired, env, effective, pending_restart }` so the console can render the
-/// toggle and a "restart pending" hint when the persisted desire differs from the
-/// supervisor's boot-time env.
+/// `{ desired, env, pending_restart }` so the console can render the toggle and a
+/// "restart pending" hint when the persisted desire differs from the supervisor's
+/// boot-time env. (No `effective` field — see [`fleet_snapshot`] for why it would
+/// merely duplicate `env` and mislead until the supervisor-sweep wiring lands.)
 /// Test: `auto_resume_set_persists_desired`.
 pub async fn auto_resume_set(enabled: bool) -> Result<Value, String> {
     auto_resume::write_desired(enabled)
@@ -135,7 +146,6 @@ pub async fn auto_resume_set(enabled: bool) -> Result<Value, String> {
     Ok(json!({
         "desired": desired,
         "env": env,
-        "effective": env,
         "pending_restart": desired != env,
     }))
 }

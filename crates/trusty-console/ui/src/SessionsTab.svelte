@@ -31,10 +31,20 @@
   let busyId = $state(null); // id of a session whose control op is in flight
   let actionMsg = $state(null);
 
-  // Activity pane state.
+  // Activity pane state — keyed by session id so concurrent fetches for
+  // different sessions never clobber each other (review finding #1). Each entry
+  // is `{ lines, loading }`. A SvelteMap keeps reads reactive in Svelte 5 runes.
   let activeActivityId = $state(null);
-  let activityLines = $state('');
-  let activityLoading = $state(false);
+  let activityById = $state(new Map()); // id -> { lines: string, loading: bool }
+
+  function activityFor(id) {
+    return activityById.get(id) ?? { lines: '', loading: false };
+  }
+  function setActivity(id, patch) {
+    const next = new Map(activityById);
+    next.set(id, { ...activityFor(id), ...patch });
+    activityById = next;
+  }
 
   // Spawn form state.
   let showSpawn = $state(false);
@@ -45,16 +55,30 @@
 
   // Lifecycle states we group by, in display order.
   const STATE_ORDER = ['active', 'provisioning', 'stopped', 'errored', 'decommissioned'];
+  // Catch-all bucket key for any state the daemon reports that we don't model
+  // explicitly — these must still render so unexpected lifecycle states are
+  // never silently dropped from the UI (review finding #6).
+  const OTHER_STATE = 'other';
 
   let grouped = $derived.by(() => {
     const g = {};
     for (const s of STATE_ORDER) g[s] = [];
+    g[OTHER_STATE] = [];
     for (const sess of sessions) {
       const st = (sess.state || 'unknown').toLowerCase();
-      (g[st] ||= []).push(sess);
+      // Known state → its own bucket; anything else → the catch-all so it is
+      // still visible (with its raw state label shown on the card).
+      if (STATE_ORDER.includes(st)) {
+        g[st].push(sess);
+      } else {
+        g[OTHER_STATE].push(sess);
+      }
     }
     return g;
   });
+
+  // Display order for rendering: the known states followed by the catch-all.
+  const GROUP_ORDER = [...STATE_ORDER, OTHER_STATE];
 
   /** Normalise the session_list result into an array of records. */
   function asArray(payload) {
@@ -115,17 +139,25 @@
   async function viewActivity(id) {
     if (activeActivityId === id) { activeActivityId = null; return; }
     activeActivityId = id;
-    activityLoading = true;
-    activityLines = '';
+    setActivity(id, { loading: true, lines: '' });
     try {
       const resp = await fetch(`/api/console/sessions/${id}/activity?lines=50`);
-      if (!resp.ok) { activityLines = `(unavailable: HTTP ${resp.status})`; return; }
+      // Resolve-time guard: if the operator switched to a different session
+      // while this fetch was in flight, drop the stale response so a late reply
+      // for session A can never overwrite the pane now showing session B
+      // (review finding #1 — the UI race).
+      if (activeActivityId !== id) return;
+      if (!resp.ok) {
+        setActivity(id, { lines: `(unavailable: HTTP ${resp.status})` });
+        return;
+      }
       const data = await resp.json();
-      activityLines = data.raw_pane || '(empty pane)';
+      if (activeActivityId !== id) return; // re-check after the awaited json()
+      setActivity(id, { lines: data.raw_pane || '(empty pane)' });
     } catch (e) {
-      activityLines = `(error: ${e.message})`;
+      if (activeActivityId === id) setActivity(id, { lines: `(error: ${e.message})` });
     } finally {
-      activityLoading = false;
+      if (activeActivityId === id) setActivity(id, { loading: false });
     }
   }
 
@@ -235,33 +267,38 @@
   {:else if error}
     <div class="not-available">{error}</div>
   {:else}
-    {#each STATE_ORDER as st}
+    {#each GROUP_ORDER as st}
       {#if grouped[st] && grouped[st].length > 0}
         <h3 class="group-title {st}">{st} ({grouped[st].length})</h3>
         <div class="session-list">
           {#each grouped[st] as sess (sess.id)}
+            {@const rawState = (sess.state || 'unknown').toLowerCase()}
+            {@const act = activityFor(sess.id)}
             <div class="session-card">
               <div class="session-head">
                 <span class="session-name">{sess.name || sess.tmux_name || sess.id}</span>
-                <span class="session-state {st}">{st}</span>
+                <!-- Show the session's actual reported state. For known states
+                     this equals the group; for the catch-all it surfaces the
+                     raw lifecycle label so unexpected states stay visible. -->
+                <span class="session-state {st}">{rawState}</span>
               </div>
               <div class="session-id">{sess.id}</div>
               <div class="session-actions">
                 <button onclick={() => viewActivity(sess.id)} disabled={busyId === sess.id}>
                   {activeActivityId === sess.id ? 'Hide' : 'Activity'}
                 </button>
-                {#if st === 'stopped' || st === 'errored'}
+                {#if rawState === 'stopped' || rawState === 'errored'}
                   <button onclick={() => control(sess.id, 'resume')} disabled={busyId === sess.id}>Resume</button>
                 {/if}
-                {#if st === 'active' || st === 'provisioning'}
+                {#if rawState === 'active' || rawState === 'provisioning'}
                   <button onclick={() => control(sess.id, 'stop')} disabled={busyId === sess.id}>Stop</button>
                 {/if}
-                {#if st !== 'decommissioned'}
+                {#if rawState !== 'decommissioned'}
                   <button class="danger" onclick={() => control(sess.id, 'decommission')} disabled={busyId === sess.id}>Decommission</button>
                 {/if}
               </div>
               {#if activeActivityId === sess.id}
-                <pre class="activity">{activityLoading ? 'Loading pane…' : activityLines}</pre>
+                <pre class="activity">{act.loading ? 'Loading pane…' : act.lines}</pre>
               {/if}
             </div>
           {/each}
@@ -312,6 +349,7 @@
   .group-title { font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin: 1rem 0 0.5rem; color: var(--color-text-secondary); }
   .group-title.active { color: var(--color-status-ok); }
   .group-title.errored { color: var(--color-status-error); }
+  .group-title.other { color: var(--color-status-warn); }
 
   .session-list { display: flex; flex-direction: column; gap: 0.5rem; }
   .session-card { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 0.5rem; padding: 0.75rem 1rem; }
@@ -320,6 +358,7 @@
   .session-state { font-size: 0.7rem; padding: 0.1rem 0.45rem; border-radius: 9999px; border: 1px solid var(--color-border); color: var(--color-text-secondary); }
   .session-state.active { color: var(--color-status-ok); }
   .session-state.errored { color: var(--color-status-error); }
+  .session-state.other { color: var(--color-status-warn); }
   .session-id { font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; color: var(--color-text-muted); margin: 0.2rem 0 0.5rem; }
   .session-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
   .session-actions button {

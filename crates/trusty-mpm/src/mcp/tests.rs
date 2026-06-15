@@ -116,9 +116,7 @@ impl OrchestratorBackend for MockBackend {
         }))
     }
     async fn auto_resume_set(&self, enabled: bool) -> Result<Value, String> {
-        Ok(
-            json!({ "desired": enabled, "env": false, "effective": false, "pending_restart": enabled }),
-        )
+        Ok(json!({ "desired": enabled, "env": false, "pending_restart": enabled }))
     }
 }
 
