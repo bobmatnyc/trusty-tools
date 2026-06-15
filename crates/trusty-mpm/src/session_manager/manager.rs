@@ -170,7 +170,42 @@ impl SessionManager {
         repo_url: Option<String>,
         branch: Option<String>,
     ) -> Result<SessionRecord, ManagedError> {
-        let id = ManagedSessionId::new();
+        self.create_with_id(
+            ManagedSessionId::new(),
+            task,
+            cwd,
+            name_hint,
+            workspace_path,
+            repo_url,
+            branch,
+        )
+        .await
+    }
+
+    /// Create a new managed session with a caller-supplied session id.
+    ///
+    /// Why: the `spawn_session` handler must provision the workspace BEFORE
+    /// creating the tmux session so that the tmux pane is rooted in the
+    /// provisioned directory (not `$HOME`). Provisioning requires the session id
+    /// upfront (it is embedded in the workspace path). This method lets the
+    /// handler pre-generate the id, provision, and then call here with `cwd =
+    /// Some(workspace_path)` so `tmux new-session -c <workspace>` is issued.
+    /// What: identical to [`create`] except the id is supplied by the caller.
+    /// Creates the tmux session at `cwd` via the driver, persists a
+    /// [`SessionRecord`] in state `Starting`, and returns it.
+    /// Test: `spawn_session_tmux_cwd_is_workspace` in session_manager/tests.rs;
+    /// `handler_spawn_creates_tmux_at_workspace_cwd` in session_manager_mvp.rs.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_with_id(
+        &self,
+        id: ManagedSessionId,
+        task: String,
+        cwd: Option<PathBuf>,
+        name_hint: Option<String>,
+        workspace_path: Option<PathBuf>,
+        repo_url: Option<String>,
+        branch: Option<String>,
+    ) -> Result<SessionRecord, ManagedError> {
         let cwd = cwd.unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")));
         let tmux_name = if let Some(hint) = name_hint {
             // Treat the hint as a path basename to get the slug convention.

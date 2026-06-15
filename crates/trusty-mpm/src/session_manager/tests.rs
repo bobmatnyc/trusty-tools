@@ -24,7 +24,9 @@ use std::sync::Arc;
 /// implementation records calls and allows the test to control which
 /// sessions appear to exist.
 /// What: stores created sessions in a mutex-guarded map; `session_exists`
-/// consults the map; all operations record their call.
+/// consults the map; all operations record their call. `create_cwd_calls`
+/// records `(session_name, workdir)` pairs so tests can assert the correct
+/// cwd was passed to `tmux new-session -c`.
 /// Test: used by every manager unit test.
 pub struct FakeTmuxDriver {
     sessions: Mutex<HashMap<String, String>>,
@@ -33,6 +35,11 @@ pub struct FakeTmuxDriver {
     pub capture_responses: Mutex<HashMap<String, String>>,
     /// Names to return from `list_sessions`.
     pub seeded_names: Mutex<Vec<String>>,
+    /// Records `(session_name, workdir)` for every `create_session` call.
+    ///
+    /// Why: regression guard — tests assert that the cwd passed to
+    /// `tmux new-session` equals the provisioned workspace path, never $HOME.
+    pub create_cwd_calls: Mutex<Vec<(String, String)>>,
 }
 
 impl FakeTmuxDriver {
@@ -43,6 +50,7 @@ impl FakeTmuxDriver {
             kill_calls: Mutex::new(Vec::new()),
             capture_responses: Mutex::new(HashMap::new()),
             seeded_names: Mutex::new(Vec::new()),
+            create_cwd_calls: Mutex::new(Vec::new()),
         })
     }
 }
@@ -53,6 +61,10 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
             .lock()
             .unwrap()
             .insert(name.to_owned(), workdir.to_owned());
+        self.create_cwd_calls
+            .lock()
+            .unwrap()
+            .push((name.to_owned(), workdir.to_owned()));
         Ok(())
     }
 
@@ -371,4 +383,95 @@ async fn manager_answer_decision() {
     let after = mgr.get(&record.id).await.unwrap();
     assert!(after.pending_decision.is_none());
     assert!(after.proposed_default.is_none());
+}
+
+/// Regression guard: the tmux session must be created with the provisioned
+/// workspace path as its cwd, never with $HOME.
+///
+/// Why: before the fix, `spawn_session` called `mgr.create()` with `cwd = None`,
+/// which fell back to `dirs::home_dir()` ($HOME). The tmux session was therefore
+/// rooted at $HOME and claude opened there instead of the isolated workspace.
+/// What: simulates the `spawn_session` handler sequence — pre-generate id,
+/// provision (FakeGitBackend creates the directory), then `create_with_id` with
+/// `cwd = Some(workspace_path)`. Asserts the recorded cwd equals the workspace
+/// path and is NOT the home directory.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn spawn_session_tmux_cwd_is_workspace() {
+    use crate::session_manager::record::ManagedSessionId;
+    use tempfile::TempDir;
+
+    let store_dir = TempDir::new().unwrap();
+    let workspace_root = TempDir::new().unwrap();
+    let fake = FakeTmuxDriver::new();
+    let mgr = SessionManager::new(store_dir.path(), fake.clone())
+        .await
+        .expect("manager");
+
+    // Pre-generate the session id (as the fixed spawn_session handler does).
+    let session_id = ManagedSessionId::new();
+
+    // Provision using FakeGitBackend (creates the workspace directory on disk).
+    let provisioner = crate::provisioner::WorkspaceProvisioner::without_prepare(
+        crate::provisioner::FakeGitBackend::new(),
+        workspace_root.path().to_owned(),
+    );
+    let prepared = provisioner
+        .provision(&session_id, "https://github.com/owner/repo", "main", "task")
+        .expect("provision");
+
+    let workspace_path = prepared.path.clone();
+
+    // Create with the provisioned workspace as cwd — this is the fixed order.
+    let record = mgr
+        .create_with_id(
+            session_id,
+            "task".into(),
+            Some(workspace_path.clone()),
+            None,
+            Some(workspace_path.clone()),
+            Some("https://github.com/owner/repo".into()),
+            Some("main".into()),
+        )
+        .await
+        .expect("create_with_id");
+
+    // The tmux session must have been created with cwd = workspace_path.
+    let cwd_calls = fake.create_cwd_calls.lock().unwrap();
+    assert_eq!(
+        cwd_calls.len(),
+        1,
+        "exactly one tmux session must be created"
+    );
+    let (session_name, cwd) = &cwd_calls[0];
+    assert_eq!(
+        session_name, &record.tmux_name,
+        "session name must match the record"
+    );
+    assert_eq!(
+        cwd,
+        &workspace_path.to_string_lossy().to_string(),
+        "tmux session cwd must equal the provisioned workspace path"
+    );
+
+    // Must NOT be $HOME.
+    let home = dirs::home_dir()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_default();
+    assert_ne!(
+        cwd, &home,
+        "tmux session cwd must NOT be $HOME (workspace-isolation regression)"
+    );
+
+    // Must NOT be /tmp (generic fallback).
+    assert_ne!(
+        cwd, "/tmp",
+        "tmux session cwd must NOT be /tmp (workspace-isolation regression)"
+    );
+
+    // workspace_path must be within workspace_root.
+    assert!(
+        workspace_path.starts_with(workspace_root.path()),
+        "workspace must be under the mpm workspace root"
+    );
 }

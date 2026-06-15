@@ -273,23 +273,31 @@ fn parse_id(id_str: &str) -> Result<ManagedSessionId, (StatusCode, String)> {
 /// Why: the primary entry point for the calling agentic process to create a new
 /// isolated agent workspace and start a harness in it.
 /// What: in order —
-///   (a) provisions an isolated workspace via `WorkspaceProvisioner::provision`
+///   (a) pre-generates a `ManagedSessionId` so the workspace path can embed it;
+///   (b) provisions an isolated workspace via `WorkspaceProvisioner::provision`
 ///       (clone + prepare_session deploy of agents/skills);
-///   (b) creates the tmux session record in `SessionManager` with cwd set to the
-///       provisioned directory;
-///   (c) launches Claude Code in the pane via `ClaudeCodeAdapter::spawn`
-///       (`env -u ANTHROPIC_API_KEY claude`);
-///   (d) marks the record Active and persists the workspace_path.
+///   (c) creates the tmux session via `SessionManager::create_with_id` with
+///       `cwd = workspace_path` so `tmux new-session -c <workspace>` is issued
+///       and claude opens IN the provisioned directory, not $HOME;
+///   (d) launches Claude Code in the pane via `ClaudeCodeAdapter::spawn`
+///       (`env -u ANTHROPIC_API_KEY claude`).
 /// On any step failing the record is marked `errored` (or the error is returned
 /// before the record is created). No panics, no `unwrap` on the critical path.
-/// Test: `handler_spawn_wires_provision_and_spawn` in tests/session_manager_mvp.rs
+/// Test: `handler_spawn_creates_tmux_at_workspace_cwd` in
+/// tests/session_manager_mvp.rs asserts the tmux session was created with
+/// `cwd == workspace_path`, never `$HOME`; `handler_spawn_wires_provision_and_spawn`
 /// asserts provision was called (workspace_path is non-null under workspaces root)
-/// and that the spawn command was sent to tmux.
+/// and the spawn command was sent to tmux.
 pub async fn spawn_session(
     State(state): State<Arc<DaemonState>>,
     Json(req): Json<SpawnRequest>,
 ) -> impl IntoResponse {
-    // ── Step 1: provision an isolated workspace ───────────────────────────────
+    // ── Step 1: pre-generate session id + provision isolated workspace ────────
+    // The id must be known before provisioning because the provisioner embeds it
+    // in the workspace path (<root>/<project>/<id>/). Provisioning before tmux
+    // session creation is the invariant that ensures the pane opens in the
+    // workspace, not in $HOME.
+    //
     // Allow tests (and operators) to override the workspace root via an env var
     // so the provisioner does not write into the real ~/.trusty-mpm tree.
     let workspace_root = std::env::var("TRUSTY_MPM_WORKSPACE_ROOT")
@@ -301,37 +309,14 @@ pub async fn spawn_session(
                 .join("workspaces")
         });
 
+    let session_id = ManagedSessionId::new();
     let provisioner = WorkspaceProvisioner::new(crate::provisioner::RealGitBackend, workspace_root);
 
-    // Create the session record first to obtain the session_id for the workspace path.
-    let mgr = state.session_manager().await;
-    let record = match mgr
-        .create(
-            req.task.clone(),
-            None,
-            req.name_hint,
-            None,
-            Some(req.repo_url.clone()),
-            Some(req.git_ref.clone()),
-        )
-        .await
+    let prepared = match provisioner.provision(&session_id, &req.repo_url, &req.git_ref, &req.task)
     {
-        Ok(r) => r,
-        Err(e) => {
-            warn!("spawn_session: session create failed: {e}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-        }
-    };
-
-    // Provision workspace, writing into ~/.trusty-mpm/workspaces/<project>/<id>/.
-    let prepared = match provisioner.provision(&record.id, &req.repo_url, &req.git_ref, &req.task) {
         Ok(p) => p,
         Err(e) => {
-            warn!(id = %record.id, "spawn_session: provision failed: {e}");
-            // Mark the session errored so `ls` surfaces the failure.
-            let _ = mgr
-                .mark_errored(&record.id, &format!("provision failed: {e}"))
-                .await;
+            warn!(id = %session_id, "spawn_session: provision failed: {e}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("workspace provisioning failed: {e}"),
@@ -340,7 +325,32 @@ pub async fn spawn_session(
         }
     };
 
-    // ── Step 2: update the record with workspace_path and transition to Active ─
+    // ── Step 2: create tmux session rooted at the provisioned workspace ───────
+    // Pass `cwd = Some(workspace_path)` so `tmux new-session -c <workspace>` is
+    // issued. The pane will open IN the workspace directory, never in $HOME.
+    let mgr = state.session_manager().await;
+    let record = match mgr
+        .create_with_id(
+            session_id,
+            req.task.clone(),
+            Some(prepared.path.clone()),
+            req.name_hint,
+            Some(prepared.path.clone()),
+            Some(req.repo_url.clone()),
+            Some(req.git_ref.clone()),
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(id = %session_id, "spawn_session: session create failed: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    };
+
+    // Transition to Active now that the workspace is ready and the tmux session
+    // has been created. This is best-effort: if it fails the state stays
+    // Starting and the caller can still inspect and attach.
     if let Err(e) = mgr
         .set_workspace(
             &record.id,
@@ -350,11 +360,9 @@ pub async fn spawn_session(
         .await
     {
         warn!(id = %record.id, "spawn_session: set_workspace failed: {e}");
-        // Non-fatal — the session was created; continue to spawn.
     }
 
     // ── Step 3: spawn Claude Code in the pane ────────────────────────────────
-    // Re-read the tmux driver via the same session manager Arc.
     let tmux_arc = mgr.tmux_driver();
     let adapter = ClaudeCodeAdapter::new(tmux_arc);
     if let Err(e) = adapter.spawn(&record.tmux_name, &prepared.path, &req.task) {

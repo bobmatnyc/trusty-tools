@@ -20,25 +20,37 @@ use trusty_mpm::session_manager::{
     ManagedError, ManagedSessionId, ManagedTmuxDriver, SessionManager,
 };
 
-/// An in-memory tmux driver that records sends and never touches a real binary.
+/// An in-memory tmux driver that records sends and create_session calls.
 ///
 /// Why: the session manager and its HTTP surface must be testable without tmux.
-/// What: records every `send_line` call; all other operations are no-ops.
-/// Test: used by `session_manager_answer_clears_pending`.
+/// What: records every `send_line` call and every `create_session` call
+/// (including the cwd argument) so tests can assert workspace-isolation invariants.
+/// Test: used by `session_manager_answer_clears_pending` and
+/// `handler_spawn_creates_tmux_at_workspace_cwd`.
 struct RecordingTmux {
     sends: std::sync::Mutex<Vec<(String, String)>>,
+    /// Records `(session_name, workdir)` for every `create_session` call.
+    ///
+    /// Why: regression guard asserting the tmux session is created in the
+    /// provisioned workspace, not $HOME.
+    create_calls: std::sync::Mutex<Vec<(String, String)>>,
 }
 
 impl RecordingTmux {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             sends: std::sync::Mutex::new(Vec::new()),
+            create_calls: std::sync::Mutex::new(Vec::new()),
         })
     }
 }
 
 impl ManagedTmuxDriver for RecordingTmux {
-    fn create_session(&self, _name: &str, _workdir: &str) -> Result<(), ManagedError> {
+    fn create_session(&self, name: &str, workdir: &str) -> Result<(), ManagedError> {
+        self.create_calls
+            .lock()
+            .unwrap()
+            .push((name.to_owned(), workdir.to_owned()));
         Ok(())
     }
     fn kill_session(&self, _name: &str) -> Result<(), ManagedError> {
@@ -369,6 +381,88 @@ async fn handler_activity_cache_hit() {
         call_count.load(Ordering::Relaxed),
         2,
         "LLM called again on new content"
+    );
+}
+
+/// Regression guard: handler spawn sequence creates the tmux session in the
+/// provisioned workspace, not in $HOME.
+///
+/// Why: before the fix, `spawn_session` called `mgr.create(cwd=None)` which
+/// defaulted to `dirs::home_dir()`. This meant `tmux new-session -c $HOME` and
+/// claude opened in the wrong directory, breaking workspace isolation.
+/// What: exercises the corrected handler flow — pre-generate id, provision
+/// (FakeGitBackend), `create_with_id(cwd=workspace_path)` — and asserts the
+/// `create_session` call was recorded with cwd == workspace_path.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn handler_spawn_creates_tmux_at_workspace_cwd() {
+    let workspace_root_dir = TempDir::new().unwrap();
+    let store_dir = TempDir::new().unwrap();
+    let tmux = RecordingTmux::new();
+    let mgr = Arc::new(
+        SessionManager::new(store_dir.path(), tmux.clone())
+            .await
+            .expect("manager"),
+    );
+
+    let repo_url = "https://github.com/owner/trusty-tools";
+    let git_ref = "main";
+    let task = "list files";
+
+    // Simulate the fixed handler sequence: pre-generate id, provision, then
+    // create_with_id(cwd = workspace_path).
+    let session_id = ManagedSessionId::new();
+    let prov = WorkspaceProvisioner::without_prepare(
+        FakeGitBackend::new(),
+        workspace_root_dir.path().to_owned(),
+    );
+    let prepared = prov
+        .provision(&session_id, repo_url, git_ref, task)
+        .expect("provision");
+
+    let workspace_path = prepared.path.clone();
+
+    let record = mgr
+        .create_with_id(
+            session_id,
+            task.into(),
+            Some(workspace_path.clone()),
+            None,
+            Some(workspace_path.clone()),
+            Some(repo_url.into()),
+            Some(git_ref.into()),
+        )
+        .await
+        .expect("create_with_id");
+
+    // Assert the tmux session was created with cwd = workspace_path.
+    let create_calls = tmux.create_calls.lock().unwrap();
+    assert_eq!(create_calls.len(), 1, "exactly one session must be created");
+    let (session_name, cwd) = &create_calls[0];
+    assert_eq!(
+        session_name, &record.tmux_name,
+        "session name must match the record"
+    );
+    assert_eq!(
+        cwd,
+        &workspace_path.to_string_lossy().to_string(),
+        "tmux session cwd must equal the provisioned workspace path, not $HOME"
+    );
+
+    // Must NOT be $HOME.
+    let home = dirs::home_dir()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_default();
+    assert_ne!(
+        cwd, &home,
+        "tmux session cwd must NOT be $HOME (workspace-isolation regression)"
+    );
+
+    // The workspace must live under the mpm workspace root.
+    assert!(
+        workspace_path.starts_with(workspace_root_dir.path()),
+        "workspace must be under the mpm workspace root; got {}",
+        workspace_path.display()
     );
 }
 
