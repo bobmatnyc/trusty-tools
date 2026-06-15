@@ -115,6 +115,36 @@ pub(crate) enum Command {
         #[arg(long)]
         mcp: bool,
     },
+    /// Run the unattended fleet supervisor (24/7 observer + auto-resumer, #1206).
+    ///
+    /// Why: for overnight / unattended operation the fleet needs an always-on
+    /// process that auto-resumes `stopped` sessions, observes session health
+    /// without a live caller, surfaces pending decisions, and exposes fleet
+    /// metrics — all while making NO autonomy decisions itself.
+    /// What: runs the supervisor loop, polling the managed-session store on an
+    /// interval. Auto-resume is gated by `TRUSTY_MPM_AUTO_RESUME=1`; the poll
+    /// cadence, classification toggle, and metrics address are read from env
+    /// (`TRUSTY_MPM_SUPERVISOR_*`) but may be overridden by these flags. Serves
+    /// `/metrics` + `/health` for fleet observability.
+    /// Test: `cli_parses_supervisor`.
+    Supervisor {
+        /// Address the supervisor's `/metrics` + `/health` server binds to.
+        ///
+        /// Overrides `TRUSTY_MPM_SUPERVISOR_ADDR` when supplied.
+        #[arg(long, env = "TRUSTY_MPM_SUPERVISOR_ADDR")]
+        addr: Option<SocketAddr>,
+        /// Poll interval in seconds (overrides `TRUSTY_MPM_SUPERVISOR_INTERVAL`).
+        #[arg(long)]
+        interval: Option<u64>,
+        /// Force auto-resume of `stopped` sessions on (overrides
+        /// `TRUSTY_MPM_AUTO_RESUME`). Without this flag (and without the env
+        /// var) the supervisor runs observe-only.
+        #[arg(long)]
+        auto_resume: bool,
+        /// Disable idle-session activity classification (no LLM calls).
+        #[arg(long)]
+        no_classify: bool,
+    },
     /// Launch a session with full setup: deploys instructions, agents, and
     /// skills, then starts Claude.
     ///

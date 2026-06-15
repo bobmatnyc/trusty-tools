@@ -4,7 +4,7 @@
 //! file well under the 500-line cap and makes the handler surface easy to
 //! navigate.
 //! What: re-exports handler modules — `daemon`, `install`, `launch`,
-//! `misc`, `project`, `services`, `session`, `telegram`.
+//! `misc`, `project`, `services`, `session`, `supervisor`, `telegram`.
 //! Test: each module has its own unit tests; integration coverage lives in
 //! `tests.rs`.
 
@@ -17,4 +17,5 @@ pub(crate) mod project;
 pub(crate) mod repair;
 pub(crate) mod services;
 pub(crate) mod session;
+pub(crate) mod supervisor;
 pub(crate) mod telegram;

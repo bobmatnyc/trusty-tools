@@ -104,6 +104,20 @@ pub mod content;
 /// Test: pure unit tests in `driver::policy::tests` and `driver::correlation::tests`.
 pub mod driver;
 
+/// Unattended supervisor: 24/7 fleet observer + auto-resumer (#1206).
+///
+/// Why: the session manager normally needs a live calling agentic process to keep
+/// a fleet moving. For overnight / unattended operation an always-on supervisor
+/// auto-resumes enduring (`stopped`) sessions, observes session health without a
+/// caller, surfaces `pending_decision`s for a human, and survives reboots under
+/// launchd/systemd. It is a PASSIVE observer — it never makes autonomy decisions.
+/// What: re-exports `Supervisor`, `SupervisorConfig`, `FleetMetrics`, and the
+/// per-tick `run_tick` sweep; the `/metrics` + `/health` HTTP server is gated
+/// behind the `daemon` feature (axum lives there).
+/// Test: `supervisor::tests` covers config parsing, metrics derivation, the
+/// N-session fleet sweep, and the HTTP handlers.
+pub mod supervisor;
+
 // ── Feature-gated modules ────────────────────────────────────────────────────
 
 /// MCP server: six orchestration tools exposed to Claude Code sessions.

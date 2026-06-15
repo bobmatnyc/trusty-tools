@@ -1,0 +1,41 @@
+# systemd user unit for the trusty-mpm unattended supervisor (#1206).
+#
+# Why: Linux persistence equivalent to the macOS launchd plist. Keeps the
+# supervisor running 24/7 and restarts it after a reboot or crash so the
+# managed-session fleet keeps moving with no live caller attached.
+#
+# What: runs `tm supervisor` as a long-lived service, restarts on failure, and
+# seeds the supervisor's policy via Environment= lines.
+#
+# Install (per-user, no root):
+#   mkdir -p ~/.config/systemd/user
+#   cp trusty-mpm-supervisor.service ~/.config/systemd/user/
+#   # edit ExecStart path + Environment as needed, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now trusty-mpm-supervisor.service
+#   loginctl enable-linger "$USER"   # so it runs without an active login session
+#
+# Replace __TM_BINARY_PATH__ with the absolute path to `tm` (run `which tm`).
+
+[Unit]
+Description=trusty-mpm unattended fleet supervisor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__TM_BINARY_PATH__ supervisor
+Restart=always
+RestartSec=5
+
+# Seed config. TRUSTY_MPM_AUTO_RESUME=1 enables auto-resume of stopped sessions;
+# remove it (or set 0) to run observe-only.
+Environment=TRUSTY_MPM_AUTO_RESUME=1
+Environment=TRUSTY_MPM_SUPERVISOR_INTERVAL=30
+Environment=TRUSTY_MPM_SUPERVISOR_ADDR=127.0.0.1:7881
+Environment=RUST_LOG=info
+# Optional: enable idle-session classification.
+# Environment=OPENROUTER_API_KEY=sk-or-...
+
+[Install]
+WantedBy=default.target
