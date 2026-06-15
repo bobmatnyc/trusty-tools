@@ -108,56 +108,8 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_helpers::FakeTmux;
     use super::*;
-    use crate::session_manager::ManagedError;
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-
-    struct FakeTmux {
-        sends: Mutex<Vec<(String, String)>>,
-    }
-
-    impl FakeTmux {
-        fn new() -> Arc<Self> {
-            Arc::new(Self {
-                sends: Mutex::new(Vec::new()),
-            })
-        }
-    }
-
-    impl ManagedTmuxDriver for FakeTmux {
-        fn create_session(&self, _name: &str, _workdir: &str) -> Result<(), ManagedError> {
-            Ok(())
-        }
-
-        fn kill_session(&self, _name: &str) -> Result<(), ManagedError> {
-            Ok(())
-        }
-
-        fn send_line(&self, name: &str, text: &str) -> Result<(), ManagedError> {
-            self.sends
-                .lock()
-                .unwrap()
-                .push((name.to_owned(), text.to_owned()));
-            Ok(())
-        }
-
-        fn capture(&self, _name: &str, _lines: u32) -> Result<String, ManagedError> {
-            Ok(String::new())
-        }
-
-        fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
-            Ok(Vec::new())
-        }
-
-        fn session_exists(&self, _name: &str) -> bool {
-            false
-        }
-    }
-
-    // We also need a HashMap-based fake for the parking_lot::Mutex version used
-    // in manager tests. This module uses std::sync::Mutex for simplicity.
-    struct _Unused(HashMap<(), ()>);
 
     #[test]
     fn claude_code_adapter_identifies() {

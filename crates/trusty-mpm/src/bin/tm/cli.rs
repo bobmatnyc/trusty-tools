@@ -461,9 +461,11 @@ pub(crate) enum SessionAction {
         ///
         /// `claude-code` runs Claude Code over OAuth (the default, unchanged
         /// behavior); `tcode` runs trusty-code against the direct Anthropic API
-        /// (the `ANTHROPIC_API_KEY` path).
-        #[arg(long, default_value = "claude-code")]
-        runtime: String,
+        /// (the `ANTHROPIC_API_KEY` path). Typed as [`RuntimeKind`] (a
+        /// `clap::ValueEnum`) so an unsupported value is rejected at parse time
+        /// with a "possible values" hint, not silently forwarded to the daemon.
+        #[arg(long, default_value = "claude-code", value_enum)]
+        runtime: trusty_mpm::runtime::RuntimeKind,
     },
     /// List managed sessions (session-manager MVP).
     ///

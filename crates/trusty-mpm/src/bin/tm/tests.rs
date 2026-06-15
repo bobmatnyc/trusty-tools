@@ -569,8 +569,8 @@ fn cli_parses_session_new() {
             assert_eq!(git_ref, "feat/x");
             assert_eq!(task, "do the thing");
             assert_eq!(name_hint.as_deref(), Some("ticket-1"));
-            // No --runtime flag → default claude-code.
-            assert_eq!(runtime, "claude-code");
+            // No --runtime flag → default claude-code (now a typed RuntimeKind).
+            assert_eq!(runtime, trusty_mpm::runtime::RuntimeKind::ClaudeCode);
         }
         other => panic!("expected session new, got {other:?}"),
     }
@@ -595,10 +595,33 @@ fn cli_parses_session_new_with_tcode_runtime() {
         Command::Session {
             action: SessionAction::New { runtime, .. },
         } => {
-            assert_eq!(runtime, "tcode");
+            assert_eq!(runtime, trusty_mpm::runtime::RuntimeKind::Tcode);
         }
         other => panic!("expected session new, got {other:?}"),
     }
+}
+
+#[test]
+fn cli_rejects_unknown_runtime_at_parse_time() {
+    // Why: #1213 — `--runtime` is now a clap `ValueEnum`, so an unsupported
+    // backend must fail during argument parsing (with a "possible values" hint)
+    // rather than being forwarded to the daemon and rejected at the HTTP layer.
+    let err = Cli::try_parse_from([
+        "trusty-mpm",
+        "session",
+        "new",
+        "https://github.com/owner/repo",
+        "--task",
+        "do the thing",
+        "--runtime",
+        "gpt",
+    ])
+    .expect_err("unknown runtime must be rejected at parse time");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("claude-code") && msg.contains("tcode"),
+        "error must list the supported runtimes: {msg}"
+    );
 }
 
 #[test]
