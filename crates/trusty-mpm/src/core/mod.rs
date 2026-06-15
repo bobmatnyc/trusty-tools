@@ -49,6 +49,8 @@ pub mod session_store;
 pub mod skill_deployer;
 pub mod skill_manifest;
 pub mod tmux;
+pub mod trusty_tools_config;
+pub mod workspace_scan;
 
 pub use connect::{ResolveResult, SessionSummary, resolve_target};
 pub use discovery::{DEFAULT_DAEMON_URL, lock_file_path, resolve_daemon_url};

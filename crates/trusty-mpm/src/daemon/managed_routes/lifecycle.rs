@@ -76,23 +76,44 @@ pub async fn spawn_managed(
     };
 
     // Step 1: pre-generate the id + provision an isolated workspace.
-    let workspace_root = std::env::var("TRUSTY_MPM_WORKSPACE_ROOT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::home_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-                .join(".trusty-mpm")
-                .join("workspaces")
-        });
-
+    //
+    // #1220: the workspace root defaults to `~/trusty-mpm-projects/` (overridable
+    // via the `TRUSTY_MPM_WORKSPACE_ROOT` env var or the
+    // `~/.trusty-tools/trusty-mpm/config.yaml` `workspace_root_template`), and the
+    // session nests under the target repo's GitHub `<owner>/<repo>` identity:
+    // `<root>/<owner>/<repo>/<session-id>/`. When the repo URL has no parseable
+    // GitHub identity we fall back to the legacy single-slug `provision` path so a
+    // bare/non-GitHub URL still provisions cleanly.
+    let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
     let session_id = ManagedSessionId::new();
-    let provisioner = WorkspaceProvisioner::new(crate::provisioner::RealGitBackend, workspace_root);
-    let prepared = provisioner
-        .provision(&session_id, &params.repo_url, &params.git_ref, &params.task)
-        .map_err(|e| {
-            warn!(id = %session_id, "spawn_managed: provision failed: {e}");
-            format!("workspace provisioning failed: {e}")
-        })?;
+    let prepared = match trusty_common::github_path::parse_github_path(&params.repo_url) {
+        Some(gh) => {
+            let project_dir = crate::core::trusty_tools_config::workspace_subpath(&config, &gh);
+            // `provision_in` only appends the session id; pass an empty workspace
+            // root because the project dir is already absolute.
+            let provisioner = WorkspaceProvisioner::new(
+                crate::provisioner::RealGitBackend,
+                std::path::PathBuf::new(),
+            );
+            provisioner.provision_in(
+                &project_dir,
+                &session_id,
+                &params.repo_url,
+                &params.git_ref,
+                &params.task,
+            )
+        }
+        None => {
+            let workspace_root = crate::core::trusty_tools_config::workspace_root(&config);
+            let provisioner =
+                WorkspaceProvisioner::new(crate::provisioner::RealGitBackend, workspace_root);
+            provisioner.provision(&session_id, &params.repo_url, &params.git_ref, &params.task)
+        }
+    }
+    .map_err(|e| {
+        warn!(id = %session_id, "spawn_managed: provision failed: {e}");
+        format!("workspace provisioning failed: {e}")
+    })?;
 
     // Step 2: create the tmux session rooted at the provisioned workspace.
     let mgr = state.session_manager().await;

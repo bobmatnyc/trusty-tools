@@ -6,6 +6,7 @@
   import AnalyzeTab from './AnalyzeTab.svelte';
   import ReviewTab from './ReviewTab.svelte';
   import SessionsTab from './SessionsTab.svelte';
+  import ConfigTab from './ConfigTab.svelte';
   import ThemeSelector from './ThemeSelector.svelte';
 
   // ── state ────────────────────────────────────────────────────────────────
@@ -22,6 +23,7 @@
     { id: 'analyze',  label: 'Analyze' },
     { id: 'review',   label: 'Review' },
     { id: 'sessions', label: 'Sessions' },
+    { id: 'config',   label: 'Config' },
   ];
 
   // Single source of truth: maps service.id → console tab key.
@@ -115,6 +117,8 @@
       <ReviewTab />
     {:else if activeTab === 'sessions'}
       <SessionsTab />
+    {:else if activeTab === 'config'}
+      <ConfigTab />
     {/if}
   </div>
 </main>

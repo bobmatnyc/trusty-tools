@@ -118,6 +118,29 @@ impl OrchestratorBackend for MockBackend {
     async fn auto_resume_set(&self, enabled: bool) -> Result<Value, String> {
         Ok(json!({ "desired": enabled, "env": false, "pending_restart": enabled }))
     }
+
+    // ── #1220: config-convention mock impls ──────────────────────────────────
+    async fn config_read(&self) -> Result<Value, String> {
+        Ok(json!({
+            "workspace_root_template": null,
+            "auto_resume": null,
+            "default_model": null,
+            "workspace_root": "/home/test/trusty-mpm-projects",
+        }))
+    }
+    async fn config_write(
+        &self,
+        workspace_root_template: Option<&str>,
+        auto_resume: Option<bool>,
+        default_model: Option<&str>,
+    ) -> Result<Value, String> {
+        Ok(json!({
+            "workspace_root_template": workspace_root_template,
+            "auto_resume": auto_resume,
+            "default_model": default_model,
+            "workspace_root": workspace_root_template.unwrap_or("/home/test/trusty-mpm-projects"),
+        }))
+    }
 }
 
 fn call(name: &str, args: Value) -> Request {
@@ -144,7 +167,8 @@ async fn dispatch_initialize_returns_server_info() {
 
 #[tokio::test]
 async fn dispatch_tools_list_returns_full_catalog() {
-    // 9 pre-existing + 6 session-lifecycle + 3 console-facing tools = 18 (#1222).
+    // 9 pre-existing + 6 session-lifecycle + 5 console-facing tools = 20
+    // (#1222 + the two #1220 config tools).
     let req = Request {
         jsonrpc: Some("2.0".into()),
         id: Some(json!(1)),
@@ -153,7 +177,46 @@ async fn dispatch_tools_list_returns_full_catalog() {
     };
     let resp = dispatch(&MockBackend, req).await;
     let tools = resp.result.unwrap()["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 18);
+    assert_eq!(tools.as_array().unwrap().len(), 20);
+}
+
+/// Why: the console Config tab calls `config_read`; dispatch must route it and
+/// return a non-error result carrying the resolved `workspace_root`.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_config_read_tool() {
+    let resp = dispatch(&MockBackend, call("config_read", json!({}))).await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("workspace_root")
+    );
+}
+
+/// Why: the Config tab's save calls `config_write`; dispatch must parse the
+/// optional fields and route them, echoing the persisted value.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_config_write_tool() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "config_write",
+            json!({ "workspace_root_template": "~/custom-projects" }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("custom-projects")
+    );
 }
 
 /// Why: the console poller calls `console_metrics`; dispatch must route it to the

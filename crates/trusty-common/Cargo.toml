@@ -342,6 +342,12 @@ tickets = ["mcp", "dep:uuid", "dep:base64", "dep:thiserror", "dep:toml"]
 # `serde_yaml`, `strsim`, `indexmap`, and `thiserror` (all otherwise optional).
 # Issue #216.
 cli-help = ["dep:serde_yaml", "dep:strsim", "dep:indexmap", "dep:thiserror"]
+# Enables the `crate_config` module: the `~/.trusty-tools/<crate>/config.yaml`
+# cross-crate configuration convention (#1220). Provides a generic typed YAML
+# loader/saver so every trusty-* crate resolves its config from one canonical,
+# per-crate location. Pulls in `serde_yaml` (pinned 0.9 — see the workspace
+# manifest's pin note and #1250) and `dirs` (already an unconditional dep).
+crate-config = ["dep:serde_yaml", "dep:thiserror"]
 # Enables the `update` module: throttled crates.io update-notification helper.
 # Checks once per 24 h via a JSON cache file in the OS cache directory. Opt-out
 # via `TRUSTY_NO_UPDATE_CHECK` or `CI` environment variables. Reuses the
