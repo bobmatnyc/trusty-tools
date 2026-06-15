@@ -347,9 +347,12 @@ pub(crate) async fn session(
             git_ref,
             task,
             name_hint,
+            runtime,
         } => {
-            crate::commands::managed::session_new(client, url, repo, git_ref, task, name_hint)
-                .await?
+            crate::commands::managed::session_new(
+                client, url, repo, git_ref, task, name_hint, runtime,
+            )
+            .await?
         }
         SessionAction::Ls { json } => {
             crate::commands::managed::session_ls(client, url, json).await?

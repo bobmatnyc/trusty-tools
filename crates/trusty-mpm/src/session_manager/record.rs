@@ -166,6 +166,17 @@ pub struct SessionRecord {
     /// deserializable — they load with an empty (fully-unset) correlation.
     #[serde(default)]
     pub correlation: crate::driver::SessionCorrelation,
+    /// Which runtime backend hosts this session's harness.
+    ///
+    /// Why: the runtime is chosen at spawn time but `resume` must re-spawn the
+    /// SAME backend; persisting it on the record keeps the choice authoritative
+    /// across daemon restarts and resume cycles.
+    ///
+    /// `#[serde(default)]` makes records persisted before this field existed
+    /// deserialize to [`RuntimeKind::ClaudeCode`] — the pre-#1203 behavior — so
+    /// old sessions resume on Claude Code exactly as before.
+    #[serde(default)]
+    pub runtime: crate::runtime::RuntimeKind,
 }
 
 /// Error types for session record operations.
@@ -225,6 +236,7 @@ mod tests {
             pending_decision: None,
             proposed_default: None,
             correlation: Default::default(),
+            runtime: Default::default(),
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -251,6 +263,7 @@ mod tests {
             pending_decision: None,
             proposed_default: None,
             correlation: Default::default(),
+            runtime: Default::default(),
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -275,10 +288,61 @@ mod tests {
             pending_decision: None,
             proposed_default: None,
             correlation: Default::default(),
+            runtime: Default::default(),
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.state, ManagedSessionState::Decommissioned);
         assert!(back.workspace_path.is_none());
+    }
+
+    #[test]
+    fn record_without_runtime_field_defaults_to_claude_code() {
+        // Why: #1203 added `runtime` with `#[serde(default)]`; records persisted
+        // before this field existed (no `runtime` key) must still deserialize
+        // and resume on the pre-#1203 default (claude-code).
+        let legacy_json = serde_json::json!({
+            "id": ManagedSessionId::new(),
+            "tmux_name": "tmpm-legacy",
+            "cwd": "/tmp",
+            "task": "legacy task",
+            "state": "active",
+            "created_at": Utc::now().to_rfc3339(),
+            "last_activity_at": null,
+            "workspace_path": null,
+            "repo_url": null,
+            "branch": null,
+            "pending_decision": null,
+            "proposed_default": null
+        })
+        .to_string();
+        let back: SessionRecord = serde_json::from_str(&legacy_json).expect("deserialize legacy");
+        assert_eq!(back.runtime, crate::runtime::RuntimeKind::ClaudeCode);
+    }
+
+    #[test]
+    fn record_round_trips_tcode_runtime() {
+        // Why: a tcode-backed session must persist its runtime so `resume`
+        // re-spawns on tcode, not claude-code.
+        let mut record = SessionRecord {
+            id: ManagedSessionId::new(),
+            tmux_name: "tmpm-tcode".into(),
+            cwd: PathBuf::from("/tmp"),
+            task: "task".into(),
+            state: ManagedSessionState::Active,
+            created_at: Utc::now(),
+            last_activity_at: None,
+            workspace_path: None,
+            repo_url: None,
+            branch: None,
+            pending_decision: None,
+            proposed_default: None,
+            correlation: Default::default(),
+            runtime: Default::default(),
+        };
+        record.runtime = crate::runtime::RuntimeKind::Tcode;
+        let json = serde_json::to_string(&record).expect("serialize");
+        let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.runtime, crate::runtime::RuntimeKind::Tcode);
     }
 }

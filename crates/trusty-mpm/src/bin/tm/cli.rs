@@ -427,6 +427,13 @@ pub(crate) enum SessionAction {
         /// Optional name hint for the tmux session.
         #[arg(long)]
         name_hint: Option<String>,
+        /// Runtime backend for the session: `claude-code` (default) or `tcode`.
+        ///
+        /// `claude-code` runs Claude Code over OAuth (the default, unchanged
+        /// behavior); `tcode` runs trusty-code against the direct Anthropic API
+        /// (the `ANTHROPIC_API_KEY` path).
+        #[arg(long, default_value = "claude-code")]
+        runtime: String,
     },
     /// List managed sessions (session-manager MVP).
     ///

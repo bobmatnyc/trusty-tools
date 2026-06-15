@@ -180,6 +180,7 @@ mod tests {
             pending_decision: None,
             proposed_default: None,
             correlation: Default::default(),
+            runtime: Default::default(),
         }
     }
 
