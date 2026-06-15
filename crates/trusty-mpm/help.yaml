@@ -167,3 +167,14 @@ commands:
       restart:
         description: Restart a service using its manifest restart_cmd
         args: [name]
+  ticket:
+    description: One-shot issue → branch → PR → close workflow (gh default; jira/linear stubbed)
+    args: [issue, system]
+    examples:
+      - cmd: trusty-mpm ticket 1232
+      - cmd: trusty-mpm ticket '#1232' gh -m "starting work"
+    flags:
+      - name: note
+        description: Note to post as an issue comment for the audit trail (repeatable)
+      - name: runtime
+        description: "Runtime backend for the spawned session: claude-code (default) or tcode"

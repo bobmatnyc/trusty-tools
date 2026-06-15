@@ -852,3 +852,71 @@ fn cli_parses_catalog_ls() {
         other => panic!("expected catalog ls, got {other:?}"),
     }
 }
+
+#[test]
+fn cli_parses_ticket() {
+    // Why: the minimal form `tm ticket <issue#>` must parse with the `gh`
+    // backend as the default and an empty notes list (#1237).
+    use crate::commands::ticket::system::TicketSystemKind;
+    let cli = Cli::try_parse_from(["trusty-mpm", "ticket", "1232"]).unwrap();
+    match cli.command {
+        Command::Ticket {
+            issue,
+            system,
+            notes,
+            runtime,
+        } => {
+            assert_eq!(issue, "1232");
+            assert_eq!(system, TicketSystemKind::Gh);
+            assert!(notes.is_empty());
+            assert_eq!(runtime, trusty_mpm::runtime::RuntimeKind::ClaudeCode);
+        }
+        other => panic!("expected ticket, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_ticket_with_hash_and_system() {
+    // Why: the leading `#` is allowed and the `[system]` positional selects the
+    // backend (#1237).
+    use crate::commands::ticket::system::TicketSystemKind;
+    let cli = Cli::try_parse_from(["trusty-mpm", "ticket", "#1232", "jira"]).unwrap();
+    match cli.command {
+        Command::Ticket { issue, system, .. } => {
+            assert_eq!(issue, "#1232");
+            assert_eq!(system, TicketSystemKind::Jira);
+        }
+        other => panic!("expected ticket, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_ticket_with_notes() {
+    // Why: `--note/-m` is repeatable and each value is posted as an issue comment
+    // for the audit trail (#1237).
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "ticket",
+        "42",
+        "-m",
+        "starting work",
+        "--note",
+        "second note",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Ticket { issue, notes, .. } => {
+            assert_eq!(issue, "42");
+            assert_eq!(notes, vec!["starting work", "second note"]);
+        }
+        other => panic!("expected ticket, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_rejects_ticket_unknown_system() {
+    // Why: an unknown `[system]` value must be rejected at parse time with a
+    // "possible values" hint, not silently forwarded (#1237).
+    let err = Cli::try_parse_from(["trusty-mpm", "ticket", "1", "bogus"]);
+    assert!(err.is_err(), "expected unknown system to be rejected");
+}
