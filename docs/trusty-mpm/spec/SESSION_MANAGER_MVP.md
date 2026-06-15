@@ -20,9 +20,9 @@ hold pending these decisions.
 | # | Decision | v1 | v2 |
 |---|---|---|---|
 | D1 | **Control surface** | MCP-primary framing implied | Synchronous HTTP API is primary. MCP is a thin optional wrapper considered for a later release only. |
-| D2 | **Coordinator** | Implied to be built into the substrate | Pluggable and BORROWED — any agentic process (Bob's CTO Claude MPM instance, Unicorn Factory bot, etc.) drives harnesses via the HTTP API. The substrate never ships a coordinator. |
-| D3 | **Autonomy operating model** | Not addressed | ~80% of harness decisions auto-accepted by coordinator; ~20% escalated to human. API exposes PENDING DECISION + PROPOSED DEFAULT per session. Autonomy policy lives in the coordinator, not the substrate. Activity monitor is observability-only, NEVER the auto-accept gate. |
-| D4 | **Observation layer** | Tmux pane capture only | Tmux panes AND GitHub issues/PRs/artifacts the harness produces. Substrate must expose workspace path, repo, and branch so coordinator can correlate a session with its worktree/PR. |
+| D2 | **Calling agentic process** | Implied to be built into the substrate | Pluggable and BORROWED — any agentic process (Bob's CTO Claude MPM instance, Unicorn Factory bot, etc.) drives harnesses via the HTTP API. The session manager never embeds the driving logic. |
+| D3 | **Autonomy operating model** | Not addressed | ~80% of harness decisions auto-accepted by the calling agentic process; ~20% escalated to human. API exposes PENDING DECISION + PROPOSED DEFAULT per session. Autonomy policy lives in the calling agentic process, not the substrate. Activity monitor is observability-only, NEVER the auto-accept gate. |
+| D4 | **Observation layer** | Tmux pane capture only | Tmux panes AND GitHub issues/PRs/artifacts the harness produces. Substrate must expose workspace path, repo, and branch so the calling agentic process can correlate a session with its worktree/PR. |
 | D5 | **Workspace isolation** | `--cwd` supplied by caller; no provisioner | NEW substrate responsibility: Workspace Provisioner pulls repo+ref into an mpm-owned isolated directory (`~/.trusty-mpm/workspaces/<project>/<session>`), runs `prepare_session` there, then launches the harness. Never touches existing project checkouts. |
 | D6 | **Content source** | Local deploy only (deferred remote registry) | Agents/skills synced FROM the claude-mpm repository via the remote-registry mechanism (#387/#388). claude-mpm repo is the source of truth; mpm fetches and caches the catalog. |
 | D7 | **Runtime adapter / auth** | Claude Code adapter via `env -u ANTHROPIC_API_KEY` | Unchanged from v1. |
@@ -72,7 +72,7 @@ detached creation.
 
 ### The pivot
 
-The daemon stops being a coordinator *of* sessions that announce themselves via
+The daemon stops being driven by sessions that announce themselves via
 hooks, and becomes a **supervisor+spawner+observer** of sessions it *creates and
 names itself*. The operator interface is a `tm session` CLI backed by the same HTTP
 daemon. The daemon is the only party that knows the naming convention and can
@@ -94,11 +94,11 @@ reconcile reality on restart.
    claude-mpm repository (remote-registry #387/#388), not re-ported by hand.
 4. **Pending-decision exposure** — per session, the API exposes not just coarse state
    but the PENDING DECISION + the harness's PROPOSED DEFAULT, and accepts an injected
-   answer. Autonomy policy (auto-accept vs. escalate) lives in the coordinator.
+   answer. Autonomy policy (auto-accept vs. escalate) lives in the calling agentic process.
 5. **`tm session` CLI** — `new`, `ls`, `send`, `activity`, `attach`, `stop` subcommands
    backed by the HTTP API.
 6. **LLM activity monitor** (observability only) — classifies pane state via a cheap
-   LLM. Used for human observation and coordinator correlation ONLY — not for
+   LLM. Used for human observation and the calling agentic process correlation ONLY — not for
    auto-accepting decisions (see safety rule in section 5.2).
 7. **Auth via Max OAuth** — `ANTHROPIC_API_KEY` unset; Claude Code uses `~/.claude`
    credentials.
@@ -121,9 +121,9 @@ or behind a seam; it is simply not exercised in the MVP.
 | Inter-session IPC (sessions communicating with each other) | DEFERRED |
 | Dispatcher mode (daemon routes tasks to sessions) | DEFERRED — sessions self-drive from assembled instructions |
 | trusty-code (tcode) runtime adapter | DEFERRED — seam defined, not implemented |
-| Coordinator-side autonomy policy (auto-accept tiers T1–T4) | DEFERRED — coordinator responsibility, not substrate |
-| Ticket/artifact correlation depth (issue/PR tracking per session) | DEFERRED — substrate exposes the workspace/repo/branch; correlation logic is the coordinator's concern |
-| Unattended supervisor daemon (always-on 24/7 fleet operation) | DEFERRED — tmux holds durable sessions; coordinator reconnects |
+| Autonomy policy (auto-accept tiers T1–T4) | DEFERRED — calling agentic process responsibility, not substrate |
+| Ticket/artifact correlation depth (issue/PR tracking per session) | DEFERRED — substrate exposes the workspace/repo/branch; correlation logic is the calling agentic process's concern |
+| Unattended supervisor daemon (always-on 24/7 fleet operation) | DEFERRED — tmux holds durable sessions; the calling agentic process reconnects |
 | Daemon-enforced circuit breakers (#393) | DEFERRED |
 | Per-agent model overrides (#394) | DEFERRED |
 
@@ -138,18 +138,18 @@ each pane runs a **RuntimeAdapter** implementation. For MVP the only adapter is
 `ClaudeCodeAdapter`, which spawns the interactive `claude` CLI. The daemon never
 runs in each session — it is purely a control plane.
 
-**The coordinator is borrowed, not built.** The substrate (trusty-mpm daemon) is a
+**The driving logic is borrowed, not built.** The substrate (trusty-mpm daemon) is a
 dumb harness launcher and observer. It does not make autonomy decisions. Those are
-the coordinator's job — whether that is Bob's CTO Claude MPM instance, a Unicorn
+the calling agentic process's job — whether that is Bob's CTO Claude MPM instance, a Unicorn
 Factory controlling bot, or a human typing `tm session send`. See section 5 for the
-substrate/coordinator boundary.
+substrate/caller boundary.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │   ONE MACHINE (single-instance enforced via daemon.lock)          │
 │                                                                  │
-│  COORDINATOR (external — Bob's CTO Claude MPM, Unicorn Factory,  │
-│  or human operator)                                              │
+│  CALLING AGENTIC PROCESS (external — Bob's CTO Claude MPM,        │
+│  Unicorn Factory, or human operator)                             │
 │       │                                                          │
 │       │  HTTP (loopback :7880, discovered via ~/.trusty-mpm/daemon.lock)
 │       ▼                                                          │
@@ -290,7 +290,7 @@ control primitives that make this model work for autonomous sessions.
 
 ---
 
-## 5. Substrate / Coordinator Boundary
+## 5. Substrate / Calling Agentic Process Boundary
 
 ### 5.1 What the substrate does
 
@@ -300,7 +300,7 @@ The substrate (trusty-mpm daemon) is responsible for:
 - Launching harnesses (tmux sessions running `claude`).
 - Observing pane state (LLM activity monitor — section 8).
 - Storing and serving `SessionRecord` metadata (id, name, workspace path, repo, branch).
-- Accepting and persisting a pending-decision answer injected by the coordinator.
+- Accepting and persisting a pending-decision answer injected by the calling agentic process.
 - Reconciling session state on restart.
 
 The substrate does NOT:
@@ -310,9 +310,9 @@ The substrate does NOT:
 - Correlate sessions with GitHub issues/PRs/artifacts (beyond storing repo+branch).
 - Coordinate between sessions.
 
-### 5.2 What the coordinator does
+### 5.2 What the calling agentic process does
 
-The coordinator is **borrowed**: it is an existing agentic process (Bob's CTO Claude
+The calling agentic process is **borrowed**: it is an existing agentic process (Bob's CTO Claude
 MPM instance, a Unicorn Factory controlling bot, a human with a terminal). It:
 
 - Calls the HTTP API to spawn sessions with specific `repo_url`, `ref`, and `task`.
@@ -321,13 +321,13 @@ MPM instance, a Unicorn Factory controlling bot, a human with a terminal). It:
   auto-accept or escalate.
 - Calls `POST /api/v1/sessions/managed/{id}/answer` to inject an accepted answer.
 - Tracks session progress by correlating the session's `repo` + `branch` with GitHub
-  PR/issue APIs directly (the substrate exposes the fields; the coordinator queries
+  PR/issue APIs directly (the substrate exposes the fields; the calling agentic process queries
   GitHub itself).
 
 ### 5.3 Autonomy operating model
 
 Approximately 80% of harness decisions can run without human intervention. The
-coordinator auto-accepts guarded default choices and escalates only the ~20% that
+calling agentic process auto-accepts guarded default choices and escalates only the ~20% that
 are genuinely ambiguous or high-risk (comparable to the unicorn-factory's tiered PR
 autonomy model: T1 trivial auto-merge through T4 human-required review).
 
@@ -349,7 +349,7 @@ the structured signals that make autonomous operation trustworthy.
 ### 5.4 Pending-decision API shape
 
 `SessionRecord` carries two optional fields updated by the harness (via inject or
-future hook) and consumed by the coordinator:
+future hook) and consumed by the calling agentic process:
 
 ```json
 {
@@ -358,7 +358,7 @@ future hook) and consumed by the coordinator:
 }
 ```
 
-The coordinator reads these fields, applies its autonomy policy, and either:
+The calling agentic process reads these fields, applies its autonomy policy, and either:
 
 - Calls `POST /api/v1/sessions/managed/{id}/answer` with `{ "answer": "<text>" }`
   to inject an accepted or overridden answer, OR
@@ -655,7 +655,7 @@ On daemon boot, `reconcile_on_boot()` runs before accepting HTTP requests:
 This component answers "what is session X doing right now?" without requiring hooks
 or instrumentation inside the Claude Code process. It is the MVP substitute for a
 hook-based activity feed, AND provides the `pending_decision` / `proposed_default`
-visibility layer for the coordinator.
+visibility layer for the calling agentic process.
 
 The monitor is **strictly observational**. It MUST NOT trigger auto-accept decisions.
 See the safety rule in section 5.3.
@@ -706,7 +706,7 @@ Valid `state` values:
 - `done` — task completion signal visible
 
 The monitor does not auto-inject responses. A `blocked_on_permission` verdict
-surfaces in the activity response so the coordinator can decide to call
+surfaces in the activity response so the calling agentic process can decide to call
 `POST /answer` or escalate to the human.
 
 ### Cost instrumentation
@@ -763,7 +763,7 @@ pub struct CheckMetrics {
 | MCP wrapper for session manager | N/A | **DEFERRED** |
 | TUI integration for managed sessions | `src/tui/` | **DEFERRED** |
 | Inter-session IPC | N/A | **DEFERRED** |
-| Coordinator autonomy policy | N/A (coordinator, not substrate) | **DEFERRED / NOT SUBSTRATE** |
+| Autonomy policy | N/A (calling agentic process, not substrate) | **DEFERRED / NOT SUBSTRATE** |
 
 ---
 
@@ -863,8 +863,8 @@ the acceptance criteria stay tight.
 | Item | Notes |
 |------|-------|
 | MCP wrapper for session-manager tools | HTTP API ships first; MCP is a thin adapter later |
-| Coordinator-side autonomy tiers (T1–T4) | Lives in the coordinator (CTO Claude MPM), not the substrate |
-| Ticket/artifact correlation (issue/PR tracking per session) | Substrate exposes repo+branch; coordinator queries GitHub directly |
+| Autonomy tiers (T1–T4) | Lives in the calling agentic process (CTO Claude MPM), not the substrate |
+| Ticket/artifact correlation (issue/PR tracking per session) | Substrate exposes repo+branch; calling agentic process queries GitHub directly |
 | Unattended supervisor daemon | Deferred until 24/7 fleet operation is needed; tmux holds state |
 | Per-session rate-limit monitoring | Add `rate_limited` verdict state when data warrants it |
 | Bare-mirror workspace optimization (disk savings) | Fresh clone for MVP; mirror deferred |
@@ -906,7 +906,7 @@ the acceptance criteria stay tight.
 This MVP refocuses the **M1 "standalone metaharness POC" milestone** of epic #380.
 Instead of continuing to close Python-parity gaps in the single-session hook-relay
 model, M1 now delivers a multi-session daemon that solves the unicorn-factory problem
-with workspace isolation, content sync, and a coordinator-ready HTTP API.
+with workspace isolation, content sync, and an agentic-process-ready HTTP API.
 
 The existing PRD roadmap phases are **not cancelled**:
 
