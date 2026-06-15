@@ -32,7 +32,8 @@ mod tests;
 use trusty_mpm::runtime::RuntimeKind;
 
 use crate::commands::ticket::runner::{CommandRunner, RealCommandRunner};
-use trusty_mpm::core::trusty_tools_config::TrustyToolsConfig;
+use crate::gh_identity::{clone_url, load_gh_env};
+use trusty_mpm::core::trusty_tools_config::{GithubConfig, TrustyToolsConfig};
 
 use args::{RawWatchArgs, ResolvedWatch, resolve};
 use dispatch::{DispatchMode, dispatch_issue};
@@ -46,13 +47,13 @@ use listen::run_listen_loop;
 /// current checkout), so the clone URL is synthesised and the default branch is
 /// asked of `gh` for that specific repo — hard-coding `main` would be wrong for
 /// `master`/`trunk` boards.
-/// What: the `https://github.com/<owner>/<repo>` clone URL and the repo's actual
-/// default branch name.
+/// What: the `https://<host>/<owner>/<repo>` clone URL (host from
+/// `github.host`, default `github.com`) and the repo's actual default branch name.
 /// Test: `resolve_board_repo_threads_default_branch`,
-/// `resolve_board_repo_falls_back_to_main`.
+/// `resolve_board_repo_falls_back_to_main`, `resolve_board_repo_uses_configured_host`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BoardRepo {
-    /// HTTPS clone URL for the board repository.
+    /// HTTPS clone URL for the board repository (honours `github.host`).
     pub(crate) clone_url: String,
     /// The board repository's default branch (base ref for new branches).
     pub(crate) default_branch: String,
@@ -83,17 +84,21 @@ pub(crate) fn dispatch_mode(execute: bool, dry_run: bool) -> DispatchMode {
 /// branches off a base ref. The board may be a different repo than the current
 /// checkout, so we synthesise the HTTPS clone URL from `owner/repo` and ask `gh`
 /// for THAT repo's default branch (so `master`/`trunk` boards branch correctly).
-/// What: builds `https://github.com/<repo>` and runs
-/// `gh repo view <repo> --json defaultBranchRef --jq …` through the injected
-/// [`CommandRunner`]; falls back to `main` only when gh returns an empty branch.
+/// The clone URL honours the configured `github.host` (#1265) so GitHub
+/// Enterprise boards clone from the right host — this closes the GHE part of
+/// #1261, replacing the previously hard-coded `https://github.com/<repo>`.
+/// What: builds `https://<host>/<repo>` (host from [`clone_url`], default
+/// `github.com`) and runs `gh repo view <repo> --json defaultBranchRef --jq …`
+/// through the injected [`CommandRunner`]; falls back to `main` only when gh
+/// returns an empty branch.
 /// Test: `resolve_board_repo_threads_default_branch`,
-/// `resolve_board_repo_falls_back_to_main`.
+/// `resolve_board_repo_falls_back_to_main`, `resolve_board_repo_uses_configured_host`.
 pub(crate) fn resolve_board_repo<R: CommandRunner>(
     runner: &R,
     repo: &str,
+    github: Option<&GithubConfig>,
 ) -> anyhow::Result<BoardRepo> {
-    // TODO: support configurable GitHub host (GHE)
-    let clone_url = format!("https://github.com/{repo}");
+    let clone_url = clone_url(github, repo);
     let out = runner.run(
         "gh",
         &[
@@ -138,12 +143,25 @@ pub(crate) async fn poll(
     runtime: RuntimeKind,
 ) -> anyhow::Result<()> {
     let config = TrustyToolsConfig::load();
-    let settings = resolve(&raw, &config.watch.unwrap_or_default())?;
+    let github = config.github.clone();
+    let settings = resolve(&raw, &config.watch.clone().unwrap_or_default())?;
     let mode = dispatch_mode(execute, dry_run);
 
-    let runner = RealCommandRunner;
-    let lister = GhIssueLister::new(RealCommandRunner);
-    run_poll_once(client, url, &runner, &lister, &settings, mode, runtime).await
+    // #1265: bind the active project's GitHub identity to every `gh` call.
+    let gh_env = load_gh_env()?;
+    let runner = RealCommandRunner::with_env(gh_env.vars().to_vec());
+    let lister = GhIssueLister::new(RealCommandRunner::with_env(gh_env.vars().to_vec()));
+    run_poll_once(
+        client,
+        url,
+        &runner,
+        &lister,
+        &settings,
+        github.as_ref(),
+        mode,
+        runtime,
+    )
+    .await
 }
 
 /// One-shot poll body, generic over the runner + lister seams for testing.
@@ -155,16 +173,18 @@ pub(crate) async fn poll(
 /// [`dispatch_issue`], and prints a count summary.
 /// Test: covered indirectly via the dispatch/github unit tests; the dry-run no-op
 /// invariant is asserted on the underlying `dispatch_issue`.
+#[allow(clippy::too_many_arguments)]
 async fn run_poll_once<R: CommandRunner, L: IssueLister>(
     client: &reqwest::Client,
     url: &str,
     runner: &R,
     lister: &L,
     settings: &ResolvedWatch,
+    github: Option<&GithubConfig>,
     mode: DispatchMode,
     runtime: RuntimeKind,
 ) -> anyhow::Result<()> {
-    let board = resolve_board_repo(runner, &settings.repo)?;
+    let board = resolve_board_repo(runner, &settings.repo, github)?;
     let issues = lister.list(&settings.repo, &settings.label, settings.state)?;
     eprintln!(
         "tm watch poll: {} issue(s) on {} carry label `{}` ({})",
@@ -220,12 +240,15 @@ pub(crate) async fn listen(
     runtime: RuntimeKind,
 ) -> anyhow::Result<()> {
     let config = TrustyToolsConfig::load();
-    let settings = resolve(&raw, &config.watch.unwrap_or_default())?;
+    let github = config.github.clone();
+    let settings = resolve(&raw, &config.watch.clone().unwrap_or_default())?;
     let mode = dispatch_mode(execute, dry_run);
 
-    let runner = RealCommandRunner;
-    let board = resolve_board_repo(&runner, &settings.repo)?;
-    let lister = GhIssueLister::new(RealCommandRunner);
+    // #1265: bind the active project's GitHub identity to every `gh` call.
+    let gh_env = load_gh_env()?;
+    let runner = RealCommandRunner::with_env(gh_env.vars().to_vec());
+    let board = resolve_board_repo(&runner, &settings.repo, github.as_ref())?;
+    let lister = GhIssueLister::new(RealCommandRunner::with_env(gh_env.vars().to_vec()));
     run_listen_loop(
         client,
         url,
