@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use crate::core::{AnalyzerRegistry, FactStore, TrustySearchClient};
 use crate::embedder::{BowEmbedder, Embedder};
-use crate::types::KgGraph;
+use crate::types::{KgGraph, SmellThresholds};
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Json, Response},
@@ -87,6 +87,18 @@ pub struct AnalyzerAppState {
     /// Test: `sse_stream_emits_fact_upserted` confirms a subscriber observes
     /// an emitted event after a successful POST.
     pub events: broadcast::Sender<AnalyzerEvent>,
+    /// Runtime-configurable thresholds for code-smell detection.
+    ///
+    /// Why: satisfies the README's "configurable thresholds" promise — operators
+    /// can override the defaults at daemon startup (e.g. via CLI flags or a
+    /// config file) without recompilation. All handlers that run smell detection
+    /// read thresholds from here so a single override site controls all paths.
+    /// What: `SmellThresholds` with defaults matching the former compile-time
+    /// constants (50 lines / depth 4 / 5 params). Set via `with_smell_thresholds`.
+    /// Test: `custom_threshold_lowers_long_function_trigger` in
+    /// `core::complexity` proves that a non-default threshold fires on a chunk
+    /// the defaults would ignore.
+    pub smell_thresholds: SmellThresholds,
     /// Optional GitHub webhook HMAC secret override.
     ///
     /// Why: `POST /webhooks/github` verifies the `X-Hub-Signature-256` HMAC.
@@ -131,6 +143,7 @@ impl AnalyzerAppState {
             embedder: Arc::new(BowEmbedder::default()),
             scip_overlays: Arc::new(RwLock::new(HashMap::new())),
             events: events_tx,
+            smell_thresholds: SmellThresholds::default(),
             webhook_secret: None,
             api_key: std::env::var("OPENROUTER_API_KEY").ok(),
             llm_model: std::env::var("TRUSTY_LLM_MODEL")
@@ -153,6 +166,7 @@ impl AnalyzerAppState {
             embedder: Arc::new(BowEmbedder::default()),
             scip_overlays: Arc::new(RwLock::new(HashMap::new())),
             events: events_tx,
+            smell_thresholds: SmellThresholds::default(),
             webhook_secret: None,
             api_key: std::env::var("OPENROUTER_API_KEY").ok(),
             llm_model: std::env::var("TRUSTY_LLM_MODEL")
@@ -169,6 +183,21 @@ impl AnalyzerAppState {
     /// Test: covered by `deep_endpoint_requires_api_key`.
     pub fn with_api_key(mut self, key: Option<String>) -> Self {
         self.api_key = key;
+        self
+    }
+
+    /// Override smell-detection thresholds for the lifetime of this daemon.
+    ///
+    /// Why: lets operators tune thresholds at startup (e.g. from CLI flags or a
+    /// config file) without recompilation, fulfilling the README's "configurable
+    /// thresholds" guarantee. Handlers read `state.smell_thresholds` rather than
+    /// calling `detect_smells` (which uses `SmellThresholds::default()`), so this
+    /// single override point controls all smell-detection paths.
+    /// What: replaces `smell_thresholds`; returns `self` for chaining.
+    /// Test: integration-level — set a low threshold on `AnalyzerAppState`, post
+    /// a chunk via the HTTP API, assert the smell appears in the response.
+    pub fn with_smell_thresholds(mut self, thresholds: SmellThresholds) -> Self {
+        self.smell_thresholds = thresholds;
         self
     }
 

@@ -12,14 +12,7 @@
 //! Test: covers cyclomatic counting, grade thresholds, and `LongFunction`
 //! smell detection.
 
-use crate::types::complexity::{CodeSmell, ComplexityGrade, ComplexityMetrics};
-
-/// Threshold for `LongFunction`: > 50 newlines in the chunk content.
-const LONG_FUNCTION_THRESHOLD: usize = 50;
-/// Threshold for `DeepNesting`: max indent depth above this triggers the smell.
-const DEEP_NESTING_THRESHOLD: u8 = 4;
-/// Threshold for `TooManyParams`: parameter count above this triggers the smell.
-const TOO_MANY_PARAMS_THRESHOLD: usize = 5;
+use crate::types::complexity::{CodeSmell, ComplexityGrade, ComplexityMetrics, SmellThresholds};
 
 /// Compute complexity for a chunk of source code.
 ///
@@ -84,12 +77,36 @@ pub fn compute_complexity(content: &str) -> ComplexityMetrics {
     }
 }
 
-/// Inspect `content` for code smells. Returns an empty vec if none fire.
+/// Inspect `content` for code smells using the default `SmellThresholds`.
+///
+/// Why: backward-compatible wrapper so existing callers need no change; the
+/// real logic lives in `detect_smells_with_thresholds`.
+/// What: calls `detect_smells_with_thresholds` with `SmellThresholds::default()`.
+/// Test: `long_function_smell_fires_above_threshold` and
+/// `missing_docstring_smell_fires_when_no_doc_marker` in the tests module.
 pub fn detect_smells(content: &str) -> Vec<CodeSmell> {
+    detect_smells_with_thresholds(content, &SmellThresholds::default())
+}
+
+/// Inspect `content` for code smells using caller-supplied `thresholds`.
+///
+/// Why: makes thresholds runtime-configurable so operators can tune them via
+/// the daemon config without recompilation, satisfying the README promise of
+/// "configurable thresholds".
+/// What: checks `LongFunction` (line count), `DeepNesting` (indent depth),
+/// `TooManyParams` (parameter count), and `MissingDocstring` against the
+/// provided thresholds; returns a `Vec<CodeSmell>` of every fired rule.
+/// Test: `custom_threshold_lowers_long_function_trigger` in the tests module
+/// proves that a threshold of 5 lines flags a 10-line function that the
+/// default threshold (50) would not flag.
+pub fn detect_smells_with_thresholds(
+    content: &str,
+    thresholds: &SmellThresholds,
+) -> Vec<CodeSmell> {
     let mut smells = Vec::new();
 
     let line_count = content.matches('\n').count();
-    if line_count > LONG_FUNCTION_THRESHOLD {
+    if line_count > thresholds.long_function_lines {
         smells.push(CodeSmell::LongFunction { lines: line_count });
     }
 
@@ -98,12 +115,12 @@ pub fn detect_smells(content: &str) -> Vec<CodeSmell> {
         .map(estimate_indent_depth)
         .max()
         .unwrap_or(0);
-    if max_depth > DEEP_NESTING_THRESHOLD {
+    if max_depth > thresholds.deep_nesting_depth {
         smells.push(CodeSmell::DeepNesting { max_depth });
     }
 
     let param_count = estimate_param_count(content);
-    if param_count > TOO_MANY_PARAMS_THRESHOLD {
+    if param_count > thresholds.too_many_params {
         smells.push(CodeSmell::TooManyParams { count: param_count });
     }
 
@@ -261,5 +278,39 @@ mod tests {
     fn grade_matches_cyclomatic_band() {
         let m = compute_complexity("/// doc\nfn f() {}\n");
         assert_eq!(m.grade, ComplexityGrade::A);
+    }
+
+    #[test]
+    fn custom_threshold_lowers_long_function_trigger() {
+        // A 10-line function does NOT trigger LongFunction with the default
+        // threshold of 50 but DOES trigger it when we lower the threshold to 5.
+        // This proves runtime configurability of thresholds.
+        let mut src = String::from("/// doc\nfn small() {\n");
+        for _ in 0..10 {
+            src.push_str("    let _ = 1;\n");
+        }
+        src.push_str("}\n");
+
+        let default_smells = detect_smells_with_thresholds(&src, &SmellThresholds::default());
+        assert!(
+            !default_smells
+                .iter()
+                .any(|s| matches!(s, CodeSmell::LongFunction { .. })),
+            "default threshold should NOT flag a 10-line function, got {:?}",
+            default_smells
+        );
+
+        let low_threshold = SmellThresholds {
+            long_function_lines: 5,
+            ..SmellThresholds::default()
+        };
+        let custom_smells = detect_smells_with_thresholds(&src, &low_threshold);
+        assert!(
+            custom_smells
+                .iter()
+                .any(|s| matches!(s, CodeSmell::LongFunction { .. })),
+            "custom threshold of 5 SHOULD flag a 10-line function, got {:?}",
+            custom_smells
+        );
     }
 }

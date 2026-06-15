@@ -21,7 +21,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::core::complexity::{compute_complexity_for, detect_smells};
+use crate::core::complexity::{compute_complexity_for, detect_smells_with_thresholds};
 use crate::core::{analyze_refactor, quality, RefactorSuggestion, Severity};
 use crate::service::events::{fetch_chunks, AnalyzerAppState, ApiError};
 use crate::types::CodeChunk;
@@ -207,7 +207,7 @@ pub async fn refactor_suggestions(
         }
         let lang = super::lang_for_extension(&chunk.file);
         let metrics = compute_complexity_for(&chunk.content, lang);
-        let smells = detect_smells(&chunk.content);
+        let smells = detect_smells_with_thresholds(&chunk.content, &state.smell_thresholds);
         let mut suggestions = analyze_refactor(
             &chunk.id,
             &chunk.file,
