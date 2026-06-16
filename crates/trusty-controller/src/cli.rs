@@ -244,7 +244,12 @@ pub enum Commands {
     /// One-line stack summary (verdict + stack version). (DOC-4 sugar)
     Status,
 
-    /// Print the controller's own bound port/address — clean stdout. (DOC-7)
+    /// Print a member daemon's bound port/address — clean stdout. (DOC-7)
+    ///
+    /// `tctl` does not host its own HTTP server; this reports the bound address
+    /// of a managed daemon read from its `http_addr` discovery file (via
+    /// `trusty_common::read_daemon_addr`). Defaults to `trusty-search` when no
+    /// member is named.
     ///
     /// Output format precedence (highest → lowest):
     ///   1. `--json-port`  →  `{"addr":"…","port":N}` (DOC-7 / trusty-search port --json pattern)
@@ -258,6 +263,9 @@ pub enum Commands {
     /// rather than by clap because `--json` is a `global = true` flag and clap's
     /// `conflicts_with` does not fire across subcommand boundaries for global flags.
     Port {
+        /// Member daemon whose port to report (defaults to `trusty-search`).
+        member: Option<String>,
+
         /// Emit host:port instead of the bare port number.
         #[arg(long)]
         addr: bool,

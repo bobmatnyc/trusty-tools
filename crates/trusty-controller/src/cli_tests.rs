@@ -242,6 +242,19 @@ fn parse_port_addr() {
     assert!(matches!(cli.command, Commands::Port { addr: true, .. }));
 }
 
+/// Parse `tctl port <member>` — the optional positional member is captured.
+#[test]
+fn parse_port_member() {
+    let cli = Cli::try_parse_from(["tctl", "port", "trusty-memory"]).expect("port member parses");
+    match cli.command {
+        Commands::Port { member, .. } => assert_eq!(member.as_deref(), Some("trusty-memory")),
+        other => panic!("expected Port, got {other:?}"),
+    }
+    // Bare `tctl port` leaves the member unset (handler defaults to search).
+    let bare = Cli::try_parse_from(["tctl", "port"]).expect("bare port parses");
+    assert!(matches!(bare.command, Commands::Port { member: None, .. }));
+}
+
 /// Parse `tctl doctor --self-check trusty-search`.
 #[test]
 fn parse_doctor_self_check() {

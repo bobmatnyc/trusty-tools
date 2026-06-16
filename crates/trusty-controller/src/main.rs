@@ -90,11 +90,11 @@ fn dispatch(cli: Cli) {
         }
 
         Commands::Stack(StackCmd::Health) => {
-            stack::run_health(json);
+            std::process::exit(stack::run_health(json));
         }
 
         Commands::Stack(StackCmd::Doctor { member }) => {
-            stack::run_doctor(member.as_deref(), json);
+            std::process::exit(stack::run_doctor(member.as_deref(), json));
         }
 
         Commands::Status => {
@@ -126,31 +126,35 @@ fn dispatch(cli: Cli) {
         }
 
         Commands::Ensure { wait } => {
-            ensure::run(wait, json);
+            std::process::exit(ensure::run(wait, json));
         }
 
         Commands::Start { members } => {
-            lifecycle::run_start(&members, yes, json);
+            std::process::exit(lifecycle::run_start(&members, yes, json));
         }
 
         Commands::Stop { members } => {
-            lifecycle::run_stop(&members, yes, json);
+            std::process::exit(lifecycle::run_stop(&members, yes, json));
         }
 
         Commands::Restart { members } => {
-            lifecycle::run_restart(&members, yes, json);
+            std::process::exit(lifecycle::run_restart(&members, yes, json));
         }
 
         Commands::Config { members } => {
-            config::run(&members, json);
+            std::process::exit(config::run(&members, json));
         }
 
-        Commands::Port { addr, json_port } => {
-            port::run(addr, json_port, json);
+        Commands::Port {
+            member,
+            addr,
+            json_port,
+        } => {
+            std::process::exit(port::run(member.as_deref(), addr, json_port, json));
         }
 
         Commands::Doctor { self_check, member } => {
-            doctor::run(self_check, member.as_deref(), json);
+            std::process::exit(doctor::run(self_check, member.as_deref(), json));
         }
 
         Commands::Ui { print } => {

@@ -20,19 +20,51 @@
 
 use serde::Serialize;
 
+/// How a daemon member is brought up / taken down.
+///
+/// Why: `tctl start|stop|restart` cannot assume every daemon is launchd-managed.
+/// The shared daemons (search/memory/analyze) register `~/Library/LaunchAgents`
+/// plists and are controlled with `launchctl bootstrap`/`bootout`. trusty-mpm,
+/// by contrast, is NOT launchd-managed — it ships its own `trusty-mpm
+/// start|stop|restart` subcommands that spawn the daemon and `pkill` it
+/// (verified in `crates/trusty-mpm/src/bin/tm/commands/daemon.rs`). Encoding the
+/// strategy as data lets the lifecycle handler dispatch correctly per member
+/// instead of forcing every daemon through a launchd path some members lack.
+///
+/// What: [`ManageStrategy::Launchd`] → control via the shared
+/// `trusty_common::launchd::LaunchdConfig` `bootstrap`/`bootout`;
+/// [`ManageStrategy::OwnVerb`] → shell out to the member's own
+/// `<binary> start|stop|restart` subcommand; [`ManageStrategy::None`] →
+/// non-daemon (no lifecycle control).
+///
+/// Test: `tests::mpm_uses_own_verb`, `tests::daemons_use_launchd`,
+/// `tests::non_daemon_has_no_strategy`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManageStrategy {
+    /// launchd-supervised: `launchctl bootstrap` / `bootout` via `LaunchdConfig`.
+    Launchd,
+    /// Self-managed: the binary's own `start`/`stop`/`restart` subcommand.
+    OwnVerb,
+    /// Not a daemon — no lifecycle control.
+    None,
+}
+
 /// One member of the stable trusty tool set.
 ///
-/// Why: `tctl` keys three things off a member — the crates.io package name (for
+/// Why: `tctl` keys four things off a member — the crates.io package name (for
 /// `cargo install` / `check_crates_io`), the installed binary name (for presence
-/// and health probes), and whether it is a launchd-supervised daemon (so upgrade
-/// can restart it cleanly). Bundling them keeps every handler consistent.
+/// and health probes), whether it is a supervised daemon (so upgrade can restart
+/// it cleanly), and HOW it is managed (launchd vs its own start/stop verb).
+/// Bundling them keeps every handler consistent.
 ///
 /// What: `crate_name` is the cargo package; `binary` is the installed binary
 /// (often equal, but `tga` differs); `daemon` marks members that run as a
 /// long-lived HTTP daemon and therefore need a connection-safe restart after an
-/// upgrade (`upgrade_and_restart`).
+/// upgrade (`upgrade_and_restart`); `manage` is the lifecycle strategy
+/// (derived from `daemon` + binary by [`StableMember::new`]).
 ///
-/// Test: `tests::stable_set_is_pinned`.
+/// Test: `tests::stable_set_is_pinned`, `tests::mpm_uses_own_verb`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct StableMember {
     /// The crates.io package name (`cargo install <crate_name> --locked`).
@@ -41,19 +73,34 @@ pub struct StableMember {
     pub binary: String,
     /// Whether this member runs as a supervised daemon (needs restart on upgrade).
     pub daemon: bool,
+    /// How `tctl start|stop|restart` controls this member's lifecycle.
+    pub manage: ManageStrategy,
 }
 
 impl StableMember {
-    /// Construct a stable-set member.
+    /// Construct a stable-set member, deriving its lifecycle strategy.
     ///
-    /// Why: Terse constructor keeps the [`stable_set`] table readable.
-    /// What: Builds a [`StableMember`] from borrowed parts.
-    /// Test: Exercised by [`stable_set`] and its tests.
+    /// Why: Terse constructor keeps the [`stable_set`] table readable while
+    /// centralising the one place a member's `manage` strategy is decided, so
+    /// callers (install/upgrade) that ignore lifecycle are unaffected.
+    /// What: Builds a [`StableMember`]; a non-daemon gets
+    /// [`ManageStrategy::None`]; trusty-mpm gets [`ManageStrategy::OwnVerb`]
+    /// (it is process-managed, not launchd); every other daemon gets
+    /// [`ManageStrategy::Launchd`].
+    /// Test: Exercised by [`stable_set`] and `tests::mpm_uses_own_verb`.
     fn new(crate_name: &str, binary: &str, daemon: bool) -> Self {
+        let manage = if !daemon {
+            ManageStrategy::None
+        } else if binary == "trusty-mpm" {
+            ManageStrategy::OwnVerb
+        } else {
+            ManageStrategy::Launchd
+        };
         Self {
             crate_name: crate_name.to_owned(),
             binary: binary.to_owned(),
             daemon,
+            manage,
         }
     }
 }
@@ -66,13 +113,14 @@ impl StableMember {
 /// git-analytics it composes with, then the console (the HTTP front door that
 /// proxies the others) last so it discovers already-running members.
 ///
-/// What: Returns the member list in install order — trusty-search,
+/// What: Returns the member list in install/topological order — trusty-search,
 /// trusty-memory, trusty-analyze, trusty-review, tga (binary `tga`,
-/// non-daemon), and trusty-console (daemon). Library crates resolve as cargo
-/// dependencies and are not listed.
+/// non-daemon), trusty-console (daemon), and trusty-mpm (the orchestrator,
+/// brought up last, process-managed via its own `start`/`stop` verbs). Library
+/// crates resolve as cargo dependencies and are not listed.
 ///
 /// Test: `tests::stable_set_is_pinned`, `tests::tga_crate_and_binary_names`,
-/// `tests::daemon_flags_match_spec`.
+/// `tests::daemon_flags_match_spec`, `tests::mpm_uses_own_verb`.
 pub fn stable_set() -> Vec<StableMember> {
     vec![
         StableMember::new("trusty-search", "trusty-search", true),
@@ -81,6 +129,7 @@ pub fn stable_set() -> Vec<StableMember> {
         StableMember::new("trusty-review", "trusty-review", true),
         StableMember::new("tga", "tga", false),
         StableMember::new("trusty-console", "trusty-console", true),
+        StableMember::new("trusty-mpm", "trusty-mpm", true),
     ]
 }
 
@@ -133,8 +182,56 @@ mod tests {
                 "trusty-review",
                 "tga",
                 "trusty-console",
+                "trusty-mpm",
             ]
         );
+    }
+
+    /// Why: trusty-mpm is a first-class managed daemon but is process-managed,
+    /// NOT launchd-managed (#1332 decision 3); its lifecycle strategy must be
+    /// `OwnVerb` so `tctl start|stop|restart` drives `trusty-mpm start|stop`
+    /// rather than a non-existent launchd job.
+    /// What: Asserts mpm is in the set, is a daemon, and uses `OwnVerb`.
+    /// Test: This is the test.
+    #[test]
+    fn mpm_uses_own_verb() {
+        let mpm = stable_set()
+            .into_iter()
+            .find(|m| m.binary == "trusty-mpm")
+            .expect("trusty-mpm in set");
+        assert!(mpm.daemon);
+        assert_eq!(mpm.manage, ManageStrategy::OwnVerb);
+    }
+
+    /// Why: The launchd-supervised daemons must resolve to the `Launchd`
+    /// strategy so lifecycle drives `bootstrap`/`bootout`.
+    /// What: Asserts search/memory/analyze/review/console are `Launchd`.
+    /// Test: This is the test.
+    #[test]
+    fn daemons_use_launchd() {
+        let set = stable_set();
+        let manage = |b: &str| set.iter().find(|m| m.binary == b).expect("present").manage;
+        for b in [
+            "trusty-search",
+            "trusty-memory",
+            "trusty-analyze",
+            "trusty-review",
+            "trusty-console",
+        ] {
+            assert_eq!(manage(b), ManageStrategy::Launchd, "{b}");
+        }
+    }
+
+    /// Why: A non-daemon has no lifecycle control; its strategy must be `None`.
+    /// What: Asserts tga resolves to `ManageStrategy::None`.
+    /// Test: This is the test.
+    #[test]
+    fn non_daemon_has_no_strategy() {
+        let tga = stable_set()
+            .into_iter()
+            .find(|m| m.binary == "tga")
+            .expect("tga in set");
+        assert_eq!(tga.manage, ManageStrategy::None);
     }
 
     /// Why: The install command must use the crate name for `cargo install` and
