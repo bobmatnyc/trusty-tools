@@ -48,6 +48,7 @@ pub mod session_launch;
 pub mod session_store;
 pub mod skill_deployer;
 pub mod skill_manifest;
+pub mod sm;
 pub mod tmux;
 pub mod trusty_tools_config;
 pub mod workspace_scan;

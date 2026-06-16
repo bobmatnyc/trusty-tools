@@ -18,6 +18,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::sm::config::SessionManagerConfig;
+
 // ──────────────────────────────────────────────
 // Top-level config sections
 // ──────────────────────────────────────────────
@@ -127,11 +129,17 @@ pub struct PmConfig {
 /// Why: a single top-level struct makes `toml::from_str` the only parsing
 /// call; every section has a `Default` impl so absent sections yield
 /// sensible values without errors.
-/// What: four optional sections (`[agents]`, `[models]`, `[skills]`,
-/// `[pm]`); absent sections produce their `Default`.
+/// What: five optional sections (`[agents]`, `[models]`, `[skills]`,
+/// `[pm]`, `[session_manager]`); absent sections produce their `Default`.
+/// The `[session_manager]` section (DOC-14 spec §10) defaults to disabled, so
+/// its mere presence in the struct never changes runtime behavior.
 /// Test: `config_absent_yields_defaults`, `config_valid_parsed`,
-/// `config_malformed_falls_back`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// `config_malformed_falls_back`, `config_session_manager_*`.
+///
+/// Note: `Eq` is intentionally NOT derived — [`SessionManagerConfig`] carries a
+/// floating-point `temperature`, and `f32` is not `Eq`. `PartialEq` is retained
+/// for the equality assertions in tests.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct MpmConfig {
     /// `[agents]` — agent discovery sources.
     #[serde(default)]
@@ -148,6 +156,13 @@ pub struct MpmConfig {
     /// `[pm]` — PM-layer feature toggles.
     #[serde(default)]
     pub pm: PmConfig,
+
+    /// `[session_manager]` — Session Manager agent config (DOC-14 §10).
+    ///
+    /// Defaults to `enabled = false`; absent or partial sections parse to spec
+    /// defaults and leave the legacy overseer path untouched.
+    #[serde(default)]
+    pub session_manager: SessionManagerConfig,
 }
 
 // ──────────────────────────────────────────────
@@ -328,6 +343,8 @@ mod tests {
         assert_eq!(cfg, MpmConfig::default());
         assert!(cfg.agents.sources.is_empty());
         assert!(cfg.models.agents.is_empty());
+        // SM-1 zero-regression: absent [session_manager] → disabled by default.
+        assert!(!cfg.session_manager.enabled);
     }
 
     #[test]
@@ -354,6 +371,21 @@ sources = ["bundled"]
 
 [pm]
 circuit_breaker = true
+
+[session_manager]
+enabled = true
+
+[session_manager.inference]
+provider = "anthropic"
+sm_model = "anthropic/claude-sonnet-4-6"
+temperature = 0.4
+
+[session_manager.memory]
+palace = "session-manager"
+recall_top_k = 8
+
+[session_manager.rounds]
+window = 12
 "#;
         let cfg = load_from_str(dir.path(), toml);
         assert_eq!(cfg.agents.sources, vec!["bundled", "user"]);
@@ -369,6 +401,47 @@ circuit_breaker = true
         assert_eq!(cfg.models.default.as_deref(), Some("sonnet"));
         assert_eq!(cfg.skills.sources, vec!["bundled"]);
         assert_eq!(cfg.pm.circuit_breaker, Some(true));
+        // [session_manager] parses through MpmConfig (DOC-14 §10).
+        assert!(cfg.session_manager.enabled);
+        assert_eq!(cfg.session_manager.inference.provider, "anthropic");
+        assert_eq!(cfg.session_manager.inference.temperature, 0.4);
+        assert_eq!(cfg.session_manager.memory.recall_top_k, 8);
+        assert_eq!(cfg.session_manager.rounds.window, 12);
+        // A field omitted from the partial inference block keeps its spec default.
+        assert_eq!(cfg.session_manager.inference.context_token_budget, 24_000);
+    }
+
+    #[test]
+    fn config_session_manager_partial_takes_defaults() {
+        // A [session_manager] section that sets only `enabled` must leave every
+        // nested subsection at its spec §10 default.
+        let dir = tempfile::TempDir::new().unwrap();
+        let toml = r#"
+[session_manager]
+enabled = true
+"#;
+        let cfg = load_from_str(dir.path(), toml);
+        assert!(cfg.session_manager.enabled);
+        assert_eq!(cfg.session_manager.inference.provider, "auto");
+        assert_eq!(cfg.session_manager.memory.palace, "session-manager");
+        assert_eq!(cfg.session_manager.rounds.window, 10);
+    }
+
+    #[test]
+    fn config_session_manager_absent_is_noop_default() {
+        // No [session_manager] section at all → the whole struct defaults and
+        // the SM is disabled (zero-regression proof for SM-1).
+        let dir = tempfile::TempDir::new().unwrap();
+        let toml = r#"
+[models.agents]
+engineer = "haiku"
+"#;
+        let cfg = load_from_str(dir.path(), toml);
+        assert_eq!(
+            cfg.session_manager,
+            crate::core::sm::config::SessionManagerConfig::default()
+        );
+        assert!(!cfg.session_manager.enabled);
     }
 
     #[test]
