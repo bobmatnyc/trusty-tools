@@ -201,6 +201,20 @@ impl DaemonState {
         Arc::clone(&self.session_manager_agent)
     }
 
+    /// The SM runtime data root (`<framework_root>/sm`), DOC-14 SM-STDIO.
+    ///
+    /// Why: the SM-STDIO adapter (`tm sm serve --stdio`) opens the per-`conv_id`
+    /// rolling-context engine state and the SM goal palace under the SAME root the
+    /// SM agent was built against (`state::sm::SM_DATA_SUBDIR`). Exposing it as one
+    /// accessor keeps the stdio wiring from re-deriving the path (and possibly
+    /// drifting from the agent's storage root).
+    /// What: returns `<framework_root>/sm`.
+    /// Test: covered by the SM-STDIO dispatch wiring; the path convention matches
+    /// `state::sm::build_session_manager_agent`.
+    pub fn sm_data_root(&self) -> std::path::PathBuf {
+        self.framework_root.join("sm")
+    }
+
     // ---- hook events ----------------------------------------------------
 
     /// Append a hook event to the bounded history ring buffer and broadcast it.

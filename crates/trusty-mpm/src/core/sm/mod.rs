@@ -54,7 +54,7 @@ pub mod memory;
 pub mod prompt;
 pub mod providers;
 
-pub use agent::{SessionManagerAgent, SmAgentError, SmChatOutcome};
+pub use agent::{SessionManagerAgent, SmAgentError, SmChatOutcome, SmHealth, SmModelTiers};
 pub use config::{SessionManagerConfig, SmInferenceConfig, SmMemoryConfig, SmRoundsConfig};
 pub use context::{
     ConversationStore, ConversationStoreError, Round, SmContextEngine, SmContextError,

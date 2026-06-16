@@ -29,6 +29,7 @@ pub mod optimizer;
 pub mod overseer_compose;
 pub mod pairing_store;
 pub mod services;
+pub mod sm_stdio;
 pub mod state;
 pub mod tmux;
 pub mod watcher;

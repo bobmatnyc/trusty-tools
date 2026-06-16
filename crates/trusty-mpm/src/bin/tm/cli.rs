@@ -223,14 +223,23 @@ pub(crate) enum Command {
     ///
     /// DOC-14 D0.2: `tm sm` and `tm session-manager` are visible aliases for
     /// `tm coordinator` — all reach the same code path. `coord` is a hidden alias.
+    ///
+    /// DOC-14 SM-STDIO (#1291): `tm sm serve --stdio` runs the SM JSON-RPC 2.0
+    /// over STDIO adapter — the primary, API-first headless drive surface
+    /// (`sm.chat`/`sm.goals.*`/`sm.sessions.*`/`sm.context.get`/`sm.health`). A
+    /// plain `tm sm <message>` still chats; the `serve` subcommand is the adapter.
     #[command(
         visible_alias = "sm",
         visible_alias = "session-manager",
         alias = "coord"
     )]
     Coordinator {
-        /// The message to send to the coordinator / session manager.
-        message: String,
+        /// The message to send to the coordinator / session manager (omit when
+        /// using the `serve` subcommand).
+        message: Option<String>,
+        /// Optional subcommand: `serve --stdio` runs the SM JSON-RPC stdio adapter.
+        #[command(subcommand)]
+        action: Option<CoordinatorAction>,
     },
 
     /// Inspect and probe workspace service daemons.
@@ -367,6 +376,30 @@ pub(crate) enum Command {
 /// What: `Poll` (discover + dispatch once, then exit) and `Listen` (repeatedly
 /// poll on an interval, processing newly-matched issues, until Ctrl-C).
 /// Test: `cli_parses_watch_poll`, `cli_parses_watch_listen` in `tests.rs`.
+/// Subcommands for `tm coordinator` / `tm sm` (DOC-14 SM-STDIO #1291).
+///
+/// Why: `tm sm` chats by default (a plain message), but the SM's PRIMARY,
+/// API-first interface is the JSON-RPC over STDIO adapter (§1A.1). Exposing it as
+/// a `serve` subcommand under the `sm` alias matches the trusty-* `serve --stdio`
+/// convention while leaving `tm sm <message>` for ad-hoc chat.
+/// What: one variant, `Serve { stdio }`, mirroring the daemon's `serve --stdio`
+/// flag shape. `--stdio` selects the newline-delimited JSON-RPC adapter; without
+/// it the subcommand prints guidance (the HTTP/TUI surfaces are separate).
+/// Test: `cli_parses_sm_serve_stdio` in `tests.rs`.
+#[derive(Debug, Subcommand)]
+pub(crate) enum CoordinatorAction {
+    /// Run the SM JSON-RPC 2.0 over STDIO adapter (the headless drive surface).
+    Serve {
+        /// Speak newline-delimited JSON-RPC 2.0 on stdin/stdout (logs to stderr).
+        ///
+        /// Why: the SM's API-first surface — a parent `claude-mpm`/PM drives every
+        /// `sm.*` method headlessly over stdio (§1A.2). Without this flag there is
+        /// no other `serve` mode yet, so it is effectively required.
+        #[arg(long)]
+        stdio: bool,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 pub(crate) enum WatchCmd {
     /// One-shot: list label-matched issues, dispatch each, then exit.
