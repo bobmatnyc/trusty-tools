@@ -105,6 +105,11 @@ detect_target() {
                     printf 'aarch64-apple-darwin'
                     ;;
                 x86_64)
+                    # On Apple Silicon running under Rosetta 2, uname -m reports x86_64.
+                    # Detect this case and guide the user to a native arm64 terminal.
+                    if sysctl -n sysctl.proc_translated 2>/dev/null | grep -q '^1$'; then
+                        die "Detected Rosetta 2 translation layer. Open a native arm64 terminal (e.g. launch Terminal from Finder without Rosetta) and re-run the installer."
+                    fi
                     die "macOS Intel (x86_64) is not yet supported. Build from source: cargo install ${CRATE}"
                     ;;
                 *)
@@ -158,6 +163,9 @@ resolve_version() {
         # Tolerate a leading tag prefix or 'v' if the user pasted a full tag.
         _v="${TRUSTY_VERSION#"${TAG_PREFIX}"}"
         _v="${_v#v}"
+        # Validate: reject pre-release suffixes like '0.3.0-rc1' which would 404.
+        printf '%s' "${_v}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            || die "TRUSTY_VERSION '${TRUSTY_VERSION}' is not a valid X.Y.Z version (got: '${_v}')"
         printf '%s' "${_v}"
         return 0
     fi
@@ -269,9 +277,10 @@ maybe_update_path() {
         {
             printf '\n# Added by trusty-tools install.sh\n'
             # shellcheck disable=SC2016
-            # Intentional: write a literal $PATH so it expands at shell startup,
-            # not now. Single quotes keep $PATH verbatim in the RC file.
-            printf 'export PATH="%s:$PATH"\n' "${_dir}"
+            # Single-quote _dir so it is written verbatim; $PATH expands at
+            # shell startup, not now. The allowlist guard above already rejects
+            # single-quote characters from _dir.
+            printf "export PATH='%s':\$PATH\n" "${_dir}"
         } >>"${_rc}"
         say "Added ${_dir} to PATH in ${_rc}. Restart your shell or run:"
         say "    export PATH=\"${_dir}:\$PATH\""
@@ -484,6 +493,7 @@ main() {
             # Security note: this skips checksum re-verification of the existing binary.
             # Run with --force / TRUSTY_FORCE=1 to always re-download and re-verify.
             say "${BIN} ${_version} is already installed, skipping download."
+            warn "Skipping integrity check for existing ${BIN} ${_version}. Use --force to re-verify."
             _need_install="0"
         fi
     fi
