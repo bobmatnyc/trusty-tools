@@ -109,6 +109,11 @@ libc = "0.2"
 ratatui = "0.29"
 crossterm = "0.28"
 teloxide = { version = "0.13", features = ["macros"] }
+# Progress bars / spinners. Shared rustup/cargo-style progress display lives in
+# the `trusty-progress` crate (#1315). Pinned to 0.17 to match the existing
+# local pins in trusty-search and tga; migrating those two crates to this
+# workspace dep is a tracked follow-up (do NOT churn them here, see #1315).
+indicatif = "0.17"
 
 # Misc utilities used across crates.
 dashmap = "6"

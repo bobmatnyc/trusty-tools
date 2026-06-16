@@ -1,0 +1,16 @@
+[package]
+name = "trusty-progress"
+description = "Shared rustup/cargo-style progress + status display for the trusty-* tooling ecosystem"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Not published yet (#1315): consumed first in-tree by trusty-controller's
+# Phase-1 install/upgrade flows. Flip `publish` once the API stabilises.
+publish = false
+
+[dependencies]
+indicatif = { workspace = true }
+thiserror = { workspace = true }
