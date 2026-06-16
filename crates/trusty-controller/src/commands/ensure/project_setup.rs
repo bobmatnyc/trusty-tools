@@ -166,9 +166,15 @@ pub async fn create_palace(
         ));
     };
 
-    // Idempotency: if the palace already exists, GET succeeds and we no-op
-    // without a create. trusty-memory derives the palace id from the name, so
-    // the id path segment equals the name.
+    // Idempotency fast-path (optimization only — correctness does NOT depend on
+    // it): if the palace already exists, GET succeeds and we no-op without a
+    // create. This GET assumes trusty-memory derives the palace id from the name
+    // so the id path segment equals the name (per the trusty-memory palace API
+    // contract). Should that assumption ever drift, the worst case is a missed
+    // fast-path: we fall through to the POST below, which is itself idempotent —
+    // trusty-memory resolves a duplicate name to the same palace dir (its
+    // registry `create_dir_all` is a no-op), so re-creating an existing palace
+    // still succeeds without duplication.
     let get_url = format!("{base}/api/v1/palaces/{name}");
     if let Ok(r) = client.get(&get_url).send().await {
         if r.status().is_success() {
@@ -267,8 +273,26 @@ mod tests {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             for (status_line, body) in responses {
                 if let Ok((mut sock, _)) = listener.accept().await {
-                    let mut buf = [0u8; 2048];
-                    let _ = sock.read(&mut buf).await;
+                    // Drain the request up to (and including) the end-of-headers
+                    // marker before replying. A single fixed-size read can split
+                    // a request whose `root_path` body is long, which used to
+                    // race the write and flake CI; reading until `\r\n\r\n` (or
+                    // EOF) consumes the whole header block deterministically. We
+                    // don't need the body — only that the request is fully sent.
+                    let mut acc = Vec::with_capacity(2048);
+                    let mut chunk = [0u8; 2048];
+                    loop {
+                        match sock.read(&mut chunk).await {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                acc.extend_from_slice(&chunk[..n]);
+                                if acc.windows(4).any(|w| w == b"\r\n\r\n") {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
                     let resp = format!(
                         "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                         body.len()
@@ -295,6 +319,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&tmp).unwrap();
         unsafe {
+            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
             std::env::set_var(DATA_DIR_OVERRIDE_ENV, &tmp);
         }
         trusty_common::write_daemon_addr(app, addr).unwrap();
@@ -314,6 +339,7 @@ mod tests {
             .await
             .unwrap();
         unsafe {
+            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
             std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -336,6 +362,7 @@ mod tests {
             .await
             .unwrap();
         unsafe {
+            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
             std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -357,6 +384,7 @@ mod tests {
             .await
             .unwrap();
         unsafe {
+            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
             std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -380,6 +408,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&tmp).unwrap();
         unsafe {
+            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
             std::env::set_var(DATA_DIR_OVERRIDE_ENV, &tmp);
         }
         let client = build_client().unwrap();
@@ -387,6 +416,7 @@ mod tests {
             .await
             .unwrap();
         unsafe {
+            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
             std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
         }
         let _ = std::fs::remove_dir_all(&tmp);
@@ -412,6 +442,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&tmp).unwrap();
         unsafe {
+            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
             std::env::set_var(DATA_DIR_OVERRIDE_ENV, &tmp);
         }
         let client = build_client().unwrap();
@@ -419,6 +450,7 @@ mod tests {
             .await
             .unwrap();
         unsafe {
+            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
             std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
         }
         let _ = std::fs::remove_dir_all(&tmp);
@@ -446,6 +478,7 @@ mod tests {
             .await
             .unwrap();
         unsafe {
+            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
             std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -468,6 +501,7 @@ mod tests {
             .await
             .unwrap();
         unsafe {
+            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
             std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -495,6 +529,7 @@ mod tests {
             .await
             .unwrap();
         unsafe {
+            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
             std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
         }
         let _ = std::fs::remove_dir_all(&dir);

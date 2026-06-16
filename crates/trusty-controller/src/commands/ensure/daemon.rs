@@ -110,12 +110,14 @@ mod tests {
         ));
         std::fs::create_dir_all(&tmp).unwrap();
         unsafe {
+            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
             std::env::set_var(DATA_DIR_OVERRIDE_ENV, &tmp);
         }
         let app = format!("tctl-ensure-app-{}", std::process::id());
         trusty_common::write_daemon_addr(&app, "127.0.0.1:54321").unwrap();
         let got = resolve_base_url(&app);
         unsafe {
+            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
             std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
         }
         let _ = std::fs::remove_dir_all(&tmp);
@@ -139,11 +141,13 @@ mod tests {
         ));
         std::fs::create_dir_all(&tmp).unwrap();
         unsafe {
+            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
             std::env::set_var(DATA_DIR_OVERRIDE_ENV, &tmp);
         }
         let app = format!("tctl-ensure-absent-{}", std::process::id());
         let got = resolve_base_url(&app);
         unsafe {
+            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
             std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
         }
         let _ = std::fs::remove_dir_all(&tmp);

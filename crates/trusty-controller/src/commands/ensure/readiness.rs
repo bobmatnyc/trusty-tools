@@ -96,11 +96,13 @@ impl PollConfig {
 ///
 /// Why: separating the deadline/cadence control flow from the actual HTTP probe
 /// makes the loop unit-testable with a deterministic in-memory probe — the
-/// hard-to-test bit (network) is injected. The probe is checked once up front so
-/// an already-ready stack returns immediately without waiting an interval.
-/// What: loops calling `probe()`; returns `true` the first time it is ready;
-/// when the next sleep would exceed the deadline it stops and returns `false`
-/// (timeout). Uses `tokio::time::sleep` between attempts.
+/// hard-to-test bit (network) is injected. A ready stack returns on the first
+/// probe without waiting an interval, while an already-expired deadline returns
+/// `false` without spending a probe at all.
+/// What: each iteration first checks the deadline (already past → `false`), then
+/// calls `probe()` and returns `true` the first time it is ready; when the next
+/// sleep would exceed the deadline it stops and returns `false` (timeout). Uses
+/// `tokio::time::sleep` between attempts.
 /// Test: `tests::poll_ready_returns_true_once_ready`,
 /// `tests::poll_times_out_when_never_ready`,
 /// `tests::poll_returns_immediately_when_ready`.
@@ -111,6 +113,13 @@ where
 {
     let deadline = Instant::now() + cfg.timeout;
     loop {
+        // Guard the deadline before probing so an already-expired deadline
+        // returns immediately without spending another probe — this caps the
+        // worst-case wall-clock at the timeout rather than `timeout + one
+        // probe duration`.
+        if Instant::now() >= deadline {
+            return false;
+        }
         if probe().await {
             return true;
         }
@@ -158,6 +167,7 @@ mod tests {
         let _g = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Ensure the env is clean for this assertion.
         unsafe {
+            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
             std::env::remove_var(WAIT_TIMEOUT_ENV);
             std::env::remove_var(WAIT_INTERVAL_ENV);
         }
@@ -173,10 +183,12 @@ mod tests {
     fn poll_config_reads_env_timeout() {
         let _g = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
+            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
             std::env::set_var(WAIT_TIMEOUT_ENV, "7");
         }
         let cfg = PollConfig::from_env();
         unsafe {
+            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
             std::env::remove_var(WAIT_TIMEOUT_ENV);
         }
         assert_eq!(cfg.timeout, Duration::from_secs(7));
@@ -189,10 +201,12 @@ mod tests {
     fn poll_config_reads_env_interval() {
         let _g = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
+            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
             std::env::set_var(WAIT_INTERVAL_ENV, "25");
         }
         let cfg = PollConfig::from_env();
         unsafe {
+            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
             std::env::remove_var(WAIT_INTERVAL_ENV);
         }
         assert_eq!(cfg.interval, Duration::from_millis(25));
@@ -234,6 +248,32 @@ mod tests {
         let ready = poll_until_ready(cfg, || async { true }).await;
         assert!(ready);
         assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    /// Why: an already-expired deadline (a zero timeout) must return `false`
+    /// immediately without spending a probe, so the worst-case wall-clock is
+    /// bounded by the timeout rather than `timeout + one probe duration`.
+    /// What: a zero-timeout config with a probe that panics if called; assert
+    /// `false` and that the probe was never invoked.
+    /// Test: This is the test.
+    #[tokio::test]
+    async fn poll_returns_false_without_probing_when_already_expired() {
+        let cfg = PollConfig {
+            interval: Duration::from_millis(5),
+            timeout: Duration::from_millis(0),
+        };
+        let calls = Cell::new(0u32);
+        let ready = poll_until_ready(cfg, || {
+            calls.set(calls.get() + 1);
+            async { true }
+        })
+        .await;
+        assert!(!ready);
+        assert_eq!(
+            calls.get(),
+            0,
+            "probe must not run past an expired deadline"
+        );
     }
 
     /// Why: a stack that never readies must time out and return `false` (→ the
