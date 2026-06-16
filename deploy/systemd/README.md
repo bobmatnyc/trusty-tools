@@ -26,8 +26,9 @@ protect against accidental deletion or volume failure.
 
 1. **Binary installed** on the target host (typically via
    `cargo install trusty-search --locked`), default path `/usr/local/bin/trusty-search`.
-2. **`trusty-embedderd` installed** alongside it:
-   `cargo install trusty-embedderd --locked`.
+2. **`trusty-embedderd` installed** alongside it — as of #1318 it is bundled
+   into the `trusty-search` install, so `cargo install trusty-search --locked`
+   (step 1) already produces the `trusty-embedderd` binary; no separate install.
 3. **Service account** created:
    ```bash
    useradd --system --no-create-home --shell /sbin/nologin trusty

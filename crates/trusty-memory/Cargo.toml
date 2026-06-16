@@ -1,6 +1,6 @@
 [package]
 name = "trusty-memory"
-version = "0.15.4"
+version = "0.15.5"
 edition = "2021"
 description = "MCP server (stdio + HTTP/SSE) for trusty-memory"
 license.workspace = true
@@ -65,13 +65,11 @@ path = "src/bin/bm25_daemon.rs"
 name = "trusty-memory-mcp-bridge"
 path = "src/bin/mcp_bridge.rs"
 
-[[bin]]
-# Why: Bundle trusty-console into trusty-memory's install surface so
-#      `cargo install trusty-memory` also installs the web dashboard
-#      (Single-Install Convention, epic #943). All dashboard logic lives in
-#      the trusty-console library crate; this is a thin shim.
-name = "trusty-console"
-path = "src/bin/trusty_console.rs"
+# Why (issue #1318): the `trusty-console` `[[bin]]` shim was REMOVED here.
+# Single-owner-per-binary — the standalone `trusty-console` crate is now the
+# sole producer of the `trusty-console` binary, so `cargo install trusty-memory`
+# no longer collides on `.crates2.json` binary ownership (#1262). Install the
+# console separately (`cargo install trusty-console`) or via `tctl` (#1316).
 
 [dependencies]
 # Why: `axum-server` is gated on this crate's own `axum-server` feature so
@@ -89,10 +87,9 @@ trusty-common = { path = "../trusty-common", version = "0.15.1", default-feature
 #      src/bin/bm25_daemon.rs calls `trusty_bm25_daemon::run()` so all daemon
 #      logic stays in the trusty-bm25-daemon library crate.
 trusty-bm25-daemon = { workspace = true }
-# Why: bundle trusty-console (Single-Install Convention, epic #943). Declaring
-# it as a dep causes `cargo install trusty-memory` to also install trusty-console.
-# All dashboard logic stays in the trusty-console library crate.
-trusty-console = { workspace = true }
+# Why (issue #1318): the `trusty-console` dependency was REMOVED. The console
+# is no longer bundled into trusty-memory (single-owner-per-binary); the
+# standalone `trusty-console` crate is its sole producer.
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

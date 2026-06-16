@@ -80,11 +80,12 @@ trusty-bm25-daemon \
 
 ## Running
 
-Usually spawned by `trusty-memory` on first access to a palace. For manual
-testing:
+Usually spawned by `trusty-memory` on first access to a palace. As of #1318
+this crate is **library-only** — the `trusty-bm25-daemon` binary is produced
+solely by `trusty-memory`, so run it manually via that crate's bundled bin:
 
 ```bash
-cargo run -p trusty-bm25-daemon -- \
+cargo run -p trusty-memory --bin trusty-bm25-daemon -- \
   --palace test \
   --data-dir /tmp/bm25-test
 ```

@@ -1,6 +1,6 @@
 [package]
 name = "trusty-bm25-daemon"
-version = "0.1.1"
+version = "0.1.2"
 publish = true
 edition = "2021"
 rust-version = "1.91"
@@ -21,14 +21,19 @@ categories = ["command-line-utilities"]
 # What: rlib so it is linkable from the bundled-install shim. Both `name`
 # and `path` are spelled out explicitly so the lib target is unambiguous
 # even if the directory layout changes.
-# Test: `cargo build -p trusty-bm25-daemon` produces both lib and bin.
+# Test: `cargo build -p trusty-bm25-daemon` produces the library.
 name = "trusty_bm25_daemon"
 path = "src/lib.rs"
 crate-type = ["rlib"]
 
-[[bin]]
-name = "trusty-bm25-daemon"
-path = "src/main.rs"
+# Why (issue #1318): single-owner-per-binary — the standalone `trusty-bm25-daemon`
+# crate is now LIBRARY-ONLY. The `trusty-bm25-daemon` binary is produced solely
+# by `trusty-memory` (the host that bundles + spawns it), so there is exactly one
+# producing crate for the binary name and `cargo install trusty-memory` no longer
+# collides on `.crates2.json` binary ownership. This crate is still published to
+# crates.io as a LIBRARY (dependent published crates require it). The former
+# `[[bin]]`/`src/main.rs` shim was removed; it now lives ONLY as
+# `crates/trusty-memory/src/bin/bm25_daemon.rs`.
 
 [dependencies]
 # Uses the in-tree, zero-dep BM25 implementation from trusty-common

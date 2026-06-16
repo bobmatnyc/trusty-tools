@@ -1,5 +1,17 @@
 # Changelog — trusty-bm25-daemon
 
+## [0.1.2] — 2026-06-16
+
+### Changed (BREAKING for the binary; closes part of #1318)
+
+- **Library-only.** Removed the `[[bin]]` target / `src/main.rs` shim. The
+  `trusty-bm25-daemon` **binary** is now produced solely by `trusty-memory`
+  (the host that bundles and spawns it), eliminating the cargo `.crates2.json`
+  binary-ownership collision that made `cargo install trusty-memory` fail
+  without `--force` (#1262). This crate is still published to crates.io as a
+  **library** (`publish = true` retained). Install the binary via
+  `cargo install trusty-memory`.
+
 ## [Unreleased]
 
 ### Changed

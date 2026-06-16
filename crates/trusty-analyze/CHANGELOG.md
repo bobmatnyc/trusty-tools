@@ -7,6 +7,16 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.7.2] — 2026-06-16
+
+### Changed (closes part of #1318)
+
+- **De-bundled `trusty-console`.** Removed the bundled `trusty-console`
+  `[[bin]]` shim and dependency. `cargo install trusty-analyze` now produces
+  the `trusty-analyze` binary only. Install the console with
+  `cargo install trusty-console`. This is part of the single-owner-per-binary
+  fix for the cargo binary-ownership collisions (#1262).
+
 ## [0.7.0] — 2026-06-09
 
 ### Added

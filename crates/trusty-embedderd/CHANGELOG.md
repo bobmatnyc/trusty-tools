@@ -1,5 +1,17 @@
 # Changelog — trusty-embedderd
 
+## [0.3.4] — 2026-06-16
+
+### Changed (BREAKING for the binary; closes part of #1318)
+
+- **Library-only.** Removed the `[[bin]]` target / `src/main.rs` shim. The
+  `trusty-embedderd` **binary** is now produced solely by `trusty-search` (the
+  host that bundles and supervises it), eliminating the cargo `.crates2.json`
+  binary-ownership collision that made `cargo install trusty-search` fail
+  without `--force` (#1262). This crate is still published to crates.io as a
+  **library** (dependent published crates require it; `publish = true` retained).
+  Install the binary via `cargo install trusty-search`.
+
 ## [0.3.2] — 2026-06-04
 
 ### Changed (closes #753)

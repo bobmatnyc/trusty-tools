@@ -1,6 +1,6 @@
 [package]
 name = "trusty-mpm"
-version = "0.8.1"
+version = "0.8.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -93,14 +93,11 @@ name = "trusty-mpm"
 path = "src/bin/tm/main.rs"
 required-features = ["cli"]
 
-[[bin]]
-# Why: Bundle trusty-console into trusty-mpm's install surface so
-#      `cargo install trusty-mpm` also installs the web dashboard
-#      (Single-Install Convention, epic #943). All dashboard logic lives in
-#      the trusty-console library crate; this is a thin shim.
-#      No required-features: trusty-console has no feature gates.
-name = "trusty-console"
-path = "src/bin/trusty_console.rs"
+# Why (issue #1318): the `trusty-console` `[[bin]]` shim was REMOVED here.
+# Single-owner-per-binary — the standalone `trusty-console` crate is now the
+# sole producer of the `trusty-console` binary, so `cargo install trusty-mpm`
+# no longer collides on `.crates2.json` binary ownership (#1262). Install the
+# console separately (`cargo install trusty-console`) or via `tctl` (#1316).
 
 # ── Integration tests ─────────────────────────────────────────────────────────
 [[test]]
@@ -123,10 +120,9 @@ trusty-common = { workspace = true, features = [
     "crate-config",
 ] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
-# Why: bundle trusty-console (Single-Install Convention, epic #943). Declaring
-# it as a dep causes `cargo install trusty-mpm` to also install trusty-console.
-# All dashboard logic stays in the trusty-console library crate.
-trusty-console = { workspace = true }
+# Why (issue #1318): the `trusty-console` dependency was REMOVED. The console is
+# no longer bundled into trusty-mpm (single-owner-per-binary); the standalone
+# `trusty-console` crate is its sole producer.
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

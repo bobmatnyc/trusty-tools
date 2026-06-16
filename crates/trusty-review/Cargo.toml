@@ -1,6 +1,6 @@
 [package]
 name        = "trusty-review"
-version     = "0.3.9"
+version     = "0.3.10"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true
@@ -18,13 +18,11 @@ name               = "trusty-review"
 path               = "src/main.rs"
 required-features  = []
 
-[[bin]]
-# Why: Bundle trusty-console into trusty-review's install surface so
-#      `cargo install trusty-review` also installs the web dashboard
-#      (Single-Install Convention, epic #943). All dashboard logic lives in
-#      the trusty-console library crate; this is a thin shim.
-name = "trusty-console"
-path = "src/bin/trusty_console.rs"
+# Why (issue #1318): the `trusty-console` `[[bin]]` shim was REMOVED here.
+# Single-owner-per-binary — the standalone `trusty-console` crate is now the
+# sole producer of the `trusty-console` binary, so `cargo install trusty-review`
+# no longer collides on `.crates2.json` binary ownership (#1262). Install the
+# console separately (`cargo install trusty-console`) or via `tctl` (#1316).
 
 [lib]
 name = "trusty_review"
@@ -82,10 +80,9 @@ clap         = { workspace = true }
 # The `mcp` feature is enabled only under the `mcp` cargo feature of this crate
 # (which is on by default) to pull in the JSON-RPC 2.0 stdio loop primitives.
 trusty-common = { workspace = true }
-# Why: bundle trusty-console (Single-Install Convention, epic #943). Declaring
-# it as a dep causes `cargo install trusty-review` to also install trusty-console.
-# All dashboard logic stays in the trusty-console library crate.
-trusty-console = { workspace = true }
+# Why (issue #1318): the `trusty-console` dependency was REMOVED. The console is
+# no longer bundled into trusty-review (single-owner-per-binary); the standalone
+# `trusty-console` crate is its sole producer.
 
 # ── JWT / HMAC / crypto (GitHub App auth) ─────────────────────────────────
 jsonwebtoken = { workspace = true }
