@@ -1,0 +1,163 @@
+//! Test-only mock provider + tier resolver for the SM chat-turn tests.
+//!
+//! Why: SM-7's acceptance tests must drive a FULL chat turn deterministically —
+//! asserting the assembled §7.5 prompt, that the round is recorded, and that the
+//! reply plus cost come back — with NO network and NO real model. The agent
+//! depends on the [`TierResolver`] seam exactly so tests can inject a resolver
+//! that hands back a [`ResolvedCall`] wrapping a recording mock [`LlmProvider`].
+//! This module is that injectable pair.
+//! What: [`MockChatProvider`] records every [`LlmRequest`] and replies with a
+//! fixed text + a fixed per-call cost; [`MockResolver`] implements
+//! [`TierResolver`] by returning a [`ResolvedCall`] over a shared
+//! `MockChatProvider`, or a degraded error when configured to. Both are
+//! `#[cfg(test)]`-only.
+//! Test: drives `agent/chat_tests.rs`.
+
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+
+use crate::core::sm::config::SmInferenceConfig;
+use crate::core::sm::providers::{
+    LlmProvider, LlmRequest, LlmResponse, ProviderKind, ResolvedCall, SmLlmError, SmModelTier,
+    TierResolver,
+};
+
+/// A recording, deterministic mock [`LlmProvider`] for the chat-turn tests.
+///
+/// Why: lets a test assert exactly what the SM sent the model (the §7.5
+/// assembly: system prompt, compressed context, recall, rounds, message) and
+/// returns a known reply + cost so the outcome is fully deterministic.
+/// What: holds a fixed reply, a fixed cost, and a shared log of every request.
+/// Clones share the log (`Arc<Mutex<…>>`), so a clone handed to a
+/// [`ResolvedCall`] still records into the handle the test holds.
+/// Test: `chat_tests.rs`.
+#[derive(Clone)]
+pub struct MockChatProvider {
+    reply: String,
+    cost_usd: f64,
+    requests: Arc<Mutex<Vec<LlmRequest>>>,
+}
+
+impl MockChatProvider {
+    /// Build a mock that replies with `reply` and reports `cost_usd`.
+    pub fn new(reply: impl Into<String>, cost_usd: f64) -> Self {
+        Self {
+            reply: reply.into(),
+            cost_usd,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// The most recent request, if any.
+    pub fn last_request(&self) -> Option<LlmRequest> {
+        self.requests.lock().expect("mock lock").last().cloned()
+    }
+}
+
+#[async_trait]
+impl LlmProvider for MockChatProvider {
+    fn name(&self) -> &str {
+        "mock"
+    }
+
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, SmLlmError> {
+        let model = req.model.clone();
+        self.requests.lock().expect("mock lock").push(req);
+        Ok(LlmResponse {
+            text: self.reply.clone(),
+            model,
+            input_tokens: 10,
+            output_tokens: 5,
+            latency_ms: 1,
+            cost_usd: self.cost_usd,
+        })
+    }
+}
+
+/// What a [`MockResolver`] does when asked to resolve a tier.
+///
+/// Why: tests need both the happy path (return a mock provider) and the degraded
+/// path (no provider configured) without a real registry.
+/// What: `Provider` wraps a shared [`MockChatProvider`]; `Degraded` returns
+/// [`SmLlmError::Degraded`].
+/// Test: `chat_tests.rs`.
+#[derive(Clone)]
+pub enum MockResolution {
+    /// Resolve every tier to this shared provider with the tier's model id.
+    Provider(MockChatProvider),
+    /// Resolve every tier to a graceful degraded error.
+    Degraded,
+    /// Resolve every tier to a non-degraded inference error (unknown provider).
+    Validation,
+}
+
+/// A mock [`TierResolver`] for the SM chat-turn tests.
+///
+/// Why: the agent resolves a provider per request through `Arc<dyn TierResolver>`;
+/// injecting this mock lets the test control the provider (and degraded/error
+/// behaviour) with no env credentials and no network.
+/// What: resolves the tier's configured model via the real
+/// [`crate::core::sm::providers::resolve_tier_model`] (so the test exercises the
+/// tier-selection logic too) and wraps the shared mock provider in a
+/// [`ResolvedCall`]; or returns the configured error.
+/// Test: `chat_tests.rs`.
+#[derive(Clone)]
+pub struct MockResolver {
+    resolution: MockResolution,
+}
+
+impl MockResolver {
+    /// A resolver that hands back `provider` for every tier.
+    pub fn with_provider(provider: MockChatProvider) -> Self {
+        Self {
+            resolution: MockResolution::Provider(provider),
+        }
+    }
+
+    /// A resolver that always reports degraded (no provider).
+    pub fn degraded() -> Self {
+        Self {
+            resolution: MockResolution::Degraded,
+        }
+    }
+
+    /// A resolver that always reports a non-degraded inference (validation) error.
+    pub fn validation() -> Self {
+        Self {
+            resolution: MockResolution::Validation,
+        }
+    }
+}
+
+#[async_trait]
+impl TierResolver for MockResolver {
+    async fn resolve(
+        &self,
+        cfg: &SmInferenceConfig,
+        tier: SmModelTier,
+    ) -> Result<ResolvedCall, SmLlmError> {
+        match &self.resolution {
+            MockResolution::Provider(provider) => {
+                // Exercise the real tier-model selection so tests cover it too,
+                // then strip any provider prefix to a bare model id for the call.
+                let tier_model = crate::core::sm::providers::resolve_tier_model(cfg, tier)?;
+                let (_kind, bare) = crate::core::sm::providers::resolve_provider_and_model(
+                    &tier_model,
+                    ProviderKind::Auto,
+                );
+                Ok(ResolvedCall {
+                    provider: Arc::new(provider.clone()),
+                    model: bare,
+                    kind: ProviderKind::Anthropic,
+                })
+            }
+            MockResolution::Degraded => Err(SmLlmError::Degraded(
+                "mock: no provider configured".to_string(),
+            )),
+            MockResolution::Validation => {
+                Err(SmLlmError::Validation("mock: unknown provider".to_string()))
+            }
+        }
+    }
+}

@@ -120,6 +120,11 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .route("/llm/chat", post(llm_chat))
         .route("/api/v1/coordinator/context", get(coordinator_context))
         .route("/api/v1/coordinator/chat", post(coordinator_chat))
+        // DOC-14 D0.1: `/session-manager/*` aliases resolve to the SAME handlers
+        // as `/coordinator/*`. The coordinator paths remain the stable surface
+        // (DOC-13 TUI + GUI bind them); these aliases are the canonical SM names.
+        .route("/api/v1/session-manager/context", get(coordinator_context))
+        .route("/api/v1/session-manager/chat", post(coordinator_chat))
         .route("/tmux/sessions", get(list_tmux_sessions))
         .route("/tmux/sessions/{name}/snapshot", get(tmux_snapshot))
         .route("/tmux/adopt", post(adopt_tmux_session))
@@ -1711,3 +1716,14 @@ fn parse_id(raw: &str) -> Result<SessionId, DaemonError> {
 #[cfg(test)]
 #[path = "api_tests.rs"]
 mod tests;
+
+/// Session-Manager endpoint tests (DOC-14 SM-7).
+///
+/// Why: the SM-path `coordinator/chat` rewire + the `/session-manager/*` aliases
+/// have their own focused suite; keeping it in a sibling file keeps `api_tests.rs`
+/// under its SLOC cap while these tests still see the private handler surface via
+/// `super::*`.
+/// Test: this *is* the SM endpoint test module.
+#[cfg(test)]
+#[path = "coordinator_sm_tests.rs"]
+mod coordinator_sm_tests;

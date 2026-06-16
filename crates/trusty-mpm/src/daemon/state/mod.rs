@@ -16,6 +16,7 @@ mod core;
 mod overseer;
 mod resources;
 mod sessions;
+mod sm;
 
 #[cfg(test)]
 mod tests;
