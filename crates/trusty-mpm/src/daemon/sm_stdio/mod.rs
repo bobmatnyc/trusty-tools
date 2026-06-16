@@ -21,7 +21,7 @@
 //! dispatcher from the daemon state and drives the shared
 //! [`trusty_common::mcp::run_stdio_loop`] (line framing + stderr-only logging),
 //! so the wire framing is the SAME proven loop trusty-memory/trusty-search use.
-//! Test: `tests.rs` — each of the 13 methods round-trips with correct JSON-RPC
+//! Test: `tests.rs` — each of the 14 methods round-trips with correct JSON-RPC
 //! framing, plus parse-error / method-not-found / stdout-cleanliness / scripted
 //! sequence coverage.
 
@@ -73,7 +73,7 @@ pub type SmGoalHandle = std::convert::Infallible;
 
 /// The transport-neutral SM dispatcher the stdio adapter drives (§1A.1).
 ///
-/// Why: separating the dispatcher from the stdio loop is what makes the 13
+/// Why: separating the dispatcher from the stdio loop is what makes the 14
 /// methods HERMETICALLY testable — the round-trip tests construct an
 /// `SmDispatcher` over mocks and call [`SmDispatcher::dispatch`] with constructed
 /// JSON requests, with no real stdin/stdout, no network, and no tmux. The
@@ -161,7 +161,7 @@ impl SmDispatcher {
     /// methods → method-not-found; bad params → invalid-params; surface failures →
     /// a structured error — never a panic.
     /// What: delegates to [`dispatch::dispatch`].
-    /// Test: `tests.rs` — all 13 methods + error paths.
+    /// Test: `tests.rs` — all 14 methods + error paths.
     pub async fn dispatch(&self, req: Request) -> Response {
         dispatch::dispatch(self, req).await
     }

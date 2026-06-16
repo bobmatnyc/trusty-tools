@@ -8,7 +8,7 @@
 //! `METHOD_NOT_FOUND`; bad params become `INVALID_PARAMS`; a notification (no id)
 //! is suppressed — never a panic.
 //! What: [`dispatch`] — `(&SmDispatcher, Request) -> Response`. It returns the
-//! suppressed sentinel for id-less notifications, routes the 13 `sm.*` methods,
+//! suppressed sentinel for id-less notifications, routes the 14 `sm.*` methods,
 //! and folds every other method into a method-not-found error.
 //! Test: `tests.rs` round-trips every method + the parse/unknown/notification
 //! paths.
@@ -27,10 +27,10 @@ use trusty_common::mcp::Request;
 /// the method to its handler, and maps the handler's `Result<Value, MethodError>`
 /// onto a `result`/`error` response. No panics: a missing handler →
 /// method-not-found, a handler error → its mapped code.
-/// What: matches `req.method` against the 13 `sm.*` names; on a hit awaits the
+/// What: matches `req.method` against the 14 `sm.*` names; on a hit awaits the
 /// handler and builds `Response::ok` / the mapped error; on a miss builds
 /// `Response::err(METHOD_NOT_FOUND)`.
-/// Test: `tests.rs` — all 13 methods, unknown method, notification suppression.
+/// Test: `tests.rs` — all 14 methods, unknown method, notification suppression.
 pub async fn dispatch(d: &SmDispatcher, req: Request) -> Response {
     // JSON-RPC notifications (no id) must not produce a reply.
     if req.id.is_none() {
@@ -41,6 +41,7 @@ pub async fn dispatch(d: &SmDispatcher, req: Request) -> Response {
 
     let result: Result<Value, MethodError> = match req.method.as_str() {
         "sm.chat" => methods::sm_chat(d, &params).await,
+        "sm.delegate" => methods::sm_delegate(d, &params).await,
         "sm.health" => methods::sm_health(d, &params).await,
         "sm.goals.list" => methods::sm_goals_list(d, &params).await,
         "sm.goals.create" => methods::sm_goals_create(d, &params).await,

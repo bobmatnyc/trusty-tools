@@ -1,18 +1,18 @@
-//! The session-control seam the SM stdio adapter maps `sm.sessions.*` onto.
+//! The production [`SessionControl`] impl over the daemon's managed surface.
 //!
-//! Why: the SM-STDIO adapter (DOC-14 §1A.1) is a THIN mapping — it must not
-//! carry session-lifecycle business logic. The `sm.sessions.launch/list/get/
-//! send/stop/resume/kill` methods map onto the daemon's existing managed-session
-//! control surface (§2.6) — the SAME code `tm ticket`/the HTTP `…/managed/*`
-//! routes use. Hiding that surface behind a narrow trait keeps the dispatcher
-//! (a) transport-neutral and (b) HERMETICALLY testable: the round-trip tests
-//! inject a deterministic mock instead of provisioning a real tmux/workspace.
-//! What: [`SessionControl`] — the seven async verbs the spec's session methods
-//! need, each returning a plain `serde_json::Value` (the wire result body) or a
-//! [`SessionControlError`]. [`DaemonSessionControl`] is the production impl that
-//! delegates to the in-process [`crate::session_manager::SessionManager`] +
-//! [`spawn_managed`]/[`resume_managed`] (so the stdio path and the HTTP path
-//! cannot diverge). The mock impl lives in `tests.rs`.
+//! Why: the SM-STDIO adapter (DOC-14 §1A.1) and the SM-8 delegation loop both
+//! drive sessions through the narrow [`SessionControl`] trait (now defined in
+//! `core::sm::control` so the agent-side loop can depend on it too). This file
+//! holds the PRODUCTION impl: an in-process bridge onto the daemon's existing
+//! managed-session control surface (§2.6) — the SAME code `tm ticket`/the HTTP
+//! `…/managed/*` routes use. Keeping it here (not in core) is deliberate: it
+//! needs daemon-internal handles (`DaemonState`, `spawn_managed`, …) that core
+//! must not depend on. The trait + input/error types are re-exported from this
+//! module so `sm_stdio`'s public surface (`pub use control::{…}`) is unchanged.
+//! What: [`DaemonSessionControl`] delegates each verb to the in-process
+//! [`crate::session_manager::SessionManager`] + [`spawn_managed`]/[`resume_managed`]
+//! (so the stdio path and the HTTP path cannot diverge). The trait, [`LaunchParams`],
+//! and [`SessionControlError`] are re-exported from [`crate::core::sm::control`].
 //! Test: `DaemonSessionControl` is exercised by the daemon's managed-session
 //! integration tests (it forwards to the same helpers those cover); the
 //! dispatcher's `sm.sessions.*` round-trips use the `tests.rs` mock.
@@ -21,95 +21,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+// Re-export the relocated trait + types so `sm_stdio`'s public surface
+// (`pub use control::{DaemonSessionControl, LaunchParams, SessionControl,
+// SessionControlError}`) is unchanged after the SM-8 move to core.
+pub use crate::core::sm::control::{LaunchParams, SessionControl, SessionControlError};
+
 use crate::daemon::managed_routes::{SpawnParams, record_to_json, resume_managed, spawn_managed};
 use crate::daemon::state::DaemonState;
 use crate::session_manager::{ManagedError, ManagedSessionId};
-
-/// Inputs for `sm.sessions.launch` (§1A.1: `{ workdir, model?, prompt?, goal_id? }`).
-///
-/// Why: the spec's launch params differ from the managed-session `SpawnParams`
-/// shape (`{ repo_url, ref, task }`); keeping the adapter's own owned input
-/// struct lets the dispatcher parse the spec params once and hand them to ANY
-/// [`SessionControl`] impl (real or mock) without re-deriving the mapping at the
-/// call site.
-/// What: `workdir` (the directory/repo the session launches against, mapped to
-/// the managed `repo_url`), an optional `model` (runtime selector), an optional
-/// `prompt` (the task/intent, mapped to the managed `task`), and an optional
-/// `goal_id` the caller wants the new session linked to (§9.3).
-/// Test: `tests.rs::launch_round_trips` constructs this from JSON params.
-#[derive(Debug, Clone)]
-pub struct LaunchParams {
-    /// Working directory / repository the session launches against.
-    pub workdir: String,
-    /// Optional model / runtime selector (mapped to the managed `runtime`).
-    pub model: Option<String>,
-    /// Optional initial prompt / task description (mapped to the managed `task`).
-    pub prompt: Option<String>,
-    /// Optional goal id to link the launched session to (§9.3).
-    pub goal_id: Option<String>,
-}
-
-/// A failure surfaced by a [`SessionControl`] operation.
-///
-/// Why: the dispatcher maps these onto JSON-RPC error responses; a typed enum
-/// lets it choose `INVALID_PARAMS` (bad id) vs `INTERNAL_ERROR` (control
-/// failure) by VARIANT rather than string-matching, and keeps the adapter
-/// panic-free per the workspace convention.
-/// What: [`NotFound`](SessionControlError::NotFound) is reserved for a malformed
-/// session id (UUID parse failure) OR a genuinely-absent session
-/// (`ManagedError::SessionNotFound`); [`Backend`](SessionControlError::Backend)
-/// for any other control-surface failure (provision/tmux/store/invalid-state).
-/// Test: `tests.rs` mock returns both variants; the dispatcher asserts the
-/// mapped JSON-RPC code.
-#[derive(Debug, thiserror::Error)]
-pub enum SessionControlError {
-    /// The session id was invalid or not present.
-    #[error("session not found: {0}")]
-    NotFound(String),
-
-    /// Any backend control failure (provisioning, tmux, store, resume).
-    #[error("{0}")]
-    Backend(String),
-}
-
-/// The narrow session-control surface the SM stdio adapter maps onto (§2.6).
-///
-/// Why: keeps `sm.sessions.*` a thin translation. The dispatcher depends on this
-/// trait (Dependency Inversion) so production wires [`DaemonSessionControl`]
-/// (the real managed-session surface) while tests wire a deterministic mock with
-/// NO tmux/workspace. Every method returns the wire `result` body directly so
-/// the dispatcher does no shaping.
-/// What: `launch` → `{ session_id }`; `list` → `{ sessions: [...] }`; `get` →
-/// the full record JSON; `send` → `{ ok }`; `stop`/`resume`/`kill` → `{ ok }`.
-/// All are `Send + Sync` to live behind `Arc<dyn SessionControl>`.
-/// Test: `tests.rs` mock; `DaemonSessionControl` via the managed integration tests.
-#[async_trait]
-pub trait SessionControl: Send + Sync {
-    /// Launch a managed session (`POST /sessions`, §2.6) and return its id.
-    async fn launch(&self, params: LaunchParams) -> Result<serde_json::Value, SessionControlError>;
-
-    /// List all managed sessions (`GET /sessions`, §2.6).
-    async fn list(&self) -> Result<serde_json::Value, SessionControlError>;
-
-    /// Get one session record (`GET /sessions/{id}`, §2.6).
-    async fn get(&self, session_id: &str) -> Result<serde_json::Value, SessionControlError>;
-
-    /// Send text into a session's pane (`POST /sessions/{id}/command`, §2.6).
-    async fn send(
-        &self,
-        session_id: &str,
-        text: &str,
-    ) -> Result<serde_json::Value, SessionControlError>;
-
-    /// Stop a session's runtime, keeping the workspace (`DELETE /sessions/{id}`).
-    async fn stop(&self, session_id: &str) -> Result<serde_json::Value, SessionControlError>;
-
-    /// Resume a stopped session (`POST /sessions/{id}/resume`, §2.6).
-    async fn resume(&self, session_id: &str) -> Result<serde_json::Value, SessionControlError>;
-
-    /// Force-stop / reap a session (`DELETE /sessions/{id}`, §2.6).
-    async fn kill(&self, session_id: &str) -> Result<serde_json::Value, SessionControlError>;
-}
 
 /// Production [`SessionControl`] over the in-process managed-session surface.
 ///
@@ -185,7 +104,7 @@ impl SessionControl for DaemonSessionControl {
     /// mapping with zero provisioning logic of its own.
     /// What: maps `workdir → repo_url`, `prompt → task` (defaulting to a generic
     /// description when absent), and `model → runtime`, then returns
-    /// `{ session_id }`. The `goal_id` link is recorded by the dispatcher via the
+    /// `{ session_id }`. The `goal_id` link is recorded by the caller via the
     /// goal store (§9.3), not here, so this stays purely session-control.
     /// Test: forwards to `spawn_managed` (managed integration tests).
     async fn launch(&self, params: LaunchParams) -> Result<serde_json::Value, SessionControlError> {

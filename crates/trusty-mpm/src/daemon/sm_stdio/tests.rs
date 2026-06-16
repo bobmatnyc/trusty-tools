@@ -1,6 +1,6 @@
 //! Round-trip + framing tests for the SM stdio adapter (SM-STDIO #1291).
 //!
-//! Why: the acceptance bar is that EVERY one of the 13 `sm.*` methods round-trips
+//! Why: the acceptance bar is that EVERY one of the 14 `sm.*` methods round-trips
 //! over the dispatcher with correct JSON-RPC 2.0 framing (id echoed, result shape
 //! correct), that malformed/unknown requests produce proper JSON-RPC errors (no
 //! panic), that `sm.chat` drives a full SM turn and `sm.health` reports provider
@@ -842,6 +842,253 @@ async fn context_get_feature_branches() {
             .await;
         err_code(&ctx, 62, CODE_UNAVAILABLE);
     }
+}
+
+// ── sm.delegate (SM-8 delegation loop) — §1A.2 step-1 e2e ───────────────────────
+
+/// Build an SM agent whose (mock) provider replies with a scripted decision JSON.
+///
+/// Why: the `sm.delegate` e2e drives the FULL delegation loop; the loop's only
+/// LLM call is DECOMPOSE, so scripting the provider reply with a delegate/respond/
+/// do_work JSON lets the dispatcher test drive any path deterministically.
+/// What: builds an agent (feature-aware) over a [`MockResolver`] returning a
+/// provider that always replies with `decision_json`.
+#[cfg(feature = "sm-memory")]
+fn agent_with_decision(
+    cfg: SessionManagerConfig,
+    data_root: &std::path::Path,
+    decision_json: &str,
+) -> Arc<SessionManagerAgent> {
+    let provider = MockChatProvider::new(decision_json, 0.0);
+    let resolver = Arc::new(MockResolver::with_provider(provider));
+    Arc::new(SessionManagerAgent::for_test(
+        cfg,
+        resolver,
+        data_root.to_path_buf(),
+    ))
+}
+
+/// A session-control mock whose `get` returns a pane carrying `evidence` text.
+///
+/// Why: the verification-gate close path needs a session that OBSERVES as
+/// `Verified` (a PR URL in the pane); this mock scripts that evidence so the
+/// dispatcher-level e2e exercises the gate passing, not just the agent-level test.
+/// What: `launch` mints an id and records params (so the goal links); `get`
+/// returns the evidence pane; `send` records the delivery.
+#[cfg(feature = "sm-memory")]
+#[derive(Default)]
+struct EvidenceControl {
+    evidence: String,
+    sends: std::sync::Mutex<Vec<(String, String)>>,
+    next: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(feature = "sm-memory")]
+#[async_trait]
+impl SessionControl for EvidenceControl {
+    async fn launch(&self, _params: LaunchParams) -> Result<Value, SessionControlError> {
+        let n = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        Ok(json!({ "session_id": format!("s-{n}") }))
+    }
+    async fn list(&self) -> Result<Value, SessionControlError> {
+        Ok(json!({ "sessions": [] }))
+    }
+    async fn get(&self, _id: &str) -> Result<Value, SessionControlError> {
+        Ok(json!({ "session": { "state": "running", "pane": self.evidence } }))
+    }
+    async fn send(&self, id: &str, text: &str) -> Result<Value, SessionControlError> {
+        self.sends
+            .lock()
+            .expect("lock")
+            .push((id.to_string(), text.to_string()));
+        Ok(json!({ "ok": true }))
+    }
+    async fn stop(&self, _id: &str) -> Result<Value, SessionControlError> {
+        Ok(json!({ "ok": true }))
+    }
+    async fn resume(&self, _id: &str) -> Result<Value, SessionControlError> {
+        Ok(json!({ "ok": true }))
+    }
+    async fn kill(&self, _id: &str) -> Result<Value, SessionControlError> {
+        Ok(json!({ "ok": true }))
+    }
+}
+
+/// Build a dispatcher over an explicit `Arc<dyn SessionControl>` (e2e helper).
+#[cfg(feature = "sm-memory")]
+fn dispatcher_with_dyn_control(
+    agent: Arc<SessionManagerAgent>,
+    cfg: SessionManagerConfig,
+    data_root: &std::path::Path,
+    sessions: Arc<dyn SessionControl>,
+) -> SmDispatcher {
+    let goals = Some(test_goal_store(data_root));
+    SmDispatcher::new(agent, cfg, data_root.to_path_buf(), sessions, goals)
+}
+
+/// Why: THE SM-8 capstone e2e (§1A.2 step-1, `claude-mpm ⟷ SM ⟷ t-mpm`) — a
+/// driver `sm.delegate`s a goal, the SM launches a session (mocked) + delivers
+/// the task + observes evidence + verifies, and the goal CLOSES through the gate.
+/// What: scripts a delegate decision + an evidence-bearing control, dispatches
+/// `sm.delegate`, and asserts the launched session, task delivery (#1299), and
+/// `goal_done == true`; then `sm.goals.list` shows the goal as `done`.
+/// Test: this is the test.
+#[cfg(feature = "sm-memory")]
+#[tokio::test]
+async fn delegate_end_to_end_launch_observe_verify_close() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = enabled_config();
+    let decision = r#"{"action":"delegate","tasks":[{"workdir":"/repo","prompt":"open a PR"}]}"#;
+    let agent = agent_with_decision(cfg.clone(), tmp.path(), decision);
+    let control = Arc::new(EvidenceControl {
+        evidence: "Opened PR https://github.com/acme/repo/pull/7".to_string(),
+        ..EvidenceControl::default()
+    });
+    let sessions: Arc<dyn SessionControl> = control.clone();
+    let d = dispatcher_with_dyn_control(agent, cfg, tmp.path(), sessions);
+
+    let resp = d
+        .dispatch(req(
+            70,
+            "sm.delegate",
+            json!({ "message": "open the PR for me" }),
+        ))
+        .await;
+    let result = ok_result(&resp, 70);
+
+    let launched = result["launched"].as_array().expect("launched array");
+    assert_eq!(launched.len(), 1, "one session launched");
+    assert_eq!(
+        result["goal_done"], true,
+        "gate passed with evidence ⇒ Done"
+    );
+
+    // #1299: the task was delivered to the launched session. Snapshot the sends
+    // out of the guard in a tight scope so no MutexGuard is held across the await.
+    let sends: Vec<(String, String)> = { control.sends.lock().expect("lock").clone() };
+    assert_eq!(sends.len(), 1, "task delivered to the session");
+    assert_eq!(sends[0].1, "open a PR");
+
+    // The goal is visible as `done` via the goals surface.
+    let goal_id = result["goal_id"].as_str().expect("goal_id").to_string();
+    let list = d.dispatch(req(71, "sm.goals.list", json!({}))).await;
+    let goals = ok_result(&list, 71);
+    let found = goals["goals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["id"] == goal_id)
+        .expect("goal present");
+    assert_eq!(found["status"], "done");
+}
+
+/// Why: the BLOCKING gate at the dispatcher level — without observed evidence,
+/// `sm.delegate` launches + observes but the goal CANNOT close (`goal_done`
+/// false). Proves the gate is enforced through the wire surface, not just in the
+/// agent unit test.
+/// What: scripts a delegate decision + the default (no-evidence) control;
+/// dispatches `sm.delegate` and asserts a launch happened but `goal_done` is false.
+/// Test: this is the test.
+#[cfg(feature = "sm-memory")]
+#[tokio::test]
+async fn delegate_gate_blocks_without_evidence_over_wire() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = enabled_config();
+    let decision = r#"{"action":"delegate","tasks":[{"workdir":"/r","prompt":"do work"}]}"#;
+    let agent = agent_with_decision(cfg.clone(), tmp.path(), decision);
+    // Default mock control: `get` returns `state: active` with NO evidence.
+    let d = dispatcher_with(
+        agent,
+        cfg,
+        tmp.path(),
+        Arc::new(MockSessionControl::default()),
+    );
+
+    let resp = d
+        .dispatch(req(
+            72,
+            "sm.delegate",
+            json!({ "message": "ship the feature" }),
+        ))
+        .await;
+    let result = ok_result(&resp, 72);
+    assert_eq!(result["launched"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        result["goal_done"], false,
+        "no evidence ⇒ gate blocks Done over the wire"
+    );
+}
+
+/// Why: the PROHIBITION guard over the wire — a `do_work` decision must be REFUSED
+/// and redirected, never executed. Proves SP1–SP5 enforcement reaches the surface.
+/// What: scripts a `do_work` decision; dispatches `sm.delegate`; asserts nothing
+/// launched and the reply redirects to launching a session.
+/// Test: this is the test.
+#[cfg(feature = "sm-memory")]
+#[tokio::test]
+async fn delegate_refuses_direct_work_over_wire() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = enabled_config();
+    let decision = r#"{"action":"do_work","summary":"I'll just edit the file"}"#;
+    let agent = agent_with_decision(cfg.clone(), tmp.path(), decision);
+    let d = dispatcher_with(
+        agent,
+        cfg,
+        tmp.path(),
+        Arc::new(MockSessionControl::default()),
+    );
+
+    let resp = d
+        .dispatch(req(73, "sm.delegate", json!({ "message": "add a flag" })))
+        .await;
+    let result = ok_result(&resp, 73);
+    assert!(result["launched"].as_array().unwrap().is_empty());
+    let reply = result["reply"].as_str().unwrap().to_ascii_lowercase();
+    assert!(reply.contains("launch a session"), "redirects to launch");
+}
+
+/// Why: a degraded SM (no provider) must surface `sm.delegate` as a graceful
+/// JSON-RPC unavailable error (the DECOMPOSE reasoning cannot run), never a panic.
+/// What: builds a degraded agent and asserts `sm.delegate` → CODE_UNAVAILABLE.
+/// Test: this is the test.
+#[cfg(feature = "sm-memory")]
+#[tokio::test]
+async fn delegate_degraded_is_unavailable() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = enabled_config();
+    let agent = agent_degraded(cfg.clone(), tmp.path());
+    let d = dispatcher_with(
+        agent,
+        cfg,
+        tmp.path(),
+        Arc::new(MockSessionControl::default()),
+    );
+    let resp = d
+        .dispatch(req(74, "sm.delegate", json!({ "message": "anything" })))
+        .await;
+    err_code(&resp, 74, CODE_UNAVAILABLE);
+}
+
+/// Why: in the no-memory build `sm.delegate` (which persists goals) is gracefully
+/// unavailable, not a compile/runtime failure.
+/// What: dispatches `sm.delegate` and asserts CODE_UNAVAILABLE.
+/// Test: this is the test.
+#[cfg(not(feature = "sm-memory"))]
+#[tokio::test]
+async fn delegate_unavailable_without_feature() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = enabled_config();
+    let agent = agent_with_provider(cfg.clone(), tmp.path());
+    let d = dispatcher_with(
+        agent,
+        cfg,
+        tmp.path(),
+        Arc::new(MockSessionControl::default()),
+    );
+    let resp = d
+        .dispatch(req(75, "sm.delegate", json!({ "message": "anything" })))
+        .await;
+    err_code(&resp, 75, CODE_UNAVAILABLE);
 }
 
 // ── stdout cleanliness guard ────────────────────────────────────────────────────
