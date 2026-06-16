@@ -62,13 +62,14 @@ resumes sessions until you opt in. To enable it, do **one** of:
 ## Persistence — macOS (launchd)
 
 ```bash
-# 1. Find your tm binary and username:
+# 1. Find your tm binary and home directory:
 which tm          # e.g. /Users/you/.cargo/bin/tm
-whoami            # e.g. you
+echo "$HOME"      # e.g. /Users/you  (use the REAL $HOME, not an assumed /Users/<user>)
 
-# 2. Copy the plist and substitute the placeholders:
+# 2. Copy the plist and substitute the placeholders. __HOME__ expands to the
+#    real $HOME so non-default home prefixes (not just /Users/<user>) work:
 mkdir -p ~/Library/LaunchAgents ~/.trusty-mpm/logs
-sed -e "s|__USER__|$(whoami)|g" \
+sed -e "s|__HOME__|$HOME|g" \
     -e "s|__TM_BINARY_PATH__|$(which tm)|g" \
     crates/trusty-mpm/deploy/supervisor/com.trusty.mpm.supervisor.plist \
     > ~/Library/LaunchAgents/com.trusty.mpm.supervisor.plist
@@ -84,8 +85,10 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.superviso
 `RunAtLoad` + `KeepAlive` make it survive reboots and restart on crash.
 
 The plist's `EnvironmentVariables` block sets a full `PATH`
-(`/opt/homebrew/bin:/usr/local/bin:~/.local/bin:~/.cargo/bin:` + system dirs,
-with `~` expanded by the `__USER__` substitution above). launchd otherwise
+(`/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.cargo/bin:` + system
+dirs, with `$HOME` substituted in for the `__HOME__` placeholder by the `sed`
+recipe above — launchd does NOT expand `~`, so the value must be the literal
+absolute home path). launchd otherwise
 relaunches the agent with a minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`)
 that omits Homebrew (`tmux`) and `~/.local/bin` (`claude`), which 500s
 managed-session spawns after every restart (#1298). The daemon also resolves

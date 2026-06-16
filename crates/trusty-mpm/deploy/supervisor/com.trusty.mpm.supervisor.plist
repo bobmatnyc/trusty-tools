@@ -11,9 +11,12 @@
   Edit the env block to taste, then load it (see deploy/supervisor/README.md).
 
   IMPORTANT — replace the placeholders before loading:
-    * __USER__              your macOS short username (e.g. `masa`)
+    * __HOME__              your home directory (e.g. `/Users/masa`); do NOT
+                            assume `/Users/<user>` — use the real $HOME so
+                            non-default home prefixes work. (run `echo $HOME`)
     * __TM_BINARY_PATH__    absolute path to the `tm` binary, e.g.
-                            /Users/__USER__/.cargo/bin/tm  (run `which tm`)
+                            $HOME/.cargo/bin/tm  (run `which tm`)
+  The deploy/supervisor/README.md sed recipe substitutes these for you.
 -->
 <plist version="1.0">
 <dict>
@@ -37,10 +40,11 @@
              agent with a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin) that omits
              both, which 500s managed-session spawns after every restart (#1298).
              launchd does NOT expand ~, so the home-relative dirs are written out
-             with the __USER__ placeholder. Keep user/Homebrew dirs before the
-             system dirs. -->
+             with the __HOME__ placeholder, which the README sed recipe replaces
+             with the real $HOME (NOT an assumed /Users/<user> prefix). Keep
+             user/Homebrew dirs before the system dirs. -->
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/Users/__USER__/.local/bin:/Users/__USER__/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>/opt/homebrew/bin:/usr/local/bin:__HOME__/.local/bin:__HOME__/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <!-- ENABLE AUTO-RESUME: uncomment the two lines below to set it to 1.
         <key>TRUSTY_MPM_AUTO_RESUME</key>
         <string>1</string>
@@ -65,9 +69,9 @@
 
     <!-- Logs land next to the daemon's own logs. -->
     <key>StandardOutPath</key>
-    <string>/Users/__USER__/.trusty-mpm/logs/supervisor.out.log</string>
+    <string>__HOME__/.trusty-mpm/logs/supervisor.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/__USER__/.trusty-mpm/logs/supervisor.err.log</string>
+    <string>__HOME__/.trusty-mpm/logs/supervisor.err.log</string>
 
     <key>ProcessType</key>
     <string>Background</string>

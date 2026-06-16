@@ -138,16 +138,40 @@ pub fn resolve_binary(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Return `dir/name` when it is an existing file, else `None`.
+/// Return `dir/name` when it is an existing, runnable file, else `None`.
 ///
 /// Why: factoring the join+exists check keeps [`resolve_binary`] readable and
-/// the "is this a runnable file" predicate in one place.
-/// What: joins `dir` and `name` and returns the path when [`Path::is_file`]
-/// holds (a symlink to a file also satisfies `is_file`).
-/// Test: exercised via the `resolve_binary_*` tests.
+/// the "is this a runnable file" predicate in one place. A bare `is_file` check
+/// is too loose: a non-executable regular file (e.g. a stray `claude.json` or a
+/// data file that happens to share a name) would be returned and then fail at
+/// spawn time. Requiring the execute bit on Unix means resolution only yields
+/// paths the daemon can actually `exec`.
+/// What: joins `dir` and `name`. On Unix the result is returned only when it is
+/// a file *and* at least one execute bit (`0o111`) is set in its permissions; a
+/// symlink to an executable file also satisfies this (metadata follows the
+/// link). On non-Unix targets the historical [`Path::is_file`] behaviour is
+/// preserved (no portable execute concept).
+/// Test: `candidate_requires_execute_bit_on_unix`, plus the `resolve_binary_*`
+/// tests.
 fn candidate(dir: &Path, name: &str) -> Option<PathBuf> {
     let p = dir.join(name);
-    p.is_file().then_some(p)
+    if !p.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // `metadata` follows symlinks, so a symlink to an executable resolves
+        // correctly. A file with no execute bit is not a runnable binary.
+        match std::fs::metadata(&p) {
+            Ok(meta) if meta.permissions().mode() & 0o111 != 0 => Some(p),
+            _ => None,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        Some(p)
+    }
 }
 
 #[cfg(test)]
@@ -220,41 +244,89 @@ mod tests {
         }
     }
 
+    /// Create a unique temp directory for a test, returning its path.
+    ///
+    /// Why: each test needs an isolated scratch dir; keying it on the test name
+    /// plus the process id avoids collisions under the parallel harness without
+    /// pulling in an extra dev-dependency.
+    /// What: joins the system temp dir with `bin_resolve_<tag>_<pid>` and
+    /// `create_dir_all`s it.
+    /// Test: exercised by every test that calls it.
+    fn make_temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("bin_resolve_{tag}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    /// Write a file and, on Unix, mark it executable.
+    ///
+    /// Why: [`candidate`] now requires the execute bit on Unix, so test fixtures
+    /// that stand in for binaries must be chmod'd `0o755` to be discoverable.
+    /// What: writes a tiny shebang stub at `path` and sets mode `0o755` on Unix.
+    /// Test: exercised by `candidate_*` and `resolve_binary_*` tests.
+    fn write_executable(path: &Path) {
+        std::fs::write(path, b"#!/bin/sh\n").expect("write fixture");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path).expect("stat fixture").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms).expect("chmod fixture");
+        }
+    }
+
     #[test]
     fn resolve_binary_finds_in_well_known_dir() {
-        // Create a fake "binary" inside a temp dir, then point one of the
-        // well-known dirs at it via a symlink-free approach: we cannot inject
-        // into daemon_path_dirs, so instead verify resolution through PATH and
-        // through an explicit directory join using candidate().
-        let tmp = std::env::temp_dir().join(format!("bin_resolve_test_{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
+        // Verify the "found in a directory" branch WITHOUT mutating the
+        // process-global PATH (which races the parallel test harness). We
+        // exercise candidate() directly against an explicit temp dir — the same
+        // per-directory predicate resolve_binary() applies to each PATH and
+        // well-known-dir entry — and confirm resolve_binary() accepts the
+        // resulting explicit path verbatim.
+        let tmp = make_temp_dir("well_known");
         let bin = tmp.join("fake-tool-xyz");
-        std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
+        write_executable(&bin);
 
-        // candidate() must find it given the directory.
+        // candidate() finds the executable given its directory.
         let hit = candidate(&tmp, "fake-tool-xyz");
         assert_eq!(hit.as_deref(), Some(bin.as_path()));
 
-        // resolve_binary honours PATH: prepend tmp to PATH and resolve.
-        let orig = std::env::var_os("PATH");
-        let mut paths = vec![tmp.clone()];
-        if let Some(ref p) = orig {
-            paths.extend(std::env::split_paths(p));
-        }
-        let joined = std::env::join_paths(paths).unwrap();
-        // SAFETY: single-threaded test; restored immediately after.
-        unsafe {
-            std::env::set_var("PATH", &joined);
-        }
-        let resolved = resolve_binary("fake-tool-xyz");
-        // SAFETY: restore original PATH before any assertion can unwind.
-        unsafe {
-            match orig {
-                Some(p) => std::env::set_var("PATH", p),
-                None => std::env::remove_var("PATH"),
-            }
-        }
-        assert_eq!(resolved.as_deref(), Some(bin.as_path()));
+        // resolve_binary() accepts the discovered path as an explicit path,
+        // closing the loop from "found in a dir" to "usable result" — no PATH
+        // mutation required.
+        let explicit = bin.to_str().expect("utf8 temp path");
+        assert_eq!(resolve_binary(explicit).as_deref(), Some(bin.as_path()));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_requires_execute_bit_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = make_temp_dir("exec_bit");
+
+        // A non-executable regular file must NOT be returned.
+        let data = tmp.join("not-a-binary");
+        std::fs::write(&data, b"plain data\n").expect("write data file");
+        let mut perms = std::fs::metadata(&data).expect("stat data").permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&data, perms).expect("chmod data");
+        assert_eq!(
+            candidate(&tmp, "not-a-binary"),
+            None,
+            "a non-executable regular file must not resolve as a runnable binary"
+        );
+
+        // An executable file with the same parent dir IS returned.
+        let exe = tmp.join("a-binary");
+        write_executable(&exe);
+        assert_eq!(
+            candidate(&tmp, "a-binary").as_deref(),
+            Some(exe.as_path()),
+            "an executable file must resolve"
+        );
 
         std::fs::remove_dir_all(&tmp).ok();
     }
