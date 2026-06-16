@@ -1,0 +1,123 @@
+# cliff.toml — git-cliff configuration for the trusty-tools workspace (issue #1322).
+#
+# Why:
+#   trusty-tools releases each crate independently (tag `<crate>-v<version>`).
+#   We want conventional-commit messages to drive both the per-crate CHANGELOG.md
+#   sections and the GitHub Release notes, without ever rewriting hand-written
+#   history. This single root config is the source of truth; per-crate scoping is
+#   done at invocation time via `--include-path crates/<dir>/** --tag-pattern <prefix>-v*`
+#   (see scripts/generate-changelog.sh and .github/workflows/release.yml), so there
+#   is no per-crate cliff.toml to keep in sync.
+#
+# What:
+#   Conventional-commit parsing → Keep-a-Changelog output.
+#   Type → section mapping:
+#     feat                     → Added
+#     fix                      → Fixed
+#     refactor, chore          → Changed
+#     perf                     → Performance
+#     docs                     → Documentation
+#     breaking (! or BREAKING) → Breaking  (sorted first)
+#   Merge commits and `chore(release):` version-bump commits are filtered out.
+#   PR numbers from the `(#NNN)` commit-subject suffix link to GitHub; commit
+#   short-hashes link to the commit URL.
+#
+# Test:
+#   Run scripts/generate-changelog.sh <crate-dir> <tag-prefix> --stdout, or directly:
+#     git cliff --config cliff.toml --include-path "crates/trusty-search/**" \
+#       --tag-pattern "trusty-search-v*" --latest --strip all
+#   Eyeball the grouped sections, PR/commit links, and that chore(release)/merge
+#   commits are absent.
+
+# NOTE: we deliberately do NOT configure [remote.github]. PR linking is done
+# offline from the `(#NNN)` suffix already present in every commit subject (see
+# commit_preprocessors below). This keeps generation deterministic and
+# network-free both locally and in CI — no GitHub token or API round-trips.
+
+[changelog]
+# Keep-a-Changelog compatible header (matches existing per-crate changelogs).
+header = """
+# Changelog
+
+All notable changes are documented in this file.
+
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+
+---
+"""
+
+# Tera template for each release section.
+# `version` is the tag stripped of its `<crate>-v` prefix by --tag-pattern, e.g.
+# `trusty-search-v0.24.9` → the literal tag string; we display the tag and date.
+body = """
+{% if version -%}
+## [{{ version | split(pat="-v") | last }}] — {{ timestamp | date(format="%Y-%m-%d") }}
+{% else -%}
+## [Unreleased]
+{% endif -%}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}
+- {{ commit.message | split(pat="\\n") | first | trim }}\
+{% if commit.id %} ([`{{ commit.id | truncate(length=7, end="") }}`](https://github.com/bobmatnyc/trusty-tools/commit/{{ commit.id }}))\
+{% endif %}
+{%- endfor %}
+{% endfor %}
+"""
+
+footer = ""
+# Strip leading/trailing whitespace from the rendered changelog body.
+trim = true
+
+[git]
+# Parse conventional commits; non-conforming commits are dropped (see filter below).
+conventional_commits = true
+filter_unconventional = true
+# Split commits on newline so multi-line bodies don't pollute the subject line.
+split_commits = false
+# Protect against accidental processing of merge commits.
+filter_commits = true
+
+# Commit-message preprocessors: extract the trailing PR number into a form the
+# template can read even without GitHub API enrichment (remote.pr_number is set
+# by git-cliff's GitHub integration; the (#NNN) suffix is our belt-and-suspenders).
+commit_preprocessors = [
+  # Turn every "(#NNN)" PR/issue reference in the subject into a markdown link to
+  # the GitHub PR. Offline, deterministic — no GitHub API needed. The /pull/ URL
+  # auto-redirects to /issues/ for plain issue refs, so both PRs and "closes #NNN"
+  # references resolve correctly.
+  { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/bobmatnyc/trusty-tools/pull/${1}))" },
+]
+
+# Conventional-commit type → changelog section mapping (owner-approved, #1322).
+# Order here also sets the display order within a release section.
+commit_parsers = [
+  # Drop version-bump release commits and merge commits entirely.
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^chore\\(deps\\)", skip = true },
+  { message = "^Merge ", skip = true },
+
+  # Breaking changes float to the top regardless of type.
+  { body = ".*BREAKING CHANGE", group = "<!-- 0 -->Breaking" },
+  { message = "^[a-z]+(\\(.+\\))?!:", group = "<!-- 0 -->Breaking" },
+
+  { message = "^feat", group = "<!-- 1 -->Added" },
+  { message = "^fix", group = "<!-- 2 -->Fixed" },
+  { message = "^perf", group = "<!-- 3 -->Performance" },
+  { message = "^refactor", group = "<!-- 4 -->Changed" },
+  { message = "^chore", group = "<!-- 4 -->Changed" },
+  { message = "^docs", group = "<!-- 5 -->Documentation" },
+
+  # Anything else (style, test, ci, build, …) is not surfaced in the changelog.
+  { message = ".*", skip = true },
+]
+
+# Process commits newest-first within a section.
+sort_commits = "newest"
+
+# Match tags shaped like `<crate>-v<semver>`; the --tag-pattern CLI arg narrows
+# this to a single crate at invocation time.
+tag_pattern = ".*-v[0-9].*"
+# Treat prerelease tags (e.g. -alpha.1) as releases too.
+ignore_tags = ""
+topo_order = false
