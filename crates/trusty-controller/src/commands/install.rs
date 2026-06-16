@@ -219,12 +219,25 @@ fn binary_size(binary: &str) -> u64 {
 ///
 /// Why: `cargo install` honours `CARGO_HOME`; hardcoding `~/.cargo/bin` would
 /// mis-resolve installed-binary sizes under a custom `CARGO_HOME` (e.g. CI).
-/// What: Returns `$CARGO_HOME/bin` when `CARGO_HOME` is set and non-empty,
-/// otherwise `~/.cargo/bin` (or `None` if the home dir cannot be resolved).
-/// Test: `tests::cargo_bin_dir_honours_cargo_home`.
+/// What: Reads `CARGO_HOME` from the process environment and delegates to the
+/// pure [`cargo_bin_dir_from_env`] (which holds the testable resolution rule).
+/// Test: `cargo_bin_dir_from_env` is unit-tested directly in
+/// `tests::cargo_bin_dir_from_env_*`; this wrapper is the side-effecting shell.
 fn cargo_bin_dir() -> Option<std::path::PathBuf> {
-    match std::env::var("CARGO_HOME") {
-        Ok(home) if !home.is_empty() => Some(std::path::PathBuf::from(home).join("bin")),
+    cargo_bin_dir_from_env(std::env::var("CARGO_HOME").ok().as_deref())
+}
+
+/// Pure resolution of the cargo bin directory from a `CARGO_HOME` value.
+///
+/// Why: Extracting the rule from the env read makes it testable WITHOUT mutating
+/// the process-global environment, so the test is safe under parallel execution.
+/// What: Returns `<cargo_home>/bin` when `cargo_home` is `Some` and non-empty,
+/// otherwise `~/.cargo/bin` (or `None` when the home dir cannot be resolved).
+/// Test: `tests::cargo_bin_dir_from_env_honours_value`,
+/// `tests::cargo_bin_dir_from_env_falls_back`.
+fn cargo_bin_dir_from_env(cargo_home: Option<&str>) -> Option<std::path::PathBuf> {
+    match cargo_home {
+        Some(home) if !home.is_empty() => Some(std::path::PathBuf::from(home).join("bin")),
         _ => dirs::home_dir().map(|h| h.join(".cargo").join("bin")),
     }
 }
@@ -304,35 +317,28 @@ mod tests {
     }
 
     /// Why: Re-review fix — `binary_size` must resolve under a non-default
-    /// `CARGO_HOME` (CI installs there), so `cargo_bin_dir` must honour the env
-    /// var rather than hardcoding `~/.cargo/bin`.
-    /// What: Sets `CARGO_HOME` to a temp path, asserts `cargo_bin_dir` returns
-    /// `<that>/bin`; clears it and asserts the fallback ends in `.cargo/bin`.
-    /// Restores the prior value so the process-global env is left untouched.
+    /// `CARGO_HOME` (CI installs there). The rule lives in the pure
+    /// `cargo_bin_dir_from_env`, exercised here WITHOUT mutating the process
+    /// environment so the test is safe to run in parallel with any other test.
+    /// What: A non-empty value yields `<that>/bin`.
     /// Test: This is the test.
     #[test]
-    fn cargo_bin_dir_honours_cargo_home() {
-        let prior = std::env::var_os("CARGO_HOME");
-
-        // This test is the sole mutator of CARGO_HOME and restores it before
-        // returning; the controller crate runs no other env-racing tests.
-        std::env::set_var("CARGO_HOME", "/tmp/fake-cargo-home");
+    fn cargo_bin_dir_from_env_honours_value() {
         assert_eq!(
-            cargo_bin_dir(),
+            cargo_bin_dir_from_env(Some("/tmp/fake-cargo-home")),
             Some(std::path::PathBuf::from("/tmp/fake-cargo-home").join("bin"))
         );
+    }
 
-        // Empty CARGO_HOME falls back to ~/.cargo/bin.
-        std::env::set_var("CARGO_HOME", "");
-        let fallback = cargo_bin_dir();
-        if let Some(p) = &fallback {
-            assert!(p.ends_with(std::path::Path::new(".cargo").join("bin")));
-        }
-
-        // Restore the prior environment.
-        match prior {
-            Some(v) => std::env::set_var("CARGO_HOME", v),
-            None => std::env::remove_var("CARGO_HOME"),
+    /// Why: An empty or absent `CARGO_HOME` must fall back to `~/.cargo/bin`.
+    /// What: Both `Some("")` and `None` resolve to a path ending in `.cargo/bin`.
+    /// Test: This is the test.
+    #[test]
+    fn cargo_bin_dir_from_env_falls_back() {
+        for value in [Some(""), None] {
+            if let Some(p) = cargo_bin_dir_from_env(value) {
+                assert!(p.ends_with(std::path::Path::new(".cargo").join("bin")));
+            }
         }
     }
 

@@ -125,6 +125,7 @@ mod tests {
             installed: Some("0.19.0".to_owned()),
             latest: "0.20.0".to_owned(),
             daemon: true,
+            is_install: false,
         }]);
         let v = serde_json::to_value(&report).expect("serialises");
         assert_eq!(v["command"], "updates");
