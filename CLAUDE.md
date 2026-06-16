@@ -1,7 +1,7 @@
 # trusty-tools — Claude Code Instructions
 
 Unified Rust workspace consolidating the entire trusty-* AI tooling ecosystem.
-20 crates — shared libraries, daemon/MCP servers, the MPM platform, the
+21 crates — shared libraries, daemon/MCP servers, the MPM platform, the
 control plane, and an orchestrator — all co-located under one Cargo workspace.
 
 ## Project Overview

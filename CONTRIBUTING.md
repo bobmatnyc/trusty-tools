@@ -56,6 +56,8 @@ git worktree remove --force <path>
 git push origin --delete <feature-branch>
 ```
 
+**Note on worktree paths:** The `.claude/worktrees/<dirname>` path is an internal convention used by Claude Code and automated tooling. External contributors may use any worktree location they prefer (e.g., `../trusty-tools-worktrees/<dirname>` or a sibling directory).
+
 **Important:** Never use `git reset --hard`, `git checkout .`, or `git stash` against the main checkout. The main repo is inspection-only.
 
 ## Code Conventions

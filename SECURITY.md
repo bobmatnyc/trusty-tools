@@ -11,9 +11,11 @@ General guidance:
 
 ## Reporting Security Vulnerabilities
 
-We take security seriously. If you discover a security vulnerability, **do not open a public issue**. Instead, please report it privately:
+We take security seriously. If you discover a security vulnerability, **do not open a public issue**. Instead, please report it privately using one of the following channels:
 
-**Email:** r@1mc.io
+**Primary (Recommended):** [GitHub Security Advisories](https://github.com/bobmatnyc/trusty-tools/security/advisories/new)
+
+**Secondary:** r@1mc.io
 
 **Include in your report:**
 - A clear description of the vulnerability
@@ -49,4 +51,4 @@ See [CLAUDE.md](CLAUDE.md) for the project's development conventions, including:
 
 ## Questions
 
-For security-related questions or concerns, email r@1mc.io.
+For security-related questions or concerns, please use the reporting channels above.

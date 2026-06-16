@@ -1,7 +1,7 @@
 # trusty-tools
 
 Unified Rust workspace consolidating the entire trusty-* AI tooling ecosystem.
-20 crates of AI development tooling with three flagship MCP servers for code search, memory management, and analysis.
+21 crates of AI development tooling with three flagship MCP servers for code search, memory management, and analysis.
 
 ## Three Flagship MCP Servers
 
@@ -103,7 +103,7 @@ documentation.
 
 ---
 
-## Full Crate Index (All 20 Crates)
+## Full Crate Index (All 21 Crates)
 
 ### Core Daemons / MCP Servers
 
@@ -247,7 +247,7 @@ cargo fmt
 
 ## Workspace Info
 
-**Single source of truth:** This monorepo consolidates seven formerly separate repos. All 20 crates are co-located under `crates/` with one workspace root and one `Cargo.lock` — no more `[patch.crates-io]` dances during active development.
+**Single source of truth:** This monorepo consolidates seven formerly separate repos. All 21 crates are co-located under `crates/` with one workspace root and one `Cargo.lock` — no more `[patch.crates-io]` dances during active development.
 
 **MSRV:** Rust 1.91+ (required by indirect `aws-smithy-*` dependencies)
 
