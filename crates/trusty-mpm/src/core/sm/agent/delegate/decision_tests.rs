@@ -93,6 +93,99 @@ fn parse_garbage_is_respond() {
     );
 }
 
+/// Why: regression for the fence-ordering bug — a reply containing BOTH a ```json
+/// block AND a later bare ``` block must parse the JSON inside the ```json block,
+/// not mis-pair the ```json opening with the later bare closing fence (which would
+/// swallow prose between them and truncate the object).
+/// What: a reply with a ```json delegate block followed by a separate ``` snippet;
+/// asserts the delegate action is recovered intact.
+/// Test: this is the test.
+#[test]
+fn parse_both_json_and_bare_fence() {
+    let reply = "Plan:\n```json\n{\"action\":\"delegate\",\"tasks\":[\
+        {\"workdir\":\"/repo\",\"prompt\":\"add login\"}]}\n```\n\nAside:\n```\nsome shell\n```";
+    match parse_decision(reply) {
+        SmDecision::Delegate { tasks } => {
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(tasks[0].workdir, "/repo");
+            assert_eq!(tasks[0].prompt, "add login");
+        }
+        other => panic!("expected Delegate from the json fence, got {other:?}"),
+    }
+}
+
+/// Why: regression for the `rfind('}')` bug — a prose brace AFTER the JSON object
+/// (e.g. `{...} see {docs}`) must NOT extend the captured span to the trailing
+/// prose brace (which truncated the JSON → a spurious `Respond` fallback that
+/// dropped an intended `Delegate`). The balanced scan stops at the FIRST complete
+/// object.
+/// What: a delegate object followed by a prose `{docs}`; asserts `Delegate`.
+/// Test: this is the test.
+#[test]
+fn parse_prose_brace_after_json() {
+    let reply =
+        "{\"action\":\"delegate\",\"tasks\":[{\"workdir\":\"/r\",\"prompt\":\"go\"}]} see {docs}";
+    match parse_decision(reply) {
+        SmDecision::Delegate { tasks } => {
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(tasks[0].prompt, "go");
+        }
+        other => panic!("expected Delegate despite trailing prose brace, got {other:?}"),
+    }
+}
+
+/// Why: a prose brace BEFORE the JSON object must not derail the balanced scan —
+/// it begins its own (unbalanced) object that never closes, so the scan must move
+/// on and still recover the real action object.
+/// What: a leading prose `{note}` then a respond object; asserts `Respond`.
+/// Test: this is the test.
+#[test]
+fn parse_prose_brace_before_json() {
+    let reply = "Context {see notes}: {\"action\":\"respond\",\"message\":\"hi there\"}";
+    assert_eq!(
+        parse_decision(reply),
+        SmDecision::Respond {
+            message: "hi there".to_string()
+        }
+    );
+}
+
+/// Why: braces INSIDE a JSON string value (e.g. a prompt mentioning `{cfg}`) must
+/// NOT change brace depth — a naive depth counter that ignored string literals
+/// would close the object early and truncate it.
+/// What: a delegate task whose prompt contains literal braces; asserts the full
+/// prompt (with the inner braces) survives.
+/// Test: this is the test.
+#[test]
+fn parse_brace_inside_string_value() {
+    let reply = "{\"action\":\"delegate\",\"tasks\":[\
+        {\"workdir\":\"/r\",\"prompt\":\"render {a:{b:1}} and ship\"}]}";
+    match parse_decision(reply) {
+        SmDecision::Delegate { tasks } => {
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(tasks[0].prompt, "render {a:{b:1}} and ship");
+        }
+        other => panic!("expected Delegate with braces inside string, got {other:?}"),
+    }
+}
+
+/// Why: an escaped quote inside a JSON string must not prematurely end string mode
+/// (which would expose an inner brace to the depth counter). Proves the escape
+/// handling in the balanced scan.
+/// What: a respond message containing an escaped quote then a brace; asserts the
+/// message round-trips with the literal quote and brace.
+/// Test: this is the test.
+#[test]
+fn parse_escaped_quote_in_string() {
+    let reply = r#"{"action":"respond","message":"say \"hi\" and {wave}"}"#;
+    assert_eq!(
+        parse_decision(reply),
+        SmDecision::Respond {
+            message: "say \"hi\" and {wave}".to_string()
+        }
+    );
+}
+
 /// Why: a delegate block may contain blank/garbage task entries; `is_launchable`
 /// lets the engine drop them rather than spawning idle sessions.
 /// What: asserts a blank-workdir task is not launchable and a full one is.

@@ -52,6 +52,20 @@ fn status_and_state_defaults() {
     assert_eq!(SessionTaskState::default(), SessionTaskState::Launched);
 }
 
+/// Why: the delegation wire response carries `goal_status` from
+/// [`GoalStatus::label`] so callers can distinguish "in progress" from
+/// "blocked"/"done"; the label must be the canonical PascalCase per variant.
+/// What: asserts the label string for every variant.
+/// Test: this is the test.
+#[test]
+fn goal_status_label_matches_variants() {
+    assert_eq!(GoalStatus::Pending.label(), "Pending");
+    assert_eq!(GoalStatus::InProgress.label(), "InProgress");
+    assert_eq!(GoalStatus::Blocked.label(), "Blocked");
+    assert_eq!(GoalStatus::Done.label(), "Done");
+    assert_eq!(GoalStatus::Abandoned.label(), "Abandoned");
+}
+
 /// Why: only `Verified` satisfies the gate / progress numerator (§3.5).
 /// What: asserts `is_verified()` for every variant.
 /// Test: this is the test.

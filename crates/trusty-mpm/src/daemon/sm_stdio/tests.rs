@@ -962,6 +962,12 @@ async fn delegate_end_to_end_launch_observe_verify_close() {
         result["goal_done"], true,
         "gate passed with evidence ⇒ Done"
     );
+    // The companion `goal_status` carries the real lifecycle label (#1311 review):
+    // a Done goal reports "Done", not just `goal_done == true`.
+    assert_eq!(
+        result["goal_status"], "Done",
+        "goal_status reflects the closed goal"
+    );
 
     // #1299: the task was delivered to the launched session. Snapshot the sends
     // out of the guard in a tight scope so no MutexGuard is held across the await.
@@ -1016,6 +1022,12 @@ async fn delegate_gate_blocks_without_evidence_over_wire() {
     assert_eq!(
         result["goal_done"], false,
         "no evidence ⇒ gate blocks Done over the wire"
+    );
+    // `goal_done == false` is ambiguous on its own; `goal_status` disambiguates —
+    // a launched-but-unverified goal is "InProgress", NOT failed/blocked (#1311).
+    assert_eq!(
+        result["goal_status"], "InProgress",
+        "an in-flight goal reports InProgress, distinguishing it from blocked/failed"
     );
 }
 

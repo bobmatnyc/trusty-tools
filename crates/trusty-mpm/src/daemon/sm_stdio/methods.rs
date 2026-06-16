@@ -144,9 +144,13 @@ pub async fn sm_chat(d: &SmDispatcher, params: &Value) -> Result<Value, MethodEr
 /// mechanism end-to-end.
 /// What: under `sm-memory`, parses `message` (required), calls `delegate_goal`
 /// with the dispatcher's `sessions` + `goals`, and returns
-/// `{ reply, goal_id, launched, goal_done }`. A degraded SM (no provider) maps to
-/// [`MethodError::Unavailable`]; any other failure → [`MethodError::Internal`].
-/// Without `sm-memory` (no goal store) it returns a graceful unavailable error.
+/// `{ reply, goal_id, launched, goal_done, goal_status }`. `goal_status` carries the
+/// goal's actual lifecycle label (`Pending`/`InProgress`/`Blocked`/`Done`/
+/// `Abandoned`) so a caller can distinguish in-progress from blocked/failed WITHOUT
+/// a follow-up `sm.goals.list`; `goal_done` is kept additively for back-compat. A
+/// degraded SM (no provider) maps to [`MethodError::Unavailable`]; any other failure
+/// → [`MethodError::Internal`]. Without `sm-memory` (no goal store) it returns a
+/// graceful unavailable error.
 /// Test: `tests.rs::delegate_end_to_end_launch_observe_verify_close`,
 /// `delegate_gate_blocks_without_evidence`, `delegate_unavailable_without_feature`.
 #[cfg(feature = "sm-memory")]
@@ -158,6 +162,7 @@ pub async fn sm_delegate(d: &SmDispatcher, params: &Value) -> Result<Value, Meth
             "goal_id": outcome.goal_id,
             "launched": outcome.launched,
             "goal_done": outcome.goal_done,
+            "goal_status": outcome.goal_status,
         })),
         Err(crate::core::sm::agent::DelegationError::Degraded(notice)) => {
             Err(MethodError::Unavailable(notice))

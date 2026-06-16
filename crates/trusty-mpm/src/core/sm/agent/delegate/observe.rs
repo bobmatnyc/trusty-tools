@@ -46,22 +46,30 @@ pub struct ObservedState {
 /// interpretation is conservative: a session is only `Verified` when the pane
 /// carries observed EVIDENCE (§3.5), never merely because it reports "done".
 /// What: reads the nested `session` object (the control surface wraps the record
-/// as `{ "session": { … } }`); scans the WHOLE JSON text for evidence via
-/// [`scan_evidence`]. If evidence is present → `Verified` + that evidence. Else
-/// if the record `state` indicates a terminal failure (`errored`/`dead`/`failed`)
-/// → `Failed`. Else if it indicates the session is gone/stopped with no evidence,
-/// or still active → `Running` (in flight, not yet verified). A brand-new record
-/// with no activity stays `Launched`.
+/// as `{ "session": { … } }`); FIRST scans the RAW pane/output string value for
+/// evidence (so JSON escaping never garbles a captured PR URL or test line), and
+/// only falls back to scanning the whole compact JSON when no pane/output field is
+/// present. If evidence is present → `Verified` + that evidence. Else if the record
+/// `state` indicates a terminal failure (`errored`/`dead`/`failed`) → `Failed`.
+/// Else if it indicates the session is gone/stopped with no evidence, or still
+/// active → `Running` (in flight, not yet verified). A brand-new record with no
+/// activity stays `Launched`.
 /// Test: `observe_tests.rs::interpret_running`, `interpret_failed`,
-/// `interpret_verified_with_pr_url`, `interpret_no_evidence_stays_running`.
+/// `interpret_verified_with_pr_url`, `interpret_no_evidence_stays_unverified`,
+/// `interpret_evidence_from_raw_pane`.
 pub fn interpret_session(session_json: &Value) -> ObservedState {
     // The control surface returns `{ "session": { … } }`; tolerate both shapes.
     let record = session_json.get("session").unwrap_or(session_json);
 
-    // Evidence is searched across the full JSON text (record fields + any
-    // captured pane output the control surface includes), so a PR URL or test
-    // output anywhere in the observed payload is captured.
-    let haystack = session_json.to_string();
+    // Evidence is scanned over the RAW pane/output string FIRST (issue #1311 review):
+    // running the scanner on the escaped compact JSON (`session_json.to_string()`)
+    // can garble evidence — e.g. a PR URL whose surrounding JSON adds `\"` / `}}`
+    // framing, or a test line with escaped newlines. Pulling the raw string value
+    // out of the record and scanning THAT keeps the captured evidence clean. We fall
+    // back to the whole compact JSON only when no pane/output field is present, so
+    // evidence anywhere in the payload is still found.
+    let raw_pane = extract_pane_text(record);
+    let haystack = raw_pane.unwrap_or_else(|| session_json.to_string());
     if let Some(evidence) = scan_evidence(&haystack) {
         return ObservedState {
             state: SessionTaskState::Verified,
@@ -89,6 +97,36 @@ pub fn interpret_session(session_json: &Value) -> ObservedState {
         state: interpreted,
         evidence: None,
     }
+}
+
+/// The ordered field names that may hold a session's raw pane / captured output.
+///
+/// Why: different control surfaces (the tmux-backed session manager, the test mock)
+/// name the captured pane text differently; checking a small ordered set finds the
+/// raw string regardless of which the surface used, most-specific first.
+const PANE_FIELDS: &[&str] = &["pane", "output", "pane_text", "tail", "stdout"];
+
+/// Extract the RAW pane/output string from a session record, if present.
+///
+/// Why: the evidence scanner must run over the UNESCAPED pane text, not the
+/// compact JSON serialization (which adds `\"`/`}}` framing and escapes newlines,
+/// garbling a captured PR URL or test line — issue #1311 review). Pulling the raw
+/// string value out lets the scanner see exactly what the session printed.
+/// What: returns the first present, non-empty string value among [`PANE_FIELDS`]
+/// on the record; `None` when the record carries no recognised pane field (the
+/// caller then falls back to the whole compact JSON so evidence elsewhere in the
+/// payload is still found).
+/// Test: `observe_tests.rs::interpret_evidence_from_raw_pane`,
+/// `scan_pr_url_strips_json_framing` (the fallback path stays green).
+fn extract_pane_text(record: &Value) -> Option<String> {
+    for field in PANE_FIELDS {
+        if let Some(s) = record.get(*field).and_then(Value::as_str)
+            && !s.is_empty()
+        {
+            return Some(s.to_string());
+        }
+    }
+    None
 }
 
 /// Whether a record `state` string indicates a terminal FAILURE.

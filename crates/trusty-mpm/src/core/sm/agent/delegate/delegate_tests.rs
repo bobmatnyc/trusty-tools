@@ -202,6 +202,11 @@ async fn delegate_observes_and_updates_progress() {
         .expect("loop runs");
 
     assert!(!outcome.goal_done, "no evidence ⇒ goal not done");
+    // `goal_status` disambiguates the false `goal_done`: this goal is in flight.
+    assert_eq!(
+        outcome.goal_status, "InProgress",
+        "an observed-but-unverified goal is InProgress, not blocked/failed"
+    );
     let store = goals.lock().await;
     let goal = store.get(&outcome.goal_id).expect("goal");
     use crate::core::sm::goals::SessionTaskState;
@@ -275,6 +280,7 @@ async fn delegate_verifies_and_closes_with_evidence() {
     );
     assert_eq!(goal.progress, 100);
     assert_eq!(goal.status, GoalStatus::Done);
+    assert_eq!(outcome.goal_status, "Done", "closed goal reports Done");
     assert!(outcome.reply.to_ascii_lowercase().contains("done"));
 }
 
@@ -316,6 +322,10 @@ async fn delegate_refuses_direct_work_and_redirects() {
         outcome.reply
     );
     assert!(lower.contains("sp1-sp5"), "reply names the prohibition");
+    assert_eq!(
+        outcome.goal_status, "Blocked",
+        "a refused direct-work goal reports Blocked in goal_status"
+    );
     // The refused goal is Blocked (awaiting operator re-issue), not an orphan Pending.
     let store = goals.lock().await;
     assert_eq!(

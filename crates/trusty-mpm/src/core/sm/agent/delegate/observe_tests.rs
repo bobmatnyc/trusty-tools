@@ -105,6 +105,46 @@ fn scan_pr_url_strips_json_framing() {
     );
 }
 
+/// Why: the evidence scanner must run over the RAW pane string, not the escaped
+/// compact JSON (issue #1311 review). A pane value containing characters JSON would
+/// escape (quotes, newlines) must still yield CLEAN evidence — proving the scan
+/// reads the unescaped value, not `session_json.to_string()`.
+/// What: a pane whose text embeds a quoted phrase + newline THEN a PR URL on its
+/// own line; asserts the captured URL is clean (no JSON framing, no escape gunk).
+/// Test: this is the test.
+#[test]
+fn interpret_evidence_from_raw_pane() {
+    let pane =
+        "Ran the job: \"build\" finished.\nOpened PR https://github.com/acme/repo/pull/13\nDone.";
+    let obs = interpret_session(&json!({
+        "session": { "state": "running", "pane": pane }
+    }));
+    assert_eq!(obs.state, SessionTaskState::Verified);
+    assert_eq!(
+        obs.evidence.as_deref(),
+        Some("PR opened: https://github.com/acme/repo/pull/13"),
+        "evidence is scanned from the raw pane value, clean of JSON escaping"
+    );
+}
+
+/// Why: when NO pane/output field is present, the scanner must FALL BACK to the
+/// whole compact JSON so evidence in another record field is still found.
+/// What: a record with a PR URL in a non-pane field and no pane field; asserts the
+/// URL is still captured via the JSON fallback.
+/// Test: this is the test.
+#[test]
+fn interpret_evidence_fallback_to_json_when_no_pane() {
+    let obs = interpret_session(&json!({
+        "session": { "state": "running", "result_url": "https://github.com/o/r/pull/5" }
+    }));
+    assert_eq!(obs.state, SessionTaskState::Verified);
+    assert_eq!(
+        obs.evidence.as_deref(),
+        Some("PR opened: https://github.com/o/r/pull/5"),
+        "no pane field ⇒ fall back to scanning the whole JSON"
+    );
+}
+
 /// Why: captured cargo/test output with a pass count is gate-satisfying evidence.
 /// What: scans a `test result: ok` line.
 /// Test: this is the test.

@@ -80,7 +80,8 @@ const DECOMPOSE_MAX_TOKENS: u32 = 2_048;
 /// site terse and the behaviour assertable.
 /// What: `reply` is the status-first operator message; `goal_id` is the tracked
 /// goal; `launched` are the session ids spawned; `goal_done` is whether the
-/// verification gate passed and the goal closed.
+/// verification gate passed and the goal closed; `goal_status` is the goal's actual
+/// lifecycle label (`Pending`/`InProgress`/`Blocked`/`Done`/`Abandoned`).
 /// Test: `delegate_tests.rs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DelegationOutcome {
@@ -92,6 +93,17 @@ pub struct DelegationOutcome {
     pub launched: Vec<String>,
     /// Whether the verification gate passed and the goal reached `Done` (§3.5).
     pub goal_done: bool,
+    /// The goal's actual lifecycle status label (§9.1).
+    ///
+    /// Why: `goal_done` alone is AMBIGUOUS — a caller can misread
+    /// `goal_done == false` as "failed" when it really means "still in progress"
+    /// (or "blocked", awaiting an operator decision). Carrying the real status
+    /// label lets the caller distinguish these WITHOUT a follow-up `sm.goals.list`.
+    /// It is additive: `goal_done` stays for back-compat.
+    /// What: the PascalCase label from
+    /// [`GoalStatus::label`](crate::core::sm::GoalStatus::label) read back from the
+    /// store after the loop (falling back to `"Pending"` only if the goal vanished).
+    pub goal_status: String,
 }
 
 /// A failure surfaced by [`SessionManagerAgent::delegate_goal`].
@@ -170,11 +182,13 @@ impl SessionManagerAgent {
             SmDecision::Respond { message } => {
                 // Allowlist 1: the SM is talking to the operator; the goal stays
                 // Pending with no fan-out (nothing delegated this turn).
+                let goal_status = self.goal_status_label(&goal_id, goals).await;
                 return Ok(DelegationOutcome {
                     reply: message,
                     goal_id,
                     launched: Vec::new(),
                     goal_done: false,
+                    goal_status,
                 });
             }
             SmDecision::DoWork { summary } => {
@@ -185,14 +199,21 @@ impl SessionManagerAgent {
                 // so leaving it Pending forever would orphan it), then return the
                 // redirect message.
                 let reply = redirect_direct_work(&summary);
-                let mut store = goals.lock().await;
-                let _ = store.note(&goal_id, reply.clone()).await;
-                let _ = store.set_status(&goal_id, GoalStatus::Blocked).await;
+                let goal_status = {
+                    let mut store = goals.lock().await;
+                    let _ = store.note(&goal_id, reply.clone()).await;
+                    let _ = store.set_status(&goal_id, GoalStatus::Blocked).await;
+                    store
+                        .get(&goal_id)
+                        .map(|g| g.status.label().to_string())
+                        .unwrap_or_else(|| GoalStatus::Blocked.label().to_string())
+                };
                 return Ok(DelegationOutcome {
                     reply,
                     goal_id,
                     launched: Vec::new(),
                     goal_done: false,
+                    goal_status,
                 });
             }
         };
@@ -200,19 +221,26 @@ impl SessionManagerAgent {
         // ── (3) LAUNCH — one session per launchable task; link + DELIVER (#1299).
         let launched = self.launch_tasks(&tasks, &goal_id, control, goals).await;
         if launched.is_empty() {
-            let mut store = goals.lock().await;
-            let _ = store
-                .note(
-                    &goal_id,
-                    "decompose produced no launchable task".to_string(),
-                )
-                .await;
+            let goal_status = {
+                let mut store = goals.lock().await;
+                let _ = store
+                    .note(
+                        &goal_id,
+                        "decompose produced no launchable task".to_string(),
+                    )
+                    .await;
+                store
+                    .get(&goal_id)
+                    .map(|g| g.status.label().to_string())
+                    .unwrap_or_else(|| GoalStatus::Pending.label().to_string())
+            };
             return Ok(DelegationOutcome {
                 reply: "No launchable task was produced for this goal; nothing delegated."
                     .to_string(),
                 goal_id,
                 launched,
                 goal_done: false,
+                goal_status,
             });
         }
 
@@ -240,11 +268,13 @@ impl SessionManagerAgent {
 
         // ── (6) REPORT — status-first summary for the operator. ─────────────────
         let reply = self.report(&goal_id, &launched, goal_done, goals).await;
+        let goal_status = self.goal_status_label(&goal_id, goals).await;
         Ok(DelegationOutcome {
             reply,
             goal_id,
             launched,
             goal_done,
+            goal_status,
         })
     }
 
@@ -339,6 +369,12 @@ impl SessionManagerAgent {
         goals: &Arc<Mutex<SmGoalStore>>,
     ) -> Vec<String> {
         let mut launched = Vec::new();
+        // WARNING (future editors): the goal-store lock (`goals.lock().await`) MUST
+        // be DROPPED before any `control.*` await below. Every store access in this
+        // loop is taken in its OWN tight scope so the `MutexGuard` is released before
+        // the next `control.launch`/`control.send` await — holding it across that
+        // async I/O would serialize the whole fan-out and risks a deadlock if the
+        // control surface ever re-enters the goal store. Keep the guards scoped.
         for task in tasks.iter().filter(|t| t.is_launchable()) {
             let params = LaunchParams {
                 workdir: task.workdir.clone(),
@@ -455,6 +491,25 @@ impl SessionManagerAgent {
             }
         }
         Ok(())
+    }
+
+    /// Read the goal's current lifecycle status label from the store.
+    ///
+    /// Why: every [`DelegationOutcome`] carries the goal's REAL status (§9.1) so a
+    /// caller never has to disambiguate `goal_done == false` between "in progress"
+    /// and "blocked"/"failed" with a follow-up call. This reads it back at the
+    /// moment of return.
+    /// What: locks the store, returns
+    /// [`GoalStatus::label`](crate::core::sm::GoalStatus::label) for the goal, or
+    /// `"Pending"` if the goal is (unexpectedly) absent.
+    /// Test: `delegate_tests.rs` asserts the label for the in-progress and done
+    /// paths.
+    async fn goal_status_label(&self, goal_id: &str, goals: &Arc<Mutex<SmGoalStore>>) -> String {
+        let store = goals.lock().await;
+        store
+            .get(goal_id)
+            .map(|g| g.status.label().to_string())
+            .unwrap_or_else(|| GoalStatus::Pending.label().to_string())
     }
 
     /// REPORT: build the status-first operator summary for the goal (§3.6).

@@ -107,21 +107,28 @@ const BARE_FENCE: &str = "```";
 /// ([`SmDecision::Respond`]) — the SM is talking, not delegating — rather than
 /// inventing a delegation or (worse) doing work. This keeps an unparseable reply
 /// on the always-safe Allowlist-1 path.
-/// What: (1) strips a leading ```json / ``` fence + trailing fence if present;
-/// (2) failing that, scans for the first `{`…matching `}` span; (3) attempts to
-/// deserialize that span as [`SmDecision`]; (4) on any failure returns
-/// `Respond { message: <trimmed original> }`.
+/// What: (1) if a ```json / ``` fenced block is present, extracts its inner
+/// content (matching opening→closing fence); (2) otherwise (or if the fenced inner
+/// is not an object) runs a BALANCED-BRACE scan from the first `{` that respects
+/// JSON string literals, yielding the first complete top-level object regardless of
+/// surrounding/trailing prose braces; (3) attempts to deserialize that candidate as
+/// [`SmDecision`]; (4) on any failure returns `Respond { message: <trimmed original> }`.
 /// Test: `decision_tests.rs::parse_fenced_json`, `parse_bare_json`,
-/// `parse_prose_wrapped_json`, `parse_garbage_is_respond`,
-/// `parse_do_work_action`.
+/// `parse_prose_wrapped_json`, `parse_garbage_is_respond`, `parse_do_work_action`,
+/// `parse_both_json_and_bare_fence`, `parse_prose_brace_after_json`,
+/// `parse_prose_brace_before_json`, `parse_brace_inside_string_value`.
 pub fn parse_decision(reply: &str) -> SmDecision {
     let trimmed = reply.trim();
 
-    // (1)/(2): find a candidate JSON object span.
-    if let Some(candidate) = extract_json_object(trimmed)
-        && let Ok(decision) = serde_json::from_str::<SmDecision>(&candidate)
-    {
-        return decision;
+    // (1)/(2)/(3): try each candidate object span in order — the first that
+    // deserializes into a valid action wins. Trying successive top-level objects
+    // (not just the first) is what lets a prose brace BEFORE the real action
+    // object — e.g. `{note}: {"action":...}` — still parse: `{note}` fails to
+    // deserialize and the scan moves on to the real object.
+    for candidate in candidate_objects(trimmed) {
+        if let Ok(decision) = serde_json::from_str::<SmDecision>(&candidate) {
+            return decision;
+        }
     }
 
     // (4): no valid action → the SM is talking to the operator (Allowlist 1).
@@ -130,37 +137,146 @@ pub fn parse_decision(reply: &str) -> SmDecision {
     }
 }
 
-/// Extract a candidate JSON-object substring from the SM's reply.
+/// Collect candidate JSON-object spans from the SM's reply, best-first.
 ///
-/// Why: keeps [`parse_decision`] readable by isolating the three extraction
-/// strategies (fenced → bare-fenced → first-brace-span). Returns the substring
-/// only; the caller decides whether it deserialises into a valid action.
-/// What: if the text contains a ```json (or ```) fence, returns the content up to
-/// the closing fence; otherwise returns the span from the first `{` to the last
-/// `}` (inclusive), or `None` when no brace pair exists.
-/// Test: exercised via `parse_decision` in `decision_tests.rs`.
-fn extract_json_object(text: &str) -> Option<String> {
-    // Strategy A: a ```json … ``` (or ``` … ```) fenced block.
-    for fence in [JSON_FENCE, BARE_FENCE] {
-        if let Some(after) = text.find(fence).map(|i| i + fence.len()) {
-            let rest = &text[after..];
-            if let Some(end) = rest.find(BARE_FENCE) {
-                let inner = rest[..end].trim();
-                if inner.starts_with('{') {
-                    return Some(inner.to_string());
-                }
-            }
-        }
+/// Why: the prior extractor was fragile in two ways the review flagged: (1) the
+/// `[JSON_FENCE, BARE_FENCE]` ordering made `BARE_FENCE` re-match a ```json
+/// opening as a bare fence and mishandled a reply with BOTH a ```json block AND a
+/// later ``` block; and (2) the `first '{' ..= last '}'` span grabbed a WRONG span
+/// whenever prose braces surrounded the JSON (e.g. `{...} see {docs}` →
+/// `rfind('}')` captured the prose brace → truncated JSON → a spurious `Respond`
+/// fallback that silently dropped an intended `Delegate`). Both are now robust.
+/// What: returns, in priority order, (1) the first balanced object found INSIDE a
+/// ```json (or bare ```) fenced block — the `json` tag is consumed as part of the
+/// opening fence so it is never re-read as a bare fence; then (2) successive
+/// complete top-level `{ … }` objects scanned over the whole text, each found by a
+/// BALANCED-BRACE walk that RESPECTS JSON string literals + escapes (so braces
+/// inside strings and prose braces before/after the object do not corrupt the
+/// span). The caller deserializes each in turn and keeps the first valid action.
+/// Test: exercised via `parse_decision` in `decision_tests.rs`
+/// (`parse_both_json_and_bare_fence`, `parse_prose_brace_after_json`,
+/// `parse_prose_brace_before_json`, `parse_brace_inside_string_value`, plus the
+/// existing fenced/bare/prose/garbage cases).
+fn candidate_objects(text: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+
+    // Strategy A: a fenced code block. Find the OPENING fence (prefer the explicit
+    // ```json tag; fall back to a bare ```), consume it, then take the first
+    // balanced object up to the matching CLOSING ``` fence. Consuming the ```json
+    // tag as part of the opening prevents re-matching the same opening as a bare
+    // fence (the BOTH-fences regression).
+    if let Some(inner) = fenced_inner(text)
+        && let Some(obj) = first_balanced_object(&inner)
+    {
+        candidates.push(obj);
     }
 
-    // Strategy B: the first `{` … last `}` span (prose-wrapped or bare object).
-    let start = text.find('{')?;
-    let end = text.rfind('}')?;
-    if end > start {
-        Some(text[start..=end].to_string())
-    } else {
-        None
+    // Strategy B: every complete top-level `{ … }` object in the whole text, in
+    // order. Prose braces before the real object yield candidates that fail to
+    // deserialize; the caller skips them and reaches the valid action.
+    let mut from = 0;
+    while let Some((obj, end)) = next_balanced_object(text, from) {
+        if !candidates.contains(&obj) {
+            candidates.push(obj);
+        }
+        from = end;
     }
+
+    candidates
+}
+
+/// Return the inner content of the first fenced code block, if any.
+///
+/// Why: isolates fence handling so [`candidate_objects`] stays readable, and so
+/// a ```json opening is matched exactly once (the `json` tag is part of the
+/// opening, never re-read as a separate bare fence).
+/// What: finds a ```json opening if present (else a bare ```), skips to the end of
+/// that line (so the opening fence + optional language tag is fully consumed), then
+/// returns the substring up to the next ``` closing fence (or end of text if the
+/// block is unterminated). Returns `None` when there is no opening fence.
+/// Test: exercised via `parse_decision` (`parse_fenced_json`, `parse_bare_json`,
+/// `parse_both_json_and_bare_fence`).
+fn fenced_inner(text: &str) -> Option<String> {
+    // Prefer the explicit ```json fence; fall back to a bare ``` fence.
+    let (open_at, fence_len) = match text.find(JSON_FENCE) {
+        Some(i) => (i, JSON_FENCE.len()),
+        None => (text.find(BARE_FENCE)?, BARE_FENCE.len()),
+    };
+    // Consume to the end of the opening-fence line so any trailing language tag on
+    // a bare ```json-equivalent (e.g. "```json5") does not leak into the inner.
+    let after_open = open_at + fence_len;
+    let body_start = match text[after_open..].find('\n') {
+        Some(nl) => after_open + nl + 1,
+        None => after_open,
+    };
+    let rest = &text[body_start..];
+    let inner = match rest.find(BARE_FENCE) {
+        Some(close) => &rest[..close],
+        None => rest,
+    };
+    Some(inner.to_string())
+}
+
+/// Return the first COMPLETE top-level JSON object in `text` (balanced scan).
+///
+/// Why: convenience wrapper for callers (the fenced-inner path) that only need the
+/// first object and not the continuation offset.
+/// What: returns the object span from [`next_balanced_object`] starting at 0.
+/// Test: exercised via `parse_decision` (`parse_fenced_json`, `parse_bare_json`).
+fn first_balanced_object(text: &str) -> Option<String> {
+    next_balanced_object(text, 0).map(|(obj, _)| obj)
+}
+
+/// Find the next COMPLETE top-level `{ … }` object at or after `from`.
+///
+/// Why: a naive `first '{' ..= last '}'` span breaks when prose braces appear
+/// before or after the JSON object, or when braces appear inside a JSON string
+/// value. A depth-tracking scan that honours JSON string literals + escapes finds
+/// each well-formed top-level object in turn, so the caller can try successive
+/// candidates (skipping a leading prose `{…}` that is not a valid action).
+/// What: from the first `{` at/after `from`, increments depth on `{` and
+/// decrements on `}`, but ONLY when NOT inside a string literal (a `"` toggles
+/// string mode; a `\` inside a string escapes the next char so an escaped quote
+/// does not end the string). Returns `(object_span, end_offset)` the moment depth
+/// returns to zero, where `end_offset` is the absolute index just past the closing
+/// `}` (so a follow-up call can resume there). Returns `None` if there is no `{`
+/// at/after `from` or the object never closes.
+/// Test: `parse_prose_brace_after_json`, `parse_prose_brace_before_json`,
+/// `parse_brace_inside_string_value`, `parse_escaped_quote_in_string`.
+fn next_balanced_object(text: &str, from: usize) -> Option<(String, usize)> {
+    if from >= text.len() {
+        return None;
+    }
+    let rel = text[from..].find('{')?;
+    let start = from + rel;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, ch) in text[start..].char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let end = start + offset + ch.len_utf8();
+                    return Some((text[start..end].to_string(), end));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 #[cfg(test)]
