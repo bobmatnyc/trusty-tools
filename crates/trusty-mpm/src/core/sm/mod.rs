@@ -54,7 +54,7 @@ pub mod memory;
 pub mod prompt;
 pub mod providers;
 
-pub use agent::SessionManagerAgent;
+pub use agent::{SessionManagerAgent, SmAgentError, SmChatOutcome};
 pub use config::{SessionManagerConfig, SmInferenceConfig, SmMemoryConfig, SmRoundsConfig};
 pub use context::{
     ConversationStore, ConversationStoreError, Round, SmContextEngine, SmContextError,
@@ -72,6 +72,6 @@ pub use prompt::{
 };
 pub use providers::{
     AnthropicProvider, LlmProvider, LlmRequest, LlmResponse, OpenRouterProvider, ProviderKind,
-    ProviderRegistry, ResolvedCall, SmLlmError, SmModelTier, resolve_provider_and_model,
-    resolve_tier_model,
+    ProviderRegistry, ResolvedCall, SmLlmError, SmModelTier, TierResolver,
+    resolve_provider_and_model, resolve_tier_model,
 };

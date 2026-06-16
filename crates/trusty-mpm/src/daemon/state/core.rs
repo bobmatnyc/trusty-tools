@@ -28,6 +28,7 @@ use crate::daemon::audit::AuditLogger;
 use crate::daemon::optimizer::OptimizerConfig;
 
 use super::overseer::{build_overseer, load_optimizer_config, load_overseer, make_audit_logger};
+use super::sm::build_session_manager_agent;
 
 /// Outcome of a reap sweep over the session registry.
 ///
@@ -116,6 +117,20 @@ pub struct DaemonState {
     /// resolved — i.e. exactly when LLM chat is available.
     /// Test: `llm_overseer_is_none_without_key`.
     pub(super) llm: Option<Arc<crate::daemon::llm_overseer::LlmOverseer>>,
+    /// The Session Manager agent (DOC-14 SM-7), built once at startup.
+    ///
+    /// Why: `POST /api/v1/coordinator/chat` (and its `/session-manager/*`
+    /// aliases) route a chat turn through this agent when
+    /// `[session_manager].enabled = true` AND a provider is available, superseding
+    /// the legacy [`LlmOverseer`] path. Built unconditionally (cheap — config +
+    /// a credentials probe) so the endpoint can consult `is_enabled()` /
+    /// `has_runtime()` per request; disabled by default so the legacy path is
+    /// preserved untouched.
+    /// What: the shared `Arc<SessionManagerAgent>` wired with the provider
+    /// resolver, the context-engine storage root, and (under `sm-memory`) the SM
+    /// palace.
+    /// Test: `sm_agent_built_disabled_by_default`.
+    pub(super) session_manager_agent: Arc<crate::core::sm::SessionManagerAgent>,
     /// Append-only JSONL logger for every overseer decision.
     pub(super) audit: Arc<AuditLogger>,
     /// The Telegram chat id paired with this daemon, when one has confirmed a
@@ -229,6 +244,7 @@ impl DaemonState {
             overseer: build.overseer,
             overseer_handler: build.handler,
             llm: build.llm,
+            session_manager_agent: build_session_manager_agent(&framework_root),
             audit: make_audit_logger(&framework_root),
             paired_chat_id: Mutex::new(paired),
             pair_code: Mutex::new(None),
@@ -300,6 +316,7 @@ impl DaemonState {
             overseer: build.overseer,
             overseer_handler: build.handler,
             llm: build.llm,
+            session_manager_agent: build_session_manager_agent(&framework_root),
             audit: make_audit_logger(&framework_root),
             paired_chat_id: Mutex::new(paired),
             pair_code: Mutex::new(None),
@@ -425,6 +442,23 @@ impl DaemonState {
     ) -> Self {
         let state = Self::new();
         let _ = state.managed_sessions.set(mgr);
+        state
+    }
+
+    /// Inject a pre-built Session Manager agent for testing the SM endpoint path.
+    ///
+    /// Why: the `coordinator/chat` SM-path tests (SM-7) need a `DaemonState`
+    /// carrying an ENABLED agent wired to a mock resolver, so the endpoint routes
+    /// through the SM with no network. The default `new()` builds a
+    /// disabled-by-default agent from the real config; this swaps it for the
+    /// test agent.
+    /// What: builds default state, then replaces `session_manager_agent` with
+    /// `agent`.
+    /// Test: used by `api_tests` SM-path tests (`sm_chat_*`, alias tests).
+    #[cfg(test)]
+    pub fn with_session_manager_agent(agent: Arc<crate::core::sm::SessionManagerAgent>) -> Self {
+        let mut state = Self::new();
+        state.session_manager_agent = agent;
         state
     }
 }

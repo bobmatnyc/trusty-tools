@@ -42,7 +42,8 @@ pub use anthropic::AnthropicProvider;
 pub use error::SmLlmError;
 pub use openrouter::OpenRouterProvider;
 pub use resolve::{
-    ProviderRegistry, ResolvedCall, SmModelTier, resolve_provider_and_model, resolve_tier_model,
+    ProviderRegistry, ResolvedCall, SmModelTier, TierResolver, resolve_provider_and_model,
+    resolve_tier_model,
 };
 
 #[cfg(feature = "bedrock")]

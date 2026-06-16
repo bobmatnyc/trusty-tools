@@ -20,6 +20,7 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use tracing::debug;
 #[cfg(not(feature = "bedrock"))]
 use tracing::info;
@@ -172,6 +173,57 @@ impl std::fmt::Debug for ResolvedCall {
             .field("model", &self.model)
             .field("provider", &self.provider.name())
             .finish()
+    }
+}
+
+// ─── Resolver seam (DOC-14 §5; SM-7 testability) ───────────────────────────────
+
+/// Resolve a per-task tier into a concrete provider + model (the SM-7 seam).
+///
+/// Why: the SM chat turn (SM-7) needs to resolve a [`ResolvedCall`] for a tier
+/// per request, but must be UNIT-TESTABLE with a mock provider and NO network.
+/// `ProviderRegistry` builds *real* HTTP providers from environment credentials,
+/// so the agent depends on this abstraction (Dependency Inversion) instead of the
+/// concrete registry: production wires the registry, tests wire a mock resolver
+/// that hands back a [`ResolvedCall`] wrapping a mock [`LlmProvider`].
+/// What: one async method, [`TierResolver::resolve`], mirroring
+/// [`ProviderRegistry::build`] — `(inference cfg, tier) → ResolvedCall | SmLlmError`
+/// (including the graceful [`SmLlmError::Degraded`] for no-credentials).
+/// Implementors are `Send + Sync` to live behind `Arc<dyn TierResolver>`.
+/// Test: `ProviderRegistry`'s impl is covered by `resolve_tests`; the mock impl
+/// lives in `agent/mock.rs` and drives `agent/chat_tests.rs`.
+#[async_trait]
+pub trait TierResolver: Send + Sync {
+    /// Resolve `tier` into a concrete [`ResolvedCall`] for one call.
+    ///
+    /// Why: the single operation the SM chat turn needs — pick the provider +
+    /// bare model for the orchestration/summary/compaction tier, honouring
+    /// prefixes, the `auto` precedence chain, and degraded mode.
+    /// What: returns a [`ResolvedCall`] or an [`SmLlmError`] (`Degraded` when no
+    /// provider has credentials).
+    /// Test: `resolve_tests` (registry); `agent/chat_tests.rs` (mock).
+    async fn resolve(
+        &self,
+        cfg: &SmInferenceConfig,
+        tier: SmModelTier,
+    ) -> Result<ResolvedCall, SmLlmError>;
+}
+
+#[async_trait]
+impl TierResolver for ProviderRegistry {
+    /// Delegate to [`ProviderRegistry::build`] — the production resolver.
+    ///
+    /// Why: `ProviderRegistry` already implements the full §5.3 resolution; the
+    /// trait impl is a thin forward so the daemon can pass the registry as
+    /// `Arc<dyn TierResolver>`.
+    /// What: calls `self.build(cfg, tier)`.
+    /// Test: `resolve_tests` exercises `build` directly.
+    async fn resolve(
+        &self,
+        cfg: &SmInferenceConfig,
+        tier: SmModelTier,
+    ) -> Result<ResolvedCall, SmLlmError> {
+        self.build(cfg, tier).await
     }
 }
 

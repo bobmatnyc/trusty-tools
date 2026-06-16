@@ -188,6 +188,19 @@ impl DaemonState {
         self.llm.clone()
     }
 
+    /// The Session Manager agent (DOC-14 SM-7).
+    ///
+    /// Why: `POST /api/v1/coordinator/chat` (and its `/session-manager/*`
+    /// aliases) consult this to decide whether to route a turn through the SM
+    /// (`is_enabled()` AND `has_runtime()`) or fall back to the legacy
+    /// [`LlmOverseer`](crate::daemon::llm_overseer::LlmOverseer) path. Sharing the
+    /// `Arc` keeps every call site using the one agent built at startup.
+    /// What: returns a clone of the `Arc<SessionManagerAgent>`.
+    /// Test: `sm_agent_built_disabled_by_default`.
+    pub fn session_manager_agent(&self) -> Arc<crate::core::sm::SessionManagerAgent> {
+        Arc::clone(&self.session_manager_agent)
+    }
+
     // ---- hook events ----------------------------------------------------
 
     /// Append a hook event to the bounded history ring buffer and broadcast it.

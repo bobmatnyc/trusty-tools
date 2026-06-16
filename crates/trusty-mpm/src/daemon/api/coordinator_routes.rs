@@ -27,16 +27,30 @@ use crate::daemon::state::DaemonState;
 ///
 /// Why: the coordinator chat is conversational; the caller owns the history so
 /// the daemon stays stateless about chat sessions, exactly like `/llm/chat`.
-/// What: the user's `message` plus the prior conversation `history`.
-/// Test: `coordinator_chat_routes_unknown_session` exercises the shape.
+/// The SM path (SM-7) maintains its OWN rolling context keyed by `conv_id`, so
+/// the request gains an OPTIONAL `conv_id` — additive, defaulting to absent, so
+/// the existing DOC-13 TUI request shape still deserializes unchanged.
+/// What: the user's `message`, the prior conversation `history` (legacy
+/// `LlmOverseer` path), and an optional `conv_id` (SM path).
+/// Test: `coordinator_chat_routes_unknown_session`, `sm_chat_request_back_compat`.
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct CoordinatorChatRequest {
     /// The user's message text.
     pub message: String,
     /// Prior conversation history (oldest first); empty starts a new chat.
+    ///
+    /// Used by the legacy `LlmOverseer` fallback path (caller-owned history). The
+    /// SM path keys its own rolling context off `conv_id` instead.
     #[serde(default)]
     #[schema(value_type = Vec<Object>)]
     pub history: Vec<ChatMessage>,
+    /// Conversation id for the SM rolling-context engine (SM path only).
+    ///
+    /// Optional and additive: absent on the existing TUI requests (a fresh id is
+    /// minted per turn). Echoed back in the response so a follow-up can continue
+    /// the same SM conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conv_id: Option<String>,
 }
 
 /// Response of `POST /api/v1/coordinator/chat`.
@@ -58,6 +72,17 @@ pub struct CoordinatorChatResponse {
     /// Captured pane output from a routed command, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_output: Option<String>,
+    /// Estimated USD cost of the SM provider call for the DOC-13 TUI status bar.
+    ///
+    /// Additive (SM-7): present only on the SM path; absent (skipped) on the
+    /// legacy `LlmOverseer` and prefix-routing paths, so the existing TUI
+    /// response shape is preserved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    /// The SM conversation id this turn used, echoed so a follow-up can continue
+    /// the same rolling context. Additive (SM-7); present only on the SM path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conv_id: Option<String>,
 }
 
 /// `GET /api/v1/coordinator/context` — a cross-session activity snapshot.
@@ -82,18 +107,28 @@ pub async fn coordinator_context(
 
 /// `POST /api/v1/coordinator/chat` — coordinator message; route or answer.
 ///
+/// Also serves the DOC-14 D0.1 alias `POST /api/v1/session-manager/chat` (same
+/// handler).
+///
 /// Why: the coordinator is the operator's one conversational surface over every
-/// session. A message prefixed with `@session:` is a direct command — the LLM
-/// is deliberately not involved — while a plain message is answered by the LLM
-/// chat assistant handed the full session snapshot as context.
+/// session. A message prefixed with `@session:` is a direct command — no model
+/// is involved — while a plain message is answered by the Session Manager (SM-7)
+/// when it is enabled, else by the legacy LLM chat assistant.
 /// What: builds a [`CoordinatorContext`], then [`parse_session_prefix`] checks
 /// for an `@prefix:` route. On a match it sends the remaining text to that
-/// session's tmux pane (via [`TmuxService`]), captures the output, and returns
-/// it as `command_output`. With no prefix it runs [`crate::daemon::llm_overseer::LlmOverseer::chat`]
-/// over the client history, prepending the coordinator system prompt as the
-/// first turn so the model sees every session. Requires a configured LLM
-/// overseer for the non-prefix path (else `503`).
-/// Test: `coordinator_chat_routes_unknown_session`, `coordinator_chat_without_overseer_is_503`.
+/// session's tmux pane (via [`TmuxService`]) and returns the captured output as
+/// `command_output`. With no prefix: when `[session_manager].enabled = true` AND
+/// a provider is wired, the turn routes through
+/// [`SessionManagerAgent::chat`](crate::core::sm::SessionManagerAgent::chat) —
+/// composing the §7.5 working prompt and returning `reply` + the additive `cost`
+/// and `conv_id` (a graceful degraded result maps to `503`). Otherwise it falls
+/// back to the legacy [`LlmOverseer::chat`](crate::daemon::llm_overseer::LlmOverseer::chat)
+/// over the client history, which requires a configured overseer (else `503`).
+/// The DOC-13 TUI request/response contract is preserved: existing fields are
+/// unchanged and `cost`/`conv_id` are additive (absent on the legacy paths).
+/// Test: `coordinator_chat_routes_unknown_session`,
+/// `coordinator_chat_without_overseer_is_503`, and the SM-path suite in
+/// `coordinator_sm_tests.rs`.
 #[utoipa::path(
     post,
     path = "/api/v1/coordinator/chat",
@@ -111,7 +146,9 @@ pub async fn coordinator_chat(
     let context = build_coordinator_context(&state);
 
     // A `@prefix:` message is a direct command — route it straight to the
-    // session's tmux pane and return the captured output, no LLM involved.
+    // session's tmux pane and return the captured output, no LLM involved. This
+    // path is identical whether or not the SM is enabled (deterministic routing
+    // is part of the SM's degraded surface too, §5.3).
     if let Some((session_name, command)) = parse_session_prefix(&body.message, &context.sessions) {
         let session = SessionService::new(&state).command_target(&session_name)?;
         TmuxService::send_command(&session, &command);
@@ -121,10 +158,25 @@ pub async fn coordinator_chat(
             reply: format!("Sent to {session_name}: {command}"),
             routed_to_session: Some(session_name),
             command_output: Some(output),
+            cost: None,
+            conv_id: None,
         }));
     }
 
-    // No prefix: answer via the LLM chat assistant, handing it the snapshot.
+    // SM path (SM-7): when the Session Manager is enabled AND a provider is
+    // wired, route the free-text turn through the SM agent — superseding the
+    // legacy LlmOverseer. The SM composes the §7.5 working prompt (system prompt
+    // + compressed context + recall + recent rounds + message) and returns the
+    // reply, per-call cost, and conversation id. A graceful degraded result
+    // (`enabled = true` but no provider credentials) maps to the documented 503
+    // notice; any other SM error is a genuine 500.
+    let sm = state.session_manager_agent();
+    if sm.is_enabled() && sm.has_runtime() {
+        return route_through_session_manager(&sm, &body).await;
+    }
+
+    // Fallback (SM disabled): answer via the legacy LLM chat assistant, handing
+    // it the snapshot. This is byte-for-byte today's behavior.
     let overseer = state.llm_overseer().ok_or_else(|| {
         DaemonError::ServiceUnavailable(
             "LLM chat is not configured (no OpenRouter API key)".to_string(),
@@ -148,5 +200,39 @@ pub async fn coordinator_chat(
         reply,
         routed_to_session: None,
         command_output: None,
+        cost: None,
+        conv_id: None,
     }))
+}
+
+/// Drive one Session Manager chat turn and map it onto the wire response (SM-7).
+///
+/// Why: isolating the SM branch keeps [`coordinator_chat`] readable and gives the
+/// error mapping (graceful degraded → 503; real failure → 500) one home. The SM
+/// owns its rolling context, so the legacy caller-owned `history` is irrelevant
+/// here — `conv_id` continues the conversation instead.
+/// What: calls [`SessionManagerAgent::chat`](crate::core::sm::SessionManagerAgent::chat)
+/// with the message + optional `conv_id`; on success fills `reply`, the additive
+/// `cost` and `conv_id` fields (leaving the routed/output fields `None` so the
+/// TUI contract holds); on [`SmAgentError::Degraded`] returns
+/// [`DaemonError::ServiceUnavailable`] (503); on any other error returns
+/// [`DaemonError::Internal`] (500).
+/// Test: `sm_chat_returns_reply_and_cost`, `sm_chat_degraded_is_503`,
+/// `coordinator_and_session_manager_aliases_match` in `api_tests`.
+async fn route_through_session_manager(
+    sm: &crate::core::sm::SessionManagerAgent,
+    body: &CoordinatorChatRequest,
+) -> Result<Json<CoordinatorChatResponse>, DaemonError> {
+    use crate::core::sm::SmAgentError;
+    match sm.chat(&body.message, body.conv_id.as_deref()).await {
+        Ok(outcome) => Ok(Json(CoordinatorChatResponse {
+            reply: outcome.reply,
+            routed_to_session: None,
+            command_output: None,
+            cost: Some(outcome.cost_usd),
+            conv_id: Some(outcome.conv_id),
+        })),
+        Err(SmAgentError::Degraded(notice)) => Err(DaemonError::ServiceUnavailable(notice)),
+        Err(e) => Err(DaemonError::Internal(e.to_string())),
+    }
 }

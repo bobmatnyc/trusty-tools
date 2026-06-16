@@ -215,13 +215,21 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: OverseerAction,
     },
-    /// Send a message to the cross-session coordinator and print its reply.
+    /// Send a message to the cross-session coordinator / session manager.
     ///
     /// A message prefixed with `@session:` routes a command at that session;
-    /// a plain message is answered by the LLM with full session context.
-    #[command(alias = "coord")]
+    /// a plain message is answered by the session manager (or the legacy LLM
+    /// chat assistant when the SM is disabled) with full session context.
+    ///
+    /// DOC-14 D0.2: `tm sm` and `tm session-manager` are visible aliases for
+    /// `tm coordinator` — all reach the same code path. `coord` is a hidden alias.
+    #[command(
+        visible_alias = "sm",
+        visible_alias = "session-manager",
+        alias = "coord"
+    )]
     Coordinator {
-        /// The message to send to the coordinator.
+        /// The message to send to the coordinator / session manager.
         message: String,
     },
 

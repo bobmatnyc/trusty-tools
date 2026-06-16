@@ -65,6 +65,23 @@ fn cli_parses_connect_with_dir() {
 }
 
 #[test]
+fn cli_sm_aliases_reach_coordinator() {
+    // DOC-14 D0.2: `tm coordinator`, `tm sm`, `tm session-manager`, and the
+    // hidden `tm coord` must all parse to the SAME `Command::Coordinator`, so
+    // every spelling reaches one code path.
+    for name in ["coordinator", "sm", "session-manager", "coord"] {
+        let cli = Cli::try_parse_from(["trusty-mpm", name, "hello there"])
+            .unwrap_or_else(|e| panic!("`tm {name}` must parse: {e}"));
+        match cli.command {
+            Command::Coordinator { message } => {
+                assert_eq!(message, "hello there", "`tm {name}` carries the message");
+            }
+            other => panic!("`tm {name}` must be Command::Coordinator, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn cli_parses_daemon_custom_addr() {
     let cli = Cli::try_parse_from(["trusty-mpm", "daemon", "--addr", "0.0.0.0:9000"]).unwrap();
     match cli.command {
