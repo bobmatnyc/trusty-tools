@@ -21,6 +21,11 @@
 #   TRUSTY_INSTALL_DIR     Install dir (default: ~/.local/bin)
 #   TRUSTY_YES             Set to 1 to skip all prompts (same as -y)
 #   TRUSTY_NO_MODIFY_PATH  Set to 1 to skip PATH modification
+#
+# Security note: This script is served over HTTPS, which is the primary
+# integrity guarantee. The installer script itself is not signed — if you
+# require a higher assurance level, download and review the script manually
+# before running it. All downloaded binaries are SHA-256 verified.
 
 set -e
 
@@ -174,10 +179,10 @@ resolve_version() {
 
     # Sanity-check it looks like a version number (not a garbled API response).
     case "${_ver}" in
-        [0-9]*.[0-9]*)
-            ;; # looks like a semver — proceed
+        [0-9]*.[0-9]*.[0-9]*)
+            ;; # X.Y.Z semver — proceed
         *)
-            die "could not parse version from API response; got: '${_ver}'"
+            die "unexpected version string from API; got: '${_ver}' (expected X.Y.Z)"
             ;;
     esac
 
@@ -335,12 +340,15 @@ download_and_install() {
     fi
 
     mkdir -p "${_install_dir}" || die "failed to create install dir ${_install_dir}"
-    if ! install -m 0755 "${_src_bin}" "${_install_dir}/${BIN}" 2>/dev/null; then
-        cp "${_src_bin}" "${_install_dir}/${BIN}" \
+    _tmp_bin="${_install_dir}/.${BIN}.tmp.$$"
+    if ! install -m 0755 "${_src_bin}" "${_tmp_bin}" 2>/dev/null; then
+        cp "${_src_bin}" "${_tmp_bin}" \
             || die "failed to copy binary to ${_install_dir}"
-        chmod 0755 "${_install_dir}/${BIN}" \
-            || die "failed to set permissions on ${_install_dir}/${BIN}"
+        chmod 0755 "${_tmp_bin}" \
+            || die "failed to set permissions on temp install binary"
     fi
+    mv "${_tmp_bin}" "${_install_dir}/${BIN}" \
+        || die "failed to move binary into place at ${_install_dir}/${BIN}"
 
     say "Installed ${BIN} to ${_install_dir}/${BIN}"
 }
@@ -466,7 +474,7 @@ main() {
     _existing="$(command -v "${BIN}" 2>/dev/null || true)"
     _need_install="1"
     if [ -n "${_existing}" ]; then
-        _existing_ver="$("${_existing}" --version 2>/dev/null | awk '{print $NF}' || true)"
+        _existing_ver="$("${_existing}" --version 2>/dev/null | awk 'NR==1{print $2}' || true)"
         if [ "${_existing_ver}" = "${_version}" ]; then
             say "${BIN} ${_version} is already installed, skipping download."
             _need_install="0"
