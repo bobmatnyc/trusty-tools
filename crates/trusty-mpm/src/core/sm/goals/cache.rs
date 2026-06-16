@@ -121,6 +121,14 @@ impl GoalCache {
             TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::write(&tmp, &json).map_err(|source| SmGoalError::Io { source })?;
+        // Atomicity relies on POSIX rename-replace semantics: on macOS/Linux (the
+        // supported targets) rename atomically replaces an existing `target` on the
+        // same filesystem, so a reader sees either the old or the new file, never a
+        // partial write. On platforms WITHOUT rename-replace (notably Windows,
+        // where rename-over-existing can fail), a failed rename may leave the
+        // `.tmp.*` file behind; the best-effort cleanup below removes it on the
+        // error path. trusty-mpm targets macOS/Linux, so this is documented, not a
+        // bug we guard against here.
         std::fs::rename(&tmp, &target).map_err(|source| {
             // Best-effort cleanup of the temp file on a failed rename.
             let _ = std::fs::remove_file(&tmp);

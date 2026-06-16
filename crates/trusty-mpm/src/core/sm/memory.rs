@@ -346,7 +346,10 @@ impl SmMemory {
     /// What: ensures the palace, then lists drawers filtered to `tag` (no room
     /// filter, a generous cap), returning each matching drawer's raw `content`
     /// string. The goal store deserialises these back into `Goal`s. No fuzzy
-    /// scoring is involved.
+    /// scoring is involved. When the returned count approaches the cap (≥90%) a
+    /// `tracing::warn!` fires so a silent truncation of the rebuild becomes
+    /// OBSERVABLE — the cap should then be revisited rather than quietly dropping
+    /// goals.
     /// Test: `goals` module rebuild tests (`rebuild_*`) assert the full set
     /// round-trips through this enumeration.
     pub fn list_tagged(&self, tag: &str) -> SmMemoryResult<Vec<String>> {
@@ -354,11 +357,21 @@ impl SmMemory {
         // A cap far above any realistic live-goal count; `list_drawers` returns
         // up to this many, sorted by importance (irrelevant here — we take all).
         const LIST_CAP: usize = 100_000;
-        Ok(handle
-            .list_drawers(None, Some(tag.to_string()), LIST_CAP)
-            .into_iter()
-            .map(|d| d.content)
-            .collect())
+        // Warn before the cap silently truncates the enumeration. list_drawers
+        // caps at LIST_CAP, so a returned count at/near it means entries may have
+        // been dropped from the rebuild and the cap must be revisited.
+        const LIST_WARN_THRESHOLD: usize = LIST_CAP / 10 * 9; // 90% of the cap.
+        let drawers = handle.list_drawers(None, Some(tag.to_string()), LIST_CAP);
+        if drawers.len() >= LIST_WARN_THRESHOLD {
+            tracing::warn!(
+                tag,
+                returned = drawers.len(),
+                cap = LIST_CAP,
+                "SM palace enumeration is approaching LIST_CAP; goal entries may be \
+                 truncated on rebuild — revisit the cap"
+            );
+        }
+        Ok(drawers.into_iter().map(|d| d.content).collect())
     }
 
     /// Number of palaces currently persisted under the SM data root.

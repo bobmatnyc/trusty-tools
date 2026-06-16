@@ -156,10 +156,14 @@ impl SmGoalStore {
     /// Why: intake (§3.4 phase 1) turns operator intent into a tracked goal with a
     /// STABLE id that survives restarts. The id is generated once here and is the
     /// join key the palace and cache key on.
-    /// What: mints `g-<short-uuid>`, builds a `Pending` [`Goal`] with the injected
-    /// clock, inserts it, then dual-writes (palace truth first, then cache).
-    /// Returns the created goal.
-    /// Test: `create_assigns_stable_id`, `create_dual_persists`.
+    /// What: mints `g-<uuid-prefix>`, builds a `Pending` [`Goal`] with the injected
+    /// clock, inserts it, then dual-writes (palace truth first, then cache). If the
+    /// persist fails the freshly-inserted goal is REMOVED from the in-memory map so
+    /// a failed create leaves the store byte-identical to before the call (no
+    /// phantom goal visible to `all()`/`get()`). Returns the created goal.
+    /// Test: `create_assigns_stable_id_that_survives_reload`,
+    /// `mutations_dual_persist_palace_and_cache`,
+    /// `failed_create_leaves_no_phantom_goal`.
     pub async fn create(
         &mut self,
         description: impl Into<String>,
@@ -168,7 +172,12 @@ impl SmGoalStore {
         let id = new_goal_id();
         let goal = Goal::new(id.clone(), description, acceptance, (self.clock)());
         self.goals.insert(id.clone(), goal);
-        self.persist(&id).await?;
+        // Atomic w.r.t. the in-memory map: a persist failure must not leave a
+        // phantom goal that was never durably written. Roll the insert back.
+        if let Err(e) = self.persist(&id).await {
+            self.goals.remove(&id);
+            return Err(e);
+        }
         Ok(self.goals.get(&id).cloned().expect("just inserted"))
     }
 
@@ -178,15 +187,20 @@ impl SmGoalStore {
     /// the close gate can derive from the per-session verification state. Linking
     /// must recompute the derived `progress` and dual-persist.
     /// What: appends `link` to the goal's `sessions`, moves a `Pending` goal to
-    /// `InProgress`, recomputes `progress`, bumps `updated`, then dual-writes.
+    /// `InProgress`, recomputes `progress`, bumps `updated`, then dual-writes. The
+    /// prior goal is snapshotted first; on persist failure it is RESTORED so a
+    /// failed link leaves the goal byte-identical to before the call.
     /// Returns the updated goal. Unknown id → [`SmGoalError::NotFound`].
-    /// Test: `link_updates_progress`, `link_unknown_goal_is_not_found`.
+    /// Test: `link_updates_progress`, `link_unknown_goal_is_not_found`,
+    /// `failed_mutation_leaves_existing_goal_unchanged`.
     pub async fn link(&mut self, goal_id: &str, link: SessionLink) -> SmGoalResult<Goal> {
+        let prior = self
+            .goals
+            .get(goal_id)
+            .cloned()
+            .ok_or_else(|| SmGoalError::NotFound(goal_id.to_string()))?;
         {
-            let goal = self
-                .goals
-                .get_mut(goal_id)
-                .ok_or_else(|| SmGoalError::NotFound(goal_id.to_string()))?;
+            let goal = self.goals.get_mut(goal_id).expect("present");
             goal.sessions.push(link);
             if goal.status == GoalStatus::Pending {
                 goal.status = GoalStatus::InProgress;
@@ -194,7 +208,7 @@ impl SmGoalStore {
             goal.recompute_progress();
             goal.updated = (self.clock)();
         }
-        self.persist(goal_id).await?;
+        self.persist_or_restore(goal_id, prior).await?;
         Ok(self.goals.get(goal_id).cloned().expect("present"))
     }
 
@@ -205,21 +219,34 @@ impl SmGoalStore {
     /// decision/blocker note; progress is re-derived from the updated states.
     /// What: finds the [`SessionLink`] by `session_id`, applies the supplied
     /// non-`None` fields, appends any `note` to the goal, recomputes `progress`,
-    /// bumps `updated`, then dual-writes. Returns the updated goal. Unknown goal or
-    /// session → [`SmGoalError::NotFound`].
-    /// Test: `update_sets_state_and_evidence`, `update_appends_note`,
-    /// `update_unknown_session_is_not_found`.
+    /// bumps `updated`, then dual-writes. The prior goal is snapshotted first; on
+    /// persist failure it is RESTORED so a failed update leaves the goal
+    /// byte-identical to before the call. Returns the updated goal. Unknown goal or
+    /// session → [`SmGoalError::NotFound`] (and the goal is left unchanged).
+    /// Test: `update_sets_state_evidence_and_note`,
+    /// `update_unknown_session_is_not_found`,
+    /// `failed_mutation_leaves_existing_goal_unchanged`.
     pub async fn update(&mut self, goal_id: &str, upd: SessionUpdate) -> SmGoalResult<Goal> {
+        let prior = self
+            .goals
+            .get(goal_id)
+            .cloned()
+            .ok_or_else(|| SmGoalError::NotFound(goal_id.to_string()))?;
         {
-            let goal = self
-                .goals
-                .get_mut(goal_id)
-                .ok_or_else(|| SmGoalError::NotFound(goal_id.to_string()))?;
+            let goal = self.goals.get_mut(goal_id).expect("present");
             let link = goal
                 .sessions
                 .iter_mut()
-                .find(|s| s.session_id == upd.session_id)
-                .ok_or_else(|| SmGoalError::NotFound(upd.session_id.clone()))?;
+                .find(|s| s.session_id == upd.session_id);
+            let link = match link {
+                Some(link) => link,
+                None => {
+                    // Unknown session: nothing mutated yet, but restore the prior
+                    // snapshot defensively so the goal is provably unchanged.
+                    self.goals.insert(goal_id.to_string(), prior);
+                    return Err(SmGoalError::NotFound(upd.session_id));
+                }
+            };
             if let Some(state) = upd.state {
                 link.state = state;
             }
@@ -232,7 +259,7 @@ impl SmGoalStore {
             goal.recompute_progress();
             goal.updated = (self.clock)();
         }
-        self.persist(goal_id).await?;
+        self.persist_or_restore(goal_id, prior).await?;
         Ok(self.goals.get(goal_id).cloned().expect("present"))
     }
 
@@ -240,19 +267,24 @@ impl SmGoalStore {
     ///
     /// Why: the SM records decisions and blockers against a goal independently of
     /// any session update; a dedicated path keeps that intent explicit.
-    /// What: pushes `note`, bumps `updated`, dual-writes. Unknown id →
+    /// What: pushes `note`, bumps `updated`, dual-writes. The prior goal is
+    /// snapshotted first; on persist failure it is RESTORED so a failed note leaves
+    /// the goal byte-identical to before the call. Unknown id →
     /// [`SmGoalError::NotFound`].
-    /// Test: `note_appends_and_persists`.
+    /// Test: `note_appends_and_persists`,
+    /// `failed_mutation_leaves_existing_goal_unchanged`.
     pub async fn note(&mut self, goal_id: &str, note: impl Into<String>) -> SmGoalResult<Goal> {
+        let prior = self
+            .goals
+            .get(goal_id)
+            .cloned()
+            .ok_or_else(|| SmGoalError::NotFound(goal_id.to_string()))?;
         {
-            let goal = self
-                .goals
-                .get_mut(goal_id)
-                .ok_or_else(|| SmGoalError::NotFound(goal_id.to_string()))?;
+            let goal = self.goals.get_mut(goal_id).expect("present");
             goal.notes.push(note.into());
             goal.updated = (self.clock)();
         }
-        self.persist(goal_id).await?;
+        self.persist_or_restore(goal_id, prior).await?;
         Ok(self.goals.get(goal_id).cloned().expect("present"))
     }
 
@@ -266,16 +298,20 @@ impl SmGoalStore {
     /// What: if `status == Done` and not [`Goal::all_verified`], returns
     /// [`SmGoalError::VerificationGate`] with the verified/total counts and does
     /// NOT mutate or persist. Otherwise sets the status, bumps `updated`, and
-    /// dual-writes. Returns the updated goal. Unknown id →
-    /// [`SmGoalError::NotFound`].
+    /// dual-writes. The prior goal is snapshotted first; on persist failure it is
+    /// RESTORED so a failed status change leaves the goal byte-identical to before
+    /// the call. Returns the updated goal. Unknown id → [`SmGoalError::NotFound`].
     /// Test: `close_without_all_verified_is_rejected`,
-    /// `close_with_all_verified_succeeds`, `set_blocked_has_no_gate`.
+    /// `close_with_all_verified_succeeds`, `set_blocked_has_no_gate`,
+    /// `failed_mutation_leaves_existing_goal_unchanged`.
     pub async fn set_status(&mut self, goal_id: &str, status: GoalStatus) -> SmGoalResult<Goal> {
+        let prior = self
+            .goals
+            .get(goal_id)
+            .cloned()
+            .ok_or_else(|| SmGoalError::NotFound(goal_id.to_string()))?;
         {
-            let goal = self
-                .goals
-                .get_mut(goal_id)
-                .ok_or_else(|| SmGoalError::NotFound(goal_id.to_string()))?;
+            let goal = self.goals.get_mut(goal_id).expect("present");
             if status == GoalStatus::Done && !goal.all_verified() {
                 let total = goal.sessions.len();
                 let verified = goal
@@ -283,6 +319,8 @@ impl SmGoalStore {
                     .iter()
                     .filter(|s| s.state.is_verified())
                     .count();
+                // Gate failure happens BEFORE any mutation, so the goal is already
+                // unchanged; just reject.
                 return Err(SmGoalError::VerificationGate {
                     goal_id: goal_id.to_string(),
                     verified,
@@ -292,7 +330,7 @@ impl SmGoalStore {
             goal.status = status;
             goal.updated = (self.clock)();
         }
-        self.persist(goal_id).await?;
+        self.persist_or_restore(goal_id, prior).await?;
         Ok(self.goals.get(goal_id).cloned().expect("present"))
     }
 
@@ -351,6 +389,26 @@ impl SmGoalStore {
         self.persist_cache()
     }
 
+    /// Dual-write a mutated goal, RESTORING its prior value if the write fails.
+    ///
+    /// Why: every existing-goal mutator (`link`/`update`/`note`/`set_status`)
+    /// mutates the in-memory map BEFORE the durable write. If the palace write (or
+    /// the cache re-derive) fails, the map would otherwise be left holding a
+    /// mutation that was never durably persisted — a phantom diverging from truth.
+    /// Centralising the rollback here keeps every mutator ATOMIC w.r.t. the map and
+    /// avoids repeating the snapshot/restore dance at each call site.
+    /// What: calls [`SmGoalStore::persist`]; on `Err`, re-inserts `prior` (the
+    /// pre-mutation snapshot) under `goal_id` so the observed goal is byte-identical
+    /// to before the call, then propagates the error.
+    /// Test: `failed_mutation_leaves_existing_goal_unchanged`.
+    async fn persist_or_restore(&mut self, goal_id: &str, prior: Goal) -> SmGoalResult<()> {
+        if let Err(e) = self.persist(goal_id).await {
+            self.goals.insert(goal_id.to_string(), prior);
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// Re-write the `goals.json` cache from the full in-memory map (§9.4).
     ///
     /// Why: the cache is a faithful mirror of the live goal set; re-writing the
@@ -365,16 +423,29 @@ impl SmGoalStore {
     }
 }
 
-/// Mint a fresh stable goal id of the form `g-<short-uuid>` (§9.1).
+/// Number of hex chars of the v4 UUID kept in a goal id (§9.1).
+///
+/// Why: the palace/cache upsert KEYS on the goal id, so a collision silently
+/// overwrites an existing goal. An 8-char (32-bit) prefix has a ~50% birthday
+/// collision at only ~65k goals — far too small for a durable join key. Keeping
+/// 16 hex chars (64-bit) pushes the 50% birthday point to ~5 billion goals while
+/// still reading cleanly in logs/TUI.
+/// What: the slice width taken from the UUID's simple (dash-free) form.
+/// Test: `goal_id_has_64bit_width`.
+const GOAL_ID_HEX_WIDTH: usize = 16;
+
+/// Mint a fresh stable goal id of the form `g-<uuid-prefix>` (§9.1).
 ///
 /// Why: each goal needs an id that is unique and STABLE for its lifetime (the
-/// palace/cache join key). A v4 UUID gives collision-resistance; the `g-` prefix
-/// and the 8-char short form match the spec's `"g-<short-uuid>"` example and keep
+/// palace/cache join key). A v4 UUID gives collision-resistance; because the
+/// palace upserts by id, the prefix must be WIDE enough that birthday collisions
+/// are not a practical concern (see [`GOAL_ID_HEX_WIDTH`]). The `g-` prefix keeps
 /// the id readable in logs/TUI.
-/// What: returns `"g-"` followed by the first 8 hex chars of a fresh v4 UUID's
-/// simple (dash-free) form.
-/// Test: `create_assigns_stable_id` (stability across reload), `goal_id_is_prefixed`.
+/// What: returns `"g-"` followed by the first [`GOAL_ID_HEX_WIDTH`] hex chars of a
+/// fresh v4 UUID's simple (dash-free) form (64 bits of entropy).
+/// Test: `create_assigns_stable_id_that_survives_reload` (stability across reload),
+/// `goal_id_has_64bit_width` (prefix + width).
 fn new_goal_id() -> String {
     let uuid = Uuid::new_v4().simple().to_string();
-    format!("g-{}", &uuid[..8])
+    format!("g-{}", &uuid[..GOAL_ID_HEX_WIDTH])
 }

@@ -516,3 +516,134 @@ async fn palace_write_failure_propagates() {
         other => panic!("palace write failure must surface as Palace error, got {other:?}"),
     }
 }
+
+/// Why: goal ids are the palace/cache upsert key, so a too-narrow id space risks
+/// silent overwrites via birthday collisions. The id must carry 64 bits of entropy
+/// (16 hex chars) behind the `g-` prefix, not the old 32-bit (8-char) prefix.
+/// What: creates a goal and asserts its id is `g-` + 16 lowercase hex chars.
+/// Test: this is the test.
+#[tokio::test]
+async fn goal_id_has_64bit_width() {
+    let palace = MockPalace::new();
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = store_with(palace, &dir);
+
+    let id = store.create("widen me", vec![]).await.expect("create").id;
+    let hex = id.strip_prefix("g-").expect("id must be g-prefixed");
+    assert_eq!(
+        hex.len(),
+        16,
+        "id must carry 16 hex chars (64-bit) for collision resistance; got {id}"
+    );
+    assert!(
+        hex.chars().all(|c| c.is_ascii_hexdigit()),
+        "id body must be hex; got {id}"
+    );
+}
+
+/// Why: `create` must be ATOMIC w.r.t. the in-memory map — if the palace write
+/// fails, the freshly-inserted goal must NOT linger as a phantom visible to
+/// `all()`/`get()` (it was never durably written). The store must be clean.
+/// What: forces the palace to fail, attempts a create, asserts the `Palace` error
+/// AND that `all()` is empty and the would-be goal is absent.
+/// Test: this is the test.
+#[tokio::test]
+async fn failed_create_leaves_no_phantom_goal() {
+    let palace = MockPalace::new();
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = store_with(palace.clone(), &dir);
+
+    palace.set_fail(true);
+    match store.create("phantom", vec![]).await {
+        Err(SmGoalError::Palace { .. }) => {}
+        other => panic!("expected Palace error on failed create, got {other:?}"),
+    }
+
+    assert!(
+        store.all().is_empty(),
+        "a failed create must leave NO phantom goal in the in-memory map"
+    );
+    assert_eq!(
+        palace.entry_count(),
+        0,
+        "nothing was durably written, so the palace must hold nothing"
+    );
+}
+
+/// Why: every existing-goal mutator (`link`/`update`/`note`/`set_status`) must be
+/// ATOMIC w.r.t. the map — if the palace write fails mid-mutation, the goal
+/// observed afterward must be byte-identical to before the call (no half-applied
+/// mutation lingering). This proves the snapshot/restore rollback.
+/// What: creates + links a goal (succeeds), snapshots it, then forces the palace to
+/// fail and drives each mutator in turn; after each failure asserts the `Palace`
+/// error AND that `get()` returns the UNCHANGED prior goal.
+/// Test: this is the test.
+#[tokio::test]
+async fn failed_mutation_leaves_existing_goal_unchanged() {
+    let palace = MockPalace::new();
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = store_with(palace.clone(), &dir);
+
+    let id = store.create("durable", vec![]).await.expect("create").id;
+    store
+        .link(&id, SessionLink::launched("s-0", "task"))
+        .await
+        .expect("link");
+
+    // Snapshot the goal in its committed state.
+    let before = store.get(&id).expect("present").clone();
+
+    // From now on every palace write fails — each mutator must roll its map change
+    // back so the goal stays byte-identical to `before`.
+    palace.set_fail(true);
+
+    let assert_unchanged = |store: &SmGoalStore, ctx: &str| {
+        let after = store.get(&id).expect("goal must still be present");
+        assert_eq!(
+            after, &before,
+            "after a failed {ctx} the goal must be UNCHANGED"
+        );
+    };
+
+    // link
+    match store
+        .link(&id, SessionLink::launched("s-1", "second"))
+        .await
+    {
+        Err(SmGoalError::Palace { .. }) => {}
+        other => panic!("failed link must surface Palace error, got {other:?}"),
+    }
+    assert_unchanged(&store, "link");
+
+    // update (existing session s-0)
+    match store
+        .update(
+            &id,
+            SessionUpdate {
+                session_id: "s-0".into(),
+                state: Some(SessionTaskState::Verified),
+                evidence: Some("ev".into()),
+                note: Some("note".into()),
+            },
+        )
+        .await
+    {
+        Err(SmGoalError::Palace { .. }) => {}
+        other => panic!("failed update must surface Palace error, got {other:?}"),
+    }
+    assert_unchanged(&store, "update");
+
+    // note
+    match store.note(&id, "blocker noted").await {
+        Err(SmGoalError::Palace { .. }) => {}
+        other => panic!("failed note must surface Palace error, got {other:?}"),
+    }
+    assert_unchanged(&store, "note");
+
+    // set_status (Blocked is ungated, so it reaches the persist)
+    match store.set_status(&id, GoalStatus::Blocked).await {
+        Err(SmGoalError::Palace { .. }) => {}
+        other => panic!("failed set_status must surface Palace error, got {other:?}"),
+    }
+    assert_unchanged(&store, "set_status");
+}
