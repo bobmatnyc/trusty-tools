@@ -64,6 +64,17 @@ pub mod log_buffer;
 /// Test: `cargo test -p trusty-common sys_metrics`.
 pub mod sys_metrics;
 
+/// Robust executable discovery and daemon `PATH` composition.
+///
+/// Why: launchd relaunches daemons with a minimal `PATH`, breaking spawns of
+/// Homebrew/user-installed tools (`tmux`, `claude`) until the inherited `PATH`
+/// is patched (#1298). This module composes the full set of well-known bin
+/// dirs for a generated launchd plist and provides a `PATH`-then-well-known
+/// binary resolver so the daemon spawns survive a minimal inherited `PATH`.
+/// What: `daemon_path_dirs`, `daemon_path_env`, `resolve_binary`.
+/// Test: `cargo test -p trusty-common bin_resolve`.
+pub mod bin_resolve;
+
 /// macOS LaunchAgent generation and lifecycle management. macOS-only —
 /// the module compiles to nothing on every other platform.
 #[cfg(target_os = "macos")]

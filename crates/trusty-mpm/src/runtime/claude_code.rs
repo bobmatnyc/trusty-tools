@@ -10,7 +10,6 @@
 //! `claude_code_adapter_identifies`.
 
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
 use tracing::debug;
@@ -33,13 +32,17 @@ use super::RuntimeError;
 /// shared [`crate::core::model_inject::SETTING_SOURCES_FLAG`] /
 /// [`crate::core::model_inject::PERMISSION_MODE_FLAG`] constants so this spawn
 /// path and the CLI launch path can never drift.
-/// What: built once at first use from `env -u ANTHROPIC_API_KEY claude` plus the
-/// two shared flag constants; piped to `tmux send-keys … Enter`.
+/// What: built from `env -u ANTHROPIC_API_KEY <claude_bin>` plus the two shared
+/// flag constants; piped to `tmux send-keys … Enter`. `claude_bin` is the
+/// resolved binary — an absolute path under launchd so the pane (which inherits
+/// the daemon's minimal `PATH`) does not need `claude` on its own `PATH` (#1298).
 /// Test: `spawn_command_contains_env_scrub`,
-/// `spawn_command_contains_isolation_flags`.
-fn spawn_command() -> String {
+/// `spawn_command_contains_isolation_flags`,
+/// `spawn_command_uses_resolved_binary`.
+fn spawn_command(claude_bin: &str) -> String {
     format!(
-        "env -u ANTHROPIC_API_KEY claude {} {}",
+        "env -u ANTHROPIC_API_KEY {} {} {}",
+        claude_bin,
         crate::core::model_inject::SETTING_SOURCES_FLAG,
         crate::core::model_inject::PERMISSION_MODE_FLAG,
     )
@@ -69,18 +72,20 @@ impl ClaudeCodeAdapter {
         Self { tmux }
     }
 
-    /// Return `true` if the `claude` binary can be found on `PATH`.
+    /// Resolve the `claude` binary to an absolute path, or `None` if missing.
     ///
-    /// Why: `spawn` must return `RuntimeError::BinaryNotFound` rather than
-    /// sending a command that silently fails inside the pane.
-    /// What: runs `which claude` and checks the exit status.
-    /// Test: `claude_code_adapter_binary_check`.
-    fn claude_available() -> bool {
-        Command::new("which")
-            .arg("claude")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+    /// Why: under launchd the daemon (and the tmux pane it spawns) inherits a
+    /// minimal `PATH` that omits `~/.local/bin` where Claude Code installs, so a
+    /// bare `claude` on the pane would fail to launch (spawn `[errored]`, #1298).
+    /// Resolving to an absolute path here lets the spawn command invoke claude
+    /// by full path, independent of the pane's `PATH`.
+    /// What: delegates to [`trusty_common::bin_resolve::resolve_binary`] which
+    /// checks the live `PATH` first then the well-known daemon dirs (Homebrew +
+    /// `~/.local/bin` + `~/.cargo/bin`); returns the resolved path as a `String`.
+    /// Test: `claude_code_adapter_binary_check_returns_option`.
+    fn resolve_claude() -> Option<String> {
+        trusty_common::bin_resolve::resolve_binary("claude")
+            .and_then(|p| p.to_str().map(str::to_owned))
     }
 }
 
@@ -89,26 +94,30 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     ///
     /// Why: the session manager calls this after creating the tmux pane so the
     /// actual agent process starts inside it.
-    /// What: checks that `claude` is on PATH (returns `BinaryNotFound` if not),
-    /// then sends [`spawn_command`] (`env -u ANTHROPIC_API_KEY claude` plus the
+    /// What: resolves `claude` to an absolute path (returns `BinaryNotFound`
+    /// if it cannot be found on `PATH` or in the well-known daemon dirs), then
+    /// sends [`spawn_command`] (`env -u ANTHROPIC_API_KEY <abs-claude>` plus the
     /// isolation/permission flags) to the pane; the task is logged for
     /// observability but not passed to the command (Claude Code reads
     /// instructions from CLAUDE.md or an interactive prompt).
     /// Test: `spawn_sends_env_scrub_when_binary_available`.
     fn spawn(&self, tmux_name: &str, cwd: &Path, task: &str) -> Result<(), RuntimeError> {
-        if !Self::claude_available() {
-            return Err(RuntimeError::BinaryNotFound(
-                "claude binary not found on PATH — install Claude Code first".into(),
-            ));
-        }
+        let claude_bin = Self::resolve_claude().ok_or_else(|| {
+            RuntimeError::BinaryNotFound(
+                "claude binary not found on PATH or in well-known dirs \
+                 (e.g. ~/.local/bin) — install Claude Code first"
+                    .into(),
+            )
+        })?;
         debug!(
             session = %tmux_name,
             cwd = %cwd.display(),
             task = %task,
+            claude = %claude_bin,
             "spawning claude-code in tmux pane"
         );
         self.tmux
-            .send_line(tmux_name, &spawn_command())
+            .send_line(tmux_name, &spawn_command(&claude_bin))
             .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))
     }
 
@@ -139,7 +148,7 @@ mod tests {
     fn spawn_command_contains_env_scrub() {
         // The spawn command must always strip the API key from the environment
         // so the session falls back to OAuth in ~/.claude.json.
-        let cmd = spawn_command();
+        let cmd = spawn_command("claude");
         assert!(
             cmd.contains("env -u ANTHROPIC_API_KEY"),
             "spawn command must contain env scrub: {cmd}"
@@ -154,7 +163,7 @@ mod tests {
     fn spawn_command_contains_isolation_flags() {
         // Why (#1269): the session_manager spawn path must isolate from the
         // user's global settings and run unattended, exactly like the CLI path.
-        let cmd = spawn_command();
+        let cmd = spawn_command("claude");
         assert!(
             cmd.contains("--setting-sources project,local"),
             "spawn command must isolate settings: {cmd}"
@@ -166,19 +175,33 @@ mod tests {
     }
 
     #[test]
-    fn claude_code_adapter_binary_check_returns_bool() {
-        // Just assert the function returns without panicking; we don't assert
-        // the result because `claude` may or may not be on PATH in CI.
-        let _ = ClaudeCodeAdapter::claude_available();
+    fn spawn_command_uses_resolved_binary() {
+        // Why (#1298): under launchd the pane inherits a minimal PATH, so the
+        // spawn command must invoke claude by the resolved (absolute) path
+        // rather than a bare `claude` that the pane's PATH cannot find.
+        let cmd = spawn_command("/Users/me/.local/bin/claude");
+        assert!(
+            cmd.contains("env -u ANTHROPIC_API_KEY /Users/me/.local/bin/claude "),
+            "spawn command must invoke the resolved absolute claude path: {cmd}"
+        );
+    }
+
+    #[test]
+    fn claude_code_adapter_binary_check_returns_option() {
+        // resolve_claude returns Some(path) or None without panicking; when it
+        // resolves, the path must be a non-empty absolute-ish string.
+        if let Some(p) = ClaudeCodeAdapter::resolve_claude() {
+            assert!(!p.is_empty(), "resolved claude path must be non-empty");
+        }
     }
 
     #[test]
     fn spawn_sends_env_scrub_when_binary_available() {
         // Patch: if claude is not available this test is a no-op (we cannot
         // install it in CI). We only assert the send when the binary exists.
-        if !ClaudeCodeAdapter::claude_available() {
+        let Some(claude_bin) = ClaudeCodeAdapter::resolve_claude() else {
             return;
-        }
+        };
         let fake = FakeTmux::new();
         let adapter = ClaudeCodeAdapter::new(fake.clone());
         adapter
@@ -187,6 +210,6 @@ mod tests {
         let sends = fake.sends.lock().unwrap();
         assert_eq!(sends.len(), 1);
         assert_eq!(sends[0].0, "tmpm-test");
-        assert_eq!(sends[0].1, spawn_command());
+        assert_eq!(sends[0].1, spawn_command(&claude_bin));
     }
 }

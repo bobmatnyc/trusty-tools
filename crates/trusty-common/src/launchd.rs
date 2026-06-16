@@ -97,6 +97,30 @@ pub struct LaunchdConfig {
 }
 
 impl LaunchdConfig {
+    /// Ensure the agent's environment exports a full `PATH` covering Homebrew
+    /// and user bin dirs, returning `self` for builder-style chaining.
+    ///
+    /// Why: macOS launchd relaunches LaunchAgents with a minimal `PATH`
+    /// (`/usr/bin:/bin:/usr/sbin:/sbin`). Daemons that shell out to Homebrew or
+    /// user-installed tools (`tmux` at `/opt/homebrew/bin`, `claude` at
+    /// `~/.local/bin`) then fail before reaching application logic, and every
+    /// daemon restart re-breaks them until the plist is hand-patched (#1298).
+    /// Seeding `PATH` into the generated plist makes the fix survive restarts.
+    /// What: if the caller has not already supplied a `PATH` env var, pushes a
+    /// `("PATH", `[`crate::bin_resolve::daemon_path_env`]`())` entry. A
+    /// caller-provided `PATH` is left untouched so explicit overrides win.
+    /// Test: `with_daemon_path_seeds_full_path`,
+    /// `with_daemon_path_preserves_explicit_path`.
+    #[must_use]
+    pub fn with_daemon_path(mut self) -> Self {
+        let has_path = self.env_vars.iter().any(|(k, _)| k == "PATH");
+        if !has_path {
+            self.env_vars
+                .push(("PATH".to_string(), crate::bin_resolve::daemon_path_env()));
+        }
+        self
+    }
+
     /// Render the launchd plist XML for this agent.
     ///
     /// Why: launchd consumes a property-list XML document; generating it in one
@@ -393,6 +417,48 @@ mod tests {
         assert!(xml.contains("<key>EnvironmentVariables</key>"));
         assert!(xml.contains("<key>RUST_LOG</key>"));
         assert!(xml.contains("<string>info</string>"));
+    }
+
+    /// Why: #1298 — every generated launchd plist for a daemon that spawns
+    /// `tmux`/`claude` must export a `PATH` covering Homebrew and the expanded
+    /// user bin dirs, or the daemon fails after each restart under launchd's
+    /// minimal `PATH`. This asserts the rendered plist carries that `PATH`.
+    /// What: builds a config with `with_daemon_path`, renders, and checks the
+    /// `EnvironmentVariables` `PATH` string contains `/opt/homebrew/bin`, the
+    /// expanded `~/.local/bin`, and the expanded `~/.cargo/bin`.
+    /// Test: itself.
+    #[test]
+    fn with_daemon_path_seeds_full_path() {
+        let home = dirs::home_dir().expect("home dir resolvable in test env");
+        let xml = sample(KeepAlive::Always)
+            .with_daemon_path()
+            .render_plist()
+            .unwrap();
+        assert!(xml.contains("<key>EnvironmentVariables</key>"));
+        assert!(xml.contains("<key>PATH</key>"));
+        assert!(
+            xml.contains("/opt/homebrew/bin"),
+            "plist PATH must include Homebrew bin dir"
+        );
+        assert!(
+            xml.contains(home.join(".local/bin").to_str().unwrap()),
+            "plist PATH must include expanded ~/.local/bin"
+        );
+        assert!(
+            xml.contains(home.join(".cargo/bin").to_str().unwrap()),
+            "plist PATH must include expanded ~/.cargo/bin"
+        );
+    }
+
+    #[test]
+    fn with_daemon_path_preserves_explicit_path() {
+        let mut cfg = sample(KeepAlive::Always);
+        cfg.env_vars = vec![("PATH".to_string(), "/custom/only".to_string())];
+        let cfg = cfg.with_daemon_path();
+        let path_entries: Vec<&(String, String)> =
+            cfg.env_vars.iter().filter(|(k, _)| k == "PATH").collect();
+        assert_eq!(path_entries.len(), 1, "must not duplicate an explicit PATH");
+        assert_eq!(path_entries[0].1, "/custom/only");
     }
 
     #[test]
