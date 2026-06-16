@@ -31,14 +31,20 @@ daemon = ["mcp",
           "dep:utoipa-swagger-ui"]
 
 # `mcp` gates the MCP server library module.
-# `async-trait` is needed by the OrchestratorBackend trait definition.
-mcp = ["dep:async-trait"]
+# (`async-trait`, used by the OrchestratorBackend trait, is now an always-on
+# dependency because the SM providers' `LlmProvider` trait needs it too — SM-2.)
+mcp = []
 
 # `tui` gates the TUI library module (`tm tui`).
 tui = ["dep:ratatui", "dep:crossterm"]
 
 # `telegram` gates the Telegram bot library module (`tm telegram`).
 telegram = ["dep:teloxide", "dep:tokio-util"]
+
+# `bedrock` gates the Session Manager's AWS Bedrock provider (SM-2, DOC-14 §5.1).
+# NOT in `default`: it pulls the heavy `aws-sdk-bedrockruntime` stack, so the
+# Bedrock provider weight is strictly opt-in. Build/test with `--features bedrock`.
+bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-types"]
 
 # `gui` is intentionally a no-dep CLI-gating feature. The `tm gui` subcommand
 # is ALWAYS available; this flag exists only so the subcommand can optionally
@@ -120,6 +126,10 @@ jsonwebtoken.workspace = true
 utoipa.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 tokio.workspace = true
+# async-trait is needed by the SM providers' `LlmProvider` trait (SM-2), which is
+# compiled unconditionally in the `core` library. (The `mcp` feature also lists it
+# below for the OrchestratorBackend trait; declaring it here makes it always-on.)
+async-trait.workspace = true
 
 # Always-on CLI/binary support deps.
 # These are pulled in by the bin targets; having them always-on is acceptable
@@ -135,8 +145,11 @@ which.workspace = true
 
 # ── Optional dependencies (feature-gated) ────────────────────────────────────
 
-# mcp feature
-async-trait = { workspace = true, optional = true }
+# bedrock feature (SM-2): AWS Bedrock Converse provider for the Session Manager.
+# Opt-in only — keeps the heavy aws-sdk stack out of the default build.
+aws-config             = { workspace = true, optional = true }
+aws-sdk-bedrockruntime = { workspace = true, optional = true }
+aws-types              = { workspace = true, optional = true }
 
 # daemon feature
 axum = { workspace = true, optional = true }

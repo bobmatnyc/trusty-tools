@@ -10953,6 +10953,9 @@ version = "0.8.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "aws-config",
+ "aws-sdk-bedrockruntime",
+ "aws-types",
  "axum",
  "chrono",
  "clap",
