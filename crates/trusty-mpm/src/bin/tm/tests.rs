@@ -766,6 +766,37 @@ fn cli_parses_session_decommission() {
 }
 
 #[test]
+fn cli_parses_session_prune_idle() {
+    // `prune-idle` (#1313) accepts both flags; defaults are false.
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "prune-idle", "--dry-run", "--json"])
+        .unwrap();
+    match cli.command {
+        Command::Session {
+            action: SessionAction::PruneIdle { dry_run, json },
+        } => {
+            assert!(dry_run);
+            assert!(json);
+        }
+        other => panic!("expected session prune-idle, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_session_prune_idle_defaults() {
+    // With no flags, prune-idle defaults to a live (non-dry-run), text run.
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "prune-idle"]).unwrap();
+    match cli.command {
+        Command::Session {
+            action: SessionAction::PruneIdle { dry_run, json },
+        } => {
+            assert!(!dry_run);
+            assert!(!json);
+        }
+        other => panic!("expected session prune-idle, got {other:?}"),
+    }
+}
+
+#[test]
 fn deprecation_notice_format() {
     // The deprecation helper renders a stable, single-line message (#1205).
     // We assert the pure message builder since the eprintln side-effect itself

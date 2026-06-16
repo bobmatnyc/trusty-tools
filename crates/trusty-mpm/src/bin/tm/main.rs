@@ -188,7 +188,12 @@ async fn main() -> anyhow::Result<()> {
     // Resolve the daemon URL once: explicit --url/TRUSTY_MPM_URL wins, then
     // lock file (daemon may bind to an ephemeral port), then default.
     let url = trusty_mpm::core::resolve_daemon_url(Some(&cli.url));
-    match cli.command {
+    // Why: handlers return `anyhow::Result`; we capture the dispatch result here
+    // so the top-level boundary can translate the typed `PruneError::SmUnavailable`
+    // (issue #1313) into the documented exit code 75. Doing the `process::exit`
+    // here — rather than inside the async `prune_idle` — guarantees no live async
+    // resource (the reqwest client, JoinSet tasks) is skipped over by exiting.
+    let result = match cli.command {
         Command::Status => status(&client, &url).await,
         Command::Start => start(&client, &url).await,
         Command::Serve { stdio } => {
@@ -264,7 +269,22 @@ async fn main() -> anyhow::Result<()> {
         } => commands::ticket::ticket(&client, &url, issue, system, notes, runtime).await,
         Command::Issue { cmd, system } => commands::issue::issue(cmd, system),
         Command::Watch { cmd } => dispatch_watch(&client, &url, cmd).await,
+    };
+
+    // Top-level exit-code translation: a `tm session prune-idle` that found the
+    // Session Manager unavailable returns `PruneError::SmUnavailable`. That is a
+    // graceful no-op, not a failure, so exit with the distinct code 75 (the
+    // pause skill branches on it) instead of anyhow's default 1. Any other error
+    // propagates normally (exit 1); `Ok` returns cleanly.
+    if let Err(err) = &result
+        && matches!(
+            err.downcast_ref::<commands::prune::PruneError>(),
+            Some(commands::prune::PruneError::SmUnavailable)
+        )
+    {
+        std::process::exit(commands::prune::EXIT_SM_UNAVAILABLE);
     }
+    result
 }
 
 /// Dispatch a `tm watch poll|listen` invocation to its handler.

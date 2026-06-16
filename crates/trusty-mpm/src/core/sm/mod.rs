@@ -62,6 +62,16 @@ pub mod goals;
 pub mod memory;
 pub mod prompt;
 pub mod providers;
+/// Idle-session prune policy (issue #1313).
+///
+/// Why: the `tm session prune-idle` command needs a pure, testable mapping from
+/// a session's latest activity-monitor verdict to a durability-respecting
+/// teardown action (stop idle, decommission done, skip everything else). Keeping
+/// it in core (not the binary) lets it be unit-tested without a live daemon and
+/// reused by any future caller.
+/// What: re-compiled in every build (pure logic, no extra deps).
+/// Test: `prune::tests`.
+pub mod prune;
 
 pub use agent::{SessionManagerAgent, SmAgentError, SmChatOutcome, SmHealth, SmModelTiers};
 pub use config::{SessionManagerConfig, SmInferenceConfig, SmMemoryConfig, SmRoundsConfig};
@@ -85,3 +95,4 @@ pub use providers::{
     ProviderRegistry, ResolvedCall, SmLlmError, SmModelTier, TierResolver,
     resolve_provider_and_model, resolve_tier_model,
 };
+pub use prune::{PruneAction, decide, normalize_verdict};

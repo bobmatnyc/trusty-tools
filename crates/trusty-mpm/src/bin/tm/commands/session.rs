@@ -403,6 +403,9 @@ pub(crate) async fn session(
         SessionAction::Decommission { id } => {
             crate::commands::managed::session_decommission(client, url, id).await?
         }
+        SessionAction::PruneIdle { dry_run, json } => {
+            crate::commands::prune::prune_idle(client, url, dry_run, json).await?
+        }
     }
     Ok(())
 }

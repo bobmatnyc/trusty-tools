@@ -850,6 +850,29 @@ pub(crate) enum SessionAction {
         /// Managed session id.
         id: String,
     },
+    /// Reclaim idle managed sessions: stop idle, decommission done (#1313).
+    ///
+    /// Why: paused orchestration sessions leave behind idle SM tmux sessions that
+    /// consume claude Max rate-limit slots. This enumerates managed sessions,
+    /// reads each one's latest activity-monitor verdict, and applies the locked
+    /// policy — `idle` → stop (resumable), `done` → decommission, everything else
+    /// (`working`/`blocked-on-permission`/`errored`/no-verdict) → leave alone —
+    /// reusing the existing stop/decommission operations. No-ops gracefully when
+    /// the Session Manager is disabled or the daemon is unreachable.
+    /// What: GETs the managed list + each activity verdict, then (unless
+    /// `--dry-run`) POSTs `runtime-stop`/`decommission` for the actionable rows.
+    /// Test: `cli_parses_session_prune_idle`; policy in `core::sm::prune::tests`;
+    /// plan/render in `commands::prune::tests`.
+    PruneIdle {
+        /// List the candidate sessions, their verdicts, and the action that
+        /// WOULD be taken — without stopping or decommissioning anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit the plan as a single JSON object (for programmatic callers such
+        /// as the claude-mpm pause skill).
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Actions for the `overseer` subcommand.

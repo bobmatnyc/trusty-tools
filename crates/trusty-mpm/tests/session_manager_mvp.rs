@@ -701,3 +701,45 @@ async fn resume_managed_typed_invalid_state_is_conflict() {
         "non-resumable state must map to the typed InvalidState variant (→ 409), got {err:?}"
     );
 }
+
+/// Why: issue #1313 review nitpick #7 — assert the SM-unavailable → exit-code-75
+/// contract end-to-end through the real `tm` binary, not just the
+/// `EXIT_SM_UNAVAILABLE` constant. `prune_idle` no longer calls `process::exit`;
+/// it returns `PruneError::SmUnavailable`, which `main` downcasts and translates
+/// to exit 75. Pointing the command at a dead loopback port forces the transport
+/// (unreachable) branch deterministically without standing up a daemon.
+/// What: spawns `tm --url http://127.0.0.1:<dead> session prune-idle --json` and
+/// asserts the process exits with status code 75. Uses `CARGO_BIN_EXE_tm`
+/// (set by Cargo for integration tests) so no extra dev-dependency is needed.
+/// Test: this test.
+#[test]
+fn cli_prune_idle_unreachable_exit_code() {
+    use std::process::Command;
+
+    // 127.0.0.1:1 is a reserved/dead port: connecting there fails fast with a
+    // transport error, which is exactly the SM-unavailable (exit 75) path.
+    let bin = env!("CARGO_BIN_EXE_tm");
+    let output = Command::new(bin)
+        .args([
+            "--url",
+            "http://127.0.0.1:1",
+            "session",
+            "prune-idle",
+            "--json",
+        ])
+        .output()
+        .expect("spawn tm binary");
+
+    assert_eq!(
+        output.status.code(),
+        Some(75),
+        "SM-unavailable prune-idle must exit 75; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The --json branch still prints the serde-derived unavailable document.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"sm_available\": false"),
+        "expected sm_available:false in JSON, got: {stdout}"
+    );
+}
