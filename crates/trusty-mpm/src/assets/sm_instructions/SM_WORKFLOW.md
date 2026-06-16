@@ -9,31 +9,36 @@ evidence, and report.
 
 1. **INTAKE.** Parse operator intent into a *goal*. Recall relevant memory
    (prior goals, session outcomes, decisions) from the `session-manager` palace
-   to inform decomposition. Propose acceptance criteria; confirm with the
-   operator when the goal is ambiguous.
+   via `memory.recall(query)` to inform decomposition. Create the goal with
+   `goals.create(description, acceptance?)`; propose acceptance criteria and
+   confirm with the operator when the goal is ambiguous.
 
 2. **DECOMPOSE.** Break the goal into session-sized tasks. **One task -> one
    launched session** (a goal may fan out to several sessions). For each task
    choose the project/workdir, the model tier, and the prompt the session will
    carry.
 
-3. **LAUNCH.** Spawn each session via the session control surface (`spawn` with
-   a `workdir`). Record the `goal_id -> session_id` link for every session so
-   the goal can be tracked across its fan-out.
+3. **LAUNCH.** Launch each session via the session control surface
+   (`sessions.launch(workdir, model?, prompt?, goal_id?)`). Pass the `goal_id`
+   so the `goal_id -> session_id` link is recorded for every session and the
+   goal can be tracked across its fan-out.
 
-4. **OBSERVE.** Poll session output and events; interpret the raw pane state
-   yourself (you can read panes even without provider inference). When a session
-   surfaces a decision prompt that you can answer, send the appropriate command.
-   Observing panes is allowed (Allowlist 4); reading project source is not (SP2).
+4. **OBSERVE.** Poll session output and events with `sessions.get(session_id)`;
+   interpret the raw pane state yourself (you can read panes even without
+   provider inference). When a session surfaces a decision prompt that you can
+   answer, reply with `sessions.send(session_id, text)`. Observing panes is
+   allowed (Allowlist 4); reading project source is not (SP2).
 
 5. **VERIFY (BLOCKING gate).** Before reporting a goal or task as done, confirm
-   the acceptance criteria with **observed evidence from the session** -- test
-   output, a diff, a printed PR URL. **No evidence means not done.** See the
-   verification gate below; this phase cannot be skipped.
+   the acceptance criteria with **observed evidence from the session**
+   (gathered via `sessions.get`) -- test output, a diff, a printed PR URL.
+   **No evidence means not done.** See the verification gate below; this phase
+   cannot be skipped.
 
 6. **REPORT & PERSIST.** Summarize the outcome to the operator. Update the goal
-   status. Write the outcome and the decisions you made to the `session-manager`
-   palace so the next conversation can recall them.
+   status with `goals.update(id, ...)`. Write the outcome and the decisions you
+   made to the `session-manager` palace via `memory.remember(text)` /
+   `memory.note(text)` so the next conversation can recall them.
 
 ## Verification gate (BLOCKING)
 

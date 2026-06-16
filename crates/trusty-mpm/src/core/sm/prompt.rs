@@ -29,6 +29,12 @@ use std::path::{Path, PathBuf};
 
 use crate::core::instruction_pipeline::SECTION_SEPARATOR;
 
+// `pub(crate)` is deliberate: these bundled defaults are consumed only through
+// `assemble_sm_prompt` / `resolve_sm_prompt`, which own the ordering and the
+// BASE_SM-last floor invariant. Any caller needing the raw section content goes
+// through those functions; exposing the constants beyond the crate would let a
+// caller reassemble the prompt out of order and silently bypass the floor.
+
 /// SM identity + Prohibitions table (SP1-SP7) + Allowlist (bundled at compile
 /// time). Mirrors `PM_INSTRUCTIONS`.
 pub(crate) const SM_INSTRUCTIONS: &str =
@@ -66,14 +72,22 @@ pub const FILE_SM_TOOLS: &str = "SM_TOOLS.md";
 /// runtime dependency on an external install and keeps the ordering rule in one
 /// auditable place (mirrors [`assemble_system_prompt`]).
 /// What: joins the four bundled assets in the fixed order SM_INSTRUCTIONS ->
-/// SM_WORKFLOW -> SM_TOOLS -> BASE_SM, separated by the `---` rule. BASE_SM is
-/// **always last** as the non-overridable framework floor.
+/// SM_WORKFLOW -> SM_TOOLS -> BASE_SM, separated by the `---` rule. Each section
+/// is trimmed before joining -- byte-for-byte the same treatment
+/// [`resolve_sm_prompt`] applies -- so the two produce identical output when no
+/// override is present. BASE_SM is **always last** as the non-overridable
+/// framework floor.
 /// Test: `assemble_sm_prompt_contains_all_sections`,
-/// `assemble_sm_prompt_base_floor_is_last`.
+/// `assemble_sm_prompt_base_floor_is_last`,
+/// `resolve_with_no_overrides_matches_assembled_sections` (exact equality).
 ///
 /// [`assemble_system_prompt`]: crate::core::instruction_pipeline::assemble_system_prompt
 pub fn assemble_sm_prompt() -> String {
-    [SM_INSTRUCTIONS, SM_WORKFLOW, SM_TOOLS, BASE_SM].join(SECTION_SEPARATOR)
+    [SM_INSTRUCTIONS, SM_WORKFLOW, SM_TOOLS, BASE_SM]
+        .iter()
+        .map(|s| s.trim())
+        .collect::<Vec<_>>()
+        .join(SECTION_SEPARATOR)
 }
 
 /// Resolve `~/.trusty-mpm/sm/`, the SM's override directory.
@@ -410,38 +424,48 @@ mod tests {
 
     #[test]
     fn resolve_with_no_overrides_matches_assembled_sections() {
-        // With an empty override dir, resolve_sm_prompt yields the same sections
-        // in the same order as the bundled assemble_sm_prompt. They are not
-        // byte-identical (resolve trims each section's interior whitespace;
-        // assemble joins assets verbatim), so we assert section identity +
-        // ordering rather than exact bytes.
+        // With an empty override dir, resolve_sm_prompt is now byte-identical to
+        // the bundled assemble_sm_prompt: both trim each section the same way
+        // before joining with the `---` rule (Finding 3). Assert exact equality.
         let tmp = TempDir::new().unwrap();
         let resolved = resolve_sm_prompt(tmp.path());
         let assembled = assemble_sm_prompt();
-        let resolved_sections: Vec<&str> = resolved
-            .split(SECTION_SEPARATOR)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect();
-        let assembled_sections: Vec<&str> = assembled
-            .split(SECTION_SEPARATOR)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect();
         assert_eq!(
-            resolved_sections, assembled_sections,
-            "resolved and assembled must agree section-for-section"
+            resolved, assembled,
+            "no-override resolve must be byte-identical to assemble"
         );
-        assert_eq!(resolved_sections.len(), 4, "four sections expected");
+        let section_count = assembled.split(SECTION_SEPARATOR).count();
+        assert_eq!(section_count, 4, "four sections expected");
     }
 
     #[test]
     fn sm_override_dir_under_home() {
-        // The production override dir resolves under ~/.trusty-mpm/sm when a home
-        // is available.
-        if let Some(dir) = sm_override_dir() {
-            assert!(dir.ends_with("sm"));
-            assert!(dir.to_string_lossy().contains(".trusty-mpm"));
+        // The production override dir resolves under ~/.trusty-mpm/sm. In the
+        // normal case (CI and dev machines both have a home) `sm_override_dir`
+        // returns `Some` and we assert the path shape. We tolerate the rare
+        // home-less environment by handling `None` explicitly with a comment, so
+        // a genuinely-skipped assertion can never masquerade as a green pass: if
+        // a home IS present the path-shape checks run and must hold; if no home
+        // resolves we record that the graceful-None fallback path was taken.
+        match sm_override_dir() {
+            Some(dir) => {
+                assert!(dir.ends_with("sm"), "override dir must end with `sm`");
+                assert!(
+                    dir.to_string_lossy().contains(".trusty-mpm"),
+                    "override dir must be anchored under `.trusty-mpm`"
+                );
+            }
+            None => {
+                // No home directory resolvable (e.g. a stripped sandbox). This is
+                // the documented graceful fallback: `resolve_sm_prompt_default`
+                // then assembles the bundled prompt unconditionally. Nothing to
+                // assert about the path shape here -- the absence itself is the
+                // contract -- but we flag it so the green pass is honest.
+                eprintln!(
+                    "sm_override_dir_under_home: no home resolved; \
+                     graceful-None fallback exercised"
+                );
+            }
         }
     }
 }
