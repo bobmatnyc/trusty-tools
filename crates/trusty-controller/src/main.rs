@@ -98,11 +98,11 @@ fn dispatch(cli: Cli) {
         }
 
         Commands::Status => {
-            status::run(json);
+            std::process::exit(status::run(json));
         }
 
         Commands::Updates { latest } => {
-            updates::run(latest, json);
+            std::process::exit(updates::run(latest, json));
         }
 
         Commands::Upgrade {
@@ -111,11 +111,18 @@ fn dispatch(cli: Cli) {
             latest,
             exclude_self,
         } => {
-            upgrade::run(check, latest, exclude_self, yes, &members, json);
+            std::process::exit(upgrade::run(
+                check,
+                latest,
+                exclude_self,
+                yes,
+                &members,
+                json,
+            ));
         }
 
         Commands::Install { members } => {
-            install::run(&members, yes, json);
+            std::process::exit(install::run(&members, yes, json));
         }
 
         Commands::Ensure { wait } => {
@@ -147,7 +154,7 @@ fn dispatch(cli: Cli) {
         }
 
         Commands::Ui { print } => {
-            ui::run(print, json);
+            std::process::exit(ui::run(print, json));
         }
 
         Commands::Passthrough(args) => {

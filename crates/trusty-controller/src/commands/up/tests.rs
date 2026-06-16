@@ -147,6 +147,28 @@ fn load_empty_file_is_default() {
     assert_eq!(cfg, BootConfig::default());
 }
 
+/// Why: The #1316 `[controller] auto_update_check` flag must parse from the
+/// config file so operators can opt into the notify-only update check.
+/// What: Writes a config with `controller.auto_update_check: true` and asserts
+/// it round-trips.
+/// Test: This is the test.
+#[test]
+fn config_parses_controller() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.yaml");
+    std::fs::write(&path, "controller:\n  auto_update_check: true\n").unwrap();
+    let cfg = load_boot_config_from(&path).unwrap();
+    assert!(cfg.controller.auto_update_check);
+}
+
+/// Why: The default posture is OFF — no opt-in, no background probing.
+/// What: Asserts the default config disables the auto-update check.
+/// Test: This is the test.
+#[test]
+fn controller_default_off() {
+    assert!(!BootConfig::default().controller.auto_update_check);
+}
+
 // ── §4/§8 policy precedence ─────────────────────────────────────────────────────
 
 fn flags(with: bool, no: bool, tty: bool, yes: bool) -> UpFlags {

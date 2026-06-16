@@ -10851,6 +10851,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trusty-common",
+ "trusty-progress",
  "which 6.0.3",
 ]
 

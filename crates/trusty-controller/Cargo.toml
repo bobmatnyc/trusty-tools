@@ -43,7 +43,13 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 # Shared update primitives (check_crates_io, perform_upgrade, verify_installed_binary,
 # is_launchd_supervised, upgrade_and_restart) reused by tctl updates/upgrade.
-trusty-common = { workspace = true }
+# The `update-check` feature gates the `trusty_common::update` module exposing
+# those primitives (it adds zero new transitive deps; the flag controls module
+# compilation only).
+trusty-common = { workspace = true, features = ["update-check"] }
+# Rustup/cargo-style progress display (#1315): Narrator `info:` lines + the
+# right-aligned ComponentTracker table for install/upgrade rows.
+trusty-progress = { workspace = true }
 
 [dev-dependencies]
 # Temporary directory helpers for integration test isolation

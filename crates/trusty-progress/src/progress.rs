@@ -41,12 +41,14 @@ impl ProgressHandle {
     pub fn spinner(output: &Output, message: impl Into<String>) -> Self {
         let bar = ProgressBar::new_spinner();
         bar.set_draw_target(output.draw_target());
-        // ProgressStyle::with_template only fails on a malformed template; ours
-        // is a const literal, so fall back to the default style if it ever does
-        // rather than unwrapping in library code.
-        if let Ok(style) = ProgressStyle::with_template(SPINNER_TEMPLATE) {
-            bar.set_style(style);
-        }
+        // `ProgressStyle::with_template` only fails on a malformed template, and
+        // `SPINNER_TEMPLATE` is a compile-time `const` literal we control — a
+        // parse failure here is a programmer error (a bad edit to the constant),
+        // never a runtime condition, so `expect` is the correct response: it
+        // surfaces the mistake loudly in dev/test rather than silently rendering
+        // an unstyled spinner. This is the one sanctioned `expect` in the crate.
+        let style = ProgressStyle::with_template(SPINNER_TEMPLATE).expect("const template valid");
+        bar.set_style(style);
         bar.set_message(message.into());
         bar.enable_steady_tick(SPINNER_TICK);
         Self { bar }
@@ -60,9 +62,10 @@ impl ProgressHandle {
     pub fn bar(output: &Output, total: u64, message: impl Into<String>) -> Self {
         let bar = ProgressBar::new(total);
         bar.set_draw_target(output.draw_target());
-        if let Ok(style) = ProgressStyle::with_template(BAR_TEMPLATE) {
-            bar.set_style(style);
-        }
+        // See `spinner` above: `BAR_TEMPLATE` is a `const` literal, so a parse
+        // failure is a programmer error and `expect` is the correct response.
+        let style = ProgressStyle::with_template(BAR_TEMPLATE).expect("const template valid");
+        bar.set_style(style);
         bar.set_message(message.into());
         Self { bar }
     }

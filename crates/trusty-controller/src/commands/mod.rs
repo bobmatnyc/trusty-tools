@@ -12,6 +12,7 @@
 //! Test: Each module has its own test section; `cargo test -p trusty-controller`
 //! runs them all.
 
+pub mod auto_update;
 pub mod config;
 pub mod doctor;
 pub mod ensure;
@@ -19,10 +20,14 @@ pub mod install;
 pub mod lifecycle;
 pub mod passthrough;
 pub mod port;
+pub mod progress_ui;
+pub mod runtime;
+pub mod stable_set;
 pub mod stack;
 pub mod status;
 pub mod ui;
 pub mod up;
+pub mod update_engine;
 pub mod updates;
 pub mod upgrade;
 pub mod version;
