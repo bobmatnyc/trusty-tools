@@ -108,6 +108,22 @@ impl ProviderKind {
             ))),
         }
     }
+
+    /// The stable lowercase name of this provider kind.
+    ///
+    /// Why: `sm.health` (SM-STDIO) reports which concrete provider resolved for
+    /// the orchestration tier; a stable string keeps the wire payload and any
+    /// operator-facing status consistent with the `provider` config values.
+    /// What: returns `"auto"`/`"anthropic"`/`"bedrock"`/`"openrouter"`.
+    /// Test: `provider_kind_name_round_trips` (this module's tests).
+    pub fn name(self) -> &'static str {
+        match self {
+            ProviderKind::Auto => "auto",
+            ProviderKind::Anthropic => "anthropic",
+            ProviderKind::Bedrock => "bedrock",
+            ProviderKind::OpenRouter => "openrouter",
+        }
+    }
 }
 
 // ─── Chat / request / response shapes ──────────────────────────────────────────
@@ -229,6 +245,24 @@ mod tests {
             ProviderKind::parse("openrouter").unwrap(),
             ProviderKind::OpenRouter
         );
+    }
+
+    /// Why: `sm.health` reports the resolved provider by name; the name must be
+    /// the stable lowercase string that also round-trips back through `parse`.
+    /// What: asserts `name()` for each kind and that `parse(name())` recovers it
+    /// (modulo `Auto`, whose name `"auto"` parses back to `Auto`).
+    /// Test: this is the test.
+    #[test]
+    fn provider_kind_name_round_trips() {
+        for kind in [
+            ProviderKind::Auto,
+            ProviderKind::Anthropic,
+            ProviderKind::Bedrock,
+            ProviderKind::OpenRouter,
+        ] {
+            assert_eq!(ProviderKind::parse(kind.name()).unwrap(), kind);
+        }
+        assert_eq!(ProviderKind::Anthropic.name(), "anthropic");
     }
 
     /// Why: SM-1 review carry-forward — an unknown `provider` string must be a

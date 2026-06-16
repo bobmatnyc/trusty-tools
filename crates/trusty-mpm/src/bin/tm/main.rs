@@ -234,7 +234,20 @@ async fn main() -> anyhow::Result<()> {
         Command::Attach { target, json } => attach_cmd(&client, &url, &target, json).await,
         Command::Optimizer { action } => optimizer(&client, &url, action).await,
         Command::Overseer { action } => overseer(&client, &url, action).await,
-        Command::Coordinator { message } => coordinator(&url, message).await,
+        Command::Coordinator { message, action } => {
+            // DOC-14 SM-STDIO (#1291): `tm sm serve --stdio` runs the JSON-RPC
+            // over STDIO adapter; a plain `tm sm <message>` chats as before.
+            match action {
+                Some(action) => commands::sm_serve::run_sm_serve(action).await,
+                None => match message {
+                    Some(message) => coordinator(&url, message).await,
+                    None => Err(anyhow::anyhow!(
+                        "provide a message (`tm sm <message>`) or a subcommand \
+                         (`tm sm serve --stdio`)"
+                    )),
+                },
+            }
+        }
         Command::Services { action } => services(action),
         Command::Repair { action } => {
             use cli::RepairAction;

@@ -73,10 +73,39 @@ fn cli_sm_aliases_reach_coordinator() {
         let cli = Cli::try_parse_from(["trusty-mpm", name, "hello there"])
             .unwrap_or_else(|e| panic!("`tm {name}` must parse: {e}"));
         match cli.command {
-            Command::Coordinator { message } => {
-                assert_eq!(message, "hello there", "`tm {name}` carries the message");
+            Command::Coordinator { message, action } => {
+                assert_eq!(
+                    message.as_deref(),
+                    Some("hello there"),
+                    "`tm {name}` carries the message"
+                );
+                assert!(action.is_none(), "a plain message has no subcommand");
             }
             other => panic!("`tm {name}` must be Command::Coordinator, got {other:?}"),
+        }
+    }
+}
+
+/// DOC-14 SM-STDIO (#1291): `tm sm serve --stdio` (and via every coordinator
+/// alias) must parse to `Command::Coordinator` with the `Serve { stdio: true }`
+/// subcommand — the JSON-RPC over STDIO adapter entry point.
+#[test]
+fn cli_parses_sm_serve_stdio() {
+    use crate::cli::CoordinatorAction;
+    for name in ["coordinator", "sm", "session-manager", "coord"] {
+        let cli = Cli::try_parse_from(["trusty-mpm", name, "serve", "--stdio"])
+            .unwrap_or_else(|e| panic!("`tm {name} serve --stdio` must parse: {e}"));
+        match cli.command {
+            Command::Coordinator { message, action } => {
+                assert!(message.is_none(), "the serve subcommand carries no message");
+                match action {
+                    Some(CoordinatorAction::Serve { stdio }) => {
+                        assert!(stdio, "--stdio sets the stdio flag");
+                    }
+                    other => panic!("`tm {name} serve` must be Serve, got {other:?}"),
+                }
+            }
+            other => panic!("`tm {name} serve` must be Command::Coordinator, got {other:?}"),
         }
     }
 }

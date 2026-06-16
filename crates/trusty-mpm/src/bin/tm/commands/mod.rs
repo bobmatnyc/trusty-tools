@@ -19,6 +19,7 @@ pub(crate) mod repair;
 pub(crate) mod serve_stdio;
 pub(crate) mod services;
 pub(crate) mod session;
+pub(crate) mod sm_serve;
 pub(crate) mod supervisor;
 pub(crate) mod telegram;
 pub(crate) mod ticket;
