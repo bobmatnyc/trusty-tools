@@ -626,3 +626,45 @@ async fn loaded_stale_estimate_does_not_spuriously_compact() {
         "no spurious compaction call from a stale estimate"
     );
 }
+
+/// Why: FINDING 1 (data integrity) — when NO provider is resolvable for
+/// compaction, the SM chat turn falls back to `record_without_compaction`, which
+/// must append the round VERBATIM and persist it (a returned reply must never
+/// diverge from the stored conversation) WITHOUT ever invoking a provider.
+/// What: opens an engine, records a round via `record_without_compaction` (no
+/// provider argument exists on this path), then reloads the conversation from disk
+/// and asserts the round is present verbatim, `total_rounds`/`window_len` advanced,
+/// and the token estimate was updated.
+/// Test: this is the test.
+#[tokio::test]
+async fn record_without_compaction_persists_round_verbatim() {
+    let inf = inference();
+    let (mut eng, dir) = engine_with(10, &inf);
+
+    eng.record_without_compaction("hello sm", "hi operator", ts(1), Vec::new())
+        .expect("record without compaction");
+
+    // In-memory state advanced.
+    assert_eq!(eng.conversation().total_rounds, 1);
+    assert_eq!(eng.conversation().window_len(), 1);
+    assert!(
+        eng.conversation().token_estimate > 0,
+        "token estimate updated for the recorded round"
+    );
+
+    // Reload from disk: the round must be present verbatim.
+    let store = ConversationStore::new(dir.path());
+    let persisted = store.load(eng.conv_id()).expect("load persisted");
+    assert_eq!(persisted.total_rounds, 1);
+    assert_eq!(persisted.recent_rounds.len(), 1);
+    let round = &persisted.recent_rounds[0];
+    assert_eq!(round.user, "hello sm");
+    assert_eq!(round.assistant, "hi operator");
+    assert_eq!(round.ts, ts(1));
+    assert!(round.tool_calls.is_empty());
+    // No compaction occurred: nothing was folded into the compressed block.
+    assert!(
+        persisted.compressed_context.is_empty(),
+        "no compaction without a provider"
+    );
+}

@@ -13,6 +13,7 @@
 //! `#[cfg(test)]`-only.
 //! Test: drives `agent/chat_tests.rs`.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -53,6 +54,19 @@ impl MockChatProvider {
     pub fn last_request(&self) -> Option<LlmRequest> {
         self.requests.lock().expect("mock lock").last().cloned()
     }
+
+    /// How many times `complete` has been invoked on this (shared) provider.
+    ///
+    /// Why: a test that drives two router calls through one shared provider must be
+    /// able to assert the provider was actually invoked twice, so a future refactor
+    /// that accidentally dedups/short-circuits the calls fails loudly rather than
+    /// silently passing.
+    /// What: returns the length of the shared request log (clones share it, so the
+    /// count spans every clone handed to a [`ResolvedCall`]).
+    /// Test: `coordinator_sm_tests::session_manager_chat_alias_matches_coordinator`.
+    pub fn request_count(&self) -> usize {
+        self.requests.lock().expect("mock lock").len()
+    }
 }
 
 #[async_trait]
@@ -90,6 +104,18 @@ pub enum MockResolution {
     Degraded,
     /// Resolve every tier to a non-degraded inference error (unknown provider).
     Validation,
+    /// Resolve the FIRST `n` calls to the shared provider, then degraded for the
+    /// rest. Models the data-integrity case where the orchestration reply succeeds
+    /// (call 1) but every subsequent compaction/orchestration resolution in
+    /// `record_round` finds no provider — forcing the verbatim no-compaction record.
+    ProviderThenDegraded {
+        /// The shared provider returned for the first `n` calls.
+        provider: MockChatProvider,
+        /// How many leading calls succeed before degraded kicks in.
+        n: usize,
+        /// Shared monotonic count of `resolve` calls so far.
+        calls: Arc<AtomicUsize>,
+    },
 }
 
 /// A mock [`TierResolver`] for the SM chat-turn tests.
@@ -128,6 +154,25 @@ impl MockResolver {
             resolution: MockResolution::Validation,
         }
     }
+
+    /// A resolver that succeeds for the first `n` resolutions, then degrades.
+    ///
+    /// Why: the data-integrity test needs the orchestration reply to succeed
+    /// (resolution #1) while every later compaction/orchestration resolution in
+    /// `record_round` fails, so the turn must persist the round VERBATIM via the
+    /// no-compaction path instead of dropping it.
+    /// What: returns a resolver whose first `n` `resolve` calls hand back
+    /// `provider`, and whose subsequent calls return [`SmLlmError::Degraded`].
+    /// Test: `chat_records_round_when_no_provider_for_compaction`.
+    pub fn provider_then_degraded(provider: MockChatProvider, n: usize) -> Self {
+        Self {
+            resolution: MockResolution::ProviderThenDegraded {
+                provider,
+                n,
+                calls: Arc::new(AtomicUsize::new(0)),
+            },
+        }
+    }
 }
 
 #[async_trait]
@@ -138,26 +183,48 @@ impl TierResolver for MockResolver {
         tier: SmModelTier,
     ) -> Result<ResolvedCall, SmLlmError> {
         match &self.resolution {
-            MockResolution::Provider(provider) => {
-                // Exercise the real tier-model selection so tests cover it too,
-                // then strip any provider prefix to a bare model id for the call.
-                let tier_model = crate::core::sm::providers::resolve_tier_model(cfg, tier)?;
-                let (_kind, bare) = crate::core::sm::providers::resolve_provider_and_model(
-                    &tier_model,
-                    ProviderKind::Auto,
-                );
-                Ok(ResolvedCall {
-                    provider: Arc::new(provider.clone()),
-                    model: bare,
-                    kind: ProviderKind::Anthropic,
-                })
-            }
+            MockResolution::Provider(provider) => resolved_call(cfg, tier, provider),
             MockResolution::Degraded => Err(SmLlmError::Degraded(
                 "mock: no provider configured".to_string(),
             )),
             MockResolution::Validation => {
                 Err(SmLlmError::Validation("mock: unknown provider".to_string()))
             }
+            MockResolution::ProviderThenDegraded { provider, n, calls } => {
+                // `fetch_add` returns the prior count, so the first `n` calls
+                // (indices 0..n) succeed and the rest degrade.
+                let idx = calls.fetch_add(1, Ordering::SeqCst);
+                if idx < *n {
+                    resolved_call(cfg, tier, provider)
+                } else {
+                    Err(SmLlmError::Degraded(
+                        "mock: provider exhausted after first call".to_string(),
+                    ))
+                }
+            }
         }
     }
+}
+
+/// Build a [`ResolvedCall`] for `tier` wrapping the shared mock `provider`.
+///
+/// Why: two resolver arms (`Provider`, `ProviderThenDegraded`) build the same
+/// resolved call; centralising it keeps them consistent and exercises the real
+/// tier-model selection in both.
+/// What: resolves the tier model via the real selection logic, strips any
+/// provider prefix to a bare model id, and wraps the cloned mock provider.
+/// Test: `chat_tests.rs`.
+fn resolved_call(
+    cfg: &SmInferenceConfig,
+    tier: SmModelTier,
+    provider: &MockChatProvider,
+) -> Result<ResolvedCall, SmLlmError> {
+    let tier_model = crate::core::sm::providers::resolve_tier_model(cfg, tier)?;
+    let (_kind, bare) =
+        crate::core::sm::providers::resolve_provider_and_model(&tier_model, ProviderKind::Auto);
+    Ok(ResolvedCall {
+        provider: Arc::new(provider.clone()),
+        model: bare,
+        kind: ProviderKind::Anthropic,
+    })
 }

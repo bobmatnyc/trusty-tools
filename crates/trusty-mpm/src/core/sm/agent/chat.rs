@@ -123,6 +123,10 @@ impl SessionManagerAgent {
         let rounds = &self.config.rounds;
 
         // (2) Open (or resume) the rolling-context engine for this conversation.
+        // TODO(#1309): the engine is opened fresh per turn with no per-conv_id
+        // concurrency guard — two concurrent turns with the SAME conv_id can
+        // last-write-wins on save and lose a round. Serialize turns per conv_id
+        // (per-conv_id async lock / actor) before or within the SM-8 loop.
         let mut engine = SmContextEngine::open(&conv_id, &runtime.data_root, inference, rounds)?;
 
         // (3) The SM system prompt (SM-3), with any operator overrides layered in.
@@ -224,17 +228,22 @@ impl SessionManagerAgent {
     ///
     /// Why: §7.2/§7.4 require every round to be appended, compacted if the window/
     /// budget overflows, and atomically persisted so context survives a restart.
-    /// The compaction call is dependency-injected — it reuses the resolved
-    /// provider with the compaction-tier model — so this code never builds a
-    /// provider. Resolving the compaction tier is best-effort: a resolution miss
-    /// (degraded compaction) must not fail an otherwise-successful chat turn, so
-    /// it is logged and the round is recorded without compaction in that case.
-    /// What: resolves the compaction-tier model + provider; on success records
-    /// through it; on a resolve failure logs at debug and records through the
-    /// orchestration provider with the orchestration model (no compaction
-    /// occurs unless the window/budget actually overflows). A persistence error
-    /// (disk) propagates as [`SmAgentError::Context`].
-    /// Test: `chat_tests.rs::chat_records_round`.
+    /// Compaction is dependency-injected — it reuses the resolved provider with the
+    /// compaction-tier model — so this code never builds a provider. CRITICAL
+    /// data-integrity invariant: a chat turn that already returned a reply to the
+    /// caller MUST persist its round — diverging the stored conversation from what
+    /// the operator saw is a silent data-loss bug. Compaction itself is best-effort:
+    /// when NO tier can be resolved (both compaction and orchestration unavailable/
+    /// degraded), we still record the round VERBATIM via the no-compaction path
+    /// rather than dropping it, accepting a possibly over-soft-cap window until a
+    /// later compaction-capable turn folds it down.
+    /// What: resolves the compaction-tier provider; on success records through it
+    /// (auto-compacts on overflow). On a compaction-resolve miss it falls back to the
+    /// orchestration tier; if THAT also fails, it `warn!`s and records the round
+    /// without compaction (append + persist, no provider call) so the round is never
+    /// lost. A persistence error (disk) propagates as [`SmAgentError::Context`].
+    /// Test: `chat_tests.rs::chat_records_round`,
+    /// `chat_records_round_when_no_provider_for_compaction`.
     async fn record_round(
         &self,
         runtime: &super::AgentRuntime,
@@ -261,31 +270,50 @@ impl SessionManagerAgent {
                     .await?;
                 Ok(())
             }
-            Err(e) => {
-                // Compaction provider unavailable (e.g. degraded). Record the
-                // round with a no-compaction-needed path: we still must persist
-                // the verbatim round. The context engine always needs *a*
-                // provider for the record signature, but it only invokes it when
-                // a trigger fires; pass through the orchestration build instead.
-                tracing::debug!(
-                    "sm chat: compaction tier unavailable ({e}); recording round without compaction"
-                );
-                let call = runtime
+            Err(compaction_err) => {
+                // Compaction tier unavailable (e.g. degraded). Try the
+                // orchestration tier's provider so compaction can still run if a
+                // trigger fires; if neither tier resolves, fall back to recording
+                // the round VERBATIM so it is never silently dropped.
+                match runtime
                     .resolver
                     .resolve(inference, SmModelTier::Orchestration)
                     .await
-                    .map_err(map_resolve_error)?;
-                engine
-                    .record(
-                        call.provider.as_ref(),
-                        &call.model,
-                        message.to_string(),
-                        reply.to_string(),
-                        Utc::now(),
-                        Vec::new(),
-                    )
-                    .await?;
-                Ok(())
+                {
+                    Ok(call) => {
+                        engine
+                            .record(
+                                call.provider.as_ref(),
+                                &call.model,
+                                message.to_string(),
+                                reply.to_string(),
+                                Utc::now(),
+                                Vec::new(),
+                            )
+                            .await?;
+                        Ok(())
+                    }
+                    Err(orchestration_err) => {
+                        // No provider can be resolved for compaction. The reply was
+                        // already produced and returned to the caller, so the round
+                        // MUST still be persisted (data integrity > compaction). Warn
+                        // so operators notice the persistence/compaction gap.
+                        tracing::warn!(
+                            compaction_error = %compaction_err,
+                            orchestration_error = %orchestration_err,
+                            "sm chat: no provider resolvable for compaction; \
+                             recording round verbatim without compaction \
+                             (window may sit over the soft cap until a later turn)"
+                        );
+                        engine.record_without_compaction(
+                            message.to_string(),
+                            reply.to_string(),
+                            Utc::now(),
+                            Vec::new(),
+                        )?;
+                        Ok(())
+                    }
+                }
             }
         }
     }

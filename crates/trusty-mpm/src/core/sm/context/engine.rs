@@ -200,6 +200,41 @@ impl SmContextEngine {
         Ok(evicted)
     }
 
+    /// Record a completed round VERBATIM, skipping LLM compaction entirely (§7.4).
+    ///
+    /// Why: a chat turn must NEVER silently drop a round it already returned to the
+    /// caller — divergence between the persisted conversation and what the operator
+    /// saw is a data-integrity bug. When NO inference provider can be resolved for
+    /// compaction (every model tier is unavailable/degraded), [`record`](Self::record)
+    /// cannot run because it requires a provider for the fold call. This method is
+    /// the best-effort fallback: it persists the round so the conversation stays
+    /// faithful, accepting that the verbatim window may sit over the soft cap until a
+    /// later compaction-capable turn folds it down — over-budget context is strictly
+    /// better than a lost round.
+    /// What: pushes a [`Round`] from `(user, assistant, tool_calls)` stamped with
+    /// `ts`, bumps `total_rounds`, recomputes `token_estimate`, and atomically
+    /// persists — but performs NO eviction, NO fold, and NO re-summarisation, so it
+    /// never touches a provider. Returns `()` (no rounds are evicted). A persistence
+    /// error (disk) propagates as [`SmContextError::Persist`].
+    /// Test: `record_without_compaction_persists_round_verbatim` in `engine_tests.rs`
+    /// (round lands verbatim, reloads from disk) and
+    /// `chat_records_round_when_no_provider_for_compaction` in `chat_tests.rs`
+    /// (the SM chat turn still persists when both tiers fail to resolve).
+    pub fn record_without_compaction(
+        &mut self,
+        user: impl Into<String>,
+        assistant: impl Into<String>,
+        ts: chrono::DateTime<chrono::Utc>,
+        tool_calls: Vec<ToolTrace>,
+    ) -> Result<(), SmContextError> {
+        let round = Round::new(user, assistant, ts, tool_calls);
+        self.conversation.recent_rounds.push_back(round);
+        self.conversation.total_rounds += 1;
+        self.recompute_estimate();
+        self.store.save(&self.conv_id, &self.conversation)?;
+        Ok(())
+    }
+
     /// Post-eviction convergence: bring an over-budget single round + compressed
     /// block back within the token budget without looping forever (§7.2/§7.6).
     ///

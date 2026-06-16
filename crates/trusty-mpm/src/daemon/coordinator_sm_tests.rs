@@ -143,6 +143,9 @@ async fn disabled_sm_falls_back_to_legacy_503() {
 async fn session_manager_chat_alias_matches_coordinator() {
     let tmp = TempDir::new().unwrap();
     let provider = MockChatProvider::new("aliased reply", 0.005);
+    // Keep a handle so we can assert the shared provider was invoked once per
+    // router call (a refactor that dedups the two calls would silently regress).
+    let provider_handle = provider.clone();
     let state = state_with_sm(Arc::new(MockResolver::with_provider(provider)), &tmp);
 
     let body = serde_json::json!({ "message": "hi", "conv_id": "alias-conv" });
@@ -181,6 +184,15 @@ async fn session_manager_chat_alias_matches_coordinator() {
     assert_eq!(coord_json["reply"], "aliased reply");
     assert_eq!(coord_json["cost"], sm_json["cost"]);
     assert_eq!(coord_json["conv_id"], sm_json["conv_id"]);
+
+    // Both router calls must have actually driven the shared provider exactly once
+    // each (one orchestration reply per turn; no compaction triggers on a single
+    // round at the default window). A refactor that dedups the calls fails here.
+    assert_eq!(
+        provider_handle.request_count(),
+        2,
+        "the shared provider must be invoked once per router call"
+    );
 }
 
 /// Why: DOC-13 TUI contract — a request in the OLD shape (just `message` +

@@ -256,6 +256,58 @@ async fn chat_works_without_memory_recall() {
     );
 }
 
+/// Why: FINDING 1 (data integrity) — a chat turn whose reply was produced
+/// (orchestration resolved) but whose compaction path can resolve NO provider for
+/// EITHER tier must STILL persist the round verbatim. Dropping it would diverge the
+/// stored conversation from the reply the caller already saw.
+/// What: a resolver that succeeds for the first resolution (the orchestration
+/// reply) and degrades for every later one (the compaction + fallback-orchestration
+/// resolutions in `record_round`). The turn must return the reply; a fresh agent
+/// over the same data root must then resume the round verbatim, proving it was
+/// persisted via the no-compaction path.
+/// Test: this is the test.
+#[tokio::test]
+async fn chat_records_round_when_no_provider_for_compaction() {
+    let tmp = TempDir::new().unwrap();
+    let provider = MockChatProvider::new("the plan", 0.0);
+    // Only the first resolution (the orchestration reply) succeeds; the compaction
+    // tier and its orchestration fallback both degrade.
+    let resolver = Arc::new(MockResolver::provider_then_degraded(provider, 1));
+    let agent = agent_with(enabled_config(), resolver, tmp.path());
+
+    let outcome = agent
+        .chat("decompose this", Some("conv-int"))
+        .await
+        .expect("turn succeeds: the reply was produced");
+    assert_eq!(outcome.reply, "the plan");
+
+    // The round must have been persisted VERBATIM despite no compaction provider.
+    // A fresh agent (with a working provider) over the same data root resumes it.
+    let provider_b = MockChatProvider::new("ack", 0.0);
+    let provider_b_handle = provider_b.clone();
+    let agent_b = agent_with(
+        enabled_config(),
+        Arc::new(MockResolver::with_provider(provider_b)),
+        tmp.path(),
+    );
+    agent_b
+        .chat("next", Some("conv-int"))
+        .await
+        .expect("follow-up turn");
+
+    let req = provider_b_handle.last_request().expect("provider called");
+    let joined: String = req
+        .messages
+        .iter()
+        .map(|m| m.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        joined.contains("decompose this"),
+        "the round must be recorded verbatim even when compaction has no provider, got: {joined}"
+    );
+}
+
 /// Why: §7.5 step 3 — when the SM memory palace IS wired (feature build) and
 /// holds a relevant fact, the chat turn must inject it into the working prompt as
 /// the "Relevant memory:" block. This proves the SM-4 recall is actually
