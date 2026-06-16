@@ -16,6 +16,17 @@
 
 pub mod agent;
 pub mod config;
+/// Rolling auto-compaction context engine (SM-5, DOC-14 §7).
+///
+/// Why: gives the SM effectively infinite conversation context — last-N rounds
+/// verbatim plus a growing faithful compressed summary — with a precise §7.5
+/// working-prompt assembly. The compaction LLM call is dependency-injected
+/// through the [`providers::LlmProvider`] trait so it is unit-testable with a
+/// mock; SM-5 is the engine only and is not yet wired into any endpoint/loop.
+/// What: re-compiled in every build (no extra feature cost — pure logic + serde
+/// + the SM-2 provider trait).
+/// Test: `context::*::tests`.
+pub mod context;
 /// Dedicated SM memory palace + recall/remember wiring (SM-4, DOC-14 §8).
 ///
 /// Why: gated behind the `sm-memory` feature because it turns on
@@ -32,6 +43,10 @@ pub mod providers;
 
 pub use agent::SessionManagerAgent;
 pub use config::{SessionManagerConfig, SmInferenceConfig, SmMemoryConfig, SmRoundsConfig};
+pub use context::{
+    ConversationStore, ConversationStoreError, Round, SmContextEngine, SmContextError,
+    SmConversation, ToolTrace,
+};
 #[cfg(feature = "sm-memory")]
 pub use memory::{SmMemory, SmMemoryError, SmMemoryResult};
 pub use prompt::{
