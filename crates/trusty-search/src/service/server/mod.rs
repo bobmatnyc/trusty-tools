@@ -34,6 +34,8 @@ mod tests_1073;
 #[cfg(test)]
 mod tests_829;
 #[cfg(test)]
+mod tests_chunks;
+#[cfg(test)]
 mod tests_contrib_graph;
 #[cfg(test)]
 mod tests_denylist;

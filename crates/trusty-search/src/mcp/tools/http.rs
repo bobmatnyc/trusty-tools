@@ -49,6 +49,44 @@ impl McpServer {
         Ok(body)
     }
 
+    /// GET a JSON endpoint with query parameters that need URL-encoding.
+    ///
+    /// Why: `list_chunks`'s cursor (`after`, issue #1325) is a chunk `id` of the
+    /// form `path:start:end` — it contains `:` and may contain path separators
+    /// and other reserved characters that must be percent-encoded or the query
+    /// string breaks. Building the query with `reqwest::RequestBuilder::query`
+    /// encodes each pair correctly, unlike hand-formatting into the path.
+    /// What: GETs `{base_url}{path}` with `query` appended as a properly-encoded
+    /// query string, then mirrors [`Self::get`]'s status-then-decode handling.
+    /// Test: `list_chunks` cursor arm exercises this via the dispatch tests.
+    pub(super) async fn get_query(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> Result<Value, DispatchError> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .http
+            .get(&url)
+            .query(query)
+            .send()
+            .await
+            .map_err(|e| DispatchError::Transport(format!("GET {url}: {e}")))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| DispatchError::Transport(format!("read {url}: {e}")))?;
+        if !status.is_success() {
+            return Err(DispatchError::Transport(format!(
+                "GET {url} returned {status}: {text}"
+            )));
+        }
+        let body: Value = serde_json::from_str(&text)
+            .map_err(|e| DispatchError::Transport(format!("decode {url}: {e}")))?;
+        Ok(body)
+    }
+
     /// GET an endpoint that returns `text/plain`.
     ///
     /// Why: `get_call_chain` (issue #76) returns prose intended for direct LLM

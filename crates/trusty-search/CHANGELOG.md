@@ -7,6 +7,33 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.24.9] — 2026-06-16
+
+### Fixed (closes #1325)
+
+- **Deep `GET /indexes/{id}/chunks` pagination no longer times out / 502s on
+  large indexes.** The endpoint's offset path materialized the entire corpus
+  and re-sorted it on every page request (O(N log N) per page), so a deep
+  offset (`offset=304000` on a 300k-chunk index) blew past the client / proxy
+  timeout and surfaced as a 502 Bad Gateway after ~120 s. Chat / search were
+  unaffected.
+
+### Added (closes #1325)
+
+- **Cursor-based pagination for `GET /indexes/{id}/chunks` and the
+  `list_chunks` MCP tool.** A new, additive, non-breaking `after` query param
+  (the `list_chunks` tool gains a matching `after` arg) pages by chunk `id`
+  using an indexed redb B-tree seek (`CorpusStore::chunks_after`) instead of an
+  O(offset) scan — each page is O(page) regardless of depth. Send `after=`
+  (empty) to start from the first chunk and pass the response's `next_cursor`
+  back as `after` to walk forward; `next_cursor` is `null` once the corpus is
+  exhausted. The legacy `offset`/`limit` mode is unchanged for back-compat
+  (its `next_cursor` is always `null`, since offset ordering — by
+  `(file, start_line)` — differs from cursor ordering — by `id`; a cursor walk
+  must not be seeded from an offset page). Consumers doing bulk enumeration
+  (e.g. trusty-analyze's PR-review static-analysis context) should switch to
+  the cursor mode.
+
 ## [0.24.8] — 2026-06-16
 
 ### Changed (closes #1326)

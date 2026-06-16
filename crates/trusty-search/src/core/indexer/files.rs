@@ -104,6 +104,101 @@ impl CodeIndexer {
         (total, page)
     }
 
+    /// Cursor-paginate the chunk corpus in ascending `chunk_id` order, doing an
+    /// indexed B-tree seek instead of a full-corpus scan (issue #1325).
+    ///
+    /// Why: [`Self::enumerate_chunks`] loads every chunk and re-sorts the whole
+    /// corpus on every page request — O(N log N) per page — which times out
+    /// (and 502s behind a proxy) at deep offsets on large indexes
+    /// (`offset=304000`). When a durable [`CorpusStore`] is wired, this method
+    /// instead seeks straight to the cursor in redb's `chunk_id`-keyed B-tree
+    /// and reads one page: O(log N) + O(page) per call, so a forward scan over
+    /// the whole corpus is O(N) total rather than O(N²/page). Indexers without
+    /// a durable corpus (BM25-only / tests) fall back to the in-memory map,
+    /// reproducing the cursor (exclusive `after`, ascending id) semantics over
+    /// the same `(file, start_line, end_line)` ordering used elsewhere — note
+    /// this differs from the redb path's pure `id` ordering, but both are
+    /// stable total orders, which is all a cursor requires.
+    /// What: returns `(total, page, next_cursor)`. `total` is the corpus chunk
+    /// count (cheap `CorpusStore::chunk_count`, or the in-memory length).
+    /// `page` is up to `limit` materialized [`CodeChunk`]s strictly after
+    /// `after`. `next_cursor` is `Some(last_id)` when a full `limit`-sized page
+    /// was returned (more rows may follow) and `None` once the page is short
+    /// (end reached) — so a client loops until `next_cursor` is `None`.
+    /// Test: `test_enumerate_chunks_after_cursor_pages_via_redb` and
+    /// `test_enumerate_chunks_after_cursor_in_memory_fallback`.
+    pub async fn enumerate_chunks_after(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> (usize, Vec<CodeChunk>, Option<String>) {
+        let root = self.root_path.clone();
+        // Durable path: indexed seek over redb, no full-corpus materialization.
+        if let Some(corpus) = self.corpus.clone() {
+            let total = corpus.chunk_count().unwrap_or(0);
+            if limit == 0 || total == 0 {
+                return (total, Vec::new(), None);
+            }
+            let after_owned = after.map(str::to_string);
+            let raws = tokio::task::spawn_blocking(move || {
+                corpus.chunks_after(after_owned.as_deref(), limit)
+            })
+            .await;
+            let raws = match raws {
+                Ok(Ok(raws)) => raws,
+                Ok(Err(e)) => {
+                    tracing::warn!("index '{}': cursor page read failed ({e})", self.index_id);
+                    return (total, Vec::new(), None);
+                }
+                Err(e) => {
+                    tracing::warn!("index '{}': cursor page task panicked ({e})", self.index_id);
+                    return (total, Vec::new(), None);
+                }
+            };
+            let next_cursor = if raws.len() == limit {
+                raws.last().map(|r| r.id.clone())
+            } else {
+                None
+            };
+            let page: Vec<CodeChunk> = raws
+                .iter()
+                .map(|raw| raw_to_code_chunk(raw, 0.0, "enumerate", None, &root))
+                .collect();
+            return (total, page, next_cursor);
+        }
+
+        // In-memory fallback (no durable corpus): reproduce the redb path's
+        // cursor semantics by ordering on `chunk_id` alone, so the exclusive
+        // `after` cursor is monotonic with the sort and `partition_point` finds
+        // the resume point correctly. This is a different (but equally stable)
+        // total order from `enumerate_chunks`'s (file, start_line) ordering —
+        // the cursor path only requires internal consistency.
+        self.ensure_chunks_loaded().await;
+        let chunks = self.chunks.read().await;
+        let total = chunks.len();
+        if limit == 0 || total == 0 {
+            return (total, Vec::new(), None);
+        }
+        let mut ordered: Vec<&RawChunk> = chunks.values().collect();
+        ordered.sort_by(|a, b| a.id.cmp(&b.id));
+        let start = match after {
+            Some(cursor) => ordered.partition_point(|r| r.id.as_str() <= cursor),
+            None => 0,
+        };
+        let end = (start + limit).min(ordered.len());
+        let slice = &ordered[start..end];
+        let next_cursor = if slice.len() == limit {
+            slice.last().map(|r| r.id.clone())
+        } else {
+            None
+        };
+        let page: Vec<CodeChunk> = slice
+            .iter()
+            .map(|raw| raw_to_code_chunk(raw, 0.0, "enumerate", None, &root))
+            .collect();
+        (total, page, next_cursor)
+    }
+
     /// Run an HNSW-only similarity search against a precomputed embedding,
     /// excluding `exclude_id` (typically the seed chunk). Returns up to
     /// `top_k` `CodeChunk`s with `match_reason = "vector"`.

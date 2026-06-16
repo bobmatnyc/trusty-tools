@@ -305,13 +305,28 @@ live updates, so a subscriber that connects after `start` still sees it.
 
 - **Response 404**: no reindex has been queued for this index.
 
-##### `GET /indexes/:id/chunks?offset=&limit=`
+##### `GET /indexes/:id/chunks?offset=&limit=&after=`
 
-Paginated enumeration of all chunks in stable `(file, start_line)` order.
+Paginated enumeration of all chunks. Two modes:
+
+- **Offset mode** (default, issue #54): stable `(file, start_line)` order; the
+  slice `[offset .. offset+limit]`. Simple but O(N log N) per page — it
+  materialises and sorts the whole corpus each call, so deep offsets on large
+  indexes are slow (and previously 502'd, issue #1325). `next_cursor` is always
+  `null` in this mode.
+- **Cursor mode** (issue #1325, preferred for deep / bulk enumeration): opt in
+  by sending the `after` param. Pages by chunk `id` via an indexed redb B-tree
+  seek — O(page) regardless of depth. Send `after=` (empty) to start from the
+  first chunk; pass the response's `next_cursor` back as `after` to walk
+  forward. `next_cursor` is `null` once the corpus is exhausted. `offset` is
+  ignored. Cursor order (by `id`) differs from offset order — pick one mode and
+  page consistently; do not seed a cursor walk from an offset page.
 
 - **Query params**:
-  - `offset` (optional, default `0`).
+  - `offset` (optional, default `0`) — offset mode only.
   - `limit` (optional, default `100`, clamped to `1000`).
+  - `after` (optional) — cursor mode. Empty string = from the first chunk;
+    otherwise the opaque cursor (a chunk `id`) from a prior `next_cursor`.
 - **Response 200**:
   ```json
   {
@@ -319,9 +334,12 @@ Paginated enumeration of all chunks in stable `(file, start_line)` order.
     "total": 14823,
     "offset": 0,
     "limit": 100,
-    "chunks": [/* CodeChunk[] */]
+    "chunks": [/* CodeChunk[] */],
+    "next_cursor": "src/zzz.rs:10:42"
   }
   ```
+  `next_cursor` is the chunk `id` to pass as the next `after`, or `null` when
+  the page was the last one (cursor mode) / always `null` (offset mode).
 
 ##### Complexity / smells / quality endpoints
 

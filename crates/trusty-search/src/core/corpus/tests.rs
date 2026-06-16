@@ -177,6 +177,55 @@ fn get_chunks_batch_reads_subset() {
 }
 
 #[test]
+fn chunks_after_cursor_seeks_and_pages_in_key_order() {
+    // Issue #1325: deep pagination must be a B-tree seek, not a full scan.
+    // `chunks_after(cursor, limit)` returns up to `limit` rows whose id is
+    // strictly greater than `cursor`, in redb key (ascending id) order, so a
+    // client can page forward in O(page) without re-reading earlier rows.
+    let dir = tempfile::tempdir().unwrap();
+    let store = CorpusStore::open(&dir.path().join("index.redb")).unwrap();
+    // Insert out of order to prove the read order is the table's key order,
+    // not insertion order.
+    store
+        .upsert_chunks(&[
+            raw("c:1:1", "fn c() {}"),
+            raw("a:1:1", "fn a() {}"),
+            raw("e:1:1", "fn e() {}"),
+            raw("b:1:1", "fn b() {}"),
+            raw("d:1:1", "fn d() {}"),
+        ])
+        .unwrap();
+
+    // First page (no cursor): the two lowest ids in key order.
+    let page1 = store.chunks_after(None, 2).unwrap();
+    assert_eq!(page1.len(), 2);
+    assert_eq!(page1[0].id, "a:1:1");
+    assert_eq!(page1[1].id, "b:1:1");
+
+    // Second page: cursor = last id of page1, exclusive.
+    let page2 = store.chunks_after(Some("b:1:1"), 2).unwrap();
+    assert_eq!(page2.len(), 2);
+    assert_eq!(page2[0].id, "c:1:1");
+    assert_eq!(page2[1].id, "d:1:1");
+
+    // Final partial page.
+    let page3 = store.chunks_after(Some("d:1:1"), 2).unwrap();
+    assert_eq!(page3.len(), 1);
+    assert_eq!(page3[0].id, "e:1:1");
+
+    // Past the end → empty, never an error.
+    assert!(store.chunks_after(Some("e:1:1"), 2).unwrap().is_empty());
+
+    // A cursor that is not itself a stored id still seeks to the next-greater
+    // row (clients pass back an opaque cursor; it need not be an exact key).
+    let after_gap = store.chunks_after(Some("a:9:9"), 10).unwrap();
+    assert_eq!(after_gap[0].id, "b:1:1", "seek lands on next-greater id");
+
+    // limit == 0 → empty page.
+    assert!(store.chunks_after(None, 0).unwrap().is_empty());
+}
+
+#[test]
 fn missing_db_is_empty() {
     // A brand-new database (post-upgrade / first-run) must open cleanly
     // and report an empty corpus rather than erroring.

@@ -245,14 +245,21 @@ pub fn tool_descriptors() -> Value {
         },
         {
             "name": "list_chunks",
-            "description": "Paginated enumeration of every chunk in an index (issue #54). Stable order by (file, start_line).",
+            "description": "Paginated enumeration of every chunk in an index (issue #54). \
+                            Two modes: offset/limit (stable order by file, start_line) for \
+                            shallow paging, or cursor paging via `after` (issue #1325) for \
+                            deep/bulk enumeration. Pass the response's `next_cursor` back as \
+                            `after` to fetch the next page in O(page) time (an indexed seek) \
+                            instead of the O(offset) scan that times out on large indexes. \
+                            `next_cursor` is null once the corpus is exhausted.",
             "inputSchema": {
                 "type": "object",
                 "required": ["index_id"],
                 "properties": {
                     "index_id": { "type": "string" },
                     "offset":   { "type": "integer", "default": 0 },
-                    "limit":    { "type": "integer", "default": 100 }
+                    "limit":    { "type": "integer", "default": 100 },
+                    "after":    { "type": "string", "description": "Forward cursor (a chunk id, typically the previous page's next_cursor). When set, offset is ignored." }
                 }
             }
         },
