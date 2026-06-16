@@ -236,6 +236,70 @@ src/
 All files stay under the 500-SLOC production cap. Existing modules (`session_manager`,
 `runtime`, `activity`) are reused as-is.
 
+### 3.3 Harness-Agnostic Design Principles
+
+The MVP ships with `ClaudeCodeAdapter` as the only runtime implementation. However, the
+`RuntimeAdapter` abstraction is the entry point for a multi-harness future. This
+section documents the design principles that make pluggable harnesses work.
+
+**The three core principles are:**
+
+#### 1. Canonical-Context Preservation Principle
+
+Whatever harness runs, it MUST receive and operate under MPM's canonical instructions,
+workflow, agents, skills, and memory. Instruction/prompt assembly stays in MPM;
+each harness implementation only **PROJECTS** that canonical context into the
+runtime's native format and deployment model.
+
+- MPM assembles the canonical instruction bundle once (agents, skills, system
+  prompt, `.mcp.json`, `.claude/settings.json`, memory palace links, hooks).
+- The `RuntimeAdapter` trait receives this bundle as input.
+- The adapter's `spawn()` method translates the bundle into the runtime's native
+  format: e.g. config files for Claude Code, environment variables for trusty-code,
+  agent/skill registration for hypothetical future harnesses.
+- The adapter launches the harness with the projected context.
+- **Adding a new harness = implementing the context-projection + launch/capture/inject
+  mechanics, never re-authoring canonical content per harness.**
+
+This principle ensures:
+- Agents and skills have one source of truth (MPM's catalog).
+- Instructions do not diverge across harnesses.
+- Memory, circuit breakers, and autonomy policies are enforced uniformly.
+- Future harnesses inherit the ecosystem without re-implementation.
+
+#### 2. No-Drop-In-Required Principle
+
+A user NEVER needs to drop into a harness to make progress on their work.
+All observation, decision-answering, and control happen through MPM's own interfaces:
+CLI (`tm session`), TUI, web dashboard, or chat. The managed session runs autonomously,
+observed and driven via these interfaces.
+
+However, the harness remains directly attachable for users who WANT to interact
+directly (e.g. `tmux attach` to the session, or the harness's native UI). Dropping
+in is always optional, never required for core functionality.
+
+- **Required path**: All progress happens via MPM API (HTTP, CLI, TUI).
+- **Optional path**: Power users may attach directly for debugging or manual
+  intervention, but this is not the primary workflow.
+- **Consequence**: The MPM-side interfaces must be feature-complete for autonomous
+  operation. The harness UI is not a required stop.
+
+This principle holds across all harnesses: Claude Code (tmux-attachable), trusty-code
+(CLI-attachable), and any future runtime. It ensures that MPM is the primary
+control surface regardless of which harness is running underneath.
+
+#### 3. Transport-Agnostic Core Modules
+
+The `session_manager`, `runtime`, `activity`, and `provisioner` modules contain
+no HTTP, CLI, or tmux-specific logic. They define domain types (`SessionRecord`,
+`RuntimeAdapter`, `ActivityVerdict`) and pure transformation functions. This
+makes them reusable across any transport (HTTP, MCP, CLI commands).
+
+- Library modules (under `src/`) contain business logic and domain types.
+- Transport layers (`daemon/api.rs`, `bin/tm.rs`) consume these modules and map
+  them to HTTP, CLI, or MCP.
+- A new harness or transport can reuse the same core without modification.
+
 ---
 
 ## 4. Runtime Backends & Auth
