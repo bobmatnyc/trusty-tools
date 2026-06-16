@@ -172,6 +172,15 @@ resolve_version() {
         die "no ${TAG_PREFIX}* release found at ${API_RELEASES_URL}"
     fi
 
+    # Sanity-check it looks like a version number (not a garbled API response).
+    case "${_ver}" in
+        [0-9]*.[0-9]*)
+            ;; # looks like a semver — proceed
+        *)
+            die "could not parse version from API response; got: '${_ver}'"
+            ;;
+    esac
+
     printf '%s' "${_ver}"
 }
 
@@ -219,6 +228,14 @@ confirm() {
 #      and ASSUME_YES=1, appends an export line to the detected RC file.
 maybe_update_path() {
     _dir="$1"
+
+    # Validate: only allow safe path characters to prevent shell RC injection.
+    case "${_dir}" in
+        *[!A-Za-z0-9/_.~-]*)
+            warn "TRUSTY_INSTALL_DIR contains unsafe characters; skipping PATH modification"
+            return 0
+            ;;
+    esac
 
     case ":${PATH}:" in
         *":${_dir}:"*)
@@ -305,7 +322,7 @@ download_and_install() {
         else
             shasum -a 256 -c "${_sha_file}"
         fi
-    ) >/dev/null 2>&1 || die "checksum verification failed for ${_archive}; aborting install"
+    ) >/dev/null || die "checksum verification failed for ${_archive}; aborting install"
     say "Checksum OK."
 
     say "Extracting..."
@@ -458,9 +475,9 @@ main() {
 
     if [ "${_need_install}" = "1" ]; then
         # Create temp working dir now that we know we will download.
+        trap 'cleanup' EXIT
         TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t trusty-install)" \
             || die "failed to create temp directory"
-        trap 'cleanup' EXIT
 
         download_and_install "${_version}" "${_target}" "${_install_dir}" "${_sha_tool}"
         maybe_update_path "${_install_dir}"
