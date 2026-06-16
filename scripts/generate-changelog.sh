@@ -78,6 +78,18 @@ CLIFF_ARGS=(
 case "${MODE}" in
   --stdout)
     # Release-notes mode: strip the Keep-a-Changelog header/footer.
+    #
+    # NOTE — semantics differ from CI: CLIFF_ARGS above uses --unreleased (the
+    # PRE-tag view: every conventional commit since the last tag, i.e. what a
+    # contributor would preview before cutting a release). CI's release.yml,
+    # by contrast, runs git-cliff with --latest (the POST-tag view: only the
+    # just-created tag's section). So this --stdout preview shows the commits
+    # that are ABOUT to be released, whereas CI renders the notes for the tag
+    # that was just pushed. The grouping/formatting are identical; only the
+    # commit range selection differs. Do not be surprised if a fresh local
+    # --stdout run lists commits that CI's --latest output will not (because at
+    # release time they belong to the new tag's --latest section, not to the
+    # next --unreleased window).
     ( cd "${WORKSPACE_ROOT}" && git-cliff "${CLIFF_ARGS[@]}" --strip all )
     ;;
   prepend)

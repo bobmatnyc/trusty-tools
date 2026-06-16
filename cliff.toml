@@ -73,7 +73,8 @@ trim = true
 # Parse conventional commits; non-conforming commits are dropped (see filter below).
 conventional_commits = true
 filter_unconventional = true
-# Split commits on newline so multi-line bodies don't pollute the subject line.
+# Do NOT split each commit on newlines — keep multi-line commit bodies intact
+# as a single entry rather than creating phantom extra changelog lines.
 split_commits = false
 # Protect against accidental processing of merge commits.
 filter_commits = true
@@ -86,6 +87,12 @@ commit_preprocessors = [
   # the GitHub PR. Offline, deterministic — no GitHub API needed. The /pull/ URL
   # auto-redirects to /issues/ for plain issue refs, so both PRs and "closes #NNN"
   # references resolve correctly.
+  #
+  # KNOWN LIMITATION: only `(#NNN)` references in the commit SUBJECT line are
+  # linkified. A bare `closes #NNN` / `fixes #NNN` in the commit BODY is NOT
+  # captured (the body is dropped — see split_commits = false and the
+  # subject-only template). The /pull/NNN URL also relies on GitHub's redirect
+  # to /issues/NNN for plain issue references that are not actually PRs.
   { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/bobmatnyc/trusty-tools/pull/${1}))" },
 ]
 
