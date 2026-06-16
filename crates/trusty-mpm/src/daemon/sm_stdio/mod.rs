@@ -46,6 +46,31 @@ use tokio::sync::Mutex;
 #[cfg(feature = "sm-memory")]
 use crate::core::sm::SmGoalStore;
 
+/// The shared goal-store handle `sm.goals.*` operate over (feature-gated type).
+///
+/// Why: [`SmDispatcher::new`] takes ONE signature across both `sm-memory` and
+/// the default build (a fragile dual-arity API was the prior shape). The goal
+/// store only exists under `sm-memory`, so the constructor accepts this handle
+/// as an `Option` that is simply always `None` in the no-memory build — gating
+/// the TYPE, never the arity. Under `sm-memory` it is the live store behind a
+/// mutex (the `&mut self` goal mutators serialise through it).
+/// What: an `Arc<Mutex<SmGoalStore>>` under the feature; an uninhabited
+/// `std::convert::Infallible` placeholder without it (never constructed —
+/// callers pass `None`).
+/// Test: `tests.rs::dispatcher_with` constructs `Some(..)`/`None` via this alias.
+#[cfg(feature = "sm-memory")]
+pub type SmGoalHandle = StdArc<Mutex<SmGoalStore>>;
+
+/// Placeholder goal-store handle for the no-memory build (never constructed).
+///
+/// Why: lets [`SmDispatcher::new`] keep ONE signature without referencing the
+/// `sm-memory`-only [`SmGoalStore`]. Callers in the default build always pass
+/// `None`, so no value of this type is ever created.
+/// What: a zero-sized uninhabitable-by-convention marker.
+/// Test: compile-only; the no-memory `new` ignores its `Option<SmGoalHandle>`.
+#[cfg(not(feature = "sm-memory"))]
+pub type SmGoalHandle = std::convert::Infallible;
+
 /// The transport-neutral SM dispatcher the stdio adapter drives (§1A.1).
 ///
 /// Why: separating the dispatcher from the stdio loop is what makes the 13
@@ -81,49 +106,50 @@ pub struct SmDispatcher {
 }
 
 impl SmDispatcher {
-    /// Build a dispatcher over the SM surfaces (production: `sm-memory`).
+    /// Build a dispatcher over the SM surfaces (ONE signature, both builds).
     ///
-    /// Why: the stdio entry point wires the real agent, control, and goal store
-    /// once; tests wire mocks through this same constructor.
-    /// What: stores the four/five handles. No I/O.
-    /// Test: `tests.rs` uses the no-memory constructor; the daemon entry point
-    /// uses this one.
-    #[cfg(feature = "sm-memory")]
+    /// Why: a single constructor across `sm-memory` and the default build keeps
+    /// the public API stable for callers and tests — they wire the SAME five
+    /// arguments regardless of feature. The goal store is an [`Option`]: `Some`
+    /// under `sm-memory` (the live store), always `None` in the no-memory build
+    /// (where `sm.goals.*`/`sm.context.get` return the graceful unavailable
+    /// error). Only the goal-handle TYPE is feature-gated (via [`SmGoalHandle`]),
+    /// never the arity.
+    /// What: stores agent/config/data_root/sessions; under `sm-memory` also stores
+    /// the unwrapped goal store (defaulting to an empty no-op store if `None`).
+    /// No I/O.
+    /// Test: `tests.rs::dispatcher_with` builds this with `Some`/`None` per build.
     pub fn new(
         agent: Arc<SessionManagerAgent>,
         config: SessionManagerConfig,
         data_root: impl Into<PathBuf>,
         sessions: Arc<dyn SessionControl>,
-        goals: StdArc<Mutex<SmGoalStore>>,
+        goals: Option<SmGoalHandle>,
     ) -> Self {
-        Self {
-            agent,
-            config,
-            data_root: data_root.into(),
-            sessions,
-            goals,
+        let data_root = data_root.into();
+        #[cfg(feature = "sm-memory")]
+        {
+            let goals =
+                goals.unwrap_or_else(|| StdArc::new(Mutex::new(empty_goal_store(&data_root))));
+            Self {
+                agent,
+                config,
+                data_root,
+                sessions,
+                goals,
+            }
         }
-    }
-
-    /// Build a dispatcher over the SM surfaces (no-memory build).
-    ///
-    /// Why: builds without the heavy memory-core feature; `sm.goals.*` and
-    /// `sm.context.get` then return a graceful "not available without sm-memory"
-    /// JSON-RPC error instead of failing to compile.
-    /// What: stores agent/config/data_root/sessions (no goal store).
-    /// Test: `tests.rs` builds this over the mock resolver + mock control.
-    #[cfg(not(feature = "sm-memory"))]
-    pub fn new(
-        agent: Arc<SessionManagerAgent>,
-        config: SessionManagerConfig,
-        data_root: impl Into<PathBuf>,
-        sessions: Arc<dyn SessionControl>,
-    ) -> Self {
-        Self {
-            agent,
-            config,
-            data_root: data_root.into(),
-            sessions,
+        #[cfg(not(feature = "sm-memory"))]
+        {
+            // No-memory build: there is no goal store; the handle is never
+            // constructed (callers always pass `None`).
+            let _ = goals;
+            Self {
+                agent,
+                config,
+                data_root,
+                sessions,
+            }
         }
     }
 
@@ -183,11 +209,17 @@ async fn build_dispatcher(
     #[cfg(feature = "sm-memory")]
     {
         let goals = build_goal_store(&data_root, &config).await;
-        Ok(SmDispatcher::new(agent, config, data_root, sessions, goals))
+        Ok(SmDispatcher::new(
+            agent,
+            config,
+            data_root,
+            sessions,
+            Some(goals),
+        ))
     }
     #[cfg(not(feature = "sm-memory"))]
     {
-        Ok(SmDispatcher::new(agent, config, data_root, sessions))
+        Ok(SmDispatcher::new(agent, config, data_root, sessions, None))
     }
 }
 

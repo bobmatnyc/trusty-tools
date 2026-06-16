@@ -69,23 +69,31 @@ fn ensure_obj(params: &Value) -> Result<(), MethodError> {
     }
 }
 
-/// Extract a REQUIRED string field from params.
+/// Extract a REQUIRED, non-blank string field from params.
 ///
 /// Why: several methods require a string (`message`, `description`, `session_id`,
-/// `text`, `id`, `workdir`); a missing/non-string value must be a clean
-/// invalid-params error, not a panic.
-/// What: returns the trimmed-non-empty string, or [`MethodError::InvalidParams`].
-/// Test: `tests.rs::*_missing_required_param_is_invalid_params`.
+/// `text`, `id`, `workdir`); a missing/non-string/blank value must be a clean
+/// invalid-params error, not a panic. Distinguishing "absent" from
+/// "present-but-blank" gives a caller an actionable message instead of a
+/// misleading "missing" when they DID supply the key (just whitespace).
+/// What: returns the original (untrimmed) string when present and non-blank;
+/// otherwise [`MethodError::InvalidParams`] — with a "missing/not a string"
+/// message when the field is absent or non-string, and a distinct "must not be
+/// blank" message when it is present but trims to empty. Blank strings are still
+/// rejected.
+/// Test: `tests.rs::*_missing_required_param_is_invalid_params`,
+/// `blank_required_param_is_distinct_invalid_params`.
 fn req_str(params: &Value, field: &str) -> Result<String, MethodError> {
     ensure_obj(params)?;
-    params
-        .get(field)
-        .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| {
-            MethodError::InvalidParams(format!("missing required string param `{field}`"))
-        })
+    match params.get(field).and_then(Value::as_str) {
+        Some(s) if !s.trim().is_empty() => Ok(s.to_string()),
+        Some(_) => Err(MethodError::InvalidParams(format!(
+            "param `{field}` must not be blank"
+        ))),
+        None => Err(MethodError::InvalidParams(format!(
+            "missing required string param `{field}`"
+        ))),
+    }
 }
 
 /// Extract an OPTIONAL string field from params (absent/null/empty → `None`).
@@ -169,6 +177,16 @@ pub async fn sm_sessions_launch(d: &SmDispatcher, params: &Value) -> Result<Valu
             .unwrap_or_default()
             .to_string();
         let linked = link_session_to_goal(d, &goal_id, &session_id).await;
+        if !linked {
+            // Best-effort link (§9.3): an unknown goal or a persist failure must
+            // NOT undo a successful launch, but it must be observable rather than
+            // silently swallowed — `linked: false` rides back in the response too.
+            tracing::warn!(
+                session_id = %session_id,
+                goal_id = %goal_id,
+                "sm.sessions.launch: goal↔session link failed (best-effort); session launched but not linked"
+            );
+        }
         let mut out = result;
         if let Some(obj) = out.as_object_mut() {
             obj.insert("goal_id".to_string(), json!(goal_id));
@@ -346,8 +364,6 @@ pub async fn sm_goals_create(d: &SmDispatcher, params: &Value) -> Result<Value, 
 /// Test: `tests.rs::goals_update_round_trips`.
 #[cfg(feature = "sm-memory")]
 pub async fn sm_goals_update(d: &SmDispatcher, params: &Value) -> Result<Value, MethodError> {
-    use crate::core::sm::GoalStatus;
-
     let id = req_str(params, "id")?;
     let note = opt_str(params, "note");
     let status = opt_str(params, "status");
@@ -364,7 +380,6 @@ pub async fn sm_goals_update(d: &SmDispatcher, params: &Value) -> Result<Value, 
         .get(&id)
         .cloned()
         .ok_or_else(|| MethodError::NotFound(format!("goal not found: {id}")))?;
-    let _ = GoalStatus::default(); // keep the import meaningful across cfgs
     serde_json::to_value(json!({ "goal": goal })).map_err(|e| MethodError::Internal(e.to_string()))
 }
 

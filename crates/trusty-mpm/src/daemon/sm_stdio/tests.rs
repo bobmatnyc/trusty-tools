@@ -41,6 +41,10 @@ use crate::core::sm::agent::mock::{MockChatProvider, MockResolver};
 struct MockSessionControl {
     /// When true, `get` returns NotFound (to cover the not-found JSON-RPC mapping).
     fail_get_not_found: bool,
+    /// When true, `stop`/`kill` return [`SessionControlError::Backend`] (to cover
+    /// the backend-failure JSON-RPC mapping — a tmux/store failure on a session
+    /// that DOES exist must NOT be reported as not-found).
+    fail_stop_kill_backend: bool,
     /// The last launch params seen (so a test can assert the mapping).
     last_launch: std::sync::Mutex<Option<LaunchParams>>,
 }
@@ -64,12 +68,20 @@ impl SessionControl for MockSessionControl {
         Ok(json!({ "ok": true }))
     }
     async fn stop(&self, _id: &str) -> Result<Value, SessionControlError> {
+        if self.fail_stop_kill_backend {
+            return Err(SessionControlError::Backend("tmux kill failed".into()));
+        }
         Ok(json!({ "ok": true }))
     }
     async fn resume(&self, _id: &str) -> Result<Value, SessionControlError> {
         Ok(json!({ "ok": true }))
     }
     async fn kill(&self, _id: &str) -> Result<Value, SessionControlError> {
+        if self.fail_stop_kill_backend {
+            return Err(SessionControlError::Backend(
+                "decommission tmux failed".into(),
+            ));
+        }
         Ok(json!({ "ok": true }))
     }
 }
@@ -124,14 +136,10 @@ fn dispatcher_with(
 ) -> SmDispatcher {
     let sessions: Arc<dyn SessionControl> = control;
     #[cfg(feature = "sm-memory")]
-    {
-        let goals = test_goal_store(data_root);
-        SmDispatcher::new(agent, cfg, data_root.to_path_buf(), sessions, goals)
-    }
+    let goals = Some(test_goal_store(data_root));
     #[cfg(not(feature = "sm-memory"))]
-    {
-        SmDispatcher::new(agent, cfg, data_root.to_path_buf(), sessions)
-    }
+    let goals = None;
+    SmDispatcher::new(agent, cfg, data_root.to_path_buf(), sessions, goals)
 }
 
 /// Build an in-memory goal store over a no-op palace for `sm.goals.*` tests.
@@ -262,6 +270,34 @@ async fn chat_missing_message_is_invalid_params() {
 
     let resp = d.dispatch(req(3, "sm.chat", json!({}))).await;
     err_code(&resp, 3, error_codes::INVALID_PARAMS);
+}
+
+/// Why: a PRESENT-but-blank required string must still be rejected (INVALID_PARAMS)
+/// but with a DISTINCT "must not be blank" message — not the misleading "missing"
+/// wording — so a caller who supplied a whitespace value gets an actionable error.
+/// What: dispatches `sm.chat` with a whitespace `message`; asserts INVALID_PARAMS
+/// and that the message distinguishes blank from missing.
+/// Test: this is the test.
+#[tokio::test]
+async fn blank_required_param_is_distinct_invalid_params() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = enabled_config();
+    let agent = agent_with_provider(cfg.clone(), tmp.path());
+    let d = dispatcher_with(
+        agent,
+        cfg,
+        tmp.path(),
+        Arc::new(MockSessionControl::default()),
+    );
+
+    let resp = d
+        .dispatch(req(7, "sm.chat", json!({ "message": "   " })))
+        .await;
+    let msg = err_code(&resp, 7, error_codes::INVALID_PARAMS);
+    assert!(
+        msg.contains("must not be blank"),
+        "blank value gets a distinct message, got: {msg}"
+    );
 }
 
 /// Why: `sm.health` must report provider status + degraded + model tiers with
@@ -423,6 +459,36 @@ async fn get_unknown_session_is_not_found() {
         ))
         .await;
     err_code(&resp, 16, CODE_NOT_FOUND);
+}
+
+/// Why: a BACKEND failure of `stop`/`kill` on a session that exists (tmux/store
+/// error, not a missing id) must map to INTERNAL_ERROR (-32603), NOT the
+/// not-found code — consistent with `send`/`resume`. This guards the regression
+/// where any `stop`/`decommission` error was reported as not-found.
+/// What: dispatches `sm.sessions.stop` and `sm.sessions.kill` against a control
+/// that returns [`SessionControlError::Backend`]; asserts INTERNAL_ERROR on both.
+/// Test: this is the test.
+#[tokio::test]
+async fn stop_kill_backend_failure_is_internal_not_found() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = enabled_config();
+    let agent = agent_with_provider(cfg.clone(), tmp.path());
+    let control = Arc::new(MockSessionControl {
+        fail_stop_kill_backend: true,
+        ..MockSessionControl::default()
+    });
+    let d = dispatcher_with(agent, cfg, tmp.path(), control);
+    let sid = "44444444-4444-4444-4444-444444444444";
+
+    let stop = d
+        .dispatch(req(17, "sm.sessions.stop", json!({ "session_id": sid })))
+        .await;
+    err_code(&stop, 17, error_codes::INTERNAL_ERROR);
+
+    let kill = d
+        .dispatch(req(18, "sm.sessions.kill", json!({ "session_id": sid })))
+        .await;
+    err_code(&kill, 18, error_codes::INTERNAL_ERROR);
 }
 
 // ── Framing: parse error / unknown method / notification ────────────────────────

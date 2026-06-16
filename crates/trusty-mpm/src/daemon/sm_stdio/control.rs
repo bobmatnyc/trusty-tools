@@ -23,7 +23,7 @@ use async_trait::async_trait;
 
 use crate::daemon::managed_routes::{SpawnParams, record_to_json, resume_managed, spawn_managed};
 use crate::daemon::state::DaemonState;
-use crate::session_manager::ManagedSessionId;
+use crate::session_manager::{ManagedError, ManagedSessionId};
 
 /// Inputs for `sm.sessions.launch` (§1A.1: `{ workdir, model?, prompt?, goal_id? }`).
 ///
@@ -55,9 +55,10 @@ pub struct LaunchParams {
 /// lets it choose `INVALID_PARAMS` (bad id) vs `INTERNAL_ERROR` (control
 /// failure) by VARIANT rather than string-matching, and keeps the adapter
 /// panic-free per the workspace convention.
-/// What: [`NotFound`](SessionControlError::NotFound) for an absent/invalid
-/// session id; [`Backend`](SessionControlError::Backend) for any control-surface
-/// failure (provision/tmux/store).
+/// What: [`NotFound`](SessionControlError::NotFound) is reserved for a malformed
+/// session id (UUID parse failure) OR a genuinely-absent session
+/// (`ManagedError::SessionNotFound`); [`Backend`](SessionControlError::Backend)
+/// for any other control-surface failure (provision/tmux/store/invalid-state).
 /// Test: `tests.rs` mock returns both variants; the dispatcher asserts the
 /// mapped JSON-RPC code.
 #[derive(Debug, thiserror::Error)]
@@ -152,6 +153,27 @@ impl DaemonSessionControl {
             .map(ManagedSessionId::from)
             .map_err(|_| SessionControlError::NotFound(session_id.to_string()))
     }
+
+    /// Map a manager [`ManagedError`] onto the control error class.
+    ///
+    /// Why: a post-parse operation failure must preserve the not-found-vs-backend
+    /// distinction so the dispatcher picks the right JSON-RPC code. Reserving
+    /// [`SessionControlError::NotFound`] for the genuinely-absent session (and the
+    /// UUID-parse failure in [`Self::parse_id`]) — and routing every OTHER manager
+    /// failure (tmux, store, invalid-state, I/O) to
+    /// [`SessionControlError::Backend`] (`-32603`) — keeps `get`/`stop`/`kill`
+    /// consistent with `send`/`resume`, which already surface backend failures as
+    /// `Backend`.
+    /// What: `ManagedError::SessionNotFound` → `NotFound`; every other variant →
+    /// `Backend(e.to_string())`.
+    /// Test: `tests.rs::stop_backend_failure_is_backend_not_found` and
+    /// `kill_backend_failure_is_backend_not_found`.
+    fn map_managed_err(e: ManagedError) -> SessionControlError {
+        match e {
+            ManagedError::SessionNotFound(msg) => SessionControlError::NotFound(msg),
+            other => SessionControlError::Backend(other.to_string()),
+        }
+    }
 }
 
 #[async_trait]
@@ -196,10 +218,7 @@ impl SessionControl for DaemonSessionControl {
     async fn get(&self, session_id: &str) -> Result<serde_json::Value, SessionControlError> {
         let id = Self::parse_id(session_id)?;
         let mgr = self.state.session_manager().await;
-        let record = mgr
-            .get(&id)
-            .await
-            .map_err(|_| SessionControlError::NotFound(session_id.to_string()))?;
+        let record = mgr.get(&id).await.map_err(Self::map_managed_err)?;
         Ok(serde_json::json!({ "session": record_to_json(&record) }))
     }
 
@@ -221,9 +240,7 @@ impl SessionControl for DaemonSessionControl {
     async fn stop(&self, session_id: &str) -> Result<serde_json::Value, SessionControlError> {
         let id = Self::parse_id(session_id)?;
         let mgr = self.state.session_manager().await;
-        mgr.stop(&id)
-            .await
-            .map_err(|_| SessionControlError::NotFound(session_id.to_string()))?;
+        mgr.stop(&id).await.map_err(Self::map_managed_err)?;
         Ok(serde_json::json!({ "ok": true }))
     }
 
@@ -247,9 +264,7 @@ impl SessionControl for DaemonSessionControl {
     async fn kill(&self, session_id: &str) -> Result<serde_json::Value, SessionControlError> {
         let id = Self::parse_id(session_id)?;
         let mgr = self.state.session_manager().await;
-        mgr.decommission(&id)
-            .await
-            .map_err(|_| SessionControlError::NotFound(session_id.to_string()))?;
+        mgr.decommission(&id).await.map_err(Self::map_managed_err)?;
         Ok(serde_json::json!({ "ok": true }))
     }
 }
