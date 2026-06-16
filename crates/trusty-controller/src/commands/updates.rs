@@ -1,43 +1,136 @@
-//! `tctl updates` — read-only listing of available updates + changelog headlines.
+//! `tctl updates` — read-only listing of available updates (#1316, DOC-9 §1).
 //!
-//! Why: The read-only companion to `tctl upgrade` (DOC-5 §1.3 / DOC-9 §1).
-//! It surfaces which members have a newer pinned or published version without
-//! performing any mutation.
+//! Why: The read-only companion to `tctl upgrade`. It surfaces which stable-set
+//! members have a newer published version *without performing any mutation* —
+//! the safe "what would change?" view, and the data the opt-in auto-update check
+//! reuses.
 //!
-//! What: Phase-0 stub. Phase-1 will walk the manifest, call
-//! `trusty_common::update::check_crates_io` for each cargo member (or the uv
-//! probe for the orchestrator), and render the per-member installed→available
-//! diff table plus changelog headlines (DOC-9 §2).
+//! What: Probes crates.io for each stable-set member via
+//! `update_engine::gather_candidates`, then renders the installed→latest diff —
+//! either a human table (rustup-style narration) or a `--json` envelope. Never
+//! mutates anything. Returns exit 0 always (read-only).
 //!
-//! Test: `run(false, false)` and `run(true, false)` do not panic.
+//! Test: `tests::report_serialises` covers the JSON shape; the network probe is
+//! side-effecting.
 
-use crate::output;
+use serde::Serialize;
+
+use super::runtime::block_on;
+use super::stable_set::stable_set;
+use super::update_engine::{gather_candidates, UpdateCandidate};
+use crate::output::render_json;
+
+/// The `tctl updates` report.
+///
+/// Why: A typed rollup keeps the machine output stable; the human path renders
+/// the same data.
+/// What: Holds the upgrade candidates and the total count.
+/// Test: `tests::report_serialises`.
+#[derive(Clone, Debug, Serialize)]
+pub struct UpdatesReport {
+    /// Fixed command tag for JSON consumers.
+    pub command: &'static str,
+    /// Members with a newer version available.
+    pub candidates: Vec<UpdateCandidate>,
+    /// Number of candidates (sugar for consumers).
+    pub count: usize,
+}
+
+impl UpdatesReport {
+    /// Build a report from gathered candidates.
+    ///
+    /// Why: Centralises the `count` derivation.
+    /// What: Sets `command = "updates"` and `count = candidates.len()`.
+    /// Test: `tests::report_serialises`.
+    fn build(candidates: Vec<UpdateCandidate>) -> Self {
+        Self {
+            command: "updates",
+            count: candidates.len(),
+            candidates,
+        }
+    }
+}
 
 /// Handle `tctl updates [--latest]`.
 ///
-/// Why: Phase-0 entry point confirming the read-only update listing is wired.
+/// Why: Phase-1 read-only update listing (#1316 priority 2).
 ///
-/// What: `latest` selects crates.io HEAD over the BOM pin (DOC-9 §1.2). Both
-/// paths are stubs in Phase 0.
+/// What: Gathers candidates across the stable set and renders them. `latest` is
+/// accepted for surface compatibility; the listing always reports the latest
+/// crates.io release (there is no separate BOM pin in Phase 1, so `--latest` and
+/// the default are equivalent today). Returns 0 (read-only, never fails the
+/// process on "updates available").
 ///
-/// Test: Call with `latest = false` and `latest = true`; neither should panic.
-pub fn run(latest: bool, json: bool) {
-    let cmd = if latest {
-        "updates --latest"
+/// Test: Side-effecting (network); the report shaping is tested via `UpdatesReport`.
+pub fn run(latest: bool, json: bool) -> i32 {
+    let _ = latest; // Phase 1: latest == default (no BOM pin yet).
+    let report = block_on(gather());
+    if json {
+        let _ = render_json(&report);
     } else {
-        "updates"
-    };
-    output::print_not_yet_implemented(cmd, json);
+        print_human(&report);
+    }
+    0
+}
+
+/// Probe the stable set for candidates and build the report.
+///
+/// Why: The async core, isolated from the sync CLI shell.
+/// What: Calls `gather_candidates(stable_set())`.
+/// Test: Side-effecting; covered indirectly.
+async fn gather() -> UpdatesReport {
+    let candidates = gather_candidates(&stable_set()).await;
+    UpdatesReport::build(candidates)
+}
+
+/// Render the human-readable updates listing to stdout.
+///
+/// Why: Operators want a quick scan of what is stale.
+/// What: Prints one line per candidate (`name installed → latest`), or a
+/// "everything up to date" line when there are none.
+/// Test: Side-effect-only; the data is tested via `UpdatesReport`.
+fn print_human(report: &UpdatesReport) {
+    if report.candidates.is_empty() {
+        println!("All stable-set tools are up to date.");
+        return;
+    }
+    println!("{} update(s) available:", report.count);
+    for c in &report.candidates {
+        let installed = c.installed.as_deref().unwrap_or("(not installed)");
+        println!("  {}  {} → {}", c.crate_name, installed, c.latest);
+    }
+    println!("Run `tctl upgrade` to apply (you will be asked to confirm).");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::update_engine::UpdateCandidate;
 
+    /// Why: The JSON envelope is a public contract; pin its shape and count.
+    /// What: Builds a report with one candidate and asserts the keys.
+    /// Test: This is the test.
     #[test]
-    fn does_not_panic() {
-        run(false, false);
-        run(true, false);
-        run(false, true);
+    fn report_serialises() {
+        let report = UpdatesReport::build(vec![UpdateCandidate {
+            crate_name: "trusty-search".to_owned(),
+            binary: "trusty-search".to_owned(),
+            installed: Some("0.19.0".to_owned()),
+            latest: "0.20.0".to_owned(),
+            daemon: true,
+        }]);
+        let v = serde_json::to_value(&report).expect("serialises");
+        assert_eq!(v["command"], "updates");
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["candidates"][0]["latest"], "0.20.0");
+    }
+
+    /// Why: An empty candidate list must report count 0 cleanly.
+    /// What: Builds an empty report; asserts count 0.
+    /// Test: This is the test.
+    #[test]
+    fn empty_report_count_zero() {
+        let report = UpdatesReport::build(vec![]);
+        assert_eq!(report.count, 0);
     }
 }

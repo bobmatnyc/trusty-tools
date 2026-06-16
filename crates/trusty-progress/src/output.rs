@@ -35,6 +35,19 @@ pub enum Mode {
 /// on stderr so stdout stays clean for JSON-RPC framing. A trait object behind
 /// an `Arc<Mutex<…>>` lets us swap stderr for an in-memory buffer.
 /// What: The shared, thread-safe write target for rendered lines.
+///
+/// ## Mutex poison recovery
+///
+/// Every `.lock()` on this sink (and on the [`Capture`] / [`SharedBuf`] buffers
+/// that back it) recovers from poisoning with
+/// `.unwrap_or_else(|poisoned| poisoned.into_inner())` rather than `.unwrap()`.
+/// A progress display is *purely cosmetic*: if one thread panicked mid-write and
+/// poisoned the mutex, the worst case is a single partially-written line — never
+/// corrupt program state. Recovering the guard lets the surviving threads keep
+/// rendering progress instead of cascading the panic into otherwise-healthy work
+/// (and, in a library, into the caller). This is the deliberate, crate-wide
+/// policy for the output sink; see the `writeln` / `Capture::contents` /
+/// `SharedBuf::write` lock sites below.
 type SharedSink = Arc<Mutex<dyn Write + Send>>;
 
 /// Why: Bundles the rendering [`Mode`] with the line sink so the narrator,

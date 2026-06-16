@@ -118,15 +118,35 @@ impl Default for BootSection {
     }
 }
 
-/// The controller's on-disk config (DOC-12 §8 / #1220).
+/// The `[controller]` config section (#1316).
+///
+/// Why: The #1316 opt-in auto-update CHECK is gated by a config flag distinct
+/// from boot policy, so it lives in its own `controller` namespace. The default
+/// is OFF — tctl must never probe crates.io in the background, let alone apply
+/// anything, unless the operator opts in.
+///
+/// What: `auto_update_check` enables the notify-only background update check
+/// (see `commands::auto_update`). It only *notifies*; applying always requires
+/// explicit confirmation via `tctl upgrade`.
+///
+/// Test: `super::tests::config_parses_controller`, `super::tests::controller_default_off`.
+#[derive(Clone, Debug, PartialEq, Eq, Default, Deserialize)]
+#[serde(default)]
+pub struct ControllerSection {
+    /// Enable the opt-in notify-only update check (default `false`).
+    pub auto_update_check: bool,
+}
+
+/// The controller's on-disk config (DOC-12 §8 / #1220 / #1316).
 ///
 /// Why: The deserialisation root for
 /// `~/.trusty-tools/trusty-controller/config.yaml`.
 ///
-/// What: Holds the `boot` section plus the optional `analyze_core_targets`
-/// override (empty = use the §3.3 default set).
+/// What: Holds the `boot` section, the optional `analyze_core_targets` override
+/// (empty = use the §3.3 default set), and the `controller` section (#1316
+/// auto-update opt-in).
 ///
-/// Test: `super::tests::config_parses_full`.
+/// Test: `super::tests::config_parses_full`, `super::tests::config_parses_controller`.
 #[derive(Clone, Debug, PartialEq, Eq, Default, Deserialize)]
 #[serde(default)]
 pub struct BootConfig {
@@ -134,6 +154,8 @@ pub struct BootConfig {
     pub boot: BootSection,
     /// Override of the §3.3 core-analysis target set (empty = default).
     pub analyze_core_targets: Vec<String>,
+    /// Controller-level settings (#1316 auto-update opt-in).
+    pub controller: ControllerSection,
 }
 
 /// Compute the #1220 controller config path: `~/.trusty-tools/trusty-controller/config.yaml`.
