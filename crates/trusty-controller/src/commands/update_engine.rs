@@ -46,6 +46,8 @@ pub struct UpdateCandidate {
     pub latest: String,
     /// Whether this member is a supervised daemon (drives restart-on-upgrade).
     pub daemon: bool,
+    /// true when the binary is absent — install-candidate vs upgrade-candidate.
+    pub is_install: bool,
 }
 
 /// The outcome of the confirm-then-apply gate.
@@ -157,12 +159,18 @@ pub fn installed_version(binary: &str) -> Option<String> {
 /// isolating the token extraction makes it unit-testable without a subprocess.
 ///
 /// What: Returns the first whitespace-delimited token that contains a `.` and a
-/// leading digit, stripping a leading `v`. Returns `None` when no token matches.
+/// leading digit, stripping a leading `v` and any trailing non-alphanumeric
+/// punctuation (e.g. a trailing comma or period). Returns `None` when no token
+/// matches.
 ///
 /// Test: `tests::extract_version_from_line`.
 pub fn extract_version_from_line(line: &str) -> Option<String> {
     line.split_whitespace()
         .map(|t| t.trim_start_matches('v'))
+        // Strip trailing non-alphanumeric punctuation so `tctl 1.2.3,` and
+        // `tctl 1.2.3.` both yield `1.2.3`. A pre-release token like `1.2.3-rc1`
+        // ends in an alphanumeric, so nothing is trimmed from it.
+        .map(|t| t.trim_end_matches(|c: char| !c.is_ascii_alphanumeric()))
         .find(|t| t.contains('.') && t.chars().next().is_some_and(|c| c.is_ascii_digit()))
         .map(|t| t.to_owned())
 }
@@ -190,6 +198,7 @@ pub async fn gather_candidates(members: &[StableMember]) -> Vec<UpdateCandidate>
             candidates.push(UpdateCandidate {
                 crate_name: m.crate_name.clone(),
                 binary: m.binary.clone(),
+                is_install: installed.is_none(),
                 installed,
                 latest: info.latest,
                 daemon: m.daemon,
@@ -291,6 +300,15 @@ mod tests {
         assert_eq!(
             super::extract_version_from_line("mytool v2.8.0"),
             Some("2.8.0".to_owned())
+        );
+        // Trailing punctuation (comma, period) is stripped.
+        assert_eq!(
+            super::extract_version_from_line("tctl 1.2.3,"),
+            Some("1.2.3".to_owned())
+        );
+        assert_eq!(
+            super::extract_version_from_line("tctl 1.2.3."),
+            Some("1.2.3".to_owned())
         );
         assert_eq!(super::extract_version_from_line("no version here"), None);
     }

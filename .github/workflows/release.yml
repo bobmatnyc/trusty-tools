@@ -256,6 +256,22 @@ jobs:
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
 
+          elif [[ "$CRATE" == "trusty-controller" ]]; then
+            # Binaries: tctl
+            # Single [[bin]] `tctl` at src/main.rs confirmed in trusty-controller/Cargo.toml;
+            # no required-features on the bin target (edition 2021).
+            # No UI embedding, no ORT: no SKIP_UI_BUILD, no AL2023 variant.
+            # (#1316 / #1332): wired into the allowlist so tctl tags build + release
+            # instead of green-skipping as a library-only crate.
+            CARGO_PKG="trusty-controller"
+            BINARIES="tctl"
+            SKIP_UI_BUILD="false"
+            CARGO_FEATURES=""
+            NO_DEFAULT_FEATURES="false"
+            AL2023_VARIANT="false"
+            AL2023_NO_DEFAULT="false"
+            AL2023_FEATURES=""
+
           elif [[ "$CRATE" == "trusty-console" ]]; then
             # Binaries: trusty-console
             # As of #1318 (single-owner-per-binary) the standalone trusty-console
@@ -305,15 +321,14 @@ jobs:
           # CAVEAT — adding a NEW binary crate: because the default is skip, a brand
           # new *binary*-producing crate will ALSO green-skip until you add an
           # explicit config branch for it above. That is intentional (fail-safe, not
-          # fail-loud), but it means a missing binary release is silent. Known gap:
-          # `trusty-controller` (bin `tctl`, added in #1316) is a real binary crate
-          # that does NOT yet have a config branch above, so its tags currently
-          # green-skip. Wire it into the allowlist before relying on tctl releases.
+          # fail-loud), but it means a missing binary release is silent. (The former
+          # `trusty-controller` / bin `tctl` gap from #1316 was closed in #1332 — it
+          # now has a config branch above and builds + releases normally.)
           else
             echo "::notice title=Library-only crate — release skipped::Crate '$CRATE' is not in the binary-release allowlist; treating it as library-only and skipping the binary release gracefully (green, not an error)."
             echo "Binary-producing crates (built + released): trusty-search, trusty-memory,"
             echo "  trusty-analyze, trusty-review, trusty-mpm, trusty-git-analytics (tga),"
-            echo "  trusty-code, trusty-console."
+            echo "  trusty-code, trusty-console, trusty-controller (tctl)."
             echo "Library-only / internal crates (green-skip, no standalone binary):"
             echo "  trusty-common, trusty-bm25-daemon, trusty-embedderd, trusty-progress,"
             echo "  trusty-agents*, trusty-mpm-gui, tc-services, cto-assistant,"
@@ -941,6 +956,7 @@ jobs:
             trusty-console)  INSTALL_BINS="trusty-console" ;;
             trusty-git-analytics) INSTALL_BINS="tga" ;;
             trusty-code)     INSTALL_BINS="tcode" ;;
+            trusty-controller) INSTALL_BINS="tctl" ;;
             *)               INSTALL_BINS="${CRATE}" ;;
           esac
 

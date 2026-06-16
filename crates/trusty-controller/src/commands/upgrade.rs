@@ -363,6 +363,7 @@ mod tests {
             installed: Some("0.19.0".to_owned()),
             latest: "0.20.0".to_owned(),
             daemon: true,
+            is_install: false,
         }
     }
 

@@ -173,10 +173,12 @@ fn spawn_detached_console() -> std::io::Result<()> {
         // affects the calling (child) process between fork and exec.
         unsafe {
             cmd.pre_exec(|| {
-                // Detach from the parent's process group/session. A non-fatal
-                // failure (already a session leader) is ignored — the redirected
-                // std streams alone still prevent terminal coupling.
-                libc::setsid();
+                // Detach from the parent's process group/session. The return
+                // value is deliberately discarded: the only documented failure
+                // is `EPERM` when the caller is already a session/process-group
+                // leader, which is benign here — the redirected std streams alone
+                // still prevent terminal coupling, so there is nothing to recover.
+                let _ = libc::setsid();
                 Ok(())
             });
         }
@@ -185,6 +187,10 @@ fn spawn_detached_console() -> std::io::Result<()> {
     let child = cmd.spawn()?;
     // Intentional detach: the console outlives `tctl`. We never wait on it, so we
     // forget the handle rather than let `Drop` (which does not reap) run.
+    // Trade-off vs `drop(child)`: `Child::drop` does NOT kill or reap the child
+    // either, so behaviourally the two are equivalent here — but `forget` signals
+    // the intent ("we are deliberately abandoning a daemon we do not own") so a
+    // future reader does not mistake a dropped handle for an oversight.
     std::mem::forget(child);
     Ok(())
 }
