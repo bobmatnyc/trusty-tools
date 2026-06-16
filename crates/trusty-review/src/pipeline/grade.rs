@@ -10,10 +10,14 @@
 //! The fix has these deterministic rules applied in `derive_verdict`:
 //!
 //! 0. SUBSTANTIVE-FINDING FILTER (#1343, applied first): findings that are
-//!    verifier-refuted (`Refuted` / `ErrorRefuted` / `TruncationRefuted`) OR carry
-//!    `confidence < 0.50` (`FLOOR_COUNT_MIN_CONFIDENCE`) are excluded from ALL
-//!    floor logic.  They are noise, never evidence — a `confidence:0.1` or refuted
-//!    finding must never harden the verdict.
+//!    verifier-refuted (`Refuted` / `ErrorRefuted` / `TruncationRefuted`) are always
+//!    excluded from ALL floor logic.  Otherwise a finding is excluded when it carries
+//!    `confidence < 0.50` (`FLOOR_COUNT_MIN_CONFIDENCE`) UNLESS it is `Effort::High`
+//!    — a non-refuted High-effort (critical/high severity) finding is retained even
+//!    at low confidence so it still drives the BLOCK floor (0.3.12 safety-net fix,
+//!    PR #1350).  A `confidence:0.1` Medium or a refuted finding is noise, never
+//!    evidence, and must never harden the verdict; an uncertain *critical* finding
+//!    keeps its place at the floor.
 //!
 //! 1. LOW-CONFIDENCE OVERRIDE: if ALL substantive findings have confidence
 //!    ≤ 0.65 AND none are `High`-effort, force APPROVE — overriding even a
@@ -85,7 +89,9 @@
 //! `approve_b_plus_survives_refuted_and_low_confidence_findings` (#1343),
 //! `approve_b_plus_two_high_conf_medium_caps_at_approve_star` (#1343),
 //! `model_request_changes_review_body_still_surfaces_request_changes` (#1343),
-//! `high_effort_finding_still_overrides_approve` (#1343).
+//! `high_effort_finding_still_overrides_approve` (#1343),
+//! `low_confidence_high_effort_finding_still_drives_floor` (PR #1350),
+//! `refuted_high_effort_finding_is_still_excluded` (PR #1350).
 
 use tracing::debug;
 
@@ -130,10 +136,18 @@ const FLOOR_MIN_CONFIDENCE: f32 = 0.80;
 /// driven by speculative findings carrying `confidence: 0.1` (and verifier-refuted
 /// findings, which are demoted to 0.10 by `VERIFY_REFUTED_CONFIDENCE`).  Such
 /// findings must never count toward any floor — they are noise, not evidence.
+/// The 0.50 value is the coin-flip line: below 0.50 a finding is more likely
+/// wrong than right, so it must not move the verdict floor.  (Contrast with
+/// `LOW_CONFIDENCE_THRESHOLD` = 0.65, the advisory-batch collapse line, and
+/// `FLOOR_MIN_CONFIDENCE` = 0.80, the Medium-counts-toward-the-floor line.)
 /// What: any finding with `confidence < FLOOR_COUNT_MIN_CONFIDENCE` is dropped
-/// from the severity-floor input set (alongside any verifier-refuted finding).
+/// from the severity-floor input set (alongside any verifier-refuted finding) —
+/// with ONE exception (0.3.12, PR #1350): a non-refuted `Effort::High` finding is
+/// retained even below 0.50, so an uncertain-but-critical concern keeps its safety
+/// net (see `is_substantive`).
 /// Test: `floor_excludes_refuted_and_low_confidence_findings`,
-/// `approve_b_plus_survives_refuted_and_low_confidence_findings`.
+/// `approve_b_plus_survives_refuted_and_low_confidence_findings`,
+/// `low_confidence_high_effort_finding_still_drives_floor`.
 const FLOOR_COUNT_MIN_CONFIDENCE: f32 = 0.50;
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -211,6 +225,12 @@ pub fn derive_verdict(model_proposed: Verdict, findings: &[Finding]) -> Verdict 
         );
         floor = Verdict::ApproveWithReservations;
     }
+    // Traceability (PR #1350): this cap only relaxes the *upward* direction
+    // (an APPROVE review_body must not be hardened to REQUEST_CHANGES by a Medium
+    // count).  The symmetric *downward* direction — a model-proposed BLOCK being
+    // relaxed below the floor — is intentionally NOT handled here; it is covered by
+    // `stricter_of` below, which takes max(model, floor), so a model BLOCK can never
+    // be softened by a weaker floor.  See `grade_model_block_kept_when_no_critical_finding`.
 
     let final_verdict = stricter_of(model_proposed.clone(), floor.clone());
 
@@ -225,16 +245,26 @@ pub fn derive_verdict(model_proposed: Verdict, findings: &[Finding]) -> Verdict 
 }
 
 /// Return `true` if a finding is substantive enough to count toward the verdict
-/// floor (closes #1343).
+/// floor (closes #1343; High-effort safety net restored in 0.3.12 per PR #1350).
 ///
 /// Why: refuted findings and very-low-confidence speculation must never harden
 /// the verdict.  The #1343 calibration bug surfaced REQUEST_CHANGES/D+ on PRs the
 /// model graded APPROVE/B+ partly because `verified:"refuted"` findings (demoted to
 /// 0.10) and raw `confidence:0.1` findings were still fed into the severity floor.
+/// BUT the original #1343 predicate dropped EVERY finding below 0.50 confidence —
+/// including genuine High-effort (critical/high severity) findings.  That removed
+/// the safety net: a real critical bug the model was merely uncertain about (e.g.
+/// `confidence:0.45`, `effort:High`) would be excluded from the floor and silently
+/// soften to APPROVE.  PR #1350's review flagged this; we restore the net here.
 /// What: returns `false` when the finding is any refutation variant
-/// (`Refuted` / `ErrorRefuted` / `TruncationRefuted`) OR its confidence is below
-/// `FLOOR_COUNT_MIN_CONFIDENCE` (0.50); `true` otherwise.
-/// Test: `floor_excludes_refuted_and_low_confidence_findings`.
+/// (`Refuted` / `ErrorRefuted` / `TruncationRefuted`) — a verifier-refuted finding
+/// is disproven evidence and is excluded REGARDLESS of effort.  Otherwise returns
+/// `true` when EITHER its `confidence >= FLOOR_COUNT_MIN_CONFIDENCE` (0.50) OR it is
+/// `Effort::High` — a non-refuted High-effort finding is retained even at low
+/// confidence so it still drives the BLOCK floor / `has_high` path.
+/// Test: `floor_excludes_refuted_and_low_confidence_findings`,
+/// `low_confidence_high_effort_finding_still_drives_floor`,
+/// `refuted_high_effort_finding_is_still_excluded`.
 fn is_substantive(f: &Finding) -> bool {
     let refuted = matches!(
         f.verified,
@@ -242,7 +272,11 @@ fn is_substantive(f: &Finding) -> bool {
             | Some(VerifyOutcome::ErrorRefuted { .. })
             | Some(VerifyOutcome::TruncationRefuted)
     );
-    !refuted && f.confidence >= FLOOR_COUNT_MIN_CONFIDENCE
+    // A refuted finding is disproven evidence — always excluded, even High-effort.
+    // Otherwise retain it if it clears the confidence floor OR is a High-effort
+    // (critical/high severity) finding: a genuine critical concern must keep its
+    // place at the verdict floor even when the model is only uncertain about it.
+    !refuted && (f.confidence >= FLOOR_COUNT_MIN_CONFIDENCE || f.effort == Effort::High)
 }
 
 // ─── Floor computation ────────────────────────────────────────────────────────
