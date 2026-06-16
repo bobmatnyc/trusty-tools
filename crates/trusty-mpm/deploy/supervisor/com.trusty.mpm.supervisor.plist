@@ -32,6 +32,15 @@
          TRUSTY_MPM_AUTO_RESUME block below (or pass `tm supervisor --auto-resume`). -->
     <key>EnvironmentVariables</key>
     <dict>
+        <!-- Full PATH so the supervisor (and the sessions it spawns) can find
+             tmux (Homebrew) and claude (~/.local/bin). launchd relaunches this
+             agent with a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin) that omits
+             both, which 500s managed-session spawns after every restart (#1298).
+             launchd does NOT expand ~, so the home-relative dirs are written out
+             with the __USER__ placeholder. Keep user/Homebrew dirs before the
+             system dirs. -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/Users/__USER__/.local/bin:/Users/__USER__/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <!-- ENABLE AUTO-RESUME: uncomment the two lines below to set it to 1.
         <key>TRUSTY_MPM_AUTO_RESUME</key>
         <string>1</string>

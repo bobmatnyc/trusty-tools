@@ -83,6 +83,15 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty.mpm.superviso
 
 `RunAtLoad` + `KeepAlive` make it survive reboots and restart on crash.
 
+The plist's `EnvironmentVariables` block sets a full `PATH`
+(`/opt/homebrew/bin:/usr/local/bin:~/.local/bin:~/.cargo/bin:` + system dirs,
+with `~` expanded by the `__USER__` substitution above). launchd otherwise
+relaunches the agent with a minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`)
+that omits Homebrew (`tmux`) and `~/.local/bin` (`claude`), which 500s
+managed-session spawns after every restart (#1298). The daemon also resolves
+`tmux`/`claude` via well-known dirs at runtime as a belt-and-braces fallback,
+so spawns survive even a minimal inherited `PATH`.
+
 ## Persistence — Linux (systemd user service)
 
 ```bash

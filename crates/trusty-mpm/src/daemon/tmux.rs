@@ -81,25 +81,32 @@ pub struct TmuxDriver {
 }
 
 impl TmuxDriver {
-    /// Resolve the `tmux` binary, or fail if it is not on `PATH`.
+    /// Resolve the `tmux` binary, or fail if it cannot be found.
     ///
     /// Why: the daemon should refuse the tmux control model up front rather
-    /// than fail on the first session start.
-    /// What: runs `which tmux`; errors with a clear message if absent.
+    /// than fail on the first session start. Under launchd the daemon inherits
+    /// a minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`) that omits Homebrew,
+    /// so a bare `PATH` lookup of `tmux` (which lives at `/opt/homebrew/bin`)
+    /// returns nothing and every managed-session spawn 500s after a restart
+    /// (#1298). Resolving via the well-known dirs makes discovery survive the
+    /// minimal inherited `PATH`.
+    /// What: delegates to [`trusty_common::bin_resolve::resolve_binary`], which
+    /// consults the live `PATH` first and then falls back to the well-known
+    /// daemon dirs (Homebrew + user bins). Errors with a clear message if no
+    /// `tmux` is found anywhere.
     /// Test: `driver_reports_availability` (skips assertion when tmux missing).
     pub fn discover() -> Result<Self> {
-        let output = Command::new("which").arg("tmux").output()?;
-        if !output.status.success() {
-            return Err(Error::Protocol(
-                "tmux not found on PATH; use the PTY or SDK control model".into(),
-            ));
-        }
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if path.is_empty() {
-            return Err(Error::Protocol(
-                "`which tmux` returned an empty path".into(),
-            ));
-        }
+        let path = trusty_common::bin_resolve::resolve_binary("tmux").ok_or_else(|| {
+            Error::Protocol(
+                "tmux not found on PATH or in well-known dirs (e.g. /opt/homebrew/bin); \
+                 use the PTY or SDK control model"
+                    .into(),
+            )
+        })?;
+        let path = path
+            .to_str()
+            .ok_or_else(|| Error::Protocol("resolved tmux path is not valid UTF-8".into()))?
+            .to_string();
         Ok(Self { tmux_path: path })
     }
 
