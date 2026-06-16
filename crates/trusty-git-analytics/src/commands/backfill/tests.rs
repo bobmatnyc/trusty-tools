@@ -790,6 +790,84 @@ fn backfill_ai_detection_commits_detects_claude() {
     assert!(human_tool.is_none(), "human commit must have ai_tool=NULL");
 }
 
+/// Why: issue #1334 — the repair path left historical `agentic_mode` stuck at
+/// its `'none'` default, so a Claude-co-authored commit backfilled after
+/// migration v21 never became queryable as `agentic_mode = 'full_agentic'`.
+/// What: seeds a Claude-trailer commit (defaulting to `agentic_mode = 'none'`),
+/// a Cursor-trailer commit, and a plain human commit; runs the backfill; asserts
+/// the Claude commit is now `'full_agentic'`, the Cursor commit `'ide_assisted'`,
+/// and the human commit remains `'none'` — matching the forward `tga collect`
+/// path.
+/// Test: this test itself.
+#[test]
+fn backfill_ai_detection_commits_repairs_agentic_mode() {
+    let mut db = Database::open_in_memory().expect("open");
+
+    // Claude Code commit — must become full_agentic (the #1334 regression).
+    let claude_msg = "feat: add auth\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>";
+    seed(&db, "claude1", claude_msg);
+    // Cursor IDE commit — must become ide_assisted.
+    let cursor_msg = "fix: npe\n\nCo-Authored-By: Cursor <noreply@cursor.sh>";
+    seed(&db, "cursor1", cursor_msg);
+    // Human-only commit — must remain none.
+    seed(&db, "human1", "chore: bump dep");
+
+    // Sanity: all rows start at the migration default 'none' before the repair.
+    let pre: String = db
+        .connection()
+        .query_row(
+            "SELECT agentic_mode FROM commits WHERE sha = 'claude1'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("read pre claude1");
+    assert_eq!(
+        pre, "none",
+        "pre-backfill agentic_mode must default to 'none'"
+    );
+
+    backfill_ai_detection_commits(&mut db, false, &[], None, None).expect("backfill ai-detection");
+
+    let claude_mode: String = db
+        .connection()
+        .query_row(
+            "SELECT agentic_mode FROM commits WHERE sha = 'claude1'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("read claude1 mode");
+    assert_eq!(
+        claude_mode, "full_agentic",
+        "Claude commit must be repaired to agentic_mode='full_agentic' (#1334)"
+    );
+
+    let cursor_mode: String = db
+        .connection()
+        .query_row(
+            "SELECT agentic_mode FROM commits WHERE sha = 'cursor1'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("read cursor1 mode");
+    assert_eq!(
+        cursor_mode, "ide_assisted",
+        "Cursor commit must be repaired to agentic_mode='ide_assisted'"
+    );
+
+    let human_mode: String = db
+        .connection()
+        .query_row(
+            "SELECT agentic_mode FROM commits WHERE sha = 'human1'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("read human1 mode");
+    assert_eq!(
+        human_mode, "none",
+        "human commit must remain agentic_mode='none'"
+    );
+}
+
 /// Why: `backfill_top_level` must fill `top_level_category` for existing
 /// classifications where it is NULL, using the built-in taxonomy.
 /// What: seeds a classification with subcategory='bugfix' and

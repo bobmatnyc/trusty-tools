@@ -6,7 +6,7 @@
 //! makes the shared `build_commits_filter_sql` helper easy to find.
 
 use rusqlite::params;
-use tga::collect::ai_attribution::detect_ai_tool;
+use tga::collect::ai_attribution::{detect_agentic_mode, detect_ai_tool};
 use tga::collect::ticket::{extract_ticket_id, is_ticketed};
 use tga::core::db::Database;
 
@@ -337,14 +337,21 @@ pub(super) fn backfill_ai_detection(db: &mut Database, dry_run: bool) -> anyhow:
 
 /// Scan existing `commits.message` for AI co-authorship trailers.
 ///
-/// Why: `is_ai_assisted` and `ai_tool` columns were added in migration v17;
-/// existing rows have `is_ai_assisted = 0` and `ai_tool = NULL` regardless of
-/// their actual history. This backfill retroactively detects Claude,
-/// GitHub Copilot, and Cursor via `Co-Authored-By:` trailers.
+/// Why: `is_ai_assisted` and `ai_tool` columns were added in migration v17 and
+/// the canonical `agentic_mode` column in v21 (issue #1113); existing rows have
+/// `is_ai_assisted = 0`, `ai_tool = NULL`, and `agentic_mode = 'none'`
+/// regardless of their actual history. Before issue #1334 this repair path only
+/// rewrote `is_ai_assisted` / `ai_tool`, leaving historical `agentic_mode` stuck
+/// at `'none'` — so downstream consumers querying `agentic_mode = 'full_agentic'`
+/// missed every backfilled Claude Code commit. This backfill now retroactively
+/// detects Claude, GitHub Copilot, and Cursor via `Co-Authored-By:` trailers AND
+/// recomputes `agentic_mode`, exactly as the forward `tga collect` path does.
 /// What: loads every commit (filtered by repos/since/until), runs
-/// [`detect_ai_tool`] on the message, and updates rows where `ai_tool`
-/// differs from the stored value. No LLM required — pure string matching.
-/// Test: `tests::backfill_ai_detection_commits_detects_claude`.
+/// [`detect_ai_tool`] and [`detect_agentic_mode`] on the message, and updates
+/// rows where `ai_tool` OR `agentic_mode` differs from the stored value. No LLM
+/// required — pure string matching, identical to the extractor's INSERT path.
+/// Test: `tests::backfill_ai_detection_commits_detects_claude` (ai_tool) and
+/// `tests::backfill_ai_detection_commits_repairs_agentic_mode` (agentic_mode).
 ///
 /// # Errors
 ///
@@ -356,37 +363,44 @@ pub(super) fn backfill_ai_detection_commits(
     since: Option<&str>,
     until: Option<&str>,
 ) -> anyhow::Result<()> {
-    let mut to_update: Vec<(i64, i64, Option<&'static str>)> = Vec::new();
+    // (id, is_ai, ai_tool, agentic_mode) — agentic_mode is the forward-path
+    // string ("none" | "ide_assisted" | "full_agentic") via `AgenticMode::as_str`.
+    let mut to_update: Vec<(i64, i64, Option<&'static str>, &'static str)> = Vec::new();
     {
         let conn = db.connection();
         let (sql, params) = build_commits_filter_sql(
-            "SELECT id, message, ai_tool FROM commits",
+            "SELECT id, message, ai_tool, agentic_mode FROM commits",
             repos_filter,
             since,
             until,
         );
         let mut stmt = conn.prepare(&sql)?;
-        let rows: Vec<(i64, String, Option<String>)> = stmt
+        let rows: Vec<(i64, String, Option<String>, String)> = stmt
             .query_map(rusqlite::params_from_iter(params.iter()), |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
+                    // Pre-v21 rows default to 'none'; COALESCE guards any NULLs.
+                    row.get::<_, Option<String>>(3)?
+                        .unwrap_or_else(|| "none".to_string()),
                 ))
             })?
             .collect::<Result<_, _>>()?;
 
-        for (id, message, current_tool) in rows {
+        for (id, message, current_tool, current_mode) in rows {
             let detected = detect_ai_tool(&message);
-            let current_str = current_tool.as_deref();
-            if detected != current_str {
+            let mode = detect_agentic_mode(&message).as_str();
+            let tool_changed = detected != current_tool.as_deref();
+            let mode_changed = mode != current_mode;
+            if tool_changed || mode_changed {
                 let is_ai = if detected.is_some() { 1_i64 } else { 0_i64 };
-                to_update.push((id, is_ai, detected));
+                to_update.push((id, is_ai, detected, mode));
             }
         }
     }
 
-    let with_tool = to_update.iter().filter(|(_, _, t)| t.is_some()).count();
+    let with_tool = to_update.iter().filter(|(_, _, t, _)| t.is_some()).count();
 
     if dry_run {
         println!(
@@ -400,10 +414,12 @@ pub(super) fn backfill_ai_detection_commits(
     let conn = db.connection_mut();
     let tx = conn.transaction()?;
     {
-        let mut up =
-            tx.prepare("UPDATE commits SET is_ai_assisted = ?1, ai_tool = ?2 WHERE id = ?3")?;
-        for (id, is_ai, tool) in &to_update {
-            up.execute(params![is_ai, tool, id])?;
+        let mut up = tx.prepare(
+            "UPDATE commits SET is_ai_assisted = ?1, ai_tool = ?2, agentic_mode = ?3 \
+             WHERE id = ?4",
+        )?;
+        for (id, is_ai, tool, mode) in &to_update {
+            up.execute(params![is_ai, tool, mode, id])?;
         }
     }
     tx.commit()?;

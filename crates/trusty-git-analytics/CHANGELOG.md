@@ -5,6 +5,21 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.1] - 2026-06-16
+
+### Fixed
+
+- **`tga backfill ai-detection-commits` now also repairs `agentic_mode` (#1334)**
+  — the repair path previously updated only `is_ai_assisted` and `ai_tool`,
+  leaving historical commits' `agentic_mode` stuck at its `'none'` default. As a
+  result, Claude Code commits backfilled after migration v21 were never
+  queryable as `agentic_mode = 'full_agentic'`, and downstream consumers
+  (e.g. cto-reports' agentic-% analytics) under-counted agentic activity. The
+  backfill now recomputes `agentic_mode` via the same `detect_agentic_mode()`
+  logic used by the forward `tga collect` INSERT path and writes it alongside
+  `is_ai_assisted` / `ai_tool`. **Operators should re-run
+  `tga backfill ai-detection-commits` to repair existing history.**
+
 ## [2.7.1] - 2026-06-07
 
 ### Changed
