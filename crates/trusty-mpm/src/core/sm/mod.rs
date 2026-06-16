@@ -7,18 +7,24 @@
 //! memory palace, rolling auto-compaction context, goal tracking, and the
 //! stdio/HTTP adapters).
 //! What: a thin facade that re-exports the SM config types, the agent
-//! skeleton, and (SM-2) the multi-provider inference abstraction from the
-//! `config`, `agent`, and `providers` submodules.
+//! skeleton, (SM-2) the multi-provider inference abstraction, and (SM-3) the
+//! system-prompt assembly + override layering from the `config`, `agent`,
+//! `providers`, and `prompt` submodules.
 //! Test: submodule `tests` modules (`config::tests`, `agent::tests`,
-//! `providers::*::tests`) plus the `MpmConfig`-level coverage in
-//! `core/config.rs::tests`.
+//! `providers::*::tests`, `prompt::tests`) plus the `MpmConfig`-level coverage
+//! in `core/config.rs::tests`.
 
 pub mod agent;
 pub mod config;
+pub mod prompt;
 pub mod providers;
 
 pub use agent::SessionManagerAgent;
 pub use config::{SessionManagerConfig, SmInferenceConfig, SmMemoryConfig, SmRoundsConfig};
+pub use prompt::{
+    FILE_SM_INSTRUCTIONS, FILE_SM_TOOLS, FILE_SM_WORKFLOW, SM_OVERRIDE_SUBDIR, assemble_sm_prompt,
+    resolve_sm_prompt, resolve_sm_prompt_default, sm_override_dir,
+};
 pub use providers::{
     AnthropicProvider, LlmProvider, LlmRequest, LlmResponse, OpenRouterProvider, ProviderKind,
     ProviderRegistry, ResolvedCall, SmLlmError, SmModelTier, resolve_provider_and_model,
