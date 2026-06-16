@@ -61,13 +61,28 @@ pub(super) async fn remove_file_handler(
     })))
 }
 
-/// Query params for `GET /indexes/:id/chunks` (issue #54).
+/// Query params for `GET /indexes/:id/chunks` (issue #54, #1325).
+///
+/// Why: the original `offset`/`limit` pair forced an O(N log N) full-corpus
+/// scan-and-sort per page, which 502'd at deep offsets (`offset=304000`) on
+/// large indexes (issue #1325). `after` adds opt-in cursor pagination keyed on
+/// the chunk's stable `id`, served by an indexed redb B-tree seek — O(page)
+/// per call. `offset` is retained verbatim for back-compat.
+/// What: `offset` (default 0), `limit` (default 100, clamped to 1000), and the
+/// optional `after` cursor. When `after` is present it takes precedence and
+/// `offset` is ignored.
+/// Test: `test_get_index_chunks_paginates` (offset) and
+/// `chunks_endpoint_cursor_*` server tests (cursor).
 #[derive(Deserialize)]
 pub struct ChunksParams {
     #[serde(default)]
     pub offset: usize,
     #[serde(default = "default_chunks_limit")]
     pub limit: usize,
+    /// Opaque forward cursor (a chunk `id`). When set, the page is the rows
+    /// strictly after this id in ascending key order; `offset` is ignored.
+    #[serde(default)]
+    pub after: Option<String>,
 }
 
 fn default_chunks_limit() -> usize {
@@ -85,12 +100,27 @@ const MAX_CHUNKS_LIMIT: usize = 1_000;
 /// Issue #54 introduces stable-order pagination on top of the existing bulk
 /// export.
 /// What: Returns
-/// `{ index_id, total, offset, limit, chunks: [...] }`. `chunks` is the slice
-/// `[offset .. offset+limit]` of the corpus sorted by `(file, start_line)`.
-/// `limit` is clamped to `MAX_CHUNKS_LIMIT` (1000); the value echoed back in
-/// the response is the post-clamp value so clients can detect the clamp.
-/// Test: `test_get_index_chunks_paginates` registers an index, indexes a few
-/// files, asserts page1 + page2 cover all chunks without overlap.
+/// `{ index_id, total, offset, limit, chunks: [...], next_cursor }`.
+///
+/// Two pagination modes, selected by the presence of the `after` query param:
+/// - **Cursor (issue #1325, preferred for deep / bulk pagination):** when
+///   `after` is present (including an empty string, meaning "from the start"),
+///   the page is the rows strictly after that chunk `id` in ascending key
+///   order, served by an indexed redb B-tree seek — O(page) regardless of
+///   depth. `next_cursor` carries the id to pass as the next `after`, or is
+///   `null` once the corpus is exhausted. `offset` is ignored in this mode.
+/// - **Offset (issue #54, back-compat):** when `after` is absent, `chunks` is
+///   the slice `[offset .. offset+limit]` of the corpus ordered by
+///   `(file, start_line)`. `next_cursor` is always `null` in this mode (offset
+///   order differs from cursor order, so a cursor walk must not be seeded from
+///   an offset page). Offset pagination still scans/sorts the whole corpus per
+///   page and can be slow at deep offsets on large indexes — prefer `after` for
+///   bulk enumeration.
+///
+/// `limit` is clamped to `MAX_CHUNKS_LIMIT` (1000); the echoed value is the
+/// post-clamp value so clients can detect the clamp.
+/// Test: `test_get_index_chunks_paginates` (offset) and the
+/// `chunks_endpoint_cursor_*` server tests (cursor + next_cursor).
 pub(super) async fn get_index_chunks_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
@@ -100,6 +130,37 @@ pub(super) async fn get_index_chunks_handler(
     let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
     let limit = params.limit.min(MAX_CHUNKS_LIMIT);
     let indexer = handle.indexer.read().await;
+
+    // Cursor mode (issue #1325): opt-in by sending the `after` param at all —
+    // even an empty string, which means "start from the first chunk". The
+    // cursor path orders strictly by `chunk_id` (the redb B-tree key) and does
+    // an indexed seek, so it is O(page) at any depth. An empty cursor is
+    // treated as "no cursor" (first page); a non-empty cursor resumes strictly
+    // after that id. NOTE: cursor order (by id) differs from offset order (by
+    // file, start_line), so a client must pick ONE mode and page consistently;
+    // do not seed a cursor walk from an offset response.
+    if let Some(cursor) = params.after.as_deref() {
+        let after = if cursor.is_empty() {
+            None
+        } else {
+            Some(cursor)
+        };
+        let (total, chunks, next_cursor) = indexer.enumerate_chunks_after(after, limit).await;
+        return Ok(Json(serde_json::json!({
+            "index_id": index_id.0,
+            "total": total,
+            "offset": params.offset,
+            "limit": limit,
+            "chunks": chunks,
+            "next_cursor": next_cursor,
+        })));
+    }
+
+    // Offset mode (issue #54): retained verbatim for back-compat. `next_cursor`
+    // is always null here — offset and cursor use different orderings, so we do
+    // not imply that a cursor walk can continue from an offset page (that would
+    // drop or duplicate rows). Clients wanting fast deep pagination should use
+    // the cursor mode from the start (`after=`).
     let (total, chunks) = indexer.enumerate_chunks(params.offset, limit).await;
     Ok(Json(serde_json::json!({
         "index_id": index_id.0,
@@ -107,6 +168,7 @@ pub(super) async fn get_index_chunks_handler(
         "offset": params.offset,
         "limit": limit,
         "chunks": chunks,
+        "next_cursor": serde_json::Value::Null,
     })))
 }
 

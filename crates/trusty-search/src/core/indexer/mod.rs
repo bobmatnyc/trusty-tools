@@ -51,6 +51,8 @@ pub(crate) use ingest::PROGRESS_CHUNK_INTERVAL;
 pub(crate) use search::KG_REFINE_THRESHOLD;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_cursor;
 
 // Re-export helpers so sibling modules can use the crate-internal API.
 pub(crate) use helpers::{

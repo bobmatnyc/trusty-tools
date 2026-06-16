@@ -126,18 +126,27 @@ pub(super) async fn dispatch_index_tool(
         }
         "list_chunks" => {
             // Issue #54 — paginated enumeration of an index's corpus.
-            // Mirrors `GET /indexes/:id/chunks?offset=&limit=`.
+            // Mirrors `GET /indexes/:id/chunks?offset=&limit=&after=`.
+            // Issue #1325: an optional `after` cursor switches to an indexed
+            // redb seek (O(page) at any depth) instead of the O(offset) scan;
+            // the daemon echoes `next_cursor` for the next call.
             let index_id = match require_str(args, "index_id") {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
             let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(100);
+            let mut query: Vec<(&str, String)> =
+                vec![("offset", offset.to_string()), ("limit", limit.to_string())];
+            if let Some(after) = args.get("after").and_then(Value::as_str) {
+                // The cursor is a chunk id (`path:start:end`) — reqwest's
+                // `.query()` percent-encodes it so reserved chars don't break
+                // the query string.
+                query.push(("after", after.to_string()));
+            }
             Some(
                 server
-                    .get(&format!(
-                        "/indexes/{index_id}/chunks?offset={offset}&limit={limit}"
-                    ))
+                    .get_query(&format!("/indexes/{index_id}/chunks"), &query)
                     .await,
             )
         }

@@ -303,6 +303,64 @@ impl CorpusStore {
         Ok(out)
     }
 
+    /// Cursor-paginate the chunk corpus in ascending `chunk_id` key order
+    /// (issue #1325).
+    ///
+    /// Why: deep offset pagination (`GET /indexes/{id}/chunks?offset=304000`)
+    /// previously loaded the *entire* corpus into memory and re-sorted it on
+    /// every page request — O(N log N) per page, which times out (and 502s
+    /// behind a proxy) on large indexes. redb's `CHUNKS_TABLE` is a B-tree
+    /// keyed by `chunk_id`, so a `range(after..)` is an indexed seek: O(log N)
+    /// to position the cursor plus O(page) to read. Paging forward by passing
+    /// the previous page's last id as `after` is therefore O(page) per call
+    /// instead of O(offset).
+    /// What: opens a read transaction and walks `CHUNKS_TABLE` starting
+    /// *strictly after* `after` (when `Some`) or from the first key (when
+    /// `None`), deserialising up to `limit` rows. The cursor is exclusive and
+    /// need not be an exact stored key — redb seeks to the next-greater key, so
+    /// a client may pass back any opaque string and still resume correctly.
+    /// Corrupt rows are skipped with a `warn`, matching `load_all_chunks`.
+    /// `limit == 0` returns an empty `Vec` without opening the table iterator.
+    /// Test: `chunks_after_cursor_seeks_and_pages_in_key_order`.
+    pub fn chunks_after(&self, after: Option<&str>, limit: usize) -> Result<Vec<RawChunk>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        use std::ops::Bound;
+        let txn = self
+            .db
+            .begin_read()
+            .context("begin chunk cursor read txn")?;
+        let table = txn.open_table(CHUNKS_TABLE)?;
+        // Exclusive lower bound on the cursor id; unbounded upper end. redb
+        // walks the B-tree from the seek point, so we never touch the rows
+        // before `after`.
+        let lower = match after {
+            Some(cursor) => Bound::Excluded(cursor),
+            None => Bound::Unbounded,
+        };
+        let mut out = Vec::with_capacity(limit);
+        let range = table
+            .range::<&str>((lower, Bound::Unbounded))
+            .context("range chunks table by cursor")?;
+        for entry in range {
+            let (key, value) = entry.context("read chunk row in cursor page")?;
+            match serde_json::from_slice::<RawChunk>(value.value()) {
+                Ok(chunk) => out.push(chunk),
+                Err(e) => {
+                    tracing::warn!(
+                        "corpus: skipping corrupt chunk row '{}' in cursor page ({e})",
+                        key.value()
+                    )
+                }
+            }
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
     /// Load every per-file entity list.
     ///
     /// Why: counterpart of [`Self::load_all_chunks`] for the entities table;
