@@ -7,7 +7,7 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
-## [0.24.8] — 2026-06-16
+## [0.24.9] — 2026-06-16
 
 ### Fixed (closes #1325)
 
@@ -33,6 +33,12 @@ Versions correspond to `Cargo.toml` patch releases.
   must not be seeded from an offset page). Consumers doing bulk enumeration
   (e.g. trusty-analyze's PR-review static-analysis context) should switch to
   the cursor mode.
+
+## [0.24.8] — 2026-06-16
+
+### Changed (closes #1326)
+
+- **Bumps `trusty-common` to 0.15.3**, which down-levels the benign `timed_out_id=None` embedder-stall WARN to `debug!`, eliminating ~2,800 spurious log lines/day during normal operation.
 
 ## [0.24.7] — 2026-06-16
 
