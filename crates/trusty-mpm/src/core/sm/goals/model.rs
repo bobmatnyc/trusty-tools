@@ -44,6 +44,28 @@ pub enum GoalStatus {
     Abandoned,
 }
 
+impl GoalStatus {
+    /// The stable, human-readable label for this status.
+    ///
+    /// Why: callers (the delegation wire response, logs, operator surfaces) need a
+    /// single canonical status string so they can DISTINGUISH "in progress" from
+    /// "blocked"/"done" without re-deriving it or misreading a boolean
+    /// `goal_done == false` (which is ambiguous between "still running" and
+    /// "failed"). Centralising the label keeps every surface consistent.
+    /// What: returns the PascalCase variant name (`"Pending"`, `"InProgress"`,
+    /// `"Blocked"`, `"Done"`, `"Abandoned"`).
+    /// Test: `goal_status_label_matches_variants`.
+    pub fn label(self) -> &'static str {
+        match self {
+            GoalStatus::Pending => "Pending",
+            GoalStatus::InProgress => "InProgress",
+            GoalStatus::Blocked => "Blocked",
+            GoalStatus::Done => "Done",
+            GoalStatus::Abandoned => "Abandoned",
+        }
+    }
+}
+
 /// Verification state of a single linked session task (DOC-14 §9.1 / §3.5).
 ///
 /// Why: `Goal` progress and the close gate are derived purely from how many

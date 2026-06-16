@@ -133,6 +133,58 @@ pub async fn sm_chat(d: &SmDispatcher, params: &Value) -> Result<Value, MethodEr
     }
 }
 
+/// `sm.delegate { message }` → the delegation-loop outcome (SM-8, §3.4).
+///
+/// Why: the capstone method — drives the FULL 6-phase delegation loop
+/// ([`SessionManagerAgent::delegate_goal`]) over the dispatcher's session-control
+/// and goal-store surfaces. This is the §1A.2 step-1 flow `claude-mpm ⟷ SM ⟷ t-mpm`:
+/// a driver sends a goal, the SM creates a tracked goal, launches and delivers
+/// session(s), observes, verifies with evidence (the §3.5 gate), and reports.
+/// Unlike `sm.chat` (a conversational turn), this runs the launch/observe/verify
+/// mechanism end-to-end.
+/// What: under `sm-memory`, parses `message` (required), calls `delegate_goal`
+/// with the dispatcher's `sessions` + `goals`, and returns
+/// `{ reply, goal_id, launched, goal_done, goal_status }`. `goal_status` carries the
+/// goal's actual lifecycle label (`Pending`/`InProgress`/`Blocked`/`Done`/
+/// `Abandoned`) so a caller can distinguish in-progress from blocked/failed WITHOUT
+/// a follow-up `sm.goals.list`; `goal_done` is kept additively for back-compat. A
+/// degraded SM (no provider) maps to [`MethodError::Unavailable`]; any other failure
+/// → [`MethodError::Internal`]. Without `sm-memory` (no goal store) it returns a
+/// graceful unavailable error.
+/// Test: `tests.rs::delegate_end_to_end_launch_observe_verify_close`,
+/// `delegate_gate_blocks_without_evidence`, `delegate_unavailable_without_feature`.
+#[cfg(feature = "sm-memory")]
+pub async fn sm_delegate(d: &SmDispatcher, params: &Value) -> Result<Value, MethodError> {
+    let message = req_str(params, "message")?;
+    match d.agent.delegate_goal(&message, &d.sessions, &d.goals).await {
+        Ok(outcome) => Ok(json!({
+            "reply": outcome.reply,
+            "goal_id": outcome.goal_id,
+            "launched": outcome.launched,
+            "goal_done": outcome.goal_done,
+            "goal_status": outcome.goal_status,
+        })),
+        Err(crate::core::sm::agent::DelegationError::Degraded(notice)) => {
+            Err(MethodError::Unavailable(notice))
+        }
+        Err(e) => Err(MethodError::Internal(e.to_string())),
+    }
+}
+
+/// `sm.delegate` is unavailable without the `sm-memory` feature.
+///
+/// Why: the delegation loop persists goals through the SM-6 store, which is backed
+/// by the SM palace (memory-core); the no-memory build returns a graceful JSON-RPC
+/// error rather than failing to compile.
+/// What: always returns [`MethodError::Unavailable`].
+/// Test: `tests.rs::delegate_unavailable_without_feature`.
+#[cfg(not(feature = "sm-memory"))]
+pub async fn sm_delegate(_d: &SmDispatcher, _params: &Value) -> Result<Value, MethodError> {
+    Err(MethodError::Unavailable(
+        "sm.delegate is not available without the sm-memory feature".to_string(),
+    ))
+}
+
 /// `sm.health {}` → `{ ok, provider, degraded, model_tiers }` (§5.3).
 ///
 /// Why: a parent driver probes SM readiness before driving turns. Maps directly

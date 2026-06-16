@@ -24,10 +24,13 @@
 //! `agent/chat_tests.rs` covers the composed turn, degraded mode, and recall.
 
 mod chat;
+mod delegate;
 mod health;
 
 #[cfg(test)]
 pub mod mock;
+
+pub use delegate::{DelegationError, DelegationOutcome, SmDecision, TaskSpec};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -226,6 +229,59 @@ impl SessionManagerAgent {
     /// Test: `agent_new_has_no_runtime`, `chat_tests.rs`.
     pub fn has_runtime(&self) -> bool {
         self.runtime.is_some()
+    }
+
+    /// Borrow the inference runtime for the delegation loop (SM-8 seam).
+    ///
+    /// Why: the SM-8 delegation loop (in the [`delegate`] submodule) needs the same
+    /// runtime handles `chat` uses — the tier resolver for the DECOMPOSE call and,
+    /// under `sm-memory`, the palace for recall. Exposing a `pub(super)` accessor
+    /// lets the submodule reach the (parent-private) runtime without widening its
+    /// visibility beyond the agent module tree.
+    /// What: returns `Some(&AgentRuntime)` when inference is wired, else `None`
+    /// (the inert agent — the loop then reports degraded).
+    /// Test: `delegate_tests.rs` (with a mock resolver), `delegate_degraded_*`.
+    fn runtime_ref(&self) -> Option<&AgentRuntime> {
+        self.runtime.as_ref()
+    }
+
+    /// Recall SM-palace context for the delegation loop's DECOMPOSE prompt (SM-4).
+    ///
+    /// Why: INTAKE recalls relevant prior goals/outcomes/decisions to inform
+    /// DECOMPOSE (§3.4 phase 1). This mirrors the chat turn's best-effort recall
+    /// but is exposed to the [`delegate`] submodule. Recall is always best-effort:
+    /// a missing palace, the feature being off, or a recall error degrades to "no
+    /// recall" rather than failing the loop.
+    /// What: under `sm-memory`, runs the palace recall and joins hit contents;
+    /// returns `None` on no-hits/error/unavailable. Without the feature, `None`.
+    /// Test: `delegate_tests.rs` (no-palace path returns a usable decision).
+    #[cfg(feature = "sm-memory")]
+    async fn delegate_recall(&self, runtime: &AgentRuntime, message: &str) -> Option<String> {
+        let memory = runtime.memory.as_ref()?;
+        match memory.recall(message).await {
+            Ok(hits) if !hits.is_empty() => {
+                let joined = hits
+                    .iter()
+                    .map(|h| h.drawer.content.trim())
+                    .filter(|c| !c.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (!joined.trim().is_empty()).then_some(joined)
+            }
+            _ => None,
+        }
+    }
+
+    /// No-memory build: delegation recall is always absent.
+    ///
+    /// Why: without the `sm-memory` feature the palace is not compiled in, so the
+    /// delegation loop composes its DECOMPOSE prompt with no recall — and must
+    /// still work.
+    /// What: always returns `None`.
+    /// Test: `delegate_tests.rs` (default build).
+    #[cfg(not(feature = "sm-memory"))]
+    async fn delegate_recall(&self, _runtime: &AgentRuntime, _message: &str) -> Option<String> {
+        None
     }
 }
 

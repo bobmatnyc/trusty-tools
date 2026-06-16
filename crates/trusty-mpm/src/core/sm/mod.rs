@@ -27,6 +27,15 @@ pub mod config;
 /// + the SM-2 provider trait).
 /// Test: `context::*::tests`.
 pub mod context;
+/// The session-control seam the SM drives its fleet through (SM-8, DOC-14 §2.6).
+///
+/// Why: both the SM-8 delegation loop and the SM-STDIO adapter must drive managed
+/// sessions through one narrow, mockable trait. Relocating it here (from
+/// `daemon::sm_stdio`) lets the agent-side loop depend on it while `sm_stdio`
+/// re-exports it unchanged.
+/// What: re-compiled in every build (pure trait + serde value shapes).
+/// Test: `agent::delegate` tests + `daemon::sm_stdio::tests`.
+pub mod control;
 /// Goal-tracking model + dual (palace + cache) persistence (SM-6, DOC-14 §9).
 ///
 /// Why: the SM tracks operator intent as durable goals fanned out to delegated
@@ -60,6 +69,7 @@ pub use context::{
     ConversationStore, ConversationStoreError, Round, SmContextEngine, SmContextError,
     SmConversation, ToolTrace,
 };
+pub use control::{LaunchParams, SessionControl, SessionControlError};
 pub use goals::{
     GOAL_TAG, Goal, GoalCache, GoalMemory, GoalStatus, SessionLink, SessionTaskState,
     SessionUpdate, SmGoalError, SmGoalResult, SmGoalStore,
