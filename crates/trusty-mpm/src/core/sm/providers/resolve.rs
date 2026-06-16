@@ -232,6 +232,32 @@ impl ProviderRegistry {
         let aws_credentials_available = ["AWS_ACCESS_KEY_ID", "AWS_PROFILE", "AWS_ROLE_ARN"]
             .iter()
             .any(|k| non_empty(k).is_some());
+
+        // Operator hint: the env-marker heuristic missed AWS credentials, but
+        // the process looks AWS-hosted (these markers are set by ECS/EKS/Lambda
+        // and `aws-sdk` web-identity flows whose creds the SDK chain resolves at
+        // call time but this cheap probe cannot see). Nudge the operator to pin
+        // Bedrock explicitly so the `auto` chain doesn't skip it. stderr-only.
+        if !aws_credentials_available {
+            let aws_hosted_markers = [
+                "AWS_EXECUTION_ENV",
+                "ECS_CONTAINER_METADATA_URI",
+                "ECS_CONTAINER_METADATA_URI_V4",
+                "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+                "AWS_WEB_IDENTITY_TOKEN_FILE",
+            ];
+            if aws_hosted_markers
+                .iter()
+                .any(|k| std::env::var_os(k).is_some())
+            {
+                debug!(
+                    "AWS-hosted environment detected but no file/role-based AWS credentials \
+                     visible to the env heuristic; set [session_manager.inference].provider = \
+                     \"bedrock\" explicitly to pin Bedrock"
+                );
+            }
+        }
+
         Self {
             anthropic_api_key: non_empty("ANTHROPIC_API_KEY"),
             aws_credentials_available,

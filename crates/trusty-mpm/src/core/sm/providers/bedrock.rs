@@ -189,7 +189,11 @@ impl BedrockProvider {
         }
 
         let inference = InferenceConfiguration::builder()
-            .max_tokens(req.max_tokens as i32)
+            // Saturating, sound conversion: `req.max_tokens` is a `u32`, but the
+            // Bedrock SDK wants an `i32`. A naive `as i32` would wrap any value
+            // above `i32::MAX` into a negative token budget; clamp to `i32::MAX`
+            // instead (`unwrap_or` here cannot panic).
+            .max_tokens(i32::try_from(req.max_tokens).unwrap_or(i32::MAX))
             .temperature(req.temperature)
             .build();
 

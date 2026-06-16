@@ -130,3 +130,34 @@ async fn complete_maps_http_errors() {
     assert!(err.is_retryable());
     assert!(!err.is_alarm());
 }
+
+/// Why: a 400 from OpenRouter is a malformed request (bad params/body), not a
+/// transient failure — retrying it is pointless. It must map to the
+/// non-retryable `Validation` variant, consistent with the Anthropic provider,
+/// so the fallback chain treats it as a config alarm rather than retrying.
+/// What: points the provider at a mock returning HTTP 400 and asserts the
+/// mapped error is `Validation` and classifies as non-retryable.
+/// Test: this is the test.
+#[tokio::test]
+async fn complete_maps_400_to_non_retryable_validation() {
+    let base = spawn_mock("HTTP/1.1 400 Bad Request", "bad request body".to_string()).await;
+    let provider = OpenRouterProvider::with_base_url("sk-test", "anthropic/claude-haiku", base)
+        .expect("provider");
+
+    let err = provider
+        .complete(LlmRequest {
+            model: "anthropic/claude-haiku".to_string(),
+            system: String::new(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "summarize".to_string(),
+            }],
+            temperature: 0.3,
+            max_tokens: 256,
+        })
+        .await
+        .expect_err("400 should error");
+
+    assert!(matches!(err, SmLlmError::Validation(_)));
+    assert!(!err.is_retryable());
+}

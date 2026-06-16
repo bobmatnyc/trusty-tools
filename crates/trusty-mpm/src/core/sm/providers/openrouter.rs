@@ -190,6 +190,11 @@ impl LlmProvider for OpenRouterProvider {
         if !status.is_success() {
             let text = http_resp.text().await.unwrap_or_default();
             return Err(match status.as_u16() {
+                // A 400 is a malformed request (bad params / body). It is a
+                // non-retryable client alarm — retrying an identical request
+                // just wastes calls — so map it to a non-retryable Validation
+                // error, consistent with the Anthropic provider.
+                400 => SmLlmError::Validation(text),
                 401 | 403 => SmLlmError::AccessDenied(text),
                 404 => SmLlmError::ModelNotFound(format!("model={}: {text}", self.model)),
                 422 => SmLlmError::Validation(text),

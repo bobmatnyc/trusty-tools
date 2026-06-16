@@ -38,6 +38,12 @@
 /// routed through OpenRouter.
 /// Test: `pricing::tests::cost_per_million_*`.
 pub fn cost_per_million(model: &str) -> (f64, f64) {
+    // NOTE: the family arms below are SUBSTRING matches and are ORDER-SENSITIVE
+    // — the first `contains(...)` that hits wins. We check `sonnet` before
+    // `haiku`/`opus`, which is safe only because we assume Anthropic model ids
+    // name exactly one family (no id contains two of "sonnet"/"haiku"/"opus").
+    // If a future id ever combined family words, the earliest arm here would
+    // mis-price it; reorder/disambiguate before adding such an id.
     match model {
         // Anthropic families (direct, Bedrock, and OpenRouter `claude-*` ids).
         m if m.contains("sonnet") => (3.00, 15.00),
