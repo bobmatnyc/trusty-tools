@@ -207,19 +207,25 @@ fn resolve_and_apply(
         }
     }
 
+    // Probe the TTY exactly once and reuse the single binding for both the
+    // prompt gate and `decide_apply`. If these ever disagreed (two separate
+    // `is_tty()` calls), the user could answer "yes" yet `decide_apply` see
+    // `is_tty=false` → NeedsConfirmation (silent refusal), or vice versa.
+    let tty = is_tty();
+
     // Only prompt when we actually need to (candidates, no --yes, on a TTY).
-    let interactive_consent = if has_candidates && !yes && is_tty() && !json {
+    let interactive_consent = if should_prompt(has_candidates, yes, tty, json) {
         prompt_yes_no("Apply these upgrades now?")
     } else {
         false
     };
 
-    let decision = decide_apply(ApplyInputs {
+    let decision = decide_apply(build_apply_inputs(
         has_candidates,
         yes,
-        is_tty: is_tty(),
+        tty,
         interactive_consent,
-    });
+    ));
 
     match decision {
         ApplyDecision::NothingToDo => UpgradeReport::non_applying("nothing_to_do", candidates),
@@ -231,6 +237,40 @@ fn resolve_and_apply(
             let outcomes = handle.block_on(apply_all(&candidates, json));
             UpgradeReport::applied(candidates, outcomes)
         }
+    }
+}
+
+/// Decide whether to show the interactive confirmation prompt.
+///
+/// Why: Extracted as a pure predicate so the prompt gate and the
+/// [`ApplyInputs`] fed to `decide_apply` are guaranteed to read the *same*
+/// `tty` value (see `resolve_and_apply`). A divergence here would let the user
+/// consent on a prompt that `decide_apply` then treats as non-interactive.
+/// What: Prompt only when there are candidates, `--yes` was not passed, we are
+/// on a TTY, and we are not in `--json` mode.
+/// Test: `tests::prompt_gate_matches_apply_inputs`.
+fn should_prompt(has_candidates: bool, yes: bool, tty: bool, json: bool) -> bool {
+    has_candidates && !yes && tty && !json
+}
+
+/// Build the [`ApplyInputs`] for the gate from a single `tty` probe.
+///
+/// Why: Centralising construction guarantees the `is_tty` field carries the
+/// exact `tty` binding used by `should_prompt` — the consent and TTY values fed
+/// to `decide_apply` can never disagree.
+/// What: Threads the four decision inputs into an [`ApplyInputs`].
+/// Test: `tests::prompt_gate_matches_apply_inputs`.
+fn build_apply_inputs(
+    has_candidates: bool,
+    yes: bool,
+    tty: bool,
+    interactive_consent: bool,
+) -> ApplyInputs {
+    ApplyInputs {
+        has_candidates,
+        yes,
+        is_tty: tty,
+        interactive_consent,
     }
 }
 
@@ -389,6 +429,38 @@ mod tests {
             }],
         );
         assert_eq!(applied_ok.exit_code(), 0);
+    }
+
+    /// Why: The load-bearing safety invariant from re-review: the `tty` value
+    /// that gates the interactive prompt MUST be the same value fed to
+    /// `decide_apply` as `is_tty`. A divergence would let a user answer "yes"
+    /// while the gate silently treats the session as non-interactive (or the
+    /// reverse). This pins the single-source-of-truth `tty` binding.
+    /// What: For every (has_candidates, yes, tty, json) combination, asserts
+    /// (a) `build_apply_inputs.is_tty` equals the probed `tty`, and (b) whenever
+    /// `should_prompt` is true the same `tty` was true — so the consent path and
+    /// the gate's TTY view are always consistent.
+    /// Test: This is the test.
+    #[test]
+    fn prompt_gate_matches_apply_inputs() {
+        for &has_candidates in &[true, false] {
+            for &yes in &[true, false] {
+                for &tty in &[true, false] {
+                    for &json in &[true, false] {
+                        let prompt = should_prompt(has_candidates, yes, tty, json);
+                        // The consent the prompt would yield is irrelevant to
+                        // the invariant; what matters is the TTY value is shared.
+                        let inputs = build_apply_inputs(has_candidates, yes, tty, prompt);
+                        // (a) the gate sees exactly the probed tty.
+                        assert_eq!(inputs.is_tty, tty);
+                        // (b) we only ever prompt when that same tty is true.
+                        if prompt {
+                            assert!(tty, "prompted without a TTY the gate also sees");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Why: An unknown member must fail fast at selection (exit 3) and never

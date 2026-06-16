@@ -114,12 +114,26 @@ fn probe_daemon_health(binary: &str) -> MemberHealth {
     if !out.status.success() {
         return MemberHealth::Down;
     }
-    match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+    classify_health_json(&out.stdout)
+}
+
+/// Classify a daemon's `health --json` stdout bytes into a [`MemberHealth`].
+///
+/// Why: Isolating the parse + classification as a pure function makes the
+/// fallback policy testable without spawning a subprocess. The re-review fix
+/// lives here: unparseable output is `Down`, not `HealthyStale`.
+/// What: Parses `bytes` as JSON; on success maps the `status` field via
+/// `classify_status` (defaulting to `down` when the field is absent). On a parse
+/// failure returns `Down` — garbage output means the daemon is broken, not
+/// merely stale ("if in doubt, degraded").
+/// Test: `tests::unparseable_health_is_down`, `tests::parsed_status_classifies`.
+fn classify_health_json(bytes: &[u8]) -> MemberHealth {
+    match serde_json::from_slice::<serde_json::Value>(bytes) {
         Ok(v) => {
             let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("down");
             classify_status(status)
         }
-        Err(_) => MemberHealth::HealthyStale,
+        Err(_) => MemberHealth::Down,
     }
 }
 
@@ -256,6 +270,35 @@ mod tests {
         assert_eq!(ready.exit_code(), 0);
         let incomplete = StatusReport::build(vec![ms("tga", None, "not_installed", false)]);
         assert_eq!(incomplete.exit_code(), 0);
+    }
+
+    /// Why: Re-review fix — a daemon that emits unparseable `health --json`
+    /// output is BROKEN, not merely stale, so the fallback must be `Down`
+    /// ("if in doubt, degraded"). Pin this so it cannot regress to `HealthyStale`.
+    /// What: Feeds non-JSON bytes to `classify_health_json`; asserts `Down`.
+    /// Test: This is the test.
+    #[test]
+    fn unparseable_health_is_down() {
+        assert_eq!(classify_health_json(b"not json at all"), MemberHealth::Down);
+        assert_eq!(classify_health_json(b""), MemberHealth::Down);
+    }
+
+    /// Why: Valid JSON must still classify via the shared `classify_status`
+    /// vocabulary, and an absent `status` field defaults to `down`.
+    /// What: Feeds healthy / stale / field-less JSON; asserts each mapping.
+    /// Test: This is the test.
+    #[test]
+    fn parsed_status_classifies() {
+        assert_eq!(
+            classify_health_json(br#"{"status":"healthy"}"#),
+            MemberHealth::HealthyVersionOk
+        );
+        assert_eq!(
+            classify_health_json(br#"{"status":"stale"}"#),
+            MemberHealth::HealthyStale
+        );
+        // Parseable JSON without a `status` field → defaults to `down`.
+        assert_eq!(classify_health_json(br#"{"other":1}"#), MemberHealth::Down);
     }
 
     /// Why: The health-string mapping is the report's vocabulary; pin it.

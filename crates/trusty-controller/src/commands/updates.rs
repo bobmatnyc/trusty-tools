@@ -64,6 +64,7 @@ impl UpdatesReport {
 ///
 /// Test: Side-effecting (network); the report shaping is tested via `UpdatesReport`.
 pub fn run(latest: bool, json: bool) -> i32 {
+    // TODO(#1316): honour --latest once BOM/version pinning lands
     let _ = latest; // Phase 1: latest == default (no BOM pin yet).
     let report = block_on(gather());
     if json {

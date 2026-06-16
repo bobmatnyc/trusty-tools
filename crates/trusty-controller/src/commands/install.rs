@@ -202,14 +202,31 @@ async fn install_one(m: &StableMember) -> anyhow::Result<()> {
 ///
 /// Why: The rustup-style table shows a size column; we look up the installed
 /// file's size, defaulting to 0 when it cannot be resolved (the row still renders).
-/// What: Checks `~/.cargo/bin/<binary>`; returns its byte length or 0.
-/// Test: Side-effect-only (filesystem); the table layout is tested in trusty-progress.
+/// What: Resolves the cargo bin directory (`$CARGO_HOME/bin`, falling back to
+/// `~/.cargo/bin`) so the size resolves under a non-default `CARGO_HOME` (CI),
+/// then returns `<bin>/<binary>`'s byte length or 0.
+/// Test: Side-effect-only (filesystem); `cargo_bin_dir` is unit-tested in
+/// `tests::cargo_bin_dir_honours_cargo_home`.
 fn binary_size(binary: &str) -> u64 {
-    dirs::home_dir()
-        .map(|h| h.join(".cargo").join("bin").join(binary))
+    cargo_bin_dir()
+        .map(|d| d.join(binary))
         .and_then(|p| std::fs::metadata(p).ok())
         .map(|md| md.len())
         .unwrap_or(0)
+}
+
+/// Resolve the cargo binary install directory.
+///
+/// Why: `cargo install` honours `CARGO_HOME`; hardcoding `~/.cargo/bin` would
+/// mis-resolve installed-binary sizes under a custom `CARGO_HOME` (e.g. CI).
+/// What: Returns `$CARGO_HOME/bin` when `CARGO_HOME` is set and non-empty,
+/// otherwise `~/.cargo/bin` (or `None` if the home dir cannot be resolved).
+/// Test: `tests::cargo_bin_dir_honours_cargo_home`.
+fn cargo_bin_dir() -> Option<std::path::PathBuf> {
+    match std::env::var("CARGO_HOME") {
+        Ok(home) if !home.is_empty() => Some(std::path::PathBuf::from(home).join("bin")),
+        _ => dirs::home_dir().map(|h| h.join(".cargo").join("bin")),
+    }
 }
 
 /// Print the human-readable install summary footer.
@@ -284,6 +301,39 @@ mod tests {
             detail: "x".to_owned(),
         }]);
         assert_eq!(bad.exit_code(), 2);
+    }
+
+    /// Why: Re-review fix — `binary_size` must resolve under a non-default
+    /// `CARGO_HOME` (CI installs there), so `cargo_bin_dir` must honour the env
+    /// var rather than hardcoding `~/.cargo/bin`.
+    /// What: Sets `CARGO_HOME` to a temp path, asserts `cargo_bin_dir` returns
+    /// `<that>/bin`; clears it and asserts the fallback ends in `.cargo/bin`.
+    /// Restores the prior value so the process-global env is left untouched.
+    /// Test: This is the test.
+    #[test]
+    fn cargo_bin_dir_honours_cargo_home() {
+        let prior = std::env::var_os("CARGO_HOME");
+
+        // This test is the sole mutator of CARGO_HOME and restores it before
+        // returning; the controller crate runs no other env-racing tests.
+        std::env::set_var("CARGO_HOME", "/tmp/fake-cargo-home");
+        assert_eq!(
+            cargo_bin_dir(),
+            Some(std::path::PathBuf::from("/tmp/fake-cargo-home").join("bin"))
+        );
+
+        // Empty CARGO_HOME falls back to ~/.cargo/bin.
+        std::env::set_var("CARGO_HOME", "");
+        let fallback = cargo_bin_dir();
+        if let Some(p) = &fallback {
+            assert!(p.ends_with(std::path::Path::new(".cargo").join("bin")));
+        }
+
+        // Restore the prior environment.
+        match prior {
+            Some(v) => std::env::set_var("CARGO_HOME", v),
+            None => std::env::remove_var("CARGO_HOME"),
+        }
     }
 
     /// Why: An unknown member must be a clean error (exit 3), not a silent skip.
