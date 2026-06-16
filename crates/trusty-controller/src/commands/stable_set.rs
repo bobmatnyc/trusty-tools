@@ -71,7 +71,7 @@ impl StableMember {
 /// non-daemon), and trusty-console (daemon). Library crates resolve as cargo
 /// dependencies and are not listed.
 ///
-/// Test: `tests::stable_set_is_pinned`, `tests::tga_crate_and_binary_differ`,
+/// Test: `tests::stable_set_is_pinned`, `tests::tga_crate_and_binary_names`,
 /// `tests::daemon_flags_match_spec`.
 pub fn stable_set() -> Vec<StableMember> {
     vec![
@@ -137,13 +137,15 @@ mod tests {
         );
     }
 
-    /// Why: `tga`'s crate name differs from most; the install command must use
-    /// the crate name for `cargo install` and the binary for probes.
-    /// What: Asserts tga's crate_name == binary == "tga" (both happen to match
-    /// here, but the field separation is what the install path depends on).
+    /// Why: The install command must use the crate name for `cargo install` and
+    /// the binary name for presence/health probes — they are read from separate
+    /// fields. For `tga` both fields happen to equal "tga", so this pins the
+    /// field *separation* (each field is independently populated and correct),
+    /// not that the two values differ.
+    /// What: Asserts tga's `binary` is "tga" and it is a non-daemon.
     /// Test: This is the test.
     #[test]
-    fn tga_crate_and_binary_differ() {
+    fn tga_crate_and_binary_names() {
         let tga = stable_set()
             .into_iter()
             .find(|m| m.crate_name == "tga")

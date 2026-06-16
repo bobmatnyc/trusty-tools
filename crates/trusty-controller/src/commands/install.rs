@@ -105,10 +105,15 @@ pub fn run(members: &[String], yes: bool, json: bool) -> i32 {
     if !unknown.is_empty() {
         let msg = format!("unknown member(s): {}", unknown.join(", "));
         if json {
-            let _ = render_json(&serde_json::json!({
+            if render_json(&serde_json::json!({
                 "command": "install",
                 "error": msg,
-            }));
+            }))
+            .is_err()
+            {
+                eprintln!("tctl install: failed to write JSON output");
+                return 1;
+            }
         } else {
             eprintln!("tctl install: {msg}");
         }
@@ -127,7 +132,12 @@ pub fn run(members: &[String], yes: bool, json: bool) -> i32 {
 
     let report = block_on(install_all(&selected, json));
     if json {
-        let _ = render_json(&report);
+        // A failed machine-readable write must not exit 0: automation would
+        // read success from the exit code while the JSON never arrived.
+        if render_json(&report).is_err() {
+            eprintln!("tctl install: failed to write JSON output");
+            return 1;
+        }
     } else {
         print_human_summary(&report);
     }

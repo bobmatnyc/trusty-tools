@@ -17,10 +17,11 @@
 //! actual `cargo install` + restart path is side-effecting.
 
 use serde::Serialize;
+use tokio::runtime::Handle;
 use trusty_progress::{Component, ComponentTracker};
 
 use super::progress_ui::{is_tty, narrator, prompt_yes_no};
-use super::runtime::block_on;
+use super::runtime::with_runtime;
 use super::stable_set::select_members;
 use super::update_engine::{
     decide_apply, gather_candidates, ApplyDecision, ApplyInputs, UpdateCandidate,
@@ -146,7 +147,10 @@ pub fn run(
     if !unknown.is_empty() {
         let msg = format!("unknown member(s): {}", unknown.join(", "));
         if json {
-            let _ = render_json(&serde_json::json!({"command":"upgrade","error":msg}));
+            if render_json(&serde_json::json!({"command":"upgrade","error":msg})).is_err() {
+                eprintln!("tctl upgrade: failed to write JSON output");
+                return 1;
+            }
         } else {
             eprintln!("tctl upgrade: {msg}");
         }
@@ -156,10 +160,20 @@ pub fn run(
         selected.retain(|m| m.crate_name != "trusty-controller" && m.binary != "tctl");
     }
 
-    let candidates = block_on(gather_candidates(&selected));
-    let report = resolve_and_apply(candidates, yes, json);
+    // Build ONE runtime for the whole command: candidate gathering and applying
+    // share the same handle (no per-future runtime construction, no nested
+    // runtime panic risk).
+    let report = with_runtime(|handle| {
+        let candidates = handle.block_on(gather_candidates(&selected));
+        resolve_and_apply(handle, candidates, yes, json)
+    });
     if json {
-        let _ = render_json(&report);
+        // A failed machine-readable write must not exit 0: automation would
+        // read success from the exit code while the JSON never arrived.
+        if render_json(&report).is_err() {
+            eprintln!("tctl upgrade: failed to write JSON output");
+            return 1;
+        }
     } else {
         print_human(&report);
     }
@@ -176,7 +190,12 @@ pub fn run(
 /// resulting [`ApplyDecision`] into an [`UpgradeReport`]. Only `Apply` mutates.
 ///
 /// Test: `tests::run_check_is_readonly`; the apply branch is side-effecting.
-fn resolve_and_apply(candidates: Vec<UpdateCandidate>, yes: bool, json: bool) -> UpgradeReport {
+fn resolve_and_apply(
+    handle: &Handle,
+    candidates: Vec<UpdateCandidate>,
+    yes: bool,
+    json: bool,
+) -> UpgradeReport {
     let has_candidates = !candidates.is_empty();
 
     if has_candidates && !json {
@@ -209,7 +228,7 @@ fn resolve_and_apply(candidates: Vec<UpdateCandidate>, yes: bool, json: bool) ->
         }
         ApplyDecision::Decline => UpgradeReport::non_applying("declined", candidates),
         ApplyDecision::Apply => {
-            let outcomes = block_on(apply_all(&candidates, json));
+            let outcomes = handle.block_on(apply_all(&candidates, json));
             UpgradeReport::applied(candidates, outcomes)
         }
     }

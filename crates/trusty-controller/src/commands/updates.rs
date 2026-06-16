@@ -59,14 +59,20 @@ impl UpdatesReport {
 /// accepted for surface compatibility; the listing always reports the latest
 /// crates.io release (there is no separate BOM pin in Phase 1, so `--latest` and
 /// the default are equivalent today). Returns 0 (read-only, never fails the
-/// process on "updates available").
+/// process on "updates available") — except exit 1 if a `--json` write to stdout
+/// fails, so automation never reads false success from a dropped JSON payload.
 ///
 /// Test: Side-effecting (network); the report shaping is tested via `UpdatesReport`.
 pub fn run(latest: bool, json: bool) -> i32 {
     let _ = latest; // Phase 1: latest == default (no BOM pin yet).
     let report = block_on(gather());
     if json {
-        let _ = render_json(&report);
+        // A failed machine-readable write must not exit 0: automation would
+        // read success from the exit code while the JSON never arrived.
+        if render_json(&report).is_err() {
+            eprintln!("tctl updates: failed to write JSON output");
+            return 1;
+        }
     } else {
         print_human(&report);
     }

@@ -175,7 +175,12 @@ pub fn run(json: bool) -> i32 {
     }
     let report = StatusReport::build(members);
     if json {
-        let _ = render_json(&report);
+        // A failed machine-readable write must not exit 0: a monitoring script
+        // would read health from the exit code while the JSON never arrived.
+        if render_json(&report).is_err() {
+            eprintln!("tctl status: failed to write JSON output");
+            return 1;
+        }
     } else {
         print_human(&report);
     }

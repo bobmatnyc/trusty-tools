@@ -137,8 +137,8 @@ pub fn decide_apply(inputs: ApplyInputs) -> ApplyDecision {
 /// it via `--version`.
 ///
 /// What: Spawns `<binary> --version`, returns the first whitespace-delimited
-/// token that looks like a version (the last token containing a digit and a
-/// dot), or `None` if the binary is absent / does not respond.
+/// token that looks like a version (the first token containing a leading digit
+/// and a dot), or `None` if the binary is absent / does not respond.
 ///
 /// Test: `tests::extract_version_from_line` covers the parsing; the spawn is
 /// side-effect-only.
