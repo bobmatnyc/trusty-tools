@@ -27,6 +27,19 @@ pub mod config;
 /// + the SM-2 provider trait).
 /// Test: `context::*::tests`.
 pub mod context;
+/// Goal-tracking model + dual (palace + cache) persistence (SM-6, DOC-14 §9).
+///
+/// Why: the SM tracks operator intent as durable goals fanned out to delegated
+/// sessions, with progress and a BLOCKING verification gate (§3.5) derived from
+/// per-session verification state. Goals persist with a dual design (§9.4): the
+/// SM palace (SM-4) is the source of truth, `goals.json` is a hot cache rebuilt
+/// from it on startup. The module is feature-INDEPENDENT (always compiled): the
+/// store depends on the `GoalMemory` abstraction, and only the production
+/// `SmMemory` impl of that trait is gated behind `sm-memory` (internally). SM-6 is
+/// the store only — not yet wired into any endpoint/loop (SM-7 / SM-8).
+/// What: re-compiled in every build (pure logic + serde + uuid/chrono).
+/// Test: `goals::{model_tests, cache_tests, store_tests}`.
+pub mod goals;
 /// Dedicated SM memory palace + recall/remember wiring (SM-4, DOC-14 §8).
 ///
 /// Why: gated behind the `sm-memory` feature because it turns on
@@ -46,6 +59,10 @@ pub use config::{SessionManagerConfig, SmInferenceConfig, SmMemoryConfig, SmRoun
 pub use context::{
     ConversationStore, ConversationStoreError, Round, SmContextEngine, SmContextError,
     SmConversation, ToolTrace,
+};
+pub use goals::{
+    GOAL_TAG, Goal, GoalCache, GoalMemory, GoalStatus, SessionLink, SessionTaskState,
+    SessionUpdate, SmGoalError, SmGoalResult, SmGoalStore,
 };
 #[cfg(feature = "sm-memory")]
 pub use memory::{SmMemory, SmMemoryError, SmMemoryResult};
